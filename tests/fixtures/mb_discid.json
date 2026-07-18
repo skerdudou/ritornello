@@ -1,0 +1,17 @@
+{
+  "releases": [
+    {
+      "title": "Kind of Blue",
+      "artist-credit": [{ "name": "Miles Davis" }],
+      "media": [
+        {
+          "tracks": [
+            { "title": "So What" },
+            { "title": "Freddie Freeloader" },
+            { "title": "Blue in Green" }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+[[stations]]
+name = "FIP"
+url = "http://icecast.radiofrance.fr/fip-midfi.mp3"
+preset = 1
+
+[[stations]]
+name = "France Inter"
+url = "http://icecast.radiofrance.fr/franceinter-midfi.mp3"
+preset = 2
