@@ -13,3 +13,8 @@ exec = "/usr/local/lib/radio-pi/plugins/radio-pi-plugin-cd"
 name = "mce"
 kind = "input"
 exec = "/usr/local/lib/radio-pi/plugins/radio-pi-plugin-mce"
+
+[[plugin]]
+name = "console"
+kind = "display"
+exec = "/usr/local/lib/radio-pi/plugins/radio-pi-plugin-console"

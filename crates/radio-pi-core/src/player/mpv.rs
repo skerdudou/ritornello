@@ -160,6 +160,10 @@ impl super::Player for MpvPlayer {
         self.ipc.command(&[json!("set_property"), json!("mute"), json!(mute)]).await?;
         Ok(())
     }
+    async fn set_audio_device(&self, device: &str) -> Result<()> {
+        self.ipc.command(&[json!("set_property"), json!("audio-device"), json!(device)]).await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

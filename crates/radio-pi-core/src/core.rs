@@ -27,6 +27,7 @@ pub struct Core<P: Player> {
     standby: bool,
     stopped: bool,
     retry_count: u32,
+    audio_device: Option<String>,
     view: View,
     state_path: PathBuf,
     view_tx: watch::Sender<View>,
@@ -57,6 +58,7 @@ impl<P: Player> Core<P> {
             standby: false,
             stopped: false,
             retry_count: 0,
+            audio_device: persisted.audio_device.clone(),
             view: View::default(),
             state_path,
             view_tx,
@@ -65,6 +67,9 @@ impl<P: Player> Core<P> {
 
     pub async fn resume(&mut self) -> Result<()> {
         self.player.set_volume(self.volume).await?;
+        if let Some(device) = self.audio_device.clone() {
+            self.player.set_audio_device(&device).await?;
+        }
         let action = self.active().request(SourceReq::Activate).await?;
         self.apply(action).await
     }
@@ -206,8 +211,19 @@ impl<P: Player> Core<P> {
         Ok(())
     }
 
+    pub async fn set_audio_device(&mut self, device: String) -> Result<()> {
+        self.player.set_audio_device(&device).await?;
+        self.audio_device = Some(device);
+        self.persist();
+        Ok(())
+    }
+
     fn persist(&self) {
-        let st = PersistedState { active_source: self.active_source.clone(), volume: self.volume };
+        let st = PersistedState {
+            active_source: self.active_source.clone(),
+            volume: self.volume,
+            audio_device: self.audio_device.clone(),
+        };
         if let Err(e) = state::save(&self.state_path, &st) {
             tracing::warn!("persistance impossible: {e}");
         }
@@ -260,6 +276,10 @@ mod tests {
         }
         async fn set_mute(&self, m: bool) -> anyhow::Result<()> {
             self.calls.lock().unwrap().push(format!("mute {m}"));
+            Ok(())
+        }
+        async fn set_audio_device(&self, device: &str) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push(format!("audio_device {device}"));
             Ok(())
         }
     }
@@ -350,6 +370,29 @@ mod tests {
         core.handle_command(Command::Power).await.unwrap();
         core.handle_source_view("radio", View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() });
         assert_eq!(rx.borrow_and_update().line1, "RADIO  P1"); // le reveil laisse la source reprendre l'affichage
+    }
+
+    #[tokio::test]
+    async fn resume_applique_la_sortie_audio_persistee() {
+        let dir = tempfile::tempdir().unwrap();
+        let player = FakePlayer::default();
+        let player_calls = player.calls.clone();
+        let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
+        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())) }));
+        let (tx, _rx) = watch::channel(View::default());
+        let persisted = PersistedState { active_source: "radio".into(), volume: 60, audio_device: Some("bluealsa:DEV=XX".into()) };
+        let mut core = Core::new(player, sources, persisted, dir.path().join("state.json"), tx);
+        core.resume().await.unwrap();
+        assert!(player_calls.lock().unwrap().contains(&"audio_device bluealsa:DEV=XX".to_string()));
+    }
+
+    #[tokio::test]
+    async fn set_audio_device_applique_et_persiste() {
+        let (mut core, player_calls, _sc, _rx, dir) = setup();
+        core.set_audio_device("hw:CARD=Headphones".into()).await.unwrap();
+        assert!(player_calls.lock().unwrap().contains(&"audio_device hw:CARD=Headphones".to_string()));
+        let st = crate::state::load(&dir.path().join("state.json"));
+        assert_eq!(st.audio_device.as_deref(), Some("hw:CARD=Headphones"));
     }
 
     #[tokio::test]

@@ -1,5 +1,5 @@
+mod audio_output;
 mod core;
-mod display;
 mod player;
 mod plugins;
 mod state;
@@ -11,7 +11,7 @@ use crate::status::{AppState, LogBuffer, LogBufferWriter, PluginStatus, StatusSt
 use crate::types::Event;
 use anyhow::{Context, Result};
 use radio_pi_proto::{Command, View};
-use radio_pi_plugin_sdk::{run_input_client, SourceClient};
+use radio_pi_plugin_sdk::{run_input_client, DisplayClient, SourceClient};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -49,7 +49,6 @@ async fn main() -> Result<()> {
     let state_path = PathBuf::from(env_or("RADIO_PI_STATE", "/var/lib/radio-pi/state.json"));
     let mpv_socket = PathBuf::from(env_or("RADIO_PI_MPV_SOCKET", "/run/radio-pi/mpv.sock"));
     let mpv_bin = env_or("RADIO_PI_MPV_BIN", "mpv");
-    let tty = PathBuf::from(env_or("RADIO_PI_TTY", "/dev/tty1"));
     let cd_dev = env_or("RADIO_PI_CD_DEV", "/dev/sr0");
     let http_addr = env_or("RADIO_PI_HTTP", "0.0.0.0:8080");
     let runtime_dir = env_or("RADIO_PI_RUNTIME_DIR", "/run/radio-pi");
@@ -62,6 +61,7 @@ async fn main() -> Result<()> {
     let (ev_tx, mut ev_rx) = broadcast::channel::<Event>(64);
     let (view_tx, mut view_rx) = watch::channel(View::default());
     let (source_view_tx, mut source_view_rx) = mpsc::channel::<(String, View)>(32);
+    let (audio_tx, mut audio_rx) = mpsc::channel::<String>(4);
 
     // mpv (inchangé).
     let (mpv_player, mut mpv_child) =
@@ -69,29 +69,12 @@ async fn main() -> Result<()> {
             .await
             .context("démarrage de mpv")?;
 
-    // Affichage console (inchangé).
-    match display::ConsoleDisplay::open(&tty) {
-        Ok(mut disp) => {
-            tokio::spawn(async move {
-                loop {
-                    if view_rx.changed().await.is_err() {
-                        break;
-                    }
-                    let v = view_rx.borrow_and_update().clone();
-                    if let Err(e) = disp.show(&v) {
-                        tracing::warn!("affichage: {e}");
-                    }
-                }
-            });
-        }
-        Err(e) => tracing::warn!("pas d'affichage ({e}), on continue sans"),
-    }
-
     // Spawn et connexion de chaque plugin déclaré.
     let mut sources: HashMap<String, Arc<dyn core::Source>> = HashMap::new();
     let mut plugin_statuses = Vec::new();
     let mut children = Vec::new();
     let mut source_connects = Vec::new();
+    let mut display_connect = None;
 
     for p in &manifest.plugins {
         let socket_path = PathBuf::from(format!("{runtime_dir}/{}.sock", p.name));
@@ -108,10 +91,13 @@ async fn main() -> Result<()> {
                             (name, admin_url, result)
                         }));
                     }
-                    PluginKind::Sink => {
-                        // Aucun plugin sink dans cette livraison : connexion tentée mais
-                        // le registre de sinks lui-même arrive dans une spec ultérieure.
-                        plugin_statuses.push(PluginStatus { name: p.name.clone(), kind: "sink".into(), connected: false, admin_url: p.admin_url.clone() });
+                    PluginKind::Display => {
+                        let name = p.name.clone();
+                        let admin_url = p.admin_url.clone();
+                        display_connect = Some(tokio::spawn(async move {
+                            let result = DisplayClient::connect(&socket_path).await;
+                            (name, admin_url, result)
+                        }));
                     }
                     PluginKind::Input => {
                         let tx = cmd_tx.clone();
@@ -147,17 +133,56 @@ async fn main() -> Result<()> {
         }
     }
 
+    let mut display_client: Option<Arc<DisplayClient>> = None;
+    if let Some(handle) = display_connect {
+        let (name, admin_url, result) = handle.await.context("tache de connexion plugin display interrompue")?;
+        match result {
+            Ok(client) => {
+                display_client = Some(client);
+                plugin_statuses.push(PluginStatus { name, kind: "display".into(), connected: true, admin_url });
+            }
+            Err(e) => {
+                tracing::warn!("plugin display {name} indisponible: {e}");
+                plugin_statuses.push(PluginStatus { name, kind: "display".into(), connected: false, admin_url });
+            }
+        }
+    }
+
     if sources.is_empty() {
         anyhow::bail!("aucune source disponible (plugins.toml vide ou tous les plugins source indisponibles)");
     }
 
-    // Page de statut du cœur (plugins, source active, dernières erreurs).
+    // Relais des vues vers le plugin d'affichage, s'il est connecté.
+    match display_client {
+        Some(display_client) => {
+            tokio::spawn(async move {
+                loop {
+                    if view_rx.changed().await.is_err() {
+                        break;
+                    }
+                    let v = view_rx.borrow_and_update().clone();
+                    if let Err(e) = display_client.send(&v).await {
+                        tracing::warn!("affichage: {e}");
+                    }
+                }
+            });
+        }
+        None => tracing::warn!("pas de plugin display connecte, on continue sans affichage"),
+    }
+
+    // Page de statut du cœur (plugins, source active, dernières erreurs, sortie audio).
     let status_state = Arc::new(RwLock::new(StatusState {
         plugins: plugin_statuses,
         active_source: persisted.active_source.clone(),
     }));
+    let audio_current = Arc::new(RwLock::new(persisted.audio_device.clone()));
     {
-        let app = status::router(AppState { status: status_state.clone(), logs: log_buffer.clone() });
+        let app = status::router(AppState {
+            status: status_state.clone(),
+            logs: log_buffer.clone(),
+            audio_current: audio_current.clone(),
+            audio_tx: audio_tx.clone(),
+        });
         let listener = tokio::net::TcpListener::bind(&http_addr).await.with_context(|| format!("bind {http_addr}"))?;
         tracing::info!("page de statut sur http://{http_addr}/status");
         tokio::spawn(async move {
@@ -199,6 +224,11 @@ async fn main() -> Result<()> {
             }
             Some((name, view)) = source_view_rx.recv() => {
                 core.handle_source_view(&name, view);
+            }
+            Some(device) = audio_rx.recv() => {
+                if let Err(e) = core.set_audio_device(device).await {
+                    tracing::warn!("changement de sortie audio: {e}");
+                }
             }
             _ = retry_sleep => {
                 retry_at = None;

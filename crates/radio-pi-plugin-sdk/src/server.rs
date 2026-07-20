@@ -71,63 +71,30 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
     }
 }
 
-use radio_pi_proto::{SinkReq, SinkRequest, SinkMessage};
-
-pub struct SinkOutcome {
-    pub audio_device: Option<String>,
-    pub error: Option<String>,
-}
-
 #[async_trait::async_trait]
-pub trait SinkPlugin: Send + 'static {
-    async fn activate(&mut self) -> SinkOutcome;
-    async fn deactivate(&mut self) -> SinkOutcome;
-
-    async fn poll_notification(&mut self) -> Option<SinkOutcome> {
-        std::future::pending().await
-    }
+pub trait DisplayPlugin: Send + 'static {
+    async fn show(&mut self, view: View) -> Result<()>;
 }
 
-pub async fn run_sink_plugin(mut plugin: impl SinkPlugin, socket_path: &Path) -> Result<()> {
+/// Lie `socket_path`, accepte une connexion (le cœur), puis affiche chaque
+/// vue reçue jusqu'à fermeture de la connexion. Protocole à sens unique :
+/// aucune réponse n'est attendue.
+pub async fn run_display_plugin(mut plugin: impl DisplayPlugin, socket_path: &Path) -> Result<()> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let _ = std::fs::remove_file(socket_path);
-    let listener = UnixListener::bind(socket_path)?;
+    let listener = UnixListener::bind(socket_path)
+        .with_context(|| format!("liaison de {}", socket_path.display()))?;
     let (stream, _) = listener.accept().await?;
-    let (read, mut write) = stream.into_split();
+    let (read, _write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
-
-    loop {
-        tokio::select! {
-            line = lines.next_line() => {
-                let Some(line) = line? else { return Ok(()) };
-                let req: SinkRequest = serde_json::from_str(&line)?;
-                let outcome = match req.req {
-                    SinkReq::Activate => plugin.activate().await,
-                    SinkReq::Deactivate => plugin.deactivate().await,
-                };
-                let msg = SinkMessage {
-                    id: Some(req.id),
-                    audio_device: outcome.audio_device,
-                    connected: None,
-                    error: outcome.error,
-                };
-                write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
-            }
-            outcome = plugin.poll_notification() => {
-                if let Some(outcome) = outcome {
-                    let msg = SinkMessage {
-                        id: None,
-                        audio_device: outcome.audio_device,
-                        connected: Some(outcome.error.is_none()),
-                        error: outcome.error,
-                    };
-                    write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
-                }
-            }
-        }
+    while let Some(line) = lines.next_line().await? {
+        let view: View = serde_json::from_str(&line)
+            .with_context(|| format!("vue invalide: {line}"))?;
+        plugin.show(view).await?;
     }
+    Ok(())
 }
 
 use radio_pi_proto::Command;
@@ -218,28 +185,33 @@ mod tests {
 }
 
 #[cfg(test)]
-mod sink_tests {
+mod display_tests {
     use super::*;
+    use radio_pi_proto::View;
+    use std::sync::{Arc, Mutex};
 
-    struct FakeSink;
+    #[derive(Clone, Default)]
+    struct RecordingDisplay {
+        views: Arc<Mutex<Vec<View>>>,
+    }
 
     #[async_trait::async_trait]
-    impl SinkPlugin for FakeSink {
-        async fn activate(&mut self) -> SinkOutcome {
-            SinkOutcome { audio_device: Some("alsa/bluealsa:DEV=XX".into()), error: None }
-        }
-        async fn deactivate(&mut self) -> SinkOutcome {
-            SinkOutcome { audio_device: None, error: None }
+    impl DisplayPlugin for RecordingDisplay {
+        async fn show(&mut self, view: View) -> Result<()> {
+            self.views.lock().unwrap().push(view);
+            Ok(())
         }
     }
 
     #[tokio::test]
-    async fn dialogue_requete_reponse_sink() {
+    async fn recoit_les_vues_en_ligne() {
         let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("sink.sock");
+        let socket = dir.path().join("display.sock");
+        let plugin = RecordingDisplay::default();
+        let views = plugin.views.clone();
         let socket_for_server = socket.clone();
         tokio::spawn(async move {
-            run_sink_plugin(FakeSink, &socket_for_server).await.unwrap();
+            let _ = run_display_plugin(plugin, &socket_for_server).await;
         });
         let mut client = None;
         for _ in 0..50 {
@@ -249,16 +221,19 @@ mod sink_tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        let stream = client.expect("connexion au plugin sink");
-        let (read, mut write) = stream.into_split();
-        let mut lines = tokio::io::BufReader::new(read).lines();
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let stream = client.expect("connexion au plugin display");
+        use tokio::io::AsyncWriteExt;
+        let mut write = stream;
+        let v = View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() };
+        write.write_all(format!("{}\n", serde_json::to_string(&v).unwrap()).as_bytes()).await.unwrap();
 
-        write.write_all(b"{\"id\":1,\"req\":\"Activate\"}\n").await.unwrap();
-        let line = lines.next_line().await.unwrap().unwrap();
-        let msg: radio_pi_proto::SinkMessage = serde_json::from_str(&line).unwrap();
-        assert_eq!(msg.id, Some(1));
-        assert_eq!(msg.audio_device.as_deref(), Some("alsa/bluealsa:DEV=XX"));
+        for _ in 0..50 {
+            if !views.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(views.lock().unwrap().as_slice(), &[v]);
     }
 }
 

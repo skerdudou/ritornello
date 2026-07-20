@@ -6,5 +6,6 @@ members = [
     "crates/radio-pi-core",
     "crates/radio-pi-plugin-radio",
     "crates/radio-pi-plugin-cd",
+    "crates/radio-pi-plugin-console",
     "crates/radio-pi-plugin-mce",
 ]

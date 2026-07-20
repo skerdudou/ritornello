@@ -2,16 +2,14 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::path::Path;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginKind {
     Source,
-    Sink,
+    Display,
     Input,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginConfig {
     pub name: String,
@@ -21,7 +19,6 @@ pub struct PluginConfig {
     pub admin_url: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PluginManifest {
     #[serde(default, rename = "plugin")]
@@ -32,7 +29,6 @@ impl PluginManifest {
     /// Un fichier absent donne un manifeste vide : le cœur démarre sans
     /// plugin plutôt que d'échouer (cohérent avec le traitement déjà
     /// existant pour `stations.toml`).
-    #[allow(dead_code)]
     pub fn load(path: &Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
             Ok(text) => Ok(toml::from_str(&text)?),
@@ -42,7 +38,6 @@ impl PluginManifest {
 }
 
 /// Spawn un plugin en lui passant le chemin de la socket qu'il doit lier.
-#[allow(dead_code)]
 pub fn spawn(exec: &str, socket_path: &Path) -> Result<tokio::process::Child> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -72,9 +67,9 @@ kind = "source"
 exec = "/usr/local/lib/radio-pi/plugins/radio-pi-plugin-radio"
 
 [[plugin]]
-name = "mce"
-kind = "input"
-exec = "/usr/local/lib/radio-pi/plugins/radio-pi-plugin-mce"
+name = "console"
+kind = "display"
+exec = "/usr/local/lib/radio-pi/plugins/radio-pi-plugin-console"
 admin_url = "http://raspberrypi.local:8081"
 "#,
         )
@@ -83,6 +78,7 @@ admin_url = "http://raspberrypi.local:8081"
         assert_eq!(m.plugins.len(), 2);
         assert_eq!(m.plugins[0].name, "radio");
         assert_eq!(m.plugins[0].kind, PluginKind::Source);
+        assert_eq!(m.plugins[1].kind, PluginKind::Display);
         assert_eq!(m.plugins[1].admin_url.as_deref(), Some("http://raspberrypi.local:8081"));
     }
 

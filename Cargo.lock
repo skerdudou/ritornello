@@ -838,6 +838,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "radio-pi-plugin-console"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "radio-pi-plugin-sdk",
+ "radio-pi-proto",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "radio-pi-plugin-mce"
 version = "0.1.0"
 dependencies = [
