@@ -1,4 +1,4 @@
-use crate::types::DiscInfo;
+use crate::disc::DiscInfo;
 use anyhow::Result;
 use serde_json::Value;
 

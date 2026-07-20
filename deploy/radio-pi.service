@@ -5,10 +5,10 @@ Wants=network-online.target
 Conflicts=getty@tty1.service
 
 [Service]
-ExecStart=/usr/local/bin/radio-pi
+ExecStart=/usr/local/bin/radio-pi-core
 Restart=always
 RestartSec=2
-# Accès /dev/tty1 (affichage HDMI), /dev/input, /dev/sr0 : root pour la v1.
+# Accès /dev/tty1 (affichage HDMI), /dev/sr0, sockets des plugins : root pour la v1.
 User=root
 RuntimeDirectory=radio-pi
 StateDirectory=radio-pi

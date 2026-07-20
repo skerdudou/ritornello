@@ -1,8 +1,6 @@
-use crate::types::Event;
 use anyhow::{bail, Context, Result};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use tokio::sync::mpsc;
 
 // linux/cdrom.h
 const CDROM_DRIVE_STATUS: libc::c_ulong = 0x5326;
@@ -38,15 +36,14 @@ pub fn drive_status(dev: &Path) -> Result<DriveStatus> {
     })
 }
 
-/// Poll toutes les 2 s ; envoie CdInserted / CdRemoved sur changement.
-pub async fn watch(dev: PathBuf, tx: mpsc::Sender<Event>) {
+/// Poll toutes les 2 s ; retourne `true`/`false` sur changement de présence du disque.
+pub async fn watch(dev: PathBuf, tx: tokio::sync::mpsc::Sender<bool>) {
     let mut present = false;
     loop {
         let now = matches!(drive_status(&dev), Ok(DriveStatus::DiscOk));
         if now != present {
             present = now;
-            let ev = if now { Event::CdInserted } else { Event::CdRemoved };
-            let _ = tx.send(ev).await;
+            let _ = tx.send(now).await;
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }

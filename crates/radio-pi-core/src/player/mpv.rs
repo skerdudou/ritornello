@@ -109,6 +109,7 @@ pub async fn start(
         .arg("--no-terminal")
         .arg(format!("--input-ipc-server={}", socket.display()))
         .arg(format!("--cdda-device={cd_dev}"))
+        .kill_on_drop(true)
         .spawn()
         .context("lancement de mpv")?;
 

@@ -1,11 +1,9 @@
 use crate::keymap::map_key;
-use crate::types::Command;
 use anyhow::{Context, Result};
 use evdev::{Device, EventType};
+use radio_pi_proto::Command;
 use tokio::sync::mpsc;
 
-/// Trouve le périphérique input dont le nom contient `name_contains`
-/// (insensible à la casse). Pour le récepteur MCE : "Media Center" ou "MCE".
 pub fn find_device(name_contains: &str) -> Result<Device> {
     let needle = name_contains.to_lowercase();
     for (path, dev) in evdev::enumerate() {
@@ -18,7 +16,6 @@ pub fn find_device(name_contains: &str) -> Result<Device> {
     anyhow::bail!("aucun périphérique input dont le nom contient « {name_contains} »")
 }
 
-/// Boucle de lecture : chaque appui (value==1) mappé devient une Command.
 pub async fn run(device: Device, tx: mpsc::Sender<Command>) -> Result<()> {
     let mut stream = device.into_event_stream().context("event stream evdev")?;
     loop {

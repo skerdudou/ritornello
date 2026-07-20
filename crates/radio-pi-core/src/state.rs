@@ -1,18 +1,16 @@
-use crate::types::Mode;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedState {
-    pub mode: Mode,
-    pub preset: u8,
+    pub active_source: String,
     pub volume: u8,
 }
 
 impl Default for PersistedState {
     fn default() -> Self {
-        Self { mode: Mode::Radio, preset: 1, volume: 60 }
+        Self { active_source: "radio".into(), volume: 60 }
     }
 }
 
@@ -36,7 +34,6 @@ pub fn save(path: &Path, state: &PersistedState) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Mode;
 
     #[test]
     fn defaut_si_fichier_absent_ou_corrompu() {
@@ -52,14 +49,15 @@ mod tests {
     fn roundtrip_save_load() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
-        let st = PersistedState { mode: Mode::Cd, preset: 5, volume: 35 };
+        let st = PersistedState { active_source: "cd".into(), volume: 35 };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
     }
 
     #[test]
-    fn defaut_est_radio_preset1_vol60() {
+    fn defaut_est_radio_vol60() {
         let d = PersistedState::default();
-        assert_eq!((d.mode, d.preset, d.volume), (Mode::Radio, 1, 60));
+        assert_eq!(d.active_source, "radio");
+        assert_eq!(d.volume, 60);
     }
 }

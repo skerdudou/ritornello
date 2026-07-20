@@ -1,12 +1,11 @@
-use crate::types::View;
 use anyhow::{Context, Result};
+use radio_pi_proto::View;
 use std::io::Write;
 use std::path::Path;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::View;
 
     #[test]
     fn rendu_efface_et_affiche_trois_lignes() {

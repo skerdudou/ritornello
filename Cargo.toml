@@ -1,23 +1,10 @@
-[package]
-name = "radio-pi"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-anyhow = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "0.8"
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = "0.3"
-axum = "0.7"
-evdev = { version = "0.12", features = ["tokio"] }
-libc = "0.2"
-async-trait = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-
-[dev-dependencies]
-tempfile = "3"
-tower = { version = "0.4", features = ["util"] }
-http-body-util = "0.1"
+[workspace]
+resolver = "2"
+members = [
+    "crates/radio-pi-proto",
+    "crates/radio-pi-plugin-sdk",
+    "crates/radio-pi-core",
+    "crates/radio-pi-plugin-radio",
+    "crates/radio-pi-plugin-cd",
+    "crates/radio-pi-plugin-mce",
+]

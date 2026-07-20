@@ -1,0 +1,15 @@
+[[plugin]]
+name = "radio"
+kind = "source"
+exec = "/usr/local/lib/radio-pi/plugins/radio-pi-plugin-radio"
+admin_url = "http://raspberrypi.local:8081"
+
+[[plugin]]
+name = "cd"
+kind = "source"
+exec = "/usr/local/lib/radio-pi/plugins/radio-pi-plugin-cd"
+
+[[plugin]]
+name = "mce"
+kind = "input"
+exec = "/usr/local/lib/radio-pi/plugins/radio-pi-plugin-mce"
