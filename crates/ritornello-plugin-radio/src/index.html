@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="fr">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ritornello — stations</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: .25rem; }
+  input { width: 100%; box-sizing: border-box; padding: .4rem; }
+  td.preset { width: 4rem; }
+  td.del { width: 2.5rem; }
+  button { padding: .5rem 1rem; margin-top: 1rem; }
+  #msg { margin-left: 1rem; }
+</style>
+<h1>ritornello</h1>
+<table id="t">
+  <tr><th>N°</th><th>Nom</th><th>URL du flux</th><th></th></tr>
+</table>
+<button onclick="addRow()">+ Ajouter</button>
+<button onclick="save()">Enregistrer</button><span id="msg"></span>
+<script>
+const t = document.getElementById('t');
+function addRow(s = { preset: '', name: '', url: '' }) {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td class="preset"><input type="number" min="1" max="9" value="${s.preset}"></td>
+    <td><input value="${s.name.replaceAll('"','&quot;')}"></td>
+    <td><input value="${s.url.replaceAll('"','&quot;')}"></td>
+    <td class="del"><button onclick="this.closest('tr').remove()">✕</button></td>`;
+  t.appendChild(tr);
+}
+async function load() {
+  try {
+    const r = await fetch('/api/stations');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    (await r.json()).stations
+      .sort((a, b) => a.preset - b.preset)
+      .forEach(addRow);
+  } catch (e) {
+    document.getElementById('msg').textContent =
+      'Erreur de chargement des stations (' + e.message + ') — corriger stations.toml, puis recharger';
+    document.querySelectorAll('button').forEach(b => b.disabled = true);
+  }
+}
+async function save() {
+  const stations = [...t.querySelectorAll('tr')].slice(1).map(tr => {
+    const [p, n, u] = tr.querySelectorAll('input');
+    return { preset: +p.value, name: n.value, url: u.value };
+  });
+  const r = await fetch('/api/stations', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ stations }),
+  });
+  document.getElementById('msg').textContent =
+    r.ok ? 'Enregistré ✓' : 'Erreur : présélections 1-9 uniques, URLs http(s)';
+}
+load();
+</script>
+</html>

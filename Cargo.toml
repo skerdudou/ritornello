@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/radio-pi-proto",
-    "crates/radio-pi-plugin-sdk",
-    "crates/radio-pi-core",
-    "crates/radio-pi-plugin-radio",
-    "crates/radio-pi-plugin-cd",
-    "crates/radio-pi-plugin-console",
-    "crates/radio-pi-plugin-mce",
+    "crates/ritornello-proto",
+    "crates/ritornello-plugin-sdk",
+    "crates/ritornello-core",
+    "crates/ritornello-plugin-radio",
+    "crates/ritornello-plugin-cd",
+    "crates/ritornello-plugin-console",
+    "crates/ritornello-plugin-mce",
 ]

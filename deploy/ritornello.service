@@ -1,0 +1,18 @@
+[Unit]
+Description=ritornello (radio internet + CD)
+After=network-online.target sound.target getty@tty1.service
+Wants=network-online.target
+Conflicts=getty@tty1.service
+
+[Service]
+ExecStart=/usr/local/bin/ritornello-core
+Restart=always
+RestartSec=2
+# Accès /dev/tty1 (affichage HDMI), /dev/sr0, sockets des plugins : root pour la v1.
+User=root
+RuntimeDirectory=ritornello
+StateDirectory=ritornello
+Environment=RITORNELLO_STATE=/var/lib/ritornello/state.json
+
+[Install]
+WantedBy=multi-user.target
