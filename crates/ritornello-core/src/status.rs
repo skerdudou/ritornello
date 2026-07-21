@@ -14,7 +14,7 @@ pub struct PluginStatus {
     pub name: String,
     pub kind: String,
     pub connected: bool,
-    pub admin_url: Option<String>,
+    pub admin: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -38,14 +38,14 @@ impl<'de> serde::Deserialize<'de> for StatusState {
             name: String,
             kind: String,
             connected: bool,
-            admin_url: Option<String>,
+            admin: bool,
         }
         let raw = Raw::deserialize(deserializer)?;
         Ok(StatusState {
             plugins: raw
                 .plugins
                 .into_iter()
-                .map(|p| PluginStatus { name: p.name, kind: p.kind, connected: p.connected, admin_url: p.admin_url })
+                .map(|p| PluginStatus { name: p.name, kind: p.kind, connected: p.connected, admin: p.admin })
                 .collect(),
             active_source: raw.active_source,
         })
@@ -58,6 +58,7 @@ pub struct AppState {
     pub logs: Arc<LogBuffer>,
     pub audio_current: Arc<RwLock<Option<String>>>,
     pub audio_tx: mpsc::Sender<String>,
+    pub admin_backends: Arc<std::collections::HashMap<String, Arc<dyn crate::admin::AdminBackend>>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -65,6 +66,11 @@ pub fn router(state: AppState) -> Router {
         .route("/status", get(status_page))
         .route("/api/status", get(status_json))
         .route("/api/audio-output", get(audio_output_json).put(audio_output_put))
+        .route("/plugins/:name/", get(crate::admin::admin_page))
+        .route(
+            "/plugins/:name/api/data",
+            get(crate::admin::admin_get_data).put(crate::admin::admin_put_data),
+        )
         .with_state(state)
 }
 
@@ -106,7 +112,11 @@ async fn status_page(State(state): State<AppState>) -> Html<String> {
     let mut rows = String::new();
     for p in &s.plugins {
         let etat = if p.connected { "connecté" } else { "indisponible" };
-        let lien = escape_html(p.admin_url.as_deref().unwrap_or("-"));
+        let lien = if p.admin {
+            format!("<a href=\"/plugins/{}/\">admin</a>", escape_html(&p.name))
+        } else {
+            "-".to_string()
+        };
         rows.push_str(&format!(
             "<tr><td>{}</td><td>{}</td><td>{etat}</td><td>{lien}</td></tr>",
             escape_html(&p.name),
@@ -206,8 +216,8 @@ mod tests {
     fn sample() -> StatusState {
         StatusState {
             plugins: vec![
-                PluginStatus { name: "radio".into(), kind: "source".into(), connected: true, admin_url: Some("http://raspberrypi.local:8081".into()) },
-                PluginStatus { name: "cd".into(), kind: "source".into(), connected: false, admin_url: None },
+                PluginStatus { name: "radio".into(), kind: "source".into(), connected: true, admin: true },
+                PluginStatus { name: "cd".into(), kind: "source".into(), connected: false, admin: false },
             ],
             active_source: "radio".into(),
         }
@@ -220,6 +230,7 @@ mod tests {
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(None)),
             audio_tx,
+            admin_backends: Arc::new(std::collections::HashMap::new()),
         }
     }
 
@@ -230,6 +241,7 @@ mod tests {
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(Some("default".to_string()))),
             audio_tx,
+            admin_backends: Arc::new(std::collections::HashMap::new()),
         };
         (state, audio_rx)
     }
@@ -284,6 +296,16 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("plugin cd indisponible"));
+    }
+
+    #[tokio::test]
+    async fn page_statut_lien_admin_interne() {
+        let app = router(app_state());
+        let resp = app.oneshot(Request::get("/status").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("href=\"/plugins/radio/\""));
+        assert!(!html.contains(":8081"));
     }
 
     #[test]

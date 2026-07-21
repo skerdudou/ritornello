@@ -1,5 +1,8 @@
 use anyhow::{bail, Context, Result};
-use ritornello_proto::{Command, SourceAction, SourceMessage, SourceReq, SourceRequest, View};
+use ritornello_proto::{
+    AdminReq, AdminRequest, AdminResponse, AdminResult, Command, SourceAction, SourceMessage,
+    SourceReq, SourceRequest, View,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -98,6 +101,81 @@ impl DisplayClient {
     }
 }
 
+pub struct AdminClient {
+    writer: Mutex<OwnedWriteHalf>,
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<AdminResult>>>>,
+    next_id: AtomicU64,
+}
+
+impl AdminClient {
+    pub async fn connect(socket_path: &Path) -> Result<Arc<Self>> {
+        let stream = connect_with_retry(socket_path).await?;
+        let (read, write) = stream.into_split();
+        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<AdminResult>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let client = Arc::new(Self {
+            writer: Mutex::new(write),
+            pending: pending.clone(),
+            next_id: AtomicU64::new(1),
+        });
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(read).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let Ok(resp) = serde_json::from_str::<AdminResponse>(&line) else { continue };
+                if let Some(tx) = pending.lock().await.remove(&resp.id) {
+                    let _ = tx.send(resp.result);
+                }
+            }
+            tracing::warn!("connexion au plugin admin fermee");
+        });
+        Ok(client)
+    }
+
+    async fn request(&self, req: AdminReq) -> Result<AdminResult> {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id, tx);
+        let msg = AdminRequest { id, req };
+        {
+            let mut w = self.writer.lock().await;
+            if let Err(e) = w.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await {
+                self.pending.lock().await.remove(&id);
+                return Err(e.into());
+            }
+        }
+        match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(_)) => bail!("plugin admin: reponse abandonnee"),
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                bail!("plugin admin: timeout de requete")
+            }
+        }
+    }
+
+    pub async fn get_page(&self) -> Result<String> {
+        match self.request(AdminReq::GetPage).await? {
+            AdminResult::Page(html) => Ok(html),
+            other => bail!("reponse admin inattendue pour GetPage: {other:?}"),
+        }
+    }
+
+    pub async fn get_data(&self) -> Result<serde_json::Value> {
+        match self.request(AdminReq::GetData).await? {
+            AdminResult::Data(v) => Ok(v),
+            other => bail!("reponse admin inattendue pour GetData: {other:?}"),
+        }
+    }
+
+    pub async fn set_data(&self, data: serde_json::Value) -> Result<Result<(), String>> {
+        match self.request(AdminReq::SetData(data)).await? {
+            AdminResult::Set { ok: true, .. } => Ok(Ok(())),
+            AdminResult::Set { ok: false, error } => Ok(Err(error.unwrap_or_default())),
+            other => bail!("reponse admin inattendue pour SetData: {other:?}"),
+        }
+    }
+}
+
 /// Se connecte au plugin input et relaie chaque `Command` reçue sur `cmd_tx`,
 /// jusqu'à fermeture de la connexion (ne revient qu'en cas d'erreur ; à
 /// spawn dans une tâche dédiée par l'appelant).
@@ -169,5 +247,36 @@ mod tests {
         let client = DisplayClient::connect(&socket).await.unwrap();
         client.send(&View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() }).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test]
+    async fn admin_client_correle_les_reponses() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("admin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            // 1re requête (get_page, id=1)
+            let _ = lines.next_line().await.unwrap().unwrap();
+            write
+                .write_all(b"{\"id\":1,\"result\":{\"kind\":\"Page\",\"data\":\"<h1>hi</h1>\"}}\n")
+                .await
+                .unwrap();
+            // 2e requête (set_data, id=2)
+            let _ = lines.next_line().await.unwrap().unwrap();
+            write
+                .write_all(b"{\"id\":2,\"result\":{\"kind\":\"Set\",\"data\":{\"ok\":false,\"error\":\"nope\"}}}\n")
+                .await
+                .unwrap();
+            let _ = &write; // garde l'écriture vivante
+            std::future::pending::<()>().await;
+        });
+
+        let client = AdminClient::connect(&socket).await.unwrap();
+        assert_eq!(client.get_page().await.unwrap(), "<h1>hi</h1>");
+        let verdict = client.set_data(serde_json::json!({})).await.unwrap();
+        assert_eq!(verdict, Err("nope".to_string()));
     }
 }

@@ -118,6 +118,115 @@ pub async fn run_input_plugin(mut plugin: impl InputPlugin, socket_path: &Path) 
     }
 }
 
+use ritornello_proto::{AdminReq, AdminRequest, AdminResponse, AdminResult};
+
+#[async_trait::async_trait]
+pub trait AdminPlugin: Send + 'static {
+    /// HTML statique de la page d'admin (servi tel quel par le cœur).
+    fn page(&self) -> &'static str;
+    /// État courant, sérialisé en JSON opaque pour le cœur.
+    async fn get_data(&self) -> serde_json::Value;
+    /// Valide et persiste ; `Err(msg)` = donnée refusée (msg montré à l'utilisateur).
+    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String>;
+}
+
+/// Lie `socket_path`, accepte une connexion (le cœur), puis traite les
+/// requêtes admin (requête/réponse corrélée par `id`) jusqu'à fermeture.
+pub async fn run_admin_plugin(mut plugin: impl AdminPlugin, socket_path: &Path) -> Result<()> {
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _ = std::fs::remove_file(socket_path);
+    let listener = UnixListener::bind(socket_path)
+        .with_context(|| format!("liaison de {}", socket_path.display()))?;
+    let (stream, _) = listener.accept().await?;
+    let (read, mut write) = stream.into_split();
+    let mut lines = BufReader::new(read).lines();
+    while let Some(line) = lines.next_line().await? {
+        let req: AdminRequest = serde_json::from_str(&line)
+            .with_context(|| format!("requete admin invalide: {line}"))?;
+        let result = match req.req {
+            AdminReq::GetPage => AdminResult::Page(plugin.page().to_string()),
+            AdminReq::GetData => AdminResult::Data(plugin.get_data().await),
+            AdminReq::SetData(data) => match plugin.set_data(data).await {
+                Ok(()) => AdminResult::Set { ok: true, error: None },
+                Err(msg) => AdminResult::Set { ok: false, error: Some(msg) },
+            },
+        };
+        let resp = AdminResponse { id: req.id, result };
+        write.write_all(format!("{}\n", serde_json::to_string(&resp)?).as_bytes()).await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod admin_server_tests {
+    use super::*;
+    use ritornello_proto::{AdminResponse, AdminResult};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    struct FakeAdmin {
+        data: serde_json::Value,
+    }
+
+    #[async_trait::async_trait]
+    impl AdminPlugin for FakeAdmin {
+        fn page(&self) -> &'static str {
+            "<h1>hello</h1>"
+        }
+        async fn get_data(&self) -> serde_json::Value {
+            self.data.clone()
+        }
+        async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String> {
+            if data.get("bad").is_some() {
+                return Err("refus".into());
+            }
+            self.data = data;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn getpage_getdata_setdata_dialogue() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("admin.sock");
+        let socket_srv = socket.clone();
+        tokio::spawn(async move {
+            run_admin_plugin(FakeAdmin { data: serde_json::json!({"n": 1}) }, &socket_srv)
+                .await
+                .unwrap();
+        });
+
+        let mut stream = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await {
+                stream = Some(s);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = stream.expect("connexion admin").into_split();
+        let mut lines = BufReader::new(read).lines();
+
+        write.write_all(b"{\"id\":1,\"req\":\"GetPage\"}\n").await.unwrap();
+        let l = lines.next_line().await.unwrap().unwrap();
+        let r: AdminResponse = serde_json::from_str(&l).unwrap();
+        assert_eq!(r.id, 1);
+        assert!(matches!(r.result, AdminResult::Page(ref h) if h.contains("hello")));
+
+        write.write_all(b"{\"id\":2,\"req\":\"GetData\"}\n").await.unwrap();
+        let l = lines.next_line().await.unwrap().unwrap();
+        let r: AdminResponse = serde_json::from_str(&l).unwrap();
+        assert!(matches!(r.result, AdminResult::Data(ref v) if v["n"] == 1));
+
+        write.write_all(b"{\"id\":3,\"req\":\"SetData\",\"arg\":{\"bad\":true}}\n").await.unwrap();
+        let l = lines.next_line().await.unwrap().unwrap();
+        let r: AdminResponse = serde_json::from_str(&l).unwrap();
+        assert!(matches!(r.result, AdminResult::Set { ok: false, .. }));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

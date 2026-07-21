@@ -2,7 +2,7 @@
 name = "radio"
 kind = "source"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-radio"
-admin_url = "http://raspberrypi.local:8081"
+admin = true
 
 [[plugin]]
 name = "cd"

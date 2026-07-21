@@ -1,4 +1,5 @@
 mod audio_output;
+mod admin;
 mod core;
 mod player;
 mod plugins;
@@ -75,28 +76,40 @@ async fn main() -> Result<()> {
     let mut children = Vec::new();
     let mut source_connects = Vec::new();
     let mut display_connect = None;
+    let mut admin_connects = Vec::new();
 
     for p in &manifest.plugins {
         let socket_path = PathBuf::from(format!("{runtime_dir}/{}.sock", p.name));
-        match plugins::spawn(&p.exec, &socket_path) {
+        let admin_socket = p
+            .admin
+            .then(|| PathBuf::from(format!("{runtime_dir}/{}-admin.sock", p.name)));
+        match plugins::spawn(&p.exec, &socket_path, admin_socket.as_deref()) {
             Ok(child) => {
                 children.push(child);
+                if p.admin {
+                    let name = p.name.clone();
+                    let asock = PathBuf::from(format!("{runtime_dir}/{}-admin.sock", p.name));
+                    admin_connects.push(tokio::spawn(async move {
+                        let result = ritornello_plugin_sdk::AdminClient::connect(&asock).await;
+                        (name, result)
+                    }));
+                }
                 match p.kind {
                     PluginKind::Source => {
                         let name = p.name.clone();
-                        let admin_url = p.admin_url.clone();
+                        let admin = p.admin;
                         let view_tx = source_view_tx.clone();
                         source_connects.push(tokio::spawn(async move {
                             let result = SourceClient::connect(&socket_path, name.clone(), view_tx).await;
-                            (name, admin_url, result)
+                            (name, admin, result)
                         }));
                     }
                     PluginKind::Display => {
                         let name = p.name.clone();
-                        let admin_url = p.admin_url.clone();
+                        let admin = p.admin;
                         display_connect = Some(tokio::spawn(async move {
                             let result = DisplayClient::connect(&socket_path).await;
-                            (name, admin_url, result)
+                            (name, admin, result)
                         }));
                     }
                     PluginKind::Input => {
@@ -108,43 +121,54 @@ async fn main() -> Result<()> {
                                 tracing::warn!("plugin input {name} deconnecte: {e}");
                             }
                         });
-                        plugin_statuses.push(PluginStatus { name: p.name.clone(), kind: "input".into(), connected: true, admin_url: p.admin_url.clone() });
+                        plugin_statuses.push(PluginStatus { name: p.name.clone(), kind: "input".into(), connected: true, admin: p.admin });
                     }
                 }
             }
             Err(e) => {
                 tracing::warn!("lancement du plugin {} impossible: {e}", p.name);
-                plugin_statuses.push(PluginStatus { name: p.name.clone(), kind: format!("{:?}", p.kind).to_lowercase(), connected: false, admin_url: p.admin_url.clone() });
+                plugin_statuses.push(PluginStatus { name: p.name.clone(), kind: format!("{:?}", p.kind).to_lowercase(), connected: false, admin: p.admin });
             }
         }
     }
 
     for handle in source_connects {
-        let (name, admin_url, result) = handle.await.context("tache de connexion plugin source interrompue")?;
+        let (name, admin, result) = handle.await.context("tache de connexion plugin source interrompue")?;
         match result {
             Ok(client) => {
                 sources.insert(name.clone(), client);
-                plugin_statuses.push(PluginStatus { name, kind: "source".into(), connected: true, admin_url });
+                plugin_statuses.push(PluginStatus { name, kind: "source".into(), connected: true, admin });
             }
             Err(e) => {
                 tracing::warn!("plugin {} indisponible: {e}", name);
-                plugin_statuses.push(PluginStatus { name, kind: "source".into(), connected: false, admin_url });
+                plugin_statuses.push(PluginStatus { name, kind: "source".into(), connected: false, admin });
             }
         }
     }
 
     let mut display_client: Option<Arc<DisplayClient>> = None;
     if let Some(handle) = display_connect {
-        let (name, admin_url, result) = handle.await.context("tache de connexion plugin display interrompue")?;
+        let (name, admin, result) = handle.await.context("tache de connexion plugin display interrompue")?;
         match result {
             Ok(client) => {
                 display_client = Some(client);
-                plugin_statuses.push(PluginStatus { name, kind: "display".into(), connected: true, admin_url });
+                plugin_statuses.push(PluginStatus { name, kind: "display".into(), connected: true, admin });
             }
             Err(e) => {
                 tracing::warn!("plugin display {name} indisponible: {e}");
-                plugin_statuses.push(PluginStatus { name, kind: "display".into(), connected: false, admin_url });
+                plugin_statuses.push(PluginStatus { name, kind: "display".into(), connected: false, admin });
             }
+        }
+    }
+
+    let mut admin_backends: HashMap<String, Arc<dyn admin::AdminBackend>> = HashMap::new();
+    for handle in admin_connects {
+        let (name, result) = handle.await.context("tache de connexion admin interrompue")?;
+        match result {
+            Ok(client) => {
+                admin_backends.insert(name, client);
+            }
+            Err(e) => tracing::warn!("plugin admin {name} injoignable: {e}"),
         }
     }
 
@@ -182,6 +206,7 @@ async fn main() -> Result<()> {
             logs: log_buffer.clone(),
             audio_current: audio_current.clone(),
             audio_tx: audio_tx.clone(),
+            admin_backends: Arc::new(admin_backends),
         });
         let listener = tokio::net::TcpListener::bind(&http_addr).await.with_context(|| format!("bind {http_addr}"))?;
         tracing::info!("page de statut sur http://{http_addr}/status");

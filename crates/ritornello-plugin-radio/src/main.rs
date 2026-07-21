@@ -1,10 +1,11 @@
+mod admin;
 mod config;
 mod state;
-mod web;
 
-use anyhow::{Context, Result};
+use crate::admin::RadioAdmin;
+use anyhow::Result;
 use config::Stations;
-use ritornello_plugin_sdk::{run_source_plugin, SourceOutcome, SourcePlugin};
+use ritornello_plugin_sdk::{run_admin_plugin, run_source_plugin, SourceOutcome, SourcePlugin};
 use ritornello_proto::{SourceAction, View};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,10 +15,9 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-fn socket_path_from_args() -> PathBuf {
+fn arg_value(flag: &str) -> Option<PathBuf> {
     let args: Vec<String> = std::env::args().collect();
-    let idx = args.iter().position(|a| a == "--socket").expect("--socket <path> requis");
-    PathBuf::from(&args[idx + 1])
+    args.iter().position(|a| a == flag).map(|i| PathBuf::from(&args[i + 1]))
 }
 
 struct RadioSource {
@@ -28,11 +28,7 @@ struct RadioSource {
 
 impl RadioSource {
     fn view_for(&self, preset: u8, status: &str) -> View {
-        View {
-            line1: format!("RADIO  P{preset}"),
-            line2: status.to_string(),
-            line3: String::new(),
-        }
+        View { line1: format!("RADIO  P{preset}"), line2: status.to_string(), line3: String::new() }
     }
 
     async fn play_preset(&mut self, n: u8) -> SourceOutcome {
@@ -91,10 +87,10 @@ impl SourcePlugin for RadioSource {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let socket_path = socket_path_from_args();
+    let socket_path = arg_value("--socket").expect("--socket <path> requis");
+    let admin_socket = arg_value("--admin-socket").expect("--admin-socket <path> requis");
     let stations_path = PathBuf::from(env_or("RITORNELLO_RADIO_STATIONS", "/etc/ritornello/stations.toml"));
     let state_path = PathBuf::from(env_or("RITORNELLO_RADIO_STATE", "/var/lib/ritornello/plugin-radio.json"));
-    let http_addr = env_or("RITORNELLO_RADIO_HTTP", "0.0.0.0:8081");
 
     let stations = Stations::load(&stations_path).unwrap_or_else(|e| {
         tracing::warn!("stations.toml invalide ou absent ({e}) : demarrage sans stations");
@@ -103,17 +99,12 @@ async fn main() -> Result<()> {
     let preset = state::load(&state_path).preset;
     let stations_shared = Arc::new(RwLock::new(stations));
 
-    {
-        let app = web::router(web::WebState { stations_path: stations_path.clone(), stations: stations_shared.clone() });
-        let listener = tokio::net::TcpListener::bind(&http_addr).await.with_context(|| format!("bind {http_addr}"))?;
-        tracing::info!("admin radio sur http://{http_addr}");
-        tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, app).await {
-                tracing::error!("serveur web radio: {e}");
-            }
-        });
-    }
+    let source = RadioSource { state_path, stations: stations_shared.clone(), preset };
+    let admin = RadioAdmin { stations_path, stations: stations_shared };
 
-    let source = RadioSource { state_path, stations: stations_shared, preset };
-    run_source_plugin(source, &socket_path).await
+    tokio::try_join!(
+        run_source_plugin(source, &socket_path),
+        run_admin_plugin(admin, &admin_socket),
+    )?;
+    Ok(())
 }

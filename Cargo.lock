@@ -964,8 +964,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "axum",
- "http-body-util",
  "ritornello-plugin-sdk",
  "ritornello-proto",
  "serde",
@@ -973,7 +971,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
- "tower 0.4.13",
  "tracing",
  "tracing-subscriber",
 ]

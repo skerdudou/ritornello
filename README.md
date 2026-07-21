@@ -70,11 +70,14 @@ alors, `cross` reste surtout utile pour changer d'architecture).
 
 `ritornello-core` charge `/etc/ritornello/plugins.toml` au démarrage (voir
 `deploy/plugins.example.toml`) : chaque entrée déclare un plugin (`source`,
-`display` ou `input`), le chemin de son exécutable, et un `admin_url` optionnel
-affiché sur la page de statut du cœur (`http://<pi>:8080/status`).
+`display` ou `input`), le chemin de son exécutable, et peut déclarer
+`admin = true` pour exposer une page d'admin servie par le cœur, sous la même
+origine, avec un lien affiché sur la page de statut du cœur
+(`http://<pi>:8080/status`).
 
-- `ritornello-plugin-radio` sert sa propre page de gestion des stations sur
-  `http://<pi>:8081` (`stations.toml`, comme avant).
+- `ritornello-plugin-radio` déclare `admin = true` : sa page de gestion des
+  stations est servie par le cœur, sous l'origine unique, à
+  `http://<hôte>:8080/plugins/radio/` (le plugin ne lie plus aucun port).
 - La mort d'un plugin est tolérée : il est marqué indisponible sur la page de
   statut, les autres continuent de fonctionner.
 - Aucun de ces plugins n'est spécifique au Pi : `ritornello-plugin-radio` et
@@ -123,7 +126,6 @@ locale sans matériel Pi :
     RITORNELLO_HTTP=127.0.0.1:8080 \
     RITORNELLO_CONSOLE_TTY=/dev/stdout \
     RITORNELLO_RADIO_STATIONS=/tmp/rp/stations.toml RITORNELLO_RADIO_STATE=/tmp/rp/plugin-radio.json \
-    RITORNELLO_RADIO_HTTP=127.0.0.1:8081 \
     cargo run -p ritornello-core
 
 ## Déploiement

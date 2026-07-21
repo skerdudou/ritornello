@@ -16,7 +16,7 @@ pub struct PluginConfig {
     pub kind: PluginKind,
     pub exec: String,
     #[serde(default)]
-    pub admin_url: Option<String>,
+    pub admin: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -37,17 +37,20 @@ impl PluginManifest {
     }
 }
 
-/// Spawn un plugin en lui passant le chemin de la socket qu'il doit lier.
-pub fn spawn(exec: &str, socket_path: &Path) -> Result<tokio::process::Child> {
+/// Spawn un plugin en lui passant le chemin de la socket de genre qu'il doit
+/// lier, et — s'il déclare `admin = true` — un `--admin-socket`.
+pub fn spawn(exec: &str, socket_path: &Path, admin_socket: Option<&Path>) -> Result<tokio::process::Child> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let _ = std::fs::remove_file(socket_path);
-    Ok(tokio::process::Command::new(exec)
-        .arg("--socket")
-        .arg(socket_path)
-        .kill_on_drop(true)
-        .spawn()?)
+    let mut cmd = tokio::process::Command::new(exec);
+    cmd.arg("--socket").arg(socket_path);
+    if let Some(admin) = admin_socket {
+        let _ = std::fs::remove_file(admin);
+        cmd.arg("--admin-socket").arg(admin);
+    }
+    Ok(cmd.kill_on_drop(true).spawn()?)
 }
 
 #[cfg(test)]
@@ -70,7 +73,7 @@ exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-radio"
 name = "console"
 kind = "display"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-console"
-admin_url = "http://raspberrypi.local:8081"
+admin = true
 "#,
         )
         .unwrap();
@@ -78,8 +81,9 @@ admin_url = "http://raspberrypi.local:8081"
         assert_eq!(m.plugins.len(), 2);
         assert_eq!(m.plugins[0].name, "radio");
         assert_eq!(m.plugins[0].kind, PluginKind::Source);
+        assert!(!m.plugins[0].admin);
         assert_eq!(m.plugins[1].kind, PluginKind::Display);
-        assert_eq!(m.plugins[1].admin_url.as_deref(), Some("http://raspberrypi.local:8081"));
+        assert!(m.plugins[1].admin);
     }
 
     #[test]

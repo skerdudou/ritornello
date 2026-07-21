@@ -31,7 +31,7 @@ function addRow(s = { preset: '', name: '', url: '' }) {
 }
 async function load() {
   try {
-    const r = await fetch('/api/stations');
+    const r = await fetch('./api/data');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     (await r.json()).stations
       .sort((a, b) => a.preset - b.preset)
@@ -47,7 +47,7 @@ async function save() {
     const [p, n, u] = tr.querySelectorAll('input');
     return { preset: +p.value, name: n.value, url: u.value };
   });
-  const r = await fetch('/api/stations', {
+  const r = await fetch('./api/data', {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ stations }),
