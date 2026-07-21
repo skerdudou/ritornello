@@ -5,11 +5,14 @@ mod state;
 use crate::admin::RadioAdmin;
 use anyhow::Result;
 use config::Stations;
+use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::{run_admin_plugin, run_source_plugin, SourceOutcome, SourcePlugin};
 use ritornello_proto::{SourceAction, View};
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, RwLock};
+use tokio::sync::RwLock as AsyncRwLock;
+
+pub(crate) const RADIO_EN: &str = include_str!("locales/en.toml");
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
@@ -22,8 +25,10 @@ fn arg_value(flag: &str) -> Option<PathBuf> {
 
 struct RadioSource {
     state_path: PathBuf,
-    stations: Arc<RwLock<Stations>>,
+    stations: Arc<AsyncRwLock<Stations>>,
     preset: u8,
+    catalog: Arc<RwLock<Catalog>>,
+    locales_root: PathBuf,
 }
 
 impl RadioSource {
@@ -41,7 +46,8 @@ impl RadioSource {
                 view: Some(View { line1: format!("RADIO  P{n}"), line2: st.name.clone(), line3: String::new() }),
             }
         } else {
-            SourceOutcome { action: SourceAction::Noop, view: Some(self.view_for(self.preset, "présélection vide")) }
+            let empty = self.catalog.read().unwrap().get("empty_preset").to_string();
+            SourceOutcome { action: SourceAction::Noop, view: Some(self.view_for(self.preset, &empty)) }
         }
     }
 }
@@ -81,6 +87,9 @@ impl SourcePlugin for RadioSource {
     async fn eject(&mut self) -> SourceOutcome {
         SourceOutcome { action: SourceAction::Noop, view: None }
     }
+    async fn set_locale(&mut self, locale: String) {
+        *self.catalog.write().unwrap() = Catalog::load("radio", &locale, &self.locales_root, RADIO_EN);
+    }
 }
 
 #[tokio::main]
@@ -97,14 +106,48 @@ async fn main() -> Result<()> {
         Stations::default()
     });
     let preset = state::load(&state_path).preset;
-    let stations_shared = Arc::new(RwLock::new(stations));
+    let stations_shared = Arc::new(AsyncRwLock::new(stations));
+    let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
+    let catalog = Arc::new(RwLock::new(Catalog::load("radio", "en", &locales_root, RADIO_EN)));
 
-    let source = RadioSource { state_path, stations: stations_shared.clone(), preset };
-    let admin = RadioAdmin { stations_path, stations: stations_shared };
+    let source = RadioSource {
+        state_path,
+        stations: stations_shared.clone(),
+        preset,
+        catalog: catalog.clone(),
+        locales_root,
+    };
+    let admin = RadioAdmin { stations_path, stations: stations_shared, catalog };
 
     tokio::try_join!(
         run_source_plugin(source, &socket_path),
         run_admin_plugin(admin, &admin_socket),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn empty_preset_utilise_le_catalogue_apres_set_locale() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
+        std::fs::write(dir.path().join("radio/fr.toml"), "empty_preset = \"PRESET VIDE\"\n").unwrap();
+
+        let state_dir = tempfile::tempdir().unwrap();
+        let catalog = Arc::new(RwLock::new(Catalog::load("radio", "en", dir.path(), RADIO_EN)));
+        let mut source = RadioSource {
+            state_path: state_dir.path().join("plugin-radio.json"),
+            stations: Arc::new(AsyncRwLock::new(Stations::default())),
+            preset: 1,
+            catalog: catalog.clone(),
+            locales_root: dir.path().to_path_buf(),
+        };
+        source.set_locale("fr".into()).await;
+        // aucun preset chargé → branche "empty_preset"
+        let outcome = source.select(1).await;
+        assert_eq!(outcome.view.unwrap().line2, "PRESET VIDE");
+    }
 }

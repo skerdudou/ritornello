@@ -1,7 +1,7 @@
 use crate::view::View;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "req", content = "arg")]
 pub enum SourceReq {
     Activate,
@@ -12,6 +12,7 @@ pub enum SourceReq {
     NextTrack,
     PrevTrack,
     Eject,
+    SetLocale(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +46,16 @@ pub struct SourceMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_locale_roundtrip() {
+        let r = SourceRequest { id: 9, req: SourceReq::SetLocale("fr".into()) };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"req\":\"SetLocale\""));
+        assert!(json.contains("\"arg\":\"fr\""));
+        let back: SourceRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.req, SourceReq::SetLocale("fr".into()));
+    }
 
     #[test]
     fn request_roundtrip() {

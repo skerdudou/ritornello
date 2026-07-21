@@ -58,11 +58,20 @@ async fn main() -> Result<()> {
         .with_context(|| format!("chargement de {}", plugins_path.display()))?;
     let persisted = state::load(&state_path);
 
+    let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
+    let catalog = Arc::new(RwLock::new(ritornello_i18n::Catalog::load(
+        "core",
+        persisted.locale.as_deref().unwrap_or("en"),
+        &locales_root,
+        core::EN,
+    )));
+
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(32);
     let (ev_tx, mut ev_rx) = broadcast::channel::<Event>(64);
     let (view_tx, mut view_rx) = watch::channel(View::default());
     let (source_view_tx, mut source_view_rx) = mpsc::channel::<(String, View)>(32);
     let (audio_tx, mut audio_rx) = mpsc::channel::<String>(4);
+    let (locale_tx, mut locale_rx) = mpsc::channel::<String>(4);
 
     // mpv (inchangé).
     let (mpv_player, mut mpv_child) =
@@ -200,12 +209,17 @@ async fn main() -> Result<()> {
         active_source: persisted.active_source.clone(),
     }));
     let audio_current = Arc::new(RwLock::new(persisted.audio_device.clone()));
+    let locale_current = Arc::new(RwLock::new(persisted.locale.clone()));
     {
         let app = status::router(AppState {
             status: status_state.clone(),
             logs: log_buffer.clone(),
             audio_current: audio_current.clone(),
             audio_tx: audio_tx.clone(),
+            catalog: catalog.clone(),
+            locale_current: locale_current.clone(),
+            locale_tx: locale_tx.clone(),
+            locales_root: locales_root.clone(),
             admin_backends: Arc::new(admin_backends),
         });
         let listener = tokio::net::TcpListener::bind(&http_addr).await.with_context(|| format!("bind {http_addr}"))?;
@@ -221,7 +235,15 @@ async fn main() -> Result<()> {
     // au démarrage (`persisted.active_source`) ; elle n'est pas mise à jour
     // en direct si l'utilisateur change de source ensuite — hors périmètre
     // de cette livraison (aucun test ne l'exige).
-    let mut core = core::Core::new(mpv_player, sources, persisted, state_path, view_tx);
+    let mut core = core::Core::new(
+        mpv_player,
+        sources,
+        persisted,
+        state_path,
+        view_tx,
+        catalog.clone(),
+        locales_root.clone(),
+    );
     core.resume().await?;
 
     let mut retry_at: Option<tokio::time::Instant> = None;
@@ -253,6 +275,11 @@ async fn main() -> Result<()> {
             Some(device) = audio_rx.recv() => {
                 if let Err(e) = core.set_audio_device(device).await {
                     tracing::warn!("changement de sortie audio: {e}");
+                }
+            }
+            Some(locale) = locale_rx.recv() => {
+                if let Err(e) = core.set_locale(locale).await {
+                    tracing::warn!("changement de langue: {e}");
                 }
             }
             _ = retry_sleep => {

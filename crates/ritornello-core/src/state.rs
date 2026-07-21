@@ -8,11 +8,13 @@ pub struct PersistedState {
     pub volume: u8,
     #[serde(default)]
     pub audio_device: Option<String>,
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 impl Default for PersistedState {
     fn default() -> Self {
-        Self { active_source: "radio".into(), volume: 60, audio_device: None }
+        Self { active_source: "radio".into(), volume: 60, audio_device: None, locale: None }
     }
 }
 
@@ -51,7 +53,7 @@ mod tests {
     fn roundtrip_save_load() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
-        let st = PersistedState { active_source: "cd".into(), volume: 35, audio_device: Some("bluealsa:DEV=XX".into()) };
+        let st = PersistedState { active_source: "cd".into(), volume: 35, audio_device: Some("bluealsa:DEV=XX".into()), locale: None };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
     }
@@ -62,5 +64,20 @@ mod tests {
         assert_eq!(d.active_source, "radio");
         assert_eq!(d.volume, 60);
         assert_eq!(d.audio_device, None);
+    }
+
+    #[test]
+    fn locale_absente_par_defaut_et_roundtrip() {
+        assert_eq!(PersistedState::default().locale, None);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let st = PersistedState {
+            active_source: "radio".into(),
+            volume: 50,
+            audio_device: None,
+            locale: Some("fr".into()),
+        };
+        save(&path, &st).unwrap();
+        assert_eq!(load(&path), st);
     }
 }

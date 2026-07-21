@@ -58,6 +58,10 @@ pub struct AppState {
     pub logs: Arc<LogBuffer>,
     pub audio_current: Arc<RwLock<Option<String>>>,
     pub audio_tx: mpsc::Sender<String>,
+    pub catalog: Arc<RwLock<ritornello_i18n::Catalog>>,
+    pub locale_current: Arc<RwLock<Option<String>>>,
+    pub locale_tx: mpsc::Sender<String>,
+    pub locales_root: std::path::PathBuf,
     pub admin_backends: Arc<std::collections::HashMap<String, Arc<dyn crate::admin::AdminBackend>>>,
 }
 
@@ -66,6 +70,7 @@ pub fn router(state: AppState) -> Router {
         .route("/status", get(status_page))
         .route("/api/status", get(status_json))
         .route("/api/audio-output", get(audio_output_json).put(audio_output_put))
+        .route("/api/locale", get(locale_json).put(locale_put))
         .route("/plugins/:name/", get(crate::admin::admin_page))
         .route(
             "/plugins/:name/api/data",
@@ -103,24 +108,78 @@ async fn audio_output_put(State(state): State<AppState>, Json(req): Json<AudioOu
     StatusCode::NO_CONTENT
 }
 
+/// Noms de langues disponibles à partir des noms de fichiers d'un répertoire
+/// `core/` : `en` (toujours) + chaque `<lang>.toml`. Fonction pure, testable,
+/// séparée de l'accès disque (comme `audio_output::parse_device_list`).
+pub fn parse_available_locales(filenames: &[String]) -> Vec<String> {
+    let mut out = vec!["en".to_string()];
+    for f in filenames {
+        if let Some(stem) = f.strip_suffix(".toml") {
+            if stem != "en" && !out.iter().any(|x| x == stem) {
+                out.push(stem.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Langues du cœur = `en` + les packs `<root>/core/*.toml` présents.
+pub fn list_locales(root: &std::path::Path) -> Vec<String> {
+    let names: Vec<String> = std::fs::read_dir(root.join("core"))
+        .map(|rd| {
+            rd.filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned())).collect()
+        })
+        .unwrap_or_default();
+    parse_available_locales(&names)
+}
+
+#[derive(Serialize)]
+struct LocaleResponse {
+    locales: Vec<String>,
+    current: Option<String>,
+}
+
+async fn locale_json(State(state): State<AppState>) -> Json<LocaleResponse> {
+    let locales = list_locales(&state.locales_root);
+    let current = state.locale_current.read().await.clone();
+    Json(LocaleResponse { locales, current })
+}
+
+#[derive(Deserialize)]
+struct LocaleRequest {
+    locale: String,
+}
+
+async fn locale_put(State(state): State<AppState>, Json(req): Json<LocaleRequest>) -> StatusCode {
+    *state.locale_current.write().await = Some(req.locale.clone());
+    if state.locale_tx.send(req.locale).await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
+    StatusCode::NO_CONTENT
+}
+
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 async fn status_page(State(state): State<AppState>) -> Html<String> {
     let s = state.status.read().await;
+    let cat = state.catalog.read().await;
+    let current_locale = state.locale_current.read().await.clone().unwrap_or_else(|| "en".to_string());
+
     let mut rows = String::new();
     for p in &s.plugins {
-        let etat = if p.connected { "connecté" } else { "indisponible" };
+        let etat = if p.connected { cat.get("connected") } else { cat.get("unavailable") };
         let lien = if p.admin {
-            format!("<a href=\"/plugins/{}/\">admin</a>", escape_html(&p.name))
+            format!("<a href=\"/plugins/{}/\">{}</a>", escape_html(&p.name), escape_html(cat.get("admin_link")))
         } else {
             "-".to_string()
         };
         rows.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td><td>{etat}</td><td>{lien}</td></tr>",
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{lien}</td></tr>",
             escape_html(&p.name),
-            escape_html(&p.kind)
+            escape_html(&p.kind),
+            escape_html(etat)
         ));
     }
     let logs: String = state
@@ -130,6 +189,7 @@ async fn status_page(State(state): State<AppState>) -> Html<String> {
         .rev()
         .map(|l| format!("<li>{}</li>", escape_html(l)))
         .collect();
+
     let devices = crate::audio_output::list_devices().unwrap_or_default();
     let current = state.audio_current.read().await.clone();
     let options: String = devices
@@ -139,22 +199,53 @@ async fn status_page(State(state): State<AppState>) -> Html<String> {
             format!("<option value=\"{}\"{sel}>{}</option>", escape_html(d), escape_html(d))
         })
         .collect();
+
+    let locales = list_locales(&state.locales_root);
+    let locale_options: String = locales
+        .iter()
+        .map(|l| {
+            let sel = if *l == current_locale { " selected" } else { "" };
+            format!("<option value=\"{}\"{sel}>{}</option>", escape_html(l), escape_html(l))
+        })
+        .collect();
+
     Html(format!(
-        "<!doctype html><html lang=\"fr\"><meta charset=\"utf-8\"><title>ritornello — statut</title>\
-         <h1>ritornello</h1><p>Source active : {}</p>\
-         <table border=\"1\"><tr><th>Plugin</th><th>Genre</th><th>État</th><th>Admin</th></tr>{}</table>\
-         <h2>Sortie audio</h2>\
+        "<!doctype html><html lang=\"{lang}\"><meta charset=\"utf-8\"><title>ritornello — {title}</title>\
+         <h1>ritornello</h1><p>{active_label} : {active}</p>\
+         <table border=\"1\"><tr><th>{c_plugin}</th><th>{c_kind}</th><th>{c_state}</th><th>{c_admin}</th></tr>{rows}</table>\
+         <h2>{audio}</h2>\
          <select id=\"audio-device\">{options}</select>\
-         <button onclick=\"setAudioOutput()\">Changer</button> <span id=\"audio-msg\"></span>\
+         <button onclick=\"setAudioOutput()\">{change}</button> <span id=\"audio-msg\"></span>\
+         <h2>{language}</h2>\
+         <select id=\"locale\">{locale_options}</select>\
+         <button onclick=\"setLocale()\">{change}</button> <span id=\"locale-msg\"></span>\
          <script>\
          async function setAudioOutput() {{\
            const device = document.getElementById('audio-device').value;\
            const r = await fetch('/api/audio-output', {{method:'PUT', headers:{{'content-type':'application/json'}}, body: JSON.stringify({{device}})}});\
-           document.getElementById('audio-msg').textContent = r.ok ? 'OK' : 'Erreur';\
+           document.getElementById('audio-msg').textContent = r.ok ? '{ok}' : '{error}';\
+         }}\
+         async function setLocale() {{\
+           const locale = document.getElementById('locale').value;\
+           const r = await fetch('/api/locale', {{method:'PUT', headers:{{'content-type':'application/json'}}, body: JSON.stringify({{locale}})}});\
+           if (r.ok) {{ location.reload(); }} else {{ document.getElementById('locale-msg').textContent = '{error}'; }}\
          }}\
          </script>\
-         <h2>Dernières erreurs</h2><ul>{}</ul></html>",
-        escape_html(&s.active_source), rows, logs
+         <h2>{recent}</h2><ul>{logs}</ul></html>",
+        lang = escape_html(&current_locale),
+        title = escape_html(cat.get("status_title")),
+        active_label = escape_html(cat.get("active_source_label")),
+        active = escape_html(&s.active_source),
+        c_plugin = escape_html(cat.get("col_plugin")),
+        c_kind = escape_html(cat.get("col_kind")),
+        c_state = escape_html(cat.get("col_state")),
+        c_admin = escape_html(cat.get("col_admin")),
+        audio = escape_html(cat.get("audio_output")),
+        change = escape_html(cat.get("change")),
+        language = escape_html(cat.get("language")),
+        ok = escape_html(cat.get("ok")),
+        error = escape_html(cat.get("error")),
+        recent = escape_html(cat.get("recent_errors")),
     ))
 }
 
@@ -225,25 +316,127 @@ mod tests {
 
     fn app_state() -> AppState {
         let (audio_tx, _audio_rx) = tokio::sync::mpsc::channel(4);
+        let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
         AppState {
             status: Arc::new(tokio::sync::RwLock::new(sample())),
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(None)),
             audio_tx,
+            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+                "core",
+                "en",
+                std::path::Path::new("/nonexistent"),
+                crate::core::EN,
+            ))),
+            locale_current: Arc::new(tokio::sync::RwLock::new(None)),
+            locale_tx,
+            locales_root: std::path::PathBuf::from("/nonexistent"),
             admin_backends: Arc::new(std::collections::HashMap::new()),
         }
     }
 
     fn app_state_with_audio() -> (AppState, tokio::sync::mpsc::Receiver<String>) {
         let (audio_tx, audio_rx) = tokio::sync::mpsc::channel(4);
+        let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
         let state = AppState {
             status: Arc::new(tokio::sync::RwLock::new(sample())),
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(Some("default".to_string()))),
             audio_tx,
+            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+                "core",
+                "en",
+                std::path::Path::new("/nonexistent"),
+                crate::core::EN,
+            ))),
+            locale_current: Arc::new(tokio::sync::RwLock::new(None)),
+            locale_tx,
+            locales_root: std::path::PathBuf::from("/nonexistent"),
             admin_backends: Arc::new(std::collections::HashMap::new()),
         };
         (state, audio_rx)
+    }
+
+    /// Variante avec un `locale_tx` observable et un catalogue chargé en `fr`
+    /// depuis une racine temporaire (le TempDir est retourné pour rester vivant).
+    fn app_state_fr() -> (AppState, tokio::sync::mpsc::Receiver<String>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("core")).unwrap();
+        std::fs::write(
+            dir.path().join("core/fr.toml"),
+            "active_source_label = \"Source active\"\naudio_output = \"Sortie audio\"\n",
+        )
+        .unwrap();
+        let (audio_tx, _audio_rx) = tokio::sync::mpsc::channel(4);
+        let (locale_tx, locale_rx) = tokio::sync::mpsc::channel(4);
+        let state = AppState {
+            status: Arc::new(tokio::sync::RwLock::new(sample())),
+            logs: Arc::new(LogBuffer::new(50)),
+            audio_current: Arc::new(tokio::sync::RwLock::new(None)),
+            audio_tx,
+            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+                "core",
+                "fr",
+                dir.path(),
+                crate::core::EN,
+            ))),
+            locale_current: Arc::new(tokio::sync::RwLock::new(Some("fr".to_string()))),
+            locale_tx,
+            locales_root: dir.path().to_path_buf(),
+            admin_backends: Arc::new(std::collections::HashMap::new()),
+        };
+        (state, locale_rx, dir)
+    }
+
+    #[test]
+    fn parse_available_locales_prefixe_en_et_deduplique() {
+        let noms = vec!["fr.toml".to_string(), "en.toml".to_string(), "README.md".to_string()];
+        assert_eq!(parse_available_locales(&noms), vec!["en".to_string(), "fr".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn get_locale_liste_en_et_les_packs_core() {
+        let (state, _rx, _dir) = app_state_fr();
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["current"], "fr");
+        let locales: Vec<String> = serde_json::from_value(v["locales"].clone()).unwrap();
+        assert!(locales.contains(&"en".to_string()));
+        assert!(locales.contains(&"fr".to_string()));
+    }
+
+    #[tokio::test]
+    async fn put_locale_notifie_et_met_a_jour_la_selection() {
+        let (state, mut locale_rx, _dir) = app_state_fr();
+        let locale_current = state.locale_current.clone();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/api/locale")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"locale":"fr"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(locale_rx.recv().await.unwrap(), "fr");
+        assert_eq!(locale_current.read().await.as_deref(), Some("fr"));
+    }
+
+    #[tokio::test]
+    async fn page_statut_rendue_en_francais() {
+        let (state, _rx, _dir) = app_state_fr();
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/status").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("Source active"));
+        assert!(html.contains("Sortie audio"));
+        assert!(!html.contains("Active source"));
     }
 
     #[tokio::test]

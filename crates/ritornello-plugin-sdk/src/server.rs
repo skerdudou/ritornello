@@ -20,6 +20,11 @@ pub trait SourcePlugin: Send + 'static {
     async fn prev_track(&mut self) -> SourceOutcome;
     async fn eject(&mut self) -> SourceOutcome;
 
+    /// Change la langue courante du plugin. Implémentation par défaut : no-op —
+    /// un plugin sans texte propre (console, mce) n'a rien à faire, et cd/radio
+    /// compilent inchangés tant qu'ils n'ont pas surchargé cette méthode.
+    async fn set_locale(&mut self, _locale: String) {}
+
     /// Notification spontanée (ex. changement de piste, métadonnées arrivées en
     /// différé). Par défaut ne se termine jamais : un plugin sans notification
     /// spontanée (Radio) n'a rien à écrire de plus.
@@ -57,6 +62,10 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                     SourceReq::NextTrack => plugin.next_track().await,
                     SourceReq::PrevTrack => plugin.prev_track().await,
                     SourceReq::Eject => plugin.eject().await,
+                    SourceReq::SetLocale(locale) => {
+                        plugin.set_locale(locale).await;
+                        SourceOutcome { action: SourceAction::Noop, view: None }
+                    }
                 };
                 let msg = SourceMessage { id: Some(req.id), action: Some(outcome.action), view: outcome.view };
                 write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
@@ -122,8 +131,8 @@ use ritornello_proto::{AdminReq, AdminRequest, AdminResponse, AdminResult};
 
 #[async_trait::async_trait]
 pub trait AdminPlugin: Send + 'static {
-    /// HTML statique de la page d'admin (servi tel quel par le cœur).
-    fn page(&self) -> &'static str;
+    /// HTML de la page d'admin (rendu serveur ; peut dépendre de la langue).
+    fn page(&self) -> String;
     /// État courant, sérialisé en JSON opaque pour le cœur.
     async fn get_data(&self) -> serde_json::Value;
     /// Valide et persiste ; `Err(msg)` = donnée refusée (msg montré à l'utilisateur).
@@ -146,7 +155,7 @@ pub async fn run_admin_plugin(mut plugin: impl AdminPlugin, socket_path: &Path) 
         let req: AdminRequest = serde_json::from_str(&line)
             .with_context(|| format!("requete admin invalide: {line}"))?;
         let result = match req.req {
-            AdminReq::GetPage => AdminResult::Page(plugin.page().to_string()),
+            AdminReq::GetPage => AdminResult::Page(plugin.page()),
             AdminReq::GetData => AdminResult::Data(plugin.get_data().await),
             AdminReq::SetData(data) => match plugin.set_data(data).await {
                 Ok(()) => AdminResult::Set { ok: true, error: None },
@@ -172,8 +181,8 @@ mod admin_server_tests {
 
     #[async_trait::async_trait]
     impl AdminPlugin for FakeAdmin {
-        fn page(&self) -> &'static str {
-            "<h1>hello</h1>"
+        fn page(&self) -> String {
+            "<h1>hello</h1>".to_string()
         }
         async fn get_data(&self) -> serde_json::Value {
             self.data.clone()
@@ -290,6 +299,54 @@ mod tests {
         let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(msg.id, Some(2));
         assert_eq!(msg.action, Some(SourceAction::Play { uri: "http://station-3".into() }));
+    }
+
+    #[tokio::test]
+    async fn set_locale_est_transmis_au_plugin_et_repond_noop() {
+        use std::sync::{Arc, Mutex};
+        struct RecordingLocale {
+            vu: Arc<Mutex<Option<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl SourcePlugin for RecordingLocale {
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
+            async fn next_track(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
+            async fn prev_track(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
+            async fn set_locale(&mut self, locale: String) {
+                *self.vu.lock().unwrap() = Some(locale);
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        let vu = Arc::new(Mutex::new(None));
+        let vu_srv = vu.clone();
+        tokio::spawn(async move {
+            run_source_plugin(RecordingLocale { vu: vu_srv }, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await {
+                client = Some(s);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = client.expect("connexion au plugin").into_split();
+        let mut lines = BufReader::new(read).lines();
+        write.write_all(b"{\"id\":1,\"req\":\"SetLocale\",\"arg\":\"fr\"}\n").await.unwrap();
+        let line = lines.next_line().await.unwrap().unwrap();
+        let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(msg.id, Some(1));
+        assert_eq!(msg.action, Some(SourceAction::Noop));
+        assert!(msg.view.is_none());
+        assert_eq!(vu.lock().unwrap().as_deref(), Some("fr"));
     }
 }
 

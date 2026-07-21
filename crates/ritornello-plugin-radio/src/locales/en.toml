@@ -1,0 +1,16 @@
+empty_preset = "empty preset"
+preset_out_of_range = "preset {p} out of range 1-9 ({name})"
+preset_duplicate = "duplicate preset {p}"
+bad_url = "invalid URL for {name}: {url}"
+
+# page d'admin
+admin_title = "stations"
+col_num = "N°"
+col_name = "Name"
+col_url = "Stream URL"
+btn_add = "+ Add"
+btn_save = "Save"
+load_error_1 = "Error loading stations ("
+load_error_2 = ") — fix stations.toml, then reload"
+saved = "Saved ✓"
+save_error = "Error: presets 1-9 unique, http(s) URLs"

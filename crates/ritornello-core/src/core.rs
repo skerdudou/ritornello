@@ -2,12 +2,16 @@ use crate::player::Player;
 use crate::state::{self, PersistedState};
 use crate::types::Event;
 use anyhow::Result;
+use ritornello_i18n::Catalog;
 use ritornello_proto::{Command, SourceAction, SourceReq, View};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{watch, RwLock};
+
+/// Anglais embarqué du cœur (base toujours présente).
+pub const EN: &str = include_str!("locales/en.toml");
 
 const RETRY_BASE: Duration = Duration::from_secs(2);
 const RETRY_MAX: Duration = Duration::from_secs(30);
@@ -31,6 +35,9 @@ pub struct Core<P: Player> {
     view: View,
     state_path: PathBuf,
     view_tx: watch::Sender<View>,
+    catalog: Arc<RwLock<Catalog>>,
+    locale: Option<String>,
+    locales_root: PathBuf,
 }
 
 impl<P: Player> Core<P> {
@@ -40,6 +47,8 @@ impl<P: Player> Core<P> {
         persisted: PersistedState,
         state_path: PathBuf,
         view_tx: watch::Sender<View>,
+        catalog: Arc<RwLock<Catalog>>,
+        locales_root: PathBuf,
     ) -> Self {
         let mut source_order: Vec<String> = sources.keys().cloned().collect();
         source_order.sort();
@@ -62,6 +71,9 @@ impl<P: Player> Core<P> {
             view: View::default(),
             state_path,
             view_tx,
+            catalog,
+            locale: persisted.locale.clone(),
+            locales_root,
         }
     }
 
@@ -69,6 +81,13 @@ impl<P: Player> Core<P> {
         self.player.set_volume(self.volume).await?;
         if let Some(device) = self.audio_device.clone() {
             self.player.set_audio_device(&device).await?;
+        }
+        if let Some(locale) = self.locale.clone() {
+            for name in self.source_order.clone() {
+                if let Some(src) = self.sources.get(&name) {
+                    let _ = src.request(SourceReq::SetLocale(locale.clone())).await;
+                }
+            }
         }
         let action = self.active().request(SourceReq::Activate).await?;
         self.apply(action).await
@@ -147,7 +166,7 @@ impl<P: Player> Core<P> {
                 if self.standby {
                     let _ = self.active().request(SourceReq::Deactivate).await;
                     self.player.stop().await?;
-                    self.view = Self::standby_view();
+                    self.view = self.standby_view().await;
                     self.push_view();
                 } else {
                     self.resume().await?;
@@ -218,11 +237,32 @@ impl<P: Player> Core<P> {
         Ok(())
     }
 
+    /// Change la langue courante : reconstruit le catalogue partagé du cœur
+    /// (lu par la page de statut), persiste l'état, et pousse `SetLocale` à
+    /// chaque plugin Source connecté (best-effort).
+    ///
+    /// Appelée depuis la boucle `select!` de `main` sur réception du canal
+    /// `locale_rx`, lui-même alimenté par la route `PUT /api/locale`.
+    pub async fn set_locale(&mut self, locale: String) -> Result<()> {
+        self.locale = Some(locale.clone());
+        *self.catalog.write().await = Catalog::load("core", &locale, &self.locales_root, EN);
+        self.persist();
+        for name in self.source_order.clone() {
+            if let Some(src) = self.sources.get(&name) {
+                if let Err(e) = src.request(SourceReq::SetLocale(locale.clone())).await {
+                    tracing::warn!("SetLocale vers {name}: {e}");
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn persist(&self) {
         let st = PersistedState {
             active_source: self.active_source.clone(),
             volume: self.volume,
             audio_device: self.audio_device.clone(),
+            locale: self.locale.clone(),
         };
         if let Err(e) = state::save(&self.state_path, &st) {
             tracing::warn!("persistance impossible: {e}");
@@ -233,8 +273,9 @@ impl<P: Player> Core<P> {
         let _ = self.view_tx.send(self.view.clone());
     }
 
-    fn standby_view() -> View {
-        View { line1: "VEILLE".into(), line2: String::new(), line3: String::new() }
+    async fn standby_view(&self) -> View {
+        let cat = self.catalog.read().await;
+        View { line1: cat.get("standby").to_string(), line2: String::new(), line3: String::new() }
     }
 }
 
@@ -313,7 +354,9 @@ mod tests {
         sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: source_calls.clone() }));
         sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls.clone() }));
         let (tx, rx) = watch::channel(View::default());
-        let core = Core::new(player, sources, PersistedState::default(), dir.path().join("state.json"), tx);
+        let root = dir.path().to_path_buf();
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let core = Core::new(player, sources, PersistedState::default(), dir.path().join("state.json"), tx, catalog, root);
         (core, player_calls, source_calls, rx, dir)
     }
 
@@ -364,9 +407,9 @@ mod tests {
         let (mut core, _pc, _sc, mut rx, _d) = setup();
         core.resume().await.unwrap();
         core.handle_command(Command::Power).await.unwrap();
-        assert_eq!(rx.borrow_and_update().line1, "VEILLE");
+        assert_eq!(rx.borrow_and_update().line1, "STANDBY");
         core.handle_source_view("radio", View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() });
-        assert_eq!(rx.borrow().line1, "VEILLE"); // toujours VEILLE, la vue source est ignoree en veille
+        assert_eq!(rx.borrow().line1, "STANDBY"); // toujours en veille, la vue source est ignoree
         core.handle_command(Command::Power).await.unwrap();
         core.handle_source_view("radio", View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() });
         assert_eq!(rx.borrow_and_update().line1, "RADIO  P1"); // le reveil laisse la source reprendre l'affichage
@@ -380,8 +423,10 @@ mod tests {
         let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
         sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())) }));
         let (tx, _rx) = watch::channel(View::default());
-        let persisted = PersistedState { active_source: "radio".into(), volume: 60, audio_device: Some("bluealsa:DEV=XX".into()) };
-        let mut core = Core::new(player, sources, persisted, dir.path().join("state.json"), tx);
+        let persisted = PersistedState { active_source: "radio".into(), volume: 60, audio_device: Some("bluealsa:DEV=XX".into()), locale: None };
+        let root = dir.path().to_path_buf();
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let mut core = Core::new(player, sources, persisted, dir.path().join("state.json"), tx, catalog, root);
         core.resume().await.unwrap();
         assert!(player_calls.lock().unwrap().contains(&"audio_device bluealsa:DEV=XX".to_string()));
     }
@@ -423,5 +468,34 @@ mod tests {
         assert!(rx.borrow().line1.is_empty()); // la vue de "cd" (inactive) n'a pas ete appliquee
         core.handle_source_view("radio", View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() });
         assert!(rx.borrow_and_update().line1.contains("RADIO"));
+    }
+
+    #[tokio::test]
+    async fn standby_view_est_traduit_par_le_catalogue() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("core")).unwrap();
+        std::fs::write(dir.path().join("core/fr.toml"), "standby = \"VEILLE\"\n").unwrap();
+        let player = FakePlayer::default();
+        let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
+        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())) }));
+        let (tx, mut rx) = watch::channel(View::default());
+        let root = dir.path().to_path_buf();
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "fr", &root, crate::core::EN)));
+        let mut core = Core::new(player, sources, PersistedState::default(), dir.path().join("state.json"), tx, catalog, root);
+        core.resume().await.unwrap();
+        core.handle_command(Command::Power).await.unwrap();
+        assert_eq!(rx.borrow_and_update().line1, "VEILLE");
+    }
+
+    #[tokio::test]
+    async fn set_locale_persiste_et_notifie_les_sources() {
+        let (mut core, _pc, source_calls, _rx, dir) = setup();
+        core.set_locale("fr".into()).await.unwrap();
+        let calls = source_calls.lock().unwrap();
+        assert!(calls.iter().any(|c| c == "radio:SetLocale(\"fr\")"));
+        assert!(calls.iter().any(|c| c == "cd:SetLocale(\"fr\")"));
+        drop(calls);
+        let st = crate::state::load(&dir.path().join("state.json"));
+        assert_eq!(st.locale.as_deref(), Some("fr"));
     }
 }

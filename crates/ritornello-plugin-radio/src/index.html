@@ -2,7 +2,7 @@
 <html lang="fr">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ritornello — stations</title>
+<title>ritornello — {{admin_title}}</title>
 <style>
   body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
   table { width: 100%; border-collapse: collapse; }
@@ -15,10 +15,10 @@
 </style>
 <h1>ritornello</h1>
 <table id="t">
-  <tr><th>N°</th><th>Nom</th><th>URL du flux</th><th></th></tr>
+  <tr><th>{{col_num}}</th><th>{{col_name}}</th><th>{{col_url}}</th><th></th></tr>
 </table>
-<button onclick="addRow()">+ Ajouter</button>
-<button onclick="save()">Enregistrer</button><span id="msg"></span>
+<button onclick="addRow()">{{btn_add}}</button>
+<button onclick="save()">{{btn_save}}</button><span id="msg"></span>
 <script>
 const t = document.getElementById('t');
 function addRow(s = { preset: '', name: '', url: '' }) {
@@ -38,7 +38,7 @@ async function load() {
       .forEach(addRow);
   } catch (e) {
     document.getElementById('msg').textContent =
-      'Erreur de chargement des stations (' + e.message + ') — corriger stations.toml, puis recharger';
+      '{{load_error_1}}' + e.message + '{{load_error_2}}';
     document.querySelectorAll('button').forEach(b => b.disabled = true);
   }
 }
@@ -53,7 +53,7 @@ async function save() {
     body: JSON.stringify({ stations }),
   });
   document.getElementById('msg').textContent =
-    r.ok ? 'Enregistré ✓' : 'Erreur : présélections 1-9 uniques, URLs http(s)';
+    r.ok ? '{{saved}}' : '{{save_error}}';
 }
 load();
 </script>

@@ -902,6 +902,7 @@ dependencies = [
  "async-trait",
  "axum",
  "http-body-util",
+ "ritornello-i18n",
  "ritornello-plugin-sdk",
  "ritornello-proto",
  "serde",
@@ -915,6 +916,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ritornello-i18n"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "ritornello-plugin-cd"
 version = "0.1.0"
 dependencies = [
@@ -922,9 +932,11 @@ dependencies = [
  "async-trait",
  "libc",
  "reqwest",
+ "ritornello-i18n",
  "ritornello-plugin-sdk",
  "ritornello-proto",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -964,6 +976,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "ritornello-i18n",
  "ritornello-plugin-sdk",
  "ritornello-proto",
  "serde",

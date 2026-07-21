@@ -1,0 +1,4 @@
+no_disc = "pas de disque"
+cd_audio = "CD audio"
+cd_track = "CD  piste {n}"
+cd_n_of_total = "CD  {n}/{total}"

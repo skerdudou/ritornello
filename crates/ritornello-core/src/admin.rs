@@ -96,6 +96,7 @@ mod tests {
 
     fn state_with(fake: Fake) -> AppState {
         let (audio_tx, _rx) = tokio::sync::mpsc::channel(4);
+        let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
         let mut backends: HashMap<String, Arc<dyn AdminBackend>> = HashMap::new();
         backends.insert("radio".into(), Arc::new(fake));
         AppState {
@@ -103,6 +104,15 @@ mod tests {
             logs: Arc::new(LogBuffer::new(10)),
             audio_current: Arc::new(tokio::sync::RwLock::new(None)),
             audio_tx,
+            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+                "core",
+                "en",
+                std::path::Path::new("/nonexistent"),
+                crate::core::EN,
+            ))),
+            locale_current: Arc::new(tokio::sync::RwLock::new(None)),
+            locale_tx,
+            locales_root: std::path::PathBuf::from("/nonexistent"),
             admin_backends: Arc::new(backends),
         }
     }

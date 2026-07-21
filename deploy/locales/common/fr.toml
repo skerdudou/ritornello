@@ -1,0 +1,4 @@
+play = "Lecture"
+pause = "Pause"
+stop = "Arrêt"
+error = "Erreur"

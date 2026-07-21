@@ -1,4 +1,5 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
+use ritornello_i18n::Catalog;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -14,6 +15,49 @@ pub struct Stations {
     #[serde(default)]
     pub stations: Vec<Station>,
 }
+
+/// Erreur de validation typée : le texte utilisateur est produit à la
+/// frontière via `message(&Catalog)`. `Display` fournit une version anglaise
+/// pour les journaux internes (dev), hors périmètre i18n.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ValidationError {
+    PresetOutOfRange { preset: u8, name: String },
+    DuplicatePreset { preset: u8 },
+    BadUrl { name: String, url: String },
+}
+
+impl ValidationError {
+    /// Message localisé remonté à l'utilisateur (corps du 422 côté admin).
+    pub fn message(&self, catalog: &Catalog) -> String {
+        match self {
+            ValidationError::PresetOutOfRange { preset, name } => catalog
+                .get("preset_out_of_range")
+                .replace("{p}", &preset.to_string())
+                .replace("{name}", name),
+            ValidationError::DuplicatePreset { preset } => {
+                catalog.get("preset_duplicate").replace("{p}", &preset.to_string())
+            }
+            ValidationError::BadUrl { name, url } => catalog
+                .get("bad_url")
+                .replace("{name}", name)
+                .replace("{url}", url),
+        }
+    }
+}
+
+impl std::fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValidationError::PresetOutOfRange { preset, name } => {
+                write!(f, "preset {preset} out of range 1-9 ({name})")
+            }
+            ValidationError::DuplicatePreset { preset } => write!(f, "duplicate preset {preset}"),
+            ValidationError::BadUrl { name, url } => write!(f, "invalid URL for {name}: {url}"),
+        }
+    }
+}
+
+impl std::error::Error for ValidationError {}
 
 impl Stations {
     pub fn load(path: &Path) -> Result<Self> {
@@ -32,17 +76,17 @@ impl Stations {
         Ok(())
     }
 
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> std::result::Result<(), ValidationError> {
         let mut seen = std::collections::HashSet::new();
         for s in &self.stations {
             if !(1..=9).contains(&s.preset) {
-                bail!("présélection {} hors bornes 1-9 ({})", s.preset, s.name);
+                return Err(ValidationError::PresetOutOfRange { preset: s.preset, name: s.name.clone() });
             }
             if !seen.insert(s.preset) {
-                bail!("présélection {} en double", s.preset);
+                return Err(ValidationError::DuplicatePreset { preset: s.preset });
             }
             if !s.url.starts_with("http://") && !s.url.starts_with("https://") {
-                bail!("URL invalide pour {} : {}", s.name, s.url);
+                return Err(ValidationError::BadUrl { name: s.name.clone(), url: s.url.clone() });
             }
         }
         Ok(())
@@ -112,5 +156,33 @@ mod tests {
         let mut s3 = sample();
         s3.stations[0].url = "ftp://nope".into();
         assert!(s3.validate().is_err());
+    }
+
+    #[test]
+    fn validation_produit_une_erreur_typee() {
+        let mut s = sample();
+        s.stations[0].preset = 10;
+        assert!(matches!(
+            s.validate(),
+            Err(ValidationError::PresetOutOfRange { preset: 10, .. })
+        ));
+        let mut d = sample();
+        d.stations[1].preset = 1;
+        assert!(matches!(d.validate(), Err(ValidationError::DuplicatePreset { preset: 1 })));
+    }
+
+    #[test]
+    fn message_de_validation_utilise_le_catalogue() {
+        use ritornello_i18n::Catalog;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
+        std::fs::write(
+            dir.path().join("radio/fr.toml"),
+            "preset_out_of_range = \"préréglage {p} hors bornes ({name})\"\n",
+        )
+        .unwrap();
+        let cat = Catalog::load("radio", "fr", dir.path(), crate::RADIO_EN);
+        let err = ValidationError::PresetOutOfRange { preset: 10, name: "X".into() };
+        assert_eq!(err.message(&cat), "préréglage 10 hors bornes (X)");
     }
 }

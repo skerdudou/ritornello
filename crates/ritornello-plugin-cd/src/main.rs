@@ -9,6 +9,10 @@ use ritornello_proto::{SourceAction, View};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
+use ritornello_i18n::Catalog;
+
+const CD_EN: &str = include_str!("locales/en.toml");
+
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -29,23 +33,33 @@ struct CdSource {
     presence_rx: mpsc::Receiver<bool>,
     metadata_tx: mpsc::Sender<(u64, usize, Option<DiscInfo>)>,
     metadata_rx: mpsc::Receiver<(u64, usize, Option<DiscInfo>)>,
+    catalog: Catalog,
+    locales_root: PathBuf,
 }
 
 impl CdSource {
     fn view(&self) -> View {
         if !self.present {
-            return View { line1: "CD".into(), line2: "pas de disque".into(), line3: String::new() };
+            return View {
+                line1: "CD".into(),
+                line2: self.catalog.get("no_disc").to_string(),
+                line3: String::new(),
+            };
         }
         let n = self.track.max(0) as usize;
         match &self.info {
             Some(info) => View {
-                line1: format!("CD  {}/{}", n + 1, info.tracks.len()),
+                line1: self
+                    .catalog
+                    .get("cd_n_of_total")
+                    .replace("{n}", &(n + 1).to_string())
+                    .replace("{total}", &info.tracks.len().to_string()),
                 line2: format!("{} — {}", info.artist, info.album),
                 line3: info.tracks.get(n).cloned().unwrap_or_default(),
             },
             None => View {
-                line1: format!("CD  piste {}", n + 1),
-                line2: "CD audio".into(),
+                line1: self.catalog.get("cd_track").replace("{n}", &(n + 1).to_string()),
+                line2: self.catalog.get("cd_audio").to_string(),
                 line3: String::new(),
             },
         }
@@ -132,6 +146,10 @@ impl SourcePlugin for CdSource {
         SourceOutcome { action: SourceAction::Stop, view: Some(self.view()) }
     }
 
+    async fn set_locale(&mut self, locale: String) {
+        self.catalog = Catalog::load("cd", &locale, &self.locales_root, CD_EN);
+    }
+
     async fn poll_notification(&mut self) -> Option<View> {
         tokio::select! {
             presence = self.presence_rx.recv() => {
@@ -171,6 +189,8 @@ async fn main() -> Result<()> {
 
     let (metadata_tx, metadata_rx) = mpsc::channel::<(u64, usize, Option<DiscInfo>)>(4);
 
+    let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
+
     let source = CdSource {
         cd_dev,
         present: false,
@@ -181,6 +201,8 @@ async fn main() -> Result<()> {
         presence_rx,
         metadata_tx,
         metadata_rx,
+        catalog: Catalog::load("cd", "en", &locales_root, CD_EN),
+        locales_root,
     };
     run_source_plugin(source, &socket_path).await
 }
@@ -202,6 +224,8 @@ mod tests {
             presence_rx,
             metadata_tx: metadata_tx.clone(),
             metadata_rx,
+            catalog: Catalog::load("cd", "en", std::path::Path::new("/nonexistent"), CD_EN),
+            locales_root: std::path::PathBuf::from("/nonexistent"),
         };
         (source, presence_tx, metadata_tx)
     }
@@ -220,5 +244,18 @@ mod tests {
         let view = source.poll_notification().await;
         assert!(view.is_some());
         assert_eq!(source.total_tracks, 12);
+    }
+
+    #[tokio::test]
+    async fn view_utilise_le_catalogue_apres_set_locale() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("cd")).unwrap();
+        std::fs::write(dir.path().join("cd/fr.toml"), "no_disc = \"PAS DE DISQUE\"\n").unwrap();
+
+        let (mut source, _presence_tx, _metadata_tx) = source_with_channels();
+        source.present = false;
+        source.locales_root = dir.path().to_path_buf();
+        source.set_locale("fr".into()).await;
+        assert_eq!(source.view().line2, "PAS DE DISQUE");
     }
 }

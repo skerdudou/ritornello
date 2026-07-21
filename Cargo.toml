@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/ritornello-proto",
+    "crates/ritornello-i18n",
     "crates/ritornello-plugin-sdk",
     "crates/ritornello-core",
     "crates/ritornello-plugin-radio",

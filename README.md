@@ -95,6 +95,29 @@ origine, avec un lien affiché sur la page de statut du cœur
   enceinte Bluetooth déjà appairée via `bluetoothctl` y apparaîtra
   automatiquement une fois exposée par `bluez-alsa`.
 
+## Internationalisation (i18n)
+
+L'interface est multilingue. La langue de base est l'**anglais**, embarquée dans
+chaque binaire ; le français (et d'autres langues) sont fournis par des **packs
+TOML externes**, décentralisés par composant :
+
+    /etc/ritornello/locales/
+      common/fr.toml   # vocabulaire commun (play/pause/stop/error…)
+      core/fr.toml     # texte du cœur + page de statut
+      radio/fr.toml    # plugin radio + page d'admin
+      cd/fr.toml       # plugin cd
+      <plugin-tiers>/fr.toml
+
+- Racine configurable par `RITORNELLO_LOCALES` (défaut `/etc/ritornello/locales`).
+- **Sélecteur** de langue sur la page de statut (`/status`) : il liste `en` plus
+  tout pack `core/<lang>.toml` présent. Le changement est appliqué à chaud, poussé
+  aux plugins, et persisté (`state.json`).
+- **Ajouter une langue** : copier l'`en` de référence, traduire les valeurs, le
+  déposer sous `<root>/<composant>/<lang>.toml`. Une clé ou un pack manquant
+  retombe automatiquement sur l'anglais (dégradation par clé, jamais d'erreur).
+- Les packs français initiaux sont livrés dans `deploy/locales/` et copiés par
+  `deploy/deploy.sh`.
+
 ## Développement
 
 Sur n'importe quelle machine Linux (ou WSL sous Windows, l'environnement
