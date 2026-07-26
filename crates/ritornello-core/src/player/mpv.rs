@@ -28,7 +28,13 @@ impl MpvIpc {
         tokio::spawn(async move {
             let mut lines = BufReader::new(read).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+                let v = match serde_json::from_str::<Value>(&line) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::debug!("ligne mpv non-JSON ignoree: {e}");
+                        continue;
+                    }
+                };
                 if let Some(id) = v.get("request_id").and_then(Value::as_u64) {
                     if let Some(tx) = pending.lock().await.remove(&id) {
                         let res = if v["error"] == json!("success") {

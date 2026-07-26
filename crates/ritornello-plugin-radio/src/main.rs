@@ -119,10 +119,29 @@ async fn main() -> Result<()> {
     };
     let admin = RadioAdmin { stations_path, stations: stations_shared, catalog };
 
-    tokio::try_join!(
-        run_source_plugin(source, &socket_path),
-        run_admin_plugin(admin, &admin_socket),
-    )?;
+    // Les deux moitiés sont indépendantes : une panne (déconnexion, erreur
+    // d'écriture, voire panique sur un lock empoisonné) sur la socket admin ne
+    // doit pas tuer la lecture audio, et réciproquement. Chaque moitié tourne
+    // dans sa propre tâche tokio::spawn : une panique y est capturée dans le
+    // JoinHandle (JoinError) au lieu de dérouler la pile de l'autre moitié,
+    // ce qu'un simple tokio::join! sur des blocs async inline ne garantirait
+    // pas (les deux futures seraient pollées dans la même tâche).
+    let source_handle = tokio::spawn(async move { run_source_plugin(source, &socket_path).await });
+    let admin_handle = tokio::spawn(async move { run_admin_plugin(admin, &admin_socket).await });
+
+    let (source_res, admin_res) = tokio::join!(source_handle, admin_handle);
+
+    match source_res {
+        Ok(Ok(())) => tracing::warn!("plugin radio (moitie source) termine normalement"),
+        Ok(Err(e)) => tracing::warn!("plugin radio (moitie source) erreur: {e}"),
+        Err(join_err) => tracing::error!("plugin radio (moitie source) a panique: {join_err}"),
+    }
+    match admin_res {
+        Ok(Ok(())) => tracing::warn!("plugin radio (moitie admin) termine normalement"),
+        Ok(Err(e)) => tracing::warn!("plugin radio (moitie admin) erreur: {e}"),
+        Err(join_err) => tracing::error!("plugin radio (moitie admin) a panique: {join_err}"),
+    }
+
     Ok(())
 }
 
@@ -149,5 +168,10 @@ mod tests {
         // aucun preset chargé → branche "empty_preset"
         let outcome = source.select(1).await;
         assert_eq!(outcome.view.unwrap().line2, "PRESET VIDE");
+    }
+
+    #[test]
+    fn en_embarque_radio_est_non_vide() {
+        assert!(!ritornello_i18n::try_parse(RADIO_EN).unwrap().is_empty());
     }
 }

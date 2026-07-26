@@ -11,6 +11,7 @@ use crate::plugins::{PluginKind, PluginManifest};
 use crate::status::{AppState, LogBuffer, LogBufferWriter, PluginStatus, StatusState};
 use crate::types::Event;
 use anyhow::{Context, Result};
+use futures::stream::{FuturesUnordered, StreamExt};
 use ritornello_proto::{Command, View};
 use ritornello_plugin_sdk::{run_input_client, DisplayClient, SourceClient};
 use std::collections::HashMap;
@@ -82,7 +83,7 @@ async fn main() -> Result<()> {
     // Spawn et connexion de chaque plugin déclaré.
     let mut sources: HashMap<String, Arc<dyn core::Source>> = HashMap::new();
     let mut plugin_statuses = Vec::new();
-    let mut children = Vec::new();
+    let mut plugin_waits = FuturesUnordered::new();
     let mut source_connects = Vec::new();
     let mut display_connect = None;
     let mut admin_connects = Vec::new();
@@ -94,7 +95,12 @@ async fn main() -> Result<()> {
             .then(|| PathBuf::from(format!("{runtime_dir}/{}-admin.sock", p.name)));
         match plugins::spawn(&p.exec, &socket_path, admin_socket.as_deref()) {
             Ok(child) => {
-                children.push(child);
+                let wname = p.name.clone();
+                plugin_waits.push(async move {
+                    let mut child = child;
+                    let status = child.wait().await;
+                    (wname, status)
+                });
                 if p.admin {
                     let name = p.name.clone();
                     let asock = PathBuf::from(format!("{runtime_dir}/{}-admin.sock", p.name));
@@ -221,6 +227,7 @@ async fn main() -> Result<()> {
             locale_tx: locale_tx.clone(),
             locales_root: locales_root.clone(),
             admin_backends: Arc::new(admin_backends),
+            cmd_tx: cmd_tx.clone(),
         });
         let listener = tokio::net::TcpListener::bind(&http_addr).await.with_context(|| format!("bind {http_addr}"))?;
         tracing::info!("page de statut sur http://{http_addr}/status");
@@ -231,10 +238,8 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Cœur. La page de statut affiche la source active telle que persistée
-    // au démarrage (`persisted.active_source`) ; elle n'est pas mise à jour
-    // en direct si l'utilisateur change de source ensuite — hors périmètre
-    // de cette livraison (aucun test ne l'exige).
+    // Cœur. La source active affichée est tenue à jour en direct par la boucle
+    // ci-dessous (mise à jour de status_state.active_source après chaque commande).
     let mut core = core::Core::new(
         mpv_player,
         sources,
@@ -247,6 +252,7 @@ async fn main() -> Result<()> {
     core.resume().await?;
 
     let mut retry_at: Option<tokio::time::Instant> = None;
+    let mut events_open = true;
 
     loop {
         let retry_sleep = async {
@@ -260,13 +266,26 @@ async fn main() -> Result<()> {
                 if let Err(e) = core.handle_command(cmd).await {
                     tracing::warn!("commande: {e}");
                 }
+                status_state.write().await.active_source = core.active_source().to_string();
             }
-            Ok(ev) = ev_rx.recv() => {
-                if matches!(ev, Event::Title(_) | Event::PlaybackActive) {
-                    retry_at = None;
-                }
-                if let Some(delay) = core.handle_event(ev).await {
-                    retry_at = Some(tokio::time::Instant::now() + delay);
+            ev = ev_rx.recv(), if events_open => {
+                match ev {
+                    Ok(ev) => {
+                        if matches!(ev, Event::Title(_) | Event::PlaybackActive) {
+                            retry_at = None;
+                        }
+                        if let Some(delay) = core.handle_event(ev).await {
+                            retry_at = Some(tokio::time::Instant::now() + delay);
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("events en retard, {n} perdus");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        // Canal fermé : on désactive le bras (comme aujourd'hui,
+                        // le bras cessait de matcher) pour éviter de tourner à vide.
+                        events_open = false;
+                    }
                 }
             }
             Some((name, view)) = source_view_rx.recv() => {
@@ -287,6 +306,10 @@ async fn main() -> Result<()> {
                 if let Err(e) = core.retry_stream().await {
                     tracing::warn!("retry flux: {e}");
                 }
+            }
+            (name, status) = plugin_waits.select_next_some() => {
+                tracing::warn!("plugin {name} termine: {status:?}");
+                crate::status::mark_plugin_disconnected(&mut *status_state.write().await, &name);
             }
             status = mpv_child.wait() => {
                 anyhow::bail!("mpv termine ({status:?}), arret pour relance par systemd");

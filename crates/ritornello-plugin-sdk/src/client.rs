@@ -43,7 +43,13 @@ impl SourceClient {
         tokio::spawn(async move {
             let mut lines = BufReader::new(read).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                let Ok(msg) = serde_json::from_str::<SourceMessage>(&line) else { continue };
+                let msg = match serde_json::from_str::<SourceMessage>(&line) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::warn!("message source invalide ignore: {e}");
+                        continue;
+                    }
+                };
                 if let (Some(id), Some(action)) = (msg.id, msg.action.clone()) {
                     if let Some(tx) = pending.lock().await.remove(&id) {
                         let _ = tx.send(action);
@@ -55,6 +61,9 @@ impl SourceClient {
                     }
                 }
             }
+            // Déconnexion : drainer les requêtes en vol. Dropper chaque Sender
+            // fait résoudre le rx.await de request() en Err immédiatement.
+            pending.lock().await.clear();
             tracing::warn!("connexion au plugin source fermee");
         });
         Ok(client)
@@ -121,11 +130,19 @@ impl AdminClient {
         tokio::spawn(async move {
             let mut lines = BufReader::new(read).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                let Ok(resp) = serde_json::from_str::<AdminResponse>(&line) else { continue };
+                let resp = match serde_json::from_str::<AdminResponse>(&line) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!("reponse admin invalide ignoree: {e}");
+                        continue;
+                    }
+                };
                 if let Some(tx) = pending.lock().await.remove(&resp.id) {
                     let _ = tx.send(resp.result);
                 }
             }
+            // Déconnexion : drainer les requêtes en vol (voir SourceClient).
+            pending.lock().await.clear();
             tracing::warn!("connexion au plugin admin fermee");
         });
         Ok(client)
@@ -278,5 +295,29 @@ mod tests {
         assert_eq!(client.get_page().await.unwrap(), "<h1>hi</h1>");
         let verdict = client.set_data(serde_json::json!({})).await.unwrap();
         assert_eq!(verdict, Err("nope".to_string()));
+    }
+
+    #[tokio::test]
+    async fn requete_en_vol_echoue_vite_a_la_deconnexion() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            // Lit la requête puis ferme la connexion sans répondre.
+            let (read, _write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let _ = lines.next_line().await;
+            // Fin du bloc : read et _write droppés -> EOF côté client.
+        });
+        let (view_tx, _view_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "radio".into(), view_tx).await.unwrap();
+        let start = std::time::Instant::now();
+        let res = client.request(SourceReq::Activate).await;
+        assert!(res.is_err());
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "la requête doit échouer AVANT le timeout de 5 s (pending drainé)"
+        );
     }
 }

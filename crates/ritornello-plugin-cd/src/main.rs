@@ -111,6 +111,11 @@ impl SourcePlugin for CdSource {
     async fn deactivate(&mut self) -> SourceOutcome {
         SourceOutcome { action: SourceAction::Stop, view: None }
     }
+    async fn wake(&mut self) -> SourceOutcome {
+        // Réveil : rafraîchir l'affichage (« pas de disque » / infos disque)
+        // sans émettre de Play — le cd ne se lance pas tout seul.
+        SourceOutcome { action: SourceAction::Noop, view: Some(self.view()) }
+    }
     async fn select(&mut self, n: u8) -> SourceOutcome {
         if !self.present || n == 0 {
             return SourceOutcome { action: SourceAction::Noop, view: None };
@@ -128,10 +133,16 @@ impl SourcePlugin for CdSource {
         SourceOutcome { action: SourceAction::Noop, view: None }
     }
     async fn next_track(&mut self) -> SourceOutcome {
-        SourceOutcome { action: SourceAction::PlayerNext, view: None }
+        // Le lecteur ne remonte pas l'index réel : on suit l'index demandé,
+        // borné à la dernière piste connue (pas de rebouclage).
+        if self.total_tracks > 0 {
+            self.track = (self.track + 1).min(self.total_tracks as i64 - 1);
+        }
+        SourceOutcome { action: SourceAction::PlayerNext, view: Some(self.view()) }
     }
     async fn prev_track(&mut self) -> SourceOutcome {
-        SourceOutcome { action: SourceAction::PlayerPrev, view: None }
+        self.track = (self.track - 1).max(0);
+        SourceOutcome { action: SourceAction::PlayerPrev, view: Some(self.view()) }
     }
     async fn eject(&mut self) -> SourceOutcome {
         let cd_dev = self.cd_dev.clone();
@@ -257,5 +268,48 @@ mod tests {
         source.locales_root = dir.path().to_path_buf();
         source.set_locale("fr".into()).await;
         assert_eq!(source.view().line2, "PAS DE DISQUE");
+    }
+
+    #[tokio::test]
+    async fn next_track_incremente_borne_et_renvoie_une_vue() {
+        let (mut source, _p, _m) = source_with_channels();
+        source.total_tracks = 3;
+        source.track = 0;
+        let out = source.next_track().await;
+        assert_eq!(out.action, SourceAction::PlayerNext);
+        assert!(out.view.is_some(), "la vue doit suivre la piste");
+        assert_eq!(source.track, 1);
+        // Bornage haut : sur la dernière piste, next_track ne reboucle pas.
+        source.track = 2;
+        let _ = source.next_track().await;
+        assert_eq!(source.track, 2);
+    }
+
+    #[tokio::test]
+    async fn prev_track_decremente_borne_a_zero() {
+        let (mut source, _p, _m) = source_with_channels();
+        source.total_tracks = 3;
+        source.track = 1;
+        let out = source.prev_track().await;
+        assert_eq!(out.action, SourceAction::PlayerPrev);
+        assert!(out.view.is_some());
+        assert_eq!(source.track, 0);
+        // Bornage bas : sur la première piste, prev_track reste à 0.
+        let _ = source.prev_track().await;
+        assert_eq!(source.track, 0);
+    }
+
+    #[tokio::test]
+    async fn wake_rafraichit_sans_jouer() {
+        let (mut source, _p, _m) = source_with_channels();
+        source.present = false;
+        let out = source.wake().await;
+        assert_eq!(out.action, SourceAction::Noop, "cd ne doit pas jouer au réveil");
+        assert!(out.view.is_some());
+    }
+
+    #[test]
+    fn en_embarque_cd_est_non_vide() {
+        assert!(!ritornello_i18n::try_parse(CD_EN).unwrap().is_empty());
     }
 }

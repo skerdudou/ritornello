@@ -63,6 +63,7 @@ pub struct AppState {
     pub locale_tx: mpsc::Sender<String>,
     pub locales_root: std::path::PathBuf,
     pub admin_backends: Arc<std::collections::HashMap<String, Arc<dyn crate::admin::AdminBackend>>>,
+    pub cmd_tx: mpsc::Sender<ritornello_proto::Command>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -71,6 +72,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/status", get(status_json))
         .route("/api/audio-output", get(audio_output_json).put(audio_output_put))
         .route("/api/locale", get(locale_json).put(locale_put))
+        .route("/api/command", axum::routing::post(command_post))
         .route("/plugins/:name/", get(crate::admin::admin_page))
         .route(
             "/plugins/:name/api/data",
@@ -90,7 +92,13 @@ struct AudioOutputResponse {
 }
 
 async fn audio_output_json(State(state): State<AppState>) -> Json<AudioOutputResponse> {
-    let devices = crate::audio_output::list_devices().unwrap_or_default();
+    let devices = match crate::audio_output::list_devices() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("liste des sorties audio indisponible: {e}");
+            Vec::new()
+        }
+    };
     let current = state.audio_current.read().await.clone();
     Json(AudioOutputResponse { devices, current })
 }
@@ -121,6 +129,17 @@ pub fn parse_available_locales(filenames: &[String]) -> Vec<String> {
         }
     }
     out
+}
+
+/// Marque le plugin `name` comme déconnecté dans l'état de statut : un plugin
+/// dont le processus s'est terminé n'est plus joignable (supervision, page de
+/// statut vivante). No-op si le nom est inconnu.
+pub fn mark_plugin_disconnected(state: &mut StatusState, name: &str) {
+    for p in &mut state.plugins {
+        if p.name == name {
+            p.connected = false;
+        }
+    }
 }
 
 /// Langues du cœur = `en` + les packs `<root>/core/*.toml` présents.
@@ -158,6 +177,17 @@ async fn locale_put(State(state): State<AppState>, Json(req): Json<LocaleRequest
     StatusCode::NO_CONTENT
 }
 
+/// Télécommande web : pousse la commande reçue dans le même canal `cmd_tx`
+/// que celui alimenté par les plugins Input (aucune logique métier propre,
+/// juste une source de commandes supplémentaire).
+async fn command_post(State(state): State<AppState>, Json(cmd): Json<ritornello_proto::Command>) -> StatusCode {
+    if state.cmd_tx.send(cmd).await.is_err() {
+        tracing::warn!("télécommande web: canal de commandes fermé");
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
+    StatusCode::NO_CONTENT
+}
+
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
@@ -190,7 +220,13 @@ async fn status_page(State(state): State<AppState>) -> Html<String> {
         .map(|l| format!("<li>{}</li>", escape_html(l)))
         .collect();
 
-    let devices = crate::audio_output::list_devices().unwrap_or_default();
+    let devices = match crate::audio_output::list_devices() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("liste des sorties audio indisponible: {e}");
+            Vec::new()
+        }
+    };
     let current = state.audio_current.read().await.clone();
     let options: String = devices
         .iter()
@@ -209,6 +245,31 @@ async fn status_page(State(state): State<AppState>) -> Html<String> {
         })
         .collect();
 
+    let mut remote_buttons = String::new();
+    for n in 1..=9u8 {
+        remote_buttons.push_str(&format!("<button onclick=\"sendCmd({{cmd:'Select',arg:{n}}})\">{n}</button> "));
+    }
+    let simple_commands: [(&str, &str); 12] = [
+        ("remote_preset_next", "Next"),
+        ("remote_preset_prev", "Prev"),
+        ("remote_vol_up", "VolumeUp"),
+        ("remote_vol_down", "VolumeDown"),
+        ("remote_mute", "Mute"),
+        ("remote_play_pause", "PlayPause"),
+        ("remote_stop", "Stop"),
+        ("remote_track_next", "NextTrack"),
+        ("remote_track_prev", "PrevTrack"),
+        ("remote_eject", "Eject"),
+        ("remote_source", "SourceCycle"),
+        ("remote_power", "Power"),
+    ];
+    for (key, cmd) in simple_commands {
+        remote_buttons.push_str(&format!(
+            "<button onclick=\"sendCmd({{cmd:'{cmd}'}})\">{}</button> ",
+            escape_html(cat.get(key))
+        ));
+    }
+
     Html(format!(
         "<!doctype html><html lang=\"{lang}\"><meta charset=\"utf-8\"><title>ritornello — {title}</title>\
          <h1>ritornello</h1><p>{active_label} : {active}</p>\
@@ -219,6 +280,9 @@ async fn status_page(State(state): State<AppState>) -> Html<String> {
          <h2>{language}</h2>\
          <select id=\"locale\">{locale_options}</select>\
          <button onclick=\"setLocale()\">{change}</button> <span id=\"locale-msg\"></span>\
+         <h2>{remote_title}</h2>\
+         <div>{remote_buttons}</div>\
+         <span id=\"remote-msg\"></span>\
          <script>\
          async function setAudioOutput() {{\
            const device = document.getElementById('audio-device').value;\
@@ -229,6 +293,10 @@ async fn status_page(State(state): State<AppState>) -> Html<String> {
            const locale = document.getElementById('locale').value;\
            const r = await fetch('/api/locale', {{method:'PUT', headers:{{'content-type':'application/json'}}, body: JSON.stringify({{locale}})}});\
            if (r.ok) {{ location.reload(); }} else {{ document.getElementById('locale-msg').textContent = '{error}'; }}\
+         }}\
+         async function sendCmd(payload) {{\
+           const r = await fetch('/api/command', {{method:'POST', headers:{{'content-type':'application/json'}}, body: JSON.stringify(payload)}});\
+           document.getElementById('remote-msg').textContent = r.ok ? '{ok}' : '{error}';\
          }}\
          </script>\
          <h2>{recent}</h2><ul>{logs}</ul></html>",
@@ -245,6 +313,8 @@ async fn status_page(State(state): State<AppState>) -> Html<String> {
         language = escape_html(cat.get("language")),
         ok = escape_html(cat.get("ok")),
         error = escape_html(cat.get("error")),
+        remote_title = escape_html(cat.get("remote_title")),
+        remote_buttons = remote_buttons,
         recent = escape_html(cat.get("recent_errors")),
     ))
 }
@@ -317,6 +387,7 @@ mod tests {
     fn app_state() -> AppState {
         let (audio_tx, _audio_rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(4);
         AppState {
             status: Arc::new(tokio::sync::RwLock::new(sample())),
             logs: Arc::new(LogBuffer::new(50)),
@@ -332,12 +403,14 @@ mod tests {
             locale_tx,
             locales_root: std::path::PathBuf::from("/nonexistent"),
             admin_backends: Arc::new(std::collections::HashMap::new()),
+            cmd_tx,
         }
     }
 
     fn app_state_with_audio() -> (AppState, tokio::sync::mpsc::Receiver<String>) {
         let (audio_tx, audio_rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(4);
         let state = AppState {
             status: Arc::new(tokio::sync::RwLock::new(sample())),
             logs: Arc::new(LogBuffer::new(50)),
@@ -353,8 +426,34 @@ mod tests {
             locale_tx,
             locales_root: std::path::PathBuf::from("/nonexistent"),
             admin_backends: Arc::new(std::collections::HashMap::new()),
+            cmd_tx,
         };
         (state, audio_rx)
+    }
+
+    /// Variante avec un `cmd_tx` observable, pour les tests de la télécommande web.
+    fn app_state_with_cmd() -> (AppState, tokio::sync::mpsc::Receiver<ritornello_proto::Command>) {
+        let (audio_tx, _audio_rx) = tokio::sync::mpsc::channel(4);
+        let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(4);
+        let state = AppState {
+            status: Arc::new(tokio::sync::RwLock::new(sample())),
+            logs: Arc::new(LogBuffer::new(50)),
+            audio_current: Arc::new(tokio::sync::RwLock::new(None)),
+            audio_tx,
+            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+                "core",
+                "en",
+                std::path::Path::new("/nonexistent"),
+                crate::core::EN,
+            ))),
+            locale_current: Arc::new(tokio::sync::RwLock::new(None)),
+            locale_tx,
+            locales_root: std::path::PathBuf::from("/nonexistent"),
+            admin_backends: Arc::new(std::collections::HashMap::new()),
+            cmd_tx,
+        };
+        (state, cmd_rx)
     }
 
     /// Variante avec un `locale_tx` observable et un catalogue chargé en `fr`
@@ -369,6 +468,7 @@ mod tests {
         .unwrap();
         let (audio_tx, _audio_rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, locale_rx) = tokio::sync::mpsc::channel(4);
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(4);
         let state = AppState {
             status: Arc::new(tokio::sync::RwLock::new(sample())),
             logs: Arc::new(LogBuffer::new(50)),
@@ -384,6 +484,7 @@ mod tests {
             locale_tx,
             locales_root: dir.path().to_path_buf(),
             admin_backends: Arc::new(std::collections::HashMap::new()),
+            cmd_tx,
         };
         (state, locale_rx, dir)
     }
@@ -457,6 +558,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn post_command_relaie_une_commande_sans_argument() {
+        let (state, mut cmd_rx) = app_state_with_cmd();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::post("/api/command")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"cmd":"VolumeUp"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(cmd_rx.recv().await.unwrap(), ritornello_proto::Command::VolumeUp);
+    }
+
+    #[tokio::test]
+    async fn post_command_relaie_une_commande_avec_argument() {
+        let (state, mut cmd_rx) = app_state_with_cmd();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::post("/api/command")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"cmd":"Select","arg":3}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(cmd_rx.recv().await.unwrap(), ritornello_proto::Command::Select(3));
+    }
+
+    #[tokio::test]
+    async fn page_statut_affiche_la_telecommande() {
+        let app = router(app_state());
+        let resp = app.oneshot(Request::get("/status").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("Remote control"));
+        assert!(html.contains("/api/command"));
+    }
+
+    #[tokio::test]
     async fn get_audio_output_liste_les_peripheriques_et_la_selection() {
         let (state, _audio_rx) = app_state_with_audio();
         let app = router(state);
@@ -520,5 +666,21 @@ mod tests {
         let mut w = LogBufferWriter(buf.clone());
         write!(w, "WARN plugin radio indisponible\n").unwrap();
         assert_eq!(buf.snapshot(), vec!["WARN plugin radio indisponible".to_string()]);
+    }
+
+    #[test]
+    fn mark_plugin_disconnected_bascule_connected() {
+        let mut st = StatusState {
+            plugins: vec![
+                PluginStatus { name: "radio".into(), kind: "source".into(), connected: true, admin: true },
+                PluginStatus { name: "cd".into(), kind: "source".into(), connected: true, admin: false },
+            ],
+            active_source: "radio".into(),
+        };
+        mark_plugin_disconnected(&mut st, "cd");
+        assert!(!st.plugins.iter().find(|p| p.name == "cd").unwrap().connected);
+        assert!(st.plugins.iter().find(|p| p.name == "radio").unwrap().connected);
+        // Nom inconnu : no-op, ne panique pas.
+        mark_plugin_disconnected(&mut st, "inconnu");
     }
 }

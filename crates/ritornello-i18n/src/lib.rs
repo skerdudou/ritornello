@@ -16,10 +16,16 @@ use std::path::Path;
 /// Vocabulaire commun anglais embarqué dans le crate.
 const COMMON_EN: &str = include_str!("locales/common_en.toml");
 
-/// Parse pur d'un pack TOML plat (`clé = "valeur"`). TOML invalide → map vide.
+/// Parse pur d'un pack TOML plat (`clé = "valeur"`). Renvoie l'erreur de parse
+/// pour l'appelant qui souhaite la logguer (chargement des couches de base).
+pub fn try_parse(s: &str) -> Result<HashMap<String, String>, toml::de::Error> {
+    toml::from_str(s)
+}
+
+/// Parse pur silencieux : TOML invalide → map vide (l'appelant gère l'absence).
 /// Séparé de l'accès disque pour être testable (comme `audio_output::parse_device_list`).
 pub fn parse_pack(s: &str) -> HashMap<String, String> {
-    toml::from_str(s).unwrap_or_default()
+    try_parse(s).unwrap_or_default()
 }
 
 /// Surcharge `base` avec le pack TOML lu sur disque en `path`. Fichier absent :
@@ -45,8 +51,20 @@ impl Catalog {
     /// `common`), puis superpose les packs externes présents et valides.
     /// Jamais de panique : un pack absent ou invalide laisse l'anglais.
     pub fn load(component: &str, locale: &str, root: &Path, own_en: &str) -> Catalog {
-        let mut own = parse_pack(own_en);
-        let mut common = parse_pack(COMMON_EN);
+        let mut own = match try_parse(own_en) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("pack embarque {component} invalide: {e}");
+                HashMap::new()
+            }
+        };
+        let mut common = match try_parse(COMMON_EN) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("pack embarque common invalide: {e}");
+                HashMap::new()
+            }
+        };
         overlay_from_disk(&mut common, &root.join("common").join(format!("{locale}.toml")));
         overlay_from_disk(&mut own, &root.join(component).join(format!("{locale}.toml")));
         Catalog { own, common }
@@ -123,5 +141,15 @@ mod tests {
         ecrire(dir.path(), "core", "fr.toml", "ceci = n'est pas valide");
         let cat = Catalog::load("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
         assert_eq!(cat.get("standby"), "STANDBY"); // repli anglais, pas de panique
+    }
+
+    #[test]
+    fn try_parse_du_common_en_embarque_est_non_vide() {
+        assert!(!try_parse(COMMON_EN).unwrap().is_empty());
+    }
+
+    #[test]
+    fn try_parse_renvoie_err_sur_toml_invalide() {
+        assert!(try_parse("ceci n'est pas du toml =").is_err());
     }
 }

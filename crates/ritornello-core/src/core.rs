@@ -29,7 +29,7 @@ pub struct Core<P: Player> {
     volume: u8,
     muted: bool,
     standby: bool,
-    stopped: bool,
+    expecting_stream: bool,
     retry_count: u32,
     audio_device: Option<String>,
     view: View,
@@ -65,7 +65,7 @@ impl<P: Player> Core<P> {
             volume: persisted.volume,
             muted: false,
             standby: false,
-            stopped: false,
+            expecting_stream: false,
             retry_count: 0,
             audio_device: persisted.audio_device.clone(),
             view: View::default(),
@@ -85,18 +85,20 @@ impl<P: Player> Core<P> {
         if let Some(locale) = self.locale.clone() {
             for name in self.source_order.clone() {
                 if let Some(src) = self.sources.get(&name) {
-                    let _ = src.request(SourceReq::SetLocale(locale.clone())).await;
+                    if let Err(e) = src.request(SourceReq::SetLocale(locale.clone())).await {
+                        tracing::warn!("SetLocale vers {name}: {e}");
+                    }
                 }
             }
         }
-        let action = self.active().request(SourceReq::Activate).await?;
+        let action = self.active().request(SourceReq::Wake).await?;
         self.apply(action).await
     }
 
     /// Rejoue le contenu courant de la source active (`Activate` demande à la
     /// source de redonner l'URI en cours, pas de passer au contenu suivant).
     pub async fn retry_stream(&mut self) -> Result<()> {
-        if !self.standby && !self.stopped {
+        if !self.standby && self.expecting_stream {
             let action = self.active().request(SourceReq::Activate).await?;
             self.apply(action).await?;
         }
@@ -158,7 +160,7 @@ impl<P: Player> Core<P> {
             }
             Command::PlayPause => self.player.toggle_pause().await?,
             Command::Stop => {
-                self.stopped = true;
+                self.expecting_stream = false;
                 self.player.stop().await?;
             }
             Command::Power => {
@@ -166,6 +168,7 @@ impl<P: Player> Core<P> {
                 if self.standby {
                     let _ = self.active().request(SourceReq::Deactivate).await;
                     self.player.stop().await?;
+                    self.expecting_stream = false;
                     self.view = self.standby_view().await;
                     self.push_view();
                 } else {
@@ -180,7 +183,6 @@ impl<P: Player> Core<P> {
                     self.active_source = next_name;
                 }
                 self.retry_count = 0;
-                self.stopped = false;
                 let action = self.active().request(SourceReq::Activate).await?;
                 self.apply(action).await?;
                 self.persist();
@@ -196,7 +198,7 @@ impl<P: Player> Core<P> {
             }
             Event::TrackChanged(_) => {}
             Event::PlaybackIdle => {
-                if !self.standby && !self.stopped {
+                if !self.standby && self.expecting_stream {
                     let delay = (RETRY_BASE * 2u32.pow(self.retry_count)).min(RETRY_MAX);
                     self.retry_count = (self.retry_count + 1).min(4);
                     return Some(delay);
@@ -213,15 +215,20 @@ impl<P: Player> Core<P> {
             .unwrap_or_else(|| panic!("source active inconnue: {}", self.active_source))
     }
 
+    /// Nom de la source actuellement active (pour la page de statut vivante).
+    pub fn active_source(&self) -> &str {
+        &self.active_source
+    }
+
     async fn apply(&mut self, action: SourceAction) -> Result<()> {
         match action {
             SourceAction::Noop => {}
             SourceAction::Play { uri } => {
-                self.stopped = false;
+                self.expecting_stream = true;
                 self.player.play(&uri).await?;
             }
             SourceAction::Stop => {
-                self.stopped = true;
+                self.expecting_stream = false;
                 self.player.stop().await?;
             }
             SourceAction::PlayerNext => self.player.next().await?,
@@ -340,6 +347,8 @@ mod tests {
                 ("radio", SourceReq::Select(_)) => SourceAction::Noop,
                 ("cd", SourceReq::Activate) => SourceAction::Play { uri: "cdda://".into() },
                 (_, SourceReq::Eject) if self.name == "cd" => SourceAction::Stop,
+                ("radio", SourceReq::Wake) => SourceAction::Play { uri: "http://fip".into() },
+                ("cd", SourceReq::Wake) => SourceAction::Noop,
                 _ => SourceAction::Noop,
             })
         }
@@ -365,7 +374,28 @@ mod tests {
         let (mut core, player_calls, source_calls, _rx, _d) = setup();
         core.resume().await.unwrap();
         assert!(player_calls.lock().unwrap().contains(&"play http://fip".to_string()));
-        assert!(source_calls.lock().unwrap().iter().any(|c| c == "radio:Activate"));
+        assert!(source_calls.lock().unwrap().iter().any(|c| c == "radio:Wake"));
+    }
+
+    #[tokio::test]
+    async fn resume_envoie_wake_pas_activate() {
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.resume().await.unwrap();
+        let calls = source_calls.lock().unwrap();
+        assert!(calls.iter().any(|c| c == "radio:Wake"));
+        assert!(!calls.iter().any(|c| c == "radio:Activate"));
+    }
+
+    #[test]
+    fn active_source_retourne_la_source_courante() {
+        let (core, _pc, _sc, _rx, _d) = setup();
+        // PersistedState::default().active_source == "radio".
+        assert_eq!(core.active_source(), "radio");
+    }
+
+    #[test]
+    fn en_embarque_du_coeur_est_non_vide() {
+        assert!(!ritornello_i18n::try_parse(super::EN).unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -485,6 +515,35 @@ mod tests {
         core.resume().await.unwrap();
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(rx.borrow_and_update().line1, "VEILLE");
+    }
+
+    #[tokio::test]
+    async fn wake_noop_ne_declenche_pas_de_retry_cd_reste_silencieux() {
+        // Regression (revue finale 2.2) : le cd repond Noop a Wake (pas de lecture
+        // au boot/reveil). L'ancienne porte de retry (!stopped) laissait quand meme
+        // planifier une relance sur le prochain PlaybackIdle, ce qui faisait
+        // demarrer le cd tout seul ~2s apres. Avec expecting_stream, aucun Play
+        // n'a ete emis => pas de retry.
+        let dir = tempfile::tempdir().unwrap();
+        let player = FakePlayer::default();
+        let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
+        sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: Arc::new(Mutex::new(Vec::new())) }));
+        let (tx, _rx) = watch::channel(View::default());
+        let persisted = PersistedState { active_source: "cd".into(), ..PersistedState::default() };
+        let root = dir.path().to_path_buf();
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let mut core = Core::new(player, sources, persisted, dir.path().join("state.json"), tx, catalog, root);
+        core.resume().await.unwrap();
+        assert_eq!(core.handle_event(Event::PlaybackIdle).await, None);
+    }
+
+    #[tokio::test]
+    async fn wake_play_declenche_bien_un_retry_apres_idle() {
+        // Contraste avec le test precedent : quand Wake resulte en Play (radio),
+        // un flux est bien attendu, donc un PlaybackIdle doit programmer un retry.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.resume().await.unwrap();
+        assert!(core.handle_event(Event::PlaybackIdle).await.is_some());
     }
 
     #[tokio::test]

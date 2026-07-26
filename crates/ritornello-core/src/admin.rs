@@ -32,7 +32,10 @@ pub async fn admin_page(State(st): State<AppState>, Path(name): Path<String>) ->
         None => (StatusCode::NOT_FOUND, "plugin inconnu").into_response(),
         Some(backend) => match backend.page().await {
             Ok(html) => Html(html).into_response(),
-            Err(_) => (StatusCode::BAD_GATEWAY, "plugin injoignable").into_response(),
+            Err(e) => {
+                tracing::warn!("plugin {name} admin injoignable (page): {e}");
+                (StatusCode::BAD_GATEWAY, "plugin injoignable").into_response()
+            }
         },
     }
 }
@@ -42,7 +45,10 @@ pub async fn admin_get_data(State(st): State<AppState>, Path(name): Path<String>
         None => (StatusCode::NOT_FOUND, "plugin inconnu").into_response(),
         Some(backend) => match backend.get_data().await {
             Ok(value) => Json(value).into_response(),
-            Err(_) => (StatusCode::BAD_GATEWAY, "plugin injoignable").into_response(),
+            Err(e) => {
+                tracing::warn!("plugin {name} admin injoignable (get_data): {e}");
+                (StatusCode::BAD_GATEWAY, "plugin injoignable").into_response()
+            }
         },
     }
 }
@@ -57,7 +63,10 @@ pub async fn admin_put_data(
         Some(backend) => match backend.set_data(data).await {
             Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
             Ok(Err(msg)) => (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg }))).into_response(),
-            Err(_) => (StatusCode::BAD_GATEWAY, "plugin injoignable").into_response(),
+            Err(e) => {
+                tracing::warn!("plugin {name} admin injoignable (set_data): {e}");
+                (StatusCode::BAD_GATEWAY, "plugin injoignable").into_response()
+            }
         },
     }
 }
@@ -97,6 +106,7 @@ mod tests {
     fn state_with(fake: Fake) -> AppState {
         let (audio_tx, _rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(4);
         let mut backends: HashMap<String, Arc<dyn AdminBackend>> = HashMap::new();
         backends.insert("radio".into(), Arc::new(fake));
         AppState {
@@ -114,6 +124,7 @@ mod tests {
             locale_tx,
             locales_root: std::path::PathBuf::from("/nonexistent"),
             admin_backends: Arc::new(backends),
+            cmd_tx,
         }
     }
 

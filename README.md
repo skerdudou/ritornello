@@ -95,6 +95,24 @@ origine, avec un lien affiché sur la page de statut du cœur
   enceinte Bluetooth déjà appairée via `bluetoothctl` y apparaîtra
   automatiquement une fois exposée par `bluez-alsa`.
 
+## Télécommande web
+
+La page de statut (`/status`) embarque une télécommande : les 13 commandes du
+protocole (présélections 1-9, présélection et piste suivante/précédente,
+volume, muet, lecture/pause, stop, éjecter, changement de source, veille).
+
+Elle passe par `POST /api/command`, dont le corps est exactement une commande
+du protocole — le même canal que celui alimenté par les plugins Input, donc
+aucune logique métier dupliquée :
+
+    curl -X POST http://<hôte>:8080/api/command \
+      -H 'content-type: application/json' -d '{"cmd":"VolumeUp"}'
+    curl -X POST http://<hôte>:8080/api/command \
+      -H 'content-type: application/json' -d '{"cmd":"Select","arg":3}'
+
+Pratique pour piloter l'appareil sans télécommande (depuis un téléphone sur le
+réseau local, ou en SSH pendant la mise au point).
+
 ## Internationalisation (i18n)
 
 L'interface est multilingue. La langue de base est l'**anglais**, embarquée dans

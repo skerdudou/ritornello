@@ -20,6 +20,13 @@ pub trait SourcePlugin: Send + 'static {
     async fn prev_track(&mut self) -> SourceOutcome;
     async fn eject(&mut self) -> SourceOutcome;
 
+    /// Réveil (boot / sortie de veille). Par défaut, se comporte comme
+    /// `activate()` (jouer) — adapté à la radio et à toute source simple.
+    /// Un plugin qui ne doit pas jouer tout seul au réveil (cd) surcharge.
+    async fn wake(&mut self) -> SourceOutcome {
+        self.activate().await
+    }
+
     /// Change la langue courante du plugin. Implémentation par défaut : no-op —
     /// un plugin sans texte propre (console, mce) n'a rien à faire, et cd/radio
     /// compilent inchangés tant qu'ils n'ont pas surchargé cette méthode.
@@ -51,10 +58,16 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
         tokio::select! {
             line = lines.next_line() => {
                 let Some(line) = line? else { return Ok(()) };
-                let req: SourceRequest = serde_json::from_str(&line)
-                    .with_context(|| format!("requete invalide: {line}"))?;
+                let req: SourceRequest = match serde_json::from_str(&line) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!("ligne source invalide ignoree: {e}");
+                        continue;
+                    }
+                };
                 let outcome = match req.req {
                     SourceReq::Activate => plugin.activate().await,
+                    SourceReq::Wake => plugin.wake().await,
                     SourceReq::Deactivate => plugin.deactivate().await,
                     SourceReq::Select(n) => plugin.select(n).await,
                     SourceReq::Next => plugin.next().await,
@@ -99,8 +112,13 @@ pub async fn run_display_plugin(mut plugin: impl DisplayPlugin, socket_path: &Pa
     let (read, _write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
-        let view: View = serde_json::from_str(&line)
-            .with_context(|| format!("vue invalide: {line}"))?;
+        let view: View = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("vue invalide ignoree: {e}");
+                continue;
+            }
+        };
         plugin.show(view).await?;
     }
     Ok(())
@@ -152,8 +170,13 @@ pub async fn run_admin_plugin(mut plugin: impl AdminPlugin, socket_path: &Path) 
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
-        let req: AdminRequest = serde_json::from_str(&line)
-            .with_context(|| format!("requete admin invalide: {line}"))?;
+        let req: AdminRequest = match serde_json::from_str(&line) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("requete admin invalide ignoree: {e}");
+                continue;
+            }
+        };
         let result = match req.req {
             AdminReq::GetPage => AdminResult::Page(plugin.page()),
             AdminReq::GetData => AdminResult::Data(plugin.get_data().await),
@@ -302,6 +325,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wake_par_defaut_delegue_a_activate() {
+        // EchoSource ne surcharge PAS wake() : doit se comporter comme activate().
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(EchoSource, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = client.expect("connexion au plugin").into_split();
+        let mut lines = BufReader::new(read).lines();
+        write.write_all(b"{\"id\":1,\"req\":\"Wake\"}\n").await.unwrap();
+        let line = lines.next_line().await.unwrap().unwrap();
+        let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(msg.action, Some(SourceAction::Play { uri: "http://fip".into() }));
+    }
+
+    #[tokio::test]
+    async fn wake_surcharge_est_dispatche() {
+        struct WakingSource;
+        #[async_trait::async_trait]
+        impl SourcePlugin for WakingSource {
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Play { uri: "http://activate".into() }, view: None } }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
+            async fn next_track(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
+            async fn prev_track(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
+            async fn wake(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Play { uri: "http://wake".into() }, view: None } }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(WakingSource, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = client.expect("connexion au plugin").into_split();
+        let mut lines = BufReader::new(read).lines();
+        write.write_all(b"{\"id\":1,\"req\":\"Wake\"}\n").await.unwrap();
+        let line = lines.next_line().await.unwrap().unwrap();
+        let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
+        // wake() dispatché (http://wake), PAS activate() (http://activate).
+        assert_eq!(msg.action, Some(SourceAction::Play { uri: "http://wake".into() }));
+    }
+
+    #[tokio::test]
     async fn set_locale_est_transmis_au_plugin_et_repond_noop() {
         use std::sync::{Arc, Mutex};
         struct RecordingLocale {
@@ -347,6 +427,31 @@ mod tests {
         assert_eq!(msg.action, Some(SourceAction::Noop));
         assert!(msg.view.is_none());
         assert_eq!(vu.lock().unwrap().as_deref(), Some("fr"));
+    }
+
+    #[tokio::test]
+    async fn source_ignore_ligne_invalide_et_repond_a_la_suivante() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(EchoSource, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = client.expect("connexion au plugin").into_split();
+        let mut lines = BufReader::new(read).lines();
+        // Ligne malformée : doit être ignorée (warn + continue), sans fermer la connexion.
+        write.write_all(b"ceci n'est pas du json\n").await.unwrap();
+        // Requête valide ensuite : réponse normale attendue.
+        write.write_all(b"{\"id\":7,\"req\":\"Activate\"}\n").await.unwrap();
+        let line = lines.next_line().await.unwrap().unwrap();
+        let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(msg.id, Some(7));
+        assert_eq!(msg.action, Some(SourceAction::Play { uri: "http://fip".into() }));
     }
 }
 

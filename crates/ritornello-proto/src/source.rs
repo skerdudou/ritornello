@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "req", content = "arg")]
 pub enum SourceReq {
     Activate,
+    /// Réveil piloté par le plugin (boot / sortie de veille). Défaut côté SDK :
+    /// se comporte comme `Activate` ; un plugin peut surcharger `wake()`.
+    Wake,
     Deactivate,
     Select(u8),
     Next,
@@ -46,6 +49,15 @@ pub struct SourceMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wake_roundtrip() {
+        let r = SourceRequest { id: 4, req: SourceReq::Wake };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"req\":\"Wake\""));
+        let back: SourceRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.req, SourceReq::Wake);
+    }
 
     #[test]
     fn set_locale_roundtrip() {
