@@ -154,7 +154,7 @@ mod tests {
             .oneshot(
                 Request::put("/plugins/radio/api/data")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"stations":[]}"#))
+                    .body(Body::from(r#"{"op":"save","stations":[]}"#))
                     .unwrap(),
             )
             .await
@@ -169,7 +169,7 @@ mod tests {
             .oneshot(
                 Request::put("/plugins/radio/api/data")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"stations":[]}"#))
+                    .body(Body::from(r#"{"op":"save","stations":[]}"#))
                     .unwrap(),
             )
             .await

@@ -4,57 +4,199 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ritornello — {{admin_title}}</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+  body { font-family: system-ui, sans-serif; max-width: 44rem; margin: 2rem auto; padding: 0 1rem; }
   table { width: 100%; border-collapse: collapse; }
-  td { padding: .25rem; }
+  th, td { padding: .25rem; text-align: left; }
   input { width: 100%; box-sizing: border-box; padding: .4rem; }
-  td.preset { width: 4rem; }
+  td.num { width: 2.5rem; text-align: right; padding-right: .75rem; }
   td.del { width: 2.5rem; }
-  button { padding: .5rem 1rem; margin-top: 1rem; }
-  #msg { margin-left: 1rem; }
+  button { padding: .4rem .8rem; }
+  .bar { margin: 1rem 0; display: flex; gap: .5rem; align-items: center; }
+  .bar input { flex: 1; }
+  #msg { margin-left: .5rem; }
+  #results { list-style: none; padding: 0; }
+  #results li { display: flex; gap: .5rem; align-items: center; padding: .25rem 0; }
+  #results .label { flex: 1; }
 </style>
 <h1>ritornello</h1>
+
 <table id="t">
-  <tr><th>{{col_num}}</th><th>{{col_name}}</th><th>{{col_url}}</th><th></th></tr>
+  <thead><tr><th>{{col_num}}</th><th>{{col_name}}</th><th>{{col_url}}</th><th></th></tr></thead>
+  <tbody></tbody>
 </table>
-<button onclick="addRow()">{{btn_add}}</button>
-<button onclick="save()">{{btn_save}}</button><span id="msg"></span>
+
+<div class="bar">
+  <button id="add">{{btn_add}}</button>
+  <button id="save">{{btn_save}}</button>
+  <span id="msg"></span>
+</div>
+
+<h2>{{search_title}}</h2>
+<div class="bar">
+  <input id="q" placeholder="{{search_placeholder}}">
+  <label for="country">{{country_label}}</label>
+  <select id="country">
+    <option value="FR">{{country_fr}}</option>
+    <option value="US">{{country_us}}</option>
+    <option value="">{{country_all}}</option>
+  </select>
+  <button id="searchBtn">{{btn_search}}</button>
+</div>
+<ul id="results"></ul>
+
 <script>
-const t = document.getElementById('t');
-function addRow(s = { preset: '', name: '', url: '' }) {
+// Numérotation automatique : la présélection d'une station est sa position
+// dans la table (1 pour la première). Aucune colonne éditable — le numéro
+// affiché est recalculé à chaque ajout/suppression, et c'est lui qui part dans
+// la charge utile de `save`. Conséquence assumée : supprimer une ligne
+// renumérote les suivantes.
+const MAX = 9; // les chiffres de la télécommande
+const T = {
+  loadError1: '{{load_error_1}}',
+  loadError2: '{{load_error_2}}',
+  saved: '{{saved}}',
+  saveError: '{{save_error}}',
+  limitReached: '{{limit_reached}}',
+  btnAddResult: '{{btn_add_result}}',
+  searching: '{{searching}}',
+  noResults: '{{no_results}}',
+  emptyQuery: '{{empty_query}}',
+};
+
+const $ = (id) => document.getElementById(id);
+const tbody = $('t').querySelector('tbody');
+const searchBtn = $('searchBtn');
+const msg = (t) => { $('msg').textContent = t; };
+const rows = () => [...tbody.querySelectorAll('tr')];
+
+function renumber() {
+  rows().forEach((tr, i) => { tr.querySelector('td.num').textContent = String(i + 1); });
+}
+
+// Ajoute une ligne côté navigateur uniquement : rien n'est persisté avant
+// « Enregistrer ». Renvoie false si la limite de 9 présélections est atteinte.
+function addRow(s) {
+  if (rows().length >= MAX) { msg(T.limitReached); return false; }
   const tr = document.createElement('tr');
-  tr.innerHTML = `<td class="preset"><input type="number" min="1" max="9" value="${s.preset}"></td>
-    <td><input value="${s.name.replaceAll('"','&quot;')}"></td>
-    <td><input value="${s.url.replaceAll('"','&quot;')}"></td>
-    <td class="del"><button onclick="this.closest('tr').remove()">✕</button></td>`;
-  t.appendChild(tr);
+  const num = document.createElement('td');
+  num.className = 'num';
+  const tdName = document.createElement('td');
+  const name = document.createElement('input');
+  name.value = s && s.name ? s.name : '';
+  tdName.appendChild(name);
+  const tdUrl = document.createElement('td');
+  const url = document.createElement('input');
+  url.value = s && s.url ? s.url : '';
+  tdUrl.appendChild(url);
+  const tdDel = document.createElement('td');
+  tdDel.className = 'del';
+  const del = document.createElement('button');
+  del.textContent = '✕';
+  del.onclick = () => { tr.remove(); renumber(); };
+  tdDel.appendChild(del);
+  tr.append(num, tdName, tdUrl, tdDel);
+  tbody.appendChild(tr);
+  renumber();
+  return true;
 }
-async function load() {
-  try {
-    const r = await fetch('./api/data');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    (await r.json()).stations
-      .sort((a, b) => a.preset - b.preset)
-      .forEach(addRow);
-  } catch (e) {
-    document.getElementById('msg').textContent =
-      '{{load_error_1}}' + e.message + '{{load_error_2}}';
-    document.querySelectorAll('button').forEach(b => b.disabled = true);
-  }
+
+async function fetchData() {
+  const r = await fetch('./api/data');
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return await r.json();
 }
-async function save() {
-  const stations = [...t.querySelectorAll('tr')].slice(1).map(tr => {
-    const [p, n, u] = tr.querySelectorAll('input');
-    return { preset: +p.value, name: n.value, url: u.value };
-  });
+
+// Renvoie null si l'opération est acceptée (204), sinon le message d'erreur
+// traduit renvoyé par le plugin (corps JSON {"error": …} du 422).
+async function put(body) {
   const r = await fetch('./api/data', {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ stations }),
+    body: JSON.stringify(body),
   });
-  document.getElementById('msg').textContent =
-    r.ok ? '{{saved}}' : '{{save_error}}';
+  if (r.status === 204) return null;
+  let detail = 'HTTP ' + r.status;
+  try { const j = await r.json(); if (j && j.error) detail = j.error; } catch (e) { /* corps non JSON */ }
+  return detail;
 }
+
+function renderResults(list) {
+  const ul = $('results');
+  ul.innerHTML = '';
+  if (!list.length) {
+    const li = document.createElement('li');
+    li.textContent = T.noResults;
+    ul.appendChild(li);
+    return;
+  }
+  list.forEach((s) => {
+    const li = document.createElement('li');
+    const label = document.createElement('span');
+    label.className = 'label';
+    // textContent, jamais innerHTML : le nom vient d'un annuaire public.
+    label.textContent = s.name + ' — ' + s.codec + ' ' + s.bitrate + ' kbps'
+      + (s.country ? ' (' + s.country + ')' : '');
+    const b = document.createElement('button');
+    b.textContent = T.btnAddResult;
+    b.onclick = () => { if (addRow({ name: s.name, url: s.url })) msg(''); };
+    li.append(label, b);
+    ul.appendChild(li);
+  });
+}
+
+async function doSave() {
+  const stations = rows().map((tr, i) => {
+    const [n, u] = tr.querySelectorAll('input');
+    return { preset: i + 1, name: n.value, url: u.value };
+  });
+  const err = await put({ op: 'save', stations: stations });
+  msg(err ? T.saveError + err : T.saved);
+}
+
+// Le plugin interroge l'annuaire (le navigateur n'appelle aucune ressource
+// externe), mémorise les résultats, puis on les relit par GetData.
+//
+// Vol unique : le SDK sert les requêtes d'admin strictement en série, donc un
+// second clic pendant qu'une recherche est en cours se met en file derrière
+// la première — avec l'annuaire en panne (budget de 4 s côté serveur), la
+// deuxième recherche ne démarre qu'après la première et dépasse le délai de
+// 5 s imposé par le cœur, qui affiche alors « plugin injoignable ». Le
+// bouton est donc désactivé à l'entrée et réactivé dans un `finally`, pour
+// se rétablir aussi bien après une erreur qu'après un succès ; Entrée
+// partage la même garde puisqu'elle appelle `doSearch`.
+async function doSearch() {
+  if (searchBtn.disabled) return;
+  const query = $('q').value.trim();
+  if (!query) { msg(T.emptyQuery); return; }
+  searchBtn.disabled = true;
+  msg(T.searching);
+  try {
+    const err = await put({ op: 'search', query: query, country: $('country').value });
+    if (err) { msg(err); return; }
+    renderResults((await fetchData()).search || []);
+    msg('');
+  } catch (e) {
+    msg(T.loadError1 + e.message + T.loadError2);
+  } finally {
+    searchBtn.disabled = false;
+  }
+}
+
+async function load() {
+  try {
+    const data = await fetchData();
+    data.stations.sort((a, b) => a.preset - b.preset).forEach((s) => addRow(s));
+    if (data.search && data.search.length) renderResults(data.search);
+  } catch (e) {
+    msg(T.loadError1 + e.message + T.loadError2);
+    document.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+  }
+}
+
+$('add').onclick = () => { if (addRow()) msg(''); };
+$('save').onclick = doSave;
+searchBtn.onclick = doSearch;
+$('q').addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
 load();
 </script>
 </html>

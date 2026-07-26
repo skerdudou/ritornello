@@ -22,7 +22,7 @@ learn_timeout = "Aucune touche détectée — abandon"
 saved = "Enregistré ✓"
 save_error = "Erreur : "
 load_error = "Erreur de chargement : "
-no_device = "Aucun périphérique d'entrée détecté"
+no_device = "Aucun périphérique d’entrée détecté"
 
 act_select_1 = "Présélection 1"
 act_select_2 = "Présélection 2"

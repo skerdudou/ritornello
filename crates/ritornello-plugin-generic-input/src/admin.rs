@@ -261,6 +261,37 @@ mod tests {
         assert_eq!(cles_en, cles_fr, "jeux de cles en/fr divergents");
     }
 
+    /// `page()` fait un `String::replace` brut, sans échappement, sur des
+    /// jetons `{{cle}}` (voir le plugin radio, où une simple apostrophe
+    /// droite dans le pack fr a suffi à casser tout le `<script>` en
+    /// français, silencieusement). Ce garde-fou couvre les deux packs livrés
+    /// avec le composant, pour rendre la classe d'erreur impossible à
+    /// réintroduire ici aussi.
+    #[test]
+    fn aucune_valeur_ne_contient_un_caractere_dangereux_pour_la_substitution() {
+        for (source, texte) in [
+            ("anglais embarque", crate::GENERIC_INPUT_EN.to_string()),
+            ("pack fr livre", pack_fr()),
+        ] {
+            let cat = ritornello_i18n::try_parse(&texte).unwrap();
+            for (cle, valeur) in &cat {
+                for (nom, present) in [
+                    ("une apostrophe droite ' (utiliser l'apostrophe typographique \u{2019}, U+2019)", valeur.contains('\'')),
+                    ("un guillemet droit \"", valeur.contains('"')),
+                    ("un antislash \\", valeur.contains('\\')),
+                    ("un saut de ligne", valeur.contains('\n')),
+                ] {
+                    assert!(
+                        !present,
+                        "{source}: la valeur de la cle `{cle}` contient {nom} ; ce caractere \
+                         casserait le JS genere par la substitution brute des jetons {{{{cle}}}} \
+                         dans index.html. Valeur : {valeur:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn la_page_expose_les_21_actions() {
         let f = fixture();

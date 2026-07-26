@@ -81,7 +81,31 @@ origine, avec un lien affiché sur la page de statut du cœur
 
 - `ritornello-plugin-radio` déclare `admin = true` : sa page de gestion des
   stations est servie par le cœur, sous l'origine unique, à
-  `http://<hôte>:8080/plugins/radio/` (le plugin ne lie plus aucun port).
+  `http://<hôte>:8080/plugins/radio/` (le plugin ne lie plus aucun port). Elle
+  permet de saisir une station à la main (nom + URL du flux) **et** d'en
+  ajouter une depuis l'annuaire communautaire en ligne
+  [Radio Browser](https://api.radio-browser.info) : taper un nom, choisir un
+  pays (France, États-Unis, tous), « Rechercher », puis « Ajouter » sur un
+  résultat. C'est **le plugin** qui interroge l'annuaire — la page ne charge
+  aucune ressource externe — et rien n'est écrit tant qu'« Enregistrer » n'a
+  pas été cliqué. Les présélections sont numérotées **automatiquement par
+  position** (1 à 9, les chiffres de la télécommande) : ajouter met en fin de
+  liste, supprimer renumérote les suivantes ; au-delà de 9, l'ajout est refusé.
+  Annuaire injoignable ⇒ message d'erreur sur la page, la lecture en cours et
+  les stations déjà configurées ne bougent pas, et la saisie manuelle reste le
+  repli. L'annuaire est interrogé sur **plusieurs serveurs essayés dans
+  l'ordre** (`de1`, `de2`, `at1`, `nl1`, `fi1` de `api.radio-browser.info`)
+  jusqu'à ce que l'un réponde : `all.api.radio-browser.info` est un
+  enregistrement tournant, et le parc de miroirs bouge avec le temps — un hôte
+  disparu échoue vite, le suivant est essayé, et chaque échec est journalisé.
+  L'ensemble tient dans un **budget de 4 s** (2 s au plus par serveur) : la
+  page d'admin passe par le protocole d'admin du cœur, qui abandonne toute
+  requête au bout de 5 s, donc une recherche qui traîne est arrêtée d'elle-même
+  avec un message d'erreur plutôt que de finir en timeout.
+  Variables : `RITORNELLO_RADIO_STATIONS`, `RITORNELLO_RADIO_STATE`,
+  `RITORNELLO_RADIO_DIRECTORY` (**épingle** un serveur d'annuaire : il devient
+  le seul essayé, pour imposer son propre miroir sans recompiler ; non
+  définie, la liste intégrée s'applique).
 - La mort d'un plugin est tolérée : il est marqué indisponible sur la page de
   statut, les autres continuent de fonctionner.
 - Aucun de ces plugins n'est spécifique au Pi : `ritornello-plugin-radio` et

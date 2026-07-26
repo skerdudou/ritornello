@@ -265,3 +265,50 @@ points, tous non bloquants :
   fois — à confirmer avec la vraie télécommande.
 - Le plugin peut-il écrire `/etc/ritornello/input-bindings.toml` (il tourne en root).
 - La liste déroulante de la page correspond-elle à ce que voit `evtest`.
+
+---
+
+## Addendum — follow-ups du chantier « annuaire radio » (2026-07-23)
+
+Ajout d'une recherche de stations dans l'annuaire communautaire **Radio Browser**
+depuis la page d'admin radio, avec numérotation automatique des présélections.
+Revue finale : « prête à merger » après une vague de correctifs dont un
+**Critical**.
+
+Le Critical vaut d'être retenu comme leçon : une apostrophe droite dans une
+valeur de traduction française (`d'abord`) était injectée telle quelle dans un
+littéral JS `'{{clé}}'` — erreur de syntaxe, **tout le script de la page
+sautait**, en français seulement. Invisible aux tests, qui rendaient la page en
+anglais et ne comparaient que les *clés* entre packs, jamais les *valeurs*. Le
+même défaut existait déjà, non détecté, sur la page du plugin input. Corrigé par
+l'apostrophe typographique `’` partout, plus un **garde-fou** qui refuse toute
+valeur contenant `'`, `"`, `\` ou un retour à la ligne, dans les deux packs des
+deux plugins.
+
+Follow-ups non bloquants :
+
+- **Échappement structurel des jetons injectés en JS.** Le garde-fou interdit
+  aujourd'hui les caractères dangereux au niveau des données ; la vraie
+  correction serait d'encoder ces valeurs (`serde_json`) au moment de la
+  substitution, ou de sérialiser l'objet JS de traductions en un seul bloc JSON.
+  Tant que ce n'est pas fait, une future traduction (allemand, espagnol…) peut
+  retomber dans le piège — le test l'attrapera, mais au prix d'une reformulation
+  plutôt que d'un vrai échappement.
+- **Client reqwest reconstruit à chaque essai de miroir** (`directory.rs`) :
+  jusqu'à 5 constructions de client TLS par recherche sur un Pi 2, et aucune
+  réutilisation de connexion entre recherches. Le construire une fois dans
+  `HttpDirectory` et appliquer l'échéance par requête préserverait exactement la
+  sémantique du budget.
+- Divers : le test d'épuisement des miroirs n'assert pas le suffixe « (N tried) »
+  donc ne prouve pas que tous ont été essayés ; pas de test avec un accent dans
+  le terme recherché (l'encodage est correct par construction) ; `{"op":"save"}`
+  sans champ `stations` écraserait la configuration (inatteignable depuis l'IHM,
+  et une liste vide est un état légitime).
+
+### À vérifier sur le vrai Pi
+- Comportement quand l'annuaire est en panne : l'annuaire a été observé
+  **entièrement down** pendant la conception (503 sur tous les points d'entrée,
+  y compris sa propre liste de serveurs). La page doit afficher une erreur et la
+  saisie manuelle d'URL doit rester le repli fonctionnel.
+- La recherche doit rendre la main en moins de 5 s (plafond du protocole
+  d'admin) même tous miroirs muets — budget global de 4 s censé le garantir.

@@ -1,5 +1,6 @@
 mod admin;
 mod config;
+mod directory;
 mod state;
 
 use crate::admin::RadioAdmin;
@@ -134,10 +135,26 @@ async fn main() -> Result<()> {
         catalog: catalog.clone(),
         locales_root,
     };
+    // Annuaire en ligne : la liste intégrée de serveurs, essayés dans l'ordre
+    // jusqu'au premier qui répond, ou l'unique serveur épinglé par
+    // `RITORNELLO_RADIO_DIRECTORY`. Journalisé au démarrage : sur un Pi sans
+    // écran, savoir quels serveurs seront interrogés évite de deviner.
+    let directory = directory::HttpDirectory::from_env();
+    tracing::info!("annuaire radio, serveurs candidats: {}", directory.bases.join(", "));
     // La moitié admin n'est construite que si `--admin-socket` a été fourni
     // (mode dégradé sinon, voir plus haut).
-    let admin = admin_socket
-        .map(|admin_socket| (RadioAdmin { stations_path, stations: stations_shared, catalog }, admin_socket));
+    let admin = admin_socket.map(|admin_socket| {
+        (
+            RadioAdmin {
+                stations_path,
+                stations: stations_shared,
+                catalog,
+                directory: Arc::new(directory),
+                search: RwLock::new(Vec::new()),
+            },
+            admin_socket,
+        )
+    });
 
     // Les deux moitiés sont indépendantes : une panne (déconnexion, erreur
     // d'écriture, voire panique sur un lock empoisonné) sur la socket admin ne

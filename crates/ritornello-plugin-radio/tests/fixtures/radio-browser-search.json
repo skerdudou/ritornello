@@ -1,0 +1,7 @@
+[
+  {"name":"France Info","url":"http://direct.franceinfo.fr/live/franceinfo-midfi.mp3","url_resolved":"http://direct.franceinfo.fr/live/franceinfo-midfi.mp3","codec":"MP3","bitrate":128,"countrycode":"FR"},
+  {"name":"RTL","url":"https://live.m6radio.quortex.io/webM89Hc99XApzgfhXNX8ASN5/grouprtl/nat","url_resolved":"https://live.m6radio.quortex.io/webM89Hc99XApzgfhXNX8ASN5/grouprtl/nat","codec":"AAC","bitrate":64,"countrycode":"FR"},
+  {"name":"Europe 1","url":"https://stream.europe1.fr/europe1.aac","url_resolved":"https://stream.europe1.fr/europe1.aac","codec":"AAC","bitrate":128,"countrycode":"FR"},
+  {"name":"RMC FR","url":"https://audio.bfmtv.com/rmcradio_128.mp3","url_resolved":"https://audio.bfmtv.com/rmcradio_128.mp3","codec":"MP3","bitrate":128,"countrycode":"FR"},
+  {"name":"Station sans flux","url":"","url_resolved":"","codec":"MP3","bitrate":0,"countrycode":"FR"}
+]
