@@ -230,3 +230,38 @@ chantier de suite devait être fait, ce serait **la supervision des plugins +
 page de statut vivante (1.1)**, qui absorbe aussi une partie de 1.2. Le reste est
 de la dette légère, à traiter opportunément quand on touche les fichiers
 concernés.
+
+---
+
+## Addendum — follow-ups du chantier `generic-input` (2026-07-23)
+
+Le plugin Input est devenu `ritornello-plugin-generic-input` (multi-périphériques,
+bindings éditables depuis l'IHM, presets, mode apprentissage). La revue finale de
+ce chantier a conclu « prête à merger » après une vague de correctifs. Restent ces
+points, tous non bloquants :
+
+- **Langue de la page d'admin appliquée au démarrage seulement.** Le cœur transmet
+  désormais sa langue persistée aux plugins via `RITORNELLO_LOCALE` à leur
+  lancement ; changer la langue depuis la page de statut ne retraduit donc la page
+  d'un plugin **qu'après redémarrage du service**. Le faire à chaud demanderait de
+  passer la langue dans `GetPage` (extension du protocole d'admin).
+- **Code mort résiduel** : `ValidationError::UnknownCommand` et le type de retour
+  `Binding::command() -> Option<Command>` sont vestigiaux depuis que la forme
+  `#[serde(flatten)]` a été retenue (un `cmd` inconnu échoue dès le parse TOML).
+  Les retirer implique de toucher les deux packs de langue pour garder la parité.
+- **Test des presets livrés partiel** : seuls 3 des 28 bindings de `mce.toml` sont
+  vérifiés ; une valeur d'`arg` erronée passerait. À rendre exhaustif (ce fichier
+  est la migration de l'ancienne table codée en dur).
+- **`inputMode = 'numeric'`** sur le champ des codes, alors qu'il accepte des codes
+  séparés par virgules — clavier mobile sans virgule.
+- Divers cosmétiques : `rd.flatten()` masque une entrée de répertoire en erreur ;
+  I/O disque synchrone dans un `async fn` (écriture sous le kilo-octet) ; l'erreur
+  d'I/O de `save` est la seule erreur utilisateur non traduite.
+
+### À vérifier sur le vrai Pi (spécifique à ce chantier)
+- **Double déclenchement** : le nouveau design écoute **tous** les nœuds portant le
+  nom d'un périphérique (c'est ce qui règle le cas des récepteurs MCE à deux nœuds).
+  Si un récepteur émet le même appui sur ses deux nœuds, la commande partirait deux
+  fois — à confirmer avec la vraie télécommande.
+- Le plugin peut-il écrire `/etc/ritornello/input-bindings.toml` (il tourne en root).
+- La liste déroulante de la page correspond-elle à ce que voit `evtest`.

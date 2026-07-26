@@ -39,7 +39,18 @@ impl PluginManifest {
 
 /// Spawn un plugin en lui passant le chemin de la socket de genre qu'il doit
 /// lier, et — s'il déclare `admin = true` — un `--admin-socket`.
-pub fn spawn(exec: &str, socket_path: &Path, admin_socket: Option<&Path>) -> Result<tokio::process::Child> {
+///
+/// `locale` transmet la langue courante du cœur via `RITORNELLO_LOCALE` : elle
+/// n'est appliquée qu'**au lancement** du processus enfant, pas en continu — un
+/// changement de langue depuis la page de statut ne retraduit la page d'admin
+/// d'un plugin qu'après redémarrage du service (le protocole `SetLocale` ne
+/// couvre que les sources, pas les pages admin servies par les plugins).
+pub fn spawn(
+    exec: &str,
+    socket_path: &Path,
+    admin_socket: Option<&Path>,
+    locale: Option<&str>,
+) -> Result<tokio::process::Child> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -49,6 +60,9 @@ pub fn spawn(exec: &str, socket_path: &Path, admin_socket: Option<&Path>) -> Res
     if let Some(admin) = admin_socket {
         let _ = std::fs::remove_file(admin);
         cmd.arg("--admin-socket").arg(admin);
+    }
+    if let Some(locale) = locale {
+        cmd.env("RITORNELLO_LOCALE", locale);
     }
     Ok(cmd.kill_on_drop(true).spawn()?)
 }

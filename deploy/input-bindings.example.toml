@@ -1,0 +1,149 @@
+# Exemple de table de bindings : le preset MCE pre-lie a un recepteur
+# infrarouge eHome. Adapter `name` au nom exact du peripherique tel qu'il
+# apparait dans la liste deroulante de http://<hote>:8080/plugins/generic-input/
+# (ou via `sudo evtest`). Tous les noeuds portant ce nom sont ecoutes.
+
+[[devices]]
+name = "eHome Infrared Transceiver"
+
+[[devices.bindings]]
+code = 2
+cmd = "Select"
+arg = 1
+
+[[devices.bindings]]
+code = 3
+cmd = "Select"
+arg = 2
+
+[[devices.bindings]]
+code = 4
+cmd = "Select"
+arg = 3
+
+[[devices.bindings]]
+code = 5
+cmd = "Select"
+arg = 4
+
+[[devices.bindings]]
+code = 6
+cmd = "Select"
+arg = 5
+
+[[devices.bindings]]
+code = 7
+cmd = "Select"
+arg = 6
+
+[[devices.bindings]]
+code = 8
+cmd = "Select"
+arg = 7
+
+[[devices.bindings]]
+code = 9
+cmd = "Select"
+arg = 8
+
+[[devices.bindings]]
+code = 10
+cmd = "Select"
+arg = 9
+
+[[devices.bindings]]
+code = 513
+cmd = "Select"
+arg = 1
+
+[[devices.bindings]]
+code = 514
+cmd = "Select"
+arg = 2
+
+[[devices.bindings]]
+code = 515
+cmd = "Select"
+arg = 3
+
+[[devices.bindings]]
+code = 516
+cmd = "Select"
+arg = 4
+
+[[devices.bindings]]
+code = 517
+cmd = "Select"
+arg = 5
+
+[[devices.bindings]]
+code = 518
+cmd = "Select"
+arg = 6
+
+[[devices.bindings]]
+code = 519
+cmd = "Select"
+arg = 7
+
+[[devices.bindings]]
+code = 520
+cmd = "Select"
+arg = 8
+
+[[devices.bindings]]
+code = 521
+cmd = "Select"
+arg = 9
+
+[[devices.bindings]]
+code = 115
+cmd = "VolumeUp"
+
+[[devices.bindings]]
+code = 114
+cmd = "VolumeDown"
+
+[[devices.bindings]]
+code = 113
+cmd = "Mute"
+
+[[devices.bindings]]
+code = 402
+cmd = "Next"
+
+[[devices.bindings]]
+code = 403
+cmd = "Prev"
+
+[[devices.bindings]]
+code = 164
+cmd = "PlayPause"
+
+[[devices.bindings]]
+code = 163
+cmd = "NextTrack"
+
+[[devices.bindings]]
+code = 165
+cmd = "PrevTrack"
+
+[[devices.bindings]]
+code = 166
+cmd = "Stop"
+
+[[devices.bindings]]
+code = 161
+cmd = "Eject"
+
+[[devices.bindings]]
+code = 226
+cmd = "SourceCycle"
+
+[[devices.bindings]]
+code = 116
+cmd = "Power"
+
+[[devices.bindings]]
+code = 356
+cmd = "Power"

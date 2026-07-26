@@ -7,7 +7,7 @@ use ritornello_proto::{Command, SourceAction, SourceReq, View};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{watch, RwLock};
 
 /// Anglais embarqué du cœur (base toujours présente).
@@ -15,6 +15,9 @@ pub const EN: &str = include_str!("locales/en.toml");
 
 const RETRY_BASE: Duration = Duration::from_secs(2);
 const RETRY_MAX: Duration = Duration::from_secs(30);
+
+/// Durée d'affichage de l'overlay volume/muet apres la derniere pression.
+const OVERLAY: Duration = Duration::from_secs(2);
 
 #[async_trait::async_trait]
 pub trait Source: Send + Sync + 'static {
@@ -33,6 +36,11 @@ pub struct Core<P: Player> {
     retry_count: u32,
     audio_device: Option<String>,
     view: View,
+    /// Overlay temporaire (volume/muet) : vue à afficher + échéance. Tant
+    /// qu'il est actif, `push_view` l'affiche à la place de `view`, mais
+    /// `view` continue d'être tenue à jour par `handle_source_view` pour
+    /// réapparaître dès l'expiration.
+    overlay: Option<(View, Instant)>,
     state_path: PathBuf,
     view_tx: watch::Sender<View>,
     catalog: Arc<RwLock<Catalog>>,
@@ -69,6 +77,7 @@ impl<P: Player> Core<P> {
             retry_count: 0,
             audio_device: persisted.audio_device.clone(),
             view: View::default(),
+            overlay: None,
             state_path,
             view_tx,
             catalog,
@@ -111,7 +120,11 @@ impl<P: Player> Core<P> {
         }
         if name == self.active_source {
             self.view = view;
-            self.push_view();
+            // Pendant un overlay volume/muet, la vue source est mémorisée
+            // (ci-dessus) mais pas affichée : elle réapparaîtra à l'expiration.
+            if self.overlay.is_none() {
+                self.push_view();
+            }
         }
     }
 
@@ -152,11 +165,12 @@ impl<P: Player> Core<P> {
                 self.volume = v.clamp(0, 100) as u8;
                 self.player.set_volume(self.volume).await?;
                 self.persist();
-                self.push_view();
+                self.show_overlay().await;
             }
             Command::Mute => {
                 self.muted = !self.muted;
                 self.player.set_mute(self.muted).await?;
+                self.show_overlay().await;
             }
             Command::PlayPause => self.player.toggle_pause().await?,
             Command::Stop => {
@@ -277,12 +291,45 @@ impl<P: Player> Core<P> {
     }
 
     fn push_view(&self) {
-        let _ = self.view_tx.send(self.view.clone());
+        let view = match &self.overlay {
+            Some((v, _)) => v.clone(),
+            None => self.view.clone(),
+        };
+        let _ = self.view_tx.send(view);
     }
 
     async fn standby_view(&self) -> View {
         let cat = self.catalog.read().await;
         View { line1: cat.get("standby").to_string(), line2: String::new(), line3: String::new() }
+    }
+
+    /// Affiche (ou prolonge) l'overlay temporaire volume/muet : ligne 1 le
+    /// libellé "volume", ligne 2 le pourcentage courant ou le message
+    /// "muet" selon `self.muted`. Chaque appel repousse l'échéance de
+    /// `OVERLAY` (une pression de plus garde l'overlay visible).
+    async fn show_overlay(&mut self) {
+        let line2 = if self.muted {
+            let cat = self.catalog.read().await;
+            cat.get("muted").to_string()
+        } else {
+            format!("{} %", self.volume)
+        };
+        let line1 = self.catalog.read().await.get("volume_label").to_string();
+        self.overlay = Some((View { line1, line2, line3: String::new() }, Instant::now() + OVERLAY));
+        self.push_view();
+    }
+
+    /// Échéance de l'overlay actif, s'il y en a un (à lire dans `main` avant
+    /// le `select!`, à l'image de `retry_at`, pour bâtir la temporisation).
+    pub fn overlay_deadline(&self) -> Option<Instant> {
+        self.overlay.as_ref().map(|(_, deadline)| *deadline)
+    }
+
+    /// Efface l'overlay expiré et laisse réapparaître la vue de la source,
+    /// mémorisée entre-temps par `handle_source_view`.
+    pub fn expire_overlay(&mut self) {
+        self.overlay = None;
+        self.push_view();
     }
 }
 
@@ -556,5 +603,82 @@ mod tests {
         drop(calls);
         let st = crate::state::load(&dir.path().join("state.json"));
         assert_eq!(st.locale.as_deref(), Some("fr"));
+    }
+
+    #[tokio::test]
+    async fn volume_up_affiche_temporairement_le_volume() {
+        let (mut core, _pc, _sc, mut rx, _d) = setup();
+        core.resume().await.unwrap();
+        rx.borrow_and_update();
+        core.handle_command(Command::VolumeUp).await.unwrap();
+        let v = rx.borrow_and_update().clone();
+        assert_eq!(v.line1, "VOLUME");
+        assert_eq!(v.line2, "65 %"); // PersistedState::default().volume == 60, VolumeUp += 5
+        assert!(v.line3.is_empty());
+        assert!(core.overlay_deadline().is_some());
+    }
+
+    #[tokio::test]
+    async fn mute_affiche_loverlay_muet() {
+        let (mut core, _pc, _sc, mut rx, _d) = setup();
+        core.resume().await.unwrap();
+        rx.borrow_and_update();
+        core.handle_command(Command::Mute).await.unwrap();
+        let v = rx.borrow_and_update().clone();
+        assert_eq!(v.line1, "VOLUME");
+        assert_eq!(v.line2, "MUTED");
+        assert!(core.overlay_deadline().is_some());
+    }
+
+    #[tokio::test]
+    async fn vue_source_pendant_overlay_est_memorisee_puis_affichee_a_expiration() {
+        let (mut core, _pc, _sc, mut rx, _d) = setup();
+        core.resume().await.unwrap();
+        core.handle_command(Command::VolumeUp).await.unwrap();
+        let overlay_view = rx.borrow_and_update().clone();
+        assert_eq!(overlay_view.line1, "VOLUME");
+
+        // La vue source arrive pendant l'overlay : elle est memorisee mais pas affichee.
+        core.handle_source_view("radio", View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() });
+        assert_eq!(rx.borrow().clone(), overlay_view); // aucun nouveau push, l'overlay reste affiche
+
+        // A l'expiration, la vue source memorisee reapparait.
+        core.expire_overlay();
+        assert_eq!(rx.borrow_and_update().line1, "RADIO  P1");
+        assert!(core.overlay_deadline().is_none());
+    }
+
+    #[test]
+    fn overlay_deadline_est_none_sans_overlay_actif() {
+        let (core, _pc, _sc, _rx, _d) = setup();
+        assert!(core.overlay_deadline().is_none());
+    }
+
+    #[tokio::test]
+    async fn une_nouvelle_pression_repousse_lecheance_de_lloverlay() {
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.resume().await.unwrap();
+        core.handle_command(Command::VolumeUp).await.unwrap();
+        let d1 = core.overlay_deadline().unwrap();
+        core.handle_command(Command::VolumeUp).await.unwrap();
+        let d2 = core.overlay_deadline().unwrap();
+        assert!(d2 >= d1);
+    }
+
+    /// Pack français livré dans le dépôt (invariant : mêmes clés que l'anglais embarqué).
+    fn pack_fr() -> String {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales/core/fr.toml");
+        std::fs::read_to_string(p).expect("pack fr livre")
+    }
+
+    #[test]
+    fn parite_des_cles_entre_len_embarque_et_le_pack_fr() {
+        let en = ritornello_i18n::try_parse(super::EN).unwrap();
+        let fr = ritornello_i18n::try_parse(&pack_fr()).unwrap();
+        let mut cles_en: Vec<&String> = en.keys().collect();
+        let mut cles_fr: Vec<&String> = fr.keys().collect();
+        cles_en.sort();
+        cles_fr.sort();
+        assert_eq!(cles_en, cles_fr, "jeux de cles en/fr divergents");
     }
 }

@@ -93,7 +93,7 @@ async fn main() -> Result<()> {
         let admin_socket = p
             .admin
             .then(|| PathBuf::from(format!("{runtime_dir}/{}-admin.sock", p.name)));
-        match plugins::spawn(&p.exec, &socket_path, admin_socket.as_deref()) {
+        match plugins::spawn(&p.exec, &socket_path, admin_socket.as_deref(), persisted.locale.as_deref()) {
             Ok(child) => {
                 let wname = p.name.clone();
                 plugin_waits.push(async move {
@@ -261,6 +261,16 @@ async fn main() -> Result<()> {
                 None => std::future::pending().await,
             }
         };
+        // Echeance de l'overlay volume/muet, lue dans une variable locale
+        // avant le `select!` (comme `retry_at`) pour ne pas garder d'emprunt
+        // sur `core` pendant l'attente.
+        let overlay_at = core.overlay_deadline().map(tokio::time::Instant::from);
+        let overlay_sleep = async {
+            match overlay_at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
                 if let Err(e) = core.handle_command(cmd).await {
@@ -306,6 +316,9 @@ async fn main() -> Result<()> {
                 if let Err(e) = core.retry_stream().await {
                     tracing::warn!("retry flux: {e}");
                 }
+            }
+            _ = overlay_sleep => {
+                core.expire_overlay();
             }
             (name, status) = plugin_waits.select_next_some() => {
                 tracing::warn!("plugin {name} termine: {status:?}");

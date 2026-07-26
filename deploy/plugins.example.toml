@@ -10,9 +10,10 @@ kind = "source"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-cd"
 
 [[plugin]]
-name = "mce"
+name = "generic-input"
 kind = "input"
-exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-mce"
+exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-generic-input"
+admin = true
 
 [[plugin]]
 name = "console"

@@ -8,5 +8,5 @@ members = [
     "crates/ritornello-plugin-radio",
     "crates/ritornello-plugin-cd",
     "crates/ritornello-plugin-console",
-    "crates/ritornello-plugin-mce",
+    "crates/ritornello-plugin-generic-input",
 ]

@@ -1,6 +1,6 @@
 # ritornello
 
-Radio internet + lecteur CD, télécommande MCE, affichage console HDMI (OLED
+Radio internet + lecteur CD, télécommande configurable (evdev), affichage console HDMI (OLED
 SSD1306 prévu ensuite). Spec et plan dans `docs/superpowers/`.
 
 Architecture à plugins : le cœur (`ritornello-core`) orchestre des plugins —
@@ -12,7 +12,7 @@ Voir la section [Plugins](#plugins).
 
 ## Portabilité
 
-Rien dans le code n'est spécifique au Raspberry Pi : la télécommande MCE
+Rien dans le code n'est spécifique au Raspberry Pi : la télécommande
 passe par `evdev` (l'API Linux générique d'entrée, pas du GPIO), le son par
 ALSA/mpv, l'IPC par sockets Unix — tout ça tourne sur n'importe quel Linux,
 x86_64 comme ARM. Le Pi 2 est le matériel de référence historique de ce
@@ -46,6 +46,8 @@ Raspberry Pi OS Lite, puis :
     sudo apt install mpv cd-discid eject
     sudo cp deploy/stations.example.toml /etc/ritornello/stations.toml
     sudo cp deploy/plugins.example.toml /etc/ritornello/plugins.toml
+    sudo cp -r deploy/input-presets /etc/ritornello/input-presets
+    sudo cp deploy/input-bindings.example.toml /etc/ritornello/input-bindings.toml
     # jack analogique en sortie par défaut + volume matériel à fond
     sudo raspi-config nonint do_audio 1
     amixer set PCM 100%
@@ -60,6 +62,8 @@ sortie audio se choisit directement dans `/api/audio-output`) :
     sudo apt install mpv cd-discid eject
     sudo cp deploy/stations.example.toml /etc/ritornello/stations.toml
     sudo cp deploy/plugins.example.toml /etc/ritornello/plugins.toml
+    sudo cp -r deploy/input-presets /etc/ritornello/input-presets
+    sudo cp deploy/input-bindings.example.toml /etc/ritornello/input-bindings.toml
 
 `deploy/deploy.sh` fonctionne à l'identique : `TARGET=x86_64-unknown-linux-gnu
 PI=user@host ./deploy/deploy.sh` (pas besoin de `cross`/Docker pour cette
@@ -81,7 +85,7 @@ origine, avec un lien affiché sur la page de statut du cœur
 - La mort d'un plugin est tolérée : il est marqué indisponible sur la page de
   statut, les autres continuent de fonctionner.
 - Aucun de ces plugins n'est spécifique au Pi : `ritornello-plugin-radio` et
-  `ritornello-plugin-cd` sont du Rust portable pur, `ritornello-plugin-mce` et
+  `ritornello-plugin-cd` sont du Rust portable pur, `ritornello-plugin-generic-input` et
   `ritornello-plugin-console` dépendent seulement de matériel Linux générique
   (respectivement un récepteur infrarouge USB reconnu par `evdev`, et une
   console `/dev/ttyN`) — pas d'un GPIO ou d'un bus propre au Pi. Un nouveau
@@ -94,6 +98,25 @@ origine, avec un lien affiché sur la page de statut du cœur
   basé sur les périphériques ALSA connus du système (`aplay -L`) — une
   enceinte Bluetooth déjà appairée via `bluetoothctl` y apparaîtra
   automatiquement une fois exposée par `bluez-alsa`.
+- `ritornello-plugin-generic-input` déclare `admin = true` : il ouvre **tous**
+  les périphériques evdev lisibles (non exclusif : le clavier continue de
+  fonctionner normalement) et traduit les touches en commandes selon
+  `/etc/ritornello/input-bindings.toml`. Sa page
+  `http://<hôte>:8080/plugins/generic-input/` liste les périphériques
+  détectés, permet d'apprendre une touche par action, de charger un preset
+  livré (`mce`, `keyboard`) et d'enregistrer ; elle permet aussi d'importer un
+  preset depuis un fichier `.toml` téléversé et d'exporter les bindings
+  courants du périphérique sélectionné vers un tel fichier. Variables :
+  `RITORNELLO_INPUT_BINDINGS`, `RITORNELLO_INPUT_PRESETS`, `RITORNELLO_LOCALE`.
+  **Mise à jour d'une installation existante** (ancien `ritornello-plugin-mce`
+  à clavier codé en dur) : dans `/etc/ritornello/plugins.toml`, remplacer
+  l'entrée du plugin par `name = "generic-input"`, `exec =
+  "/usr/local/lib/ritornello/plugins/ritornello-plugin-generic-input"` et
+  **ne pas oublier `admin = true`** — sans elle le plugin démarre quand même
+  (mode dégradé, moitié Input seule) mais sa page d'admin n'est pas servie.
+  `deploy/deploy.sh` supprime automatiquement l'ancien binaire
+  `ritornello-plugin-mce` sur la cible pour éviter qu'il continue de tourner
+  après une mise à jour.
 
 ## Télécommande web
 
@@ -150,6 +173,7 @@ locale sans matériel Pi :
     name = "radio"
     kind = "source"
     exec = "target/debug/ritornello-plugin-radio"
+    admin = true
 
     [[plugin]]
     name = "console"
@@ -169,6 +193,18 @@ locale sans matériel Pi :
     RITORNELLO_RADIO_STATIONS=/tmp/rp/stations.toml RITORNELLO_RADIO_STATE=/tmp/rp/plugin-radio.json \
     cargo run -p ritornello-core
 
+Le plugin `generic-input` peut être ajouté au `plugins.toml` de `/tmp/rp` :
+
+    [[plugin]]
+    name = "generic-input"
+    kind = "input"
+    exec = "target/debug/ritornello-plugin-generic-input"
+    admin = true
+
+et les variables suivantes ajoutées à la ligne d'environnement :
+
+    RITORNELLO_INPUT_BINDINGS=/tmp/rp/input-bindings.toml RITORNELLO_INPUT_PRESETS=deploy/input-presets
+
 ## Déploiement
 
     PI=pi@raspberrypi.local ./deploy/deploy.sh
@@ -182,5 +218,8 @@ Interface web : http://<hôte>:8080 — logs : `journalctl -u ritornello -f`.
 
 ## Télécommande
 
-Si une touche ne répond pas : `sudo evtest` sur la machine cible, noter le
-code de la touche, ajuster `crates/ritornello-plugin-mce/src/keymap.rs`.
+Si une touche ne répond pas, ouvrir `http://<hôte>:8080/plugins/generic-input/`,
+choisir le périphérique dans la liste (bouton « Rafraîchir » s'il vient d'être
+branché), cliquer « Apprendre » sur la ligne de l'action, appuyer sur la touche,
+puis « Enregistrer ». Aucun redémarrage n'est nécessaire : la table est relue à
+chaque appui. Pour partir d'une base, charger le preset `mce` ou `keyboard`.

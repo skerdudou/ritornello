@@ -1013,15 +1013,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "ritornello-plugin-mce"
+name = "ritornello-plugin-generic-input"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "evdev",
+ "ritornello-i18n",
  "ritornello-plugin-sdk",
  "ritornello-proto",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]

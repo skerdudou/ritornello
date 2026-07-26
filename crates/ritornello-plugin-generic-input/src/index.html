@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ritornello — {{admin_title}}</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 44rem; margin: 2rem auto; padding: 0 1rem; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: .25rem; text-align: left; }
+  td.act { width: 12rem; }
+  td.code { width: 9rem; }
+  td.btn { width: 6rem; }
+  input { width: 100%; box-sizing: border-box; padding: .4rem; }
+  button { padding: .4rem .8rem; }
+  .bar { margin: 1rem 0; display: flex; gap: .5rem; align-items: center; }
+  #msg { margin-left: .5rem; }
+  .file-btn { padding: .4rem .8rem; border: 1px solid #888; border-radius: .25rem; cursor: pointer; }
+  .file-btn input { display: none; }
+</style>
+<h1>ritornello</h1>
+
+<div class="bar">
+  <label for="dev">{{device_label}}</label>
+  <select id="dev"></select>
+  <button id="refresh">{{btn_refresh}}</button>
+</div>
+
+<table id="t">
+  <thead><tr><th>{{col_action}}</th><th>{{col_code}}</th><th></th><th></th></tr></thead>
+  <tbody></tbody>
+</table>
+
+<div class="bar">
+  <label for="preset">{{preset_label}}</label>
+  <select id="preset"></select>
+  <button id="loadPreset">{{btn_load_preset}}</button>
+  <label class="file-btn">{{btn_import}}<input type="file" id="importFile" accept=".toml" hidden></label>
+  <button id="exportPreset">{{btn_export}}</button>
+</div>
+
+<div class="bar">
+  <button id="save">{{btn_save}}</button>
+  <button id="cancel" hidden>{{btn_cancel}}</button>
+  <span id="msg"></span>
+</div>
+
+<script>
+// Les 21 actions : libellé traduit côté serveur, commande au format
+// ritornello_proto::Command sérialisé (cmd/arg).
+const ACTIONS = [
+  { label: '{{act_select_1}}', cmd: { cmd: 'Select', arg: 1 } },
+  { label: '{{act_select_2}}', cmd: { cmd: 'Select', arg: 2 } },
+  { label: '{{act_select_3}}', cmd: { cmd: 'Select', arg: 3 } },
+  { label: '{{act_select_4}}', cmd: { cmd: 'Select', arg: 4 } },
+  { label: '{{act_select_5}}', cmd: { cmd: 'Select', arg: 5 } },
+  { label: '{{act_select_6}}', cmd: { cmd: 'Select', arg: 6 } },
+  { label: '{{act_select_7}}', cmd: { cmd: 'Select', arg: 7 } },
+  { label: '{{act_select_8}}', cmd: { cmd: 'Select', arg: 8 } },
+  { label: '{{act_select_9}}', cmd: { cmd: 'Select', arg: 9 } },
+  { label: '{{act_next}}', cmd: { cmd: 'Next' } },
+  { label: '{{act_prev}}', cmd: { cmd: 'Prev' } },
+  { label: '{{act_volume_up}}', cmd: { cmd: 'VolumeUp' } },
+  { label: '{{act_volume_down}}', cmd: { cmd: 'VolumeDown' } },
+  { label: '{{act_mute}}', cmd: { cmd: 'Mute' } },
+  { label: '{{act_play_pause}}', cmd: { cmd: 'PlayPause' } },
+  { label: '{{act_stop}}', cmd: { cmd: 'Stop' } },
+  { label: '{{act_next_track}}', cmd: { cmd: 'NextTrack' } },
+  { label: '{{act_prev_track}}', cmd: { cmd: 'PrevTrack' } },
+  { label: '{{act_eject}}', cmd: { cmd: 'Eject' } },
+  { label: '{{act_source_cycle}}', cmd: { cmd: 'SourceCycle' } },
+  { label: '{{act_power}}', cmd: { cmd: 'Power' } },
+];
+const T = {
+  learn: '{{btn_learn}}',
+  clear: '{{btn_clear}}',
+  learning: '{{learning_msg}}',
+  timeout: '{{learn_timeout}}',
+  saved: '{{saved}}',
+  saveError: '{{save_error}}',
+  loadError: '{{load_error}}',
+  noDevice: '{{no_device}}',
+};
+
+let state = { devices: [], bindings: { devices: [] }, presets: [], learning: null };
+let sel = null;   // périphérique sélectionné
+let timer = null; // sondage d'apprentissage
+
+const $ = (id) => document.getElementById(id);
+const msg = (t) => { $('msg').textContent = t; };
+const sameCmd = (a, b) => a.cmd === b.cmd && (a.arg ?? null) === (b.arg ?? null);
+
+async function fetchState() {
+  const r = await fetch('./api/data');
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return await r.json();
+}
+
+// Renvoie null si l'opération est acceptée (204), sinon le message d'erreur
+// (corps JSON {"error": …} du 422).
+async function put(body) {
+  const r = await fetch('./api/data', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (r.status === 204) return null;
+  let detail = 'HTTP ' + r.status;
+  try { const j = await r.json(); if (j && j.error) detail = j.error; } catch (e) { /* corps non JSON */ }
+  return detail;
+}
+
+function codesFor(device, action) {
+  const d = state.bindings.devices.find((x) => x.name === device);
+  if (!d) return '';
+  return d.bindings.filter((b) => sameCmd(b, action.cmd)).map((b) => b.code).join(', ');
+}
+
+function option(value) {
+  const o = document.createElement('option');
+  o.value = value;
+  o.textContent = value;
+  return o;
+}
+
+function render() {
+  const dev = $('dev');
+  dev.innerHTML = '';
+  state.devices.forEach((n) => dev.appendChild(option(n)));
+  if (!state.devices.includes(sel)) sel = state.devices[0] || null;
+  if (sel) dev.value = sel;
+
+  const preset = $('preset');
+  preset.innerHTML = '';
+  state.presets.forEach((n) => preset.appendChild(option(n)));
+
+  const tbody = $('t').querySelector('tbody');
+  tbody.innerHTML = '';
+  ACTIONS.forEach((a, i) => {
+    const tr = document.createElement('tr');
+    const tdA = document.createElement('td');
+    tdA.className = 'act';
+    tdA.textContent = a.label;
+    const tdC = document.createElement('td');
+    tdC.className = 'code';
+    const input = document.createElement('input');
+    input.id = 'c' + i;
+    input.inputMode = 'numeric';
+    input.value = sel ? codesFor(sel, a) : '';
+    tdC.appendChild(input);
+    const tdL = document.createElement('td');
+    tdL.className = 'btn';
+    const bl = document.createElement('button');
+    bl.textContent = T.learn;
+    bl.onclick = () => learn(i);
+    tdL.appendChild(bl);
+    const tdX = document.createElement('td');
+    tdX.className = 'btn';
+    const bx = document.createElement('button');
+    bx.textContent = T.clear;
+    bx.onclick = () => { input.value = ''; };
+    tdX.appendChild(bx);
+    tr.append(tdA, tdC, tdL, tdX);
+    tbody.appendChild(tr);
+  });
+  if (!sel) msg(T.noDevice);
+}
+
+// Reconstruit la table complète : les autres périphériques sont préservés
+// tels quels, seul le périphérique courant est réécrit depuis le tableau.
+function collect() {
+  const devices = state.bindings.devices.filter((d) => d.name !== sel);
+  const bindings = [];
+  ACTIONS.forEach((a, i) => {
+    const raw = $('c' + i).value.trim();
+    if (!raw) return;
+    raw.split(',').forEach((part) => {
+      const code = parseInt(part.trim(), 10);
+      if (!Number.isNaN(code)) bindings.push(Object.assign({ code: code }, a.cmd));
+    });
+  });
+  if (sel) devices.push({ name: sel, bindings: bindings });
+  return { devices: devices };
+}
+
+async function save() {
+  if (!sel) { msg(T.noDevice); return; }
+  const table = collect();
+  const err = await put({ op: 'save', bindings: table });
+  if (err) { msg(T.saveError + err); return; }
+  state.bindings = table;
+  msg(T.saved);
+}
+
+async function stopLearn(text) {
+  if (timer) { clearInterval(timer); timer = null; }
+  $('cancel').hidden = true;
+  await put({ op: 'cancel_learn' });
+  msg(text);
+}
+
+async function learn(i) {
+  if (!sel) { msg(T.noDevice); return; }
+  if (timer) await stopLearn('');
+  const err = await put({ op: 'learn', device: sel });
+  if (err) { msg(err); return; }
+  msg(T.learning);
+  $('cancel').hidden = false;
+  const deadline = Date.now() + 10000;
+  timer = setInterval(async () => {
+    if (Date.now() > deadline) { await stopLearn(T.timeout); return; }
+    let s;
+    try { s = await fetchState(); } catch (e) { return; }
+    const c = s.learning ? s.learning.captured : null;
+    if (c !== null && c !== undefined) {
+      $('c' + i).value = String(c);
+      await stopLearn('');
+    }
+  }, 300);
+}
+
+async function reload() {
+  try {
+    state = await fetchState();
+    msg('');
+    render();
+  } catch (e) {
+    msg(T.loadError + e.message);
+  }
+}
+
+$('dev').onchange = async () => { if (timer) await stopLearn(''); sel = $('dev').value; render(); };
+$('refresh').onclick = async () => { await put({ op: 'rescan' }); await reload(); };
+$('loadPreset').onclick = async () => {
+  if (!sel) { msg(T.noDevice); return; }
+  const err = await put({ op: 'load_preset', device: sel, preset: $('preset').value });
+  if (err) { msg(err); return; }
+  await reload();
+};
+
+// Importe un preset depuis un fichier local : lu en texte côté navigateur,
+// puis parsé et validé côté serveur (op `import_preset`), exactement comme
+// `load_preset` mais sans passer par /etc/ritornello/input-presets — rien
+// n'est persisté avant un « Enregistrer » explicite.
+$('importFile').onchange = (e) => {
+  const file = e.target.files[0];
+  e.target.value = ''; // permet de réimporter le même fichier ensuite
+  if (!file) return;
+  if (!sel) { msg(T.noDevice); return; }
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const err = await put({ op: 'import_preset', device: sel, content: reader.result });
+    if (err) { msg(err); return; }
+    await reload();
+  };
+  reader.onerror = () => { msg(T.loadError + (reader.error ? reader.error.message : '')); };
+  reader.readAsText(file);
+};
+
+// Sérialisation TOML des bindings du périphérique courant, en miroir du
+// format lu par `presets::parse_preset` (crates/ritornello-plugin-generic-input/
+// src/presets.rs) : un bloc [[bindings]] par binding, avec code/cmd et arg
+// seulement s'il est présent. Toute évolution du format côté Rust doit être
+// répercutée ici, sous peine de fichiers exportés que le serveur refuserait.
+function presetToml(bindings) {
+  return bindings.map((b) => {
+    let block = '[[bindings]]\ncode = ' + b.code + '\ncmd = "' + b.cmd + '"\n';
+    if (b.arg !== undefined && b.arg !== null) block += 'arg = ' + b.arg + '\n';
+    return block;
+  }).join('\n');
+}
+
+function sanitiseDeviceName(name) {
+  return name.replace(/[^a-zA-Z0-9_-]+/g, '_');
+}
+
+$('exportPreset').onclick = () => {
+  if (!sel) { msg(T.noDevice); return; }
+  const d = state.bindings.devices.find((x) => x.name === sel);
+  const text = presetToml(d ? d.bindings : []);
+  const blob = new Blob([text], { type: 'application/toml' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'ritornello-bindings-' + sanitiseDeviceName(sel) + '.toml';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+};
+
+$('save').onclick = save;
+$('cancel').onclick = () => stopLearn('');
+reload();
+</script>
+</html>

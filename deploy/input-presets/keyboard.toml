@@ -1,0 +1,86 @@
+# Clavier ordinaire : chiffres 1-9 (codes 2-10) vers les preselections,
+# fleches haut/bas pour le volume, fleches droite/gauche pour les
+# preselections, espace lecture/pause, m muet, s changement de source,
+# p veille.
+#
+# ATTENTION : l'ouverture evdev de generic-input est non exclusive, donc sur
+# un Pi avec une console de connexion sur ce meme clavier, ces lettres et
+# chiffres nus declenchent aussi les commandes ci-dessous pendant qu'on tape
+# a la console (notamment `p` = veille et `m` = muet).
+
+[[bindings]]
+code = 2
+cmd = "Select"
+arg = 1
+
+[[bindings]]
+code = 3
+cmd = "Select"
+arg = 2
+
+[[bindings]]
+code = 4
+cmd = "Select"
+arg = 3
+
+[[bindings]]
+code = 5
+cmd = "Select"
+arg = 4
+
+[[bindings]]
+code = 6
+cmd = "Select"
+arg = 5
+
+[[bindings]]
+code = 7
+cmd = "Select"
+arg = 6
+
+[[bindings]]
+code = 8
+cmd = "Select"
+arg = 7
+
+[[bindings]]
+code = 9
+cmd = "Select"
+arg = 8
+
+[[bindings]]
+code = 10
+cmd = "Select"
+arg = 9
+
+[[bindings]]
+code = 103
+cmd = "VolumeUp"
+
+[[bindings]]
+code = 108
+cmd = "VolumeDown"
+
+[[bindings]]
+code = 106
+cmd = "Next"
+
+[[bindings]]
+code = 105
+cmd = "Prev"
+
+[[bindings]]
+code = 57
+cmd = "PlayPause"
+
+[[bindings]]
+code = 50
+cmd = "Mute"
+
+[[bindings]]
+code = 31
+cmd = "SourceCycle"
+
+[[bindings]]
+code = 25
+cmd = "Power"

@@ -67,6 +67,11 @@ impl SourcePlugin for RadioSource {
     async fn next(&mut self) -> SourceOutcome {
         let next = self.stations.read().await.next_preset(self.preset);
         match next {
+            // Une seule station configurée : next_preset reboucle sur le
+            // preset courant. Rejouer provoquerait une reconnexion du flux
+            // live (loadfile mpv), audible comme un changement de station
+            // alors que l'affichage ne bouge pas. Rien à faire dans ce cas.
+            Some(n) if n == self.preset => SourceOutcome { action: SourceAction::Noop, view: None },
             Some(n) => self.play_preset(n).await,
             None => SourceOutcome { action: SourceAction::Noop, view: None },
         }
@@ -74,6 +79,9 @@ impl SourcePlugin for RadioSource {
     async fn prev(&mut self) -> SourceOutcome {
         let prev = self.stations.read().await.prev_preset(self.preset);
         match prev {
+            // Voir commentaire dans next() : même garde contre la
+            // reconnexion audible quand une seule station est configurée.
+            Some(n) if n == self.preset => SourceOutcome { action: SourceAction::Noop, view: None },
             Some(n) => self.play_preset(n).await,
             None => SourceOutcome { action: SourceAction::Noop, view: None },
         }
@@ -97,7 +105,16 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
 
     let socket_path = arg_value("--socket").expect("--socket <path> requis");
-    let admin_socket = arg_value("--admin-socket").expect("--admin-socket <path> requis");
+    // `--admin-socket` n'est fourni par le cœur que si `admin = true` dans
+    // plugins.toml. Absent (oubli lors d'une mise à jour de plugins.toml, ou
+    // usage volontaire sans page d'admin), on continue en mode dégradé :
+    // la moitié Source tourne seule, sans page de gestion des stations.
+    let admin_socket = arg_value("--admin-socket");
+    if admin_socket.is_none() {
+        tracing::warn!(
+            "--admin-socket absent : la page de gestion des stations ne sera pas servie, seule la moitie Source tourne (il manque 'admin = true' dans plugins.toml)"
+        );
+    }
     let stations_path = PathBuf::from(env_or("RITORNELLO_RADIO_STATIONS", "/etc/ritornello/stations.toml"));
     let state_path = PathBuf::from(env_or("RITORNELLO_RADIO_STATE", "/var/lib/ritornello/plugin-radio.json"));
 
@@ -117,7 +134,10 @@ async fn main() -> Result<()> {
         catalog: catalog.clone(),
         locales_root,
     };
-    let admin = RadioAdmin { stations_path, stations: stations_shared, catalog };
+    // La moitié admin n'est construite que si `--admin-socket` a été fourni
+    // (mode dégradé sinon, voir plus haut).
+    let admin = admin_socket
+        .map(|admin_socket| (RadioAdmin { stations_path, stations: stations_shared, catalog }, admin_socket));
 
     // Les deux moitiés sont indépendantes : une panne (déconnexion, erreur
     // d'écriture, voire panique sur un lock empoisonné) sur la socket admin ne
@@ -125,24 +145,35 @@ async fn main() -> Result<()> {
     // dans sa propre tâche tokio::spawn : une panique y est capturée dans le
     // JoinHandle (JoinError) au lieu de dérouler la pile de l'autre moitié,
     // ce qu'un simple tokio::join! sur des blocs async inline ne garantirait
-    // pas (les deux futures seraient pollées dans la même tâche).
+    // pas (les deux futures seraient pollées dans la même tâche). Quand
+    // `admin` est `None`, seule la moitié Source est lancée : jamais de
+    // `try_join!` ici, les deux tâches (quand les deux existent) restent
+    // suivies indépendamment.
     let source_handle = tokio::spawn(async move { run_source_plugin(source, &socket_path).await });
-    let admin_handle = tokio::spawn(async move { run_admin_plugin(admin, &admin_socket).await });
 
-    let (source_res, admin_res) = tokio::join!(source_handle, admin_handle);
-
-    match source_res {
-        Ok(Ok(())) => tracing::warn!("plugin radio (moitie source) termine normalement"),
-        Ok(Err(e)) => tracing::warn!("plugin radio (moitie source) erreur: {e}"),
-        Err(join_err) => tracing::error!("plugin radio (moitie source) a panique: {join_err}"),
-    }
-    match admin_res {
-        Ok(Ok(())) => tracing::warn!("plugin radio (moitie admin) termine normalement"),
-        Ok(Err(e)) => tracing::warn!("plugin radio (moitie admin) erreur: {e}"),
-        Err(join_err) => tracing::error!("plugin radio (moitie admin) a panique: {join_err}"),
+    match admin {
+        Some((admin, admin_socket)) => {
+            let admin_handle = tokio::spawn(async move { run_admin_plugin(admin, &admin_socket).await });
+            let (source_res, admin_res) = tokio::join!(source_handle, admin_handle);
+            log_half("moitie source", source_res);
+            log_half("moitie admin", admin_res);
+        }
+        None => {
+            log_half("moitie source", source_handle.await);
+        }
     }
 
     Ok(())
+}
+
+/// Logue le résultat d'une des deux moitiés (succès / erreur applicative /
+/// panique) sans jamais faire remonter l'échec d'une moitié sur l'autre.
+fn log_half(label: &str, res: std::result::Result<Result<()>, tokio::task::JoinError>) {
+    match res {
+        Ok(Ok(())) => tracing::warn!("plugin radio ({label}) termine normalement"),
+        Ok(Err(e)) => tracing::warn!("plugin radio ({label}) erreur: {e}"),
+        Err(join_err) => tracing::error!("plugin radio ({label}) a panique: {join_err}"),
+    }
 }
 
 #[cfg(test)]
@@ -173,5 +204,76 @@ mod tests {
     #[test]
     fn en_embarque_radio_est_non_vide() {
         assert!(!ritornello_i18n::try_parse(RADIO_EN).unwrap().is_empty());
+    }
+
+    fn make_source(stations: Stations, preset: u8) -> RadioSource {
+        let dir = tempfile::tempdir().unwrap();
+        RadioSource {
+            state_path: dir.path().join("plugin-radio.json"),
+            stations: Arc::new(AsyncRwLock::new(stations)),
+            preset,
+            catalog: Arc::new(RwLock::new(Catalog::load("radio", "en", dir.path(), RADIO_EN))),
+            locales_root: dir.path().to_path_buf(),
+        }
+    }
+
+    fn one_station() -> Stations {
+        config::Stations {
+            stations: vec![config::Station {
+                name: "FIP".into(),
+                url: "http://icecast.radiofrance.fr/fip-midfi.mp3".into(),
+                preset: 1,
+            }],
+        }
+    }
+
+    fn two_stations() -> Stations {
+        config::Stations {
+            stations: vec![
+                config::Station {
+                    name: "FIP".into(),
+                    url: "http://icecast.radiofrance.fr/fip-midfi.mp3".into(),
+                    preset: 1,
+                },
+                config::Station {
+                    name: "France Inter".into(),
+                    url: "http://icecast.radiofrance.fr/franceinter-midfi.mp3".into(),
+                    preset: 2,
+                },
+            ],
+        }
+    }
+
+    #[tokio::test]
+    async fn une_seule_station_next_et_prev_sont_sans_effet() {
+        let mut source = make_source(one_station(), 1);
+        let outcome = source.next().await;
+        assert!(matches!(outcome.action, SourceAction::Noop));
+        assert!(outcome.view.is_none());
+
+        let outcome = source.prev().await;
+        assert!(matches!(outcome.action, SourceAction::Noop));
+        assert!(outcome.view.is_none());
+    }
+
+    #[tokio::test]
+    async fn deux_stations_next_et_prev_rebouclent_toujours_vers_l_autre() {
+        let mut source = make_source(two_stations(), 1);
+        let outcome = source.next().await;
+        assert!(matches!(outcome.action, SourceAction::Play { .. }));
+
+        let mut source = make_source(two_stations(), 1);
+        let outcome = source.prev().await;
+        assert!(matches!(outcome.action, SourceAction::Play { .. }));
+    }
+
+    #[tokio::test]
+    async fn activate_sur_le_preset_courant_rejoue_quand_meme_le_flux() {
+        // Chemin de récupération après coupure (retry_stream côté cœur) :
+        // activate() doit continuer à rejouer le même preset, sans la garde
+        // ajoutée à next()/prev().
+        let mut source = make_source(one_station(), 1);
+        let outcome = source.activate().await;
+        assert!(matches!(outcome.action, SourceAction::Play { .. }));
     }
 }

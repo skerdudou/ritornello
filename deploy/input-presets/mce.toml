@@ -1,0 +1,145 @@
+# Telecommande MCE (recepteur infrarouge eHome et compatibles).
+# Transcription de l'ancienne table codee en dur (keymap.rs) :
+# chiffres 2-10 et 513-521 -> Select(1..9).
+
+[[bindings]]
+code = 2
+cmd = "Select"
+arg = 1
+
+[[bindings]]
+code = 3
+cmd = "Select"
+arg = 2
+
+[[bindings]]
+code = 4
+cmd = "Select"
+arg = 3
+
+[[bindings]]
+code = 5
+cmd = "Select"
+arg = 4
+
+[[bindings]]
+code = 6
+cmd = "Select"
+arg = 5
+
+[[bindings]]
+code = 7
+cmd = "Select"
+arg = 6
+
+[[bindings]]
+code = 8
+cmd = "Select"
+arg = 7
+
+[[bindings]]
+code = 9
+cmd = "Select"
+arg = 8
+
+[[bindings]]
+code = 10
+cmd = "Select"
+arg = 9
+
+[[bindings]]
+code = 513
+cmd = "Select"
+arg = 1
+
+[[bindings]]
+code = 514
+cmd = "Select"
+arg = 2
+
+[[bindings]]
+code = 515
+cmd = "Select"
+arg = 3
+
+[[bindings]]
+code = 516
+cmd = "Select"
+arg = 4
+
+[[bindings]]
+code = 517
+cmd = "Select"
+arg = 5
+
+[[bindings]]
+code = 518
+cmd = "Select"
+arg = 6
+
+[[bindings]]
+code = 519
+cmd = "Select"
+arg = 7
+
+[[bindings]]
+code = 520
+cmd = "Select"
+arg = 8
+
+[[bindings]]
+code = 521
+cmd = "Select"
+arg = 9
+
+[[bindings]]
+code = 115
+cmd = "VolumeUp"
+
+[[bindings]]
+code = 114
+cmd = "VolumeDown"
+
+[[bindings]]
+code = 113
+cmd = "Mute"
+
+[[bindings]]
+code = 402
+cmd = "Next"
+
+[[bindings]]
+code = 403
+cmd = "Prev"
+
+[[bindings]]
+code = 164
+cmd = "PlayPause"
+
+[[bindings]]
+code = 163
+cmd = "NextTrack"
+
+[[bindings]]
+code = 165
+cmd = "PrevTrack"
+
+[[bindings]]
+code = 166
+cmd = "Stop"
+
+[[bindings]]
+code = 161
+cmd = "Eject"
+
+[[bindings]]
+code = 226
+cmd = "SourceCycle"
+
+[[bindings]]
+code = 116
+cmd = "Power"
+
+[[bindings]]
+code = 356
+cmd = "Power"
