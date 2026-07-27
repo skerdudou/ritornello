@@ -1,0 +1,58 @@
+[
+  {
+    "name": "AD",
+    "stationcount": 8
+  },
+  {
+    "name": "AE",
+    "stationcount": 800
+  },
+  {
+    "name": "AF",
+    "stationcount": 124
+  },
+  {
+    "name": "AG",
+    "stationcount": 6
+  },
+  {
+    "name": "AI",
+    "stationcount": 6
+  },
+  {
+    "name": "AL",
+    "stationcount": 48
+  },
+  {
+    "name": "AM",
+    "stationcount": 19
+  },
+  {
+    "name": "BE",
+    "stationcount": 506
+  },
+  {
+    "name": "CA",
+    "stationcount": 1536
+  },
+  {
+    "name": "CH",
+    "stationcount": 636
+  },
+  {
+    "name": "DE",
+    "stationcount": 6081
+  },
+  {
+    "name": "FR",
+    "stationcount": 2746
+  },
+  {
+    "name": "GB",
+    "stationcount": 2314
+  },
+  {
+    "name": "US",
+    "stationcount": 7560
+  }
+]

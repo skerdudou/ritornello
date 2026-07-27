@@ -58,7 +58,9 @@ impl RadioSource {
         let stations = self.stations.read().await;
         if let Some(st) = stations.by_preset(n) {
             self.preset = n;
-            let _ = state::save(&self.state_path, &state::PluginState { preset: n });
+            // `update` et non `save` : la moitié Admin écrit le pays choisi dans
+            // ce même fichier, et un `save` construit ici l'effacerait.
+            let _ = state::update(&self.state_path, |s| s.preset = n);
             SourceOutcome::new(SourceAction::Play { uri: st.url.clone() })
                 .with_view(View {
                     line1: format!("RADIO  P{n}"),
@@ -148,7 +150,7 @@ async fn main() -> Result<()> {
     let catalog = Arc::new(RwLock::new(Catalog::load("radio", "en", &locales_root, RADIO_EN)));
 
     let source = RadioSource {
-        state_path,
+        state_path: state_path.clone(),
         stations: stations_shared.clone(),
         preset,
         catalog: catalog.clone(),
@@ -166,10 +168,12 @@ async fn main() -> Result<()> {
         (
             RadioAdmin {
                 stations_path,
+                state_path,
                 stations: stations_shared,
                 catalog,
                 directory: Arc::new(directory),
                 search: RwLock::new(Vec::new()),
+                countries: RwLock::new(Vec::new()),
             },
             admin_socket,
         )

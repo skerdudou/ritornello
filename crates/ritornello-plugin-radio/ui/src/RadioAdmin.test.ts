@@ -1,6 +1,7 @@
-import { Select, SelectItem } from '@ritornello/ui'
+import { Dialog } from '@ritornello/ui'
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import PaysPicker from './PaysPicker.vue'
 import RadioAdmin from './RadioAdmin.vue'
 
 const CATALOGUE = {
@@ -10,7 +11,9 @@ const CATALOGUE = {
   searching: 'Recherche…', no_results: 'Aucun résultat',
   col_num: 'N°', col_name: 'Nom', col_url: 'URL',
   search_title: 'Annuaire', search_placeholder: 'nom', country_label: 'Pays',
-  country_fr: 'France', country_us: 'États-Unis', country_all: 'Tous',
+  country_all: 'Tous', country_filter_placeholder: 'Pays ou code',
+  country_none: 'Aucun pays', country_loading: 'Chargement…',
+  reorder_hint: 'Glisser', move_up: 'Monter', move_down: 'Descendre',
   load_error_1: 'Erreur : ', load_error_2: '',
 }
 
@@ -94,6 +97,7 @@ describe('RadioAdmin', () => {
   it('recherche dans l’annuaire puis relit les résultats', async () => {
     const { w, spy } = await monter({
       stations: [],
+      country: 'FR',
       search: [{ name: 'FIP', url: 'http://fip', codec: 'MP3', bitrate: 128, country: 'FR' }],
     })
     await w.find('[data-query]').setValue('fip')
@@ -107,25 +111,21 @@ describe('RadioAdmin', () => {
     expect(w.text()).toContain('128')
   })
 
-  it('traduit la sentinelle « tous pays » en chaîne vide au moment de la requête', async () => {
-    // Reka UI refuse une <SelectItem value="">. « Tous pays » est donc porté
-    // par une sentinelle interne, traduite en '' uniquement au moment de
-    // construire la requête. Piloter l'état via le composant `Select`
-    // (v-model) plutôt que par une vraie interaction souris/clavier : le
-    // contenu du menu est teleporte hors du DOM visible quand il est fermé,
-    // mais reste present dans l'arbre de composants Vue (voir
-    // reka-ui/dist/Select/SelectContent.js — la fermeture teleporte le slot
-    // dans un DocumentFragment detache plutot que de le demonter), donc les
-    // `SelectItem` sont trouvables sans ouvrir le menu.
-    const { w, spy } = await monter({ stations: [], search: [] })
-    const itemTous = w.findAllComponents(SelectItem).find((i) => i.text().includes('Tous'))
-    expect(itemTous).toBeTruthy()
-    const sentinelle = itemTous!.props('value') as string
-    // La sentinelle elle-meme ne doit jamais etre la chaine vide : sinon on
-    // ne testerait pas la conversion, seulement une valeur qui se trouve
-    // deja etre la bonne.
-    expect(sentinelle).not.toBe('')
-    await w.findComponent(Select).vm.$emit('update:modelValue', sentinelle)
+  it('reprend le pays mémorisé par le plugin et l’affiche traduit', async () => {
+    // Defaut corrige : le libelle venait du composant `Select`, qui capture le
+    // texte de l'element selectionne au premier rendu — or `PluginView` monte
+    // l'IHM avec un catalogue **vide**, donc la page affichait la cle de
+    // traduction elle-meme (« country_fr »). Le libelle est desormais rendu
+    // depuis le code, par `Intl.DisplayNames`.
+    const { w } = await monter({ stations: [], search: [], country: 'DE' })
+    expect(w.find('[data-country-open]').text()).toBe('Germany')
+  })
+
+  it('affiche « tous les pays » quand aucun pays n’est mémorisé', async () => {
+    // Chaine vide = choix legitime, et non absence de valeur : c'est ce que le
+    // plugin attend dans `country`.
+    const { w, spy } = await monter({ stations: [], search: [], country: '' })
+    expect(w.find('[data-country-open]').text()).toBe('Tous')
     await w.find('[data-query]').setValue('fip')
     await w.find('[data-search]').trigger('click')
     await flushPromises()
@@ -133,6 +133,123 @@ describe('RadioAdmin', () => {
     expect(JSON.parse(String((put![1] as RequestInit).body))).toEqual({
       op: 'search', query: 'fip', country: '',
     })
+  })
+
+  it('ne demande la liste des pays qu’à l’ouverture du sélecteur, et une seule fois', async () => {
+    // Simulacre fidèle au plugin : `get_data` ne rend la liste **qu'après**
+    // l'opération `countries`. Un simulacre qui la rendrait dès le montage
+    // masquerait la récupération ; un simulacre qui la rendrait toujours vide
+    // ferait croire à une redemande à chaque ouverture.
+    let recuperee = false
+    const spy = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        if (JSON.parse(String(init.body)).op === 'countries') recuperee = true
+        return new Response(null, { status: 204 })
+      }
+      const corps = {
+        stations: [],
+        search: [],
+        countries: recuperee ? [{ code: 'BE', stations: 300 }] : [],
+      }
+      return new Response(JSON.stringify(corps), { status: 200 })
+    })
+    vi.stubGlobal('fetch', spy)
+    const w = mount(RadioAdmin, { props: { catalog: CATALOGUE, base: BASE } })
+    await flushPromises()
+
+    const puts = () =>
+      spy.mock.calls
+        .filter((c) => (c[1] as RequestInit)?.method === 'PUT')
+        .map((c) => JSON.parse(String((c[1] as RequestInit).body)).op)
+    // Au chargement de la page, aucun appel : rien ne le justifie tant que
+    // l'utilisateur ne cherche pas à changer de pays.
+    expect(puts()).toEqual([])
+
+    // `update:open` plutôt qu'un vrai clic : le contenu d'un Dialog reka n'est
+    // monté que lorsqu'il est ouvert, et c'est l'état qui déclenche la
+    // récupération, pas le geste.
+    await w.findComponent(Dialog).vm.$emit('update:open', true)
+    await flushPromises()
+    expect(puts()).toEqual(['countries'])
+
+    // Refermer puis rouvrir ne redemande rien : la liste est mémorisée.
+    await w.findComponent(Dialog).vm.$emit('update:open', false)
+    await w.findComponent(Dialog).vm.$emit('update:open', true)
+    await flushPromises()
+    expect(puts()).toEqual(['countries'])
+  })
+
+  it('le pays choisi dans le sélecteur part dans la recherche', async () => {
+    const { w, spy } = await monter({
+      stations: [],
+      search: [],
+      country: '',
+      countries: [{ code: 'BE', stations: 300 }],
+    })
+    await w.findComponent(Dialog).vm.$emit('update:open', true)
+    await flushPromises()
+    await w.findComponent(PaysPicker).vm.$emit('choose', 'BE')
+    await flushPromises()
+    expect(w.find('[data-country-open]').text()).toBe('Belgium')
+
+    await w.find('[data-query]').setValue('rock')
+    await w.find('[data-search]').trigger('click')
+    await flushPromises()
+    const put = spy.mock.calls
+      .filter((c) => (c[1] as RequestInit)?.method === 'PUT')
+      .map((c) => JSON.parse(String((c[1] as RequestInit).body)))
+      .find((b) => b.op === 'search')
+    expect(put).toEqual({ op: 'search', query: 'rock', country: 'BE' })
+  })
+
+  it('glisser une station la déplace, et la présélection suit la position', async () => {
+    const { w, spy } = await monter({
+      stations: [
+        { preset: 1, name: 'A', url: 'http://a' },
+        { preset: 2, name: 'B', url: 'http://b' },
+        { preset: 3, name: 'C', url: 'http://c' },
+      ],
+      search: [],
+    })
+    const lignes = () => w.findAll('[data-station-row]')
+    await lignes()[0]!.trigger('dragstart')
+    await lignes()[2]!.trigger('drop')
+    const noms = w.findAll('[data-station-name]').map((i) => (i.element as HTMLInputElement).value)
+    expect(noms).toEqual(['B', 'C', 'A'])
+
+    // La présélection **est** la position : c'est ce que l'enregistrement envoie.
+    await w.find('[data-save]').trigger('click')
+    await flushPromises()
+    const put = spy.mock.calls
+      .filter((c) => (c[1] as RequestInit)?.method === 'PUT')
+      .map((c) => JSON.parse(String((c[1] as RequestInit).body)))
+      .find((b) => b.op === 'save')
+    expect(put.stations).toEqual([
+      { preset: 1, name: 'B', url: 'http://b' },
+      { preset: 2, name: 'C', url: 'http://c' },
+      { preset: 3, name: 'A', url: 'http://a' },
+    ])
+  })
+
+  it('les boutons monter/descendre déplacent aussi, et sont bornés', async () => {
+    // Le glisser-déposer n'est ni au clavier ni fiable au doigt : ces boutons
+    // sont le chemin accessible, pas un ornement.
+    const { w } = await monter({
+      stations: [
+        { preset: 1, name: 'A', url: 'http://a' },
+        { preset: 2, name: 'B', url: 'http://b' },
+      ],
+      search: [],
+    })
+    const noms = () =>
+      w.findAll('[data-station-name]').map((i) => (i.element as HTMLInputElement).value)
+    await w.findAll('[data-station-down]')[0]!.trigger('click')
+    expect(noms()).toEqual(['B', 'A'])
+    await w.findAll('[data-station-up]')[1]!.trigger('click')
+    expect(noms()).toEqual(['A', 'B'])
+    // Aux extrémités, les boutons sont désactivés.
+    expect(w.findAll('[data-station-up]')[0]!.attributes('disabled')).toBeDefined()
+    expect(w.findAll('[data-station-down]')[1]!.attributes('disabled')).toBeDefined()
   })
 
   it('une requête vide n’émet rien et affiche le message dédié', async () => {

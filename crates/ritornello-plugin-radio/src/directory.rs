@@ -143,6 +143,56 @@ pub fn parse_search_results(json: &str) -> Result<Vec<DirectoryStation>, String>
         .collect())
 }
 
+/// Un pays de l'annuaire, réduit à ce dont l'IHM a besoin.
+///
+/// `code` est le code ISO 3166-1 alpha-2, celui-là même que `countrycode=`
+/// attend à la recherche. Aucun **nom** de pays n'est transporté : l'IHM le rend
+/// avec `Intl.DisplayNames`, donc dans la langue du navigateur et sans table à
+/// tenir à jour de notre côté.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectoryCountry {
+    pub code: String,
+    pub stations: u32,
+}
+
+/// Entrée brute de `/json/countrycodes`. Le champ `name` y porte le **code**
+/// (`"FR"`), pas un nom de pays — nommage de l'API, pas du nôtre.
+#[derive(Debug, Deserialize)]
+struct RawCountry {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    stationcount: Option<u32>,
+}
+
+/// Analyse une réponse `/json/countrycodes`. Fonction *pure*, testée sur une
+/// capture réelle.
+///
+/// Les entrées inexploitables sont écartées en silence, comme pour les
+/// stations : un code qui n'est pas deux lettres ne peut pas servir à
+/// `countrycode=`, et un pays sans station n'a rien à proposer. Relevé le
+/// 2026-07-27 : 241 entrées, toutes à deux lettres et toutes non vides — ces
+/// gardes sont donc préventives, et c'est bien ce qu'on veut d'une donnée tierce.
+pub fn parse_countries(json: &str) -> Result<Vec<DirectoryCountry>, String> {
+    let brutes: Vec<RawCountry> = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    Ok(brutes
+        .iter()
+        .filter_map(|r| {
+            let code = r.name.as_deref()?.trim().to_ascii_uppercase();
+            if code.len() != 2 || !code.chars().all(|c| c.is_ascii_alphabetic()) {
+                return None;
+            }
+            let stations = r.stationcount.unwrap_or(0);
+            (stations > 0).then_some(DirectoryCountry { code, stations })
+        })
+        .collect())
+}
+
+/// URL de la liste des pays.
+pub fn countries_url(base: &str) -> String {
+    format!("{}/json/countrycodes", base.trim_end_matches('/'))
+}
+
 /// Encodage pour-cent d'un paramètre de requête (caractères non réservés
 /// laissés tels quels). Écrit à la main : la partie pure du module ne dépend
 /// d'aucune bibliothèque HTTP, elle reste compilable et testable seule.
@@ -247,6 +297,23 @@ pub async fn search(
     parse_search_results(&body)
 }
 
+/// Interroge **un** serveur pour la liste des pays. Même forme que `search` :
+/// le délai est imposé par l'appelant, l'analyse est déléguée à une fonction
+/// pure.
+pub async fn countries(base: &str, timeout: Duration) -> Result<Vec<DirectoryCountry>, String> {
+    let client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .timeout(timeout)
+        .build()
+        .map_err(short_error)?;
+    let resp = client.get(countries_url(base)).send().await.map_err(short_error)?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status().as_u16()));
+    }
+    let body = resp.text().await.map_err(short_error)?;
+    parse_countries(&body)
+}
+
 /// Essaie les serveurs **dans l'ordre** et renvoie la première réponse
 /// exploitable. C'est la résilience minimale attendue d'un annuaire
 /// communautaire : pendant la conception, le serveur par défaut renvoyait
@@ -277,31 +344,57 @@ pub async fn search_with_fallback(
     query: &str,
     country: Option<&str>,
 ) -> Result<Vec<DirectoryStation>, String> {
+    avec_repli(bases, "recherche", |base, delai| async move {
+        search(&base, query, country, delai).await
+    })
+    .await
+}
+
+/// Liste des pays, même mécanique de repli et même budget que la recherche : la
+/// requête part sur la même socket d'admin, avec le même plafond de 5 s du côté
+/// du cœur.
+pub async fn countries_with_fallback(bases: &[String]) -> Result<Vec<DirectoryCountry>, String> {
+    avec_repli(bases, "pays", |base, delai| async move { countries(&base, delai).await }).await
+}
+
+/// Essaie les serveurs **dans l'ordre**, sous budget, et renvoie la première
+/// réponse exploitable. Toute la logique décrite sur `search_with_fallback` vit
+/// ici — recherche et liste des pays la partagent, plutôt que de tenir deux
+/// arithmétiques de budget à garder cohérentes.
+/// Le serveur est passé **possédé** à `essai` et non emprunté : un futur qui
+/// emprunterait la base devrait valoir pour n'importe quelle durée de vie, ce
+/// qu'une clôture asynchrone ne sait pas exprimer. Un `String` par essai, sur
+/// cinq essais au plus, ne se mesure pas.
+async fn avec_repli<T, F, Fut>(bases: &[String], quoi: &str, essai: F) -> Result<T, String>
+where
+    F: Fn(String, Duration) -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
     let debut = Instant::now();
     let mut essais = 0usize;
     for base in bases {
         let restant = SEARCH_BUDGET.saturating_sub(debut.elapsed());
         let Some(delai) = attempt_timeout(restant) else {
             tracing::warn!(
-                "budget de recherche epuise apres {essais} essai(s), \
+                "budget de {quoi} epuise apres {essais} essai(s), \
                  {} serveur(s) non essaye(s)",
                 bases.len() - essais
             );
             break;
         };
         essais += 1;
-        match search(base, query, country, delai).await {
-            Ok(stations) => {
-                tracing::debug!("annuaire {base}: {} resultat(s)", stations.len());
-                return Ok(stations);
+        match essai(base.clone(), delai).await {
+            Ok(reponse) => {
+                tracing::debug!("annuaire {base}: {quoi} aboutie");
+                return Ok(reponse);
             }
-            Err(e) => tracing::warn!("annuaire {base} en echec: {e}"),
+            Err(e) => tracing::warn!("annuaire {base} en echec ({quoi}): {e}"),
         }
     }
     // Un seul message court, jamais la concaténation des erreurs : le détail
     // est dans le journal, la page d'admin n'a pas la place pour cinq causes.
     tracing::warn!(
-        "aucun serveur d'annuaire n'a repondu ({essais} essaye(s) en {:?})",
+        "aucun serveur d'annuaire n'a repondu pour {quoi} ({essais} essaye(s) en {:?})",
         debut.elapsed()
     );
     Err(format!("{NO_SERVER} ({essais} tried)"))
@@ -317,6 +410,9 @@ pub trait Directory: Send + Sync {
         query: &str,
         country: Option<&str>,
     ) -> Result<Vec<DirectoryStation>, String>;
+
+    /// Liste des pays ayant au moins une station.
+    async fn countries(&self) -> Result<Vec<DirectoryCountry>, String>;
 }
 
 /// Implémentation réelle : un appel HTTP sur les bases configurées, essayées
@@ -344,6 +440,10 @@ impl Directory for HttpDirectory {
     ) -> Result<Vec<DirectoryStation>, String> {
         search_with_fallback(&self.bases, query, country).await
     }
+
+    async fn countries(&self) -> Result<Vec<DirectoryCountry>, String> {
+        countries_with_fallback(&self.bases).await
+    }
 }
 
 #[cfg(test)]
@@ -351,6 +451,55 @@ mod tests {
     use super::*;
 
     const FIXTURE: &str = include_str!("../tests/fixtures/radio-browser-search.json");
+    /// Capture réelle de `/json/countrycodes` (relevée le 2026-07-27, 241
+    /// entrées), **réduite** à quatorze pour rester lisible en revue.
+    const PAYS: &str = include_str!("../tests/fixtures/radio-browser-countrycodes.json");
+
+    #[test]
+    fn parse_countries_lit_une_capture_reelle() {
+        let pays = parse_countries(PAYS).unwrap();
+        assert_eq!(pays.len(), 14);
+        let fr = pays.iter().find(|p| p.code == "FR").expect("FR presente");
+        assert!(fr.stations > 1000, "compteur inattendu: {}", fr.stations);
+        // Le champ `name` de l'API porte le **code**, pas un nom de pays : si
+        // cette confusion se glissait un jour, `countrycode=` recevrait
+        // « France » et la recherche ne renverrait plus rien.
+        assert!(pays.iter().all(|p| p.code.len() == 2), "codes ISO attendus");
+    }
+
+    #[test]
+    fn parse_countries_ecarte_ce_qui_ne_peut_pas_servir() {
+        // Un code qui n'est pas deux lettres ne peut pas alimenter
+        // `countrycode=`, et un pays sans station n'a rien à proposer. Données
+        // tierces : la garde est préventive.
+        let json = r#"[
+            {"name":"FR","stationcount":10},
+            {"name":"","stationcount":5},
+            {"name":"FRANCE","stationcount":5},
+            {"name":"XX","stationcount":0},
+            {"name":"be","stationcount":3},
+            {"stationcount":7},
+            {"name":"D1","stationcount":2}
+        ]"#;
+        let pays = parse_countries(json).unwrap();
+        let codes: Vec<&str> = pays.iter().map(|p| p.code.as_str()).collect();
+        assert_eq!(codes, vec!["FR", "BE"], "minuscules normalisees, reste ecarte");
+    }
+
+    #[test]
+    fn parse_countries_rejette_un_json_invalide() {
+        assert!(parse_countries("pas du json").is_err());
+        assert!(parse_countries("{}").is_err());
+        assert_eq!(parse_countries("[]").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn lurl_des_pays_est_bien_formee() {
+        assert_eq!(
+            countries_url("https://de1.api.radio-browser.info/"),
+            "https://de1.api.radio-browser.info/json/countrycodes"
+        );
+    }
 
     #[test]
     fn parse_extrait_les_stations_de_la_fixture() {

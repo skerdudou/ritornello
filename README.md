@@ -118,6 +118,16 @@ origine, avec un lien affiché sur l'accueil du cœur (`http://<pi>:8080/`).
   pas été cliqué. Les présélections sont numérotées **automatiquement par
   position** (1 à 9, les chiffres de la télécommande) : ajouter met en fin de
   liste, supprimer renumérote les suivantes ; au-delà de 9, l'ajout est refusé.
+  L'ordre se change **en glissant une ligne** (ou par les flèches ▲▼, qui
+  restent le chemin accessible au clavier et au doigt) : déplacer une station
+  change donc son chiffre de télécommande.
+  Le **pays** de recherche se choisit dans une liste filtrable au clavier,
+  peuplée par l'annuaire lui-même (241 pays au dernier relevé, avec le nombre de
+  stations de chacun). Les noms sont rendus par le navigateur depuis le code ISO
+  — pas de table de pays à traduire dans les packs de langue. La liste n'est
+  demandée qu'à l'ouverture du sélecteur, jamais au chargement de la page, et le
+  choix est **retenu par le plugin** (dans `plugin-radio.json`, à côté de la
+  présélection courante) : il suit l'appareil et non le navigateur.
   Annuaire injoignable ⇒ message d'erreur sur la page, la lecture en cours et
   les stations déjà configurées ne bougent pas, et la saisie manuelle reste le
   repli. L'annuaire est interrogé sur **plusieurs serveurs essayés dans

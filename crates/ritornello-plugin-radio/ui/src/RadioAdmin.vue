@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import {
-  api, Button, createT, Input, type Catalog,
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+  api, Button, createT, Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger,
+  Input, type Catalog,
 } from '@ritornello/ui'
 import { computed, onMounted, ref } from 'vue'
+import { deplacer } from './ordre'
+import PaysPicker from './PaysPicker.vue'
+import { nomPays, TOUS_PAYS, type Pays } from './pays'
 
 // `base` fait partie du contrat des IHM de plugin, au meme titre que
 // `catalog` : le prefixe **absolu** sous lequel le coeur sert les routes de ce
@@ -34,19 +37,28 @@ function url(chemin: string): string {
 // l'autorite serveur.
 const MAX = 9
 
-// Reka UI refuse une `<SelectItem>` de valeur vide (« doit pouvoir designer
-// l'absence de selection »). Le pays « tous » est donc porte par ce jeton
-// interne cote IHM uniquement : `chercher()` le traduit en chaine vide avant
-// l'envoi, pour rester conforme au contrat `country: ''` du plugin.
-const TOUS_PAYS = '__ALL__'
-
 interface Station { name: string; url: string }
+/**
+ * Ligne en cours d'edition. La cle est **cote navigateur uniquement** et sert au
+ * `:key` de la boucle : sans identite stable, reordonner les lignes ferait
+ * reutiliser les champs de saisie a la mauvaise place (Vue rapproche par index)
+ * et le focus sauterait pendant un glisser-deposer.
+ */
+interface Ligne extends Station { cle: number }
 interface Trouvee { name: string; url: string; codec: string; bitrate: number; country: string }
 
-const stations = ref<Station[]>([])
+let prochaineCle = 0
+function ligne(s: Station): Ligne {
+  prochaineCle += 1
+  return { cle: prochaineCle, name: s.name, url: s.url }
+}
+
+const stations = ref<Ligne[]>([])
 const resultats = ref<Trouvee[] | null>(null)
 const query = ref('')
-const pays = ref('FR')
+const pays = ref(TOUS_PAYS)
+const paysListe = ref<Pays[]>([])
+const paysOuvert = ref(false)
 const message = ref('')
 const rechercheEnCours = ref(false)
 // Garde-fou repris de l'ancienne page, qui terminait son gestionnaire d'echec
@@ -69,15 +81,36 @@ const rechercheEnCours = ref(false)
 // page inerte qu'une page qui detruit les donnees qu'elle n'a pas su lire.
 const chargementEchoue = ref(false)
 
+/**
+ * Libelle du bouton de pays, rendu depuis **notre** etat.
+ *
+ * C'est la correction d'un defaut constate : la version precedente confiait ce
+ * libelle a `<SelectValue>`, qui capture le texte de l'element selectionne au
+ * premier rendu. Or `PluginView` monte l'IHM avec un catalogue **vide** (il est
+ * charge en asynchrone), donc le texte capture etait la cle de traduction
+ * elle-meme — la page affichait litteralement « country_fr » jusqu'a ce qu'on
+ * ouvre la liste.
+ */
+const libellePays = computed(() =>
+  pays.value === TOUS_PAYS ? t.value('country_all') : nomPays(pays.value),
+)
+
 async function recharger(): Promise<void> {
   try {
-    const data = await api.get<{ stations: Array<Station & { preset: number }>; search?: Trouvee[] }>(
-      url('api/data'),
-    )
+    const data = await api.get<{
+      stations: Array<Station & { preset: number }>
+      search?: Trouvee[]
+      countries?: Pays[]
+      country?: string
+    }>(url('api/data'))
     stations.value = [...data.stations]
       .sort((a, b) => a.preset - b.preset)
-      .map(({ name, url }) => ({ name, url }))
+      .map((s) => ligne({ name: s.name, url: s.url }))
     if (data.search?.length) resultats.value = data.search
+    if (data.countries?.length) paysListe.value = data.countries
+    // Pays retenu par le plugin : `??` et non `||`, une chaine vide etant un
+    // choix legitime (« tous les pays ») et non une absence de valeur.
+    pays.value = data.country ?? TOUS_PAYS
   } catch (e) {
     message.value = t.value('load_error_1') + (e as Error).message + t.value('load_error_2')
     chargementEchoue.value = true
@@ -86,6 +119,38 @@ async function recharger(): Promise<void> {
 
 onMounted(recharger)
 
+/**
+ * Recupere la liste des pays, une seule fois et **seulement a l'ouverture** du
+ * selecteur : c'est un appel reseau que rien ne justifie tant que l'utilisateur
+ * ne cherche pas a changer de pays.
+ */
+async function ouvrirPays(ouvert: boolean): Promise<void> {
+  paysOuvert.value = ouvert
+  if (!ouvert || chargementEchoue.value) return
+  if (paysListe.value.length || rechercheEnCours.value) return
+  rechercheEnCours.value = true
+  message.value = t.value('country_loading')
+  try {
+    const err = await api.put(url('api/data'), { op: 'countries' })
+    if (err) {
+      message.value = err
+      return
+    }
+    const data = await api.get<{ countries?: Pays[] }>(url('api/data'))
+    paysListe.value = data.countries ?? []
+    message.value = ''
+  } catch (e) {
+    message.value = t.value('load_error_1') + (e as Error).message + t.value('load_error_2')
+  } finally {
+    rechercheEnCours.value = false
+  }
+}
+
+function choisirPays(code: string): void {
+  pays.value = code
+  paysOuvert.value = false
+}
+
 // Rien n'est persiste avant « Enregistrer » : l'ajout n'agit que sur la table
 // en cours d'edition.
 function ajouter(s: Station = { name: '', url: '' }): boolean {
@@ -93,13 +158,29 @@ function ajouter(s: Station = { name: '', url: '' }): boolean {
     message.value = t.value('limit_reached')
     return false
   }
-  stations.value.push({ ...s })
+  stations.value.push(ligne(s))
   message.value = ''
   return true
 }
 
 function supprimer(i: number): void {
   stations.value.splice(i, 1)
+}
+
+// Reordonnancement : la preselection **est** la position, donc deplacer une
+// ligne change son numero de telecommande. Rien n'est persiste avant
+// « Enregistrer », comme pour l'ajout et la suppression.
+const glisse = ref<number | null>(null)
+
+function deposer(vers: number): void {
+  if (glisse.value === null) return
+  stations.value = deplacer(stations.value, glisse.value, vers)
+  glisse.value = null
+}
+
+/** Boutons haut/bas : le glisser-deposer n'est ni au clavier ni fiable au doigt. */
+function decaler(i: number, pas: number): void {
+  stations.value = deplacer(stations.value, i, i + pas)
 }
 
 // Numerotation automatique : la presélection est la **position** de la ligne.
@@ -141,8 +222,7 @@ async function chercher(): Promise<void> {
   rechercheEnCours.value = true
   message.value = t.value('searching')
   try {
-    const country = pays.value === TOUS_PAYS ? '' : pays.value
-    const err = await api.put(url('api/data'), { op: 'search', query: q, country })
+    const err = await api.put(url('api/data'), { op: 'search', query: q, country: pays.value })
     if (err) {
       message.value = err
       return
@@ -167,18 +247,59 @@ function libelle(s: Trouvee): string {
     <table class="w-full text-sm">
       <thead class="text-muted-foreground">
         <tr>
-          <th class="w-10 text-left font-normal">{{ t('col_num') }}</th>
+          <th class="w-16 text-left font-normal">{{ t('col_num') }}</th>
           <th class="text-left font-normal">{{ t('col_name') }}</th>
           <th class="text-left font-normal">{{ t('col_url') }}</th>
-          <th class="w-10" />
+          <th class="w-24" />
         </tr>
       </thead>
       <tbody>
-        <tr v-for="(s, i) in stations" :key="i" class="border-t border-border">
-          <td data-station-num class="tabular-nums text-muted-foreground">{{ i + 1 }}</td>
+        <!--
+          Lignes deplacables : la presélection etant la position, glisser une
+          station change son numero. `dragover.prevent` est indispensable —
+          sans lui le navigateur refuse le depot.
+        -->
+        <tr
+          v-for="(s, i) in stations"
+          :key="s.cle"
+          class="border-t border-border"
+          :class="glisse === i ? 'opacity-50' : ''"
+          draggable="true"
+          data-station-row
+          @dragstart="glisse = i"
+          @dragover.prevent
+          @drop.prevent="deposer(i)"
+          @dragend="glisse = null"
+        >
+          <td class="tabular-nums text-muted-foreground">
+            <span class="cursor-grab select-none pr-1" :title="t('reorder_hint')" data-drag-handle>⠿</span>
+            <span data-station-num>{{ i + 1 }}</span>
+          </td>
           <td class="py-1 pr-2"><Input v-model="s.name" data-station-name /></td>
           <td class="py-1 pr-2"><Input v-model="s.url" data-station-url /></td>
-          <td>
+          <td class="whitespace-nowrap">
+            <!-- Alternative au glisser-deposer : ni le clavier ni un ecran
+                 tactile ne s'en sortent bien. -->
+            <Button
+              variant="ghost"
+              size="icon"
+              data-station-up
+              :aria-label="t('move_up')"
+              :disabled="i === 0"
+              @click="decaler(i, -1)"
+            >
+              ▲
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              data-station-down
+              :aria-label="t('move_down')"
+              :disabled="i === stations.length - 1"
+              @click="decaler(i, 1)"
+            >
+              ▼
+            </Button>
             <Button variant="ghost" size="icon" data-station-delete @click="supprimer(i)">✕</Button>
           </td>
         </tr>
@@ -205,14 +326,24 @@ function libelle(s: Trouvee): string {
           :placeholder="t('search_placeholder')"
           @keydown.enter="chercher"
         />
-        <Select v-model="pays">
-          <SelectTrigger class="w-40"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="FR">{{ t('country_fr') }}</SelectItem>
-            <SelectItem value="US">{{ t('country_us') }}</SelectItem>
-            <SelectItem :value="TOUS_PAYS">{{ t('country_all') }}</SelectItem>
-          </SelectContent>
-        </Select>
+        <Dialog :open="paysOuvert" @update:open="ouvrirPays">
+          <DialogTrigger as-child>
+            <Button variant="outline" class="w-44 justify-start" data-country-open>
+              {{ libellePays }}
+            </Button>
+          </DialogTrigger>
+          <DialogContent class="sm:max-w-md">
+            <DialogHeader><DialogTitle>{{ t('country_label') }}</DialogTitle></DialogHeader>
+            <PaysPicker
+              :liste="paysListe"
+              :current="pays"
+              :label-tous="t('country_all')"
+              :placeholder="t('country_filter_placeholder')"
+              :vide="t('country_none')"
+              @choose="choisirPays"
+            />
+          </DialogContent>
+        </Dialog>
         <Button data-search :disabled="rechercheEnCours || chargementEchoue" @click="chercher">
           {{ t('btn_search') }}
         </Button>

@@ -22,9 +22,16 @@ limit_reached = "9 presets maximum — remove one first"
 search_title = "Add from the online directory"
 search_placeholder = "Station name"
 country_label = "Country"
-country_fr = "France"
-country_us = "United States"
+# Les noms de pays ne sont **pas** traduits ici : l'IHM les rend avec
+# `Intl.DisplayNames` depuis le code ISO, dans la langue du navigateur. Une table
+# de 241 pays à tenir dans chaque pack de langue n'aurait aucun sens.
 country_all = "All countries"
+country_filter_placeholder = "Country or code"
+country_none = "No matching country"
+country_loading = "Loading countries…"
+reorder_hint = "Drag to reorder"
+move_up = "Move up"
+move_down = "Move down"
 btn_search = "Search"
 btn_add_result = "Add"
 searching = "Searching…"

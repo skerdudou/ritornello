@@ -1,5 +1,5 @@
 use crate::config::{Station, Stations};
-use crate::directory::{Directory, DirectoryStation};
+use crate::directory::{Directory, DirectoryCountry, DirectoryStation};
 use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::AdminPlugin;
 use serde::Deserialize;
@@ -20,19 +20,30 @@ enum Op {
         #[serde(default)]
         stations: Vec<Station>,
     },
-    /// Interroge l'annuaire en ligne et mémorise les résultats. Rien n'est
-    /// persisté : l'utilisateur ajoute ensuite les stations qui l'intéressent
-    /// puis clique « Enregistrer ».
+    /// Interroge l'annuaire en ligne et mémorise les résultats. Aucune station
+    /// n'est persistée : l'utilisateur ajoute ensuite celles qui l'intéressent
+    /// puis clique « Enregistrer ». Le **pays**, lui, est retenu (voir
+    /// `PluginState::country`) : c'est une préférence de l'appareil, et la
+    /// retrouver au rechargement évite de la resaisir à chaque fois.
     Search {
         query: String,
         /// Code pays ISO ; chaîne vide = « tous pays ».
         #[serde(default)]
         country: String,
     },
+    /// Récupère la liste des pays de l'annuaire et la mémorise.
+    ///
+    /// Opération distincte, et **à la demande** : elle coûte un appel réseau que
+    /// rien ne justifie tant que l'utilisateur n'ouvre pas le sélecteur de pays.
+    /// La mémoriser évite de la redemander à chaque ouverture.
+    Countries,
 }
 
 pub struct RadioAdmin {
     pub stations_path: PathBuf,
+    /// État persisté du plugin, partagé avec la moitié Source : c'est là que le
+    /// pays choisi est retenu, à côté de la présélection.
+    pub state_path: PathBuf,
     pub stations: Arc<AsyncRwLock<Stations>>,
     pub catalog: Arc<RwLock<Catalog>>,
     /// Accès à l'annuaire derrière un trait : les tests injectent des
@@ -42,6 +53,9 @@ pub struct RadioAdmin {
     /// `search`) ; liste vide tant qu'aucune recherche n'a été faite. Une
     /// recherche en échec les laisse intacts.
     pub search: RwLock<Vec<DirectoryStation>>,
+    /// Liste des pays, une fois récupérée. Vide tant que l'utilisateur n'a pas
+    /// ouvert le sélecteur : aucun appel réseau n'est fait sans cela.
+    pub countries: RwLock<Vec<DirectoryCountry>>,
 }
 
 #[async_trait::async_trait]
@@ -67,10 +81,20 @@ impl AdminPlugin for RadioAdmin {
 
     async fn get_data(&self) -> serde_json::Value {
         let stations = self.stations.read().await.stations.clone();
-        // Garde `std::sync` prise après le seul `.await` de la fonction :
+        // Gardes `std::sync` prises après le seul `.await` de la fonction :
         // aucune garde ne traverse un point d'attente.
         let search = self.search.read().unwrap().clone();
-        serde_json::json!({ "stations": stations, "search": search })
+        let countries = self.countries.read().unwrap().clone();
+        // Le pays est relu du disque à chaque appel plutôt que gardé en mémoire :
+        // la moitié Source écrit dans le même fichier, et une copie en mémoire
+        // divergerait sans qu'on s'en aperçoive.
+        let country = crate::state::load(&self.state_path).country;
+        serde_json::json!({
+            "stations": stations,
+            "search": search,
+            "countries": countries,
+            "country": country,
+        })
     }
 
     async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String> {
@@ -112,6 +136,27 @@ impl AdminPlugin for RadioAdmin {
                             .replace("{detail}", &detail)
                     })?;
                 *self.search.write().unwrap() = resultats;
+                // Le pays n'est retenu qu'après une recherche **réussie** : une
+                // recherche en échec ne dit rien de l'intention de
+                // l'utilisateur, et mémoriser un pays qui vient d'échouer le
+                // ferait réessayer au rechargement.
+                let choisi = pays.unwrap_or_default();
+                if let Err(e) = crate::state::update(&self.state_path, |s| s.country = choisi) {
+                    // Sans conséquence sur la recherche qui vient d'aboutir :
+                    // seule la mémoire du choix est perdue.
+                    tracing::warn!("pays non memorise: {e}");
+                }
+                Ok(())
+            }
+            Op::Countries => {
+                let pays = self.directory.countries().await.map_err(|detail| {
+                    self.catalog
+                        .read()
+                        .unwrap()
+                        .get("search_error")
+                        .replace("{detail}", &detail)
+                })?;
+                *self.countries.write().unwrap() = pays;
                 Ok(())
             }
         }
@@ -130,17 +175,29 @@ mod tests {
     /// enregistre les arguments reçus. Aucune socket, aucun réseau.
     struct StubDirectory {
         resultat: Result<Vec<DirectoryStation>, String>,
+        pays: Result<Vec<DirectoryCountry>, String>,
         vus: std::sync::Mutex<Vec<(String, Option<String>)>>,
+        appels_pays: std::sync::atomic::AtomicUsize,
     }
 
     impl StubDirectory {
         fn ok(stations: Vec<DirectoryStation>) -> Arc<Self> {
-            Arc::new(StubDirectory { resultat: Ok(stations), vus: std::sync::Mutex::new(Vec::new()) })
+            Arc::new(StubDirectory {
+                resultat: Ok(stations),
+                pays: Ok(vec![
+                    DirectoryCountry { code: "FR".into(), stations: 2746 },
+                    DirectoryCountry { code: "BE".into(), stations: 300 },
+                ]),
+                vus: std::sync::Mutex::new(Vec::new()),
+                appels_pays: std::sync::atomic::AtomicUsize::new(0),
+            })
         }
         fn err(msg: &str) -> Arc<Self> {
             Arc::new(StubDirectory {
                 resultat: Err(msg.to_string()),
+                pays: Err(msg.to_string()),
                 vus: std::sync::Mutex::new(Vec::new()),
+                appels_pays: std::sync::atomic::AtomicUsize::new(0),
             })
         }
     }
@@ -158,6 +215,11 @@ mod tests {
                 .push((query.to_string(), country.map(str::to_string)));
             self.resultat.clone()
         }
+
+        async fn countries(&self) -> Result<Vec<DirectoryCountry>, String> {
+            self.appels_pays.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.pays.clone()
+        }
     }
 
     fn admin_avec(dir: &std::path::Path, directory: Arc<dyn Directory>) -> RadioAdmin {
@@ -168,6 +230,7 @@ mod tests {
         stations.save(&path).unwrap();
         RadioAdmin {
             stations_path: path,
+            state_path: dir.join("plugin-radio.json"),
             stations: Arc::new(AsyncRwLock::new(stations)),
             catalog: Arc::new(RwLock::new(Catalog::load(
                 "radio",
@@ -177,6 +240,7 @@ mod tests {
             ))),
             directory,
             search: RwLock::new(Vec::new()),
+            countries: RwLock::new(Vec::new()),
         }
     }
 
@@ -328,6 +392,71 @@ mod tests {
         assert_eq!(err, "Directory search failed: timeout");
         assert_eq!(a.get_data().await["search"].as_array().unwrap().len(), 4);
         assert_eq!(a.stations.read().await.stations[0].name, "FIP");
+    }
+
+    #[tokio::test]
+    async fn les_pays_ne_sont_recuperes_qua_la_demande_et_memorises() {
+        // L'appel reseau ne doit pas partir au chargement de la page : il ne se
+        // justifie que quand l'utilisateur ouvre le selecteur de pays.
+        let dir = tempfile::tempdir().unwrap();
+        let stub = StubDirectory::ok(Vec::new());
+        let mut a = admin_avec(dir.path(), stub.clone());
+        assert_eq!(a.get_data().await["countries"], serde_json::json!([]));
+        assert_eq!(stub.appels_pays.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        assert!(a.set_data(serde_json::json!({ "op": "countries" })).await.is_ok());
+        let v = a.get_data().await;
+        assert_eq!(v["countries"][0]["code"], "FR");
+        assert_eq!(v["countries"][0]["stations"], 2746);
+        assert_eq!(stub.appels_pays.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn les_pays_en_erreur_renvoient_un_message_traduit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = admin_avec(dir.path(), StubDirectory::err("timeout"));
+        let err = a.set_data(serde_json::json!({ "op": "countries" })).await.unwrap_err();
+        assert_eq!(err, "Directory search failed: timeout");
+        assert_eq!(a.get_data().await["countries"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn une_recherche_reussie_memorise_le_pays_et_get_data_le_rend() {
+        // C'est ce qui evite de resaisir le pays a chaque ouverture de la page.
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = admin_avec(dir.path(), StubDirectory::ok(Vec::new()));
+        assert_eq!(a.get_data().await["country"], "");
+        let op = serde_json::json!({ "op": "search", "query": "rock", "country": "BE" });
+        assert!(a.set_data(op).await.is_ok());
+        assert_eq!(a.get_data().await["country"], "BE");
+        // « tous pays » est un choix comme un autre, et doit se retenir aussi.
+        let op = serde_json::json!({ "op": "search", "query": "rock", "country": "" });
+        assert!(a.set_data(op).await.is_ok());
+        assert_eq!(a.get_data().await["country"], "");
+    }
+
+    #[tokio::test]
+    async fn memoriser_le_pays_ne_perd_pas_la_preselection() {
+        // Les deux moities du plugin ecrivent dans le meme fichier d'etat.
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = admin_avec(dir.path(), StubDirectory::ok(Vec::new()));
+        crate::state::update(&a.state_path, |s| s.preset = 6).unwrap();
+        let op = serde_json::json!({ "op": "search", "query": "rock", "country": "DE" });
+        assert!(a.set_data(op).await.is_ok());
+        let etat = crate::state::load(&a.state_path);
+        assert_eq!(etat.country, "DE");
+        assert_eq!(etat.preset, 6, "la preselection ne doit pas etre ecrasee");
+    }
+
+    #[tokio::test]
+    async fn une_recherche_en_echec_ne_memorise_pas_le_pays() {
+        // Retenir un pays qui vient d'echouer ferait reessayer au rechargement
+        // ce dont on sait deja qu'il ne marche pas.
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = admin_avec(dir.path(), StubDirectory::err("timeout"));
+        let op = serde_json::json!({ "op": "search", "query": "rock", "country": "IT" });
+        assert!(a.set_data(op).await.is_err());
+        assert_eq!(crate::state::load(&a.state_path).country, "");
     }
 
     #[tokio::test]
