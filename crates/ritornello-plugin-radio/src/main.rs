@@ -44,18 +44,35 @@ impl RadioSource {
         View { line1: format!("RADIO  P{preset}"), line2: status.to_string(), line3: String::new() }
     }
 
+    /// Identité de ce que joue la radio : le flux, désigné par son URL.
+    ///
+    /// Opaque pour le cœur, qui ne fait que la comparer et la relayer. C'est en
+    /// revanche ce qu'un plugin `metadata` lit pour reconnaître une station :
+    /// l'URL est la seule chose qui distingue durablement un flux (le nom de
+    /// présélection, lui, dépend de la configuration de l'appareil).
+    fn identite_du_flux(url: &str) -> serde_json::Value {
+        serde_json::json!({ "kind": "stream", "url": url })
+    }
+
     async fn play_preset(&mut self, n: u8) -> SourceOutcome {
         let stations = self.stations.read().await;
         if let Some(st) = stations.by_preset(n) {
             self.preset = n;
             let _ = state::save(&self.state_path, &state::PluginState { preset: n });
-            SourceOutcome {
-                action: SourceAction::Play { uri: st.url.clone() },
-                view: Some(View { line1: format!("RADIO  P{n}"), line2: st.name.clone(), line3: String::new() }),
-            }
+            SourceOutcome::new(SourceAction::Play { uri: st.url.clone() })
+                .with_view(View {
+                    line1: format!("RADIO  P{n}"),
+                    line2: st.name.clone(),
+                    line3: String::new(),
+                })
+                .plays(Self::identite_du_flux(&st.url))
         } else {
             let empty = self.catalog.read().unwrap().get("empty_preset").to_string();
-            SourceOutcome { action: SourceAction::Noop, view: Some(self.view_for(self.preset, &empty)) }
+            // Présélection vide : rien ne joue, et il faut le dire — sinon les
+            // plugins `metadata` continueraient sur la station précédente.
+            SourceOutcome::new(SourceAction::Noop)
+                .with_view(self.view_for(self.preset, &empty))
+                .plays_nothing()
         }
     }
 }
@@ -67,7 +84,7 @@ impl SourcePlugin for RadioSource {
         self.play_preset(preset).await
     }
     async fn deactivate(&mut self) -> SourceOutcome {
-        SourceOutcome { action: SourceAction::Stop, view: None }
+        SourceOutcome::new(SourceAction::Stop).plays_nothing()
     }
     async fn select(&mut self, n: u8) -> SourceOutcome {
         self.play_preset(n).await
@@ -78,10 +95,11 @@ impl SourcePlugin for RadioSource {
             // Une seule station configurée : next_preset reboucle sur le
             // preset courant. Rejouer provoquerait une reconnexion du flux
             // live (loadfile mpv), audible comme un changement de station
-            // alors que l'affichage ne bouge pas. Rien à faire dans ce cas.
-            Some(n) if n == self.preset => SourceOutcome { action: SourceAction::Noop, view: None },
+            // alors que l'affichage ne bouge pas. Rien à faire dans ce cas —
+            // et surtout ne rien dire de l'identité, qui n'a pas changé.
+            Some(n) if n == self.preset => SourceOutcome::new(SourceAction::Noop),
             Some(n) => self.play_preset(n).await,
-            None => SourceOutcome { action: SourceAction::Noop, view: None },
+            None => SourceOutcome::new(SourceAction::Noop),
         }
     }
     async fn prev(&mut self) -> SourceOutcome {
@@ -89,13 +107,13 @@ impl SourcePlugin for RadioSource {
         match prev {
             // Voir commentaire dans next() : même garde contre la
             // reconnexion audible quand une seule station est configurée.
-            Some(n) if n == self.preset => SourceOutcome { action: SourceAction::Noop, view: None },
+            Some(n) if n == self.preset => SourceOutcome::new(SourceAction::Noop),
             Some(n) => self.play_preset(n).await,
-            None => SourceOutcome { action: SourceAction::Noop, view: None },
+            None => SourceOutcome::new(SourceAction::Noop),
         }
     }
     async fn eject(&mut self) -> SourceOutcome {
-        SourceOutcome { action: SourceAction::Noop, view: None }
+        SourceOutcome::new(SourceAction::Noop)
     }
     async fn set_locale(&mut self, locale: String) {
         *self.catalog.write().unwrap() = Catalog::load("radio", &locale, &self.locales_root, RADIO_EN);
@@ -268,10 +286,43 @@ mod tests {
         let outcome = source.next().await;
         assert!(matches!(outcome.action, SourceAction::Noop));
         assert!(outcome.view.is_none());
+        // Ne rien dire de l'identité : la station n'a pas changé, et annoncer un
+        // changement remettrait à zéro les métadonnées du morceau en cours.
+        assert!(outcome.identity.is_none());
 
         let outcome = source.prev().await;
         assert!(matches!(outcome.action, SourceAction::Noop));
         assert!(outcome.view.is_none());
+        assert!(outcome.identity.is_none());
+    }
+
+    #[tokio::test]
+    async fn jouer_une_station_declare_son_flux_comme_identite() {
+        let mut source = make_source(two_stations(), 1);
+        let outcome = source.select(2).await;
+        assert_eq!(
+            outcome.identity,
+            Some(ritornello_proto::IdentityUpdate::Playing(serde_json::json!({
+                "kind": "stream",
+                "url": "http://icecast.radiofrance.fr/franceinter-midfi.mp3"
+            })))
+        );
+    }
+
+    #[tokio::test]
+    async fn une_preselection_vide_declare_que_plus_rien_ne_joue() {
+        let mut source = make_source(Stations::default(), 1);
+        let outcome = source.select(4).await;
+        assert!(matches!(outcome.action, SourceAction::Noop));
+        assert_eq!(outcome.identity, Some(ritornello_proto::IdentityUpdate::Nothing));
+    }
+
+    #[tokio::test]
+    async fn se_desactiver_declare_que_plus_rien_ne_joue() {
+        let mut source = make_source(two_stations(), 1);
+        let outcome = source.deactivate().await;
+        assert!(matches!(outcome.action, SourceAction::Stop));
+        assert_eq!(outcome.identity, Some(ritornello_proto::IdentityUpdate::Nothing));
     }
 
     #[tokio::test]

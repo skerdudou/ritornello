@@ -1,0 +1,124 @@
+# Webradios OUI FM : correspondance entre l’identifiant de flux (présent dans
+# l’URL du flux audio) et l’identifiant attendu par le flux de métadonnées.
+#
+# RELEVÉ, PAS DEVINÉ. Source : la variable JavaScript `apidata` de
+# https://www.ouifm.fr/player, dont les champs `id` (identifiant de flux) et
+# `idMds` (identifiant de métadonnées) sont repris ici tels quels.
+# `scripts/fetch-webradios.mjs` régénère ce fichier depuis cette même source.
+#
+# Vérifié à la main sur `?id=` du flux de métadonnées : l’identifiant `metas`
+# renvoie artiste et titre, l’identifiant de flux renvoie une trame vide.
+#
+# Chaque entrée de `urls` est cherchée comme sous-chaîne de l’URL du flux :
+# l’URL de diffusion porte un jeton signé et un format variables, mais
+# toujours l’identifiant de flux. Les fragments `ouifmN.` reconnaissent les
+# mounts Icecast historiques (diffusion Infomaniak), qui sont les URL
+# publiées de longue date — donc celles qu’un annuaire référence et qu’un
+# utilisateur copie. Voir `scripts/fetch-webradios.mjs` pour leur relevé.
+#
+# Relevé le 2026-07-27. 21 flux.
+
+[[webradio]]
+label = "Oüi FM"
+urls = ["QnaHBfM52n", "ouifm-high"]
+metas = "2174546520932614531"
+
+[[webradio]]
+label = "Oüi FM Classic Rock"
+urls = ["3qhtSltZ27", "ouifm3."]
+metas = "3134161803443976427"
+
+[[webradio]]
+label = "Oüi FM Rock Indé"
+urls = ["fkYz8mdU3T", "ouifm5."]
+metas = "3134161803443976526"
+
+[[webradio]]
+label = "Oüi FM Alternatif"
+urls = ["S2UWS5S3lJ", "ouifm2."]
+metas = "3134161803443976382"
+
+[[webradio]]
+label = "Oüi FM Top of the Week"
+urls = ["RFWji6sMSN"]
+metas = "3754485939764896014"
+
+[[webradio]]
+label = "Oüi FM Garage Rock"
+urls = ["PVQ1nX8P2i"]
+metas = "1016696403088961793"
+
+[[webradio]]
+label = "Oüi FM Girls Rock"
+urls = ["0hw7uCfIT8"]
+metas = "3864441174941011218"
+
+[[webradio]]
+label = "Oüi FM Rock Français"
+urls = ["3fkpVzB8Cc"]
+metas = "3820775684199026845"
+
+[[webradio]]
+label = "Oüi FM Blues'n'Rock"
+urls = ["OSdEHZc03t"]
+metas = "3134161803443976485"
+
+[[webradio]]
+label = "Oüi FM Bring The Noise"
+urls = ["tBdigJT2rb"]
+metas = "4004502594738215513"
+
+[[webradio]]
+label = "Oüi FM Summertime"
+urls = ["RN2oOuAbDH"]
+metas = "3652031559378160590"
+
+[[webradio]]
+label = "Oüi FM Acoustic"
+urls = ["NSzUtv6XGF"]
+metas = "3906034555622012146"
+
+[[webradio]]
+label = "Oüi FM Génération Woodstock"
+urls = ["xD29y7pjPX"]
+metas = "3707948669989820452"
+
+[[webradio]]
+label = "Oüi FM Les Slows du Rock"
+urls = ["QqHO8qpoE2"]
+metas = "3818508936105954443"
+
+[[webradio]]
+label = "Oüi FM Reggae"
+urls = ["ufIfkfDXSl"]
+metas = "3540892623380233022"
+
+[[webradio]]
+label = "Oüi FM Rock 60's"
+urls = ["Jhdp1QoWCO"]
+metas = "3540892623380233039"
+
+[[webradio]]
+label = "Oüi FM Rock 70's"
+urls = ["GlXr8ww38P"]
+metas = "3540892623380233057"
+
+[[webradio]]
+label = "Oüi FM Rock 80's"
+urls = ["6fo6l1uD2X"]
+metas = "3610476513821993259"
+
+[[webradio]]
+label = "Oüi FM Rock 90's"
+urls = ["OQiFGri4ef"]
+metas = "3610476513821993340"
+
+[[webradio]]
+label = "Oüi FM Rock 2000"
+urls = ["PS5mho8vsS"]
+metas = "3652031559378160547"
+
+[[webradio]]
+label = "Oüi FM Rock'n'Food"
+urls = ["AQxuZekZgM"]
+metas = "3796007387461058949"

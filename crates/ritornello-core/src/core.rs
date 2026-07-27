@@ -1,9 +1,11 @@
+use crate::metadata::{self, Metadonnees, NowPlayingState};
 use crate::player::Player;
 use crate::state::{self, PersistedState};
 use crate::types::Event;
 use anyhow::Result;
 use ritornello_i18n::Catalog;
-use ritornello_proto::{Command, SourceAction, SourceReq, View};
+use ritornello_plugin_sdk::SourceUpdate;
+use ritornello_proto::{Command, Enrichment, IdentityUpdate, NowPlaying, SourceAction, SourceReq, View};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,6 +26,38 @@ pub trait Source: Send + Sync + 'static {
     async fn request(&self, req: SourceReq) -> Result<SourceAction>;
 }
 
+/// Tout ce que le cœur reçoit du montage de `main` : ses sources, son état
+/// persisté, ses canaux de sortie.
+///
+/// Une structure nommée plutôt qu'une longue liste de paramètres positionnels :
+/// à huit éléments, l'ordre d'un appel ne se vérifie plus à l'œil, et deux
+/// `PathBuf` voisins (`state_path`, `locales_root`) s'échangeraient sans que le
+/// compilateur y trouve à redire.
+pub struct Cablage {
+    pub sources: HashMap<String, Arc<dyn Source>>,
+    pub persisted: PersistedState,
+    pub state_path: PathBuf,
+    /// Vues composées, vers les plugins Display.
+    pub view_tx: watch::Sender<View>,
+    pub catalog: Arc<RwLock<Catalog>>,
+    pub locales_root: PathBuf,
+    pub metadata: MetadataCablage,
+}
+
+/// Câblage des métadonnées.
+pub struct MetadataCablage {
+    /// Noms des plugins `metadata`, **dans l'ordre de déclaration** de
+    /// `plugins.toml` : cet ordre est la priorité d'arbitrage.
+    pub plugins: Vec<String>,
+    /// Ce qui joue, vers les plugins `metadata`. Un `watch` et non un appel
+    /// direct : un plugin qui ne lit plus ne doit pas pouvoir figer le cœur.
+    pub now_playing: watch::Sender<NowPlaying>,
+    /// État structuré du morceau, vers la SPA (route `GET /api/now-playing`).
+    /// Canal distinct de `view_tx` : la SPA reçoit du structuré, les afficheurs
+    /// reçoivent des lignes déjà composées, chacun son chemin.
+    pub etat: watch::Sender<NowPlayingState>,
+}
+
 pub struct Core<P: Player> {
     player: P,
     sources: HashMap<String, Arc<dyn Source>>,
@@ -36,9 +70,13 @@ pub struct Core<P: Player> {
     retry_count: u32,
     audio_device: Option<String>,
     view: View,
+    /// La Source a déclaré la `line2` de `view` remplaçable par une métadonnée
+    /// (voir `metadata::composer`). Mémorisé avec la vue, puisque c'est d'elle
+    /// que la déclaration parle.
+    view_line2_replaceable: bool,
     /// Overlay temporaire (volume/muet) : vue à afficher + échéance. Tant
     /// qu'il est actif, `push_view` l'affiche à la place de `view`, mais
-    /// `view` continue d'être tenue à jour par `handle_source_view` pour
+    /// `view` continue d'être tenue à jour par `handle_source_update` pour
     /// réapparaître dès l'expiration.
     overlay: Option<(View, Instant)>,
     state_path: PathBuf,
@@ -48,18 +86,17 @@ pub struct Core<P: Player> {
     locales_root: PathBuf,
     theme: Option<String>,
     mode: Option<String>,
+    /// Métadonnées du morceau : identité de ce qui joue, titre ICY, et
+    /// enrichissements des plugins. Voir `metadata.rs` pour l'arbitrage.
+    metadonnees: Metadonnees,
+    now_playing_tx: watch::Sender<NowPlaying>,
+    etat_tx: watch::Sender<NowPlayingState>,
 }
 
 impl<P: Player> Core<P> {
-    pub fn new(
-        player: P,
-        sources: HashMap<String, Arc<dyn Source>>,
-        persisted: PersistedState,
-        state_path: PathBuf,
-        view_tx: watch::Sender<View>,
-        catalog: Arc<RwLock<Catalog>>,
-        locales_root: PathBuf,
-    ) -> Self {
+    pub fn new(player: P, cablage: Cablage) -> Self {
+        let Cablage { sources, persisted, state_path, view_tx, catalog, locales_root, metadata } =
+            cablage;
         let mut source_order: Vec<String> = sources.keys().cloned().collect();
         source_order.sort();
         let active_source = if sources.contains_key(&persisted.active_source) {
@@ -79,6 +116,7 @@ impl<P: Player> Core<P> {
             retry_count: 0,
             audio_device: persisted.audio_device.clone(),
             view: View::default(),
+            view_line2_replaceable: false,
             overlay: None,
             state_path,
             view_tx,
@@ -87,6 +125,9 @@ impl<P: Player> Core<P> {
             locales_root,
             theme: persisted.theme.clone(),
             mode: persisted.mode.clone(),
+            metadonnees: Metadonnees::new(metadata.plugins),
+            now_playing_tx: metadata.now_playing,
+            etat_tx: metadata.etat,
         }
     }
 
@@ -118,18 +159,130 @@ impl<P: Player> Core<P> {
         Ok(())
     }
 
-    pub fn handle_source_view(&mut self, name: &str, view: View) {
-        if self.standby {
+    /// Applique ce qu'une Source rapporte : sa vue, et/ou l'identité de ce
+    /// qu'elle joue désormais.
+    ///
+    /// Les deux arrivent dans la même trame et sont appliqués ensemble, sans
+    /// affichage intermédiaire : aucun instant observable ne voit la ligne
+    /// affichée décrire un morceau et l'identité annoncée aux plugins en décrire
+    /// un autre.
+    pub fn handle_source_update(&mut self, name: &str, update: SourceUpdate) {
+        if self.standby || name != self.active_source {
             return;
         }
-        if name == self.active_source {
+        // La vue **avant** l'identité : `set_identity` rafraîchit l'affichage,
+        // et l'ordre inverse le ferait composer l'ancienne vue avec l'ardoise
+        // déjà vidée. Les deux venant de la même trame, aucun instant
+        // observable ne les voit se contredire.
+        if let Some(view) = update.view {
             self.view = view;
-            // Pendant un overlay volume/muet, la vue source est mémorisée
-            // (ci-dessus) mais pas affichée : elle réapparaîtra à l'expiration.
-            if self.overlay.is_none() {
-                self.push_view();
-            }
+            self.view_line2_replaceable = update.line2_replaceable;
         }
+        if let Some(identity) = update.identity {
+            let valeur = match identity {
+                IdentityUpdate::Playing(v) => Some(v),
+                IdentityUpdate::Nothing => None,
+            };
+            self.set_identity(valeur);
+        }
+        // Pendant un overlay volume/muet, la vue source est mémorisée
+        // (ci-dessus) mais pas affichée : elle réapparaîtra à l'expiration.
+        if self.overlay.is_none() {
+            self.push_view();
+        }
+    }
+
+    /// Change ce qui joue : remet l'ardoise des métadonnées à zéro, prévient les
+    /// plugins `metadata`, et rafraîchit affichage et état diffusé.
+    ///
+    /// `None` = plus rien ne joue. Le cœur ne regarde jamais **dans** l'identité :
+    /// il la compare par égalité et la relaie telle quelle.
+    fn set_identity(&mut self, identity: Option<serde_json::Value>) {
+        if !self.metadonnees.set_identity(identity) {
+            return;
+        }
+        let np = NowPlaying {
+            source: self.active_source.clone(),
+            identity: self.metadonnees.identity().cloned(),
+        };
+        // Échec impossible en pratique (le cœur garde le Sender), et de toute
+        // façon sans conséquence sur la lecture : un `warn` suffirait à noyer
+        // les journaux si un plugin metadata manquait.
+        let _ = self.now_playing_tx.send(np);
+        self.publie_etat();
+        // L'ardoise a changé, donc l'affichage doit suivre — comme le font
+        // `handle_icy_title` et `handle_enrichment`. Sans ce rafraîchissement,
+        // `Command::Stop` laissait le titre du morceau arrêté **figé sur
+        // l'afficheur** jusqu'à la prochaine action de l'utilisateur, alors que
+        // la SPA, elle, se vidait correctement.
+        if self.overlay.is_none() {
+            self.push_view();
+        }
+    }
+
+    /// Titre annoncé par le flux lui-même (en-tête ICY vu par mpv).
+    fn handle_icy_title(&mut self, titre: String) {
+        // Deux gardes, et **aucune** ne consulte l'identité : cette couche doit
+        // fonctionner sans plugin `metadata` et même face à une Source qui ne
+        // déclare aucune identité, sinon la seule couche qui marche toute seule
+        // se taisait en silence.
+        //
+        // En veille, rien ne doit atteindre l'affichage — même garde que
+        // `handle_source_update`. Le chemin est réel : `Command::Power` attend
+        // la réponse de la Source à `Deactivate` (jusqu'à 5 s) pendant que mpv
+        // joue encore, et un titre émis dans cet intervalle arrive après que la
+        // vue de veille a été poussée.
+        //
+        // `expecting_stream` est ce que le cœur sait **de lui-même** de la
+        // lecture : mis à vrai sur chaque `Play` qu'il applique, à faux sur
+        // `Stop`. C'est ce qui empêche un titre en retard de s'afficher, et d'y
+        // rester, après un arrêt.
+        if self.standby || !self.expecting_stream {
+            return;
+        }
+        if !self.metadonnees.set_icy(titre) {
+            return;
+        }
+        self.publie_etat();
+        if self.overlay.is_none() {
+            self.push_view();
+        }
+    }
+
+    /// Enrichissement remonté par un plugin `metadata`. Rien ne se passe s'il
+    /// est périmé, vide, ou émis par un plugin non déclaré (voir
+    /// `Metadonnees::ajoute`).
+    pub fn handle_enrichment(&mut self, plugin: &str, e: Enrichment) {
+        if !self.metadonnees.ajoute(plugin, e) {
+            return;
+        }
+        // On journalise **le gagnant**, pas celui qui vient de répondre : un
+        // plugin moins prioritaire peut être retenu en réserve sans rien
+        // afficher, et un journal qui le nommerait mentirait dans le seul cas
+        // où on le consulte — celui d'un affichage douteux à attribuer.
+        match self.metadonnees.gagnant() {
+            Some(gagnant) if gagnant != plugin => {
+                tracing::debug!("metadonnees affichees: {gagnant} (reponse de {plugin} gardee en reserve)");
+            }
+            Some(gagnant) => tracing::debug!("metadonnees affichees: {gagnant}"),
+            None => {}
+        }
+        self.publie_etat();
+        if self.overlay.is_none() {
+            self.push_view();
+        }
+    }
+
+    /// Diffuse l'état structuré du morceau vers la SPA.
+    fn publie_etat(&self) {
+        let _ = self.etat_tx.send(self.metadonnees.etat(&self.active_source));
+    }
+
+    /// État courant du morceau. La production le lit sur le canal `watch` ;
+    /// cet accès direct n'existe que pour les tests.
+    #[cfg(test)]
+    pub fn now_playing_state(&self) -> NowPlayingState {
+        self.metadonnees.etat(&self.active_source)
     }
 
     pub async fn handle_command(&mut self, cmd: Command) -> Result<()> {
@@ -181,6 +334,20 @@ impl<P: Player> Core<P> {
             Command::Stop => {
                 self.expecting_stream = false;
                 self.player.stop().await?;
+                // Oublier l'identité **avant** de prévenir la Source : cet
+                // appel efface le titre de l'afficheur, et une Source
+                // injoignable ferait attendre jusqu'à 5 s (timeout de
+                // `SourceClient::request`) avec le morceau arrêté encore à
+                // l'écran.
+                self.set_identity(None);
+                // La Source n'a pas été consultée pour cet arrêt : le lui dire,
+                // sinon celle qui tient un état de lecture propre (le cd) le
+                // garderait faux et annoncerait plus tard des métadonnées pour
+                // un morceau à l'arrêt. Au mieux : une Source muette n'empêche
+                // rien.
+                if let Err(e) = self.active().request(SourceReq::Stop).await {
+                    tracing::debug!("notification d'arret a la source: {e}");
+                }
             }
             Command::Power => {
                 self.standby = !self.standby;
@@ -188,6 +355,10 @@ impl<P: Player> Core<P> {
                     let _ = self.active().request(SourceReq::Deactivate).await;
                     self.player.stop().await?;
                     self.expecting_stream = false;
+                    // Même raison qu'au-dessus : la réponse de la Source à
+                    // `Deactivate` est ignorée, et la vue de veille qui suit
+                    // passerait outre le garde-fou de `handle_source_update`.
+                    self.set_identity(None);
                     self.view = self.standby_view().await;
                     self.push_view();
                 } else {
@@ -201,6 +372,12 @@ impl<P: Player> Core<P> {
                 if let Some(next_name) = self.source_order.get(next_idx).cloned() {
                     self.active_source = next_name;
                 }
+                // Changer de source, c'est toujours changer de ce qui joue. On
+                // l'acte ici sans attendre que la nouvelle Source le déclare :
+                // sinon une Source qui omettrait de le faire laisserait
+                // l'identité de l'autre en place, et les plugins `metadata`
+                // continueraient d'enrichir le morceau précédent.
+                self.set_identity(None);
                 self.retry_count = 0;
                 let action = self.active().request(SourceReq::Activate).await?;
                 self.apply(action).await?;
@@ -215,7 +392,29 @@ impl<P: Player> Core<P> {
             Event::Title(_) | Event::PlaybackActive => {
                 self.retry_count = 0;
             }
-            Event::TrackChanged(_) => {}
+            // Volontairement sans effet sur `retry_count` : la vivacité du flux
+            // est déjà attestée par `PlaybackActive`, et un titre ICY n'est pas
+            // une preuve de lecture (une station peut en envoyer un puis se
+            // taire). Ici, uniquement des métadonnées.
+            Event::IcyTitle(titre) => self.handle_icy_title(titre),
+            // Le lecteur a changé de piste de lui-même : fin de piste d'un
+            // disque, pression sur aucune touche. Le cœur le sait (mpv le lui
+            // dit) mais ne peut pas corriger l'identité — elle est opaque pour
+            // lui. Il le dit donc à la Source, qui renverra vue et identité par
+            // le canal habituel. Sans cela, l'affichage et les métadonnées
+            // restaient sur la piste précédente jusqu'à la prochaine commande.
+            //
+            // L'événement arrive aussi pour les changements **demandés** (la
+            // Source vient déjà de se recaler) : elle renvoie alors la même
+            // identité, que le cœur reconnaît comme inchangée, et la vue
+            // identique n'est pas repoussée.
+            Event::TrackChanged(n) => {
+                if !self.standby {
+                    if let Err(e) = self.active().request(SourceReq::PlayerTrack(n)).await {
+                        tracing::debug!("notification de piste a la source: {e}");
+                    }
+                }
+            }
             Event::PlaybackIdle => {
                 if !self.standby && self.expecting_stream {
                     let delay = (RETRY_BASE * 2u32.pow(self.retry_count)).min(RETRY_MAX);
@@ -309,12 +508,38 @@ impl<P: Player> Core<P> {
         }
     }
 
+    /// Pousse la vue à afficher aux plugins Display.
+    ///
+    /// La composition avec les métadonnées se fait **ici**, à l'affichage, et
+    /// non dans `self.view` : l'arrivée d'un enrichissement doit pouvoir
+    /// rafraîchir la ligne sans qu'on ait à redemander sa vue à la Source, et
+    /// réciproquement une nouvelle vue de la Source ne doit pas effacer les
+    /// métadonnées déjà connues.
+    ///
+    /// L'overlay volume/muet, lui, remplace tout : il est éphémère et n'a pas à
+    /// porter le titre du morceau.
     fn push_view(&self) {
         let view = match &self.overlay {
             Some((v, _)) => v.clone(),
-            None => self.view.clone(),
+            None => metadata::composer(
+                &self.view,
+                &self.metadonnees.etat(&self.active_source),
+                self.view_line2_replaceable,
+            ),
         };
-        let _ = self.view_tx.send(view);
+        // Rien envoyé si rien ne change à l'écran. Plusieurs chemins peuvent
+        // désormais rafraîchir l'affichage pour un même événement (une trame de
+        // Source porte à la fois une vue et une identité) ; sans cette garde,
+        // chaque afficheur recevrait deux fois la même ligne, et le plugin
+        // console la réimprimerait.
+        self.view_tx.send_if_modified(|courante| {
+            if *courante == view {
+                false
+            } else {
+                *courante = view;
+                true
+            }
+        });
     }
 
     async fn standby_view(&self) -> View {
@@ -345,7 +570,7 @@ impl<P: Player> Core<P> {
     }
 
     /// Efface l'overlay expiré et laisse réapparaître la vue de la source,
-    /// mémorisée entre-temps par `handle_source_view`.
+    /// mémorisée entre-temps par `handle_source_update`.
     pub fn expire_overlay(&mut self) {
         self.overlay = None;
         self.push_view();
@@ -424,6 +649,38 @@ mod tests {
     /// journaux d'appels du lecteur et des sources, récepteur de vue, répertoire temporaire.
     type Montage = (Core<FakePlayer>, Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<String>>>, watch::Receiver<View>, tempfile::TempDir);
 
+    /// Câblage métadonnées sans observateur : les récepteurs sont lâchés
+    /// aussitôt, les `send` du cœur échouent silencieusement (c'est déjà le cas
+    /// en production quand aucun plugin `metadata` n'est déclaré). Les tests qui
+    /// observent ces canaux utilisent `setup_metadonnees`.
+    fn cablage_muet(plugins: Vec<String>) -> MetadataCablage {
+        MetadataCablage {
+            plugins,
+            now_playing: watch::channel(NowPlaying { source: String::new(), identity: None }).0,
+            etat: watch::channel(NowPlayingState::default()).0,
+        }
+    }
+
+    /// Mise à jour ne portant qu'une vue, dont la `line2` est la ligne propre de
+    /// la Source (non remplaçable) — le cas de la radio.
+    fn vue(v: View) -> SourceUpdate {
+        SourceUpdate { view: Some(v), identity: None, line2_replaceable: false }
+    }
+
+    /// Mise à jour dont la `line2` est un remplissage remplaçable — le cas du cd.
+    fn vue_remplacable(v: View) -> SourceUpdate {
+        SourceUpdate { view: Some(v), identity: None, line2_replaceable: true }
+    }
+
+    /// Mise à jour ne portant qu'une identité.
+    fn joue(identity: serde_json::Value) -> SourceUpdate {
+        SourceUpdate {
+            view: None,
+            identity: Some(IdentityUpdate::Playing(identity)),
+            line2_replaceable: false,
+        }
+    }
+
     fn setup() -> Montage {
         let dir = tempfile::tempdir().unwrap();
         let player = FakePlayer::default();
@@ -435,8 +692,58 @@ mod tests {
         let (tx, rx) = watch::channel(View::default());
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
-        let core = Core::new(player, sources, PersistedState::default(), dir.path().join("state.json"), tx, catalog, root);
+        let core = Core::new(
+            player,
+            Cablage {
+                sources,
+                persisted: PersistedState::default(),
+                state_path: dir.path().join("state.json"),
+                view_tx: tx,
+                catalog,
+                locales_root: root,
+                metadata: cablage_muet(vec![]),
+            },
+        );
         (core, player_calls, source_calls, rx, dir)
+    }
+
+    /// Montage observant les deux canaux de métadonnées : ce qui descend vers
+    /// les plugins, et l'état structuré qui monte vers la SPA.
+    ///
+    /// `plugins` porte l'ordre de déclaration, donc la priorité d'arbitrage.
+    #[allow(clippy::type_complexity)]
+    fn setup_metadonnees(
+        plugins: Vec<String>,
+    ) -> (
+        Core<FakePlayer>,
+        watch::Receiver<View>,
+        watch::Receiver<NowPlaying>,
+        watch::Receiver<NowPlayingState>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let source_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
+        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: source_calls.clone() }));
+        sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls }));
+        let (view_tx, view_rx) = watch::channel(View::default());
+        let (np_tx, np_rx) = watch::channel(NowPlaying { source: "radio".into(), identity: None });
+        let (etat_tx, etat_rx) = watch::channel(NowPlayingState::default());
+        let root = dir.path().to_path_buf();
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let core = Core::new(
+            FakePlayer::default(),
+            Cablage {
+                sources,
+                persisted: PersistedState::default(),
+                state_path: dir.path().join("state.json"),
+                view_tx,
+                catalog,
+                locales_root: root,
+                metadata: MetadataCablage { plugins, now_playing: np_tx, etat: etat_tx },
+            },
+        );
+        (core, view_rx, np_rx, etat_rx, dir)
     }
 
     #[tokio::test]
@@ -508,10 +815,10 @@ mod tests {
         core.resume().await.unwrap();
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(rx.borrow_and_update().line1, "STANDBY");
-        core.handle_source_view("radio", View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() });
+        core.handle_source_update("radio", vue(View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() }));
         assert_eq!(rx.borrow().line1, "STANDBY"); // toujours en veille, la vue source est ignoree
         core.handle_command(Command::Power).await.unwrap();
-        core.handle_source_view("radio", View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() });
+        core.handle_source_update("radio", vue(View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() }));
         assert_eq!(rx.borrow_and_update().line1, "RADIO  P1"); // le reveil laisse la source reprendre l'affichage
     }
 
@@ -533,7 +840,7 @@ mod tests {
         };
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
-        let mut core = Core::new(player, sources, persisted, dir.path().join("state.json"), tx, catalog, root);
+        let mut core = Core::new(player, Cablage { sources, persisted, state_path: dir.path().join("state.json"), view_tx: tx, catalog, locales_root: root, metadata: cablage_muet(vec![]) });
         core.resume().await.unwrap();
         assert!(player_calls.lock().unwrap().contains(&"audio_device bluealsa:DEV=XX".to_string()));
     }
@@ -571,9 +878,9 @@ mod tests {
     async fn vue_dune_source_inactive_est_ignoree() {
         let (mut core, _pc, _sc, mut rx, _d) = setup();
         core.resume().await.unwrap();
-        core.handle_source_view("cd", View { line1: "CD".into(), line2: "".into(), line3: "".into() });
+        core.handle_source_update("cd", vue(View { line1: "CD".into(), line2: "".into(), line3: "".into() }));
         assert!(rx.borrow().line1.is_empty()); // la vue de "cd" (inactive) n'a pas ete appliquee
-        core.handle_source_view("radio", View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() });
+        core.handle_source_update("radio", vue(View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() }));
         assert!(rx.borrow_and_update().line1.contains("RADIO"));
     }
 
@@ -588,7 +895,7 @@ mod tests {
         let (tx, mut rx) = watch::channel(View::default());
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "fr", &root, crate::core::EN)));
-        let mut core = Core::new(player, sources, PersistedState::default(), dir.path().join("state.json"), tx, catalog, root);
+        let mut core = Core::new(player, Cablage { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), view_tx: tx, catalog, locales_root: root, metadata: cablage_muet(vec![]) });
         core.resume().await.unwrap();
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(rx.borrow_and_update().line1, "VEILLE");
@@ -609,7 +916,7 @@ mod tests {
         let persisted = PersistedState { active_source: "cd".into(), ..PersistedState::default() };
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
-        let mut core = Core::new(player, sources, persisted, dir.path().join("state.json"), tx, catalog, root);
+        let mut core = Core::new(player, Cablage { sources, persisted, state_path: dir.path().join("state.json"), view_tx: tx, catalog, locales_root: root, metadata: cablage_muet(vec![]) });
         core.resume().await.unwrap();
         assert_eq!(core.handle_event(Event::PlaybackIdle).await, None);
     }
@@ -669,7 +976,7 @@ mod tests {
         assert_eq!(overlay_view.line1, "VOLUME");
 
         // La vue source arrive pendant l'overlay : elle est memorisee mais pas affichee.
-        core.handle_source_view("radio", View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() });
+        core.handle_source_update("radio", vue(View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() }));
         assert_eq!(rx.borrow().clone(), overlay_view); // aucun nouveau push, l'overlay reste affiche
 
         // A l'expiration, la vue source memorisee reapparait.
@@ -693,6 +1000,314 @@ mod tests {
         core.handle_command(Command::VolumeUp).await.unwrap();
         let d2 = core.overlay_deadline().unwrap();
         assert!(d2 >= d1);
+    }
+
+    /// Vue de base de la radio : ligne 3 libre, c'est là que les métadonnées
+    /// viendront se poser.
+    fn vue_radio() -> View {
+        View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: String::new() }
+    }
+
+    fn enrichissement(identity: serde_json::Value, artist: &str, title: &str) -> Enrichment {
+        Enrichment {
+            identity,
+            artist: Some(artist.into()),
+            title: Some(title.into()),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn lidentite_declaree_par_la_source_est_annoncee_aux_plugins() {
+        let (mut core, _vue_rx, np_rx, _etat_rx, _d) = setup_metadonnees(vec!["ouifm".into()]);
+        let id = serde_json::json!({"kind": "stream", "url": "http://ouifm"});
+        core.handle_source_update("radio", joue(id.clone()));
+        let np = np_rx.borrow().clone();
+        assert_eq!(np.source, "radio");
+        assert_eq!(np.identity, Some(id));
+    }
+
+    #[tokio::test]
+    async fn une_identite_dune_source_inactive_est_ignoree() {
+        // Le cd peut rapporter l'insertion d'un disque pendant que la radio
+        // joue : annoncer cette identité ferait travailler les plugins sur un
+        // morceau qui ne sort d'aucun haut-parleur.
+        let (mut core, _vue_rx, np_rx, _etat_rx, _d) = setup_metadonnees(vec![]);
+        core.handle_source_update("cd", joue(serde_json::json!({"kind": "disc"})));
+        assert_eq!(np_rx.borrow().identity, None);
+    }
+
+    #[tokio::test]
+    async fn licy_se_pose_sur_la_ligne3_et_est_diffuse_a_la_spa() {
+        let (mut core, mut vue_rx, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
+        // `resume` met la radio en lecture : sans quoi le cœur écarte à raison
+        // tout titre ICY, rien ne jouant.
+        core.resume().await.unwrap();
+        core.handle_source_update("radio", joue(serde_json::json!({"url": "un"})));
+        core.handle_source_update("radio", vue(vue_radio()));
+        assert_eq!(vue_rx.borrow_and_update().line3, "");
+
+        core.handle_event(Event::IcyTitle("Mandrillus Sphynx - Bikwix".into())).await;
+        let v = vue_rx.borrow_and_update().clone();
+        assert_eq!(v.line3, "Mandrillus Sphynx - Bikwix");
+        assert_eq!(v.line2, "FIP", "le nom de station reste intouche");
+        let etat = etat_rx.borrow().clone();
+        assert_eq!(etat.title.as_deref(), Some("Mandrillus Sphynx - Bikwix"));
+        assert_eq!(etat.origin.as_deref(), Some("icy"));
+    }
+
+    #[tokio::test]
+    async fn un_enrichissement_de_plugin_ecrase_licy() {
+        let (mut core, mut vue_rx, _np_rx, _etat_rx, _d) = setup_metadonnees(vec!["ouifm".into()]);
+        core.resume().await.unwrap();
+        let id = serde_json::json!({"url": "un"});
+        core.handle_source_update("radio", joue(id.clone()));
+        core.handle_source_update("radio", vue(vue_radio()));
+        // Texte de remplissage réellement émis par OUI FM sur son flux principal.
+        core.handle_event(Event::IcyTitle("Now Playing info goes here".into())).await;
+        // Sans ce contrôle, la suite du test passerait aussi bien si l'ICY
+        // n'était jamais entré : ce n'est pas « l'enrichissement gagne » qu'on
+        // vérifierait, mais « l'ICY est absent ».
+        assert_eq!(vue_rx.borrow_and_update().line3, "Now Playing info goes here");
+        core.handle_enrichment("ouifm", enrichissement(id, "Shaka Ponk", "Wanna Get Free"));
+        assert_eq!(vue_rx.borrow_and_update().line3, "Shaka Ponk — Wanna Get Free");
+        assert_eq!(core.now_playing_state().origin.as_deref(), Some("ouifm"));
+    }
+
+    #[tokio::test]
+    async fn un_enrichissement_perime_ne_touche_pas_laffichage() {
+        let (mut core, mut vue_rx, _np_rx, _etat_rx, _d) = setup_metadonnees(vec!["ouifm".into()]);
+        core.handle_source_update("radio", joue(serde_json::json!({"url": "deux"})));
+        core.handle_source_update("radio", vue(vue_radio()));
+        vue_rx.borrow_and_update();
+        core.handle_enrichment(
+            "ouifm",
+            enrichissement(serde_json::json!({"url": "un"}), "Ancien", "Morceau"),
+        );
+        assert_eq!(vue_rx.borrow().line3, "", "la reponse en retard ne doit rien afficher");
+        assert!(core.now_playing_state().est_vide());
+    }
+
+    #[tokio::test]
+    async fn changer_de_morceau_efface_immediatement_le_precedent() {
+        // Le morceau précédent ne doit pas rester à l'écran pendant qu'on
+        // attend le suivant : c'est un comportement, pas un détail.
+        let (mut core, mut vue_rx, _np_rx, _etat_rx, _d) = setup_metadonnees(vec!["ouifm".into()]);
+        let id = serde_json::json!({"url": "un"});
+        core.handle_source_update("radio", joue(id.clone()));
+        core.handle_source_update("radio", vue(vue_radio()));
+        core.handle_enrichment("ouifm", enrichissement(id, "Miles Davis", "So What"));
+        assert_eq!(vue_rx.borrow_and_update().line3, "Miles Davis — So What");
+
+        core.handle_source_update("radio", joue(serde_json::json!({"url": "deux"})));
+        assert_eq!(vue_rx.borrow_and_update().line3, "", "l'ardoise doit etre nette aussitot");
+    }
+
+    #[tokio::test]
+    async fn larret_demande_par_la_telecommande_efface_le_titre_de_lafficheur() {
+        // Défaut trouvé en revue : `set_identity` ne rafraîchissait pas
+        // l'affichage. La SPA se vidait (canal d'état), mais l'afficheur
+        // physique gardait le titre du morceau arrêté jusqu'à la prochaine
+        // action de l'utilisateur — toute la nuit sur un appareil qu'on arrête
+        // le soir. L'ancien test n'assertionnait que le canal `now_playing` :
+        // il passait aussi bien contre le code faux.
+        let (mut core, mut vue_rx, np_rx, _etat_rx, _d) = setup_metadonnees(vec!["ouifm".into()]);
+        let id = serde_json::json!({"url": "un"});
+        core.handle_source_update("radio", joue(id.clone()));
+        core.handle_source_update("radio", vue(vue_radio()));
+        core.handle_enrichment("ouifm", enrichissement(id, "Miles Davis", "So What"));
+        assert_eq!(vue_rx.borrow_and_update().line3, "Miles Davis — So What");
+
+        core.handle_command(Command::Stop).await.unwrap();
+        assert_eq!(np_rx.borrow().identity, None, "les plugins doivent cesser leur travail");
+        assert_eq!(vue_rx.borrow_and_update().line3, "", "le titre ne doit pas rester affiche");
+    }
+
+    #[tokio::test]
+    async fn une_avance_de_piste_du_lecteur_est_relayee_a_la_source() {
+        // mpv rapporte l'avance, le cœur ne peut pas corriger une identité
+        // opaque : il la fait corriger par la Source, seule à savoir ce que
+        // « piste 2 » veut dire.
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.resume().await.unwrap();
+        core.handle_event(Event::TrackChanged(2)).await;
+        assert!(source_calls.lock().unwrap().iter().any(|c| c == "radio:PlayerTrack(2)"));
+    }
+
+    #[tokio::test]
+    async fn une_avance_de_piste_en_veille_nest_pas_relayee() {
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.resume().await.unwrap();
+        core.handle_command(Command::Power).await.unwrap();
+        source_calls.lock().unwrap().clear();
+        core.handle_event(Event::TrackChanged(2)).await;
+        assert!(source_calls.lock().unwrap().is_empty(), "rien ne doit partir en veille");
+    }
+
+    #[tokio::test]
+    async fn larret_est_notifie_a_la_source_active() {
+        // `Command::Stop` est la seule commande qui change l'état de lecture
+        // sans consulter la Source : sans cette notification, une Source qui
+        // tient un état de lecture propre (le cd) le garderait faux.
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.resume().await.unwrap();
+        core.handle_command(Command::Stop).await.unwrap();
+        assert!(source_calls.lock().unwrap().iter().any(|c| c == "radio:Stop"));
+    }
+
+    #[tokio::test]
+    async fn un_titre_icy_arrivant_en_veille_natteint_pas_lafficheur() {
+        // Chemin réel : `Command::Power` attend la réponse de la Source à
+        // `Deactivate` (jusqu'à 5 s) pendant que mpv joue encore. Un titre émis
+        // dans cet intervalle arrive après que la vue de veille a été poussée —
+        // et rien ne se produisant plus en veille, il y resterait des semaines.
+        let (mut core, mut vue_rx, _np_rx, _etat_rx, _d) = setup_metadonnees(vec![]);
+        core.resume().await.unwrap();
+        core.handle_source_update("radio", joue(serde_json::json!({"url": "un"})));
+        core.handle_source_update("radio", vue(vue_radio()));
+        core.handle_command(Command::Power).await.unwrap();
+        assert_eq!(vue_rx.borrow_and_update().line1, "STANDBY");
+
+        core.handle_event(Event::IcyTitle("Mandrillus Sphynx - Bikwix".into())).await;
+        let v = vue_rx.borrow().clone();
+        assert_eq!(v.line1, "STANDBY");
+        assert_eq!(v.line3, "", "aucun titre ne doit se coller sur la vue de veille");
+    }
+
+    #[tokio::test]
+    async fn la_veille_bloque_licy_meme_avec_une_identite_vivante() {
+        // Deux gardes couvrent ce chemin, et celle-ci n'est pas redondante : la
+        // mise en veille efface normalement l'identité, mais `Command::Power`
+        // peut rendre la main sur l'erreur de `player.stop()` **avant** de le
+        // faire, laissant la veille active avec une identité vivante. L'état est
+        // donc posé directement ici pour éprouver la garde de veille seule.
+        let (mut core, mut vue_rx, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
+        core.resume().await.unwrap(); // pose `expecting_stream` (la radio joue)
+        core.handle_source_update("radio", joue(serde_json::json!({"url": "un"})));
+        core.handle_source_update("radio", vue(vue_radio()));
+        vue_rx.borrow_and_update();
+        // Veille posée directement : c'est l'état atteint quand `Command::Power`
+        // rend la main sur l'erreur de `player.stop()`, donc avec une lecture
+        // encore attendue. La garde de veille est alors la seule à agir.
+        core.standby = true;
+        assert!(core.expecting_stream, "sans quoi ce test n'eprouverait pas la garde de veille");
+
+        core.handle_event(Event::IcyTitle("Mandrillus Sphynx - Bikwix".into())).await;
+        assert_eq!(vue_rx.borrow().line3, "", "rien ne doit atteindre l'afficheur en veille");
+        assert_eq!(etat_rx.borrow().title, None);
+    }
+
+    #[tokio::test]
+    async fn licy_saffiche_meme_si_la_source_ne_declare_aucune_identite() {
+        // Régression rencontrée en essai réel : la couche ICY était
+        // conditionnée à la déclaration d'identité de la Source, donc muette
+        // face à un plugin qui ne la déclare pas — et muette **en silence**,
+        // sans une ligne de journal. C'est pourtant la seule couche censée
+        // fonctionner sans aucun plugin `metadata`.
+        let (mut core, mut vue_rx, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
+        core.resume().await.unwrap();
+        // Aucune identité n'est jamais déclarée : seule la vue arrive.
+        core.handle_source_update("radio", vue(vue_radio()));
+        core.handle_event(Event::IcyTitle("Made Up - TAHITI 80".into())).await;
+        assert_eq!(vue_rx.borrow_and_update().line3, "Made Up - TAHITI 80");
+        assert_eq!(etat_rx.borrow().origin.as_deref(), Some("icy"));
+    }
+
+    #[tokio::test]
+    async fn un_titre_icy_arrivant_apres_un_arret_est_ignore() {
+        let (mut core, mut vue_rx, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
+        core.resume().await.unwrap();
+        core.handle_source_update("radio", joue(serde_json::json!({"url": "un"})));
+        core.handle_source_update("radio", vue(vue_radio()));
+        core.handle_command(Command::Stop).await.unwrap();
+        vue_rx.borrow_and_update();
+
+        core.handle_event(Event::IcyTitle("un titre en retard".into())).await;
+        assert_eq!(vue_rx.borrow().line3, "");
+        assert_eq!(etat_rx.borrow().title, None, "la SPA ne doit pas annoncer de morceau");
+    }
+
+    #[tokio::test]
+    async fn la_mise_en_veille_oublie_lidentite() {
+        let (mut core, _vue_rx, np_rx, _etat_rx, _d) = setup_metadonnees(vec!["ouifm".into()]);
+        core.resume().await.unwrap();
+        core.handle_source_update("radio", joue(serde_json::json!({"url": "un"})));
+        core.handle_command(Command::Power).await.unwrap();
+        assert_eq!(np_rx.borrow().identity, None);
+    }
+
+    #[tokio::test]
+    async fn changer_de_source_oublie_lidentite_precedente() {
+        let (mut core, _vue_rx, np_rx, _etat_rx, _d) = setup_metadonnees(vec!["ouifm".into()]);
+        core.handle_source_update("radio", joue(serde_json::json!({"url": "un"})));
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        let np = np_rx.borrow().clone();
+        assert_eq!(np.identity, None);
+        assert_eq!(np.source, "cd", "l'annonce porte la nouvelle source active");
+    }
+
+    #[tokio::test]
+    async fn un_enrichissement_pendant_loverlay_ne_le_remplace_pas() {
+        let (mut core, mut vue_rx, _np_rx, _etat_rx, _d) = setup_metadonnees(vec!["ouifm".into()]);
+        let id = serde_json::json!({"url": "un"});
+        core.handle_source_update("radio", joue(id.clone()));
+        core.handle_source_update("radio", vue(vue_radio()));
+        core.handle_command(Command::VolumeUp).await.unwrap();
+        let overlay = vue_rx.borrow_and_update().clone();
+        assert_eq!(overlay.line1, "VOLUME");
+
+        core.handle_enrichment("ouifm", enrichissement(id, "Miles Davis", "So What"));
+        assert_eq!(vue_rx.borrow().clone(), overlay, "l'overlay volume reste seul a l'ecran");
+        // ... et le titre réapparaît composé dès l'expiration.
+        core.expire_overlay();
+        assert_eq!(vue_rx.borrow_and_update().line3, "Miles Davis — So What");
+    }
+
+    #[tokio::test]
+    async fn un_plugin_metadata_declare_mais_muet_neclipse_pas_licy() {
+        // Un plugin déclaré qui ne répond jamais (processus mort, socket muette)
+        // ne doit pas priver l'appareil de la couche de base : le titre annoncé
+        // par le flux doit continuer de s'afficher, attribué à `icy`.
+        let (mut core, mut vue_rx, _np_rx, etat_rx, _d) = setup_metadonnees(vec!["mort".into()]);
+        core.resume().await.unwrap();
+        core.handle_source_update("radio", joue(serde_json::json!({"url": "un"})));
+        core.handle_source_update("radio", vue(vue_radio()));
+        core.handle_event(Event::IcyTitle("Mandrillus Sphynx - Bikwix".into())).await;
+        let v = vue_rx.borrow_and_update().clone();
+        assert_eq!(v.line1, "RADIO  P1");
+        assert_eq!(v.line2, "FIP");
+        assert_eq!(v.line3, "Mandrillus Sphynx - Bikwix");
+        assert_eq!(etat_rx.borrow().origin.as_deref(), Some("icy"));
+    }
+
+    #[tokio::test]
+    async fn lalbum_ne_se_pose_que_sur_une_ligne_declaree_remplacable() {
+        // Bout en bout : la déclaration du plugin traverse le canal de mise à
+        // jour et gouverne la composition.
+        let (mut core, mut vue_rx, _np_rx, _etat_rx, _d) = setup_metadonnees(vec!["mb".into()]);
+        let id = serde_json::json!({"kind": "disc", "track": 0});
+        core.handle_source_update("radio", joue(id.clone()));
+        let etiquette = View { line1: "CD 1/3".into(), line2: "audio CD".into(), line3: String::new() };
+        core.handle_source_update("radio", vue_remplacable(etiquette.clone()));
+        assert_eq!(vue_rx.borrow_and_update().line2, "audio CD", "sans album, l'etiquette reste");
+
+        core.handle_enrichment(
+            "mb",
+            Enrichment {
+                identity: id.clone(),
+                artist: Some("Miles Davis".into()),
+                title: Some("So What".into()),
+                album: Some("Kind of Blue".into()),
+                duration_s: None,
+            },
+        );
+        let v = vue_rx.borrow_and_update().clone();
+        assert_eq!(v.line2, "Kind of Blue");
+        assert_eq!(v.line3, "Miles Davis — So What");
+
+        // La même vue, non déclarée remplaçable : l'album ne s'y pose plus.
+        core.handle_source_update("radio", vue(etiquette));
+        assert_eq!(vue_rx.borrow_and_update().line2, "audio CD");
     }
 
     /// Pack français livré dans le dépôt (invariant : mêmes clés que l'anglais embarqué).

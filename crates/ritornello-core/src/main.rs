@@ -1,6 +1,7 @@
 mod audio_output;
 mod admin;
 mod core;
+mod metadata;
 mod placeholder;
 mod player;
 mod plugins;
@@ -10,13 +11,15 @@ mod theme;
 mod types;
 mod web;
 
+use crate::core::MetadataCablage;
+use crate::metadata::NowPlayingState;
 use crate::plugins::{PluginKind, PluginManifest};
 use crate::status::{AppState, LogBuffer, LogBufferWriter, PluginStatus, StatusState};
 use crate::types::Event;
 use anyhow::{Context, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
-use ritornello_proto::{Command, View};
-use ritornello_plugin_sdk::{run_input_client, DisplayClient, SourceClient};
+use ritornello_proto::{Command, Enrichment, NowPlaying, View};
+use ritornello_plugin_sdk::{run_input_client, run_metadata_client, DisplayClient, SourceClient, SourceUpdate};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -73,7 +76,20 @@ async fn main() -> Result<()> {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(32);
     let (ev_tx, mut ev_rx) = broadcast::channel::<Event>(64);
     let (view_tx, mut view_rx) = watch::channel(View::default());
-    let (source_view_tx, mut source_view_rx) = mpsc::channel::<(String, View)>(32);
+    let (source_view_tx, mut source_view_rx) = mpsc::channel::<(String, SourceUpdate)>(32);
+    // Ce qui joue, vers les plugins `metadata` : un `watch`, parce que seule la
+    // dernière valeur compte et qu'un plugin lent ne doit pas bloquer le cœur.
+    let (now_playing_tx, now_playing_rx) = watch::channel(NowPlaying {
+        source: persisted.active_source.clone(),
+        identity: None,
+    });
+    // État structuré du morceau, vers la SPA (route SSE). Canal distinct des
+    // vues : la SPA reçoit du structuré, les afficheurs des lignes composées.
+    let (etat_tx, etat_rx) = watch::channel(NowPlayingState {
+        source: persisted.active_source.clone(),
+        ..Default::default()
+    });
+    let (enrich_tx, mut enrich_rx) = mpsc::channel::<(String, Enrichment)>(32);
     let (audio_tx, mut audio_rx) = mpsc::channel::<String>(4);
     let (locale_tx, mut locale_rx) = mpsc::channel::<String>(4);
     let (theme_tx, mut theme_rx) = mpsc::channel::<theme::ThemeState>(4);
@@ -88,6 +104,19 @@ async fn main() -> Result<()> {
         player::mpv::start(&mpv_bin, &mpv_socket, &cd_dev, audio_buffer, readahead, ev_tx.clone())
             .await
             .context("démarrage de mpv")?;
+
+    // Plugins `metadata` déclarés, **dans l'ordre du fichier** : cet ordre est
+    // la priorité d'arbitrage. La liste est bâtie depuis le manifeste et non
+    // depuis les plugins effectivement lancés — la priorité est une propriété
+    // de configuration, pas d'exécution ; un plugin qui n'a pas démarré ne
+    // répondra jamais, donc ne gagnera jamais, sans que l'ordre des autres
+    // change d'un démarrage à l'autre.
+    let metadata_plugins: Vec<String> = manifest
+        .plugins
+        .iter()
+        .filter(|p| p.kind == PluginKind::Metadata)
+        .map(|p| p.name.clone())
+        .collect();
 
     // Spawn et connexion de chaque plugin déclaré.
     let mut sources: HashMap<String, Arc<dyn core::Source>> = HashMap::new();
@@ -146,6 +175,21 @@ async fn main() -> Result<()> {
                             }
                         });
                         plugin_statuses.push(PluginStatus { name: p.name.clone(), kind: "input".into(), connected: true, admin: p.admin });
+                    }
+                    PluginKind::Metadata => {
+                        // Relais dans les deux sens, dans sa propre tâche : sa
+                        // panne ne concerne que les métadonnées. **La lecture
+                        // n'est jamais affectée** par un plugin `metadata`.
+                        let tx = enrich_tx.clone();
+                        let np_rx = now_playing_rx.clone();
+                        let socket_for_task = socket_path.clone();
+                        let name = p.name.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = run_metadata_client(&socket_for_task, name.clone(), tx, np_rx).await {
+                                tracing::warn!("plugin metadata {name} deconnecte: {e}");
+                            }
+                        });
+                        plugin_statuses.push(PluginStatus { name: p.name.clone(), kind: "metadata".into(), connected: true, admin: p.admin });
                     }
                 }
             }
@@ -250,6 +294,7 @@ async fn main() -> Result<()> {
             cmd_tx: cmd_tx.clone(),
             theme_current: theme_current.clone(),
             theme_tx: theme_tx.clone(),
+            now_playing: etat_rx.clone(),
         });
         let listener = tokio::net::TcpListener::bind(&http_addr).await.with_context(|| format!("bind {http_addr}"))?;
         tracing::info!("interface web sur http://{http_addr}/");
@@ -264,12 +309,19 @@ async fn main() -> Result<()> {
     // ci-dessous (mise à jour de status_state.active_source après chaque commande).
     let mut core = core::Core::new(
         mpv_player,
-        sources,
-        persisted,
-        state_path,
-        view_tx,
-        catalog.clone(),
-        locales_root.clone(),
+        core::Cablage {
+            sources,
+            persisted,
+            state_path,
+            view_tx,
+            catalog: catalog.clone(),
+            locales_root: locales_root.clone(),
+            metadata: MetadataCablage {
+                plugins: metadata_plugins,
+                now_playing: now_playing_tx,
+                etat: etat_tx,
+            },
+        },
     );
     core.resume().await?;
 
@@ -320,8 +372,11 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            Some((name, view)) = source_view_rx.recv() => {
-                core.handle_source_view(&name, view);
+            Some((name, update)) = source_view_rx.recv() => {
+                core.handle_source_update(&name, update);
+            }
+            Some((plugin, enrichment)) = enrich_rx.recv() => {
+                core.handle_enrichment(&plugin, enrichment);
             }
             Some(device) = audio_rx.recv() => {
                 if let Err(e) = core.set_audio_device(device).await {

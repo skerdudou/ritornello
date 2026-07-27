@@ -1,6 +1,43 @@
-use crate::disc::DiscInfo;
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use serde_json::Value;
+
+/// Ce qu'un disque reconnu apprend : l'artiste, l'album, et les titres dans
+/// l'ordre des pistes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscInfo {
+    pub artist: String,
+    pub album: String,
+    pub tracks: Vec<String>,
+}
+
+/// Met la TOC brute (`NTRACKS OFF1 … OFFN LEADOUT`, telle que le plugin cd la
+/// place dans l'identité) au format attendu par MusicBrainz :
+/// `1+NTRACKS+LEADOUT+OFF1+…+OFFN`.
+///
+/// Cette conversion vit ici, avec le seul code qui connaît MusicBrainz : le
+/// plugin cd décrit un disque, il n'a pas à connaître le format de requête d'un
+/// fournisseur de métadonnées particulier.
+///
+/// La validation est refaite intégralement, sans supposer que l'émetteur a bien
+/// travaillé : l'identité arrive d'un autre processus, dans un JSON opaque que
+/// le cœur ne relit pas.
+pub fn mb_toc_param(raw: &str) -> Result<String> {
+    let nums: Vec<u64> = raw
+        .split_whitespace()
+        .map(|s| s.parse::<u64>())
+        .collect::<Result<_, _>>()
+        .context("TOC non numérique")?;
+    if nums.len() < 3 {
+        bail!("TOC trop courte: {raw:?}");
+    }
+    let ntracks = nums[0] as usize;
+    if nums.len() != ntracks + 2 {
+        bail!("TOC incohérente ({} champs pour {} pistes)", nums.len(), ntracks);
+    }
+    let leadout = nums[nums.len() - 1];
+    let offsets: Vec<String> = nums[1..nums.len() - 1].iter().map(u64::to_string).collect();
+    Ok(format!("1+{}+{}+{}", ntracks, leadout, offsets.join("+")))
+}
 
 /// Cherche dans les releases un media dont le nombre de pistes correspond au
 /// disque inséré, et en extrait artiste / album / titres.
@@ -36,8 +73,8 @@ pub fn parse_lookup(json: &str, ntracks: usize) -> Option<DiscInfo> {
     None
 }
 
-/// Lookup TOC « fuzzy » MusicBrainz. Ok(None) = pas trouvé / hors ligne
-/// (l'appelant garde l'affichage « Piste N »).
+/// Lookup TOC « fuzzy » MusicBrainz. `Ok(None)` = pas trouvé ou hors ligne :
+/// le plugin se tait alors, et l'affichage garde ce que la Source montrait.
 pub async fn lookup(toc: &str, ntracks: usize) -> Result<Option<DiscInfo>> {
     let url = format!(
         "https://musicbrainz.org/ws/2/discid/-?toc={toc}&fmt=json&inc=recordings+artist-credits"
@@ -90,5 +127,20 @@ mod tests {
         assert!(parse_lookup("{}", 3).is_none());
         assert!(parse_lookup("pas du json", 3).is_none());
         assert!(parse_lookup("{\"releases\":[]}", 3).is_none());
+    }
+
+    #[test]
+    fn toc_musicbrainz_bien_forme() {
+        // 3 pistes, offsets 150/22767/41887, leadout 63000
+        assert_eq!(mb_toc_param("3 150 22767 41887 63000\n").unwrap(), "1+3+63000+150+22767+41887");
+    }
+
+    #[test]
+    fn toc_invalide_rejetee_sans_appel_reseau() {
+        // L'identité vient d'un autre processus : une TOC douteuse doit être
+        // refusée ici, pas envoyée à un service tiers.
+        assert!(mb_toc_param("").is_err());
+        assert!(mb_toc_param("3 150 22767").is_err());
+        assert!(mb_toc_param("abc def").is_err());
     }
 }

@@ -1,0 +1,121 @@
+import { describe, expect, it, vi } from 'vitest'
+import type { NowPlayingPayload } from '../types'
+import { formateDuree, riendAfficher, useNowPlaying } from './useNowPlaying'
+
+/** Etat complet, dont chaque test retire ce qu'il veut eprouver. */
+function etat(partiel: Partial<NowPlayingPayload> = {}): NowPlayingPayload {
+  return {
+    source: 'radio',
+    artist: 'Shaka Ponk',
+    title: 'Wanna Get Free',
+    album: null,
+    duration_s: 214,
+    origin: 'ouifm-metas',
+    ...partiel,
+  }
+}
+
+/** Faux `EventSource` : retient les instances et permet de pousser des trames. */
+class FauxEventSource {
+  static instances: FauxEventSource[] = []
+  onmessage: ((e: MessageEvent) => void) | null = null
+  fermee = false
+  constructor(public url: string) {
+    FauxEventSource.instances.push(this)
+  }
+  close() {
+    this.fermee = true
+  }
+  pousse(data: unknown) {
+    this.onmessage?.({ data: typeof data === 'string' ? data : JSON.stringify(data) } as MessageEvent)
+  }
+}
+
+describe('formateDuree', () => {
+  it('formate en minutes et secondes', () => {
+    expect(formateDuree(214)).toBe('3:34')
+    expect(formateDuree(60)).toBe('1:00')
+    expect(formateDuree(9)).toBe('0:09')
+    expect(formateDuree(3600)).toBe('60:00')
+  })
+
+  it('traite comme inconnue toute valeur inexploitable', () => {
+    // Ces valeurs viennent d'un tiers : mieux vaut ne rien afficher que « -1:59 ».
+    expect(formateDuree(null)).toBeNull()
+    expect(formateDuree(undefined)).toBeNull()
+    expect(formateDuree(0)).toBeNull()
+    expect(formateDuree(-5)).toBeNull()
+    expect(formateDuree(Number.NaN)).toBeNull()
+    expect(formateDuree(Number.POSITIVE_INFINITY)).toBeNull()
+  })
+})
+
+describe('riendAfficher', () => {
+  it('accepte toute information partielle', () => {
+    // Decision du proprietaire : on affiche tout ce qui est disponible.
+    expect(riendAfficher(etat())).toBe(false)
+    expect(riendAfficher(etat({ artist: null }))).toBe(false)
+    expect(riendAfficher(etat({ title: null }))).toBe(false)
+    expect(riendAfficher(etat({ artist: null, title: null, album: 'Kind of Blue' }))).toBe(false)
+  })
+
+  it('ne retient ni un etat absent, ni une duree seule', () => {
+    expect(riendAfficher(null)).toBe(true)
+    expect(riendAfficher(etat({ artist: null, title: null, album: null }))).toBe(true)
+    // « 3:34 » sans titre ni artiste n'informe personne.
+    expect(riendAfficher(etat({ artist: null, title: null, album: null, duration_s: 214 }))).toBe(true)
+  })
+})
+
+describe('useNowPlaying', () => {
+  it('ouvre le flux pousse et applique chaque trame', () => {
+    FauxEventSource.instances = []
+    vi.stubGlobal('EventSource', FauxEventSource)
+    const { etat: courant, ouvre, ferme } = useNowPlaying()
+    ouvre()
+    const flux = FauxEventSource.instances[0]!
+    expect(flux.url).toBe('/api/now-playing')
+    expect(courant.value).toBeNull()
+
+    flux.pousse(etat({ title: 'premier' }))
+    expect(courant.value?.title).toBe('premier')
+    flux.pousse(etat({ title: 'second' }))
+    expect(courant.value?.title).toBe('second')
+
+    ferme()
+    expect(flux.fermee).toBe(true)
+  })
+
+  it('garde l affichage precedent sur une trame illisible', () => {
+    // Vider l'ecran parce qu'une trame est corrompue serait plus trompeur que
+    // de laisser le morceau precedent une seconde de trop.
+    FauxEventSource.instances = []
+    vi.stubGlobal('EventSource', FauxEventSource)
+    const { etat: courant, ouvre } = useNowPlaying()
+    ouvre()
+    const flux = FauxEventSource.instances[0]!
+    flux.pousse(etat({ title: 'connu' }))
+    flux.pousse('pas du json')
+    expect(courant.value?.title).toBe('connu')
+  })
+
+  it('ferme le flux precedent plutot que d en accumuler', () => {
+    FauxEventSource.instances = []
+    vi.stubGlobal('EventSource', FauxEventSource)
+    const { ouvre } = useNowPlaying()
+    ouvre()
+    ouvre()
+    expect(FauxEventSource.instances).toHaveLength(2)
+    expect(FauxEventSource.instances[0]!.fermee).toBe(true)
+  })
+
+  it('sans EventSource, previent et laisse le reste de la page vivre', () => {
+    vi.stubGlobal('EventSource', undefined)
+    const avertit = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { etat: courant, ouvre } = useNowPlaying()
+    expect(() => ouvre()).not.toThrow()
+    expect(courant.value).toBeNull()
+    expect(avertit).toHaveBeenCalled()
+    avertit.mockRestore()
+  })
+})

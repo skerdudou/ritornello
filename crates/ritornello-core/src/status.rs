@@ -67,6 +67,10 @@ pub struct AppState {
     pub cmd_tx: mpsc::Sender<ritornello_proto::Command>,
     pub theme_current: Arc<RwLock<crate::theme::ThemeState>>,
     pub theme_tx: mpsc::Sender<crate::theme::ThemeState>,
+    /// Morceau en cours, alimenté par le cœur. Un `watch` : chaque connexion
+    /// SSE clone ce récepteur, seule la dernière valeur compte, et un
+    /// navigateur lent ne peut pas retenir le cœur.
+    pub now_playing: tokio::sync::watch::Receiver<crate::metadata::NowPlayingState>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -76,6 +80,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/locale", get(locale_json).put(locale_put))
         .route("/api/i18n", get(i18n_json))
         .route("/api/logs", get(logs_json))
+        .route("/api/now-playing", get(now_playing_sse))
         .route("/api/theme", get(crate::theme::theme_json).put(crate::theme::theme_put))
         .route("/api/command", axum::routing::post(command_post))
         .route(
@@ -237,6 +242,53 @@ async fn logs_json(State(state): State<AppState>) -> Json<LogsResponse> {
     Json(LogsResponse { lines })
 }
 
+/// Morceau en cours, en flux poussé (`text/event-stream`).
+///
+/// Poussé et non sondé, pour trois raisons mesurées avant de trancher : la SPA
+/// ne sonde rien aujourd'hui (aucun `setInterval`, aucun WebSocket) ; le cœur
+/// diffuse **déjà** ses changements sur un canal `watch`, donc la route ne
+/// coûte que quelques lignes et n'ajoute aucun état ; et un appareil le plus
+/// souvent inactif n'a pas à recevoir des requêtes qui n'apprennent rien.
+///
+/// L'état courant est émis **dès la connexion** — même propriété que le flux
+/// d'OUI FM qu'on consomme par ailleurs : un onglet ouvert au milieu d'un
+/// morceau ne doit pas rester vide jusqu'au suivant.
+///
+/// Pas d'authentification, comme toutes les autres routes de l'appareil : en
+/// ajouter ici seulement donnerait l'illusion d'une protection alors que
+/// `/api/command` pilote déjà la lecture sans en demander.
+async fn now_playing_sse(
+    State(state): State<AppState>,
+) -> axum::response::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>>
+{
+    use futures::StreamExt;
+
+    let flux = futures::stream::unfold((state.now_playing.clone(), true), |(mut rx, premier)| async move {
+        if premier {
+            // `borrow_and_update` marque la valeur comme vue : le prochain
+            // `changed()` attendra un vrai changement au lieu de renvoyer
+            // aussitôt l'état déjà émis.
+            let etat = rx.borrow_and_update().clone();
+            return Some((etat, (rx, false)));
+        }
+        // Err = le cœur a lâché l'émetteur : fin du flux, le navigateur
+        // reconnectera de lui-même (`EventSource` s'en charge).
+        rx.changed().await.ok()?;
+        let etat = rx.borrow_and_update().clone();
+        Some((etat, (rx, false)))
+    })
+    .map(|etat| {
+        // La sérialisation d'un `NowPlayingState` ne peut pas échouer (que des
+        // types simples) ; en cas d'imprévu, un objet vide vaut mieux qu'une
+        // connexion coupée, que le client interpréterait comme une panne.
+        Ok(axum::response::sse::Event::default()
+            .json_data(&etat)
+            .unwrap_or_else(|_| axum::response::sse::Event::default().data("{}")))
+    });
+
+    axum::response::Sse::new(flux).keep_alive(axum::response::sse::KeepAlive::default())
+}
+
 /// Tampon circulaire des dernières lignes de log (WARN/ERROR), affiché sur
 /// la page de statut. `LogBufferWriter` (ci-dessous) y pousse les lignes
 /// depuis une couche `tracing` installée dans `main`.
@@ -291,6 +343,24 @@ impl std::io::Write for LogBufferWriter {
 #[cfg(test)]
 pub(crate) mod tests_support {
     use super::*;
+    use crate::metadata::NowPlayingState;
+
+    /// Récepteur de morceau en cours pour les montages qui ne testent pas le
+    /// flux SSE : l'émetteur est lâché aussitôt, donc le flux se termine après
+    /// la valeur initiale. Les tests du flux passent par
+    /// `app_state_with_now_playing`, qui garde l'émetteur.
+    pub(crate) fn now_playing_inerte() -> tokio::sync::watch::Receiver<NowPlayingState> {
+        tokio::sync::watch::channel(NowPlayingState::default()).1
+    }
+
+    /// Montage avec l'émetteur de morceau en cours conservé, pour pousser des
+    /// changements pendant un test du flux SSE.
+    pub(crate) fn app_state_with_now_playing(
+        initial: NowPlayingState,
+    ) -> (AppState, tokio::sync::watch::Sender<NowPlayingState>) {
+        let (tx, rx) = tokio::sync::watch::channel(initial);
+        (AppState { now_playing: rx, ..app_state() }, tx)
+    }
 
     pub(crate) fn sample() -> StatusState {
         StatusState {
@@ -325,6 +395,7 @@ pub(crate) mod tests_support {
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
             theme_tx: tokio::sync::mpsc::channel(4).0,
+            now_playing: now_playing_inerte(),
         }
     }
 
@@ -351,6 +422,7 @@ pub(crate) mod tests_support {
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
             theme_tx: tokio::sync::mpsc::channel(4).0,
+            now_playing: now_playing_inerte(),
         };
         (state, audio_rx)
     }
@@ -379,6 +451,7 @@ pub(crate) mod tests_support {
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
             theme_tx: tokio::sync::mpsc::channel(4).0,
+            now_playing: now_playing_inerte(),
         };
         (state, cmd_rx)
     }
@@ -415,6 +488,7 @@ pub(crate) mod tests_support {
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
             theme_tx: tokio::sync::mpsc::channel(4).0,
+            now_playing: now_playing_inerte(),
         };
         (state, locale_rx, dir)
     }
@@ -599,6 +673,111 @@ mod tests {
         let lignes: Vec<String> = serde_json::from_value(v["lines"].clone()).unwrap();
         // Ordre inverse, comme le faisait la page rendue cote serveur.
         assert_eq!(lignes, vec!["WARN seconde".to_string(), "WARN premiere".to_string()]);
+    }
+
+    /// Lit la prochaine trame SSE d'un corps de réponse.
+    ///
+    /// Le flux est **infini** : un `collect()` sur le corps ne rendrait jamais
+    /// la main. On lit donc morceau par morceau, en accumulant jusqu'à une
+    /// trame complète (terminée par la ligne vide qui sépare les événements
+    /// SSE), et on renvoie la charge utile de la ligne `data:`.
+    async fn prochaine_trame(corps: &mut axum::body::BodyDataStream) -> serde_json::Value {
+        use futures::StreamExt;
+        let mut tampon = String::new();
+        for _ in 0..50 {
+            let Some(chunk) = corps.next().await else { panic!("flux termine avant la trame") };
+            tampon.push_str(std::str::from_utf8(&chunk.unwrap()).unwrap());
+            if let Some(data) = tampon.lines().find_map(|l| l.strip_prefix("data:")) {
+                if tampon.contains("\n\n") {
+                    return serde_json::from_str(data.trim()).expect("charge utile JSON");
+                }
+            }
+        }
+        panic!("aucune trame complete recue : {tampon:?}");
+    }
+
+    fn etat(titre: &str) -> crate::metadata::NowPlayingState {
+        crate::metadata::NowPlayingState {
+            source: "radio".into(),
+            title: Some(titre.into()),
+            origin: Some("icy".into()),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn now_playing_emet_letat_courant_des_la_connexion() {
+        // Propriété reprise du flux d'OUI FM : un onglet ouvert au milieu d'un
+        // morceau ne doit pas rester vide jusqu'au suivant.
+        let (state, _tx) = tests_support::app_state_with_now_playing(etat("Miles Davis - So What"));
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/now-playing").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap().to_str().unwrap(),
+            "text/event-stream"
+        );
+        let mut corps = resp.into_body().into_data_stream();
+        let v = prochaine_trame(&mut corps).await;
+        assert_eq!(v["title"], "Miles Davis - So What");
+        assert_eq!(v["source"], "radio");
+        assert_eq!(v["origin"], "icy");
+    }
+
+    #[tokio::test]
+    async fn now_playing_pousse_les_changements_suivants() {
+        let (state, tx) = tests_support::app_state_with_now_playing(etat("premier"));
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/now-playing").body(Body::empty()).unwrap()).await.unwrap();
+        let mut corps = resp.into_body().into_data_stream();
+        assert_eq!(prochaine_trame(&mut corps).await["title"], "premier");
+        tx.send(etat("second")).unwrap();
+        assert_eq!(prochaine_trame(&mut corps).await["title"], "second");
+    }
+
+    #[tokio::test]
+    async fn deux_clients_recoivent_tous_les_deux() {
+        let (state, tx) = tests_support::app_state_with_now_playing(etat("premier"));
+        let un = router(state.clone())
+            .oneshot(Request::get("/api/now-playing").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let deux = router(state)
+            .oneshot(Request::get("/api/now-playing").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let mut corps_un = un.into_body().into_data_stream();
+        let mut corps_deux = deux.into_body().into_data_stream();
+        assert_eq!(prochaine_trame(&mut corps_un).await["title"], "premier");
+        assert_eq!(prochaine_trame(&mut corps_deux).await["title"], "premier");
+        tx.send(etat("second")).unwrap();
+        assert_eq!(prochaine_trame(&mut corps_un).await["title"], "second");
+        assert_eq!(prochaine_trame(&mut corps_deux).await["title"], "second");
+    }
+
+    #[tokio::test]
+    async fn un_client_qui_se_deconnecte_ne_perturbe_ni_le_canal_ni_les_autres() {
+        let (state, tx) = tests_support::app_state_with_now_playing(etat("premier"));
+        let survivant = router(state.clone())
+            .oneshot(Request::get("/api/now-playing").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let mut corps_survivant = survivant.into_body().into_data_stream();
+        assert_eq!(prochaine_trame(&mut corps_survivant).await["title"], "premier");
+
+        {
+            let parti = router(state)
+                .oneshot(Request::get("/api/now-playing").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let mut corps = parti.into_body().into_data_stream();
+            prochaine_trame(&mut corps).await;
+            // Fin de portée : le corps est lâché, comme un onglet fermé.
+        }
+
+        // L'émission continue de fonctionner, et l'autre client la reçoit.
+        assert!(tx.send(etat("second")).is_ok(), "le canal ne doit pas etre casse");
+        assert_eq!(prochaine_trame(&mut corps_survivant).await["title"], "second");
     }
 
     #[tokio::test]

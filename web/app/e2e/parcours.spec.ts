@@ -38,6 +38,35 @@ test('une seule instance de Vue sert le shell et les modules de plugin', async (
   expect(requetes).toContain('/plugins/radio/ui.css')
 })
 
+test('le morceau en cours arrive en flux poussé dès la connexion', async ({ page }) => {
+  await page.goto('/')
+  // Seule preuve de bout en bout de la route SSE : un `EventSource` reel du
+  // navigateur, servi par le vrai binaire Rust. Aucun test unitaire ne couvre
+  // la chaine complete (axum -> canal watch -> EventSource), et la propriete
+  // verifiee ici est precisement celle qui evite un onglet vide : l'etat
+  // courant est emis **des la connexion**, sans attendre un changement.
+  const premiere = await page.evaluate(
+    () =>
+      new Promise<string>((resolve, reject) => {
+        const flux = new EventSource('/api/now-playing')
+        const minuteur = setTimeout(() => {
+          flux.close()
+          reject(new Error('aucune trame en 5 s'))
+        }, 5000)
+        flux.onmessage = (e) => {
+          clearTimeout(minuteur)
+          flux.close()
+          resolve(e.data as string)
+        }
+      }),
+  )
+  // Le harnais ne declare aucun plugin `metadata` et ne lit aucun flux reel :
+  // l'etat est donc vide de metadonnees, mais il porte la source active.
+  const etat = JSON.parse(premiere) as { source: string; title: string | null }
+  expect(etat.source).toBe('radio')
+  expect(etat.title).toBeNull()
+})
+
 test('bascule clair/sombre, appliquée et persistée', async ({ page }) => {
   await page.goto('/')
   const clair = await variable(page, '--background')

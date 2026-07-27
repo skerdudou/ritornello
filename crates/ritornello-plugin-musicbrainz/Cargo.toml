@@ -1,0 +1,22 @@
+[package]
+name = "ritornello-plugin-musicbrainz"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ritornello-plugin-musicbrainz"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+async-trait = "0.1"
+# Pas de feature `json` : la réponse est lue en texte et analysée à la main
+# (`parse_lookup`), pour n'extraire que le premier media dont le nombre de
+# pistes correspond au disque inséré.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+ritornello-proto = { path = "../ritornello-proto" }
+ritornello-plugin-sdk = { path = "../ritornello-plugin-sdk" }

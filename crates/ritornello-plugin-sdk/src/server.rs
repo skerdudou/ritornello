@@ -1,12 +1,93 @@
 use anyhow::{Context, Result};
-use ritornello_proto::{SourceAction, SourceReq, SourceRequest, SourceMessage, View};
+use ritornello_proto::{
+    Enrichment, IdentityUpdate, NowPlaying, SourceAction, SourceMessage, SourceReq, SourceRequest,
+    View,
+};
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
+/// Issue d'une requête adressée à une Source : l'action que le cœur doit
+/// appliquer au lecteur, éventuellement une vue à afficher, éventuellement une
+/// correction de l'identité de ce qui joue.
 pub struct SourceOutcome {
     pub action: SourceAction,
     pub view: Option<View>,
+    /// Laissé à `None`, l'identité courante du cœur est conservée. Une Source
+    /// qui sait ce qu'elle vient de mettre en lecture doit la renseigner :
+    /// sans elle, aucun plugin `metadata` n'apprend le changement, et un
+    /// enrichissement en vol sur le morceau précédent resterait affiché.
+    pub identity: Option<IdentityUpdate>,
+    /// `line2` de la vue est un remplissage que le cœur peut remplacer par une
+    /// métadonnée (voir `SourceMessage::line2_replaceable`).
+    pub line2_replaceable: bool,
+}
+
+impl SourceOutcome {
+    /// Issue portant seulement une action (ni vue, ni identité).
+    pub fn new(action: SourceAction) -> Self {
+        Self { action, view: None, identity: None, line2_replaceable: false }
+    }
+
+    pub fn with_view(mut self, view: View) -> Self {
+        self.view = Some(view);
+        self
+    }
+
+    /// Déclare que la `line2` de la vue n'est qu'un remplissage : le cœur peut
+    /// y écrire une métadonnée s'il en connaît une, et la Source récupère sa
+    /// propre ligne dès qu'il n'en connaît plus.
+    pub fn line2_replaceable(mut self) -> Self {
+        self.line2_replaceable = true;
+        self
+    }
+
+    /// Déclare l'identité **opaque** de ce qui joue désormais.
+    pub fn plays(mut self, identity: serde_json::Value) -> Self {
+        self.identity = Some(IdentityUpdate::Playing(identity));
+        self
+    }
+
+    /// Déclare que plus rien ne joue.
+    pub fn plays_nothing(mut self) -> Self {
+        self.identity = Some(IdentityUpdate::Nothing);
+        self
+    }
+}
+
+/// Notification spontanée d'une Source : changement de piste, arrivée différée
+/// d'une TOC, insertion d'un disque.
+///
+/// Volontairement sans action : le cœur décide seul de ce qui se met en
+/// lecture. Une Source qui pourrait déclencher un `Play` de sa propre
+/// initiative rendrait la lecture imprévisible depuis la télécommande.
+#[derive(Default)]
+pub struct Notification {
+    pub view: Option<View>,
+    pub identity: Option<IdentityUpdate>,
+    /// Voir `SourceOutcome::line2_replaceable`.
+    pub line2_replaceable: bool,
+}
+
+impl Notification {
+    pub fn view(view: View) -> Self {
+        Self { view: Some(view), identity: None, line2_replaceable: false }
+    }
+
+    pub fn line2_replaceable(mut self) -> Self {
+        self.line2_replaceable = true;
+        self
+    }
+
+    pub fn plays(mut self, identity: serde_json::Value) -> Self {
+        self.identity = Some(IdentityUpdate::Playing(identity));
+        self
+    }
+
+    pub fn plays_nothing(mut self) -> Self {
+        self.identity = Some(IdentityUpdate::Nothing);
+        self
+    }
 }
 
 #[async_trait::async_trait]
@@ -25,15 +106,34 @@ pub trait SourcePlugin: Send + 'static {
         self.activate().await
     }
 
+    /// Le cœur a arrêté la lecture sans consulter la Source (touche Stop).
+    ///
+    /// Implémentation par défaut : déclarer que plus rien ne joue, ce qui est
+    /// vrai pour toute Source, et ne rien afficher de nouveau. Une Source qui
+    /// tient un état de lecture propre (le cd) surcharge pour le remettre à
+    /// jour ; les autres compilent inchangées.
+    async fn stop(&mut self) -> SourceOutcome {
+        SourceOutcome::new(SourceAction::Noop).plays_nothing()
+    }
+
+    /// Le lecteur est passé de lui-même à la piste d'index `n`.
+    ///
+    /// Implémentation par défaut : rien — une radio n'a pas de pistes. Une Source
+    /// qui suit un index (le cd) surcharge pour se recaler et rendre une vue et
+    /// une identité à jour.
+    async fn player_track(&mut self, _n: i64) -> SourceOutcome {
+        SourceOutcome::new(SourceAction::Noop)
+    }
+
     /// Change la langue courante du plugin. Implémentation par défaut : no-op —
     /// un plugin sans texte propre (console, mce) n'a rien à faire, et cd/radio
     /// compilent inchangés tant qu'ils n'ont pas surchargé cette méthode.
     async fn set_locale(&mut self, _locale: String) {}
 
-    /// Notification spontanée (ex. changement de piste, métadonnées arrivées en
-    /// différé). Par défaut ne se termine jamais : un plugin sans notification
+    /// Notification spontanée (ex. changement de piste, arrivée différée d'une
+    /// TOC). Par défaut ne se termine jamais : un plugin sans notification
     /// spontanée (Radio) n'a rien à écrire de plus.
-    async fn poll_notification(&mut self) -> Option<View> {
+    async fn poll_notification(&mut self) -> Option<Notification> {
         std::future::pending().await
     }
 }
@@ -71,17 +171,31 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                     SourceReq::Next => plugin.next().await,
                     SourceReq::Prev => plugin.prev().await,
                     SourceReq::Eject => plugin.eject().await,
+                    SourceReq::Stop => plugin.stop().await,
+                    SourceReq::PlayerTrack(n) => plugin.player_track(n).await,
                     SourceReq::SetLocale(locale) => {
                         plugin.set_locale(locale).await;
-                        SourceOutcome { action: SourceAction::Noop, view: None }
+                        SourceOutcome::new(SourceAction::Noop)
                     }
                 };
-                let msg = SourceMessage { id: Some(req.id), action: Some(outcome.action), view: outcome.view };
+                let msg = SourceMessage {
+                    id: Some(req.id),
+                    action: Some(outcome.action),
+                    view: outcome.view,
+                    identity: outcome.identity,
+                    line2_replaceable: outcome.line2_replaceable,
+                };
                 write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
             }
-            view = plugin.poll_notification() => {
-                if let Some(view) = view {
-                    let msg = SourceMessage { id: None, action: None, view: Some(view) };
+            notification = plugin.poll_notification() => {
+                if let Some(n) = notification {
+                    let msg = SourceMessage {
+                        id: None,
+                        action: None,
+                        view: n.view,
+                        identity: n.identity,
+                        line2_replaceable: n.line2_replaceable,
+                    };
                     write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
                 }
             }
@@ -138,6 +252,54 @@ pub async fn run_input_plugin(mut plugin: impl InputPlugin, socket_path: &Path) 
     loop {
         let cmd = plugin.next_command().await?;
         write.write_all(format!("{}\n", serde_json::to_string(&cmd)?).as_bytes()).await?;
+    }
+}
+
+#[async_trait::async_trait]
+pub trait MetadataPlugin: Send + 'static {
+    /// Ce qui joue a changé. Le plugin décide seul s'il sait faire quelque
+    /// chose de cette identité ; s'il ne la reconnaît pas, il se tait.
+    async fn now_playing(&mut self, np: NowPlaying);
+
+    /// Prochain enrichissement disponible. Ne se termine jamais s'il n'y a
+    /// rien à dire (même convention que `poll_notification`).
+    ///
+    /// **Doit être annulable sans perte** : ce futur est abandonné dès qu'un
+    /// `NowPlaying` arrive, donc tout état durable (connexion HTTP ouverte,
+    /// file d'attente, cache) doit vivre dans le plugin, jamais dans les
+    /// variables locales du futur.
+    async fn next_enrichment(&mut self) -> Enrichment;
+}
+
+/// Lie `socket_path`, accepte une connexion (le cœur), puis relaie dans les
+/// deux sens jusqu'à fermeture : chaque ligne reçue est un `NowPlaying`, chaque
+/// enrichissement produit part sur le fil. Aucune corrélation par `id` : les
+/// deux sens sont indépendants.
+pub async fn run_metadata_plugin(mut plugin: impl MetadataPlugin, socket_path: &Path) -> Result<()> {
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _ = std::fs::remove_file(socket_path);
+    let listener = UnixListener::bind(socket_path)
+        .with_context(|| format!("liaison de {}", socket_path.display()))?;
+    let (stream, _) = listener.accept().await?;
+    let (read, mut write) = stream.into_split();
+    let mut lines = BufReader::new(read).lines();
+
+    loop {
+        tokio::select! {
+            line = lines.next_line() => {
+                let Some(line) = line? else { return Ok(()) };
+                match serde_json::from_str::<NowPlaying>(&line) {
+                    Ok(np) => plugin.now_playing(np).await,
+                    Err(e) => tracing::warn!("ligne metadata invalide ignoree: {e}"),
+                }
+            }
+            enrichment = plugin.next_enrichment() => {
+                let ligne = format!("{}\n", serde_json::to_string(&enrichment)?);
+                write.write_all(ligne.as_bytes()).await?;
+            }
+        }
     }
 }
 
@@ -287,20 +449,19 @@ mod tests {
     #[async_trait::async_trait]
     impl SourcePlugin for EchoSource {
         async fn activate(&mut self) -> SourceOutcome {
-            SourceOutcome {
-                action: SourceAction::Play { uri: "http://fip".into() },
-                view: Some(View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() }),
-            }
+            SourceOutcome::new(SourceAction::Play { uri: "http://fip".into() })
+                .with_view(View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() })
+                .plays(serde_json::json!({"kind": "stream", "url": "http://fip"}))
         }
         async fn deactivate(&mut self) -> SourceOutcome {
-            SourceOutcome { action: SourceAction::Stop, view: None }
+            SourceOutcome::new(SourceAction::Stop).plays_nothing()
         }
         async fn select(&mut self, n: u8) -> SourceOutcome {
-            SourceOutcome { action: SourceAction::Play { uri: format!("http://station-{n}") }, view: None }
+            SourceOutcome::new(SourceAction::Play { uri: format!("http://station-{n}") })
         }
-        async fn next(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
-        async fn prev(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
-        async fn eject(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
+        async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+        async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+        async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
     }
 
     #[tokio::test]
@@ -330,6 +491,10 @@ mod tests {
         assert_eq!(msg.id, Some(1));
         assert_eq!(msg.action, Some(SourceAction::Play { uri: "http://fip".into() }));
         assert_eq!(msg.view.unwrap().line2, "FIP");
+        assert_eq!(
+            msg.identity,
+            Some(IdentityUpdate::Playing(serde_json::json!({"kind": "stream", "url": "http://fip"})))
+        );
 
         write.write_all(b"{\"id\":2,\"req\":\"Select\",\"arg\":3}\n").await.unwrap();
         let line = lines.next_line().await.unwrap().unwrap();
@@ -365,13 +530,13 @@ mod tests {
         struct WakingSource;
         #[async_trait::async_trait]
         impl SourcePlugin for WakingSource {
-            async fn activate(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Play { uri: "http://activate".into() }, view: None } }
-            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
-            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
-            async fn next(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
-            async fn prev(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
-            async fn eject(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
-            async fn wake(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Play { uri: "http://wake".into() }, view: None } }
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Play { uri: "http://activate".into() }) }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn wake(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Play { uri: "http://wake".into() }) }
         }
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("plugin.sock");
@@ -401,12 +566,12 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl SourcePlugin for RecordingLocale {
-            async fn activate(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
-            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
-            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
-            async fn next(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
-            async fn prev(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
-            async fn eject(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
             async fn set_locale(&mut self, locale: String) {
                 *self.vu.lock().unwrap() = Some(locale);
             }
@@ -437,6 +602,57 @@ mod tests {
         assert_eq!(msg.action, Some(SourceAction::Noop));
         assert!(msg.view.is_none());
         assert_eq!(vu.lock().unwrap().as_deref(), Some("fr"));
+    }
+
+    #[tokio::test]
+    async fn une_notification_spontanee_porte_vue_et_identite() {
+        // C'est le chemin du changement de piste d'un disque et de l'arrivée
+        // différée d'une TOC : aucune requête du cœur, mais l'identité change.
+        struct Spontanee {
+            emis: bool,
+        }
+        #[async_trait::async_trait]
+        impl SourcePlugin for Spontanee {
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn poll_notification(&mut self) -> Option<Notification> {
+                if self.emis {
+                    std::future::pending::<()>().await;
+                }
+                self.emis = true;
+                Some(
+                    Notification::view(View { line1: "CD 3/12".into(), line2: String::new(), line3: String::new() })
+                        .plays(serde_json::json!({"kind": "disc", "track": 2})),
+                )
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(Spontanee { emis: false }, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, _write) = client.expect("connexion au plugin").into_split();
+        let mut lines = BufReader::new(read).lines();
+        let line = lines.next_line().await.unwrap().unwrap();
+        let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(msg.id, None, "une notification n'est correlee a aucune requete");
+        assert_eq!(msg.action, None, "une notification ne declenche jamais d'action");
+        assert_eq!(msg.view.unwrap().line1, "CD 3/12");
+        assert_eq!(
+            msg.identity,
+            Some(IdentityUpdate::Playing(serde_json::json!({"kind": "disc", "track": 2})))
+        );
     }
 
     #[tokio::test]
@@ -515,6 +731,129 @@ mod display_tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert_eq!(views.lock().unwrap().as_slice(), &[v]);
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    /// Plugin d'essai : mémorise ce qu'on lui annonce et renvoie un
+    /// enrichissement en écho de la dernière identité reçue.
+    struct EnEcho {
+        recus: Arc<Mutex<Vec<NowPlaying>>>,
+        a_dire: Option<Enrichment>,
+    }
+
+    #[async_trait::async_trait]
+    impl MetadataPlugin for EnEcho {
+        async fn now_playing(&mut self, np: NowPlaying) {
+            self.recus.lock().unwrap().push(np.clone());
+            self.a_dire = np.identity.map(|identity| Enrichment {
+                identity,
+                artist: Some("Miles Davis".into()),
+                title: Some("So What".into()),
+                ..Default::default()
+            });
+        }
+        async fn next_enrichment(&mut self) -> Enrichment {
+            match self.a_dire.take() {
+                Some(e) => e,
+                // Rien à dire : ne se termine jamais (le futur sera abandonné
+                // par le `select!` du runner dès qu'un NowPlaying arrivera).
+                None => std::future::pending().await,
+            }
+        }
+    }
+
+    async fn connecte(socket: &std::path::Path) -> UnixStream {
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(socket).await {
+                return s;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("connexion au plugin metadata impossible");
+    }
+
+    #[tokio::test]
+    async fn dialogue_non_correle_dans_les_deux_sens() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("meta.sock");
+        let socket_srv = socket.clone();
+        let recus = Arc::new(Mutex::new(Vec::new()));
+        let recus_plugin = recus.clone();
+        tokio::spawn(async move {
+            run_metadata_plugin(EnEcho { recus: recus_plugin, a_dire: None }, &socket_srv).await.unwrap();
+        });
+
+        let (read, mut write) = connecte(&socket).await.into_split();
+        let mut lines = BufReader::new(read).lines();
+
+        let np = NowPlaying {
+            source: "cd".into(),
+            identity: Some(serde_json::json!({"kind": "disc", "track": 0})),
+        };
+        write.write_all(format!("{}\n", serde_json::to_string(&np).unwrap()).as_bytes()).await.unwrap();
+
+        // L'enrichissement arrive sans qu'on l'ait demandé, et sans `id`.
+        let line = lines.next_line().await.unwrap().unwrap();
+        let e: Enrichment = serde_json::from_str(&line).unwrap();
+        assert_eq!(e.identity, serde_json::json!({"kind": "disc", "track": 0}));
+        assert_eq!(e.title.as_deref(), Some("So What"));
+        assert!(!line.contains("\"id\""), "aucune correlation par id: {line}");
+        assert_eq!(recus.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn larret_est_transmis_au_plugin() {
+        // `identity: null` est le signal qui fait cesser le travail du plugin
+        // (fermer une connexion HTTP, oublier son cache).
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("meta.sock");
+        let socket_srv = socket.clone();
+        let recus = Arc::new(Mutex::new(Vec::new()));
+        let recus_plugin = recus.clone();
+        tokio::spawn(async move {
+            run_metadata_plugin(EnEcho { recus: recus_plugin, a_dire: None }, &socket_srv).await.unwrap();
+        });
+
+        let mut write = connecte(&socket).await;
+        write.write_all(b"{\"source\":\"radio\",\"identity\":null}\n").await.unwrap();
+        for _ in 0..50 {
+            if !recus.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let recus = recus.lock().unwrap();
+        assert_eq!(recus.len(), 1);
+        assert_eq!(recus[0].identity, None);
+        assert_eq!(recus[0].source, "radio");
+    }
+
+    #[tokio::test]
+    async fn ligne_invalide_ignoree_et_la_suivante_traitee() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("meta.sock");
+        let socket_srv = socket.clone();
+        let recus = Arc::new(Mutex::new(Vec::new()));
+        let recus_plugin = recus.clone();
+        tokio::spawn(async move {
+            run_metadata_plugin(EnEcho { recus: recus_plugin, a_dire: None }, &socket_srv).await.unwrap();
+        });
+
+        let (read, mut write) = connecte(&socket).await.into_split();
+        let mut lines = BufReader::new(read).lines();
+        write.write_all(b"ceci n'est pas du json\n").await.unwrap();
+        write.write_all(b"{\"source\":\"cd\",\"identity\":{\"k\":1}}\n").await.unwrap();
+        let line = lines.next_line().await.unwrap().unwrap();
+        let e: Enrichment = serde_json::from_str(&line).unwrap();
+        assert_eq!(e.identity, serde_json::json!({"k": 1}));
+        assert_eq!(recus.lock().unwrap().len(), 1, "seule la trame valide compte");
     }
 }
 

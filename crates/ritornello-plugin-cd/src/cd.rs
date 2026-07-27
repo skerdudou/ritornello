@@ -49,7 +49,12 @@ pub async fn watch(dev: PathBuf, tx: tokio::sync::mpsc::Sender<bool>) {
     }
 }
 
-/// TOC au format MusicBrainz via l'utilitaire cd-discid (paquet Debian).
+/// TOC du disque via l'utilitaire cd-discid (paquet Debian).
+///
+/// La sortie brute (`NTRACKS OFF1 … OFFN LEADOUT`) est ce qui part dans
+/// l'identité du morceau, telle quelle : c'est une description standard de
+/// disque, et c'est au plugin `metadata` de la mettre au format qu'attend son
+/// fournisseur. Ce plugin-ci ne connaît aucun fournisseur de métadonnées.
 pub fn read_toc(dev: &str) -> Result<String> {
     let out = std::process::Command::new("cd-discid")
         .arg("--musicbrainz")
@@ -62,9 +67,13 @@ pub fn read_toc(dev: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Transforme la sortie `NTRACKS OFF1 … OFFN LEADOUT` en paramètre toc
-/// MusicBrainz `1+NTRACKS+LEADOUT+OFF1+…+OFFN`, plus le nombre de pistes.
-pub fn mb_toc_param(raw: &str) -> Result<(String, usize)> {
+/// Nombre de pistes annoncé par la TOC, avec vérification de cohérence.
+///
+/// C'est tout ce dont ce plugin a besoin de la TOC : borner l'index de piste.
+/// La validation est néanmoins complète, parce qu'une TOC incohérente doit être
+/// refusée **ici** plutôt que d'être envoyée dans l'identité, où elle ferait
+/// interroger un service tiers pour rien.
+pub fn toc_ntracks(raw: &str) -> Result<usize> {
     let nums: Vec<u64> = raw
         .split_whitespace()
         .map(|s| s.parse::<u64>())
@@ -77,9 +86,7 @@ pub fn mb_toc_param(raw: &str) -> Result<(String, usize)> {
     if nums.len() != ntracks + 2 {
         bail!("sortie cd-discid incohérente ({} champs pour {} pistes)", nums.len(), ntracks);
     }
-    let leadout = nums[nums.len() - 1];
-    let offsets: Vec<String> = nums[1..nums.len() - 1].iter().map(u64::to_string).collect();
-    Ok((format!("1+{}+{}+{}", ntracks, leadout, offsets.join("+")), ntracks))
+    Ok(ntracks)
 }
 
 pub fn eject(dev: &str) {
@@ -91,18 +98,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn toc_musicbrainz_bien_forme() {
+    fn compte_les_pistes_dune_toc_bien_formee() {
         // 3 pistes, offsets 150/22767/41887, leadout 63000
-        let raw = "3 150 22767 41887 63000\n";
-        let (toc, n) = mb_toc_param(raw).unwrap();
-        assert_eq!(toc, "1+3+63000+150+22767+41887");
-        assert_eq!(n, 3);
+        assert_eq!(toc_ntracks("3 150 22767 41887 63000\n").unwrap(), 3);
     }
 
     #[test]
     fn toc_invalide_rejete() {
-        assert!(mb_toc_param("").is_err());
-        assert!(mb_toc_param("3 150 22767\n").is_err()); // pas assez de champs
-        assert!(mb_toc_param("abc def\n").is_err());
+        assert!(toc_ntracks("").is_err());
+        assert!(toc_ntracks("3 150 22767\n").is_err()); // pas assez de champs
+        assert!(toc_ntracks("abc def\n").is_err());
     }
 }

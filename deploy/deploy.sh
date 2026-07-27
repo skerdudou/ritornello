@@ -19,11 +19,11 @@ scp -r deploy/input-presets "$PI:/tmp/input-presets"
 ssh "$PI" 'sudo cp -r /tmp/input-presets/. /etc/ritornello/input-presets/ && rm -rf /tmp/input-presets'
 
 scp "$OUT/ritornello-core" "$PI:/tmp/ritornello-core"
-scp "$OUT/ritornello-plugin-radio" "$OUT/ritornello-plugin-cd" "$OUT/ritornello-plugin-generic-input" "$OUT/ritornello-plugin-console" "$PI:/tmp/"
+scp "$OUT/ritornello-plugin-radio" "$OUT/ritornello-plugin-cd" "$OUT/ritornello-plugin-generic-input" "$OUT/ritornello-plugin-console" "$OUT/ritornello-plugin-musicbrainz" "$OUT/ritornello-plugin-ouifm-metas" "$PI:/tmp/"
 scp deploy/ritornello.service "$PI:/tmp/"
 
 ssh "$PI" 'sudo mv /tmp/ritornello-core /usr/local/bin/ritornello-core \
-  && sudo mv /tmp/ritornello-plugin-radio /tmp/ritornello-plugin-cd /tmp/ritornello-plugin-generic-input /tmp/ritornello-plugin-console /usr/local/lib/ritornello/plugins/ \
+  && sudo mv /tmp/ritornello-plugin-radio /tmp/ritornello-plugin-cd /tmp/ritornello-plugin-generic-input /tmp/ritornello-plugin-console /tmp/ritornello-plugin-musicbrainz /tmp/ritornello-plugin-ouifm-metas /usr/local/lib/ritornello/plugins/ \
   && sudo chmod +x /usr/local/lib/ritornello/plugins/* \
   && sudo rm -f /usr/local/lib/ritornello/plugins/ritornello-plugin-mce \
   && sudo mv /tmp/ritornello.service /etc/systemd/system/ \

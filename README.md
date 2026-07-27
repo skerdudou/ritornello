@@ -102,7 +102,7 @@ alors, `cross` reste surtout utile pour changer d'architecture).
 
 `ritornello-core` charge `/etc/ritornello/plugins.toml` au démarrage (voir
 `deploy/plugins.example.toml`) : chaque entrée déclare un plugin (`source`,
-`display` ou `input`), le chemin de son exécutable, et peut déclarer
+`display`, `input` ou `metadata`), le chemin de son exécutable, et peut déclarer
 `admin = true` pour exposer une page d'admin servie par le cœur, sous la même
 origine, avec un lien affiché sur l'accueil du cœur (`http://<pi>:8080/`).
 
@@ -168,6 +168,113 @@ origine, avec un lien affiché sur l'accueil du cœur (`http://<pi>:8080/`).
   `deploy/deploy.sh` supprime automatiquement l'ancien binaire
   `ritornello-plugin-mce` sur la cible pour éviter qu'il continue de tourner
   après une mise à jour.
+
+### Métadonnées du morceau (genre `metadata`)
+
+Un plugin `metadata` enrichit ce que joue la Source active **sans que celle-ci
+le sache**. Le cœur lui annonce ce qui joue, il répond ce qu'il en sait.
+
+Deux couches se superposent, et la seconde gagne :
+
+1. **Ce que le flux annonce lui-même.** Le cœur observe la propriété `metadata`
+   de mpv et en lit l'en-tête ICY (`icy-title`), affiché **brut**, sans découpage
+   sur `" - "` : la convention existe mais n'est pas garantie — les webradios
+   OUI FM émettent d'ailleurs `Titre - ARTISTE`, dans l'ordre inverse de l'usage.
+   Cette couche fonctionne sans aucun plugin, et sans que la Source ait à
+   déclarer quoi que ce soit.
+2. **Ce qu'un plugin `metadata` a appris**, s'il correspond à ce qui joue.
+
+Sans plugin `metadata` déclaré, il n'y a donc pas d'enrichissement — c'est
+assumé, ce n'est pas une régression. **La lecture n'est jamais affectée** par un
+plugin `metadata`, et son échec est silencieux à l'écran. Un plugin dont le
+processus meurt est marqué indisponible sur la page de statut ; en revanche, un
+plugin qui démarre puis ne sert jamais sa socket y reste affiché comme connecté
+(même comportement que le genre `input`, dont la connexion n'est pas attendue au
+démarrage).
+
+**L'ordre de déclaration compte**, et c'est le seul genre pour lequel c'est le
+cas : entre deux plugins qui répondent pour le même morceau, le premier déclaré
+dans `plugins.toml` gagne, et un plugin déclaré plus bas ne l'écrase jamais. Le
+critère retenu est la prévisibilité pour qui débogue : « premier arrivé »
+dépendrait de la latence réseau, donc la même installation afficherait autre
+chose d'un démarrage à l'autre.
+
+**Mise à jour d'une installation existante.** `deploy/deploy.sh` installe les
+nouveaux binaires mais ne touche pas à `/etc/ritornello/plugins.toml` : sans
+ajout manuel des deux entrées `kind = "metadata"` (voir
+`deploy/plugins.example.toml`), un appareil déjà en service **perd les titres de
+piste du CD**, que le plugin cd fournissait lui-même avant cette version. Le
+reste de l'affichage est inchangé.
+
+Deux plugins sont livrés :
+
+- `ritornello-plugin-musicbrainz` reconnaît un disque auprès de MusicBrainz.
+  C'est le code qui vivait dans `ritornello-plugin-cd`, où un appel réseau de
+  plusieurs secondes partageait le processus devant répondre aux commandes de
+  piste. Aucune variable à régler.
+- `ritornello-plugin-ouifm-metas` lit le flux de métadonnées des webradios
+  OUI FM. **Rien à configurer** : la table des 21 flux est embarquée dans le
+  binaire (`src/webradios.toml`), relevée de la source de vérité du site — la
+  variable JavaScript `apidata` de sa page de lecteur, où chaque flux porte son
+  identifiant de flux et son identifiant de métadonnées.
+  `scripts/fetch-webradios.mjs` la régénère depuis cette même source (avec
+  `--verifier`, il signale une dérive sans rien écrire).
+
+  La reconnaissance porte sur un **fragment de l'URL** et non sur l'URL entière :
+  celle qu'OUI FM sert comporte un jeton signé et un paramètre de format
+  variables, alors que l'identifiant de flux, lui, est stable. Les **deux formes
+  d'URL** d'une même webradio sont reconnues : celle de
+  `streams.lesindesradios.fr` et le mount Icecast historique
+  (`ouifm3.ice.infomaniak.ch/ouifm3.mp3`) — c'est cette seconde forme qu'on
+  rencontre en pratique, publiée de longue date, donc référencée par les
+  annuaires et recopiée par les utilisateurs.
+
+  Le fichier optionnel `/etc/ritornello/ouifm-metas.toml` (variable
+  `RITORNELLO_OUIFM_METAS`, exemple dans `deploy/`) sert le jour où OUI FM
+  change quelque chose : ses entrées sont consultées **avant** la table
+  embarquée, ce qui permet de corriger une correspondance devenue fausse ou d'en
+  ajouter une, sans recompiler.
+
+**Où cela s'affiche.** Sur les afficheurs, le cœur compose : `line3` porte
+`artiste — titre` (avec repli sur l'un des deux seul — une information partielle
+vaut mieux que rien), et `line2` reçoit l'album **uniquement si la Source a
+déclaré sa propre `line2` remplaçable**, c'est-à-dire l'a écrite faute de mieux.
+Le plugin cd s'en sert : il écrit « audio CD », l'album prend la place quand un
+plugin le rapporte, et l'étiquette revient dès qu'il ne le sait plus. Le critère
+est cette déclaration explicite et non le fait que la ligne soit vide : sinon une
+Source demanderait l'album en se taisant, et celle qui veut une ligne vide
+n'aurait aucun moyen de le dire. Le cœur ne détruit jamais une information que la
+Source seule possède, et le protocole Display reste inchangé : un futur afficheur
+(OLED SSD1306) n'a aucune règle de repli à réimplémenter.
+
+Dans l'IHM web, la page d'accueil affiche tout ce qui est connu, avec une
+pastille indiquant **l'origine** de l'information (`icy`, ou le nom du plugin
+gagnant) — la première question qu'on se pose devant un titre faux.
+
+**Avance automatique de piste.** Quand un CD passe seul à la piste suivante, mpv
+en informe le cœur, qui le relaie à la Source (`SourceReq::PlayerTrack`) : c'est
+elle qui se recale et renvoie vue et identité, le cœur ne pouvant pas modifier
+une identité qu'il a pour principe de ne jamais interpréter. L'affichage et les
+métadonnées suivent donc l'avance sans qu'aucune touche soit pressée.
+
+**Écrire un plugin `metadata`.** Implémenter `MetadataPlugin` du SDK
+(`now_playing` / `next_enrichment`) et appeler `run_metadata_plugin`. Deux
+points de contrat :
+
+- l'**identité** de ce qui joue est un JSON **opaque** produit par la Source,
+  que le cœur ne fait que comparer et relayer. Le plugin radio y met
+  `{"kind":"stream","url":…}`, le plugin cd `{"kind":"disc","toc":…,"track":…}`.
+  Un plugin qui ne reconnaît pas la forme reçue se contente de se taire ;
+- chaque enrichissement doit **réécho l'identité** concernée. C'est le garde-fou
+  de péremption : le cœur jette celui qui ne correspond plus à ce qui joue, ce
+  qui empêche une réponse lente d'écraser le morceau suivant. Un enrichissement
+  dont tous les champs textuels sont vides compte comme une non-réponse, et
+  laisse donc gagner un plugin moins prioritaire.
+
+`next_enrichment` doit être **annulable sans perte** : son futur est abandonné
+dès qu'un `NowPlaying` arrive, donc tout état durable (connexion HTTP ouverte,
+cache, file d'attente) doit vivre dans le plugin, pas dans les variables locales
+du futur.
 
 ### IHM d'un plugin
 

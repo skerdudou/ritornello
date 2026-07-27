@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use ritornello_proto::{
-    AdminReq, AdminRequest, AdminResponse, AdminResult, Command, SourceAction, SourceMessage,
-    SourceReq, SourceRequest, View,
+    AdminReq, AdminRequest, AdminResponse, AdminResult, Command, Enrichment, IdentityUpdate,
+    NowPlaying, SourceAction, SourceMessage, SourceReq, SourceRequest, View,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -24,6 +24,22 @@ async fn connect_with_retry(socket_path: &Path) -> Result<UnixStream> {
     stream.with_context(|| format!("connexion a {} (10 s)", socket_path.display()))
 }
 
+/// Ce qu'une Source rapporte spontanément ou en marge d'une réponse : une vue
+/// à afficher, une correction de l'identité de ce qui joue, ou les deux.
+///
+/// Les deux voyagent ensemble parce qu'ils sont produits ensemble par le
+/// plugin, dans une seule trame : les séparer en deux canaux ferait exister des
+/// instants où la vue affichée et l'identité annoncée aux plugins `metadata` se
+/// contredisent.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SourceUpdate {
+    pub view: Option<View>,
+    pub identity: Option<IdentityUpdate>,
+    /// Voir `SourceMessage::line2_replaceable`. N'a de sens qu'accompagné d'une
+    /// `view`.
+    pub line2_replaceable: bool,
+}
+
 pub struct SourceClient {
     writer: Mutex<OwnedWriteHalf>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<SourceAction>>>>,
@@ -34,7 +50,7 @@ impl SourceClient {
     pub async fn connect(
         socket_path: &Path,
         name: String,
-        view_tx: mpsc::Sender<(String, View)>,
+        view_tx: mpsc::Sender<(String, SourceUpdate)>,
     ) -> Result<Arc<Self>> {
         let stream = connect_with_retry(socket_path).await?;
         let (read, write) = stream.into_split();
@@ -55,9 +71,37 @@ impl SourceClient {
                         let _ = tx.send(action);
                     }
                 }
-                if let Some(view) = msg.view {
-                    if view_tx.try_send((name.clone(), view)).is_err() {
-                        tracing::warn!("vue de {name} perdue (canal plein)");
+                if msg.view.is_some() || msg.identity.is_some() {
+                    let porte_identite = msg.identity.is_some();
+                    let update = SourceUpdate {
+                        view: msg.view,
+                        identity: msg.identity,
+                        line2_replaceable: msg.line2_replaceable,
+                    };
+                    if view_tx.try_send((name.clone(), update)).is_err() {
+                        // Conséquence aggravée depuis que la trame porte aussi
+                        // l'identité : une vue perdue était réparée par la
+                        // suivante, une **identité** perdue ne l'est jamais — la
+                        // Source ne la réémet que sur changement, donc le cœur
+                        // garde celle du morceau précédent et les plugins
+                        // `metadata` continuent de l'enrichir, sans que le
+                        // garde-fou de péremption y voie quoi que ce soit.
+                        //
+                        // Toujours `try_send` et non `send().await` : cette même
+                        // tâche délivre les réponses corrélées aux requêtes du
+                        // cœur. Attendre ici sur un canal plein retiendrait la
+                        // réponse que le cœur attend, et le cœur ne draine le
+                        // canal qu'en revenant à sa boucle — soit un blocage
+                        // croisé jusqu'au timeout de 5 s de `request`. Perdre
+                        // une trame en le signalant fort vaut mieux qu'une
+                        // seconde d'appareil figé.
+                        if porte_identite {
+                            tracing::error!(
+                                "identite de {name} perdue (canal plein) : affichage et metadonnees possiblement perimes jusqu'au prochain changement"
+                            );
+                        } else {
+                            tracing::warn!("vue de {name} perdue (canal plein)");
+                        }
                     }
                 }
             }
@@ -200,6 +244,66 @@ impl AdminClient {
     }
 }
 
+/// Se connecte à un plugin `metadata` et fait circuler les deux sens jusqu'à
+/// fermeture : ce qui joue descend vers le plugin, ses enrichissements montent
+/// vers le cœur, étiquetés de son nom (c'est le nom qui départage deux plugins,
+/// selon l'ordre de déclaration dans `plugins.toml`).
+///
+/// Le sens descendant passe par un `watch` et non par un `mpsc` : seule la
+/// dernière valeur compte, les intermédiaires n'ont aucune valeur, et surtout
+/// **un plugin lent ne peut pas bloquer le cœur**. Si le cœur attendait
+/// l'écriture sur cette socket depuis sa boucle principale, un plugin qui ne
+/// lit plus (mais dont le processus vit toujours) remplirait le tampon de la
+/// socket et figerait l'appareil entier — c'est exactement pour cette raison
+/// que les vues passent déjà par un `watch` plutôt que par un appel direct.
+///
+/// L'état courant est envoyé **dès la connexion** : un plugin qui démarre
+/// pendant qu'un morceau joue n'a pas à attendre le suivant pour se mettre au
+/// travail.
+///
+/// Ne revient qu'en cas d'erreur ; à spawn dans une tâche dédiée par l'appelant.
+pub async fn run_metadata_client(
+    socket_path: &Path,
+    name: String,
+    enrich_tx: mpsc::Sender<(String, Enrichment)>,
+    mut np_rx: tokio::sync::watch::Receiver<NowPlaying>,
+) -> Result<()> {
+    let stream = connect_with_retry(socket_path).await?;
+    let (read, mut write) = stream.into_split();
+    let mut lines = BufReader::new(read).lines();
+
+    let mut a_envoyer = Some(np_rx.borrow_and_update().clone());
+    loop {
+        if let Some(np) = a_envoyer.take() {
+            write.write_all(format!("{}\n", serde_json::to_string(&np)?).as_bytes()).await?;
+        }
+        tokio::select! {
+            line = lines.next_line() => {
+                let Some(line) = line? else {
+                    bail!("connexion au plugin metadata {name} fermee");
+                };
+                match serde_json::from_str::<Enrichment>(&line) {
+                    // `cleaned` ici, au plus près de l'entrée : le cœur n'a
+                    // ensuite qu'une seule forme à traiter (voir `is_empty`,
+                    // qui décide de l'arbitrage).
+                    Ok(e) => {
+                        if enrich_tx.send((name.clone(), e.cleaned())).await.is_err() {
+                            bail!("coeur ferme, arret du relais metadata {name}");
+                        }
+                    }
+                    Err(e) => tracing::warn!("enrichissement invalide de {name} ignore: {e}"),
+                }
+            }
+            change = np_rx.changed() => {
+                if change.is_err() {
+                    bail!("canal now-playing ferme, arret du relais metadata {name}");
+                }
+                a_envoyer = Some(np_rx.borrow_and_update().clone());
+            }
+        }
+    }
+}
+
 /// Se connecte au plugin input et relaie chaque `Command` reçue sur `cmd_tx`,
 /// jusqu'à fermeture de la connexion (ne revient qu'en cas d'erreur ; à
 /// spawn dans une tâche dédiée par l'appelant).
@@ -240,6 +344,10 @@ mod tests {
                 id: Some(req.id),
                 action: Some(SourceAction::Play { uri: "http://fip".into() }),
                 view: Some(View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() }),
+                identity: Some(ritornello_proto::IdentityUpdate::Playing(
+                    serde_json::json!({"kind": "stream", "url": "http://fip"}),
+                )),
+                line2_replaceable: false,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             let _ = socket_for_server; // garde le chemin vivant pour le débogage
@@ -249,9 +357,145 @@ mod tests {
         let client = SourceClient::connect(&socket, "radio".into(), view_tx).await.unwrap();
         let action = client.request(ritornello_proto::SourceReq::Activate).await.unwrap();
         assert_eq!(action, SourceAction::Play { uri: "http://fip".into() });
-        let (name, view) = view_rx.recv().await.unwrap();
+        let (name, update) = view_rx.recv().await.unwrap();
         assert_eq!(name, "radio");
-        assert_eq!(view.line2, "FIP");
+        assert_eq!(update.view.unwrap().line2, "FIP");
+        // La vue et l'identité arrivent dans la même mise à jour : c'est ce qui
+        // garantit qu'on n'affiche jamais une station en annonçant l'autre.
+        assert_eq!(
+            update.identity,
+            Some(ritornello_proto::IdentityUpdate::Playing(
+                serde_json::json!({"kind": "stream", "url": "http://fip"})
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn source_client_ne_relaie_rien_quand_la_trame_ne_porte_ni_vue_ni_identite() {
+        // Une réponse à SetLocale, par exemple : inutile de réveiller la boucle
+        // du cœur pour une trame qui ne dit rien de l'affichage.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+            let msg = ritornello_proto::SourceMessage {
+                id: Some(req.id),
+                action: Some(SourceAction::Noop),
+                view: None,
+                identity: None,
+                line2_replaceable: false,
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let (view_tx, mut view_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "radio".into(), view_tx).await.unwrap();
+        client.request(SourceReq::SetLocale("fr".into())).await.unwrap();
+        assert!(view_rx.try_recv().is_err(), "aucune mise a jour ne doit etre relayee");
+    }
+
+    #[tokio::test]
+    async fn metadata_client_descend_letat_courant_puis_remonte_les_enrichissements() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("meta.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            // Le plugin reçoit l'état courant sans avoir rien demandé, puis
+            // répond en écho de l'identité reçue.
+            let line = lines.next_line().await.unwrap().unwrap();
+            let np: NowPlaying = serde_json::from_str(&line).unwrap();
+            let e = Enrichment {
+                identity: np.identity.clone().unwrap(),
+                // Espaces volontaires : c'est le relais qui normalise.
+                artist: Some("  Mandrillus Sphynx ".into()),
+                title: Some("Bikwix".into()),
+                ..Default::default()
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&e).unwrap()).as_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let (np_tx, np_rx) = tokio::sync::watch::channel(NowPlaying {
+            source: "radio".into(),
+            identity: Some(serde_json::json!({"kind": "stream", "url": "http://soma"})),
+        });
+        let (enrich_tx, mut enrich_rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move {
+            let _ = run_metadata_client(&socket, "ouifm".into(), enrich_tx, np_rx).await;
+        });
+
+        let (nom, e) = enrich_rx.recv().await.unwrap();
+        assert_eq!(nom, "ouifm");
+        assert_eq!(e.artist.as_deref(), Some("Mandrillus Sphynx"), "les blancs doivent etre elagues");
+        assert_eq!(e.title.as_deref(), Some("Bikwix"));
+        assert_eq!(e.identity, serde_json::json!({"kind": "stream", "url": "http://soma"}));
+        drop(np_tx);
+    }
+
+    #[tokio::test]
+    async fn metadata_client_transmet_les_changements_de_ce_qui_joue() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("meta.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let vues = Arc::new(Mutex::new(Vec::<NowPlaying>::new()));
+        let vues_srv = vues.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, _write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                vues_srv.lock().await.push(serde_json::from_str(&line).unwrap());
+            }
+        });
+
+        let (np_tx, np_rx) = tokio::sync::watch::channel(NowPlaying {
+            source: "radio".into(),
+            identity: Some(serde_json::json!({"url": "un"})),
+        });
+        let (enrich_tx, _enrich_rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move {
+            let _ = run_metadata_client(&socket, "ouifm".into(), enrich_tx, np_rx).await;
+        });
+
+        // Chaque envoi est attendu avant le suivant. Ce n'est pas de la
+        // précaution de test : `watch` ne garantit **que** la dernière valeur,
+        // et deux `send` consécutifs peuvent légitimement n'en produire qu'un
+        // seul sur le fil. C'est la propriété qu'on veut (un plugin lent ne
+        // retarde pas le cœur et ne rattrape pas un historique sans intérêt),
+        // donc le test séquence au lieu de compter des trames.
+        async fn attendre(vues: &Arc<Mutex<Vec<NowPlaying>>>, combien: usize) -> Vec<NowPlaying> {
+            for _ in 0..100 {
+                if vues.lock().await.len() >= combien {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            vues.lock().await.clone()
+        }
+
+        // L'état courant descend dès la connexion, sans changement préalable.
+        let recues = attendre(&vues, 1).await;
+        assert_eq!(recues.first().and_then(|np| np.identity.clone()), Some(serde_json::json!({"url": "un"})));
+
+        np_tx.send(NowPlaying { source: "radio".into(), identity: Some(serde_json::json!({"url": "deux"})) }).unwrap();
+        let recues = attendre(&vues, 2).await;
+        assert_eq!(recues.get(1).and_then(|np| np.identity.clone()), Some(serde_json::json!({"url": "deux"})));
+
+        // L'arrêt descend aussi : c'est le signal qui fait cesser le travail du
+        // plugin (couper une connexion HTTP ouverte, oublier son cache).
+        np_tx.send(NowPlaying { source: "radio".into(), identity: None }).unwrap();
+        let recues = attendre(&vues, 3).await;
+        assert_eq!(recues.len(), 3, "{recues:?}");
+        assert_eq!(recues[2].identity, None);
     }
 
     #[tokio::test]

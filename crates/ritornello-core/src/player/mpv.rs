@@ -47,9 +47,20 @@ impl MpvIpc {
                 } else if v["event"] == json!("property-change") {
                     let ev = match (v["name"].as_str(), &v["data"]) {
                         (Some("media-title"), Value::String(t)) => Some(Event::Title(t.clone())),
+                        (Some("metadata"), data) => icy_title(data).map(Event::IcyTitle),
                         (Some("idle-active"), Value::Bool(true)) => Some(Event::PlaybackIdle),
                         (Some("idle-active"), Value::Bool(false)) => Some(Event::PlaybackActive),
-                        (Some("playlist-pos"), Value::Number(n)) => {
+                        // Deux propriétés pour un même fait, l'avance de piste :
+                        // mpv expose les pistes d'un CD comme des entrées de
+                        // liste de lecture ou comme des chapitres selon la
+                        // façon dont le disque a été ouvert (`cdda://` entier
+                        // ou `cdda://<piste>`). Une seule des deux parle donc à
+                        // la fois, et le cœur relaie la même chose dans les deux
+                        // cas — c'est la Source qui sait ce que « piste n »
+                        // signifie. Un index négatif (mpv dit `-1` quand il n'y
+                        // a pas de chapitre) est transmis tel quel et écarté par
+                        // la Source.
+                        (Some("playlist-pos") | Some("chapter"), Value::Number(n)) => {
                             n.as_i64().map(Event::TrackChanged)
                         }
                         _ => None,
@@ -91,6 +102,28 @@ impl MpvIpc {
         self.command(&[json!("observe_property"), json!(id), json!(name)]).await?;
         Ok(())
     }
+}
+
+/// Extrait le titre annoncé par le flux du contenu de la propriété `metadata`
+/// de mpv. Fonction pure, testable sur une capture réelle.
+///
+/// La clé est cherchée **sans égard à la casse** : mpv recopie les noms de
+/// champs tels que la station les envoie, et l'en-tête ICY apparaît selon les
+/// serveurs en `icy-title`, `Icy-Title` ou `ICY-TITLE`.
+///
+/// Une valeur vide ou blanche donne `None`, donc aucun événement : plusieurs
+/// stations mesurées émettent un `StreamTitle` vide entre deux morceaux (et OUI
+/// FM y met un texte de remplissage). Effacer l'affichage à chaque trou
+/// laisserait la ligne clignoter, alors que le changement de morceau, lui,
+/// remet déjà l'ardoise à zéro côté cœur.
+pub fn icy_title(data: &Value) -> Option<String> {
+    let map = data.as_object()?;
+    let brut = map
+        .iter()
+        .find(|(cle, _)| cle.eq_ignore_ascii_case("icy-title"))
+        .and_then(|(_, valeur)| valeur.as_str())?;
+    let elague = brut.trim();
+    (!elague.is_empty()).then(|| elague.to_string())
 }
 
 pub struct MpvPlayer {
@@ -168,6 +201,12 @@ pub fn mpv_args(socket: &Path, cd_dev: &str, audio_buffer: f64, readahead: f64) 
     ]
 }
 
+/// Propriétés que le cœur demande à mpv de pousser. `metadata` porte l'en-tête
+/// ICY reçu de la station (clé `icy-title`), seule source de titre disponible
+/// pour une radio sans plugin `metadata` dédié.
+const OBSERVEES: [&str; 5] =
+    ["media-title", "metadata", "idle-active", "playlist-pos", "chapter"];
+
 /// Lance mpv en démon idle et s'y connecte. Le Child est rendu à l'appelant :
 /// s'il meurt, main quitte et systemd relance tout le service.
 pub async fn start(
@@ -198,9 +237,9 @@ pub async fn start(
     }
     let stream = stream.context("connexion à la socket mpv (10 s)")?;
     let ipc = MpvIpc::from_stream(stream, events);
-    ipc.observe("media-title").await?;
-    ipc.observe("idle-active").await?;
-    ipc.observe("playlist-pos").await?;
+    for propriete in OBSERVEES {
+        ipc.observe(propriete).await?;
+    }
     Ok((MpvPlayer { ipc }, child))
 }
 
@@ -312,6 +351,59 @@ mod tests {
             w.write_all(resp.as_bytes()).await.unwrap();
         });
         assert!(ipc.command(&[serde_json::json!("loadfile")]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn metadata_icy_devient_un_evenement_de_titre() {
+        // Capture réelle : forme du `property-change` que mpv émet pour la
+        // propriété `metadata` sur un flux Icecast (SomaFM Groove Salad, le seul
+        // des cinq flux mesurés à émettre un StreamTitle exploitable).
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, mut rx) = broadcast::channel(16);
+        let _ipc = MpvIpc::from_stream(client, tx);
+        let (_r, mut w) = server.into_split();
+        w.write_all(
+            b"{\"event\":\"property-change\",\"name\":\"metadata\",\"data\":{\"icy-br\":\"128\",\"icy-title\":\"Mandrillus Sphynx - Bikwix\"}}\n",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rx.recv().await.unwrap(), Event::IcyTitle("Mandrillus Sphynx - Bikwix".into()));
+    }
+
+    #[test]
+    fn icy_title_ignore_le_vide_et_labsence() {
+        // Cas mesurés : Radio Nova envoie un StreamTitle vide, FIP n'envoie
+        // aucun en-tête ICY (pas d'icy-metaint du tout).
+        assert_eq!(icy_title(&serde_json::json!({"icy-title": ""})), None);
+        assert_eq!(icy_title(&serde_json::json!({"icy-title": "   "})), None);
+        assert_eq!(icy_title(&serde_json::json!({"icy-br": "128"})), None);
+        assert_eq!(icy_title(&serde_json::json!({})), None);
+        // `metadata` vaut null tant qu'aucun fichier n'est chargé.
+        assert_eq!(icy_title(&Value::Null), None);
+        assert_eq!(icy_title(&serde_json::json!("pas un objet")), None);
+        // Une valeur non textuelle ne doit pas paniquer.
+        assert_eq!(icy_title(&serde_json::json!({"icy-title": 42})), None);
+    }
+
+    #[test]
+    fn icy_title_tolere_la_casse_et_elague() {
+        assert_eq!(
+            icy_title(&serde_json::json!({"Icy-Title": "  Miles Davis - So What "})).as_deref(),
+            Some("Miles Davis - So What")
+        );
+        assert_eq!(icy_title(&serde_json::json!({"ICY-TITLE": "x"})).as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn les_proprietes_utiles_sont_toutes_observees() {
+        // Sans `observe_property`, mpv ne pousse jamais la propriété : la couche
+        // ICY resterait muette sans qu'aucun test de `icy_title` ne s'en
+        // aperçoive. `start` lançant un vrai processus mpv, c'est la liste
+        // qu'elle parcourt qui est vérifiée ici.
+        assert!(OBSERVEES.contains(&"metadata"), "sans elle, aucun titre ICY n'arrive jamais");
+        assert!(OBSERVEES.contains(&"idle-active"), "sans elle, plus de relance apres coupure");
+        assert!(OBSERVEES.contains(&"media-title"));
+        assert!(OBSERVEES.contains(&"playlist-pos"));
     }
 
     #[test]

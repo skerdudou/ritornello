@@ -1,3 +1,4 @@
+use crate::metadata::IdentityUpdate;
 use crate::view::View;
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +15,23 @@ pub enum SourceReq {
     Prev,
     Eject,
     SetLocale(String),
+    /// Le cœur a arrêté la lecture de sa propre initiative (touche Stop de la
+    /// télécommande), **sans** que la Source ait été consultée.
+    ///
+    /// C'est la seule commande dans ce cas : `Play` traverse le cœur, `Eject` et
+    /// `Deactivate` passent par la Source. Sans cette notification, une Source
+    /// qui tient un état de lecture (le cd, pour savoir si un morceau joue
+    /// vraiment) ne peut pas rester juste, et annoncerait des métadonnées pour
+    /// un morceau arrêté.
+    Stop,
+    /// Le lecteur est passé **de lui-même** à la piste d'index `n` (fin de piste
+    /// d'un disque), sans commande de l'utilisateur.
+    ///
+    /// Le cœur l'apprend de mpv, mais ne peut pas corriger l'identité : elle est
+    /// opaque pour lui, et seule la Source sait ce que « piste n » veut dire pour
+    /// ce qu'elle joue. Sans cette notification, l'affichage et les métadonnées
+    /// restaient sur la piste précédente jusqu'à la prochaine commande.
+    PlayerTrack(i64),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +60,32 @@ pub struct SourceMessage {
     pub action: Option<SourceAction>,
     #[serde(default)]
     pub view: Option<View>,
+    /// Identité de ce qui joue **après** cette action, quand la Source a de
+    /// quoi la mettre à jour.
+    ///
+    /// Le champ voyage ici, à côté de la vue, et non dans `SourceAction::Play` :
+    /// un CD change de piste sans nouveau `Play` (`PlayerNext` fait avancer mpv),
+    /// donc l'identité changerait sans qu'aucun `Play` ne soit émis. Toute
+    /// occasion où une Source rapporte une vue devient ainsi une occasion de
+    /// corriger l'identité — ce qui couvre le changement de piste d'un disque,
+    /// la sélection d'une présélection et l'arrivée différée d'une TOC.
+    ///
+    /// Absent = « cette trame ne dit rien de l'identité, garde la précédente ».
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<IdentityUpdate>,
+    /// La Source déclare que la `line2` de la vue ci-dessus est un
+    /// **remplissage** : ce qu'elle a trouvé à écrire faute de mieux, que le
+    /// cœur peut remplacer s'il connaît une métadonnée pour cette place.
+    ///
+    /// Le plugin cd s'en sert : il écrit « audio CD », et l'album le remplace
+    /// quand un plugin `metadata` le rapporte. Sans cette déclaration
+    /// **explicite**, la seule façon pour le cœur de savoir s'il peut écrire là
+    /// serait de regarder si la ligne est vide — une négociation par l'absence,
+    /// où une Source qui veut une ligne vide (une entrée auxiliaire sobre) se
+    /// verrait imposer un album sans l'avoir demandé, et devrait écrire une
+    /// chaîne factice pour s'en protéger.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub line2_replaceable: bool,
 }
 
 #[cfg(test)]
@@ -82,19 +126,45 @@ mod tests {
             id: Some(1),
             action: Some(SourceAction::Play { uri: "http://fip".into() }),
             view: Some(View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() }),
+            identity: Some(IdentityUpdate::Playing(serde_json::json!({"kind": "stream"}))),
+            line2_replaceable: false,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, Some(1));
         assert_eq!(back.action, Some(SourceAction::Play { uri: "http://fip".into() }));
+        assert_eq!(back.identity, m.identity);
     }
 
     #[test]
     fn message_notification_sans_id() {
-        let m = SourceMessage { id: None, action: None, view: Some(View::default()) };
+        let m = SourceMessage { id: None, action: None, view: Some(View::default()), identity: None, line2_replaceable: false };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, None);
         assert_eq!(back.action, None);
+    }
+
+    #[test]
+    fn identite_absente_et_identite_nulle_ne_disent_pas_la_meme_chose() {
+        // C'est la raison d'être de l'enum `IdentityUpdate` : « je ne dis rien
+        // de l'identité » (champ omis, donc l'identité courante est conservée)
+        // doit rester distinct de « plus rien ne joue » (`Nothing`, donc
+        // l'identité courante est oubliée). Un `Option<Option<Value>>` aurait
+        // ramené les deux à la même valeur en désérialisation.
+        let rien_dit: SourceMessage = serde_json::from_str(r#"{"id":1}"#).unwrap();
+        assert_eq!(rien_dit.identity, None);
+        let arret: SourceMessage =
+            serde_json::from_str(r#"{"id":1,"identity":{"state":"Nothing"}}"#).unwrap();
+        assert_eq!(arret.identity, Some(IdentityUpdate::Nothing));
+    }
+
+    #[test]
+    fn identite_absente_nest_pas_serialisee() {
+        // La majorité des trames ne disent rien de l'identité (SetLocale,
+        // Deactivate…) : les alourdir d'un `"identity":null` serait du bruit sur
+        // une liaison volontairement lisible à l'œil.
+        let m = SourceMessage { id: Some(2), action: None, view: None, identity: None, line2_replaceable: false };
+        assert_eq!(serde_json::to_string(&m).unwrap(), r#"{"id":2,"action":null,"view":null}"#);
     }
 }

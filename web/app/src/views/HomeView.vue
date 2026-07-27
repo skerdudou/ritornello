@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { api, Button, Card, CardContent, CardHeader, CardTitle, toast } from '@ritornello/ui'
 import { onMounted, ref } from 'vue'
+import NowPlaying from '../components/NowPlaying.vue'
 import { useCatalog } from '../composables/useCatalog'
 import type { Command, StatusPayload } from '../types'
 import { REMOTE_COMMANDS } from './remoteCommands'
@@ -28,6 +29,7 @@ async function send(cmd: Command) {
     <p class="text-sm text-muted-foreground">
       {{ t('active_source_label') }} : <span class="text-foreground">{{ active }}</span>
     </p>
+    <NowPlaying />
     <Card>
       <CardHeader><CardTitle>{{ t('remote_title') }}</CardTitle></CardHeader>
       <CardContent class="space-y-3">

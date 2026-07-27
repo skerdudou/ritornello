@@ -9,6 +9,30 @@ name = "cd"
 kind = "source"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-cd"
 
+# Plugins `metadata` : ils enrichissent ce que joue la Source active (artiste,
+# titre, album) sans que celle-ci le sache. Sans eux, le cœur affiche seulement
+# ce que le flux annonce lui-même (en-tête ICY), ce qui est vide ou inutilisable
+# sur la plupart des stations françaises.
+#
+# L'ORDRE DE DÉCLARATION COMPTE ICI, et seulement ici : si deux plugins
+# répondent pour le même morceau, le premier déclaré gagne, et un plugin déclaré
+# plus bas ne l'écrase jamais. C'est ce qui rend l'affichage reproductible d'un
+# démarrage à l'autre, indépendamment de la latence réseau.
+#
+# `ouifm-metas` n'a rien à configurer : la table des 21 flux OUI FM est
+# embarquée dans son binaire. Le fichier /etc/ritornello/ouifm-metas.toml est
+# facultatif, pour corriger une correspondance devenue fausse ou en ajouter une
+# (voir ouifm-metas.example.toml).
+[[plugin]]
+name = "ouifm-metas"
+kind = "metadata"
+exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-ouifm-metas"
+
+[[plugin]]
+name = "musicbrainz"
+kind = "metadata"
+exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-musicbrainz"
+
 [[plugin]]
 name = "generic-input"
 kind = "input"

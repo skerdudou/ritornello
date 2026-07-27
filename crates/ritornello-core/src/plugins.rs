@@ -8,6 +8,13 @@ pub enum PluginKind {
     Source,
     Display,
     Input,
+    /// Enrichit ce que joue la Source active sans que celle-ci le sache.
+    ///
+    /// **L'ordre de déclaration compte** : entre deux plugins `metadata` qui
+    /// répondent pour le même morceau, le premier déclaré gagne. C'est le seul
+    /// genre pour lequel l'ordre du fichier est porteur de sens, d'où la
+    /// mention ici et dans le README.
+    Metadata,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -98,6 +105,37 @@ admin = true
         assert!(!m.plugins[0].admin);
         assert_eq!(m.plugins[1].kind, PluginKind::Display);
         assert!(m.plugins[1].admin);
+    }
+
+    #[test]
+    fn charge_les_plugins_metadata_dans_lordre_de_declaration() {
+        // L'ordre du fichier est la priorité d'arbitrage : il doit survivre au
+        // chargement, et rien ne doit trier cette liste.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[plugin]]
+name = "ouifm-metas"
+kind = "metadata"
+exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-ouifm-metas"
+
+[[plugin]]
+name = "musicbrainz"
+kind = "metadata"
+exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-musicbrainz"
+"#,
+        )
+        .unwrap();
+        let m = PluginManifest::load(&path).unwrap();
+        let metadata: Vec<&str> = m
+            .plugins
+            .iter()
+            .filter(|p| p.kind == PluginKind::Metadata)
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(metadata, vec!["ouifm-metas", "musicbrainz"]);
     }
 
     #[test]
