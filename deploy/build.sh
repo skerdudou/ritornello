@@ -7,6 +7,9 @@
 # une image Docker sans Node.
 set -euo pipefail
 
+# Toujours depuis la racine du depot, comme deploy.sh : lancable de n'importe ou.
+cd "$(dirname "$0")/.."
+
 TARGET="${TARGET:-armv7-unknown-linux-gnueabihf}"
 
 echo "== 1/3 IHM web (npm) =="
