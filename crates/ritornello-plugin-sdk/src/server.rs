@@ -23,12 +23,21 @@ pub struct SourceOutcome {
     pub line2_replaceable: bool,
     /// La vue est un message éphémère (voir `SourceMessage::transient`).
     pub transient: bool,
+    /// Touche 1-9 correspondant à ce qui joue (voir `SourceMessage::preset`).
+    pub preset: Option<u8>,
 }
 
 impl SourceOutcome {
     /// Issue portant seulement une action (ni vue, ni identité).
     pub fn new(action: SourceAction) -> Self {
-        Self { action, view: None, identity: None, line2_replaceable: false, transient: false }
+        Self {
+            action,
+            view: None,
+            identity: None,
+            line2_replaceable: false,
+            transient: false,
+            preset: None,
+        }
     }
 
     pub fn with_view(mut self, view: View) -> Self {
@@ -49,6 +58,15 @@ impl SourceOutcome {
     /// pour signaler un incident sans détruire l'affichage de ce qui joue.
     pub fn transient(mut self) -> Self {
         self.transient = true;
+        self
+    }
+
+    /// Déclare la touche 1-9 de la télécommande à laquelle correspond ce qui
+    /// joue : la présélection pour une radio, la piste pour un cd. C'est ce
+    /// qui permet à l'IHM de mettre la touche active en évidence. Le cœur
+    /// l'oublie de lui-même quand plus rien ne joue.
+    pub fn preset(mut self, n: u8) -> Self {
+        self.preset = Some(n);
         self
     }
 
@@ -79,15 +97,29 @@ pub struct Notification {
     pub line2_replaceable: bool,
     /// Voir `SourceMessage::transient`.
     pub transient: bool,
+    /// Voir `SourceOutcome::preset`.
+    pub preset: Option<u8>,
 }
 
 impl Notification {
     pub fn view(view: View) -> Self {
-        Self { view: Some(view), identity: None, line2_replaceable: false, transient: false }
+        Self {
+            view: Some(view),
+            identity: None,
+            line2_replaceable: false,
+            transient: false,
+            preset: None,
+        }
     }
 
     pub fn line2_replaceable(mut self) -> Self {
         self.line2_replaceable = true;
+        self
+    }
+
+    /// Voir `SourceOutcome::preset`.
+    pub fn preset(mut self, n: u8) -> Self {
+        self.preset = Some(n);
         self
     }
 
@@ -214,6 +246,7 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                     identity: outcome.identity,
                     line2_replaceable: outcome.line2_replaceable,
                     transient: outcome.transient,
+                    preset: outcome.preset,
                 };
                 write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
             }
@@ -227,6 +260,7 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                             identity: n.identity,
                             line2_replaceable: n.line2_replaceable,
                             transient: n.transient,
+                            preset: n.preset,
                         };
                         write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
                     }

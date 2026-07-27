@@ -96,6 +96,11 @@ pub struct Core<P: Player> {
     /// `view` continue d'être tenue à jour par `handle_source_update` pour
     /// réapparaître dès l'expiration.
     overlay: Option<(View, Instant)>,
+    /// Touche 1-9 correspondant à ce qui joue, déclarée par la Source active
+    /// (voir `SourceMessage::preset`). Oubliée dès que plus rien ne joue —
+    /// c'est `set_identity(None)` qui fait foi, comme pour l'ardoise des
+    /// métadonnées.
+    preset: Option<u8>,
     state_path: PathBuf,
     view_tx: watch::Sender<View>,
     catalog: Arc<RwLock<Catalog>>,
@@ -137,6 +142,7 @@ impl<P: Player> Core<P> {
             view: View::default(),
             view_line2_replaceable: false,
             overlay: None,
+            preset: None,
             state_path,
             view_tx,
             catalog,
@@ -219,11 +225,22 @@ impl<P: Player> Core<P> {
             };
             self.set_identity(valeur);
         }
+        // Après l'identité : `set_identity(None)` efface la sélection, et une
+        // trame qui porterait « rien ne joue » **et** une sélection (ça
+        // n'arrive pas, mais rien ne l'interdit) doit laisser gagner la
+        // déclaration explicite.
+        if let Some(p) = update.preset {
+            self.preset = Some(p);
+        }
         // Toujours pousser : `push_view` donne la priorité à l'incrustation si
         // elle est active, et le canal écarte une vue identique — une vue source
         // arrivant pendant une incrustation ne la perturbe donc pas, tout en
         // étant mémorisée pour reparaître.
         self.push_view();
+        // La sélection courante fait partie de l'état diffusé : publier ici
+        // couvre la trame qui ne change ni identité ni métadonnées (les autres
+        // chemins publient déjà, et le canal déduplique).
+        self.publie_etat();
     }
 
     /// Change ce qui joue : remet l'ardoise des métadonnées à zéro, prévient les
@@ -232,6 +249,14 @@ impl<P: Player> Core<P> {
     /// `None` = plus rien ne joue. Le cœur ne regarde jamais **dans** l'identité :
     /// il la compare par égalité et la relaie telle quelle.
     fn set_identity(&mut self, identity: Option<serde_json::Value>) {
+        // « Plus rien ne joue » emporte la sélection courante avec lui : la
+        // touche mise en évidence désigne **ce qui joue**, pas la dernière
+        // pression. Fait avant le garde d'égalité : une identité déjà à
+        // `None` (arrêt répété, bascule de source après un stop) doit quand
+        // même laisser la sélection effacée.
+        if identity.is_none() {
+            self.preset = None;
+        }
         if !self.metadonnees.set_identity(identity) {
             return;
         }
@@ -334,6 +359,7 @@ impl<P: Player> Core<P> {
             volume: self.volume,
             muted: self.muted,
             standby: self.standby,
+            preset: self.preset,
             morceau: self.metadonnees.etat(),
         }
     }
@@ -777,12 +803,12 @@ mod tests {
     /// Mise à jour ne portant qu'une vue, dont la `line2` est la ligne propre de
     /// la Source (non remplaçable) — le cas de la radio.
     fn vue(v: View) -> SourceUpdate {
-        SourceUpdate { view: Some(v), identity: None, line2_replaceable: false, transient: false }
+        SourceUpdate { view: Some(v), identity: None, line2_replaceable: false, transient: false, preset: None }
     }
 
     /// Mise à jour dont la `line2` est un remplissage remplaçable — le cas du cd.
     fn vue_remplacable(v: View) -> SourceUpdate {
-        SourceUpdate { view: Some(v), identity: None, line2_replaceable: true, transient: false }
+        SourceUpdate { view: Some(v), identity: None, line2_replaceable: true, transient: false, preset: None }
     }
 
     /// Mise à jour ne portant qu'une identité.
@@ -792,6 +818,7 @@ mod tests {
             identity: Some(IdentityUpdate::Playing(identity)),
             line2_replaceable: false,
             transient: false,
+            preset: None,
         }
     }
 
@@ -1268,6 +1295,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn la_selection_declaree_est_diffusee_puis_oubliee_quand_rien_ne_joue() {
+        // La touche 1-9 mise en évidence sur la télécommande de l'IHM désigne
+        // **ce qui joue** : elle suit la déclaration de la Source, et
+        // disparaît à l'arrêt plutôt que de rester sur la dernière pression.
+        let (mut core, _vue_rx, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
+        let mut update = joue(serde_json::json!({"kind": "stream", "url": "http://inter"}));
+        update.preset = Some(2);
+        core.handle_source_update("radio", update);
+        assert_eq!(etat_rx.borrow().preset, Some(2));
+        core.handle_command(Command::Stop).await.unwrap();
+        assert_eq!(etat_rx.borrow().preset, None);
+    }
+
+    #[tokio::test]
+    async fn changer_de_source_oublie_la_selection_de_lancienne() {
+        // La présélection 2 de la radio ne veut rien dire pour le cd : la
+        // laisser en évidence après la bascule désignerait une touche au
+        // hasard.
+        let (mut core, _vue_rx, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
+        let mut update = joue(serde_json::json!({"kind": "stream", "url": "http://inter"}));
+        update.preset = Some(2);
+        core.handle_source_update("radio", update);
+        assert_eq!(etat_rx.borrow().preset, Some(2));
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        assert_eq!(etat_rx.borrow().preset, None);
+    }
+
+    #[tokio::test]
     async fn lidentite_declaree_par_la_source_est_annoncee_aux_plugins() {
         let (mut core, _vue_rx, np_rx, _etat_rx, _d) = setup_metadonnees(vec!["ouifm".into()]);
         let id = serde_json::json!({"kind": "stream", "url": "http://ouifm"});
@@ -1572,7 +1627,7 @@ mod tests {
         let message = View { line1: "RADIO  P4".into(), line2: "empty preset".into(), line3: String::new() };
         core.handle_source_update(
             "radio",
-            SourceUpdate { view: Some(message), identity: None, line2_replaceable: false, transient: true },
+            SourceUpdate { view: Some(message), identity: None, line2_replaceable: false, transient: true, preset: None },
         );
         let affiche = vue_rx.borrow_and_update().clone();
         assert_eq!(affiche.line2, "empty preset", "le message doit s'afficher");

@@ -22,6 +22,12 @@ export interface PlayerPayload {
   volume: number
   muted: boolean
   standby: boolean
+  /**
+   * Touche 1-9 correspondant a ce qui joue (preselection radio, piste cd),
+   * telle que la source active l'a declaree — c'est elle que la telecommande
+   * met en evidence. `null` : rien ne joue, ou rien de declare.
+   */
+  preset: number | null
   artist: string | null
   title: string | null
   album: string | null

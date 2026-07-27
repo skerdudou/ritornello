@@ -68,17 +68,25 @@ test('l’état du lecteur arrive en flux poussé dès la connexion', async ({ p
     volume: number
     muted: boolean
     standby: boolean
+    preset: number | null
     title: string | null
   }
   expect(etat.source).toBe('radio')
   expect(etat.volume).toBeGreaterThan(0)
   expect(etat.muted).toBe(false)
   expect(etat.standby).toBe(false)
+  // Le reveil de la radio joue la preselection 1 (stations.toml du harnais) et
+  // la declare : c'est la preuve de bout en bout que la touche active voyage
+  // du plugin jusqu'a la SPA. FIP n'emet pas d'ICY, donc pas de titre.
+  expect(etat.preset).toBe(1)
   expect(etat.title).toBeNull()
   // Et l'encart du lecteur les affiche.
   await expect(page.locator('[data-source]')).toHaveText('radio')
   await expect(page.locator('[data-volume]')).toHaveText(`${etat.volume} %`)
   await expect(page.locator('[data-now-playing]')).toHaveCount(0)
+  // La touche de la preselection qui joue est mise en evidence, et elle seule.
+  await expect(page.locator('[data-preset-button="1"]')).toHaveAttribute('data-preset-active', 'true')
+  await expect(page.locator('[data-preset-active]')).toHaveCount(1)
 })
 
 test('bascule clair/sombre, appliquée et persistée', async ({ page }) => {

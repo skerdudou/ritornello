@@ -93,12 +93,21 @@ impl CdSource {
         match (self.lecture && self.present, &self.toc) {
             // La TOC désigne le disque, l'index désigne la piste : les deux sont
             // nécessaires, un changement de piste étant un changement de morceau.
-            (true, Some(toc)) => sortie.plays(serde_json::json!({
-                "kind": "disc",
-                "toc": toc,
-                "tracks": self.total_tracks,
-                "track": self.track,
-            })),
+            (true, Some(toc)) => {
+                let sortie = sortie.plays(serde_json::json!({
+                    "kind": "disc",
+                    "toc": toc,
+                    "tracks": self.total_tracks,
+                    "track": self.track,
+                }));
+                // Les touches 1-9 sélectionnent les pistes sur cette source :
+                // la piste en cours est donc la touche à mettre en évidence —
+                // quand elle en a une (au-delà de la 9e, aucune).
+                match u8::try_from(self.track + 1) {
+                    Ok(n) if (1..=9).contains(&n) => sortie.preset(n),
+                    _ => sortie,
+                }
+            }
             // Rien ne joue, ou rien d'identifiable (TOC pas encore lue,
             // illisible, lecteur vide). On le dit : une identité partielle
             // ferait travailler les plugins pour rien.
@@ -312,6 +321,7 @@ impl CdSource {
             // Jamais éphémère : ce que le cd rapporte (disque inséré, TOC lue,
             // piste changée) décrit l'état durable de l'appareil.
             transient: false,
+            preset: issue.preset,
         }
     }
 }
@@ -528,6 +538,25 @@ mod tests {
                 "track": 2,
             })))
         );
+    }
+
+    #[tokio::test]
+    async fn la_piste_en_lecture_est_declaree_comme_touche_active() {
+        // Les touches 1-9 selectionnent les pistes sur cette source : la piste
+        // en cours (0-indexee en interne) est la touche que l'IHM met en
+        // evidence.
+        let mut source = source_en_lecture();
+        let out = source.player_track(2).await;
+        assert_eq!(out.preset, Some(3));
+        // Sans lecture, aucune touche a mettre en evidence.
+        source.lecture = false;
+        assert_eq!(source.issue(SourceAction::Noop).preset, None);
+        // Au-dela de la 9e piste, aucune touche ne correspond : rien n'est
+        // declare plutot qu'un chiffre faux.
+        source.lecture = true;
+        source.total_tracks = 12;
+        source.track = 10;
+        assert_eq!(source.issue(SourceAction::Noop).preset, None);
     }
 
     #[tokio::test]

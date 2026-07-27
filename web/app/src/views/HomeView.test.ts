@@ -1,6 +1,33 @@
 import { mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
+import type { PlayerPayload } from '../types'
 import { REMOTE_COMMANDS, REMOTE_POWER, REMOTE_ROWS } from './remoteCommands'
+
+/** Faux `EventSource` : jsdom n'en fournit pas. */
+class FauxEventSource {
+  static derniere: FauxEventSource | null = null
+  onmessage: ((e: MessageEvent) => void) | null = null
+  constructor(public url: string) {
+    FauxEventSource.derniere = this
+  }
+  close() {}
+  pousse(etat: Partial<PlayerPayload>) {
+    const complet: PlayerPayload = {
+      source: 'radio',
+      volume: 60,
+      muted: false,
+      standby: false,
+      preset: null,
+      artist: null,
+      title: null,
+      album: null,
+      duration_s: null,
+      origin: null,
+      ...etat,
+    }
+    this.onmessage?.({ data: JSON.stringify(complet) } as MessageEvent)
+  }
+}
 
 describe('REMOTE_COMMANDS', () => {
   it('couvre les 10 commandes simples du protocole, veille comprise', () => {
@@ -75,6 +102,38 @@ describe('HomeView', () => {
     const action = w.find('[data-slot="card-action"]')
     expect(action.exists()).toBe(true)
     expect(action.find('[data-remote-power]').exists()).toBe(true)
+  })
+
+  it('met en évidence la touche de la présélection qui joue, et l’éteint à l’arrêt', async () => {
+    // « On ne sait pas sur quel preset on est » : la touche correspondant à ce
+    // qui joue (déclarée par la source active via le flux poussé) porte
+    // aria-current et la variante pleine ; les autres restent neutres.
+    vi.stubGlobal('EventSource', FauxEventSource)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
+    const HomeView = (await import('./HomeView.vue')).default
+    const w = mount(HomeView)
+    FauxEventSource.derniere!.pousse({ preset: 3 })
+    await w.vm.$nextTick()
+    const actif = w.find('[data-preset-button="3"]')
+    expect(actif.attributes('data-preset-active')).toBe('true')
+    expect(actif.attributes('aria-current')).toBe('true')
+    expect(w.findAll('[data-preset-active]')).toHaveLength(1)
+    // Plus rien ne joue : plus aucune touche en évidence.
+    FauxEventSource.derniere!.pousse({ preset: null })
+    await w.vm.$nextTick()
+    expect(w.findAll('[data-preset-active]')).toHaveLength(0)
+  })
+
+  it('relaie l’état poussé à l’encart Lecteur', async () => {
+    // L'unique connexion SSE de la page vit dans HomeView : l'encart doit
+    // recevoir le même état en prop (c'était son propre flux auparavant).
+    vi.stubGlobal('EventSource', FauxEventSource)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
+    const HomeView = (await import('./HomeView.vue')).default
+    const w = mount(HomeView)
+    FauxEventSource.derniere!.pousse({ volume: 45 })
+    await w.vm.$nextTick()
+    expect(w.find('[data-volume]').text()).toBe('45 %')
   })
 
   it('le bouton de veille poste la commande Power', async () => {

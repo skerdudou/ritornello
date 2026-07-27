@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { Badge, Card, CardContent, CardHeader, CardTitle } from '@ritornello/ui'
-import { onMounted } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
-import { formateDuree, riendAfficher, usePlayer } from '../composables/usePlayer'
+import { formateDuree, riendAfficher } from '../composables/usePlayer'
+import type { PlayerPayload } from '../types'
 
+// L'etat vient du parent (HomeView), qui tient l'**unique** connexion SSE de
+// la page : la telecommande en a besoin elle aussi (touche active), et ouvrir
+// une seconde connexion ici doublerait les flux pour le meme contenu.
 const { t } = useCatalog()
-const { etat, ouvre } = usePlayer()
-
-onMounted(ouvre)
+defineProps<{ etat: PlayerPayload | null }>()
 </script>
 
 <template>

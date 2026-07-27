@@ -2,19 +2,23 @@
 import {
   api, Button, Card, CardAction, CardContent, CardHeader, CardTitle, toast,
 } from '@ritornello/ui'
+import { onMounted } from 'vue'
 import PlayerCard from '../components/PlayerCard.vue'
 import { useCatalog } from '../composables/useCatalog'
+import { usePlayer } from '../composables/usePlayer'
 import type { Command } from '../types'
 import { REMOTE_POWER, REMOTE_ROWS } from './remoteCommands'
 
 const { t } = useCatalog()
 
-const PRESETS = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+// L'unique connexion SSE de la page vit ici : l'encart Lecteur (en prop) et
+// la telecommande (touche active) consomment le meme etat, pousse par
+// `/api/player` — rien n'est sonde, et l'etat suit la telecommande infrarouge
+// comme les autres onglets.
+const { etat, ouvre } = usePlayer()
+onMounted(ouvre)
 
-// La source active vient desormais du flux pousse `/api/player`, avec le reste
-// de l'etat volatil, et non d'une lecture unique de `/api/status` au montage :
-// elle changeait sans que la page le sache (telecommande infrarouge, autre
-// onglet, bouton de l'appareil).
+const PRESETS = [1, 2, 3, 4, 5, 6, 7, 8, 9]
 
 async function send(cmd: Command) {
   const err = await api.post('/api/command', cmd)
@@ -24,7 +28,7 @@ async function send(cmd: Command) {
 
 <template>
   <div class="space-y-4">
-    <PlayerCard />
+    <PlayerCard :etat="etat" />
     <Card>
       <!-- La veille au coin de la carte : c'est la seule commande qui agisse sur
            l'appareil entier plutot que sur la lecture, et la plus consequente —
@@ -41,12 +45,18 @@ async function send(cmd: Command) {
         </CardAction>
       </CardHeader>
       <CardContent class="space-y-3">
+        <!-- La touche correspondant a ce qui joue est mise en evidence
+             (variante pleine + aria-current) : la source active la declare
+             (preselection radio, piste cd), et elle s'eteint quand plus rien
+             ne joue. -->
         <div class="grid grid-cols-3 gap-2 sm:grid-cols-9">
           <Button
             v-for="n in PRESETS"
             :key="n"
             :data-preset-button="n"
-            variant="secondary"
+            :data-preset-active="etat?.preset === n ? 'true' : undefined"
+            :aria-current="etat?.preset === n ? 'true' : undefined"
+            :variant="etat?.preset === n ? 'default' : 'secondary'"
             @click="send({ cmd: 'Select', arg: n })"
           >
             {{ n }}

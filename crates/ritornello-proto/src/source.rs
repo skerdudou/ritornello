@@ -99,6 +99,18 @@ pub struct SourceMessage {
     /// d'elle-même.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub transient: bool,
+    /// La touche 1-9 de la télécommande à laquelle correspond ce qui joue
+    /// **après** cette trame : la présélection pour la radio, la piste pour le
+    /// cd. C'est ce qui permet à l'IHM de mettre en évidence la touche active —
+    /// une information que la Source seule possède, le cœur n'interprétant
+    /// jamais ce que `Select(n)` a voulu dire.
+    ///
+    /// Absent = « cette trame ne dit rien de la sélection, garde la
+    /// précédente ». Le cœur l'oublie de lui-même quand plus rien ne joue
+    /// (identité `Nothing`, arrêt, changement de source, veille) : il n'y a
+    /// donc pas de forme « effacée » à déclarer ici.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<u8>,
 }
 
 #[cfg(test)]
@@ -142,6 +154,7 @@ mod tests {
             identity: Some(IdentityUpdate::Playing(serde_json::json!({"kind": "stream"}))),
             line2_replaceable: false,
             transient: false,
+            preset: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
@@ -152,7 +165,7 @@ mod tests {
 
     #[test]
     fn message_notification_sans_id() {
-        let m = SourceMessage { id: None, action: None, view: Some(View::default()), identity: None, line2_replaceable: false, transient: false };
+        let m = SourceMessage { id: None, action: None, view: Some(View::default()), identity: None, line2_replaceable: false, transient: false, preset: None };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, None);
@@ -174,11 +187,32 @@ mod tests {
     }
 
     #[test]
+    fn la_selection_fait_le_tour_et_reste_absente_par_defaut() {
+        // Roundtrip du champ, et compatibilité : une trame d'un plugin
+        // antérieur (sans le champ) doit se relire comme « rien déclaré ».
+        let m = SourceMessage {
+            id: Some(3),
+            action: Some(SourceAction::Noop),
+            view: None,
+            identity: None,
+            line2_replaceable: false,
+            transient: false,
+            preset: Some(4),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"preset\":4"));
+        let back: SourceMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.preset, Some(4));
+        let ancien: SourceMessage = serde_json::from_str(r#"{"id":3}"#).unwrap();
+        assert_eq!(ancien.preset, None);
+    }
+
+    #[test]
     fn identite_absente_nest_pas_serialisee() {
         // La majorité des trames ne disent rien de l'identité (SetLocale,
         // Deactivate…) : les alourdir d'un `"identity":null` serait du bruit sur
         // une liaison volontairement lisible à l'œil.
-        let m = SourceMessage { id: Some(2), action: None, view: None, identity: None, line2_replaceable: false, transient: false };
+        let m = SourceMessage { id: Some(2), action: None, view: None, identity: None, line2_replaceable: false, transient: false, preset: None };
         assert_eq!(serde_json::to_string(&m).unwrap(), r#"{"id":2,"action":null,"view":null}"#);
     }
 }

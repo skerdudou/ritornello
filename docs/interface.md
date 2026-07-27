@@ -29,6 +29,12 @@ muet, veille, et le morceau en cours avec l'origine de l'information) est
 alimenté en flux poussé par `GET /api/player` (SSE) — rien n'est sondé, et
 l'état suit la télécommande infrarouge comme les autres onglets.
 
+Sur la grille 1-9, la touche correspondant à **ce qui joue** est mise en
+évidence : la présélection pour la radio, la piste pour le CD. C'est la
+source active qui la déclare (champ `preset` de ses trames, voir le
+protocole) — le cœur n'interprète jamais ce que `Select(n)` a voulu dire —
+et elle s'éteint dès que plus rien ne joue.
+
 ## Télécommande physique
 
 Si une touche ne répond pas, ouvrir `http://<hôte>:8080/plugins/generic-input/`,

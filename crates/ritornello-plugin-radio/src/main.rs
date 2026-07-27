@@ -68,6 +68,9 @@ impl RadioSource {
                     line3: String::new(),
                 })
                 .plays(Self::identite_du_flux(&st.url))
+                // La touche que l'IHM doit mettre en évidence : seule la
+                // Source sait à quelle présélection correspond ce qui joue.
+                .preset(n)
         } else {
             let empty = self.catalog.read().unwrap().get("empty_preset").to_string();
             // Message **éphémère** : rien n'a été lancé, donc la station
@@ -316,6 +319,20 @@ mod tests {
                 "url": "http://icecast.radiofrance.fr/franceinter-midfi.mp3"
             })))
         );
+    }
+
+    #[tokio::test]
+    async fn jouer_une_preselection_la_declare_pour_lihm() {
+        // C'est ce qui permet a la telecommande web de mettre la touche active
+        // en evidence : seule la Source sait a quelle preselection correspond
+        // ce qui joue.
+        let mut source = make_source(two_stations(), 1);
+        let outcome = source.select(2).await;
+        assert_eq!(outcome.preset, Some(2));
+        // Et une preselection vide ne declare rien : ce qui joue n'a pas
+        // change.
+        let outcome = source.select(7).await;
+        assert_eq!(outcome.preset, None);
     }
 
     #[tokio::test]

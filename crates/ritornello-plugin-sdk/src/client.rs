@@ -45,6 +45,9 @@ pub struct SourceUpdate {
     pub line2_replaceable: bool,
     /// Voir `SourceMessage::transient`.
     pub transient: bool,
+    /// Voir `SourceMessage::preset`. Absent = rien déclaré, garder la valeur
+    /// courante.
+    pub preset: Option<u8>,
 }
 
 pub struct SourceClient {
@@ -78,13 +81,14 @@ impl SourceClient {
                         let _ = tx.send(action);
                     }
                 }
-                if msg.view.is_some() || msg.identity.is_some() {
+                if msg.view.is_some() || msg.identity.is_some() || msg.preset.is_some() {
                     let porte_identite = msg.identity.is_some();
                     let update = SourceUpdate {
                         view: msg.view,
                         identity: msg.identity,
                         line2_replaceable: msg.line2_replaceable,
                         transient: msg.transient,
+                        preset: msg.preset,
                     };
                     if view_tx.try_send((name.clone(), update)).is_err() {
                         // Conséquence aggravée depuis que la trame porte aussi
@@ -363,6 +367,7 @@ mod tests {
                 )),
                 line2_replaceable: false,
                 transient: false,
+                preset: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             let _ = socket_for_server; // garde le chemin vivant pour le débogage
@@ -405,6 +410,7 @@ mod tests {
                 identity: None,
                 line2_replaceable: false,
                 transient: false,
+                preset: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
