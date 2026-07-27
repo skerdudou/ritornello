@@ -1,4 +1,4 @@
-import { Select, toast } from '@ritornello/ui'
+import { Select, SelectItem, toast } from '@ritornello/ui'
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHistory, createRouter } from 'vue-router'
@@ -156,6 +156,16 @@ describe('StatusView — langue', () => {
     // Le catalogue a ete relu apres le PUT — sans quoi l'IHM resterait
     // affichee dans l'ancienne langue jusqu'au prochain rechargement manuel.
     expect(spy.mock.calls.filter((c) => c[0] === '/api/i18n').length).toBeGreaterThan(avant)
+  })
+
+  it('affiche le nom de la langue et non son code', async () => {
+    // « français » se lit, « fr » se devine. Le code reste la valeur envoyée au
+    // cœur (verifié par le test du PUT ci-dessus).
+    const { w } = await monter()
+    const textes = w.findAllComponents(SelectItem).map((i) => i.text())
+    expect(textes).toContain('français')
+    expect(textes).toContain('English')
+    expect(textes).not.toContain('fr')
   })
 
   it('un PUT de langue en échec est signalé et ne recharge rien', async () => {

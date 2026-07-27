@@ -3,7 +3,7 @@ import { api, Button, Card, CardContent, CardHeader, CardTitle, toast } from '@r
 import PlayerCard from '../components/PlayerCard.vue'
 import { useCatalog } from '../composables/useCatalog'
 import type { Command } from '../types'
-import { REMOTE_COMMANDS } from './remoteCommands'
+import { REMOTE_POWER, REMOTE_ROWS } from './remoteCommands'
 
 const { t } = useCatalog()
 
@@ -24,7 +24,15 @@ async function send(cmd: Command) {
   <div class="space-y-4">
     <PlayerCard />
     <Card>
-      <CardHeader><CardTitle>{{ t('remote_title') }}</CardTitle></CardHeader>
+      <!-- La veille au coin de la carte : c'est la seule commande qui agisse sur
+           l'appareil entier plutot que sur la lecture, et la plus consequente —
+           la tenir a l'ecart de la grille evite de l'actionner par megarde. -->
+      <CardHeader class="flex-row items-center justify-between space-y-0">
+        <CardTitle>{{ t('remote_title') }}</CardTitle>
+        <Button variant="outline" size="sm" data-remote-power @click="send(REMOTE_POWER.cmd)">
+          {{ t(REMOTE_POWER.key) }}
+        </Button>
+      </CardHeader>
       <CardContent class="space-y-3">
         <div class="grid grid-cols-3 gap-2 sm:grid-cols-9">
           <Button
@@ -37,8 +45,11 @@ async function send(cmd: Command) {
             {{ n }}
           </Button>
         </div>
-        <div class="flex flex-wrap gap-2">
-          <Button v-for="c in REMOTE_COMMANDS" :key="c.key" variant="outline" @click="send(c.cmd)">
+        <!-- Une rangee par groupe : transport, contenu, son, appareil. Le
+             groupement est une donnee (`REMOTE_ROWS`), pas une mise en page
+             recopiee ici. -->
+        <div v-for="(rangee, i) in REMOTE_ROWS" :key="i" class="flex flex-wrap gap-2" data-remote-row>
+          <Button v-for="c in rangee" :key="c.key" variant="outline" @click="send(c.cmd)">
             {{ t(c.key) }}
           </Button>
         </div>

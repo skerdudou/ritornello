@@ -5,6 +5,7 @@ import {
 } from '@ritornello/ui'
 import { onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
+import { nomLangue } from '../composables/langues'
 import { useCatalog } from '../composables/useCatalog'
 import type { AudioPayload, LocalePayload, LogsPayload, StatusPayload } from '../types'
 
@@ -110,7 +111,11 @@ async function changerLangue() {
         <Select v-model="lang">
           <SelectTrigger class="min-w-32"><SelectValue /></SelectTrigger>
           <SelectContent>
-            <SelectItem v-for="l in locale.locales" :key="l" :value="l">{{ l }}</SelectItem>
+            <!-- Nom de la langue et non son code : « français » se lit, « fr »
+                 se devine. Le code reste la valeur envoyée au cœur. -->
+            <SelectItem v-for="l in locale.locales" :key="l" :value="l">
+              {{ nomLangue(l) }}
+            </SelectItem>
           </SelectContent>
         </Select>
         <Button data-lang-change @click="changerLangue">{{ t('change') }}</Button>
