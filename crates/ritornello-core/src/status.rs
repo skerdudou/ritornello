@@ -67,10 +67,10 @@ pub struct AppState {
     pub cmd_tx: mpsc::Sender<ritornello_proto::Command>,
     pub theme_current: Arc<RwLock<crate::theme::ThemeState>>,
     pub theme_tx: mpsc::Sender<crate::theme::ThemeState>,
-    /// Morceau en cours, alimenté par le cœur. Un `watch` : chaque connexion
-    /// SSE clone ce récepteur, seule la dernière valeur compte, et un
-    /// navigateur lent ne peut pas retenir le cœur.
-    pub now_playing: tokio::sync::watch::Receiver<crate::metadata::NowPlayingState>,
+    /// État du lecteur (source, volume, muet, veille, morceau), alimenté par le
+    /// cœur. Un `watch` : chaque connexion SSE clone ce récepteur, seule la
+    /// dernière valeur compte, et un navigateur lent ne peut pas retenir le cœur.
+    pub player: tokio::sync::watch::Receiver<crate::metadata::PlayerState>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -80,7 +80,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/locale", get(locale_json).put(locale_put))
         .route("/api/i18n", get(i18n_json))
         .route("/api/logs", get(logs_json))
-        .route("/api/now-playing", get(now_playing_sse))
+        .route("/api/player", get(player_sse))
         .route("/api/theme", get(crate::theme::theme_json).put(crate::theme::theme_put))
         .route("/api/command", axum::routing::post(command_post))
         .route(
@@ -242,13 +242,22 @@ async fn logs_json(State(state): State<AppState>) -> Json<LogsResponse> {
     Json(LogsResponse { lines })
 }
 
-/// Morceau en cours, en flux poussé (`text/event-stream`).
+/// État du lecteur en flux poussé (`text/event-stream`) : source active, volume,
+/// muet, veille, et le morceau quand on le connaît.
+///
+/// Tout ce qui est **volatil** passe ici, et rien d'autre : c'est la raison pour
+/// laquelle le volume n'est exposé par aucune route sondée. `/api/status` porte à
+/// côté le contrat de navigation (quels plugins existent, lesquels ont une page
+/// d'admin), structurellement stable et lu une fois au montage.
 ///
 /// Poussé et non sondé, pour trois raisons mesurées avant de trancher : la SPA
 /// ne sonde rien aujourd'hui (aucun `setInterval`, aucun WebSocket) ; le cœur
 /// diffuse **déjà** ses changements sur un canal `watch`, donc la route ne
 /// coûte que quelques lignes et n'ajoute aucun état ; et un appareil le plus
 /// souvent inactif n'a pas à recevoir des requêtes qui n'apprennent rien.
+/// Corollaire utile : le volume affiché suit la télécommande infrarouge et les
+/// autres onglets, ce qu'un sondage n'aurait donné qu'avec un intervalle de
+/// retard.
 ///
 /// L'état courant est émis **dès la connexion** — même propriété que le flux
 /// d'OUI FM qu'on consomme par ailleurs : un onglet ouvert au milieu d'un
@@ -257,13 +266,13 @@ async fn logs_json(State(state): State<AppState>) -> Json<LogsResponse> {
 /// Pas d'authentification, comme toutes les autres routes de l'appareil : en
 /// ajouter ici seulement donnerait l'illusion d'une protection alors que
 /// `/api/command` pilote déjà la lecture sans en demander.
-async fn now_playing_sse(
+async fn player_sse(
     State(state): State<AppState>,
 ) -> axum::response::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>>
 {
     use futures::StreamExt;
 
-    let flux = futures::stream::unfold((state.now_playing.clone(), true), |(mut rx, premier)| async move {
+    let flux = futures::stream::unfold((state.player.clone(), true), |(mut rx, premier)| async move {
         if premier {
             // `borrow_and_update` marque la valeur comme vue : le prochain
             // `changed()` attendra un vrai changement au lieu de renvoyer
@@ -278,7 +287,7 @@ async fn now_playing_sse(
         Some((etat, (rx, false)))
     })
     .map(|etat| {
-        // La sérialisation d'un `NowPlayingState` ne peut pas échouer (que des
+        // La sérialisation d'un `PlayerState` ne peut pas échouer (que des
         // types simples) ; en cas d'imprévu, un objet vide vaut mieux qu'une
         // connexion coupée, que le client interpréterait comme une panne.
         Ok(axum::response::sse::Event::default()
@@ -343,23 +352,23 @@ impl std::io::Write for LogBufferWriter {
 #[cfg(test)]
 pub(crate) mod tests_support {
     use super::*;
-    use crate::metadata::NowPlayingState;
+    use crate::metadata::PlayerState;
 
     /// Récepteur de morceau en cours pour les montages qui ne testent pas le
     /// flux SSE : l'émetteur est lâché aussitôt, donc le flux se termine après
     /// la valeur initiale. Les tests du flux passent par
     /// `app_state_with_now_playing`, qui garde l'émetteur.
-    pub(crate) fn now_playing_inerte() -> tokio::sync::watch::Receiver<NowPlayingState> {
-        tokio::sync::watch::channel(NowPlayingState::default()).1
+    pub(crate) fn player_inerte() -> tokio::sync::watch::Receiver<PlayerState> {
+        tokio::sync::watch::channel(PlayerState::default()).1
     }
 
     /// Montage avec l'émetteur de morceau en cours conservé, pour pousser des
     /// changements pendant un test du flux SSE.
-    pub(crate) fn app_state_with_now_playing(
-        initial: NowPlayingState,
-    ) -> (AppState, tokio::sync::watch::Sender<NowPlayingState>) {
+    pub(crate) fn app_state_with_player(
+        initial: PlayerState,
+    ) -> (AppState, tokio::sync::watch::Sender<PlayerState>) {
         let (tx, rx) = tokio::sync::watch::channel(initial);
-        (AppState { now_playing: rx, ..app_state() }, tx)
+        (AppState { player: rx, ..app_state() }, tx)
     }
 
     pub(crate) fn sample() -> StatusState {
@@ -395,7 +404,7 @@ pub(crate) mod tests_support {
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
             theme_tx: tokio::sync::mpsc::channel(4).0,
-            now_playing: now_playing_inerte(),
+            player: player_inerte(),
         }
     }
 
@@ -422,7 +431,7 @@ pub(crate) mod tests_support {
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
             theme_tx: tokio::sync::mpsc::channel(4).0,
-            now_playing: now_playing_inerte(),
+            player: player_inerte(),
         };
         (state, audio_rx)
     }
@@ -451,7 +460,7 @@ pub(crate) mod tests_support {
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
             theme_tx: tokio::sync::mpsc::channel(4).0,
-            now_playing: now_playing_inerte(),
+            player: player_inerte(),
         };
         (state, cmd_rx)
     }
@@ -488,7 +497,7 @@ pub(crate) mod tests_support {
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
             theme_tx: tokio::sync::mpsc::channel(4).0,
-            now_playing: now_playing_inerte(),
+            player: player_inerte(),
         };
         (state, locale_rx, dir)
     }
@@ -696,22 +705,26 @@ mod tests {
         panic!("aucune trame complete recue : {tampon:?}");
     }
 
-    fn etat(titre: &str) -> crate::metadata::NowPlayingState {
-        crate::metadata::NowPlayingState {
+    fn etat(titre: &str) -> crate::metadata::PlayerState {
+        crate::metadata::PlayerState {
             source: "radio".into(),
-            title: Some(titre.into()),
-            origin: Some("icy".into()),
+            volume: 60,
+            morceau: crate::metadata::Morceau {
+                title: Some(titre.into()),
+                origin: Some("icy".into()),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
 
     #[tokio::test]
-    async fn now_playing_emet_letat_courant_des_la_connexion() {
+    async fn player_emet_letat_courant_des_la_connexion() {
         // Propriété reprise du flux d'OUI FM : un onglet ouvert au milieu d'un
         // morceau ne doit pas rester vide jusqu'au suivant.
-        let (state, _tx) = tests_support::app_state_with_now_playing(etat("Miles Davis - So What"));
+        let (state, _tx) = tests_support::app_state_with_player(etat("Miles Davis - So What"));
         let app = router(state);
-        let resp = app.oneshot(Request::get("/api/now-playing").body(Body::empty()).unwrap()).await.unwrap();
+        let resp = app.oneshot(Request::get("/api/player").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
             resp.headers().get("content-type").unwrap().to_str().unwrap(),
@@ -725,10 +738,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn now_playing_pousse_les_changements_suivants() {
-        let (state, tx) = tests_support::app_state_with_now_playing(etat("premier"));
+    async fn player_pousse_les_changements_suivants() {
+        let (state, tx) = tests_support::app_state_with_player(etat("premier"));
         let app = router(state);
-        let resp = app.oneshot(Request::get("/api/now-playing").body(Body::empty()).unwrap()).await.unwrap();
+        let resp = app.oneshot(Request::get("/api/player").body(Body::empty()).unwrap()).await.unwrap();
         let mut corps = resp.into_body().into_data_stream();
         assert_eq!(prochaine_trame(&mut corps).await["title"], "premier");
         tx.send(etat("second")).unwrap();
@@ -737,13 +750,13 @@ mod tests {
 
     #[tokio::test]
     async fn deux_clients_recoivent_tous_les_deux() {
-        let (state, tx) = tests_support::app_state_with_now_playing(etat("premier"));
+        let (state, tx) = tests_support::app_state_with_player(etat("premier"));
         let un = router(state.clone())
-            .oneshot(Request::get("/api/now-playing").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/api/player").body(Body::empty()).unwrap())
             .await
             .unwrap();
         let deux = router(state)
-            .oneshot(Request::get("/api/now-playing").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/api/player").body(Body::empty()).unwrap())
             .await
             .unwrap();
         let mut corps_un = un.into_body().into_data_stream();
@@ -757,9 +770,9 @@ mod tests {
 
     #[tokio::test]
     async fn un_client_qui_se_deconnecte_ne_perturbe_ni_le_canal_ni_les_autres() {
-        let (state, tx) = tests_support::app_state_with_now_playing(etat("premier"));
+        let (state, tx) = tests_support::app_state_with_player(etat("premier"));
         let survivant = router(state.clone())
-            .oneshot(Request::get("/api/now-playing").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/api/player").body(Body::empty()).unwrap())
             .await
             .unwrap();
         let mut corps_survivant = survivant.into_body().into_data_stream();
@@ -767,7 +780,7 @@ mod tests {
 
         {
             let parti = router(state)
-                .oneshot(Request::get("/api/now-playing").body(Body::empty()).unwrap())
+                .oneshot(Request::get("/api/player").body(Body::empty()).unwrap())
                 .await
                 .unwrap();
             let mut corps = parti.into_body().into_data_stream();

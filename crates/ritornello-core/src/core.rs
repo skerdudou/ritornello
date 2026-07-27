@@ -1,4 +1,4 @@
-use crate::metadata::{self, Metadonnees, NowPlayingState};
+use crate::metadata::{self, Metadonnees, PlayerState};
 use crate::player::Player;
 use crate::state::{self, PersistedState};
 use crate::types::Event;
@@ -52,10 +52,11 @@ pub struct MetadataCablage {
     /// Ce qui joue, vers les plugins `metadata`. Un `watch` et non un appel
     /// direct : un plugin qui ne lit plus ne doit pas pouvoir figer le cœur.
     pub now_playing: watch::Sender<NowPlaying>,
-    /// État structuré du morceau, vers la SPA (route `GET /api/now-playing`).
-    /// Canal distinct de `view_tx` : la SPA reçoit du structuré, les afficheurs
-    /// reçoivent des lignes déjà composées, chacun son chemin.
-    pub etat: watch::Sender<NowPlayingState>,
+    /// État du lecteur, vers la SPA (route `GET /api/player`) : source, volume,
+    /// muet, veille, et le morceau quand on le connaît. Canal distinct de
+    /// `view_tx` : la SPA reçoit du structuré, les afficheurs reçoivent des
+    /// lignes déjà composées, chacun son chemin.
+    pub etat: watch::Sender<PlayerState>,
 }
 
 pub struct Core<P: Player> {
@@ -90,7 +91,7 @@ pub struct Core<P: Player> {
     /// enrichissements des plugins. Voir `metadata.rs` pour l'arbitrage.
     metadonnees: Metadonnees,
     now_playing_tx: watch::Sender<NowPlaying>,
-    etat_tx: watch::Sender<NowPlayingState>,
+    etat_tx: watch::Sender<PlayerState>,
 }
 
 impl<P: Player> Core<P> {
@@ -146,7 +147,11 @@ impl<P: Player> Core<P> {
             }
         }
         let action = self.active().request(SourceReq::Wake).await?;
-        self.apply(action).await
+        self.apply(action).await?;
+        // L'IHM doit connaître le volume et la source dès le premier affichage,
+        // sans attendre qu'on touche à quelque chose.
+        self.publie_etat();
+        Ok(())
     }
 
     /// Rejoue le contenu courant de la source active (`Activate` demande à la
@@ -275,20 +280,49 @@ impl<P: Player> Core<P> {
 
     /// Diffuse l'état structuré du morceau vers la SPA.
     fn publie_etat(&self) {
-        let _ = self.etat_tx.send(self.metadonnees.etat(&self.active_source));
+        let etat = self.etat_lecteur();
+        // Même déduplication que `push_view`, et pour la même raison : cet état
+        // est publié généreusement (à la fin de chaque commande, en plus des
+        // chemins de métadonnées), et sans cette garde chaque navigateur
+        // connecté recevrait une trame SSE identique à la précédente.
+        self.etat_tx.send_if_modified(|courant| {
+            if *courant == etat {
+                false
+            } else {
+                *courant = etat;
+                true
+            }
+        });
     }
 
-    /// État courant du morceau. La production le lit sur le canal `watch` ;
-    /// cet accès direct n'existe que pour les tests.
-    #[cfg(test)]
-    pub fn now_playing_state(&self) -> NowPlayingState {
-        self.metadonnees.etat(&self.active_source)
+    /// État complet du lecteur : ce qui est volatil, donc ce que la SPA reçoit
+    /// en flux poussé.
+    pub fn etat_lecteur(&self) -> PlayerState {
+        PlayerState {
+            source: self.active_source.clone(),
+            volume: self.volume,
+            muted: self.muted,
+            standby: self.standby,
+            morceau: self.metadonnees.etat(),
+        }
     }
 
     pub async fn handle_command(&mut self, cmd: Command) -> Result<()> {
         if self.standby && cmd != Command::Power {
             return Ok(());
         }
+        let issue = self.appliquer_commande(cmd).await;
+        // Publication à la sortie de **toute** commande, plutôt qu'un appel dans
+        // chacune : volume, muet, veille et source active y changent, et une
+        // branche oubliée laisserait l'IHM afficher un état périmé sans que rien
+        // ne le signale. Le canal déduplique, donc publier pour rien ne coûte
+        // aucune trame. Publié même en cas d'erreur : l'état partiel atteint est
+        // ce que l'IHM doit montrer.
+        self.publie_etat();
+        issue
+    }
+
+    async fn appliquer_commande(&mut self, cmd: Command) -> Result<()> {
         match cmd {
             Command::Select(n) => {
                 self.retry_count = 0;
@@ -523,7 +557,7 @@ impl<P: Player> Core<P> {
             Some((v, _)) => v.clone(),
             None => metadata::composer(
                 &self.view,
-                &self.metadonnees.etat(&self.active_source),
+                &self.metadonnees.etat(),
                 self.view_line2_replaceable,
             ),
         };
@@ -657,7 +691,7 @@ mod tests {
         MetadataCablage {
             plugins,
             now_playing: watch::channel(NowPlaying { source: String::new(), identity: None }).0,
-            etat: watch::channel(NowPlayingState::default()).0,
+            etat: watch::channel(PlayerState::default()).0,
         }
     }
 
@@ -718,7 +752,7 @@ mod tests {
         Core<FakePlayer>,
         watch::Receiver<View>,
         watch::Receiver<NowPlaying>,
-        watch::Receiver<NowPlayingState>,
+        watch::Receiver<PlayerState>,
         tempfile::TempDir,
     ) {
         let dir = tempfile::tempdir().unwrap();
@@ -728,7 +762,7 @@ mod tests {
         sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls }));
         let (view_tx, view_rx) = watch::channel(View::default());
         let (np_tx, np_rx) = watch::channel(NowPlaying { source: "radio".into(), identity: None });
-        let (etat_tx, etat_rx) = watch::channel(NowPlayingState::default());
+        let (etat_tx, etat_rx) = watch::channel(PlayerState::default());
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
         let core = Core::new(
@@ -1052,8 +1086,8 @@ mod tests {
         assert_eq!(v.line3, "Mandrillus Sphynx - Bikwix");
         assert_eq!(v.line2, "FIP", "le nom de station reste intouche");
         let etat = etat_rx.borrow().clone();
-        assert_eq!(etat.title.as_deref(), Some("Mandrillus Sphynx - Bikwix"));
-        assert_eq!(etat.origin.as_deref(), Some("icy"));
+        assert_eq!(etat.morceau.title.as_deref(), Some("Mandrillus Sphynx - Bikwix"));
+        assert_eq!(etat.morceau.origin.as_deref(), Some("icy"));
     }
 
     #[tokio::test]
@@ -1071,7 +1105,7 @@ mod tests {
         assert_eq!(vue_rx.borrow_and_update().line3, "Now Playing info goes here");
         core.handle_enrichment("ouifm", enrichissement(id, "Shaka Ponk", "Wanna Get Free"));
         assert_eq!(vue_rx.borrow_and_update().line3, "Shaka Ponk — Wanna Get Free");
-        assert_eq!(core.now_playing_state().origin.as_deref(), Some("ouifm"));
+        assert_eq!(core.etat_lecteur().morceau.origin.as_deref(), Some("ouifm"));
     }
 
     #[tokio::test]
@@ -1085,7 +1119,7 @@ mod tests {
             enrichissement(serde_json::json!({"url": "un"}), "Ancien", "Morceau"),
         );
         assert_eq!(vue_rx.borrow().line3, "", "la reponse en retard ne doit rien afficher");
-        assert!(core.now_playing_state().est_vide());
+        assert!(core.etat_lecteur().morceau.est_vide());
     }
 
     #[tokio::test]
@@ -1121,6 +1155,66 @@ mod tests {
         core.handle_command(Command::Stop).await.unwrap();
         assert_eq!(np_rx.borrow().identity, None, "les plugins doivent cesser leur travail");
         assert_eq!(vue_rx.borrow_and_update().line3, "", "le titre ne doit pas rester affiche");
+    }
+
+    #[tokio::test]
+    async fn letat_du_lecteur_diffuse_volume_muet_veille_et_source() {
+        // Le volume n'est expose par aucune route : sa place est ce canal
+        // pousse, avec le reste de ce qui est volatil. Une branche de
+        // `handle_command` qui oublierait de publier laisserait l'IHM afficher
+        // un etat perime sans que rien ne le signale — d'ou la publication a la
+        // sortie de **toute** commande, et d'ou ce test qui les parcourt.
+        let (mut core, _vue_rx, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
+        core.resume().await.unwrap();
+        let initial = etat_rx.borrow().clone();
+        assert_eq!(initial.volume, 60, "le volume persiste doit etre connu des le demarrage");
+        assert_eq!(initial.source, "radio");
+        assert!(!initial.muted);
+        assert!(!initial.standby);
+
+        core.handle_command(Command::VolumeUp).await.unwrap();
+        assert_eq!(etat_rx.borrow().volume, 65);
+        core.handle_command(Command::VolumeDown).await.unwrap();
+        assert_eq!(etat_rx.borrow().volume, 60);
+
+        core.handle_command(Command::Mute).await.unwrap();
+        assert!(etat_rx.borrow().muted);
+        core.handle_command(Command::Mute).await.unwrap();
+        assert!(!etat_rx.borrow().muted);
+
+        core.handle_command(Command::Power).await.unwrap();
+        assert!(etat_rx.borrow().standby, "la veille doit se voir dans l'IHM");
+        core.handle_command(Command::Power).await.unwrap();
+        assert!(!etat_rx.borrow().standby);
+    }
+
+    #[tokio::test]
+    async fn changer_de_source_diffuse_la_nouvelle_source() {
+        // Piege : `SourceCycle` appelle `set_identity(None)`, qui sort sans rien
+        // publier quand l'identite etait **deja** nulle — cas du cd sans disque.
+        // La source active a pourtant change. C'est ce qui justifie de publier a
+        // la sortie de la commande plutot que depuis `set_identity`.
+        let (mut core, _vue_rx, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
+        assert_eq!(etat_rx.borrow().source, "");
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        assert_eq!(etat_rx.borrow().source, "cd");
+    }
+
+    #[tokio::test]
+    async fn le_morceau_est_aplati_dans_le_json_de_letat() {
+        // L'IHM recoit un objet plat : un seul encart, pas deux niveaux a
+        // distinguer.
+        let (mut core, _vue_rx, _np_rx, _etat_rx, _d) = setup_metadonnees(vec!["ouifm".into()]);
+        core.resume().await.unwrap();
+        let id = serde_json::json!({"url": "un"});
+        core.handle_source_update("radio", joue(id.clone()));
+        core.handle_enrichment("ouifm", enrichissement(id, "Miles Davis", "So What"));
+        let json = serde_json::to_value(core.etat_lecteur()).unwrap();
+        assert_eq!(json["source"], "radio");
+        assert_eq!(json["volume"], 60);
+        assert_eq!(json["artist"], "Miles Davis", "aplati, pas sous `morceau`");
+        assert_eq!(json["title"], "So What");
+        assert_eq!(json["origin"], "ouifm");
     }
 
     #[tokio::test]
@@ -1194,7 +1288,7 @@ mod tests {
 
         core.handle_event(Event::IcyTitle("Mandrillus Sphynx - Bikwix".into())).await;
         assert_eq!(vue_rx.borrow().line3, "", "rien ne doit atteindre l'afficheur en veille");
-        assert_eq!(etat_rx.borrow().title, None);
+        assert_eq!(etat_rx.borrow().morceau.title, None);
     }
 
     #[tokio::test]
@@ -1210,7 +1304,7 @@ mod tests {
         core.handle_source_update("radio", vue(vue_radio()));
         core.handle_event(Event::IcyTitle("Made Up - TAHITI 80".into())).await;
         assert_eq!(vue_rx.borrow_and_update().line3, "Made Up - TAHITI 80");
-        assert_eq!(etat_rx.borrow().origin.as_deref(), Some("icy"));
+        assert_eq!(etat_rx.borrow().morceau.origin.as_deref(), Some("icy"));
     }
 
     #[tokio::test]
@@ -1224,7 +1318,7 @@ mod tests {
 
         core.handle_event(Event::IcyTitle("un titre en retard".into())).await;
         assert_eq!(vue_rx.borrow().line3, "");
-        assert_eq!(etat_rx.borrow().title, None, "la SPA ne doit pas annoncer de morceau");
+        assert_eq!(etat_rx.borrow().morceau.title, None, "la SPA ne doit pas annoncer de morceau");
     }
 
     #[tokio::test]
@@ -1277,7 +1371,7 @@ mod tests {
         assert_eq!(v.line1, "RADIO  P1");
         assert_eq!(v.line2, "FIP");
         assert_eq!(v.line3, "Mandrillus Sphynx - Bikwix");
-        assert_eq!(etat_rx.borrow().origin.as_deref(), Some("icy"));
+        assert_eq!(etat_rx.borrow().morceau.origin.as_deref(), Some("icy"));
     }
 
     #[tokio::test]

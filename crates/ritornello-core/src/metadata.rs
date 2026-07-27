@@ -17,15 +17,13 @@ use std::collections::HashMap;
 /// Origine retenue pour l'affichage quand elle vient du flux lui-même.
 pub const ORIGINE_ICY: &str = "icy";
 
-/// Ce qui est affichable du morceau en cours, tel que diffusé à la SPA.
+/// Ce qui est affichable du morceau en cours.
 ///
 /// `origin` dit **qui** a fourni l'information (`"icy"` ou le nom du plugin
 /// gagnant) : sans elle, un affichage douteux ne serait attribuable à personne,
 /// et c'est exactement la question qu'on se pose devant un titre faux.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
-pub struct NowPlayingState {
-    /// Nom de la Source active, pour que la SPA sache de quoi elle parle.
-    pub source: String,
+pub struct Morceau {
     pub artist: Option<String>,
     pub title: Option<String>,
     pub album: Option<String>,
@@ -33,7 +31,29 @@ pub struct NowPlayingState {
     pub origin: Option<String>,
 }
 
-impl NowPlayingState {
+/// État du lecteur diffusé à la SPA : ce qui est volatil, et qui a donc besoin
+/// d'être **poussé**.
+///
+/// Un seul état et un seul canal pour tout ce qui bouge — source active, volume,
+/// muet, veille, et le morceau quand on le connaît. La route `/api/status`, elle,
+/// porte le contrat de navigation (quels plugins existent, lesquels ont une page
+/// d'admin) : structurellement stable, lue une fois au montage. Y mêler du
+/// volatil obligerait la SPA à la resonder en boucle pour afficher un volume.
+///
+/// Le morceau est **aplati** dans le JSON (`serde(flatten)`) : l'IHM reçoit un
+/// objet plat, sans avoir à distinguer deux niveaux pour un même encart.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct PlayerState {
+    /// Nom de la Source active, pour que la SPA sache de quoi elle parle.
+    pub source: String,
+    pub volume: u8,
+    pub muted: bool,
+    pub standby: bool,
+    #[serde(flatten)]
+    pub morceau: Morceau,
+}
+
+impl Morceau {
     /// Vrai si rien n'est connu du morceau.
     ///
     /// Réservé aux tests : côté IHM, c'est la SPA qui décide quoi montrer d'un
@@ -87,6 +107,7 @@ impl Metadonnees {
 
     /// Retient le titre annoncé par le flux. Renvoie `true` s'il apporte du
     /// nouveau (Icecast répète le même en-tête tout au long d'un morceau).
+    ///
     /// **Ne conditionne rien à l'identité.** C'est délibéré, et la première
     /// version le faisait : refuser un titre ICY faute d'identité courante rend
     /// la couche ICY dépendante du bon vouloir de la Source, alors qu'elle doit
@@ -166,11 +187,10 @@ impl Metadonnees {
     /// plugin fournit de toute façon des champs déjà séparés. Une station qui
     /// n'annonce que son propre nom ou ses jingles verra donc cela s'afficher —
     /// c'est ce qu'elle émet.
-    pub fn etat(&self, source: &str) -> NowPlayingState {
+    pub fn etat(&self) -> Morceau {
         for plugin in &self.ordre {
             if let Some(e) = self.enrichissements.get(plugin) {
-                return NowPlayingState {
-                    source: source.to_string(),
+                return Morceau {
                     artist: e.artist.clone(),
                     title: e.title.clone(),
                     album: e.album.clone(),
@@ -180,13 +200,12 @@ impl Metadonnees {
             }
         }
         match &self.icy {
-            Some(icy) => NowPlayingState {
-                source: source.to_string(),
+            Some(icy) => Morceau {
                 title: Some(icy.clone()),
                 origin: Some(ORIGINE_ICY.to_string()),
                 ..Default::default()
             },
-            None => NowPlayingState { source: source.to_string(), ..Default::default() },
+            None => Morceau::default(),
         }
     }
 }
@@ -222,7 +241,7 @@ pub fn ligne_titre(artist: Option<&str>, title: Option<&str>) -> Option<String> 
 /// Le critère est une déclaration **explicite** et non le fait que la ligne soit
 /// vide : avec le vide pour signal, une Source demanderait l'album en se taisant,
 /// et celle qui veut une ligne vide n'aurait aucun moyen de le dire.
-pub fn composer(base: &View, etat: &NowPlayingState, line2_replaceable: bool) -> View {
+pub fn composer(base: &View, etat: &Morceau, line2_replaceable: bool) -> View {
     let mut vue = base.clone();
     if let Some(ligne) = ligne_titre(etat.artist.as_deref(), etat.title.as_deref()) {
         vue.line3 = ligne;
@@ -260,8 +279,8 @@ mod tests {
     }
 
     /// État complet, tel qu'un plugin `metadata` le fournit pour un disque.
-    fn etat_complet() -> NowPlayingState {
-        NowPlayingState {
+    fn etat_complet() -> Morceau {
+        Morceau {
             artist: Some("Miles Davis".into()),
             title: Some("So What".into()),
             album: Some("Kind of Blue".into()),
@@ -272,7 +291,7 @@ mod tests {
     #[test]
     fn composer_laisse_la_ligne3_de_la_source_quand_rien_nest_connu() {
         let base = View { line1: "CD 3/12".into(), line2: "audio CD".into(), line3: "deja la".into() };
-        let vue = composer(&base, &NowPlayingState::default(), true);
+        let vue = composer(&base, &Morceau::default(), true);
         assert_eq!(vue.line3, "deja la", "le coeur ne vide jamais une ligne ecrite par la Source");
         // Ligne declaree remplacable, mais aucun album connu : l'etiquette de la
         // Source reste. C'est ce qui evite un afficheur a moitie vide sur un
@@ -315,7 +334,7 @@ mod tests {
         // meme : le coeur n'a rien detruit.
         let base = View { line1: "CD 3/12".into(), line2: "audio CD".into(), line3: String::new() };
         assert_eq!(composer(&base, &etat_complet(), true).line2, "Kind of Blue");
-        assert_eq!(composer(&base, &NowPlayingState::default(), true).line2, "audio CD");
+        assert_eq!(composer(&base, &Morceau::default(), true).line2, "audio CD");
     }
 
     #[test]
@@ -324,7 +343,7 @@ mod tests {
         m.set_identity(Some(json!({"url": "deux"})));
         let retenu = m.ajoute("ouifm", enrichissement(json!({"url": "un"}), "A", "T"));
         assert!(!retenu);
-        assert!(m.etat("radio").est_vide());
+        assert!(m.etat().est_vide());
     }
 
     #[test]
@@ -333,10 +352,10 @@ mod tests {
         m.set_identity(Some(json!({"url": "un"})));
         assert!(m.set_icy("Station - Jingle".into()));
         assert!(m.ajoute("ouifm", enrichissement(json!({"url": "un"}), "A", "T")));
-        assert!(!m.etat("radio").est_vide());
+        assert!(!m.etat().est_vide());
 
         assert!(m.set_identity(Some(json!({"url": "deux"}))));
-        assert!(m.etat("radio").est_vide(), "l'ardoise doit etre remise a zero immediatement");
+        assert!(m.etat().est_vide(), "l'ardoise doit etre remise a zero immediatement");
     }
 
     #[test]
@@ -347,7 +366,7 @@ mod tests {
         m.set_identity(Some(json!({"url": "un"})));
         m.set_icy("Miles Davis - So What".into());
         assert!(!m.set_identity(Some(json!({"url": "un"}))));
-        assert_eq!(m.etat("radio").title.as_deref(), Some("Miles Davis - So What"));
+        assert_eq!(m.etat().title.as_deref(), Some("Miles Davis - So What"));
     }
 
     #[test]
@@ -359,7 +378,7 @@ mod tests {
         m.set_identity(Some(json!({"url": "un"})));
         m.set_icy("Now Playing info goes here".into());
         m.ajoute("ouifm", enrichissement(json!({"url": "un"}), "Shaka Ponk", "Wanna Get Free"));
-        let etat = m.etat("radio");
+        let etat = m.etat();
         assert_eq!(etat.artist.as_deref(), Some("Shaka Ponk"));
         assert_eq!(etat.title.as_deref(), Some("Wanna Get Free"));
         assert_eq!(etat.origin.as_deref(), Some("ouifm"));
@@ -370,7 +389,7 @@ mod tests {
         let mut m = Metadonnees::new(vec![]);
         m.set_identity(Some(json!({"url": "un"})));
         m.set_icy("Mandrillus Sphynx - Bikwix".into());
-        let etat = m.etat("radio");
+        let etat = m.etat();
         // Aucun découpage sur " - " : la convention n'est pas garantie.
         assert_eq!(etat.title.as_deref(), Some("Mandrillus Sphynx - Bikwix"));
         assert_eq!(etat.artist, None);
@@ -387,14 +406,14 @@ mod tests {
         let id = json!({"url": "un"});
         m.set_identity(Some(id.clone()));
         assert!(m.ajoute("secondaire", enrichissement(id.clone(), "Second", "Titre second")));
-        assert_eq!(m.etat("radio").artist.as_deref(), Some("Second"));
+        assert_eq!(m.etat().artist.as_deref(), Some("Second"));
 
         assert!(m.ajoute("prioritaire", enrichissement(id.clone(), "Premier", "Titre premier")));
-        assert_eq!(m.etat("radio").artist.as_deref(), Some("Premier"));
+        assert_eq!(m.etat().artist.as_deref(), Some("Premier"));
 
         // Et un nouvel enrichissement du moins prioritaire ne reprend pas la main.
         assert!(m.ajoute("secondaire", enrichissement(id, "Second bis", "Titre second bis")));
-        assert_eq!(m.etat("radio").artist.as_deref(), Some("Premier"));
+        assert_eq!(m.etat().artist.as_deref(), Some("Premier"));
     }
 
     #[test]
@@ -405,7 +424,7 @@ mod tests {
         let vide = Enrichment { identity: id.clone(), ..Default::default() };
         assert!(!m.ajoute("prioritaire", vide), "un enrichissement vide compte comme une non-reponse");
         assert!(m.ajoute("secondaire", enrichissement(id, "Second", "Titre")));
-        assert_eq!(m.etat("radio").artist.as_deref(), Some("Second"));
+        assert_eq!(m.etat().artist.as_deref(), Some("Second"));
     }
 
     #[test]
@@ -413,7 +432,7 @@ mod tests {
         let mut m = Metadonnees::new(vec!["ouifm".into()]);
         // Plus rien ne joue : rien à enrichir.
         assert!(!m.ajoute("ouifm", enrichissement(json!({"url": "un"}), "A", "T")));
-        assert!(m.etat("radio").est_vide());
+        assert!(m.etat().est_vide());
     }
 
     #[test]
@@ -426,7 +445,7 @@ mod tests {
         let id = json!({"url": "un"});
         m.set_identity(Some(id.clone()));
         assert!(!m.ajoute("inconnu", enrichissement(id, "A", "T")));
-        assert!(m.etat("radio").est_vide());
+        assert!(m.etat().est_vide());
     }
 
     #[test]
@@ -446,8 +465,8 @@ mod tests {
         // `Core::handle_icy_title`, qui s'appuie sur `expecting_stream`.
         let mut m = Metadonnees::new(vec![]);
         assert!(m.set_icy("Miles Davis - So What".into()));
-        assert_eq!(m.etat("radio").title.as_deref(), Some("Miles Davis - So What"));
-        assert_eq!(m.etat("radio").origin.as_deref(), Some("icy"));
+        assert_eq!(m.etat().title.as_deref(), Some("Miles Davis - So What"));
+        assert_eq!(m.etat().origin.as_deref(), Some("icy"));
     }
 
     #[test]
@@ -507,8 +526,7 @@ mod tests {
                 duration_s: Some(214),
             },
         );
-        let etat = m.etat("radio");
-        assert_eq!(etat.source, "radio");
+        let etat = m.etat();
         assert_eq!(etat.duration_s, Some(214));
     }
 }

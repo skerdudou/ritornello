@@ -201,7 +201,7 @@ mod tests {
             admin_backends: Arc::new(backends),
             admin_assets: Arc::new(Default::default()),
             cmd_tx,
-            now_playing: crate::status::tests_support::now_playing_inerte(),
+            player: crate::status::tests_support::player_inerte(),
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
             theme_tx: tokio::sync::mpsc::channel(4).0,
         }

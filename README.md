@@ -247,9 +247,13 @@ n'aurait aucun moyen de le dire. Le cœur ne détruit jamais une information que
 Source seule possède, et le protocole Display reste inchangé : un futur afficheur
 (OLED SSD1306) n'a aucune règle de repli à réimplémenter.
 
-Dans l'IHM web, la page d'accueil affiche tout ce qui est connu, avec une
-pastille indiquant **l'origine** de l'information (`icy`, ou le nom du plugin
-gagnant) — la première question qu'on se pose devant un titre faux.
+Dans l'IHM web, la page d'accueil porte un encart **Lecteur**, au-dessus de la
+télécommande : source active, volume, et deux pastilles pour le muet et la
+veille. Le morceau **s'y ajoute** quand on le connaît — avec une pastille
+indiquant son **origine** (`icy`, ou le nom du plugin gagnant), la première
+question qu'on se pose devant un titre faux. Rien de tout cela n'est sondé :
+l'encart se met à jour en flux poussé, donc le volume suit la télécommande
+infrarouge et les autres onglets.
 
 **Avance automatique de piste.** Quand un CD passe seul à la piste suivante, mpv
 en informe le cœur, qui le relaie à la Source (`SourceReq::PlayerTrack`) : c'est

@@ -12,7 +12,7 @@ mod types;
 mod web;
 
 use crate::core::MetadataCablage;
-use crate::metadata::NowPlayingState;
+use crate::metadata::PlayerState;
 use crate::plugins::{PluginKind, PluginManifest};
 use crate::status::{AppState, LogBuffer, LogBufferWriter, PluginStatus, StatusState};
 use crate::types::Event;
@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
     });
     // État structuré du morceau, vers la SPA (route SSE). Canal distinct des
     // vues : la SPA reçoit du structuré, les afficheurs des lignes composées.
-    let (etat_tx, etat_rx) = watch::channel(NowPlayingState {
+    let (etat_tx, etat_rx) = watch::channel(PlayerState {
         source: persisted.active_source.clone(),
         ..Default::default()
     });
@@ -194,7 +194,9 @@ async fn main() -> Result<()> {
                 }
             }
             Err(e) => {
-                tracing::warn!("lancement du plugin {} impossible: {e}", p.name);
+                // `{e:#}` et non `{e}` : la chaîne de contexte porte le chemin
+                // cherché, que le seul message d'erreur système n'indique pas.
+                tracing::warn!("lancement du plugin {} impossible: {e:#}", p.name);
                 plugin_statuses.push(PluginStatus { name: p.name.clone(), kind: format!("{:?}", p.kind).to_lowercase(), connected: false, admin: p.admin });
             }
         }
@@ -294,7 +296,7 @@ async fn main() -> Result<()> {
             cmd_tx: cmd_tx.clone(),
             theme_current: theme_current.clone(),
             theme_tx: theme_tx.clone(),
-            now_playing: etat_rx.clone(),
+            player: etat_rx.clone(),
         });
         let listener = tokio::net::TcpListener::bind(&http_addr).await.with_context(|| format!("bind {http_addr}"))?;
         tracing::info!("interface web sur http://{http_addr}/");

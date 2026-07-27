@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -59,7 +59,8 @@ pub fn spawn(
     locale: Option<&str>,
 ) -> Result<tokio::process::Child> {
     if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creation du repertoire de sockets {}", parent.display()))?;
     }
     let _ = std::fs::remove_file(socket_path);
     let mut cmd = tokio::process::Command::new(exec);
@@ -71,7 +72,12 @@ pub fn spawn(
     if let Some(locale) = locale {
         cmd.env("RITORNELLO_LOCALE", locale);
     }
-    Ok(cmd.kill_on_drop(true).spawn()?)
+    // Le chemin est nommé dans l'erreur : « No such file or directory » seul
+    // laisse deviner **lequel** des chemins de `plugins.toml` est en cause, et
+    // la confusion la plus courante est justement là — un `exec` de déploiement
+    // (`/usr/local/lib/...`) recopié dans une configuration de développement,
+    // où les binaires sont sous `target/debug/`.
+    cmd.kill_on_drop(true).spawn().with_context(|| format!("executable {exec}"))
 }
 
 #[cfg(test)]
@@ -136,6 +142,21 @@ exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-musicbrainz"
             .map(|p| p.name.as_str())
             .collect();
         assert_eq!(metadata, vec!["ouifm-metas", "musicbrainz"]);
+    }
+
+    #[test]
+    fn une_erreur_de_lancement_nomme_lexecutable_cherche() {
+        // Sans le chemin dans l'erreur, un `plugins.toml` a plusieurs entrees ne
+        // laisse aucun moyen de savoir laquelle est fautive : « No such file or
+        // directory (os error 2) » ne designe rien.
+        let dir = tempfile::tempdir().unwrap();
+        let e = spawn("/chemin/qui/nexiste/pas/ritornello-plugin-bidon", &dir.path().join("p.sock"), None, None)
+            .expect_err("un executable absent doit echouer");
+        let message = format!("{e:#}");
+        assert!(
+            message.contains("/chemin/qui/nexiste/pas/ritornello-plugin-bidon"),
+            "l'erreur doit nommer l'executable cherche: {message}"
+        );
     }
 
     #[test]

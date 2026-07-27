@@ -38,7 +38,7 @@ test('une seule instance de Vue sert le shell et les modules de plugin', async (
   expect(requetes).toContain('/plugins/radio/ui.css')
 })
 
-test('le morceau en cours arrive en flux poussé dès la connexion', async ({ page }) => {
+test('l’état du lecteur arrive en flux poussé dès la connexion', async ({ page }) => {
   await page.goto('/')
   // Seule preuve de bout en bout de la route SSE : un `EventSource` reel du
   // navigateur, servi par le vrai binaire Rust. Aucun test unitaire ne couvre
@@ -48,7 +48,7 @@ test('le morceau en cours arrive en flux poussé dès la connexion', async ({ pa
   const premiere = await page.evaluate(
     () =>
       new Promise<string>((resolve, reject) => {
-        const flux = new EventSource('/api/now-playing')
+        const flux = new EventSource('/api/player')
         const minuteur = setTimeout(() => {
           flux.close()
           reject(new Error('aucune trame en 5 s'))
@@ -61,10 +61,24 @@ test('le morceau en cours arrive en flux poussé dès la connexion', async ({ pa
       }),
   )
   // Le harnais ne declare aucun plugin `metadata` et ne lit aucun flux reel :
-  // l'etat est donc vide de metadonnees, mais il porte la source active.
-  const etat = JSON.parse(premiere) as { source: string; title: string | null }
+  // l'etat est donc vide de metadonnees, mais il porte deja source et volume —
+  // c'est ce qui permet a l'IHM d'afficher l'etat du lecteur sans sondage.
+  const etat = JSON.parse(premiere) as {
+    source: string
+    volume: number
+    muted: boolean
+    standby: boolean
+    title: string | null
+  }
   expect(etat.source).toBe('radio')
+  expect(etat.volume).toBeGreaterThan(0)
+  expect(etat.muted).toBe(false)
+  expect(etat.standby).toBe(false)
   expect(etat.title).toBeNull()
+  // Et l'encart du lecteur les affiche.
+  await expect(page.locator('[data-source]')).toHaveText('radio')
+  await expect(page.locator('[data-volume]')).toHaveText(`${etat.volume} %`)
+  await expect(page.locator('[data-now-playing]')).toHaveCount(0)
 })
 
 test('bascule clair/sombre, appliquée et persistée', async ({ page }) => {

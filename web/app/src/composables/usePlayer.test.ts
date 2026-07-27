@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { NowPlayingPayload } from '../types'
-import { formateDuree, riendAfficher, useNowPlaying } from './useNowPlaying'
+import type { PlayerPayload } from '../types'
+import { formateDuree, riendAfficher, usePlayer } from './usePlayer'
 
 /** Etat complet, dont chaque test retire ce qu'il veut eprouver. */
-function etat(partiel: Partial<NowPlayingPayload> = {}): NowPlayingPayload {
+function etat(partiel: Partial<PlayerPayload> = {}): PlayerPayload {
   return {
     source: 'radio',
+    volume: 60,
+    muted: false,
+    standby: false,
     artist: 'Shaka Ponk',
     title: 'Wanna Get Free',
     album: null,
@@ -67,14 +70,14 @@ describe('riendAfficher', () => {
   })
 })
 
-describe('useNowPlaying', () => {
+describe('usePlayer', () => {
   it('ouvre le flux pousse et applique chaque trame', () => {
     FauxEventSource.instances = []
     vi.stubGlobal('EventSource', FauxEventSource)
-    const { etat: courant, ouvre, ferme } = useNowPlaying()
+    const { etat: courant, ouvre, ferme } = usePlayer()
     ouvre()
     const flux = FauxEventSource.instances[0]!
-    expect(flux.url).toBe('/api/now-playing')
+    expect(flux.url).toBe('/api/player')
     expect(courant.value).toBeNull()
 
     flux.pousse(etat({ title: 'premier' }))
@@ -91,7 +94,7 @@ describe('useNowPlaying', () => {
     // de laisser le morceau precedent une seconde de trop.
     FauxEventSource.instances = []
     vi.stubGlobal('EventSource', FauxEventSource)
-    const { etat: courant, ouvre } = useNowPlaying()
+    const { etat: courant, ouvre } = usePlayer()
     ouvre()
     const flux = FauxEventSource.instances[0]!
     flux.pousse(etat({ title: 'connu' }))
@@ -102,7 +105,7 @@ describe('useNowPlaying', () => {
   it('ferme le flux precedent plutot que d en accumuler', () => {
     FauxEventSource.instances = []
     vi.stubGlobal('EventSource', FauxEventSource)
-    const { ouvre } = useNowPlaying()
+    const { ouvre } = usePlayer()
     ouvre()
     ouvre()
     expect(FauxEventSource.instances).toHaveLength(2)
@@ -112,7 +115,7 @@ describe('useNowPlaying', () => {
   it('sans EventSource, previent et laisse le reste de la page vivre', () => {
     vi.stubGlobal('EventSource', undefined)
     const avertit = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const { etat: courant, ouvre } = useNowPlaying()
+    const { etat: courant, ouvre } = usePlayer()
     expect(() => ouvre()).not.toThrow()
     expect(courant.value).toBeNull()
     expect(avertit).toHaveBeenCalled()

@@ -1,5 +1,5 @@
 import { getCurrentInstance, onUnmounted, ref } from 'vue'
-import type { NowPlayingPayload } from '../types'
+import type { PlayerPayload } from '../types'
 
 /**
  * Duree en `m:ss`, ou `null` si inconnue.
@@ -21,21 +21,21 @@ export function formateDuree(secondes: number | null | undefined): string | null
  * La duree seule ne compte pas : « 3:34 » sans titre ni artiste n'informe
  * personne, et afficherait un bloc vide.
  */
-export function riendAfficher(etat: NowPlayingPayload | null): boolean {
+export function riendAfficher(etat: PlayerPayload | null): boolean {
   if (!etat) return true
   return !etat.artist && !etat.title && !etat.album
 }
 
 /**
- * Morceau en cours, recu en flux pousse depuis `/api/now-playing`.
+ * Etat du lecteur, recu en flux pousse depuis `/api/player`.
  *
  * `EventSource` plutot qu'un sondage : le coeur pousse deja chaque changement,
  * et le navigateur se reconnecte tout seul apres une coupure — aucune logique
  * de reprise a ecrire ici. L'etat courant arrive des la connexion, donc un
  * onglet ouvert au milieu d'un morceau ne reste pas vide.
  */
-export function useNowPlaying() {
-  const etat = ref<NowPlayingPayload | null>(null)
+export function usePlayer() {
+  const etat = ref<PlayerPayload | null>(null)
   let flux: EventSource | null = null
 
   function ouvre(): void {
@@ -46,10 +46,10 @@ export function useNowPlaying() {
       return
     }
     ferme()
-    flux = new EventSource('/api/now-playing')
+    flux = new EventSource('/api/player')
     flux.onmessage = (e: MessageEvent) => {
       try {
-        etat.value = JSON.parse(e.data as string) as NowPlayingPayload
+        etat.value = JSON.parse(e.data as string) as PlayerPayload
       } catch {
         // Trame illisible : on garde l'affichage precedent plutot que de le vider.
       }

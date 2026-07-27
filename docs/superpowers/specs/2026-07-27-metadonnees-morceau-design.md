@@ -78,7 +78,7 @@ Deux conceptions ont été examinées et écartées :
 | Surcharge | Un enrichissement de plugin, s'il correspond à l'identité courante, **gagne** sur l'ICY. |
 | MusicBrainz | **Extrait** du plugin cd vers un plugin `metadata`, donc interchangeable. |
 | Déclaration | Un plugin `metadata` doit être **déclaré** dans `plugins.toml` : sans lui, pas d'enrichissement. Assumé, ce n'est pas traité comme une régression. |
-| Chemin vers la SPA | Une route **`GET /api/now-playing`** en `text/event-stream`, alimentée par un canal `watch` du cœur. **Pas** de champ dans `/api/status`. |
+| Chemin vers la SPA | Une route **`GET /api/player`** en `text/event-stream`, alimentée par un canal `watch` du cœur. **Pas** de champ dans `/api/status`. |
 | Composition de l'affichage | **Le cœur** compose `View`. Le protocole Display reste inchangé, les afficheurs restent passifs. |
 | Arbitrage entre plugins | **L'ordre de déclaration** dans `plugins.toml` : le premier déclaré qui répond gagne, un plugin plus bas ne l'écrase jamais. |
 | Périmètre | Affichage seulement. Aucune pochette, aucun historique, aucune recherche. |
@@ -190,7 +190,7 @@ fournit de toute façon des champs déjà séparés.
 
 ## Décision — le chemin jusqu'à la SPA : une route `text/event-stream`
 
-**`GET /api/now-playing`, un flux poussé, alimenté par le canal `watch` que le
+**`GET /api/player`, un flux poussé, alimenté par le canal `watch` que le
 cœur possède déjà.** Pas de champ dans `/api/status`.
 
 Ce que fait la SPA aujourd'hui a été vérifié avant de trancher : elle **ne
@@ -230,7 +230,7 @@ Options écartées :
   d'un intervalle de sondage.
 - **WebSocket** : de la machinerie bidirectionnelle pour un flux à sens unique,
   plus de code sur un Pi 2 sans contrepartie.
-- **Nouvelle route sondée `GET /api/now-playing`** : plus simple à écrire, mais
+- **Nouvelle route sondée `GET /api/player`** : plus simple à écrire, mais
   échange de la latence contre des requêtes inutiles sur un appareil le plus
   souvent inactif — et le canal `watch` déjà présent rend le poussé moins
   coûteux que le tiré.
@@ -366,7 +366,7 @@ enrichissement, et la couche ICY brute par défaut.
 - **composition** : les quatre cas de repli de `line3` (artiste et titre, titre
   seul, artiste seul, aucun des deux — cette dernière laissant la ligne
   **inchangée**), en fonction pure pour être testée sans routeur ni socket.
-- **route SSE** : `GET /api/now-playing` répond en `text/event-stream`, émet
+- **route SSE** : `GET /api/player` répond en `text/event-stream`, émet
   l'état courant **dès la connexion** (même propriété que le flux d'OUI FM, pour
   qu'un onglet ouvert en cours de morceau ne reste pas vide), puis un événement
   par changement ; deux clients connectés reçoivent tous les deux ; un client qui
