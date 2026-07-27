@@ -28,16 +28,6 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-fn arg_value(flag: &str) -> Option<PathBuf> {
-    let args: Vec<String> = std::env::args().collect();
-    args.iter().position(|a| a == flag).map(|i| {
-        let value = args
-            .get(i + 1)
-            .unwrap_or_else(|| panic!("{flag} requiert une valeur (aucun argument apres {flag})"));
-        PathBuf::from(value)
-    })
-}
-
 /// Moitié Input : consomme le mpsc alimenté par toutes les tâches de lecture
 /// evdev, quel que soit le périphérique d'origine.
 struct EvdevInput {
@@ -58,12 +48,12 @@ impl InputPlugin for EvdevInput {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let socket_path = arg_value("--socket").expect("--socket <path> requis");
+    let socket_path = ritornello_plugin_sdk::socket_path();
     // `--admin-socket` n'est fourni par le cœur que si `admin = true` dans
     // plugins.toml. Absent (oubli lors d'une mise à jour de plugins.toml, ou
     // usage volontaire sans page d'admin), on continue en mode dégradé :
     // la moitié Input tourne seule, sans page web.
-    let admin_socket = arg_value("--admin-socket");
+    let admin_socket = ritornello_plugin_sdk::admin_socket_path();
     if admin_socket.is_none() {
         tracing::warn!(
             "--admin-socket absent : la page d'administration ne sera pas servie, seule la moitie Input tourne"
@@ -148,18 +138,7 @@ mod tests {
         assert!(!ritornello_i18n::try_parse(GENERIC_INPUT_EN).unwrap().is_empty());
     }
 
-    #[test]
-    fn chemins_par_defaut() {
-        std::env::remove_var("RITORNELLO_INPUT_BINDINGS_TEST");
-        assert_eq!(
-            env_or("RITORNELLO_INPUT_BINDINGS_TEST", "/etc/ritornello/input-bindings.toml"),
-            "/etc/ritornello/input-bindings.toml"
-        );
-        std::env::set_var("RITORNELLO_INPUT_BINDINGS_TEST", "/tmp/x.toml");
-        assert_eq!(
-            env_or("RITORNELLO_INPUT_BINDINGS_TEST", "/etc/ritornello/input-bindings.toml"),
-            "/tmp/x.toml"
-        );
-        std::env::remove_var("RITORNELLO_INPUT_BINDINGS_TEST");
-    }
+    // Le test `chemins_par_defaut` qui vivait ici ne testait que `env_or`,
+    // c'est-à-dire `std::env` : il passait sur n'importe quel programme.
+    // Supprimé plutôt que gardé pour le nombre (revue 2026-07-27).
 }

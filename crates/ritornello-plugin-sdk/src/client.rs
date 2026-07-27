@@ -13,15 +13,20 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 async fn connect_with_retry(socket_path: &Path) -> Result<UnixStream> {
-    let mut stream = None;
+    // La dernière erreur est conservée pour le rapport final : « connexion a
+    // <socket> (10 s) » seul cache la cause, et une erreur permanente (droits
+    // refusés sur la socket) était retentée 100 fois puis rapportée comme un
+    // simple délai dépassé — diagnostic inutilement difficile au démarrage.
+    let mut derniere = None;
     for _ in 0..100 {
-        if let Ok(s) = UnixStream::connect(socket_path).await {
-            stream = Some(s);
-            break;
+        match UnixStream::connect(socket_path).await {
+            Ok(s) => return Ok(s),
+            Err(e) => derniere = Some(e),
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    stream.with_context(|| format!("connexion a {} (10 s)", socket_path.display()))
+    Err(anyhow::anyhow!(derniere.expect("au moins un essai")))
+        .with_context(|| format!("connexion a {} (10 s)", socket_path.display()))
 }
 
 /// Ce qu'une Source rapporte spontanément ou en marge d'une réponse : une vue
@@ -316,7 +321,13 @@ pub async fn run_input_client(socket_path: &Path, cmd_tx: mpsc::Sender<Command>)
     while let Some(line) = lines.next_line().await? {
         match serde_json::from_str::<Command>(&line) {
             Ok(cmd) => {
-                let _ = cmd_tx.send(cmd).await;
+                // Récepteur disparu = boucle du cœur finie : continuer à lire
+                // la socket pour jeter les commandes serait une fuite de
+                // tâche. Même traitement que le cas symétrique du relais
+                // metadata (canal now-playing fermé).
+                if cmd_tx.send(cmd).await.is_err() {
+                    bail!("coeur ferme, arret du relais input");
+                }
             }
             Err(e) => tracing::warn!("commande invalide recue du plugin input: {e}"),
         }
@@ -505,10 +516,14 @@ mod tests {
 
     #[tokio::test]
     async fn display_client_envoie_la_vue_en_ligne() {
+        // Les assertions de contenu vivent dans la tâche serveur : son
+        // `JoinHandle` doit être **joint**, sans quoi une panique y serait
+        // avalée et le test ne prouverait que « send() rend Ok » — il passait
+        // avec un client écrivant du JSON faux ou la mauvaise ligne.
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("display.sock");
         let listener = UnixListener::bind(&socket).unwrap();
-        tokio::spawn(async move {
+        let serveur = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (read, _write) = stream.into_split();
             let mut lines = BufReader::new(read).lines();
@@ -519,7 +534,7 @@ mod tests {
 
         let client = DisplayClient::connect(&socket).await.unwrap();
         client.send(&View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() }).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        serveur.await.expect("les assertions du serveur ont paniqué");
     }
 
     #[tokio::test]

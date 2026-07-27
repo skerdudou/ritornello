@@ -145,6 +145,19 @@ pub trait SourcePlugin: Send + 'static {
     /// Notification spontanée (ex. changement de piste, arrivée différée d'une
     /// TOC). Par défaut ne se termine jamais : un plugin sans notification
     /// spontanée (Radio) n'a rien à écrire de plus.
+    ///
+    /// Deux points de contrat, dictés par le `select!` du harnais :
+    ///
+    /// - **`None` est terminal** : il signifie « plus jamais de notification »
+    ///   (la tâche interne qui les produisait est morte), et le harnais cesse
+    ///   d'appeler cette méthode — les requêtes du cœur restent servies. Un
+    ///   `None` re-pollé en boucle aurait tourné à 100 % CPU sans autre
+    ///   symptôme que la chauffe.
+    /// - **Annulable sans perte** : le futur est abandonné dès qu'une requête
+    ///   du cœur arrive (même exigence, et même raison, que
+    ///   `MetadataPlugin::next_enrichment`). Tout état durable doit vivre dans
+    ///   le plugin, pas dans les variables locales du futur — deux `await`
+    ///   successifs dont le second serait interrompu perdraient le premier.
     async fn poll_notification(&mut self) -> Option<Notification> {
         std::future::pending().await
     }
@@ -163,6 +176,10 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
     let (stream, _) = listener.accept().await?;
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
+
+    // Vrai tant que `poll_notification` n'a pas rendu `None` — qui est
+    // terminal (voir le trait) et désarme le bras correspondant du `select!`.
+    let mut notifications_ouvertes = true;
 
     loop {
         tokio::select! {
@@ -200,17 +217,29 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                 };
                 write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
             }
-            notification = plugin.poll_notification() => {
-                if let Some(n) = notification {
-                    let msg = SourceMessage {
-                        id: None,
-                        action: None,
-                        view: n.view,
-                        identity: n.identity,
-                        line2_replaceable: n.line2_replaceable,
-                        transient: n.transient,
-                    };
-                    write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
+            notification = plugin.poll_notification(), if notifications_ouvertes => {
+                match notification {
+                    Some(n) => {
+                        let msg = SourceMessage {
+                            id: None,
+                            action: None,
+                            view: n.view,
+                            identity: n.identity,
+                            line2_replaceable: n.line2_replaceable,
+                            transient: n.transient,
+                        };
+                        write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
+                    }
+                    // `None` est terminal (voir le trait) : désarmer le bras,
+                    // sans quoi il serait re-pollé immédiatement et la boucle
+                    // tournerait à vide — 100 % CPU pendant que les requêtes
+                    // continuent d'être servies, la panne la plus discrète qui
+                    // soit. Le cas est réel : le plugin cd rend `None` si sa
+                    // tâche de veille du lecteur meurt.
+                    None => {
+                        tracing::warn!("plus de notifications spontanees (tache interne terminee)");
+                        notifications_ouvertes = false;
+                    }
                 }
             }
         }
@@ -515,6 +544,68 @@ mod tests {
         let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(msg.id, Some(2));
         assert_eq!(msg.action, Some(SourceAction::Play { uri: "http://station-3".into() }));
+    }
+
+    /// Source dont le flux de notifications se tarit : premier appel `None`,
+    /// puis compte les re-polls — il ne doit pas y en avoir.
+    struct SourceTarie {
+        polls: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    #[async_trait::async_trait]
+    impl SourcePlugin for SourceTarie {
+        async fn activate(&mut self) -> SourceOutcome {
+            SourceOutcome::new(SourceAction::Noop)
+        }
+        async fn deactivate(&mut self) -> SourceOutcome {
+            SourceOutcome::new(SourceAction::Noop)
+        }
+        async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+        async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+        async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+        async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+        async fn poll_notification(&mut self) -> Option<Notification> {
+            let n = self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                None
+            } else {
+                std::future::pending().await
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn un_none_de_poll_notification_est_terminal_et_nest_pas_re_polle() {
+        // Régression (revue 2026-07-27) : `None` était ignoré et le bras
+        // re-pollé immédiatement — boucle chaude à 100 % CPU pendant que les
+        // requêtes continuaient d'être servies. Le cas est réel : le plugin cd
+        // rend `None` si sa tâche de veille du lecteur meurt.
+        let polls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        let polls_serveur = polls.clone();
+        tokio::spawn(async move {
+            run_source_plugin(SourceTarie { polls: polls_serveur }, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = client.expect("connexion au plugin").into_split();
+        let mut lines = BufReader::new(read).lines();
+        // Les requêtes restent servies après le tarissement…
+        write.write_all(b"{\"id\":1,\"req\":\"Activate\"}\n").await.unwrap();
+        let line = lines.next_line().await.unwrap().unwrap();
+        let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(msg.id, Some(1));
+        // …et le `None` n'a été lu qu'une fois : pas de re-poll. La pause
+        // laisse à la boucle le temps de consommer le `None` (l'ordre des bras
+        // d'un `select!` est aléatoire) — avec l'ancien code, le compteur
+        // serait à 2 ici, le bras ayant été re-pollé aussitôt.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

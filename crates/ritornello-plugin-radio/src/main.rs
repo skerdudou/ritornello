@@ -26,11 +26,6 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-fn arg_value(flag: &str) -> Option<PathBuf> {
-    let args: Vec<String> = std::env::args().collect();
-    args.iter().position(|a| a == flag).map(|i| PathBuf::from(&args[i + 1]))
-}
-
 struct RadioSource {
     state_path: PathBuf,
     stations: Arc<AsyncRwLock<Stations>>,
@@ -60,7 +55,12 @@ impl RadioSource {
             self.preset = n;
             // `update` et non `save` : la moitié Admin écrit le pays choisi dans
             // ce même fichier, et un `save` construit ici l'effacerait.
-            let _ = state::update(&self.state_path, |s| s.preset = n);
+            // L'échec est journalisé, comme le fait déjà la moitié Admin : un
+            // /var/lib en lecture seule perdrait la présélection à chaque
+            // redémarrage sans que rien ne le dise.
+            if let Err(e) = state::update(&self.state_path, |s| s.preset = n) {
+                tracing::warn!("persistance de la preselection: {e}");
+            }
             SourceOutcome::new(SourceAction::Play { uri: st.url.clone() })
                 .with_view(View {
                     line1: format!("RADIO  P{n}"),
@@ -131,12 +131,12 @@ impl SourcePlugin for RadioSource {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let socket_path = arg_value("--socket").expect("--socket <path> requis");
+    let socket_path = ritornello_plugin_sdk::socket_path();
     // `--admin-socket` n'est fourni par le cœur que si `admin = true` dans
     // plugins.toml. Absent (oubli lors d'une mise à jour de plugins.toml, ou
     // usage volontaire sans page d'admin), on continue en mode dégradé :
     // la moitié Source tourne seule, sans page de gestion des stations.
-    let admin_socket = arg_value("--admin-socket");
+    let admin_socket = ritornello_plugin_sdk::admin_socket_path();
     if admin_socket.is_none() {
         tracing::warn!(
             "--admin-socket absent : la page de gestion des stations ne sera pas servie, seule la moitie Source tourne (il manque 'admin = true' dans plugins.toml)"

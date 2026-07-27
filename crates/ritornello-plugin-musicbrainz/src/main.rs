@@ -15,17 +15,10 @@ use musicbrainz::DiscInfo;
 use ritornello_plugin_sdk::{run_metadata_plugin, MetadataPlugin};
 use ritornello_proto::{Enrichment, NowPlaying};
 use serde_json::Value;
-use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 /// Résultat d'une interrogation : la TOC concernée, et ce qu'on a trouvé.
 type Trouve = (String, Option<DiscInfo>);
-
-fn socket_path_from_args() -> PathBuf {
-    let args: Vec<String> = std::env::args().collect();
-    let idx = args.iter().position(|a| a == "--socket").expect("--socket <path> requis");
-    PathBuf::from(&args[idx + 1])
-}
 
 /// Ce qu'une identité de disque apprend à ce plugin.
 #[derive(Debug, Clone, PartialEq)]
@@ -182,8 +175,17 @@ impl MetadataPlugin for MusicBrainzPlugin {
                     if self.en_vol.as_deref() == Some(toc.as_str()) {
                         self.en_vol = None;
                     }
-                    self.connu = Some((toc, info));
-                    self.prepare();
+                    // Un résultat n'est retenu que s'il décrit le disque
+                    // suivi : deux lookups peuvent se croiser lors d'un
+                    // échange rapide de disques (A en vol, B inséré, réponse
+                    // de B puis celle de A), et retenir le retardataire
+                    // écrasait le cache du disque courant — `prepare()`
+                    // protégeait l'affichage, mais le prochain changement de
+                    // piste relançait une requête MusicBrainz pour rien.
+                    if self.disque.as_ref().is_some_and(|d| d.toc == toc) {
+                        self.connu = Some((toc, info));
+                        self.prepare();
+                    }
                 }
                 // Impossible en pratique (le plugin garde un Sender) : ne pas
                 // rendre la main plutôt que de boucler à vide.
@@ -196,7 +198,7 @@ impl MetadataPlugin for MusicBrainzPlugin {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
-    let socket_path = socket_path_from_args();
+    let socket_path = ritornello_plugin_sdk::socket_path();
     run_metadata_plugin(MusicBrainzPlugin::new(), &socket_path).await
 }
 

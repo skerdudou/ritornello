@@ -26,12 +26,6 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-fn socket_path_from_args() -> PathBuf {
-    let args: Vec<String> = std::env::args().collect();
-    let idx = args.iter().position(|a| a == "--socket").expect("--socket <path> requis");
-    PathBuf::from(&args[idx + 1])
-}
-
 struct CdSource {
     cd_dev: String,
     present: bool,
@@ -238,9 +232,11 @@ impl SourcePlugin for CdSource {
     }
     async fn eject(&mut self) -> SourceOutcome {
         let cd_dev = self.cd_dev.clone();
-        tokio::spawn(async move {
-            tokio::task::spawn_blocking(move || cd::eject(&cd_dev)).await.ok();
-        });
+        // `spawn_blocking` seul suffit : la commande `eject` bloque le temps
+        // que le tiroir s'ouvre, et la réponse au cœur ne l'attend pas. Le
+        // `JoinHandle` est lâché sciemment — `cd::eject` journalise lui-même
+        // ses échecs, il n'y a rien à récolter ici.
+        tokio::task::spawn_blocking(move || cd::eject(&cd_dev));
         self.present = false;
         self.lecture = false;
         self.oublie_le_disque();
@@ -324,7 +320,7 @@ impl CdSource {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let socket_path = socket_path_from_args();
+    let socket_path = ritornello_plugin_sdk::socket_path();
     let cd_dev = env_or("RITORNELLO_CD_DEV", "/dev/sr0");
 
     let (presence_tx, presence_rx) = mpsc::channel(8);

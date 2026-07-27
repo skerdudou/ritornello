@@ -1,6 +1,8 @@
+pub mod args;
 pub mod client;
 pub mod server;
 
+pub use args::{admin_socket_path, socket_path};
 pub use client::{
     run_input_client, run_metadata_client, AdminClient, DisplayClient, SourceClient, SourceUpdate,
 };

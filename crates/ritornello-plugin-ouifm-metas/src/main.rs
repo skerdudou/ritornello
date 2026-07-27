@@ -30,11 +30,6 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-fn arg_value(flag: &str) -> Option<PathBuf> {
-    let args: Vec<String> = std::env::args().collect();
-    args.iter().position(|a| a == flag).map(|i| PathBuf::from(&args[i + 1]))
-}
-
 /// URL d'une identité de flux, si c'en est une.
 ///
 /// Fonction pure : point d'entrée de données venues d'un autre processus, donc
@@ -153,7 +148,7 @@ impl MetadataPlugin for OuiFmMetas {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
-    let socket_path = arg_value("--socket").expect("--socket <path> requis");
+    let socket_path = ritornello_plugin_sdk::socket_path();
     let table_path =
         PathBuf::from(env_or("RITORNELLO_OUIFM_METAS", "/etc/ritornello/ouifm-metas.toml"));
     let table = Table::load(&table_path);

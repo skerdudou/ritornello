@@ -22,17 +22,20 @@ pub fn try_parse(s: &str) -> Result<HashMap<String, String>, toml::de::Error> {
     toml::from_str(s)
 }
 
-/// Parse pur silencieux : TOML invalide → map vide (l'appelant gère l'absence).
-/// Séparé de l'accès disque pour être testable (comme `audio_output::parse_device_list`).
-pub fn parse_pack(s: &str) -> HashMap<String, String> {
-    try_parse(s).unwrap_or_default()
-}
-
-/// Surcharge `base` avec le pack TOML lu sur disque en `path`. Fichier absent :
-/// silencieux (cas normal). TOML illisible : `warn` loggé, `base` inchangée.
+/// Surcharge `base` avec le pack TOML lu sur disque en `path`. Fichier
+/// **absent** : silencieux (cas normal — la plupart des composants n'ont pas de
+/// pack pour la plupart des langues). Toute autre erreur — droits refusés,
+/// UTF-8 invalide, TOML invalide — laisse `base` inchangée mais est **tracée** :
+/// un pack présent que l'opérateur a voulu installer ne doit pas disparaître
+/// sans une ligne de journal.
 fn overlay_from_disk(base: &mut HashMap<String, String>, path: &Path) {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return;
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            tracing::warn!("pack i18n {} ignoré (lecture impossible): {e}", path.display());
+            return;
+        }
     };
     match toml::from_str::<HashMap<String, String>>(&text) {
         Ok(ext) => base.extend(ext),
@@ -108,14 +111,6 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         let mut f = std::fs::File::create(d.join(fichier)).unwrap();
         f.write_all(contenu.as_bytes()).unwrap();
-    }
-
-    #[test]
-    fn parse_pack_lit_le_toml_plat_et_ignore_l_invalide() {
-        let m = parse_pack("a = \"un\"\nb = \"deux\"\n");
-        assert_eq!(m.get("a").map(String::as_str), Some("un"));
-        assert_eq!(m.get("b").map(String::as_str), Some("deux"));
-        assert!(parse_pack("ceci n'est pas du toml =").is_empty());
     }
 
     #[test]
