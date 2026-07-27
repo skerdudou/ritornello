@@ -45,4 +45,14 @@ describe('api', () => {
     await expect(api.post('/api/command', { cmd: 'VolumeUp' })).resolves.toBeNull()
     expect(spy.mock.calls[0]?.[1]).toMatchObject({ method: 'POST' })
   })
+
+  it('put et post rendent une panne réseau comme message, jamais comme exception', async () => {
+    // Régression (revue 2026-07-27) : un rejet de `fetch` lui-même (cœur en
+    // cours de redémarrage, Wi-Fi coupé) sortait de la convention « valeur de
+    // retour » — les appelants sans `try` laissaient l'utilisateur sans aucun
+    // retour, avec une unhandled rejection en console pour seul indice.
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+    await expect(api.put('/x', {})).resolves.toBe('Failed to fetch')
+    await expect(api.post('/x', {})).resolves.toBe('Failed to fetch')
+  })
 })

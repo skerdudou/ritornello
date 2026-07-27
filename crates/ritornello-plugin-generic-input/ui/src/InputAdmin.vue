@@ -154,21 +154,31 @@ async function apprendre(i: number) {
     apprend.value = true
     message.value = t.value('learning_msg')
     const echeance = Date.now() + DELAI_MS
+    // Garde de recouvrement : sur une machine lente, un GET qui depasse
+    // l'intervalle empilerait des requetes dans la file serielle du plugin —
+    // le meme risque que celui documente pour la recherche radio.
+    let sondeEnVol = false
     timer = setInterval(async () => {
-      if (Date.now() > echeance) {
-        await arreterApprentissage(t.value('learn_timeout'))
-        return
-      }
-      let d: Data
+      if (sondeEnVol) return
+      sondeEnVol = true
       try {
-        d = await api.get<Data>(url('api/data'))
-      } catch {
-        return // une lecture ratee ne doit pas interrompre le sondage
-      }
-      const c = d.learning?.captured
-      if (c !== null && c !== undefined) {
-        codes.value[i] = String(c)
-        await arreterApprentissage('')
+        if (Date.now() > echeance) {
+          await arreterApprentissage(t.value('learn_timeout'))
+          return
+        }
+        let d: Data
+        try {
+          d = await api.get<Data>(url('api/data'))
+        } catch {
+          return // une lecture ratee ne doit pas interrompre le sondage
+        }
+        const c = d.learning?.captured
+        if (c !== null && c !== undefined) {
+          codes.value[i] = String(c)
+          await arreterApprentissage('')
+        }
+      } finally {
+        sondeEnVol = false
       }
     }, SONDAGE_MS)
   } finally {
@@ -276,9 +286,11 @@ function exporter() {
 <template>
   <div class="space-y-4">
     <div class="flex flex-wrap items-center gap-2">
+      <!-- Le <label> voisin n'est pas associe au declencheur (pas de for/id a
+           travers le composant Select) : l'aria-label donne le nom accessible. -->
       <label class="text-sm text-muted-foreground">{{ t('device_label') }}</label>
       <Select v-model="device">
-        <SelectTrigger data-device-select class="min-w-64"><SelectValue /></SelectTrigger>
+        <SelectTrigger data-device-select class="min-w-64" :aria-label="t('device_label')"><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem v-for="d in data.devices" :key="d" :value="d">{{ d }}</SelectItem>
         </SelectContent>
@@ -307,7 +319,7 @@ function exporter() {
     <div class="flex flex-wrap items-center gap-2">
       <label class="text-sm text-muted-foreground">{{ t('preset_label') }}</label>
       <Select v-model="preset">
-        <SelectTrigger class="min-w-40"><SelectValue /></SelectTrigger>
+        <SelectTrigger class="min-w-40" :aria-label="t('preset_label')"><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem v-for="p in data.presets" :key="p" :value="p">{{ p }}</SelectItem>
         </SelectContent>

@@ -95,8 +95,10 @@ async function changerLangue() {
     <Card>
       <CardHeader><CardTitle>{{ t('audio_output') }}</CardTitle></CardHeader>
       <CardContent class="flex flex-wrap items-center gap-2">
+        <!-- Le titre de la carte n'est pas associé au déclencheur : sans
+             aria-label, le sélecteur n'a aucun nom accessible. -->
         <Select v-model="device">
-          <SelectTrigger class="min-w-64"><SelectValue /></SelectTrigger>
+          <SelectTrigger class="min-w-64" :aria-label="t('audio_output')"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem v-for="d in audio.devices" :key="d" :value="d">{{ d }}</SelectItem>
           </SelectContent>
@@ -109,7 +111,7 @@ async function changerLangue() {
       <CardHeader><CardTitle>{{ t('language') }}</CardTitle></CardHeader>
       <CardContent class="flex flex-wrap items-center gap-2">
         <Select v-model="lang">
-          <SelectTrigger class="min-w-32"><SelectValue /></SelectTrigger>
+          <SelectTrigger class="min-w-32" :aria-label="t('language')"><SelectValue /></SelectTrigger>
           <SelectContent>
             <!-- Nom de la langue et non son code : « français » se lit, « fr »
                  se devine. Le code reste la valeur envoyée au cœur. -->

@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { Input, presets, resolveVars, type Mode } from '@ritornello/ui'
 import { computed, ref } from 'vue'
+import { useCatalog } from '../composables/useCatalog'
 import { filterPresets } from '../composables/useTheme'
 
 const props = defineProps<{ current: string; mode: Mode }>()
 defineEmits<{ choose: [id: string] }>()
 
+const { t } = useCatalog()
 const query = ref('')
 const liste = computed(() => filterPresets(query.value))
 
@@ -21,7 +23,7 @@ function couleur(id: string, cle: string): string {
 
 <template>
   <div class="space-y-3">
-    <Input v-model="query" placeholder="filter" />
+    <Input v-model="query" :placeholder="t('theme_filter')" />
     <div class="grid max-h-[60vh] grid-cols-2 gap-2 overflow-y-auto sm:grid-cols-3">
       <button
         v-for="p in liste"

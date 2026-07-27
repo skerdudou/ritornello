@@ -300,7 +300,17 @@ function libelle(s: Trouvee): string {
             >
               ▼
             </Button>
-            <Button variant="ghost" size="icon" data-station-delete @click="supprimer(i)">✕</Button>
+            <!-- Sans nom accessible, un lecteur d'écran annonce le glyphe « ✕ »
+                 — ses voisins monter/descendre, eux, en avaient déjà un. -->
+            <Button
+              variant="ghost"
+              size="icon"
+              data-station-delete
+              :aria-label="t('remove_station')"
+              @click="supprimer(i)"
+            >
+              ✕
+            </Button>
           </td>
         </tr>
       </tbody>

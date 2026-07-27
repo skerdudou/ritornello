@@ -3,12 +3,14 @@ import { describe, expect, it } from 'vitest'
 import ThemePicker from './ThemePicker.vue'
 
 describe('ThemePicker', () => {
-  it('propage le placeholder "filter" sur le champ de recherche rendu', () => {
-    // Ciblé tel quel par le parcours Playwright (Task 13) via
-    // `getByPlaceholder('filter')` : le composant `Input` du kit doit bien
-    // le faire descendre jusqu'à l'élément `<input>` rendu.
+  it('propage le placeholder du catalogue sur le champ de recherche rendu', () => {
+    // Le placeholder vient désormais du catalogue (clé `theme_filter`, valeur
+    // anglaise embarquée « filter » — celle que le parcours Playwright cible
+    // via `getByPlaceholder('filter')`). Sans catalogue chargé, `t()` retombe
+    // sur la clé : c'est elle qu'on doit voir descendre jusqu'à l'`<input>`
+    // rendu par le composant `Input` du kit.
     const w = mount(ThemePicker, { props: { current: 'northern-lights', mode: 'light' } })
-    expect(w.find('input').attributes('placeholder')).toBe('filter')
+    expect(w.find('input').attributes('placeholder')).toBe('theme_filter')
   })
 
   it('liste les 42 thèmes avec quatre pastilles chacun', () => {

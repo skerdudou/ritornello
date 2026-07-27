@@ -5,7 +5,18 @@ const JSON_HEADERS = { 'content-type': 'application/json' }
 /// sinon. Convention reprise telle quelle du helper `put()` des pages
 /// actuelles, pour que les vues migrées n'aient pas à changer de logique.
 async function send(method: 'PUT' | 'POST', url: string, body: unknown): Promise<string | null> {
-  const r = await fetch(url, { method, headers: JSON_HEADERS, body: JSON.stringify(body) })
+  // Le rejet de `fetch` lui-même (cœur en cours de redémarrage, Wi-Fi coupé)
+  // fait partie de la convention « valeur de retour », comme les statuts
+  // non-ok : la quasi-totalité des appelants ne mettent pas de `try` autour
+  // d'un `api.put`, et une exception ici devenait une *unhandled rejection*
+  // muette — l'utilisateur pressait « Lecture » ou « Enregistrer » et rien ne
+  // se passait, sans toast ni message.
+  let r: Response
+  try {
+    r = await fetch(url, { method, headers: JSON_HEADERS, body: JSON.stringify(body) })
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e)
+  }
   if (r.ok) return null
   try {
     const j = (await r.json()) as { error?: string }
