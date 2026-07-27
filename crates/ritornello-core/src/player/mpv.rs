@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixStream;
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 pub struct MpvIpc {
     writer: Mutex<OwnedWriteHalf>,
@@ -17,7 +17,7 @@ pub struct MpvIpc {
 }
 
 impl MpvIpc {
-    pub fn from_stream(stream: UnixStream, events: broadcast::Sender<Event>) -> Arc<Self> {
+    pub fn from_stream(stream: UnixStream, events: mpsc::Sender<Event>) -> Arc<Self> {
         let (read, write) = stream.into_split();
         let ipc = Arc::new(Self {
             writer: Mutex::new(write),
@@ -66,7 +66,13 @@ impl MpvIpc {
                         _ => None,
                     };
                     if let Some(ev) = ev {
-                        let _ = events.send(ev);
+                        // `mpsc` sans perte : canal plein = contre-pression sur
+                        // cette pompe (la lecture de la socket attend), jamais
+                        // d'événement jeté. Récepteur disparu = boucle du cœur
+                        // finie, plus personne à servir.
+                        if events.send(ev).await.is_err() {
+                            break;
+                        }
                     }
                 }
             }
@@ -215,7 +221,7 @@ pub async fn start(
     cd_dev: &str,
     audio_buffer: f64,
     readahead: f64,
-    events: broadcast::Sender<Event>,
+    events: mpsc::Sender<Event>,
 ) -> Result<(MpvPlayer, tokio::process::Child)> {
     if let Some(parent) = socket.parent() {
         std::fs::create_dir_all(parent)?;
@@ -286,12 +292,11 @@ mod tests {
     use crate::types::Event;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
-    use tokio::sync::broadcast;
 
     #[tokio::test]
     async fn command_recoit_la_reponse_correspondante() {
         let (client, server) = UnixStream::pair().unwrap();
-        let (tx, _rx) = broadcast::channel(16);
+        let (tx, _rx) = mpsc::channel(16);
         let ipc = MpvIpc::from_stream(client, tx);
 
         tokio::spawn(async move {
@@ -313,7 +318,7 @@ mod tests {
     #[tokio::test]
     async fn property_change_devient_event() {
         let (client, server) = UnixStream::pair().unwrap();
-        let (tx, mut rx) = broadcast::channel(16);
+        let (tx, mut rx) = mpsc::channel(16);
         let _ipc = MpvIpc::from_stream(client, tx);
 
         let (_r, mut w) = server.into_split();
@@ -339,7 +344,7 @@ mod tests {
     #[tokio::test]
     async fn erreur_mpv_remonte_en_err() {
         let (client, server) = UnixStream::pair().unwrap();
-        let (tx, _rx) = broadcast::channel(16);
+        let (tx, _rx) = mpsc::channel(16);
         let ipc = MpvIpc::from_stream(client, tx);
         tokio::spawn(async move {
             let (r, mut w) = server.into_split();
@@ -359,7 +364,7 @@ mod tests {
         // propriété `metadata` sur un flux Icecast (SomaFM Groove Salad, le seul
         // des cinq flux mesurés à émettre un StreamTitle exploitable).
         let (client, server) = UnixStream::pair().unwrap();
-        let (tx, mut rx) = broadcast::channel(16);
+        let (tx, mut rx) = mpsc::channel(16);
         let _ipc = MpvIpc::from_stream(client, tx);
         let (_r, mut w) = server.into_split();
         w.write_all(

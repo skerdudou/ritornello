@@ -23,7 +23,7 @@ use ritornello_plugin_sdk::{run_input_client, run_metadata_client, DisplayClient
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, watch, RwLock};
+use tokio::sync::{mpsc, watch, RwLock};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::prelude::*;
 
@@ -74,7 +74,13 @@ async fn main() -> Result<()> {
     )));
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(32);
-    let (ev_tx, mut ev_rx) = broadcast::channel::<Event>(64);
+    // Événements de mpv : un `mpsc`, pas un `broadcast` — il n'y a qu'un
+    // consommateur (la boucle ci-dessous), et la sémantique avec perte de
+    // `broadcast` (`Lagged`) pouvait jeter un `PlaybackIdle` que mpv, qui ne
+    // signale que les transitions, n'aurait jamais réémis : flux coupé sans
+    // relance jusqu'à la prochaine action. Ici, canal plein = contre-pression
+    // sur la pompe d'événements, jamais de perte.
+    let (ev_tx, mut ev_rx) = mpsc::channel::<Event>(64);
     let (view_tx, mut view_rx) = watch::channel(View::default());
     let (source_view_tx, mut source_view_rx) = mpsc::channel::<(String, SourceUpdate)>(32);
     // Ce qui joue, vers les plugins `metadata` : un `watch`, parce que seule la
@@ -101,7 +107,7 @@ async fn main() -> Result<()> {
     let audio_buffer = player::mpv::audio_buffer_regle(audio_buffer_brut.as_deref());
     let readahead = player::mpv::readahead_regle(readahead_brut.as_deref());
     let (mpv_player, mut mpv_child) =
-        player::mpv::start(&mpv_bin, &mpv_socket, &cd_dev, audio_buffer, readahead, ev_tx.clone())
+        player::mpv::start(&mpv_bin, &mpv_socket, &cd_dev, audio_buffer, readahead, ev_tx)
             .await
             .context("démarrage de mpv")?;
 
@@ -325,10 +331,15 @@ async fn main() -> Result<()> {
             },
         },
     );
-    core.resume().await?;
+    // Best-effort, comme le réveil par `Power` : un plugin source qui ne
+    // répond pas à `Wake` au boot (timeout de 5 s), ou un `state.json`
+    // douteux, ne doivent pas mettre systemd en boucle de relance — le
+    // service démarre en état dégradé et les commandes restent servies.
+    if let Err(e) = core.resume().await {
+        tracing::warn!("reveil au demarrage: {e}");
+    }
 
     let mut retry_at: Option<tokio::time::Instant> = None;
-    let mut events_open = true;
 
     loop {
         let retry_sleep = async {
@@ -354,24 +365,19 @@ async fn main() -> Result<()> {
                 }
                 status_state.write().await.active_source = core.active_source().to_string();
             }
-            ev = ev_rx.recv(), if events_open => {
-                match ev {
-                    Ok(ev) => {
-                        if matches!(ev, Event::Title(_) | Event::PlaybackActive) {
-                            retry_at = None;
-                        }
-                        if let Some(delay) = core.handle_event(ev).await {
-                            retry_at = Some(tokio::time::Instant::now() + delay);
-                        }
+            // Canal fermé (pompe mpv morte) : le motif `Some(..)` cesse de
+            // matcher et `tokio::select!` désactive le bras — le bras
+            // `mpv_child.wait()` prendra le relais pour sortir proprement.
+            Some(ev) = ev_rx.recv() => {
+                // C'est le cœur qui qualifie l'événement (voir `EventOutcome`) :
+                // la liste des variantes qui attestent la vivacité du flux
+                // n'existe qu'à un seul endroit.
+                match core.handle_event(ev).await {
+                    core::EventOutcome::StreamAlive => retry_at = None,
+                    core::EventOutcome::RetryIn(delay) => {
+                        retry_at = Some(tokio::time::Instant::now() + delay);
                     }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("events en retard, {n} perdus");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        // Canal fermé : on désactive le bras (comme aujourd'hui,
-                        // le bras cessait de matcher) pour éviter de tourner à vide.
-                        events_open = false;
-                    }
+                    core::EventOutcome::Nothing => {}
                 }
             }
             Some((name, update)) = source_view_rx.recv() => {
@@ -402,7 +408,14 @@ async fn main() -> Result<()> {
             _ = overlay_sleep => {
                 core.expire_overlay();
             }
-            (name, status) = plugin_waits.select_next_some() => {
+            // `next()` et non `select_next_some()` : `tokio::select!` ne
+            // consulte pas `is_terminated`, et re-poller un `FuturesUnordered`
+            // épuisé via `select_next_some` panique (`SelectNextSome polled
+            // after terminated`) — c'est-à-dire que la mort du **dernier**
+            // plugin tuait le cœur à l'itération suivante, l'inverse exact de
+            // la dégradation voulue. Avec `next()`, l'épuisement rend `None`,
+            // le motif ne matche pas, et le bras est simplement désactivé.
+            Some((name, status)) = plugin_waits.next() => {
                 tracing::warn!("plugin {name} termine: {status:?}");
                 crate::status::mark_plugin_disconnected(&mut *status_state.write().await, &name);
             }

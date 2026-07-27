@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginStatus {
     pub name: String,
     pub kind: String,
@@ -17,39 +17,10 @@ pub struct PluginStatus {
     pub admin: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusState {
     pub plugins: Vec<PluginStatus>,
     pub active_source: String,
-}
-
-impl<'de> serde::Deserialize<'de> for StatusState {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(serde::Deserialize)]
-        struct Raw {
-            plugins: Vec<RawPlugin>,
-            active_source: String,
-        }
-        #[derive(serde::Deserialize)]
-        struct RawPlugin {
-            name: String,
-            kind: String,
-            connected: bool,
-            admin: bool,
-        }
-        let raw = Raw::deserialize(deserializer)?;
-        Ok(StatusState {
-            plugins: raw
-                .plugins
-                .into_iter()
-                .map(|p| PluginStatus { name: p.name, kind: p.kind, connected: p.connected, admin: p.admin })
-                .collect(),
-            active_source: raw.active_source,
-        })
-    }
 }
 
 #[derive(Clone)]
@@ -204,7 +175,24 @@ struct LocaleRequest {
     locale: String,
 }
 
+/// Forme d'un code de langue acceptable : ce que produisent les noms de
+/// fichiers `<lang>.toml` des packs (`fr`, `en`, `pt-BR`…).
+///
+/// La valeur finit dans des chemins de fichiers (`<root>/<composant>/<lang>.toml`
+/// via `Catalog::load`), dans `state.json` et en variable d'environnement des
+/// plugins : même rigueur que pour le thème et la sortie audio, qui sont
+/// validés — une chaîne arbitraire ouvrait une traversée de chemin
+/// (`{"locale":"../../nimporte/quoi"}`) sur une API non authentifiée.
+fn locale_valide(locale: &str) -> bool {
+    !locale.is_empty()
+        && locale.len() <= 16
+        && locale.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 async fn locale_put(State(state): State<AppState>, Json(req): Json<LocaleRequest>) -> StatusCode {
+    if !locale_valide(&req.locale) {
+        return StatusCode::BAD_REQUEST;
+    }
     *state.locale_current.write().await = Some(req.locale.clone());
     if state.locale_tx.send(req.locale).await.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR;
@@ -556,6 +544,40 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         assert_eq!(locale_rx.recv().await.unwrap(), "fr");
         assert_eq!(locale_current.read().await.as_deref(), Some("fr"));
+    }
+
+    #[tokio::test]
+    async fn put_locale_refuse_une_valeur_qui_nest_pas_un_code_de_langue() {
+        // Régression (revue 2026-07-27) : la valeur finit dans des chemins de
+        // fichiers, dans state.json et en variable d'environnement des
+        // plugins ; `../../x` doit être refusé **avant** toute mise à jour,
+        // comme le thème et la sortie audio le font déjà pour leurs champs.
+        let (state, mut locale_rx, _dir) = app_state_fr();
+        let locale_current = state.locale_current.clone();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/api/locale")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"locale":"../../var/lib/quelconque"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // Ni notifiée, ni retenue comme sélection courante.
+        assert!(locale_rx.try_recv().is_err());
+        assert_eq!(locale_current.read().await.as_deref(), Some("fr"));
+    }
+
+    #[test]
+    fn locale_valide_accepte_les_codes_et_refuse_le_reste() {
+        for ok in ["en", "fr", "pt-BR", "zh_Hant", "fr-CA"] {
+            assert!(locale_valide(ok), "{ok} devrait passer");
+        }
+        for ko in ["", "..", "../fr", "fr/..", "fr toml", "a".repeat(17).as_str()] {
+            assert!(!locale_valide(ko), "{ko:?} devrait être refusé");
+        }
     }
 
     #[tokio::test]

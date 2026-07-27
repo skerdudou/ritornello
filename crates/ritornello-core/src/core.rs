@@ -26,6 +26,22 @@ pub trait Source: Send + Sync + 'static {
     async fn request(&self, req: SourceReq) -> Result<SourceAction>;
 }
 
+/// Ce que la boucle principale doit faire d'un événement du lecteur.
+///
+/// C'est le cœur qui décide quelles variantes attestent la vivacité du flux
+/// (`StreamAlive`) : la boucle de `main`, qui tient l'échéance de relance,
+/// suit ce verdict au lieu de dupliquer la liste des variantes — les deux
+/// listes avaient déjà commencé à devoir être maintenues en parallèle.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EventOutcome {
+    /// Rien à faire côté temporisation.
+    Nothing,
+    /// Le flux est vivant : annuler toute relance programmée.
+    StreamAlive,
+    /// Programmer une relance du flux dans ce délai.
+    RetryIn(Duration),
+}
+
 /// Tout ce que le cœur reçoit du montage de `main` : ses sources, son état
 /// persisté, ses canaux de sortie.
 ///
@@ -110,7 +126,9 @@ impl<P: Player> Core<P> {
             sources,
             source_order,
             active_source,
-            volume: persisted.volume,
+            // Reborné à la lecture : `state.json` peut avoir été édité à la
+            // main, et un `volume: 255` partirait tel quel à mpv au réveil.
+            volume: persisted.volume.min(100),
             muted: false,
             standby: false,
             expecting_stream: false,
@@ -221,9 +239,11 @@ impl<P: Player> Core<P> {
             source: self.active_source.clone(),
             identity: self.metadonnees.identity().cloned(),
         };
-        // Échec impossible en pratique (le cœur garde le Sender), et de toute
+        // Échec impossible en pratique : un `watch::Sender::send` n'échoue que
+        // quand plus aucun récepteur ne vit, et `main` garde le sien pour
+        // alimenter les connexions de plugins `metadata` à venir. De toute
         // façon sans conséquence sur la lecture : un `warn` suffirait à noyer
-        // les journaux si un plugin metadata manquait.
+        // les journaux si aucun plugin metadata n'était déclaré.
         let _ = self.now_playing_tx.send(np);
         self.publie_etat();
         // L'ardoise a changé, donc l'affichage doit suivre — comme le font
@@ -404,6 +424,11 @@ impl<P: Player> Core<P> {
                     // `Deactivate` est ignorée, et la vue de veille qui suit
                     // passerait outre le garde-fou de `handle_source_update`.
                     self.set_identity(None);
+                    // L'incrustation volume/muet ne survit pas à la mise en
+                    // veille : elle garde la priorité dans `push_view`, et
+                    // « VOLUME 65 % » restait à l'écran jusqu'à 2 s après
+                    // l'extinction avant que la vue de veille n'apparaisse.
+                    self.overlay = None;
                     self.view = self.standby_view().await;
                     self.push_view();
                 } else {
@@ -411,31 +436,55 @@ impl<P: Player> Core<P> {
                 }
             }
             Command::SourceCycle => {
-                let _ = self.active().request(SourceReq::Deactivate).await;
+                // Changer de source, c'est toujours changer de ce qui joue —
+                // et c'est le cœur qui arrête, sans dépendre des réponses des
+                // plugins. Avant, l'action renvoyée par `Deactivate` (le
+                // `Stop` du plugin radio) était ignorée, et l'arrêt reposait
+                // sur le `Play` de l'`Activate` suivant — que le cd sans
+                // disque ne renvoie pas (`Noop`) : l'ancien flux continuait
+                // de jouer sous un affichage qui annonçait la nouvelle
+                // source, titres ICY compris.
+                self.expecting_stream = false;
+                self.player.stop().await?;
+                // L'ancienne source est prévenue en best-effort : son arrêt
+                // est déjà fait, elle n'a plus qu'à recaler son propre état.
+                if let Err(e) = self.active().request(SourceReq::Deactivate).await {
+                    tracing::debug!("deactivate: {e}");
+                }
                 let idx = self.source_order.iter().position(|n| n == &self.active_source).unwrap_or(0);
                 let next_idx = (idx + 1) % self.source_order.len().max(1);
                 if let Some(next_name) = self.source_order.get(next_idx).cloned() {
                     self.active_source = next_name;
                 }
-                // Changer de source, c'est toujours changer de ce qui joue. On
-                // l'acte ici sans attendre que la nouvelle Source le déclare :
-                // sinon une Source qui omettrait de le faire laisserait
-                // l'identité de l'autre en place, et les plugins `metadata`
-                // continueraient d'enrichir le morceau précédent.
+                // On l'acte ici sans attendre que la nouvelle Source le
+                // déclare : sinon une Source qui omettrait de le faire
+                // laisserait l'identité de l'autre en place, et les plugins
+                // `metadata` continueraient d'enrichir le morceau précédent.
                 self.set_identity(None);
                 self.retry_count = 0;
+                // Persister **avant** `Activate` : si la nouvelle source ne
+                // répond pas (timeout de 5 s du SDK), l'état mémoire, l'état
+                // sur disque et l'affichage disent déjà tous la même chose —
+                // nouvelle source, rien ne joue. Sans cela, l'échec laissait
+                // la bascule à moitié faite : « cd » à l'écran, « radio »
+                // dans state.json.
+                self.persist();
                 let action = self.active().request(SourceReq::Activate).await?;
                 self.apply(action).await?;
-                self.persist();
             }
         }
         Ok(())
     }
 
-    pub async fn handle_event(&mut self, ev: Event) -> Option<Duration> {
+    pub async fn handle_event(&mut self, ev: Event) -> EventOutcome {
         match ev {
+            // Un seul endroit décide quelles variantes attestent la vivacité
+            // du flux : la boucle de `main` (qui tient l'échéance `retry_at`)
+            // et ce compteur suivent le même verdict via `StreamAlive`, au
+            // lieu de dupliquer la liste des variantes de part et d'autre.
             Event::Title(_) | Event::PlaybackActive => {
                 self.retry_count = 0;
+                return EventOutcome::StreamAlive;
             }
             // Volontairement sans effet sur `retry_count` : la vivacité du flux
             // est déjà attestée par `PlaybackActive`, et un titre ICY n'est pas
@@ -464,11 +513,24 @@ impl<P: Player> Core<P> {
                 if !self.standby && self.expecting_stream {
                     let delay = (RETRY_BASE * 2u32.pow(self.retry_count)).min(RETRY_MAX);
                     self.retry_count = (self.retry_count + 1).min(4);
-                    return Some(delay);
+                    return EventOutcome::RetryIn(delay);
+                }
+                // Fin de lecture **normale** (fin de disque, notamment) : le
+                // dire à la Source, seule à pouvoir recaler son état de
+                // lecture, sa vue et son identité — le cœur ne peut pas
+                // inventer « plus rien ne joue » à sa place, l'identité est
+                // opaque. Sans cela, la fin d'un disque laissait la dernière
+                // piste et ses métadonnées affichées indéfiniment.
+                // Idempotent quand l'arrêt vient d'une commande (la Source a
+                // déjà été prévenue par `Command::Stop`).
+                if !self.standby {
+                    if let Err(e) = self.active().request(SourceReq::Stop).await {
+                        tracing::debug!("notification d'arret a la source: {e}");
+                    }
                 }
             }
         }
-        None
+        EventOutcome::Nothing
     }
 
     fn active(&self) -> Arc<dyn Source> {
@@ -487,7 +549,13 @@ impl<P: Player> Core<P> {
         match action {
             SourceAction::Noop => {}
             SourceAction::Play { uri } => {
-                self.expecting_stream = true;
+                // La machinerie de relance (`expecting_stream` puis
+                // `PlaybackIdle` → retry) n'existe que pour les flux réseau :
+                // un disque qui se termine est une fin normale, pas une
+                // panne. Marquer `cdda://` « flux attendu » faisait
+                // redémarrer le disque en boucle : fin du disque → mpv idle
+                // → relance ~2 s → `Activate` → `Play cdda://` → piste 1.
+                self.expecting_stream = !uri.starts_with("cdda://");
                 self.player.play(&uri).await?;
             }
             SourceAction::Stop => {
@@ -900,23 +968,33 @@ mod tests {
         assert_eq!(st.audio_device.as_deref(), Some("hw:CARD=Headphones"));
     }
 
+    /// Extrait le délai d'un `RetryIn`, ou échoue en nommant ce qui est arrivé.
+    fn relance(outcome: EventOutcome) -> Duration {
+        match outcome {
+            EventOutcome::RetryIn(d) => d,
+            autre => panic!("attendu RetryIn, obtenu {autre:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn stop_intentionnel_ne_declenche_pas_de_retry() {
         let (mut core, _pc, _sc, _rx, _d) = setup();
         core.resume().await.unwrap();
         core.handle_command(Command::Stop).await.unwrap();
-        assert_eq!(core.handle_event(Event::PlaybackIdle).await, None);
+        assert_eq!(core.handle_event(Event::PlaybackIdle).await, EventOutcome::Nothing);
     }
 
     #[tokio::test]
     async fn backoff_croissant_puis_reinitialise_par_un_titre() {
         let (mut core, _pc, _sc, _rx, _d) = setup();
         core.resume().await.unwrap();
-        let d1 = core.handle_event(Event::PlaybackIdle).await.unwrap();
-        let d2 = core.handle_event(Event::PlaybackIdle).await.unwrap();
+        let d1 = relance(core.handle_event(Event::PlaybackIdle).await);
+        let d2 = relance(core.handle_event(Event::PlaybackIdle).await);
         assert!(d2 > d1);
-        core.handle_event(Event::Title("ok".into())).await;
-        let d3 = core.handle_event(Event::PlaybackIdle).await.unwrap();
+        // Un titre atteste la vivacité du flux : c'est aussi le verdict que la
+        // boucle de `main` suit pour annuler l'échéance de relance.
+        assert_eq!(core.handle_event(Event::Title("ok".into())).await, EventOutcome::StreamAlive);
+        let d3 = relance(core.handle_event(Event::PlaybackIdle).await);
         assert_eq!(d3, d1);
     }
 
@@ -964,7 +1042,7 @@ mod tests {
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
         let mut core = Core::new(player, Cablage { sources, persisted, state_path: dir.path().join("state.json"), view_tx: tx, catalog, locales_root: root, metadata: cablage_muet(vec![]) });
         core.resume().await.unwrap();
-        assert_eq!(core.handle_event(Event::PlaybackIdle).await, None);
+        assert_eq!(core.handle_event(Event::PlaybackIdle).await, EventOutcome::Nothing);
     }
 
     #[tokio::test]
@@ -973,7 +1051,115 @@ mod tests {
         // un flux est bien attendu, donc un PlaybackIdle doit programmer un retry.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         core.resume().await.unwrap();
-        assert!(core.handle_event(Event::PlaybackIdle).await.is_some());
+        assert!(matches!(core.handle_event(Event::PlaybackIdle).await, EventOutcome::RetryIn(_)));
+    }
+
+    #[tokio::test]
+    async fn la_fin_du_disque_ne_relance_pas_la_lecture_et_previent_la_source() {
+        // Régression (revue 2026-07-27) : `Play cdda://` posait
+        // `expecting_stream`, donc la fin du disque (mpv idle) déclenchait la
+        // machinerie de relance des flux réseau : `Activate` → `Play cdda://`
+        // → le disque repartait de la piste 1, indéfiniment.
+        let dir = tempfile::tempdir().unwrap();
+        let player = FakePlayer::default();
+        let player_calls = player.calls.clone();
+        let source_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
+        sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls.clone() }));
+        let (tx, _rx) = watch::channel(View::default());
+        let persisted = PersistedState { active_source: "cd".into(), ..PersistedState::default() };
+        let root = dir.path().to_path_buf();
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let mut core = Core::new(player, Cablage { sources, persisted, state_path: dir.path().join("state.json"), view_tx: tx, catalog, locales_root: root, metadata: cablage_muet(vec![]) });
+        // Unique source : SourceCycle re-active « cd », qui répond `Play cdda://`.
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        assert!(player_calls.lock().unwrap().contains(&"play cdda://".to_string()));
+        // Fin du disque : pas de relance, et la Source est prévenue — elle
+        // seule peut recaler sa vue et son identité sur « plus rien ne joue ».
+        assert_eq!(core.handle_event(Event::PlaybackIdle).await, EventOutcome::Nothing);
+        assert!(source_calls.lock().unwrap().iter().any(|c| c == "cd:Stop"));
+    }
+
+    /// Source qui n'a jamais rien à jouer : un lecteur cd sans disque.
+    struct SourceVide;
+
+    #[async_trait::async_trait]
+    impl Source for SourceVide {
+        async fn request(&self, _req: SourceReq) -> Result<SourceAction> {
+            Ok(SourceAction::Noop)
+        }
+    }
+
+    #[tokio::test]
+    async fn changer_de_source_arrete_la_lecture_meme_si_la_nouvelle_na_rien_a_jouer() {
+        // Régression (revue 2026-07-27) : l'action renvoyée par `Deactivate`
+        // était ignorée et l'arrêt reposait sur le `Play` de l'`Activate`
+        // suivant — que le cd sans disque ne renvoie pas (`Noop`). La radio
+        // continuait de jouer sous un affichage qui annonçait « cd », titres
+        // ICY compris.
+        let dir = tempfile::tempdir().unwrap();
+        let player = FakePlayer::default();
+        let player_calls = player.calls.clone();
+        let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
+        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())) }));
+        sources.insert("cd".into(), Arc::new(SourceVide));
+        let (tx, _rx) = watch::channel(View::default());
+        let (etat_tx, etat_rx) = watch::channel(PlayerState::default());
+        let root = dir.path().to_path_buf();
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let metadata = MetadataCablage {
+            plugins: vec![],
+            now_playing: watch::channel(NowPlaying { source: String::new(), identity: None }).0,
+            etat: etat_tx,
+        };
+        let mut core = Core::new(player, Cablage { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), view_tx: tx, catalog, locales_root: root, metadata });
+        core.resume().await.unwrap();
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        // C'est le cœur qui a arrêté mpv, sans dépendre des plugins.
+        assert!(player_calls.lock().unwrap().contains(&"stop".to_string()));
+        // Et un titre ICY en retard de l'ancien flux n'atteint plus personne :
+        // plus aucun flux n'est attendu.
+        core.handle_event(Event::IcyTitle("en retard".into())).await;
+        assert_eq!(etat_rx.borrow().morceau.title, None);
+    }
+
+    /// Source dont l'activation échoue — un plugin bloqué, que le SDK
+    /// sanctionne par un timeout.
+    struct SourceEnPanne;
+
+    #[async_trait::async_trait]
+    impl Source for SourceEnPanne {
+        async fn request(&self, req: SourceReq) -> Result<SourceAction> {
+            match req {
+                SourceReq::Activate => anyhow::bail!("timeout"),
+                _ => Ok(SourceAction::Noop),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn un_echec_dactivation_laisse_la_bascule_coherente() {
+        // Régression (revue 2026-07-27) : `persist()` n'était appelé qu'après
+        // un `Activate` réussi. Son échec laissait la bascule à moitié faite :
+        // « cd » en mémoire et à l'écran, « radio » dans state.json, et
+        // l'ancien flux toujours audible.
+        let dir = tempfile::tempdir().unwrap();
+        let player = FakePlayer::default();
+        let player_calls = player.calls.clone();
+        let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
+        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())) }));
+        sources.insert("cd".into(), Arc::new(SourceEnPanne));
+        let (tx, _rx) = watch::channel(View::default());
+        let root = dir.path().to_path_buf();
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let mut core = Core::new(player, Cablage { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), view_tx: tx, catalog, locales_root: root, metadata: cablage_muet(vec![]) });
+        core.resume().await.unwrap();
+        assert!(core.handle_command(Command::SourceCycle).await.is_err());
+        // L'état est cohérent : nouvelle source partout, et rien ne joue.
+        assert_eq!(core.active_source(), "cd");
+        let st = crate::state::load(&dir.path().join("state.json"));
+        assert_eq!(st.active_source, "cd");
+        assert!(player_calls.lock().unwrap().contains(&"stop".to_string()));
     }
 
     #[tokio::test]
@@ -1045,7 +1231,25 @@ mod tests {
         let d1 = core.overlay_deadline().unwrap();
         core.handle_command(Command::VolumeUp).await.unwrap();
         let d2 = core.overlay_deadline().unwrap();
-        assert!(d2 >= d1);
+        // Strictement supérieur : `>=` passerait aussi avec une échéance
+        // jamais repoussée (`d2 == d1`), soit exactement le défaut que ce
+        // test prétend attraper. Deux `Instant::now()` successifs sont
+        // toujours distincts sur les horloges monotones visées.
+        assert!(d2 > d1);
+    }
+
+    #[tokio::test]
+    async fn la_mise_en_veille_efface_lincrustation_volume() {
+        // Régression (revue 2026-07-27) : l'incrustation garde la priorité
+        // dans `push_view`, donc « VOLUME 65 % » restait affiché jusqu'à 2 s
+        // après l'extinction avant que la vue de veille n'apparaisse.
+        let (mut core, _pc, _sc, mut rx, _d) = setup();
+        core.resume().await.unwrap();
+        core.handle_command(Command::VolumeUp).await.unwrap();
+        assert_eq!(rx.borrow_and_update().line1, "VOLUME");
+        core.handle_command(Command::Power).await.unwrap();
+        assert_eq!(rx.borrow_and_update().line1, "STANDBY");
+        assert!(core.overlay_deadline().is_none());
     }
 
     /// Vue de base de la radio : ligne 3 libre, c'est là que les métadonnées

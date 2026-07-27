@@ -33,13 +33,17 @@ pub struct PluginManifest {
 }
 
 impl PluginManifest {
-    /// Un fichier absent donne un manifeste vide : le cœur démarre sans
+    /// Un fichier **absent** donne un manifeste vide : le cœur démarre sans
     /// plugin plutôt que d'échouer (cohérent avec le traitement déjà
-    /// existant pour `stations.toml`).
+    /// existant pour `stations.toml`). Toute autre erreur d'E/S est remontée,
+    /// comme un TOML invalide : un `plugins.toml` présent mais illisible
+    /// (droits) qui donnerait « aucune source disponible » enverrait le
+    /// diagnostic dans la mauvaise direction.
     pub fn load(path: &Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
             Ok(text) => Ok(toml::from_str(&text)?),
-            Err(_) => Ok(Self::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e).with_context(|| format!("lecture de {}", path.display())),
         }
     }
 }
@@ -111,6 +115,20 @@ admin = true
         assert!(!m.plugins[0].admin);
         assert_eq!(m.plugins[1].kind, PluginKind::Display);
         assert!(m.plugins[1].admin);
+    }
+
+    #[test]
+    fn un_manifeste_absent_est_vide_mais_illisible_est_une_erreur() {
+        // Absent = installation sans plugin, cas normal. Illisible (ici : le
+        // « répertoire » parent est en réalité un fichier) = un problème à
+        // nommer — « aucune source disponible » enverrait le diagnostic dans
+        // la mauvaise direction.
+        let dir = tempfile::tempdir().unwrap();
+        let absent = PluginManifest::load(&dir.path().join("plugins.toml")).unwrap();
+        assert!(absent.plugins.is_empty());
+        let bouchon = dir.path().join("pas-un-repertoire");
+        std::fs::write(&bouchon, "").unwrap();
+        assert!(PluginManifest::load(&bouchon.join("plugins.toml")).is_err());
     }
 
     #[test]
