@@ -63,6 +63,20 @@ describe('HomeView', () => {
     expect(w.find('[data-remote-power]').exists()).toBe(true)
   })
 
+  it('la veille est dans le slot d’action de l’en-tête, donc sur la ligne du titre', async () => {
+    // Ce n'est pas cosmetique : `CardHeader` est une grille qui ne passe en deux
+    // colonnes qu'en presence d'un enfant `data-slot="card-action"`. Sans lui, le
+    // bouton tombe sur la deuxieme ligne, sous le titre — c'est exactement ce
+    // qui s'etait produit, et aucune classe utilitaire ajoutee a la main ne le
+    // corrigeait.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
+    const HomeView = (await import('./HomeView.vue')).default
+    const w = mount(HomeView)
+    const action = w.find('[data-slot="card-action"]')
+    expect(action.exists()).toBe(true)
+    expect(action.find('[data-remote-power]').exists()).toBe(true)
+  })
+
   it('le bouton de veille poste la commande Power', async () => {
     const spy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
     vi.stubGlobal('fetch', spy)

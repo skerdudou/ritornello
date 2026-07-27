@@ -198,16 +198,18 @@ Deux couches se superposent, et la seconde gagne :
    déclarer quoi que ce soit.
 2. **Ce qu'un plugin `metadata` a appris**, s'il correspond à ce qui joue.
 
-Un **nouveau** titre ICY périme les enrichissements en mémoire : c'est la preuve
-que le morceau a changé, et ce qu'un plugin avait dit décrivait le précédent.
-Sans cela, l'ancien enrichissement — prioritaire — restait affiché plusieurs
-secondes, le temps que le plugin reçoive sa propre trame. Pour une radio,
-l'identité est l'URL du flux : elle ne change pas d'un morceau à l'autre et ne
-peut donc pas servir de garde-fou, contrairement au disque dont l'identité porte
-l'index de piste. Conséquence visible et voulue : sur une station dont l'ICY est
-exploitable, l'affichage montre d'abord ce que le flux annonce, puis l'artiste et
-le titre séparés dès que le plugin répond — la pastille d'origine passe de `icy`
-au nom du plugin.
+**Un plugin est prioritaire sur l'ICY en toutes circonstances**, tant que la
+station ne change pas : ce qu'il a dit reste affiché même si le flux annonce
+entre-temps un nouveau titre. L'ICY de ces flux est de moindre qualité — ordre
+inversé (`Titre - ARTISTE`), parfois le seul nom de la station en remplissage —
+et le laisser reprendre la main à chaque morceau faisait changer la forme de
+l'affichage deux fois par morceau.
+
+Compromis assumé : au changement de morceau, le titre précédent reste affiché le
+temps que le plugin envoie sa trame — court en pratique, les deux venant de la
+même automatisation de la station, mais durable si le plugin cesse de répondre.
+Changer de station, en revanche, remet l'ardoise à zéro : c'est l'identité qui
+change, et l'ICY reprend la main jusqu'à la première réponse du plugin.
 
 Sans plugin `metadata` déclaré, il n'y a donc pas d'enrichissement — c'est
 assumé, ce n'est pas une régression. **La lecture n'est jamais affectée** par un

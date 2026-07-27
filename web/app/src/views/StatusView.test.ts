@@ -163,7 +163,7 @@ describe('StatusView — langue', () => {
     // cœur (verifié par le test du PUT ci-dessus).
     const { w } = await monter()
     const textes = w.findAllComponents(SelectItem).map((i) => i.text())
-    expect(textes).toContain('français')
+    expect(textes).toContain('Français')
     expect(textes).toContain('English')
     expect(textes).not.toContain('fr')
   })

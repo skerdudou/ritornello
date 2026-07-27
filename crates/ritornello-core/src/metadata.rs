@@ -123,21 +123,24 @@ impl Metadonnees {
             return false;
         }
         self.icy = Some(titre);
-        // Un titre ICY **nouveau** est la preuve que le morceau a changé, et les
-        // enrichissements en mémoire décrivent le précédent. Les garder les
-        // ferait gagner — ils ont priorité sur l'ICY — et afficher le morceau
-        // d'avant jusqu'à ce qu'un plugin rattrape, avec plusieurs secondes
-        // d'écart le temps qu'il reçoive sa propre trame.
+        // Les enrichissements ne sont **pas** effacés ici, et c'est une décision
+        // du propriétaire : un plugin `metadata` garde la priorité sur l'ICY en
+        // toutes circonstances.
         //
-        // Pour une radio, l'identité est l'URL du flux : elle ne change pas d'un
-        // morceau à l'autre, et ne peut donc pas servir de garde-fou ici,
-        // contrairement au disque dont l'identité porte l'index de piste. L'ICY
-        // est le seul signal de changement dont le cœur dispose sur un flux.
+        // Une version antérieure les effaçait, au motif qu'un titre ICY nouveau
+        // prouve que le morceau a changé et que l'enrichissement en mémoire
+        // décrit le précédent. C'est exact, mais la conséquence était une
+        // alternance visible : à chaque morceau, l'affichage passait par la forme
+        // ICY (sur ces flux, « Titre - ARTISTE », parfois le seul nom de la
+        // station en remplissage) avant que le plugin ne corrige une seconde plus
+        // tard.
         //
-        // Sans conséquence pour les stations dont l'ICY ne change jamais (OUI FM
-        // n'y met qu'un texte de remplissage) : la comparaison ci-dessus écarte
-        // les répétitions, donc rien n'est effacé.
-        self.enrichissements.clear();
+        // Compromis assumé, et il est réel : au changement de morceau, le titre
+        // précédent reste affiché le temps que le plugin envoie sa trame. Court
+        // en pratique — les deux viennent de la même automatisation de la station
+        // — mais durable si le plugin cesse de répondre. Un titre légèrement en
+        // retard a été juge préférable à une forme qui change deux fois par
+        // morceau.
         true
     }
 
@@ -464,13 +467,16 @@ mod tests {
     }
 
     #[test]
-    fn un_nouveau_titre_icy_perime_les_enrichissements() {
-        // Defaut constate a l'usage : sur une meme station, l'origine affichee
-        // alternait entre `icy` et le plugin. La cause n'etait pas l'alternance
-        // elle-meme — legitime, l'ICY arrive avant la trame du plugin — mais le
-        // fait qu'un enrichissement du morceau **precedent** restait retenu et
-        // gagnait sur un ICY frais, l'identite d'un flux (son URL) ne changeant
-        // pas d'un morceau a l'autre.
+    fn un_plugin_garde_la_priorite_meme_sur_un_titre_icy_plus_recent() {
+        // Decision du proprietaire : un plugin `metadata` est prioritaire sur
+        // l'ICY **en toutes circonstances**. Une version anterieure effacait les
+        // enrichissements a chaque nouveau titre ICY (celui-ci prouvant que le
+        // morceau a change), ce qui faisait passer l'affichage par la forme ICY
+        // — « Titre - ARTISTE » sur ces flux — avant correction par le plugin,
+        // deux fois par morceau.
+        //
+        // Compromis assume, verifie ici : au changement de morceau, c'est le
+        // titre precedent qui reste affiche jusqu'a la trame suivante du plugin.
         let mut m = Metadonnees::new(vec!["ouifm".into()]);
         let id = json!({"kind": "stream", "url": "http://ouifm3"});
         m.set_identity(Some(id.clone()));
@@ -479,14 +485,32 @@ mod tests {
         assert_eq!(m.etat().origin.as_deref(), Some("ouifm"));
 
         // Morceau suivant : le flux l'annonce, le plugin n'a pas encore parle.
-        assert!(m.set_icy("Fade To Grey - VISAGE".into()));
+        assert!(m.set_icy("Fade To Grey - VISAGE".into()), "l'ICY est bien retenu");
         let etat = m.etat();
-        assert_eq!(etat.origin.as_deref(), Some("icy"), "l'ancien enrichissement ne doit plus gagner");
-        assert_eq!(etat.title.as_deref(), Some("Fade To Grey - VISAGE"));
+        assert_eq!(etat.origin.as_deref(), Some("ouifm"), "le plugin garde la main");
+        assert_eq!(etat.artist.as_deref(), Some("TAHITI 80"));
 
-        // Puis le plugin rattrape, et reprend la main.
+        // Puis le plugin rattrape.
         m.ajoute("ouifm", enrichissement(id, "VISAGE", "FADE TO GREY"));
         assert_eq!(m.etat().artist.as_deref(), Some("VISAGE"));
+    }
+
+    #[test]
+    fn licy_reprend_la_main_quand_la_station_change() {
+        // La priorite du plugin ne vaut que pour **ce qui joue** : changer de
+        // station change l'identite, ce qui remet l'ardoise a zero. Sans quoi le
+        // titre d'une station suivrait sur la suivante.
+        let mut m = Metadonnees::new(vec!["ouifm".into()]);
+        let une = json!({"kind": "stream", "url": "http://ouifm3"});
+        m.set_identity(Some(une.clone()));
+        m.ajoute("ouifm", enrichissement(une, "TAHITI 80", "MADE UP"));
+        assert_eq!(m.etat().origin.as_deref(), Some("ouifm"));
+
+        m.set_identity(Some(json!({"kind": "stream", "url": "http://fip"})));
+        m.set_icy("Miles Davis - So What".into());
+        let etat = m.etat();
+        assert_eq!(etat.origin.as_deref(), Some("icy"));
+        assert_eq!(etat.title.as_deref(), Some("Miles Davis - So What"));
     }
 
     #[test]

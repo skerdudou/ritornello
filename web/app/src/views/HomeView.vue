@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { api, Button, Card, CardContent, CardHeader, CardTitle, toast } from '@ritornello/ui'
+import {
+  api, Button, Card, CardAction, CardContent, CardHeader, CardTitle, toast,
+} from '@ritornello/ui'
 import PlayerCard from '../components/PlayerCard.vue'
 import { useCatalog } from '../composables/useCatalog'
 import type { Command } from '../types'
@@ -26,12 +28,17 @@ async function send(cmd: Command) {
     <Card>
       <!-- La veille au coin de la carte : c'est la seule commande qui agisse sur
            l'appareil entier plutot que sur la lecture, et la plus consequente —
-           la tenir a l'ecart de la grille evite de l'actionner par megarde. -->
-      <CardHeader class="flex-row items-center justify-between space-y-0">
+           la tenir a l'ecart de la grille evite de l'actionner par megarde.
+           `CardAction` est ce qui la place a droite **sur la ligne du titre** :
+           l'en-tete est une grille qui ne passe en deux colonnes qu'en presence
+           de ce slot. Sans lui, le bouton tombait sous le titre. -->
+      <CardHeader>
         <CardTitle>{{ t('remote_title') }}</CardTitle>
-        <Button variant="outline" size="sm" data-remote-power @click="send(REMOTE_POWER.cmd)">
-          {{ t(REMOTE_POWER.key) }}
-        </Button>
+        <CardAction>
+          <Button variant="outline" size="sm" data-remote-power @click="send(REMOTE_POWER.cmd)">
+            {{ t(REMOTE_POWER.key) }}
+          </Button>
+        </CardAction>
       </CardHeader>
       <CardContent class="space-y-3">
         <div class="grid grid-cols-3 gap-2 sm:grid-cols-9">

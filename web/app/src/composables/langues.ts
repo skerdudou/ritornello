@@ -20,8 +20,28 @@ export function nomLangue(code: string): string {
   if (!brut) return ''
   try {
     const noms = new Intl.DisplayNames([brut], { type: 'language' })
-    return noms.of(brut) ?? brut
+    const nom = noms.of(brut)
+    // Capitalise seulement un **nom** : quand `Intl` ne connait pas le code, il
+    // le renvoie tel quel, et un code s'affiche verbatim — « Qqq » ne serait ni
+    // un nom ni un code.
+    return nom && nom !== brut ? majuscule(nom, brut) : brut
   } catch {
     return brut
   }
+}
+
+/**
+ * Premiere lettre en majuscule.
+ *
+ * Les conventions typographiques divergent — l'anglais capitalise les noms de
+ * langue (« English »), le francais non (« francais ») — et une liste ou les
+ * entrees alternent les deux se lit mal. On capitalise donc toutes les entrees.
+ *
+ * `toLocaleUpperCase` avec la langue concernee, et non `toUpperCase` : la
+ * transformation depend de la langue (le turc distingue `i` et `ı`), et elle est
+ * sans effet sur les ecritures qui n'ont pas de casse.
+ */
+function majuscule(nom: string, langue: string): string {
+  const premiere = nom.slice(0, 1).toLocaleUpperCase(langue)
+  return premiere + nom.slice(1)
 }
