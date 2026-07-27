@@ -17,13 +17,18 @@ pub enum PluginKind {
     Metadata,
 }
 
+/// Une entrée de `plugins.toml` : quoi lancer, rien d'autre.
+///
+/// La page d'admin n'y est **pas** déclarée : c'est une propriété du binaire,
+/// pas du déploiement. Le cœur propose `--admin-socket` à tous les plugins, et
+/// celui qui a une page la déclare en **liant** cette socket (voir
+/// `attend_liaison`). Un champ `admin` d'un ancien fichier est simplement
+/// ignoré par serde.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginConfig {
     pub name: String,
     pub kind: PluginKind,
     pub exec: String,
-    #[serde(default)]
-    pub admin: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -49,7 +54,10 @@ impl PluginManifest {
 }
 
 /// Spawn un plugin en lui passant le chemin de la socket de genre qu'il doit
-/// lier, et — s'il déclare `admin = true` — un `--admin-socket`.
+/// lier, et un `--admin-socket` **proposé à tous** : un plugin sans page
+/// d'admin ignore l'argument, un plugin qui en a une lie la socket — c'est
+/// cette liaison qui vaut déclaration (voir `attend_liaison`). Le fichier est
+/// supprimé avant le spawn : son apparition ne peut donc venir que du plugin.
 ///
 /// `locale` transmet la langue courante du cœur via `RITORNELLO_LOCALE` : elle
 /// n'est appliquée qu'**au lancement** du processus enfant, pas en continu — un
@@ -59,7 +67,7 @@ impl PluginManifest {
 pub fn spawn(
     exec: &str,
     socket_path: &Path,
-    admin_socket: Option<&Path>,
+    admin_socket: &Path,
     locale: Option<&str>,
 ) -> Result<tokio::process::Child> {
     if let Some(parent) = socket_path.parent() {
@@ -67,12 +75,10 @@ pub fn spawn(
             .with_context(|| format!("creation du repertoire de sockets {}", parent.display()))?;
     }
     let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_file(admin_socket);
     let mut cmd = tokio::process::Command::new(exec);
     cmd.arg("--socket").arg(socket_path);
-    if let Some(admin) = admin_socket {
-        let _ = std::fs::remove_file(admin);
-        cmd.arg("--admin-socket").arg(admin);
-    }
+    cmd.arg("--admin-socket").arg(admin_socket);
     if let Some(locale) = locale {
         cmd.env("RITORNELLO_LOCALE", locale);
     }
@@ -84,12 +90,36 @@ pub fn spawn(
     cmd.kill_on_drop(true).spawn().with_context(|| format!("executable {exec}"))
 }
 
+/// Attend que `path` apparaisse sur le disque, au plus `fenetre`.
+///
+/// C'est ainsi qu'un plugin déclare sa page d'admin : en **liant** la socket
+/// que le cœur propose à tous (`--admin-socket`) — le fichier apparaît au
+/// `bind()`, première chose que fait la moitié admin d'un plugin qui en a
+/// une. Une déclaration observée plutôt qu'une ligne de configuration que
+/// l'opérateur devait connaître et pouvait oublier (le mode dégradé silencieux
+/// de `admin = true` manquant a réellement été rencontré).
+pub async fn attend_liaison(path: &Path, fenetre: std::time::Duration) -> bool {
+    let echeance = tokio::time::Instant::now() + fenetre;
+    loop {
+        if path.exists() {
+            return true;
+        }
+        if tokio::time::Instant::now() >= echeance {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn charge_un_manifeste_toml() {
+        // La seconde entrée porte l'ancien champ `admin = true` : il n'existe
+        // plus (la page d'admin se déclare en liant la socket), mais un
+        // fichier en service qui le porte encore doit se charger sans erreur.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("plugins.toml");
         std::fs::write(
@@ -112,9 +142,33 @@ admin = true
         assert_eq!(m.plugins.len(), 2);
         assert_eq!(m.plugins[0].name, "radio");
         assert_eq!(m.plugins[0].kind, PluginKind::Source);
-        assert!(!m.plugins[0].admin);
         assert_eq!(m.plugins[1].kind, PluginKind::Display);
-        assert!(m.plugins[1].admin);
+    }
+
+    #[tokio::test]
+    async fn attend_liaison_voit_une_socket_liee_en_cours_de_fenetre() {
+        // La « déclaration » d'une page d'admin est l'apparition du fichier de
+        // socket : elle peut survenir n'importe quand pendant la fenêtre, pas
+        // seulement avant le premier regard.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugin-admin.sock");
+        let path_ecrivain = path.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            std::fs::write(&path_ecrivain, "").unwrap();
+        });
+        assert!(attend_liaison(&path, std::time::Duration::from_secs(2)).await);
+    }
+
+    #[tokio::test]
+    async fn attend_liaison_abandonne_a_lecheance() {
+        // Un plugin sans page d'admin ne lie jamais la socket proposée : la
+        // fenêtre doit se refermer, pas attendre indéfiniment.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jamais-liee.sock");
+        let debut = std::time::Instant::now();
+        assert!(!attend_liaison(&path, std::time::Duration::from_millis(200)).await);
+        assert!(debut.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]
@@ -168,8 +222,13 @@ exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-musicbrainz"
         // laisse aucun moyen de savoir laquelle est fautive : « No such file or
         // directory (os error 2) » ne designe rien.
         let dir = tempfile::tempdir().unwrap();
-        let e = spawn("/chemin/qui/nexiste/pas/ritornello-plugin-bidon", &dir.path().join("p.sock"), None, None)
-            .expect_err("un executable absent doit echouer");
+        let e = spawn(
+            "/chemin/qui/nexiste/pas/ritornello-plugin-bidon",
+            &dir.path().join("p.sock"),
+            &dir.path().join("p-admin.sock"),
+            None,
+        )
+        .expect_err("un executable absent doit echouer");
         let message = format!("{e:#}");
         assert!(
             message.contains("/chemin/qui/nexiste/pas/ritornello-plugin-bidon"),

@@ -134,10 +134,13 @@ async fn main() -> Result<()> {
 
     for p in &manifest.plugins {
         let socket_path = PathBuf::from(format!("{runtime_dir}/{}.sock", p.name));
-        let admin_socket = p
-            .admin
-            .then(|| PathBuf::from(format!("{runtime_dir}/{}-admin.sock", p.name)));
-        match plugins::spawn(&p.exec, &socket_path, admin_socket.as_deref(), persisted.locale.as_deref()) {
+        // La socket d'admin est proposée à **tous** les plugins : celui qui a
+        // une page la lie (c'est sa déclaration), les autres ignorent
+        // l'argument. Plus de champ `admin` dans plugins.toml — c'était une
+        // propriété du binaire que l'opérateur devait connaître, et son oubli
+        // produisait un mode dégradé silencieux.
+        let admin_socket = PathBuf::from(format!("{runtime_dir}/{}-admin.sock", p.name));
+        match plugins::spawn(&p.exec, &socket_path, &admin_socket, persisted.locale.as_deref()) {
             Ok(child) => {
                 let wname = p.name.clone();
                 plugin_waits.push(async move {
@@ -145,30 +148,40 @@ async fn main() -> Result<()> {
                     let status = child.wait().await;
                     (wname, status)
                 });
-                if p.admin {
+                {
                     let name = p.name.clone();
-                    let asock = PathBuf::from(format!("{runtime_dir}/{}-admin.sock", p.name));
                     admin_connects.push(tokio::spawn(async move {
-                        let result = ritornello_plugin_sdk::AdminClient::connect(&asock).await;
-                        (name, result)
+                        // Le fichier a été supprimé avant le spawn : son
+                        // apparition ne peut venir que du plugin. La liaison
+                        // est la première chose que fait une moitié admin, la
+                        // fenêtre est donc large — et elle court en parallèle
+                        // des connexions de genre, pas après.
+                        if !plugins::attend_liaison(&admin_socket, std::time::Duration::from_secs(2)).await {
+                            return (name, None);
+                        }
+                        match ritornello_plugin_sdk::AdminClient::connect(&admin_socket).await {
+                            Ok(client) => (name, Some(client)),
+                            Err(e) => {
+                                tracing::warn!("plugin admin {name} injoignable: {e}");
+                                (name, None)
+                            }
+                        }
                     }));
                 }
                 match p.kind {
                     PluginKind::Source => {
                         let name = p.name.clone();
-                        let admin = p.admin;
                         let view_tx = source_view_tx.clone();
                         source_connects.push(tokio::spawn(async move {
                             let result = SourceClient::connect(&socket_path, name.clone(), view_tx).await;
-                            (name, admin, result)
+                            (name, result)
                         }));
                     }
                     PluginKind::Display => {
                         let name = p.name.clone();
-                        let admin = p.admin;
                         display_connect = Some(tokio::spawn(async move {
                             let result = DisplayClient::connect(&socket_path).await;
-                            (name, admin, result)
+                            (name, result)
                         }));
                     }
                     PluginKind::Input => {
@@ -180,7 +193,10 @@ async fn main() -> Result<()> {
                                 tracing::warn!("plugin input {name} deconnecte: {e}");
                             }
                         });
-                        plugin_statuses.push(PluginStatus { name: p.name.clone(), kind: "input".into(), connected: true, admin: p.admin });
+                        // `admin` est posé à faux partout ici : la détection
+                        // (liaison de la socket d'admin) complète le drapeau
+                        // plus bas, une fois les tâches d'observation jointes.
+                        plugin_statuses.push(PluginStatus { name: p.name.clone(), kind: "input".into(), connected: true, admin: false });
                     }
                     PluginKind::Metadata => {
                         // Relais dans les deux sens, dans sa propre tâche : sa
@@ -195,7 +211,7 @@ async fn main() -> Result<()> {
                                 tracing::warn!("plugin metadata {name} deconnecte: {e}");
                             }
                         });
-                        plugin_statuses.push(PluginStatus { name: p.name.clone(), kind: "metadata".into(), connected: true, admin: p.admin });
+                        plugin_statuses.push(PluginStatus { name: p.name.clone(), kind: "metadata".into(), connected: true, admin: false });
                     }
                 }
             }
@@ -203,48 +219,50 @@ async fn main() -> Result<()> {
                 // `{e:#}` et non `{e}` : la chaîne de contexte porte le chemin
                 // cherché, que le seul message d'erreur système n'indique pas.
                 tracing::warn!("lancement du plugin {} impossible: {e:#}", p.name);
-                plugin_statuses.push(PluginStatus { name: p.name.clone(), kind: format!("{:?}", p.kind).to_lowercase(), connected: false, admin: p.admin });
+                plugin_statuses.push(PluginStatus { name: p.name.clone(), kind: format!("{:?}", p.kind).to_lowercase(), connected: false, admin: false });
             }
         }
     }
 
     for handle in source_connects {
-        let (name, admin, result) = handle.await.context("tache de connexion plugin source interrompue")?;
+        let (name, result) = handle.await.context("tache de connexion plugin source interrompue")?;
         match result {
             Ok(client) => {
                 sources.insert(name.clone(), client);
-                plugin_statuses.push(PluginStatus { name, kind: "source".into(), connected: true, admin });
+                plugin_statuses.push(PluginStatus { name, kind: "source".into(), connected: true, admin: false });
             }
             Err(e) => {
                 tracing::warn!("plugin {} indisponible: {e}", name);
-                plugin_statuses.push(PluginStatus { name, kind: "source".into(), connected: false, admin });
+                plugin_statuses.push(PluginStatus { name, kind: "source".into(), connected: false, admin: false });
             }
         }
     }
 
     let mut display_client: Option<Arc<DisplayClient>> = None;
     if let Some(handle) = display_connect {
-        let (name, admin, result) = handle.await.context("tache de connexion plugin display interrompue")?;
+        let (name, result) = handle.await.context("tache de connexion plugin display interrompue")?;
         match result {
             Ok(client) => {
                 display_client = Some(client);
-                plugin_statuses.push(PluginStatus { name, kind: "display".into(), connected: true, admin });
+                plugin_statuses.push(PluginStatus { name, kind: "display".into(), connected: true, admin: false });
             }
             Err(e) => {
                 tracing::warn!("plugin display {name} indisponible: {e}");
-                plugin_statuses.push(PluginStatus { name, kind: "display".into(), connected: false, admin });
+                plugin_statuses.push(PluginStatus { name, kind: "display".into(), connected: false, admin: false });
             }
         }
     }
 
+    // La page d'admin est une capacité **observée** : le drapeau des statuts
+    // suit ce qui a réellement été détecté, pas une déclaration de fichier.
     let mut admin_backends: HashMap<String, Arc<dyn admin::AdminBackend>> = HashMap::new();
     for handle in admin_connects {
-        let (name, result) = handle.await.context("tache de connexion admin interrompue")?;
-        match result {
-            Ok(client) => {
-                admin_backends.insert(name, client);
+        let (name, backend) = handle.await.context("tache de detection admin interrompue")?;
+        if let Some(client) = backend {
+            if let Some(st) = plugin_statuses.iter_mut().find(|s| s.name == name) {
+                st.admin = true;
             }
-            Err(e) => tracing::warn!("plugin admin {name} injoignable: {e}"),
+            admin_backends.insert(name, client);
         }
     }
 

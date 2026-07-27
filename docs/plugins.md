@@ -9,10 +9,13 @@ plugin (ex. une source Bluetooth, un afficheur OLED) ne touche pas au cœur.
 
 `ritornello-core` charge `/etc/ritornello/plugins.toml` au démarrage (voir
 `deploy/plugins.example.toml`) : chaque entrée déclare un plugin (`source`,
-`display`, `input` ou `metadata`), le chemin de son exécutable, et peut
-déclarer `admin = true` pour exposer une page d'admin servie par le cœur,
-sous la même origine, avec un lien affiché sur l'accueil du cœur
-(`http://<hôte>:8080/`).
+`display`, `input` ou `metadata`) et le chemin de son exécutable — rien
+d'autre. Une **page d'admin** est une propriété du binaire, pas du
+déploiement : le cœur propose `--admin-socket` à tous les plugins, et celui
+qui a une page la déclare en **liant cette socket** au démarrage. Elle est
+alors servie par le cœur sous la même origine, avec un lien affiché sur
+l'accueil (`http://<hôte>:8080/`) — aucune ligne de configuration à
+connaître, donc aucun oubli possible.
 
 La mort d'un plugin est tolérée : il est marqué indisponible sur la page de
 statut, les autres continuent de fonctionner. Aucun de ces plugins n'est
@@ -24,9 +27,9 @@ console `/dev/ttyN`) — pas d'un GPIO ou d'un bus propre au Pi.
 
 ## `ritornello-plugin-radio` — la radio internet
 
-Déclare `admin = true` : sa page de gestion des stations est servie par le
-cœur, sous l'origine unique, à `http://<hôte>:8080/plugins/radio/` (le plugin
-ne lie aucun port). Elle permet de saisir une station à la main (nom + URL du
+Sa page de gestion des stations est servie par le cœur, sous l'origine
+unique, à `http://<hôte>:8080/plugins/radio/` (le plugin ne lie aucun port
+réseau — sa page est détectée par la socket d'admin qu'il lie). Elle permet de saisir une station à la main (nom + URL du
 flux) **et** d'en ajouter une depuis l'annuaire communautaire en ligne
 [Radio Browser](https://api.radio-browser.info) : taper un nom, choisir un
 pays, « Rechercher », puis « Ajouter » sur un résultat. C'est **le plugin**
@@ -95,9 +98,9 @@ système (`aplay -L`) — une enceinte Bluetooth déjà appairée via
 
 ## `ritornello-plugin-generic-input` — les entrées
 
-Déclare `admin = true` : il ouvre **tous** les périphériques evdev lisibles
-(non exclusif : le clavier continue de fonctionner normalement) et traduit
-les touches en commandes selon `/etc/ritornello/input-bindings.toml`. Sa page
+Il ouvre **tous** les périphériques evdev lisibles (non exclusif : le clavier
+continue de fonctionner normalement) et traduit les touches en commandes
+selon `/etc/ritornello/input-bindings.toml`. Sa page
 `http://<hôte>:8080/plugins/generic-input/` liste les périphériques détectés,
 permet d'apprendre une touche par action, de charger un preset livré (`mce`,
 `keyboard`) et d'enregistrer ; elle permet aussi d'importer un preset depuis
@@ -108,9 +111,7 @@ périphérique sélectionné vers un tel fichier. Variables :
 **Mise à jour d'une installation existante** (ancien `ritornello-plugin-mce`
 à clavier codé en dur) : dans `/etc/ritornello/plugins.toml`, remplacer
 l'entrée du plugin par `name = "generic-input"`, `exec =
-"/usr/local/lib/ritornello/plugins/ritornello-plugin-generic-input"` et
-**ne pas oublier `admin = true`** — sans elle le plugin démarre quand même
-(mode dégradé, moitié Input seule) mais sa page d'admin n'est pas servie.
+"/usr/local/lib/ritornello/plugins/ritornello-plugin-generic-input"`.
 `deploy/deploy.sh` supprime automatiquement l'ancien binaire
 `ritornello-plugin-mce` sur la cible pour éviter qu'il continue de tourner
 après une mise à jour.
@@ -253,9 +254,10 @@ SDK.)
 
 ## IHM d'un plugin
 
-Un plugin qui déclare `admin = true` peut livrer sa propre interface, sans
-qu'une ligne du cœur change. Il répond à trois requêtes du protocole
-d'admin :
+Un plugin qui lie la socket `--admin-socket` que le cœur lui propose peut
+livrer sa propre interface, sans qu'une ligne du cœur change (le SDK fait
+tout : `run_admin_plugin` sur `ritornello_plugin_sdk::admin_socket_path()`).
+Il répond à trois requêtes du protocole d'admin :
 
 - `GetAsset("ui.js")` → un **module ESM** exportant `contract` (la version du
   contrat, voir `web/kit/src/contract.ts`) et, par défaut, un composant Vue ;

@@ -81,13 +81,11 @@ writeFileSync(
 name = "radio"
 kind = "source"
 exec = "${racine}/target/debug/ritornello-plugin-radio"
-admin = true
 
 [[plugin]]
 name = "generic-input"
 kind = "input"
 exec = "${racine}/target/debug/ritornello-plugin-generic-input"
-admin = true
 `,
 )
 writeFileSync(

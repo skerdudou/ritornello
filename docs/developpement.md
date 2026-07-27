@@ -14,7 +14,6 @@ une instance locale sans matériel Pi :
     name = "radio"
     kind = "source"
     exec = "target/debug/ritornello-plugin-radio"
-    admin = true
 
     [[plugin]]
     name = "console"
@@ -40,7 +39,6 @@ Le plugin `generic-input` peut être ajouté au `plugins.toml` de `/tmp/rp` :
     name = "generic-input"
     kind = "input"
     exec = "target/debug/ritornello-plugin-generic-input"
-    admin = true
 
 et les variables suivantes ajoutées à la ligne d'environnement :
 
