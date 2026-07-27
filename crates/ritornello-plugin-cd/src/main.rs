@@ -313,6 +313,9 @@ impl CdSource {
             view: issue.view,
             identity: issue.identity,
             line2_replaceable: issue.line2_replaceable,
+            // Jamais éphémère : ce que le cd rapporte (disque inséré, TOC lue,
+            // piste changée) décrit l'état durable de l'appareil.
+            transient: false,
         }
     }
 }

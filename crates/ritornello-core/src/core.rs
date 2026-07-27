@@ -180,8 +180,19 @@ impl<P: Player> Core<P> {
         // déjà vidée. Les deux venant de la même trame, aucun instant
         // observable ne les voit se contredire.
         if let Some(view) = update.view {
-            self.view = view;
-            self.view_line2_replaceable = update.line2_replaceable;
+            if update.transient {
+                // Message éphémère (« présélection vide ») : il emprunte
+                // l'emplacement et l'échéance de l'incrustation volume/muet,
+                // donc `self.view` — la vue permanente — est conservée et
+                // reparaît d'elle-même. Sans cela, le message restait à l'écran
+                // indéfiniment alors que la lecture continuait sur la station
+                // précédente : l'affichage décrivait durablement un état qui
+                // n'existait plus.
+                self.overlay = Some((view, Instant::now() + OVERLAY));
+            } else {
+                self.view = view;
+                self.view_line2_replaceable = update.line2_replaceable;
+            }
         }
         if let Some(identity) = update.identity {
             let valeur = match identity {
@@ -190,11 +201,11 @@ impl<P: Player> Core<P> {
             };
             self.set_identity(valeur);
         }
-        // Pendant un overlay volume/muet, la vue source est mémorisée
-        // (ci-dessus) mais pas affichée : elle réapparaîtra à l'expiration.
-        if self.overlay.is_none() {
-            self.push_view();
-        }
+        // Toujours pousser : `push_view` donne la priorité à l'incrustation si
+        // elle est active, et le canal écarte une vue identique — une vue source
+        // arrivant pendant une incrustation ne la perturbe donc pas, tout en
+        // étant mémorisée pour reparaître.
+        self.push_view();
     }
 
     /// Change ce qui joue : remet l'ardoise des métadonnées à zéro, prévient les
@@ -698,12 +709,12 @@ mod tests {
     /// Mise à jour ne portant qu'une vue, dont la `line2` est la ligne propre de
     /// la Source (non remplaçable) — le cas de la radio.
     fn vue(v: View) -> SourceUpdate {
-        SourceUpdate { view: Some(v), identity: None, line2_replaceable: false }
+        SourceUpdate { view: Some(v), identity: None, line2_replaceable: false, transient: false }
     }
 
     /// Mise à jour dont la `line2` est un remplissage remplaçable — le cas du cd.
     fn vue_remplacable(v: View) -> SourceUpdate {
-        SourceUpdate { view: Some(v), identity: None, line2_replaceable: true }
+        SourceUpdate { view: Some(v), identity: None, line2_replaceable: true, transient: false }
     }
 
     /// Mise à jour ne portant qu'une identité.
@@ -712,6 +723,7 @@ mod tests {
             view: None,
             identity: Some(IdentityUpdate::Playing(identity)),
             line2_replaceable: false,
+            transient: false,
         }
     }
 
@@ -1338,6 +1350,34 @@ mod tests {
         let np = np_rx.borrow().clone();
         assert_eq!(np.identity, None);
         assert_eq!(np.source, "cd", "l'annonce porte la nouvelle source active");
+    }
+
+    #[tokio::test]
+    async fn un_message_ephemere_seffece_et_rend_la_vue_precedente() {
+        // Cas reel : selectionner une preselection vide. Rien n'est lance, la
+        // station precedente joue toujours — le message doit donc passer, puis
+        // ceder la place, sans que la vue permanente ni les metadonnees bougent.
+        let (mut core, mut vue_rx, _np_rx, _etat_rx, _d) = setup_metadonnees(vec!["ouifm".into()]);
+        core.resume().await.unwrap();
+        let id = serde_json::json!({"url": "un"});
+        core.handle_source_update("radio", joue(id.clone()));
+        core.handle_source_update("radio", vue(vue_radio()));
+        core.handle_enrichment("ouifm", enrichissement(id, "Miles Davis", "So What"));
+        assert_eq!(vue_rx.borrow_and_update().line2, "FIP");
+
+        let message = View { line1: "RADIO  P4".into(), line2: "empty preset".into(), line3: String::new() };
+        core.handle_source_update(
+            "radio",
+            SourceUpdate { view: Some(message), identity: None, line2_replaceable: false, transient: true },
+        );
+        let affiche = vue_rx.borrow_and_update().clone();
+        assert_eq!(affiche.line2, "empty preset", "le message doit s'afficher");
+        assert!(core.overlay_deadline().is_some(), "et porter une echeance");
+
+        core.expire_overlay();
+        let apres = vue_rx.borrow_and_update().clone();
+        assert_eq!(apres.line2, "FIP", "la station qui joue doit reparaitre");
+        assert_eq!(apres.line3, "Miles Davis — So What", "les metadonnees aussi");
     }
 
     #[tokio::test]

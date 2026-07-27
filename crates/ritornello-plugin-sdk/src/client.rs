@@ -38,6 +38,8 @@ pub struct SourceUpdate {
     /// Voir `SourceMessage::line2_replaceable`. N'a de sens qu'accompagné d'une
     /// `view`.
     pub line2_replaceable: bool,
+    /// Voir `SourceMessage::transient`.
+    pub transient: bool,
 }
 
 pub struct SourceClient {
@@ -77,6 +79,7 @@ impl SourceClient {
                         view: msg.view,
                         identity: msg.identity,
                         line2_replaceable: msg.line2_replaceable,
+                        transient: msg.transient,
                     };
                     if view_tx.try_send((name.clone(), update)).is_err() {
                         // Conséquence aggravée depuis que la trame porte aussi
@@ -348,6 +351,7 @@ mod tests {
                     serde_json::json!({"kind": "stream", "url": "http://fip"}),
                 )),
                 line2_replaceable: false,
+                transient: false,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             let _ = socket_for_server; // garde le chemin vivant pour le débogage
@@ -389,6 +393,7 @@ mod tests {
                 view: None,
                 identity: None,
                 line2_replaceable: false,
+                transient: false,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;

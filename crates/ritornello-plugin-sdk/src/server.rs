@@ -21,12 +21,14 @@ pub struct SourceOutcome {
     /// `line2` de la vue est un remplissage que le cœur peut remplacer par une
     /// métadonnée (voir `SourceMessage::line2_replaceable`).
     pub line2_replaceable: bool,
+    /// La vue est un message éphémère (voir `SourceMessage::transient`).
+    pub transient: bool,
 }
 
 impl SourceOutcome {
     /// Issue portant seulement une action (ni vue, ni identité).
     pub fn new(action: SourceAction) -> Self {
-        Self { action, view: None, identity: None, line2_replaceable: false }
+        Self { action, view: None, identity: None, line2_replaceable: false, transient: false }
     }
 
     pub fn with_view(mut self, view: View) -> Self {
@@ -39,6 +41,14 @@ impl SourceOutcome {
     /// propre ligne dès qu'il n'en connaît plus.
     pub fn line2_replaceable(mut self) -> Self {
         self.line2_replaceable = true;
+        self
+    }
+
+    /// Déclare la vue comme un message **éphémère** : le cœur l'affiche quelques
+    /// secondes, puis fait reparaître la vue permanente précédente. À employer
+    /// pour signaler un incident sans détruire l'affichage de ce qui joue.
+    pub fn transient(mut self) -> Self {
+        self.transient = true;
         self
     }
 
@@ -67,11 +77,13 @@ pub struct Notification {
     pub identity: Option<IdentityUpdate>,
     /// Voir `SourceOutcome::line2_replaceable`.
     pub line2_replaceable: bool,
+    /// Voir `SourceMessage::transient`.
+    pub transient: bool,
 }
 
 impl Notification {
     pub fn view(view: View) -> Self {
-        Self { view: Some(view), identity: None, line2_replaceable: false }
+        Self { view: Some(view), identity: None, line2_replaceable: false, transient: false }
     }
 
     pub fn line2_replaceable(mut self) -> Self {
@@ -184,6 +196,7 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                     view: outcome.view,
                     identity: outcome.identity,
                     line2_replaceable: outcome.line2_replaceable,
+                    transient: outcome.transient,
                 };
                 write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
             }
@@ -195,6 +208,7 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                         view: n.view,
                         identity: n.identity,
                         line2_replaceable: n.line2_replaceable,
+                        transient: n.transient,
                     };
                     write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
                 }

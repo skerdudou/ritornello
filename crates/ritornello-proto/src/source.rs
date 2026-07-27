@@ -86,6 +86,19 @@ pub struct SourceMessage {
     /// chaîne factice pour s'en protéger.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub line2_replaceable: bool,
+    /// La vue ci-dessus est un message **éphémère** : le cœur l'affiche quelques
+    /// secondes, puis fait reparaître la précédente.
+    ///
+    /// Sans cela, un message d'incident (« présélection vide ») restait à l'écran
+    /// indéfiniment, jusqu'à ce que l'utilisateur touche autre chose — alors que
+    /// la lecture, elle, continuait sur la station précédente : l'affichage
+    /// décrivait durablement un état qui n'existait plus.
+    ///
+    /// Le cœur emploie le même emplacement et la même échéance que l'incrustation
+    /// volume/muet, donc la vue permanente est conservée telle quelle et reparaît
+    /// d'elle-même.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transient: bool,
 }
 
 #[cfg(test)]
@@ -128,6 +141,7 @@ mod tests {
             view: Some(View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() }),
             identity: Some(IdentityUpdate::Playing(serde_json::json!({"kind": "stream"}))),
             line2_replaceable: false,
+            transient: false,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
@@ -138,7 +152,7 @@ mod tests {
 
     #[test]
     fn message_notification_sans_id() {
-        let m = SourceMessage { id: None, action: None, view: Some(View::default()), identity: None, line2_replaceable: false };
+        let m = SourceMessage { id: None, action: None, view: Some(View::default()), identity: None, line2_replaceable: false, transient: false };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, None);
@@ -164,7 +178,7 @@ mod tests {
         // La majorité des trames ne disent rien de l'identité (SetLocale,
         // Deactivate…) : les alourdir d'un `"identity":null` serait du bruit sur
         // une liaison volontairement lisible à l'œil.
-        let m = SourceMessage { id: Some(2), action: None, view: None, identity: None, line2_replaceable: false };
+        let m = SourceMessage { id: Some(2), action: None, view: None, identity: None, line2_replaceable: false, transient: false };
         assert_eq!(serde_json::to_string(&m).unwrap(), r#"{"id":2,"action":null,"view":null}"#);
     }
 }

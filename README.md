@@ -130,7 +130,11 @@ origine, avec un lien affiché sur l'accueil du cœur (`http://<pi>:8080/`).
   présélection courante) : il suit l'appareil et non le navigateur.
   Annuaire injoignable ⇒ message d'erreur sur la page, la lecture en cours et
   les stations déjà configurées ne bougent pas, et la saisie manuelle reste le
-  repli. L'annuaire est interrogé sur **plusieurs serveurs essayés dans
+  repli.
+  Sélectionner une présélection **vide** affiche « présélection vide » quelques
+  secondes, puis l'affichage revient à la station qui joue : rien n'a été lancé,
+  donc rien ne s'est arrêté, et le message ne doit pas décrire durablement un
+  état qui n'existe pas. L'annuaire est interrogé sur **plusieurs serveurs essayés dans
   l'ordre** (`de1`, `de2`, `at1`, `nl1`, `fi1` de `api.radio-browser.info`)
   jusqu'à ce que l'un réponde : `all.api.radio-browser.info` est un
   enregistrement tournant, et le parc de miroirs bouge avec le temps — un hôte
@@ -193,6 +197,17 @@ Deux couches se superposent, et la seconde gagne :
    Cette couche fonctionne sans aucun plugin, et sans que la Source ait à
    déclarer quoi que ce soit.
 2. **Ce qu'un plugin `metadata` a appris**, s'il correspond à ce qui joue.
+
+Un **nouveau** titre ICY périme les enrichissements en mémoire : c'est la preuve
+que le morceau a changé, et ce qu'un plugin avait dit décrivait le précédent.
+Sans cela, l'ancien enrichissement — prioritaire — restait affiché plusieurs
+secondes, le temps que le plugin reçoive sa propre trame. Pour une radio,
+l'identité est l'URL du flux : elle ne change pas d'un morceau à l'autre et ne
+peut donc pas servir de garde-fou, contrairement au disque dont l'identité porte
+l'index de piste. Conséquence visible et voulue : sur une station dont l'ICY est
+exploitable, l'affichage montre d'abord ce que le flux annonce, puis l'artiste et
+le titre séparés dès que le plugin répond — la pastille d'origine passe de `icy`
+au nom du plugin.
 
 Sans plugin `metadata` déclaré, il n'y a donc pas d'enrichissement — c'est
 assumé, ce n'est pas une régression. **La lecture n'est jamais affectée** par un

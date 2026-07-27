@@ -70,11 +70,16 @@ impl RadioSource {
                 .plays(Self::identite_du_flux(&st.url))
         } else {
             let empty = self.catalog.read().unwrap().get("empty_preset").to_string();
-            // Présélection vide : rien ne joue, et il faut le dire — sinon les
-            // plugins `metadata` continueraient sur la station précédente.
+            // Message **éphémère** : rien n'a été lancé, donc la station
+            // précédente joue toujours et doit reparaître à l'écran. Le laisser
+            // permanent faisait décrire durablement un état qui n'existait pas.
+            //
+            // Et surtout, aucune déclaration d'identité : `plays_nothing()`
+            // serait faux ici, puisque le flux précédent continue — cela aurait
+            // fait cesser les plugins `metadata` et vidé le titre affiché.
             SourceOutcome::new(SourceAction::Noop)
                 .with_view(self.view_for(self.preset, &empty))
-                .plays_nothing()
+                .transient()
         }
     }
 }
@@ -314,11 +319,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn une_preselection_vide_declare_que_plus_rien_ne_joue() {
+    async fn une_preselection_vide_affiche_un_message_ephemere_sans_couper_la_lecture() {
+        // Defaut constate a l'usage : le message restait a l'ecran
+        // indefiniment. Or rien n'a ete lance — la station precedente joue
+        // toujours — donc l'affichage doit revenir a elle, et surtout les
+        // metadonnees ne doivent pas etre effacees.
         let mut source = make_source(Stations::default(), 1);
         let outcome = source.select(4).await;
         assert!(matches!(outcome.action, SourceAction::Noop));
-        assert_eq!(outcome.identity, Some(ritornello_proto::IdentityUpdate::Nothing));
+        assert!(outcome.transient, "le message doit s'effacer de lui-meme");
+        assert!(
+            outcome.identity.is_none(),
+            "declarer un arret serait faux : le flux precedent continue"
+        );
+        assert!(outcome.view.is_some());
     }
 
     #[tokio::test]

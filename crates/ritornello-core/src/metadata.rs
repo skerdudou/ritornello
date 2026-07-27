@@ -123,6 +123,21 @@ impl Metadonnees {
             return false;
         }
         self.icy = Some(titre);
+        // Un titre ICY **nouveau** est la preuve que le morceau a changé, et les
+        // enrichissements en mémoire décrivent le précédent. Les garder les
+        // ferait gagner — ils ont priorité sur l'ICY — et afficher le morceau
+        // d'avant jusqu'à ce qu'un plugin rattrape, avec plusieurs secondes
+        // d'écart le temps qu'il reçoive sa propre trame.
+        //
+        // Pour une radio, l'identité est l'URL du flux : elle ne change pas d'un
+        // morceau à l'autre, et ne peut donc pas servir de garde-fou ici,
+        // contrairement au disque dont l'identité porte l'index de piste. L'ICY
+        // est le seul signal de changement dont le cœur dispose sur un flux.
+        //
+        // Sans conséquence pour les stations dont l'ICY ne change jamais (OUI FM
+        // n'y met qu'un texte de remplissage) : la comparaison ci-dessus écarte
+        // les répétitions, donc rien n'est effacé.
+        self.enrichissements.clear();
         true
     }
 
@@ -446,6 +461,32 @@ mod tests {
         m.set_identity(Some(id.clone()));
         assert!(!m.ajoute("inconnu", enrichissement(id, "A", "T")));
         assert!(m.etat().est_vide());
+    }
+
+    #[test]
+    fn un_nouveau_titre_icy_perime_les_enrichissements() {
+        // Defaut constate a l'usage : sur une meme station, l'origine affichee
+        // alternait entre `icy` et le plugin. La cause n'etait pas l'alternance
+        // elle-meme — legitime, l'ICY arrive avant la trame du plugin — mais le
+        // fait qu'un enrichissement du morceau **precedent** restait retenu et
+        // gagnait sur un ICY frais, l'identite d'un flux (son URL) ne changeant
+        // pas d'un morceau a l'autre.
+        let mut m = Metadonnees::new(vec!["ouifm".into()]);
+        let id = json!({"kind": "stream", "url": "http://ouifm3"});
+        m.set_identity(Some(id.clone()));
+        m.set_icy("Made Up - TAHITI 80".into());
+        m.ajoute("ouifm", enrichissement(id.clone(), "TAHITI 80", "MADE UP"));
+        assert_eq!(m.etat().origin.as_deref(), Some("ouifm"));
+
+        // Morceau suivant : le flux l'annonce, le plugin n'a pas encore parle.
+        assert!(m.set_icy("Fade To Grey - VISAGE".into()));
+        let etat = m.etat();
+        assert_eq!(etat.origin.as_deref(), Some("icy"), "l'ancien enrichissement ne doit plus gagner");
+        assert_eq!(etat.title.as_deref(), Some("Fade To Grey - VISAGE"));
+
+        // Puis le plugin rattrape, et reprend la main.
+        m.ajoute("ouifm", enrichissement(id, "VISAGE", "FADE TO GREY"));
+        assert_eq!(m.etat().artist.as_deref(), Some("VISAGE"));
     }
 
     #[test]
