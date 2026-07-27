@@ -87,9 +87,18 @@ impl AdminPlugin for GenericInputAdmin {
             }
             Op::LoadPreset { device, preset } => {
                 // Rien n'est persisté : l'utilisateur enregistre ensuite.
+                // Même validation sur copie qu'`ImportPreset` : le répertoire
+                // des presets est configurable et ouvert à l'opérateur, donc
+                // « fichiers livrés, réputés valides » ne tient pas. Sans
+                // cela, un preset invalide devenait actif en mémoire et
+                // c'est le « Enregistrer » suivant qui échouait — sur une
+                // table que l'IHM elle-même avait produite.
                 let bindings = presets::load(&self.presets_root, &preset)
                     .map_err(|e| e.message(&self.catalog.read().unwrap()))?;
-                self.hub.bindings.write().unwrap().replace_device(&device, bindings);
+                let mut candidat = self.hub.bindings.read().unwrap().clone();
+                candidat.replace_device(&device, bindings);
+                candidat.validate().map_err(|e| e.message(&self.catalog.read().unwrap()))?;
+                *self.hub.bindings.write().unwrap() = candidat;
                 Ok(())
             }
             Op::ImportPreset { device, content } => {

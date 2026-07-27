@@ -39,8 +39,27 @@ pub fn drive_status(dev: &Path) -> Result<DriveStatus> {
 /// Poll toutes les 2 s ; retourne `true`/`false` sur changement de présence du disque.
 pub async fn watch(dev: PathBuf, tx: tokio::sync::mpsc::Sender<bool>) {
     let mut present = false;
+    // Une erreur de sonde équivaut à « pas de disque » pour la présence — un
+    // lecteur débranché ne doit pas faire paniquer le plugin — mais elle est
+    // journalisée **au premier échec** (puis tue jusqu'au retour au normal) :
+    // un binaire hors du groupe `cdrom` ou un mauvais RITORNELLO_CD_DEV
+    // affichait « no disc » pour toujours sans une seule ligne de log, alors
+    // que les journaux sont le seul outil de diagnostic sur l'appareil.
+    let mut derniere_erreur_signalee = false;
     loop {
-        let now = matches!(drive_status(&dev), Ok(DriveStatus::DiscOk));
+        let now = match drive_status(&dev) {
+            Ok(statut) => {
+                derniere_erreur_signalee = false;
+                statut == DriveStatus::DiscOk
+            }
+            Err(e) => {
+                if !derniere_erreur_signalee {
+                    tracing::warn!("sonde du lecteur cd {}: {e:#}", dev.display());
+                    derniere_erreur_signalee = true;
+                }
+                false
+            }
+        };
         if now != present {
             present = now;
             let _ = tx.send(now).await;
@@ -90,7 +109,14 @@ pub fn toc_ntracks(raw: &str) -> Result<usize> {
 }
 
 pub fn eject(dev: &str) {
-    let _ = std::process::Command::new("eject").arg(dev).status();
+    // Best-effort — le tiroir peut être bloqué, c'est physique — mais jamais
+    // muet : un binaire `eject` absent du système donnait un tiroir qui ne
+    // s'ouvre jamais, sans aucune trace à mettre en face de la touche pressée.
+    match std::process::Command::new("eject").arg(dev).status() {
+        Ok(statut) if statut.success() => {}
+        Ok(statut) => tracing::warn!("eject {dev}: {statut}"),
+        Err(e) => tracing::warn!("eject {dev}: {e} (paquet eject installe ?)"),
+    }
 }
 
 #[cfg(test)]

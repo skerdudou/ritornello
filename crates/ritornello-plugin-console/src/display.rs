@@ -8,8 +8,20 @@ use std::path::Path;
 pub fn render_console(view: &View) -> String {
     format!(
         "\x1b[2J\x1b[H\r\n  {}\r\n\r\n  {}\r\n\r\n  {}\r\n",
-        view.line1, view.line2, view.line3
+        assainit(&view.line1),
+        assainit(&view.line2),
+        assainit(&view.line3)
     )
+}
+
+/// Retire les caractères de contrôle d'une ligne avant écriture sur le tty.
+///
+/// `line2`/`line3` finissent par porter des titres ICY venus du réseau : un
+/// flux (ou un miroir compromis) qui glisse `\x1b[...` dans son titre pourrait
+/// manipuler la console. Les seules séquences de contrôle du rendu sont celles
+/// que ce module écrit lui-même ; le contenu, lui, reste des données.
+fn assainit(ligne: &str) -> String {
+    ligne.chars().filter(|c| !c.is_control()).collect()
 }
 
 pub struct ConsoleDisplay {
@@ -48,5 +60,23 @@ mod tests {
         assert!(s.contains("RADIO  P3\r\n"));
         assert!(s.contains("France Inter\r\n"));
         assert!(s.contains("Le 7/9\r\n"));
+    }
+
+    #[test]
+    fn un_titre_venu_du_reseau_ne_peut_pas_injecter_de_sequence_de_controle() {
+        // `line3` porte des titres ICY : données réseau non maîtrisées. Seules
+        // les séquences écrites par `render_console` lui-même doivent survivre.
+        let v = View {
+            line1: "RADIO  P3".into(),
+            line2: "FIP".into(),
+            line3: "titre\x1b[2Jmalicieux\x07".into(),
+        };
+        let s = render_console(&v);
+        // Sans l'ESC, « [2J » n'est plus qu'un texte imprimable inoffensif ;
+        // le BEL, lui, disparaît entièrement.
+        assert!(s.contains("titre[2Jmalicieux"));
+        assert!(!s.contains('\x07'));
+        // Les deux seuls ESC sont ceux de l'en-tête du rendu (\x1b[2J\x1b[H).
+        assert_eq!(s.matches('\x1b').count(), 2);
     }
 }

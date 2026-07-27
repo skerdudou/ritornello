@@ -79,8 +79,14 @@ pub async fn lookup(toc: &str, ntracks: usize) -> Result<Option<DiscInfo>> {
     let url = format!(
         "https://musicbrainz.org/ws/2/discid/-?toc={toc}&fmt=json&inc=recordings+artist-credits"
     );
+    // Version tirée du Cargo.toml, comme l'annuaire du plugin radio : un
+    // user-agent figé mentirait à la première montée de version.
     let client = reqwest::Client::builder()
-        .user_agent("ritornello/0.1 (https://github.com/skerdudou/ritornello)")
+        .user_agent(concat!(
+            "ritornello/",
+            env!("CARGO_PKG_VERSION"),
+            " (https://github.com/skerdudou/ritornello)"
+        ))
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
     let resp = match client.get(&url).send().await {

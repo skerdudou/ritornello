@@ -70,6 +70,13 @@ impl Stations {
 
     pub fn save(&self, path: &Path) -> Result<()> {
         self.validate()?;
+        // Comme `state::save` et `Bindings::save` : sur une machine vierge
+        // sans /etc/ritornello, le premier « Enregistrer » de la page d'admin
+        // échouait sur une erreur d'E/S brute.
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creation de {}", parent.display()))?;
+        }
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, toml::to_string_pretty(self)?)?;
         std::fs::rename(&tmp, path)?;

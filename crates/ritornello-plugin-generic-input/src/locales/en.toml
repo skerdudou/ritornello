@@ -26,7 +26,7 @@ save_error = "Error: "
 load_error = "Loading error: "
 no_device = "No input device detected"
 
-# les 21 actions
+# les 19 actions
 act_select_1 = "Preset 1"
 act_select_2 = "Preset 2"
 act_select_3 = "Preset 3"

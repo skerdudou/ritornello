@@ -32,7 +32,16 @@ pub fn save(path: &Path, state: &PluginState) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("json.tmp");
+    // Nom temporaire propre à ce processus **et** à cet appel : les deux
+    // moitiés du plugin écrivent le même fichier, et un `.tmp` partagé
+    // permettait à deux écritures simultanées de se voler le fichier sous le
+    // pied (`rename` en ENOENT), en plus de la perte de préférence décrite
+    // sur `update`.
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = path.with_extension(format!("json.tmp.{}.{unique}", std::process::id()));
     std::fs::write(&tmp, serde_json::to_string_pretty(state)?)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
@@ -45,9 +54,10 @@ pub fn save(path: &Path, state: &PluginState) -> Result<()> {
 /// l'une effacerait donc le champ de l'autre — c'est arrivé par construction
 /// lors de l'ajout du pays, d'où cette lecture-modification-écriture.
 ///
-/// Reste une fenêtre de course : deux écritures simultanées peuvent se perdre
-/// l'une l'autre. Conséquence maximale, une préférence oubliée jusqu'au prochain
-/// changement ; un verrou ne se justifierait pas pour cela.
+/// Reste une fenêtre de course : deux lectures-modifications simultanées
+/// peuvent se perdre l'une l'autre. Conséquence maximale, une préférence
+/// oubliée jusqu'au prochain changement ; un verrou ne se justifierait pas
+/// pour cela.
 pub fn update(path: &Path, modifie: impl FnOnce(&mut PluginState)) -> Result<()> {
     let mut etat = load(path);
     modifie(&mut etat);

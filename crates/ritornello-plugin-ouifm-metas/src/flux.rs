@@ -165,7 +165,10 @@ pub fn prochain_recul(recul: Duration, duree: Duration) -> Duration {
 /// quand ce qui joue change — d'où l'étiquetage de chaque trame par l'`id` : une
 /// trame déjà en file au moment de l'arrêt doit pouvoir être écartée.
 pub async fn suit(id: String, tx: mpsc::Sender<(String, Meta)>) {
-    let mut recul = RECUL_BASE;
+    // Moitié de la base, parce que le recul est recalculé avant chaque
+    // attente (voir plus bas) : le premier échec immédiat double cette valeur
+    // et attend donc exactement `RECUL_BASE`, comme avant.
+    let mut recul = RECUL_BASE / 2;
     loop {
         let debut = tokio::time::Instant::now();
         let resultat = ecoute(&id, &tx).await;
@@ -181,8 +184,15 @@ pub async fn suit(id: String, tx: mpsc::Sender<(String, Meta)>) {
                 tracing::info!("flux de metadonnees interrompu apres {} s: {e}", duree.as_secs())
             }
         }
-        tokio::time::sleep(recul).await;
+        // Le recul est recalculé **avant** de dormir : la coupure qui vient
+        // d'arriver dit tout ce qu'il faut savoir (une connexion qui a tenu
+        // ramène à la base). L'ordre inverse appliquait l'ancien recul une
+        // fois de trop — après une rafale d'échecs puis quatre heures
+        // d'écoute saine, la première coupure attendait encore les 60 s
+        // périmés — soit précisément le cas que la doc de `prochain_recul`
+        // promet d'éviter.
         recul = prochain_recul(recul, duree);
+        tokio::time::sleep(recul).await;
     }
 }
 
