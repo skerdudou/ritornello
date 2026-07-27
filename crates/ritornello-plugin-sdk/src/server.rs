@@ -16,8 +16,6 @@ pub trait SourcePlugin: Send + 'static {
     async fn select(&mut self, n: u8) -> SourceOutcome;
     async fn next(&mut self) -> SourceOutcome;
     async fn prev(&mut self) -> SourceOutcome;
-    async fn next_track(&mut self) -> SourceOutcome;
-    async fn prev_track(&mut self) -> SourceOutcome;
     async fn eject(&mut self) -> SourceOutcome;
 
     /// Réveil (boot / sortie de veille). Par défaut, se comporte comme
@@ -72,8 +70,6 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                     SourceReq::Select(n) => plugin.select(n).await,
                     SourceReq::Next => plugin.next().await,
                     SourceReq::Prev => plugin.prev().await,
-                    SourceReq::NextTrack => plugin.next_track().await,
-                    SourceReq::PrevTrack => plugin.prev_track().await,
                     SourceReq::Eject => plugin.eject().await,
                     SourceReq::SetLocale(locale) => {
                         plugin.set_locale(locale).await;
@@ -149,11 +145,12 @@ use ritornello_proto::{AdminReq, AdminRequest, AdminResponse, AdminResult};
 
 #[async_trait::async_trait]
 pub trait AdminPlugin: Send + 'static {
-    /// HTML de la page d'admin (rendu serveur ; peut dépendre de la langue).
-    fn page(&self) -> String;
-    /// État courant, sérialisé en JSON opaque pour le cœur.
+    /// Actif d'IHM : `(mime, corps)`, ou `None` si le chemin est inconnu.
+    /// Typiquement `ui.js` et `ui.css`, embarqués par `include_str!`.
+    fn asset(&self, path: &str) -> Option<(String, String)>;
+    /// Catalogue i18n du plugin dans la langue courante, à plat.
+    fn catalog(&self) -> serde_json::Value;
     async fn get_data(&self) -> serde_json::Value;
-    /// Valide et persiste ; `Err(msg)` = donnée refusée (msg montré à l'utilisateur).
     async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String>;
 }
 
@@ -178,7 +175,11 @@ pub async fn run_admin_plugin(mut plugin: impl AdminPlugin, socket_path: &Path) 
             }
         };
         let result = match req.req {
-            AdminReq::GetPage => AdminResult::Page(plugin.page()),
+            AdminReq::GetAsset(path) => match plugin.asset(&path) {
+                Some((mime, body)) => AdminResult::Asset { mime, body: Some(body) },
+                None => AdminResult::Asset { mime: "text/plain".to_string(), body: None },
+            },
+            AdminReq::GetCatalog => AdminResult::Catalog(plugin.catalog()),
             AdminReq::GetData => AdminResult::Data(plugin.get_data().await),
             AdminReq::SetData(data) => match plugin.set_data(data).await {
                 Ok(()) => AdminResult::Set { ok: true, error: None },
@@ -204,8 +205,14 @@ mod admin_server_tests {
 
     #[async_trait::async_trait]
     impl AdminPlugin for FakeAdmin {
-        fn page(&self) -> String {
-            "<h1>hello</h1>".to_string()
+        fn asset(&self, path: &str) -> Option<(String, String)> {
+            match path {
+                "ui.js" => Some(("text/javascript".into(), "export const contract = 1".into())),
+                _ => None,
+            }
+        }
+        fn catalog(&self) -> serde_json::Value {
+            serde_json::json!({ "btn_save": "Enregistrer" })
         }
         async fn get_data(&self) -> serde_json::Value {
             self.data.clone()
@@ -220,7 +227,7 @@ mod admin_server_tests {
     }
 
     #[tokio::test]
-    async fn getpage_getdata_setdata_dialogue() {
+    async fn getasset_getdata_setdata_getcatalog_dialogue() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("admin.sock");
         let socket_srv = socket.clone();
@@ -241,11 +248,10 @@ mod admin_server_tests {
         let (read, mut write) = stream.expect("connexion admin").into_split();
         let mut lines = BufReader::new(read).lines();
 
-        write.write_all(b"{\"id\":1,\"req\":\"GetPage\"}\n").await.unwrap();
+        write.write_all(b"{\"id\":1,\"req\":\"GetAsset\",\"arg\":\"ui.js\"}\n").await.unwrap();
         let l = lines.next_line().await.unwrap().unwrap();
         let r: AdminResponse = serde_json::from_str(&l).unwrap();
-        assert_eq!(r.id, 1);
-        assert!(matches!(r.result, AdminResult::Page(ref h) if h.contains("hello")));
+        assert!(matches!(r.result, AdminResult::Asset { body: Some(ref b), .. } if b.contains("contract")));
 
         write.write_all(b"{\"id\":2,\"req\":\"GetData\"}\n").await.unwrap();
         let l = lines.next_line().await.unwrap().unwrap();
@@ -256,6 +262,16 @@ mod admin_server_tests {
         let l = lines.next_line().await.unwrap().unwrap();
         let r: AdminResponse = serde_json::from_str(&l).unwrap();
         assert!(matches!(r.result, AdminResult::Set { ok: false, .. }));
+
+        write.write_all(b"{\"id\":4,\"req\":\"GetAsset\",\"arg\":\"inconnu.txt\"}\n").await.unwrap();
+        let l = lines.next_line().await.unwrap().unwrap();
+        let r: AdminResponse = serde_json::from_str(&l).unwrap();
+        assert!(matches!(r.result, AdminResult::Asset { body: None, .. }));
+
+        write.write_all(b"{\"id\":5,\"req\":\"GetCatalog\"}\n").await.unwrap();
+        let l = lines.next_line().await.unwrap().unwrap();
+        let r: AdminResponse = serde_json::from_str(&l).unwrap();
+        assert!(matches!(r.result, AdminResult::Catalog(ref v) if v["btn_save"] == "Enregistrer"));
     }
 }
 
@@ -284,8 +300,6 @@ mod tests {
         }
         async fn next(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
         async fn prev(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
-        async fn next_track(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::PlayerNext, view: None } }
-        async fn prev_track(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::PlayerPrev, view: None } }
         async fn eject(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
     }
 
@@ -356,8 +370,6 @@ mod tests {
             async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
             async fn next(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
             async fn prev(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
-            async fn next_track(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
-            async fn prev_track(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
             async fn eject(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
             async fn wake(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Play { uri: "http://wake".into() }, view: None } }
         }
@@ -394,8 +406,6 @@ mod tests {
             async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
             async fn next(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
             async fn prev(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
-            async fn next_track(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
-            async fn prev_track(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
             async fn eject(&mut self) -> SourceOutcome { SourceOutcome { action: SourceAction::Noop, view: None } }
             async fn set_locale(&mut self, locale: String) {
                 *self.vu.lock().unwrap() = Some(locale);

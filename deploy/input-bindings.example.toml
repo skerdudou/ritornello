@@ -2,6 +2,13 @@
 # infrarouge eHome. Adapter `name` au nom exact du peripherique tel qu'il
 # apparait dans la liste deroulante de http://<hote>:8080/plugins/generic-input/
 # (ou via `sudo evtest`). Tous les noeuds portant ce nom sont ecoutes.
+#
+# Les touches "piste suiv./prec." (codes 163/165) sont fusionnees sur
+# Next/Prev : deux touches physiques distinctes restent legitimement liees a
+# la meme commande, desormais interpretee par la source active (preselection
+# pour la radio, piste pour le cd). Un binding qui reference encore
+# `NextTrack`/`PrevTrack` (ancien nom) n'est plus valide : il doit etre
+# reecrit en `Next`/`Prev`.
 
 [[devices]]
 name = "eHome Infrared Transceiver"
@@ -113,20 +120,20 @@ code = 402
 cmd = "Next"
 
 [[devices.bindings]]
+code = 163
+cmd = "Next"
+
+[[devices.bindings]]
 code = 403
+cmd = "Prev"
+
+[[devices.bindings]]
+code = 165
 cmd = "Prev"
 
 [[devices.bindings]]
 code = 164
 cmd = "PlayPause"
-
-[[devices.bindings]]
-code = 163
-cmd = "NextTrack"
-
-[[devices.bindings]]
-code = 165
-cmd = "PrevTrack"
 
 [[devices.bindings]]
 code = 166

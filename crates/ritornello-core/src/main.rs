@@ -1,11 +1,14 @@
 mod audio_output;
 mod admin;
 mod core;
+mod placeholder;
 mod player;
 mod plugins;
 mod state;
 mod status;
+mod theme;
 mod types;
+mod web;
 
 use crate::plugins::{PluginKind, PluginManifest};
 use crate::status::{AppState, LogBuffer, LogBufferWriter, PluginStatus, StatusState};
@@ -73,10 +76,16 @@ async fn main() -> Result<()> {
     let (source_view_tx, mut source_view_rx) = mpsc::channel::<(String, View)>(32);
     let (audio_tx, mut audio_rx) = mpsc::channel::<String>(4);
     let (locale_tx, mut locale_rx) = mpsc::channel::<String>(4);
+    let (theme_tx, mut theme_rx) = mpsc::channel::<theme::ThemeState>(4);
 
-    // mpv (inchangé).
+    // mpv. Les deux durées de tampon sont réglables sans recompiler : la bonne
+    // valeur dépend du réseau et de la charge de la machine, pas du code.
+    let audio_buffer_brut = std::env::var("RITORNELLO_AUDIO_BUFFER").ok();
+    let readahead_brut = std::env::var("RITORNELLO_NETWORK_READAHEAD").ok();
+    let audio_buffer = player::mpv::audio_buffer_regle(audio_buffer_brut.as_deref());
+    let readahead = player::mpv::readahead_regle(readahead_brut.as_deref());
     let (mpv_player, mut mpv_child) =
-        player::mpv::start(&mpv_bin, &mpv_socket, &cd_dev, ev_tx.clone())
+        player::mpv::start(&mpv_bin, &mpv_socket, &cd_dev, audio_buffer, readahead, ev_tx.clone())
             .await
             .context("démarrage de mpv")?;
 
@@ -216,6 +225,16 @@ async fn main() -> Result<()> {
     }));
     let audio_current = Arc::new(RwLock::new(persisted.audio_device.clone()));
     let locale_current = Arc::new(RwLock::new(persisted.locale.clone()));
+    // `state.json` est relu sans garantie : `theme_put` valide le chemin HTTP,
+    // mais un fichier d'etat corrompu ou edite a la main peut porter n'importe
+    // quoi. Un nom de theme inconnu fait sortir `applyTheme` cote SPA sans
+    // poser une seule variable CSS, et `theme.css` n'a pas de valeur de repli :
+    // l'IHM s'affiche entierement non themee. `from_persisted` valide et
+    // retombe sur les defauts en journalisant un avertissement.
+    let theme_current = Arc::new(RwLock::new(theme::from_persisted(
+        persisted.theme.as_deref(),
+        persisted.mode.as_deref(),
+    )));
     {
         let app = status::router(AppState {
             status: status_state.clone(),
@@ -227,10 +246,13 @@ async fn main() -> Result<()> {
             locale_tx: locale_tx.clone(),
             locales_root: locales_root.clone(),
             admin_backends: Arc::new(admin_backends),
+            admin_assets: Arc::new(Default::default()),
             cmd_tx: cmd_tx.clone(),
+            theme_current: theme_current.clone(),
+            theme_tx: theme_tx.clone(),
         });
         let listener = tokio::net::TcpListener::bind(&http_addr).await.with_context(|| format!("bind {http_addr}"))?;
-        tracing::info!("page de statut sur http://{http_addr}/status");
+        tracing::info!("interface web sur http://{http_addr}/");
         tokio::spawn(async move {
             if let Err(e) = axum::serve(listener, app).await {
                 tracing::error!("serveur de statut: {e}");
@@ -310,6 +332,9 @@ async fn main() -> Result<()> {
                 if let Err(e) = core.set_locale(locale).await {
                     tracing::warn!("changement de langue: {e}");
                 }
+            }
+            Some(t) = theme_rx.recv() => {
+                core.set_theme(t);
             }
             _ = retry_sleep => {
                 retry_at = None;

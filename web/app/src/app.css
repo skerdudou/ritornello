@@ -1,0 +1,13 @@
+@import "tailwindcss";
+@import "@ritornello/ui/theme.css";
+
+/* Les composants du kit vivent hors de ce paquet : sans cette directive,
+   Tailwind ne verrait pas leurs classes et le CSS du shell serait incomplet
+   (boutons et tables sans style, y compris quand ce sont des vues de plugin
+   qui les emploient). */
+@source "../../kit/src";
+
+body {
+  @apply bg-background text-foreground;
+  font-family: var(--font-sans);
+}

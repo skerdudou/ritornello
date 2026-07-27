@@ -1,0 +1,129 @@
+<script setup lang="ts">
+import {
+  api, Badge, Button, Card, CardContent, CardHeader, CardTitle,
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue, toast,
+} from '@ritornello/ui'
+import { onMounted, ref } from 'vue'
+import { RouterLink } from 'vue-router'
+import { useCatalog } from '../composables/useCatalog'
+import type { AudioPayload, LocalePayload, LogsPayload, StatusPayload } from '../types'
+
+const { t, reload } = useCatalog()
+const status = ref<StatusPayload>({ plugins: [], active_source: '' })
+const audio = ref<AudioPayload>({ devices: [], current: null })
+const locale = ref<LocalePayload>({ locales: [], current: null })
+const logs = ref<string[]>([])
+const device = ref('')
+const lang = ref('')
+
+async function chargerTout() {
+  // Necessaire ici, pas redondant : c'est ce qui recharge le catalogue apres
+  // un changement de langue reussi (voir `changerLangue` plus bas), a la
+  // place de l'ancien `location.reload()`.
+  await reload()
+  status.value = await api.get<StatusPayload>('/api/status').catch(() => status.value)
+  audio.value = await api.get<AudioPayload>('/api/audio-output').catch(() => audio.value)
+  locale.value = await api.get<LocalePayload>('/api/locale').catch(() => locale.value)
+  logs.value = (await api.get<LogsPayload>('/api/logs').catch(() => ({ lines: [] }))).lines
+  // Repli sur le premier peripherique disponible, jamais la chaine vide.
+  // L'ancienne page etait rendue cote serveur : faute de sortie choisie, aucun
+  // `<option>` ne portait `selected`, donc le navigateur selectionnait le
+  // premier peripherique et « Changer » envoyait toujours un nom reel. Sur une
+  // installation neuve (`current: null`), `?? ''` laissait au contraire le
+  // declencheur vide et « Changer » envoyait `device: ""`. Le coeur le refuse
+  // desormais (422, voir `status::validate_audio_device`) ; ce repli evite de
+  // proposer a l'utilisateur un bouton qui ne peut que rater.
+  device.value = audio.value.current ?? audio.value.devices[0] ?? ''
+  lang.value = locale.value.current ?? 'en'
+}
+
+onMounted(chargerTout)
+
+async function changerSortie() {
+  const err = await api.put('/api/audio-output', { device: device.value })
+  toast[err ? 'error' : 'success'](err ?? t.value('ok'))
+}
+
+// Le changement de langue recharge les catalogues au lieu de recharger la
+// page entiere comme le faisait l'ancienne IHM.
+async function changerLangue() {
+  const err = await api.put('/api/locale', { locale: lang.value })
+  if (err) {
+    toast.error(err)
+    return
+  }
+  await chargerTout()
+}
+</script>
+
+<template>
+  <div class="space-y-4">
+    <Card>
+      <CardHeader><CardTitle>{{ t('status_title') }}</CardTitle></CardHeader>
+      <CardContent>
+        <table class="w-full text-sm">
+          <thead class="text-muted-foreground">
+            <tr>
+              <th class="text-left font-normal">{{ t('col_plugin') }}</th>
+              <th class="text-left font-normal">{{ t('col_kind') }}</th>
+              <th class="text-left font-normal">{{ t('col_state') }}</th>
+              <th class="text-left font-normal">{{ t('col_admin') }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="p in status.plugins" :key="p.name" data-plugin-row class="border-t border-border">
+              <td class="py-1" data-plugin-name>{{ p.name }}</td>
+              <td data-plugin-kind>{{ p.kind }}</td>
+              <td data-plugin-state>
+                <Badge :variant="p.connected ? 'secondary' : 'destructive'">
+                  {{ p.connected ? t('connected') : t('unavailable') }}
+                </Badge>
+              </td>
+              <td>
+                <RouterLink v-if="p.admin" :to="`/plugins/${p.name}/`" data-admin-link class="underline">
+                  {{ t('admin_link') }}
+                </RouterLink>
+                <span v-else>-</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </CardContent>
+    </Card>
+
+    <Card>
+      <CardHeader><CardTitle>{{ t('audio_output') }}</CardTitle></CardHeader>
+      <CardContent class="flex flex-wrap items-center gap-2">
+        <Select v-model="device">
+          <SelectTrigger class="min-w-64"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem v-for="d in audio.devices" :key="d" :value="d">{{ d }}</SelectItem>
+          </SelectContent>
+        </Select>
+        <Button data-audio-change @click="changerSortie">{{ t('change') }}</Button>
+      </CardContent>
+    </Card>
+
+    <Card>
+      <CardHeader><CardTitle>{{ t('language') }}</CardTitle></CardHeader>
+      <CardContent class="flex flex-wrap items-center gap-2">
+        <Select v-model="lang">
+          <SelectTrigger class="min-w-32"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem v-for="l in locale.locales" :key="l" :value="l">{{ l }}</SelectItem>
+          </SelectContent>
+        </Select>
+        <Button data-lang-change @click="changerLangue">{{ t('change') }}</Button>
+      </CardContent>
+    </Card>
+
+    <Card>
+      <CardHeader><CardTitle>{{ t('recent_errors') }}</CardTitle></CardHeader>
+      <CardContent>
+        <ul class="space-y-1 font-mono text-xs text-muted-foreground">
+          <li v-for="(l, i) in logs" :key="i" data-log-line>{{ l }}</li>
+        </ul>
+      </CardContent>
+    </Card>
+  </div>
+</template>

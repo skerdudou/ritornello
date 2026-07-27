@@ -12,8 +12,6 @@ pub enum SourceReq {
     Select(u8),
     Next,
     Prev,
-    NextTrack,
-    PrevTrack,
     Eject,
     SetLocale(String),
 }

@@ -2,3 +2,10 @@ play = "Play"
 pause = "Pause"
 stop = "Stop"
 error = "Error"
+# Chargement d'une IHM de plugin (shell de la SPA, web/app/src/views/PluginView.ts).
+# Ces clés vivent dans la couche `common` — héritée par TOUS les catalogues —
+# et non dans celui du cœur : le shell résout d'abord dans le catalogue du
+# plugin, qui est vide précisément quand le plugin est injoignable.
+loading = "Loading…"
+plugin_unavailable = "Plugin interface unavailable."
+plugin_contract_mismatch = "This plugin's interface must be rebuilt: it does not match the current UI contract."

@@ -1,0 +1,161 @@
+import { createT, UI_CONTRACT, type Catalog } from '@ritornello/ui'
+import {
+  defineComponent,
+  h,
+  ref,
+  shallowRef,
+  watchEffect,
+  type Component,
+  type PropType,
+} from 'vue'
+import { useCatalog } from '../composables/useCatalog'
+
+export interface PluginModule {
+  contract: number
+  default: Component
+}
+
+// Suivi des feuilles de style deja demandees, par nom de plugin. Un `Set`
+// plutot qu'une requete DOM par selecteur d'attribut : construire un
+// selecteur CSS a partir d'un nom de plugin arbitraire (`link[href="..."]`)
+// leve un `SyntaxError` hors de tout `try` si ce nom contient un guillemet,
+// ce qui blanchit la vue au lieu du message d'erreur explicite que ce
+// fichier prepare par ailleurs.
+const feuillesInjectees = new Set<string>()
+
+/**
+ * Prefixe **absolu** sous lequel le coeur sert les routes d'un plugin, transmis
+ * a son composant par la prop `base`.
+ *
+ * Sans lui, `RadioAdmin` et `InputAdmin` appelaient `api.get('./api/data')` en
+ * relatif — donc resolu contre l'URL du navigateur, et non contre quoi que ce
+ * soit que le contrat garantisse. Consequence mesuree : `/plugins/radio/` et
+ * `/plugins/radio` matchent tous deux la route du routeur Vue (non-strict par
+ * defaut) ; sur la forme **sans** slash final, `./api/data` resout vers
+ * `/plugins/api/data`, que le coeur interprete comme le plugin `"api"` -> 404.
+ * La page se montait, affichait une table vide et une erreur de chargement, et
+ * tous les boutons echouaient.
+ *
+ * L'URL est cosmetique ; le couplage ne l'est pas : c'est un contrat documente
+ * pour les auteurs de plugins tiers (voir la section « IHM d'un plugin » du
+ * README), qui dependait silencieusement du slash final. Le routeur redirige
+ * par ailleurs la forme sans slash vers la forme avec (voir `router.ts`).
+ */
+export function pluginBase(name: string): string {
+  return `/plugins/${name}/`
+}
+
+// Le CSS d'un plugin est sa propre passe Tailwind : on l'injecte une fois et
+// on le laisse en place (revenir sur la page ne doit pas rejouer un
+// telechargement).
+function ensureStylesheet(name: string): void {
+  if (feuillesInjectees.has(name)) return
+  feuillesInjectees.add(name)
+  const link = document.createElement('link')
+  link.rel = 'stylesheet'
+  link.href = `${pluginBase(name)}ui.css`
+  document.head.appendChild(link)
+}
+
+// Charge le module d'IHM d'un plugin et le monte. Le nom du plugin vient de
+// `/api/status` : ni ce fichier ni le coeur ne connaissent la liste des
+// plugins. `loadModule` n'est parametrable que pour les tests ; en
+// production c'est un `import()` dynamique de `/plugins/<nom>/ui.js`.
+export default defineComponent({
+  name: 'PluginView',
+  props: {
+    name: { type: String, required: true },
+    catalog: { type: Object as PropType<Catalog>, default: () => ({}) },
+    loadModule: {
+      type: Function as PropType<(name: string) => Promise<unknown>>,
+      default: (name: string) => import(/* @vite-ignore */ `/plugins/${name}/ui.js`),
+    },
+  },
+  setup(props) {
+    // `shallowRef` : le composant charge est un objet d'options Vue complet
+    // (`defineComponent`, potentiellement volumineux). Un `ref` le
+    // rendrait reactif en profondeur — surcout de proxy inutile sur chaque
+    // propriete interne, et l'avertissement `Vue received a Component that
+    // was made a reactive object`. `erreur` reste un `ref` : c'est une
+    // simple chaine.
+    const composant = shallowRef<Component | null>(null)
+    // Les trois messages de chargement sont portes par des cles du
+    // **vocabulaire commun** (`crates/ritornello-i18n/src/locales/common_en.toml`
+    // et `deploy/locales/common/fr.toml`), donc heritees par tous les
+    // catalogues. Elles etaient auparavant nommees `indisponible`/`contrat`/
+    // `loading` et n'existaient dans aucun catalogue : `createT` retombant sur
+    // la cle, l'utilisateur lisait litteralement « loading » puis
+    // « indisponible » ou « contrat » — le mode d'echec visible de toute
+    // l'architecture de chargement des plugins.
+    const erreur = ref<'plugin_unavailable' | 'plugin_contract_mismatch' | null>(null)
+
+    // Catalogue du shell, utilise en repli. Indispensable : les messages
+    // ci-dessus sont resolus dans le catalogue **du plugin**, qui est vide
+    // precisement quand le plugin est injoignable — le cas meme qui produit
+    // `plugin_unavailable`.
+    const { t: tShell } = useCatalog()
+
+    // Compteur de generation : le `watchEffect` est asynchrone et relance a
+    // chaque changement de `props.name`. Sans lui, la resolution tardive
+    // d'un chargement A ecraserait le resultat d'un chargement B plus
+    // recent si les deux etaient un jour en vol simultanement. Ce n'est pas
+    // observable aujourd'hui parce que `PluginRoute.vue` monte ce composant
+    // avec `:key="name"`, qui le detruit et le recree a chaque nom plutot
+    // que de laisser `props.name` changer en place — mais cette garantie
+    // vit dans un autre fichier. Le compteur rend ce fichier correct par
+    // lui-meme, independamment de ce que fera la route dans les tasks 9 et
+    // 11.
+    let generation = 0
+
+    watchEffect(async () => {
+      const gen = ++generation
+      composant.value = null
+      erreur.value = null
+      try {
+        ensureStylesheet(props.name)
+        const mod = (await props.loadModule(props.name)) as Partial<PluginModule>
+        if (gen !== generation) return
+        if (mod?.contract !== UI_CONTRACT) {
+          console.warn(`plugin ${props.name}: contrat ${mod?.contract} attendu ${UI_CONTRACT}`)
+          erreur.value = 'plugin_contract_mismatch'
+          return
+        }
+        if (!mod.default) {
+          console.warn(`plugin ${props.name}: aucun composant par defaut exporte`)
+          erreur.value = 'plugin_unavailable'
+          return
+        }
+        composant.value = mod.default
+      } catch (e) {
+        if (gen !== generation) return
+        console.warn(`plugin ${props.name}: chargement impossible`, e)
+        erreur.value = 'plugin_unavailable'
+      }
+    })
+
+    return () => {
+      // Un catalogue de plugin vide signifie « pas de catalogue » : on prend
+      // alors celui du shell, qui porte les memes trois cles par la couche
+      // commune. Lu dans le rendu (et non capture une fois pour toutes) pour
+      // rester reactif : le catalogue du shell est charge en asynchrone par
+      // `App.vue`, donc souvent apres le premier rendu de cette vue.
+      const t = Object.keys(props.catalog).length > 0 ? createT(props.catalog) : tShell.value
+      if (erreur.value) return h('p', { class: 'text-muted-foreground' }, t(erreur.value))
+      if (!composant.value) return h('p', { class: 'text-muted-foreground' }, t('loading'))
+      // `catalog` doit etre transmis explicitement : `h()` ne fait pas
+      // suivre les props de PluginView vers le composant qu'il monte (ce
+      // n'est pas de l'« attribute fallthrough », qui ne concerne que les
+      // attributs non declares). Sans ce relais, tout module de plugin
+      // reel — RadioAdmin, InputAdmin — recoit `catalog: undefined` et
+      // `createT` leve au premier `t(...)` de son template.
+      //
+      // `base` fait partie du **contrat** des IHM de plugin, au meme titre que
+      // `catalog` : c'est le prefixe absolu sous lequel le coeur sert les
+      // routes du plugin. Les modules construisaient auparavant leurs URL en
+      // relatif (`./api/data`), donc resolues contre l'URL du navigateur et
+      // non contre quoi que ce soit que le contrat garantisse — un couplage
+      // silencieux a la forme de la route du shell (voir `pluginBase`).
+      return h(composant.value, { catalog: props.catalog, base: pluginBase(props.name) })
+    }
+  },
+})

@@ -10,11 +10,18 @@ pub struct PersistedState {
     pub audio_device: Option<String>,
     #[serde(default)]
     pub locale: Option<String>,
+    /// Preset de thème choisi (nom opaque pour le cœur : la liste des presets
+    /// vit dans la SPA). Absent = `theme::DEFAULT_THEME`.
+    #[serde(default)]
+    pub theme: Option<String>,
+    /// `"light"` ou `"dark"`. Absent = `theme::DEFAULT_MODE`.
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 impl Default for PersistedState {
     fn default() -> Self {
-        Self { active_source: "radio".into(), volume: 60, audio_device: None, locale: None }
+        Self { active_source: "radio".into(), volume: 60, audio_device: None, locale: None, theme: None, mode: None }
     }
 }
 
@@ -53,7 +60,14 @@ mod tests {
     fn roundtrip_save_load() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
-        let st = PersistedState { active_source: "cd".into(), volume: 35, audio_device: Some("bluealsa:DEV=XX".into()), locale: None };
+        let st = PersistedState {
+            active_source: "cd".into(),
+            volume: 35,
+            audio_device: Some("bluealsa:DEV=XX".into()),
+            locale: None,
+            theme: None,
+            mode: None,
+        };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
     }
@@ -76,8 +90,46 @@ mod tests {
             volume: 50,
             audio_device: None,
             locale: Some("fr".into()),
+            theme: None,
+            mode: None,
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
+    }
+
+    #[test]
+    fn theme_et_mode_absents_par_defaut_et_roundtrip() {
+        assert_eq!(PersistedState::default().theme, None);
+        assert_eq!(PersistedState::default().mode, None);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let st = PersistedState {
+            active_source: "radio".into(),
+            volume: 50,
+            audio_device: None,
+            locale: None,
+            theme: Some("cyberpunk".into()),
+            mode: Some("dark".into()),
+        };
+        save(&path, &st).unwrap();
+        assert_eq!(load(&path), st);
+    }
+
+    #[test]
+    fn un_state_json_anterieur_reste_lisible() {
+        // Compatibilite ascendante : un fichier ecrit avant cette version n'a
+        // ni `theme` ni `mode` ; il doit se charger sans erreur.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"active_source":"radio","volume":42,"audio_device":null,"locale":"fr"}"#,
+        )
+        .unwrap();
+        let st = load(&path);
+        assert_eq!(st.volume, 42);
+        assert_eq!(st.locale.as_deref(), Some("fr"));
+        assert_eq!(st.theme, None);
+        assert_eq!(st.mode, None);
     }
 }

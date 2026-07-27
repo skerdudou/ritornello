@@ -127,12 +127,6 @@ impl SourcePlugin for CdSource {
         SourceOutcome { action: SourceAction::Play { uri: format!("cdda://{n}") }, view: Some(self.view()) }
     }
     async fn next(&mut self) -> SourceOutcome {
-        SourceOutcome { action: SourceAction::Noop, view: None }
-    }
-    async fn prev(&mut self) -> SourceOutcome {
-        SourceOutcome { action: SourceAction::Noop, view: None }
-    }
-    async fn next_track(&mut self) -> SourceOutcome {
         // Le lecteur ne remonte pas l'index réel : on suit l'index demandé,
         // borné à la dernière piste connue (pas de rebouclage).
         if self.total_tracks > 0 {
@@ -140,7 +134,7 @@ impl SourcePlugin for CdSource {
         }
         SourceOutcome { action: SourceAction::PlayerNext, view: Some(self.view()) }
     }
-    async fn prev_track(&mut self) -> SourceOutcome {
+    async fn prev(&mut self) -> SourceOutcome {
         self.track = (self.track - 1).max(0);
         SourceOutcome { action: SourceAction::PlayerPrev, view: Some(self.view()) }
     }
@@ -222,7 +216,11 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
-    fn source_with_channels() -> (CdSource, mpsc::Sender<bool>, mpsc::Sender<(u64, usize, Option<DiscInfo>)>) {
+    /// Alias local pour le type de retour de `source_with_channels`, sinon
+    /// signalé trop complexe par clippy (`type_complexity`).
+    type MetadataSender = mpsc::Sender<(u64, usize, Option<DiscInfo>)>;
+
+    fn source_with_channels() -> (CdSource, mpsc::Sender<bool>, MetadataSender) {
         let (presence_tx, presence_rx) = mpsc::channel(8);
         let (metadata_tx, metadata_rx) = mpsc::channel(4);
         let source = CdSource {
@@ -271,31 +269,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn next_track_incremente_borne_et_renvoie_une_vue() {
+    async fn next_incremente_borne_et_renvoie_une_vue() {
         let (mut source, _p, _m) = source_with_channels();
         source.total_tracks = 3;
         source.track = 0;
-        let out = source.next_track().await;
+        let out = source.next().await;
         assert_eq!(out.action, SourceAction::PlayerNext);
         assert!(out.view.is_some(), "la vue doit suivre la piste");
         assert_eq!(source.track, 1);
-        // Bornage haut : sur la dernière piste, next_track ne reboucle pas.
+        // Bornage haut : sur la dernière piste, next ne reboucle pas.
         source.track = 2;
-        let _ = source.next_track().await;
+        let _ = source.next().await;
         assert_eq!(source.track, 2);
     }
 
     #[tokio::test]
-    async fn prev_track_decremente_borne_a_zero() {
+    async fn prev_decremente_borne_a_zero() {
         let (mut source, _p, _m) = source_with_channels();
         source.total_tracks = 3;
         source.track = 1;
-        let out = source.prev_track().await;
+        let out = source.prev().await;
         assert_eq!(out.action, SourceAction::PlayerPrev);
         assert!(out.view.is_some());
         assert_eq!(source.track, 0);
-        // Bornage bas : sur la première piste, prev_track reste à 0.
-        let _ = source.prev_track().await;
+        // Bornage bas : sur la première piste, prev reste à 0.
+        let _ = source.prev().await;
         assert_eq!(source.track, 0);
     }
 

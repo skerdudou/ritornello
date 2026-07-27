@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "resolveJsonModule": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["vitest/globals"],
+    "skipLibCheck": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    // `@ritornello/ui` expose ses sources brutes (voir vitest.config.ts,
+    // `crossPackageAlias`) : un `.vue` du kit importe via `@/lib/utils`,
+    // resolu par vite/vitest en fonction de l'importeur, mais `vue-tsc`
+    // n'a qu'un seul jeu de `paths` par programme. Le second candidat
+    // (`../kit/src/*`) n'est essaye que si `./src/*` ne resout rien : les
+    // fichiers de l'app ne collisionnent avec aucun chemin du kit.
+    "paths": { "@/*": ["./src/*", "../kit/src/*"] },
+    "jsx": "preserve"
+  },
+  "include": ["src", "*.ts"]
+}

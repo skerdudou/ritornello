@@ -7,37 +7,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as AsyncRwLock;
 
-/// Clés i18n substituées dans `index.html`. Trois tests les gardent alignées :
-/// toutes présentes dans l'anglais embarqué, parité en/fr, et aucun jeton
-/// `{{…}}` survivant au rendu.
-pub const PAGE_KEYS: &[&str] = &[
-    "admin_title",
-    "col_num",
-    "col_name",
-    "col_url",
-    "btn_add",
-    "btn_save",
-    "load_error_1",
-    "load_error_2",
-    "saved",
-    "save_error",
-    "limit_reached",
-    "search_title",
-    "search_placeholder",
-    "country_label",
-    "country_fr",
-    "country_us",
-    "country_all",
-    "btn_search",
-    "btn_add_result",
-    "searching",
-    "no_results",
-    "empty_query",
-];
-
 /// Opérations portées par `SetData`, discriminées par le champ `op` (modèle du
 /// plugin generic-input) : le protocole d'admin n'est **pas** étendu, tout
-/// passe par `GetPage` / `GetData` / `SetData`.
+/// passe par `GetAsset` / `GetCatalog` / `GetData` / `SetData`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Op {
@@ -74,13 +46,23 @@ pub struct RadioAdmin {
 
 #[async_trait::async_trait]
 impl AdminPlugin for RadioAdmin {
-    fn page(&self) -> String {
-        let cat = self.catalog.read().unwrap();
-        let mut html = include_str!("index.html").to_string();
-        for key in PAGE_KEYS {
-            html = html.replace(&format!("{{{{{key}}}}}"), cat.get(key));
+    fn asset(&self, path: &str) -> Option<(String, String)> {
+        match path {
+            "ui.js" => Some((
+                "text/javascript".to_string(),
+                include_str!("../ui/dist/ui.js").to_string(),
+            )),
+            "ui.css" => Some((
+                "text/css".to_string(),
+                include_str!("../ui/dist/ui.css").to_string(),
+            )),
+            _ => None,
         }
-        html
+    }
+
+    fn catalog(&self) -> serde_json::Value {
+        let cat = self.catalog.read().unwrap();
+        serde_json::json!(cat.entries())
     }
 
     async fn get_data(&self) -> serde_json::Value {
@@ -203,15 +185,23 @@ mod tests {
     }
 
     #[test]
-    fn page_substitue_les_jetons_avec_le_catalogue() {
+    fn asset_expose_ui_js_et_ui_css_et_rien_dautre() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
-        std::fs::write(dir.path().join("radio/fr.toml"), "btn_save = \"Enregistrer\"\n").unwrap();
-        let mut a = admin(dir.path());
-        a.catalog = Arc::new(RwLock::new(Catalog::load("radio", "fr", dir.path(), crate::RADIO_EN)));
-        let html = a.page();
-        assert!(html.contains("Enregistrer"));
-        assert!(!html.contains("{{btn_save}}"));
+        let a = admin(dir.path());
+        let (mime, corps) = a.asset("ui.js").unwrap();
+        assert_eq!(mime, "text/javascript");
+        assert!(!corps.is_empty());
+        assert_eq!(a.asset("ui.css").unwrap().0, "text/css");
+        // Un chemin inconnu n'est pas une erreur : c'est un 404 cote coeur.
+        assert!(a.asset("../../../etc/passwd").is_none());
+        assert!(a.asset("index.html").is_none());
+    }
+
+    #[test]
+    fn catalog_expose_les_cles_du_composant() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = admin(dir.path()).catalog();
+        assert!(v["btn_save"].is_string(), "le catalogue doit porter les cles du plugin");
     }
 
     #[tokio::test]
@@ -353,22 +343,6 @@ mod tests {
         assert!(err2.starts_with("invalid request:"), "message inattendu: {err2}");
     }
 
-    #[test]
-    fn page_ne_laisse_aucun_jeton_non_substitue() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = admin(dir.path());
-        let html = a.page();
-        assert!(!html.contains("{{"), "jeton non substitue dans la page");
-    }
-
-    #[test]
-    fn toutes_les_cles_de_page_existent_dans_len_embarque() {
-        let en = ritornello_i18n::try_parse(crate::RADIO_EN).unwrap();
-        for key in PAGE_KEYS {
-            assert!(en.contains_key(*key), "cle absente de en.toml: {key}");
-        }
-    }
-
     /// Pack français livré dans le dépôt.
     fn pack_fr() -> String {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -385,56 +359,5 @@ mod tests {
         cles_en.sort();
         cles_fr.sort();
         assert_eq!(cles_en, cles_fr, "jeux de cles en/fr divergents");
-    }
-
-    /// `page()` fait un `String::replace` brut, sans échappement, sur des
-    /// jetons `{{cle}}` qui atterrissent aussi bien en texte HTML qu'à
-    /// l'intérieur de littéraux JS entre apostrophes (voir `T` dans
-    /// `index.html`). Une valeur qui contient l'un de ces caractères casse la
-    /// syntaxe du script généré — une simple apostrophe droite dans
-    /// `limit_reached` a suffi à faire échouer tout le `<script>` en
-    /// français, silencieusement, sans qu'aucun test ne le voie (les tests de
-    /// page rendent l'anglais, et la parité de clés ne compare que les jeux
-    /// de clés, jamais les valeurs). Ce garde-fou couvre les deux packs
-    /// livrés avec le composant, pour rendre la classe d'erreur impossible à
-    /// réintroduire.
-    #[test]
-    fn aucune_valeur_ne_contient_un_caractere_dangereux_pour_la_substitution() {
-        for (source, texte) in
-            [("anglais embarque", crate::RADIO_EN.to_string()), ("pack fr livre", pack_fr())]
-        {
-            let cat = ritornello_i18n::try_parse(&texte).unwrap();
-            for (cle, valeur) in &cat {
-                for (nom, present) in [
-                    ("une apostrophe droite ' (utiliser l'apostrophe typographique \u{2019}, U+2019)", valeur.contains('\'')),
-                    ("un guillemet droit \"", valeur.contains('"')),
-                    ("un antislash \\", valeur.contains('\\')),
-                    ("un saut de ligne", valeur.contains('\n')),
-                ] {
-                    assert!(
-                        !present,
-                        "{source}: la valeur de la cle `{cle}` contient {nom} ; ce caractere \
-                         casserait le JS genere par la substitution brute des jetons {{{{cle}}}} \
-                         dans index.html. Valeur : {valeur:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn la_page_porte_la_recherche_annuaire_et_la_numerotation_automatique() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = admin(dir.path());
-        let html = a.page();
-        // recherche annuaire : opération, champ, sélecteur de pays
-        assert!(html.contains("op: 'search'"), "operation search absente de la page");
-        assert!(html.contains("id=\"country\""), "selecteur de pays absent");
-        assert!(html.contains("value=\"FR\"") && html.contains("value=\"US\""));
-        // numérotation automatique : plus de champ preset éditable
-        assert!(!html.contains("type=\"number\""), "colonne preset editable encore presente");
-        assert!(html.contains("preset: i + 1"), "numerotation par position absente");
-        // limite de 9 présélections
-        assert!(html.contains("const MAX = 9"), "limite de 9 presets absente");
     }
 }

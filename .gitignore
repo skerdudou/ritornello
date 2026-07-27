@@ -1,3 +1,9 @@
 /target
 /.superpowers/
 /.claude/
+
+/node_modules
+node_modules/
+dist/
+/web/app/test-results
+/web/app/playwright-report

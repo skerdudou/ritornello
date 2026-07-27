@@ -1,0 +1,105 @@
+import { expect, test } from '@playwright/test'
+
+// Lit une variable CSS **calculee** sur la racine du document : c'est la
+// seule preuve qu'un moteur de thème agit reellement sur le rendu — un
+// attribut ou une classe ne prouve que l'intention, pas l'effet.
+const variable = (page: import('@playwright/test').Page, nom: string) =>
+  page.evaluate(
+    (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim(),
+    nom,
+  )
+
+test('navigation entre l’accueil, le statut et les pages de plugin', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.locator('[data-preset-button="1"]')).toBeVisible()
+  await page.goto('/status')
+  // `getByText('radio')` seul est ambigu : l'en-tete liste aussi les
+  // plugins admin par leur nom (voir App.vue), donc « radio » y apparait en
+  // plus de la cellule du tableau de statut — d'ou ce ciblage par role.
+  await expect(page.getByRole('cell', { name: 'radio' })).toBeVisible()
+  // Page de plugin : le module ESM est charge dynamiquement et resolu par
+  // l'import map — c'est ce qu'aucun test unitaire ne peut verifier.
+  await page.goto('/plugins/radio/')
+  await expect(page.locator('[data-save]')).toBeVisible()
+  await page.goto('/plugins/generic-input/')
+  await expect(page.locator('[data-action-row]')).toHaveCount(19)
+})
+
+test('une seule instance de Vue sert le shell et les modules de plugin', async ({ page }) => {
+  const requetes: string[] = []
+  page.on('request', (r) => requetes.push(new URL(r.url()).pathname))
+  await page.goto('/plugins/radio/')
+  await expect(page.locator('[data-save]')).toBeVisible()
+  // La propriete centrale de l'architecture : le shell et le module de
+  // plugin importent tous deux 'vue' via l'import map, qui resout vers la
+  // meme URL stable — une seule requete, donc une seule instance chargee.
+  expect(requetes.filter((p) => p === '/assets/vue.js')).toHaveLength(1)
+  expect(requetes).toContain('/plugins/radio/ui.js')
+  expect(requetes).toContain('/plugins/radio/ui.css')
+})
+
+test('bascule clair/sombre, appliquée et persistée', async ({ page }) => {
+  await page.goto('/')
+  const clair = await variable(page, '--background')
+  await page.getByLabel('toggle theme mode').click()
+  await expect.poll(() => variable(page, '--background')).not.toBe(clair)
+  const sombre = await variable(page, '--background')
+  // Persistance cote serveur : un rechargement doit conserver le mode.
+  await page.reload()
+  await expect.poll(() => variable(page, '--background')).toBe(sombre)
+  expect(await page.evaluate(() => document.documentElement.classList.contains('dark'))).toBe(true)
+})
+
+test('choix d’un thème dans la popin, appliqué et persisté', async ({ page }) => {
+  await page.goto('/')
+  await page.getByLabel('pick theme').click()
+  await page.locator('[data-preset="vercel"]').click()
+  const primaire = await variable(page, '--primary')
+  await page.reload()
+  await expect.poll(() => variable(page, '--primary')).toBe(primaire)
+  await page.getByLabel('pick theme').click()
+  await expect(page.locator('[data-preset="vercel"]')).toHaveAttribute('data-active', 'true')
+})
+
+test('la popin liste les 42 thèmes et les filtre', async ({ page }) => {
+  await page.goto('/')
+  await page.getByLabel('pick theme').click()
+  await expect(page.locator('[data-preset]')).toHaveCount(42)
+  // Frappe reelle plutot qu'un `setInputFiles`/evaluation directe : le
+  // `v-model` du composant `Input` du kit passe par `useVModel({passive:
+  // true})` de @vueuse/core, un chemin qu'aucun test unitaire ne couvre.
+  await page.getByPlaceholder('filter').fill('northern')
+  await expect(page.locator('[data-preset]')).toHaveCount(1)
+})
+
+test('ajout et enregistrement d’une station, relus depuis l’API', async ({ page, request }) => {
+  await page.goto('/plugins/radio/')
+  await page.locator('[data-add]').click()
+  const lignes = page.locator('[data-station-name]')
+  await lignes.last().fill('Test E2E')
+  await page.locator('[data-station-url]').last().fill('http://exemple.test/flux.mp3')
+  await page.locator('[data-save]').click()
+  const data = await (await request.get('/plugins/radio/api/data')).json()
+  expect(data.stations.map((s: { name: string }) => s.name)).toContain('Test E2E')
+  // Numerotation par position : la station de depart (stations.toml du
+  // harnais) occupe la présélection 1, la station ajoutee prend donc la 2.
+  expect(data.stations.find((s: { name: string }) => s.name === 'Test E2E').preset).toBe(2)
+})
+
+test('apprentissage de touche : la vue atteint un état défini', async ({ page }) => {
+  await page.goto('/plugins/generic-input/')
+  const premiere = page.locator('[data-action-row]').first()
+  await premiere.locator('[data-learn]').click()
+  // Deux issues sont legitimes selon que l'environnement expose ou non un
+  // peripherique evdev lisible, et les deux sont des etats definis :
+  //  - aucun peripherique  -> « No input device detected »
+  //  - apprentissage lance -> « Press a key on the device… »
+  // On assert sur cet ensemble ferme de messages (valeurs de
+  // crates/ritornello-plugin-generic-input/src/locales/en.toml — l'anglais
+  // embarque, puisque RITORNELLO_LOCALES n'est pas defini par le harnais),
+  // et non sur « un texte quelconque » : un test qui accepte n'importe quoi
+  // ne prouve rien.
+  await expect(
+    page.getByText(/No input device detected|Press a key on the device/),
+  ).toBeVisible()
+})

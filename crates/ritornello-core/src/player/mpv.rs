@@ -97,12 +97,85 @@ pub struct MpvPlayer {
     ipc: Arc<MpvIpc>,
 }
 
+/// Tampon de sortie audio, en secondes. **On reprend le défaut de mpv**, donc
+/// ce module ne change rien au comportement tant que la variable n'est pas
+/// définie : la cause des microcoupures observées n'est pas établie, et élargir
+/// d'office aurait masqué le diagnostic plutôt que de le faire. La molette
+/// existe parce que la bonne valeur dépend de la machine — sur un Pi 2, une
+/// hausse de charge peut faire manquer une échéance d'écriture ALSA, ce qui
+/// s'entend comme une microcoupure, et monter à 0,5 s est alors le premier
+/// essai. Le coût est une latence d'autant sur la prise en compte du volume ou
+/// du muet, imperceptible pour de la radio.
+pub const AUDIO_BUFFER_DEFAUT: f64 = 0.2;
+
+/// Borne haute imposée par mpv à `--audio-buffer`.
+const AUDIO_BUFFER_MAX: f64 = 10.0;
+
+/// Avance de lecture, en secondes. **On reprend le défaut de mpv**, pour la
+/// même raison que le tampon de sortie : ne rien changer sans avoir mesuré.
+/// Une seconde est pourtant mince pour un flux internet — la moindre gigue
+/// réseau vide l'avance et mpv met la lecture en pause le temps de se remplir —
+/// donc c'est la molette à tourner en premier sur une liaison capricieuse.
+/// Dix secondes de MP3 à 128 kbit/s pèsent environ 160 Ko, négligeable même
+/// sur 1 Go de RAM.
+pub const READAHEAD_DEFAUT: f64 = 1.0;
+
+/// Borne haute retenue ici : au-delà, le tampon coûte de la mémoire sans
+/// bénéfice audible, et retarde la prise en compte d'un changement de station.
+const READAHEAD_MAX: f64 = 120.0;
+
+/// Lit une durée fournie par l'environnement. Variable absente : le défaut, en
+/// silence. Valeur illisible, négative ou hors bornes : le défaut **avec** un
+/// avertissement, plutôt qu'un échec de démarrage — un appareil muet parce
+/// qu'une variable est mal écrite serait un pire résultat qu'un réglage par
+/// défaut.
+fn duree_reglee(brut: Option<&str>, defaut: f64, max: f64, quoi: &str) -> f64 {
+    let Some(brut) = brut else { return defaut };
+    match brut.trim().parse::<f64>() {
+        Ok(v) if v.is_finite() && (0.0..=max).contains(&v) => v,
+        Ok(v) => {
+            tracing::warn!("{quoi}={v} hors bornes (0..={max}), on garde {defaut}");
+            defaut
+        }
+        Err(e) => {
+            tracing::warn!("{quoi}={brut:?} illisible ({e}), on garde {defaut}");
+            defaut
+        }
+    }
+}
+
+/// Tampon de sortie retenu, d'après `RITORNELLO_AUDIO_BUFFER` s'il est défini.
+pub fn audio_buffer_regle(brut: Option<&str>) -> f64 {
+    duree_reglee(brut, AUDIO_BUFFER_DEFAUT, AUDIO_BUFFER_MAX, "RITORNELLO_AUDIO_BUFFER")
+}
+
+/// Avance de lecture retenue, d'après `RITORNELLO_NETWORK_READAHEAD`.
+pub fn readahead_regle(brut: Option<&str>) -> f64 {
+    duree_reglee(brut, READAHEAD_DEFAUT, READAHEAD_MAX, "RITORNELLO_NETWORK_READAHEAD")
+}
+
+/// Arguments de lancement de mpv. Fonction pure, séparée de `start` pour être
+/// testable sans lancer de processus.
+pub fn mpv_args(socket: &Path, cd_dev: &str, audio_buffer: f64, readahead: f64) -> Vec<String> {
+    vec![
+        "--idle=yes".to_string(),
+        "--no-video".to_string(),
+        "--no-terminal".to_string(),
+        format!("--input-ipc-server={}", socket.display()),
+        format!("--cdda-device={cd_dev}"),
+        format!("--audio-buffer={audio_buffer}"),
+        format!("--demuxer-readahead-secs={readahead}"),
+    ]
+}
+
 /// Lance mpv en démon idle et s'y connecte. Le Child est rendu à l'appelant :
 /// s'il meurt, main quitte et systemd relance tout le service.
 pub async fn start(
     mpv_bin: &str,
     socket: &Path,
     cd_dev: &str,
+    audio_buffer: f64,
+    readahead: f64,
     events: broadcast::Sender<Event>,
 ) -> Result<(MpvPlayer, tokio::process::Child)> {
     if let Some(parent) = socket.parent() {
@@ -110,11 +183,7 @@ pub async fn start(
     }
     let _ = std::fs::remove_file(socket);
     let child = tokio::process::Command::new(mpv_bin)
-        .arg("--idle=yes")
-        .arg("--no-video")
-        .arg("--no-terminal")
-        .arg(format!("--input-ipc-server={}", socket.display()))
-        .arg(format!("--cdda-device={cd_dev}"))
+        .args(mpv_args(socket, cd_dev, audio_buffer, readahead))
         .kill_on_drop(true)
         .spawn()
         .context("lancement de mpv")?;
@@ -243,5 +312,58 @@ mod tests {
             w.write_all(resp.as_bytes()).await.unwrap();
         });
         assert!(ipc.command(&[serde_json::json!("loadfile")]).await.is_err());
+    }
+
+    #[test]
+    fn variable_absente_donne_le_defaut_sans_bruit() {
+        assert_eq!(audio_buffer_regle(None), AUDIO_BUFFER_DEFAUT);
+        assert_eq!(readahead_regle(None), READAHEAD_DEFAUT);
+    }
+
+    #[test]
+    fn une_valeur_valide_est_retenue() {
+        assert_eq!(audio_buffer_regle(Some("1.5")), 1.5);
+        assert_eq!(audio_buffer_regle(Some("  2  ")), 2.0);
+        assert_eq!(readahead_regle(Some("30")), 30.0);
+        // 0 est légitime : c'est la façon de revenir au comportement le plus
+        // réactif, au prix de la robustesse.
+        assert_eq!(audio_buffer_regle(Some("0")), 0.0);
+    }
+
+    #[test]
+    fn une_valeur_invalide_retombe_sur_le_defaut() {
+        for brut in ["", "abc", "-1", "1,5", "NaN", "inf"] {
+            assert_eq!(audio_buffer_regle(Some(brut)), AUDIO_BUFFER_DEFAUT, "brut={brut:?}");
+        }
+        // Hors borne haute : mpv refuserait au-delà de 10 s pour le tampon de
+        // sortie, et une avance de lecture démesurée coûte de la mémoire sans
+        // bénéfice.
+        assert_eq!(audio_buffer_regle(Some("42")), AUDIO_BUFFER_DEFAUT);
+        assert_eq!(readahead_regle(Some("999")), READAHEAD_DEFAUT);
+    }
+
+    #[test]
+    fn les_defauts_reproduisent_ceux_de_mpv() {
+        // mpv 0.37 : --audio-buffer=0.2 et --demuxer-readahead-secs=1 (mesuré
+        // par `mpv --list-options`). Ce module rend les deux réglables sans
+        // changer le comportement par défaut : sans variable définie, mpv doit
+        // se comporter exactement comme s'il était lancé sans ces options.
+        // Toute dérive de ces valeurs est un changement de comportement audio
+        // qui doit être voulu, pas un effet de bord — d'où ce test.
+        assert_eq!(audio_buffer_regle(None), 0.2);
+        assert_eq!(readahead_regle(None), 1.0);
+    }
+
+    #[test]
+    fn les_arguments_portent_les_deux_tampons() {
+        let args = mpv_args(std::path::Path::new("/run/rp/mpv.sock"), "/dev/sr0", 0.5, 10.0);
+        assert!(args.contains(&"--audio-buffer=0.5".to_string()), "{args:?}");
+        assert!(args.contains(&"--demuxer-readahead-secs=10".to_string()), "{args:?}");
+        // Les arguments préexistants ne doivent pas avoir été perdus au passage.
+        assert!(args.contains(&"--idle=yes".to_string()));
+        assert!(args.contains(&"--no-video".to_string()));
+        assert!(args.contains(&"--no-terminal".to_string()));
+        assert!(args.contains(&"--input-ipc-server=/run/rp/mpv.sock".to_string()));
+        assert!(args.contains(&"--cdda-device=/dev/sr0".to_string()));
     }
 }

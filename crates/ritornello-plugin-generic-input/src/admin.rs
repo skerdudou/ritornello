@@ -7,52 +7,6 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-/// Clés i18n substituées dans `index.html`. Deux tests les gardent alignées :
-/// toutes présentes dans l'anglais embarqué, et aucun jeton `{{…}}` survivant
-/// au rendu.
-pub const PAGE_KEYS: &[&str] = &[
-    "admin_title",
-    "device_label",
-    "btn_refresh",
-    "col_action",
-    "col_code",
-    "btn_learn",
-    "btn_clear",
-    "preset_label",
-    "btn_load_preset",
-    "btn_import",
-    "btn_export",
-    "btn_save",
-    "btn_cancel",
-    "learning_msg",
-    "learn_timeout",
-    "saved",
-    "save_error",
-    "load_error",
-    "no_device",
-    "act_select_1",
-    "act_select_2",
-    "act_select_3",
-    "act_select_4",
-    "act_select_5",
-    "act_select_6",
-    "act_select_7",
-    "act_select_8",
-    "act_select_9",
-    "act_next",
-    "act_prev",
-    "act_volume_up",
-    "act_volume_down",
-    "act_mute",
-    "act_play_pause",
-    "act_stop",
-    "act_next_track",
-    "act_prev_track",
-    "act_eject",
-    "act_source_cycle",
-    "act_power",
-];
-
 /// Opérations portées par `SetData`, discriminées par le champ `op`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -75,13 +29,23 @@ pub struct GenericInputAdmin {
 
 #[async_trait::async_trait]
 impl AdminPlugin for GenericInputAdmin {
-    fn page(&self) -> String {
-        let cat = self.catalog.read().unwrap();
-        let mut html = include_str!("index.html").to_string();
-        for key in PAGE_KEYS {
-            html = html.replace(&format!("{{{{{key}}}}}"), cat.get(key));
+    fn asset(&self, path: &str) -> Option<(String, String)> {
+        match path {
+            "ui.js" => Some((
+                "text/javascript".to_string(),
+                include_str!("../ui/dist/ui.js").to_string(),
+            )),
+            "ui.css" => Some((
+                "text/css".to_string(),
+                include_str!("../ui/dist/ui.css").to_string(),
+            )),
+            _ => None,
         }
-        html
+    }
+
+    fn catalog(&self) -> serde_json::Value {
+        let cat = self.catalog.read().unwrap();
+        serde_json::json!(cat.entries())
     }
 
     async fn get_data(&self) -> serde_json::Value {
@@ -209,38 +173,22 @@ mod tests {
     }
 
     #[test]
-    fn page_substitue_tous_les_jetons() {
+    fn asset_expose_ui_js_et_ui_css_et_rien_dautre() {
         let f = fixture();
-        let html = f.admin.page();
-        assert!(html.contains("input bindings"));
-        assert!(!html.contains("{{"), "jeton non substitue dans la page");
+        let (mime, corps) = f.admin.asset("ui.js").unwrap();
+        assert_eq!(mime, "text/javascript");
+        assert!(!corps.is_empty());
+        assert_eq!(f.admin.asset("ui.css").unwrap().0, "text/css");
+        // Un chemin inconnu n'est pas une erreur : c'est un 404 cote coeur.
+        assert!(f.admin.asset("../../../etc/passwd").is_none());
+        assert!(f.admin.asset("index.html").is_none());
     }
 
     #[test]
-    fn page_utilise_le_catalogue_de_la_langue_courante() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("generic-input")).unwrap();
-        std::fs::write(
-            dir.path().join("generic-input/fr.toml"),
-            "admin_title = \"touches\"\n",
-        )
-        .unwrap();
-        let mut f = fixture();
-        f.admin.catalog = Arc::new(RwLock::new(Catalog::load(
-            "generic-input",
-            "fr",
-            dir.path(),
-            crate::GENERIC_INPUT_EN,
-        )));
-        assert!(f.admin.page().contains("touches"));
-    }
-
-    #[test]
-    fn toutes_les_cles_de_page_existent_dans_len_embarque() {
-        let en = ritornello_i18n::try_parse(crate::GENERIC_INPUT_EN).unwrap();
-        for key in PAGE_KEYS {
-            assert!(en.contains_key(*key), "cle absente de en.toml: {key}");
-        }
+    fn catalog_expose_les_cles_du_composant() {
+        let f = fixture();
+        let v = f.admin.catalog();
+        assert!(v["btn_save"].is_string(), "le catalogue doit porter les cles du plugin");
     }
 
     /// Pack français livré dans le dépôt.
@@ -259,50 +207,6 @@ mod tests {
         cles_en.sort();
         cles_fr.sort();
         assert_eq!(cles_en, cles_fr, "jeux de cles en/fr divergents");
-    }
-
-    /// `page()` fait un `String::replace` brut, sans échappement, sur des
-    /// jetons `{{cle}}` (voir le plugin radio, où une simple apostrophe
-    /// droite dans le pack fr a suffi à casser tout le `<script>` en
-    /// français, silencieusement). Ce garde-fou couvre les deux packs livrés
-    /// avec le composant, pour rendre la classe d'erreur impossible à
-    /// réintroduire ici aussi.
-    #[test]
-    fn aucune_valeur_ne_contient_un_caractere_dangereux_pour_la_substitution() {
-        for (source, texte) in [
-            ("anglais embarque", crate::GENERIC_INPUT_EN.to_string()),
-            ("pack fr livre", pack_fr()),
-        ] {
-            let cat = ritornello_i18n::try_parse(&texte).unwrap();
-            for (cle, valeur) in &cat {
-                for (nom, present) in [
-                    ("une apostrophe droite ' (utiliser l'apostrophe typographique \u{2019}, U+2019)", valeur.contains('\'')),
-                    ("un guillemet droit \"", valeur.contains('"')),
-                    ("un antislash \\", valeur.contains('\\')),
-                    ("un saut de ligne", valeur.contains('\n')),
-                ] {
-                    assert!(
-                        !present,
-                        "{source}: la valeur de la cle `{cle}` contient {nom} ; ce caractere \
-                         casserait le JS genere par la substitution brute des jetons {{{{cle}}}} \
-                         dans index.html. Valeur : {valeur:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn la_page_expose_les_21_actions() {
-        let f = fixture();
-        let html = f.admin.page();
-        for label in [
-            "Preset 1", "Preset 9", "Next preset", "Previous preset", "Volume +", "Volume -",
-            "Mute", "Play/pause", "Stop", "Next track", "Previous track", "Eject",
-            "Change source", "Standby",
-        ] {
-            assert!(html.contains(label), "libelle absent de la page: {label}");
-        }
     }
 
     #[tokio::test]

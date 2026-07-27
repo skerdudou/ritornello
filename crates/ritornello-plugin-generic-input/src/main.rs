@@ -2,6 +2,13 @@ mod admin;
 mod bindings;
 mod devices;
 mod learn;
+// Uniquement compile sous `cargo test` : `ui_placeholder_js` ne sert au run-
+// time nulle part dans ce crate (contrairement a `placeholder_html` du coeur,
+// utilise en repli par `web.rs`), seulement a `build.rs` (compilation
+// separee, via `include!`) et a ses propres tests. Le compiler en continu
+// dans le binaire declencherait un `dead_code` que `-D warnings` refuserait.
+#[cfg(test)]
+mod placeholder;
 mod presets;
 
 use crate::admin::GenericInputAdmin;

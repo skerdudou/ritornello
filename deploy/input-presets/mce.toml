@@ -1,6 +1,12 @@
 # Telecommande MCE (recepteur infrarouge eHome et compatibles).
 # Transcription de l'ancienne table codee en dur (keymap.rs) :
 # chiffres 2-10 et 513-521 -> Select(1..9).
+#
+# Les touches "piste suiv./prec." (codes 163/165) sont fusionnees sur
+# Next/Prev : deux touches physiques distinctes (les fleches "presel."
+# 402/403 et les touches "piste" 163/165) restent legitimement liees a la
+# meme commande, desormais interpretee par la source active (preselection
+# pour la radio, piste pour le cd).
 
 [[bindings]]
 code = 2
@@ -109,20 +115,20 @@ code = 402
 cmd = "Next"
 
 [[bindings]]
+code = 163
+cmd = "Next"
+
+[[bindings]]
 code = 403
+cmd = "Prev"
+
+[[bindings]]
+code = 165
 cmd = "Prev"
 
 [[bindings]]
 code = 164
 cmd = "PlayPause"
-
-[[bindings]]
-code = 163
-cmd = "NextTrack"
-
-[[bindings]]
-code = 165
-cmd = "PrevTrack"
 
 [[bindings]]
 code = 166

@@ -1,0 +1,12 @@
+{
+  "name": "ritornello-web",
+  "private": true,
+  "type": "module",
+  "workspaces": ["web/kit", "web/app", "crates/*/ui"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  }
+}

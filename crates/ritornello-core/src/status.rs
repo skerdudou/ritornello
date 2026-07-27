@@ -1,6 +1,6 @@
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::Html;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -63,21 +63,29 @@ pub struct AppState {
     pub locale_tx: mpsc::Sender<String>,
     pub locales_root: std::path::PathBuf,
     pub admin_backends: Arc<std::collections::HashMap<String, Arc<dyn crate::admin::AdminBackend>>>,
+    pub admin_assets: Arc<crate::admin::AssetCache>,
     pub cmd_tx: mpsc::Sender<ritornello_proto::Command>,
+    pub theme_current: Arc<RwLock<crate::theme::ThemeState>>,
+    pub theme_tx: mpsc::Sender<crate::theme::ThemeState>,
 }
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/status", get(status_page))
         .route("/api/status", get(status_json))
         .route("/api/audio-output", get(audio_output_json).put(audio_output_put))
         .route("/api/locale", get(locale_json).put(locale_put))
+        .route("/api/i18n", get(i18n_json))
+        .route("/api/logs", get(logs_json))
+        .route("/api/theme", get(crate::theme::theme_json).put(crate::theme::theme_put))
         .route("/api/command", axum::routing::post(command_post))
-        .route("/plugins/:name/", get(crate::admin::admin_page))
         .route(
             "/plugins/:name/api/data",
             get(crate::admin::admin_get_data).put(crate::admin::admin_put_data),
         )
+        .route("/plugins/:name/api/i18n", get(crate::admin::admin_i18n))
+        .route("/plugins/:name/:fichier", get(crate::admin::admin_asset))
+        .merge(crate::web::routes())
+        .fallback(crate::web::shell)
         .with_state(state)
 }
 
@@ -108,12 +116,34 @@ struct AudioOutputRequest {
     device: String,
 }
 
-async fn audio_output_put(State(state): State<AppState>, Json(req): Json<AudioOutputRequest>) -> StatusCode {
+/// Refuse un nom de sortie vide (ou uniquement blanc). Fonction pure, sur le
+/// modèle de `theme::validate`.
+///
+/// L'ancienne page de statut était rendue côté serveur : faute de sortie
+/// choisie, aucun `<option>` ne portait `selected`, donc le navigateur
+/// sélectionnait le premier périphérique et « Changer » envoyait toujours un
+/// nom réel. La SPA n'a pas cette garantie structurelle — d'où cette
+/// validation côté cœur, qui ne dépend d'aucune IHM. Sans elle, sur une
+/// installation neuve, `audio_current` valait `Some("")`,
+/// `GET /api/audio-output` renvoyait `current: ""` indéfiniment, et `""`
+/// était transmis à mpv puis persisté dans `state.json`.
+pub fn validate_audio_device(device: &str) -> Result<(), String> {
+    if device.trim().is_empty() {
+        return Err("nom de sortie audio vide".to_string());
+    }
+    Ok(())
+}
+
+async fn audio_output_put(State(state): State<AppState>, Json(req): Json<AudioOutputRequest>) -> Response {
+    if let Err(msg) = validate_audio_device(&req.device) {
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg })))
+            .into_response();
+    }
     *state.audio_current.write().await = Some(req.device.clone());
     if state.audio_tx.send(req.device).await.is_err() {
-        return StatusCode::INTERNAL_SERVER_ERROR;
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    StatusCode::NO_CONTENT
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// Noms de langues disponibles à partir des noms de fichiers d'un répertoire
@@ -177,6 +207,12 @@ async fn locale_put(State(state): State<AppState>, Json(req): Json<LocaleRequest
     StatusCode::NO_CONTENT
 }
 
+/// Catalogue du cœur dans la langue courante, à plat, pour le `t()` de la SPA.
+async fn i18n_json(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let cat = state.catalog.read().await;
+    Json(serde_json::json!(cat.entries()))
+}
+
 /// Télécommande web : pousse la commande reçue dans le même canal `cmd_tx`
 /// que celui alimenté par les plugins Input (aucune logique métier propre,
 /// juste une source de commandes supplémentaire).
@@ -188,135 +224,17 @@ async fn command_post(State(state): State<AppState>, Json(cmd): Json<ritornello_
     StatusCode::NO_CONTENT
 }
 
-fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+#[derive(Serialize)]
+struct LogsResponse {
+    lines: Vec<String>,
 }
 
-async fn status_page(State(state): State<AppState>) -> Html<String> {
-    let s = state.status.read().await;
-    let cat = state.catalog.read().await;
-    let current_locale = state.locale_current.read().await.clone().unwrap_or_else(|| "en".to_string());
-
-    let mut rows = String::new();
-    for p in &s.plugins {
-        let etat = if p.connected { cat.get("connected") } else { cat.get("unavailable") };
-        let lien = if p.admin {
-            format!("<a href=\"/plugins/{}/\">{}</a>", escape_html(&p.name), escape_html(cat.get("admin_link")))
-        } else {
-            "-".to_string()
-        };
-        rows.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{lien}</td></tr>",
-            escape_html(&p.name),
-            escape_html(&p.kind),
-            escape_html(etat)
-        ));
-    }
-    let logs: String = state
-        .logs
-        .snapshot()
-        .iter()
-        .rev()
-        .map(|l| format!("<li>{}</li>", escape_html(l)))
-        .collect();
-
-    let devices = match crate::audio_output::list_devices() {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!("liste des sorties audio indisponible: {e}");
-            Vec::new()
-        }
-    };
-    let current = state.audio_current.read().await.clone();
-    let options: String = devices
-        .iter()
-        .map(|d| {
-            let sel = if Some(d) == current.as_ref() { " selected" } else { "" };
-            format!("<option value=\"{}\"{sel}>{}</option>", escape_html(d), escape_html(d))
-        })
-        .collect();
-
-    let locales = list_locales(&state.locales_root);
-    let locale_options: String = locales
-        .iter()
-        .map(|l| {
-            let sel = if *l == current_locale { " selected" } else { "" };
-            format!("<option value=\"{}\"{sel}>{}</option>", escape_html(l), escape_html(l))
-        })
-        .collect();
-
-    let mut remote_buttons = String::new();
-    for n in 1..=9u8 {
-        remote_buttons.push_str(&format!("<button onclick=\"sendCmd({{cmd:'Select',arg:{n}}})\">{n}</button> "));
-    }
-    let simple_commands: [(&str, &str); 12] = [
-        ("remote_preset_next", "Next"),
-        ("remote_preset_prev", "Prev"),
-        ("remote_vol_up", "VolumeUp"),
-        ("remote_vol_down", "VolumeDown"),
-        ("remote_mute", "Mute"),
-        ("remote_play_pause", "PlayPause"),
-        ("remote_stop", "Stop"),
-        ("remote_track_next", "NextTrack"),
-        ("remote_track_prev", "PrevTrack"),
-        ("remote_eject", "Eject"),
-        ("remote_source", "SourceCycle"),
-        ("remote_power", "Power"),
-    ];
-    for (key, cmd) in simple_commands {
-        remote_buttons.push_str(&format!(
-            "<button onclick=\"sendCmd({{cmd:'{cmd}'}})\">{}</button> ",
-            escape_html(cat.get(key))
-        ));
-    }
-
-    Html(format!(
-        "<!doctype html><html lang=\"{lang}\"><meta charset=\"utf-8\"><title>ritornello — {title}</title>\
-         <h1>ritornello</h1><p>{active_label} : {active}</p>\
-         <table border=\"1\"><tr><th>{c_plugin}</th><th>{c_kind}</th><th>{c_state}</th><th>{c_admin}</th></tr>{rows}</table>\
-         <h2>{audio}</h2>\
-         <select id=\"audio-device\">{options}</select>\
-         <button onclick=\"setAudioOutput()\">{change}</button> <span id=\"audio-msg\"></span>\
-         <h2>{language}</h2>\
-         <select id=\"locale\">{locale_options}</select>\
-         <button onclick=\"setLocale()\">{change}</button> <span id=\"locale-msg\"></span>\
-         <h2>{remote_title}</h2>\
-         <div>{remote_buttons}</div>\
-         <span id=\"remote-msg\"></span>\
-         <script>\
-         async function setAudioOutput() {{\
-           const device = document.getElementById('audio-device').value;\
-           const r = await fetch('/api/audio-output', {{method:'PUT', headers:{{'content-type':'application/json'}}, body: JSON.stringify({{device}})}});\
-           document.getElementById('audio-msg').textContent = r.ok ? '{ok}' : '{error}';\
-         }}\
-         async function setLocale() {{\
-           const locale = document.getElementById('locale').value;\
-           const r = await fetch('/api/locale', {{method:'PUT', headers:{{'content-type':'application/json'}}, body: JSON.stringify({{locale}})}});\
-           if (r.ok) {{ location.reload(); }} else {{ document.getElementById('locale-msg').textContent = '{error}'; }}\
-         }}\
-         async function sendCmd(payload) {{\
-           const r = await fetch('/api/command', {{method:'POST', headers:{{'content-type':'application/json'}}, body: JSON.stringify(payload)}});\
-           document.getElementById('remote-msg').textContent = r.ok ? '{ok}' : '{error}';\
-         }}\
-         </script>\
-         <h2>{recent}</h2><ul>{logs}</ul></html>",
-        lang = escape_html(&current_locale),
-        title = escape_html(cat.get("status_title")),
-        active_label = escape_html(cat.get("active_source_label")),
-        active = escape_html(&s.active_source),
-        c_plugin = escape_html(cat.get("col_plugin")),
-        c_kind = escape_html(cat.get("col_kind")),
-        c_state = escape_html(cat.get("col_state")),
-        c_admin = escape_html(cat.get("col_admin")),
-        audio = escape_html(cat.get("audio_output")),
-        change = escape_html(cat.get("change")),
-        language = escape_html(cat.get("language")),
-        ok = escape_html(cat.get("ok")),
-        error = escape_html(cat.get("error")),
-        remote_title = escape_html(cat.get("remote_title")),
-        remote_buttons = remote_buttons,
-        recent = escape_html(cat.get("recent_errors")),
-    ))
+/// Les dernières lignes WARN/ERROR, les plus récentes en premier — c'est
+/// l'ordre dans lequel l'ancienne page de statut les affichait.
+async fn logs_json(State(state): State<AppState>) -> Json<LogsResponse> {
+    let mut lines = state.logs.snapshot();
+    lines.reverse();
+    Json(LogsResponse { lines })
 }
 
 /// Tampon circulaire des dernières lignes de log (WARN/ERROR), affiché sur
@@ -366,15 +284,15 @@ impl std::io::Write for LogBufferWriter {
     }
 }
 
+/// Constructeurs d'état partagés par les tests de `status.rs`, `web.rs` (et
+/// au-delà) : extraits ici pour éviter à `web.rs` de les redéfinir.
+/// Déplacement mécanique depuis `mod tests` ci-dessous, sans changement de
+/// contenu.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests_support {
     use super::*;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use http_body_util::BodyExt;
-    use tower::util::ServiceExt;
 
-    fn sample() -> StatusState {
+    pub(crate) fn sample() -> StatusState {
         StatusState {
             plugins: vec![
                 PluginStatus { name: "radio".into(), kind: "source".into(), connected: true, admin: true },
@@ -384,7 +302,7 @@ mod tests {
         }
     }
 
-    fn app_state() -> AppState {
+    pub(crate) fn app_state() -> AppState {
         let (audio_tx, _audio_rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(4);
@@ -403,11 +321,14 @@ mod tests {
             locale_tx,
             locales_root: std::path::PathBuf::from("/nonexistent"),
             admin_backends: Arc::new(std::collections::HashMap::new()),
+            admin_assets: Arc::new(Default::default()),
             cmd_tx,
+            theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
+            theme_tx: tokio::sync::mpsc::channel(4).0,
         }
     }
 
-    fn app_state_with_audio() -> (AppState, tokio::sync::mpsc::Receiver<String>) {
+    pub(crate) fn app_state_with_audio() -> (AppState, tokio::sync::mpsc::Receiver<String>) {
         let (audio_tx, audio_rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(4);
@@ -426,13 +347,16 @@ mod tests {
             locale_tx,
             locales_root: std::path::PathBuf::from("/nonexistent"),
             admin_backends: Arc::new(std::collections::HashMap::new()),
+            admin_assets: Arc::new(Default::default()),
             cmd_tx,
+            theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
+            theme_tx: tokio::sync::mpsc::channel(4).0,
         };
         (state, audio_rx)
     }
 
     /// Variante avec un `cmd_tx` observable, pour les tests de la télécommande web.
-    fn app_state_with_cmd() -> (AppState, tokio::sync::mpsc::Receiver<ritornello_proto::Command>) {
+    pub(crate) fn app_state_with_cmd() -> (AppState, tokio::sync::mpsc::Receiver<ritornello_proto::Command>) {
         let (audio_tx, _audio_rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(4);
@@ -451,14 +375,17 @@ mod tests {
             locale_tx,
             locales_root: std::path::PathBuf::from("/nonexistent"),
             admin_backends: Arc::new(std::collections::HashMap::new()),
+            admin_assets: Arc::new(Default::default()),
             cmd_tx,
+            theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
+            theme_tx: tokio::sync::mpsc::channel(4).0,
         };
         (state, cmd_rx)
     }
 
     /// Variante avec un `locale_tx` observable et un catalogue chargé en `fr`
     /// depuis une racine temporaire (le TempDir est retourné pour rester vivant).
-    fn app_state_fr() -> (AppState, tokio::sync::mpsc::Receiver<String>, tempfile::TempDir) {
+    pub(crate) fn app_state_fr() -> (AppState, tokio::sync::mpsc::Receiver<String>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("core")).unwrap();
         std::fs::write(
@@ -484,9 +411,29 @@ mod tests {
             locale_tx,
             locales_root: dir.path().to_path_buf(),
             admin_backends: Arc::new(std::collections::HashMap::new()),
+            admin_assets: Arc::new(Default::default()),
             cmd_tx,
+            theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
+            theme_tx: tokio::sync::mpsc::channel(4).0,
         };
         (state, locale_rx, dir)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tests_support::*;
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::util::ServiceExt;
+
+    /// Variante avec un `theme_tx` observable, pour les tests de `/api/theme`.
+    fn app_state_with_theme() -> (AppState, tokio::sync::mpsc::Receiver<crate::theme::ThemeState>) {
+        let (state, _audio_rx) = app_state_with_audio();
+        let (theme_tx, theme_rx) = tokio::sync::mpsc::channel(4);
+        (AppState { theme_tx, ..state }, theme_rx)
     }
 
     #[test]
@@ -529,18 +476,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn page_statut_rendue_en_francais() {
-        let (state, _rx, _dir) = app_state_fr();
-        let app = router(state);
-        let resp = app.oneshot(Request::get("/status").body(Body::empty()).unwrap()).await.unwrap();
-        let body = resp.into_body().collect().await.unwrap().to_bytes();
-        let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("Source active"));
-        assert!(html.contains("Sortie audio"));
-        assert!(!html.contains("Active source"));
-    }
-
-    #[tokio::test]
     async fn put_audio_output_notifie_et_met_a_jour_la_selection_affichee() {
         let (state, mut audio_rx) = app_state_with_audio();
         let app = router(state);
@@ -555,6 +490,43 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         assert_eq!(audio_rx.recv().await.unwrap(), "hw:CARD=Headphones");
+    }
+
+    #[test]
+    fn validate_audio_device_refuse_le_vide_et_le_blanc() {
+        assert!(validate_audio_device("hw:CARD=Headphones").is_ok());
+        assert!(validate_audio_device("default").is_ok());
+        assert!(validate_audio_device("").is_err());
+        assert!(validate_audio_device("   ").is_err());
+    }
+
+    #[tokio::test]
+    async fn put_audio_output_vide_renvoie_422_et_ne_change_rien() {
+        // Installation neuve : la SPA laissait le déclencheur vide et « Changer »
+        // envoyait `device: ""`, que le cœur stockait sans validation — d'où
+        // `current: ""` renvoyé indéfiniment, `""` transmis à mpv, et un toast
+        // de succès. Le cœur refuse maintenant, comme le fait `theme_put`.
+        let (state, mut audio_rx) = app_state_with_audio();
+        let audio_current = state.audio_current.clone();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/api/audio-output")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"device":""}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        // Un message d'erreur exploitable par le client (`api.put` en fait le
+        // texte du toast), comme pour `/api/theme`.
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["error"].is_string());
+        // L'état partagé n'a pas bougé et rien n'est parti vers mpv.
+        assert_eq!(audio_current.read().await.as_deref(), Some("default"));
+        assert!(audio_rx.try_recv().is_err(), "rien ne doit partir dans le canal");
     }
 
     #[tokio::test]
@@ -592,17 +564,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn page_statut_affiche_la_telecommande() {
-        let app = router(app_state());
-        let resp = app.oneshot(Request::get("/status").body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = resp.into_body().collect().await.unwrap().to_bytes();
-        let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("Remote control"));
-        assert!(html.contains("/api/command"));
-    }
-
-    #[tokio::test]
     async fn get_audio_output_liste_les_peripheriques_et_la_selection() {
         let (state, _audio_rx) = app_state_with_audio();
         let app = router(state);
@@ -626,25 +587,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn page_statut_affiche_les_dernieres_erreurs() {
-        let state = app_state();
-        state.logs.push("WARN plugin cd indisponible".into());
+    async fn api_logs_renvoie_les_lignes_les_plus_recentes_en_premier() {
+        let state = tests_support::app_state();
+        state.logs.push("WARN premiere".into());
+        state.logs.push("WARN seconde".into());
         let app = router(state);
-        let resp = app.oneshot(Request::get("/status").body(Body::empty()).unwrap()).await.unwrap();
+        let resp = app.oneshot(Request::get("/api/logs").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
-        let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("plugin cd indisponible"));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let lignes: Vec<String> = serde_json::from_value(v["lines"].clone()).unwrap();
+        // Ordre inverse, comme le faisait la page rendue cote serveur.
+        assert_eq!(lignes, vec!["WARN seconde".to_string(), "WARN premiere".to_string()]);
     }
 
     #[tokio::test]
-    async fn page_statut_lien_admin_interne() {
-        let app = router(app_state());
+    async fn lancienne_route_status_est_desormais_servie_par_la_spa() {
+        // `/status` reste une URL valide (README, liens existants) : elle sert
+        // maintenant le shell, plus du HTML genere par le coeur.
+        let app = router(tests_support::app_state());
         let resp = app.oneshot(Request::get("/status").body(Body::empty()).unwrap()).await.unwrap();
-        let body = resp.into_body().collect().await.unwrap().to_bytes();
-        let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("href=\"/plugins/radio/\""));
-        assert!(!html.contains(":8081"));
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+        assert!(html.contains("__RITORNELLO_THEME__"));
+        assert!(!html.contains("<table"), "le coeur ne genere plus de HTML metier");
     }
 
     #[test]
@@ -664,7 +630,7 @@ mod tests {
         use std::io::Write;
         let buf = Arc::new(LogBuffer::new(10));
         let mut w = LogBufferWriter(buf.clone());
-        write!(w, "WARN plugin radio indisponible\n").unwrap();
+        writeln!(w, "WARN plugin radio indisponible").unwrap();
         assert_eq!(buf.snapshot(), vec!["WARN plugin radio indisponible".to_string()]);
     }
 
@@ -682,5 +648,78 @@ mod tests {
         assert!(st.plugins.iter().find(|p| p.name == "radio").unwrap().connected);
         // Nom inconnu : no-op, ne panique pas.
         mark_plugin_disconnected(&mut st, "inconnu");
+    }
+
+    #[tokio::test]
+    async fn get_theme_renvoie_les_defauts_quand_rien_nest_persiste() {
+        let app = router(app_state());
+        let resp = app.oneshot(Request::get("/api/theme").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["theme"], "northern-lights");
+        assert_eq!(v["mode"], "light");
+    }
+
+    #[tokio::test]
+    async fn put_theme_notifie_et_met_a_jour_la_selection() {
+        let (state, mut theme_rx) = app_state_with_theme();
+        let theme_current = state.theme_current.clone();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/api/theme")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"theme":"cyberpunk","mode":"dark"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let recu = theme_rx.recv().await.unwrap();
+        assert_eq!(recu.theme, "cyberpunk");
+        assert_eq!(recu.mode, "dark");
+        assert_eq!(theme_current.read().await.theme, "cyberpunk");
+    }
+
+    #[tokio::test]
+    async fn put_theme_invalide_renvoie_422_et_ne_change_rien() {
+        let (state, mut theme_rx) = app_state_with_theme();
+        let theme_current = state.theme_current.clone();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/api/theme")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"theme":"cyberpunk","mode":"system"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(theme_current.read().await.theme, "northern-lights");
+        assert!(theme_rx.try_recv().is_err(), "rien ne doit partir dans le canal");
+    }
+
+    #[tokio::test]
+    async fn api_i18n_renvoie_le_catalogue_a_plat() {
+        let app = router(tests_support::app_state());
+        let resp = app.oneshot(Request::get("/api/i18n").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // L'anglais embarque du coeur porte ces cles (src/locales/en.toml).
+        assert!(v["remote_title"].is_string());
+        assert!(v["audio_output"].is_string());
+    }
+
+    #[tokio::test]
+    async fn api_i18n_suit_la_langue_courante() {
+        let (state, _rx, _dir) = tests_support::app_state_fr();
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/i18n").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["audio_output"], "Sortie audio");
     }
 }

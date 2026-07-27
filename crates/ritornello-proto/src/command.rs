@@ -4,10 +4,12 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "cmd", content = "arg")]
 pub enum Command {
     Select(u8),
+    /// La distinction présélection/piste n'est pas portée par la commande
+    /// elle-même mais par la source active : la radio interprète
+    /// `Next`/`Prev` comme un changement de présélection, le lecteur CD
+    /// comme piste suivante/précédente.
     Next,
     Prev,
-    NextTrack,
-    PrevTrack,
     VolumeUp,
     VolumeDown,
     Mute,

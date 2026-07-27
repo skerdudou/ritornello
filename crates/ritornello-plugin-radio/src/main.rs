@@ -1,6 +1,13 @@
 mod admin;
 mod config;
 mod directory;
+// Uniquement compile sous `cargo test` : `ui_placeholder_js` ne sert au run-
+// time nulle part dans ce crate (contrairement a `placeholder_html` du coeur,
+// utilise en repli par `web.rs`), seulement a `build.rs` (compilation
+// separee, via `include!`) et a ses propres tests. Le compiler en continu
+// dans le binaire declencherait un `dead_code` que `-D warnings` refuserait.
+#[cfg(test)]
+mod placeholder;
 mod state;
 
 use crate::admin::RadioAdmin;
@@ -86,12 +93,6 @@ impl SourcePlugin for RadioSource {
             Some(n) => self.play_preset(n).await,
             None => SourceOutcome { action: SourceAction::Noop, view: None },
         }
-    }
-    async fn next_track(&mut self) -> SourceOutcome {
-        SourceOutcome { action: SourceAction::Noop, view: None }
-    }
-    async fn prev_track(&mut self) -> SourceOutcome {
-        SourceOutcome { action: SourceAction::Noop, view: None }
     }
     async fn eject(&mut self) -> SourceOutcome {
         SourceOutcome { action: SourceAction::Noop, view: None }

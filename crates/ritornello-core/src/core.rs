@@ -46,6 +46,8 @@ pub struct Core<P: Player> {
     catalog: Arc<RwLock<Catalog>>,
     locale: Option<String>,
     locales_root: PathBuf,
+    theme: Option<String>,
+    mode: Option<String>,
 }
 
 impl<P: Player> Core<P> {
@@ -83,6 +85,8 @@ impl<P: Player> Core<P> {
             catalog,
             locale: persisted.locale.clone(),
             locales_root,
+            theme: persisted.theme.clone(),
+            mode: persisted.mode.clone(),
         }
     }
 
@@ -138,6 +142,15 @@ impl<P: Player> Core<P> {
                 let action = self.active().request(SourceReq::Select(n)).await?;
                 self.apply(action).await?;
             }
+            // `Next`/`Prev` portent maintenant les deux sémantiques : la
+            // source active décide (préselection pour la radio, piste pour
+            // le cd — voir `SourcePlugin::next`/`prev` de chaque plugin).
+            // Remettre `retry_count` à 0 ici est correct pour un changement
+            // de préselection (nouveau flux radio, un retry sur l'ancien
+            // n'aurait plus de sens) et inoffensif pour un changement de
+            // piste cd (`retry_count` ne concerne que la relance d'un flux
+            // réseau attendu, pas la lecture cd) : rien à distinguer entre
+            // les deux sources sur ce point.
             Command::Next => {
                 self.retry_count = 0;
                 let action = self.active().request(SourceReq::Next).await?;
@@ -146,14 +159,6 @@ impl<P: Player> Core<P> {
             Command::Prev => {
                 self.retry_count = 0;
                 let action = self.active().request(SourceReq::Prev).await?;
-                self.apply(action).await?;
-            }
-            Command::NextTrack => {
-                let action = self.active().request(SourceReq::NextTrack).await?;
-                self.apply(action).await?;
-            }
-            Command::PrevTrack => {
-                let action = self.active().request(SourceReq::PrevTrack).await?;
                 self.apply(action).await?;
             }
             Command::Eject => {
@@ -278,12 +283,26 @@ impl<P: Player> Core<P> {
         Ok(())
     }
 
+    /// Change le thème courant et le persiste. Contrairement à `set_locale`,
+    /// rien n'est poussé aux plugins : le thème est un réglage d'apparence de
+    /// l'IHM web, dont aucun plugin n'a connaissance.
+    ///
+    /// Appelée depuis la boucle `select!` de `main` sur réception du canal
+    /// `theme_rx`, lui-même alimenté par la route `PUT /api/theme`.
+    pub fn set_theme(&mut self, t: crate::theme::ThemeState) {
+        self.theme = Some(t.theme);
+        self.mode = Some(t.mode);
+        self.persist();
+    }
+
     fn persist(&self) {
         let st = PersistedState {
             active_source: self.active_source.clone(),
             volume: self.volume,
             audio_device: self.audio_device.clone(),
             locale: self.locale.clone(),
+            theme: self.theme.clone(),
+            mode: self.mode.clone(),
         };
         if let Err(e) = state::save(&self.state_path, &st) {
             tracing::warn!("persistance impossible: {e}");
@@ -401,7 +420,11 @@ mod tests {
         }
     }
 
-    fn setup() -> (Core<FakePlayer>, Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<String>>>, watch::Receiver<View>, tempfile::TempDir) {
+    /// Alias pour le montage de test (clippy::type_complexity) : cœur factice,
+    /// journaux d'appels du lecteur et des sources, récepteur de vue, répertoire temporaire.
+    type Montage = (Core<FakePlayer>, Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<String>>>, watch::Receiver<View>, tempfile::TempDir);
+
+    fn setup() -> Montage {
         let dir = tempfile::tempdir().unwrap();
         let player = FakePlayer::default();
         let player_calls = player.calls.clone();
@@ -500,7 +523,14 @@ mod tests {
         let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
         sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())) }));
         let (tx, _rx) = watch::channel(View::default());
-        let persisted = PersistedState { active_source: "radio".into(), volume: 60, audio_device: Some("bluealsa:DEV=XX".into()), locale: None };
+        let persisted = PersistedState {
+            active_source: "radio".into(),
+            volume: 60,
+            audio_device: Some("bluealsa:DEV=XX".into()),
+            locale: None,
+            theme: None,
+            mode: None,
+        };
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
         let mut core = Core::new(player, sources, persisted, dir.path().join("state.json"), tx, catalog, root);

@@ -170,10 +170,17 @@ impl AdminClient {
         }
     }
 
-    pub async fn get_page(&self) -> Result<String> {
-        match self.request(AdminReq::GetPage).await? {
-            AdminResult::Page(html) => Ok(html),
-            other => bail!("reponse admin inattendue pour GetPage: {other:?}"),
+    pub async fn get_asset(&self, path: &str) -> Result<Option<(String, String)>> {
+        match self.request(AdminReq::GetAsset(path.to_string())).await? {
+            AdminResult::Asset { mime, body } => Ok(body.map(|b| (mime, b))),
+            autre => anyhow::bail!("reponse inattendue a GetAsset: {autre:?}"),
+        }
+    }
+
+    pub async fn get_catalog(&self) -> Result<serde_json::Value> {
+        match self.request(AdminReq::GetCatalog).await? {
+            AdminResult::Catalog(v) => Ok(v),
+            autre => anyhow::bail!("reponse inattendue a GetCatalog: {autre:?}"),
         }
     }
 
@@ -275,16 +282,24 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let (read, mut write) = stream.into_split();
             let mut lines = BufReader::new(read).lines();
-            // 1re requête (get_page, id=1)
+            // 1re requête (get_asset, id=1)
             let _ = lines.next_line().await.unwrap().unwrap();
             write
-                .write_all(b"{\"id\":1,\"result\":{\"kind\":\"Page\",\"data\":\"<h1>hi</h1>\"}}\n")
+                .write_all(
+                    b"{\"id\":1,\"result\":{\"kind\":\"Asset\",\"data\":{\"mime\":\"text/javascript\",\"body\":\"export default 1\"}}}\n",
+                )
                 .await
                 .unwrap();
-            // 2e requête (set_data, id=2)
+            // 2e requête (get_catalog, id=2)
             let _ = lines.next_line().await.unwrap().unwrap();
             write
-                .write_all(b"{\"id\":2,\"result\":{\"kind\":\"Set\",\"data\":{\"ok\":false,\"error\":\"nope\"}}}\n")
+                .write_all(b"{\"id\":2,\"result\":{\"kind\":\"Catalog\",\"data\":{\"btn_save\":\"Enregistrer\"}}}\n")
+                .await
+                .unwrap();
+            // 3e requête (set_data, id=3)
+            let _ = lines.next_line().await.unwrap().unwrap();
+            write
+                .write_all(b"{\"id\":3,\"result\":{\"kind\":\"Set\",\"data\":{\"ok\":false,\"error\":\"nope\"}}}\n")
                 .await
                 .unwrap();
             let _ = &write; // garde l'écriture vivante
@@ -292,7 +307,11 @@ mod tests {
         });
 
         let client = AdminClient::connect(&socket).await.unwrap();
-        assert_eq!(client.get_page().await.unwrap(), "<h1>hi</h1>");
+        assert_eq!(
+            client.get_asset("ui.js").await.unwrap(),
+            Some(("text/javascript".to_string(), "export default 1".to_string()))
+        );
+        assert_eq!(client.get_catalog().await.unwrap(), serde_json::json!({"btn_save": "Enregistrer"}));
         let verdict = client.set_data(serde_json::json!({})).await.unwrap();
         assert_eq!(verdict, Err("nope".to_string()));
     }

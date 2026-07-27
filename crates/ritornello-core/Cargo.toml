@@ -21,6 +21,7 @@ async-trait = "0.1"
 ritornello-proto = { path = "../ritornello-proto" }
 ritornello-plugin-sdk = { path = "../ritornello-plugin-sdk" }
 ritornello-i18n = { path = "../ritornello-i18n" }
+rust-embed = { version = "8", features = ["debug-embed"] }
 
 [dev-dependencies]
 tempfile = "3"

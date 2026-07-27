@@ -78,6 +78,23 @@ impl Catalog {
             .map(String::as_str)
             .unwrap_or(key)
     }
+
+    /// Carte plate de **toutes** les clés connues, `own` surchargeant
+    /// `common` — même ordre de priorité que `get`, mais exposé d'un bloc.
+    ///
+    /// Sert à livrer le catalogue au navigateur (`GET /api/i18n`) : la SPA
+    /// résout ses clés côté client, ce qui remplace la substitution `{{clé}}`
+    /// d'autrefois. Les valeurs restent des **données** de bout en bout :
+    /// aucun caractère n'est dangereux, contrairement à la substitution brute
+    /// dans du source JS.
+    pub fn entries(&self) -> HashMap<&str, &str> {
+        let mut out: HashMap<&str, &str> =
+            self.common.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        for (k, v) in &self.own {
+            out.insert(k.as_str(), v.as_str());
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -151,5 +168,69 @@ mod tests {
     #[test]
     fn try_parse_renvoie_err_sur_toml_invalide() {
         assert!(try_parse("ceci n'est pas du toml =").is_err());
+    }
+
+    #[test]
+    fn entries_fusionne_own_par_dessus_common() {
+        let dir = tempfile::tempdir().unwrap();
+        // `error` existe dans le common embarque : `own` doit primer, comme
+        // dans `get`.
+        let cat = Catalog::load("core", "en", dir.path(), "error = \"own-error\"\nautre = \"x\"\n");
+        let e = cat.entries();
+        assert_eq!(e.get("error").copied(), Some("own-error"));
+        assert_eq!(e.get("autre").copied(), Some("x"));
+        // Les cles du common non redefinies sont presentes : la carte est
+        // complete, c'est elle qui alimente `t()` cote navigateur.
+        assert!(e.len() > 1);
+        assert!(e.keys().any(|k| *k == "play"), "le vocabulaire commun doit etre inclus");
+    }
+
+    /// Pack `common` français livré dans le dépôt. Même invariant de parité que
+    /// pour chaque composant (voir `core.rs::parite_des_cles_entre_len_embarque_et_le_pack_fr`),
+    /// qui manquait à la couche commune : rien ne signalait qu'une clé ajoutée
+    /// dans `common_en.toml` n'avait pas de traduction française.
+    fn pack_common_fr() -> String {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../deploy/locales/common/fr.toml");
+        std::fs::read_to_string(p).expect("pack common fr livre")
+    }
+
+    #[test]
+    fn parite_des_cles_entre_le_common_embarque_et_le_pack_fr() {
+        let en = try_parse(COMMON_EN).unwrap();
+        let fr = try_parse(&pack_common_fr()).unwrap();
+        let mut cles_en: Vec<&String> = en.keys().collect();
+        let mut cles_fr: Vec<&String> = fr.keys().collect();
+        cles_en.sort();
+        cles_fr.sort();
+        assert_eq!(cles_en, cles_fr, "jeux de cles common en/fr divergents");
+    }
+
+    #[test]
+    fn les_cles_de_chargement_dihm_de_plugin_vivent_dans_la_couche_commune() {
+        // Ces trois clés sont affichées par le shell de la SPA
+        // (`web/app/src/views/PluginView.ts`). Elles doivent vivre dans
+        // `common` — héritée par TOUS les catalogues — et non dans celui du
+        // cœur : le shell les résout d'abord dans le catalogue **du plugin**,
+        // qui est vide précisément quand le plugin est injoignable, le cas même
+        // qui produit `plugin_unavailable`.
+        let dir = tempfile::tempdir().unwrap();
+        // Catalogue d'un plugin dont le `own` ne définit rien : les trois clés
+        // doivent quand même se résoudre, et jamais renvoyer la clé elle-même.
+        let cat = Catalog::load("radio", "en", dir.path(), "");
+        for cle in ["loading", "plugin_unavailable", "plugin_contract_mismatch"] {
+            assert_ne!(cat.get(cle), cle, "cle {cle} absente du vocabulaire commun");
+            // `entries()` est ce qui part vers le navigateur : la clé doit y
+            // être, sinon le `t()` de la SPA retombe sur la clé brute.
+            assert!(cat.entries().contains_key(cle), "cle {cle} absente de entries()");
+        }
+    }
+
+    #[test]
+    fn entries_reflete_les_surcharges_externes() {
+        let dir = tempfile::tempdir().unwrap();
+        ecrire(dir.path(), "core", "fr.toml", "standby = \"VEILLE\"\n");
+        let cat = Catalog::load("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
+        assert_eq!(cat.entries().get("standby").copied(), Some("VEILLE"));
     }
 }
