@@ -99,6 +99,12 @@ independently, e.g. `TARGET=x86_64-unknown-linux-gnu PI=user@host
 fresh), copies the binaries, the language packs and the presets, installs
 the systemd unit and restarts the service.
 
+Even without an SSH key, the password is asked **once** per run, not once
+per copy: every ssh/scp call of the script shares a single master
+connection (`ControlMaster`), closed when the script exits. To not type
+it at all, install a key once — `ssh-keygen` if you have none, then
+`ssh-copy-id pi@raspberrypi.local`.
+
 Web interface: http://<host>:8080 — logs: `journalctl -u ritornello -f`.
 
 `deploy.sh` installs the binaries but **never touches**

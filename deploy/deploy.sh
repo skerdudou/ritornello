@@ -14,6 +14,16 @@ cd "$(dirname "$0")/.."
 # and a list duplicated between the two would end up diverging.
 PLUGINS=(radio cd generic-input console musicbrainz ouifm-metas)
 
+# One password prompt for the whole run: every ssh/scp call below shares a
+# single master connection (ControlMaster), opened by the first call and
+# closed by the trap. Without an SSH key, the password is asked once
+# instead of once per call; with a key or an agent, it is simply faster.
+# %C is a hash of user/host/port — short (Unix sockets cap path length)
+# and stable across the calls of one run.
+SSHOPTS=(-o ControlMaster=auto -o 'ControlPath=/tmp/ritornello-deploy-%C' -o ControlPersist=yes)
+fermer_liaison() { ssh "${SSHOPTS[@]}" -O exit "$PI" 2>/dev/null || true; }
+trap fermer_liaison EXIT
+
 if ! command -v cross >/dev/null; then
   # No `2>/dev/null || true`: if the installation fails, its diagnostic is
   # the only explanation for the "command not found" that would follow.
@@ -26,13 +36,13 @@ fi
 # no warning at all. build.sh runs the steps in the right order.
 ./deploy/build.sh
 
-ssh "$PI" 'sudo mkdir -p /usr/local/lib/ritornello/plugins /etc/ritornello'
+ssh "${SSHOPTS[@]}" "$PI" 'sudo mkdir -p /usr/local/lib/ritornello/plugins /etc/ritornello'
 
 # The service runs unprivileged: a dedicated system user, created on first
 # deployment (device access comes through the groups declared in the unit,
 # not through useradd -G). Its home is the state directory, the only place
 # a subprocess (mpv) could want to write to.
-ssh "$PI" 'id -u ritornello >/dev/null 2>&1 \
+ssh "${SSHOPTS[@]}" "$PI" 'id -u ritornello >/dev/null 2>&1 \
   || sudo useradd --system --home-dir /var/lib/ritornello --no-create-home \
        --shell /usr/sbin/nologin ritornello'
 
@@ -40,17 +50,17 @@ ssh "$PI" 'id -u ritornello >/dev/null 2>&1 \
 # between the scp and the installation, `scp -r` into a leftover directory
 # would create /tmp/locales/locales, and a stray subdirectory would end up
 # in /etc/ritornello/locales.
-ssh "$PI" 'sudo mkdir -p /etc/ritornello/locales && rm -rf /tmp/locales'
-scp -r deploy/locales "$PI:/tmp/locales"
-ssh "$PI" 'sudo cp -r /tmp/locales/. /etc/ritornello/locales/ && rm -rf /tmp/locales'
+ssh "${SSHOPTS[@]}" "$PI" 'sudo mkdir -p /etc/ritornello/locales && rm -rf /tmp/locales'
+scp "${SSHOPTS[@]}" -r deploy/locales "$PI:/tmp/locales"
+ssh "${SSHOPTS[@]}" "$PI" 'sudo cp -r /tmp/locales/. /etc/ritornello/locales/ && rm -rf /tmp/locales'
 
-ssh "$PI" 'sudo mkdir -p /etc/ritornello/input-presets && rm -rf /tmp/input-presets'
-scp -r deploy/input-presets "$PI:/tmp/input-presets"
-ssh "$PI" 'sudo cp -r /tmp/input-presets/. /etc/ritornello/input-presets/ && rm -rf /tmp/input-presets'
+ssh "${SSHOPTS[@]}" "$PI" 'sudo mkdir -p /etc/ritornello/input-presets && rm -rf /tmp/input-presets'
+scp "${SSHOPTS[@]}" -r deploy/input-presets "$PI:/tmp/input-presets"
+ssh "${SSHOPTS[@]}" "$PI" 'sudo cp -r /tmp/input-presets/. /etc/ritornello/input-presets/ && rm -rf /tmp/input-presets'
 
-scp "$OUT/ritornello-core" "$PI:/tmp/ritornello-core"
-scp "${PLUGINS[@]/#/$OUT/ritornello-plugin-}" "$PI:/tmp/"
-scp deploy/ritornello.service "$PI:/tmp/"
+scp "${SSHOPTS[@]}" "$OUT/ritornello-core" "$PI:/tmp/ritornello-core"
+scp "${SSHOPTS[@]}" "${PLUGINS[@]/#/$OUT/ritornello-plugin-}" "$PI:/tmp/"
+scp "${SSHOPTS[@]}" deploy/ritornello.service "$PI:/tmp/"
 
 # After every copy into /etc/ritornello, which would hand them back to
 # root: the directory belongs to the service, because the radio and
@@ -59,11 +69,11 @@ scp deploy/ritornello.service "$PI:/tmp/"
 # access to the directory itself. /var/lib/ritornello is taken over too:
 # a previous root installation left state files there that the service
 # could no longer rewrite.
-ssh "$PI" 'sudo chown -R ritornello: /etc/ritornello \
+ssh "${SSHOPTS[@]}" "$PI" 'sudo chown -R ritornello: /etc/ritornello \
   && if [ -d /var/lib/ritornello ]; then sudo chown -R ritornello: /var/lib/ritornello; fi'
 
 DEPLACE_PLUGINS=$(printf '/tmp/ritornello-plugin-%s ' "${PLUGINS[@]}")
-ssh "$PI" "sudo mv /tmp/ritornello-core /usr/local/bin/ritornello-core \
+ssh "${SSHOPTS[@]}" "$PI" "sudo mv /tmp/ritornello-core /usr/local/bin/ritornello-core \
   && sudo mv $DEPLACE_PLUGINS /usr/local/lib/ritornello/plugins/ \
   && sudo chmod +x /usr/local/lib/ritornello/plugins/* \
   && sudo rm -f /usr/local/lib/ritornello/plugins/ritornello-plugin-mce \
