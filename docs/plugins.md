@@ -1,326 +1,326 @@
-# Les plugins
+# The plugins
 
-Architecture à plugins : le cœur (`ritornello-core`) orchestre des plugins —
-processus séparés communiquant par socket Unix (protocole JSON par ligne) —
-de quatre genres : **source** (contenu à jouer : radio, CD), **input**
-(télécommande), **display** (affichage) et **metadata** (métadonnées du
-morceau en cours). Chaque genre a une interface stable ; ajouter un nouveau
-plugin (ex. une source Bluetooth, un afficheur OLED) ne touche pas au cœur.
+Plugin architecture: the core (`ritornello-core`) orchestrates plugins —
+separate processes communicating over Unix sockets (line-delimited JSON
+protocol) — of four kinds: **source** (content to play: radio, CD),
+**input** (remote control), **display** (screens) and **metadata**
+(now-playing metadata). Each kind has a stable interface; adding a new
+plugin (e.g. a Bluetooth source, an OLED display) does not touch the core.
 
-`ritornello-core` charge `/etc/ritornello/plugins.toml` au démarrage (voir
-`deploy/plugins.example.toml`) : chaque entrée déclare un plugin (`source`,
-`display`, `input` ou `metadata`) et le chemin de son exécutable — rien
-d'autre. Une **page d'admin** est une propriété du binaire, pas du
-déploiement : le cœur propose `--admin-socket` à tous les plugins, et celui
-qui a une page la déclare en **liant cette socket** au démarrage. Elle est
-alors servie par le cœur sous la même origine, avec un lien affiché sur
-l'accueil (`http://<hôte>:8080/`) — aucune ligne de configuration à
-connaître, donc aucun oubli possible.
+`ritornello-core` loads `/etc/ritornello/plugins.toml` at startup (see
+`deploy/plugins.example.toml`): each entry declares a plugin (`source`,
+`display`, `input` or `metadata`) and the path to its executable — nothing
+else. An **admin page** is a property of the binary, not of the
+deployment: the core offers `--admin-socket` to every plugin, and the one
+that has a page declares it by **binding that socket** at startup. The
+page is then served by the core under the same origin, with a link shown
+on the home page (`http://<host>:8080/`) — no configuration line to know
+about, hence nothing to forget.
 
-La mort d'un plugin est tolérée : il est marqué indisponible sur la page de
-statut, les autres continuent de fonctionner. Aucun de ces plugins n'est
-spécifique au Pi : `ritornello-plugin-radio` et `ritornello-plugin-cd` sont
-du Rust portable pur, `ritornello-plugin-generic-input` et
-`ritornello-plugin-console` dépendent seulement de matériel Linux générique
-(respectivement un récepteur infrarouge USB reconnu par `evdev`, et une
-console `/dev/ttyN`) — pas d'un GPIO ou d'un bus propre au Pi.
+A plugin's death is tolerated: it is marked unavailable on the status
+page, the others keep working. None of these plugins is Pi-specific:
+`ritornello-plugin-radio` and `ritornello-plugin-cd` are pure portable
+Rust, `ritornello-plugin-generic-input` and `ritornello-plugin-console`
+only depend on generic Linux hardware (respectively a USB infrared
+receiver recognized by `evdev`, and a `/dev/ttyN` console) — not on GPIO
+or any Pi-specific bus.
 
-## `ritornello-plugin-radio` — la radio internet
+## `ritornello-plugin-radio` — internet radio
 
-Sa page de gestion des stations est servie par le cœur, sous l'origine
-unique, à `http://<hôte>:8080/plugins/radio/` (le plugin ne lie aucun port
-réseau — sa page est détectée par la socket d'admin qu'il lie). Elle permet de saisir une station à la main (nom + URL du
-flux) **et** d'en ajouter une depuis l'annuaire communautaire en ligne
-[Radio Browser](https://api.radio-browser.info) : taper un nom, choisir un
-pays, « Rechercher », puis « Ajouter » sur un résultat. C'est **le plugin**
-qui interroge l'annuaire — la page ne charge aucune ressource externe — et
-rien n'est écrit tant qu'« Enregistrer » n'a pas été cliqué.
+Its station management page is served by the core, under the single
+origin, at `http://<host>:8080/plugins/radio/` (the plugin binds no
+network port — its page is detected through the admin socket it binds).
+It lets you enter a station by hand (name + stream URL) **and** add one
+from the online community directory
+[Radio Browser](https://api.radio-browser.info): type a name, pick a
+country, "Search", then "Add" on a result. It is **the plugin** that
+queries the directory — the page loads no external resource — and nothing
+is written until "Save" has been clicked.
 
-Les présélections sont numérotées **automatiquement par position** (1 à 9,
-les chiffres de la télécommande) : ajouter met en fin de liste, supprimer
-renumérote les suivantes ; au-delà de 9, l'ajout est refusé. L'ordre se
-change **en glissant une ligne** (ou par les flèches ▲▼, qui restent le
-chemin accessible au clavier et au doigt) : déplacer une station change donc
-son chiffre de télécommande.
+Presets are numbered **automatically by position** (1 to 9, the remote's
+digits): adding appends to the end of the list, deleting renumbers the
+following ones; beyond 9, adding is refused. The order is changed **by
+dragging a row** (or with the ▲▼ arrows, which remain the
+keyboard-and-touch-accessible path): moving a station therefore changes
+its remote digit.
 
-Le **pays** de recherche se choisit dans une liste filtrable au clavier,
-peuplée par l'annuaire lui-même (241 pays au dernier relevé, avec le nombre
-de stations de chacun). Les noms sont rendus par le navigateur depuis le code
-ISO — pas de table de pays à traduire dans les packs de langue. La liste
-n'est demandée qu'à l'ouverture du sélecteur, jamais au chargement de la
-page, et le choix est **retenu par le plugin** (dans `plugin-radio.json`, à
-côté de la présélection courante) : il suit l'appareil et non le navigateur.
+The search **country** is picked from a keyboard-filterable list,
+populated by the directory itself (241 countries at the last count, with
+each one's station count). Names are rendered by the browser from the ISO
+code — no country table to translate in the language packs. The list is
+only requested when the picker opens, never on page load, and the choice
+is **remembered by the plugin** (in `plugin-radio.json`, next to the
+current preset): it follows the device, not the browser.
 
-Annuaire injoignable ⇒ message d'erreur sur la page, la lecture en cours et
-les stations déjà configurées ne bougent pas, et la saisie manuelle reste le
-repli. L'annuaire est interrogé sur **plusieurs serveurs essayés dans
-l'ordre** (`de1`, `de2`, `at1`, `nl1`, `fi1` de `api.radio-browser.info`)
-jusqu'à ce que l'un réponde : `all.api.radio-browser.info` est un
-enregistrement tournant, et le parc de miroirs bouge avec le temps — un hôte
-disparu échoue vite, le suivant est essayé, et chaque échec est journalisé.
-L'ensemble tient dans un **budget de 4 s** (2 s au plus par serveur) : la
-page d'admin passe par le protocole d'admin du cœur, qui abandonne toute
-requête au bout de 5 s, donc une recherche qui traîne est arrêtée d'elle-même
-avec un message d'erreur plutôt que de finir en timeout.
+Directory unreachable ⇒ error message on the page, current playback and
+already-configured stations are untouched, and manual entry remains the
+fallback. The directory is queried across **several servers tried in
+order** (`de1`, `de2`, `at1`, `nl1`, `fi1` of `api.radio-browser.info`)
+until one answers: `all.api.radio-browser.info` is a rotating record, and
+the mirror fleet drifts over time — a vanished host fails fast, the next
+one is tried, and every failure is logged. The whole thing fits in a
+**4 s budget** (at most 2 s per server): the admin page goes through the
+core's admin protocol, which abandons any request after 5 s, so a search
+that drags on is stopped on its own with an error message rather than
+ending in a timeout.
 
-Sélectionner une présélection **vide** affiche « présélection vide » quelques
-secondes, puis l'affichage revient à la station qui joue : rien n'a été
-lancé, donc rien ne s'est arrêté, et le message ne doit pas décrire
-durablement un état qui n'existe pas.
+Selecting an **empty** preset shows "empty preset" for a few seconds,
+then the display returns to the station that is playing: nothing was
+started, so nothing stopped, and the message must not durably describe a
+state that does not exist.
 
-Variables : `RITORNELLO_RADIO_STATIONS`, `RITORNELLO_RADIO_STATE`,
-`RITORNELLO_RADIO_DIRECTORY` (**épingle** un serveur d'annuaire : il devient
-le seul essayé, pour imposer son propre miroir sans recompiler ; non définie,
-la liste intégrée s'applique).
+Variables: `RITORNELLO_RADIO_STATIONS`, `RITORNELLO_RADIO_STATE`,
+`RITORNELLO_RADIO_DIRECTORY` (**pins** a directory server: it becomes the
+only one tried, to impose your own mirror without recompiling; when
+unset, the built-in list applies).
 
-## `ritornello-plugin-cd` — le lecteur CD
+## `ritornello-plugin-cd` — the CD player
 
-Détection du disque par ioctl (`RITORNELLO_CD_DEV`, défaut `/dev/sr0`),
-lecture de la TOC via `cd-discid`, pistes suivante/précédente, éjection
-(paquet `eject`). La reconnaissance de l'album ne vit **pas** ici : elle est
-l'affaire du plugin `metadata` MusicBrainz (voir plus bas) — un appel réseau
-de plusieurs secondes n'a rien à faire dans le processus qui répond aux
-commandes de piste.
+Disc detection by ioctl (`RITORNELLO_CD_DEV`, default `/dev/sr0`), TOC
+read through `cd-discid`, next/previous tracks, ejection (`eject`
+package). Album recognition does **not** live here: it is the business of
+the MusicBrainz `metadata` plugin (see below) — a multi-second network
+call has no place in the process that answers track commands.
 
-## `ritornello-plugin-console` — l'affichage
+## `ritornello-plugin-console` — the display
 
-Plugin d'affichage sur console HDMI (variable `RITORNELLO_CONSOLE_TTY`,
-défaut `/dev/tty1`). Trois lignes composées par le cœur ; les caractères de
-contrôle venus du contenu (titres ICY…) sont filtrés avant écriture sur le
-tty. Un futur afficheur (OLED SSD1306 en SPI/I2C, par exemple) serait un
-nouveau plugin du même genre, sans règle de repli à réimplémenter.
+Display plugin for the HDMI console (`RITORNELLO_CONSOLE_TTY` variable,
+default `/dev/tty1`). Three lines composed by the core; control
+characters coming from content (ICY titles…) are filtered before being
+written to the tty. A future display (an SSD1306 OLED over SPI/I2C, for
+example) would be a new plugin of the same kind, with no fallback rule to
+reimplement.
 
-La page de statut du cœur (`http://<hôte>:8080/status`) propose aussi un
-sélecteur de **sortie audio**, basé sur les périphériques ALSA connus du
-système (`aplay -L`) — une enceinte Bluetooth déjà appairée via
-`bluetoothctl` y apparaîtra automatiquement une fois exposée par
-`bluez-alsa`.
+The core's status page (`http://<host>:8080/status`) also offers an
+**audio output** picker, based on the ALSA devices the system knows about
+(`aplay -L`) — a Bluetooth speaker already paired through `bluetoothctl`
+will show up there automatically once exposed by `bluez-alsa`.
 
-## `ritornello-plugin-generic-input` — les entrées
+## `ritornello-plugin-generic-input` — inputs
 
-Il ouvre **tous** les périphériques evdev lisibles (non exclusif : le clavier
-continue de fonctionner normalement) et traduit les touches en commandes
-selon `/etc/ritornello/input-bindings.toml`. Sa page
-`http://<hôte>:8080/plugins/generic-input/` liste les périphériques détectés,
-permet d'apprendre une touche par action, de charger un preset livré (`mce`,
-`keyboard`) et d'enregistrer ; elle permet aussi d'importer un preset depuis
-un fichier `.toml` téléversé et d'exporter les bindings courants du
-périphérique sélectionné vers un tel fichier. Variables :
-`RITORNELLO_INPUT_BINDINGS`, `RITORNELLO_INPUT_PRESETS`, `RITORNELLO_LOCALE`.
+It opens **all** readable evdev devices (non-exclusively: the keyboard
+keeps working normally) and translates keys into commands according to
+`/etc/ritornello/input-bindings.toml`. Its page
+`http://<host>:8080/plugins/generic-input/` lists the detected devices,
+lets you learn one key per action, load a bundled preset (`mce`,
+`keyboard`) and save; it also lets you import a preset from an uploaded
+`.toml` file and export the selected device's current bindings to such a
+file. Variables: `RITORNELLO_INPUT_BINDINGS`, `RITORNELLO_INPUT_PRESETS`,
+`RITORNELLO_LOCALE`.
 
-**Mise à jour d'une installation existante** (ancien `ritornello-plugin-mce`
-à clavier codé en dur) : dans `/etc/ritornello/plugins.toml`, remplacer
-l'entrée du plugin par `name = "generic-input"`, `exec =
+**Updating an existing installation** (old hard-coded-keyboard
+`ritornello-plugin-mce`): in `/etc/ritornello/plugins.toml`, replace the
+plugin's entry with `name = "generic-input"`, `exec =
 "/usr/local/lib/ritornello/plugins/ritornello-plugin-generic-input"`.
-`deploy/deploy.sh` supprime automatiquement l'ancien binaire
-`ritornello-plugin-mce` sur la cible pour éviter qu'il continue de tourner
-après une mise à jour.
+`deploy/deploy.sh` automatically removes the old `ritornello-plugin-mce`
+binary on the target so it does not keep running after an update.
 
-## Métadonnées du morceau (genre `metadata`)
+## Now-playing metadata (the `metadata` kind)
 
-Un plugin `metadata` enrichit ce que joue la Source active **sans que
-celle-ci le sache**. Le cœur lui annonce ce qui joue, il répond ce qu'il en
-sait.
+A `metadata` plugin enriches what the active Source is playing **without
+the Source knowing**. The core tells it what is playing, it answers with
+what it knows about it.
 
-Deux couches se superposent, et la seconde gagne :
+Two layers stack up, and the second one wins:
 
-1. **Ce que le flux annonce lui-même.** Le cœur observe la propriété
-   `metadata` de mpv et en lit l'en-tête ICY (`icy-title`), affiché **brut**,
-   sans découpage sur `" - "` : la convention existe mais n'est pas
-   garantie — les webradios OUI FM émettent d'ailleurs `Titre - ARTISTE`,
-   dans l'ordre inverse de l'usage. Cette couche fonctionne sans aucun
-   plugin, et sans que la Source ait à déclarer quoi que ce soit.
-2. **Ce qu'un plugin `metadata` a appris**, s'il correspond à ce qui joue.
+1. **What the stream announces itself.** The core watches mpv's
+   `metadata` property and reads the ICY header (`icy-title`), displayed
+   **raw**, without splitting on `" - "`: the convention exists but is not
+   guaranteed — OUI FM's webradios actually emit `Title - ARTIST`, in the
+   reverse of the usual order. This layer works without any plugin, and
+   without the Source having to declare anything.
+2. **What a `metadata` plugin has learned**, if it matches what is
+   playing.
 
-**Un plugin est prioritaire sur l'ICY en toutes circonstances**, tant que la
-station ne change pas : ce qu'il a dit reste affiché même si le flux annonce
-entre-temps un nouveau titre. L'ICY de ces flux est de moindre qualité —
-ordre inversé (`Titre - ARTISTE`), parfois le seul nom de la station en
-remplissage — et le laisser reprendre la main à chaque morceau faisait
-changer la forme de l'affichage deux fois par morceau.
+**A plugin takes precedence over ICY under all circumstances**, as long
+as the station does not change: what it said stays displayed even if the
+stream announces a new title in the meantime. These streams' ICY is of
+lesser quality — reversed order (`Title - ARTIST`), sometimes just the
+station name as filler — and letting it take over on every track made the
+display change shape twice per track.
 
-Compromis assumé : au changement de morceau, le titre précédent reste affiché
-le temps que le plugin envoie sa trame — court en pratique, les deux venant
-de la même automatisation de la station, mais durable si le plugin cesse de
-répondre. Changer de station, en revanche, remet l'ardoise à zéro : c'est
-l'identité qui change, et l'ICY reprend la main jusqu'à la première réponse
-du plugin.
+Accepted trade-off: on a track change, the previous title stays displayed
+until the plugin sends its frame — short in practice, both coming from
+the station's same automation, but lasting if the plugin stops
+responding. Changing station, on the other hand, wipes the slate clean:
+the identity changes, and ICY takes over until the plugin's first answer.
 
-Sans plugin `metadata` déclaré, il n'y a donc pas d'enrichissement — c'est
-assumé, ce n'est pas une régression. **La lecture n'est jamais affectée** par
-un plugin `metadata`, et son échec est silencieux à l'écran. Un plugin dont
-le processus meurt est marqué indisponible sur la page de statut ; en
-revanche, un plugin qui démarre puis ne sert jamais sa socket y reste affiché
-comme connecté (même comportement que le genre `input`, dont la connexion
-n'est pas attendue au démarrage).
+With no `metadata` plugin declared, there is therefore no enrichment —
+this is by design, not a regression. **Playback is never affected** by a
+`metadata` plugin, and its failure is silent on screen. A plugin whose
+process dies is marked unavailable on the status page; however, a plugin
+that starts but never serves its socket stays shown there as connected
+(same behavior as the `input` kind, whose connection is not awaited at
+startup).
 
-**L'ordre de déclaration compte**, et c'est le seul genre pour lequel c'est
-le cas : entre deux plugins qui répondent pour le même morceau, le premier
-déclaré dans `plugins.toml` gagne, et un plugin déclaré plus bas ne l'écrase
-jamais. Le critère retenu est la prévisibilité pour qui débogue : « premier
-arrivé » dépendrait de la latence réseau, donc la même installation
-afficherait autre chose d'un démarrage à l'autre.
+**Declaration order matters**, and this is the only kind for which it
+does: between two plugins answering for the same track, the first one
+declared in `plugins.toml` wins, and a plugin declared lower down never
+overwrites it. The chosen criterion is predictability for whoever is
+debugging: "first to arrive" would depend on network latency, so the same
+installation would display different things from one boot to the next.
 
-**Mise à jour d'une installation existante.** `deploy/deploy.sh` installe
-les nouveaux binaires mais ne touche pas à `/etc/ritornello/plugins.toml` :
-sans ajout manuel des deux entrées `kind = "metadata"` (voir
-`deploy/plugins.example.toml`), un appareil déjà en service **perd les titres
-de piste du CD**, que le plugin cd fournissait lui-même avant cette version.
-Le reste de l'affichage est inchangé.
+**Updating an existing installation.** `deploy/deploy.sh` installs the
+new binaries but does not touch `/etc/ritornello/plugins.toml`: without
+manually adding the two `kind = "metadata"` entries (see
+`deploy/plugins.example.toml`), a device already in service **loses the
+CD track titles**, which the cd plugin used to provide itself before this
+version. The rest of the display is unchanged.
 
-### Les deux plugins livrés
+### The two bundled plugins
 
-- `ritornello-plugin-musicbrainz` reconnaît un disque auprès de MusicBrainz.
-  C'est le code qui vivait dans `ritornello-plugin-cd`, où un appel réseau de
-  plusieurs secondes partageait le processus devant répondre aux commandes de
-  piste. Aucune variable à régler.
-- `ritornello-plugin-ouifm-metas` lit le flux de métadonnées des webradios
-  OUI FM. **Rien à configurer** : la table des 21 flux est embarquée dans le
-  binaire (`src/webradios.toml`), relevée de la source de vérité du site — la
-  variable JavaScript `apidata` de sa page de lecteur, où chaque flux porte
-  son identifiant de flux et son identifiant de métadonnées.
-  `scripts/fetch-webradios.mjs` la régénère depuis cette même source (avec
-  `--verifier`, il signale une dérive sans rien écrire).
+- `ritornello-plugin-musicbrainz` recognizes a disc through MusicBrainz.
+  This is the code that used to live in `ritornello-plugin-cd`, where a
+  multi-second network call shared the process that had to answer track
+  commands. No variable to set.
+- `ritornello-plugin-ouifm-metas` reads the metadata feed of OUI FM's
+  webradios. **Nothing to configure**: the table of 21 streams is
+  embedded in the binary (`src/webradios.toml`), taken from the site's
+  source of truth — the `apidata` JavaScript variable of its player page,
+  where each stream carries its stream identifier and its metadata
+  identifier. `scripts/fetch-webradios.mjs` regenerates it from that same
+  source (with `--verifier`, it reports a drift without writing
+  anything).
 
-  La reconnaissance porte sur un **fragment de l'URL** et non sur l'URL
-  entière : celle qu'OUI FM sert comporte un jeton signé et un paramètre de
-  format variables, alors que l'identifiant de flux, lui, est stable. Les
-  **deux formes d'URL** d'une même webradio sont reconnues : celle de
-  `streams.lesindesradios.fr` et le mount Icecast historique
-  (`ouifm3.ice.infomaniak.ch/ouifm3.mp3`) — c'est cette seconde forme qu'on
-  rencontre en pratique, publiée de longue date, donc référencée par les
-  annuaires et recopiée par les utilisateurs.
+  Recognition is based on a **fragment of the URL**, not the whole URL:
+  the one OUI FM serves carries a signed token and a format parameter
+  that vary, while the stream identifier is stable. **Both URL forms** of
+  a given webradio are recognized: the `streams.lesindesradios.fr` one
+  and the historical Icecast mount (`ouifm3.ice.infomaniak.ch/ouifm3.mp3`)
+  — the latter is the form met in practice, long published, hence
+  referenced by directories and copied around by users.
 
-  Le fichier optionnel `/etc/ritornello/ouifm-metas.toml` (variable
-  `RITORNELLO_OUIFM_METAS`, exemple dans `deploy/`) sert le jour où OUI FM
-  change quelque chose : ses entrées sont consultées **avant** la table
-  embarquée, ce qui permet de corriger une correspondance devenue fausse ou
-  d'en ajouter une, sans recompiler.
+  The optional `/etc/ritornello/ouifm-metas.toml` file
+  (`RITORNELLO_OUIFM_METAS` variable, example in `deploy/`) is there for
+  the day OUI FM changes something: its entries are consulted **before**
+  the embedded table, which allows fixing a mapping gone stale or adding
+  one, without recompiling.
 
-### Où cela s'affiche
+### Where it shows up
 
-Sur les afficheurs, le cœur compose : `line3` porte `artiste — titre` (avec
-repli sur l'un des deux seul — une information partielle vaut mieux que
-rien), et `line2` reçoit l'album **uniquement si la Source a déclaré sa
-propre `line2` remplaçable**, c'est-à-dire l'a écrite faute de mieux. Le
-plugin cd s'en sert : il écrit « audio CD », l'album prend la place quand un
-plugin le rapporte, et l'étiquette revient dès qu'il ne le sait plus. Le
-critère est cette déclaration explicite et non le fait que la ligne soit
-vide : sinon une Source demanderait l'album en se taisant, et celle qui veut
-une ligne vide n'aurait aucun moyen de le dire. Le cœur ne détruit jamais une
-information que la Source seule possède, et le protocole Display reste
-inchangé : un futur afficheur n'a aucune règle de repli à réimplémenter.
+On the displays, the core composes: `line3` carries `artist — title`
+(falling back to either one alone — partial information beats none), and
+`line2` receives the album **only if the Source declared its own `line2`
+as replaceable**, that is, wrote it for lack of anything better. The cd
+plugin uses this: it writes "audio CD", the album takes its place when a
+plugin reports it, and the label comes back as soon as it is no longer
+known. The criterion is that explicit declaration, not the line being
+empty: otherwise a Source would be asking for the album by staying
+silent, and one that wants an empty line would have no way to say so. The
+core never destroys information only the Source has, and the Display
+protocol stays unchanged: a future display has no fallback rule to
+reimplement.
 
-Dans l'IHM web, la page d'accueil porte un encart **Lecteur**, au-dessus de
-la télécommande : source active, volume, et deux pastilles pour le muet et la
-veille. Le morceau **s'y ajoute** quand on le connaît — avec une pastille
-indiquant son **origine** (`icy`, ou le nom du plugin gagnant), la première
-question qu'on se pose devant un titre faux. Rien de tout cela n'est sondé :
-l'encart se met à jour en flux poussé, donc le volume suit la télécommande
-infrarouge et les autres onglets.
+In the web UI, the home page carries a **Player** card, above the remote:
+active source, volume, and two badges for mute and standby. The track
+**joins it** when known — with a badge indicating its **origin** (`icy`,
+or the name of the winning plugin), the first question one asks in front
+of a wrong title. None of this is polled: the card updates over a pushed
+stream, so the volume follows the infrared remote and the other tabs.
 
-**Avance automatique de piste.** Quand un CD passe seul à la piste suivante,
-mpv en informe le cœur, qui le relaie à la Source
-(`SourceReq::PlayerTrack`) : c'est elle qui se recale et renvoie vue et
-identité, le cœur ne pouvant pas modifier une identité qu'il a pour principe
-de ne jamais interpréter. L'affichage et les métadonnées suivent donc
-l'avance sans qu'aucune touche soit pressée. La **fin du disque** suit le
-même principe en sens inverse : le cœur signale l'arrêt à la Source, qui
-recale son état — sans quoi la dernière piste resterait affichée
-indéfiniment.
+**Automatic track advance.** When a CD moves to the next track on its
+own, mpv informs the core, which relays it to the Source
+(`SourceReq::PlayerTrack`): the Source is what realigns itself and sends
+back view and identity, since the core cannot modify an identity it has
+made a principle of never interpreting. Display and metadata therefore
+follow the advance without any key being pressed. The **end of the disc**
+follows the same principle in reverse: the core signals the stop to the
+Source, which realigns its state — without which the last track would
+stay displayed indefinitely.
 
-### Écrire un plugin `metadata`
+### Writing a `metadata` plugin
 
-Implémenter `MetadataPlugin` du SDK (`now_playing` / `next_enrichment`) et
-appeler `run_metadata_plugin`. Deux points de contrat :
+Implement the SDK's `MetadataPlugin` (`now_playing` / `next_enrichment`)
+and call `run_metadata_plugin`. Two points of contract:
 
-- l'**identité** de ce qui joue est un JSON **opaque** produit par la Source,
-  que le cœur ne fait que comparer et relayer. Le plugin radio y met
-  `{"kind":"stream","url":…}`, le plugin cd
-  `{"kind":"disc","toc":…,"track":…}`. Un plugin qui ne reconnaît pas la
-  forme reçue se contente de se taire ;
-- chaque enrichissement doit **réécho l'identité** concernée. C'est le
-  garde-fou de péremption : le cœur jette celui qui ne correspond plus à ce
-  qui joue, ce qui empêche une réponse lente d'écraser le morceau suivant. Un
-  enrichissement dont tous les champs textuels sont vides compte comme une
-  non-réponse, et laisse donc gagner un plugin moins prioritaire.
+- the **identity** of what is playing is an **opaque** JSON produced by
+  the Source, which the core only compares and relays. The radio plugin
+  puts `{"kind":"stream","url":…}` there, the cd plugin
+  `{"kind":"disc","toc":…,"track":…}`. A plugin that does not recognize
+  the shape it receives simply stays silent;
+- every enrichment must **echo back the identity** it concerns. This is
+  the staleness guard: the core discards one that no longer matches what
+  is playing, which prevents a slow answer from overwriting the next
+  track. An enrichment whose text fields are all empty counts as a
+  non-answer, and therefore lets a lower-priority plugin win.
 
-`next_enrichment` doit être **annulable sans perte** : son futur est
-abandonné dès qu'un `NowPlaying` arrive, donc tout état durable (connexion
-HTTP ouverte, cache, file d'attente) doit vivre dans le plugin, pas dans les
-variables locales du futur. (La même exigence vaut pour le
-`poll_notification` des Sources, et pour la même raison — voir la doc du
-SDK.)
+`next_enrichment` must be **cancellable without loss**: its future is
+dropped as soon as a `NowPlaying` arrives, so any durable state (open
+HTTP connection, cache, queue) must live in the plugin, not in the
+future's local variables. (The same requirement holds for the Sources'
+`poll_notification`, and for the same reason — see the SDK docs.)
 
-## IHM d'un plugin
+## A plugin's UI
 
-Un plugin qui lie la socket `--admin-socket` que le cœur lui propose peut
-livrer sa propre interface, sans qu'une ligne du cœur change (le SDK fait
-tout : `run_admin_plugin` sur `ritornello_plugin_sdk::admin_socket_path()`).
-Il répond à trois requêtes du protocole d'admin :
+A plugin that binds the `--admin-socket` the core offers it can ship its
+own interface, without a single line of the core changing (the SDK does
+everything: `run_admin_plugin` on
+`ritornello_plugin_sdk::admin_socket_path()`). It answers three requests
+of the admin protocol:
 
-- `GetAsset("ui.js")` → un **module ESM** exportant `contract` (la version du
-  contrat, voir `web/kit/src/contract.ts`) et, par défaut, un composant Vue ;
-- `GetAsset("ui.css")` → la feuille de style du module (sa propre passe
-  Tailwind, important : le CSS du cœur ne contient que les classes qu'il
-  voit) ;
-- `GetCatalog` → son catalogue i18n à plat, que la vue consomme via `t()`.
+- `GetAsset("ui.js")` → an **ESM module** exporting `contract` (the
+  contract version, see `web/kit/src/contract.ts`) and, as default, a Vue
+  component;
+- `GetAsset("ui.css")` → the module's stylesheet (its own Tailwind pass,
+  important: the core's CSS only contains the classes the core sees);
+- `GetCatalog` → its flat i18n catalog, which the view consumes through
+  `t()`.
 
-Le shell monte le composant par défaut du module en lui passant **deux
-props**, qui sont l'intégralité du contrat côté données :
+The shell mounts the module's default component passing it **two props**,
+which are the entirety of the data-side contract:
 
-- `catalog` : le catalogue i18n à plat renvoyé par `GetCatalog`, à consommer
-  via `createT(catalog)` ;
-- `base` : le préfixe **absolu** sous lequel le cœur sert les routes de ce
-  plugin, slash final compris (`/plugins/<nom>/`). Toute URL du module se
-  construit à partir de lui — `api.get(`${base}api/data`)` — et **jamais** en
-  relatif. Un `./api/data` est résolu contre l'URL du navigateur, pas contre
-  le préfixe du plugin : sur `/plugins/<nom>` (sans slash final) il désigne
-  `/plugins/api/data`, que le cœur interprète comme un plugin nommé « api »,
-  donc un 404. Le routeur du shell canonise désormais l'URL, mais un module
-  ne doit pas dépendre de cette forme : `base` est la garantie, l'URL
-  affichée n'en est pas une. Les deux modules livrés déclarent `base`
-  **requise**, sans valeur par défaut : le nom sous lequel un plugin est
-  servi vient de `plugins.toml`, donc du déploiement, et un module qui
-  reconstruirait `/plugins/<son-nom>/` serait faux — silencieusement — dès
-  qu'un opérateur le déclare sous un autre nom.
+- `catalog`: the flat i18n catalog returned by `GetCatalog`, to be
+  consumed through `createT(catalog)`;
+- `base`: the **absolute** prefix under which the core serves this
+  plugin's routes, trailing slash included (`/plugins/<name>/`). Every
+  URL in the module is built from it — `api.get(`${base}api/data`)` — and
+  **never** relatively. A `./api/data` is resolved against the browser's
+  URL, not against the plugin's prefix: on `/plugins/<name>` (no trailing
+  slash) it designates `/plugins/api/data`, which the core interprets as
+  a plugin named "api", hence a 404. The shell's router now canonicalizes
+  the URL, but a module must not depend on that form: `base` is the
+  guarantee, the displayed URL is not one. Both bundled modules declare
+  `base` **required**, with no default value: the name a plugin is served
+  under comes from `plugins.toml`, hence from the deployment, and a
+  module that rebuilt `/plugins/<its-name>/` would be wrong — silently —
+  as soon as an operator declares it under another name.
 
-Le module importe `vue` et `@ritornello/ui` **sans les embarquer** : le shell
-les fournit par une import map, donc une seule instance de Vue et un seul jeu
-de composants servent tout le monde. Un contrat incompatible est signalé dans
-l'interface plutôt que de casser la page.
+The module imports `vue` and `@ritornello/ui` **without bundling them**:
+the shell provides them through an import map, so a single Vue instance
+and a single set of components serve everyone. An incompatible contract
+is reported in the interface rather than breaking the page.
 
-L'ESM natif ne demande aucune compilation : un plugin simple peut livrer un
-`ui.js` **écrit à la main**. Les deux plugins livrés utilisent un build Vite
-(voir `crates/ritornello-plugin-radio/ui/`) pour bénéficier des `.vue` et de
-TypeScript — c'est un choix de confort, pas une exigence.
+Native ESM requires no build step: a simple plugin can ship a
+**hand-written** `ui.js`. The two bundled plugins use a Vite build (see
+`crates/ritornello-plugin-radio/ui/`) to benefit from `.vue` files and
+TypeScript — a comfort choice, not a requirement.
 
-Quatre points appris pendant ce chantier, à connaître avant d'écrire l'IHM
-d'un plugin tiers :
+Four things learned during this work stream, to know before writing a
+third-party plugin's UI:
 
-- `assets/vue.js` est le build **runtime-only** de Vue (pas de compilateur de
-  template embarqué) : un module de plugin doit livrer des **templates
-  précompilés** (SFC `.vue` passés par `@vitejs/plugin-vue`, ou `h()` à la
-  main), jamais un `template: "<div>...</div>"` en chaîne évaluée à
-  l'exécution — ça échouerait silencieusement à l'exécution, pas à la
-  construction. `vue-router` n'est, quant à lui, **délibérément pas** dans
-  l'import map : un module de plugin ne doit pas utiliser `useRoute` ni
-  `RouterLink` — sa propre copie de `vue-router` embarquerait ses propres
-  clés d'injection, incompatibles avec le routeur du shell.
-- Le protocole d'admin ne transporte que du **texte** (`AdminResult::Asset {
-  body: Option<String>, .. }`, voir `crates/ritornello-proto/src/admin.rs`) :
-  un actif binaire (fonte, sprite, wasm) devrait être encodé en base64 par le
-  plugin puis décodé côté module ESM. C'est un plafond assumé du relai, pas
-  un oubli.
-- Les actifs d'un plugin ne sont servis que sur **un seul segment de chemin**
-  (`/plugins/<nom>/<fichier>`, sans sous-répertoire) : le build d'un plugin
-  doit donc produire des noms de fichiers **plats**. Un chemin plus profond
-  (ex. `/plugins/<nom>/assets/ui.js`) ne correspond à aucune route du cœur et
-  répond **404**. Il tombait auparavant sur le repli de la SPA, qui renvoyait
-  200 avec le shell HTML : un `import()` dynamique recevait du HTML, mode
-  d'échec très déroutant puisque rien ne signalait l'erreur.
-- Les polices déclarées par les thèmes du cœur (voir
-  [interface.md](interface.md)) viennent d'un CDN, la seule ressource externe
-  de toute l'interface ; un module de plugin qui voudrait ses propres polices
-  devrait suivre la même logique de repli (police système hors ligne) plutôt
-  que de bloquer le rendu.
+- `assets/vue.js` is the **runtime-only** build of Vue (no embedded
+  template compiler): a plugin module must ship **precompiled templates**
+  (`.vue` SFCs put through `@vitejs/plugin-vue`, or hand-written `h()`),
+  never a `template: "<div>...</div>"` string evaluated at runtime — it
+  would fail silently at runtime, not at build time. `vue-router`, for
+  its part, is **deliberately not** in the import map: a plugin module
+  must not use `useRoute` or `RouterLink` — its own copy of `vue-router`
+  would bundle its own injection keys, incompatible with the shell's
+  router.
+- The admin protocol only carries **text** (`AdminResult::Asset { body:
+  Option<String>, .. }`, see `crates/ritornello-proto/src/admin.rs`): a
+  binary asset (font, sprite, wasm) would have to be base64-encoded by
+  the plugin then decoded on the ESM module side. This is an accepted
+  ceiling of the relay, not an oversight.
+- A plugin's assets are only served on **a single path segment**
+  (`/plugins/<name>/<file>`, no subdirectory): a plugin's build must
+  therefore produce **flat** file names. A deeper path (e.g.
+  `/plugins/<name>/assets/ui.js`) matches no core route and answers
+  **404**. It used to fall through to the SPA fallback, which returned
+  200 with the HTML shell: a dynamic `import()` received HTML, a very
+  confusing failure mode since nothing flagged the error.
+- The fonts declared by the core's themes (see
+  [interface.md](interface.md)) come from a CDN, the only external
+  resource of the whole interface; a plugin module that wanted its own
+  fonts should follow the same fallback logic (system font when offline)
+  rather than blocking rendering.

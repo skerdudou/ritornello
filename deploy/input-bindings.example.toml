@@ -1,14 +1,13 @@
-# Exemple de table de bindings : le preset MCE pre-lie a un recepteur
-# infrarouge eHome. Adapter `name` au nom exact du peripherique tel qu'il
-# apparait dans la liste deroulante de http://<hote>:8080/plugins/generic-input/
-# (ou via `sudo evtest`). Tous les noeuds portant ce nom sont ecoutes.
+# Example bindings table: the MCE preset pre-bound to an eHome infrared
+# receiver. Set `name` to the exact device name as it appears in the
+# drop-down list of http://<host>:8080/plugins/generic-input/
+# (or through `sudo evtest`). Every node bearing this name is listened to.
 #
-# Les touches "piste suiv./prec." (codes 163/165) sont fusionnees sur
-# Next/Prev : deux touches physiques distinctes restent legitimement liees a
-# la meme commande, desormais interpretee par la source active (preselection
-# pour la radio, piste pour le cd). Un binding qui reference encore
-# `NextTrack`/`PrevTrack` (ancien nom) n'est plus valide : il doit etre
-# reecrit en `Next`/`Prev`.
+# The "next/prev track" keys (codes 163/165) are merged onto Next/Prev:
+# two distinct physical keys legitimately stay bound to the same command,
+# now interpreted by the active source (preset for the radio, track for
+# the cd). A binding still referencing `NextTrack`/`PrevTrack` (the old
+# name) is no longer valid: it must be rewritten as `Next`/`Prev`.
 
 [[devices]]
 name = "eHome Infrared Transceiver"

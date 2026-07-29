@@ -1,11 +1,11 @@
 // Lance un coeur jetable pour les parcours Playwright : repertoire d'etat
 // temporaire, port dedie, les deux plugins a IHM declares. Volontairement
-// proche de la configuration de developpement de docs/developpement.md.
+// proche de la configuration de developpement de docs/development.md.
 //
 // Particularite de cet atelier : Node/npm/Playwright tournent cote Windows,
 // mais les binaires du coeur sont des ELF Linux compiles sous WSL (Node est
 // absent de WSL). Ce script detecte donc la plate-forme :
-//  - sous Linux (l'environnement documente par docs/developpement.md, et celui d'une
+//  - sous Linux (l'environnement documente par docs/development.md, et celui d'une
 //    eventuelle CI) : lance le binaire directement, comme avant ;
 //  - sous Windows : ecrit la configuration dans un repertoire temporaire
 //    puis lance le coeur via `wsl.exe -- bash <script.sh>`, avec des chemins

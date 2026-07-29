@@ -1,12 +1,11 @@
-# Clavier ordinaire : chiffres 1-9 (codes 2-10) vers les preselections,
-# fleches haut/bas pour le volume, fleches droite/gauche pour les
-# preselections, espace lecture/pause, m muet, s changement de source,
-# p veille.
+# Plain keyboard: digits 1-9 (codes 2-10) to the presets, up/down arrows
+# for the volume, right/left arrows for the presets, space play/pause,
+# m mute, s source switch, p standby.
 #
-# ATTENTION : l'ouverture evdev de generic-input est non exclusive, donc sur
-# un Pi avec une console de connexion sur ce meme clavier, ces lettres et
-# chiffres nus declenchent aussi les commandes ci-dessous pendant qu'on tape
-# a la console (notamment `p` = veille et `m` = muet).
+# CAUTION: generic-input's evdev opening is non-exclusive, so on a Pi with
+# a login console on that same keyboard, these bare letters and digits
+# also trigger the commands below while typing at the console (notably
+# `p` = standby and `m` = mute).
 
 [[bindings]]
 code = 2

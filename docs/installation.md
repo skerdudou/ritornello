@@ -1,72 +1,71 @@
-# Installation et exploitation
+# Installation and operations
 
-## Portabilité
+## Portability
 
-Rien dans le code n'est spécifique au Raspberry Pi : la télécommande passe
-par `evdev` (l'API Linux générique d'entrée, pas du GPIO), le son par
-ALSA/mpv, l'IPC par sockets Unix — tout ça tourne sur n'importe quel Linux,
-x86_64 comme ARM. Le Pi 2 est le matériel de référence historique de ce
-projet, pas une contrainte technique — les exemples ci-dessous en sont une
-simple illustration.
+Nothing in the code is specific to the Raspberry Pi: the remote control
+goes through `evdev` (the generic Linux input API, not GPIO), sound through
+ALSA/mpv, IPC through Unix sockets — all of which run on any Linux, x86_64
+and ARM alike. The Pi 2 is this project's historical reference hardware,
+not a technical constraint — the examples below merely illustrate it.
 
-## Compiler
+## Building
 
-L'interface web est une SPA (Vue 3 + shadcn-vue) embarquée dans le binaire du
-cœur : **Node 20+** est donc un prérequis de développement, là où `cargo`
-suffisait. La procédure de référence est `deploy/build.sh`, qui enchaîne
-toujours les trois étapes dans cet ordre :
+The web interface is a SPA (Vue 3 + shadcn-vue) embedded into the core
+binary: **Node 20+** is therefore a development prerequisite, where `cargo`
+used to be enough. The reference procedure is `deploy/build.sh`, which
+always runs the three steps in this order:
 
-    ./deploy/build.sh                 # npm, puis cargo x86_64, puis cross ARM
+    ./deploy/build.sh                 # npm, then cargo x86_64, then cross ARM
     TARGET=aarch64-unknown-linux-gnu ./deploy/build.sh
 
-Le build npm ne tourne qu'une fois : son livrable est lu à la compilation par
-les deux étapes cargo. C'est ce qui permet à `cross` de fonctionner avec une
-image Docker sans Node.
+The npm build runs only once: its output is read at compile time by both
+cargo steps. This is what lets `cross` work with a Docker image that has no
+Node.
 
-Un `cargo build` lancé seul, sans avoir construit l'IHM, **réussit** : un
-bouchon est embarqué à la place, et la page servie invite à lancer
-`npm run build --workspaces`. Ce n'est pas une panne. Les tests
-(`cargo test --workspace`) restent verts dans cette situation ; côté
-navigateur, `npm test --workspaces` couvre l'IHM et `npm run e2e -w app` les
-parcours complets (voir [developpement.md](developpement.md)).
+A `cargo build` run on its own, without building the UI first,
+**succeeds**: a placeholder is embedded instead, and the served page
+invites you to run `npm run build --workspaces`. This is not a failure.
+The tests (`cargo test --workspace`) stay green in that situation; on the
+browser side, `npm test --workspaces` covers the UI and `npm run e2e -w app`
+the full journeys (see [development.md](development.md)).
 
-Le workspace compile nativement pour l'architecture de la machine qui lance
-la commande (x86_64 sur un PC/serveur Linux classique), et pour ARM par
-cross-compilation avec [`cross`](https://github.com/cross-rs/cross) (qui a
-besoin de Docker) :
+The workspace compiles natively for the architecture of the machine
+running the command (x86_64 on a typical Linux PC/server), and for ARM by
+cross-compilation with [`cross`](https://github.com/cross-rs/cross) (which
+needs Docker):
 
-    # Natif (ex. x86_64) — utilisé aussi pour les tests en développement
+    # Native (e.g. x86_64) — also used for tests during development
     cargo build --workspace
     cargo test --workspace
 
-    # Cross-compilation ARM (ex. Raspberry Pi 2, 32 bits)
+    # ARM cross-compilation (e.g. Raspberry Pi 2, 32-bit)
     cargo install cross --locked
     cross build --release --workspace --target armv7-unknown-linux-gnueabihf
 
-Les deux chemins sont testés à chaque évolution du projet. Autres cibles ARM
-possibles avec `cross` : `aarch64-unknown-linux-gnu` (cartes ARM 64 bits,
-type Pi 3/4/5 — non testé sur ce projet faute de matériel, mais sans raison
-de ne pas fonctionner).
+Both paths are exercised on every project change. Other ARM targets are
+possible with `cross`: `aarch64-unknown-linux-gnu` (64-bit ARM boards, Pi
+3/4/5 class — untested on this project for lack of hardware, but with no
+reason not to work).
 
-## Exemple : Raspberry Pi 2
+## Example: Raspberry Pi 2
 
-Raspberry Pi OS Lite, puis :
+Raspberry Pi OS Lite, then:
 
     sudo apt install mpv cd-discid eject
     sudo cp deploy/stations.example.toml /etc/ritornello/stations.toml
     sudo cp deploy/plugins.example.toml /etc/ritornello/plugins.toml
     sudo cp -r deploy/input-presets /etc/ritornello/input-presets
     sudo cp deploy/input-bindings.example.toml /etc/ritornello/input-bindings.toml
-    # jack analogique en sortie par défaut + volume matériel à fond
+    # analog jack as default output + hardware volume at maximum
     sudo raspi-config nonint do_audio 1
     amixer set PCM 100%
 
-Wifi : `sudo raspi-config` (System Options > Wireless LAN).
+Wifi: `sudo raspi-config` (System Options > Wireless LAN).
 
-## Exemple : machine Linux x86_64 générique
+## Example: generic x86_64 Linux machine
 
-Mêmes paquets, sans les étapes propres au Pi (pas de `raspi-config`, la
-sortie audio se choisit directement dans `/api/audio-output`) :
+Same packages, minus the Pi-specific steps (no `raspi-config`, the audio
+output is picked directly through `/api/audio-output`):
 
     sudo apt install mpv cd-discid eject
     sudo cp deploy/stations.example.toml /etc/ritornello/stations.toml
@@ -74,69 +73,68 @@ sortie audio se choisit directement dans `/api/audio-output`) :
     sudo cp -r deploy/input-presets /etc/ritornello/input-presets
     sudo cp deploy/input-bindings.example.toml /etc/ritornello/input-bindings.toml
 
-`deploy/deploy.sh` fonctionne à l'identique : `TARGET=x86_64-unknown-linux-gnu
-PI=user@host ./deploy/deploy.sh` (pas besoin de `cross`/Docker pour cette
-cible si la machine qui compile est déjà x86_64 — `cargo build` natif suffit
-alors, `cross` reste surtout utile pour changer d'architecture).
+`deploy/deploy.sh` works identically: `TARGET=x86_64-unknown-linux-gnu
+PI=user@host ./deploy/deploy.sh` (no need for `cross`/Docker for this
+target if the build machine is already x86_64 — a native `cargo build` is
+enough then; `cross` is mostly useful for changing architecture).
 
-## Déploiement
+## Deploying
 
     PI=pi@raspberrypi.local ./deploy/deploy.sh
 
-`PI` désigne n'importe quel hôte SSH cible (Pi ou autre Linux), et `TARGET`
-la cible de compilation (voir [Compiler](#compiler)) — les deux se
-surchargent indépendamment, ex. `TARGET=x86_64-unknown-linux-gnu PI=user@host
-./deploy/deploy.sh`. Le script enchaîne `build.sh` (donc l'IHM npm **puis**
-la cross-compilation — l'ordre garantit que la SPA embarquée est fraîche),
-copie les binaires, les packs de langue et les presets, installe l'unité
-systemd et redémarre le service.
+`PI` names any target SSH host (Pi or other Linux), and `TARGET` the
+compilation target (see [Building](#building)) — the two override
+independently, e.g. `TARGET=x86_64-unknown-linux-gnu PI=user@host
+./deploy/deploy.sh`. The script chains `build.sh` (so the npm UI build
+**then** the cross-compilation — the order guarantees the embedded SPA is
+fresh), copies the binaries, the language packs and the presets, installs
+the systemd unit and restarts the service.
 
-Interface web : http://<hôte>:8080 — logs : `journalctl -u ritornello -f`.
+Web interface: http://<host>:8080 — logs: `journalctl -u ritornello -f`.
 
-`deploy.sh` installe les binaires mais **ne touche jamais** à
-`/etc/ritornello/plugins.toml` : à la première installation, le provisionner
-depuis `deploy/plugins.example.toml` (voir les exemples ci-dessus) ; lors
-d'une mise à jour qui introduit de nouveaux plugins, y ajouter les entrées à
-la main (voir [plugins.md](plugins.md)).
+`deploy.sh` installs the binaries but **never touches**
+`/etc/ritornello/plugins.toml`: on first installation, provision it from
+`deploy/plugins.example.toml` (see the examples above); when an update
+introduces new plugins, add their entries by hand (see
+[plugins.md](plugins.md)).
 
-## Microcoupures audio
+## Audio dropouts
 
-Deux tampons distincts protègent la lecture, et ils ne traitent pas le même
-problème. Les confondre fait perdre du temps.
+Two distinct buffers protect playback, and they do not address the same
+problem. Confusing them wastes time.
 
-| Variable | Défaut | Ce qu'elle protège |
+| Variable | Default | What it protects |
 |---|---|---|
-| `RITORNELLO_AUDIO_BUFFER` | `0.2` | la **sortie** : une échéance d'écriture ALSA manquée parce que la machine était occupée |
-| `RITORNELLO_NETWORK_READAHEAD` | `1` | l'**entrée** : une gigue réseau qui vide l'avance de lecture d'un flux internet |
+| `RITORNELLO_AUDIO_BUFFER` | `0.2` | the **output**: an ALSA write deadline missed because the machine was busy |
+| `RITORNELLO_NETWORK_READAHEAD` | `1` | the **input**: network jitter draining an internet stream's read-ahead |
 
-Les deux sont en secondes et s'appliquent au lancement de mpv
-(`--audio-buffer` et `--demuxer-readahead-secs`). Les défauts sont **ceux de
-mpv** : sans variable définie, la lecture se comporte exactement comme si ces
-options n'étaient pas passées. Une valeur illisible ou hors bornes est ignorée
-avec un avertissement dans les logs, sans empêcher le démarrage.
+Both are in seconds and apply when mpv is launched (`--audio-buffer` and
+`--demuxer-readahead-secs`). The defaults are **mpv's own**: with no
+variable set, playback behaves exactly as if these options were not passed.
+An unreadable or out-of-range value is ignored with a warning in the logs,
+without preventing startup.
 
-Avant de tourner une molette, **identifier laquelle** — les deux symptômes
-s'entendent pareil mais ne se soignent pas au même endroit :
+Before turning a knob, **identify which one** — the two symptoms sound the
+same but are not fixed in the same place:
 
-    mpv --no-video --msg-level=ao=v,cache=v <url-de-la-station> 2>&1 \
+    mpv --no-video --msg-level=ao=v,cache=v <station-url> 2>&1 \
       | grep -iE "underrun|buffering|cache"
 
-Des `underrun` désignent la sortie : monter `RITORNELLO_AUDIO_BUFFER`, par
-exemple à `0.5`. Des `buffering` désignent l'entrée : monter
-`RITORNELLO_NETWORK_READAHEAD`, par exemple à `10`, voire `30` sur une liaison
-capricieuse — dix secondes de MP3 à 128 kbit/s pèsent environ 160 Ko,
-négligeable même sur 1 Go de RAM.
+`underrun` lines point at the output: raise `RITORNELLO_AUDIO_BUFFER`, for
+example to `0.5`. `buffering` lines point at the input: raise
+`RITORNELLO_NETWORK_READAHEAD`, for example to `10`, or even `30` on a
+flaky link — ten seconds of 128 kbit/s MP3 weigh about 160 KB, negligible
+even with 1 GB of RAM.
 
-Un cas à écarter d'emblée : en développement sous **WSL**, l'audio traverse le
-pont WSLg vers Windows, dont la gigue propre produit des microcoupures que
-ces deux réglages ne corrigeront pas. Ne conclure sur les tampons qu'après
-avoir écouté sur la machine cible.
+One case to rule out from the start: during development under **WSL**,
+audio crosses the WSLg bridge to Windows, whose own jitter produces
+dropouts that neither of these settings will fix. Only draw conclusions
+about the buffers after listening on the target machine.
 
-Augmenter le tampon de **sortie** aide contre les coupures dues à la charge de
-la machine, au prix d'une latence d'autant sur la prise en compte du volume ou
-du muet. **Le réduire aggrave les coupures** : c'est le sens de la variation,
-pas son ampleur, qui compte.
+Increasing the **output** buffer helps against dropouts caused by machine
+load, at the cost of the same amount of latency on volume or mute taking
+effect. **Reducing it makes dropouts worse**: it is the direction of the
+change that matters, not its magnitude.
 
-Pour distinguer les deux causes, `journalctl -u ritornello -f` pendant une
-coupure : mpv journalise le vidage du cache réseau, pas les sous-alimentations
-d'ALSA.
+To tell the two causes apart, run `journalctl -u ritornello -f` during a
+dropout: mpv logs the network cache draining, not ALSA underruns.

@@ -1,95 +1,97 @@
 <h1 align="center">Ritornello</h1>
 
-<p align="center"><em>Un poste de radio internet et lecteur CD autonome, en Rust, pour Raspberry Pi — et pour n'importe quel Linux.</em></p>
+<p align="center"><em>A standalone internet radio and CD player, in Rust, for Raspberry Pi — and any Linux box.</em></p>
 
 <p align="center">
-  <img src="docs/captures/accueil-clair.png" width="85%" alt="L'accueil de l'IHM web : encart Lecteur avec le morceau en cours et son origine, télécommande complète en dessous">
+  <img src="docs/captures/accueil-clair.png" width="85%" alt="The web UI home page: a Player card with the current track and where the information came from, a full remote control below">
 </p>
 
-Ritornello transforme un Raspberry Pi branché sur un ampli en poste de radio
-et lecteur CD qui se pilote à la télécommande infrarouge, s'affiche sur
-l'écran HDMI, et s'administre depuis un navigateur sur le réseau local. Le
-cœur est un orchestrateur Rust qui pilote [mpv](https://mpv.io) ; tout le
-reste — sources de contenu, entrées, affichages, métadonnées — vit dans des
-**plugins en processus séparés**, remplaçables sans toucher au cœur.
+Ritornello turns a Raspberry Pi plugged into an amplifier into a radio and
+CD player that is driven by an infrared remote, displays on the HDMI
+screen, and is administered from a browser on the local network. The core
+is a Rust orchestrator driving [mpv](https://mpv.io); everything else —
+content sources, inputs, displays, metadata — lives in **plugins running as
+separate processes**, replaceable without touching the core.
 
-## L'essentiel
+## Highlights
 
-- **Radio internet** : 9 présélections au clavier de la télécommande,
-  gestion des stations dans le navigateur, recherche dans l'annuaire
-  communautaire [Radio Browser](https://api.radio-browser.info) (par nom et
-  par pays), stations réordonnables par glisser-déposer.
-- **Lecteur CD** : détection du disque, pistes, reconnaissance de l'album
-  auprès de MusicBrainz.
-- **Métadonnées du morceau en cours** : en-tête ICY du flux, enrichi par des
-  plugins dédiés (MusicBrainz pour les disques, le flux de métadonnées
-  d'OUI FM pour ses webradios) — affiché sur l'écran comme dans l'IHM, avec
-  l'origine de l'information.
-- **Télécommande configurable** : tout périphérique d'entrée Linux (evdev)
-  fait l'affaire ; les touches s'apprennent depuis le navigateur, des
-  presets sont livrés (MCE, clavier).
-- **IHM web embarquée** (Vue 3, servie par le binaire du cœur) : état du
-  lecteur poussé en continu (SSE), télécommande complète, bascule
-  clair/sombre et 42 thèmes, français/anglais extensible par packs TOML.
-- **Robuste par construction** : chaque plugin est un processus supervisé —
-  sa mort est tolérée et signalée, jamais propagée.
+- **Internet radio**: 9 presets on the remote's number pad, station
+  management in the browser, search in the community directory
+  [Radio Browser](https://api.radio-browser.info) (by name and by
+  country), stations reorderable by drag and drop.
+- **CD player**: disc detection, tracks, album recognition through
+  MusicBrainz.
+- **Now-playing metadata**: the stream's ICY header, enriched by dedicated
+  plugins (MusicBrainz for discs, OUI FM's metadata feed for its
+  webradios) — shown on the screen and in the web UI alike, along with
+  where the information came from.
+- **Configurable remote control**: any Linux input device (evdev) will do;
+  keys are learned from the browser, presets ship with the project (MCE,
+  keyboard).
+- **Embedded web UI** (Vue 3, served by the core binary): player state
+  pushed continuously (SSE), full remote control, light/dark toggle and 42
+  themes, English/French extensible through TOML language packs.
+- **Robust by construction**: every plugin is a supervised process — its
+  death is tolerated and reported, never propagated.
 
 <p align="center">
-  <img src="docs/captures/accueil-sombre.png" width="49%" alt="Le même accueil en mode sombre">
-  <img src="docs/captures/admin-radio.png" width="49%" alt="La page d'administration du plugin radio : stations réordonnables et recherche dans l'annuaire">
+  <img src="docs/captures/accueil-sombre.png" width="49%" alt="The same home page in dark mode">
+  <img src="docs/captures/admin-radio.png" width="49%" alt="The radio plugin's administration page: reorderable stations and directory search">
 </p>
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    ir["Télécommande IR"] --> input
-    navigateur["Navigateur<br/>(IHM Vue 3 embarquée)"] <--> core
-    subgraph appareil["Raspberry Pi — ou tout Linux"]
-        core["ritornello-core<br/>orchestrateur + serveur web"]
+    ir["IR remote"] --> input
+    browser["Browser<br/>(embedded Vue 3 UI)"] <--> core
+    subgraph device["Raspberry Pi — or any Linux"]
+        core["ritornello-core<br/>orchestrator + web server"]
         mpv["mpv (JSON-IPC)"]
-        radio["plugin radio"] <--> core
-        cd["plugin cd"] <--> core
-        core <--> mb["plugin musicbrainz"]
-        core <--> ouifm["plugin ouifm-metas"]
-        input["plugin generic-input<br/>(evdev)"] --> core
-        core --> console["plugin console<br/>(écran HDMI)"]
+        radio["radio plugin"] <--> core
+        cd["cd plugin"] <--> core
+        core <--> mb["musicbrainz plugin"]
+        core <--> ouifm["ouifm-metas plugin"]
+        input["generic-input plugin<br/>(evdev)"] --> core
+        core --> console["console plugin<br/>(HDMI screen)"]
         core <--> mpv
     end
-    mpv --> hp["ALSA → ampli"]
+    mpv --> hp["ALSA → amplifier"]
 ```
 
-Les plugins parlent un protocole JSON par ligne sur socket Unix, en quatre
-genres : **source** (quoi jouer : radio, CD…), **input** (d'où viennent les
-commandes), **display** (où afficher) et **metadata** (qu'est-ce qui joue,
-exactement). Ajouter une source Bluetooth ou un afficheur OLED, c'est écrire
-un binaire qui implémente l'un de ces genres — le cœur et les autres plugins
-ne changent pas. Rien dans le code n'est spécifique au Raspberry Pi : evdev,
-ALSA/mpv et sockets Unix tournent sur n'importe quel Linux, x86_64 comme ARM.
+Plugins speak a line-delimited JSON protocol over Unix sockets, in four
+kinds: **source** (what to play: radio, CD…), **input** (where commands
+come from), **display** (where to show things) and **metadata** (what
+exactly is playing). Adding a Bluetooth source or an OLED display means
+writing a binary that implements one of these kinds — the core and the
+other plugins do not change. Nothing in the code is specific to the
+Raspberry Pi: evdev, ALSA/mpv and Unix sockets run on any Linux, x86_64
+and ARM alike.
 
-## Démarrage rapide
+## Quick start
 
-Sur la machine de développement (Node 20+, Rust, [`cross`](https://github.com/cross-rs/cross)
-pour l'ARM) :
+On the development machine (Node 20+, Rust, [`cross`](https://github.com/cross-rs/cross)
+for ARM):
 
-    ./deploy/build.sh                              # npm, puis cargo, puis cross ARM
-    PI=pi@raspberrypi.local ./deploy/deploy.sh     # compile tout et installe via SSH
+    ./deploy/build.sh                              # npm, then cargo, then cross ARM
+    PI=pi@raspberrypi.local ./deploy/deploy.sh     # builds everything and installs over SSH
 
-Sur l'appareil cible : `sudo apt install mpv cd-discid eject`, plus les
-fichiers de configuration d'exemple — le détail pas à pas est dans
-[docs/installation.md](docs/installation.md). Pour essayer sans matériel,
-une instance locale se lance en cinq minutes :
-[docs/developpement.md](docs/developpement.md).
+On the target device: `sudo apt install mpv cd-discid eject`, plus the
+example configuration files — the step-by-step details are in
+[docs/installation.md](docs/installation.md). To try it without any
+hardware, a local instance runs in five minutes:
+[docs/development.md](docs/development.md).
 
 ## Documentation
 
-| Document | Contenu |
+| Document | Contents |
 |---|---|
-| [docs/installation.md](docs/installation.md) | Compiler, installer sur un Pi ou un PC Linux, déployer, régler les tampons audio |
-| [docs/plugins.md](docs/plugins.md) | Les plugins livrés, le genre `metadata`, écrire son propre plugin et son IHM |
-| [docs/interface.md](docs/interface.md) | L'IHM web, l'API de commande, la télécommande physique, les langues, les thèmes |
-| [docs/developpement.md](docs/developpement.md) | Instance locale sans matériel, tests, parcours e2e, régénération des données embarquées |
+| [docs/installation.md](docs/installation.md) | Building, installing on a Pi or a Linux PC, deploying, tuning the audio buffers |
+| [docs/plugins.md](docs/plugins.md) | The bundled plugins, the `metadata` kind, writing your own plugin and its UI |
+| [docs/interface.md](docs/interface.md) | The web UI, the command API, the physical remote, languages, themes |
+| [docs/development.md](docs/development.md) | Local instance without hardware, tests, e2e journeys, regenerating embedded data |
 
-Les spécifications et plans qui ont conduit chaque chantier sont archivés
-dans [docs/superpowers/](docs/superpowers/) — le projet est développé par
-revues et tests systématiques, et ces documents en sont la trace.
+The specifications and plans that drove each work stream are archived in
+[docs/superpowers/](docs/superpowers/) (in French) — the project is
+developed through systematic reviews and tests, and these documents are
+the record of that.

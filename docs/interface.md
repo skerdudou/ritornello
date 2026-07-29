@@ -1,88 +1,86 @@
-# L'interface
+# The interface
 
-## Télécommande web et API de commande
+## Web remote and command API
 
-L'accueil (`http://<hôte>:8080/`) embarque une télécommande : les 11
-commandes du protocole (présélections 1-9, suivant/précédent, volume, muet,
-lecture/pause, stop, éjecter, changement de source, veille).
+The home page (`http://<host>:8080/`) embeds a remote control: the 11
+commands of the protocol (presets 1-9, next/previous, volume, mute,
+play/pause, stop, eject, source switch, standby).
 
-`Next`/`Prev` sont interprétées par la source active : présélection pour la
-radio, piste pour le lecteur CD — ce n'est pas deux paires de commandes
-distinctes, seulement une sémantique qui varie selon la source. Un binding
-qui référence encore `NextTrack` ou `PrevTrack` (ancien nom) n'est plus
-valide : il doit être réécrit en `Next`/`Prev`.
+`Next`/`Prev` are interpreted by the active source: preset for the radio,
+track for the CD player — these are not two distinct command pairs, only a
+semantic that varies with the source. A binding that still references
+`NextTrack` or `PrevTrack` (the old name) is no longer valid: it must be
+rewritten as `Next`/`Prev`.
 
-Elle passe par `POST /api/command`, dont le corps est exactement une commande
-du protocole — le même canal que celui alimenté par les plugins Input, donc
-aucune logique métier dupliquée :
+The remote goes through `POST /api/command`, whose body is exactly a
+protocol command — the same channel the Input plugins feed, so no business
+logic is duplicated:
 
-    curl -X POST http://<hôte>:8080/api/command \
+    curl -X POST http://<host>:8080/api/command \
       -H 'content-type: application/json' -d '{"cmd":"VolumeUp"}'
-    curl -X POST http://<hôte>:8080/api/command \
+    curl -X POST http://<host>:8080/api/command \
       -H 'content-type: application/json' -d '{"cmd":"Select","arg":3}'
 
-Pratique pour piloter l'appareil sans télécommande (depuis un téléphone sur
-le réseau local, ou en SSH pendant la mise au point).
+Handy for driving the device without a remote (from a phone on the local
+network, or over SSH while debugging).
 
-L'encart **Lecteur** au-dessus de la télécommande (source active, volume,
-muet, veille, et le morceau en cours avec l'origine de l'information) est
-alimenté en flux poussé par `GET /api/player` (SSE) — rien n'est sondé, et
-l'état suit la télécommande infrarouge comme les autres onglets.
+The **Player** card above the remote (active source, volume, mute,
+standby, and the current track with where the information came from) is
+fed by a pushed stream from `GET /api/player` (SSE) — nothing is polled,
+and the state follows the infrared remote as well as other browser tabs.
 
-Sur la grille 1-9, la touche correspondant à **ce qui joue** est mise en
-évidence : la présélection pour la radio, la piste pour le CD. C'est la
-source active qui la déclare (champ `preset` de ses trames, voir le
-protocole) — le cœur n'interprète jamais ce que `Select(n)` a voulu dire —
-et elle s'éteint dès que plus rien ne joue.
+On the 1-9 grid, the key matching **what is playing** is highlighted: the
+preset for the radio, the track for the CD. The active source is what
+declares it (the `preset` field of its frames, see the protocol) — the
+core never interprets what `Select(n)` was supposed to mean — and it goes
+out as soon as nothing is playing anymore.
 
-## Télécommande physique
+## Physical remote
 
-Si une touche ne répond pas, ouvrir `http://<hôte>:8080/plugins/generic-input/`,
-choisir le périphérique dans la liste (bouton « Rafraîchir » s'il vient d'être
-branché), cliquer « Apprendre » sur la ligne de l'action, appuyer sur la
-touche, puis « Enregistrer ». Aucun redémarrage n'est nécessaire : la table
-est relue à chaque appui. Pour partir d'une base, charger le preset `mce` ou
-`keyboard`.
+If a key does not respond, open `http://<host>:8080/plugins/generic-input/`,
+pick the device from the list ("Refresh" button if it was just plugged
+in), click "Learn" on the action's row, press the key, then "Save". No
+restart is needed: the table is re-read on every key press. To start from
+a base, load the `mce` or `keyboard` preset.
 
-## Internationalisation (i18n)
+## Internationalization (i18n)
 
-L'interface est multilingue. La langue de base est l'**anglais**, embarquée
-dans chaque binaire ; le français (et d'autres langues) sont fournis par des
-**packs TOML externes**, décentralisés par composant :
+The interface is multilingual. The base language is **English**, embedded
+in every binary; French (and other languages) are provided by **external
+TOML packs**, decentralized per component:
 
     /etc/ritornello/locales/
-      common/fr.toml   # vocabulaire commun (play/pause/stop/error…)
-      core/fr.toml     # texte du cœur + page de statut
-      radio/fr.toml    # plugin radio + page d'admin
-      cd/fr.toml       # plugin cd
-      <plugin-tiers>/fr.toml
+      common/fr.toml   # shared vocabulary (play/pause/stop/error…)
+      core/fr.toml     # core text + status page
+      radio/fr.toml    # radio plugin + admin page
+      cd/fr.toml       # cd plugin
+      <third-party-plugin>/fr.toml
 
-- Racine configurable par `RITORNELLO_LOCALES` (défaut
+- Root configurable through `RITORNELLO_LOCALES` (default
   `/etc/ritornello/locales`).
-- **Sélecteur** de langue sur la page de statut (`/status`) : il liste `en`
-  plus tout pack `core/<lang>.toml` présent, chaque langue affichée par son
-  nom dans sa propre langue (« Français », « English »). Le changement est
-  appliqué à chaud, poussé aux plugins, et persisté (`state.json`).
-- **Ajouter une langue** : copier l'`en` de référence, traduire les valeurs,
-  le déposer sous `<root>/<composant>/<lang>.toml`. Une clé ou un pack
-  manquant retombe automatiquement sur l'anglais (dégradation par clé, jamais
-  d'erreur). Un pack présent mais illisible (droits, TOML invalide) est
-  ignoré **avec une trace dans les journaux**.
-- Les packs français initiaux sont livrés dans `deploy/locales/` et copiés
-  par `deploy/deploy.sh`.
+- Language **picker** on the status page (`/status`): it lists `en` plus
+  every `core/<lang>.toml` pack present, each language shown by its name
+  in its own language ("Français", "English"). The change is applied live,
+  pushed to the plugins, and persisted (`state.json`).
+- **Adding a language**: copy the reference `en`, translate the values,
+  drop it under `<root>/<component>/<lang>.toml`. A missing key or pack
+  automatically falls back to English (per-key degradation, never an
+  error). A pack that is present but unreadable (permissions, invalid
+  TOML) is ignored **with a trace in the logs**.
+- The initial French packs ship in `deploy/locales/` and are copied by
+  `deploy/deploy.sh`.
 
-## Thème
+## Theme
 
-L'interface propose une bascule **clair/sombre** et un sélecteur ouvrant une
-popin avec les **42 thèmes** de [tweakcn](https://tweakcn.com) (Apache-2.0).
-C'est un réglage **de l'appareil**, comme la langue : il est persisté dans
-`state.json` (champs `theme` et `mode`) et s'applique donc à tous les
-navigateurs qui consultent l'interface. Défaut : `northern-lights`, mode
-clair.
+The interface offers a **light/dark** toggle and a picker opening a dialog
+with the **42 themes** from [tweakcn](https://tweakcn.com) (Apache-2.0).
+This is a **device** setting, like the language: it is persisted in
+`state.json` (`theme` and `mode` fields) and therefore applies to every
+browser visiting the interface. Default: `northern-lights`, light mode.
 
-Les polices déclarées par les thèmes sont chargées depuis un CDN — la seule
-ressource externe de l'interface. Hors ligne, l'affichage retombe sur la
-police système sans autre conséquence.
+The fonts declared by the themes are loaded from a CDN — the interface's
+only external resource. Offline, the display falls back to the system font
+with no other consequence.
 
-Régénérer les presets depuis l'amont :
+To regenerate the presets from upstream:
 `cd web/kit && node scripts/fetch-presets.mjs`.

@@ -1,48 +1,47 @@
-# Correspondance webradio OUI FM -> identifiant de métadonnées.
+# OUI FM webradio -> metadata identifier mapping.
 #
-# CE FICHIER EST FACULTATIF. Le plugin ritornello-plugin-ouifm-metas embarque
-# la table des 21 flux OUI FM (relevée de la source du site, voir
-# crates/ritornello-plugin-ouifm-metas/src/webradios.toml) : sans rien
-# configurer, les titres s'affichent pour toutes les webradios OUI FM.
+# THIS FILE IS OPTIONAL. The ritornello-plugin-ouifm-metas plugin embeds the
+# table of the 21 OUI FM streams (taken from the site's source, see
+# crates/ritornello-plugin-ouifm-metas/src/webradios.toml): with nothing
+# configured, titles show up for every OUI FM webradio.
 #
-# Il ne sert qu'à deux choses, le jour où OUI FM change quelque chose sans
-# qu'on ait recompilé l'appareil :
+# It only serves two purposes, the day OUI FM changes something without the
+# device having been recompiled:
 #
-#   1. CORRIGER une entrée devenue fausse — les entrées de ce fichier sont
-#      consultées AVANT la table embarquée, donc déclarer le même `stream` ici
-#      prend le dessus ;
-#   2. AJOUTER un flux absent de la table livrée.
+#   1. FIX an entry gone stale — this file's entries are consulted BEFORE the
+#      embedded table, so declaring the same `stream` here takes precedence;
+#   2. ADD a stream missing from the bundled table.
 #
-# À copier en /etc/ritornello/ouifm-metas.toml (ou pointer ailleurs avec
-# RITORNELLO_OUIFM_METAS). Fichier absent : cas normal, rien n'est journalisé.
-# Fichier invalide : un avertissement, et la table embarquée continue seule.
+# Copy it to /etc/ritornello/ouifm-metas.toml (or point elsewhere with
+# RITORNELLO_OUIFM_METAS). Missing file: the normal case, nothing is logged.
+# Invalid file: a warning, and the embedded table carries on alone.
 #
-# COMMENT RELEVER LES DEUX IDENTIFIANTS (une minute) :
-#   1. ouvrir https://www.ouifm.fr/player, afficher le source de la page ;
-#   2. y chercher la variable JavaScript `apidata` : ses tableaux
-#      `radiostreams` et `webradios` listent tous les flux ;
-#   3. pour la webradio voulue, relever `id` (-> `stream` ci-dessous) et
-#      `idMds` (-> `metas` ci-dessous).
-# Ou, plus simplement, lancer :
+# HOW TO COLLECT THE TWO IDENTIFIERS (one minute):
+#   1. open https://www.ouifm.fr/player, view the page source;
+#   2. look for the `apidata` JavaScript variable: its `radiostreams` and
+#      `webradios` arrays list every stream;
+#   3. for the desired webradio, note `id` (-> `stream` below) and
+#      `idMds` (-> `metas` below).
+# Or, more simply, run:
 #   node crates/ritornello-plugin-ouifm-metas/scripts/fetch-webradios.mjs
-# qui régénère la table embarquée depuis cette même source.
+# which regenerates the embedded table from that same source.
 #
-# Chaque entrée de `urls` est cherchée comme sous-chaîne de l'URL enregistrée
-# dans stations.toml : inutile d'y mettre l'URL entière, dont le jeton signé et
-# le format varient. Une même webradio se diffuse sous deux formes d'URL (celle
-# de streams.lesindesradios.fr et le mount Icecast historique
-# ouifmN.ice.infomaniak.ch), d'où plusieurs fragments par entrée.
+# Each `urls` entry is matched as a substring of the URL recorded in
+# stations.toml: no need to put the whole URL there, whose signed token and
+# format vary. A given webradio is broadcast under two URL forms (the
+# streams.lesindesradios.fr one and the historical Icecast mount
+# ouifmN.ice.infomaniak.ch), hence several fragments per entry.
 #
-# `metas` est l'identifiant attendu par le flux de métadonnées — vérifié : ce
-# n'est PAS l'identifiant de flux, et employer ce dernier donne une trame vide,
-# sans artiste ni titre.
+# `metas` is the identifier the metadata feed expects — verified: it is NOT
+# the stream identifier, and using the latter yields an empty frame, with
+# neither artist nor title.
 #
-# Attention : un fragment trop court capture les mauvaises stations. `ouifm`
-# reconnaîtrait toutes les webradios OUI FM et afficherait les titres de la
-# première déclarée. Préférer `ouifm3.` ou l'identifiant de flux.
+# Careful: a fragment too short captures the wrong stations. `ouifm` would
+# match every OUI FM webradio and show the titles of the first one declared.
+# Prefer `ouifm3.` or the stream identifier.
 #
-# Exemple (ces valeurs sont déjà dans la table embarquée, inutile de les
-# recopier — c'est la forme qui est montrée) :
+# Example (these values are already in the embedded table, no need to copy
+# them — it is the shape that is being shown):
 #
 # [[webradio]]
 # label = "Oüi FM Classic Rock"

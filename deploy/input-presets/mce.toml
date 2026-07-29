@@ -1,12 +1,12 @@
-# Telecommande MCE (recepteur infrarouge eHome et compatibles).
-# Transcription de l'ancienne table codee en dur (keymap.rs) :
-# chiffres 2-10 et 513-521 -> Select(1..9).
+# MCE remote (eHome infrared receiver and compatibles).
+# Transcription of the old hard-coded table (keymap.rs):
+# digits 2-10 and 513-521 -> Select(1..9).
 #
-# Les touches "piste suiv./prec." (codes 163/165) sont fusionnees sur
-# Next/Prev : deux touches physiques distinctes (les fleches "presel."
-# 402/403 et les touches "piste" 163/165) restent legitimement liees a la
-# meme commande, desormais interpretee par la source active (preselection
-# pour la radio, piste pour le cd).
+# The "next/prev track" keys (codes 163/165) are merged onto Next/Prev:
+# two distinct physical keys (the "preset" arrows 402/403 and the "track"
+# keys 163/165) legitimately stay bound to the same command, now
+# interpreted by the active source (preset for the radio, track for
+# the cd).
 
 [[bindings]]
 code = 2
