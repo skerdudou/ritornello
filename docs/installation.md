@@ -52,6 +52,7 @@ reason not to work).
 Raspberry Pi OS Lite, then:
 
     sudo apt install mpv cd-discid eject
+    sudo mkdir -p /etc/ritornello
     sudo cp deploy/stations.example.toml /etc/ritornello/stations.toml
     sudo cp deploy/plugins.example.toml /etc/ritornello/plugins.toml
     sudo cp -r deploy/input-presets /etc/ritornello/input-presets
@@ -62,12 +63,20 @@ Raspberry Pi OS Lite, then:
 
 Wifi: `sudo raspi-config` (System Options > Wireless LAN).
 
+**DietPi** works the same (it is Debian with systemd underneath): same
+packages, same files, same `deploy.sh`. The differences are cosmetic —
+there is no `raspi-config`, so the sound card is picked through
+`dietpi-config` (Audio Options; `amixer` comes with `alsa-utils` if
+missing), and mDNS is not installed by default, so target the device by
+IP (or install `avahi-daemon`) rather than `<hostname>.local`.
+
 ## Example: generic x86_64 Linux machine
 
 Same packages, minus the Pi-specific steps (no `raspi-config`, the audio
 output is picked directly through `/api/audio-output`):
 
     sudo apt install mpv cd-discid eject
+    sudo mkdir -p /etc/ritornello
     sudo cp deploy/stations.example.toml /etc/ritornello/stations.toml
     sudo cp deploy/plugins.example.toml /etc/ritornello/plugins.toml
     sudo cp -r deploy/input-presets /etc/ritornello/input-presets
@@ -97,6 +106,43 @@ Web interface: http://<host>:8080 — logs: `journalctl -u ritornello -f`.
 `deploy/plugins.example.toml` (see the examples above); when an update
 introduces new plugins, add their entries by hand (see
 [plugins.md](plugins.md)).
+
+## Unprivileged service
+
+The service does not run as root. Nothing in the code needs root — only
+device access, which comes through groups. `deploy.sh` creates a
+dedicated `ritornello` system user on first deployment, and the systemd
+unit (`deploy/ritornello.service`) grants the groups and applies the
+usual hardening (`NoNewPrivileges`, `ProtectSystem=strict`,
+`ProtectHome`):
+
+| Access | How |
+|---|---|
+| HTTP port 8080 | nothing needed (unprivileged port) |
+| sound (ALSA/mpv) | `audio` group |
+| remote control (`/dev/input/*`) | `input` group |
+| CD drive (`/dev/sr0`, `eject`) | `cdrom` group |
+| HDMI console (`/dev/tty1`) | `tty` group |
+| plugin and mpv sockets (`/run/ritornello`) | `RuntimeDirectory` |
+| persisted state (`/var/lib/ritornello`) | `StateDirectory` |
+
+The groups are granted by `SupplementaryGroups=` in the unit — the user
+itself is not added to any group, so the unit is the single place to
+audit. `/etc/ritornello` is owned by the service user: the radio and
+generic-input plugins persist `stations.toml` and `input-bindings.toml`
+there through atomic writes (`.tmp` then rename), which requires write
+access to the directory itself.
+
+Installing by hand instead of through `deploy.sh`? The two commands the
+script runs for this are:
+
+    sudo useradd --system --home-dir /var/lib/ritornello --no-create-home \
+      --shell /usr/sbin/nologin ritornello
+    sudo chown -R ritornello: /etc/ritornello
+
+An installation deployed before this change ran as root: the next
+`deploy.sh` migrates it (the user is created, `/etc/ritornello` and
+`/var/lib/ritornello` change owner, the new unit replaces the old one).
 
 ## Audio dropouts
 

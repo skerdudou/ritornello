@@ -32,7 +32,9 @@ separate processes**, replaceable without touching the core.
   pushed continuously (SSE), full remote control, light/dark toggle and 42
   themes, English/French extensible through TOML language packs.
 - **Robust by construction**: every plugin is a supervised process — its
-  death is tolerated and reported, never propagated.
+  death is tolerated and reported, never propagated. The service runs
+  **unprivileged** (dedicated system user, device access through groups,
+  hardened systemd unit).
 
 <p align="center">
   <img src="docs/captures/accueil-sombre.png" width="49%" alt="The same home page in dark mode">

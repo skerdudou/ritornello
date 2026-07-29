@@ -8,11 +8,28 @@ Conflicts=getty@tty1.service
 ExecStart=/usr/local/bin/ritornello-core
 Restart=always
 RestartSec=2
-# Accès /dev/tty1 (affichage HDMI), /dev/sr0, sockets des plugins : root pour la v1.
-User=root
+# Unprivileged service: the `ritornello` system user is created by
+# deploy/deploy.sh. Nothing in the code needs root — only device access,
+# granted by groups: sound (audio), remote control (input), CD drive
+# (cdrom), HDMI console /dev/tty1 (tty).
+User=ritornello
+SupplementaryGroups=audio input cdrom tty
+# /run/ritornello (plugin and mpv sockets) and /var/lib/ritornello
+# (persisted state) are created and owned by the service user.
 RuntimeDirectory=ritornello
 StateDirectory=ritornello
 Environment=RITORNELLO_STATE=/var/lib/ritornello/state.json
+# Hardening. ProtectSystem=strict mounts everything read-only except the
+# two directories above — /etc/ritornello must stay writable: the radio
+# and generic-input plugins persist stations.toml and input-bindings.toml
+# there (atomic write: .tmp then rename, hence write access to the
+# directory itself, set up by deploy.sh). No PrivateDevices: the whole
+# point of the groups above is /dev access.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/etc/ritornello
+ProtectHome=true
+RestrictSUIDSGID=true
 
 [Install]
 WantedBy=multi-user.target
