@@ -1,21 +1,21 @@
 #!/usr/bin/env node
-// Garde-fou anti-regression branche en fin de `npm run build` de chaque
-// paquet `crates/*/ui` (module de plugin). Frere de
-// `web/app/scripts/verifier-dist.mjs` : meme esprit (un `vite build` vert
-// ne garantit ni l'unicite de l'instance de Vue ni la forme du contrat de
-// livraison des plugins), adapte aux invariants du cote plugin plutot que
-// du shell :
-//   - `ui/dist/` ne contient que `ui.js` et `ui.css`, a plat (le coeur sert
-//     `/plugins/<nom>/<fichier>` sans sous-repertoire — voir README) ;
-//   - `vue` et `@ritornello/ui` sont bien des imports externes de `ui.js`,
-//     pas embarques (sinon deux instances de Vue coexistent dans la page) ;
-//   - aucun `process.env` residuel (le mode `build.lib` de vite ne le
-//     substitue pas ; une reference qui survit plante au chargement, faute
-//     de `process` global dans le navigateur).
+// Anti-regression guardrail wired at the end of each `crates/*/ui`
+// package's `npm run build` (plugin module). Sibling of
+// `web/app/scripts/verifier-dist.mjs`: same spirit (a green `vite build`
+// guarantees neither the uniqueness of the Vue instance nor the shape of
+// the plugins' delivery contract), adapted to the plugin-side invariants
+// rather than the shell's:
+//   - `ui/dist/` contains only `ui.js` and `ui.css`, flat (the core serves
+//     `/plugins/<name>/<file>` with no subdirectory — see README);
+//   - `vue` and `@ritornello/ui` really are external imports of `ui.js`,
+//     not bundled (otherwise two Vue instances coexist in the page);
+//   - no leftover `process.env` (vite's `build.lib` mode does not
+//     substitute it; a surviving reference crashes at load time, there
+//     being no global `process` in the browser).
 //
-// Ce script suppose etre lance avec `process.cwd()` egal au repertoire du
-// paquet (i.e. depuis un script npm `build` du paquet, pas appele
-// directement depuis la racine du repo).
+// This script assumes it is launched with `process.cwd()` equal to the
+// package directory (i.e. from a package npm `build` script, not called
+// directly from the repo root).
 import { readFileSync, readdirSync } from 'node:fs'
 
 const distDir = `${process.cwd()}/dist`
@@ -32,10 +32,10 @@ try {
   echouer(`impossible de lire ${distDir} — le build a-t-il ete lance avant ce script ?`)
 }
 
-// 1. Contrat de livraison : uniquement ui.js et ui.css, a plat. Un fichier
-// supplementaire (ou un sous-repertoire, ex. assets/) ne correspond a aucune
-// route du coeur (`/plugins/<nom>/<fichier>`, sans sous-repertoire) et
-// echouerait en 404 silencieux a l'usage.
+// 1. Delivery contract: only ui.js and ui.css, flat. An extra file (or a
+// subdirectory, e.g. assets/) matches no core route
+// (`/plugins/<name>/<file>`, no subdirectory) and would fail as a silent
+// 404 in use.
 const attendu = new Set(['ui.js', 'ui.css'])
 const inattendus = entrees.filter((f) => !attendu.has(f))
 if (inattendus.length > 0) {
@@ -54,10 +54,10 @@ for (const fichier of attendu) {
 const uiJs = readFileSync(`${distDir}/ui.js`, 'utf8')
 const uiCss = readFileSync(`${distDir}/ui.css`, 'utf8')
 
-// 2. Le mode `build.lib` ne substitue pas `process.env.NODE_ENV` : une
-// reference qui survit plante au chargement (pas de `process` global dans
-// le navigateur). C'est le meme risque que celui documente dans
-// web/app/scripts/verifier-dist.mjs pour vue.js/ui-kit.js.
+// 2. `build.lib` mode does not substitute `process.env.NODE_ENV`: a
+// surviving reference crashes at load time (no global `process` in the
+// browser). Same risk as the one documented in
+// web/app/scripts/verifier-dist.mjs for vue.js/ui-kit.js.
 for (const [nom, contenu] of [['ui.js', uiJs], ['ui.css', uiCss]]) {
   if (contenu.includes('process.env')) {
     echouer(
@@ -67,8 +67,8 @@ for (const [nom, contenu] of [['ui.js', uiJs], ['ui.css', uiCss]]) {
   }
 }
 
-// 3. `vue` et `@ritornello/ui` doivent apparaitre comme imports externes
-// (pas de bundling du kit ni du runtime Vue dans le module de plugin).
+// 3. `vue` and `@ritornello/ui` must appear as external imports (no
+// bundling of the kit or the Vue runtime into the plugin module).
 for (const specifier of ['vue', '@ritornello/ui']) {
   const motif = new RegExp(`from\\s*["']${specifier.replace('/', '\\/')}["']`)
   if (!motif.test(uiJs)) {
@@ -79,11 +79,10 @@ for (const specifier of ['vue', '@ritornello/ui']) {
   }
 }
 
-// 4. Meme verification que (3) mais du point de vue de la consequence :
-// si le runtime Vue avait ete embarque malgre l'externalisation declaree,
-// ces empreintes surviennent generalement a la minification (elles ne sont
-// jamais presentes dans du code de plugin, seulement dans le runtime Vue
-// lui-meme).
+// 4. Same check as (3) but from the consequence's point of view: if the
+// Vue runtime had been bundled despite the declared externalization,
+// these fingerprints generally survive minification (they are never
+// present in plugin code, only in the Vue runtime itself).
 for (const empreinte of ['__v_isRef', '__v_skip', '[Vue warn]']) {
   if (uiJs.includes(empreinte)) {
     echouer(

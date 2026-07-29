@@ -1,46 +1,46 @@
-// Lance un coeur jetable pour les parcours Playwright : repertoire d'etat
-// temporaire, port dedie, les deux plugins a IHM declares. Volontairement
-// proche de la configuration de developpement de docs/development.md.
+// Launches a throwaway core for the Playwright journeys: temporary state
+// directory, dedicated port, both UI-bearing plugins declared.
+// Deliberately close to the development setup of docs/development.md.
 //
-// Particularite de cet atelier : Node/npm/Playwright tournent cote Windows,
-// mais les binaires du coeur sont des ELF Linux compiles sous WSL (Node est
-// absent de WSL). Ce script detecte donc la plate-forme :
-//  - sous Linux (l'environnement documente par docs/development.md, et celui d'une
-//    eventuelle CI) : lance le binaire directement, comme avant ;
-//  - sous Windows : ecrit la configuration dans un repertoire temporaire
-//    puis lance le coeur via `wsl.exe -- bash <script.sh>`, avec des chemins
-//    `/mnt/c/...` et `RITORNELLO_HTTP=0.0.0.0:8099` — mesure faite, un
-//    service lie a 127.0.0.1 *dans* WSL n'est pas joignable depuis Windows,
-//    alors qu'un service lie a 0.0.0.0 l'est, sur 127.0.0.1 cote hote.
+// This workshop's peculiarity: Node/npm/Playwright run on the Windows
+// side, but the core binaries are Linux ELFs compiled under WSL (Node is
+// absent from WSL). This script therefore detects the platform:
+//  - under Linux (the environment documented by docs/development.md, and
+//    that of a possible CI): launches the binary directly, as before;
+//  - under Windows: writes the configuration into a temporary directory
+//    then launches the core through `wsl.exe -- bash <script.sh>`, with
+//    `/mnt/c/...` paths and `RITORNELLO_HTTP=0.0.0.0:8099` — measured: a
+//    service bound to 127.0.0.1 *inside* WSL is not reachable from
+//    Windows, while one bound to 0.0.0.0 is, on 127.0.0.1 host-side.
 //
-// Sous Windows, deux repertoires distincts sont necessaires, pas un seul :
-//  - un repertoire de *configuration*, sous l'arbre du depot (donc visible
-//    a la fois de Windows et, via `/mnt/c/...`, de WSL) : il ne contient que
-//    les fichiers dont Node genere le contenu (plugins.toml, stations.toml,
-//    le script de lancement) — de simples fichiers, aucun probleme sur ce
-//    montage ;
-//  - un repertoire d'*execution*, natif du systeme de fichiers WSL (sous
-//    `/tmp`) : mesure faite, `mpv --input-ipc-server=<chemin>` ne cree pas
-//    sa socket Unix quand `<chemin>` est sous `/mnt/c/...` (le montage 9p
-//    de DrvFs ne supporte pas les sockets Unix), alors que le meme appel
-//    reussit sous `/tmp`. Toutes les sockets (mpv, plugins) et le fichier
-//    de PID vivent donc ici — le coeur cree lui-meme ce repertoire (et ceux
-//    de state.json, etc.) via `create_dir_all`, inutile de le pre-creer.
+// Under Windows, two distinct directories are needed, not one:
+//  - a *configuration* directory, under the repo tree (hence visible both
+//    from Windows and, through `/mnt/c/...`, from WSL): it only holds the
+//    files whose content Node generates (plugins.toml, stations.toml, the
+//    launch script) — plain files, no problem on that mount;
+//  - an *execution* directory, native to the WSL filesystem (under
+//    `/tmp`): measured, `mpv --input-ipc-server=<path>` does not create
+//    its Unix socket when `<path>` is under `/mnt/c/...` (the DrvFs 9p
+//    mount does not support Unix sockets), while the same call succeeds
+//    under `/tmp`. All the sockets (mpv, plugins) and the PID file
+//    therefore live here — the core creates this directory itself (and
+//    those of state.json, etc.) via `create_dir_all`, no need to
+//    pre-create it.
 //
-// Le lancement passe par un fichier `.sh` (plutot qu'un enorme `bash -lc
-// '<script inline>'`) : mesure faite, une commande inline combinant guillemets
-// simples et doubles, `$(...)` et `$$` a travers Node -> wsl.exe -> bash se
-// corrompt parfois en route (cause exacte non identifiee avec certitude —
-// vraisemblablement une re-interpretation de l'argument par une des couches
-// de l'interop Windows/WSL) ; un chemin de fichier, lui, ne contient aucun
-// caractere sensible a ce passage.
+// The launch goes through a `.sh` file (rather than a huge `bash -lc
+// '<inline script>'`): measured, an inline command combining single and
+// double quotes, `$(...)` and `$$` across Node -> wsl.exe -> bash
+// sometimes gets corrupted on the way (exact cause not identified with
+// certainty — plausibly a re-interpretation of the argument by one of the
+// Windows/WSL interop layers); a file path, by contrast, contains no
+// character sensitive to that crossing.
 //
-// L'arret propre est delegue a `teardown.mjs` (voir globalTeardown dans
-// playwright.config.ts) : tuer ce process ou `wsl.exe` depuis Windows ne
-// tue pas forcement le processus Linux lance a l'interieur de WSL2, donc on
-// ecrit ici un fichier d'etat (PID reel cote WSL + repertoire d'execution)
-// que `teardown.mjs` pourra retrouver et arreter explicitement, quel que
-// soit le sort de *ce* process node.
+// Clean shutdown is delegated to `teardown.mjs` (see globalTeardown in
+// playwright.config.ts): killing this process or `wsl.exe` from Windows
+// does not necessarily kill the Linux process launched inside WSL2, so a
+// state file is written here (real WSL-side PID + execution directory)
+// that `teardown.mjs` can find and stop explicitly, whatever the fate of
+// *this* node process.
 import { randomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
@@ -50,19 +50,19 @@ import { join } from 'node:path'
 const estWindows = process.platform === 'win32'
 const racineNative = process.cwd().replace(/[\\/]web[\\/]app$/, '')
 
-// Convertit un chemin Windows (`C:\a\b`) en son equivalent WSL
-// (`/mnt/c/a/b`) : c'est le seul moyen pour un process Linux, lance depuis
-// Windows via `wsl.exe`, de retrouver les fichiers ecrits ici par Node.
+// Converts a Windows path (`C:\a\b`) into its WSL equivalent
+// (`/mnt/c/a/b`): the only way for a Linux process, launched from Windows
+// through `wsl.exe`, to find the files Node wrote here.
 function versWsl(cheminWindows) {
   const normalise = cheminWindows.replace(/\\/g, '/')
   const correspondance = /^([A-Za-z]):\/(.*)$/.exec(normalise)
   return correspondance ? `/mnt/${correspondance[1].toLowerCase()}/${correspondance[2]}` : normalise
 }
 
-// Sous Windows, le repertoire de configuration est cree sous l'arbre du
-// depot (donc sous un point de montage `/mnt/c/...` predictible pour WSL2)
-// plutot que dans le `tmpdir()` systeme, dont la racine (souvent `AppData`)
-// n'offre aucune garantie de ce genre.
+// Under Windows, the configuration directory is created under the repo
+// tree (hence under a `/mnt/c/...` mount point predictable for WSL2)
+// rather than in the system `tmpdir()`, whose root (often `AppData`)
+// offers no such guarantee.
 mkdirSync(join(racineNative, 'target'), { recursive: true })
 const dirConfigNative = estWindows
   ? mkdtempSync(join(racineNative, 'target', 'e2e-'))
@@ -70,9 +70,9 @@ const dirConfigNative = estWindows
 
 const racine = estWindows ? versWsl(racineNative) : racineNative
 const dirConfig = estWindows ? versWsl(dirConfigNative) : dirConfigNative
-// Repertoire d'execution (sockets, PID) : natif WSL sous Windows — voir
-// l'en-tete —, confondu avec le repertoire de configuration sous Linux
-// natif ou la question ne se pose pas.
+// Execution directory (sockets, PID): WSL-native under Windows — see the
+// header —, same as the configuration directory under native Linux where
+// the question does not arise.
 const dirExec = estWindows ? `/tmp/ritornello-e2e-${randomBytes(6).toString('hex')}` : dirConfig
 
 writeFileSync(
@@ -94,9 +94,9 @@ writeFileSync(
 )
 
 const env = {
-  // Voir l'en-tete : 0.0.0.0 sous Windows (joignable depuis l'hote sur
-  // 127.0.0.1 via le transfert WSL2), 127.0.0.1 sous Linux natif (meme
-  // machine, pas de traversee de VM).
+  // See the header: 0.0.0.0 under Windows (reachable from the host on
+  // 127.0.0.1 through WSL2 forwarding), 127.0.0.1 under native Linux
+  // (same machine, no VM crossing).
   RITORNELLO_HTTP: estWindows ? '0.0.0.0:8099' : '127.0.0.1:8099',
   RITORNELLO_PLUGINS: `${dirConfig}/plugins.toml`,
   RITORNELLO_STATE: `${dirExec}/state.json`,
@@ -108,28 +108,27 @@ const env = {
   RITORNELLO_INPUT_PRESETS: `${racine}/deploy/input-presets`,
 }
 
-// Nom fixe (pas celui, aleatoire, du repertoire jetable) : `teardown.mjs`
-// tourne dans un process node distinct, lance independamment par
-// Playwright, et doit pouvoir retrouver cet etat sans rien partager d'autre
-// que le systeme de fichiers.
+// Fixed name (not the random one of the throwaway directory):
+// `teardown.mjs` runs in a distinct node process, launched independently
+// by Playwright, and must be able to find this state while sharing
+// nothing but the filesystem.
 const etatPath = join(racineNative, 'target', 'e2e-etat.json')
 
 let enfant
 
 if (estWindows) {
-  // Fichier de PID a cote du repertoire d'execution (pas dedans) : ce
-  // dernier n'existe pas encore a cet instant (le coeur le cree lui-meme
-  // au premier `create_dir_all`), alors que `/tmp` existe toujours.
+  // PID file next to the execution directory (not inside it): the latter
+  // does not exist yet at this point (the core creates it itself on the
+  // first `create_dir_all`), whereas `/tmp` always exists.
   const pidFile = `${dirExec}.pid`
   const affectations = Object.entries(env)
     .map(([cle, valeur]) => `${cle}='${valeur}'`)
     .join(' ')
-  // `echo $$` puis `exec` : `exec` remplace l'image du shell par celle du
-  // coeur tout en conservant le PID — le fichier ecrit ici designe donc
-  // bien le futur PID reel du coeur, joignable par un appel `wsl.exe`
-  // ulterieur et independant (WSL2 est une VM unique, partagee entre tous
-  // les appels `wsl.exe`, donc les PID y restent valides d'un appel a
-  // l'autre).
+  // `echo $$` then `exec`: `exec` replaces the shell's image with the
+  // core's while keeping the PID — the file written here therefore really
+  // names the core's future real PID, reachable by a later, independent
+  // `wsl.exe` call (WSL2 is a single VM, shared between all `wsl.exe`
+  // calls, so PIDs stay valid from one call to the next).
   const scriptLancementNative = join(dirConfigNative, 'lancer.sh')
   writeFileSync(
     scriptLancementNative,
@@ -149,10 +148,10 @@ if (estWindows) {
   })
 }
 
-// Filet de securite pour les cas ou ce process recoit reellement le signal
-// (par ex. Ctrl+C en developpement, hors du `taskkill /T /F` de Playwright) :
-// sous Linux, ce `kill` atteint directement le coeur ; sous Windows il ne
-// vise que le process `wsl.exe` cote Windows — l'arret qui compte reste
-// celui de `teardown.mjs`.
+// Safety net for the cases where this process really receives the signal
+// (e.g. Ctrl+C in development, outside Playwright's `taskkill /T /F`):
+// under Linux, this `kill` reaches the core directly; under Windows it
+// only targets the Windows-side `wsl.exe` process — the shutdown that
+// matters remains `teardown.mjs`'s.
 process.on('SIGTERM', () => enfant.kill('SIGTERM'))
 process.on('exit', () => enfant.kill('SIGTERM'))

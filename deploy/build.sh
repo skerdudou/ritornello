@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# Chaine de build complete de ritornello.
+# Ritornello's complete build chain.
 #
-# Le build npm ne tourne **qu'une fois** : les livrables qu'il depose sont lus
-# par `include_str!`/`rust-embed` a la compilation, donc les deux etapes cargo
-# les consomment tels quels. C'est ce qui permet a `cross` de fonctionner avec
-# une image Docker sans Node.
+# The npm build runs **only once**: the artifacts it drops are read by
+# `include_str!`/`rust-embed` at compile time, so both cargo steps consume
+# them as-is. This is what lets `cross` work with a Docker image that has
+# no Node.
 set -euo pipefail
 
-# Toujours depuis la racine du depot, comme deploy.sh : lancable de n'importe ou.
+# Always from the repository root, like deploy.sh: launchable from anywhere.
 cd "$(dirname "$0")/.."
 
 TARGET="${TARGET:-armv7-unknown-linux-gnueabihf}"
 
-echo "== 1/3 IHM web (npm) =="
+echo "== 1/3 web UI (npm) =="
 npm ci
 npm run build --workspaces
 npm run typecheck
 
-echo "== 2/3 build natif (x86_64) =="
+echo "== 2/3 native build (x86_64) =="
 cargo build --workspace
 
 echo "== 3/3 cross-compilation ($TARGET) =="

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// Garde-fou anti-regression branche en fin de `npm run build -w app`. Un
-// `vite build` vert ne garantit ni l'import map ni l'unicite de l'instance
-// de Vue : le round de correction 1 de la Task 4 a laisse passer un
-// `ReferenceError: process is not defined` au chargement de `vue.js` avec
-// un build, 36 tests et un `tsc` tous verts. Ce script verifie les trois
-// invariants dont depend la Task 6.
+// Anti-regression guardrail wired at the end of `npm run build -w app`. A
+// green `vite build` guarantees neither the import map nor the uniqueness
+// of the Vue instance: fix round 1 of Task 4 let a
+// `ReferenceError: process is not defined` through at `vue.js` load time
+// with a build, 36 tests and a `tsc` all green. This script checks the
+// three invariants Task 6 depends on.
 import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath, URL } from 'node:url'
 
@@ -16,9 +16,10 @@ function echouer(message) {
   process.exit(1)
 }
 
-// 1. L'import map doit etre presente et pointer vers les deux URL stables du
-// contrat (`vue.js`, `ui-kit.js`) : sans elle, tout `import` de 'vue' ou de
-// '@ritornello/ui' resout en 404 dans le navigateur, en silence pour le build.
+// 1. The import map must be present and point at the contract's two
+// stable URLs (`vue.js`, `ui-kit.js`): without it, every `import` of
+// 'vue' or '@ritornello/ui' resolves to a 404 in the browser, silently
+// as far as the build is concerned.
 const indexHtml = readFileSync(`${distDir}/index.html`, 'utf8')
 if (!indexHtml.includes('<script type="importmap">')) {
   echouer(
@@ -45,10 +46,10 @@ const fichiers = readdirSync(assetsDir).filter((f) => f.endsWith('.js'))
 for (const fichier of fichiers) {
   const contenu = readFileSync(`${assetsDir}/${fichier}`, 'utf8')
 
-  // 2. Le mode `build.lib` (utilise pour `vue.js` et, cote kit, pour
-  // `ui-kit.js`) ne substitue pas `process.env.NODE_ENV` : une reference qui
-  // survit fait planter le navigateur, qui n'a pas de `process` global. C'est
-  // exactement le Critical du round de correction 1.
+  // 2. `build.lib` mode (used for `vue.js` and, kit side, for
+  // `ui-kit.js`) does not substitute `process.env.NODE_ENV`: a surviving
+  // reference crashes the browser, which has no global `process`. This is
+  // exactly fix round 1's Critical.
   if (contenu.includes('process.env')) {
     echouer(
       `${fichier} contient encore "process.env" — ajouter/verifier le define ` +
@@ -58,10 +59,10 @@ for (const fichier of fichiers) {
     )
   }
 
-  // 3. Les chunks du shell (`app-*.js`) doivent rester vides de toute
-  // empreinte du runtime Vue : sa presence signalerait que 'vue' n'a pas ete
-  // externalise (rollupOptions.external) et que deux instances de Vue, donc
-  // deux graphes de reactivite, coexistent dans la page.
+  // 3. The shell's chunks (`app-*.js`) must stay free of any Vue runtime
+  // fingerprint: its presence would mean 'vue' was not externalized
+  // (rollupOptions.external) and that two Vue instances, hence two
+  // reactivity graphs, coexist in the page.
   if (fichier.startsWith('app-')) {
     for (const empreinte of ['__v_isRef', '__v_skip', '[Vue warn]']) {
       if (contenu.includes(empreinte)) {

@@ -1,62 +1,62 @@
-// Arret explicite du coeur jetable lance par `serve.mjs` (globalTeardown de
-// playwright.config.ts, execute apres tous les parcours, quel que soit leur
-// resultat).
+// Explicit shutdown of the throwaway core launched by `serve.mjs`
+// (globalTeardown of playwright.config.ts, run after all the journeys,
+// whatever their outcome).
 //
-// Sous Windows, Playwright arrete le process `node e2e/serve.mjs` par
-// `taskkill /pid <pid> /T /F` (voir launchProcess dans playwright-core :
-// `attemptToGracefullyClose` y leve toujours sur win32, donc c'est
-// systematiquement la voie forcee qui joue). Ce `taskkill` ne tue que
-// l'arbre de process *Windows* : `wsl.exe` en fait partie et meurt, mais le
-// process Linux qu'il a lance a l'interieur de la VM WSL2 n'est pas dans cet
-// arbre et lui survit — un coeur reste alors vivant, bloquant le port 8099
-// pour l'execution suivante. D'ou cet arret independant, qui ne depend pas
-// du sort du process node du webServer.
+// Under Windows, Playwright stops the `node e2e/serve.mjs` process with
+// `taskkill /pid <pid> /T /F` (see launchProcess in playwright-core:
+// `attemptToGracefullyClose` always throws there on win32, so the forced
+// path is what systematically plays). That `taskkill` only kills the
+// *Windows* process tree: `wsl.exe` is part of it and dies, but the Linux
+// process it launched inside the WSL2 VM is not in that tree and survives
+// it — a core then stays alive, holding port 8099 against the next run.
+// Hence this independent shutdown, which does not depend on the fate of
+// the webServer's node process.
 //
-// Repli en deux temps, execute par un `wsl.exe` autonome :
-//  1. `kill -TERM` sur le vrai PID du coeur, retrouve via le fichier ecrit
-//     cote WSL par serve.mjs (fiable : `exec` a conserve le PID au lancement).
-//  2. Un `pgrep -f` sur le repertoire d'execution temporaire, qui ramasse mpv
-//     et les plugins : le coeur ne tue pas ses enfants sur un simple
-//     SIGTERM (leur `kill_on_drop` ne joue qu'au retour normal de `main`,
-//     pas sur la disposition par defaut d'un signal), donc seul un balayage
-//     par repertoire garantit qu'aucun processus ne survit. mpv et les
-//     plugins recoivent leur chemin de socket sous ce repertoire (voir
-//     `RITORNELLO_MPV_SOCKET`, `--socket`), qui apparait donc dans leur
-//     ligne de commande.
+// Two-step fallback, executed by a standalone `wsl.exe`:
+//  1. `kill -TERM` on the core's real PID, found through the file written
+//     WSL-side by serve.mjs (reliable: `exec` kept the PID at launch).
+//  2. A `pgrep -f` on the temporary execution directory, which picks up
+//     mpv and the plugins: the core does not kill its children on a mere
+//     SIGTERM (their `kill_on_drop` only plays on a normal return from
+//     `main`, not on a signal's default disposition), so only a sweep by
+//     directory guarantees no process survives. mpv and the plugins
+//     receive their socket path under that directory (see
+//     `RITORNELLO_MPV_SOCKET`, `--socket`), which therefore shows up in
+//     their command line.
 //
-// Deux pieges verifies empiriquement, tous deux contournes ci-dessous :
-//  - un `pkill -f <motif>` tue aussi le shell qui l'invoque si ce motif est
-//    lui-meme present dans SA propre ligne de commande — ce qui est
-//    exactement le cas ici, puisqu'on cherche le repertoire d'execution en
-//    l'ayant d'abord ecrit dans le script qui fait la recherche. `pkill`
-//    s'exclut lui-meme mais pas son shell parent, qui meurt donc en plein
-//    script avant les lignes suivantes. D'ou la boucle `pgrep` + filtre
-//    explicite sur `$$` plutot qu'un simple `pkill`.
-//  - une commande inline passee en argument (`bash -lc '<script>'`) a
-//    travers Node -> wsl.exe -> bash se corrompt parfois en route quand elle
-//    combine guillemets simples/doubles, `$(...)` et `$$` (cause exacte non
-//    identifiee avec certitude, vraisemblablement une re-interpretation par
-//    une des couches de l'interop Windows/WSL) — reproduit avec `bash: -c:
-//    syntax error near unexpected token` citant un PID reel comme jeton.
-//    D'ou l'ecriture de ce script dans un fichier `.sh`, dont seul le
-//    *chemin* (sans caractere sensible) traverse cette frontiere.
+// Two pitfalls verified empirically, both worked around below:
+//  - a `pkill -f <pattern>` also kills the shell invoking it if that
+//    pattern is itself present in ITS own command line — which is exactly
+//    the case here, since we search for the execution directory having
+//    first written it into the script doing the search. `pkill` excludes
+//    itself but not its parent shell, which therefore dies mid-script
+//    before the following lines. Hence the `pgrep` loop + explicit filter
+//    on `$$` rather than a plain `pkill`.
+//  - an inline command passed as an argument (`bash -lc '<script>'`)
+//    across Node -> wsl.exe -> bash sometimes gets corrupted on the way
+//    when it combines single/double quotes, `$(...)` and `$$` (exact
+//    cause not identified with certainty, plausibly a re-interpretation
+//    by one of the Windows/WSL interop layers) — reproduced with `bash:
+//    -c: syntax error near unexpected token` quoting a real PID as the
+//    token. Hence writing this script to a `.sh` file, of which only the
+//    *path* (no sensitive character) crosses that boundary.
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 export default async function globalTeardown() {
-  // Meme calcul que dans serve.mjs : `process.cwd()` est `web/app` (npm y
-  // place le process pour un script `-w app`), le fichier d'etat vit a la
-  // racine du depot, sous `target/` (ignore de git).
+  // Same computation as in serve.mjs: `process.cwd()` is `web/app` (npm
+  // puts the process there for a `-w app` script), the state file lives
+  // at the repo root, under `target/` (git-ignored).
   const racineNative = process.cwd().replace(/[\\/]web[\\/]app$/, '')
   const etatPath = join(racineNative, 'target', 'e2e-etat.json')
   if (!existsSync(etatPath)) return
   const etat = JSON.parse(readFileSync(etatPath, 'utf8'))
 
   if (etat.estWindows) {
-    // `balayer` : tue tout ce qui correspond au motif, en excluant
-    // explicitement `$$` (le shell qui execute ce script — voir la note
-    // ci-dessus sur l'auto-correspondance de `pkill -f`/`pgrep -f`).
+    // `balayer`: kills everything matching the pattern, explicitly
+    // excluding `$$` (the shell executing this script — see the note
+    // above on `pkill -f`/`pgrep -f` self-matching).
     const balayer = (signal) =>
       `for pid in $(pgrep -f '${etat.dirExec}'); do [ "$pid" = "$$" ] && continue; kill -${signal} "$pid" 2>/dev/null; done`
     const script =
@@ -66,36 +66,35 @@ export default async function globalTeardown() {
       `${balayer('TERM')}\n` +
       `sleep 0.3\n` +
       `${balayer('KILL')}\n` +
-      // Repertoire d'execution (natif WSL, sous /tmp) et fichier de PID :
-      // hors de portee de `rmSync` cote Windows, nettoyes ici cote WSL.
+      // Execution directory (WSL-native, under /tmp) and PID file: out of
+      // reach of `rmSync` on the Windows side, cleaned up here WSL-side.
       `rm -rf '${etat.dirExec}' '${etat.pidFile}'\n`
     const scriptNative = join(etat.dirConfigNative, 'arreter.sh')
     const scriptWsl = `${versWsl(etat.dirConfigNative)}/arreter.sh`
     writeFileSync(scriptNative, script)
     spawnSync('wsl.exe', ['--', 'bash', scriptWsl], { stdio: 'inherit' })
   }
-  // Sous Linux natif, le SIGKILL de groupe que Playwright envoie deja au
-  // process du webServer (voir launchProcess : `detached: true` hors
-  // Windows) emporte le coeur direct et ses enfants dans le meme appel —
-  // rien a refaire ici.
+  // Under native Linux, the group SIGKILL Playwright already sends to the
+  // webServer's process (see launchProcess: `detached: true` outside
+  // Windows) takes the direct core and its children out in the same call
+  // — nothing left to do here.
 
   try {
     rmSync(etat.dirConfigNative, { recursive: true, force: true })
   } catch {
-    // Meilleur effort : un fichier verrouille (socket encore tenu un
-    // instant par un process en cours d'arret) ne doit pas faire echouer
-    // les parcours.
+    // Best effort: a locked file (a socket still held for an instant by a
+    // process on its way out) must not fail the journeys.
   }
   try {
     rmSync(etatPath, { force: true })
   } catch {
-    // idem
+    // same
   }
 }
 
-// Meme conversion que dans serve.mjs (dupliquee : les deux fichiers sont
-// lances comme des points d'entree independants par Playwright, pas des
-// modules qui s'importent l'un l'autre).
+// Same conversion as in serve.mjs (duplicated: both files are launched as
+// independent entry points by Playwright, not modules importing each
+// other).
 function versWsl(cheminWindows) {
   const normalise = cheminWindows.replace(/\\/g, '/')
   const correspondance = /^([A-Za-z]):\/(.*)$/.exec(normalise)
