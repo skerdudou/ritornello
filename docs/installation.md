@@ -49,26 +49,38 @@ reason not to work).
 
 ## Example: Raspberry Pi 2
 
-Raspberry Pi OS Lite, then:
+Two distributions are exercised on this project's hardware: Raspberry Pi
+OS Lite and DietPi. Both work identically for everything that matters
+(Debian base, systemd, same packages, same `deploy.sh`, same unit) — only
+the initial tuning tools differ.
+
+On **Raspberry Pi OS Lite**:
 
     sudo apt install mpv cd-discid eject
-    sudo mkdir -p /etc/ritornello
-    sudo cp deploy/stations.example.toml /etc/ritornello/stations.toml
-    sudo cp deploy/plugins.example.toml /etc/ritornello/plugins.toml
-    sudo cp -r deploy/input-presets /etc/ritornello/input-presets
-    sudo cp deploy/input-bindings.example.toml /etc/ritornello/input-bindings.toml
     # analog jack as default output + hardware volume at maximum
     sudo raspi-config nonint do_audio 1
     amixer set PCM 100%
 
+No configuration to copy: on first deployment, `deploy.sh` provisions
+`/etc/ritornello` with the defaults (all bundled plugins, two starter
+stations, MCE remote bindings — the `deploy/*.example.toml` files), then
+everything is adjusted from the browser or by editing those files. An
+existing configuration is never overwritten (see
+[Deploying](#deploying)).
+
 Wifi: `sudo raspi-config` (System Options > Wireless LAN).
 
-**DietPi** works the same (it is Debian with systemd underneath): same
-packages, same files, same `deploy.sh`. The differences are cosmetic —
-there is no `raspi-config`, so the sound card is picked through
-`dietpi-config` (Audio Options; `amixer` comes with `alsa-utils` if
-missing), and mDNS is not installed by default, so target the device by
-IP (or install `avahi-daemon`) rather than `<hostname>.local`.
+On **DietPi**, same packages (`sudo apt install mpv cd-discid eject`),
+and two differences to know about:
+
+- no `raspi-config`: the sound card is **enabled and picked** through
+  `dietpi-config` (Audio Options) — DietPi ships with onboard sound
+  disabled, so this step is required before anything plays; `amixer`
+  comes with `alsa-utils` if missing;
+- mDNS is not installed by default: target the device by IP, e.g.
+  `PI=dietpi@192.168.1.20 ./deploy/deploy.sh` (the `dietpi` and `root`
+  users both work — the script's `sudo` calls are a no-op for root), or
+  install `avahi-daemon` to keep using a `<hostname>.local` name.
 
 ## Example: generic x86_64 Linux machine
 
@@ -76,12 +88,8 @@ Same packages, minus the Pi-specific steps (no `raspi-config`, the audio
 output is picked directly through `/api/audio-output`):
 
     sudo apt install mpv cd-discid eject
-    sudo mkdir -p /etc/ritornello
-    sudo cp deploy/stations.example.toml /etc/ritornello/stations.toml
-    sudo cp deploy/plugins.example.toml /etc/ritornello/plugins.toml
-    sudo cp -r deploy/input-presets /etc/ritornello/input-presets
-    sudo cp deploy/input-bindings.example.toml /etc/ritornello/input-bindings.toml
 
+Configuration is provisioned by `deploy.sh` here too (see above).
 `deploy/deploy.sh` works identically: `TARGET=x86_64-unknown-linux-gnu
 PI=user@host ./deploy/deploy.sh` (no need for `cross`/Docker for this
 target if the build machine is already x86_64 — a native `cargo build` is
@@ -107,10 +115,12 @@ it at all, install a key once — `ssh-keygen` if you have none, then
 
 Web interface: http://<host>:8080 — logs: `journalctl -u ritornello -f`.
 
-`deploy.sh` installs the binaries but **never touches**
-`/etc/ritornello/plugins.toml`: on first installation, provision it from
-`deploy/plugins.example.toml` (see the examples above); when an update
-introduces new plugins, add their entries by hand (see
+Configuration: `deploy.sh` provisions `plugins.toml`, `stations.toml` and
+`input-bindings.toml` from the `deploy/*.example.toml` defaults **only
+when the file is absent** — a first installation needs no manual copy,
+and a file that exists is **never overwritten**, whatever it contains.
+The flip side of that guarantee: when an update introduces new plugins,
+their entries must be added to the existing `plugins.toml` by hand (see
 [plugins.md](plugins.md)).
 
 ## Unprivileged service

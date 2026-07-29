@@ -161,7 +161,9 @@ debugging: "first to arrive" would depend on network latency, so the same
 installation would display different things from one boot to the next.
 
 **Updating an existing installation.** `deploy/deploy.sh` installs the
-new binaries but does not touch `/etc/ritornello/plugins.toml`: without
+new binaries but never overwrites an existing
+`/etc/ritornello/plugins.toml` (it only provisions the default one when
+the file is absent): without
 manually adding the two `kind = "metadata"` entries (see
 `deploy/plugins.example.toml`), a device already in service **loses the
 CD track titles**, which the cd plugin used to provide itself before this

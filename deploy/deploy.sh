@@ -58,6 +58,19 @@ ssh "${SSHOPTS[@]}" "$PI" 'sudo mkdir -p /etc/ritornello/input-presets && rm -rf
 scp "${SSHOPTS[@]}" -r deploy/input-presets "$PI:/tmp/input-presets"
 ssh "${SSHOPTS[@]}" "$PI" 'sudo cp -r /tmp/input-presets/. /etc/ritornello/input-presets/ && rm -rf /tmp/input-presets'
 
+# Default configuration, provisioned from the example files ONLY when the
+# target file is absent: a first installation works without any manual
+# copy, and an existing configuration (stations added from the browser,
+# learned bindings, a hand-edited plugin list) is never overwritten — an
+# update that introduces new plugins still requires adding their entries
+# by hand (see docs/plugins.md).
+scp "${SSHOPTS[@]}" deploy/plugins.example.toml deploy/stations.example.toml \
+  deploy/input-bindings.example.toml "$PI:/tmp/"
+ssh "${SSHOPTS[@]}" "$PI" 'for f in plugins stations input-bindings; do
+  [ -e "/etc/ritornello/$f.toml" ] || sudo cp "/tmp/$f.example.toml" "/etc/ritornello/$f.toml"
+  rm -f "/tmp/$f.example.toml"
+done'
+
 scp "${SSHOPTS[@]}" "$OUT/ritornello-core" "$PI:/tmp/ritornello-core"
 scp "${SSHOPTS[@]}" "${PLUGINS[@]/#/$OUT/ritornello-plugin-}" "$PI:/tmp/"
 scp "${SSHOPTS[@]}" deploy/ritornello.service "$PI:/tmp/"
