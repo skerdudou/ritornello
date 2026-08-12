@@ -108,6 +108,11 @@ pub struct Core<P: Player> {
     /// the next source re-declares it on activate/wake — but kept on stop:
     /// a stopped radio still has its stations.
     preset_count: Option<u8>,
+    /// Remote tens offset in flight: `Plus10` presses accumulate here until
+    /// a digit key consumes them (`+10` then `4` selects 14). It lives and
+    /// dies with the overlay that displays it — one deadline, not two
+    /// timers.
+    pending_tens: u8,
     state_path: PathBuf,
     view_tx: watch::Sender<View>,
     catalog: Arc<RwLock<Catalog>>,
@@ -160,6 +165,7 @@ impl<P: Player> Core<P> {
             overlay: None,
             preset: None,
             preset_count: None,
+            pending_tens: 0,
             state_path,
             view_tx,
             catalog,
@@ -469,8 +475,26 @@ impl<P: Player> Core<P> {
     }
 
     async fn appliquer_commande(&mut self, cmd: Command) -> Result<()> {
+        // Any command other than Plus10/Select abandons a pending tens
+        // sequence: pressing volume mid-sequence is a change of mind, not a
+        // step of it.
+        if !matches!(cmd, Command::Plus10 | Command::Select(_)) {
+            self.pending_tens = 0;
+        }
         match cmd {
             Command::Select(n) => {
+                let tens = std::mem::take(&mut self.pending_tens);
+                if tens != 0 {
+                    // The consumed offset's overlay has said what it had to
+                    // say; the source's own view takes over.
+                    self.overlay = None;
+                    self.push_view();
+                }
+                let n = n.saturating_add(tens);
+                if n == 0 {
+                    // Key 0 with no pending offset: nothing to select.
+                    return Ok(());
+                }
                 self.retry_count = 0;
                 let action = self.active().request(SourceReq::Select(n)).await?;
                 self.apply(action).await?;
@@ -598,8 +622,24 @@ impl<P: Player> Core<P> {
                 self.apply(action).await?;
             }
             Command::Plus10 => {
-                // Handled in a later task: increment the pending tens offset
-                // and display it in the overlay.
+                let next = self.pending_tens.saturating_add(10);
+                self.pending_tens = match self.preset_count {
+                    // Wrap past the last useful decade: the largest
+                    // reachable multiple of 10 is (count / 10) * 10
+                    // (station 20 is +10 +10 then 0, so offset 20 must
+                    // stay allowed for a count of 20).
+                    Some(count) if next > (count / 10) * 10 => 0,
+                    // No known count: saturate, don't wrap — we can't know
+                    // where the end is.
+                    None => next.min(240),
+                    _ => next,
+                };
+                if self.pending_tens == 0 {
+                    self.overlay = None;
+                    self.push_view();
+                } else {
+                    self.show_tens_overlay().await;
+                }
             }
         }
         Ok(())
@@ -813,6 +853,17 @@ impl<P: Player> Core<P> {
         self.push_view();
     }
 
+    /// Overlay for the pending tens offset ("+10", "+20"): same slot and
+    /// same deadline as the volume overlay, so each press pushes the
+    /// deadline back and expiry forgets the offset together with the
+    /// display.
+    async fn show_tens_overlay(&mut self) {
+        let line1 = self.catalog.read().await.get("preset_label").to_string();
+        let line2 = format!("+{}", self.pending_tens);
+        self.overlay = Some((View { line1, line2, line3: String::new() }, Instant::now() + OVERLAY));
+        self.push_view();
+    }
+
     /// Échéance de l'overlay actif, s'il y en a un (à lire dans `main` avant
     /// le `select!`, à l'image de `retry_at`, pour bâtir la temporisation).
     pub fn overlay_deadline(&self) -> Option<Instant> {
@@ -823,6 +874,7 @@ impl<P: Player> Core<P> {
     /// mémorisée entre-temps par `handle_source_update`.
     pub fn expire_overlay(&mut self) {
         self.overlay = None;
+        self.pending_tens = 0;
         self.push_view();
     }
 }
@@ -1951,6 +2003,93 @@ mod tests {
         core.resume().await.unwrap();
         core.handle_input(InputMessage::from(Command::Select(3))).await.unwrap();
         assert!(source_calls.lock().unwrap().iter().any(|c| c.contains("Select(3)")));
+    }
+
+    #[tokio::test]
+    async fn plus10_saffiche_et_repousse_son_echeance() {
+        // Chaque appui montre le cumul (+10, +20) dans l'incrustation, avec la
+        // même échéance que le volume.
+        let (mut core, _pc, _sc, mut rx, _d) = setup();
+        core.handle_command(Command::Plus10).await.unwrap();
+        assert!(core.overlay_deadline().is_some());
+        assert_eq!(rx.borrow_and_update().line2, "+10");
+        core.handle_command(Command::Plus10).await.unwrap();
+        assert_eq!(rx.borrow_and_update().line2, "+20");
+    }
+
+    #[tokio::test]
+    async fn le_decalage_est_consomme_par_la_touche_chiffre() {
+        // +10 puis 4 = présélection 14 ; le décalage ne survit pas à sa
+        // consommation.
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.handle_source_update("radio", update_avec_compte(Some(23)));
+        core.handle_command(Command::Plus10).await.unwrap();
+        core.handle_command(Command::Select(4)).await.unwrap();
+        assert!(source_calls.lock().unwrap().iter().any(|c| c.contains("Select(14)")));
+        core.handle_command(Command::Select(4)).await.unwrap();
+        assert!(source_calls.lock().unwrap().iter().any(|c| c.contains("Select(4)")));
+    }
+
+    #[tokio::test]
+    async fn la_touche_zero_seule_ne_fait_rien() {
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.handle_command(Command::Select(0)).await.unwrap();
+        assert!(!source_calls.lock().unwrap().iter().any(|c| c.contains("Select(0)")));
+    }
+
+    #[tokio::test]
+    async fn zero_atteint_les_multiples_de_dix() {
+        // 20 stations : +10 +10 puis 0 = 20 — le décalage 20 doit rester permis.
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.handle_source_update("radio", update_avec_compte(Some(20)));
+        core.handle_command(Command::Plus10).await.unwrap();
+        core.handle_command(Command::Plus10).await.unwrap();
+        core.handle_command(Command::Select(0)).await.unwrap();
+        assert!(source_calls.lock().unwrap().iter().any(|c| c.contains("Select(20)")));
+    }
+
+    #[tokio::test]
+    async fn plus10_reboucle_apres_la_derniere_dizaine() {
+        // 23 stations : décalages utiles 10 et 20 ; le troisième appui revient
+        // à zéro et éteint l'incrustation, comme la fenêtre web.
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.handle_source_update("radio", update_avec_compte(Some(23)));
+        for _ in 0..3 {
+            core.handle_command(Command::Plus10).await.unwrap();
+        }
+        assert!(core.overlay_deadline().is_none());
+        core.handle_command(Command::Select(3)).await.unwrap();
+        assert!(source_calls.lock().unwrap().iter().any(|c| c.contains("Select(3)")));
+    }
+
+    #[tokio::test]
+    async fn une_autre_commande_abandonne_le_decalage() {
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.handle_command(Command::Plus10).await.unwrap();
+        core.handle_command(Command::VolumeUp).await.unwrap();
+        core.handle_command(Command::Select(3)).await.unwrap();
+        assert!(source_calls.lock().unwrap().iter().any(|c| c.contains("Select(3)")));
+    }
+
+    #[tokio::test]
+    async fn lecheance_de_lincrustation_oublie_le_decalage() {
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.handle_command(Command::Plus10).await.unwrap();
+        core.expire_overlay();
+        core.handle_command(Command::Select(3)).await.unwrap();
+        assert!(source_calls.lock().unwrap().iter().any(|c| c.contains("Select(3)")));
+    }
+
+    #[tokio::test]
+    async fn sans_compte_connu_le_decalage_sature_sans_reboucler() {
+        // Pas de compte déclaré : on ne sait pas où est la fin, donc pas de
+        // rebouclage — saturation à 240.
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        for _ in 0..30 {
+            core.handle_command(Command::Plus10).await.unwrap();
+        }
+        core.handle_command(Command::Select(3)).await.unwrap();
+        assert!(source_calls.lock().unwrap().iter().any(|c| c.contains("Select(243)")));
     }
 
     #[tokio::test]
