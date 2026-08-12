@@ -1,5 +1,5 @@
 import { mount } from '@vue/test-utils'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { PlayerPayload } from '../types'
 import { REMOTE_COMMANDS, REMOTE_POWER, REMOTE_ROWS } from './remoteCommands'
 
@@ -146,5 +146,75 @@ describe('HomeView', () => {
       '/api/command',
       expect.objectContaining({ method: 'POST', body: JSON.stringify({ cmd: 'Power' }) }),
     )
+  })
+})
+
+describe('HomeView — volume maintenu', () => {
+  /** Monte la vue avec des timings servis par /api/settings et des faux minuteurs. */
+  async function monterAvecTimings(reglages = { volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: false }) {
+    vi.useFakeTimers()
+    const posts: string[] = []
+    const spy = vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        posts.push(String(init.body))
+        return new Response(null, { status: 204 })
+      }
+      if (url === '/api/settings') return new Response(JSON.stringify(reglages), { status: 200 })
+      return new Response('{}', { status: 200 })
+    })
+    vi.stubGlobal('fetch', spy)
+    const HomeView = (await import('./HomeView.vue')).default
+    const w = mount(HomeView)
+    // Laisse le GET /api/settings du montage se résoudre sous faux minuteurs.
+    await vi.runOnlyPendingTimersAsync()
+    return { w, posts }
+  }
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  it('un appui simple envoie une seule commande', async () => {
+    const { w, posts } = await monterAvecTimings()
+    await w.find('[data-remote-hold="VolumeUp"]').trigger('pointerdown')
+    await w.find('[data-remote-hold="VolumeUp"]').trigger('pointerup')
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(posts).toEqual([JSON.stringify({ cmd: 'VolumeUp' })])
+  })
+
+  it('un appui maintenu répète après le délai initial puis à l’intervalle', async () => {
+    const { w, posts } = await monterAvecTimings()
+    await w.find('[data-remote-hold="VolumeDown"]').trigger('pointerdown')
+    expect(posts).toHaveLength(1) // le pas immédiat
+    await vi.advanceTimersByTimeAsync(999)
+    expect(posts).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(posts).toHaveLength(2) // premier pas répété à 1000 ms
+    await vi.advanceTimersByTimeAsync(500)
+    expect(posts).toHaveLength(3)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(posts).toHaveLength(4)
+    await w.find('[data-remote-hold="VolumeDown"]').trigger('pointerup')
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(posts).toHaveLength(4) // plus rien après le relâchement
+  })
+
+  it('les timings viennent de /api/settings', async () => {
+    const { w, posts } = await monterAvecTimings({ volume_repeat_initial_ms: 200, volume_repeat_interval_ms: 100, start_in_standby: false })
+    await w.find('[data-remote-hold="VolumeUp"]').trigger('pointerdown')
+    await vi.advanceTimersByTimeAsync(200)
+    expect(posts).toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(posts).toHaveLength(3)
+    await w.find('[data-remote-hold="VolumeUp"]').trigger('pointerup')
+  })
+
+  it('quitter le bouton pendant le maintien arrête la répétition', async () => {
+    const { w, posts } = await monterAvecTimings()
+    await w.find('[data-remote-hold="VolumeUp"]').trigger('pointerdown')
+    await w.find('[data-remote-hold="VolumeUp"]').trigger('pointerleave')
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(posts).toHaveLength(1)
   })
 })

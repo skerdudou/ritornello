@@ -2,12 +2,13 @@
 import {
   api, Button, Card, CardAction, CardContent, CardHeader, CardTitle, toast,
 } from '@ritornello/ui'
-import { onMounted } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import PlayerCard from '../components/PlayerCard.vue'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlayer } from '../composables/usePlayer'
-import type { Command } from '../types'
+import type { Command, SettingsPayload } from '../types'
 import { REMOTE_POWER, REMOTE_ROWS } from './remoteCommands'
+import type { RemoteCommand } from './remoteCommands'
 
 const { t } = useCatalog()
 
@@ -24,6 +25,44 @@ async function send(cmd: Command) {
   const err = await api.post('/api/command', cmd)
   if (err) toast.error(err)
 }
+
+// Timings du volume maintenu, servis par le cœur (modifiables sur la page
+// config). Les défauts couvrent le temps du GET et son éventuel échec.
+const reglages = ref<SettingsPayload>({
+  volume_repeat_initial_ms: 1000,
+  volume_repeat_interval_ms: 500,
+  start_in_standby: false,
+})
+onMounted(async () => {
+  reglages.value = await api.get<SettingsPayload>('/api/settings').catch(() => reglages.value)
+})
+
+// Appui maintenu sur Volume +/- : un pas immédiat, puis après le délai
+// initial un pas par intervalle jusqu'au relâchement. Miroir côté navigateur
+// du cadencement que le cœur applique aux répétitions de la télécommande
+// infrarouge — les timings sont les mêmes, servis par /api/settings.
+let minuteurInitial: number | null = null
+let minuteurIntervalle: number | null = null
+
+function estVolume(c: RemoteCommand) {
+  return c.cmd.cmd === 'VolumeUp' || c.cmd.cmd === 'VolumeDown'
+}
+
+function debutMaintien(cmd: Command) {
+  finMaintien()
+  send(cmd)
+  minuteurInitial = window.setTimeout(() => {
+    send(cmd)
+    minuteurIntervalle = window.setInterval(() => send(cmd), reglages.value.volume_repeat_interval_ms)
+  }, reglages.value.volume_repeat_initial_ms)
+}
+
+function finMaintien() {
+  if (minuteurInitial !== null) { window.clearTimeout(minuteurInitial); minuteurInitial = null }
+  if (minuteurIntervalle !== null) { window.clearInterval(minuteurIntervalle); minuteurIntervalle = null }
+}
+
+onUnmounted(finMaintien)
 </script>
 
 <template>
@@ -66,9 +105,29 @@ async function send(cmd: Command) {
              groupement est une donnee (`REMOTE_ROWS`), pas une mise en page
              recopiee ici. -->
         <div v-for="(rangee, i) in REMOTE_ROWS" :key="i" class="flex flex-wrap gap-2" data-remote-row>
-          <Button v-for="c in rangee" :key="c.key" variant="outline" @click="send(c.cmd)">
-            {{ t(c.key) }}
-          </Button>
+          <template v-for="c in rangee" :key="c.key">
+            <!-- Volume +/- : appui maintenu (pointeur) au lieu d'un clic. Pas
+                 de @click : il partirait en double après le pointerup. Le
+                 clavier garde un pas par touche via @keydown. touch-none
+                 empêche le défilement tactile d'avaler le maintien,
+                 @contextmenu.prevent le menu d'appui long mobile. -->
+            <Button
+              v-if="estVolume(c)"
+              :data-remote-hold="c.cmd.cmd"
+              variant="outline"
+              class="touch-none select-none"
+              @pointerdown="debutMaintien(c.cmd)"
+              @pointerup="finMaintien"
+              @pointercancel="finMaintien"
+              @pointerleave="finMaintien"
+              @contextmenu.prevent
+              @keydown.enter.prevent="send(c.cmd)"
+              @keydown.space.prevent="send(c.cmd)"
+            >
+              {{ t(c.key) }}
+            </Button>
+            <Button v-else variant="outline" @click="send(c.cmd)">{{ t(c.key) }}</Button>
+          </template>
         </div>
       </CardContent>
     </Card>
