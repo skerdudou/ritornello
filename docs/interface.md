@@ -68,6 +68,22 @@ there wins, so the highlight tracks what's actually being read rather
 than whichever callback fired last. Clicking an entry scrolls smoothly to
 its section.
 
+### Audio output picker
+
+Backed by `GET`/`PUT /api/audio-output`. The list comes straight from
+`aplay -L`: each entry shows the device's **description** first, its
+technical ALSA name in small print beneath — the `null` PCM (discards
+audio) is filtered out, it has no place in an audio chain.
+
+The first entry, **"System default"**, sends `device: null`: no device is
+imposed on mpv (`audio-device=auto`), so the OS default applies. That is
+the state of a fresh install — `audio_device` is `None` until a device is
+explicitly picked — and it stays available afterwards to go back to
+"whatever the system decides". A `PUT` with a named device persists it in
+`state.json` and pushes it to mpv immediately; the currently selected
+device is kept visible even if it disappears from `aplay -L` (a card
+unplugged since), rather than leaving the picker blank.
+
 ### Startup card
 
 Whether the device starts **on** (resumes the active source) or in
