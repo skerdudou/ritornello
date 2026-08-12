@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use ritornello_proto::{
-    AdminReq, AdminRequest, AdminResponse, AdminResult, Command, Enrichment, IdentityUpdate,
+    AdminReq, AdminRequest, AdminResponse, AdminResult, Enrichment, IdentityUpdate, InputMessage,
     NowPlaying, SourceAction, SourceMessage, SourceReq, SourceRequest, View,
 };
 use std::collections::HashMap;
@@ -316,20 +316,24 @@ pub async fn run_metadata_client(
     }
 }
 
-/// Se connecte au plugin input et relaie chaque `Command` reçue sur `cmd_tx`,
-/// jusqu'à fermeture de la connexion (ne revient qu'en cas d'erreur ; à
-/// spawn dans une tâche dédiée par l'appelant).
-pub async fn run_input_client(socket_path: &Path, cmd_tx: mpsc::Sender<Command>) -> Result<()> {
+/// Se connecte au plugin input et relaie chaque `InputMessage` reçu sur
+/// `cmd_tx`, jusqu'à fermeture de la connexion (ne revient qu'en cas d'erreur ;
+/// à spawn dans une tâche dédiée par l'appelant).
+///
+/// Accepte aussi bien l'enveloppe complète (`{"cmd":...,"held":true}`) que la
+/// forme nue d'avant Tâche 1 (`{"cmd":...}`) : `InputMessage` désérialise les
+/// deux, `held` retombant sur `false` en son absence.
+pub async fn run_input_client(socket_path: &Path, cmd_tx: mpsc::Sender<InputMessage>) -> Result<()> {
     let stream = connect_with_retry(socket_path).await?;
     let mut lines = BufReader::new(stream).lines();
     while let Some(line) = lines.next_line().await? {
-        match serde_json::from_str::<Command>(&line) {
-            Ok(cmd) => {
+        match serde_json::from_str::<InputMessage>(&line) {
+            Ok(msg) => {
                 // Récepteur disparu = boucle du cœur finie : continuer à lire
                 // la socket pour jeter les commandes serait une fuite de
                 // tâche. Même traitement que le cas symétrique du relais
                 // metadata (canal now-playing fermé).
-                if cmd_tx.send(cmd).await.is_err() {
+                if cmd_tx.send(msg).await.is_err() {
                     bail!("coeur ferme, arret du relais input");
                 }
             }
@@ -584,6 +588,26 @@ mod tests {
         assert_eq!(client.get_catalog().await.unwrap(), serde_json::json!({"btn_save": "Enregistrer"}));
         let verdict = client.set_data(serde_json::json!({})).await.unwrap();
         assert_eq!(verdict, Err("nope".to_string()));
+    }
+
+    #[tokio::test]
+    async fn input_client_relaie_les_lignes_avec_et_sans_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("input.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let socket_for_client = socket.clone();
+        tokio::spawn(async move {
+            let _ = run_input_client(&socket_for_client, tx).await;
+        });
+        let (mut stream, _) = listener.accept().await.unwrap();
+        // A plain line from a pre-envelope plugin, then a held line.
+        stream.write_all(b"{\"cmd\":\"VolumeUp\"}\n{\"cmd\":\"VolumeDown\",\"held\":true}\n").await.unwrap();
+        let premier = rx.recv().await.unwrap();
+        assert_eq!(premier, ritornello_proto::InputMessage::from(ritornello_proto::Command::VolumeUp));
+        let second = rx.recv().await.unwrap();
+        assert_eq!(second.cmd, ritornello_proto::Command::VolumeDown);
+        assert!(second.held);
     }
 
     #[tokio::test]

@@ -17,7 +17,7 @@ use crate::devices::Hub;
 use anyhow::Result;
 use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::{run_admin_plugin, run_input_plugin, InputPlugin};
-use ritornello_proto::Command;
+use ritornello_proto::InputMessage;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
@@ -31,12 +31,12 @@ fn env_or(key: &str, default: &str) -> String {
 /// Moitié Input : consomme le mpsc alimenté par toutes les tâches de lecture
 /// evdev, quel que soit le périphérique d'origine.
 struct EvdevInput {
-    rx: mpsc::Receiver<Command>,
+    rx: mpsc::Receiver<InputMessage>,
 }
 
 #[async_trait::async_trait]
 impl InputPlugin for EvdevInput {
-    async fn next_command(&mut self) -> Result<Command> {
+    async fn next_command(&mut self) -> Result<InputMessage> {
         self.rx
             .recv()
             .await
@@ -141,7 +141,7 @@ mod tests {
         // appelée, et le lâchait ; or le hub tient l'émetteur du canal des
         // commandes. Le contrat que `main` doit tenir est celui-ci : tant
         // qu'un émetteur vit, `next_command` attend au lieu de se terminer.
-        let (tx, rx) = mpsc::channel::<Command>(4);
+        let (tx, rx) = mpsc::channel::<InputMessage>(4);
         let mut input = EvdevInput { rx };
         tokio::select! {
             _ = input.next_command() => panic!("next_command ne doit pas se terminer tant qu'un emetteur vit"),

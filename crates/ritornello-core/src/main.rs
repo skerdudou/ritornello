@@ -18,7 +18,7 @@ use crate::status::{AppState, LogBuffer, LogBufferWriter, PluginStatus, StatusSt
 use crate::types::Event;
 use anyhow::{Context, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
-use ritornello_proto::{Command, Enrichment, NowPlaying, View};
+use ritornello_proto::{Enrichment, InputMessage, NowPlaying, View};
 use ritornello_plugin_sdk::{run_input_client, run_metadata_client, DisplayClient, SourceClient, SourceUpdate};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
         core::EN,
     )));
 
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(32);
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<InputMessage>(32);
     // Événements de mpv : un `mpsc`, pas un `broadcast` — il n'y a qu'un
     // consommateur (la boucle ci-dessous), et la sémantique avec perte de
     // `broadcast` (`Lagged`) pouvait jeter un `PlaybackIdle` que mpv, qui ne
@@ -382,8 +382,8 @@ async fn main() -> Result<()> {
             }
         };
         tokio::select! {
-            Some(cmd) = cmd_rx.recv() => {
-                if let Err(e) = core.handle_command(cmd).await {
+            Some(msg) = cmd_rx.recv() => {
+                if let Err(e) = core.handle_input(msg).await {
                     tracing::warn!("commande: {e}");
                 }
                 status_state.write().await.active_source = core.active_source().to_string();

@@ -1,7 +1,7 @@
 use crate::bindings::Bindings;
 use crate::learn::LearnState;
 use evdev::{Device, EventType};
-use ritornello_proto::Command;
+use ritornello_proto::{Command, InputMessage};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -65,11 +65,11 @@ pub struct Hub {
     pub learn: Arc<RwLock<LearnState>>,
     /// Nœuds actuellement ouverts : chemin → nom du périphérique.
     pub open: Arc<RwLock<BTreeMap<PathBuf, String>>>,
-    pub tx: mpsc::Sender<Command>,
+    pub tx: mpsc::Sender<InputMessage>,
 }
 
 impl Hub {
-    pub fn new(bindings: Bindings, tx: mpsc::Sender<Command>) -> Hub {
+    pub fn new(bindings: Bindings, tx: mpsc::Sender<InputMessage>) -> Hub {
         Hub {
             bindings: Arc::new(RwLock::new(bindings)),
             learn: Arc::new(RwLock::new(LearnState::default())),
@@ -172,7 +172,7 @@ impl Hub {
                 };
                 if let Some(cmd) = cmd {
                     tracing::debug!("{name}: touche {} -> {cmd:?}", ev.code());
-                    let _ = hub.tx.send(cmd).await;
+                    let _ = hub.tx.send(InputMessage::from(cmd)).await;
                 }
             }
             hub.forget(&path);
@@ -206,7 +206,7 @@ mod tests {
         }
     }
 
-    fn hub_de_test() -> (Hub, mpsc::Receiver<Command>) {
+    fn hub_de_test() -> (Hub, mpsc::Receiver<InputMessage>) {
         let (tx, rx) = mpsc::channel(8);
         (Hub::new(table(), tx), rx)
     }

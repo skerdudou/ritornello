@@ -129,12 +129,12 @@ impl AdminPlugin for GenericInputAdmin {
 mod tests {
     use super::*;
     use crate::bindings::{Binding, Device};
-    use ritornello_proto::Command;
+    use ritornello_proto::{Command, InputMessage};
     use tokio::sync::mpsc;
 
     struct Fixture {
         admin: GenericInputAdmin,
-        _rx: mpsc::Receiver<Command>,
+        _rx: mpsc::Receiver<InputMessage>,
         _dir: tempfile::TempDir,
     }
 

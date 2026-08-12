@@ -311,13 +311,18 @@ pub async fn run_display_plugin(mut plugin: impl DisplayPlugin, socket_path: &Pa
     Ok(())
 }
 
-use ritornello_proto::Command;
+use ritornello_proto::InputMessage;
 
 #[async_trait::async_trait]
 pub trait InputPlugin: Send + 'static {
-    async fn next_command(&mut self) -> Result<Command>;
+    async fn next_command(&mut self) -> Result<InputMessage>;
 }
 
+/// Lie `socket_path`, accepte une connexion (le cœur), puis relaie chaque
+/// `InputMessage` produit par le plugin. `held: false` n'est pas sérialisé
+/// (voir `InputMessage`), donc les octets sur le fil restent inchangés pour
+/// les commandes non maintenues — un cœur d'avant Tâche 1 déserialiserait la
+/// trame sans rien y voir de nouveau.
 pub async fn run_input_plugin(mut plugin: impl InputPlugin, socket_path: &Path) -> Result<()> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -327,8 +332,8 @@ pub async fn run_input_plugin(mut plugin: impl InputPlugin, socket_path: &Path) 
     let (stream, _) = listener.accept().await?;
     let (_read, mut write) = stream.into_split();
     loop {
-        let cmd = plugin.next_command().await?;
-        write.write_all(format!("{}\n", serde_json::to_string(&cmd)?).as_bytes()).await?;
+        let msg = plugin.next_command().await?;
+        write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
     }
 }
 
@@ -1002,12 +1007,12 @@ mod input_tests {
     use ritornello_proto::Command;
 
     struct FixedCommands {
-        remaining: Vec<Command>,
+        remaining: Vec<InputMessage>,
     }
 
     #[async_trait::async_trait]
     impl InputPlugin for FixedCommands {
-        async fn next_command(&mut self) -> anyhow::Result<Command> {
+        async fn next_command(&mut self) -> anyhow::Result<InputMessage> {
             if self.remaining.is_empty() {
                 std::future::pending::<()>().await;
             }
@@ -1020,7 +1025,9 @@ mod input_tests {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("input.sock");
         let socket_for_server = socket.clone();
-        let plugin = FixedCommands { remaining: vec![Command::Select(3), Command::Stop] };
+        let plugin = FixedCommands {
+            remaining: vec![InputMessage::from(Command::Select(3)), InputMessage::from(Command::Stop)],
+        };
         tokio::spawn(async move {
             let _ = run_input_plugin(plugin, &socket_for_server).await;
         });
@@ -1037,8 +1044,40 @@ mod input_tests {
         let mut lines = tokio::io::BufReader::new(stream).lines();
 
         let l1 = lines.next_line().await.unwrap().unwrap();
-        assert_eq!(serde_json::from_str::<Command>(&l1).unwrap(), Command::Select(3));
+        assert_eq!(serde_json::from_str::<InputMessage>(&l1).unwrap(), InputMessage::from(Command::Select(3)));
         let l2 = lines.next_line().await.unwrap().unwrap();
-        assert_eq!(serde_json::from_str::<Command>(&l2).unwrap(), Command::Stop);
+        assert_eq!(serde_json::from_str::<InputMessage>(&l2).unwrap(), InputMessage::from(Command::Stop));
+    }
+
+    #[tokio::test]
+    async fn un_message_maintenu_serialise_held_true_un_non_maintenu_omet_le_champ() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("input.sock");
+        let socket_for_server = socket.clone();
+        let plugin = FixedCommands {
+            remaining: vec![
+                InputMessage::from(Command::VolumeUp),
+                InputMessage { cmd: Command::VolumeUp, held: true },
+            ],
+        };
+        tokio::spawn(async move {
+            let _ = run_input_plugin(plugin, &socket_for_server).await;
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = tokio::net::UnixStream::connect(&socket).await {
+                client = Some(s);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let stream = client.expect("connexion au plugin input");
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = tokio::io::BufReader::new(stream).lines();
+
+        let l1 = lines.next_line().await.unwrap().unwrap();
+        assert!(!l1.contains("held"), "held:false ne doit pas apparaitre sur le fil: {l1}");
+        let l2 = lines.next_line().await.unwrap().unwrap();
+        assert!(l2.contains("\"held\":true"), "held:true doit apparaitre sur le fil: {l2}");
     }
 }

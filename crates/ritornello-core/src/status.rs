@@ -35,7 +35,7 @@ pub struct AppState {
     pub locales_root: std::path::PathBuf,
     pub admin_backends: Arc<std::collections::HashMap<String, Arc<dyn crate::admin::AdminBackend>>>,
     pub admin_assets: Arc<crate::admin::AssetCache>,
-    pub cmd_tx: mpsc::Sender<ritornello_proto::Command>,
+    pub cmd_tx: mpsc::Sender<ritornello_proto::InputMessage>,
     pub theme_current: Arc<RwLock<crate::theme::ThemeState>>,
     pub theme_tx: mpsc::Sender<crate::theme::ThemeState>,
     /// Behavior settings shown on the config page. Same pattern as
@@ -247,9 +247,11 @@ async fn i18n_json(State(state): State<AppState>) -> Json<serde_json::Value> {
 
 /// Télécommande web : pousse la commande reçue dans le même canal `cmd_tx`
 /// que celui alimenté par les plugins Input (aucune logique métier propre,
-/// juste une source de commandes supplémentaire).
-async fn command_post(State(state): State<AppState>, Json(cmd): Json<ritornello_proto::Command>) -> StatusCode {
-    if state.cmd_tx.send(cmd).await.is_err() {
+/// juste une source de commandes supplémentaire). Le drapeau `held` de
+/// l'enveloppe traverse tel quel : le cœur cadence les commandes de volume
+/// maintenues quelle que soit leur origine (voir `Core::handle_input`).
+async fn command_post(State(state): State<AppState>, Json(msg): Json<ritornello_proto::InputMessage>) -> StatusCode {
+    if state.cmd_tx.send(msg).await.is_err() {
         tracing::warn!("télécommande web: canal de commandes fermé");
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
@@ -468,7 +470,7 @@ pub(crate) mod tests_support {
     }
 
     /// Variante avec un `cmd_tx` observable, pour les tests de la télécommande web.
-    pub(crate) fn app_state_with_cmd() -> (AppState, tokio::sync::mpsc::Receiver<ritornello_proto::Command>) {
+    pub(crate) fn app_state_with_cmd() -> (AppState, tokio::sync::mpsc::Receiver<ritornello_proto::InputMessage>) {
         let (audio_tx, _audio_rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(4);
@@ -702,7 +704,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        assert_eq!(cmd_rx.recv().await.unwrap(), ritornello_proto::Command::VolumeUp);
+        assert_eq!(cmd_rx.recv().await.unwrap().cmd, ritornello_proto::Command::VolumeUp);
     }
 
     #[tokio::test]
@@ -719,7 +721,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        assert_eq!(cmd_rx.recv().await.unwrap(), ritornello_proto::Command::Select(3));
+        assert_eq!(cmd_rx.recv().await.unwrap().cmd, ritornello_proto::Command::Select(3));
+    }
+
+    #[tokio::test]
+    async fn post_command_accepte_le_drapeau_held() {
+        let (state, mut cmd_rx) = app_state_with_cmd();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::post("/api/command")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"cmd":"VolumeUp","held":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let recu = cmd_rx.recv().await.unwrap();
+        assert_eq!(recu.cmd, ritornello_proto::Command::VolumeUp);
+        assert!(recu.held);
     }
 
     #[tokio::test]
