@@ -578,6 +578,10 @@ impl<P: Player> Core<P> {
                 let action = self.active().request(SourceReq::Activate).await?;
                 self.apply(action).await?;
             }
+            Command::Plus10 => {
+                // Handled in a later task: increment the pending tens offset
+                // and display it in the overlay.
+            }
         }
         Ok(())
     }
@@ -891,12 +895,12 @@ mod tests {
     /// Mise à jour ne portant qu'une vue, dont la `line2` est la ligne propre de
     /// la Source (non remplaçable) — le cas de la radio.
     fn vue(v: View) -> SourceUpdate {
-        SourceUpdate { view: Some(v), identity: None, line2_replaceable: false, transient: false, preset: None }
+        SourceUpdate { view: Some(v), identity: None, line2_replaceable: false, transient: false, preset: None, preset_count: None }
     }
 
     /// Mise à jour dont la `line2` est un remplissage remplaçable — le cas du cd.
     fn vue_remplacable(v: View) -> SourceUpdate {
-        SourceUpdate { view: Some(v), identity: None, line2_replaceable: true, transient: false, preset: None }
+        SourceUpdate { view: Some(v), identity: None, line2_replaceable: true, transient: false, preset: None, preset_count: None }
     }
 
     /// Mise à jour ne portant qu'une identité.
@@ -907,6 +911,7 @@ mod tests {
             line2_replaceable: false,
             transient: false,
             preset: None,
+            preset_count: None,
         }
     }
 
@@ -1728,7 +1733,7 @@ mod tests {
         let message = View { line1: "RADIO  P4".into(), line2: "empty preset".into(), line3: String::new() };
         core.handle_source_update(
             "radio",
-            SourceUpdate { view: Some(message), identity: None, line2_replaceable: false, transient: true, preset: None },
+            SourceUpdate { view: Some(message), identity: None, line2_replaceable: false, transient: true, preset: None, preset_count: None },
         );
         let affiche = vue_rx.borrow_and_update().clone();
         assert_eq!(affiche.line2, "empty preset", "le message doit s'afficher");

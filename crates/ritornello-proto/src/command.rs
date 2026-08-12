@@ -18,6 +18,11 @@ pub enum Command {
     Stop,
     Eject,
     Power,
+    /// Cumulative tens key of the remote: each press shifts the next digit
+    /// key by +10 (`+10` then `4` selects 14, `+10 +10` then `0` selects 20).
+    /// The pending offset lives in the core — which also displays it and
+    /// expires it; input plugins just relay the key press.
+    Plus10,
 }
 
 /// One line of the input protocol: the command, plus whether it comes from a
@@ -82,5 +87,19 @@ mod tests {
     #[test]
     fn input_message_from_command() {
         assert_eq!(InputMessage::from(Command::Stop), InputMessage { cmd: Command::Stop, held: false });
+    }
+
+    #[test]
+    fn plus10_et_select_zero_font_le_tour() {
+        // Plus10 est la touche +10 de la télécommande, Select(0) sa touche 0 :
+        // les deux doivent voyager tels quels.
+        let p = Command::Plus10;
+        let json = serde_json::to_string(&p).unwrap();
+        assert_eq!(json, r#"{"cmd":"Plus10"}"#);
+        assert_eq!(serde_json::from_str::<Command>(&json).unwrap(), p);
+        let z = Command::Select(0);
+        let json = serde_json::to_string(&z).unwrap();
+        assert_eq!(json, r#"{"cmd":"Select","arg":0}"#);
+        assert_eq!(serde_json::from_str::<Command>(&json).unwrap(), z);
     }
 }

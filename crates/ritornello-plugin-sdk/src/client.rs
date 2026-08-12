@@ -48,6 +48,8 @@ pub struct SourceUpdate {
     /// Voir `SourceMessage::preset`. Absent = rien déclaré, garder la valeur
     /// courante.
     pub preset: Option<u8>,
+    /// See `SourceMessage::preset_count`.
+    pub preset_count: Option<u8>,
 }
 
 pub struct SourceClient {
@@ -81,7 +83,7 @@ impl SourceClient {
                         let _ = tx.send(action);
                     }
                 }
-                if msg.view.is_some() || msg.identity.is_some() || msg.preset.is_some() {
+                if msg.view.is_some() || msg.identity.is_some() || msg.preset.is_some() || msg.preset_count.is_some() {
                     let porte_identite = msg.identity.is_some();
                     let update = SourceUpdate {
                         view: msg.view,
@@ -89,6 +91,7 @@ impl SourceClient {
                         line2_replaceable: msg.line2_replaceable,
                         transient: msg.transient,
                         preset: msg.preset,
+                        preset_count: msg.preset_count,
                     };
                     if view_tx.try_send((name.clone(), update)).is_err() {
                         // Conséquence aggravée depuis que la trame porte aussi
@@ -372,6 +375,7 @@ mod tests {
                 line2_replaceable: false,
                 transient: false,
                 preset: None,
+                preset_count: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             let _ = socket_for_server; // garde le chemin vivant pour le débogage
@@ -395,6 +399,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trame_seule_avec_le_compte_est_relayee() {
+        // Une trame portant seulement preset_count est "intéressante"
+        // et doit être relayée (même logique que preset).
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+            let msg = ritornello_proto::SourceMessage {
+                id: Some(req.id),
+                action: Some(SourceAction::Noop),
+                view: None,
+                identity: None,
+                line2_replaceable: false,
+                transient: false,
+                preset: None,
+                preset_count: Some(5),
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let (view_tx, mut view_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "radio".into(), view_tx).await.unwrap();
+        client.request(SourceReq::Activate).await.unwrap();
+        let (name, update) = view_rx.recv().await.unwrap();
+        assert_eq!(name, "radio");
+        assert_eq!(update.preset_count, Some(5));
+    }
+
+    #[tokio::test]
     async fn source_client_ne_relaie_rien_quand_la_trame_ne_porte_ni_vue_ni_identite() {
         // Une réponse à SetLocale, par exemple : inutile de réveiller la boucle
         // du cœur pour une trame qui ne dit rien de l'affichage.
@@ -415,6 +454,7 @@ mod tests {
                 line2_replaceable: false,
                 transient: false,
                 preset: None,
+                preset_count: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;

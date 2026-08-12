@@ -111,6 +111,18 @@ pub struct SourceMessage {
     /// donc pas de forme « effacée » à déclarer ici.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<u8>,
+    /// How many numbered presets the source currently offers: stations for
+    /// the radio, tracks for the cd. This is what lets the web UI show only
+    /// the numbers that exist instead of an unconditional 1-9 grid.
+    ///
+    /// Absent = "this frame says nothing about the count, keep the previous
+    /// one". `Some(0)` is meaningful — "there is nothing to number" (cd
+    /// without a disc) — and distinct from absent. The core forgets the
+    /// remembered count on source change and standby (the next source
+    /// re-declares it on activate/wake), but NOT on stop: a stopped radio
+    /// still has its stations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_count: Option<u8>,
 }
 
 #[cfg(test)]
@@ -155,6 +167,7 @@ mod tests {
             line2_replaceable: false,
             transient: false,
             preset: None,
+            preset_count: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
@@ -165,7 +178,7 @@ mod tests {
 
     #[test]
     fn message_notification_sans_id() {
-        let m = SourceMessage { id: None, action: None, view: Some(View::default()), identity: None, line2_replaceable: false, transient: false, preset: None };
+        let m = SourceMessage { id: None, action: None, view: Some(View::default()), identity: None, line2_replaceable: false, transient: false, preset: None, preset_count: None };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, None);
@@ -198,6 +211,7 @@ mod tests {
             line2_replaceable: false,
             transient: false,
             preset: Some(4),
+            preset_count: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"preset\":4"));
@@ -212,7 +226,32 @@ mod tests {
         // La majorité des trames ne disent rien de l'identité (SetLocale,
         // Deactivate…) : les alourdir d'un `"identity":null` serait du bruit sur
         // une liaison volontairement lisible à l'œil.
-        let m = SourceMessage { id: Some(2), action: None, view: None, identity: None, line2_replaceable: false, transient: false, preset: None };
+        let m = SourceMessage { id: Some(2), action: None, view: None, identity: None, line2_replaceable: false, transient: false, preset: None, preset_count: None };
         assert_eq!(serde_json::to_string(&m).unwrap(), r#"{"id":2,"action":null,"view":null}"#);
+    }
+
+    #[test]
+    fn le_compte_fait_le_tour_et_reste_absent_par_defaut() {
+        let m = SourceMessage {
+            id: Some(3),
+            action: Some(SourceAction::Noop),
+            view: None,
+            identity: None,
+            line2_replaceable: false,
+            transient: false,
+            preset: None,
+            preset_count: Some(23),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"preset_count\":23"));
+        let back: SourceMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.preset_count, Some(23));
+        // Trame d'un plugin antérieur : rien déclaré.
+        let ancien: SourceMessage = serde_json::from_str(r#"{"id":3}"#).unwrap();
+        assert_eq!(ancien.preset_count, None);
+        // Some(0) est porteur de sens (cd sans disque) et doit voyager tel quel,
+        // distinct de l'absence.
+        let zero: SourceMessage = serde_json::from_str(r#"{"id":3,"preset_count":0}"#).unwrap();
+        assert_eq!(zero.preset_count, Some(0));
     }
 }

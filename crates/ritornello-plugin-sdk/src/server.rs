@@ -25,6 +25,8 @@ pub struct SourceOutcome {
     pub transient: bool,
     /// Touche 1-9 correspondant à ce qui joue (voir `SourceMessage::preset`).
     pub preset: Option<u8>,
+    /// See `SourceMessage::preset_count`.
+    pub preset_count: Option<u8>,
 }
 
 impl SourceOutcome {
@@ -37,6 +39,7 @@ impl SourceOutcome {
             line2_replaceable: false,
             transient: false,
             preset: None,
+            preset_count: None,
         }
     }
 
@@ -70,6 +73,13 @@ impl SourceOutcome {
         self
     }
 
+    /// Declare how many numbered presets exist after this frame (stations,
+    /// tracks). See `SourceMessage::preset_count` for the exact semantics.
+    pub fn preset_count(mut self, n: u8) -> Self {
+        self.preset_count = Some(n);
+        self
+    }
+
     /// Déclare l'identité **opaque** de ce qui joue désormais.
     pub fn plays(mut self, identity: serde_json::Value) -> Self {
         self.identity = Some(IdentityUpdate::Playing(identity));
@@ -99,9 +109,15 @@ pub struct Notification {
     pub transient: bool,
     /// Voir `SourceOutcome::preset`.
     pub preset: Option<u8>,
+    /// See `SourceMessage::preset_count`.
+    pub preset_count: Option<u8>,
 }
 
 impl Notification {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     pub fn view(view: View) -> Self {
         Self {
             view: Some(view),
@@ -109,6 +125,7 @@ impl Notification {
             line2_replaceable: false,
             transient: false,
             preset: None,
+            preset_count: None,
         }
     }
 
@@ -120,6 +137,12 @@ impl Notification {
     /// Voir `SourceOutcome::preset`.
     pub fn preset(mut self, n: u8) -> Self {
         self.preset = Some(n);
+        self
+    }
+
+    /// See `SourceMessage::preset_count`.
+    pub fn preset_count(mut self, n: u8) -> Self {
+        self.preset_count = Some(n);
         self
     }
 
@@ -247,6 +270,7 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                     line2_replaceable: outcome.line2_replaceable,
                     transient: outcome.transient,
                     preset: outcome.preset,
+                    preset_count: outcome.preset_count,
                 };
                 write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
             }
@@ -261,6 +285,7 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                             line2_replaceable: n.line2_replaceable,
                             transient: n.transient,
                             preset: n.preset,
+                            preset_count: n.preset_count,
                         };
                         write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
                     }
@@ -525,6 +550,14 @@ mod tests {
     use ritornello_proto::{SourceAction, View};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
+
+    #[test]
+    fn le_compte_du_builder_atterrit_dans_la_trame() {
+        let o = SourceOutcome::new(SourceAction::Noop).preset_count(23);
+        assert_eq!(o.preset_count, Some(23));
+        let n = Notification::new().preset_count(0);
+        assert_eq!(n.preset_count, Some(0));
+    }
 
     struct EchoSource;
 

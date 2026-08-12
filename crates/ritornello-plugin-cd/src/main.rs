@@ -322,6 +322,7 @@ impl CdSource {
             // piste changée) décrit l'état durable de l'appareil.
             transient: false,
             preset: issue.preset,
+            preset_count: None,
         }
     }
 }
