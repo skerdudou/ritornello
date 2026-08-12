@@ -217,4 +217,11 @@ describe('HomeView — volume maintenu', () => {
     await vi.advanceTimersByTimeAsync(5000)
     expect(posts).toHaveLength(1)
   })
+
+  it('l’auto-répétition du clavier ne mitraille pas : un seul pas par appui', async () => {
+    const { w, posts } = await monterAvecTimings()
+    await w.find('[data-remote-hold="VolumeUp"]').trigger('keydown.enter', { repeat: false })
+    await w.find('[data-remote-hold="VolumeUp"]').trigger('keydown.enter', { repeat: true })
+    expect(posts).toEqual([JSON.stringify({ cmd: 'VolumeUp' })])
+  })
 })

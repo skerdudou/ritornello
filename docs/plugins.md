@@ -127,6 +127,11 @@ volume-hold card in [interface.md](interface.md)) and ignores `held` on
 any command other than volume, so a plugin that did send it elsewhere
 would have no effect.
 
+Plugins built with the Rust SDK return an `InputMessage` from
+`next_command`; `From<Command>` covers the non-held case, so a plugin that
+never sends held repeats can keep returning a bare `Command` — the wire
+format stays backward compatible either way.
+
 **Updating an existing installation** (old hard-coded-keyboard
 `ritornello-plugin-mce`): in `/etc/ritornello/plugins.toml`, replace the
 plugin's entry with `name = "generic-input"`, `exec =

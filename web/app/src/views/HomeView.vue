@@ -63,6 +63,12 @@ function finMaintien() {
 }
 
 onUnmounted(finMaintien)
+
+// Un pas par appui : les répétitions du clavier (keydown auto-répété) sont
+// ignorées, le maintien cadencé reste l'affaire du pointeur.
+function toucheVolume(e: KeyboardEvent, cmd: Command) {
+  if (!e.repeat) send(cmd)
+}
 </script>
 
 <template>
@@ -108,9 +114,11 @@ onUnmounted(finMaintien)
           <template v-for="c in rangee" :key="c.key">
             <!-- Volume +/- : appui maintenu (pointeur) au lieu d'un clic. Pas
                  de @click : il partirait en double après le pointerup. Le
-                 clavier garde un pas par touche via @keydown. touch-none
-                 empêche le défilement tactile d'avaler le maintien,
-                 @contextmenu.prevent le menu d'appui long mobile. -->
+                 clavier garde un pas par touche via @keydown (les
+                 répétitions auto du navigateur sont filtrées par
+                 `toucheVolume`, voir le script). touch-none empêche le
+                 défilement tactile d'avaler le maintien, @contextmenu.prevent
+                 le menu d'appui long mobile. -->
             <Button
               v-if="estVolume(c)"
               :data-remote-hold="c.cmd.cmd"
@@ -121,8 +129,8 @@ onUnmounted(finMaintien)
               @pointercancel="finMaintien"
               @pointerleave="finMaintien"
               @contextmenu.prevent
-              @keydown.enter.prevent="send(c.cmd)"
-              @keydown.space.prevent="send(c.cmd)"
+              @keydown.enter.prevent="toucheVolume($event, c.cmd)"
+              @keydown.space.prevent="toucheVolume($event, c.cmd)"
             >
               {{ t(c.key) }}
             </Button>

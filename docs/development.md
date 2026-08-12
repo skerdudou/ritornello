@@ -92,7 +92,10 @@ import map is correct and that the Vue runtime is unique; the equivalent
 for plugin bundles is `verifier-dist-plugin.mjs`. The npm build must
 **always** precede the cargo builds: the SPA and the plugins' `ui.js` are
 embedded at compile time (`rust-embed`, `include_str!`). This is the
-order `deploy/build.sh` applies.
+order `deploy/build.sh` applies. When cargo runs through WSL against a
+Windows checkout, the `dist` fingerprint may not invalidate reliably —
+`touch crates/ritornello-core/build.rs` after an npm rebuild to force
+re-embedding the SPA.
 
 ## Process
 

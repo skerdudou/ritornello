@@ -453,6 +453,8 @@ impl<P: Player> Core<P> {
         self.view = self.standby_view().await;
         self.push_view();
         self.publie_etat();
+        // A held key must re-press after standby: stale deadlines don't survive it.
+        self.volume_deadline = None;
         Ok(())
     }
 
@@ -533,6 +535,8 @@ impl<P: Player> Core<P> {
                     self.overlay = None;
                     self.view = self.standby_view().await;
                     self.push_view();
+                    // A held key must re-press after standby: stale deadlines don't survive it.
+                    self.volume_deadline = None;
                 } else {
                     self.resume().await?;
                 }
@@ -1886,6 +1890,21 @@ mod tests {
         core.handle_command(Command::Power).await.unwrap();
         assert!(!core.etat_lecteur().standby);
         assert!(source_calls.lock().unwrap().iter().any(|c| c.contains("Wake")));
+    }
+
+    #[tokio::test]
+    async fn volume_deadline_ne_survit_pas_a_la_veille() {
+        // A deadline armed before standby must not let a held key step the
+        // volume after waking: it has to re-press first.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.set_settings(reglages_rapides());
+        core.resume().await.unwrap();
+        core.handle_command(Command::VolumeUp).await.unwrap(); // 65, arms the deadline
+        core.handle_command(Command::Power).await.unwrap();    // standby, clears it
+        core.handle_command(Command::Power).await.unwrap();    // wake
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        core.handle_input(InputMessage { cmd: Command::VolumeUp, held: true }).await.unwrap();
+        assert_eq!(core.etat_lecteur().volume, 65, "pas de deadline restante : le held ne fait rien");
     }
 
     /// Pack français livré dans le dépôt (invariant : mêmes clés que l'anglais embarqué).
