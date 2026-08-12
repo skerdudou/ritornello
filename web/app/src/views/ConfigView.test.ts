@@ -16,7 +16,8 @@ const CATALOGUE = {
   plugins_title: 'Plugins',
   col_plugin: 'Plugin', col_kind: 'Genre', col_state: 'État', col_admin: 'Admin',
   connected: 'connecté', unavailable: 'indisponible', admin_link: 'admin',
-  audio_output: 'Sortie audio', language: 'Langue', change: 'Changer', ok: 'OK',
+  audio_output: 'Sortie audio', audio_default_device: 'Par défaut (système)',
+  language: 'Langue', change: 'Changer', ok: 'OK',
   recent_errors: 'Dernières erreurs',
   startup_title: 'Démarrage', startup_on: 'allumé', startup_standby: 'veille',
   volume_hold_title: 'Volume maintenu',
@@ -34,7 +35,13 @@ function charges() {
       ],
       active_source: 'radio',
     } as unknown,
-    '/api/audio-output': { devices: ['hw:CARD=Headphones', 'hw:CARD=HDMI'], current: 'hw:CARD=HDMI' } as unknown,
+    '/api/audio-output': {
+      devices: [
+        { name: 'hw:CARD=Headphones', description: 'bcm2835 Headphones — Direct hardware device' },
+        { name: 'hw:CARD=HDMI', description: '' },
+      ],
+      current: 'hw:CARD=HDMI',
+    } as unknown,
     '/api/locale': { locales: ['en', 'fr'], current: 'fr' } as unknown,
     '/api/logs': { lines: ['WARN plugin radio indisponible'] } as unknown,
     '/api/settings': { volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: false } as unknown,
@@ -236,7 +243,7 @@ describe('ConfigView — journaux', () => {
 describe('ConfigView — sortie audio', () => {
   beforeEach(reinitialiser)
 
-  it('envoie le PUT de sortie audio avec la charge utile attendue', async () => {
+  it('envoie le PUT du périphérique choisi, inchangé', async () => {
     const { w, puts } = await monter()
     expect(w.findAllComponents(Select)[0]!.props('modelValue')).toBe('hw:CARD=HDMI')
     await w.find('[data-audio-change]').trigger('click')
@@ -245,31 +252,58 @@ describe('ConfigView — sortie audio', () => {
     expect(toast.success).toHaveBeenCalledWith('OK')
   })
 
-  it('sans sortie choisie, retombe sur le premier périphérique disponible', async () => {
-    // IMPORTANT 3 de la revue finale. L'ancienne page etait rendue cote
-    // serveur : faute de sortie choisie, aucun `<option>` ne portait
-    // `selected`, donc le navigateur selectionnait le premier peripherique et
-    // « Changer » envoyait toujours un nom reel. Avec `?? ''`, une
-    // installation neuve (`current: null`) laissait le declencheur vide et
-    // « Changer » envoyait `device: ""` — que le coeur stockait alors sans
-    // validation : `current: ""` renvoye indefiniment, `""` transmis a mpv
-    // puis persiste, et un toast de succes par-dessus.
+  it('sans choix enregistré, l’entrée par défaut est sélectionnée et « Changer » envoie null', async () => {
+    // Fini le repli sur le premier périphérique : `current: null` est un état
+    // légitime (« suis le défaut système »), l'entrée synthétique le porte.
     const { w, puts } = await monter({
-      '/api/audio-output': { devices: ['hw:CARD=Headphones', 'hw:CARD=HDMI'], current: null },
+      '/api/audio-output': {
+        devices: [{ name: 'hw:CARD=Headphones', description: '' }],
+        current: null,
+      },
     })
-    expect(w.findAllComponents(Select)[0]!.props('modelValue')).toBe('hw:CARD=Headphones')
+    expect(w.findAllComponents(Select)[0]!.props('modelValue')).toBe('__system_default__')
     await w.find('[data-audio-change]').trigger('click')
     await flushPromises()
-    // Jamais la chaine vide : c'est tout l'objet du repli.
-    expect(puts).toEqual([{ url: '/api/audio-output', corps: { device: 'hw:CARD=Headphones' } }])
+    expect(puts).toEqual([{ url: '/api/audio-output', corps: { device: null } }])
   })
 
-  it('sans aucun périphérique listé, ne fabrique pas de nom', async () => {
-    // Cas degenere (aucune sortie ALSA visible) : le repli n'a rien sur quoi
-    // retomber. La vue ne doit pas inventer de valeur ; le coeur refuserait de
-    // toute facon la chaine vide par un 422.
-    const { w } = await monter({ '/api/audio-output': { devices: [], current: null } })
-    expect(w.findAllComponents(Select)[0]!.props('modelValue')).toBe('')
+  it('l’entrée par défaut est la première de la liste', async () => {
+    const { w } = await monter()
+    const premier = w.findAllComponents(SelectItem)[0]!
+    expect(premier.attributes('data-audio-default')).toBeDefined()
+    expect(premier.text()).toBe('Par défaut (système)')
+  })
+
+  it('affiche la description en principal et le nom technique en secondaire', async () => {
+    const { w } = await monter()
+    const items = w.findAllComponents(SelectItem)
+    const avecDescription = items.find((i) => i.text().includes('bcm2835 Headphones'))!
+    expect(avecDescription.text()).toContain('hw:CARD=Headphones')
+    // Sans description : le nom seul, pas de ligne secondaire vide.
+    const sansDescription = items.find((i) => i.props('value') === 'hw:CARD=HDMI')!
+    expect(sansDescription.text()).toBe('hw:CARD=HDMI')
+  })
+
+  it('un périphérique choisi mais absent de la liste reste visible', async () => {
+    // Carte débranchée : la sélection courante est rajoutée en fin de liste
+    // (nom seul) plutôt que de laisser un déclencheur vide.
+    const { w } = await monter({
+      '/api/audio-output': {
+        devices: [{ name: 'hw:CARD=Headphones', description: '' }],
+        current: 'hw:CARD=USB',
+      },
+    })
+    expect(w.findAllComponents(Select)[0]!.props('modelValue')).toBe('hw:CARD=USB')
+    const valeurs = w.findAllComponents(SelectItem).map((i) => i.props('value'))
+    expect(valeurs).toContain('hw:CARD=USB')
+  })
+
+  it('aucun périphérique listé : l’entrée par défaut reste utilisable', async () => {
+    const { w, puts } = await monter({ '/api/audio-output': { devices: [], current: null } })
+    expect(w.findAllComponents(Select)[0]!.props('modelValue')).toBe('__system_default__')
+    await w.find('[data-audio-change]').trigger('click')
+    await flushPromises()
+    expect(puts).toEqual([{ url: '/api/audio-output', corps: { device: null } }])
   })
 })
 

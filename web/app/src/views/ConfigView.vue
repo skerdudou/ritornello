@@ -28,6 +28,25 @@ const demarrage = computed({
   set: (v: string) => { reglages.value.start_in_standby = v === 'standby' },
 })
 
+/**
+ * Valeur de vue pour « Par défaut (système) » : jamais envoyée telle quelle
+ * (« Changer » la traduit en `device: null`), et impossible à confondre avec
+ * un nom de PCM ALSA.
+ */
+const DEFAUT_SYSTEME = '__system_default__'
+
+// La sélection courante peut nommer un périphérique disparu (carte
+// débranchée) : on la garde visible en fin de liste plutôt que de laisser
+// le déclencheur vide.
+const appareils = computed(() => {
+  const liste = [...audio.value.devices]
+  const courant = audio.value.current
+  if (courant && !liste.some((d) => d.name === courant)) {
+    liste.push({ name: courant, description: '' })
+  }
+  return liste
+})
+
 async function chargerTout() {
   // Necessaire ici, pas redondant : c'est ce qui recharge le catalogue apres
   // un changement de langue reussi (voir `changerLangue` plus bas), a la
@@ -38,22 +57,19 @@ async function chargerTout() {
   locale.value = await api.get<LocalePayload>('/api/locale').catch(() => locale.value)
   logs.value = (await api.get<LogsPayload>('/api/logs').catch(() => ({ lines: [] }))).lines
   reglages.value = await api.get<SettingsPayload>('/api/settings').catch(() => reglages.value)
-  // Repli sur le premier peripherique disponible, jamais la chaine vide.
-  // L'ancienne page etait rendue cote serveur : faute de sortie choisie, aucun
-  // `<option>` ne portait `selected`, donc le navigateur selectionnait le
-  // premier peripherique et « Changer » envoyait toujours un nom reel. Sur une
-  // installation neuve (`current: null`), `?? ''` laissait au contraire le
-  // declencheur vide et « Changer » envoyait `device: ""`. Le coeur le refuse
-  // desormais (422, voir `status::validate_audio_device`) ; ce repli evite de
-  // proposer a l'utilisateur un bouton qui ne peut que rater.
-  device.value = audio.value.current ?? audio.value.devices[0] ?? ''
+  // `current: null` = aucun choix enregistré : c'est l'entrée « Par défaut
+  // (système) » qui le porte — plus de repli sur le premier périphérique
+  // (c'était `null`, le PCM qui jette le son, en tête de `aplay -L`).
+  device.value = audio.value.current ?? DEFAUT_SYSTEME
   lang.value = locale.value.current ?? 'en'
 }
 
 onMounted(chargerTout)
 
 async function changerSortie() {
-  const err = await api.put('/api/audio-output', { device: device.value })
+  const err = await api.put('/api/audio-output', {
+    device: device.value === DEFAUT_SYSTEME ? null : device.value,
+  })
   toast[err ? 'error' : 'success'](err ?? t.value('ok'))
 }
 
@@ -172,7 +188,18 @@ function aller(id: string) {
             <Select v-model="device">
               <SelectTrigger class="min-w-64" :aria-label="t('audio_output')"><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem v-for="d in audio.devices" :key="d" :value="d">{{ d }}</SelectItem>
+                <SelectItem :value="DEFAUT_SYSTEME" data-audio-default>
+                  {{ t('audio_default_device') }}
+                </SelectItem>
+                <!-- Description lisible en principal, nom technique en
+                     secondaire — même motif que « Français » affiché / `fr`
+                     envoyé pour les langues. -->
+                <SelectItem v-for="d in appareils" :key="d.name" :value="d.name">
+                  <div class="flex flex-col items-start">
+                    <span>{{ d.description || d.name }}</span>
+                    <span v-if="d.description" class="text-xs text-muted-foreground">{{ d.name }}</span>
+                  </div>
+                </SelectItem>
               </SelectContent>
             </Select>
             <Button data-audio-change @click="changerSortie">{{ t('change') }}</Button>
