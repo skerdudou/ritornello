@@ -3,7 +3,7 @@ import {
   api, Badge, Button, Card, CardContent, CardHeader, CardTitle, Input,
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue, toast,
 } from '@ritornello/ui'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { nomLangue } from '../composables/langues'
 import { useCatalog } from '../composables/useCatalog'
@@ -76,113 +76,190 @@ async function changerLangue() {
   }
   await chargerTout()
 }
+
+/**
+ * Le sommaire : une entrée par carte, dans l'ordre du gabarit. C'est une
+ * donnée (comme REMOTE_ROWS pour la télécommande) : la vue la parcourt pour
+ * le nav ET pour l'observation du défilement.
+ */
+const SECTIONS = [
+  { id: 'plugins', key: 'plugins_title' },
+  { id: 'audio', key: 'audio_output' },
+  { id: 'language', key: 'language' },
+  { id: 'startup', key: 'startup_title' },
+  { id: 'volume-hold', key: 'volume_hold_title' },
+  { id: 'logs', key: 'recent_errors' },
+] as const
+
+const active = ref<string>(SECTIONS[0].id)
+// Visibilité par section, tenue à jour par l'observateur : la section active
+// est la première visible dans l'ordre du sommaire (pas la dernière entrée
+// reçue, qui dépend de l'ordre d'arrivée des callbacks).
+const visibles = new Set<string>()
+let observer: IntersectionObserver | null = null
+
+onMounted(() => {
+  observer = new IntersectionObserver(
+    (entries) => {
+      for (const e of entries) {
+        if (e.isIntersecting) visibles.add(e.target.id)
+        else visibles.delete(e.target.id)
+      }
+      const premiere = SECTIONS.find((s) => visibles.has(s.id))
+      if (premiere) active.value = premiere.id
+    },
+    // La bande d'observation est le haut de l'écran : la section « active »
+    // est celle qu'on est en train de lire, pas celle qui pointe en bas.
+    { rootMargin: '0px 0px -60% 0px' },
+  )
+  for (const s of SECTIONS) {
+    const el = document.getElementById(s.id)
+    if (el) observer.observe(el)
+  }
+})
+onUnmounted(() => observer?.disconnect())
+
+function aller(id: string) {
+  active.value = id
+  document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
+}
 </script>
 
 <template>
-  <div class="space-y-4">
-    <Card>
-      <CardHeader><CardTitle>{{ t('plugins_title') }}</CardTitle></CardHeader>
-      <CardContent>
-        <table class="w-full text-sm">
-          <thead class="text-muted-foreground">
-            <tr>
-              <th class="text-left font-normal">{{ t('col_plugin') }}</th>
-              <th class="text-left font-normal">{{ t('col_kind') }}</th>
-              <th class="text-left font-normal">{{ t('col_state') }}</th>
-              <th class="text-left font-normal">{{ t('col_admin') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="p in status.plugins" :key="p.name" data-plugin-row class="border-t border-border">
-              <td class="py-1" data-plugin-name>{{ p.name }}</td>
-              <td data-plugin-kind>{{ p.kind }}</td>
-              <td data-plugin-state>
-                <Badge :variant="p.connected ? 'secondary' : 'destructive'">
-                  {{ p.connected ? t('connected') : t('unavailable') }}
-                </Badge>
-              </td>
-              <td>
-                <RouterLink v-if="p.admin" :to="`/plugins/${p.name}/`" data-admin-link class="underline">
-                  {{ t('admin_link') }}
-                </RouterLink>
-                <span v-else>-</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </CardContent>
-    </Card>
+  <div class="flex gap-8">
+    <div class="min-w-0 flex-1 space-y-4">
+      <section id="plugins" class="scroll-mt-6">
+        <Card>
+          <CardHeader><CardTitle>{{ t('plugins_title') }}</CardTitle></CardHeader>
+          <CardContent>
+            <table class="w-full text-sm">
+              <thead class="text-muted-foreground">
+                <tr>
+                  <th class="text-left font-normal">{{ t('col_plugin') }}</th>
+                  <th class="text-left font-normal">{{ t('col_kind') }}</th>
+                  <th class="text-left font-normal">{{ t('col_state') }}</th>
+                  <th class="text-left font-normal">{{ t('col_admin') }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="p in status.plugins" :key="p.name" data-plugin-row class="border-t border-border">
+                  <td class="py-1" data-plugin-name>{{ p.name }}</td>
+                  <td data-plugin-kind>{{ p.kind }}</td>
+                  <td data-plugin-state>
+                    <Badge :variant="p.connected ? 'secondary' : 'destructive'">
+                      {{ p.connected ? t('connected') : t('unavailable') }}
+                    </Badge>
+                  </td>
+                  <td>
+                    <RouterLink v-if="p.admin" :to="`/plugins/${p.name}/`" data-admin-link class="underline">
+                      {{ t('admin_link') }}
+                    </RouterLink>
+                    <span v-else>-</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+      </section>
 
-    <Card>
-      <CardHeader><CardTitle>{{ t('audio_output') }}</CardTitle></CardHeader>
-      <CardContent class="flex flex-wrap items-center gap-2">
-        <!-- Le titre de la carte n'est pas associé au déclencheur : sans
-             aria-label, le sélecteur n'a aucun nom accessible. -->
-        <Select v-model="device">
-          <SelectTrigger class="min-w-64" :aria-label="t('audio_output')"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem v-for="d in audio.devices" :key="d" :value="d">{{ d }}</SelectItem>
-          </SelectContent>
-        </Select>
-        <Button data-audio-change @click="changerSortie">{{ t('change') }}</Button>
-      </CardContent>
-    </Card>
+      <section id="audio" class="scroll-mt-6">
+        <Card>
+          <CardHeader><CardTitle>{{ t('audio_output') }}</CardTitle></CardHeader>
+          <CardContent class="flex flex-wrap items-center gap-2">
+            <!-- Le titre de la carte n'est pas associé au déclencheur : sans
+                 aria-label, le sélecteur n'a aucun nom accessible. -->
+            <Select v-model="device">
+              <SelectTrigger class="min-w-64" :aria-label="t('audio_output')"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="d in audio.devices" :key="d" :value="d">{{ d }}</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button data-audio-change @click="changerSortie">{{ t('change') }}</Button>
+          </CardContent>
+        </Card>
+      </section>
 
-    <Card>
-      <CardHeader><CardTitle>{{ t('language') }}</CardTitle></CardHeader>
-      <CardContent class="flex flex-wrap items-center gap-2">
-        <Select v-model="lang">
-          <SelectTrigger class="min-w-32" :aria-label="t('language')"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <!-- Nom de la langue et non son code : « français » se lit, « fr »
-                 se devine. Le code reste la valeur envoyée au cœur. -->
-            <SelectItem v-for="l in locale.locales" :key="l" :value="l">
-              {{ nomLangue(l) }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
-        <Button data-lang-change @click="changerLangue">{{ t('change') }}</Button>
-      </CardContent>
-    </Card>
+      <section id="language" class="scroll-mt-6">
+        <Card>
+          <CardHeader><CardTitle>{{ t('language') }}</CardTitle></CardHeader>
+          <CardContent class="flex flex-wrap items-center gap-2">
+            <Select v-model="lang">
+              <SelectTrigger class="min-w-32" :aria-label="t('language')"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <!-- Nom de la langue et non son code : « français » se lit, « fr »
+                     se devine. Le code reste la valeur envoyée au cœur. -->
+                <SelectItem v-for="l in locale.locales" :key="l" :value="l">
+                  {{ nomLangue(l) }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <Button data-lang-change @click="changerLangue">{{ t('change') }}</Button>
+          </CardContent>
+        </Card>
+      </section>
 
-    <Card>
-      <CardHeader><CardTitle>{{ t('startup_title') }}</CardTitle></CardHeader>
-      <CardContent class="flex flex-wrap items-center gap-2">
-        <Select v-model="demarrage">
-          <SelectTrigger class="min-w-32" data-startup-select :aria-label="t('startup_title')"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="on">{{ t('startup_on') }}</SelectItem>
-            <SelectItem value="standby">{{ t('startup_standby') }}</SelectItem>
-          </SelectContent>
-        </Select>
-        <Button data-startup-change @click="enregistrerReglages">{{ t('change') }}</Button>
-      </CardContent>
-    </Card>
+      <section id="startup" class="scroll-mt-6">
+        <Card>
+          <CardHeader><CardTitle>{{ t('startup_title') }}</CardTitle></CardHeader>
+          <CardContent class="flex flex-wrap items-center gap-2">
+            <Select v-model="demarrage">
+              <SelectTrigger class="min-w-32" data-startup-select :aria-label="t('startup_title')"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="on">{{ t('startup_on') }}</SelectItem>
+                <SelectItem value="standby">{{ t('startup_standby') }}</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button data-startup-change @click="enregistrerReglages">{{ t('change') }}</Button>
+          </CardContent>
+        </Card>
+      </section>
 
-    <Card>
-      <CardHeader><CardTitle>{{ t('volume_hold_title') }}</CardTitle></CardHeader>
-      <CardContent class="flex flex-wrap items-end gap-4">
-        <label class="grid gap-1 text-sm">
-          {{ t('volume_hold_initial') }}
-          <Input type="number" min="200" max="5000" step="100" class="w-28" data-hold-initial
-            v-model="reglages.volume_repeat_initial_ms" />
-        </label>
-        <label class="grid gap-1 text-sm">
-          {{ t('volume_hold_interval') }}
-          <Input type="number" min="100" max="2000" step="50" class="w-28" data-hold-interval
-            v-model="reglages.volume_repeat_interval_ms" />
-        </label>
-        <Button data-hold-change @click="enregistrerReglages">{{ t('change') }}</Button>
-      </CardContent>
-    </Card>
+      <section id="volume-hold" class="scroll-mt-6">
+        <Card>
+          <CardHeader><CardTitle>{{ t('volume_hold_title') }}</CardTitle></CardHeader>
+          <CardContent class="flex flex-wrap items-end gap-4">
+            <label class="grid gap-1 text-sm">
+              {{ t('volume_hold_initial') }}
+              <Input type="number" min="200" max="5000" step="100" class="w-28" data-hold-initial
+                v-model="reglages.volume_repeat_initial_ms" />
+            </label>
+            <label class="grid gap-1 text-sm">
+              {{ t('volume_hold_interval') }}
+              <Input type="number" min="100" max="2000" step="50" class="w-28" data-hold-interval
+                v-model="reglages.volume_repeat_interval_ms" />
+            </label>
+            <Button data-hold-change @click="enregistrerReglages">{{ t('change') }}</Button>
+          </CardContent>
+        </Card>
+      </section>
 
-    <Card>
-      <CardHeader><CardTitle>{{ t('recent_errors') }}</CardTitle></CardHeader>
-      <CardContent>
-        <ul class="space-y-1 font-mono text-xs text-muted-foreground">
-          <li v-for="(l, i) in logs" :key="i" data-log-line>{{ l }}</li>
-        </ul>
-      </CardContent>
-    </Card>
+      <section id="logs" class="scroll-mt-6">
+        <Card>
+          <CardHeader><CardTitle>{{ t('recent_errors') }}</CardTitle></CardHeader>
+          <CardContent>
+            <ul class="space-y-1 font-mono text-xs text-muted-foreground">
+              <li v-for="(l, i) in logs" :key="i" data-log-line>{{ l }}</li>
+            </ul>
+          </CardContent>
+        </Card>
+      </section>
+    </div>
+
+    <nav data-toc :aria-label="t('toc_label')" class="sticky top-6 hidden w-40 shrink-0 self-start lg:block">
+      <ul class="space-y-1 text-sm">
+        <li v-for="s in SECTIONS" :key="s.id">
+          <a
+            :href="`#${s.id}`"
+            data-toc-link
+            :aria-current="active === s.id ? 'true' : undefined"
+            :class="active === s.id ? 'font-medium text-foreground' : 'text-muted-foreground'"
+            @click.prevent="aller(s.id)"
+          >
+            {{ t(s.key) }}
+          </a>
+        </li>
+      </ul>
+    </nav>
   </div>
 </template>

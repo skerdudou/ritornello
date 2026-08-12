@@ -21,6 +21,7 @@ const CATALOGUE = {
   startup_title: 'Démarrage', startup_on: 'allumé', startup_standby: 'veille',
   volume_hold_title: 'Volume maintenu',
   volume_hold_initial: 'Délai initial (ms)', volume_hold_interval: 'Intervalle de répétition (ms)',
+  toc_label: 'sections',
 }
 
 /** Charges utiles servies par le faux `fetch`, surchargeables par test. */
@@ -43,6 +44,17 @@ function charges() {
 
 type Charges = ReturnType<typeof charges>
 
+// jsdom n'implemente pas IntersectionObserver : la vue en a besoin pour le
+// scrollspy, on la remplace par une fausse classe qui capture le callback
+// pour que les tests puissent simuler des entrees/sorties de viewport.
+type IOCallback = (entries: Array<{ target: Element; isIntersecting: boolean }>) => void
+let ioCallback: IOCallback | null = null
+class FauxIO {
+  constructor(cb: IOCallback) { ioCallback = cb }
+  observe() {}
+  disconnect() {}
+}
+
 /**
  * Monte ConfigView avec un routeur en memoire (RouterLink est importe
  * directement par le SFC : il lui faut un vrai routeur, ce qui permet en outre
@@ -64,6 +76,7 @@ async function monter(surcharges: Partial<Charges> = {}, erreurPut?: string) {
     return new Response(JSON.stringify(data), { status: 200 })
   })
   vi.stubGlobal('fetch', spy)
+  vi.stubGlobal('IntersectionObserver', FauxIO)
 
   const router = createRouter({
     history: createMemoryHistory(),
@@ -77,7 +90,13 @@ async function monter(surcharges: Partial<Charges> = {}, erreurPut?: string) {
   await router.isReady()
 
   const ConfigView = (await import('./ConfigView.vue')).default
-  const w = mount(ConfigView, { global: { plugins: [router] } })
+  // Attache au vrai document (et non a un noeud detache, defaut de `mount`) :
+  // le sommaire retrouve ses sections via `document.getElementById`, qui ne
+  // voit rien hors de l'arbre du document. On repart d'un corps vide a chaque
+  // montage pour eviter que les id des sections (uniques par charge utile,
+  // mais reutilises entre tests) ne pointent vers le montage precedent.
+  document.body.innerHTML = ''
+  const w = mount(ConfigView, { global: { plugins: [router] }, attachTo: document.body })
   await flushPromises()
   return { w, spy, puts, table }
 }
@@ -307,5 +326,41 @@ describe('ConfigView — réglages', () => {
   it('un /api/settings injoignable laisse les valeurs par défaut', async () => {
     const { w } = await monter({ '/api/settings': undefined })
     expect((w.find('[data-hold-initial]').element as HTMLInputElement).value).toBe('1000')
+  })
+})
+
+describe('ConfigView — sommaire', () => {
+  beforeEach(reinitialiser)
+
+  it('liste une entrée par section, avec le libellé de sa carte', async () => {
+    const { w } = await monter()
+    const liens = w.findAll('[data-toc-link]')
+    expect(liens.map((l) => l.text())).toEqual([
+      'Plugins', 'Sortie audio', 'Langue', 'Démarrage', 'Volume maintenu', 'Dernières erreurs',
+    ])
+    // Masqué sur petit écran : la colonne fait max-w-3xl, pas la place en mobile.
+    expect(w.find('[data-toc]').classes()).toContain('hidden')
+  })
+
+  it('un clic fait défiler en douceur vers la section et la marque active', async () => {
+    const { w } = await monter()
+    const scrollIntoView = vi.fn()
+    const cible = w.find('#audio')
+    expect(cible.exists()).toBe(true)
+    cible.element.scrollIntoView = scrollIntoView
+    await w.findAll('[data-toc-link]')[1]!.trigger('click')
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth' })
+    expect(w.findAll('[data-toc-link]')[1]!.attributes('aria-current')).toBe('true')
+  })
+
+  it('le défilement met à jour la section active (scrollspy)', async () => {
+    const { w } = await monter()
+    expect(ioCallback).not.toBeNull()
+    ioCallback!([{ target: w.find('#language').element, isIntersecting: true }])
+    ioCallback!([{ target: w.find('#plugins').element, isIntersecting: false }])
+    await w.vm.$nextTick()
+    const actifs = w.findAll('[data-toc-link][aria-current="true"]')
+    expect(actifs).toHaveLength(1)
+    expect(actifs[0]!.text()).toBe('Langue')
   })
 })
