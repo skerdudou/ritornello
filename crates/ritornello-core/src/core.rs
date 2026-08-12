@@ -1,11 +1,13 @@
 use crate::metadata::{self, Metadonnees, PlayerState};
 use crate::player::Player;
-use crate::state::{self, PersistedState, Settings};
+use crate::state::{self, PersistedState};
 use crate::types::Event;
 use anyhow::Result;
 use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::SourceUpdate;
-use ritornello_proto::{Command, Enrichment, IdentityUpdate, NowPlaying, SourceAction, SourceReq, View};
+use ritornello_proto::{
+    Command, Enrichment, IdentityUpdate, InputMessage, NowPlaying, SourceAction, SourceReq, View,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -113,6 +115,15 @@ pub struct Core<P: Player> {
     metadonnees: Metadonnees,
     now_playing_tx: watch::Sender<NowPlaying>,
     etat_tx: watch::Sender<PlayerState>,
+    /// Behavior settings (hold-to-repeat timings, startup power state),
+    /// persisted with the rest of the state.
+    settings: crate::state::Settings,
+    /// Hold-to-repeat pacing: instant before which a held volume command is
+    /// ignored. Armed by a fresh volume step (now + initial delay), re-armed
+    /// by each applied repeat (now + interval). `None` until a first press —
+    /// a held event arriving out of nowhere (core restarted mid-hold) does
+    /// nothing.
+    volume_deadline: Option<Instant>,
 }
 
 impl<P: Player> Core<P> {
@@ -153,6 +164,8 @@ impl<P: Player> Core<P> {
             metadonnees: Metadonnees::new(metadata.plugins),
             now_playing_tx: metadata.now_playing,
             etat_tx: metadata.etat,
+            settings: persisted.settings.clone(),
+            volume_deadline: None,
         }
     }
 
@@ -379,6 +392,70 @@ impl<P: Player> Core<P> {
         issue
     }
 
+    /// One volume step (±5), applied to mpv, persisted, shown as an overlay.
+    /// Shared by fresh presses and held repeats; only the caller decides how
+    /// to re-arm `volume_deadline`.
+    async fn step_volume(&mut self, up: bool) -> Result<()> {
+        let v = self.volume as i16 + if up { 5 } else { -5 };
+        self.volume = v.clamp(0, 100) as u8;
+        self.player.set_volume(self.volume).await?;
+        self.persist();
+        self.show_overlay().await;
+        Ok(())
+    }
+
+    /// Entry point for everything that used to call `handle_command`: fresh
+    /// commands pass through unchanged; held (autorepeat) volume commands are
+    /// paced by `volume_deadline`. Held on any other command is a no-op — the
+    /// remote's autorepeat only means something for the volume.
+    pub async fn handle_input(&mut self, msg: InputMessage) -> Result<()> {
+        if !msg.held {
+            return self.handle_command(msg.cmd).await;
+        }
+        if self.standby {
+            return Ok(());
+        }
+        let up = match msg.cmd {
+            Command::VolumeUp => true,
+            Command::VolumeDown => false,
+            _ => return Ok(()),
+        };
+        let Some(deadline) = self.volume_deadline else { return Ok(()) };
+        if Instant::now() < deadline {
+            return Ok(());
+        }
+        let issue = self.step_volume(up).await;
+        self.volume_deadline =
+            Some(Instant::now() + Duration::from_millis(self.settings.volume_repeat_interval_ms.into()));
+        // Same publication contract as `handle_command`: the UI must see the
+        // new volume even if mpv errored mid-way.
+        self.publie_etat();
+        issue
+    }
+
+    /// New settings from `PUT /api/settings` (via the `select!` loop of main).
+    /// No bounds check here: the HTTP layer validates, and tests rely on tiny
+    /// timings.
+    pub fn set_settings(&mut self, s: crate::state::Settings) {
+        self.settings = s;
+        self.persist();
+    }
+
+    /// Startup in standby (`settings.start_in_standby`): mpv is configured
+    /// (volume, audio device) so a later wake starts right, but the active
+    /// source is not woken and the display shows the standby view.
+    pub async fn start_in_standby(&mut self) -> Result<()> {
+        self.standby = true;
+        self.player.set_volume(self.volume).await?;
+        if let Some(device) = self.audio_device.clone() {
+            self.player.set_audio_device(&device).await?;
+        }
+        self.view = self.standby_view().await;
+        self.push_view();
+        self.publie_etat();
+        Ok(())
+    }
+
     async fn appliquer_commande(&mut self, cmd: Command) -> Result<()> {
         match cmd {
             Command::Select(n) => {
@@ -410,11 +487,10 @@ impl<P: Player> Core<P> {
                 self.apply(action).await?;
             }
             Command::VolumeUp | Command::VolumeDown => {
-                let v = self.volume as i16 + if cmd == Command::VolumeUp { 5 } else { -5 };
-                self.volume = v.clamp(0, 100) as u8;
-                self.player.set_volume(self.volume).await?;
-                self.persist();
-                self.show_overlay().await;
+                self.step_volume(cmd == Command::VolumeUp).await?;
+                self.volume_deadline = Some(
+                    Instant::now() + Duration::from_millis(self.settings.volume_repeat_initial_ms.into()),
+                );
             }
             Command::Mute => {
                 self.muted = !self.muted;
@@ -641,7 +717,7 @@ impl<P: Player> Core<P> {
             locale: self.locale.clone(),
             theme: self.theme.clone(),
             mode: self.mode.clone(),
-            settings: Settings::default(),
+            settings: self.settings.clone(),
         };
         if let Err(e) = state::save(&self.state_path, &st) {
             tracing::warn!("persistance impossible: {e}");
@@ -979,7 +1055,7 @@ mod tests {
             locale: None,
             theme: None,
             mode: None,
-            settings: Settings::default(),
+            settings: crate::state::Settings::default(),
         };
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
@@ -1703,6 +1779,113 @@ mod tests {
         // La même vue, non déclarée remplaçable : l'album ne s'y pose plus.
         core.handle_source_update("radio", vue(etiquette));
         assert_eq!(vue_rx.borrow_and_update().line2, "audio CD");
+    }
+
+    /// Short timings so pacing tests run in tens of milliseconds. The core does
+    /// not validate bounds (that's the HTTP layer's job), so this is legal.
+    fn reglages_rapides() -> crate::state::Settings {
+        crate::state::Settings {
+            volume_repeat_initial_ms: 30,
+            volume_repeat_interval_ms: 25,
+            start_in_standby: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn volume_maintenu_est_ignore_avant_le_delai_initial() {
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.set_settings(reglages_rapides());
+        core.resume().await.unwrap();
+        core.handle_command(Command::VolumeUp).await.unwrap(); // 60 -> 65
+        core.handle_input(InputMessage { cmd: Command::VolumeUp, held: true }).await.unwrap();
+        assert_eq!(core.etat_lecteur().volume, 65, "une repetition avant le delai initial ne fait rien");
+    }
+
+    #[tokio::test]
+    async fn volume_maintenu_repete_apres_le_delai_puis_a_lintervalle() {
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.set_settings(reglages_rapides());
+        core.resume().await.unwrap();
+        core.handle_command(Command::VolumeUp).await.unwrap(); // 65
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        core.handle_input(InputMessage { cmd: Command::VolumeUp, held: true }).await.unwrap();
+        assert_eq!(core.etat_lecteur().volume, 70, "premiere repetition apres le delai initial");
+        // Immediately after: the interval has not elapsed yet.
+        core.handle_input(InputMessage { cmd: Command::VolumeUp, held: true }).await.unwrap();
+        assert_eq!(core.etat_lecteur().volume, 70);
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        core.handle_input(InputMessage { cmd: Command::VolumeUp, held: true }).await.unwrap();
+        assert_eq!(core.etat_lecteur().volume, 75, "puis une par intervalle");
+    }
+
+    #[tokio::test]
+    async fn volume_maintenu_sans_pression_initiale_ne_fait_rien() {
+        // A held event with no prior press (core restarted mid-hold): no
+        // deadline is armed, nothing moves.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.set_settings(reglages_rapides());
+        core.resume().await.unwrap();
+        core.handle_input(InputMessage { cmd: Command::VolumeDown, held: true }).await.unwrap();
+        assert_eq!(core.etat_lecteur().volume, 60);
+    }
+
+    #[tokio::test]
+    async fn held_sur_une_commande_non_volume_est_ignore() {
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.resume().await.unwrap();
+        source_calls.lock().unwrap().clear();
+        core.handle_input(InputMessage { cmd: Command::Next, held: true }).await.unwrap();
+        assert!(source_calls.lock().unwrap().is_empty(), "un Next maintenu ne doit pas atteindre la source");
+    }
+
+    #[tokio::test]
+    async fn volume_maintenu_est_bloque_en_veille() {
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.set_settings(reglages_rapides());
+        core.resume().await.unwrap();
+        core.handle_command(Command::VolumeUp).await.unwrap(); // 65, arms the deadline
+        core.handle_command(Command::Power).await.unwrap();    // standby
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        core.handle_input(InputMessage { cmd: Command::VolumeUp, held: true }).await.unwrap();
+        assert_eq!(core.etat_lecteur().volume, 65);
+    }
+
+    #[tokio::test]
+    async fn handle_input_non_held_equivaut_a_handle_command() {
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.resume().await.unwrap();
+        core.handle_input(InputMessage::from(Command::Select(3))).await.unwrap();
+        assert!(source_calls.lock().unwrap().iter().any(|c| c.contains("Select(3)")));
+    }
+
+    #[tokio::test]
+    async fn set_settings_persiste() {
+        let (mut core, _pc, _sc, _rx, dir) = setup();
+        core.set_settings(crate::state::Settings {
+            volume_repeat_initial_ms: 800,
+            volume_repeat_interval_ms: 250,
+            start_in_standby: true,
+        });
+        let st = crate::state::load(&dir.path().join("state.json"));
+        assert_eq!(st.settings.volume_repeat_initial_ms, 800);
+        assert!(st.settings.start_in_standby);
+    }
+
+    #[tokio::test]
+    async fn demarrage_en_veille_applique_le_volume_sans_reveiller_la_source() {
+        let (mut core, player_calls, source_calls, mut rx, _d) = setup();
+        core.start_in_standby().await.unwrap();
+        // mpv is configured (volume applied) so waking later starts right...
+        // (FakePlayer::set_volume records "vol {v}", see FakePlayer above.)
+        assert!(player_calls.lock().unwrap().iter().any(|c| c.starts_with("vol ")));
+        // ...but the source was NOT woken, and the display shows standby.
+        assert!(!source_calls.lock().unwrap().iter().any(|c| c.contains("Wake")), "pas de Wake en veille");
+        assert_eq!(rx.borrow_and_update().line1, "STANDBY");
+        assert!(core.etat_lecteur().standby);
+        // Power then wakes normally.
+        core.handle_command(Command::Power).await.unwrap();
+        assert!(!core.etat_lecteur().standby);
+        assert!(source_calls.lock().unwrap().iter().any(|c| c.contains("Wake")));
     }
 
     /// Pack français livré dans le dépôt (invariant : mêmes clés que l'anglais embarqué).
