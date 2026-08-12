@@ -12,7 +12,8 @@ vi.mock('@ritornello/ui', async () => {
 })
 
 const CATALOGUE = {
-  status_title: 'Statut',
+  config_title: 'Configuration',
+  plugins_title: 'Plugins',
   col_plugin: 'Plugin', col_kind: 'Genre', col_state: 'État', col_admin: 'Admin',
   connected: 'connecté', unavailable: 'indisponible', admin_link: 'admin',
   audio_output: 'Sortie audio', language: 'Langue', change: 'Changer', ok: 'OK',
@@ -39,7 +40,7 @@ function charges() {
 type Charges = ReturnType<typeof charges>
 
 /**
- * Monte StatusView avec un routeur en memoire (RouterLink est importe
+ * Monte ConfigView avec un routeur en memoire (RouterLink est importe
  * directement par le SFC : il lui faut un vrai routeur, ce qui permet en outre
  * d'observer le `href` reellement resolu) et un `fetch` espionne.
  */
@@ -64,15 +65,15 @@ async function monter(surcharges: Partial<Charges> = {}, erreurPut?: string) {
     history: createMemoryHistory(),
     routes: [
       { path: '/', component: { template: '<div />' } },
-      { path: '/status', component: { template: '<div />' } },
+      { path: '/config', component: { template: '<div />' } },
       { path: '/plugins/:name/', component: { template: '<div />' } },
     ],
   })
-  router.push('/status')
+  router.push('/config')
   await router.isReady()
 
-  const StatusView = (await import('./StatusView.vue')).default
-  const w = mount(StatusView, { global: { plugins: [router] } })
+  const ConfigView = (await import('./ConfigView.vue')).default
+  const w = mount(ConfigView, { global: { plugins: [router] } })
   await flushPromises()
   return { w, spy, puts, table }
 }
@@ -91,7 +92,7 @@ function reinitialiser() {
 // rechargement des catalogues, ni le rendu des journaux — et le defaut de la
 // sortie audio vide (IMPORTANT 3) est precisement celui qu'un tel test aurait
 // attrape.
-describe('StatusView — table des plugins', () => {
+describe('ConfigView — table des plugins', () => {
   beforeEach(reinitialiser)
 
   it('rend une ligne par plugin avec ses quatre colonnes', async () => {
@@ -132,11 +133,11 @@ describe('StatusView — table des plugins', () => {
   it('une table de plugins vide ne casse pas le rendu', async () => {
     const { w } = await monter({ '/api/status': { plugins: [], active_source: '' } })
     expect(w.findAll('[data-plugin-row]')).toHaveLength(0)
-    expect(w.text()).toContain('Statut')
+    expect(w.text()).toContain('Plugins')
   })
 })
 
-describe('StatusView — langue', () => {
+describe('ConfigView — langue', () => {
   beforeEach(reinitialiser)
 
   it('envoie le PUT de langue puis recharge le catalogue', async () => {
@@ -180,7 +181,7 @@ describe('StatusView — langue', () => {
   })
 })
 
-describe('StatusView — journaux', () => {
+describe('ConfigView — journaux', () => {
   beforeEach(reinitialiser)
 
   it('rend une ligne par entrée de journal, dans l’ordre reçu', async () => {
@@ -209,7 +210,7 @@ describe('StatusView — journaux', () => {
   })
 })
 
-describe('StatusView — sortie audio', () => {
+describe('ConfigView — sortie audio', () => {
   beforeEach(reinitialiser)
 
   it('envoie le PUT de sortie audio avec la charge utile attendue', async () => {

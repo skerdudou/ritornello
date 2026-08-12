@@ -5,14 +5,23 @@ describe('router', () => {
   it('conserve les URL historiques', async () => {
     await router.push('/')
     expect(router.currentRoute.value.name).toBe('home')
-    await router.push('/status')
-    expect(router.currentRoute.value.name).toBe('status')
+    await router.push('/config')
+    expect(router.currentRoute.value.name).toBe('config')
     await router.push('/plugins/radio/')
     expect(router.currentRoute.value.name).toBe('plugin')
     expect(router.currentRoute.value.params.name).toBe('radio')
     // La forme canonique ne bouge pas : c'est un invariant epingle par ailleurs
     // cote coeur (`serves_shell("/plugins/radio/")`).
     expect(router.currentRoute.value.fullPath).toBe('/plugins/radio/')
+  })
+
+  it("redirige l'ancienne URL /status vers /config", async () => {
+    // La page a ete renommee (elle configure plus qu'elle ne rapporte), mais
+    // /status est restee une URL valide depuis l'epoque du rendu cote
+    // serveur : elle atterrit desormais sur la meme page sous son nouveau nom.
+    await router.push('/status')
+    expect(router.currentRoute.value.fullPath).toBe('/config')
+    expect(router.currentRoute.value.name).toBe('config')
   })
 
   it('redirige la forme sans slash final vers la forme canonique', async () => {

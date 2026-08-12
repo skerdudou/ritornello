@@ -9,10 +9,10 @@ const variable = (page: import('@playwright/test').Page, nom: string) =>
     nom,
   )
 
-test('navigation entre l’accueil, le statut et les pages de plugin', async ({ page }) => {
+test('navigation entre l’accueil, la config et les pages de plugin', async ({ page }) => {
   await page.goto('/')
   await expect(page.locator('[data-preset-button="1"]')).toBeVisible()
-  await page.goto('/status')
+  await page.goto('/config')
   // `getByText('radio')` seul est ambigu : l'en-tete liste aussi les
   // plugins admin par leur nom (voir App.vue), donc « radio » y apparait en
   // plus de la cellule du tableau de statut — d'ou ce ciblage par role.

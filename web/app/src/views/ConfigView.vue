@@ -60,7 +60,7 @@ async function changerLangue() {
 <template>
   <div class="space-y-4">
     <Card>
-      <CardHeader><CardTitle>{{ t('status_title') }}</CardTitle></CardHeader>
+      <CardHeader><CardTitle>{{ t('plugins_title') }}</CardTitle></CardHeader>
       <CardContent>
         <table class="w-full text-sm">
           <thead class="text-muted-foreground">

@@ -6,7 +6,10 @@ export const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', name: 'home', component: () => import('./views/HomeView.vue') },
-    { path: '/status', name: 'status', component: () => import('./views/StatusView.vue') },
+    // `/status` est l'URL historique de cette page (servie depuis les débuts
+    // par le cœur) : elle reste valide et redirige vers son nouveau nom.
+    { path: '/config', name: 'config', component: () => import('./views/ConfigView.vue') },
+    { path: '/status', redirect: '/config' },
     // `strict` sur les deux formes : sans lui, le routeur tolere un slash
     // final absent ou surnumeraire, donc `/plugins/<nom>` matcherait deja la
     // route canonique et la redirection ci-dessous ne se declencherait jamais
