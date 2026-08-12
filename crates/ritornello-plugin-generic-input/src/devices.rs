@@ -56,6 +56,24 @@ pub fn key_outcome(
     bindings.resolve(device_name, code)
 }
 
+/// Same resolution as `key_outcome`, plus the autorepeat rule: a held key
+/// (evdev `value == 2`) only emits for the volume commands, marked `held` so
+/// the core paces them (the kernel repeats much faster than one step per
+/// 500 ms should go). Pure function, testable without hardware.
+pub fn key_outcome_held(
+    bindings: &Bindings,
+    learning_device: Option<&str>,
+    device_name: &str,
+    code: u16,
+    held: bool,
+) -> Option<InputMessage> {
+    let cmd = key_outcome(bindings, learning_device, device_name, code)?;
+    if held && !matches!(cmd, Command::VolumeUp | Command::VolumeDown) {
+        return None;
+    }
+    Some(InputMessage { cmd, held })
+}
+
 /// État partagé entre la moitié Input (les tâches de lecture) et la moitié
 /// Admin. `std::sync::RwLock` : les gardes sont toujours relâchées avant le
 /// moindre `.await`, et `page()` (synchrone) peut lire sans runtime.
@@ -156,23 +174,28 @@ impl Hub {
                         break;
                     }
                 };
-                if ev.event_type() != EventType::KEY || ev.value() != 1 {
+                let value = ev.value();
+                // 1 = key down, 2 = kernel autorepeat while held. Release (0)
+                // stays ignored: the core paces repeats, no timer to stop here.
+                if ev.event_type() != EventType::KEY || (value != 1 && value != 2) {
                     continue;
                 }
-                // L'apprentissage consomme le premier appui et n'émet rien.
-                let capture = { hub.learn.write().unwrap().capture(&name, ev.code()) };
-                if capture {
-                    continue;
+                if value == 1 {
+                    // Learning consumes the first press and emits nothing.
+                    let capture = { hub.learn.write().unwrap().capture(&name, ev.code()) };
+                    if capture {
+                        continue;
+                    }
                 }
-                // Aucune garde de verrou ne traverse le `.await` d'envoi.
-                let cmd = {
+                // No lock guard crosses the send `.await`.
+                let msg = {
                     let learn = hub.learn.read().unwrap();
                     let b = hub.bindings.read().unwrap();
-                    key_outcome(&b, learn.device(), &name, ev.code())
+                    key_outcome_held(&b, learn.device(), &name, ev.code(), value == 2)
                 };
-                if let Some(cmd) = cmd {
-                    tracing::debug!("{name}: touche {} -> {cmd:?}", ev.code());
-                    let _ = hub.tx.send(InputMessage::from(cmd)).await;
+                if let Some(msg) = msg {
+                    tracing::debug!("{name}: touche {} -> {:?}", ev.code(), msg.cmd);
+                    let _ = hub.tx.send(msg).await;
                 }
             }
             hub.forget(&path);
@@ -324,5 +347,32 @@ mod tests {
         // le dernier disparaît : l'apprentissage est abandonné
         hub.forget(&p2);
         assert_eq!(hub.learn.read().unwrap().snapshot(), None);
+    }
+
+    #[test]
+    fn key_outcome_held_marque_les_repetitions_du_volume() {
+        let t = table();
+        let presse = key_outcome_held(&t, None, "eHome", 115, false).unwrap();
+        assert_eq!(presse, InputMessage::from(Command::VolumeUp));
+        let repete = key_outcome_held(&t, None, "eHome", 115, true).unwrap();
+        assert_eq!(repete.cmd, Command::VolumeUp);
+        assert!(repete.held);
+    }
+
+    #[test]
+    fn key_outcome_held_ignore_les_repetitions_hors_volume() {
+        // Holding Stop or Next must not machine-gun the command: autorepeat
+        // only means something for the volume.
+        let mut t = table();
+        t.devices[0].bindings.push(Binding::new(166, &Command::Stop));
+        assert_eq!(key_outcome_held(&t, None, "eHome", 166, true), None);
+        // The fresh press still goes through.
+        assert!(key_outcome_held(&t, None, "eHome", 166, false).is_some());
+    }
+
+    #[test]
+    fn key_outcome_held_respecte_lapprentissage() {
+        let t = table();
+        assert_eq!(key_outcome_held(&t, Some("eHome"), "eHome", 115, true), None);
     }
 }
