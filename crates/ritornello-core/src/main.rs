@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
         ..Default::default()
     });
     let (enrich_tx, mut enrich_rx) = mpsc::channel::<(String, Enrichment)>(32);
-    let (audio_tx, mut audio_rx) = mpsc::channel::<String>(4);
+    let (audio_tx, mut audio_rx) = mpsc::channel::<Option<String>>(4);
     let (locale_tx, mut locale_rx) = mpsc::channel::<String>(4);
     let (theme_tx, mut theme_rx) = mpsc::channel::<theme::ThemeState>(4);
     let (settings_tx, mut settings_rx) = mpsc::channel::<state::Settings>(4);

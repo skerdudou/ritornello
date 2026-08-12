@@ -674,9 +674,16 @@ impl<P: Player> Core<P> {
         Ok(())
     }
 
-    pub async fn set_audio_device(&mut self, device: String) -> Result<()> {
-        self.player.set_audio_device(&device).await?;
-        self.audio_device = Some(device);
+    /// Applies an output choice from the config page. `None` means "follow
+    /// the system default": mpv gets its native `auto` back (settable at
+    /// runtime), and nothing is recorded on disk — the same state as a fresh
+    /// install, where `resume()` sends no device at all.
+    pub async fn set_audio_device(&mut self, device: Option<String>) -> Result<()> {
+        match &device {
+            Some(d) => self.player.set_audio_device(d).await?,
+            None => self.player.set_audio_device("auto").await?,
+        }
+        self.audio_device = device;
         self.persist();
         Ok(())
     }
@@ -1071,10 +1078,22 @@ mod tests {
     #[tokio::test]
     async fn set_audio_device_applique_et_persiste() {
         let (mut core, player_calls, _sc, _rx, dir) = setup();
-        core.set_audio_device("hw:CARD=Headphones".into()).await.unwrap();
+        core.set_audio_device(Some("hw:CARD=Headphones".into())).await.unwrap();
         assert!(player_calls.lock().unwrap().contains(&"audio_device hw:CARD=Headphones".to_string()));
         let st = crate::state::load(&dir.path().join("state.json"));
         assert_eq!(st.audio_device.as_deref(), Some("hw:CARD=Headphones"));
+    }
+
+    #[tokio::test]
+    async fn set_audio_device_none_revient_au_defaut_systeme() {
+        // "System default" from the config page: nothing imposed on mpv
+        // anymore (its native `auto`), and no device recorded on disk.
+        let (mut core, player_calls, _sc, _rx, dir) = setup();
+        core.set_audio_device(Some("hw:CARD=Headphones".into())).await.unwrap();
+        core.set_audio_device(None).await.unwrap();
+        assert!(player_calls.lock().unwrap().contains(&"audio_device auto".to_string()));
+        let st = crate::state::load(&dir.path().join("state.json"));
+        assert_eq!(st.audio_device, None);
     }
 
     /// Extrait le délai d'un `RetryIn`, ou échoue en nommant ce qui est arrivé.

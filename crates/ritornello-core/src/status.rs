@@ -28,7 +28,7 @@ pub struct AppState {
     pub status: Arc<RwLock<StatusState>>,
     pub logs: Arc<LogBuffer>,
     pub audio_current: Arc<RwLock<Option<String>>>,
-    pub audio_tx: mpsc::Sender<String>,
+    pub audio_tx: mpsc::Sender<Option<String>>,
     pub catalog: Arc<RwLock<ritornello_i18n::Catalog>>,
     pub locale_current: Arc<RwLock<Option<String>>>,
     pub locale_tx: mpsc::Sender<String>,
@@ -95,7 +95,7 @@ async fn audio_output_json(State(state): State<AppState>) -> Json<AudioOutputRes
 
 #[derive(Deserialize)]
 struct AudioOutputRequest {
-    device: String,
+    device: Option<String>,
 }
 
 /// Refuse un nom de sortie vide (ou uniquement blanc). Fonction pure, sur le
@@ -117,11 +117,15 @@ pub fn validate_audio_device(device: &str) -> Result<(), String> {
 }
 
 async fn audio_output_put(State(state): State<AppState>, Json(req): Json<AudioOutputRequest>) -> Response {
-    if let Err(msg) = validate_audio_device(&req.device) {
-        return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg })))
-            .into_response();
+    // `null` (or absent) = follow the system default. A named device is
+    // validated as before: the empty string stays refused.
+    if let Some(device) = &req.device {
+        if let Err(msg) = validate_audio_device(device) {
+            return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg })))
+                .into_response();
+        }
     }
-    *state.audio_current.write().await = Some(req.device.clone());
+    *state.audio_current.write().await = req.device.clone();
     if state.audio_tx.send(req.device).await.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
@@ -439,7 +443,7 @@ pub(crate) mod tests_support {
         }
     }
 
-    pub(crate) fn app_state_with_audio() -> (AppState, tokio::sync::mpsc::Receiver<String>) {
+    pub(crate) fn app_state_with_audio() -> (AppState, tokio::sync::mpsc::Receiver<Option<String>>) {
         let (audio_tx, audio_rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(4);
@@ -650,7 +654,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        assert_eq!(audio_rx.recv().await.unwrap(), "hw:CARD=Headphones");
+        assert_eq!(audio_rx.recv().await.unwrap(), Some("hw:CARD=Headphones".to_string()));
+    }
+
+    #[tokio::test]
+    async fn put_audio_output_null_choisit_le_defaut_systeme() {
+        let (state, mut audio_rx) = app_state_with_audio();
+        let audio_current = state.audio_current.clone();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/api/audio-output")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"device":null}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(audio_rx.recv().await.unwrap(), None);
+        assert_eq!(*audio_current.read().await, None);
     }
 
     #[test]
