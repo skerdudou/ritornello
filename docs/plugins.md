@@ -17,7 +17,7 @@ page is then served by the core under the same origin, with a link shown
 on the home page (`http://<host>:8080/`) — no configuration line to know
 about, hence nothing to forget.
 
-A plugin's death is tolerated: it is marked unavailable on the status
+A plugin's death is tolerated: it is marked unavailable on the config
 page, the others keep working. None of these plugins is Pi-specific:
 `ritornello-plugin-radio` and `ritornello-plugin-cd` are pure portable
 Rust, `ritornello-plugin-generic-input` and `ritornello-plugin-console`
@@ -91,10 +91,11 @@ written to the tty. A future display (an SSD1306 OLED over SPI/I2C, for
 example) would be a new plugin of the same kind, with no fallback rule to
 reimplement.
 
-The core's status page (`http://<host>:8080/status`) also offers an
-**audio output** picker, based on the ALSA devices the system knows about
-(`aplay -L`) — a Bluetooth speaker already paired through `bluetoothctl`
-will show up there automatically once exposed by `bluez-alsa`.
+The core's config page (`http://<host>:8080/config`, `/status` redirects
+there) also offers an **audio output** picker, based on the ALSA devices
+the system knows about (`aplay -L`) — a Bluetooth speaker already paired
+through `bluetoothctl` will show up there automatically once exposed by
+`bluez-alsa`.
 
 ## `ritornello-plugin-generic-input` — inputs
 
@@ -107,6 +108,24 @@ lets you learn one key per action, load a bundled preset (`mce`,
 `.toml` file and export the selected device's current bindings to such a
 file. Variables: `RITORNELLO_INPUT_BINDINGS`, `RITORNELLO_INPUT_PRESETS`,
 `RITORNELLO_LOCALE`.
+
+Each line an input plugin writes on its socket is an `InputMessage`: a
+`Command` plus an optional `"held": true` flag set when a key **repeats
+while held down** rather than being freshly pressed — for this plugin,
+kernel autorepeat (evdev `value == 2`) on an already-known key. Absent (or
+`false`) means a fresh press. `held` is **additive and backward
+compatible**: a plugin that writes a bare `Command` line (no `held` field)
+keeps working unchanged, parses as `held: false`, and `false` is never
+serialized, so pre-existing messages stay byte-identical on the wire.
+
+This plugin only marks **volume** repeats as `held` — a held Stop or Next
+would otherwise machine-gun the command, since the kernel repeats much
+faster than a sane step rate — and drops repeats of every other command
+rather than forwarding them. The core, for its part, **paces** held volume
+commands itself (an initial delay, then one step per interval; see the
+volume-hold card in [interface.md](interface.md)) and ignores `held` on
+any command other than volume, so a plugin that did send it elsewhere
+would have no effect.
 
 **Updating an existing installation** (old hard-coded-keyboard
 `ritornello-plugin-mce`): in `/etc/ritornello/plugins.toml`, replace the
@@ -148,7 +167,7 @@ the identity changes, and ICY takes over until the plugin's first answer.
 With no `metadata` plugin declared, there is therefore no enrichment —
 this is by design, not a regression. **Playback is never affected** by a
 `metadata` plugin, and its failure is silent on screen. A plugin whose
-process dies is marked unavailable on the status page; however, a plugin
+process dies is marked unavailable on the config page; however, a plugin
 that starts but never serves its socket stays shown there as connected
 (same behavior as the `input` kind, whose connection is not awaited at
 startup).

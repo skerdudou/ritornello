@@ -35,6 +35,14 @@ declares it (the `preset` field of its frames, see the protocol) — the
 core never interprets what `Select(n)` was supposed to mean — and it goes
 out as soon as nothing is playing anymore.
 
+**Volume +/- respond to holding**, not just clicking: pointer-down sends
+one step immediately, then — after the initial delay set on the config
+page's volume-hold card — repeats at that card's interval until
+pointer-up (`pointercancel`/`pointerleave` also stop it). Keyboard
+activation (Enter/Space) still sends a single step per press. The timings
+come from `GET /api/settings`, so the web remote's autorepeat always
+matches the infrared remote's.
+
 ## Physical remote
 
 If a key does not respond, open `http://<host>:8080/plugins/generic-input/`,
@@ -42,6 +50,40 @@ pick the device from the list ("Refresh" button if it was just plugged
 in), click "Learn" on the action's row, press the key, then "Save". No
 restart is needed: the table is re-read on every key press. To start from
 a base, load the `mce` or `keyboard` preset.
+
+## Config page
+
+The former status page is now the **config page**, at
+`http://<host>:8080/config` — `/status`, its historical URL, redirects
+there, so existing bookmarks and links keep working. It lists the
+plugins with their connection state and admin link, the audio output and
+language pickers (below), the two settings cards described here, and the
+recent error log.
+
+A **sticky table of contents** sits alongside the cards (from the `lg`
+breakpoint up): the entry for the section currently scrolled into view is
+highlighted — an `IntersectionObserver` watches each section against a
+band at the top of the viewport, and the first section still visible
+there wins, so the highlight tracks what's actually being read rather
+than whichever callback fired last. Clicking an entry scrolls smoothly to
+its section.
+
+### Startup card
+
+Whether the device starts **on** (resumes the active source) or in
+**standby** at launch — on by default. Persisted in `state.json`
+(`settings.start_in_standby`) and read once at process start, so a device
+configured for standby boot does not start playing again on its own after
+a power cut or a reboot.
+
+### Volume-hold card
+
+The two timings that pace a **held** volume key, on the physical remote
+and on the web remote's own buttons alike: the delay before the first
+repeat, and the interval between the following ones. Backed by
+`GET`/`PUT /api/settings`, with bounds enforced on write (a `PUT` outside
+them answers `422`): initial delay **200-5000 ms**, interval **100-2000
+ms**.
 
 ## Internationalization (i18n)
 
@@ -51,14 +93,14 @@ TOML packs**, decentralized per component:
 
     /etc/ritornello/locales/
       common/fr.toml   # shared vocabulary (play/pause/stop/error…)
-      core/fr.toml     # core text + status page
+      core/fr.toml     # core text + config page
       radio/fr.toml    # radio plugin + admin page
       cd/fr.toml       # cd plugin
       <third-party-plugin>/fr.toml
 
 - Root configurable through `RITORNELLO_LOCALES` (default
   `/etc/ritornello/locales`).
-- Language **picker** on the status page (`/status`): it lists `en` plus
+- Language **picker** on the config page (`/config`): it lists `en` plus
   every `core/<lang>.toml` pack present, each language shown by its name
   in its own language ("Français", "English"). The change is applied live,
   pushed to the plugins, and persisted (`state.json`).
