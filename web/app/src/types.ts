@@ -6,6 +6,12 @@ export interface AudioPayload { devices: string[]; current: string | null }
 export interface LocalePayload { locales: string[]; current: string | null }
 export interface ThemePayload { theme: string; mode: Mode }
 export interface LogsPayload { lines: string[] }
+/** Réglages de comportement, tels que les sert `GET /api/settings`. */
+export interface SettingsPayload {
+  volume_repeat_initial_ms: number
+  volume_repeat_interval_ms: number
+  start_in_standby: boolean
+}
 /**
  * Etat du lecteur, tel que le pousse `/api/player` : tout ce qui est volatil.
  *

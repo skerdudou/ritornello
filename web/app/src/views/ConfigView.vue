@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import {
-  api, Badge, Button, Card, CardContent, CardHeader, CardTitle,
+  api, Badge, Button, Card, CardContent, CardHeader, CardTitle, Input,
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue, toast,
 } from '@ritornello/ui'
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { nomLangue } from '../composables/langues'
 import { useCatalog } from '../composables/useCatalog'
-import type { AudioPayload, LocalePayload, LogsPayload, StatusPayload } from '../types'
+import type { AudioPayload, LocalePayload, LogsPayload, SettingsPayload, StatusPayload } from '../types'
 
 const { t, reload } = useCatalog()
 const status = ref<StatusPayload>({ plugins: [], active_source: '' })
@@ -16,6 +16,17 @@ const locale = ref<LocalePayload>({ locales: [], current: null })
 const logs = ref<string[]>([])
 const device = ref('')
 const lang = ref('')
+const reglages = ref<SettingsPayload>({
+  volume_repeat_initial_ms: 1000,
+  volume_repeat_interval_ms: 500,
+  start_in_standby: false,
+})
+// Le Select ne porte que des chaînes : « on »/« standby » traduits à
+// l'affichage, le booléen reste la valeur envoyée au cœur.
+const demarrage = computed({
+  get: () => (reglages.value.start_in_standby ? 'standby' : 'on'),
+  set: (v: string) => { reglages.value.start_in_standby = v === 'standby' },
+})
 
 async function chargerTout() {
   // Necessaire ici, pas redondant : c'est ce qui recharge le catalogue apres
@@ -26,6 +37,7 @@ async function chargerTout() {
   audio.value = await api.get<AudioPayload>('/api/audio-output').catch(() => audio.value)
   locale.value = await api.get<LocalePayload>('/api/locale').catch(() => locale.value)
   logs.value = (await api.get<LogsPayload>('/api/logs').catch(() => ({ lines: [] }))).lines
+  reglages.value = await api.get<SettingsPayload>('/api/settings').catch(() => reglages.value)
   // Repli sur le premier peripherique disponible, jamais la chaine vide.
   // L'ancienne page etait rendue cote serveur : faute de sortie choisie, aucun
   // `<option>` ne portait `selected`, donc le navigateur selectionnait le
@@ -42,6 +54,15 @@ onMounted(chargerTout)
 
 async function changerSortie() {
   const err = await api.put('/api/audio-output', { device: device.value })
+  toast[err ? 'error' : 'success'](err ?? t.value('ok'))
+}
+
+async function enregistrerReglages() {
+  const err = await api.put('/api/settings', {
+    ...reglages.value,
+    volume_repeat_initial_ms: Number(reglages.value.volume_repeat_initial_ms),
+    volume_repeat_interval_ms: Number(reglages.value.volume_repeat_interval_ms),
+  })
   toast[err ? 'error' : 'success'](err ?? t.value('ok'))
 }
 
@@ -121,6 +142,37 @@ async function changerLangue() {
           </SelectContent>
         </Select>
         <Button data-lang-change @click="changerLangue">{{ t('change') }}</Button>
+      </CardContent>
+    </Card>
+
+    <Card>
+      <CardHeader><CardTitle>{{ t('startup_title') }}</CardTitle></CardHeader>
+      <CardContent class="flex flex-wrap items-center gap-2">
+        <Select v-model="demarrage">
+          <SelectTrigger class="min-w-32" data-startup-select :aria-label="t('startup_title')"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="on">{{ t('startup_on') }}</SelectItem>
+            <SelectItem value="standby">{{ t('startup_standby') }}</SelectItem>
+          </SelectContent>
+        </Select>
+        <Button data-startup-change @click="enregistrerReglages">{{ t('change') }}</Button>
+      </CardContent>
+    </Card>
+
+    <Card>
+      <CardHeader><CardTitle>{{ t('volume_hold_title') }}</CardTitle></CardHeader>
+      <CardContent class="flex flex-wrap items-end gap-4">
+        <label class="grid gap-1 text-sm">
+          {{ t('volume_hold_initial') }}
+          <Input type="number" min="200" max="5000" step="100" class="w-28" data-hold-initial
+            v-model="reglages.volume_repeat_initial_ms" />
+        </label>
+        <label class="grid gap-1 text-sm">
+          {{ t('volume_hold_interval') }}
+          <Input type="number" min="100" max="2000" step="50" class="w-28" data-hold-interval
+            v-model="reglages.volume_repeat_interval_ms" />
+        </label>
+        <Button data-hold-change @click="enregistrerReglages">{{ t('change') }}</Button>
       </CardContent>
     </Card>
 

@@ -18,6 +18,9 @@ const CATALOGUE = {
   connected: 'connecté', unavailable: 'indisponible', admin_link: 'admin',
   audio_output: 'Sortie audio', language: 'Langue', change: 'Changer', ok: 'OK',
   recent_errors: 'Dernières erreurs',
+  startup_title: 'Démarrage', startup_on: 'allumé', startup_standby: 'veille',
+  volume_hold_title: 'Volume maintenu',
+  volume_hold_initial: 'Délai initial (ms)', volume_hold_interval: 'Intervalle de répétition (ms)',
 }
 
 /** Charges utiles servies par le faux `fetch`, surchargeables par test. */
@@ -33,6 +36,7 @@ function charges() {
     '/api/audio-output': { devices: ['hw:CARD=Headphones', 'hw:CARD=HDMI'], current: 'hw:CARD=HDMI' } as unknown,
     '/api/locale': { locales: ['en', 'fr'], current: 'fr' } as unknown,
     '/api/logs': { lines: ['WARN plugin radio indisponible'] } as unknown,
+    '/api/settings': { volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: false } as unknown,
     '/api/i18n': CATALOGUE as unknown,
   }
 }
@@ -247,5 +251,61 @@ describe('ConfigView — sortie audio', () => {
     // toute facon la chaine vide par un 422.
     const { w } = await monter({ '/api/audio-output': { devices: [], current: null } })
     expect(w.findAllComponents(Select)[0]!.props('modelValue')).toBe('')
+  })
+})
+
+describe('ConfigView — réglages', () => {
+  beforeEach(reinitialiser)
+
+  it('affiche les réglages lus depuis /api/settings', async () => {
+    const { w } = await monter({
+      '/api/settings': { volume_repeat_initial_ms: 800, volume_repeat_interval_ms: 250, start_in_standby: true },
+    })
+    expect((w.find('[data-hold-initial]').element as HTMLInputElement).value).toBe('800')
+    expect((w.find('[data-hold-interval]').element as HTMLInputElement).value).toBe('250')
+    // Le sélecteur de démarrage reflète la veille.
+    const demarrage = w.findAllComponents(Select).find((s) => s.props('modelValue') === 'standby')
+    expect(demarrage).toBeDefined()
+  })
+
+  it('enregistre le démarrage en veille par un PUT du bloc complet', async () => {
+    const { w, puts } = await monter()
+    const demarrage = w.findAllComponents(Select).find((s) => s.props('modelValue') === 'on')!
+    await demarrage.vm.$emit('update:modelValue', 'standby')
+    await w.find('[data-startup-change]').trigger('click')
+    await flushPromises()
+    expect(puts).toEqual([
+      {
+        url: '/api/settings',
+        corps: { volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: true },
+      },
+    ])
+    expect(toast.success).toHaveBeenCalledWith('OK')
+  })
+
+  it('enregistre les délais du volume maintenu en nombres', async () => {
+    const { w, puts } = await monter()
+    await w.find('[data-hold-initial]').setValue('1500')
+    await w.find('[data-hold-interval]').setValue('300')
+    await w.find('[data-hold-change]').trigger('click')
+    await flushPromises()
+    expect(puts).toEqual([
+      {
+        url: '/api/settings',
+        corps: { volume_repeat_initial_ms: 1500, volume_repeat_interval_ms: 300, start_in_standby: false },
+      },
+    ])
+  })
+
+  it('un PUT de réglages refusé est signalé par un toast', async () => {
+    const { w } = await monter({}, 'délai initial hors bornes (200-5000 ms)')
+    await w.find('[data-hold-change]').trigger('click')
+    await flushPromises()
+    expect(toast.error).toHaveBeenCalledWith('délai initial hors bornes (200-5000 ms)')
+  })
+
+  it('un /api/settings injoignable laisse les valeurs par défaut', async () => {
+    const { w } = await monter({ '/api/settings': undefined })
+    expect((w.find('[data-hold-initial]').element as HTMLInputElement).value).toBe('1000')
   })
 })
