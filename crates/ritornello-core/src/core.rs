@@ -1,6 +1,6 @@
 use crate::metadata::{self, Metadonnees, PlayerState};
 use crate::player::Player;
-use crate::state::{self, PersistedState};
+use crate::state::{self, PersistedState, Settings};
 use crate::types::Event;
 use anyhow::Result;
 use ritornello_i18n::Catalog;
@@ -641,6 +641,7 @@ impl<P: Player> Core<P> {
             locale: self.locale.clone(),
             theme: self.theme.clone(),
             mode: self.mode.clone(),
+            settings: Settings::default(),
         };
         if let Err(e) = state::save(&self.state_path, &st) {
             tracing::warn!("persistance impossible: {e}");
@@ -978,6 +979,7 @@ mod tests {
             locale: None,
             theme: None,
             mode: None,
+            settings: Settings::default(),
         };
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));

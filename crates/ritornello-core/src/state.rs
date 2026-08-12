@@ -2,6 +2,26 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Behavior settings, edited on the config page (`PUT /api/settings`).
+/// Container-level `serde(default)`: a partial block in a hand-edited
+/// state.json fills in with defaults instead of failing to load.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// Hold-to-repeat: delay before the first repeated volume step.
+    pub volume_repeat_initial_ms: u32,
+    /// Hold-to-repeat: delay between subsequent volume steps.
+    pub volume_repeat_interval_ms: u32,
+    /// Start in standby instead of waking the active source at launch.
+    pub start_in_standby: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self { volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: false }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedState {
     pub active_source: String,
@@ -17,11 +37,14 @@ pub struct PersistedState {
     /// `"light"` ou `"dark"`. Absent = `theme::DEFAULT_MODE`.
     #[serde(default)]
     pub mode: Option<String>,
+    /// Behavior settings (hold-to-repeat timings, startup power state).
+    #[serde(default)]
+    pub settings: Settings,
 }
 
 impl Default for PersistedState {
     fn default() -> Self {
-        Self { active_source: "radio".into(), volume: 60, audio_device: None, locale: None, theme: None, mode: None }
+        Self { active_source: "radio".into(), volume: 60, audio_device: None, locale: None, theme: None, mode: None, settings: Settings::default() }
     }
 }
 
@@ -67,6 +90,7 @@ mod tests {
             locale: None,
             theme: None,
             mode: None,
+            settings: Settings::default(),
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -92,6 +116,7 @@ mod tests {
             locale: Some("fr".into()),
             theme: None,
             mode: None,
+            settings: Settings::default(),
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -110,6 +135,7 @@ mod tests {
             locale: None,
             theme: Some("cyberpunk".into()),
             mode: Some("dark".into()),
+            settings: Settings::default(),
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -131,5 +157,45 @@ mod tests {
         assert_eq!(st.locale.as_deref(), Some("fr"));
         assert_eq!(st.theme, None);
         assert_eq!(st.mode, None);
+    }
+
+    #[test]
+    fn settings_par_defaut() {
+        let s = Settings::default();
+        assert_eq!(s.volume_repeat_initial_ms, 1000);
+        assert_eq!(s.volume_repeat_interval_ms, 500);
+        assert!(!s.start_in_standby);
+        assert_eq!(PersistedState::default().settings, Settings::default());
+    }
+
+    #[test]
+    fn un_state_json_sans_settings_reste_lisible() {
+        // Backward compatibility: a state.json written before this version has
+        // no `settings` block; it must load with the defaults.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"active_source":"radio","volume":42,"audio_device":null,"locale":"fr"}"#,
+        )
+        .unwrap();
+        let st = load(&path);
+        assert_eq!(st.settings, Settings::default());
+        assert_eq!(st.volume, 42);
+    }
+
+    #[test]
+    fn settings_roundtrip_et_bloc_partiel() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut st = PersistedState::default();
+        st.settings = Settings { volume_repeat_initial_ms: 800, volume_repeat_interval_ms: 250, start_in_standby: true };
+        save(&path, &st).unwrap();
+        assert_eq!(load(&path), st);
+        // A hand-edited partial block falls back to defaults for what's missing.
+        std::fs::write(&path, r#"{"active_source":"radio","volume":42,"settings":{"start_in_standby":true}}"#).unwrap();
+        let st = load(&path);
+        assert!(st.settings.start_in_standby);
+        assert_eq!(st.settings.volume_repeat_initial_ms, 1000);
     }
 }
