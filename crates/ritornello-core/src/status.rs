@@ -77,7 +77,7 @@ async fn status_json(State(state): State<AppState>) -> Json<StatusState> {
 
 #[derive(Serialize)]
 struct AudioOutputResponse {
-    devices: Vec<String>,
+    devices: Vec<crate::audio_output::AudioDevice>,
     current: Option<String>,
 }
 
@@ -753,6 +753,11 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["current"], "default");
         assert!(v["devices"].is_array());
+        // Chaque périphérique est une paire nom/description, plus une chaîne nue.
+        if let Some(premier) = v["devices"].get(0) {
+            assert!(premier["name"].is_string());
+            assert!(premier["description"].is_string());
+        }
     }
 
     #[tokio::test]
