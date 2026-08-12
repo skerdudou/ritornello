@@ -99,6 +99,7 @@ async fn main() -> Result<()> {
     let (audio_tx, mut audio_rx) = mpsc::channel::<String>(4);
     let (locale_tx, mut locale_rx) = mpsc::channel::<String>(4);
     let (theme_tx, mut theme_rx) = mpsc::channel::<theme::ThemeState>(4);
+    let (settings_tx, mut settings_rx) = mpsc::channel::<state::Settings>(4);
 
     // mpv. Les deux durées de tampon sont réglables sans recompiler : la bonne
     // valeur dépend du réseau et de la charge de la machine, pas du code.
@@ -305,6 +306,7 @@ async fn main() -> Result<()> {
         persisted.theme.as_deref(),
         persisted.mode.as_deref(),
     )));
+    let settings_current = Arc::new(RwLock::new(persisted.settings.clone()));
     {
         let app = status::router(AppState {
             status: status_state.clone(),
@@ -320,6 +322,8 @@ async fn main() -> Result<()> {
             cmd_tx: cmd_tx.clone(),
             theme_current: theme_current.clone(),
             theme_tx: theme_tx.clone(),
+            settings_current: settings_current.clone(),
+            settings_tx: settings_tx.clone(),
             player: etat_rx.clone(),
         });
         let listener = tokio::net::TcpListener::bind(&http_addr).await.with_context(|| format!("bind {http_addr}"))?;
@@ -333,6 +337,7 @@ async fn main() -> Result<()> {
 
     // Cœur. La source active affichée est tenue à jour en direct par la boucle
     // ci-dessous (mise à jour de status_state.active_source après chaque commande).
+    let start_in_standby = persisted.settings.start_in_standby;
     let mut core = core::Core::new(
         mpv_player,
         core::Cablage {
@@ -349,11 +354,11 @@ async fn main() -> Result<()> {
             },
         },
     );
-    // Best-effort, comme le réveil par `Power` : un plugin source qui ne
-    // répond pas à `Wake` au boot (timeout de 5 s), ou un `state.json`
-    // douteux, ne doivent pas mettre systemd en boucle de relance — le
-    // service démarre en état dégradé et les commandes restent servies.
-    if let Err(e) = core.resume().await {
+    // Best-effort, like the wake via `Power` (see the comment below): startup
+    // must never put systemd in a restart loop. `start_in_standby` skips the
+    // source wake but still configures mpv, so the first `Power` starts right.
+    let demarrage = if start_in_standby { core.start_in_standby().await } else { core.resume().await };
+    if let Err(e) = demarrage {
         tracing::warn!("reveil au demarrage: {e}");
     }
 
@@ -416,6 +421,9 @@ async fn main() -> Result<()> {
             }
             Some(t) = theme_rx.recv() => {
                 core.set_theme(t);
+            }
+            Some(s) = settings_rx.recv() => {
+                core.set_settings(s);
             }
             _ = retry_sleep => {
                 retry_at = None;

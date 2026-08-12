@@ -38,6 +38,11 @@ pub struct AppState {
     pub cmd_tx: mpsc::Sender<ritornello_proto::Command>,
     pub theme_current: Arc<RwLock<crate::theme::ThemeState>>,
     pub theme_tx: mpsc::Sender<crate::theme::ThemeState>,
+    /// Behavior settings shown on the config page. Same pattern as
+    /// `theme_current`/`theme_tx`: the HTTP layer validates and updates the
+    /// shared copy, the channel carries the change to the core loop.
+    pub settings_current: Arc<RwLock<crate::state::Settings>>,
+    pub settings_tx: mpsc::Sender<crate::state::Settings>,
     /// État du lecteur (source, volume, muet, veille, morceau), alimenté par le
     /// cœur. Un `watch` : chaque connexion SSE clone ce récepteur, seule la
     /// dernière valeur compte, et un navigateur lent ne peut pas retenir le cœur.
@@ -53,6 +58,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/logs", get(logs_json))
         .route("/api/player", get(player_sse))
         .route("/api/theme", get(crate::theme::theme_json).put(crate::theme::theme_put))
+        .route("/api/settings", get(settings_json).put(settings_put))
         .route("/api/command", axum::routing::post(command_post))
         .route(
             "/plugins/:name/api/data",
@@ -117,6 +123,39 @@ async fn audio_output_put(State(state): State<AppState>, Json(req): Json<AudioOu
     }
     *state.audio_current.write().await = Some(req.device.clone());
     if state.audio_tx.send(req.device).await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Bounds for the hold-to-repeat timings. Pure function, same model as
+/// `validate_audio_device`: the core itself accepts anything (tests use tiny
+/// timings), the HTTP surface is where user input is checked.
+pub fn validate_settings(s: &crate::state::Settings) -> Result<(), String> {
+    if !(200..=5000).contains(&s.volume_repeat_initial_ms) {
+        return Err("délai initial hors bornes (200-5000 ms)".to_string());
+    }
+    if !(100..=2000).contains(&s.volume_repeat_interval_ms) {
+        return Err("intervalle de répétition hors bornes (100-2000 ms)".to_string());
+    }
+    Ok(())
+}
+
+async fn settings_json(State(state): State<AppState>) -> Json<crate::state::Settings> {
+    Json(state.settings_current.read().await.clone())
+}
+
+/// Full replacement: the SPA GETs the struct, edits it, and PUTs it back
+/// whole. A field absent from the body falls back to its default (the struct
+/// is `serde(default)`), which is the price of reusing the state type — fine
+/// on a single-user device.
+async fn settings_put(State(state): State<AppState>, Json(req): Json<crate::state::Settings>) -> Response {
+    if let Err(msg) = validate_settings(&req) {
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg })))
+            .into_response();
+    }
+    *state.settings_current.write().await = req.clone();
+    if state.settings_tx.send(req).await.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     StatusCode::NO_CONTENT.into_response()
@@ -392,6 +431,8 @@ pub(crate) mod tests_support {
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
             theme_tx: tokio::sync::mpsc::channel(4).0,
+            settings_current: Arc::new(tokio::sync::RwLock::new(crate::state::Settings::default())),
+            settings_tx: tokio::sync::mpsc::channel(4).0,
             player: player_inerte(),
         }
     }
@@ -419,6 +460,8 @@ pub(crate) mod tests_support {
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
             theme_tx: tokio::sync::mpsc::channel(4).0,
+            settings_current: Arc::new(tokio::sync::RwLock::new(crate::state::Settings::default())),
+            settings_tx: tokio::sync::mpsc::channel(4).0,
             player: player_inerte(),
         };
         (state, audio_rx)
@@ -448,6 +491,8 @@ pub(crate) mod tests_support {
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
             theme_tx: tokio::sync::mpsc::channel(4).0,
+            settings_current: Arc::new(tokio::sync::RwLock::new(crate::state::Settings::default())),
+            settings_tx: tokio::sync::mpsc::channel(4).0,
             player: player_inerte(),
         };
         (state, cmd_rx)
@@ -485,6 +530,8 @@ pub(crate) mod tests_support {
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
             theme_tx: tokio::sync::mpsc::channel(4).0,
+            settings_current: Arc::new(tokio::sync::RwLock::new(crate::state::Settings::default())),
+            settings_tx: tokio::sync::mpsc::channel(4).0,
             player: player_inerte(),
         };
         (state, locale_rx, dir)
@@ -505,6 +552,13 @@ mod tests {
         let (state, _audio_rx) = app_state_with_audio();
         let (theme_tx, theme_rx) = tokio::sync::mpsc::channel(4);
         (AppState { theme_tx, ..state }, theme_rx)
+    }
+
+    /// Variant with an observable `settings_tx`, for the `/api/settings` tests.
+    fn app_state_with_settings() -> (AppState, tokio::sync::mpsc::Receiver<crate::state::Settings>) {
+        let (state, _audio_rx) = app_state_with_audio();
+        let (settings_tx, settings_rx) = tokio::sync::mpsc::channel(4);
+        (AppState { settings_tx, ..state }, settings_rx)
     }
 
     #[test]
@@ -935,5 +989,84 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["audio_output"], "Sortie audio");
+    }
+
+    #[tokio::test]
+    async fn get_settings_renvoie_les_valeurs_courantes() {
+        let app = router(app_state());
+        let resp = app.oneshot(Request::get("/api/settings").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["volume_repeat_initial_ms"], 1000);
+        assert_eq!(v["volume_repeat_interval_ms"], 500);
+        assert_eq!(v["start_in_standby"], false);
+    }
+
+    #[tokio::test]
+    async fn put_settings_notifie_et_met_a_jour_la_selection() {
+        let (state, mut settings_rx) = app_state_with_settings();
+        let settings_current = state.settings_current.clone();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/api/settings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"volume_repeat_initial_ms":800,"volume_repeat_interval_ms":250,"start_in_standby":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let recu = settings_rx.recv().await.unwrap();
+        assert_eq!(recu.volume_repeat_initial_ms, 800);
+        assert!(recu.start_in_standby);
+        assert_eq!(settings_current.read().await.volume_repeat_interval_ms, 250);
+    }
+
+    #[tokio::test]
+    async fn put_settings_hors_bornes_renvoie_422_et_ne_change_rien() {
+        // Same contract as /api/audio-output and /api/theme: validated before
+        // any state change, with an `error` message the SPA turns into a toast.
+        let (state, mut settings_rx) = app_state_with_settings();
+        let settings_current = state.settings_current.clone();
+        let app = router(state);
+        for corps in [
+            r#"{"volume_repeat_initial_ms":100,"volume_repeat_interval_ms":500,"start_in_standby":false}"#,
+            r#"{"volume_repeat_initial_ms":1000,"volume_repeat_interval_ms":50,"start_in_standby":false}"#,
+            r#"{"volume_repeat_initial_ms":9000,"volume_repeat_interval_ms":500,"start_in_standby":false}"#,
+        ] {
+            // `AppState` est `Clone` : chaque oneshot repart du même montage.
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::put("/api/settings")
+                        .header("content-type", "application/json")
+                        .body(Body::from(corps))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{corps}");
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(v["error"].is_string());
+        }
+        assert_eq!(settings_current.read().await.volume_repeat_initial_ms, 1000);
+        assert!(settings_rx.try_recv().is_err(), "rien ne doit partir dans le canal");
+    }
+
+    #[test]
+    fn validate_settings_borne_les_deux_delais() {
+        use crate::state::Settings;
+        assert!(validate_settings(&Settings::default()).is_ok());
+        assert!(validate_settings(&Settings { volume_repeat_initial_ms: 200, volume_repeat_interval_ms: 100, ..Default::default() }).is_ok());
+        assert!(validate_settings(&Settings { volume_repeat_initial_ms: 5000, volume_repeat_interval_ms: 2000, ..Default::default() }).is_ok());
+        assert!(validate_settings(&Settings { volume_repeat_initial_ms: 199, ..Default::default() }).is_err());
+        assert!(validate_settings(&Settings { volume_repeat_initial_ms: 5001, ..Default::default() }).is_err());
+        assert!(validate_settings(&Settings { volume_repeat_interval_ms: 99, ..Default::default() }).is_err());
+        assert!(validate_settings(&Settings { volume_repeat_interval_ms: 2001, ..Default::default() }).is_err());
     }
 }

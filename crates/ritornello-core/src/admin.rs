@@ -204,6 +204,8 @@ mod tests {
             player: crate::status::tests_support::player_inerte(),
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
             theme_tx: tokio::sync::mpsc::channel(4).0,
+            settings_current: Arc::new(tokio::sync::RwLock::new(crate::state::Settings::default())),
+            settings_tx: tokio::sync::mpsc::channel(4).0,
         }
     }
 
