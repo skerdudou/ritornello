@@ -103,6 +103,11 @@ pub struct Core<P: Player> {
     /// c'est `set_identity(None)` qui fait foi, comme pour l'ardoise des
     /// métadonnées.
     preset: Option<u8>,
+    /// How many numbered presets the active source offers (stations,
+    /// tracks), as last declared. Forgotten on source change and standby —
+    /// the next source re-declares it on activate/wake — but kept on stop:
+    /// a stopped radio still has its stations.
+    preset_count: Option<u8>,
     state_path: PathBuf,
     view_tx: watch::Sender<View>,
     catalog: Arc<RwLock<Catalog>>,
@@ -154,6 +159,7 @@ impl<P: Player> Core<P> {
             view_line2_replaceable: false,
             overlay: None,
             preset: None,
+            preset_count: None,
             state_path,
             view_tx,
             catalog,
@@ -244,6 +250,9 @@ impl<P: Player> Core<P> {
         // déclaration explicite.
         if let Some(p) = update.preset {
             self.preset = Some(p);
+        }
+        if let Some(c) = update.preset_count {
+            self.preset_count = Some(c);
         }
         // Toujours pousser : `push_view` donne la priorité à l'incrustation si
         // elle est active, et le canal écarte une vue identique — une vue source
@@ -373,6 +382,7 @@ impl<P: Player> Core<P> {
             muted: self.muted,
             standby: self.standby,
             preset: self.preset,
+            preset_count: self.preset_count,
             morceau: self.metadonnees.etat(),
         }
     }
@@ -528,6 +538,10 @@ impl<P: Player> Core<P> {
                     // `Deactivate` est ignorée, et la vue de veille qui suit
                     // passerait outre le garde-fou de `handle_source_update`.
                     self.set_identity(None);
+                    // Le compte de présélections n'a de sens que pour la
+                    // Source active : la veille l'oublie, et la prochaine
+                    // Source (activate/wake) le redéclarera si elle en a un.
+                    self.preset_count = None;
                     // L'incrustation volume/muet ne survit pas à la mise en
                     // veille : elle garde la priorité dans `push_view`, et
                     // « VOLUME 65 % » restait à l'écran jusqu'à 2 s après
@@ -567,6 +581,11 @@ impl<P: Player> Core<P> {
                 // laisserait l'identité de l'autre en place, et les plugins
                 // `metadata` continueraient d'enrichir le morceau précédent.
                 self.set_identity(None);
+                // Le compte de présélections annoncé par l'ancienne Source ne
+                // veut rien dire pour la nouvelle : la garder afficherait une
+                // fenêtre de numéros qui ne correspond à aucune présélection
+                // réelle tant que la nouvelle Source n'a pas parlé.
+                self.preset_count = None;
                 self.retry_count = 0;
                 // Persister **avant** `Activate` : si la nouvelle source ne
                 // répond pas (timeout de 5 s du SDK), l'état mémoire, l'état
@@ -1426,6 +1445,54 @@ mod tests {
         assert_eq!(etat_rx.borrow().preset, Some(2));
         core.handle_command(Command::SourceCycle).await.unwrap();
         assert_eq!(etat_rx.borrow().preset, None);
+    }
+
+    /// Mise à jour ne portant qu'un compte de présélections déclaré par la Source.
+    fn update_avec_compte(compte: Option<u8>) -> SourceUpdate {
+        SourceUpdate {
+            view: None,
+            identity: None,
+            line2_replaceable: false,
+            transient: false,
+            preset: None,
+            preset_count: compte,
+        }
+    }
+
+    #[tokio::test]
+    async fn le_compte_de_preselections_est_memorise_et_publie() {
+        // Une trame qui déclare un compte doit se retrouver dans PlayerState ;
+        // une trame muette sur le sujet ne doit pas l'effacer.
+        let (mut core, _vue_rx, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
+        core.handle_source_update("radio", update_avec_compte(Some(23)));
+        assert_eq!(etat_rx.borrow().preset_count, Some(23));
+        core.handle_source_update("radio", update_avec_compte(None));
+        assert_eq!(etat_rx.borrow().preset_count, Some(23));
+        // Some(0) écrase : le cd sans disque dit « rien à numéroter ».
+        core.handle_source_update("radio", update_avec_compte(Some(0)));
+        assert_eq!(etat_rx.borrow().preset_count, Some(0));
+    }
+
+    #[tokio::test]
+    async fn le_compte_survit_a_larret_mais_pas_au_changement_de_source() {
+        // Stop efface preset (plus rien ne joue) mais pas le compte : une radio
+        // arrêtée a toujours ses stations.
+        let (mut core, _vue_rx, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
+        core.handle_source_update("radio", update_avec_compte(Some(23)));
+        assert_eq!(etat_rx.borrow().preset_count, Some(23));
+        core.handle_command(Command::Stop).await.unwrap();
+        assert_eq!(etat_rx.borrow().preset_count, Some(23));
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        assert_eq!(etat_rx.borrow().preset_count, None);
+    }
+
+    #[tokio::test]
+    async fn le_compte_est_oublie_en_veille() {
+        let (mut core, _vue_rx, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
+        core.handle_source_update("radio", update_avec_compte(Some(23)));
+        assert_eq!(etat_rx.borrow().preset_count, Some(23));
+        core.handle_command(Command::Power).await.unwrap(); // entre en veille
+        assert_eq!(etat_rx.borrow().preset_count, None);
     }
 
     #[tokio::test]

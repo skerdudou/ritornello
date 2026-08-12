@@ -54,6 +54,11 @@ pub struct PlayerState {
     /// de l'IHM met en évidence. `None` = rien ne joue, ou la Source n'a rien
     /// déclaré.
     pub preset: Option<u8>,
+    /// Nombre de présélections numérotées offertes par la Source active
+    /// (stations pour la radio, pistes pour le cd), tel qu'elle l'a déclaré.
+    /// `None` = rien déclaré : l'IHM retombe sur la grille 1-9 historique.
+    /// `Some(0)` = rien à numéroter (cd sans disque) : aucune touche.
+    pub preset_count: Option<u8>,
     #[serde(flatten)]
     pub morceau: Morceau,
 }
