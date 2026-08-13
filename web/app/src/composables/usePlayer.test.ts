@@ -10,6 +10,7 @@ function etat(partiel: Partial<PlayerPayload> = {}): PlayerPayload {
     muted: false,
     standby: false,
     preset: null,
+    preset_count: null,
     artist: 'Shaka Ponk',
     title: 'Wanna Get Free',
     album: null,

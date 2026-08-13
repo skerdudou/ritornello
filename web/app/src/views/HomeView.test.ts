@@ -1,5 +1,6 @@
 import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { nextTick } from 'vue'
 import type { PlayerPayload } from '../types'
 import { REMOTE_COMMANDS, REMOTE_POWER, REMOTE_ROWS } from './remoteCommands'
 
@@ -18,6 +19,7 @@ class FauxEventSource {
       muted: false,
       standby: false,
       preset: null,
+      preset_count: null,
       artist: null,
       title: null,
       album: null,
@@ -75,11 +77,15 @@ describe('HomeView', () => {
     )
   })
 
-  it('expose les 9 présélections de la télécommande', async () => {
+  it('sans compte déclaré, la grille retombe sur 1-9', async () => {
+    // `preset_count: null` (defaut de FauxEventSource, jamais poussee ici) :
+    // la source ne declare rien, on garde la grille nue historique et pas de
+    // +10 (rien a decaler vers).
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     expect(w.findAll('[data-preset-button]')).toHaveLength(9)
+    expect(w.find('[data-preset-plus10]').exists()).toBe(false)
   })
 
   it('rend une rangée par groupe et la veille dans l’en-tête', async () => {
@@ -223,5 +229,79 @@ describe('HomeView — volume maintenu', () => {
     await w.find('[data-remote-hold="VolumeUp"]').trigger('keydown.enter', { repeat: false })
     await w.find('[data-remote-hold="VolumeUp"]').trigger('keydown.enter', { repeat: true })
     expect(posts).toEqual([JSON.stringify({ cmd: 'VolumeUp' })])
+  })
+})
+
+describe('HomeView — fenêtre +10', () => {
+  /** Monte la vue et pousse un état poussé avec ces champs surchargés. */
+  async function monterAvec(etat: Partial<PlayerPayload>) {
+    vi.useFakeTimers()
+    const posts: string[] = []
+    const spy = vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        posts.push(String(init.body))
+        return new Response(null, { status: 204 })
+      }
+      return new Response('{}', { status: 200 })
+    })
+    vi.stubGlobal('fetch', spy)
+    vi.stubGlobal('EventSource', FauxEventSource)
+    const HomeView = (await import('./HomeView.vue')).default
+    const w = mount(HomeView)
+    FauxEventSource.derniere!.pousse(etat)
+    await nextTick()
+    return { w, posts }
+  }
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  it('la grille ne montre que les numéros existants', async () => {
+    const { w } = await monterAvec({ preset_count: 5 })
+    expect(w.findAll('[data-preset-button]')).toHaveLength(5)
+    expect(w.find('[data-preset-plus10]').exists()).toBe(false)
+  })
+
+  it('un compte nul ne montre aucune touche numérotée', async () => {
+    const { w } = await monterAvec({ preset_count: 0 })
+    expect(w.findAll('[data-preset-button]')).toHaveLength(0)
+    expect(w.find('[data-preset-plus10]').exists()).toBe(false)
+  })
+
+  it('+10 décale la fenêtre, puis reboucle sur la première', async () => {
+    const { w } = await monterAvec({ preset_count: 23 })
+    expect(w.findAll('[data-preset-button]')).toHaveLength(9) // 1-9
+    await w.find('[data-preset-plus10]').trigger('click')
+    let nums = w.findAll('[data-preset-button]').map((b) => b.text())
+    expect(nums).toEqual(['10', '11', '12', '13', '14', '15', '16', '17', '18', '19'])
+    await w.find('[data-preset-plus10]').trigger('click')
+    nums = w.findAll('[data-preset-button]').map((b) => b.text())
+    expect(nums).toEqual(['20', '21', '22', '23'])
+    await w.find('[data-preset-plus10]').trigger('click')
+    expect(w.findAll('[data-preset-button]')).toHaveLength(9) // retour 1-9
+  })
+
+  it('la fenêtre retombe seule après 2 s, comme l’incrustation du cœur', async () => {
+    const { w } = await monterAvec({ preset_count: 23 })
+    await w.find('[data-preset-plus10]').trigger('click')
+    vi.advanceTimersByTime(2000)
+    await nextTick()
+    expect(w.findAll('[data-preset-button]')).toHaveLength(9)
+  })
+
+  it('choisir un numéro poste la valeur absolue et referme la fenêtre', async () => {
+    const { w, posts } = await monterAvec({ preset_count: 23 })
+    await w.find('[data-preset-plus10]').trigger('click')
+    await w.find('[data-preset-button="14"]').trigger('click')
+    expect(posts).toEqual([JSON.stringify({ cmd: 'Select', arg: 14 })])
+    expect(w.findAll('[data-preset-button]')).toHaveLength(9)
+  })
+
+  it('met en évidence la touche active au-delà de 9', async () => {
+    const { w } = await monterAvec({ preset_count: 23, preset: 14 })
+    await w.find('[data-preset-plus10]').trigger('click')
+    expect(w.find('[data-preset-button="14"]').attributes('data-preset-active')).toBe('true')
   })
 })

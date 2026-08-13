@@ -2,7 +2,7 @@
 import {
   api, Button, Card, CardAction, CardContent, CardHeader, CardTitle, toast,
 } from '@ritornello/ui'
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import PlayerCard from '../components/PlayerCard.vue'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlayer } from '../composables/usePlayer'
@@ -19,12 +19,58 @@ const { t } = useCatalog()
 const { etat, ouvre } = usePlayer()
 onMounted(ouvre)
 
-const PRESETS = [1, 2, 3, 4, 5, 6, 7, 8, 9]
-
 async function send(cmd: Command) {
   const err = await api.post('/api/command', cmd)
   if (err) toast.error(err)
 }
+
+// Même valeur que la constante OVERLAY du cœur (2 s) : la fenêtre web et le
+// décalage +10 de la télécommande retombent au même rythme.
+const FENETRE_MS = 2000
+const fenetre = ref(0)
+let minuterieFenetre: ReturnType<typeof setTimeout> | undefined
+
+// Compte déclaré par la source (null = source muette sur le sujet : grille
+// 1-9 historique, pour ne jamais désarmer la télécommande).
+const compte = computed(() => etat.value?.preset_count ?? null)
+
+// Numéros de la fenêtre courante, seulement ceux qui existent. Fenêtre 0 :
+// 1-9 (les touches nues de la télécommande) ; fenêtre k : 10k à 10k+9 (le
+// 0 de la télécommande donne 10k).
+const presets = computed(() => {
+  const c = compte.value
+  if (c === null) return Array.from({ length: 9 }, (_, i) => i + 1)
+  const debut = fenetre.value === 0 ? 1 : fenetre.value * 10
+  const fin = Math.min(fenetre.value * 10 + 9, c)
+  return debut > fin ? [] : Array.from({ length: fin - debut + 1 }, (_, i) => debut + i)
+})
+
+const plus10Visible = computed(() => (compte.value ?? 0) > 9)
+
+function armerRetour() {
+  clearTimeout(minuterieFenetre)
+  minuterieFenetre = setTimeout(() => { fenetre.value = 0 }, FENETRE_MS)
+}
+
+function decaler() {
+  // Même règle que le cœur : la dernière fenêtre utile commence au plus
+  // grand multiple de 10 encore atteignable ((compte / 10) * 10).
+  const c = compte.value ?? 0
+  fenetre.value = (fenetre.value + 1) * 10 > c ? 0 : fenetre.value + 1
+  armerRetour()
+}
+
+function choisir(n: number) {
+  // Le web envoie toujours le numéro absolu : Plus10 ne voyage jamais
+  // depuis la SPA, la fenêtre est un état purement local.
+  clearTimeout(minuterieFenetre)
+  fenetre.value = 0
+  send({ cmd: 'Select', arg: n })
+}
+
+// Un changement de compte (autre source, disque éjecté) invalide la fenêtre.
+watch(compte, () => { fenetre.value = 0 })
+onUnmounted(() => clearTimeout(minuterieFenetre))
 
 // Timings du volume maintenu, servis par le cœur (modifiables sur la page
 // config). Les défauts couvrent le temps du GET et son éventuel échec.
@@ -94,18 +140,22 @@ function toucheVolume(e: KeyboardEvent, cmd: Command) {
              (variante pleine + aria-current) : la source active la declare
              (preselection radio, piste cd), et elle s'eteint quand plus rien
              ne joue. -->
-        <div class="grid grid-cols-3 gap-2 sm:grid-cols-9">
+        <div
+          :class="['grid grid-cols-3 gap-2',
+                    presets.length + (plus10Visible ? 1 : 0) > 9 ? 'sm:grid-cols-10' : 'sm:grid-cols-9']"
+        >
           <Button
-            v-for="n in PRESETS"
+            v-for="n in presets"
             :key="n"
             :data-preset-button="n"
             :data-preset-active="etat?.preset === n ? 'true' : undefined"
             :aria-current="etat?.preset === n ? 'true' : undefined"
             :variant="etat?.preset === n ? 'default' : 'secondary'"
-            @click="send({ cmd: 'Select', arg: n })"
+            @click="choisir(n)"
           >
             {{ n }}
           </Button>
+          <Button v-if="plus10Visible" data-preset-plus10 variant="secondary" @click="decaler">+10</Button>
         </div>
         <!-- Une rangee par groupe : transport, contenu, son, appareil. Le
              groupement est une donnee (`REMOTE_ROWS`), pas une mise en page

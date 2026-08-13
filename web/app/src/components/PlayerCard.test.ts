@@ -15,6 +15,7 @@ function complet(etat: Partial<PlayerPayload>): PlayerPayload {
     muted: false,
     standby: false,
     preset: null,
+    preset_count: null,
     artist: null,
     title: null,
     album: null,

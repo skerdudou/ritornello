@@ -35,6 +35,13 @@ export interface PlayerPayload {
    * met en evidence. `null` : rien ne joue, ou rien de declare.
    */
   preset: number | null
+  /**
+   * Nombre de preselections que la source active declare (stations radio,
+   * pistes cd), ou `null` si elle ne le declare pas — la grille retombe alors
+   * sur les 9 touches nues historiques. `0` est significatif ("rien a
+   * numeroter", ex. cd sans disque) et distinct de `null`.
+   */
+  preset_count: number | null
   artist: string | null
   title: string | null
   album: string | null
