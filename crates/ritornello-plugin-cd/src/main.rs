@@ -90,6 +90,14 @@ impl CdSource {
         // « audio CD » et « pas de disque » sont tous deux des remplissages :
         // l'album vaut mieux quand on le connaît, et l'étiquette revient sinon.
         let sortie = sortie.line2_replaceable();
+        // The count is a property of the inserted disc, not of playback: it is
+        // declared on every frame, 0 when no TOC is known (no disc, or the
+        // TOC is still being read).
+        let count = match &self.toc {
+            Some(_) => u8::try_from(self.total_tracks).unwrap_or(255),
+            None => 0,
+        };
+        let sortie = sortie.preset_count(count);
         match (self.lecture && self.present, &self.toc) {
             // La TOC désigne le disque, l'index désigne la piste : les deux sont
             // nécessaires, un changement de piste étant un changement de morceau.
@@ -100,12 +108,10 @@ impl CdSource {
                     "tracks": self.total_tracks,
                     "track": self.track,
                 }));
-                // Les touches 1-9 sélectionnent les pistes sur cette source :
-                // la piste en cours est donc la touche à mettre en évidence —
-                // quand elle en a une (au-delà de la 9e, aucune).
+                // La piste en cours est la touche à mettre en évidence.
                 match u8::try_from(self.track + 1) {
-                    Ok(n) if (1..=9).contains(&n) => sortie.preset(n),
-                    _ => sortie,
+                    Ok(n) => sortie.preset(n),
+                    Err(_) => sortie,
                 }
             }
             // Rien ne joue, ou rien d'identifiable (TOC pas encore lue,
@@ -322,7 +328,10 @@ impl CdSource {
             // piste changée) décrit l'état durable de l'appareil.
             transient: false,
             preset: issue.preset,
-            preset_count: None,
+            // The TOC can arrive after activation (async read): without this,
+            // the count declared at activation (0, TOC unknown yet) would
+            // never be corrected once the disc is actually readable.
+            preset_count: issue.preset_count,
         }
     }
 }
@@ -431,6 +440,10 @@ mod tests {
                 "track": 0,
             })))
         );
+        // La TOC arrive en asynchrone, apres l'activation qui avait declare
+        // 0 (compte inconnu) : la notification doit corriger le compte,
+        // sinon la fenetre de numeros affichee reste fausse.
+        assert_eq!(n.preset_count, Some(3));
     }
 
     #[tokio::test]
@@ -543,21 +556,32 @@ mod tests {
 
     #[tokio::test]
     async fn la_piste_en_lecture_est_declaree_comme_touche_active() {
-        // Les touches 1-9 selectionnent les pistes sur cette source : la piste
-        // en cours (0-indexee en interne) est la touche que l'IHM met en
-        // evidence.
+        // La piste en cours (0-indexee en interne) est la touche que l'IHM
+        // met en evidence, quel que soit son numero.
         let mut source = source_en_lecture();
         let out = source.player_track(2).await;
         assert_eq!(out.preset, Some(3));
         // Sans lecture, aucune touche a mettre en evidence.
         source.lecture = false;
         assert_eq!(source.issue(SourceAction::Noop).preset, None);
-        // Au-dela de la 9e piste, aucune touche ne correspond : rien n'est
-        // declare plutot qu'un chiffre faux.
+        // Au-dela de la 9e piste, la touche correspond toujours : le +10 de
+        // la telecommande et la fenetre web permettent d'y acceder.
         source.lecture = true;
         source.total_tracks = 12;
         source.track = 10;
-        assert_eq!(source.issue(SourceAction::Noop).preset, None);
+        assert_eq!(source.issue(SourceAction::Noop).preset, Some(11));
+    }
+
+    #[test]
+    fn le_compte_de_pistes_suit_la_toc() {
+        // TOC connue -> total des pistes ; pas de TOC (pas de disque, ou lecture
+        // en cours de la TOC) -> 0, « rien a numeroter ».
+        let mut source = source_en_lecture();
+        source.total_tracks = 12;
+        assert_eq!(source.issue(SourceAction::Noop).preset_count, Some(12));
+
+        source.toc = None;
+        assert_eq!(source.issue(SourceAction::Noop).preset_count, Some(0));
     }
 
     #[tokio::test]
