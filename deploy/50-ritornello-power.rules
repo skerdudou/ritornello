@@ -1,0 +1,30 @@
+// Ritornello's System tab offers "shut down" and "restart" for the whole
+// machine. The service runs as the unprivileged `ritornello` user with
+// NoNewPrivileges=true, so `sudo` and any setuid path are structurally
+// unavailable: logind through polkit is the mechanism, and this file is the
+// authorisation.
+//
+// Three actions per verb, not one. logind checks the plain action only when
+// nothing else is going on: it switches to `*-multiple-sessions` as soon as
+// another session exists — an open SSH connection is enough, which is
+// exactly the situation while testing this — and to `*-ignore-inhibit` when
+// an inhibitor is held. Granting only the plain action produces "it works,
+// except when I am logged in over SSH", a symptom that costs an hour to
+// attribute.
+//
+// Nothing else is granted: not `manage-units`, because restarting
+// Ritornello itself needs no privilege (the process exits and systemd
+// restarts it, the unit saying Restart=always).
+polkit.addRule(function (action, subject) {
+  var autorisees = [
+    "org.freedesktop.login1.power-off",
+    "org.freedesktop.login1.power-off-multiple-sessions",
+    "org.freedesktop.login1.power-off-ignore-inhibit",
+    "org.freedesktop.login1.reboot",
+    "org.freedesktop.login1.reboot-multiple-sessions",
+    "org.freedesktop.login1.reboot-ignore-inhibit",
+  ];
+  if (subject.user === "ritornello" && autorisees.indexOf(action.id) !== -1) {
+    return polkit.Result.YES;
+  }
+});

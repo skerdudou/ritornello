@@ -73,7 +73,7 @@ done'
 
 scp "${SSHOPTS[@]}" "$OUT/ritornello-core" "$PI:/tmp/ritornello-core"
 scp "${SSHOPTS[@]}" "${PLUGINS[@]/#/$OUT/ritornello-plugin-}" "$PI:/tmp/"
-scp "${SSHOPTS[@]}" deploy/ritornello.service "$PI:/tmp/"
+scp "${SSHOPTS[@]}" deploy/ritornello.service deploy/50-ritornello-power.rules "$PI:/tmp/"
 
 # After every copy into /etc/ritornello, which would hand them back to
 # root: the directory belongs to the service, because the radio and
@@ -91,6 +91,10 @@ ssh "${SSHOPTS[@]}" "$PI" "sudo mv /tmp/ritornello-core /usr/local/bin/ritornell
   && sudo chmod +x /usr/local/lib/ritornello/plugins/* \
   && sudo rm -f /usr/local/lib/ritornello/plugins/ritornello-plugin-mce \
   && sudo mv /tmp/ritornello.service /etc/systemd/system/ \
+  && sudo mkdir -p /etc/polkit-1/rules.d \
+  && sudo mv /tmp/50-ritornello-power.rules /etc/polkit-1/rules.d/ \
+  && sudo chown root: /etc/polkit-1/rules.d/50-ritornello-power.rules \
+  && sudo chmod 644 /etc/polkit-1/rules.d/50-ritornello-power.rules \
   && sudo systemctl daemon-reload \
   && sudo systemctl enable ritornello \
   && sudo systemctl restart ritornello \
