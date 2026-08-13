@@ -99,7 +99,7 @@ pub struct SourceMessage {
     /// d'elle-même.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub transient: bool,
-    /// La touche 1-9 de la télécommande à laquelle correspond ce qui joue
+    /// La touche numérotée de la télécommande à laquelle correspond ce qui joue
     /// **après** cette trame : la présélection pour la radio, la piste pour le
     /// cd. C'est ce qui permet à l'IHM de mettre en évidence la touche active —
     /// une information que la Source seule possède, le cœur n'interprétant

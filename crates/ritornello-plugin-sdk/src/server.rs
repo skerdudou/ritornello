@@ -23,7 +23,7 @@ pub struct SourceOutcome {
     pub line2_replaceable: bool,
     /// La vue est un message éphémère (voir `SourceMessage::transient`).
     pub transient: bool,
-    /// Touche 1-9 correspondant à ce qui joue (voir `SourceMessage::preset`).
+    /// Touche numérotée correspondant à ce qui joue (voir `SourceMessage::preset`).
     pub preset: Option<u8>,
     /// See `SourceMessage::preset_count`.
     pub preset_count: Option<u8>,
@@ -64,7 +64,7 @@ impl SourceOutcome {
         self
     }
 
-    /// Déclare la touche 1-9 de la télécommande à laquelle correspond ce qui
+    /// Déclare la touche numérotée de la télécommande à laquelle correspond ce qui
     /// joue : la présélection pour une radio, la piste pour un cd. C'est ce
     /// qui permet à l'IHM de mettre la touche active en évidence. Le cœur
     /// l'oublie de lui-même quand plus rien ne joue.

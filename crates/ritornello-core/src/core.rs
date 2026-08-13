@@ -98,7 +98,7 @@ pub struct Core<P: Player> {
     /// `view` continue d'être tenue à jour par `handle_source_update` pour
     /// réapparaître dès l'expiration.
     overlay: Option<(View, Instant)>,
-    /// Touche 1-9 correspondant à ce qui joue, déclarée par la Source active
+    /// Touche numérotée correspondant à ce qui joue, déclarée par la Source active
     /// (voir `SourceMessage::preset`). Oubliée dès que plus rien ne joue —
     /// c'est `set_identity(None)` qui fait foi, comme pour l'ardoise des
     /// métadonnées.
@@ -1473,7 +1473,7 @@ mod tests {
 
     #[tokio::test]
     async fn la_selection_declaree_est_diffusee_puis_oubliee_quand_rien_ne_joue() {
-        // La touche 1-9 mise en évidence sur la télécommande de l'IHM désigne
+        // La touche numérotée mise en évidence sur la télécommande de l'IHM désigne
         // **ce qui joue** : elle suit la déclaration de la Source, et
         // disparaît à l'arrêt plutôt que de rester sur la dernière pression.
         let (mut core, _vue_rx, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);

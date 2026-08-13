@@ -49,7 +49,7 @@ pub struct PlayerState {
     pub volume: u8,
     pub muted: bool,
     pub standby: bool,
-    /// Touche 1-9 correspondant à ce qui joue, telle que la Source active l'a
+    /// Touche numérotée correspondant à ce qui joue, telle que la Source active l'a
     /// déclarée (présélection radio, piste cd) : c'est ce que la télécommande
     /// de l'IHM met en évidence. `None` = rien ne joue, ou la Source n'a rien
     /// déclaré.
