@@ -309,6 +309,10 @@ async fn main() -> Result<()> {
     )));
     let settings_current = Arc::new(RwLock::new(persisted.settings.clone()));
     {
+        // Asked once, before serving: the answer gates the System tab's two
+        // OS buttons, and asking per request would mean spawning `busctl`
+        // twice every five seconds.
+        let (can_power_off, can_reboot) = system::probe_capabilities().await;
         let app = status::router(AppState {
             status: status_state.clone(),
             logs: log_buffer.clone(),
@@ -326,7 +330,11 @@ async fn main() -> Result<()> {
             settings_current: settings_current.clone(),
             settings_tx: settings_tx.clone(),
             player: etat_rx.clone(),
-            system: Arc::new(system::SystemInfo::default()),
+            system: Arc::new(system::SystemInfo {
+                can_power_off,
+                can_reboot,
+                ..Default::default()
+            }),
         });
         let listener = tokio::net::TcpListener::bind(&http_addr).await.with_context(|| format!("bind {http_addr}"))?;
         tracing::info!("interface web sur http://{http_addr}/");

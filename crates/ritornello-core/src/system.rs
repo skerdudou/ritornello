@@ -10,6 +10,7 @@
 //! warrants `spawn_blocking`.
 //!
 use serde::Serialize;
+use std::sync::Arc;
 
 /// Available/total pair in kilobytes — the unit `/proc/meminfo` already
 /// uses, kept for the filesystem too so the SPA formats both the same way.
@@ -45,20 +46,41 @@ pub struct Metrics {
     pub can_reboot: bool,
 }
 
-/// Process-lifetime facts the metrics endpoint needs: when this process
-/// started, and what logind allows it to do.
-#[derive(Debug, Clone)]
+/// Called to restart the service. A field rather than a direct
+/// `std::process::exit(0)` **so the route can be tested**: a test that
+/// really exited would kill the test binary.
+pub type RestartHook = Arc<dyn Fn() + Send + Sync>;
+
+/// Process-lifetime facts the System tab's endpoints need.
+#[derive(Clone)]
 pub struct SystemInfo {
     pub started: std::time::Instant,
     pub can_power_off: bool,
     pub can_reboot: bool,
+    /// Command used for the OS power actions. A field rather than a
+    /// constant **so the destructive routes can be tested**: a test that
+    /// really ran `systemctl poweroff` would shut down the machine running
+    /// the suite. Tests point it at `/bin/true` and `/bin/false` and still
+    /// exercise the real spawn/await/exit-code path.
+    pub systemctl: String,
+    /// Delay between the `202` and the process exit, so the response
+    /// reaches the browser before the socket dies.
+    pub restart_delay: std::time::Duration,
+    pub restart: RestartHook,
 }
 
 impl Default for SystemInfo {
     /// Capabilities default to `false`: not knowing means offering nothing.
     /// `main` replaces them with what logind answers.
     fn default() -> Self {
-        Self { started: std::time::Instant::now(), can_power_off: false, can_reboot: false }
+        Self {
+            started: std::time::Instant::now(),
+            can_power_off: false,
+            can_reboot: false,
+            systemctl: "systemctl".to_string(),
+            restart_delay: std::time::Duration::from_millis(300),
+            restart: Arc::new(|| std::process::exit(0)),
+        }
     }
 }
 
@@ -230,6 +252,151 @@ pub async fn system_json(State(state): State<crate::status::AppState>) -> Json<M
     Json(collect(&state.system))
 }
 
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+
+/// What `POST /api/system/power` accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerAction {
+    PowerOff,
+    Reboot,
+    RestartService,
+}
+
+/// The action arrives as a string and is validated here rather than through
+/// serde's enum deserialization: an unknown value must answer with this
+/// project's `422 {"error": …}` shape, whereas a serde rejection would
+/// answer with axum's own plain-text 422. Same reasoning as
+/// `validate_audio_device`.
+pub fn parse_action(action: &str) -> Result<PowerAction, String> {
+    match action {
+        "poweroff" => Ok(PowerAction::PowerOff),
+        "reboot" => Ok(PowerAction::Reboot),
+        "restart-service" => Ok(PowerAction::RestartService),
+        _ => Err("action d'alimentation inconnue".to_string()),
+    }
+}
+
+/// `busctl` prints `s "yes"` for a granted action. Anything else — `"no"`,
+/// `"challenge"` (interactive authentication, which a system service can
+/// never satisfy), or unparseable output — means no.
+pub fn parse_can(raw: &str) -> bool {
+    raw.contains("\"yes\"")
+}
+
+/// Asks logind, once at startup, whether this process may power off and
+/// reboot the machine.
+///
+/// Cached for the process lifetime on purpose: two spawned processes per
+/// 5-second poll of the System tab would be absurd. Installing the polkit
+/// rule therefore takes effect at the next service start — which is how it
+/// gets installed in the first place, `deploy.sh` restarting the service.
+///
+/// The cache does not replace reporting the real failure when an action is
+/// attempted: logind can still refuse at call time (another session, an
+/// inhibitor), which is why the shipped rule grants all six actions.
+pub async fn probe_capabilities() -> (bool, bool) {
+    (interroge_logind("CanPowerOff").await, interroge_logind("CanReboot").await)
+}
+
+async fn interroge_logind(methode: &str) -> bool {
+    let appel = tokio::process::Command::new("busctl")
+        .args([
+            "--system",
+            "call",
+            "org.freedesktop.login1",
+            "/org/freedesktop/login1",
+            "org.freedesktop.login1.Manager",
+            methode,
+        ])
+        .output();
+    // INFO and not WARN throughout: a development machine without logind is
+    // a normal situation, and WARN lines are surfaced on the config page.
+    match tokio::time::timeout(std::time::Duration::from_secs(3), appel).await {
+        Ok(Ok(out)) if out.status.success() => parse_can(&String::from_utf8_lossy(&out.stdout)),
+        Ok(Ok(out)) => {
+            tracing::info!("logind {methode}: {}", String::from_utf8_lossy(&out.stderr).trim());
+            false
+        }
+        Ok(Err(e)) => {
+            tracing::info!("busctl indisponible ({e}): arrêt et redémarrage désactivés dans l'IHM");
+            false
+        }
+        Err(_) => {
+            tracing::info!("logind {methode}: pas de réponse en 3 s");
+            false
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct PowerRequest {
+    action: String,
+}
+
+/// The three power actions of the System tab.
+///
+/// `poweroff` and `reboot` go through `systemctl`, hence logind and polkit:
+/// the service is unprivileged and `NoNewPrivileges` rules out `sudo`. The
+/// child is awaited up to 5 s so a refusal can be reported with logind's own
+/// message — `Interactive authentication required` is exactly the sentence
+/// that names the missing polkit rule. A fire-and-forget `202` would show a
+/// page that looks fine while nothing happens.
+///
+/// `restart-service` needs no privilege at all: the process exits and
+/// systemd starts it again, because the unit says `Restart=always` /
+/// `RestartSec=2`. Exiting abruptly loses nothing — `Core::persist()` runs
+/// on every change, never at shutdown.
+pub async fn power_post(
+    State(state): State<crate::status::AppState>,
+    Json(req): Json<PowerRequest>,
+) -> Response {
+    let action = match parse_action(&req.action) {
+        Ok(a) => a,
+        Err(msg) => {
+            return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg })))
+                .into_response()
+        }
+    };
+    let verbe = match action {
+        PowerAction::PowerOff => "poweroff",
+        PowerAction::Reboot => "reboot",
+        PowerAction::RestartService => {
+            tracing::warn!("redémarrage du service demandé depuis l'IHM");
+            let info = state.system.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(info.restart_delay).await;
+                (info.restart)();
+            });
+            return StatusCode::ACCEPTED.into_response();
+        }
+    };
+    tracing::warn!("{verbe} de l'OS demandé depuis l'IHM");
+    let appel = tokio::process::Command::new(&state.system.systemctl).arg(verbe).output();
+    match tokio::time::timeout(std::time::Duration::from_secs(5), appel).await {
+        // Still running after 5 s: the machine is on its way out, which is
+        // the successful case. The child is not killed — dropping the
+        // future leaves it alone, `kill_on_drop` being off by default.
+        Err(_) => StatusCode::ACCEPTED.into_response(),
+        Ok(Ok(out)) if out.status.success() => StatusCode::ACCEPTED.into_response(),
+        Ok(Ok(out)) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let msg = if stderr.is_empty() {
+                format!("systemctl a échoué (code {})", out.status.code().unwrap_or(-1))
+            } else {
+                stderr
+            };
+            tracing::warn!("{verbe} refusé: {msg}");
+            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": msg }))).into_response()
+        }
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("systemctl injoignable: {e}") })),
+        )
+            .into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,5 +512,90 @@ mod tests {
         let v = corps_json(app(info), "/api/system").await;
         assert_eq!(v["can_power_off"], true);
         assert_eq!(v["can_reboot"], true);
+    }
+
+    #[test]
+    fn action_connue_ou_refusee() {
+        assert_eq!(parse_action("poweroff"), Ok(PowerAction::PowerOff));
+        assert_eq!(parse_action("reboot"), Ok(PowerAction::Reboot));
+        assert_eq!(parse_action("restart-service"), Ok(PowerAction::RestartService));
+        assert!(parse_action("").is_err());
+        assert!(parse_action("halt").is_err());
+        // Pas de tolérance de casse ni d'alias : le seul client est la SPA,
+        // qui envoie ces trois chaînes exactes.
+        assert!(parse_action("PowerOff").is_err());
+    }
+
+    #[test]
+    fn reponse_de_logind() {
+        assert!(parse_can("s \"yes\"\n"));
+        assert!(!parse_can("s \"no\"\n"));
+        // « challenge » = authentification interactive, qu'un service
+        // système ne peut jamais satisfaire : c'est un non.
+        assert!(!parse_can("s \"challenge\"\n"));
+        assert!(!parse_can(""));
+    }
+
+    async fn post_power(app: axum::Router, corps: &str) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .oneshot(
+                Request::post("/api/system/power")
+                    .header("content-type", "application/json")
+                    .body(Body::from(corps.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v = if body.is_empty() { serde_json::Value::Null } else { serde_json::from_slice(&body).unwrap() };
+        (status, v)
+    }
+
+    #[tokio::test]
+    async fn post_power_action_inconnue_renvoie_422_exploitable() {
+        let (status, v) = post_power(app(SystemInfo::default()), r#"{"action":"halt"}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        // Un message dans le champ `error`, comme /api/theme et
+        // /api/audio-output : c'est ce que la SPA transforme en toast.
+        assert!(v["error"].is_string());
+    }
+
+    #[tokio::test]
+    async fn post_power_accepte_quand_systemctl_reussit() {
+        // `/bin/true` tient le rôle de systemctl : le chemin réel du code
+        // est exercé (lancement, attente, code de sortie) sans risquer la
+        // machine qui exécute les tests.
+        let info = SystemInfo { systemctl: "/bin/true".to_string(), ..Default::default() };
+        let (status, _) = post_power(app(info), r#"{"action":"poweroff"}"#).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn post_power_relaie_lechec_de_systemctl() {
+        let info = SystemInfo { systemctl: "/bin/false".to_string(), ..Default::default() };
+        let (status, v) = post_power(app(info), r#"{"action":"reboot"}"#).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        // /bin/false n'écrit rien sur stderr : le repli nomme le code de
+        // sortie plutôt que de renvoyer une chaîne vide.
+        assert!(v["error"].as_str().is_some_and(|m| !m.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn post_power_redemarre_le_service_par_le_crochet() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let declenche = Arc::new(AtomicBool::new(false));
+        let temoin = declenche.clone();
+        let info = SystemInfo {
+            restart_delay: std::time::Duration::from_millis(10),
+            restart: Arc::new(move || temoin.store(true, Ordering::SeqCst)),
+            ..Default::default()
+        };
+        let (status, _) = post_power(app(info), r#"{"action":"restart-service"}"#).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        // La réponse part avant la sortie du process : le crochet est
+        // appelé par une tâche détachée, après le délai.
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert!(declenche.load(Ordering::SeqCst), "le crochet de redémarrage doit être appelé");
     }
 }

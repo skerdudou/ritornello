@@ -65,6 +65,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/theme", get(crate::theme::theme_json).put(crate::theme::theme_put))
         .route("/api/settings", get(settings_json).put(settings_put))
         .route("/api/system", get(crate::system::system_json))
+        .route("/api/system/power", axum::routing::post(crate::system::power_post))
         .route("/api/command", axum::routing::post(command_post))
         .route(
             "/plugins/:name/api/data",
