@@ -2,9 +2,9 @@
 
 ## Web remote and command API
 
-The home page (`http://<host>:8080/`) embeds a remote control: the 11
-commands of the protocol (presets 1-9, next/previous, volume, mute,
-play/pause, stop, eject, source switch, standby).
+The home page (`http://<host>:8080/`) embeds a remote control: the 12
+commands of the protocol (presets 1-9 plus `+10`, next/previous, volume,
+mute, play/pause, stop, eject, source switch, standby).
 
 `Next`/`Prev` are interpreted by the active source: preset for the radio,
 track for the CD player — these are not two distinct command pairs, only a
@@ -29,11 +29,45 @@ standby, and the current track with where the information came from) is
 fed by a pushed stream from `GET /api/player` (SSE) — nothing is polled,
 and the state follows the infrared remote as well as other browser tabs.
 
-On the 1-9 grid, the key matching **what is playing** is highlighted: the
-preset for the radio, the track for the CD. The active source is what
+On the preset grid, the key matching **what is playing** is highlighted:
+the preset for the radio, the track for the CD. The active source is what
 declares it (the `preset` field of its frames, see the protocol) — the
 core never interprets what `Select(n)` was supposed to mean — and it goes
 out as soon as nothing is playing anymore.
+
+The grid is not hardcoded to nine keys: the active source also declares
+**how many** presets it has (`preset_count` in its frames) — stations for
+the radio, tracks for the CD — and the web UI shows only the numbers that
+exist. Absent means the source says nothing on the subject, so the grid
+falls back to the historical 1-9 layout rather than being disarmed by a
+source that has not been updated; `Some(0)` is a distinct, meaningful
+answer ("nothing to number", an empty CD tray). The remembered count is
+forgotten on a source change and on standby (the newly active source
+re-declares it on activate/wake) but **not** on stop — a stopped radio
+still has its stations.
+
+Past the ninth preset, bare digits cannot reach further: the **`+10`**
+key — the web grid's own button, or the corresponding key on the physical
+remote once bound — accumulates a tens offset held by the **core**,
+cumulatively (each press adds 10), wrapping back to 0 once it passes the
+last useful decade (`(count / 10) * 10`, so a count of 20 still lets
+`+10 +10` then `0` reach preset 20; with no known count, the offset
+saturates instead of wrapping). It is shown as `+NN` through the same
+overlay slot and the same 2 s deadline as the volume/mute overlay, so a
+further `+10` within that window extends it rather than starting a new
+one. The next digit (`Select`) consumes the pending offset — effective
+number = offset + digit — and clears the overlay; any other command
+abandons a pending offset outright, since pressing, say, a volume key
+mid-sequence is a change of mind, not a step of it. Key **`0`** is legal
+input for exactly this: alone, with no offset pending, `Select(0)`
+selects nothing (there is no preset 0).
+
+The web grid mirrors the same decade window **locally**: its own `+10`
+button (shown once the count exceeds nine) shifts the visible numbers to
+the next ten, wraps at the same boundary as the core, and auto-returns to
+the base 1-9 window after 2 s of inactivity or as soon as a preset is
+picked — the browser always sends the absolute number to `Select`, `+10`
+itself never leaves it.
 
 **Volume +/- respond to holding**, not just clicking: pointer-down sends
 one step immediately, then — after the initial delay set on the config

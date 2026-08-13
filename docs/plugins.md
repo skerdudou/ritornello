@@ -37,12 +37,15 @@ country, "Search", then "Add" on a result. It is **the plugin** that
 queries the directory — the page loads no external resource — and nothing
 is written until "Save" has been clicked.
 
-Presets are numbered **automatically by position** (1 to 9, the remote's
-digits): adding appends to the end of the list, deleting renumbers the
-following ones; beyond 9, adding is refused. The order is changed **by
-dragging a row** (or with the ▲▼ arrows, which remain the
-keyboard-and-touch-accessible path): moving a station therefore changes
-its remote digit.
+Presets are numbered **automatically by position** (1 to 99): adding
+appends to the end of the list, deleting renumbers the following ones;
+beyond 99, adding is refused. The station count is declared to the core
+as `preset_count`, which is what lets the web grid show only the numbers
+that exist and reach past nine through its `+10` window (see
+[interface.md](interface.md)) — the remote's bare digits alone only
+reach 1-9. The order is changed **by dragging a row** (or with the ▲▼
+arrows, which remain the keyboard-and-touch-accessible path): moving a
+station therefore changes its remote digit.
 
 The search **country** is picked from a keyboard-filterable list,
 populated by the directory itself (241 countries at the last count, with
@@ -81,6 +84,11 @@ read through `cd-discid`, next/previous tracks, ejection (`eject`
 package). Album recognition does **not** live here: it is the business of
 the MusicBrainz `metadata` plugin (see below) — a multi-second network
 call has no place in the process that answers track commands.
+
+It declares its track count as `preset_count` (`Some(0)` with no disc
+loaded), the same field the radio plugin uses — this drives the same
+preset grid described in [interface.md](interface.md), tracks standing
+in for stations.
 
 ## `ritornello-plugin-console` — the display
 
