@@ -47,6 +47,15 @@ const presets = computed(() => {
 
 const plus10Visible = computed(() => (compte.value ?? 0) > 9)
 
+// Autant de colonnes que de cellules (touches + bouton +10) pour que +10
+// reste la dernière cellule de la rangée ; classes littérales pour Tailwind.
+const colonnes = computed(() => {
+  const cellules = presets.value.length + (plus10Visible.value ? 1 : 0)
+  if (cellules >= 11) return 'sm:grid-cols-11'
+  if (cellules === 10) return 'sm:grid-cols-10'
+  return 'sm:grid-cols-9'
+})
+
 function armerRetour() {
   clearTimeout(minuterieFenetre)
   minuterieFenetre = setTimeout(() => { fenetre.value = 0 }, FENETRE_MS)
@@ -141,8 +150,7 @@ function toucheVolume(e: KeyboardEvent, cmd: Command) {
              (preselection radio, piste cd), et elle s'eteint quand plus rien
              ne joue. -->
         <div
-          :class="['grid grid-cols-3 gap-2',
-                    presets.length + (plus10Visible ? 1 : 0) > 9 ? 'sm:grid-cols-10' : 'sm:grid-cols-9']"
+          :class="['grid grid-cols-3 gap-2', colonnes]"
         >
           <Button
             v-for="n in presets"
