@@ -188,8 +188,10 @@ mod tests {
     fn settings_roundtrip_et_bloc_partiel() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
-        let mut st = PersistedState::default();
-        st.settings = Settings { volume_repeat_initial_ms: 800, volume_repeat_interval_ms: 250, start_in_standby: true };
+        let st = PersistedState {
+            settings: Settings { volume_repeat_initial_ms: 800, volume_repeat_interval_ms: 250, start_in_standby: true },
+            ..Default::default()
+        };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
         // A hand-edited partial block falls back to defaults for what's missing.
