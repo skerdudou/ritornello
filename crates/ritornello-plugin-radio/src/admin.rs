@@ -315,7 +315,7 @@ mod tests {
         let mut a = admin(dir.path());
         let mauvais = serde_json::json!({
             "op": "save",
-            "stations": [{ "name": "X", "url": "http://x", "preset": 12 }]
+            "stations": [{ "name": "X", "url": "http://x", "preset": 200 }]
         });
         assert!(a.set_data(mauvais).await.is_err());
         // l'état partagé et le disque restent inchangés
@@ -324,19 +324,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_dune_dixieme_station_est_refuse_cote_serveur() {
-        // Filet serveur : l'IHM refuse déjà d'ajouter au-delà de 9, mais
-        // `Stations::validate` reste l'autorité.
+    async fn save_dune_preselection_hors_bornes_est_refuse_cote_serveur() {
+        // Filet serveur : `Stations::validate` reste l'autorité même pour un
+        // payload qui ne passe pas par la page d'admin — la borne est
+        // désormais 1..=99 (avant : 1..=9, d'où l'ancien nom de ce test).
         let dir = tempfile::tempdir().unwrap();
         let mut a = admin(dir.path());
-        let stations: Vec<serde_json::Value> = (1..=10)
-            .map(|i| serde_json::json!({ "name": format!("S{i}"), "url": "http://x", "preset": i }))
-            .collect();
+        let stations = vec![serde_json::json!({ "name": "S100", "url": "http://x", "preset": 100 })];
         let err = a
             .set_data(serde_json::json!({ "op": "save", "stations": stations }))
             .await
             .unwrap_err();
-        assert!(err.contains("10"), "message inattendu: {err}");
+        assert!(err.contains("100"), "message inattendu: {err}");
         assert!(!Stations::load(&a.stations_path).unwrap().stations.is_empty());
     }
 

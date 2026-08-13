@@ -1,5 +1,5 @@
 empty_preset = "empty preset"
-preset_out_of_range = "preset {p} out of range 1-9 ({name})"
+preset_out_of_range = "preset {p} out of range 1-99 ({name})"
 preset_duplicate = "duplicate preset {p}"
 bad_url = "invalid URL for {name}: {url}"
 bad_request = "invalid request: {detail}"

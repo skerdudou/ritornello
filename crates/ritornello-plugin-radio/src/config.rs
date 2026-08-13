@@ -49,7 +49,7 @@ impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ValidationError::PresetOutOfRange { preset, name } => {
-                write!(f, "preset {preset} out of range 1-9 ({name})")
+                write!(f, "preset {preset} out of range 1-99 ({name})")
             }
             ValidationError::DuplicatePreset { preset } => write!(f, "duplicate preset {preset}"),
             ValidationError::BadUrl { name, url } => write!(f, "invalid URL for {name}: {url}"),
@@ -86,7 +86,7 @@ impl Stations {
     pub fn validate(&self) -> std::result::Result<(), ValidationError> {
         let mut seen = std::collections::HashSet::new();
         for s in &self.stations {
-            if !(1..=9).contains(&s.preset) {
+            if !(1..=99).contains(&s.preset) {
                 return Err(ValidationError::PresetOutOfRange { preset: s.preset, name: s.name.clone() });
             }
             if !seen.insert(s.preset) {
@@ -113,6 +113,14 @@ impl Stations {
         let mut p: Vec<u8> = self.stations.iter().map(|s| s.preset).collect();
         p.sort_unstable();
         p.iter().rev().copied().find(|x| *x < from).or_else(|| p.last().copied())
+    }
+
+    /// Highest preset number in the table — what the web grid shows. Through
+    /// the admin presets are contiguous 1..N so this is also the count; a
+    /// hand-edited sparse table just exposes a few empty numbers, answered
+    /// by the existing "empty preset" transient.
+    pub fn preset_count(&self) -> u8 {
+        self.stations.iter().map(|s| s.preset).max().unwrap_or(0)
     }
 }
 
@@ -158,7 +166,7 @@ mod tests {
         s.stations[1].preset = 1;
         assert!(s.validate().is_err());
         let mut s2 = sample();
-        s2.stations[0].preset = 10;
+        s2.stations[0].preset = 100;
         assert!(s2.validate().is_err());
         let mut s3 = sample();
         s3.stations[0].url = "ftp://nope".into();
@@ -168,14 +176,53 @@ mod tests {
     #[test]
     fn validation_produit_une_erreur_typee() {
         let mut s = sample();
-        s.stations[0].preset = 10;
+        s.stations[0].preset = 100;
         assert!(matches!(
             s.validate(),
-            Err(ValidationError::PresetOutOfRange { preset: 10, .. })
+            Err(ValidationError::PresetOutOfRange { preset: 100, .. })
         ));
         let mut d = sample();
         d.stations[1].preset = 1;
         assert!(matches!(d.validate(), Err(ValidationError::DuplicatePreset { preset: 1 })));
+    }
+
+    #[test]
+    fn la_validation_accepte_les_preselections_jusqua_99() {
+        // Une présélection à deux chiffres au-delà de 9 est désormais valide.
+        let mut s = sample();
+        s.stations[0].preset = 42;
+        assert!(s.validate().is_ok());
+
+        // Toujours refusée au-delà de 99.
+        let mut trop_haute = sample();
+        trop_haute.stations[0].preset = 100;
+        assert!(matches!(
+            trop_haute.validate(),
+            Err(ValidationError::PresetOutOfRange { preset: 100, .. })
+        ));
+
+        // Et 0 reste toujours refusé (la borne basse ne bouge pas).
+        let mut zero = sample();
+        zero.stations[0].preset = 0;
+        assert!(matches!(
+            zero.validate(),
+            Err(ValidationError::PresetOutOfRange { preset: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn le_compte_est_la_plus_haute_preselection() {
+        // Table avec des trous (éditée à la main) : le compte suit le plus
+        // haut numéro, pas le nombre de stations.
+        let s = Stations {
+            stations: vec![
+                Station { name: "A".into(), url: "http://a".into(), preset: 1 },
+                Station { name: "B".into(), url: "http://b".into(), preset: 5 },
+                Station { name: "C".into(), url: "http://c".into(), preset: 9 },
+            ],
+        };
+        assert_eq!(s.preset_count(), 9);
+        assert_eq!(Stations::default().preset_count(), 0);
     }
 
     #[test]

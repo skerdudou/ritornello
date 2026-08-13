@@ -1,5 +1,5 @@
 empty_preset = "présélection vide"
-preset_out_of_range = "présélection {p} hors bornes 1-9 ({name})"
+preset_out_of_range = "présélection {p} hors bornes 1-99 ({name})"
 preset_duplicate = "présélection {p} en double"
 bad_url = "URL invalide pour {name} : {url}"
 bad_request = "requête invalide : {detail}"

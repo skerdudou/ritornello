@@ -51,6 +51,10 @@ impl RadioSource {
 
     async fn play_preset(&mut self, n: u8) -> SourceOutcome {
         let stations = self.stations.read().await;
+        // How many numbered presets exist right now, for the web grid — see
+        // `Stations::preset_count`. Declared on both branches below: a miss
+        // (empty preset) still tells the truth about the table.
+        let count = stations.preset_count();
         if let Some(st) = stations.by_preset(n) {
             self.preset = n;
             // `update` et non `save` : la moitié Admin écrit le pays choisi dans
@@ -71,6 +75,7 @@ impl RadioSource {
                 // La touche que l'IHM doit mettre en évidence : seule la
                 // Source sait à quelle présélection correspond ce qui joue.
                 .preset(n)
+                .preset_count(count)
         } else {
             let empty = self.catalog.read().unwrap().get("empty_preset").to_string();
             // Message **éphémère** : rien n'a été lancé, donc la station
@@ -83,6 +88,7 @@ impl RadioSource {
             SourceOutcome::new(SourceAction::Noop)
                 .with_view(self.view_for(self.preset, &empty))
                 .transient()
+                .preset_count(count)
         }
     }
 }
@@ -329,10 +335,16 @@ mod tests {
         let mut source = make_source(two_stations(), 1);
         let outcome = source.select(2).await;
         assert_eq!(outcome.preset, Some(2));
+        // Le compte de preselections (ici 2, la plus haute de two_stations)
+        // est declare sur la branche "trouvee".
+        assert_eq!(outcome.preset_count, Some(2));
         // Et une preselection vide ne declare rien : ce qui joue n'a pas
         // change.
         let outcome = source.select(7).await;
         assert_eq!(outcome.preset, None);
+        // ... mais le compte reste declare sur la branche "vide" aussi : la
+        // table n'a pas change, seule la selection a echoue.
+        assert_eq!(outcome.preset_count, Some(2));
     }
 
     #[tokio::test]
@@ -350,6 +362,8 @@ mod tests {
             "declarer un arret serait faux : le flux precedent continue"
         );
         assert!(outcome.view.is_some());
+        // Table vide : le compte declare est 0, pas absent.
+        assert_eq!(outcome.preset_count, Some(0));
     }
 
     #[tokio::test]
