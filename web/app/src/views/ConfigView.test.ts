@@ -305,6 +305,14 @@ describe('ConfigView — sortie audio', () => {
     await flushPromises()
     expect(puts).toEqual([{ url: '/api/audio-output', corps: { device: null } }])
   })
+
+  it('un /api/audio-output injoignable désactive « Changer »', async () => {
+    // Sans cela, le sélecteur affiche « Par défaut (système) » comme si
+    // c'était l'état réel, et « Changer » enverrait device: null — une
+    // réinitialisation silencieuse.
+    const { w } = await monter({ '/api/audio-output': undefined })
+    expect(w.find('[data-audio-change]').attributes('disabled')).toBeDefined()
+  })
 })
 
 describe('ConfigView — réglages', () => {

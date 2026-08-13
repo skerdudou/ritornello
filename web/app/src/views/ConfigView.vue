@@ -16,6 +16,7 @@ const locale = ref<LocalePayload>({ locales: [], current: null })
 const logs = ref<string[]>([])
 const device = ref('')
 const lang = ref('')
+const audioIndisponible = ref(false)
 const reglages = ref<SettingsPayload>({
   volume_repeat_initial_ms: 1000,
   volume_repeat_interval_ms: 500,
@@ -53,7 +54,11 @@ async function chargerTout() {
   // place de l'ancien `location.reload()`.
   await reload()
   status.value = await api.get<StatusPayload>('/api/status').catch(() => status.value)
-  audio.value = await api.get<AudioPayload>('/api/audio-output').catch(() => audio.value)
+  audioIndisponible.value = false
+  audio.value = await api.get<AudioPayload>('/api/audio-output').catch(() => {
+    audioIndisponible.value = true
+    return audio.value
+  })
   locale.value = await api.get<LocalePayload>('/api/locale').catch(() => locale.value)
   logs.value = (await api.get<LogsPayload>('/api/logs').catch(() => ({ lines: [] }))).lines
   reglages.value = await api.get<SettingsPayload>('/api/settings').catch(() => reglages.value)
@@ -202,7 +207,7 @@ function aller(id: string) {
                 </SelectItem>
               </SelectContent>
             </Select>
-            <Button data-audio-change @click="changerSortie">{{ t('change') }}</Button>
+            <Button data-audio-change :disabled="audioIndisponible" @click="changerSortie">{{ t('change') }}</Button>
           </CardContent>
         </Card>
       </section>
