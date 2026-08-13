@@ -86,7 +86,7 @@ impl std::fmt::Display for ValidationError {
                 write!(f, "code {code} bound twice on {device}")
             }
             ValidationError::SelectOutOfRange { device, arg } => {
-                write!(f, "preset {arg} out of range 1-9 on {device}")
+                write!(f, "preset {arg} out of range 0-9 on {device}")
             }
             ValidationError::UnknownCommand { device, code } => {
                 write!(f, "unknown command bound to code {code} on {device}")
@@ -154,7 +154,7 @@ impl Bindings {
                             code: b.code,
                         })
                     }
-                    Some(Command::Select(n)) if !(1..=9).contains(&n) => {
+                    Some(Command::Select(n)) if !(0..=9).contains(&n) => {
                         return Err(ValidationError::SelectOutOfRange {
                             device: dev.name.clone(),
                             arg: n,
@@ -297,19 +297,32 @@ mod tests {
     }
 
     #[test]
-    fn validate_refuse_un_select_hors_bornes() {
+    fn validate_accepte_select_0_la_touche_0_de_la_telecommande() {
         let mut b = exemple();
         b.devices[1].bindings.push(Binding::new(11, &Command::Select(0)));
-        assert_eq!(
-            b.validate(),
-            Err(ValidationError::SelectOutOfRange { device: "USB Keyboard".into(), arg: 0 })
-        );
+        assert!(b.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_refuse_un_select_hors_bornes() {
         let mut b2 = exemple();
         b2.devices[1].bindings.push(Binding::new(11, &Command::Select(10)));
         assert_eq!(
             b2.validate(),
             Err(ValidationError::SelectOutOfRange { device: "USB Keyboard".into(), arg: 10 })
         );
+    }
+
+    #[test]
+    fn plus10_se_lie_et_fait_le_tour_en_toml() {
+        let b = Binding::new(11, &Command::Plus10);
+        let t = toml::to_string_pretty(&b).unwrap();
+        assert!(t.contains("cmd = \"Plus10\""), "TOML produit: {t}");
+        assert!(!t.contains("arg"), "TOML produit: {t}");
+        assert_eq!(toml::from_str::<Binding>(&t).unwrap(), b);
+        let mut table = Bindings::default();
+        table.devices.push(Device { name: "X".into(), bindings: vec![b] });
+        assert!(table.validate().is_ok());
     }
 
     #[test]

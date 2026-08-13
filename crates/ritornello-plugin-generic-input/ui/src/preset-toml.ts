@@ -3,7 +3,7 @@ export interface Binding extends Command { code: number }
 export interface DeviceBindings { name: string; bindings: Binding[] }
 export interface BindingTable { devices: DeviceBindings[] }
 
-// Les 19 actions, dans l'ordre de l'ancienne page (moins les deux entrees
+// Les 21 actions, dans l'ordre de l'ancienne page (moins les deux entrees
 // "preselection suivante/precedente", fusionnees sur `act_next`/`act_prev` :
 // meme commande de protocole, interpretee par la source active - preselection
 // pour la radio, piste pour le cd). Le libelle est traduit par le catalogue
@@ -14,6 +14,10 @@ export const ACTIONS: Array<{ key: string; cmd: Command }> = [
     key: `act_select_${i + 1}`,
     cmd: { cmd: 'Select', arg: i + 1 },
   })),
+  // La touche 0 et +10 de la télécommande : 0 vaut « décalage + 0 » (10, 20…)
+  // et +10 cumule le décalage tenu par le cœur.
+  { key: 'act_select_0', cmd: { cmd: 'Select', arg: 0 } },
+  { key: 'act_plus10', cmd: { cmd: 'Plus10' } },
   { key: 'act_volume_up', cmd: { cmd: 'VolumeUp' } },
   { key: 'act_volume_down', cmd: { cmd: 'VolumeDown' } },
   { key: 'act_mute', cmd: { cmd: 'Mute' } },

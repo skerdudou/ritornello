@@ -22,7 +22,7 @@ test('navigation entre l’accueil, la config et les pages de plugin', async ({ 
   await page.goto('/plugins/radio/')
   await expect(page.locator('[data-save]')).toBeVisible()
   await page.goto('/plugins/generic-input/')
-  await expect(page.locator('[data-action-row]')).toHaveCount(19)
+  await expect(page.locator('[data-action-row]')).toHaveCount(21)
 })
 
 test('une seule instance de Vue sert le shell et les modules de plugin', async ({ page }) => {

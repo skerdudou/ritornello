@@ -1,6 +1,6 @@
 # messages de validation
 duplicate_code = "code {code} is bound twice on {device}"
-select_out_of_range = "preset {n} out of range 1-9 on {device}"
+select_out_of_range = "preset {n} out of range 0-9 on {device}"
 unknown_command = "unknown command bound to code {code} on {device}"
 unknown_preset = "unknown preset: {preset}"
 bad_request = "invalid request: {detail}"
@@ -26,7 +26,7 @@ save_error = "Error: "
 load_error = "Loading error: "
 no_device = "No input device detected"
 
-# les 19 actions
+# les 21 actions
 act_select_1 = "Preset 1"
 act_select_2 = "Preset 2"
 act_select_3 = "Preset 3"
@@ -36,6 +36,8 @@ act_select_6 = "Preset 6"
 act_select_7 = "Preset 7"
 act_select_8 = "Preset 8"
 act_select_9 = "Preset 9"
+act_select_0 = "Key 0"
+act_plus10 = "+10"
 act_volume_up = "Volume +"
 act_volume_down = "Volume -"
 act_mute = "Mute"

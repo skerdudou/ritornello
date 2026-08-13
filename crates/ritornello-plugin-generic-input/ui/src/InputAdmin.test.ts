@@ -44,9 +44,9 @@ describe('InputAdmin', () => {
   beforeEach(() => vi.unstubAllGlobals())
   afterEach(() => vi.useRealTimers())
 
-  it('liste les périphériques, les presets et les 19 actions', async () => {
+  it('liste les périphériques, les presets et les 21 actions', async () => {
     const { w } = await monter()
-    expect(w.findAll('[data-action-row]')).toHaveLength(19)
+    expect(w.findAll('[data-action-row]')).toHaveLength(21)
     expect(w.find('[data-device-select]').exists()).toBe(true)
   })
 
