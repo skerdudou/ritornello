@@ -283,8 +283,10 @@ Cards, in order:
    `under_voltage` is `true`.
 
 Unreadable values render as `—`. A failed `GET /api/system` shows a
-diagnostic line and a toast, on the model of the config page; it never
-leaves the page blank.
+diagnostic line and logs to the console — **no toast**: a poll repeating
+every 5 s would turn one unreachable core into a stream of toasts. The
+config page's `audioIndisponible` flag is the model. The page is never left
+blank.
 
 **Wording is load-bearing:** the buttons read « Éteindre le système » and
 « Redémarrer le système », never « veille ». The home page already offers
@@ -394,7 +396,7 @@ Every new key goes into **both** `crates/ritornello-core/src/locales/en.toml`
 
 `system_title`, `system_load`, `system_temperature`, `system_frequency`,
 `system_loadavg`, `system_cores`, `system_history`, `system_history_empty`,
-`system_memory`, `system_storage`, `system_used`, `system_total`,
+`system_memory`, `system_storage`,
 `system_device`, `system_hostname`, `system_ip`, `system_os`,
 `system_kernel`, `system_version`, `system_uptime`,
 `system_service_uptime`, `system_power`, `system_poweroff`,
@@ -404,6 +406,11 @@ Every new key goes into **both** `crates/ritornello-core/src/locales/en.toml`
 `system_under_voltage`, `system_powering_off`, `system_rebooting`,
 `system_restarting`, `system_restarted`, `system_restart_timeout`,
 `system_unavailable`.
+
+Units are translated too, rather than hardcoded in the view — the SPA is
+bilingual and "MB"/"Mo" and "d"/"j" differ: `system_unit_mb`,
+`system_unit_gb`, `system_unit_day`, `system_unit_hour`,
+`system_unit_minute`.
 
 ## Documentation
 
