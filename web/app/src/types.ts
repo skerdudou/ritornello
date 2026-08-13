@@ -49,3 +49,30 @@ export interface PlayerPayload {
   origin: string | null
 }
 export type Command = { cmd: string; arg?: number }
+export interface SystemUsage { total_kb: number; available_kb: number }
+/**
+ * Metriques de l'OS, telles que les sert `GET /api/system`.
+ *
+ * Tout champ que la machine n'expose pas vaut `null` — pas de capteur
+ * thermique, pas de cpufreq, pas de sonde de sous-tension — et la vue
+ * affiche « — » sans traiter cela comme une panne. Le jeu de cles, lui, est
+ * stable.
+ */
+export interface SystemPayload {
+  temperature_c: number | null
+  cpu_mhz: number | null
+  load: [number, number, number] | null
+  cpus: number | null
+  memory: SystemUsage | null
+  disk: SystemUsage | null
+  under_voltage: boolean | null
+  uptime_s: number | null
+  service_uptime_s: number
+  hostname: string | null
+  ip: string | null
+  os: string | null
+  kernel: string | null
+  version: string
+  can_power_off: boolean
+  can_reboot: boolean
+}

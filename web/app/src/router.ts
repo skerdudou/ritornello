@@ -9,6 +9,7 @@ export const router = createRouter({
     // `/status` est l'URL historique de cette page (servie depuis les débuts
     // par le cœur) : elle reste valide et redirige vers son nouveau nom.
     { path: '/config', name: 'config', component: () => import('./views/ConfigView.vue') },
+    { path: '/system', name: 'system', component: () => import('./views/SystemView.vue') },
     { path: '/status', redirect: '/config' },
     // `strict` sur les deux formes : sans lui, le routeur tolere un slash
     // final absent ou surnumeraire, donc `/plugins/<nom>` matcherait deja la

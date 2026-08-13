@@ -28,6 +28,7 @@ onMounted(async () => {
       <nav class="mx-auto flex max-w-3xl items-center gap-4 px-4 py-3">
         <RouterLink to="/" class="font-semibold">Ritornello</RouterLink>
         <RouterLink to="/config" class="text-sm text-muted-foreground">{{ t('config_title') }}</RouterLink>
+        <RouterLink to="/system" class="text-sm text-muted-foreground">{{ t('system_title') }}</RouterLink>
         <RouterLink
           v-for="name in admins"
           :key="name"
