@@ -7,7 +7,7 @@ import RadioAdmin from './RadioAdmin.vue'
 const CATALOGUE = {
   btn_add: 'Ajouter', btn_save: 'Enregistrer', btn_search: 'Chercher',
   btn_add_result: '+', saved: 'Enregistré', save_error: 'Échec : ',
-  limit_reached: '9 maximum', empty_query: 'Saisir un terme',
+  limit_reached: '99 maximum', empty_query: 'Saisir un terme',
   searching: 'Recherche…', no_results: 'Aucun résultat',
   col_num: 'N°', col_name: 'Nom', col_url: 'URL',
   search_title: 'Annuaire', search_placeholder: 'nom', country_label: 'Pays',
@@ -66,14 +66,23 @@ describe('RadioAdmin', () => {
       .toEqual(['B', 'C'])
   })
 
-  it('refuse une dixième station avec un message', async () => {
+  it('accepte une dixième station : la borne suit désormais le serveur (1..=99)', async () => {
     const stations = Array.from({ length: 9 }, (_, i) => ({
       preset: i + 1, name: `S${i}`, url: `http://s${i}`,
     }))
     const { w } = await monter({ stations, search: [] })
     await w.find('[data-add]').trigger('click')
-    expect(w.findAll('[data-station-num]')).toHaveLength(9)
-    expect(w.text()).toContain('9 maximum')
+    expect(w.findAll('[data-station-num]')).toHaveLength(10)
+  })
+
+  it('refuse une centième station avec un message', async () => {
+    const stations = Array.from({ length: 99 }, (_, i) => ({
+      preset: i + 1, name: `S${i}`, url: `http://s${i}`,
+    }))
+    const { w } = await monter({ stations, search: [] })
+    await w.find('[data-add]').trigger('click')
+    expect(w.findAll('[data-station-num]')).toHaveLength(99)
+    expect(w.text()).toContain('99 maximum')
   })
 
   it('envoie la présélection déduite de la position à l’enregistrement', async () => {

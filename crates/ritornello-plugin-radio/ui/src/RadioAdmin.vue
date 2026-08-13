@@ -32,10 +32,10 @@ function url(chemin: string): string {
   return `${props.base}${chemin}`
 }
 
-// Les chiffres de la telecommande : au-dela, l'ajout est refuse cote IHM
+// Meme borne que la validation serveur (1..=99) : l'IHM refuse l'ajout
 // plutot que de laisser l'enregistrement echouer. `Stations::validate` reste
 // l'autorite serveur.
-const MAX = 9
+const MAX = 99
 
 interface Station { name: string; url: string }
 /**

@@ -16,7 +16,7 @@ load_error_1 = "Error loading stations ("
 load_error_2 = ") — fix stations.toml, then reload"
 saved = "Saved ✓"
 save_error = "Error: "
-limit_reached = "9 presets maximum — remove one first"
+limit_reached = "99 presets maximum — remove one first"
 
 # annuaire en ligne
 search_title = "Add from the online directory"
