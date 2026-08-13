@@ -1015,6 +1015,7 @@ dependencies = [
  "axum",
  "futures",
  "http-body-util",
+ "libc",
  "ritornello-i18n",
  "ritornello-plugin-sdk",
  "ritornello-proto",

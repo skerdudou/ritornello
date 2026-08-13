@@ -7,6 +7,7 @@ mod player;
 mod plugins;
 mod state;
 mod status;
+mod system;
 mod theme;
 mod types;
 mod web;

@@ -22,6 +22,9 @@ ritornello-proto = { path = "../ritornello-proto" }
 ritornello-plugin-sdk = { path = "../ritornello-plugin-sdk" }
 ritornello-i18n = { path = "../ritornello-i18n" }
 rust-embed = { version = "8", features = ["debug-embed"] }
+# statvfs, for the root filesystem usage shown on the System tab. Already
+# in Cargo.lock (tokio depends on it), so this adds no compilation.
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
