@@ -9,14 +9,6 @@
 //! disk read does — and `statvfs` reads a cached superblock. Neither
 //! warrants `spawn_blocking`.
 //!
-//! Nothing in this crate calls into this module yet — Task 2 wires
-//! `collect` into an HTTP handler. `ritornello-core` is a `[[bin]]`-only
-//! crate (no `[lib]`), so `pub` gives none of the "another crate might use
-//! it" exemption it would in a library: every item here is genuinely
-//! unreachable from `main` for now, and `-D warnings` turns that into a
-//! hard compile error. Remove this allow once Task 2 lands.
-#![allow(dead_code)]
-
 use serde::Serialize;
 
 /// Available/total pair in kilobytes — the unit `/proc/meminfo` already
@@ -229,6 +221,15 @@ pub fn collect(info: &SystemInfo) -> Metrics {
     }
 }
 
+use axum::extract::State;
+use axum::Json;
+
+/// Metrics for the System tab. Read on demand, nothing cached: the page
+/// polls, and everything here costs a handful of pseudo-file reads.
+pub async fn system_json(State(state): State<crate::status::AppState>) -> Json<Metrics> {
+    Json(collect(&state.system))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,5 +300,50 @@ mod tests {
         assert!(m.kernel.is_some());
         assert_eq!(m.version, env!("CARGO_PKG_VERSION"));
         assert!(!m.can_power_off, "capacités à false par défaut");
+    }
+
+    use crate::status::{router, AppState};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use std::sync::Arc;
+    use tower::util::ServiceExt;
+
+    /// Montage HTTP avec un `SystemInfo` choisi, sur le montage partagé des
+    /// tests de `status.rs`.
+    fn app(info: SystemInfo) -> axum::Router {
+        router(AppState { system: Arc::new(info), ..crate::status::tests_support::app_state() })
+    }
+
+    async fn corps_json(app: axum::Router, uri: &str) -> serde_json::Value {
+        let resp = app.oneshot(Request::get(uri).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn get_system_expose_toutes_les_cles() {
+        let v = corps_json(app(SystemInfo::default()), "/api/system").await;
+        // Jeu de clés stable : un champ illisible vaut `null` et reste
+        // présent, pour que la vue n'ait pas deux cas à distinguer.
+        for cle in [
+            "temperature_c", "cpu_mhz", "load", "cpus", "memory", "disk", "under_voltage",
+            "uptime_s", "service_uptime_s", "hostname", "ip", "os", "kernel", "version",
+            "can_power_off", "can_reboot",
+        ] {
+            assert!(v.get(cle).is_some(), "clé {cle} absente");
+        }
+        assert!(v["version"].is_string());
+        assert_eq!(v["can_power_off"], false);
+        assert_eq!(v["can_reboot"], false);
+    }
+
+    #[tokio::test]
+    async fn get_system_reflete_les_capacites_connues() {
+        let info = SystemInfo { can_power_off: true, can_reboot: true, ..Default::default() };
+        let v = corps_json(app(info), "/api/system").await;
+        assert_eq!(v["can_power_off"], true);
+        assert_eq!(v["can_reboot"], true);
     }
 }

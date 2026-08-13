@@ -47,6 +47,11 @@ pub struct AppState {
     /// cœur. Un `watch` : chaque connexion SSE clone ce récepteur, seule la
     /// dernière valeur compte, et un navigateur lent ne peut pas retenir le cœur.
     pub player: tokio::sync::watch::Receiver<crate::metadata::PlayerState>,
+    /// Process-lifetime system facts (start instant, what logind allows),
+    /// read by the System tab's endpoints. One `Arc` field rather than
+    /// three loose ones: every test constructor below would otherwise grow
+    /// by three lines.
+    pub system: Arc<crate::system::SystemInfo>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -59,6 +64,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/player", get(player_sse))
         .route("/api/theme", get(crate::theme::theme_json).put(crate::theme::theme_put))
         .route("/api/settings", get(settings_json).put(settings_put))
+        .route("/api/system", get(crate::system::system_json))
         .route("/api/command", axum::routing::post(command_post))
         .route(
             "/plugins/:name/api/data",
@@ -440,6 +446,7 @@ pub(crate) mod tests_support {
             settings_current: Arc::new(tokio::sync::RwLock::new(crate::state::Settings::default())),
             settings_tx: tokio::sync::mpsc::channel(4).0,
             player: player_inerte(),
+            system: Default::default(),
         }
     }
 
@@ -469,6 +476,7 @@ pub(crate) mod tests_support {
             settings_current: Arc::new(tokio::sync::RwLock::new(crate::state::Settings::default())),
             settings_tx: tokio::sync::mpsc::channel(4).0,
             player: player_inerte(),
+            system: Default::default(),
         };
         (state, audio_rx)
     }
@@ -500,6 +508,7 @@ pub(crate) mod tests_support {
             settings_current: Arc::new(tokio::sync::RwLock::new(crate::state::Settings::default())),
             settings_tx: tokio::sync::mpsc::channel(4).0,
             player: player_inerte(),
+            system: Default::default(),
         };
         (state, cmd_rx)
     }
@@ -539,6 +548,7 @@ pub(crate) mod tests_support {
             settings_current: Arc::new(tokio::sync::RwLock::new(crate::state::Settings::default())),
             settings_tx: tokio::sync::mpsc::channel(4).0,
             player: player_inerte(),
+            system: Default::default(),
         };
         (state, locale_rx, dir)
     }

@@ -326,6 +326,7 @@ async fn main() -> Result<()> {
             settings_current: settings_current.clone(),
             settings_tx: settings_tx.clone(),
             player: etat_rx.clone(),
+            system: Arc::new(system::SystemInfo::default()),
         });
         let listener = tokio::net::TcpListener::bind(&http_addr).await.with_context(|| format!("bind {http_addr}"))?;
         tracing::info!("interface web sur http://{http_addr}/");
