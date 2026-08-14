@@ -62,12 +62,19 @@ mid-sequence is a change of mind, not a step of it. Key **`0`** is legal
 input for exactly this: alone, with no offset pending, `Select(0)`
 selects nothing (there is no preset 0).
 
-The web grid mirrors the same decade window **locally**: its own `+10`
-button (shown once the count exceeds nine) shifts the visible numbers to
-the next ten, wraps at the same boundary as the core, and auto-returns to
-the base 1-9 window after 2 s of inactivity or as soon as a preset is
-picked — the browser always sends the absolute number to `Select`, `+10`
-itself never leaves it.
+The web grid mirrors the same decade window **locally**, through two `<`/`>`
+arrows next to the count (shown once it exceeds nine) instead of a `+10`
+button: page 0 is 1-9, page k is 10k to 10k+9 — the same boundaries as the
+core's offset, so both interfaces agree on what "the same page" means.
+Unlike the core, the web grid does **not** wrap: `<` is disabled on the
+first page and `>` on the last, and there is no auto-return to page 0. The
+physical remote wraps because it has a single key and no way back, so
+wrapping is its only way to reach everything; a pair of arrows has a way
+back, so wrapping would just be gratuitous and confusing. Picking a preset
+no longer changes page either — trying several presets from the same group
+should not require paging back each time. The browser always sends the
+absolute number to `Select`; only a source/count change resets the page to
+0 (the same guard that already resets the window on a source switch).
 
 **Volume +/- respond to holding**, not just clicking: pointer-down sends
 one step immediately, then — after the initial delay set on the config

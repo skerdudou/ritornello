@@ -24,11 +24,7 @@ async function send(cmd: Command) {
   if (err) toast.error(err)
 }
 
-// Même valeur que la constante OVERLAY du cœur (2 s) : la fenêtre web et le
-// décalage +10 de la télécommande retombent au même rythme.
-const FENETRE_MS = 2000
 const fenetre = ref(0)
-let minuterieFenetre: ReturnType<typeof setTimeout> | undefined
 
 // Compte déclaré par la source (null = source muette sur le sujet : grille
 // 1-9 historique, pour ne jamais désarmer la télécommande).
@@ -45,41 +41,44 @@ const presets = computed(() => {
   return debut > fin ? [] : Array.from({ length: fin - debut + 1 }, (_, i) => debut + i)
 })
 
-const plus10Visible = computed(() => (compte.value ?? 0) > 9)
+const paginationVisible = computed(() => (compte.value ?? 0) > 9)
 
-// Autant de colonnes que de cellules (touches + bouton +10) pour que +10
-// reste la dernière cellule de la rangée ; classes littérales pour Tailwind.
-const colonnes = computed(() => {
-  const cellules = presets.value.length + (plus10Visible.value ? 1 : 0)
-  if (cellules >= 11) return 'sm:grid-cols-11'
-  if (cellules === 10) return 'sm:grid-cols-10'
-  return 'sm:grid-cols-9'
+// Dernière fenêtre non vide : le plus grand multiple de 10 encore atteignable
+// (même borne que le rebouclage du +10 côté cœur), 0 si tout tient sur 1-9.
+const derniereFenetre = computed(() => {
+  const c = compte.value ?? 0
+  return c > 9 ? Math.floor(c / 10) : 0
 })
 
-function armerRetour() {
-  clearTimeout(minuterieFenetre)
-  minuterieFenetre = setTimeout(() => { fenetre.value = 0 }, FENETRE_MS)
+// Les flèches vivent sur la ligne du compteur, hors de la grille : `colonnes`
+// ne compte plus que les touches numérotées (9 ou 10 selon la fenêtre), qui
+// est tout ce qu'elle a jamais eu besoin de savoir. Les mettre dans la grille
+// porterait le maximum à 11 cellules et retomberait sur le même défaut que le
+// +10 y avait révélé (11 cellules, colonnes plafonnées à 10, dernière cellule
+// qui tombe à la ligne) — d'où le placement au-dessus. Classes littérales :
+// une classe construite par concaténation n'est pas vue par le scanner
+// Tailwind et ne serait pas générée.
+const colonnes = computed(() => (presets.value.length === 10 ? 'sm:grid-cols-10' : 'sm:grid-cols-9'))
+
+function pagePrecedente() {
+  if (fenetre.value > 0) fenetre.value -= 1
 }
 
-function decaler() {
-  // Même règle que le cœur : la dernière fenêtre utile commence au plus
-  // grand multiple de 10 encore atteignable ((compte / 10) * 10).
-  const c = compte.value ?? 0
-  fenetre.value = (fenetre.value + 1) * 10 > c ? 0 : fenetre.value + 1
-  armerRetour()
+function pageSuivante() {
+  if (fenetre.value < derniereFenetre.value) fenetre.value += 1
 }
 
 function choisir(n: number) {
-  // Le web envoie toujours le numéro absolu : Plus10 ne voyage jamais
-  // depuis la SPA, la fenêtre est un état purement local.
-  clearTimeout(minuterieFenetre)
-  fenetre.value = 0
+  // Le web envoie toujours le numéro absolu ; contrairement à l'ancien +10,
+  // choisir une présélection ne referme plus la page — on peut vouloir en
+  // essayer plusieurs du même groupe.
   send({ cmd: 'Select', arg: n })
 }
 
-// Un changement de compte (autre source, disque éjecté) invalide la fenêtre.
+// Un changement de compte (autre source, disque éjecté) invalide la page :
+// c'est le mécanisme qui porte la garantie « changer de source revient à la
+// première page », demandée par le propriétaire — pas de minuterie séparée.
 watch(compte, () => { fenetre.value = 0 })
-onUnmounted(() => clearTimeout(minuterieFenetre))
 
 // Timings du volume maintenu, servis par le cœur (modifiables sur la page
 // config). Les défauts couvrent le temps du GET et son éventuel échec.
@@ -163,17 +162,49 @@ function toucheVolume(e: KeyboardEvent, cmd: Command) {
           >
             {{ n }}
           </Button>
-          <Button v-if="plus10Visible" data-preset-plus10 variant="secondary" @click="decaler">+10</Button>
         </div>
-        <!-- Combien de touches la source declare. Utile a deux titres : un
-             compte au-dela de la fenetre affichee dit qu'il en existe plus loin
-             (c'est ce que le +10 va chercher), et un compte de 0 explique une
-             grille vide — un cd sans disque — au lieu de la laisser enigmatique.
-             Absent quand la source ne declare rien : la grille nue 1-9 est alors
-             un repli, pas un inventaire, et annoncer « 9 » serait faux. -->
-        <p v-if="compte !== null" data-preset-count class="text-xs text-muted-foreground">
-          {{ t('presets_label') }} : {{ compte }}
-        </p>
+        <!-- Ligne du compteur : flèche précédente, compte, flèche suivante.
+             Hors de la grille (voir `colonnes`) pour ne pas en repousser le
+             nombre de colonnes. Pas de rebouclage ici, à la différence du +10
+             de la télécommande physique : celle-ci n'a qu'une touche et aucun
+             moyen de revenir en arrière, donc reboucler est son seul moyen de
+             tout couvrir ; avec deux flèches, reboucler serait gratuit et
+             déroutant, donc on borne : `<` inactive en première page, `>` en
+             dernière. -->
+        <div v-if="compte !== null" class="flex items-center justify-between gap-2">
+          <Button
+            v-if="paginationVisible"
+            data-preset-prev
+            variant="secondary"
+            size="sm"
+            :disabled="fenetre === 0"
+            :aria-label="t('presets_prev_page')"
+            @click="pagePrecedente"
+          >
+            &lt;
+          </Button>
+          <!-- Combien de touches la source declare. Utile a deux titres : un
+               compte au-dela de la fenetre affichee dit qu'il en existe plus
+               loin (c'est ce que la flèche suivante va chercher), et un
+               compte de 0 explique une grille vide — un cd sans disque — au
+               lieu de la laisser enigmatique. Absent quand la source ne
+               declare rien : la grille nue 1-9 est alors un repli, pas un
+               inventaire, et annoncer « 9 » serait faux. -->
+          <p data-preset-count class="text-xs text-muted-foreground">
+            {{ t('presets_label') }} : {{ compte }}
+          </p>
+          <Button
+            v-if="paginationVisible"
+            data-preset-next
+            variant="secondary"
+            size="sm"
+            :disabled="fenetre === derniereFenetre"
+            :aria-label="t('presets_next_page')"
+            @click="pageSuivante"
+          >
+            &gt;
+          </Button>
+        </div>
         <!-- Une rangee par groupe : transport, contenu, son, appareil. Le
              groupement est une donnee (`REMOTE_ROWS`), pas une mise en page
              recopiee ici. -->

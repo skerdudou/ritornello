@@ -85,7 +85,8 @@ describe('HomeView', () => {
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     expect(w.findAll('[data-preset-button]')).toHaveLength(9)
-    expect(w.find('[data-preset-plus10]').exists()).toBe(false)
+    expect(w.find('[data-preset-prev]').exists()).toBe(false)
+    expect(w.find('[data-preset-next]').exists()).toBe(false)
   })
 
   it('rend une rangée par groupe et la veille dans l’en-tête', async () => {
@@ -262,7 +263,7 @@ describe('HomeView — volume maintenu', () => {
   })
 })
 
-describe('HomeView — fenêtre +10', () => {
+describe('HomeView — pagination des présélections', () => {
   /** Monte la vue et pousse un état poussé avec ces champs surchargés. */
   async function monterAvec(etat: Partial<PlayerPayload>) {
     vi.useFakeTimers()
@@ -283,6 +284,11 @@ describe('HomeView — fenêtre +10', () => {
     return { w, posts }
   }
 
+  /** Numéros actuellement rendus, dans l'ordre — pas seulement leur nombre. */
+  function numeros(w: Awaited<ReturnType<typeof monterAvec>>['w']) {
+    return w.findAll('[data-preset-button]').map((b) => b.text())
+  }
+
   afterEach(() => {
     vi.useRealTimers()
     vi.unstubAllGlobals()
@@ -291,47 +297,90 @@ describe('HomeView — fenêtre +10', () => {
   it('la grille ne montre que les numéros existants', async () => {
     const { w } = await monterAvec({ preset_count: 5 })
     expect(w.findAll('[data-preset-button]')).toHaveLength(5)
-    expect(w.find('[data-preset-plus10]').exists()).toBe(false)
+    expect(w.find('[data-preset-prev]').exists()).toBe(false)
+    expect(w.find('[data-preset-next]').exists()).toBe(false)
   })
 
   it('un compte nul ne montre aucune touche numérotée', async () => {
     const { w } = await monterAvec({ preset_count: 0 })
     expect(w.findAll('[data-preset-button]')).toHaveLength(0)
-    expect(w.find('[data-preset-plus10]').exists()).toBe(false)
+    expect(w.find('[data-preset-prev]').exists()).toBe(false)
+    expect(w.find('[data-preset-next]').exists()).toBe(false)
   })
 
-  it('+10 décale la fenêtre, puis reboucle sur la première', async () => {
-    const { w } = await monterAvec({ preset_count: 23 })
-    expect(w.findAll('[data-preset-button]')).toHaveLength(9) // 1-9
-    await w.find('[data-preset-plus10]').trigger('click')
-    let nums = w.findAll('[data-preset-button]').map((b) => b.text())
-    expect(nums).toEqual(['10', '11', '12', '13', '14', '15', '16', '17', '18', '19'])
-    await w.find('[data-preset-plus10]').trigger('click')
-    nums = w.findAll('[data-preset-button]').map((b) => b.text())
-    expect(nums).toEqual(['20', '21', '22', '23'])
-    await w.find('[data-preset-plus10]').trigger('click')
-    expect(w.findAll('[data-preset-button]')).toHaveLength(9) // retour 1-9
+  it('les deux flèches sont absentes avec 9 présélections ou moins', async () => {
+    const { w } = await monterAvec({ preset_count: 9 })
+    expect(w.find('[data-preset-prev]').exists()).toBe(false)
+    expect(w.find('[data-preset-next]').exists()).toBe(false)
   })
 
-  it('la fenêtre retombe seule après 2 s, comme l’incrustation du cœur', async () => {
-    const { w } = await monterAvec({ preset_count: 23 })
-    await w.find('[data-preset-plus10]').trigger('click')
-    vi.advanceTimersByTime(2000)
+  it('> avance d’une page à travers toute la plage', async () => {
+    const { w } = await monterAvec({ preset_count: 24 })
+    expect(numeros(w)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9'])
+    await w.find('[data-preset-next]').trigger('click')
     await nextTick()
-    expect(w.findAll('[data-preset-button]')).toHaveLength(9)
+    expect(numeros(w)).toEqual(['10', '11', '12', '13', '14', '15', '16', '17', '18', '19'])
+    await w.find('[data-preset-next]').trigger('click')
+    await nextTick()
+    expect(numeros(w)).toEqual(['20', '21', '22', '23', '24'])
   })
 
-  it('choisir un numéro poste la valeur absolue et referme la fenêtre', async () => {
+  it('< revient à la page précédente', async () => {
+    const { w } = await monterAvec({ preset_count: 24 })
+    await w.find('[data-preset-next]').trigger('click')
+    await w.find('[data-preset-next]').trigger('click')
+    await nextTick()
+    expect(numeros(w)).toEqual(['20', '21', '22', '23', '24'])
+    await w.find('[data-preset-prev]').trigger('click')
+    await nextTick()
+    expect(numeros(w)).toEqual(['10', '11', '12', '13', '14', '15', '16', '17', '18', '19'])
+  })
+
+  it('bornes : < inactive sur la première page, > sur la dernière', async () => {
+    const { w } = await monterAvec({ preset_count: 24 })
+    expect(w.get('[data-preset-prev]').attributes('disabled')).toBeDefined()
+    expect(w.get('[data-preset-next]').attributes('disabled')).toBeUndefined()
+    await w.find('[data-preset-next]').trigger('click')
+    await w.find('[data-preset-next]').trigger('click')
+    await nextTick()
+    expect(w.get('[data-preset-next]').attributes('disabled')).toBeDefined()
+    expect(w.get('[data-preset-prev]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('aucun retour automatique après avoir avancé', async () => {
+    // Ce test échouerait sans la suppression de la minuterie de retour.
+    const { w } = await monterAvec({ preset_count: 23 })
+    await w.find('[data-preset-next]').trigger('click')
+    await nextTick()
+    vi.advanceTimersByTime(60_000)
+    await nextTick()
+    expect(numeros(w)).toEqual(['10', '11', '12', '13', '14', '15', '16', '17', '18', '19'])
+  })
+
+  it('un changement de compte ramène à la première page', async () => {
+    const { w } = await monterAvec({ preset_count: 24 })
+    await w.find('[data-preset-next]').trigger('click')
+    await nextTick()
+    expect(numeros(w)).toEqual(['10', '11', '12', '13', '14', '15', '16', '17', '18', '19'])
+    // Nouvelle source, nouveau compte : la fenêtre ne doit pas survivre.
+    FauxEventSource.derniere!.pousse({ preset_count: 5 })
+    await nextTick()
+    expect(numeros(w)).toEqual(['1', '2', '3', '4', '5'])
+  })
+
+  it('choisir une présélection laisse la page en place', async () => {
     const { w, posts } = await monterAvec({ preset_count: 23 })
-    await w.find('[data-preset-plus10]').trigger('click')
+    await w.find('[data-preset-next]').trigger('click')
+    await nextTick()
     await w.find('[data-preset-button="14"]').trigger('click')
     expect(posts).toEqual([JSON.stringify({ cmd: 'Select', arg: 14 })])
-    expect(w.findAll('[data-preset-button]')).toHaveLength(9)
+    expect(numeros(w)).toEqual(['10', '11', '12', '13', '14', '15', '16', '17', '18', '19'])
   })
 
   it('met en évidence la touche active au-delà de 9', async () => {
     const { w } = await monterAvec({ preset_count: 23, preset: 14 })
-    await w.find('[data-preset-plus10]').trigger('click')
+    await w.find('[data-preset-next]').trigger('click')
+    await nextTick()
     expect(w.find('[data-preset-button="14"]').attributes('data-preset-active')).toBe('true')
   })
 })

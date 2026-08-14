@@ -13,10 +13,11 @@ test('navigation entre l’accueil, la config et les pages de plugin', async ({ 
   await page.goto('/')
   await expect(page.locator('[data-preset-button="1"]')).toBeVisible()
   // Le harnais ne déclare qu'une seule station (stations.toml) : la grille
-  // n'affiche que ce numéro reel, et pas de fenêtre +10 puisque le compte
-  // ne dépasse pas neuf.
+  // n'affiche que ce numéro reel, et pas de fleches de pagination puisque le
+  // compte ne dépasse pas neuf.
   await expect(page.locator('[data-preset-button]')).toHaveCount(1)
-  await expect(page.locator('[data-preset-plus10]')).toHaveCount(0)
+  await expect(page.locator('[data-preset-prev]')).toHaveCount(0)
+  await expect(page.locator('[data-preset-next]')).toHaveCount(0)
   await page.goto('/config')
   // `getByText('radio')` seul est ambigu : l'en-tete liste aussi les
   // plugins admin par leur nom (voir App.vue), donc « radio » y apparait en
