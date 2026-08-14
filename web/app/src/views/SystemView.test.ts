@@ -366,6 +366,90 @@ describe('SystemView', () => {
     w.unmount()
   })
 
+  it('un sondage en vol empêche un second sondage de corrompre le delta suivant', async () => {
+    // Chaque GET reste en attente jusqu'à ce que le test le résolve
+    // explicitement, pour simuler un sondage qui n'a pas encore répondu
+    // quand le minuteur tique à nouveau.
+    const differes: { resolve: (v: unknown) => void }[] = []
+    let n = 0
+    const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') return Promise.resolve({ ok: true, json: async () => ({}) } as Response)
+      if (String(url).includes('/api/i18n')) return Promise.resolve({ ok: true, json: async () => CATALOGUE } as Response)
+      n += 1
+      return new Promise((resolve) => differes.push({ resolve }))
+    })
+    vi.stubGlobal('fetch', f)
+    const w = await monter()
+    // Premier sondage (déclenché par `demarrer()` au montage) : en vol.
+    expect(n).toBe(1)
+    // Le minuteur tique pendant que ce premier sondage n'a toujours pas
+    // répondu : sans le verrou, ça déclencherait un second `fetch` par-dessus.
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(n).toBe(1)
+    // Le premier sondage répond enfin, posant la référence de jiffies.
+    differes[0]!.resolve({ ok: true, json: async () => payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 500 }) })
+    await flushPromises()
+    // Le minuteur retique : le verrou est levé, un second sondage part bien.
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(n).toBe(2)
+    differes[1]!.resolve({ ok: true, json: async () => payload({ cpu_total_jiffies: 2000, cpu_idle_jiffies: 750 }) })
+    await flushPromises()
+    // Le delta n'a pas été corrompu par un chevauchement : 75 % exact, comme
+    // dans le test sans chevauchement ci-dessus.
+    expect(w.get('[data-system-cpu-usage]').text()).toBe('75 %')
+    w.unmount()
+  })
+
+  it('un changement de période pendant un sondage en vol n écrase pas un état plus frais', async () => {
+    type Differe = { signal: AbortSignal | null | undefined; resolve: (v: unknown) => void }
+    const differes: Differe[] = []
+    const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') return Promise.resolve({ ok: true, json: async () => ({}) } as Response)
+      if (String(url).includes('/api/i18n')) return Promise.resolve({ ok: true, json: async () => CATALOGUE } as Response)
+      return new Promise((resolve, reject) => {
+        const signal = init?.signal
+        // Un `AbortSignal` réel rejette son `fetch` à l'annulation : le stub
+        // reproduit ce comportement plutôt que de laisser la promesse en
+        // vol pour toujours.
+        signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+        differes.push({ signal, resolve })
+      })
+    })
+    vi.stubGlobal('fetch', f)
+    const w = await monter()
+    expect(differes.length).toBe(1)
+    // Changement de période pendant que ce premier sondage est encore en vol.
+    await w.findComponent(Select).vm.$emit('update:modelValue', '1')
+    await flushPromises()
+    // `arreter()` a dû annuler la requête en vol...
+    expect(differes[0]!.signal?.aborted).toBe(true)
+    // ... et `demarrer()` en relancer une nouvelle immédiatement.
+    expect(differes.length).toBe(2)
+    // La requête annulée finit par « répondre » avec des données pourtant
+    // plus anciennes que celles déjà posées par la requête plus fraîche :
+    // elle ne doit ni les écraser, ni afficher la ligne d'indisponibilité —
+    // une requête abandonnée par notre propre code n'est pas un échec du
+    // cœur.
+    differes[1]!.resolve({ ok: true, json: async () => payload({ cpu_total_jiffies: 2000, cpu_idle_jiffies: 1000 }) })
+    await flushPromises()
+    expect(w.find('[data-system-unavailable]').exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('re-choisir la période déjà active ne redéclenche pas le sondage', async () => {
+    const f = stub(payload())
+    const w = await monter()
+    await flushPromises()
+    const appels = f.mock.calls.length
+    // La valeur initiale du sélecteur est déjà « 5 » (période par défaut) :
+    // la re-choisir ne doit ni sonder immédiatement, ni réinitialiser le
+    // minuteur.
+    await w.findComponent(Select).vm.$emit('update:modelValue', '5')
+    await flushPromises()
+    expect(f.mock.calls.length).toBe(appels)
+    w.unmount()
+  })
+
   it('change la cadence de sondage en changeant la période', async () => {
     const f = stub(payload())
     const w = await monter()
@@ -424,8 +508,26 @@ describe('SystemView', () => {
     stub(payload({ under_voltage: true }))
     const w = await monter()
     const tension = w.get('[data-system-under-voltage]')
-    expect(tension.text()).toBe('system_under_voltage')
+    // Le mot court dans la grille, pas la phrase entière : voir le test
+    // suivant pour la phrase de conseil, affichée à part.
+    expect(tension.text()).toBe('system_voltage_low')
     expect(tension.classes()).toContain('text-destructive')
+    w.unmount()
+  })
+
+  it('affiche la phrase de conseil sous la grille seulement quand l alerte est active', async () => {
+    stub(payload({ under_voltage: false }))
+    const w = await monter()
+    expect(w.find('[data-system-under-voltage-avis]').exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('affiche la phrase de conseil avec role status en cas de sous-tension', async () => {
+    stub(payload({ under_voltage: true }))
+    const w = await monter()
+    const avis = w.get('[data-system-under-voltage-avis]')
+    expect(avis.text()).toBe('system_under_voltage')
+    expect(avis.attributes('role')).toBe('status')
     w.unmount()
   })
 
@@ -436,6 +538,30 @@ describe('SystemView', () => {
     await w.findComponent(Select).vm.$emit('update:modelValue', '30')
     await flushPromises()
     expect(w.get('[data-system-history-span]').text()).toContain('30')
+    w.unmount()
+  })
+
+  it('affiche la fenêtre de repli (capacité × période) tant que l historique ne mesure rien', async () => {
+    // Page fraîche : aucun échantillon encore poussé (seul le premier sondage
+    // de référence a eu lieu), donc rien à mesurer — repli sur la capacité
+    // théorique à la période par défaut (5 s × 60 = 5 min).
+    stub(payload({ cpu_total_jiffies: 0, cpu_idle_jiffies: 0 }))
+    const w = await monter()
+    expect(w.get('[data-system-history-span]').text()).toBe('5 min')
+    w.unmount()
+  })
+
+  it('affiche la durée réelle de l historique plutôt que la capacité une fois mesurable', async () => {
+    const jiffies = prochainsJiffies()
+    stub(() => payload(jiffies()))
+    const w = await monter()
+    // Trois sondages supplémentaires à 5 s : le premier ne fait que poser la
+    // référence de jiffies, les deux suivants poussent deux échantillons
+    // distants de 5 s réels — bien moins que les 5 min que promettrait la
+    // capacité théorique à cette période.
+    await vi.advanceTimersByTimeAsync(15000)
+    await flushPromises()
+    expect(w.get('[data-system-history-span]').text()).toBe('0 min')
     w.unmount()
   })
 
@@ -527,16 +653,90 @@ describe('SystemView', () => {
       w.unmount()
     })
 
-    it('le popin reste dans la carte sur la première et la dernière colonne', async () => {
+    it('un appui tactile affiche le popin sans attendre un mouvement', async () => {
+      // `pointerdown` seul, sans `pointermove` : un tap immobile sur écran
+      // tactile ne déclencherait jamais `pointermove`.
       const { w, svg } = await monterAvecHistorique()
+      expect(w.find('[data-system-history-popin]').exists()).toBe(false)
+      await svg.trigger('pointerdown', { clientX: 100 })
+      const popin = w.get('[data-system-history-popin]')
+      expect(popin.text()).toContain('50 %')
+      w.unmount()
+    })
+
+    it('un geste interrompu efface le popin', async () => {
+      // `pointercancel` : le geste est interrompu (un défilement de page qui
+      // démarre, par exemple) sans qu'un `pointerup` n'ait jamais eu lieu.
+      const { w, svg } = await monterAvecHistorique()
+      await svg.trigger('pointerdown', { clientX: 100 })
+      expect(w.find('[data-system-history-popin]').exists()).toBe(true)
+      await svg.trigger('pointercancel')
+      expect(w.find('[data-system-history-popin]').exists()).toBe(false)
+      w.unmount()
+    })
+
+    it('le trait de survol suit la colonne pointée', async () => {
+      // `LARGEUR` du viewBox vaut 100, n = 5 : le pas entre colonnes vaut
+      // 25. La colonne 2 (survolée par `clientX: 100`, voir le test du
+      // milieu ci-dessus) doit donc placer le trait à x = 50.
+      const { w, svg } = await monterAvecHistorique()
+      await svg.trigger('pointermove', { clientX: 100 })
+      const ligne = w.get('[data-system-history-line]')
+      expect(ligne.attributes('x1')).toBe('50')
+      expect(ligne.attributes('x2')).toBe('50')
+      w.unmount()
+    })
+
+    it('arrondit à la colonne la plus proche plutôt que d arrondir vers le bas', async () => {
+      // n = 5 sur une largeur de 200 px : les colonnes tombent à 0, 50, 100,
+      // 150, 200. `clientX: 95` (fraction 1,9) et `clientX: 105` (fraction
+      // 2,1) doivent tous deux désigner la colonne 2 : un `Math.floor`
+      // donnerait 1 pour le premier et 2 pour le second, deux réponses
+      // différentes là où « la plus proche » n'en admet qu'une.
+      const { w, svg } = await monterAvecHistorique()
+      await svg.trigger('pointermove', { clientX: 95 })
+      let ligne = w.get('[data-system-history-line]')
+      expect(ligne.attributes('x1')).toBe('50')
+      await svg.trigger('pointermove', { clientX: 105 })
+      ligne = w.get('[data-system-history-line]')
+      expect(ligne.attributes('x1')).toBe('50')
+      // `clientX: 125` (fraction 2,5, à cheval entre les colonnes 2 et 3) :
+      // `Math.round` arrondit les demis vers le haut, donc la colonne 3
+      // (x = 75), ce qu'un arrondi « au plus proche » différent (vers le
+      // pair, par exemple) ne donnerait pas forcément.
+      await svg.trigger('pointermove', { clientX: 125 })
+      ligne = w.get('[data-system-history-line]')
+      expect(ligne.attributes('x1')).toBe('75')
+      w.unmount()
+    })
+
+    it('le popin est centré par une transformation constante, bornée en pixels sur les trois régimes', async () => {
+      // Graphe large de 200 px (voir le stub de `getBoundingClientRect`
+      // ci-dessus), popin large de 100 px (`LARGEUR_POPIN_PX`) : le centre
+      // idéal ne peut descendre sous 50 px ni dépasser 150 px sans faire
+      // déborder le popin de la carte.
+      const { w, svg } = await monterAvecHistorique()
+      // Première colonne (i = 0 sur 5) : centre idéal à 0 px, borné à 50 px —
+      // la transformation reste -50 % constante, c'est la position qui est
+      // bornée, pas un cas particulier de transformation comme avant cette
+      // série.
       await svg.trigger('pointermove', { clientX: 0 })
-      const debut = w.get('[data-system-history-popin]').element as HTMLElement
-      expect(debut.style.left).toBe('0%')
-      expect(debut.style.transform).toBe('translateX(0)')
+      let popin = w.get('[data-system-history-popin]').element as HTMLElement
+      expect(popin.style.transform).toBe('translateX(-50%)')
+      expect(popin.style.left).toBe('50px')
+      // Colonne du milieu (i = 2 sur 5) : centre idéal à 100 px, dans la
+      // bande non bornée — c'était la branche non testée avant cette série,
+      // celle où l'ancien code centrait sans jamais borner.
+      await svg.trigger('pointermove', { clientX: 100 })
+      popin = w.get('[data-system-history-popin]').element as HTMLElement
+      expect(popin.style.transform).toBe('translateX(-50%)')
+      expect(popin.style.left).toBe('100px')
+      // Dernière colonne (i = 4 sur 5) : centre idéal à 200 px, borné à
+      // 150 px, symétrique de la première colonne.
       await svg.trigger('pointermove', { clientX: 200 })
-      const fin = w.get('[data-system-history-popin]').element as HTMLElement
-      expect(fin.style.left).toBe('100%')
-      expect(fin.style.transform).toBe('translateX(-100%)')
+      popin = w.get('[data-system-history-popin]').element as HTMLElement
+      expect(popin.style.transform).toBe('translateX(-50%)')
+      expect(popin.style.left).toBe('150px')
       w.unmount()
     })
 

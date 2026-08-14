@@ -36,6 +36,17 @@ const HAUTEUR = 30
 const RIEN = '—'
 
 const historique = ref<{ cpu: number; ram: number; t: number }[]>([])
+/**
+ * Sondage en vol, à double usage : `sonder()` s'en sert comme verrou pour
+ * refuser de s'y superposer, `arreter()` pour l'annuler. Avant le delta CPU
+ * stateful, une réponse en retard n'était qu'un affichage périmé ; désormais
+ * une réponse qui atterrit dans le désordre écraserait `precedentJiffies`
+ * avec une référence trop récente ou trop ancienne, et fausserait le delta
+ * du sondage suivant (`Δtotal <= 0` ou une fenêtre bien plus longue que la
+ * période affichée). D'où le verrou : un sondage déjà en vol en bloque un
+ * second plutôt que de laisser deux réponses se doubler dans le désordre.
+ */
+let sondageEnVol: AbortController | null = null
 let minuteur: ReturnType<typeof setInterval> | null = null
 /** Devient faux au démontage : empêche `demarrer()` de recréer un minuteur
  *  après coup (par ex. depuis `attendreRetour`, qui peut se terminer
@@ -48,6 +59,16 @@ let monte = true
  * comme une série à afficher.
  */
 const precedentJiffies = ref<{ total: number; idle: number } | null>(null)
+
+/** Dernière utilisation CPU calculée par `sonder`, indépendamment de
+ *  l'historique : la carte CPU l'affiche dès qu'elle existe, sans attendre
+ *  que la mémoire soit elle aussi lisible (condition propre à l'historique).
+ *  Déclarée ici, à côté de `precedentJiffies` plutôt que près de son usage
+ *  d'affichage plus bas : `sonder()` l'assigne, et ne compte que sur l'ordre
+ *  d'exécution (premier appel via `onMounted`) pour que ça reste sûr — un
+ *  futur appel plus impatient tomberait sur la zone morte temporelle d'un
+ *  `const` déclaré après coup. */
+const utilisationCpuActuelle = ref<number | null>(null)
 
 /**
  * Utilisation CPU réelle entre ce sondage et le précédent : les compteurs de
@@ -101,8 +122,14 @@ function pourcentages(s: SystemPayload, cpu: number | null): { cpu: number; ram:
  * le drapeau `audioIndisponible` de la page de configuration.
  */
 async function sonder() {
+  // Verrou d'entrée : un sondage déjà en vol (minuteur qui tique plus vite
+  // que la réponse n'arrive) n'en déclenche pas un second par-dessus, voir
+  // le commentaire sur `sondageEnVol`.
+  if (sondageEnVol) return
+  const controleur = new AbortController()
+  sondageEnVol = controleur
   try {
-    const s = await api.get<SystemPayload>('/api/system')
+    const s = await api.get<SystemPayload>('/api/system', { signal: controleur.signal })
     etat.value = s
     indisponible.value = false
     const cpu = utilisationCpu(s)
@@ -113,8 +140,15 @@ async function sonder() {
       if (historique.value.length > CAPACITE) historique.value.shift()
     }
   } catch (e) {
+    // Une annulation par `arreter()` (changement de période, démontage,
+    // arrêt de l'appareil) rejette aussi le `fetch` : ce n'est pas un échec
+    // du cœur, juste notre propre requête coupée court, donc pas de ligne
+    // « indisponible » pour ça.
+    if (controleur.signal.aborted) return
     indisponible.value = true
     console.warn('GET /api/system indisponible', e)
+  } finally {
+    if (sondageEnVol === controleur) sondageEnVol = null
   }
 }
 
@@ -136,6 +170,13 @@ function arreter() {
     clearInterval(minuteur)
     minuteur = null
   }
+  // Annule un sondage encore en vol : sans ça, un changement de période
+  // laisserait une réponse plus ancienne atterrir après celle du nouveau
+  // rythme et écraser `etat`/`precedentJiffies` avec des données périmées.
+  if (sondageEnVol) {
+    sondageEnVol.abort()
+    sondageEnVol = null
+  }
 }
 
 function visibilite() {
@@ -152,18 +193,35 @@ function visibilite() {
 const periode = computed({
   get: () => String(periodeMs.value / 1000),
   set: (v: string) => {
-    periodeMs.value = Number(v) * 1000
+    const ms = Number(v) * 1000
+    // Choisir à nouveau la période déjà active ne doit rien redéclencher :
+    // sans ce garde-fou, chaque sélection — même sans changement — arrêtait
+    // et relançait le sondage, avec un sondage immédiat superflu et une
+    // fenêtre de delta CPU réinitialisée pour rien.
+    if (ms === periodeMs.value) return
+    periodeMs.value = ms
     arreter()
     demarrer()
   },
 })
 
-/** Fenêtre visible de l'historique, en minutes : `CAPACITE` échantillons à
- *  la période courante. Affichée pour ne pas laisser deviner : à 60
- *  échantillons, elle vaut numériquement la période en secondes (1 s → 1
- *  min, 30 s → 30 min), mais la formule reste écrite en toutes lettres plutôt
- *  que de s'appuyer sur cette coïncidence. */
-const dureeFenetreMin = computed(() => (CAPACITE * (periodeMs.value / 1000)) / 60)
+/**
+ * Fenêtre visible de l'historique, en minutes : la durée réelle couverte par
+ * `historique`, mesurée par l'horodatage de son premier et de son dernier
+ * échantillon, et non la capacité théorique (`CAPACITE` × période) qui
+ * suppose un tampon déjà plein. Cette hypothèse est fausse à l'arrivée sur la
+ * page (tampon vide) et pendant les `CAPACITE` sondages qui suivent tout
+ * changement de période : passer de 30 s à 1 s avec un tampon plein
+ * afficherait sinon « 1 min » alors que le graphe trace encore une demi-heure
+ * d'échantillons espacés de 30 s, et resterait faux pendant les 60 sondages
+ * suivants. Repli sur la capacité théorique seulement tant qu'il n'y a rien
+ * à mesurer (moins de deux échantillons).
+ */
+const dureeFenetreMin = computed(() => {
+  const h = historique.value
+  if (h.length >= 2) return Math.round((h.at(-1)!.t - h[0]!.t) / 60000)
+  return Math.round((CAPACITE * (periodeMs.value / 1000)) / 60)
+})
 
 onMounted(() => {
   demarrer()
@@ -186,10 +244,6 @@ const frequence = computed(() =>
 const charge = computed(() =>
   etat.value?.load ? etat.value.load.map((v) => v.toFixed(2)).join(' · ') : RIEN,
 )
-/** Dernière utilisation CPU calculée par `sonder`, indépendamment de
- *  l'historique : la carte CPU l'affiche dès qu'elle existe, sans attendre
- *  que la mémoire soit elle aussi lisible (condition propre à l'historique). */
-const utilisationCpuActuelle = ref<number | null>(null)
 const utilisationTexte = computed(() =>
   utilisationCpuActuelle.value == null ? RIEN : `${Math.round(utilisationCpuActuelle.value)} %`,
 )
@@ -199,12 +253,17 @@ const utilisationTexte = computed(() =>
  * affichage confondait : aucune sonde (`null`, rendu « — » comme toute autre
  * métrique absente), une sonde qui rapporte une alimentation saine
  * (`false`), et une sous-tension réellement détectée (`true`). Une ligne
- * permanente qui passe au rouge se voit aussi bien qu'une bannière, et
- * l'information n'existe plus qu'à un seul endroit.
+ * permanente qui passe au rouge se voit aussi bien qu'une bannière.
+ *
+ * Le mot est court (« Sous-tension », pas la phrase entière) : la phrase de
+ * conseil (`system_under_voltage`) vit séparément, juste sous la grille, et
+ * n'apparaît que lorsque l'alerte est active — un seul endroit pour l'état,
+ * un seul pour le conseil, plutôt que les deux concaténés dans une cellule de
+ * grille à deux colonnes qui les faisait déborder.
  */
 const tension = computed(() => {
   if (etat.value?.under_voltage == null) return RIEN
-  return etat.value.under_voltage ? t.value('system_under_voltage') : t.value('system_voltage_ok')
+  return etat.value.under_voltage ? t.value('system_voltage_low') : t.value('system_voltage_ok')
 })
 const dernier = computed(() => historique.value.at(-1) ?? null)
 const cheminCpu = computed(() =>
@@ -218,6 +277,13 @@ const cheminRam = computed(() =>
  *  n'est pas sur le graphe. */
 const survolIndex = ref<number | null>(null)
 
+/** Largeur en pixels du graphe, mesurée au dernier événement pointeur : sert
+ *  à borner la position du popin en pixels réels (voir `stylePopin`), plutôt
+ *  qu'en pourcentage du conteneur — un pixel se borne directement, un
+ *  pourcentage demanderait de connaître par avance la largeur du popin
+ *  rapportée à celle, variable, de la carte. */
+const largeurGraphe = ref(0)
+
 /**
  * Traduit la position du pointeur en index d'échantillon : même mapping que
  * `cheminSparkline` (pas = `LARGEUR / (n - 1)`, inversé ici en repartant de
@@ -226,6 +292,7 @@ const survolIndex = ref<number | null>(null)
  */
 function indexSurvol(event: PointerEvent): number {
   const rect = (event.currentTarget as Element).getBoundingClientRect()
+  largeurGraphe.value = rect.width
   const n = historique.value.length
   const frac = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0
   return Math.min(n - 1, Math.max(0, Math.round(frac * (n - 1))))
@@ -242,6 +309,17 @@ function survolPointeur(event: PointerEvent) {
   survolIndex.value = indexSurvol(event)
 }
 
+/**
+ * Efface le popin. `pointerleave` et `pointercancel` suffisent à couvrir la
+ * sortie du pointeur, qu'il s'agisse de la souris ou du doigt : la
+ * spécification pointer events déclenche déjà `pointerout` puis
+ * `pointerleave` juste après le `pointerup` d'un pointeur à manipulation
+ * directe (le doigt qui se lève). Un `@pointerup` séparé ici n'ajoutait donc
+ * rien de plus — et faisait pire : sur écran tactile, un simple tap
+ * affichait puis effaçait le popin en moins de 100 ms (seuls un
+ * appui-maintien ou un glisser laissaient le temps de le lire), et sur
+ * souris, cliquer sur le graphe le masquait jusqu'au prochain mouvement.
+ */
 function finSurvol() {
   survolIndex.value = null
 }
@@ -259,21 +337,47 @@ const echantillonSurvol = computed(() => {
   return historique.value[survolIndex.value] ?? null
 })
 
+/** Largeur figée du popin (voir la classe `min-w-` sur son élément) : sert à
+ *  connaître son demi-encombrement pour le borner ci-dessous, sans dépendre
+ *  du texte affiché. */
+const LARGEUR_POPIN_PX = 100
+const DEMI_LARGEUR_POPIN_PX = LARGEUR_POPIN_PX / 2
+
 /**
- * Position horizontale du popin : centré sur la colonne pointée
- * (translation -50 %), sauf sur la toute première et la toute dernière
- * colonne où ce centrage le ferait déborder de la carte — il se colle alors
- * au bord correspondant, avec une translation bornée à 0 ou -100 % plutôt
- * qu'à -50 %.
+ * Position horizontale du popin : toujours centré sur la colonne pointée
+ * (translation -50 % constante), avec la position bornée en pixels plutôt
+ * que la colonne pointée elle-même.
+ *
+ * L'ancien code ne bornait que les deux colonnes extrêmes (`i === 0` et
+ * `i === n - 1`) en désactivant le centrage sur elles seules — un raisonnement
+ * pensé pour deux colonnes qui débordent, alors que le débordement touche en
+ * réalité une bande entière de colonnes proches des bords (toutes celles à
+ * moins d'un demi-popin du bord de la carte), pas seulement les deux
+ * dernières. Sur un tampon plein (60 échantillons) dans une carte étroite,
+ * ça laissait déborder les popins des index 1 à 4 environ, et symétriquement
+ * en fin de série — précisément ce que la borne existe pour empêcher.
+ *
+ * Bornage en pixels (`largeurGraphe`, mesurée au dernier pointeur) et non via
+ * un `clamp()` CSS mêlant `%` et `calc()` : les deux rendraient exactement la
+ * même chose dans un navigateur, mais un pixel se borne par un simple
+ * `Math.min`/`Math.max`, sans dépendre d'un moteur CSS pour l'interpréter —
+ * ce qui inclut celui, très limité, de l'environnement de test.
  */
 const stylePopin = computed(() => {
   const n = historique.value.length
   const i = survolIndex.value
   if (i === null || n < 2) return null
-  const gauche = `${(i / (n - 1)) * 100}%`
-  if (i === 0) return { left: gauche, transform: 'translateX(0)' }
-  if (i === n - 1) return { left: gauche, transform: 'translateX(-100%)' }
-  return { left: gauche, transform: 'translateX(-50%)' }
+  const largeur = largeurGraphe.value
+  if (largeur <= 0) {
+    // Largeur pas encore mesurée : repli non borné plutôt qu'une division
+    // par zéro — un cas qui ne devrait pas survenir en pratique, l'événement
+    // pointeur qui produit `i` ayant déjà mesuré cette largeur au passage.
+    return { left: `${(i / (n - 1)) * 100}%`, transform: 'translateX(-50%)' }
+  }
+  const centre = (i / (n - 1)) * largeur
+  const bordeSup = Math.max(largeur - DEMI_LARGEUR_POPIN_PX, DEMI_LARGEUR_POPIN_PX)
+  const gauche = Math.min(Math.max(centre, DEMI_LARGEUR_POPIN_PX), bordeSup)
+  return { left: `${gauche}px`, transform: 'translateX(-50%)' }
 })
 
 function texte(v: string | null | undefined): string {
@@ -511,7 +615,6 @@ async function attendreRetour(avant: number | null) {
               @pointermove="survolPointeur"
               @pointerdown="survolPointeur"
               @pointerleave="finSurvol"
-              @pointerup="finSurvol"
               @pointercancel="finSurvol"
             >
               <path
@@ -555,7 +658,7 @@ async function attendreRetour(avant: number | null) {
             <div
               v-if="echantillonSurvol && stylePopin"
               data-system-history-popin
-              class="pointer-events-none absolute top-0 rounded-md border bg-popover px-2 py-1 text-xs whitespace-nowrap text-popover-foreground shadow-md"
+              class="pointer-events-none absolute top-0 min-w-[100px] rounded-md border bg-popover px-2 py-1 text-xs whitespace-nowrap text-popover-foreground shadow-md"
               :style="stylePopin"
             >
               <div>{{ new Date(echantillonSurvol.t).toLocaleTimeString() }}</div>
@@ -593,23 +696,40 @@ async function attendreRetour(avant: number | null) {
 
     <Card>
       <CardHeader><CardTitle>{{ t('system_device') }}</CardTitle></CardHeader>
-      <CardContent class="grid gap-2 text-sm sm:grid-cols-2">
-        <div>{{ t('system_hostname') }} : <span data-system-hostname>{{ texte(etat?.hostname) }}</span></div>
-        <div>{{ t('system_ip') }} : <span data-system-ip>{{ texte(etat?.ip) }}</span></div>
-        <div>{{ t('system_os') }} : <span data-system-os>{{ texte(etat?.os) }}</span></div>
-        <div>{{ t('system_kernel') }} : <span data-system-kernel>{{ texte(etat?.kernel) }}</span></div>
-        <div>{{ t('system_version') }} : <span data-system-version>{{ texte(etat?.version) }}</span></div>
-        <div>{{ t('system_uptime') }} : <span data-system-uptime>{{ duree(etat?.uptime_s) }}</span></div>
-        <div>
-          {{ t('system_service_uptime') }} :
-          <span data-system-service-uptime>{{ duree(etat?.service_uptime_s) }}</span>
+      <CardContent class="space-y-2 text-sm">
+        <div class="grid gap-2 sm:grid-cols-2">
+          <div>{{ t('system_hostname') }} : <span data-system-hostname>{{ texte(etat?.hostname) }}</span></div>
+          <div>{{ t('system_ip') }} : <span data-system-ip>{{ texte(etat?.ip) }}</span></div>
+          <div>{{ t('system_os') }} : <span data-system-os>{{ texte(etat?.os) }}</span></div>
+          <div>{{ t('system_kernel') }} : <span data-system-kernel>{{ texte(etat?.kernel) }}</span></div>
+          <div>{{ t('system_version') }} : <span data-system-version>{{ texte(etat?.version) }}</span></div>
+          <div>{{ t('system_uptime') }} : <span data-system-uptime>{{ duree(etat?.uptime_s) }}</span></div>
+          <div>
+            {{ t('system_service_uptime') }} :
+            <span data-system-service-uptime>{{ duree(etat?.service_uptime_s) }}</span>
+          </div>
+          <div>
+            {{ t('system_voltage') }} :
+            <span data-system-under-voltage :class="{ 'text-destructive': etat?.under_voltage === true }">
+              {{ tension }}
+            </span>
+          </div>
         </div>
-        <div>
-          {{ t('system_voltage') }} :
-          <span data-system-under-voltage :class="{ 'text-destructive': etat?.under_voltage === true }">
-            {{ tension }}
-          </span>
-        </div>
+        <!-- Un seul endroit pour l'état (la ligne ci-dessus, courte : « Sous-tension »
+             ou « Nominale »), un seul pour le conseil qui l'accompagne — et
+             ce conseil n'existe que quand il s'applique. Avant, la phrase
+             complète vivait dans la grille elle-même : deux-points doublés
+             (« Tension d'alimentation : Sous-tension détectée : vérifier
+             l'alimentation. ») et un texte qui débordait de sa cellule à deux
+             colonnes. -->
+        <p
+          v-if="etat?.under_voltage === true"
+          data-system-under-voltage-avis
+          role="status"
+          class="text-destructive"
+        >
+          {{ t('system_under_voltage') }}
+        </p>
       </CardContent>
     </Card>
 

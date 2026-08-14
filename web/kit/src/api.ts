@@ -28,8 +28,11 @@ async function send(method: 'PUT' | 'POST', url: string, body: unknown): Promise
 }
 
 export const api = {
-  async get<T>(url: string): Promise<T> {
-    const r = await fetch(url)
+  // `init` optionnel : SystemView.vue s'en sert pour passer un `AbortSignal`
+  // par sondage, sans quoi un changement de période ne pourrait pas annuler
+  // une requête devenue obsolète.
+  async get<T>(url: string, init?: RequestInit): Promise<T> {
+    const r = await fetch(url, init)
     if (!r.ok) throw new Error(`HTTP ${r.status}`)
     return (await r.json()) as T
   },
