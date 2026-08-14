@@ -123,6 +123,17 @@ pub struct SourceMessage {
     /// still has its stations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_count: Option<u8>,
+    /// The human-readable name the Source gives to the preset carried by
+    /// `preset` above (the configured station name for the radio; the cd
+    /// plugin never fills this in, since it has nothing to name here — see
+    /// its metadata path instead).
+    ///
+    /// Absent = "this frame says nothing about the name, keep the previous
+    /// one" — the same convention as `preset`. It lives and dies with
+    /// `preset`: the core clears both together, and only when the identity
+    /// is cleared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_name: Option<String>,
 }
 
 #[cfg(test)]
@@ -168,6 +179,7 @@ mod tests {
             transient: false,
             preset: None,
             preset_count: None,
+            preset_name: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
@@ -178,7 +190,7 @@ mod tests {
 
     #[test]
     fn message_notification_sans_id() {
-        let m = SourceMessage { id: None, action: None, view: Some(View::default()), identity: None, line2_replaceable: false, transient: false, preset: None, preset_count: None };
+        let m = SourceMessage { id: None, action: None, view: Some(View::default()), identity: None, line2_replaceable: false, transient: false, preset: None, preset_count: None, preset_name: None };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, None);
@@ -212,6 +224,7 @@ mod tests {
             transient: false,
             preset: Some(4),
             preset_count: None,
+            preset_name: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"preset\":4"));
@@ -226,7 +239,7 @@ mod tests {
         // La majorité des trames ne disent rien de l'identité (SetLocale,
         // Deactivate…) : les alourdir d'un `"identity":null` serait du bruit sur
         // une liaison volontairement lisible à l'œil.
-        let m = SourceMessage { id: Some(2), action: None, view: None, identity: None, line2_replaceable: false, transient: false, preset: None, preset_count: None };
+        let m = SourceMessage { id: Some(2), action: None, view: None, identity: None, line2_replaceable: false, transient: false, preset: None, preset_count: None, preset_name: None };
         assert_eq!(serde_json::to_string(&m).unwrap(), r#"{"id":2,"action":null,"view":null}"#);
     }
 
@@ -241,6 +254,7 @@ mod tests {
             transient: false,
             preset: None,
             preset_count: Some(23),
+            preset_name: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"preset_count\":23"));
@@ -253,5 +267,37 @@ mod tests {
         // distinct de l'absence.
         let zero: SourceMessage = serde_json::from_str(r#"{"id":3,"preset_count":0}"#).unwrap();
         assert_eq!(zero.preset_count, Some(0));
+    }
+
+    #[test]
+    fn le_nom_fait_le_tour_et_reste_absent_par_defaut() {
+        // Aller-retour du champ, avec un preset assorti : c'est ainsi que le
+        // plugin radio le déclare toujours (voir `play_preset`).
+        let m = SourceMessage {
+            id: Some(3),
+            action: Some(SourceAction::Noop),
+            view: None,
+            identity: None,
+            line2_replaceable: false,
+            transient: false,
+            preset: Some(4),
+            preset_count: None,
+            preset_name: Some("FIP".into()),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"preset_name\":\"FIP\""));
+        let back: SourceMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.preset_name.as_deref(), Some("FIP"));
+    }
+
+    #[test]
+    fn une_trame_dun_plugin_anterieur_sans_preset_name_se_relit_comme_rien_declare() {
+        // Rétrocompatibilité : un plugin qui ne connaît pas encore ce champ
+        // (ou une trame qui ne dit rien du nom) doit se désérialiser sans
+        // erreur, le champ retombant sur `None` — « garde la valeur
+        // courante », pas « efface-la ».
+        let ancien: SourceMessage = serde_json::from_str(r#"{"id":3,"preset":4}"#).unwrap();
+        assert_eq!(ancien.preset_name, None);
+        assert_eq!(ancien.preset, Some(4));
     }
 }

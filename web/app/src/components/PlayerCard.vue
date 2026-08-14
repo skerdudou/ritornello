@@ -31,6 +31,24 @@ defineProps<{ etat: PlayerPayload | null }>()
         {{ t('active_source_label') }} :
         <span class="text-foreground" data-source>{{ etat?.source }}</span>
       </p>
+      <!-- La touche numérotée de ce qui joue, quand la Source en déclare une.
+           Absente plutôt qu'affichée vide : `null` signifie « rien ne joue, ou
+           la Source ne numérote pas » (un cd sans disque, une entrée auxiliaire),
+           et une ligne « Présélection : — » laisserait croire à une panne là où
+           il n'y a simplement rien à numéroter. Même règle que le bloc « En
+           écoute » juste en dessous.
+
+           Le nom se colle au numéro dans la même ligne (data-player-preset
+           reste sur le seul numéro, data-player-preset-name porte le nom) :
+           aucune clé i18n dédiée, pour ne pas dire « station » là où ce n'en
+           est pas toujours une — le cd, par exemple, ne déclare aucun nom. -->
+      <p v-if="etat?.preset != null" class="text-sm text-muted-foreground">
+        {{ t('player_preset') }} :
+        <span class="text-foreground" data-player-preset>{{ etat.preset }}</span>
+        <template v-if="etat.preset_name">
+          — <span class="text-foreground" data-player-preset-name>{{ etat.preset_name }}</span>
+        </template>
+      </p>
       <p class="text-sm text-muted-foreground">
         {{ t('volume') }} :
         <span class="text-foreground" data-volume>{{ etat ? etat.volume + ' %' : '' }}</span>

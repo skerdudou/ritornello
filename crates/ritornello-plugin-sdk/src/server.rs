@@ -27,6 +27,8 @@ pub struct SourceOutcome {
     pub preset: Option<u8>,
     /// See `SourceMessage::preset_count`.
     pub preset_count: Option<u8>,
+    /// See `SourceMessage::preset_name`.
+    pub preset_name: Option<String>,
 }
 
 impl SourceOutcome {
@@ -40,6 +42,7 @@ impl SourceOutcome {
             transient: false,
             preset: None,
             preset_count: None,
+            preset_name: None,
         }
     }
 
@@ -77,6 +80,14 @@ impl SourceOutcome {
     /// tracks). See `SourceMessage::preset_count` for the exact semantics.
     pub fn preset_count(mut self, n: u8) -> Self {
         self.preset_count = Some(n);
+        self
+    }
+
+    /// Déclare le nom lisible de la présélection portée par `preset` (voir
+    /// `SourceMessage::preset_name`). Le plugin radio s'en sert avec le nom
+    /// configuré de la station.
+    pub fn preset_name(mut self, nom: impl Into<String>) -> Self {
+        self.preset_name = Some(nom.into());
         self
     }
 
@@ -271,6 +282,7 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                     transient: outcome.transient,
                     preset: outcome.preset,
                     preset_count: outcome.preset_count,
+                    preset_name: outcome.preset_name,
                 };
                 write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
             }
@@ -286,6 +298,12 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                             transient: n.transient,
                             preset: n.preset,
                             preset_count: n.preset_count,
+                            // Une notification spontanée ne nomme jamais de
+                            // présélection : le seul cas réel (l'annonce de
+                            // `preset_count` par le plugin radio après un
+                            // enregistrement admin) ne joue rien de nouveau,
+                            // donc n'a pas de nom à déclarer.
+                            preset_name: None,
                         };
                         write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
                     }
@@ -557,6 +575,13 @@ mod tests {
         assert_eq!(o.preset_count, Some(23));
         let n = Notification::new().preset_count(0);
         assert_eq!(n.preset_count, Some(0));
+    }
+
+    #[test]
+    fn le_nom_du_builder_atterrit_dans_la_trame() {
+        let o = SourceOutcome::new(SourceAction::Noop).preset(4).preset_name("FIP");
+        assert_eq!(o.preset, Some(4));
+        assert_eq!(o.preset_name.as_deref(), Some("FIP"));
     }
 
     struct EchoSource;

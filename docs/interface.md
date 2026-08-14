@@ -35,6 +35,15 @@ declares it (the `preset` field of its frames, see the protocol) — the
 core never interprets what `Select(n)` was supposed to mean — and it goes
 out as soon as nothing is playing anymore.
 
+The Player card also shows the readable name the source gives that preset
+(`preset_name` in its frames), next to the number, when it declares one —
+the configured station name for the radio. It lives and dies with `preset`:
+both clear together as soon as nothing is playing anymore, and neither
+survives a source change. The field exists because that name used to live
+only in a display line that a `metadata` plugin is free to overwrite (see
+[plugins.md](plugins.md)), so the SPA had nothing stable to show; the CD
+plugin never declares one, since a track number is not a name.
+
 The grid is not hardcoded to nine keys: the active source also declares
 **how many** presets it has (`preset_count` in its frames) — stations for
 the radio, tracks for the CD — and the web UI shows only the numbers that

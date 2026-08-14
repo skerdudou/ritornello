@@ -100,6 +100,12 @@ pub struct Core<P: Player> {
     /// c'est `set_identity(None)` qui fait foi, comme pour l'ardoise des
     /// métadonnées.
     preset: Option<u8>,
+    /// Nom lisible de la présélection en cours, déclaré par la Source active
+    /// (voir `SourceMessage::preset_name`). Vit et meurt avec `preset` : c'est
+    /// `set_identity(None)` qui fait foi pour les deux, et nulle part ailleurs
+    /// — la mise en veille, le changement de source et l'arrêt appellent tous
+    /// `set_identity(None)`, donc ce point unique les couvre déjà.
+    preset_name: Option<String>,
     /// How many numbered presets the active source offers (stations,
     /// tracks), as last declared. Forgotten on source change and standby —
     /// the next source re-declares it on activate/wake — but kept on stop:
@@ -164,6 +170,7 @@ impl<P: Player> Core<P> {
             view_line2_replaceable: false,
             overlay: None,
             preset: None,
+            preset_name: None,
             preset_count: None,
             pending_tens: 0,
             state_path,
@@ -266,6 +273,9 @@ impl<P: Player> Core<P> {
         if let Some(p) = update.preset {
             self.preset = Some(p);
         }
+        if let Some(n) = update.preset_name {
+            self.preset_name = Some(n);
+        }
         if let Some(c) = update.preset_count {
             self.preset_count = Some(c);
         }
@@ -293,6 +303,7 @@ impl<P: Player> Core<P> {
         // même laisser la sélection effacée.
         if identity.is_none() {
             self.preset = None;
+            self.preset_name = None;
         }
         if !self.metadonnees.set_identity(identity) {
             return;
@@ -397,6 +408,7 @@ impl<P: Player> Core<P> {
             muted: self.muted,
             standby: self.standby,
             preset: self.preset,
+            preset_name: self.preset_name.clone(),
             preset_count: self.preset_count,
             morceau: self.metadonnees.etat(),
         }
@@ -999,12 +1011,12 @@ mod tests {
     /// Mise à jour ne portant qu'une vue, dont la `line2` est la ligne propre de
     /// la Source (non remplaçable) — le cas de la radio.
     fn vue(v: View) -> SourceUpdate {
-        SourceUpdate { view: Some(v), identity: None, line2_replaceable: false, transient: false, preset: None, preset_count: None }
+        SourceUpdate { view: Some(v), identity: None, line2_replaceable: false, transient: false, preset: None, preset_count: None, preset_name: None }
     }
 
     /// Mise à jour dont la `line2` est un remplissage remplaçable — le cas du cd.
     fn vue_remplacable(v: View) -> SourceUpdate {
-        SourceUpdate { view: Some(v), identity: None, line2_replaceable: true, transient: false, preset: None, preset_count: None }
+        SourceUpdate { view: Some(v), identity: None, line2_replaceable: true, transient: false, preset: None, preset_count: None, preset_name: None }
     }
 
     /// Mise à jour ne portant qu'une identité.
@@ -1016,6 +1028,7 @@ mod tests {
             transient: false,
             preset: None,
             preset_count: None,
+            preset_name: None,
         }
     }
 
@@ -1509,27 +1522,37 @@ mod tests {
         // La touche numérotée mise en évidence sur la télécommande de l'IHM désigne
         // **ce qui joue** : elle suit la déclaration de la Source, et
         // disparaît à l'arrêt plutôt que de rester sur la dernière pression.
+        // Le nom de présélection suit exactement la même règle : c'est le
+        // point du cahier des charges qui compte (le cycle de vie de
+        // `preset_name` est celui de `preset`, verrouillé ici).
         let (mut core, _vue_rx, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
         let mut update = joue(serde_json::json!({"kind": "stream", "url": "http://inter"}));
         update.preset = Some(2);
+        update.preset_name = Some("France Inter".into());
         core.handle_source_update("radio", update);
         assert_eq!(etat_rx.borrow().preset, Some(2));
+        assert_eq!(etat_rx.borrow().preset_name.as_deref(), Some("France Inter"));
         core.handle_command(Command::Stop).await.unwrap();
         assert_eq!(etat_rx.borrow().preset, None);
+        assert_eq!(etat_rx.borrow().preset_name, None);
     }
 
     #[tokio::test]
     async fn changer_de_source_oublie_la_selection_de_lancienne() {
         // La présélection 2 de la radio ne veut rien dire pour le cd : la
         // laisser en évidence après la bascule désignerait une touche au
-        // hasard.
+        // hasard. Même chose pour son nom : "France Inter" affiché après un
+        // passage au cd serait un nom de station attribué à un disque.
         let (mut core, _vue_rx, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
         let mut update = joue(serde_json::json!({"kind": "stream", "url": "http://inter"}));
         update.preset = Some(2);
+        update.preset_name = Some("France Inter".into());
         core.handle_source_update("radio", update);
         assert_eq!(etat_rx.borrow().preset, Some(2));
+        assert_eq!(etat_rx.borrow().preset_name.as_deref(), Some("France Inter"));
         core.handle_command(Command::SourceCycle).await.unwrap();
         assert_eq!(etat_rx.borrow().preset, None);
+        assert_eq!(etat_rx.borrow().preset_name, None);
     }
 
     /// Mise à jour ne portant qu'un compte de présélections déclaré par la Source.
@@ -1541,6 +1564,20 @@ mod tests {
             transient: false,
             preset: None,
             preset_count: compte,
+            preset_name: None,
+        }
+    }
+
+    /// Mise à jour ne portant qu'un nom de présélection déclaré par la Source.
+    fn update_avec_nom(nom: Option<&str>) -> SourceUpdate {
+        SourceUpdate {
+            view: None,
+            identity: None,
+            line2_replaceable: false,
+            transient: false,
+            preset: None,
+            preset_count: None,
+            preset_name: nom.map(str::to_string),
         }
     }
 
@@ -1590,6 +1627,26 @@ mod tests {
         core.handle_source_update("radio", update_avec_compte(Some(5)));
 
         assert_eq!(etat_rx.borrow().preset_count, Some(5), "le compte doit etre publie");
+        assert!(!view_rx.has_changed().unwrap(), "la vue ne doit pas bouger");
+        assert!(!np_rx.has_changed().unwrap(), "l'identite ne doit pas bouger");
+        assert_eq!(np_rx.borrow().identity, Some(id));
+    }
+
+    #[tokio::test]
+    async fn une_mise_a_jour_de_seul_nom_laisse_vue_et_identite_intactes() {
+        // Même garantie que pour `preset_count` ci-dessus, cette fois pour
+        // `preset_name` : une trame qui ne porte que le nom doit se fondre
+        // dans l'état publié sans rien déranger d'autre.
+        let (mut core, mut view_rx, mut np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
+        let id = serde_json::json!({"kind": "stream", "url": "http://fip"});
+        core.handle_source_update("radio", joue(id.clone()));
+        core.handle_source_update("radio", vue(vue_radio()));
+        view_rx.borrow_and_update();
+        np_rx.borrow_and_update();
+
+        core.handle_source_update("radio", update_avec_nom(Some("FIP")));
+
+        assert_eq!(etat_rx.borrow().preset_name.as_deref(), Some("FIP"), "le nom doit etre publie");
         assert!(!view_rx.has_changed().unwrap(), "la vue ne doit pas bouger");
         assert!(!np_rx.has_changed().unwrap(), "l'identite ne doit pas bouger");
         assert_eq!(np_rx.borrow().identity, Some(id));
@@ -1884,6 +1941,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn la_mise_en_veille_oublie_la_selection_et_son_nom() {
+        // Le point du cahier des charges qui compte : `preset_name` vit et
+        // meurt avec `preset`, et le seul endroit qui les efface est
+        // `set_identity(None)` — que `Command::Power` atteint en entrant en
+        // veille, comme `Stop` et `SourceCycle` déjà couverts plus haut.
+        let (mut core, _vue_rx, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
+        let mut update = joue(serde_json::json!({"kind": "stream", "url": "http://inter"}));
+        update.preset = Some(2);
+        update.preset_name = Some("France Inter".into());
+        core.handle_source_update("radio", update);
+        assert_eq!(etat_rx.borrow().preset, Some(2));
+        assert_eq!(etat_rx.borrow().preset_name.as_deref(), Some("France Inter"));
+        core.handle_command(Command::Power).await.unwrap(); // entre en veille
+        assert_eq!(etat_rx.borrow().preset, None);
+        assert_eq!(etat_rx.borrow().preset_name, None);
+    }
+
+    #[tokio::test]
     async fn changer_de_source_oublie_lidentite_precedente() {
         let (mut core, _vue_rx, np_rx, _etat_rx, _d) = setup_metadonnees(vec!["ouifm".into()]);
         core.handle_source_update("radio", joue(serde_json::json!({"url": "un"})));
@@ -1909,7 +1984,7 @@ mod tests {
         let message = View { line1: "RADIO  P4".into(), line2: "empty preset".into(), line3: String::new() };
         core.handle_source_update(
             "radio",
-            SourceUpdate { view: Some(message), identity: None, line2_replaceable: false, transient: true, preset: None, preset_count: None },
+            SourceUpdate { view: Some(message), identity: None, line2_replaceable: false, transient: true, preset: None, preset_count: None, preset_name: None },
         );
         let affiche = vue_rx.borrow_and_update().clone();
         assert_eq!(affiche.line2, "empty preset", "le message doit s'afficher");
@@ -2201,6 +2276,7 @@ mod tests {
                 transient: true,
                 preset: None,
                 preset_count: None,
+                preset_name: None,
             },
         );
 

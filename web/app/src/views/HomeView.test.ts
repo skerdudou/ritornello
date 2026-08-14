@@ -20,6 +20,7 @@ class FauxEventSource {
       standby: false,
       preset: null,
       preset_count: null,
+      preset_name: null,
       artist: null,
       title: null,
       album: null,

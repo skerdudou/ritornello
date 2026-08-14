@@ -59,6 +59,12 @@ pub struct PlayerState {
     /// `None` = rien déclaré : l'IHM retombe sur la grille 1-9 historique.
     /// `Some(0)` = rien à numéroter (cd sans disque) : aucune touche.
     pub preset_count: Option<u8>,
+    /// Nom lisible de la présélection donnée par `preset`, tel que la Source
+    /// active l'a déclaré (le nom configuré de la station pour la radio).
+    /// `None` : la Source ne nomme rien à cet emplacement (le cd, dont
+    /// « audio CD » n'a rien à voir avec une présélection nommée), ou rien ne
+    /// joue. Vit et meurt avec `preset` — voir `Core::set_identity`.
+    pub preset_name: Option<String>,
     #[serde(flatten)]
     pub morceau: Morceau,
 }

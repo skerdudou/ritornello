@@ -85,6 +85,9 @@ impl RadioSource {
                 // La touche que l'IHM doit mettre en évidence : seule la
                 // Source sait à quelle présélection correspond ce qui joue.
                 .preset(n)
+                // Le nom configuré de la station : c'est ce que la carte
+                // Lecteur affiche à côté du numéro de présélection.
+                .preset_name(st.name.clone())
                 .preset_count(count)
         } else {
             let empty = self.catalog.read().unwrap().get("empty_preset").to_string();
@@ -389,13 +392,16 @@ mod tests {
         let mut source = make_source(two_stations(), 1);
         let outcome = source.select(2).await;
         assert_eq!(outcome.preset, Some(2));
+        // Le nom configure de la station accompagne toujours le numero.
+        assert_eq!(outcome.preset_name.as_deref(), Some("France Inter"));
         // Le compte de preselections (ici 2, la plus haute de two_stations)
         // est declare sur la branche "trouvee".
         assert_eq!(outcome.preset_count, Some(2));
-        // Et une preselection vide ne declare rien : ce qui joue n'a pas
-        // change.
+        // Et une preselection vide ne declare ni preset ni nom : ce qui joue
+        // n'a pas change, la station precedente continue.
         let outcome = source.select(7).await;
         assert_eq!(outcome.preset, None);
+        assert_eq!(outcome.preset_name, None, "aucun nom sur la branche vide : rien n'a change");
         // ... mais le compte reste declare sur la branche "vide" aussi : la
         // table n'a pas change, seule la selection a echoue.
         assert_eq!(outcome.preset_count, Some(2));

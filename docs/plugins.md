@@ -55,6 +55,15 @@ something was played on the radio. That notification carries `preset_count`
 and **nothing else**: no view, no identity, no preset, so it disturbs
 neither the display nor whatever is currently playing.
 
+Playing a preset also declares its `preset_name`: the configured station
+name, alongside the `preset` number, in the same frame. The field exists
+because the name used to live only in the displays' `line2` — which a
+`metadata` plugin is free to rewrite (see `line2_replaceable` below) and
+which the SPA never received in structured form — so the web Player card had
+no stable name to show. `preset_name` is absent (not cleared) on the "empty
+preset" branch: nothing new is playing there, the previous station carries
+on, so its name — if any — must stay exactly as it was.
+
 The search **country** is picked from a keyboard-filterable list,
 populated by the directory itself (241 countries at the last count, with
 each one's station count). Names are rendered by the browser from the ISO
@@ -97,6 +106,12 @@ It declares its track count as `preset_count` (`Some(0)` with no disc
 loaded), the same field the radio plugin uses — this drives the same
 preset grid described in [interface.md](interface.md), tracks standing
 in for stations.
+
+It never fills `preset_name`: a track number is not a name, and what is
+interesting about a disc (album, title, artist) already arrives through the
+`metadata` path (see below), not through the preset name. At this slot it
+writes "audio CD" into `line2`, declared replaceable — a filler, not a
+name.
 
 ## `ritornello-plugin-console` — the display
 
@@ -254,7 +269,10 @@ protocol stays unchanged: a future display has no fallback rule to
 reimplement.
 
 In the web UI, the home page carries a **Player** card, above the remote:
-active source, volume, and two badges for mute and standby. The track
+active source, volume, and two badges for mute and standby. The preset
+number a Source declares is shown alongside the readable name it gives it,
+when it declares one (`preset_name`) — "Preset: 4 — FIP" for the radio,
+just "Preset: 4" for a Source that names nothing at that slot. The track
 **joins it** when known — with a badge indicating its **origin** (`icy`,
 or the name of the winning plugin), the first question one asks in front
 of a wrong title. None of this is polled: the card updates over a pushed

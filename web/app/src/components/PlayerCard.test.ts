@@ -16,6 +16,7 @@ function complet(etat: Partial<PlayerPayload>): PlayerPayload {
     standby: false,
     preset: null,
     preset_count: null,
+    preset_name: null,
     artist: null,
     title: null,
     album: null,
@@ -35,6 +36,40 @@ describe('PlayerCard', () => {
     const w = monteAvec({ source: 'cd', volume: 45 })
     expect(w.find('[data-source]').text()).toBe('cd')
     expect(w.find('[data-volume]').text()).toBe('45 %')
+  })
+
+  it('affiche la présélection en cours quand la Source en déclare une', () => {
+    const w = monteAvec({ preset: 4 })
+    expect(w.find('[data-player-preset]').text()).toBe('4')
+  })
+
+  it('n affiche pas de ligne de présélection quand la Source n en déclare aucune', () => {
+    // `null` couvre deux situations où il n'y a rien à numéroter — rien ne joue,
+    // ou la Source ne numérote pas (cd sans disque, entrée auxiliaire) — et une
+    // ligne vide y laisserait croire à une panne.
+    const w = monteAvec({ preset: null })
+    expect(w.find('[data-player-preset]').exists()).toBe(false)
+  })
+
+  it('affiche la présélection 0 plutôt que de la confondre avec une absence', () => {
+    // Garde contre un `v-if` écrit sur la valeur elle-même : `0` est faux en
+    // JavaScript mais reste une présélection déclarée.
+    const w = monteAvec({ preset: 0 })
+    expect(w.find('[data-player-preset]').text()).toBe('0')
+  })
+
+  it('ajoute le nom de la présélection quand la Source en déclare un', () => {
+    const w = monteAvec({ preset: 4, preset_name: 'FIP' })
+    expect(w.find('[data-player-preset]').text()).toBe('4')
+    expect(w.find('[data-player-preset-name]').text()).toBe('FIP')
+  })
+
+  it('n affiche que le numéro quand la Source ne nomme rien', () => {
+    // Cas du cd : une présélection déclarée (la piste), mais aucun nom — pas
+    // de clé i18n générique du type « station » qui serait fausse ici.
+    const w = monteAvec({ preset: 3, preset_name: null })
+    expect(w.find('[data-player-preset]').text()).toBe('3')
+    expect(w.find('[data-player-preset-name]').exists()).toBe(false)
   })
 
   it('signale le muet et la veille', () => {

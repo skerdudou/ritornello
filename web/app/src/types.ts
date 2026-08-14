@@ -46,6 +46,12 @@ export interface PlayerPayload {
    * numeroter", ex. cd sans disque) et distinct de `null`.
    */
   preset_count: number | null
+  /**
+   * Nom lisible que la source active donne a la preselection en cours
+   * (nom configure de la station pour la radio), ou `null` quand elle n'en
+   * declare pas (le cd, ou rien ne joue). Vit et meurt avec `preset`.
+   */
+  preset_name: string | null
   artist: string | null
   title: string | null
   album: string | null

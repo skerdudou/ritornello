@@ -50,6 +50,8 @@ pub struct SourceUpdate {
     pub preset: Option<u8>,
     /// See `SourceMessage::preset_count`.
     pub preset_count: Option<u8>,
+    /// See `SourceMessage::preset_name`.
+    pub preset_name: Option<String>,
 }
 
 pub struct SourceClient {
@@ -83,7 +85,12 @@ impl SourceClient {
                         let _ = tx.send(action);
                     }
                 }
-                if msg.view.is_some() || msg.identity.is_some() || msg.preset.is_some() || msg.preset_count.is_some() {
+                if msg.view.is_some()
+                    || msg.identity.is_some()
+                    || msg.preset.is_some()
+                    || msg.preset_count.is_some()
+                    || msg.preset_name.is_some()
+                {
                     let porte_identite = msg.identity.is_some();
                     let update = SourceUpdate {
                         view: msg.view,
@@ -92,6 +99,7 @@ impl SourceClient {
                         transient: msg.transient,
                         preset: msg.preset,
                         preset_count: msg.preset_count,
+                        preset_name: msg.preset_name,
                     };
                     if view_tx.try_send((name.clone(), update)).is_err() {
                         // Conséquence aggravée depuis que la trame porte aussi
@@ -374,8 +382,9 @@ mod tests {
                 )),
                 line2_replaceable: false,
                 transient: false,
-                preset: None,
+                preset: Some(1),
                 preset_count: None,
+                preset_name: Some("FIP".into()),
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             let _ = socket_for_server; // garde le chemin vivant pour le débogage
@@ -396,6 +405,9 @@ mod tests {
                 serde_json::json!({"kind": "stream", "url": "http://fip"})
             ))
         );
+        // Le nom de présélection voyage dans la même mise à jour que le reste.
+        assert_eq!(update.preset, Some(1));
+        assert_eq!(update.preset_name.as_deref(), Some("FIP"));
     }
 
     #[tokio::test]
@@ -420,6 +432,7 @@ mod tests {
                 transient: false,
                 preset: None,
                 preset_count: Some(5),
+                preset_name: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -431,6 +444,44 @@ mod tests {
         let (name, update) = view_rx.recv().await.unwrap();
         assert_eq!(name, "radio");
         assert_eq!(update.preset_count, Some(5));
+    }
+
+    #[tokio::test]
+    async fn trame_seule_avec_le_nom_est_relayee() {
+        // C'est exactement le piège signalé par le cahier des charges : une
+        // trame ne portant que `preset_name` (sans vue, identité, preset ni
+        // compte) doit passer la condition qui décide qu'une trame est
+        // "intéressante", sans quoi elle serait jetée en silence.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+            let msg = ritornello_proto::SourceMessage {
+                id: Some(req.id),
+                action: Some(SourceAction::Noop),
+                view: None,
+                identity: None,
+                line2_replaceable: false,
+                transient: false,
+                preset: None,
+                preset_count: None,
+                preset_name: Some("FIP".into()),
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let (view_tx, mut view_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "radio".into(), view_tx).await.unwrap();
+        client.request(SourceReq::Activate).await.unwrap();
+        let (name, update) = view_rx.recv().await.unwrap();
+        assert_eq!(name, "radio");
+        assert_eq!(update.preset_name.as_deref(), Some("FIP"));
     }
 
     #[tokio::test]
@@ -455,6 +506,7 @@ mod tests {
                 transient: false,
                 preset: None,
                 preset_count: None,
+                preset_name: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
