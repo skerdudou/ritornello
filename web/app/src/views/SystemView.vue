@@ -214,6 +214,68 @@ const cheminRam = computed(() =>
   cheminSparkline(historique.value.map((h) => h.ram), LARGEUR, HAUTEUR),
 )
 
+/** Index de la colonne survolée dans `historique`, `null` si le pointeur
+ *  n'est pas sur le graphe. */
+const survolIndex = ref<number | null>(null)
+
+/**
+ * Traduit la position du pointeur en index d'échantillon : même mapping que
+ * `cheminSparkline` (pas = `LARGEUR / (n - 1)`, inversé ici en repartant de
+ * la fraction horizontale du rectangle réel de l'élément), pour que le
+ * popin ne dérive jamais du tracé qu'il commente.
+ */
+function indexSurvol(event: PointerEvent): number {
+  const rect = (event.currentTarget as Element).getBoundingClientRect()
+  const n = historique.value.length
+  const frac = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0
+  return Math.min(n - 1, Math.max(0, Math.round(frac * (n - 1))))
+}
+
+/**
+ * `pointermove` et `pointerdown` partagent ce gestionnaire : le premier
+ * couvre à la fois le survol souris et le glisser tactile, le second
+ * affiche le popin dès l'appui sur un écran tactile (sans lui, un simple tap
+ * sans mouvement ne déclencherait jamais `pointermove`).
+ */
+function survolPointeur(event: PointerEvent) {
+  if (historique.value.length < 2) return
+  survolIndex.value = indexSurvol(event)
+}
+
+function finSurvol() {
+  survolIndex.value = null
+}
+
+/** Abscisse du trait de survol, en unités de `viewBox`. */
+const xLigneSurvol = computed(() => {
+  const n = historique.value.length
+  if (survolIndex.value === null || n < 2) return null
+  return survolIndex.value * (LARGEUR / (n - 1))
+})
+
+/** Échantillon pointé, pour les deux valeurs affichées dans le popin. */
+const echantillonSurvol = computed(() => {
+  if (survolIndex.value === null) return null
+  return historique.value[survolIndex.value] ?? null
+})
+
+/**
+ * Position horizontale du popin : centré sur la colonne pointée
+ * (translation -50 %), sauf sur la toute première et la toute dernière
+ * colonne où ce centrage le ferait déborder de la carte — il se colle alors
+ * au bord correspondant, avec une translation bornée à 0 ou -100 % plutôt
+ * qu'à -50 %.
+ */
+const stylePopin = computed(() => {
+  const n = historique.value.length
+  const i = survolIndex.value
+  if (i === null || n < 2) return null
+  const gauche = `${(i / (n - 1)) * 100}%`
+  if (i === 0) return { left: gauche, transform: 'translateX(0)' }
+  if (i === n - 1) return { left: gauche, transform: 'translateX(-100%)' }
+  return { left: gauche, transform: 'translateX(-50%)' }
+})
+
 function texte(v: string | null | undefined): string {
   return v || RIEN
 }
@@ -429,34 +491,78 @@ async function attendreRetour(avant: number | null) {
           {{ t('system_history_empty') }}
         </p>
         <template v-else>
-          <!-- `preserveAspectRatio="none"` étire le repère à la largeur
-               disponible ; `vector-effect` empêche l'épaisseur du trait
-               d'être étirée avec lui. -->
-          <svg
-            data-system-history
-            :viewBox="`0 0 ${LARGEUR} ${HAUTEUR}`"
-            preserveAspectRatio="none"
-            class="h-24 w-full"
-            role="img"
-            :aria-label="t('system_history')"
-          >
-            <path
-              :d="cheminCpu"
-              class="text-primary"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              vector-effect="non-scaling-stroke"
-            />
-            <path
-              :d="cheminRam"
-              class="text-muted-foreground"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              vector-effect="non-scaling-stroke"
-            />
-          </svg>
+          <!-- `relative` : ancre le popin de survol au graphe, pas à la
+               carte entière. -->
+          <div class="relative">
+            <!-- `preserveAspectRatio="none"` étire le repère à la largeur
+                 disponible ; `vector-effect` empêche l'épaisseur du trait
+                 d'être étirée avec lui. Événements *pointer*, pas *mouse* :
+                 la page se consulte surtout au doigt, et `pointermove` seul
+                 couvre déjà le survol souris et le glisser tactile. Pas de
+                 `touch-action: none` ici : ça bloquerait le défilement
+                 vertical de la page au-dessus du graphe sur un téléphone. -->
+            <svg
+              data-system-history
+              :viewBox="`0 0 ${LARGEUR} ${HAUTEUR}`"
+              preserveAspectRatio="none"
+              class="h-24 w-full"
+              role="img"
+              :aria-label="t('system_history')"
+              @pointermove="survolPointeur"
+              @pointerdown="survolPointeur"
+              @pointerleave="finSurvol"
+              @pointerup="finSurvol"
+              @pointercancel="finSurvol"
+            >
+              <path
+                :d="cheminCpu"
+                class="text-primary"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                vector-effect="non-scaling-stroke"
+              />
+              <path
+                :d="cheminRam"
+                class="text-muted-foreground"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                vector-effect="non-scaling-stroke"
+              />
+              <!-- Trait de survol seul, pas de point par série : un
+                   `<circle>` dans un viewBox étiré par
+                   `preserveAspectRatio="none"` se dessinerait en ellipse, pas
+                   en cercle. Le trait plus les valeurs du popin répondent à
+                   la demande sans ce défaut — ne pas « corriger » en ajoutant
+                   des cercles. -->
+              <line
+                v-if="xLigneSurvol !== null"
+                data-system-history-line
+                :x1="xLigneSurvol"
+                :x2="xLigneSurvol"
+                y1="0"
+                :y2="HAUTEUR"
+                class="text-muted-foreground"
+                stroke="currentColor"
+                stroke-width="1"
+                vector-effect="non-scaling-stroke"
+              />
+            </svg>
+            <!-- `pointer-events-none` : le popin suit le pointeur sans lui
+                 jamais faire écran, sans quoi il capterait les événements
+                 dont il dépend. -->
+            <div
+              v-if="echantillonSurvol && stylePopin"
+              data-system-history-popin
+              class="pointer-events-none absolute top-0 rounded-md border bg-popover px-2 py-1 text-xs whitespace-nowrap text-popover-foreground shadow-md"
+              :style="stylePopin"
+            >
+              <div>{{ new Date(echantillonSurvol.t).toLocaleTimeString() }}</div>
+              <div class="text-primary">{{ t('system_cpu') }} {{ Math.round(echantillonSurvol.cpu) }} %</div>
+              <div class="text-muted-foreground">{{ t('system_memory') }} {{ Math.round(echantillonSurvol.ram) }} %</div>
+            </div>
+          </div>
           <p class="mt-2 flex gap-4 text-xs">
             <span class="text-primary">
               {{ t('system_cpu') }} {{ dernier ? Math.round(dernier.cpu) : 0 }} %

@@ -438,4 +438,116 @@ describe('SystemView', () => {
     expect(w.get('[data-system-history-span]').text()).toContain('30')
     w.unmount()
   })
+
+  describe('survol de l historique', () => {
+    /**
+     * Cinq réponses successives aux valeurs bien séparées (cpu 10/30/50/70/90 %,
+     * ram 5/25/45/65/85 %) : de quoi distinguer sans ambiguïté la colonne
+     * pointée. La toute première réponse ne fait que poser la référence de
+     * jiffies (voir `utilisationCpu`) et ne pousse aucun échantillon.
+     */
+    function reponsesSurvol() {
+      const cibles: [cpu: number, ram: number][] = [
+        [10, 5],
+        [30, 25],
+        [50, 45],
+        [70, 65],
+        [90, 85],
+      ]
+      const reponses = [payload({ cpu_total_jiffies: 0, cpu_idle_jiffies: 0 })]
+      let total = 0
+      let idle = 0
+      for (const [cpuCible, ramCible] of cibles) {
+        total += 1000
+        idle += 1000 * (1 - cpuCible / 100)
+        reponses.push(
+          payload({
+            cpu_total_jiffies: total,
+            cpu_idle_jiffies: idle,
+            memory: { total_kb: 1_000_000, available_kb: 1_000_000 * (1 - ramCible / 100) },
+          }),
+        )
+      }
+      return reponses
+    }
+
+    /**
+     * Monte la vue avec les cinq échantillons ci-dessus déjà en historique, et
+     * stube le rectangle du graphe : sous jsdom, `getBoundingClientRect`
+     * renvoie des zéros, et tout x se ramènerait au même index sans ce stub.
+     */
+    async function monterAvecHistorique() {
+      const reponses = reponsesSurvol()
+      let i = 0
+      stub(() => reponses[Math.min(i++, reponses.length - 1)])
+      const w = await monter()
+      await vi.advanceTimersByTimeAsync(5 * 5000)
+      await flushPromises()
+      const svg = w.get('[data-system-history]')
+      vi.spyOn(svg.element, 'getBoundingClientRect').mockReturnValue({
+        left: 0, width: 200, top: 0, height: 0, right: 200, bottom: 0, x: 0, y: 0, toJSON: () => {},
+      } as DOMRect)
+      return { w, svg }
+    }
+
+    it('un pointeur au milieu du graphe affiche l échantillon du milieu', async () => {
+      const { w, svg } = await monterAvecHistorique()
+      await svg.trigger('pointermove', { clientX: 100 })
+      const popin = w.get('[data-system-history-popin]')
+      expect(popin.text()).toContain('50 %')
+      expect(popin.text()).toContain('45 %')
+      w.unmount()
+    })
+
+    it('un pointeur sur la première colonne affiche le premier échantillon', async () => {
+      const { w, svg } = await monterAvecHistorique()
+      await svg.trigger('pointermove', { clientX: 0 })
+      const popin = w.get('[data-system-history-popin]')
+      expect(popin.text()).toContain('10 %')
+      expect(popin.text()).toContain('5 %')
+      w.unmount()
+    })
+
+    it('un pointeur sur la dernière colonne affiche le dernier échantillon', async () => {
+      const { w, svg } = await monterAvecHistorique()
+      await svg.trigger('pointermove', { clientX: 200 })
+      const popin = w.get('[data-system-history-popin]')
+      expect(popin.text()).toContain('90 %')
+      expect(popin.text()).toContain('85 %')
+      w.unmount()
+    })
+
+    it('le popin apparaît au survol et disparaît en quittant le graphe', async () => {
+      const { w, svg } = await monterAvecHistorique()
+      expect(w.find('[data-system-history-popin]').exists()).toBe(false)
+      await svg.trigger('pointermove', { clientX: 100 })
+      expect(w.find('[data-system-history-popin]').exists()).toBe(true)
+      await svg.trigger('pointerleave')
+      expect(w.find('[data-system-history-popin]').exists()).toBe(false)
+      w.unmount()
+    })
+
+    it('le popin reste dans la carte sur la première et la dernière colonne', async () => {
+      const { w, svg } = await monterAvecHistorique()
+      await svg.trigger('pointermove', { clientX: 0 })
+      const debut = w.get('[data-system-history-popin]').element as HTMLElement
+      expect(debut.style.left).toBe('0%')
+      expect(debut.style.transform).toBe('translateX(0)')
+      await svg.trigger('pointermove', { clientX: 200 })
+      const fin = w.get('[data-system-history-popin]').element as HTMLElement
+      expect(fin.style.left).toBe('100%')
+      expect(fin.style.transform).toBe('translateX(-100%)')
+      w.unmount()
+    })
+
+    it('rien ne s affiche tant que moins de deux échantillons existent', async () => {
+      // Un seul sondage : la référence de jiffies est posée mais aucun
+      // échantillon poussé, le graphe lui-même n'est pas dessiné.
+      stub(payload({ cpu_total_jiffies: 0, cpu_idle_jiffies: 0 }))
+      const w = await monter()
+      expect(w.find('[data-system-history]').exists()).toBe(false)
+      expect(w.find('[data-system-history-popin]').exists()).toBe(false)
+      w.unmount()
+    })
+  })
 })
