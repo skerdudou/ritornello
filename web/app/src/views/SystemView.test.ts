@@ -197,10 +197,12 @@ describe('SystemView', () => {
     // Assez d'échantillons de part et d'autre du changement pour que la
     // comparaison ait un sens.
     expect(xs.length).toBeGreaterThanOrEqual(5)
-    const ecarts = xs.slice(1).map((x, i) => x - xs[i])
+    const ecarts = xs.slice(1).map((x, i) => x - (xs[i] ?? 0))
+    const premier = ecarts[0] ?? 0
+    const dernier = ecarts.at(-1) ?? 0
     // Rapport théorique 5 (5 s contre 1 s) ; on exige 3 pour laisser passer le
     // temps réel qui s'écoule aussi sous `shouldAdvanceTime`.
-    expect(ecarts[0]).toBeGreaterThan(ecarts[ecarts.length - 1] * 3)
+    expect(premier).toBeGreaterThan(dernier * 3)
     w.unmount()
   })
 

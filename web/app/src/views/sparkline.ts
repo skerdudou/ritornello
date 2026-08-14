@@ -21,9 +21,15 @@
  */
 export function abscisses(horodatages: number[], largeur: number): number[] {
   const n = horodatages.length
-  if (n < 2) return n === 1 ? [0] : []
   const debut = horodatages[0]
-  const etendue = horodatages[n - 1] - debut
+  const fin = horodatages[n - 1]
+  // Indéfinis ⇔ tableau vide. Le test porte sur les valeurs et non sur `n`,
+  // parce que `noUncheckedIndexedAccess` ne déduit pas d'un `n >= 2` que les
+  // accès indexés sont sûrs — et une assertion `!` masquerait ici la seule
+  // chose qui rende ce code total.
+  if (debut === undefined || fin === undefined) return []
+  if (n === 1) return [0]
+  const etendue = fin - debut
   if (etendue <= 0) return horodatages.map((_, i) => (i * largeur) / (n - 1))
   return horodatages.map((t) => ((t - debut) / etendue) * largeur)
 }
@@ -55,7 +61,12 @@ export function cheminSparkline(valeurs: number[], xs: number[], hauteur: number
     .map((v, i) => {
       const borne = Math.min(100, Math.max(0, v))
       const y = hauteur - (borne / 100) * hauteur
-      return `${i === 0 ? 'M' : 'L'}${xs[i].toFixed(2)},${y.toFixed(2)}`
+      // Le `?? 0` est inatteignable — les deux longueurs viennent d'être
+      // vérifiées égales — mais il vaut mieux qu'une assertion `!` : si
+      // quelqu'un relâche un jour ce contrôle, le tracé se décale au lieu de
+      // se remplir de `NaN`.
+      const x = xs[i] ?? 0
+      return `${i === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`
     })
     .join(' ')
 }

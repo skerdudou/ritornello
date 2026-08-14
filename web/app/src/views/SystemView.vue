@@ -338,17 +338,25 @@ function indexSurvol(event: PointerEvent): number {
   largeurGraphe.value = rect.width
   const frac = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0
   const cible = Math.min(1, Math.max(0, frac)) * LARGEUR
-  const xs = abscissesGraphe.value
   let plusProche = 0
+  let meilleureDistance = Number.POSITIVE_INFINITY
   // `<=` et non `<` : à distance égale — pointeur exactement à cheval entre
   // deux colonnes — c'est la colonne de droite qui gagne. Ce départage n'est
   // pas un détail d'implémentation mais le comportement qu'épinglait déjà le
   // test de l'arrondi, `Math.round` arrondissant les demis vers le haut. Le
   // changer silencieusement en passant du rang à l'abscisse aurait été une
   // régression invisible à l'œil.
-  for (let i = 1; i < xs.length; i += 1) {
-    if (Math.abs(xs[i] - cible) <= Math.abs(xs[plusProche] - cible)) plusProche = i
-  }
+  //
+  // `forEach` plutôt qu'une boucle indexée : il livre l'abscisse elle-même, là
+  // où un `xs[i]` demanderait de traiter un `undefined` que la longueur du
+  // tableau exclut déjà.
+  abscissesGraphe.value.forEach((x, i) => {
+    const distance = Math.abs(x - cible)
+    if (distance <= meilleureDistance) {
+      meilleureDistance = distance
+      plusProche = i
+    }
+  })
   return plusProche
 }
 
