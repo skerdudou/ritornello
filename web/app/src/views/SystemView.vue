@@ -575,25 +575,28 @@ async function attendreRetour(avant: number | null) {
 
     <Card>
       <CardHeader><CardTitle>{{ t('system_cpu') }}</CardTitle></CardHeader>
-      <CardContent class="grid gap-2 text-sm sm:grid-cols-2">
-        <div>{{ t('system_temperature') }} : <span data-system-temperature>{{ temperature }}</span></div>
-        <div>{{ t('system_frequency') }} : <span data-system-frequency>{{ frequence }}</span></div>
-        <div>{{ t('system_cores') }} : <span data-system-cores>{{ nombre(etat?.cpus) }}</span></div>
+      <CardContent class="space-y-2 text-sm">
+        <div class="grid gap-2 sm:grid-cols-2">
+          <div>{{ t('system_temperature') }} : <span data-system-temperature>{{ temperature }}</span></div>
+          <div>{{ t('system_frequency') }} : <span data-system-frequency>{{ frequence }}</span></div>
+          <div>{{ t('system_cores') }} : <span data-system-cores>{{ nombre(etat?.cpus) }}</span></div>
+        </div>
+        <!-- L'utilisation sort de la grille des trois autres métriques pour
+             tenir sa propre ligne, juste au-dessus de sa barre : c'est ce qui
+             la libelle. Dans la grille, elle atterrissait en deuxième colonne,
+             à côté du nombre de cœurs, et la barre pleine largeur en dessous
+             n'annonçait plus ce qu'elle mesurait. Même forme que Mémoire et
+             Stockage : une ligne de texte, puis sa barre. -->
         <div>
           {{ t('system_cpu_usage') }} :
           <span data-system-cpu-usage :class="cpuEnAlerte ? 'font-medium text-destructive' : undefined">
             {{ utilisationTexte }}
           </span>
         </div>
-        <!-- Barre sur le modèle de Mémoire et Stockage, mais seulement quand le
-             pourcentage est connu : une barre vide se lirait « 0 % » alors que
-             le premier sondage n'a encore aucun delta à comparer. Elle occupe
-             les deux colonnes de la grille. -->
-        <div
-          v-if="utilisationCpuActuelle !== null"
-          data-system-cpu-bar
-          class="h-2 w-full rounded bg-muted sm:col-span-2"
-        >
+        <!-- Barre seulement quand le pourcentage est connu : une barre vide se
+             lirait « 0 % » alors que le premier sondage n'a encore aucun delta
+             à comparer. -->
+        <div v-if="utilisationCpuActuelle !== null" data-system-cpu-bar class="h-2 w-full rounded bg-muted">
           <div
             class="h-2 rounded"
             :class="cpuEnAlerte ? 'bg-destructive' : 'bg-primary'"

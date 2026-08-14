@@ -31,7 +31,16 @@ Pi hardware:
     RITORNELLO_HTTP=127.0.0.1:8080 \
     RITORNELLO_CONSOLE_TTY=/dev/stdout \
     RITORNELLO_RADIO_STATIONS=/tmp/rp/stations.toml RITORNELLO_RADIO_STATE=/tmp/rp/plugin-radio.json \
+    RITORNELLO_LOCALES=deploy/locales \
     cargo run -p ritornello-core
+
+`RITORNELLO_LOCALES` matters more than it looks: English is embedded in the
+binary, every other language is read from disk at startup. Its default
+(`/etc/ritornello/locales`) is a path `deploy.sh` installs and that a
+development checkout does not have, so without the line above the language
+dropdown offers **English only** — the French pack sits unread in
+`deploy/locales/`. One setting is enough: plugins inherit the core's
+environment and read the same variable.
 
 The `generic-input` plugin can be added to the `plugins.toml` in
 `/tmp/rp`:
