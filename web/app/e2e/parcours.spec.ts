@@ -159,3 +159,22 @@ test('apprentissage de touche : la vue atteint un état défini', async ({ page 
     page.getByText(/No input device detected|Press a key on the device/),
   ).toBeVisible()
 })
+
+// L'onglet Système : rendu et navigation seulement. AUCUNE action
+// d'alimentation n'est confirmée ici — le harnais lance un vrai cœur sur la
+// machine de développement, où confirmer « Éteindre » l'arrêterait et
+// « Redémarrer Ritornello » tuerait le harnais en cours de route. Le
+// dialogue et l'envoi sont couverts par les tests vitest, qui n'ont pas de
+// machine à perdre.
+test('onglet Système : métriques et boutons présents', async ({ page }) => {
+  await page.goto('/system')
+  // Toujours lisible sous Linux, donc une valeur réelle et non « — ».
+  await expect(page.locator('[data-system-kernel]')).not.toHaveText('—')
+  await expect(page.locator('[data-system-memory]')).toBeVisible()
+  await expect(page.locator('[data-system-disk]')).toBeVisible()
+  await expect(page.locator('[data-power-poweroff]')).toBeVisible()
+  await expect(page.locator('[data-power-restart]')).toBeVisible()
+  // Le lien de navigation existe depuis la page d'accueil.
+  await page.goto('/')
+  await expect(page.locator('a[href="/system"]')).toBeVisible()
+})

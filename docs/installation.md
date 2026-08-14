@@ -139,6 +139,7 @@ usual hardening (`NoNewPrivileges`, `ProtectSystem=strict`,
 | remote control (`/dev/input/*`) | `input` group |
 | CD drive (`/dev/sr0`, `eject`) | `cdrom` group |
 | HDMI console (`/dev/tty1`) | `tty` group |
+| OS shutdown / reboot | polkit rule + logind (see the next section) |
 | plugin and mpv sockets (`/run/ritornello`) | `RuntimeDirectory` |
 | persisted state (`/var/lib/ritornello`) | `StateDirectory` |
 
@@ -159,6 +160,55 @@ script runs for this are:
 An installation deployed before this change ran as root: the next
 `deploy.sh` migrates it (the user is created, `/etc/ritornello` and
 `/var/lib/ritornello` change owner, the new unit replaces the old one).
+
+## Shutdown and reboot from the web UI
+
+The System tab offers three power actions. Two of them act on the machine
+and need an authorisation; the third needs none.
+
+| Action | Mechanism | Prerequisite |
+|---|---|---|
+| Shut down / restart the **system** | `systemctl poweroff` / `reboot` → logind → polkit | the polkit rule below |
+| Restart **Ritornello** | the process exits, systemd starts it again (`Restart=always` in the unit) | none |
+
+`deploy.sh` installs `deploy/50-ritornello-power.rules` into
+`/etc/polkit-1/rules.d/`. It grants the `ritornello` user the six logind
+actions involved — power-off and reboot, each in its plain,
+`-multiple-sessions` and `-ignore-inhibit` form. All six, because logind
+checks the plain action only when nothing else is going on: it switches to
+`-multiple-sessions` as soon as another session exists (an open SSH
+connection is enough, which is the usual situation while testing) and to
+`-ignore-inhibit` when an inhibitor is held.
+
+polkit itself is not installed by `deploy.sh` — the script installs no
+package — and it is not present everywhere:
+
+- **DietPi**: absent by default, `sudo apt install polkitd`;
+- **Raspberry Pi OS Lite**: normally already there; if not, same command;
+- **other Debian-based distributions**: `polkitd`, or `policykit-1` before
+  Debian 12;
+- **Arch, Fedora, openSUSE**: `polkit`, generally already installed.
+
+To check, on the device:
+
+    sudo -u ritornello busctl --system call org.freedesktop.login1 \
+      /org/freedesktop/login1 org.freedesktop.login1.Manager CanPowerOff
+
+`s "yes"` means the rule is in effect. `s "challenge"` or `s "no"` means it
+is not: polkit is missing, or the rule did not land.
+
+Nothing breaks without it: the core asks logind the same question at
+startup, and the two system buttons stay **disabled**, with the reason shown
+on the page. That answer is cached for the lifetime of the process, so
+installing polkit takes effect at the next service start —
+`sudo systemctl restart ritornello`, or simply the next `deploy.sh`.
+
+"Restart Ritornello" depends on none of this: the process exits and systemd
+starts it again two seconds later. Run **outside** systemd (development),
+the same action merely stops the process — there is no supervisor to bring
+it back. And systemd's start rate limit applies: five restarts within ten
+seconds leave the unit failed, cleared with
+`sudo systemctl reset-failed ritornello`.
 
 ## Audio dropouts
 

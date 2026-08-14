@@ -135,6 +135,58 @@ repeat, and the interval between the following ones. Backed by
 them answers `422`): initial delay **200-5000 ms**, interval **100-2000
 ms**.
 
+## System page
+
+`GET /api/system` reports OS metrics. **Every metric is optional and is
+`null` when the machine does not expose it** — no thermal zone under WSL, no
+cpufreq in most VMs, no `rpi_volt` sensor outside a Raspberry Pi — while the
+set of keys stays stable:
+
+```json
+{
+  "temperature_c": 47.8, "cpu_mhz": 900, "load": [0.12, 0.15, 0.09], "cpus": 4,
+  "memory": { "total_kb": 948000, "available_kb": 512000 },
+  "disk": { "total_kb": 30000000, "available_kb": 24000000 },
+  "under_voltage": false, "uptime_s": 84213, "service_uptime_s": 3600,
+  "hostname": "ritornello", "ip": "192.168.1.20",
+  "os": "Debian GNU/Linux 12 (bookworm)", "kernel": "6.6.51+rpt-rpi-v7",
+  "version": "0.1.0", "can_power_off": true, "can_reboot": true
+}
+```
+
+Sources: `/sys/class/thermal/thermal_zone0/temp`,
+`cpu0/cpufreq/scaling_cur_freq`, `/proc/loadavg`, `/proc/meminfo`
+(`MemAvailable`, not `MemFree`), `statvfs("/")` (`f_bavail`, so the blocks
+reserved for root are not counted as free), the `rpi_volt` hwmon
+`in0_lcrit_alarm`, `/proc/uptime`, `/proc/sys/kernel/{hostname,osrelease}`,
+`/etc/os-release`. The IP address is the local end of a UDP socket
+*connected* to a routable address: no packet is sent and no internet access
+is needed — the kernel is merely asked which interface faces the default
+route.
+
+`can_power_off` and `can_reboot` answer logind's `CanPowerOff`/`CanReboot`,
+asked **once at startup** and cached: the page polls, and spawning `busctl`
+twice per poll would be absurd. Installing the polkit rule therefore takes
+effect at the next service start (see
+[installation.md](installation.md#shutdown-and-reboot-from-the-web-ui)).
+
+`POST /api/system/power` takes `{"action": "poweroff" | "reboot" |
+"restart-service"}`. An unknown action is refused with `422` and an `error`
+message. `poweroff` and `reboot` run `systemctl` and wait up to 5 s:
+`202` when it succeeds or is still running (the machine is going away),
+`502` carrying **logind's own message** when it refuses — that message names
+the missing polkit rule, which a silent `202` would hide.
+`restart-service` answers `202` and exits the process 300 ms later; systemd
+restarts it because the unit says `Restart=always`. It needs no privilege,
+which is why there is no `can_restart_service` field. Outside systemd, that
+action stops the process for good.
+
+The page polls `GET /api/system` every 5 s while it is open and visible,
+rather than receiving a stream: unlike the player state, which the core
+produces anyway, these metrics exist only because someone asked for them.
+The CPU/RAM history graph lives in the page only — 60 samples, five
+minutes, lost on navigation and never stored.
+
 ## Internationalization (i18n)
 
 The interface is multilingual. The base language is **English**, embedded
