@@ -28,9 +28,14 @@ pub struct Settings {
     /// reverse — see that field's comment. The core stores each overlay's
     /// own deadline (`overlay: Option<(View, Instant)>`), so
     /// `show_tens_overlay` reading this field and `expire_overlay`
-    /// staying oblivious to which duration produced the deadline is what
-    /// keeps the offset and its overlay disarming together by
-    /// construction, whatever the two values are.
+    /// staying oblivious to which duration produced the deadline keeps
+    /// the offset and its overlay disarming together **on expiry**,
+    /// whatever the two values are. That alone would not be enough: the
+    /// overlay slot can also be taken over before its deadline — by the
+    /// abandon guard in `appliquer_commande`, or by a source's transient
+    /// message in `handle_source_update` — and both of those explicitly
+    /// clear the offset too, so it never survives behind a display that
+    /// no longer shows it.
     pub tens_window_ms: u32,
 }
 

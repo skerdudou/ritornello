@@ -106,9 +106,12 @@ pub struct Core<P: Player> {
     /// a stopped radio still has its stations.
     preset_count: Option<u8>,
     /// Remote tens offset in flight: `Plus10` presses accumulate here until
-    /// a digit key consumes them (`+10` then `4` selects 14). It lives and
-    /// dies with the overlay that displays it — one deadline, not two
-    /// timers.
+    /// a digit key consumes them (`+10` then `4` selects 14). Cleared by the
+    /// overlay's own deadline (`expire_overlay`) or by its consumption
+    /// (`Select`), and just as much by `appliquer_commande`'s abandon
+    /// guard — which also clears `self.overlay` in that third case, so an
+    /// abandoned offset never leaves its `+NN` behind on a display that no
+    /// longer means it.
     pending_tens: u8,
     state_path: PathBuf,
     view_tx: watch::Sender<View>,
@@ -237,6 +240,12 @@ impl<P: Player> Core<P> {
                 // message n'a rien à voir avec le décalage `+NN` de la
                 // télécommande, seule l'incrustation volume/muet partage son
                 // échéance avec lui.
+                //
+                // Un décalage `+NN` en cours perd donc son emplacement
+                // d'affichage ici : le désarmer avec lui est ce qui évite
+                // qu'il survive derrière un écran qui ne le montre plus (même
+                // raison que le garde d'abandon d'`appliquer_commande`).
+                self.pending_tens = 0;
                 self.overlay = Some((view, Instant::now() + Duration::from_millis(self.settings.overlay_ms.into())));
             } else {
                 self.view = view;
@@ -477,9 +486,19 @@ impl<P: Player> Core<P> {
     async fn appliquer_commande(&mut self, cmd: Command) -> Result<()> {
         // Any command other than Plus10/Select abandons a pending tens
         // sequence: pressing volume mid-sequence is a change of mind, not a
-        // step of it.
-        if !matches!(cmd, Command::Plus10 | Command::Select(_)) {
-            self.pending_tens = 0;
+        // step of it. When an offset was actually armed, its `+NN` overlay
+        // must go with it: `push_view` gives the overlay absolute priority,
+        // and none of the arms below (PlayPause, Stop, Next, Prev, Eject)
+        // rewrite it on their own, so without this the display would keep
+        // showing an offset that no longer applies until the deadline
+        // expires on its own. The `!= 0` guard on `mem::take` keeps
+        // VolumeUp/Mute/Power unaffected: they already overwrite or clear
+        // `self.overlay` right after this.
+        if !matches!(cmd, Command::Plus10 | Command::Select(_))
+            && std::mem::take(&mut self.pending_tens) != 0
+        {
+            self.overlay = None;
+            self.push_view();
         }
         match cmd {
             Command::Select(n) => {
@@ -2110,6 +2129,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn abandonner_le_decalage_efface_aussi_son_incrustation() {
+        // `VolumeUp` masque le defaut (il ecrit son propre overlay juste
+        // apres) : `PlayPause` n'ecrit aucun overlay, donc rien ne doit
+        // effacer le `+NN` a sa place si ce n'est le garde d'abandon
+        // lui-meme. Sans le correctif, l'incrustation restait a l'ecran
+        // jusqu'a son echeance alors que le decalage etait deja abandonne.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.handle_command(Command::Plus10).await.unwrap();
+        assert!(core.overlay_deadline().is_some(), "l'incrustation +10 doit etre affichee");
+        core.handle_command(Command::PlayPause).await.unwrap();
+        assert!(
+            core.overlay_deadline().is_none(),
+            "l'incrustation +NN doit disparaitre avec le decalage abandonne"
+        );
+    }
+
+    #[tokio::test]
     async fn lecheance_de_lincrustation_oublie_le_decalage() {
         let (mut core, _pc, source_calls, _rx, _d) = setup();
         core.handle_command(Command::Plus10).await.unwrap();
@@ -2142,6 +2178,41 @@ mod tests {
         let st = crate::state::load(&dir.path().join("state.json"));
         assert_eq!(st.settings.volume_repeat_initial_ms, 800);
         assert!(st.settings.start_in_standby);
+    }
+
+    #[tokio::test]
+    async fn un_message_ephemere_desarme_un_decalage_en_cours() {
+        // Le message ephemere d'une source (« preselection vide ») emprunte
+        // le meme emplacement d'overlay que le cumul +NN et le lui vole :
+        // sans desarmer le decalage ici, l'appui suivant sur un chiffre
+        // composerait encore l'ancien decalage alors que l'ecran ne montre
+        // plus +NN mais le message de la source.
+        let (mut core, _pc, source_calls, mut rx, _d) = setup();
+        core.handle_command(Command::Plus10).await.unwrap();
+        assert_eq!(rx.borrow_and_update().line2, "+10");
+
+        let message = View { line1: "RADIO  P4".into(), line2: "empty preset".into(), line3: String::new() };
+        core.handle_source_update(
+            "radio",
+            SourceUpdate {
+                view: Some(message),
+                identity: None,
+                line2_replaceable: false,
+                transient: true,
+                preset: None,
+                preset_count: None,
+            },
+        );
+
+        core.handle_command(Command::Select(3)).await.unwrap();
+        assert!(
+            source_calls.lock().unwrap().iter().any(|c| c.contains("Select(3)")),
+            "sans decalage arme, Select(3) doit demander la preselection 3"
+        );
+        assert!(
+            !source_calls.lock().unwrap().iter().any(|c| c.contains("Select(13)")),
+            "le decalage abandonne par le message ephemere ne doit pas etre applique"
+        );
     }
 
     #[tokio::test]
