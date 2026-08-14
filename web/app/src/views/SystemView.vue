@@ -593,10 +593,12 @@ async function attendreRetour(avant: number | null) {
             {{ utilisationTexte }}
           </span>
         </div>
-        <!-- Barre seulement quand le pourcentage est connu : une barre vide se
-             lirait « 0 % » alors que le premier sondage n'a encore aucun delta
-             à comparer. -->
-        <div v-if="utilisationCpuActuelle !== null" data-system-cpu-bar class="h-2 w-full rounded bg-muted">
+        <!-- Barre toujours présente, à zéro tant que le pourcentage est
+             inconnu : elle apparaissait sinon d'un coup au deuxième sondage,
+             en poussant la mise en page. Le risque de lire « 0 % » dans une
+             barre vide est couvert par la ligne au-dessus, qui affiche « — »
+             et non « 0 % » jusqu'à ce qu'un delta soit calculable. -->
+        <div data-system-cpu-bar class="h-2 w-full rounded bg-muted">
           <div
             class="h-2 rounded"
             :class="cpuEnAlerte ? 'bg-destructive' : 'bg-primary'"

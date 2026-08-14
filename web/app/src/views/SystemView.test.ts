@@ -429,12 +429,14 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('n affiche aucune barre CPU tant que le pourcentage est inconnu', async () => {
-    // Une barre vide se lirait « 0 % » alors qu'aucun delta n'est calculable.
+  it('affiche la barre CPU à zéro tant que le pourcentage est inconnu', async () => {
+    // La barre est là dès le premier rendu, vide : elle apparaissait sinon
+    // d'un coup au deuxième sondage en poussant la mise en page. Rien ne
+    // prétend « 0 % » pour autant — la ligne de lecture affiche « — ».
     stub(payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 500 }))
     const w = await monter()
     expect(w.get('[data-system-cpu-usage]').text()).toBe('—')
-    expect(w.find('[data-system-cpu-bar]').exists()).toBe(false)
+    expect(w.get('[data-system-cpu-bar] div').attributes('style')).toContain('width: 0%')
     w.unmount()
   })
 
