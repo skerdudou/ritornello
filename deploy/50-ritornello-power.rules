@@ -10,7 +10,9 @@
 // exactly the situation while testing this — and to `*-ignore-inhibit` when
 // an inhibitor is held. Granting only the plain action produces "it works,
 // except when I am logged in over SSH", a symptom that costs an hour to
-// attribute.
+// attribute. The `*-ignore-inhibit` grant has a second consequence worth
+// naming: a confirmed shutdown or reboot overrides shutdown inhibitors, so
+// it will not wait for an in-progress apt/dpkg run to finish.
 //
 // Nothing else is granted: not `manage-units`, because restarting
 // Ritornello itself needs no privilege (the process exits and systemd

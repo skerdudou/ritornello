@@ -164,7 +164,14 @@ An installation deployed before this change ran as root: the next
 ## Shutdown and reboot from the web UI
 
 The System tab offers three power actions. Two of them act on the machine
-and need an authorisation; the third needs none.
+and need an authorisation; the third needs none. Like every other route of
+the appliance, these routes carry no authentication: anyone who can reach
+port 8080 can power the machine off. This is the accepted design of this
+project, not an oversight to fix — the appliance is meant to sit on a
+trusted network, the same way its other routes do. A cross-origin HTML form
+cannot reach them regardless, though: the request body is JSON, and a plain
+HTML form has no way to set the `content-type: application/json` header
+the endpoint requires.
 
 | Action | Mechanism | Prerequisite |
 |---|---|---|
@@ -178,7 +185,9 @@ actions involved — power-off and reboot, each in its plain,
 checks the plain action only when nothing else is going on: it switches to
 `-multiple-sessions` as soon as another session exists (an open SSH
 connection is enough, which is the usual situation while testing) and to
-`-ignore-inhibit` when an inhibitor is held.
+`-ignore-inhibit` when an inhibitor is held — which also means a confirmed
+shutdown overrides shutdown inhibitors and will not wait for an
+in-progress `apt`/`dpkg` run to finish.
 
 polkit itself is not installed by `deploy.sh` — the script installs no
 package — and it is not present everywhere:
@@ -206,8 +215,12 @@ installing polkit takes effect at the next service start —
 "Restart Ritornello" depends on none of this: the process exits and systemd
 starts it again two seconds later. Run **outside** systemd (development),
 the same action merely stops the process — there is no supervisor to bring
-it back. And systemd's start rate limit applies: five restarts within ten
-seconds leave the unit failed, cleared with
+it back, and because the restart works by exiting the process, it leaves
+mpv and the plugin processes behind: only systemd's cgroup sweeps them when
+it manages the unit. Left running, they keep holding their sockets in
+`/run/ritornello` and the ALSA device, which makes the next manual start
+fail confusingly. And systemd's start rate limit applies: five restarts
+within ten seconds leave the unit failed, cleared with
 `sudo systemctl reset-failed ritornello`.
 
 ## Audio dropouts
