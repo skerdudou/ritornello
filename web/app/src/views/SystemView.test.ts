@@ -134,4 +134,68 @@ describe('SystemView', () => {
     await vi.advanceTimersByTimeAsync(15000)
     expect(f.mock.calls.length).toBe(appels)
   })
+
+  it('désactive les boutons système quand polkit n est pas configuré', async () => {
+    stub(payload({ can_power_off: false, can_reboot: false }))
+    const w = await monter()
+    expect(w.get('[data-power-poweroff]').attributes('disabled')).toBeDefined()
+    expect(w.get('[data-power-reboot]').attributes('disabled')).toBeDefined()
+    // Le redémarrage du service ne dépend d'aucune autorisation.
+    expect(w.get('[data-power-restart]').attributes('disabled')).toBeUndefined()
+    expect(w.find('[data-power-unavailable]').exists()).toBe(true)
+    w.unmount()
+  })
+
+  it('n envoie rien avant confirmation', async () => {
+    const f = stub(payload())
+    const w = await monter()
+    await w.get('[data-power-poweroff]').trigger('click')
+    await flushPromises()
+    // Le dialogue est monté dans un portail : il vit dans document.body.
+    expect(document.body.querySelector('[data-power-confirm]')).not.toBeNull()
+    expect(f.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'POST')).toBe(false)
+    document.body.querySelector<HTMLElement>('[data-power-cancel]')!.click()
+    await flushPromises()
+    expect(f.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'POST')).toBe(false)
+    w.unmount()
+  })
+
+  it('poste l action confirmée puis annonce l arrêt et cesse de sonder', async () => {
+    const f = stub(payload())
+    const w = await monter()
+    await w.get('[data-power-poweroff]').trigger('click')
+    await flushPromises()
+    document.body.querySelector<HTMLElement>('[data-power-confirm]')!.click()
+    await flushPromises()
+    const poste = f.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'POST')
+    expect(poste).toBeDefined()
+    expect(poste?.[0]).toBe('/api/system/power')
+    expect(JSON.parse(String((poste?.[1] as RequestInit).body))).toEqual({ action: 'poweroff' })
+    expect(w.find('[data-power-progress]').exists()).toBe(true)
+    // Le cœur s'en va : plus aucun sondage, sans quoi la page afficherait
+    // une erreur réseau alors que tout se passe comme demandé.
+    const appels = f.mock.calls.length
+    await vi.advanceTimersByTimeAsync(15000)
+    expect(f.mock.calls.length).toBe(appels)
+    w.unmount()
+  })
+
+  it('reprend la main quand le redémarrage du service aboutit', async () => {
+    // Uptime décroissant : le service est bien revenu, ce qu'une simple
+    // réponse ne prouverait pas (le premier sondage peut encore atteindre
+    // l'ancien process).
+    const reponses = [payload(), payload(), payload({ service_uptime_s: 2 })]
+    let i = 0
+    stub(() => reponses[Math.min(i++, reponses.length - 1)])
+    const w = await monter()
+    await w.get('[data-power-restart]').trigger('click')
+    await flushPromises()
+    document.body.querySelector<HTMLElement>('[data-power-confirm]')!.click()
+    await flushPromises()
+    expect(w.get('[data-power-progress]').text()).toBeTruthy()
+    await vi.advanceTimersByTimeAsync(6000)
+    await flushPromises()
+    expect(w.find('[data-power-progress]').exists()).toBe(false)
+    w.unmount()
+  })
 })

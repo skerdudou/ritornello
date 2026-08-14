@@ -1,5 +1,8 @@
 <script setup lang="ts">
-import { api, Card, CardContent, CardHeader, CardTitle } from '@ritornello/ui'
+import {
+  api, Button, Card, CardContent, CardHeader, CardTitle, Dialog, DialogContent,
+  DialogDescription, DialogHeader, DialogTitle, toast,
+} from '@ritornello/ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
 import type { SystemPayload, SystemUsage } from '../types'
@@ -145,6 +148,87 @@ function duree(secondes: number | null | undefined): string {
   if (h > 0) return `${h} ${heure} ${m} ${minute}`
   return `${m} ${minute}`
 }
+
+type ActionPower = 'poweroff' | 'reboot' | 'restart-service'
+
+/** Sondage rapproché pendant le redémarrage du service, et son plafond. */
+const REPRISE_MS = 2000
+const REPRISE_MAX_MS = 30000
+
+/** Action dont on attend la confirmation, et action en cours. */
+const dialogue = ref<ActionPower | null>(null)
+const enCours = ref<ActionPower | null>(null)
+
+function libelle(a: ActionPower): string {
+  if (a === 'poweroff') return t.value('system_poweroff')
+  if (a === 'reboot') return t.value('system_reboot')
+  return t.value('system_restart_service')
+}
+
+function consequence(a: ActionPower): string {
+  if (a === 'poweroff') return t.value('system_confirm_poweroff')
+  if (a === 'reboot') return t.value('system_confirm_reboot')
+  return t.value('system_confirm_restart_service')
+}
+
+const messageEnCours = computed(() => {
+  if (enCours.value === 'poweroff') return t.value('system_powering_off')
+  if (enCours.value === 'reboot') return t.value('system_rebooting')
+  if (enCours.value === 'restart-service') return t.value('system_restarting')
+  return ''
+})
+
+/**
+ * Le cœur va disparaître : le sondage normal s'arrête avant l'envoi. Sans
+ * cela, le sondage suivant échouerait et afficherait une erreur réseau
+ * alarmante alors que l'arrêt se passe exactement comme demandé.
+ */
+async function confirmer() {
+  const action = dialogue.value
+  if (!action) return
+  dialogue.value = null
+  enCours.value = action
+  arreter()
+  const uptimeAvant = etat.value?.service_uptime_s ?? null
+  const err = await api.post('/api/system/power', { action })
+  if (err) {
+    // Refus de logind (règle polkit absente) ou cœur injoignable : rien ne
+    // s'arrête, on rend la main.
+    toast.error(err)
+    enCours.value = null
+    demarrer()
+    return
+  }
+  if (action === 'restart-service') await attendreRetour(uptimeAvant)
+}
+
+/**
+ * Le service redémarre : on sonde plus vite en ignorant les erreurs (il est
+ * arrêté, c'est attendu), et on ne le considère revenu que lorsque son
+ * uptime a *diminué* — une réponse suffirait à se tromper, le premier
+ * sondage pouvant encore atteindre l'ancien process.
+ */
+async function attendreRetour(avant: number | null) {
+  const limite = Date.now() + REPRISE_MAX_MS
+  while (Date.now() < limite) {
+    await new Promise((r) => setTimeout(r, REPRISE_MS))
+    try {
+      const s = await api.get<SystemPayload>('/api/system')
+      if (avant === null || s.service_uptime_s < avant) {
+        etat.value = s
+        enCours.value = null
+        toast.success(t.value('system_restarted'))
+        demarrer()
+        return
+      }
+    } catch {
+      // Service arrêté : on réessaie jusqu'au plafond.
+    }
+  }
+  toast.error(t.value('system_restart_timeout'))
+  enCours.value = null
+  demarrer()
+}
 </script>
 
 <template>
@@ -249,5 +333,72 @@ function duree(secondes: number | null | undefined): string {
         </div>
       </CardContent>
     </Card>
+
+    <Card>
+      <CardHeader><CardTitle>{{ t('system_power') }}</CardTitle></CardHeader>
+      <CardContent class="space-y-3">
+        <p v-if="etat?.under_voltage" data-system-under-voltage class="text-sm text-destructive">
+          {{ t('system_under_voltage') }}
+        </p>
+        <p v-if="enCours" data-power-progress class="text-sm text-muted-foreground">
+          {{ messageEnCours }}
+        </p>
+        <p
+          v-else-if="etat && (!etat.can_power_off || !etat.can_reboot)"
+          data-power-unavailable
+          class="text-sm text-muted-foreground"
+        >
+          {{ t('system_power_unavailable') }}
+        </p>
+        <div class="flex flex-wrap gap-2">
+          <Button
+            variant="destructive"
+            data-power-poweroff
+            :disabled="!!enCours || !etat?.can_power_off"
+            @click="dialogue = 'poweroff'"
+          >
+            {{ t('system_poweroff') }}
+          </Button>
+          <Button
+            variant="destructive"
+            data-power-reboot
+            :disabled="!!enCours || !etat?.can_reboot"
+            @click="dialogue = 'reboot'"
+          >
+            {{ t('system_reboot') }}
+          </Button>
+          <Button
+            variant="outline"
+            data-power-restart
+            :disabled="!!enCours"
+            @click="dialogue = 'restart-service'"
+          >
+            {{ t('system_restart_service') }}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+
+    <!-- Un seul dialogue pour les trois actions : le titre et la phrase de
+         conséquence viennent de l'action en attente. -->
+    <Dialog
+      :open="dialogue !== null"
+      @update:open="(ouvert: boolean) => { if (!ouvert) dialogue = null }"
+    >
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{{ dialogue ? libelle(dialogue) : '' }}</DialogTitle>
+          <DialogDescription>{{ dialogue ? consequence(dialogue) : '' }}</DialogDescription>
+        </DialogHeader>
+        <div class="flex justify-end gap-2">
+          <Button variant="outline" data-power-cancel @click="dialogue = null">
+            {{ t('system_cancel') }}
+          </Button>
+          <Button variant="destructive" data-power-confirm @click="confirmer">
+            {{ t('system_confirm') }}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>
