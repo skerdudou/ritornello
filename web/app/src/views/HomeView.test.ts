@@ -21,6 +21,8 @@ class FauxEventSource {
       preset: null,
       preset_count: null,
       preset_name: null,
+      status: null,
+      overlay: null,
       artist: null,
       title: null,
       album: null,

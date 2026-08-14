@@ -52,6 +52,18 @@ export interface PlayerPayload {
    * declare pas (le cd, ou rien ne joue). Vit et meurt avec `preset`.
    */
   preset_name: string | null
+  /**
+   * Phrase d'etat deja traduite : le statut declare par la source (« PAS DE
+   * DISQUE ») ou le mot de veille resolu par le coeur. `null` quand il n'y a
+   * rien a dire.
+   */
+  status: string | null
+  /**
+   * Incrustation en cours cote afficheur. La SPA l'ignore — elle montre le
+   * volume en clair et a ses propres toasts — mais le champ voyage parce que
+   * la charge utile est unique.
+   */
+  overlay: unknown | null
   artist: string | null
   title: string | null
   album: string | null

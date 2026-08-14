@@ -103,13 +103,77 @@ impl Enrichment {
 /// `origin` dit **qui** a fourni l'information (`"icy"` ou le nom du plugin
 /// gagnant) : sans elle, un affichage douteux ne serait attribuable à personne,
 /// et c'est exactement la question qu'on se pose devant un titre faux.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Morceau {
     pub artist: Option<String>,
     pub title: Option<String>,
     pub album: Option<String>,
     pub duration_s: Option<u32>,
     pub origin: Option<String>,
+}
+
+/// A transient overlay the appliance is showing right now, carrying **both**
+/// the raw value and the resolved words: a display can draw a volume gauge
+/// from `level`, or simply print `text`, without needing a catalogue of its
+/// own.
+///
+/// `remaining_ms` is informative. The core alone owns the deadline — it
+/// publishes a frame when the overlay expires — so a display may animate a
+/// countdown but never decides when the overlay ends.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Overlay {
+    /// Volume/mute overlay.
+    Volume { level: u8, muted: bool, text: String, remaining_ms: u32 },
+    /// Pending tens offset being composed on the remote (`+10`, `+20`).
+    Tens { offset: u8, text: String, remaining_ms: u32 },
+    /// Ephemeral message from a source ("empty preset").
+    Message { text: String, remaining_ms: u32 },
+}
+
+/// Égalité **volontairement écrite à la main** : elle ignore `remaining_ms`.
+///
+/// Deux incrustations qui ne diffèrent que par le temps restant décrivent le
+/// même écran, et `Core::publie_etat` déduplique les trames par égalité. Une
+/// dérive automatique ferait passer chaque rafraîchissement redondant pour un
+/// changement — plusieurs chemins du cœur rafraîchissent pour un même
+/// événement — et chaque afficheur réimprimerait la même chose.
+///
+/// Écrite ici, sur `Overlay`, et non sur `PlayerState` : au niveau de la
+/// charge utile il faudrait comparer à la main tous les autres champs pour ne
+/// traiter spécialement qu'un champ imbriqué dans un enum sous une `Option`,
+/// et chaque champ ajouté plus tard serait un oubli en puissance.
+impl PartialEq for Overlay {
+    fn eq(&self, autre: &Self) -> bool {
+        match (self, autre) {
+            (
+                Self::Volume { level: a, muted: ma, text: ta, .. },
+                Self::Volume { level: b, muted: mb, text: tb, .. },
+            ) => a == b && ma == mb && ta == tb,
+            (Self::Tens { offset: a, text: ta, .. }, Self::Tens { offset: b, text: tb, .. }) => {
+                a == b && ta == tb
+            }
+            (Self::Message { text: ta, .. }, Self::Message { text: tb, .. }) => ta == tb,
+            _ => false,
+        }
+    }
+}
+
+impl Overlay {
+    /// Réécrit le temps restant, calculé à la publication depuis l'échéance que
+    /// le cœur détient. Le `remaining_ms` mémorisé dans `self` n'est donc jamais
+    /// lu — et l'égalité l'ignorant, ce rafraîchissement ne défait pas la
+    /// déduplication des trames.
+    #[must_use]
+    pub fn avec_restant(self, restant_ms: u32) -> Self {
+        match self {
+            Self::Volume { level, muted, text, .. } => {
+                Self::Volume { level, muted, text, remaining_ms: restant_ms }
+            }
+            Self::Tens { offset, text, .. } => Self::Tens { offset, text, remaining_ms: restant_ms },
+            Self::Message { text, .. } => Self::Message { text, remaining_ms: restant_ms },
+        }
+    }
 }
 
 /// État du lecteur diffusé à la SPA : ce qui est volatil, et qui a donc besoin
@@ -123,7 +187,7 @@ pub struct Morceau {
 ///
 /// Le morceau est **aplati** dans le JSON (`serde(flatten)`) : l'IHM reçoit un
 /// objet plat, sans avoir à distinguer deux niveaux pour un même encart.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlayerState {
     /// Nom de la Source active, pour que la SPA sache de quoi elle parle.
     pub source: String,
@@ -146,6 +210,16 @@ pub struct PlayerState {
     /// « audio CD » n'a rien à voir avec une présélection nommée), ou rien ne
     /// joue. Vit et meurt avec `preset` — voir `Core::set_identity`.
     pub preset_name: Option<String>,
+    /// The appliance's current state as a **resolved sentence**: the status a
+    /// source declared ("NO DISC", "AUDIO CD") or the core's standby word.
+    /// One slot, because there is never more than one status at a time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// The transient overlay showing right now, if any. Displays render it as
+    /// they see fit; the SPA ignores it (it shows the volume in plain sight
+    /// and has its own toasts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<Overlay>,
     #[serde(flatten)]
     pub morceau: Morceau,
 }
@@ -252,5 +326,61 @@ mod tests {
         let artiste_seul =
             Enrichment { identity: json!(1), artist: Some("FIP".into()), ..Default::default() };
         assert!(!artiste_seul.is_empty());
+    }
+
+    #[test]
+    fn overlay_volume_fait_un_aller_retour_json() {
+        let o = Overlay::Volume { level: 65, muted: false, text: "VOLUME 65 %".into(), remaining_ms: 4200 };
+        let json = serde_json::to_string(&o).unwrap();
+        // Étiquetage interne : un objet plat, plus simple à lire côté web qu'un
+        // couple {"kind":…,"data":{…}}.
+        assert!(json.contains("\"kind\":\"volume\""));
+        assert!(json.contains("\"level\":65"));
+        let back: Overlay = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, o);
+    }
+
+    #[test]
+    fn overlay_cumul_et_message_font_un_aller_retour_json() {
+        let t = Overlay::Tens { offset: 20, text: "PRESELECTION +20".into(), remaining_ms: 3000 };
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains("\"kind\":\"tens\""));
+        assert_eq!(serde_json::from_str::<Overlay>(&json).unwrap(), t);
+
+        let m = Overlay::Message { text: "PRESELECTION VIDE".into(), remaining_ms: 5000 };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"kind\":\"message\""));
+        assert_eq!(serde_json::from_str::<Overlay>(&json).unwrap(), m);
+    }
+
+    #[test]
+    fn deux_incrustations_ne_differant_que_par_le_temps_restant_sont_egales() {
+        // La garantie qui protège la déduplication de `publie_etat` : deux trames
+        // qui ne diffèrent que par le temps restant décrivent le même écran. Sans
+        // cette égalité, chaque rafraîchissement redondant serait poussé, et
+        // chaque afficheur réimprimerait la même chose.
+        let a = Overlay::Volume { level: 65, muted: false, text: "VOLUME 65 %".into(), remaining_ms: 4200 };
+        let b = Overlay::Volume { level: 65, muted: false, text: "VOLUME 65 %".into(), remaining_ms: 120 };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn une_incrustation_qui_differe_ailleurs_reste_differente() {
+        // Garde-fou de l'égalité ci-dessus : elle ignore le temps restant, et rien
+        // d'autre.
+        let a = Overlay::Volume { level: 65, muted: false, text: "VOLUME 65 %".into(), remaining_ms: 4200 };
+        let b = Overlay::Volume { level: 66, muted: false, text: "VOLUME 66 %".into(), remaining_ms: 4200 };
+        assert_ne!(a, b);
+        let c = Overlay::Message { text: "X".into(), remaining_ms: 1 };
+        let d = Overlay::Message { text: "Y".into(), remaining_ms: 1 };
+        assert_ne!(c, d);
+    }
+
+    #[test]
+    fn les_deux_champs_neufs_sont_absents_du_json_quand_ils_sont_vides() {
+        // La charge utile de la SPA ne doit pas se remplir de nulls.
+        let json = serde_json::to_string(&PlayerState::default()).unwrap();
+        assert!(!json.contains("status"));
+        assert!(!json.contains("overlay"));
     }
 }

@@ -410,6 +410,11 @@ impl<P: Player> Core<P> {
             preset: self.preset,
             preset_name: self.preset_name.clone(),
             preset_count: self.preset_count,
+            // Personne ne remplit encore ces deux champs (chantier en cours) :
+            // rester à `None` reproduit exactement le comportement d'avant leur
+            // ajout, `Option::is_none` les faisant disparaître du JSON.
+            status: None,
+            overlay: None,
             morceau: self.metadonnees.etat(),
         }
     }
