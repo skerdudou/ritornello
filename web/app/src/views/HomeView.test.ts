@@ -130,6 +130,36 @@ describe('HomeView', () => {
     expect(w.findAll('[data-preset-active]')).toHaveLength(0)
   })
 
+  it('annonce le nombre de présélections déclaré par la source', async () => {
+    vi.stubGlobal('EventSource', FauxEventSource)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
+    const HomeView = (await import('./HomeView.vue')).default
+    const w = mount(HomeView)
+    FauxEventSource.derniere!.pousse({ preset_count: 24 })
+    await w.vm.$nextTick()
+    // Le compte porte au-delà de la fenêtre affichée : c'est justement ce qu'il
+    // apprend, la grille n'en montrant que neuf à la fois.
+    expect(w.get('[data-preset-count]').text()).toContain('24')
+    expect(w.findAll('[data-preset-button]')).toHaveLength(9)
+    // Zéro est une information, pas une absence : il explique la grille vide
+    // d'un cd sans disque.
+    FauxEventSource.derniere!.pousse({ preset_count: 0 })
+    await w.vm.$nextTick()
+    expect(w.get('[data-preset-count]').text()).toContain('0')
+  })
+
+  it('n’annonce aucun compte quand la source ne déclare rien', async () => {
+    // Grille nue 1-9 : c'est un repli, pas un inventaire — annoncer « 9 »
+    // serait une affirmation que personne n'a faite.
+    vi.stubGlobal('EventSource', FauxEventSource)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
+    const HomeView = (await import('./HomeView.vue')).default
+    const w = mount(HomeView)
+    FauxEventSource.derniere!.pousse({ preset_count: null })
+    await w.vm.$nextTick()
+    expect(w.find('[data-preset-count]').exists()).toBe(false)
+  })
+
   it('relaie l’état poussé à l’encart Lecteur', async () => {
     // L'unique connexion SSE de la page vit dans HomeView : l'encart doit
     // recevoir le même état en prop (c'était son propre flux auparavant).

@@ -165,6 +165,15 @@ function toucheVolume(e: KeyboardEvent, cmd: Command) {
           </Button>
           <Button v-if="plus10Visible" data-preset-plus10 variant="secondary" @click="decaler">+10</Button>
         </div>
+        <!-- Combien de touches la source declare. Utile a deux titres : un
+             compte au-dela de la fenetre affichee dit qu'il en existe plus loin
+             (c'est ce que le +10 va chercher), et un compte de 0 explique une
+             grille vide — un cd sans disque — au lieu de la laisser enigmatique.
+             Absent quand la source ne declare rien : la grille nue 1-9 est alors
+             un repli, pas un inventaire, et annoncer « 9 » serait faux. -->
+        <p v-if="compte !== null" data-preset-count class="text-xs text-muted-foreground">
+          {{ t('presets_label') }} : {{ compte }}
+        </p>
         <!-- Une rangee par groupe : transport, contenu, son, appareil. Le
              groupement est une donnee (`REMOTE_ROWS`), pas une mise en page
              recopiee ici. -->
