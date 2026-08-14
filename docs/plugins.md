@@ -41,7 +41,7 @@ Presets are numbered **automatically by position** (1 to 99): adding
 appends to the end of the list, deleting renumbers the following ones;
 beyond 99, adding is refused. The station count is declared to the core
 as `preset_count`, which is what lets the web grid show only the numbers
-that exist and reach past nine through its `+10` window (see
+that exist and reach past nine through its own `<`/`>` page arrows (see
 [interface.md](interface.md)) — the remote's bare digits alone only
 reach 1-9. The order is changed **by dragging a row** (or with the ▲▼
 arrows, which remain the keyboard-and-touch-accessible path): moving a

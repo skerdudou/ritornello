@@ -46,13 +46,14 @@ forgotten on a source change and on standby (the newly active source
 re-declares it on activate/wake) but **not** on stop — a stopped radio
 still has its stations.
 
-Past the ninth preset, bare digits cannot reach further: the **`+10`**
-key — the web grid's own button, or the corresponding key on the physical
-remote once bound — accumulates a tens offset held by the **core**,
-cumulatively (each press adds 10), wrapping back to 0 once it passes the
-last useful decade (`(count / 10) * 10`, so a count of 20 still lets
-`+10 +10` then `0` reach preset 20; with no known count, the offset
-saturates instead of wrapping). It is shown as `+NN` through the same
+Past the ninth preset, bare digits cannot reach further: the physical
+remote's **`+10`** key, once bound, accumulates a tens offset held by the
+**core**, cumulatively (each press adds 10), wrapping back to 0 once it
+passes the last useful decade (`(count / 10) * 10`, so a count of 20
+still lets `+10 +10` then `0` reach preset 20; with no known count, the
+offset saturates instead of wrapping) — the web grid has no `+10` button
+of its own, it reaches the same numbers through its own `<`/`>` page
+arrows, described below. It is shown as `+NN` through the same
 overlay slot as the volume/mute overlay, but its own deadline: the
 config page's `tens_window_ms` setting, 5 s by default and independent
 from the volume/mute overlay's own `overlay_ms` (see the config page
