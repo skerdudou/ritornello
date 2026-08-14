@@ -75,4 +75,11 @@ export interface SystemPayload {
   version: string
   can_power_off: boolean
   can_reboot: boolean
+  /**
+   * Compteurs cumulatifs de `/proc/stat` depuis le démarrage — jamais un
+   * pourcentage : deux onglets sondant hors phase corrompraient un delta
+   * calculé côté cœur. La vue les compare entre deux sondages successifs.
+   */
+  cpu_total_jiffies: number | null
+  cpu_idle_jiffies: number | null
 }

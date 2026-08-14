@@ -1,9 +1,13 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { CardTitle, Select } from '@ritornello/ui'
 import { useCatalog } from '../composables/useCatalog'
 import SystemView from './SystemView.vue'
 
-// Charge utile complète, réutilisée en la modifiant par cas.
+// Charge utile complète, réutilisée en la modifiant par cas. Les jiffies CPU
+// valent `null` par défaut : c'est le cas « la machine ne les expose pas »,
+// pas une panne — les tests qui ont besoin d'un delta calculable les
+// fournissent explicitement via `prochainsJiffies`.
 function payload(surcharge: Record<string, unknown> = {}) {
   return {
     temperature_c: 47.8,
@@ -22,17 +26,34 @@ function payload(surcharge: Record<string, unknown> = {}) {
     version: '0.1.0',
     can_power_off: true,
     can_reboot: true,
+    cpu_total_jiffies: null,
+    cpu_idle_jiffies: null,
     ...surcharge,
   }
 }
 
-/** Catalogue minimal : seules les unités sont assertées à l'affichage. */
+/**
+ * Compteurs jiffies croissants à chaque appel : Δtotal 1000, Δidle 750, donc
+ * 25 % d'utilisation calculable dès le second sondage. Sert aux tests
+ * d'historique, qui ont besoin d'un delta réel plutôt que de valeurs figées.
+ */
+function prochainsJiffies() {
+  let n = 0
+  return () => {
+    n += 1
+    return { cpu_total_jiffies: n * 1000, cpu_idle_jiffies: n * 750 }
+  }
+}
+
+/** Catalogue minimal : les unités et le gabarit de la fenêtre d'historique
+ *  sont assertés à l'affichage. */
 const CATALOGUE = {
   system_unit_mb: 'Mo',
   system_unit_gb: 'Go',
   system_unit_day: 'j',
   system_unit_hour: 'h',
   system_unit_minute: 'min',
+  system_history_span: '{minutes} min',
 }
 
 /**
@@ -114,12 +135,17 @@ describe('SystemView', () => {
   })
 
   it('arrive avec un historique vide et le remplit au fil des sondages', async () => {
-    stub(payload())
+    const jiffies = prochainsJiffies()
+    stub(() => payload(jiffies()))
     const w = await monter()
     // Un seul échantillon : pas de ligne, le message d'attente à la place.
     expect(w.find('[data-system-history-empty]').exists()).toBe(true)
     expect(w.find('[data-system-history]').exists()).toBe(false)
-    await vi.advanceTimersByTimeAsync(5000)
+    // Un échantillon exige un delta de jiffies : le premier sondage ne fait
+    // que poser la référence, sans rien pousser. Deux sondages
+    // supplémentaires (10 s) en poussent donc deux, assez pour tracer une
+    // ligne.
+    await vi.advanceTimersByTimeAsync(10000)
     await flushPromises()
     expect(w.find('[data-system-history]').exists()).toBe(true)
     expect(w.get('[data-system-history]').html()).toContain('M0.00,')
@@ -127,13 +153,16 @@ describe('SystemView', () => {
   })
 
   it('plafonne l historique à 60 échantillons', async () => {
-    stub(payload())
+    const jiffies = prochainsJiffies()
+    stub(() => payload(jiffies()))
     const w = await monter()
-    // Le montage pousse un premier échantillon ; 60 sondages supplémentaires
-    // (période de 5 s) poussent le 61e, qui fait sortir le plus ancien par
+    // Le montage ne pousse aucun échantillon : il faut un delta de jiffies,
+    // donc un premier sondage de référence avant que quoi que ce soit ne
+    // soit calculable. 61 sondages supplémentaires (période de 5 s) poussent
+    // donc 61 échantillons, le 61e faisant sortir le plus ancien par
     // `shift()` : il doit en rester exactement 60, soit 59 commandes « L »
     // dans le tracé (un « M » puis n-1 « L »).
-    await vi.advanceTimersByTimeAsync(60 * 5000)
+    await vi.advanceTimersByTimeAsync(61 * 5000)
     await flushPromises()
     // Le tracé est porté par le premier `<path>`, `[data-system-history]`
     // marquant le `<svg>` qui les contient tous les deux.
@@ -301,5 +330,112 @@ describe('SystemView', () => {
     const appels = f.mock.calls.length
     await vi.advanceTimersByTimeAsync(30000)
     expect(f.mock.calls.length).toBe(appels)
+  })
+
+  it('calcule un pourcentage d utilisation CPU exact entre deux sondages', async () => {
+    // Δtotal 1000, Δidle 250 : 100 × (1 − 250/1000) = 75 %.
+    const reponses = [
+      payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 500 }),
+      payload({ cpu_total_jiffies: 2000, cpu_idle_jiffies: 750 }),
+    ]
+    let i = 0
+    stub(() => reponses[Math.min(i++, reponses.length - 1)])
+    const w = await monter()
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushPromises()
+    expect(w.get('[data-system-cpu-usage]').text()).toBe('75 %')
+    w.unmount()
+  })
+
+  it('affiche un tiret pour l utilisation CPU au premier sondage', async () => {
+    // Pas de sondage précédent : aucun delta n'est calculable, et ce n'est
+    // pas une panne.
+    stub(payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 500 }))
+    const w = await monter()
+    expect(w.get('[data-system-cpu-usage]').text()).toBe('—')
+    w.unmount()
+  })
+
+  it('affiche un tiret quand le delta total est nul ou négatif', async () => {
+    // Mêmes compteurs à chaque sondage : Δtotal = 0.
+    stub(payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 500 }))
+    const w = await monter()
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushPromises()
+    expect(w.get('[data-system-cpu-usage]').text()).toBe('—')
+    w.unmount()
+  })
+
+  it('change la cadence de sondage en changeant la période', async () => {
+    const f = stub(payload())
+    const w = await monter()
+    await w.findComponent(Select).vm.$emit('update:modelValue', '1')
+    await flushPromises()
+    const appels = f.mock.calls.length
+    await vi.advanceTimersByTimeAsync(3000)
+    await flushPromises()
+    // À une seconde, trois sondages supplémentaires en 3 s ; la période
+    // précédente de 5 s n'en aurait produit aucun sur la même durée.
+    expect(f.mock.calls.length - appels).toBe(3)
+    w.unmount()
+  })
+
+  it('ordonne les cartes CPU, Mémoire, Historique, Stockage, Appareil, Alimentation', async () => {
+    stub(payload())
+    const w = await monter()
+    const titres = w.findAllComponents(CardTitle).map((c) => c.text())
+    expect(titres[0]).toBe('system_cpu')
+    expect(titres[1]).toBe('system_memory')
+    expect(titres[2]).toContain('system_history')
+    expect(titres[3]).toBe('system_storage')
+    expect(titres[4]).toBe('system_device')
+    expect(titres[5]).toBe('system_power')
+    w.unmount()
+  })
+
+  it('affiche la charge moyenne dans la carte historique', async () => {
+    stub(payload())
+    const w = await monter()
+    expect(w.get('[data-system-load]').text()).toBe('0.50 · 0.40 · 0.30')
+    w.unmount()
+  })
+
+  it('affiche un tiret pour la tension quand aucune sonde n est presente', async () => {
+    // `null` : pas de capteur `rpi_volt`, à distinguer d'une alimentation
+    // saine (`false`) — l'ancien affichage confondait les deux.
+    stub(payload({ under_voltage: null }))
+    const w = await monter()
+    const tension = w.get('[data-system-under-voltage]')
+    expect(tension.text()).toBe('—')
+    expect(tension.classes()).not.toContain('text-destructive')
+    w.unmount()
+  })
+
+  it('affiche la tension nominale quand la sonde ne detecte rien', async () => {
+    stub(payload({ under_voltage: false }))
+    const w = await monter()
+    const tension = w.get('[data-system-under-voltage]')
+    expect(tension.text()).toBe('system_voltage_ok')
+    expect(tension.classes()).not.toContain('text-destructive')
+    w.unmount()
+  })
+
+  it('affiche l alerte en rouge en cas de sous-tension detectee', async () => {
+    stub(payload({ under_voltage: true }))
+    const w = await monter()
+    const tension = w.get('[data-system-under-voltage]')
+    expect(tension.text()).toBe('system_under_voltage')
+    expect(tension.classes()).toContain('text-destructive')
+    w.unmount()
+  })
+
+  it('le libellé de la fenêtre suit la période choisie', async () => {
+    stub(payload())
+    const w = await monter()
+    expect(w.get('[data-system-history-span]').text()).toContain('5')
+    await w.findComponent(Select).vm.$emit('update:modelValue', '30')
+    await flushPromises()
+    expect(w.get('[data-system-history-span]').text()).toContain('30')
+    w.unmount()
   })
 })
