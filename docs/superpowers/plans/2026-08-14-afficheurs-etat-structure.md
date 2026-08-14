@@ -270,6 +270,11 @@ Puis, dans `PlayerState`, après `preset_name` :
 `PlayerState` doit aussi dériver `Deserialize` (le SDK la désérialisera en
 Task 4) : ajouter `Deserialize` à sa liste de dérives et à celle de `Morceau`.
 
+Ajouter `Overlay` au `pub use metadata::{…}` de
+`crates/ritornello-proto/src/lib.rs`, comme la Task 1 l'a fait pour `Morceau` et
+`PlayerState` : sans cette ligne le chemin `ritornello_proto::Overlay` n'existe
+pas à la racine du crate, et rien ne le signale avant le premier usage externe.
+
 - [ ] **Step 4: lancer, constater le succès**
 
 Run: `cargo test -p ritornello-proto`

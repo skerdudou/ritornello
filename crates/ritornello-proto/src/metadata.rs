@@ -153,8 +153,15 @@ pub struct PlayerState {
 impl Morceau {
     /// Vrai si rien n'est connu du morceau.
     ///
-    /// Réservé aux tests : côté IHM, c'est la SPA qui décide quoi montrer d'un
-    /// état partiel, et le cœur n'a aucune raison de trancher pour elle.
+    /// N'a d'appelant que dans les tests, et c'est voulu : côté IHM, c'est la
+    /// SPA qui décide quoi montrer d'un état partiel, et le cœur n'a aucune
+    /// raison de trancher pour elle.
+    ///
+    /// Cette convention n'est plus tenue par le compilateur. Elle l'était par un
+    /// `#[cfg(test)]`, du temps où la structure vivait dans le cœur avec ses
+    /// tests ; un tel attribut ne survit pas au passage dans un crate séparé,
+    /// où il ne s'applique qu'à la compilation de ce crate-là et ferait
+    /// disparaître la méthode pour tous les autres.
     pub fn est_vide(&self) -> bool {
         self.artist.is_none() && self.title.is_none() && self.album.is_none()
     }
