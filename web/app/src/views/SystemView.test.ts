@@ -366,6 +366,63 @@ describe('SystemView', () => {
     w.unmount()
   })
 
+  /** Deux sondages dont le delta donne le pourcentage voulu. */
+  function jiffiesPour(pourcent: number) {
+    const idle = 1000 - pourcent * 10
+    const reponses = [
+      payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 1000 }),
+      payload({ cpu_total_jiffies: 2000, cpu_idle_jiffies: 1000 + idle }),
+    ]
+    let i = 0
+    return () => reponses[Math.min(i++, reponses.length - 1)]
+  }
+
+  it('la barre d utilisation CPU suit le pourcentage', async () => {
+    stub(jiffiesPour(75))
+    const w = await monter()
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushPromises()
+    expect(w.get('[data-system-cpu-usage]').text()).toBe('75 %')
+    const barre = w.get('[data-system-cpu-bar] div')
+    expect(barre.attributes('style')).toContain('width: 75%')
+    // En dessous du seuil : couleur normale, pour les deux éléments.
+    expect(barre.classes()).toContain('bg-primary')
+    expect(w.get('[data-system-cpu-usage]').classes()).not.toContain('text-destructive')
+    w.unmount()
+  })
+
+  it('passe l utilisation CPU en rouge au dela de 90 pour cent', async () => {
+    stub(jiffiesPour(95))
+    const w = await monter()
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushPromises()
+    expect(w.get('[data-system-cpu-usage]').text()).toBe('95 %')
+    expect(w.get('[data-system-cpu-usage]').classes()).toContain('text-destructive')
+    expect(w.get('[data-system-cpu-bar] div').classes()).toContain('bg-destructive')
+    w.unmount()
+  })
+
+  it('90 pour cent pile n est pas encore une alerte', async () => {
+    // Le seuil est strict : sans cela une charge nominale afficherait du rouge.
+    stub(jiffiesPour(90))
+    const w = await monter()
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushPromises()
+    expect(w.get('[data-system-cpu-usage]').text()).toBe('90 %')
+    expect(w.get('[data-system-cpu-usage]').classes()).not.toContain('text-destructive')
+    expect(w.get('[data-system-cpu-bar] div').classes()).toContain('bg-primary')
+    w.unmount()
+  })
+
+  it('n affiche aucune barre CPU tant que le pourcentage est inconnu', async () => {
+    // Une barre vide se lirait « 0 % » alors qu'aucun delta n'est calculable.
+    stub(payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 500 }))
+    const w = await monter()
+    expect(w.get('[data-system-cpu-usage]').text()).toBe('—')
+    expect(w.find('[data-system-cpu-bar]').exists()).toBe(false)
+    w.unmount()
+  })
+
   it('un sondage en vol empêche un second sondage de corrompre le delta suivant', async () => {
     // Chaque GET reste en attente jusqu'à ce que le test le résolve
     // explicitement, pour simuler un sondage qui n'a pas encore répondu

@@ -248,6 +248,18 @@ const utilisationTexte = computed(() =>
   utilisationCpuActuelle.value == null ? RIEN : `${Math.round(utilisationCpuActuelle.value)} %`,
 )
 /**
+ * Seuil de mise en alerte de l'utilisation CPU. Strictement supérieur : 90 %
+ * pile n'est pas encore une alerte.
+ */
+const SEUIL_ALERTE_CPU = 90
+const cpuEnAlerte = computed(() => (utilisationCpuActuelle.value ?? 0) > SEUIL_ALERTE_CPU)
+/**
+ * Largeur de la barre. Passée par une computed plutôt qu'inline : le gabarit
+ * n'a pas à réduire un `number | null` derrière son `v-if`, ce que la
+ * vérification de types ne suit pas toujours à travers cette frontière.
+ */
+const largeurCpu = computed(() => Math.round(utilisationCpuActuelle.value ?? 0))
+/**
  * Ligne d'alimentation de la carte Appareil, toujours affichée — jamais
  * masquée derrière un `v-if` — pour distinguer trois situations que l'ancien
  * affichage confondait : aucune sonde (`null`, rendu « — » comme toute autre
@@ -563,7 +575,27 @@ async function attendreRetour(avant: number | null) {
         <div>{{ t('system_temperature') }} : <span data-system-temperature>{{ temperature }}</span></div>
         <div>{{ t('system_frequency') }} : <span data-system-frequency>{{ frequence }}</span></div>
         <div>{{ t('system_cores') }} : <span data-system-cores>{{ nombre(etat?.cpus) }}</span></div>
-        <div>{{ t('system_cpu_usage') }} : <span data-system-cpu-usage>{{ utilisationTexte }}</span></div>
+        <div>
+          {{ t('system_cpu_usage') }} :
+          <span data-system-cpu-usage :class="cpuEnAlerte ? 'font-medium text-destructive' : undefined">
+            {{ utilisationTexte }}
+          </span>
+        </div>
+        <!-- Barre sur le modèle de Mémoire et Stockage, mais seulement quand le
+             pourcentage est connu : une barre vide se lirait « 0 % » alors que
+             le premier sondage n'a encore aucun delta à comparer. Elle occupe
+             les deux colonnes de la grille. -->
+        <div
+          v-if="utilisationCpuActuelle !== null"
+          data-system-cpu-bar
+          class="h-2 w-full rounded bg-muted sm:col-span-2"
+        >
+          <div
+            class="h-2 rounded"
+            :class="cpuEnAlerte ? 'bg-destructive' : 'bg-primary'"
+            :style="{ width: `${largeurCpu}%` }"
+          />
+        </div>
       </CardContent>
     </Card>
 
