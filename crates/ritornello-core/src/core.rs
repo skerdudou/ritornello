@@ -2130,18 +2130,18 @@ mod tests {
 
     #[tokio::test]
     async fn abandonner_le_decalage_efface_aussi_son_incrustation() {
-        // `VolumeUp` masque le defaut (il ecrit son propre overlay juste
-        // apres) : `PlayPause` n'ecrit aucun overlay, donc rien ne doit
-        // effacer le `+NN` a sa place si ce n'est le garde d'abandon
-        // lui-meme. Sans le correctif, l'incrustation restait a l'ecran
-        // jusqu'a son echeance alors que le decalage etait deja abandonne.
+        // `VolumeUp` masque le défaut (il écrit son propre overlay juste
+        // après) : `PlayPause` n'écrit aucun overlay, donc rien ne doit
+        // effacer le `+NN` à sa place si ce n'est le garde d'abandon
+        // lui-même. Sans le correctif, l'incrustation restait à l'écran
+        // jusqu'à son échéance alors que le décalage était déjà abandonné.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         core.handle_command(Command::Plus10).await.unwrap();
-        assert!(core.overlay_deadline().is_some(), "l'incrustation +10 doit etre affichee");
+        assert!(core.overlay_deadline().is_some(), "l'incrustation +10 doit être affichée");
         core.handle_command(Command::PlayPause).await.unwrap();
         assert!(
             core.overlay_deadline().is_none(),
-            "l'incrustation +NN doit disparaitre avec le decalage abandonne"
+            "l'incrustation +NN doit disparaître avec le décalage abandonné"
         );
     }
 
@@ -2182,10 +2182,10 @@ mod tests {
 
     #[tokio::test]
     async fn un_message_ephemere_desarme_un_decalage_en_cours() {
-        // Le message ephemere d'une source (« preselection vide ») emprunte
-        // le meme emplacement d'overlay que le cumul +NN et le lui vole :
-        // sans desarmer le decalage ici, l'appui suivant sur un chiffre
-        // composerait encore l'ancien decalage alors que l'ecran ne montre
+        // Le message éphémère d'une source (« présélection vide ») emprunte
+        // le même emplacement d'overlay que le cumul +NN et le lui vole :
+        // sans désarmer le décalage ici, l'appui suivant sur un chiffre
+        // composerait encore l'ancien décalage alors que l'écran ne montre
         // plus +NN mais le message de la source.
         let (mut core, _pc, source_calls, mut rx, _d) = setup();
         core.handle_command(Command::Plus10).await.unwrap();
@@ -2207,11 +2207,11 @@ mod tests {
         core.handle_command(Command::Select(3)).await.unwrap();
         assert!(
             source_calls.lock().unwrap().iter().any(|c| c.contains("Select(3)")),
-            "sans decalage arme, Select(3) doit demander la preselection 3"
+            "sans décalage armé, Select(3) doit demander la présélection 3"
         );
         assert!(
             !source_calls.lock().unwrap().iter().any(|c| c.contains("Select(13)")),
-            "le decalage abandonne par le message ephemere ne doit pas etre applique"
+            "le décalage abandonné par le message éphémère ne doit pas être appliqué"
         );
     }
 

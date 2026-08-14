@@ -188,12 +188,12 @@ function toucheVolume(e: KeyboardEvent, cmd: Command) {
           >
             &lt;
           </Button>
-          <!-- Combien de touches la source declare. Utile a deux titres : un
-               compte au-dela de la page affichee dit qu'il en existe plus
+          <!-- Combien de touches la source déclare. Utile à deux titres : un
+               compte au-delà de la page affichée dit qu'il en existe plus
                loin (c'est ce que la flèche suivante va chercher), et un
                compte de 0 explique une grille vide — un cd sans disque — au
-               lieu de la laisser enigmatique. Absent quand la source ne
-               declare rien : la grille nue 1-9 est alors un repli, pas un
+               lieu de la laisser énigmatique. Absent quand la source ne
+               déclare rien : la grille nue 1-9 est alors un repli, pas un
                inventaire, et annoncer « 9 » serait faux. -->
           <p data-preset-count class="text-xs text-muted-foreground">
             {{ t('presets_label') }} : {{ compte }}

@@ -469,14 +469,14 @@ mod tests {
 
     #[tokio::test]
     async fn la_valeur_initiale_dun_watch_frais_nest_pas_vue_comme_un_changement() {
-        // Pilier dont depend `poll_notification` : un `watch::channel(v).1`
-        // fraichement cree ne signale jamais sa valeur de depart comme un
-        // changement pour `changed()`. Si cette propriete cessait d'etre
-        // vraie — ou si le cablage passait par `subscribe()` puis
-        // `mark_changed()`, ou deplacait la creation du canal ailleurs —
-        // chaque demarrage radio annoncerait `preset_count(0)` avant meme
-        // la premiere lecture : grille vide et « Presets : 0 » jusqu'a ce
-        // que quelque chose joue.
+        // Pilier dont dépend `poll_notification` : un `watch::channel(v).1`
+        // fraîchement créé ne signale jamais sa valeur de départ comme un
+        // changement pour `changed()`. Si cette propriété cessait d'être
+        // vraie — ou si le câblage passait par `subscribe()` puis
+        // `mark_changed()`, ou déplaçait la création du canal ailleurs —
+        // chaque démarrage radio annoncerait `preset_count(0)` avant même
+        // la première lecture : grille vide et « Présélections : 0 » jusqu'à
+        // ce que quelque chose joue.
         let mut source = make_source(two_stations(), 1);
         source.preset_count_rx = Some(tokio::sync::watch::channel(0u8).1);
         let resultat = tokio::time::timeout(
@@ -484,7 +484,10 @@ mod tests {
             source.poll_notification(),
         )
         .await;
-        assert!(resultat.is_err(), "la valeur initiale du watch ne doit produire aucune notification");
+        assert!(
+            resultat.is_err(),
+            "la valeur initiale du watch ne doit produire aucune notification"
+        );
     }
 
     #[tokio::test]
