@@ -25,6 +25,10 @@ const RIEN = '—'
 
 const historique = ref<{ cpu: number; ram: number }[]>([])
 let minuteur: ReturnType<typeof setInterval> | null = null
+/** Devient faux au démontage : empêche `demarrer()` de recréer un minuteur
+ *  après coup (par ex. depuis `attendreRetour`, qui peut se terminer
+ *  longtemps après que l'utilisateur a quitté la vue). */
+let monte = true
 
 /**
  * Pourcentages retenus dans l'historique. `null` si l'un des deux manque :
@@ -67,7 +71,7 @@ async function sonder() {
 }
 
 function demarrer() {
-  if (minuteur !== null) return
+  if (!monte || minuteur !== null) return
   void sonder()
   minuteur = setInterval(sonder, PERIODE_MS)
 }
@@ -89,6 +93,7 @@ onMounted(() => {
   document.addEventListener('visibilitychange', visibilite)
 })
 onUnmounted(() => {
+  monte = false
   arreter()
   document.removeEventListener('visibilitychange', visibilite)
 })
@@ -178,6 +183,11 @@ const messageEnCours = computed(() => {
   return ''
 })
 
+/** Le bouton de confirmation n'est peint en « destructive » que pour les
+ *  actions qui le sont réellement : la relance du service laisse l'appareil
+ *  allumé, ce que sa propre phrase de conséquence promet. */
+const variantConfirmation = computed(() => (dialogue.value === 'restart-service' ? 'default' : 'destructive'))
+
 /**
  * Le cœur va disparaître : le sondage normal s'arrête avant l'envoi. Sans
  * cela, le sondage suivant échouerait et afficherait une erreur réseau
@@ -207,13 +217,28 @@ async function confirmer() {
  * arrêté, c'est attendu), et on ne le considère revenu que lorsque son
  * uptime a *diminué* — une réponse suffirait à se tromper, le premier
  * sondage pouvant encore atteindre l'ancien process.
+ *
+ * `monte` dans la condition de boucle : si l'utilisateur a quitté la vue,
+ * on cesse de sonder au tour suivant plutôt que de courir jusqu'au plafond
+ * pour, à la fin, rappeler `demarrer()` sur une vue démontée — ce qui
+ * recréerait un minuteur que plus personne ne pourrait jamais arrêter.
  */
 async function attendreRetour(avant: number | null) {
   const limite = Date.now() + REPRISE_MAX_MS
-  while (Date.now() < limite) {
+  while (monte && Date.now() < limite) {
     await new Promise((r) => setTimeout(r, REPRISE_MS))
     try {
-      const s = await api.get<SystemPayload>('/api/system')
+      // Le sondage est mis en course avec un délai : sans lui, une requête
+      // qui se connecte mais ne répond jamais (Wi-Fi capricieux, socket à
+      // moitié ouverte) bloquerait l'attente ici, indéfiniment, au-delà du
+      // plafond de 30 s promis à l'utilisateur. La requête abandonnée reste
+      // en vol mais n'a plus d'effet : la boucle a déjà tourné la page.
+      const s = await Promise.race([
+        api.get<SystemPayload>('/api/system'),
+        new Promise<never>((_, rejette) =>
+          setTimeout(() => rejette(new Error('sondage sans réponse')), REPRISE_MS),
+        ),
+      ])
       if (avant === null || s.service_uptime_s < avant) {
         etat.value = s
         enCours.value = null
@@ -222,9 +247,10 @@ async function attendreRetour(avant: number | null) {
         return
       }
     } catch {
-      // Service arrêté : on réessaie jusqu'au plafond.
+      // Service arrêté, ou sondage sans réponse : on réessaie jusqu'au plafond.
     }
   }
+  if (!monte) return
   toast.error(t.value('system_restart_timeout'))
   enCours.value = null
   demarrer()
@@ -394,7 +420,7 @@ async function attendreRetour(avant: number | null) {
           <Button variant="outline" data-power-cancel @click="dialogue = null">
             {{ t('system_cancel') }}
           </Button>
-          <Button variant="destructive" data-power-confirm @click="confirmer">
+          <Button :variant="variantConfirmation" data-power-confirm @click="confirmer">
             {{ t('system_confirm') }}
           </Button>
         </div>

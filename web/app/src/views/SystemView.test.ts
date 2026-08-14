@@ -146,6 +146,18 @@ describe('SystemView', () => {
     w.unmount()
   })
 
+  it('n en désactive qu un seul quand une seule autorisation manque', async () => {
+    // Le message d'indisponibilité est un OU sur les deux drapeaux : il doit
+    // rester affiché même quand un seul des deux manque, sans désactiver
+    // l'autre bouton.
+    stub(payload({ can_power_off: false, can_reboot: true }))
+    const w = await monter()
+    expect(w.find('[data-power-unavailable]').exists()).toBe(true)
+    expect(w.get('[data-power-poweroff]').attributes('disabled')).toBeDefined()
+    expect(w.get('[data-power-reboot]').attributes('disabled')).toBeUndefined()
+    w.unmount()
+  })
+
   it('n envoie rien avant confirmation', async () => {
     const f = stub(payload())
     const w = await monter()
@@ -197,5 +209,54 @@ describe('SystemView', () => {
     await flushPromises()
     expect(w.find('[data-power-progress]').exists()).toBe(false)
     w.unmount()
+  })
+
+  it('atteint le plafond de 30 s même si un sondage reste sans réponse', async () => {
+    // Après le POST, chaque GET reste en attente pour toujours : une
+    // requête qui se connecte mais ne répond jamais. Sans la course contre
+    // un délai dans `attendreRetour`, l'attente resterait bloquée dessus au
+    // lieu d'atteindre le plafond promis.
+    let poste = false
+    const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        poste = true
+        return Promise.resolve({ ok: true, json: async () => ({}) } as Response)
+      }
+      if (String(url).includes('/api/i18n')) {
+        return Promise.resolve({ ok: true, json: async () => CATALOGUE } as Response)
+      }
+      if (poste) return new Promise<Response>(() => {})
+      return Promise.resolve({ ok: true, json: async () => payload() } as Response)
+    })
+    vi.stubGlobal('fetch', f)
+    const w = await monter()
+    await w.get('[data-power-restart]').trigger('click')
+    await flushPromises()
+    document.body.querySelector<HTMLElement>('[data-power-confirm]')!.click()
+    await flushPromises()
+    expect(w.find('[data-power-progress]').exists()).toBe(true)
+    await vi.advanceTimersByTimeAsync(35000)
+    await flushPromises()
+    expect(w.find('[data-power-progress]').exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('démonter pendant l attente ne relance pas le sondage ensuite', async () => {
+    // L'uptime du service ne baisse jamais : l'attente tourne jusqu'à ce
+    // qu'on démonte la vue.
+    const f = stub(payload())
+    const w = await monter()
+    await w.get('[data-power-restart]').trigger('click')
+    await flushPromises()
+    document.body.querySelector<HTMLElement>('[data-power-confirm]')!.click()
+    await flushPromises()
+    w.unmount()
+    // Une requête déjà en vol au moment du démontage est normale (la boucle
+    // ne s'arrête qu'au tour suivant) ; ce qui ne doit jamais se produire,
+    // c'est un nouveau minuteur créé après coup par `demarrer()`.
+    await vi.advanceTimersByTimeAsync(10000)
+    const appels = f.mock.calls.length
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(f.mock.calls.length).toBe(appels)
   })
 })
