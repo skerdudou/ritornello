@@ -12,6 +12,10 @@ export interface SettingsPayload {
   volume_repeat_initial_ms: number
   volume_repeat_interval_ms: number
   start_in_standby: boolean
+  /** Durée d'affichage de l'incrustation volume/muet et des messages éphémères des sources. */
+  overlay_ms: number
+  /** Fenêtre de saisie du cumul `+10` de la télécommande (temps laissé pour la seconde pression). */
+  tens_window_ms: number
 }
 /**
  * Etat du lecteur, tel que le pousse `/api/player` : tout ce qui est volatil.

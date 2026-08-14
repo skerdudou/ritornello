@@ -14,11 +14,35 @@ pub struct Settings {
     pub volume_repeat_interval_ms: u32,
     /// Start in standby instead of waking the active source at launch.
     pub start_in_standby: bool,
+    /// How long the volume/mute overlay and sources' transient messages
+    /// (e.g. "empty preset") stay on screen before the permanent view
+    /// reappears. Deliberately a separate field from `tens_window_ms`,
+    /// not shared: this overlay hides the "now playing" view and may want
+    /// to shrink one day, while the tens-offset window below must stay
+    /// comfortable regardless — coupling them would forbid tuning either
+    /// on its own.
+    pub overlay_ms: u32,
+    /// How long the remote's pending `+10`/`+20`/... offset stays armed,
+    /// shown as the `+NN` overlay: the time left to press the second
+    /// digit. Independent from `overlay_ms` for the same reason in
+    /// reverse — see that field's comment. The core stores each overlay's
+    /// own deadline (`overlay: Option<(View, Instant)>`), so
+    /// `show_tens_overlay` reading this field and `expire_overlay`
+    /// staying oblivious to which duration produced the deadline is what
+    /// keeps the offset and its overlay disarming together by
+    /// construction, whatever the two values are.
+    pub tens_window_ms: u32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { volume_repeat_initial_ms: 800, volume_repeat_interval_ms: 200, start_in_standby: false }
+        Self {
+            volume_repeat_initial_ms: 800,
+            volume_repeat_interval_ms: 200,
+            start_in_standby: false,
+            overlay_ms: 5000,
+            tens_window_ms: 5000,
+        }
     }
 }
 
@@ -165,6 +189,8 @@ mod tests {
         assert_eq!(s.volume_repeat_initial_ms, 800);
         assert_eq!(s.volume_repeat_interval_ms, 200);
         assert!(!s.start_in_standby);
+        assert_eq!(s.overlay_ms, 5000);
+        assert_eq!(s.tens_window_ms, 5000);
         assert_eq!(PersistedState::default().settings, Settings::default());
     }
 
@@ -188,11 +214,18 @@ mod tests {
     fn settings_roundtrip_et_bloc_partiel() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
-        // 900, not the default 800: the roundtrip assertion below must be
-        // able to tell "the written value survived" from "the default was
-        // applied regardless of what was written".
+        // Non-default values throughout, overlay_ms/tens_window_ms included:
+        // a fixture carrying 5000 would no longer distinguish "the default
+        // applied" from "the written value survived" — exactly the defect a
+        // review flagged on the volume fixture above.
         let st = PersistedState {
-            settings: Settings { volume_repeat_initial_ms: 900, volume_repeat_interval_ms: 250, start_in_standby: true },
+            settings: Settings {
+                volume_repeat_initial_ms: 900,
+                volume_repeat_interval_ms: 250,
+                start_in_standby: true,
+                overlay_ms: 6000,
+                tens_window_ms: 7000,
+            },
             ..Default::default()
         };
         save(&path, &st).unwrap();
@@ -202,5 +235,7 @@ mod tests {
         let st = load(&path);
         assert!(st.settings.start_in_standby);
         assert_eq!(st.settings.volume_repeat_initial_ms, 800);
+        assert_eq!(st.settings.overlay_ms, 5000);
+        assert_eq!(st.settings.tens_window_ms, 5000);
     }
 }

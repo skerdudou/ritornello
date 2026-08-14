@@ -149,6 +149,16 @@ pub fn validate_settings(s: &crate::state::Settings) -> Result<(), String> {
     if !(100..=2000).contains(&s.volume_repeat_interval_ms) {
         return Err("intervalle de répétition hors bornes (100-2000 ms)".to_string());
     }
+    // Same bounds for both overlay durations: under a second an overlay is
+    // unreadable and the tens-offset capture becomes impractical (it takes
+    // two presses inside the window); past roughly fifteen seconds an
+    // overlay durably hides the "now playing" view.
+    if !(1000..=15000).contains(&s.overlay_ms) {
+        return Err("incrustation hors bornes (1000-15000 ms)".to_string());
+    }
+    if !(1000..=15000).contains(&s.tens_window_ms) {
+        return Err("fenêtre de saisie du cumul hors bornes (1000-15000 ms)".to_string());
+    }
     Ok(())
 }
 
@@ -1061,6 +1071,8 @@ mod tests {
         assert_eq!(v["volume_repeat_initial_ms"], 800);
         assert_eq!(v["volume_repeat_interval_ms"], 200);
         assert_eq!(v["start_in_standby"], false);
+        assert_eq!(v["overlay_ms"], 5000);
+        assert_eq!(v["tens_window_ms"], 5000);
     }
 
     #[tokio::test]
@@ -1073,7 +1085,7 @@ mod tests {
                 Request::put("/api/settings")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"volume_repeat_initial_ms":800,"volume_repeat_interval_ms":250,"start_in_standby":true}"#,
+                        r#"{"volume_repeat_initial_ms":800,"volume_repeat_interval_ms":250,"start_in_standby":true,"overlay_ms":3000,"tens_window_ms":9000}"#,
                     ))
                     .unwrap(),
             )
@@ -1083,7 +1095,10 @@ mod tests {
         let recu = settings_rx.recv().await.unwrap();
         assert_eq!(recu.volume_repeat_initial_ms, 800);
         assert!(recu.start_in_standby);
+        assert_eq!(recu.overlay_ms, 3000);
+        assert_eq!(recu.tens_window_ms, 9000);
         assert_eq!(settings_current.read().await.volume_repeat_interval_ms, 250);
+        assert_eq!(settings_current.read().await.tens_window_ms, 9000);
     }
 
     #[tokio::test]
@@ -1094,9 +1109,13 @@ mod tests {
         let settings_current = state.settings_current.clone();
         let app = router(state);
         for corps in [
-            r#"{"volume_repeat_initial_ms":100,"volume_repeat_interval_ms":500,"start_in_standby":false}"#,
-            r#"{"volume_repeat_initial_ms":1000,"volume_repeat_interval_ms":50,"start_in_standby":false}"#,
-            r#"{"volume_repeat_initial_ms":9000,"volume_repeat_interval_ms":500,"start_in_standby":false}"#,
+            r#"{"volume_repeat_initial_ms":100,"volume_repeat_interval_ms":500,"start_in_standby":false,"overlay_ms":5000,"tens_window_ms":5000}"#,
+            r#"{"volume_repeat_initial_ms":1000,"volume_repeat_interval_ms":50,"start_in_standby":false,"overlay_ms":5000,"tens_window_ms":5000}"#,
+            r#"{"volume_repeat_initial_ms":9000,"volume_repeat_interval_ms":500,"start_in_standby":false,"overlay_ms":5000,"tens_window_ms":5000}"#,
+            r#"{"volume_repeat_initial_ms":800,"volume_repeat_interval_ms":200,"start_in_standby":false,"overlay_ms":999,"tens_window_ms":5000}"#,
+            r#"{"volume_repeat_initial_ms":800,"volume_repeat_interval_ms":200,"start_in_standby":false,"overlay_ms":15001,"tens_window_ms":5000}"#,
+            r#"{"volume_repeat_initial_ms":800,"volume_repeat_interval_ms":200,"start_in_standby":false,"overlay_ms":5000,"tens_window_ms":999}"#,
+            r#"{"volume_repeat_initial_ms":800,"volume_repeat_interval_ms":200,"start_in_standby":false,"overlay_ms":5000,"tens_window_ms":15001}"#,
         ] {
             // `AppState` est `Clone` : chaque oneshot repart du même montage.
             let resp = app
@@ -1115,6 +1134,8 @@ mod tests {
             assert!(v["error"].is_string());
         }
         assert_eq!(settings_current.read().await.volume_repeat_initial_ms, 800);
+        assert_eq!(settings_current.read().await.overlay_ms, 5000);
+        assert_eq!(settings_current.read().await.tens_window_ms, 5000);
         assert!(settings_rx.try_recv().is_err(), "rien ne doit partir dans le canal");
     }
 
@@ -1128,5 +1149,16 @@ mod tests {
         assert!(validate_settings(&Settings { volume_repeat_initial_ms: 5001, ..Default::default() }).is_err());
         assert!(validate_settings(&Settings { volume_repeat_interval_ms: 99, ..Default::default() }).is_err());
         assert!(validate_settings(&Settings { volume_repeat_interval_ms: 2001, ..Default::default() }).is_err());
+    }
+
+    #[test]
+    fn validate_settings_borne_les_deux_durees_dincrustation() {
+        use crate::state::Settings;
+        assert!(validate_settings(&Settings { overlay_ms: 1000, tens_window_ms: 1000, ..Default::default() }).is_ok());
+        assert!(validate_settings(&Settings { overlay_ms: 15000, tens_window_ms: 15000, ..Default::default() }).is_ok());
+        assert!(validate_settings(&Settings { overlay_ms: 999, ..Default::default() }).is_err());
+        assert!(validate_settings(&Settings { overlay_ms: 15001, ..Default::default() }).is_err());
+        assert!(validate_settings(&Settings { tens_window_ms: 999, ..Default::default() }).is_err());
+        assert!(validate_settings(&Settings { tens_window_ms: 15001, ..Default::default() }).is_err());
     }
 }

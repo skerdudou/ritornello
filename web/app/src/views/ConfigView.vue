@@ -21,6 +21,8 @@ const reglages = ref<SettingsPayload>({
   volume_repeat_initial_ms: 800,
   volume_repeat_interval_ms: 200,
   start_in_standby: false,
+  overlay_ms: 5000,
+  tens_window_ms: 5000,
 })
 // Le Select ne porte que des chaînes : « on »/« standby » traduits à
 // l'affichage, le booléen reste la valeur envoyée au cœur.
@@ -83,6 +85,8 @@ async function enregistrerReglages() {
     ...reglages.value,
     volume_repeat_initial_ms: Number(reglages.value.volume_repeat_initial_ms),
     volume_repeat_interval_ms: Number(reglages.value.volume_repeat_interval_ms),
+    overlay_ms: Number(reglages.value.overlay_ms),
+    tens_window_ms: Number(reglages.value.tens_window_ms),
   })
   toast[err ? 'error' : 'success'](err ?? t.value('ok'))
 }
@@ -109,6 +113,7 @@ const SECTIONS = [
   { id: 'language', key: 'language' },
   { id: 'startup', key: 'startup_title' },
   { id: 'volume-hold', key: 'volume_hold_title' },
+  { id: 'overlays', key: 'overlays_title' },
   { id: 'logs', key: 'recent_errors' },
 ] as const
 
@@ -262,6 +267,25 @@ function aller(id: string) {
                 v-model="reglages.volume_repeat_interval_ms" />
             </label>
             <Button data-hold-change @click="enregistrerReglages">{{ t('change') }}</Button>
+          </CardContent>
+        </Card>
+      </section>
+
+      <section id="overlays" class="scroll-mt-6">
+        <Card>
+          <CardHeader><CardTitle>{{ t('overlays_title') }}</CardTitle></CardHeader>
+          <CardContent class="flex flex-wrap items-end gap-4">
+            <label class="grid gap-1 text-sm">
+              {{ t('overlay_ms_label') }}
+              <Input type="number" min="1000" max="15000" step="500" class="w-28" data-overlay-ms
+                v-model="reglages.overlay_ms" />
+            </label>
+            <label class="grid gap-1 text-sm">
+              {{ t('tens_window_ms_label') }}
+              <Input type="number" min="1000" max="15000" step="500" class="w-28" data-tens-window-ms
+                v-model="reglages.tens_window_ms" />
+            </label>
+            <Button data-overlays-change @click="enregistrerReglages">{{ t('change') }}</Button>
           </CardContent>
         </Card>
       </section>

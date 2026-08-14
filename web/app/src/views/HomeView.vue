@@ -82,10 +82,15 @@ watch(compte, () => { fenetre.value = 0 })
 
 // Timings du volume maintenu, servis par le cœur (modifiables sur la page
 // config). Les défauts couvrent le temps du GET et son éventuel échec.
+// overlay_ms/tens_window_ms ne sont pas utilisés ici (cet encart ne gère
+// que le maintien du volume) mais font partie du même objet servi par
+// /api/settings, donc du même repli.
 const reglages = ref<SettingsPayload>({
   volume_repeat_initial_ms: 800,
   volume_repeat_interval_ms: 200,
   start_in_standby: false,
+  overlay_ms: 5000,
+  tens_window_ms: 5000,
 })
 onMounted(async () => {
   reglages.value = await api.get<SettingsPayload>('/api/settings').catch(() => reglages.value)

@@ -22,6 +22,9 @@ const CATALOGUE = {
   startup_title: 'Démarrage', startup_on: 'allumé', startup_standby: 'veille',
   volume_hold_title: 'Volume maintenu',
   volume_hold_initial: 'Délai initial (ms)', volume_hold_interval: 'Intervalle de répétition (ms)',
+  overlays_title: 'Incrustations',
+  overlay_ms_label: "Durée d'affichage (volume, messages) (ms)",
+  tens_window_ms_label: 'Fenêtre de saisie du cumul +10 (ms)',
   toc_label: 'sections',
 }
 
@@ -44,7 +47,10 @@ function charges() {
     } as unknown,
     '/api/locale': { locales: ['en', 'fr'], current: 'fr' } as unknown,
     '/api/logs': { lines: ['WARN plugin radio indisponible'] } as unknown,
-    '/api/settings': { volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: false } as unknown,
+    '/api/settings': {
+      volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: false,
+      overlay_ms: 5000, tens_window_ms: 5000,
+    } as unknown,
     '/api/i18n': CATALOGUE as unknown,
   }
 }
@@ -320,7 +326,10 @@ describe('ConfigView — réglages', () => {
 
   it('affiche les réglages lus depuis /api/settings', async () => {
     const { w } = await monter({
-      '/api/settings': { volume_repeat_initial_ms: 800, volume_repeat_interval_ms: 250, start_in_standby: true },
+      '/api/settings': {
+        volume_repeat_initial_ms: 800, volume_repeat_interval_ms: 250, start_in_standby: true,
+        overlay_ms: 5000, tens_window_ms: 5000,
+      },
     })
     expect((w.find('[data-hold-initial]').element as HTMLInputElement).value).toBe('800')
     expect((w.find('[data-hold-interval]').element as HTMLInputElement).value).toBe('250')
@@ -338,7 +347,10 @@ describe('ConfigView — réglages', () => {
     expect(puts).toEqual([
       {
         url: '/api/settings',
-        corps: { volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: true },
+        corps: {
+          volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: true,
+          overlay_ms: 5000, tens_window_ms: 5000,
+        },
       },
     ])
     expect(toast.success).toHaveBeenCalledWith('OK')
@@ -353,7 +365,10 @@ describe('ConfigView — réglages', () => {
     expect(puts).toEqual([
       {
         url: '/api/settings',
-        corps: { volume_repeat_initial_ms: 1500, volume_repeat_interval_ms: 300, start_in_standby: false },
+        corps: {
+          volume_repeat_initial_ms: 1500, volume_repeat_interval_ms: 300, start_in_standby: false,
+          overlay_ms: 5000, tens_window_ms: 5000,
+        },
       },
     ])
   })
@@ -374,6 +389,46 @@ describe('ConfigView — réglages', () => {
   })
 })
 
+describe('ConfigView — incrustations', () => {
+  beforeEach(reinitialiser)
+
+  it('affiche les deux durées lues depuis /api/settings', async () => {
+    const { w } = await monter({
+      '/api/settings': {
+        volume_repeat_initial_ms: 800, volume_repeat_interval_ms: 250, start_in_standby: false,
+        overlay_ms: 3000, tens_window_ms: 9000,
+      },
+    })
+    expect((w.find('[data-overlay-ms]').element as HTMLInputElement).value).toBe('3000')
+    expect((w.find('[data-tens-window-ms]').element as HTMLInputElement).value).toBe('9000')
+  })
+
+  it('enregistre les deux durées en nombres, au bloc complet', async () => {
+    const { w, puts } = await monter()
+    await w.find('[data-overlay-ms]').setValue('2000')
+    await w.find('[data-tens-window-ms]').setValue('7000')
+    await w.find('[data-overlays-change]').trigger('click')
+    await flushPromises()
+    expect(puts).toEqual([
+      {
+        url: '/api/settings',
+        corps: {
+          volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: false,
+          overlay_ms: 2000, tens_window_ms: 7000,
+        },
+      },
+    ])
+    expect(toast.success).toHaveBeenCalledWith('OK')
+  })
+
+  it('un PUT hors bornes est signalé par un toast', async () => {
+    const { w } = await monter({}, 'incrustation hors bornes (1000-15000 ms)')
+    await w.find('[data-overlays-change]').trigger('click')
+    await flushPromises()
+    expect(toast.error).toHaveBeenCalledWith('incrustation hors bornes (1000-15000 ms)')
+  })
+})
+
 describe('ConfigView — sommaire', () => {
   beforeEach(reinitialiser)
 
@@ -381,7 +436,7 @@ describe('ConfigView — sommaire', () => {
     const { w } = await monter()
     const liens = w.findAll('[data-toc-link]')
     expect(liens.map((l) => l.text())).toEqual([
-      'Plugins', 'Sortie audio', 'Langue', 'Démarrage', 'Volume maintenu', 'Dernières erreurs',
+      'Plugins', 'Sortie audio', 'Langue', 'Démarrage', 'Volume maintenu', 'Incrustations', 'Dernières erreurs',
     ])
     // Masqué sur petit écran : la colonne fait max-w-3xl, pas la place en mobile.
     expect(w.find('[data-toc]').classes()).toContain('hidden')

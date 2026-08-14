@@ -53,10 +53,15 @@ cumulatively (each press adds 10), wrapping back to 0 once it passes the
 last useful decade (`(count / 10) * 10`, so a count of 20 still lets
 `+10 +10` then `0` reach preset 20; with no known count, the offset
 saturates instead of wrapping). It is shown as `+NN` through the same
-overlay slot and the same 2 s deadline as the volume/mute overlay, so a
-further `+10` within that window extends it rather than starting a new
-one. The next digit (`Select`) consumes the pending offset — effective
-number = offset + digit — and clears the overlay; any other command
+overlay slot as the volume/mute overlay, but its own deadline: the
+config page's `tens_window_ms` setting, 5 s by default and independent
+from the volume/mute overlay's own `overlay_ms` (see the config page
+section below). The `+NN` overlay lasts exactly as long as the offset
+stays armed — not an arbitrary display duration, since that equality is
+what guarantees a digit is never composed blind. A further `+10` within
+that window extends it rather than starting a new one. The next digit
+(`Select`) consumes the pending offset — effective number = offset +
+digit — and clears the overlay; any other command
 abandons a pending offset outright, since pressing, say, a volume key
 mid-sequence is a change of mind, not a step of it. Key **`0`** is legal
 input for exactly this: alone, with no offset pending, `Select(0)`
@@ -98,8 +103,8 @@ The former status page is now the **config page**, at
 `http://<host>:8080/config` — `/status`, its historical URL, redirects
 there, so existing bookmarks and links keep working. It lists the
 plugins with their connection state and admin link, the audio output and
-language pickers (below), the two settings cards described here, and the
-recent error log.
+language pickers (below), the three settings cards described here, and
+the recent error log.
 
 A **sticky table of contents** sits alongside the cards (from the `lg`
 breakpoint up): the entry for the section currently scrolled into view is
@@ -141,6 +146,18 @@ repeat, and the interval between the following ones. Backed by
 `GET`/`PUT /api/settings`, with bounds enforced on write (a `PUT` outside
 them answers `422`): initial delay **200-5000 ms**, interval **100-2000
 ms**.
+
+### Overlays card
+
+Two more durations, both 5 s by default and bounded **1000-15000 ms**
+(same `422`-on-write contract), backed by the same `GET`/`PUT
+/api/settings`: `overlay_ms`, how long the volume/mute overlay and a
+source's transient messages (e.g. "empty preset") stay on screen before
+the "now playing" view returns; and `tens_window_ms`, the remote's `+10`
+entry window described above. They are deliberately two independent
+settings, not one shared timer: the volume/mute overlay may want to
+shrink one day without shortening the time left to key in a two-digit
+preset, and vice versa.
 
 ## System page
 

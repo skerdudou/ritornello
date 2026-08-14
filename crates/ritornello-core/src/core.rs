@@ -20,9 +20,6 @@ pub const EN: &str = include_str!("locales/en.toml");
 const RETRY_BASE: Duration = Duration::from_secs(2);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 
-/// Durée d'affichage de l'overlay volume/muet apres la derniere pression.
-const OVERLAY: Duration = Duration::from_secs(2);
-
 #[async_trait::async_trait]
 pub trait Source: Send + Sync + 'static {
     async fn request(&self, req: SourceReq) -> Result<SourceAction>;
@@ -236,8 +233,11 @@ impl<P: Player> Core<P> {
                 // reparaît d'elle-même. Sans cela, le message restait à l'écran
                 // indéfiniment alors que la lecture continuait sur la station
                 // précédente : l'affichage décrivait durablement un état qui
-                // n'existait plus.
-                self.overlay = Some((view, Instant::now() + OVERLAY));
+                // n'existait plus. `overlay_ms`, pas `tens_window_ms` : ce
+                // message n'a rien à voir avec le décalage `+NN` de la
+                // télécommande, seule l'incrustation volume/muet partage son
+                // échéance avec lui.
+                self.overlay = Some((view, Instant::now() + Duration::from_millis(self.settings.overlay_ms.into())));
             } else {
                 self.view = view;
                 self.view_line2_replaceable = update.line2_replaceable;
@@ -840,7 +840,14 @@ impl<P: Player> Core<P> {
     /// Affiche (ou prolonge) l'overlay temporaire volume/muet : ligne 1 le
     /// libellé "volume", ligne 2 le pourcentage courant ou le message
     /// "muet" selon `self.muted`. Chaque appel repousse l'échéance de
-    /// `OVERLAY` (une pression de plus garde l'overlay visible).
+    /// `overlay_ms` (une pression de plus garde l'overlay visible).
+    ///
+    /// `overlay_ms`, distinct de `tens_window_ms` (voir le commentaire de
+    /// `Settings`) : cette incrustation masque la vue « en écoute » et
+    /// pourrait vouloir raccourcir un jour, sans affecter le temps laissé
+    /// pour composer un `+NN`. `expire_overlay` n'a pas besoin de savoir
+    /// laquelle des deux durées a posé l'échéance qu'il désarme : elle est
+    /// stockée avec le message, dans `self.overlay`.
     async fn show_overlay(&mut self) {
         let line2 = if self.muted {
             let cat = self.catalog.read().await;
@@ -849,18 +856,25 @@ impl<P: Player> Core<P> {
             format!("{} %", self.volume)
         };
         let line1 = self.catalog.read().await.get("volume_label").to_string();
-        self.overlay = Some((View { line1, line2, line3: String::new() }, Instant::now() + OVERLAY));
+        let echeance = Instant::now() + Duration::from_millis(self.settings.overlay_ms.into());
+        self.overlay = Some((View { line1, line2, line3: String::new() }, echeance));
         self.push_view();
     }
 
-    /// Overlay for the pending tens offset ("+10", "+20"): same slot and
-    /// same deadline as the volume overlay, so each press pushes the
-    /// deadline back and expiry forgets the offset together with the
-    /// display.
+    /// Overlay for the pending tens offset ("+10", "+20"): same slot as the
+    /// volume overlay, but its own deadline from `tens_window_ms` — the
+    /// time left to press the second digit, independent from
+    /// `overlay_ms` (see `Settings`). Each press pushes the deadline back,
+    /// and `expire_overlay` clears the overlay and the offset together
+    /// regardless of which duration is stored here: it reads whatever
+    /// deadline is in `self.overlay`, never which field produced it, so
+    /// the two stay aligned by construction whatever values the two
+    /// settings take.
     async fn show_tens_overlay(&mut self) {
         let line1 = self.catalog.read().await.get("preset_label").to_string();
         let line2 = format!("+{}", self.pending_tens);
-        self.overlay = Some((View { line1, line2, line3: String::new() }, Instant::now() + OVERLAY));
+        let echeance = Instant::now() + Duration::from_millis(self.settings.tens_window_ms.into());
+        self.overlay = Some((View { line1, line2, line3: String::new() }, echeance));
         self.push_view();
     }
 
@@ -1958,7 +1972,7 @@ mod tests {
         crate::state::Settings {
             volume_repeat_initial_ms: 30,
             volume_repeat_interval_ms: 25,
-            start_in_standby: false,
+            ..Default::default()
         }
     }
 
@@ -2123,10 +2137,37 @@ mod tests {
             volume_repeat_initial_ms: 800,
             volume_repeat_interval_ms: 250,
             start_in_standby: true,
+            ..Default::default()
         });
         let st = crate::state::load(&dir.path().join("state.json"));
         assert_eq!(st.settings.volume_repeat_initial_ms, 800);
         assert!(st.settings.start_in_standby);
+    }
+
+    #[tokio::test]
+    async fn overlay_volume_et_decalage_ont_des_echeances_independantes() {
+        // Le test qui compte (brief) : avec deux durées différentes,
+        // l'incrustation volume suit `overlay_ms` et celle du cumul suit
+        // `tens_window_ms`. C'est l'assertion qui échouerait si quelqu'un
+        // recouplait les deux durées derrière un seul champ. Échéances
+        // comparées à `Instant::now()`, pas de sommeil.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.set_settings(crate::state::Settings { overlay_ms: 1000, tens_window_ms: 8000, ..Default::default() });
+
+        let avant = Instant::now();
+        core.handle_command(Command::VolumeUp).await.unwrap();
+        let echeance_volume = core.overlay_deadline().unwrap();
+        assert!(
+            echeance_volume < avant + Duration::from_millis(2000),
+            "l'incrustation volume doit suivre overlay_ms (1000 ms), pas tens_window_ms"
+        );
+
+        core.handle_command(Command::Plus10).await.unwrap();
+        let echeance_decalage = core.overlay_deadline().unwrap();
+        assert!(
+            echeance_decalage > avant + Duration::from_millis(2000),
+            "l'incrustation du cumul doit suivre tens_window_ms (8000 ms), pas overlay_ms"
+        );
     }
 
     #[tokio::test]
