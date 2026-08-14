@@ -509,6 +509,39 @@ describe('SystemView', () => {
     w.unmount()
   })
 
+  it('changer la période ne sonde pas sur-le-champ tant que l échéance court encore', async () => {
+    // 5 s par défaut, on avance de 1 s, puis on passe à 10 s : le dernier
+    // sondage a 1 s, l'échéance neuve est à 10 s, donc rien ne doit partir
+    // avant les 9 s restantes.
+    const f = stub(payload())
+    const w = await monter()
+    await vi.advanceTimersByTimeAsync(1000)
+    const avant = f.mock.calls.length
+    await w.findComponent(Select).vm.$emit('update:modelValue', '10')
+    await flushPromises()
+    expect(f.mock.calls.length).toBe(avant)
+    await vi.advanceTimersByTimeAsync(8000)
+    expect(f.mock.calls.length).toBe(avant)
+    await vi.advanceTimersByTimeAsync(1500)
+    expect(f.mock.calls.length).toBe(avant + 1)
+    w.unmount()
+  })
+
+  it('changer la période sonde tout de suite si elle rend le dernier sondage périmé', async () => {
+    // 5 s par défaut, on avance de 4 s, puis on passe à 1 s : le dernier
+    // sondage a 4 s pour une période de 1 s, il est donc déjà périmé et la
+    // reprise doit être immédiate — sans quoi la page resterait sur des
+    // chiffres vieux de plusieurs périodes après avoir demandé d'accélérer.
+    const f = stub(payload())
+    const w = await monter()
+    await vi.advanceTimersByTimeAsync(4000)
+    const avant = f.mock.calls.length
+    await w.findComponent(Select).vm.$emit('update:modelValue', '1')
+    await flushPromises()
+    expect(f.mock.calls.length).toBe(avant + 1)
+    w.unmount()
+  })
+
   it('un changement de période pendant un sondage en vol n écrase pas un état plus frais', async () => {
     type Differe = { signal: AbortSignal | null | undefined; resolve: (v: unknown) => void }
     const differes: Differe[] = []
@@ -532,7 +565,14 @@ describe('SystemView', () => {
     await flushPromises()
     // `arreter()` a dû annuler la requête en vol...
     expect(differes[0]!.signal?.aborted).toBe(true)
-    // ... et `demarrer()` en relancer une nouvelle immédiatement.
+    // ... sans que cette annulation compte pour une panne : une requête
+    // abandonnée par notre propre code n'est pas un échec du cœur.
+    expect(w.find('[data-system-unavailable]').exists()).toBe(false)
+    // ... et la reprise n'est plus immédiate : le dernier sondage venant tout
+    // juste d'être lancé, l'échéance du nouveau rythme (1 s) n'est pas
+    // atteinte. C'est elle qui relancera.
+    expect(differes.length).toBe(1)
+    await vi.advanceTimersByTimeAsync(1000)
     expect(differes.length).toBe(2)
     // La requête annulée finit par « répondre » avec des données pourtant
     // plus anciennes que celles déjà posées par la requête plus fraîche :

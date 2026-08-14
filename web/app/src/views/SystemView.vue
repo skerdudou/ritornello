@@ -48,6 +48,21 @@ const historique = ref<{ cpu: number; ram: number; t: number }[]>([])
  */
 let sondageEnVol: AbortController | null = null
 let minuteur: ReturnType<typeof setInterval> | null = null
+/**
+ * Attente unique avant de reprendre le rythme, quand `demarrer()` constate que
+ * l'échéance de la période courante n'est pas encore atteinte. Distincte de
+ * `minuteur` parce qu'elle ne tique qu'une fois, et arrêtée par `arreter()`
+ * comme lui — un `setTimeout` oublié rallumerait le sondage après un démontage
+ * ou en pleine action d'alimentation.
+ */
+let attente: ReturnType<typeof setTimeout> | null = null
+/**
+ * Horodatage du dernier sondage réellement lancé, qui datemarque l'échéance :
+ * `dernierSondage + periodeMs` dit quand le prochain est dû. `null` tant
+ * qu'aucun sondage n'a eu lieu — l'arrivée sur la page, où il n'y a rien à
+ * attendre.
+ */
+let dernierSondage: number | null = null
 /** Devient faux au démontage : empêche `demarrer()` de recréer un minuteur
  *  après coup (par ex. depuis `attendreRetour`, qui peut se terminer
  *  longtemps après que l'utilisateur a quitté la vue). */
@@ -126,6 +141,9 @@ async function sonder() {
   // que la réponse n'arrive) n'en déclenche pas un second par-dessus, voir
   // le commentaire sur `sondageEnVol`.
   if (sondageEnVol) return
+  // Après le verrou, pas avant : un appel repoussé par le verrou n'a rien
+  // sondé, il ne doit donc pas repousser l'échéance.
+  dernierSondage = Date.now()
   const controleur = new AbortController()
   sondageEnVol = controleur
   try {
@@ -161,14 +179,39 @@ function demarrer() {
   // vue montée alors que l'onglet est déjà en arrière-plan ne doit pas
   // sonder avant le premier `visibilitychange`.
   if (!monte || document.hidden || enCours.value !== null || minuteur !== null) return
-  void sonder()
-  minuteur = setInterval(sonder, periodeMs.value)
+  if (attente !== null) return
+  // Reprise à l'échéance, pas sur-le-champ : changer la période ne doit pas
+  // valoir un sondage. On ne sonde tout de suite que si le nouveau rythme rend
+  // le précédent sondage déjà périmé — passer de 30 s à 1 s deux secondes après
+  // le dernier, par exemple. Sinon on attend le temps qui restait à courir,
+  // puis le rythme régulier reprend.
+  //
+  // La règle vaut aussi pour le retour de visibilité, et c'est voulu : un
+  // aller-retour d'onglet plus court que la période laisse à l'écran des
+  // chiffres que la page elle-même juge encore frais, alors qu'une absence plus
+  // longue déclenche bien un sondage immédiat.
+  const restant =
+    dernierSondage === null ? 0 : Math.max(0, dernierSondage + periodeMs.value - Date.now())
+  if (restant === 0) {
+    void sonder()
+    minuteur = setInterval(sonder, periodeMs.value)
+    return
+  }
+  attente = setTimeout(() => {
+    attente = null
+    void sonder()
+    minuteur = setInterval(sonder, periodeMs.value)
+  }, restant)
 }
 
 function arreter() {
   if (minuteur !== null) {
     clearInterval(minuteur)
     minuteur = null
+  }
+  if (attente !== null) {
+    clearTimeout(attente)
+    attente = null
   }
   // Annule un sondage encore en vol : sans ça, un changement de période
   // laisserait une réponse plus ancienne atterrir après celle du nouveau
