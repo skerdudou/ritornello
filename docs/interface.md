@@ -172,10 +172,12 @@ effect at the next service start (see
 
 `POST /api/system/power` takes `{"action": "poweroff" | "reboot" |
 "restart-service"}`. An unknown action is refused with `422` and an `error`
-message. `poweroff` and `reboot` run `systemctl` and wait up to 5 s:
-`202` when it succeeds or is still running (the machine is going away),
-`502` carrying **logind's own message** when it refuses — that message names
-the missing polkit rule, which a silent `202` would hide.
+message. `poweroff` and `reboot` run `systemctl` and wait up to 5 s: `202`
+when it succeeds or is still running (the machine is going away); `502`
+when it refuses, carrying **logind's own message** whenever it wrote one —
+that sentence names the missing polkit rule, which a silent `202` would
+hide — or `systemctl a échoué (code N)` when stderr was empty; `500` when
+`systemctl` could not be started at all.
 `restart-service` answers `202` and exits the process 300 ms later; systemd
 restarts it because the unit says `Restart=always`. It needs no privilege,
 which is why there is no `can_restart_service` field. Outside systemd, that

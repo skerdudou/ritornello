@@ -168,7 +168,10 @@ test('apprentissage de touche : la vue atteint un état défini', async ({ page 
 // machine à perdre.
 test('onglet Système : métriques et boutons présents', async ({ page }) => {
   await page.goto('/system')
-  // Toujours lisible sous Linux, donc une valeur réelle et non « — ».
+  // Deux assertions et non une : `not.toHaveText` seul passerait aussi sur une
+  // page blanche — un locator absent ne peut pas valoir « — ». La première
+  // exige que le champ existe, la seconde qu'il porte une vraie valeur.
+  await expect(page.locator('[data-system-kernel]')).toBeVisible()
   await expect(page.locator('[data-system-kernel]')).not.toHaveText('—')
   await expect(page.locator('[data-system-memory]')).toBeVisible()
   await expect(page.locator('[data-system-disk]')).toBeVisible()
