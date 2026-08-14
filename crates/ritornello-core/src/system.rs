@@ -9,6 +9,10 @@
 //! disk read does — and `statvfs` reads a cached superblock. Neither
 //! warrants `spawn_blocking`.
 //!
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -243,17 +247,11 @@ pub fn collect(info: &SystemInfo) -> Metrics {
     }
 }
 
-use axum::extract::State;
-use axum::Json;
-
 /// Metrics for the System tab. Read on demand, nothing cached: the page
 /// polls, and everything here costs a handful of pseudo-file reads.
 pub async fn system_json(State(state): State<crate::status::AppState>) -> Json<Metrics> {
     Json(collect(&state.system))
 }
-
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 
 /// What `POST /api/system/power` accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,8 +293,13 @@ pub fn parse_can(raw: &str) -> bool {
 /// The cache does not replace reporting the real failure when an action is
 /// attempted: logind can still refuse at call time (another session, an
 /// inhibitor), which is why the shipped rule grants all six actions.
+///
+/// The two calls are joined rather than awaited one after the other: this
+/// probe runs before the HTTP listener binds and before the core resumes, so
+/// a machine where `busctl` exists but D-Bus hangs would otherwise delay both
+/// the web interface and the audio wake by up to twice the 3 s timeout.
 pub async fn probe_capabilities() -> (bool, bool) {
-    (interroge_logind("CanPowerOff").await, interroge_logind("CanReboot").await)
+    tokio::join!(interroge_logind("CanPowerOff"), interroge_logind("CanReboot"))
 }
 
 async fn interroge_logind(methode: &str) -> bool {
@@ -578,6 +581,18 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         // /bin/false n'écrit rien sur stderr : le repli nomme le code de
         // sortie plutôt que de renvoyer une chaîne vide.
+        assert!(v["error"].as_str().is_some_and(|m| !m.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn post_power_relaie_lechec_de_lancement_de_systemctl() {
+        // Chemin inexistant : `Command::output` échoue avant même de lancer
+        // un processus (branche `Ok(Err(e))`, distincte de l'échec exercé par
+        // /bin/false, qui lance bien systemctl mais lui fait rendre un code
+        // d'erreur).
+        let info = SystemInfo { systemctl: "/nonexistent".to_string(), ..Default::default() };
+        let (status, v) = post_power(app(info), r#"{"action":"poweroff"}"#).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(v["error"].as_str().is_some_and(|m| !m.is_empty()));
     }
 
