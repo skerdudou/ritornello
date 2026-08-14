@@ -280,9 +280,14 @@ describe('SystemView', () => {
   })
 
   it('démonter pendant l attente ne relance pas le sondage ensuite', async () => {
-    // L'uptime du service ne baisse jamais : l'attente tourne jusqu'à ce
-    // qu'on démonte la vue.
-    const f = stub(payload())
+    // L'ancien processus répond encore, donc son uptime **croît** avec
+    // l'horloge — c'est ce que fait un processus toujours vivant. La condition
+    // de retour le compare à `avant + écoulé` : un uptime qui suit l'horloge
+    // ne peut jamais passer sous ce seuil, donc l'attente tourne jusqu'à ce
+    // qu'on démonte la vue. Un échantillon figé, lui, finirait par être pris
+    // pour un redémarrage réussi et ce test ne dirait plus ce qu'il annonce.
+    const debut = Date.now()
+    const f = stub(() => payload({ service_uptime_s: 3600 + Math.floor((Date.now() - debut) / 1000) }))
     const w = await monter()
     await w.get('[data-power-restart]').trigger('click')
     await flushPromises()
