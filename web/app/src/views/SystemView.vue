@@ -7,7 +7,7 @@ import {
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
 import type { SystemPayload, SystemUsage } from '../types'
-import { abscisses, cheminSparkline } from './sparkline'
+import { abscisses, cheminSparkline, reperesMinute } from './sparkline'
 
 const { t } = useCatalog()
 const etat = ref<SystemPayload | null>(null)
@@ -351,6 +351,14 @@ const cheminCpu = computed(() =>
 )
 const cheminRam = computed(() =>
   cheminSparkline(historique.value.map((h) => h.ram), abscissesGraphe.value, HAUTEUR),
+)
+
+/** Hauteur des repères de minute, en unités de `viewBox` : une encoche sur le
+ *  bas du cadre, assez courte pour ne pas croiser les courbes. */
+const HAUTEUR_REPERE = 4
+/** Abscisses des repères de minute (voir `reperesMinute`). */
+const reperes = computed(() =>
+  reperesMinute(historique.value.map((h) => h.t), LARGEUR),
 )
 
 /** Index de la colonne survolée dans `historique`, `null` si le pointeur
@@ -753,6 +761,24 @@ async function attendreRetour(avant: number | null) {
             @pointerleave="finSurvol"
             @pointercancel="finSurvol"
           >
+            <!-- Repères de minute, dessinés **avant** les courbes pour passer
+                 dessous : ce sont des jalons, pas des données. Une encoche
+                 sur le bas du cadre, sans texte — l'échelle exacte est
+                 annoncée une fois pour toutes par le libellé de la carte, et
+                 la valeur d'un instant précis se lit au survol. -->
+            <line
+              v-for="(x, i) in reperes"
+              :key="`repere-${i}`"
+              data-system-history-tick
+              :x1="x"
+              :x2="x"
+              :y1="HAUTEUR - HAUTEUR_REPERE"
+              :y2="HAUTEUR"
+              class="text-muted-foreground/60"
+              stroke="currentColor"
+              stroke-width="1"
+              vector-effect="non-scaling-stroke"
+            />
             <path
               :d="cheminCpu"
               class="text-primary"

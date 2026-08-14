@@ -509,6 +509,22 @@ describe('SystemView', () => {
     w.unmount()
   })
 
+  it('pose un repère de minute sur l axe du graphe par minute couverte', async () => {
+    const jiffies = prochainsJiffies()
+    stub(() => payload(jiffies()))
+    const w = await monter()
+    // Trois sondages (15 s) : la fenêtre couverte n'atteint pas la minute.
+    await vi.advanceTimersByTimeAsync(3 * 5000)
+    await flushPromises()
+    expect(w.findAll('[data-system-history-tick]').length).toBe(0)
+    // 28 sondages de plus : environ 2 min 25 couvertes, donc deux minutes
+    // pleines et deux marques.
+    await vi.advanceTimersByTimeAsync(28 * 5000)
+    await flushPromises()
+    expect(w.findAll('[data-system-history-tick]').length).toBe(2)
+    w.unmount()
+  })
+
   it('changer la période ne sonde pas sur-le-champ tant que l échéance court encore', async () => {
     // 5 s par défaut, on avance de 1 s, puis on passe à 10 s : le dernier
     // sondage a 1 s, l'échéance neuve est à 10 s, donc rien ne doit partir

@@ -1,5 +1,37 @@
 import { describe, expect, it } from 'vitest'
-import { abscisses, cheminSparkline } from './sparkline'
+import { abscisses, cheminSparkline, reperesMinute } from './sparkline'
+
+describe('reperesMinute', () => {
+  it('ne pose aucun repère tant qu une minute pleine n est pas couverte', () => {
+    expect(reperesMinute([0, 30_000], 100)).toEqual([])
+  })
+
+  it('pose un repère par minute pleine, ancré sur le dernier échantillon', () => {
+    // Fenêtre de 2 min : t−1 min tombe au milieu, t−2 min sur le bord gauche.
+    // L'ordre est celui du comptage (t−1, t−2), sans importance à l'affichage.
+    expect(reperesMinute([0, 120_000], 100)).toEqual([50, 0])
+  })
+
+  it('reste ancré à droite quand la fenêtre n est pas un multiple de la minute', () => {
+    // Fenêtre de 80 s : t−1 min tombe 20 s après le début, soit au quart. Un
+    // ancrage sur le premier échantillon l'aurait mis aux trois quarts, et les
+    // marques glisseraient à chaque échantillon sortant du tampon.
+    expect(reperesMinute([0, 80_000], 100)).toEqual([25])
+  })
+
+  it('ne pose rien sur une étendue nulle ou un tableau vide', () => {
+    expect(reperesMinute([7, 7], 100)).toEqual([])
+    expect(reperesMinute([], 100)).toEqual([])
+  })
+
+  it('plafonne le nombre de repères sur une étendue aberrante', () => {
+    // Une horloge qui saute (machine sans pile ni réseau au démarrage) donne
+    // une étendue absurde : un an couvert ferait un demi-million de marques
+    // pour quelques centaines de pixels.
+    const unAn = 365 * 24 * 60 * 60 * 1000
+    expect(reperesMinute([0, unAn], 100).length).toBe(240)
+  })
+})
 
 describe('abscisses', () => {
   it('ancre le premier point à 0 et le dernier au bord', () => {

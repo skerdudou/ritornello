@@ -34,6 +34,45 @@ export function abscisses(horodatages: number[], largeur: number): number[] {
   return horodatages.map((t) => ((t - debut) / etendue) * largeur)
 }
 
+const MINUTE_MS = 60_000
+
+/**
+ * Nombre maximum de repères rendus. La fenêtre réelle plafonne bien en dessous
+ * (60 échantillons à 30 s font 30 minutes), mais un horodatage aberrant — une
+ * horloge qui saute, chose banale sur une machine sans pile ni réseau au
+ * démarrage — produirait sinon des milliers d'éléments pour un graphe large de
+ * quelques centaines de pixels.
+ */
+const MAX_REPERES = 240
+
+/**
+ * Abscisses des repères de minute : une marque à chaque minute pleine avant le
+ * dernier échantillon (t−1 min, t−2 min, …), tant qu'elle tombe dans la fenêtre
+ * couverte.
+ *
+ * Ancrés sur le **dernier** échantillon et non sur le premier : c'est le bord
+ * droit qui est « maintenant », donc le seul repère temporel stable pour l'œil
+ * — les marques y restent immobiles pendant que le tracé défile, au lieu de
+ * glisser avec le début du tampon.
+ *
+ * Même échelle que `abscisses`, forcément : un repère qui ne partagerait pas
+ * l'échelle du tracé désignerait un autre instant que celui qu'il prétend.
+ * Étendue nulle ou moins d'une minute couverte : aucune marque.
+ */
+export function reperesMinute(horodatages: number[], largeur: number): number[] {
+  const n = horodatages.length
+  const debut = horodatages[0]
+  const fin = horodatages[n - 1]
+  if (debut === undefined || fin === undefined) return []
+  const etendue = fin - debut
+  if (etendue <= 0) return []
+  const combien = Math.min(Math.floor(etendue / MINUTE_MS), MAX_REPERES)
+  return Array.from(
+    { length: combien },
+    (_, i) => ((etendue - (i + 1) * MINUTE_MS) / etendue) * largeur,
+  )
+}
+
 /**
  * Construit l'attribut `d` d'un `<path>` SVG pour une série de pourcentages,
  * placée aux abscisses fournies par `abscisses`.
