@@ -160,10 +160,10 @@ impl PartialEq for Overlay {
 }
 
 impl Overlay {
-    /// Réécrit le temps restant, calculé à la publication depuis l'échéance que
-    /// le cœur détient. Le `remaining_ms` mémorisé dans `self` n'est donc jamais
-    /// lu — et l'égalité l'ignorant, ce rafraîchissement ne défait pas la
-    /// déduplication des trames.
+    /// Replaces the remaining time, computed at publication from the deadline
+    /// the core holds. The `remaining_ms` stored in `self` is therefore never
+    /// read — and since equality ignores it, refreshing it does not defeat the
+    /// frame deduplication.
     #[must_use]
     pub fn avec_restant(self, restant_ms: u32) -> Self {
         match self {
@@ -374,6 +374,36 @@ mod tests {
         let c = Overlay::Message { text: "X".into(), remaining_ms: 1 };
         let d = Overlay::Message { text: "Y".into(), remaining_ms: 1 };
         assert_ne!(c, d);
+    }
+
+    #[test]
+    fn avec_restant_ne_touche_qu_au_temps_restant_des_trois_variantes() {
+        // La méthode n'aura son premier appelant qu'au moment où le cœur
+        // publiera un temps restant frais. Sans ce test, une permutation de
+        // champs entre variantes — reconstruire un `offset` depuis un `level` —
+        // compilerait et ne se verrait qu'à l'intégration. L'égalité d'`Overlay`
+        // ignorant `remaining_ms`, elle ne peut pas servir ici : on déstructure.
+        let v = Overlay::Volume { level: 65, muted: true, text: "VOLUME MUET".into(), remaining_ms: 4000 };
+        match v.avec_restant(7) {
+            Overlay::Volume { level, muted, text, remaining_ms } => {
+                assert_eq!((level, muted, text.as_str(), remaining_ms), (65, true, "VOLUME MUET", 7));
+            }
+            autre => panic!("la variante doit être préservée, obtenu {autre:?}"),
+        }
+        let t = Overlay::Tens { offset: 20, text: "+20".into(), remaining_ms: 4000 };
+        match t.avec_restant(8) {
+            Overlay::Tens { offset, text, remaining_ms } => {
+                assert_eq!((offset, text.as_str(), remaining_ms), (20, "+20", 8));
+            }
+            autre => panic!("la variante doit être préservée, obtenu {autre:?}"),
+        }
+        let m = Overlay::Message { text: "PRESELECTION VIDE".into(), remaining_ms: 4000 };
+        match m.avec_restant(9) {
+            Overlay::Message { text, remaining_ms } => {
+                assert_eq!((text.as_str(), remaining_ms), ("PRESELECTION VIDE", 9));
+            }
+            autre => panic!("la variante doit être préservée, obtenu {autre:?}"),
+        }
     }
 
     #[test]
