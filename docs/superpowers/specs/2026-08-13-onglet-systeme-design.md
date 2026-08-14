@@ -269,18 +269,23 @@ the documentation section.
 Route `/system`, nav link `t('system_title')` in `App.vue` after
 `config`, view `SystemView.vue`.
 
-Cards, in order:
+Cards, in order (reordered after the owner tried the original layout — see
+Amendments):
 
-1. **Load** — temperature, CPU frequency, 1/5/15 load average, core count.
-   CPU frequency is here rather than an invented "thermal throttling" flag:
-   a frequency well under the maximum *is* the visible form of throttling.
-2. **History** — the CPU/RAM sparkline (below).
-3. **Memory** — used / total, with a bar.
+1. **CPU** — temperature, CPU frequency, core count, and a real CPU usage
+   percentage (see History below for how it's computed — it is *not* the
+   load average, which moved to the History card).
+2. **Memory** — used / total, with a bar.
+3. **History** — the CPU/RAM sparkline, the load average (moved here from
+   the original CPU/Load card: it complements the CPU series it sits next
+   to, not the instantaneous reading in the CPU card), and the window-label
+   / refresh-period controls (below).
 4. **Storage** — used / total of `/`, with a bar.
 5. **Device** — hostname, IP, OS, kernel, Ritornello version, OS uptime,
-   service uptime.
-6. **Power** — the three buttons, plus the undervoltage warning when
-   `under_voltage` is `true`.
+   service uptime, and a **permanent three-state supply-voltage row** (no
+   sensor / nominal / undervoltage — see Amendments; it used to be a
+   Power-card warning shown only when `under_voltage` was `true`).
+6. **Power** — the three buttons.
 
 Unreadable values render as `—`. A failed `GET /api/system` shows a
 diagnostic line and logs to the console — **no toast**: a poll repeating
@@ -296,8 +301,21 @@ the device stays on.
 
 ### Polling
 
-`GET /api/system` every **5 s**, only while the view is mounted **and** the
-document is visible (`visibilitychange`); stopped on unmount.
+`GET /api/system` on a **user-selectable period** — 1, 2, 5, 10, or 30 s,
+defaulting to 5 s (see Amendments; the original design fixed it at 5 s) —
+only while the view is mounted **and** the document is visible
+(`visibilitychange`); stopped on unmount. The period is a page-local `ref`,
+not a device setting: it lives in neither `localStorage` nor
+`/api/settings`, and resets to 5 s on every arrival, like the history
+itself.
+
+A poll cannot overlap another (an in-flight guard makes a second `sonder()`
+call a no-op), and a period change aborts whatever poll is still in flight
+via `AbortController` before starting a fresh one at the new rhythm. Both
+guards exist because the CPU percentage below is **stateful**: before it
+existed, a late response only meant a stale display; now, a response that
+lands out of order would overwrite the jiffy reference the next delta is
+computed against, corrupting it rather than merely delaying it.
 
 This diverges from the project's documented "volatile state goes through
 SSE" doctrine, and the divergence is deliberate — the view carries a
@@ -308,12 +326,29 @@ work permanently for nobody.
 
 ### History graph
 
-- `historique = ref<{ cpu: number; ram: number }[]>([])`, capped at **60
-  samples** (5 minutes at 5 s), one push per successful poll.
-- `cpu` = `min(100, load[0] / cpus * 100)`, `ram` =
+- `historique = ref<{ cpu: number; ram: number; t: number }[]>([])`, capped
+  at **60 samples**, one push per successful poll. `t = Date.now()` was
+  added after the original design (see Amendments) for the hover popin and
+  the window label below.
+- **`cpu` is a real CPU utilisation percentage, computed in the page, not in
+  the core** — the original design's `min(100, load[0] / cpus * 100)` was
+  replaced (see Amendments) because the load average is a minutes-long
+  smoothed figure that barely moves between two polls a few seconds apart
+  and reads as flat, especially at the faster end of the new refresh-period
+  range. The core instead exposes two cumulative jiffy counters from
+  `/proc/stat` (`cpu_total_jiffies`, `cpu_idle_jiffies` — see `Metrics`
+  above), and the page differences two successive polls itself:
+  `100 × (1 − Δidle / Δtotal)`, clamped to 0–100, `null` when there is no
+  previous poll yet or when `Δtotal <= 0`. **The core does not compute the
+  percentage itself, deliberately**: that would need it to remember the
+  previous reading as shared state, and two browser tabs polling out of
+  phase would corrupt each other's delta — letting the page difference its
+  own successive polls avoids that altogether. `ram` is unchanged:
   `(total_kb - available_kb) / total_kb * 100`. A sample is pushed only
-  when **both** are computable; a machine missing `loadavg` or `meminfo`
-  keeps an empty graph rather than a half-drawn one.
+  when **both** are computable; a machine missing readable jiffies or
+  `meminfo` keeps an empty graph rather than a half-drawn one — and, since
+  the CPU delta itself needs a previous reading, the very first poll after
+  every arrival (and after every period change) never pushes a sample.
 - Rendered as an inline `<svg viewBox="0 0 100 30" preserveAspectRatio="none">`
   with two `<path fill="none" stroke="currentColor">`, coloured by Tailwind
   classes so the themes apply (`text-primary` for CPU,
@@ -325,13 +360,36 @@ work permanently for nobody.
   `cheminSparkline(valeurs: number[], largeur: number, hauteur: number): string`
   in `web/app/src/views/sparkline.ts`: values clamped to 0–100, y inverted
   (0 % at the bottom), `''` for fewer than two points.
-- Below the graph, a legend with the two current percentages.
+- Below the graph, a legend with the two current percentages, and the load
+  average (moved here — see the card order above).
 - **Empty on every arrival, by design** (the owner asked for exactly this):
   the array is a local `ref`, never persisted, never server-side. With
   fewer than two samples the card shows
   `t('system_history_empty')` — "fills as the page polls" — instead of an
   empty frame. A metrics history is not state worth keeping on an appliance
   that is idle most of the time.
+- **Refresh-period selector** (added after the original design — see
+  Amendments): 1/2/5/10/30 s, defaulting to 5 s (see Polling above).
+  Choosing the period already in effect is a no-op — it does not restart
+  polling or reset the delta window.
+- **Window label**: `t('system_history_span', { minutes })` states the span
+  actually covered by `historique`, derived from the timestamp of its first
+  and last sample — **not** `CAPACITE × période`, which only matches
+  reality once the buffer has filled *at the current period*; switching
+  period with a full buffer, or simply arriving on the page, made that
+  figure wrong for up to 60 polls. The capacity-based figure is now only a
+  fallback, used while fewer than two samples exist to measure a real span
+  from.
+- **Hover / touch readout** (added after the original design — see
+  Amendments): pointer events over the graph draw a vertical line
+  (`data-system-history-line`) and a small popin naming the pointed
+  sample's timestamp and both percentages, positioned by nearest column
+  (`Math.round`) and horizontally clamped in pixels so it cannot spill past
+  either edge of the card. `pointermove` covers both mouse hover and touch
+  drag; `pointerdown` covers a still tap (which would otherwise never fire
+  `pointermove`); `pointerleave` and `pointercancel` clear it — a
+  `pointerup` handler was tried and removed, since a direct-manipulation
+  pointer already fires `pointerleave` right after its `pointerup`.
 
 ### Power card behaviour
 
@@ -394,18 +452,31 @@ Every new key goes into **both** `crates/ritornello-core/src/locales/en.toml`
 (English, checked by the SPA's `i18nKeysUsed` guard) and
 `deploy/locales/core/fr.toml` (French). Keys, all prefixed `system_`:
 
-`system_title`, `system_load`, `system_temperature`, `system_frequency`,
-`system_loadavg`, `system_cores`, `system_history`, `system_history_empty`,
-`system_memory`, `system_storage`,
+`system_title`, `system_cpu`, `system_cpu_usage`, `system_temperature`,
+`system_frequency`, `system_loadavg`, `system_cores`, `system_period`,
+`system_unit_second`, `system_history`, `system_history_empty`,
+`system_history_span`, `system_memory`, `system_storage`,
 `system_device`, `system_hostname`, `system_ip`, `system_os`,
 `system_kernel`, `system_version`, `system_uptime`,
-`system_service_uptime`, `system_power`, `system_poweroff`,
+`system_service_uptime`, `system_voltage`, `system_voltage_ok`,
+`system_voltage_low`, `system_power`, `system_poweroff`,
 `system_reboot`, `system_restart_service`, `system_confirm_poweroff`,
 `system_confirm_reboot`, `system_confirm_restart_service`,
 `system_confirm`, `system_cancel`, `system_power_unavailable`,
 `system_under_voltage`, `system_powering_off`, `system_rebooting`,
 `system_restarting`, `system_restarted`, `system_restart_timeout`,
 `system_unavailable`.
+
+(This list was amended 2026-08-14 to match what actually shipped: the
+original `system_load` never existed under that name — the load-average key
+is `system_loadavg` — and it omitted every key added since, listed above:
+`system_cpu`, `system_cpu_usage`, `system_period`, `system_unit_second`,
+`system_history_span`, `system_voltage`, `system_voltage_ok`,
+`system_voltage_low`. `system_under_voltage` is no longer the Device grid's
+row value — it is now a full sentence shown as a separate advice line,
+`role="status"`, directly under the grid and only while the alert is
+active; the row itself shows the short `system_voltage_low` /
+`system_voltage_ok`, see Amendments.)
 
 Units are translated too, rather than hardcoded in the view — the SPA is
 bilingual and "MB"/"Mo" and "d"/"j" differ: `system_unit_mb`,
@@ -480,3 +551,42 @@ config page.
   SSH**, which is the case that needs `*-multiple-sessions`.
 - « Redémarrer Ritornello »: the page recovers on its own within a few
   seconds.
+
+## Amendments (2026-08-14)
+
+This is a living record for this chantier, not an archive: the tab shipped,
+the owner tried it, and asked for changes. What follows is what changed
+after the design above, folded into the sections it touches (this note is
+the index, not a duplicate of the detail):
+
+- **Card order**: CPU, Memory, History, Storage, Device, Power — not
+  Load/History/Memory/Storage/Device/Power as originally designed. The load
+  average moved from the (renamed) CPU card into the History card, next to
+  the series it complements.
+- **CPU usage is now a real, computed-in-the-page percentage**
+  (`100 × (1 − Δidle / Δtotal)` between two polls' `/proc/stat` jiffy
+  counters), replacing `min(100, load[0] / cpus * 100)`. The load average
+  moves too slowly to read as a live CPU figure, especially once the
+  refresh period below can go down to 1 s. The core exposes the raw
+  cumulative counters rather than a ready-made percentage on purpose: a
+  percentage needs a remembered previous reading, and that shared state
+  would let two browser tabs polling out of phase corrupt each other's
+  delta.
+- **Refresh period is now user-selectable**: 1, 2, 5, 10, or 30 s,
+  defaulting to 5 s, a page-local preference (not persisted) rather than
+  the original fixed 5 s. The visible history window is `60 × période`,
+  which the header states from the history's actual timestamps rather than
+  from that formula (see History graph), since the formula alone is wrong
+  for up to 60 polls after any arrival or period change.
+- **The undervoltage warning moved from the Power card to the Device
+  card**, and split in two: a permanent three-state row (no sensor /
+  nominal / undervoltage, short words, red when active) in the Device
+  grid, plus the full advisory sentence as a separate `role="status"` red
+  line directly under the grid, shown only while the alert is active. The
+  original design showed the full sentence as a single Power-card warning,
+  visible only when active.
+- **Hover / touch readout on the history graph**: not part of the original
+  design at all. Pointer events over the sparkline show a vertical line and
+  a popin with the pointed sample's time and both percentages; this is also
+  why samples now carry a timestamp (`t`), originally omitted since nothing
+  consumed it.

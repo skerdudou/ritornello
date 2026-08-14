@@ -191,11 +191,15 @@ restarts it because the unit says `Restart=always`. It needs no privilege,
 which is why there is no `can_restart_service` field. Outside systemd, that
 action stops the process for good.
 
-The page polls `GET /api/system` every 5 s while it is open and visible,
-rather than receiving a stream: unlike the player state, which the core
-produces anyway, these metrics exist only because someone asked for them.
-The CPU/RAM history graph lives in the page only — 60 samples, five
-minutes, lost on navigation and never stored.
+The page polls `GET /api/system` while it is open and visible, rather than
+receiving a stream: unlike the player state, which the core produces
+anyway, these metrics exist only because someone asked for them. The
+refresh period is chosen on the page itself — 1, 2, 5, 10, or 30 s,
+defaulting to 5 s — and is not persisted: it resets to 5 s on every
+arrival, like the history below. The CPU/RAM history graph lives in the
+page only — 60 samples at the chosen period (5 minutes at the default
+5 s, 1 minute at 1 s, 30 minutes at 30 s), lost on navigation and never
+stored.
 
 ## Internationalization (i18n)
 
