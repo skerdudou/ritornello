@@ -120,12 +120,13 @@ impl AdminPlugin for RadioAdmin {
                 let compte = stations.preset_count();
                 *self.stations.write().await = stations;
                 // Annonce spontanée à la moitié Source, sur **chaque**
-                // enregistrement réussi — même si le compte ne change pas : un
-                // renommage ou une renumérotation peut déplacer quels numéros
-                // existent sans changer combien il y en a, et la fusion côté
-                // cœur (`Core::handle_source_update`) est idempotente. Aucun
-                // récepteur en mode dégradé (pas d'admin) : `send` renvoie
-                // alors une erreur sans conséquence, ignorée.
+                // enregistrement réussi — même si le compte ne change pas :
+                // comparer avant d'envoyer coûterait une garde pour un gain
+                // nul, la fusion côté cœur (`Core::handle_source_update`) et
+                // ses diffusions (`push_view`/`publie_etat`) dédupliquant déjà
+                // toute trame identique à la précédente. Aucun récepteur en
+                // mode dégradé (pas d'admin) : `send` renvoie alors une
+                // erreur sans conséquence, ignorée.
                 let _ = self.preset_count_tx.send(compte);
                 Ok(())
             }

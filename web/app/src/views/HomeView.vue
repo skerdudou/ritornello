@@ -24,34 +24,34 @@ async function send(cmd: Command) {
   if (err) toast.error(err)
 }
 
-const fenetre = ref(0)
+const page = ref(0)
 
 // Compte déclaré par la source (null = source muette sur le sujet : grille
 // 1-9 historique, pour ne jamais désarmer la télécommande).
 const compte = computed(() => etat.value?.preset_count ?? null)
 
-// Numéros de la fenêtre courante, seulement ceux qui existent. Fenêtre 0 :
-// 1-9 (les touches nues de la télécommande) ; fenêtre k : 10k à 10k+9 (le
+// Numéros de la page courante, seulement ceux qui existent. Page 0 :
+// 1-9 (les touches nues de la télécommande) ; page k : 10k à 10k+9 (le
 // 0 de la télécommande donne 10k).
 const presets = computed(() => {
   const c = compte.value
   if (c === null) return Array.from({ length: 9 }, (_, i) => i + 1)
-  const debut = fenetre.value === 0 ? 1 : fenetre.value * 10
-  const fin = Math.min(fenetre.value * 10 + 9, c)
+  const debut = page.value === 0 ? 1 : page.value * 10
+  const fin = Math.min(page.value * 10 + 9, c)
   return debut > fin ? [] : Array.from({ length: fin - debut + 1 }, (_, i) => debut + i)
 })
 
 const paginationVisible = computed(() => (compte.value ?? 0) > 9)
 
-// Dernière fenêtre non vide : le plus grand multiple de 10 encore atteignable
+// Dernière page non vide : le plus grand multiple de 10 encore atteignable
 // (même borne que le rebouclage du +10 côté cœur), 0 si tout tient sur 1-9.
-const derniereFenetre = computed(() => {
+const dernierePage = computed(() => {
   const c = compte.value ?? 0
   return c > 9 ? Math.floor(c / 10) : 0
 })
 
 // Les flèches vivent sur la ligne du compteur, hors de la grille : `colonnes`
-// ne compte plus que les touches numérotées (9 ou 10 selon la fenêtre), qui
+// ne compte plus que les touches numérotées (9 ou 10 selon la page), qui
 // est tout ce qu'elle a jamais eu besoin de savoir. Les mettre dans la grille
 // porterait le maximum à 11 cellules et retomberait sur le même défaut que le
 // +10 y avait révélé (11 cellules, colonnes plafonnées à 10, dernière cellule
@@ -61,11 +61,11 @@ const derniereFenetre = computed(() => {
 const colonnes = computed(() => (presets.value.length === 10 ? 'sm:grid-cols-10' : 'sm:grid-cols-9'))
 
 function pagePrecedente() {
-  if (fenetre.value > 0) fenetre.value -= 1
+  if (page.value > 0) page.value -= 1
 }
 
 function pageSuivante() {
-  if (fenetre.value < derniereFenetre.value) fenetre.value += 1
+  if (page.value < dernierePage.value) page.value += 1
 }
 
 function choisir(n: number) {
@@ -78,7 +78,7 @@ function choisir(n: number) {
 // Un changement de compte (autre source, disque éjecté) invalide la page :
 // c'est le mécanisme qui porte la garantie « changer de source revient à la
 // première page », demandée par le propriétaire — pas de minuterie séparée.
-watch(compte, () => { fenetre.value = 0 })
+watch(compte, () => { page.value = 0 })
 
 // Timings du volume maintenu, servis par le cœur (modifiables sur la page
 // config). Les défauts couvrent le temps du GET et son éventuel échec.
@@ -182,14 +182,14 @@ function toucheVolume(e: KeyboardEvent, cmd: Command) {
             data-preset-prev
             variant="secondary"
             size="sm"
-            :disabled="fenetre === 0"
+            :disabled="page === 0"
             :aria-label="t('presets_prev_page')"
             @click="pagePrecedente"
           >
             &lt;
           </Button>
           <!-- Combien de touches la source declare. Utile a deux titres : un
-               compte au-dela de la fenetre affichee dit qu'il en existe plus
+               compte au-dela de la page affichee dit qu'il en existe plus
                loin (c'est ce que la flèche suivante va chercher), et un
                compte de 0 explique une grille vide — un cd sans disque — au
                lieu de la laisser enigmatique. Absent quand la source ne
@@ -203,7 +203,7 @@ function toucheVolume(e: KeyboardEvent, cmd: Command) {
             data-preset-next
             variant="secondary"
             size="sm"
-            :disabled="fenetre === derniereFenetre"
+            :disabled="page === dernierePage"
             :aria-label="t('presets_next_page')"
             @click="pageSuivante"
           >

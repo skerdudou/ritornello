@@ -468,6 +468,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn la_valeur_initiale_dun_watch_frais_nest_pas_vue_comme_un_changement() {
+        // Pilier dont depend `poll_notification` : un `watch::channel(v).1`
+        // fraichement cree ne signale jamais sa valeur de depart comme un
+        // changement pour `changed()`. Si cette propriete cessait d'etre
+        // vraie — ou si le cablage passait par `subscribe()` puis
+        // `mark_changed()`, ou deplacait la creation du canal ailleurs —
+        // chaque demarrage radio annoncerait `preset_count(0)` avant meme
+        // la premiere lecture : grille vide et « Presets : 0 » jusqu'a ce
+        // que quelque chose joue.
+        let mut source = make_source(two_stations(), 1);
+        source.preset_count_rx = Some(tokio::sync::watch::channel(0u8).1);
+        let resultat = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            source.poll_notification(),
+        )
+        .await;
+        assert!(resultat.is_err(), "la valeur initiale du watch ne doit produire aucune notification");
+    }
+
+    #[tokio::test]
     async fn sans_moitie_admin_poll_notification_reste_en_attente() {
         // Mode dégradé (`--admin-socket` absent) : aucun émetteur n'existe
         // pour ce plugin, donc rien ne doit jamais en sortir — surtout pas un

@@ -250,9 +250,13 @@ const utilisationTexte = computed(() =>
 /**
  * Seuil de mise en alerte de l'utilisation CPU. Strictement supérieur : 90 %
  * pile n'est pas encore une alerte.
+ *
+ * Comparé à la valeur **affichée** (arrondie), pas à la valeur brute : sinon
+ * 90 < u <= 90,5 afficherait « 90 % » tout en déclenchant l'alerte, ce que ni
+ * le libellé ni le commentaire ci-dessus ne laissent supposer.
  */
 const SEUIL_ALERTE_CPU = 90
-const cpuEnAlerte = computed(() => (utilisationCpuActuelle.value ?? 0) > SEUIL_ALERTE_CPU)
+const cpuEnAlerte = computed(() => Math.round(utilisationCpuActuelle.value ?? 0) > SEUIL_ALERTE_CPU)
 /**
  * Largeur de la barre. Passée par une computed plutôt qu'inline : le gabarit
  * n'a pas à réduire un `number | null` derrière son `v-if`, ce que la

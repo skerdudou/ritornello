@@ -414,6 +414,21 @@ describe('SystemView', () => {
     w.unmount()
   })
 
+  it('un pourcentage entre 90 et 90 virgule 5 affiche 90 pour cent sans alerte', async () => {
+    // Le libellé affiché est arrondi (`Math.round`) : le seuil doit comparer
+    // cette même valeur arrondie, pas la valeur brute — sinon 90 < u <= 90,5
+    // afficherait « 90 % » tout en étant rouge, ce qui contredirait le
+    // libellé lui-même.
+    stub(jiffiesPour(90.2))
+    const w = await monter()
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushPromises()
+    expect(w.get('[data-system-cpu-usage]').text()).toBe('90 %')
+    expect(w.get('[data-system-cpu-usage]').classes()).not.toContain('text-destructive')
+    expect(w.get('[data-system-cpu-bar] div').classes()).toContain('bg-primary')
+    w.unmount()
+  })
+
   it('n affiche aucune barre CPU tant que le pourcentage est inconnu', async () => {
     // Une barre vide se lirait « 0 % » alors qu'aucun delta n'est calculable.
     stub(payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 500 }))
