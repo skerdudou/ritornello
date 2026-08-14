@@ -126,6 +126,22 @@ describe('SystemView', () => {
     w.unmount()
   })
 
+  it('plafonne l historique à 60 échantillons', async () => {
+    stub(payload())
+    const w = await monter()
+    // Le montage pousse un premier échantillon ; 60 sondages supplémentaires
+    // (période de 5 s) poussent le 61e, qui fait sortir le plus ancien par
+    // `shift()` : il doit en rester exactement 60, soit 59 commandes « L »
+    // dans le tracé (un « M » puis n-1 « L »).
+    await vi.advanceTimersByTimeAsync(60 * 5000)
+    await flushPromises()
+    // Le tracé est porté par le premier `<path>`, `[data-system-history]`
+    // marquant le `<svg>` qui les contient tous les deux.
+    const d = w.get('[data-system-history] path').attributes('d')!
+    expect((d.match(/L/g) ?? []).length).toBe(59)
+    w.unmount()
+  })
+
   it('arrête de sonder au démontage', async () => {
     const f = stub(payload())
     const w = await monter()
@@ -192,11 +208,33 @@ describe('SystemView', () => {
     w.unmount()
   })
 
+  it('ne relance pas le sondage sur un retour de visibilité pendant un arrêt confirmé', async () => {
+    const f = stub(payload())
+    const w = await monter()
+    await w.get('[data-power-poweroff]').trigger('click')
+    await flushPromises()
+    document.body.querySelector<HTMLElement>('[data-power-confirm]')!.click()
+    await flushPromises()
+    expect(w.find('[data-power-progress]').exists()).toBe(true)
+    const appels = f.mock.calls.length
+    // L'utilisateur change d'onglet puis revient : `visibilitychange` doit
+    // rappeler `demarrer()`, qui ne doit rien faire tant que l'arrêt est en
+    // cours, sans quoi la page sonderait un cœur déjà parti.
+    document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(f.mock.calls.length).toBe(appels)
+    w.unmount()
+  })
+
   it('reprend la main quand le redémarrage du service aboutit', async () => {
     // Uptime décroissant : le service est bien revenu, ce qu'une simple
     // réponse ne prouverait pas (le premier sondage peut encore atteindre
-    // l'ancien process).
-    const reponses = [payload(), payload(), payload({ service_uptime_s: 2 })]
+    // l'ancien process). Les deux premières réponses portent un uptime
+    // largement supérieur à `avant + écoulé` (3600 + quelques secondes tout
+    // au plus dans ce test) : sans cette marge, elles satisferaient déjà le
+    // nouveau seuil et l'attente s'arrêterait dès le premier sondage au lieu
+    // du troisième, ce que ce test doit précisément distinguer.
+    const reponses = [payload(), payload({ service_uptime_s: 9999 }), payload({ service_uptime_s: 2 })]
     let i = 0
     stub(() => reponses[Math.min(i++, reponses.length - 1)])
     const w = await monter()

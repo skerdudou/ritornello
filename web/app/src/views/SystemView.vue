@@ -71,7 +71,14 @@ async function sonder() {
 }
 
 function demarrer() {
-  if (!monte || minuteur !== null) return
+  // `enCours` : une action d'alimentation en cours a déjà arrêté le sondage
+  // normal (voir `confirmer`) ; le laisser reprendre ici — par ex. au retour
+  // de visibilité pendant un arrêt ou un redémarrage du service — afficherait
+  // une erreur réseau alarmante sur un arrêt qui se déroule comme demandé,
+  // ou sonderait en double avec `attendreRetour`. `document.hidden` : une
+  // vue montée alors que l'onglet est déjà en arrière-plan ne doit pas
+  // sonder avant le premier `visibilitychange`.
+  if (!monte || document.hidden || enCours.value !== null || minuteur !== null) return
   void sonder()
   minuteur = setInterval(sonder, PERIODE_MS)
 }
@@ -214,9 +221,17 @@ async function confirmer() {
 
 /**
  * Le service redémarre : on sonde plus vite en ignorant les erreurs (il est
- * arrêté, c'est attendu), et on ne le considère revenu que lorsque son
- * uptime a *diminué* — une réponse suffirait à se tromper, le premier
- * sondage pouvant encore atteindre l'ancien process.
+ * arrêté, c'est attendu). On ne le considère revenu que lorsque son uptime
+ * est *inférieur à ce que l'ancien process afficherait maintenant* — et non
+ * simplement inférieur à `avant` : juste après un redémarrage réussi,
+ * `service_uptime_s` vaut très souvent 0, et rien ne peut jamais être
+ * strictement inférieur à 0. Comparer à `avant + écoulé` (l'uptime que
+ * l'ancien process, lui, continue d'accumuler pendant qu'on attend) reste
+ * vrai même quand le process revenu affiche 0. Pas de marge ajoutée à ce
+ * seuil : `Math.floor` ne peut que retarder l'acceptation d'une seconde,
+ * alors qu'une marge ajoutée au seuil faciliterait l'acceptation et
+ * pourrait faire passer l'*ancien* process pour un process redémarré — soit
+ * exactement le bug que cette comparaison d'uptime existe pour empêcher.
  *
  * `monte` dans la condition de boucle : si l'utilisateur a quitté la vue,
  * on cesse de sonder au tour suivant plutôt que de courir jusqu'au plafond
@@ -224,7 +239,8 @@ async function confirmer() {
  * recréerait un minuteur que plus personne ne pourrait jamais arrêter.
  */
 async function attendreRetour(avant: number | null) {
-  const limite = Date.now() + REPRISE_MAX_MS
+  const t0 = Date.now()
+  const limite = t0 + REPRISE_MAX_MS
   while (monte && Date.now() < limite) {
     await new Promise((r) => setTimeout(r, REPRISE_MS))
     try {
@@ -239,9 +255,15 @@ async function attendreRetour(avant: number | null) {
           setTimeout(() => rejette(new Error('sondage sans réponse')), REPRISE_MS),
         ),
       ])
-      if (avant === null || s.service_uptime_s < avant) {
+      const ecoule = Math.floor((Date.now() - t0) / 1000)
+      if (avant === null || s.service_uptime_s < avant + ecoule) {
         etat.value = s
         enCours.value = null
+        // Pas de garde sur `monte` ici, contrairement au message de délai
+        // ci-dessous : c'est délibéré. Un succès annoncé après que
+        // l'utilisateur a quitté la vue reste une information utile ; un
+        // échec signalé 30 s trop tard n'est que du bruit. Ne pas
+        // « corriger » cette asymétrie en symétrie.
         toast.success(t.value('system_restarted'))
         demarrer()
         return
@@ -366,7 +388,7 @@ async function attendreRetour(avant: number | null) {
         <p v-if="etat?.under_voltage" data-system-under-voltage class="text-sm text-destructive">
           {{ t('system_under_voltage') }}
         </p>
-        <p v-if="enCours" data-power-progress class="text-sm text-muted-foreground">
+        <p v-if="enCours" data-power-progress aria-live="polite" class="text-sm text-muted-foreground">
           {{ messageEnCours }}
         </p>
         <p
