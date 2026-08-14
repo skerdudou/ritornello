@@ -70,9 +70,18 @@ français, les doc `///` suivent le fichier où elles vivent.
 
 ## La charge utile
 
-`PlayerState` (`crates/ritornello-core/src/metadata.rs`) garde son nom : il
-sert déjà les deux publics, et le renommer ferait du bruit pour rien. Il gagne
-deux champs.
+`PlayerState` garde son nom : il sert déjà les deux publics, et le renommer
+ferait du bruit pour rien. Il gagne deux champs.
+
+**Il change en revanche de crate.** Il vit aujourd'hui dans
+`crates/ritornello-core/src/metadata.rs`, or le SDK devra le **désérialiser**
+pour le passer aux plugins d'affichage — et le SDK ne peut pas dépendre du cœur
+sans créer un cycle. `PlayerState` et `Morceau` déménagent donc dans
+`crates/ritornello-proto/src/metadata.rs`, aux côtés d'`Enrichment` et
+d'`IdentityUpdate` qui y sont déjà. Un réexport depuis le cœur garde valides les
+`use crate::metadata::PlayerState` existants. C'est un déplacement pur, sans
+changement de comportement, et il gagne `Deserialize` au passage (le cœur ne
+faisait que sérialiser).
 
 ### `status: Option<String>`
 
