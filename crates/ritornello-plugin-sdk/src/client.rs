@@ -52,6 +52,8 @@ pub struct SourceUpdate {
     pub preset_count: Option<u8>,
     /// See `SourceMessage::preset_name`.
     pub preset_name: Option<String>,
+    /// See `SourceMessage::status`.
+    pub status: Option<String>,
 }
 
 pub struct SourceClient {
@@ -90,6 +92,7 @@ impl SourceClient {
                     || msg.preset.is_some()
                     || msg.preset_count.is_some()
                     || msg.preset_name.is_some()
+                    || msg.status.is_some()
                 {
                     let porte_identite = msg.identity.is_some();
                     let update = SourceUpdate {
@@ -100,6 +103,7 @@ impl SourceClient {
                         preset: msg.preset,
                         preset_count: msg.preset_count,
                         preset_name: msg.preset_name,
+                        status: msg.status,
                     };
                     if view_tx.try_send((name.clone(), update)).is_err() {
                         // Conséquence aggravée depuis que la trame porte aussi
@@ -385,6 +389,7 @@ mod tests {
                 preset: Some(1),
                 preset_count: None,
                 preset_name: Some("FIP".into()),
+                status: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             let _ = socket_for_server; // garde le chemin vivant pour le débogage
@@ -433,6 +438,7 @@ mod tests {
                 preset: None,
                 preset_count: Some(5),
                 preset_name: None,
+                status: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -471,6 +477,7 @@ mod tests {
                 preset: None,
                 preset_count: None,
                 preset_name: Some("FIP".into()),
+                status: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -482,6 +489,45 @@ mod tests {
         let (name, update) = view_rx.recv().await.unwrap();
         assert_eq!(name, "radio");
         assert_eq!(update.preset_name.as_deref(), Some("FIP"));
+    }
+
+    #[tokio::test]
+    async fn trame_seule_avec_le_statut_est_relayee() {
+        // Le même piège que pour `preset_name` (voir le cahier des charges) :
+        // une trame ne portant que `status` (sans vue, identité, preset, compte
+        // ni nom) doit passer la condition qui décide qu'une trame est
+        // "intéressante", sans quoi elle serait jetée en silence.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+            let msg = ritornello_proto::SourceMessage {
+                id: Some(req.id),
+                action: Some(SourceAction::Noop),
+                view: None,
+                identity: None,
+                line2_replaceable: false,
+                transient: false,
+                preset: None,
+                preset_count: None,
+                preset_name: None,
+                status: Some("PAS DE DISQUE".into()),
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let (view_tx, mut view_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "radio".into(), view_tx).await.unwrap();
+        client.request(SourceReq::Activate).await.unwrap();
+        let (name, update) = view_rx.recv().await.unwrap();
+        assert_eq!(name, "radio");
+        assert_eq!(update.status.as_deref(), Some("PAS DE DISQUE"));
     }
 
     #[tokio::test]
@@ -507,6 +553,7 @@ mod tests {
                 preset: None,
                 preset_count: None,
                 preset_name: None,
+                status: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;

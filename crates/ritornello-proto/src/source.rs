@@ -134,6 +134,17 @@ pub struct SourceMessage {
     /// is cleared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_name: Option<String>,
+    /// The source's own word about its state, **already translated** by its
+    /// catalogue ("NO DISC", "AUDIO CD", "EMPTY PRESET").
+    ///
+    /// Unlike `preset`, absent means **"no status"**, not "keep the previous
+    /// one": a source restates it on every frame, and this is the only
+    /// convention that lets a status be cleared at all.
+    ///
+    /// With `transient` set, the status is an ephemeral message: it feeds the
+    /// overlay and leaves the remembered status untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 #[cfg(test)]
@@ -180,6 +191,7 @@ mod tests {
             preset: None,
             preset_count: None,
             preset_name: None,
+            status: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
@@ -190,7 +202,7 @@ mod tests {
 
     #[test]
     fn message_notification_sans_id() {
-        let m = SourceMessage { id: None, action: None, view: Some(View::default()), identity: None, line2_replaceable: false, transient: false, preset: None, preset_count: None, preset_name: None };
+        let m = SourceMessage { id: None, action: None, view: Some(View::default()), identity: None, line2_replaceable: false, transient: false, preset: None, preset_count: None, preset_name: None, status: None };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, None);
@@ -225,6 +237,7 @@ mod tests {
             preset: Some(4),
             preset_count: None,
             preset_name: None,
+            status: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"preset\":4"));
@@ -239,7 +252,7 @@ mod tests {
         // La majorité des trames ne disent rien de l'identité (SetLocale,
         // Deactivate…) : les alourdir d'un `"identity":null` serait du bruit sur
         // une liaison volontairement lisible à l'œil.
-        let m = SourceMessage { id: Some(2), action: None, view: None, identity: None, line2_replaceable: false, transient: false, preset: None, preset_count: None, preset_name: None };
+        let m = SourceMessage { id: Some(2), action: None, view: None, identity: None, line2_replaceable: false, transient: false, preset: None, preset_count: None, preset_name: None, status: None };
         assert_eq!(serde_json::to_string(&m).unwrap(), r#"{"id":2,"action":null,"view":null}"#);
     }
 
@@ -255,6 +268,7 @@ mod tests {
             preset: None,
             preset_count: Some(23),
             preset_name: None,
+            status: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"preset_count\":23"));
@@ -283,6 +297,7 @@ mod tests {
             preset: Some(4),
             preset_count: None,
             preset_name: Some("FIP".into()),
+            status: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"preset_name\":\"FIP\""));
@@ -299,5 +314,33 @@ mod tests {
         let ancien: SourceMessage = serde_json::from_str(r#"{"id":3,"preset":4}"#).unwrap();
         assert_eq!(ancien.preset_name, None);
         assert_eq!(ancien.preset, Some(4));
+    }
+
+    #[test]
+    fn le_statut_fait_le_tour_et_reste_absent_par_defaut() {
+        // Convention différente de `preset`/`preset_name` : ici l'absence est
+        // testée sur une trame qui déclare explicitement `status: None` (une
+        // Source qui n'a plus rien à dire de son état), pas sur une trame d'un
+        // plugin antérieur — voir `Core::handle_source_update` pour la raison.
+        let m = SourceMessage {
+            id: Some(3),
+            action: Some(SourceAction::Noop),
+            view: None,
+            identity: None,
+            line2_replaceable: false,
+            transient: false,
+            preset: None,
+            preset_count: None,
+            preset_name: None,
+            status: Some("PAS DE DISQUE".into()),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"status\":\"PAS DE DISQUE\""));
+        let back: SourceMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.status.as_deref(), Some("PAS DE DISQUE"));
+        // Une trame d'un plugin antérieur (ou qui ne dit rien du statut) se
+        // relit sans erreur, le champ retombant sur `None`.
+        let ancien: SourceMessage = serde_json::from_str(r#"{"id":3}"#).unwrap();
+        assert_eq!(ancien.status, None);
     }
 }

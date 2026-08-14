@@ -90,6 +90,13 @@ impl CdSource {
         // « audio CD » et « pas de disque » sont tous deux des remplissages :
         // l'album vaut mieux quand on le connaît, et l'étiquette revient sinon.
         let sortie = sortie.line2_replaceable();
+        // Le statut permanent de la Source : ce que la carte Lecteur de la SPA
+        // affiche désormais (voir `SourceMessage::status`).
+        let sortie = if self.present {
+            sortie.status(self.catalog.get("cd_audio"))
+        } else {
+            sortie.status(self.catalog.get("no_disc"))
+        };
         // The count is a property of the inserted disc, not of playback: it is
         // declared on every frame, 0 when no TOC is known (no disc, or the
         // TOC is still being read).
@@ -332,6 +339,10 @@ impl CdSource {
             // the count declared at activation (0, TOC unknown yet) would
             // never be corrected once the disc is actually readable.
             preset_count: issue.preset_count,
+            // The cd plugin never names a preset (see `SourceMessage::preset_name`).
+            preset_name: issue.preset_name,
+            // Same status logic as any other frame: presence flips it.
+            status: issue.status,
         }
     }
 }
@@ -695,6 +706,21 @@ mod tests {
         source.locales_root = dir.path().to_path_buf();
         source.set_locale("fr".into()).await;
         assert_eq!(source.view().line2, "PAS DE DISQUE");
+    }
+
+    #[tokio::test]
+    async fn le_statut_declare_labsence_ou_la_presence_dun_disque() {
+        // C'est ce que la carte Lecteur de la SPA affiche désormais (voir
+        // `SourceMessage::status`) : « no disc » ou « audio CD », selon
+        // `self.present`, sur chaque trame.
+        let (mut source, _presence_tx, _toc_tx) = source_with_channels();
+        source.present = false;
+        let outcome = source.activate().await;
+        assert_eq!(outcome.status.as_deref(), Some("no disc"));
+
+        let mut source = source_en_lecture();
+        let outcome = source.activate().await;
+        assert_eq!(outcome.status.as_deref(), Some("audio CD"));
     }
 
     #[tokio::test]

@@ -49,6 +49,12 @@ defineProps<{ etat: PlayerPayload | null }>()
           — <span class="text-foreground" data-player-preset-name>{{ etat.preset_name }}</span>
         </template>
       </p>
+      <!-- Le statut de la source, déjà traduit par elle. Invisible sur le web
+           jusqu'ici pour la même raison que le nom de station l'était : il
+           n'existait que dans une ligne d'afficheur. -->
+      <p v-if="etat?.status" class="text-sm text-muted-foreground">
+        <span class="text-foreground" data-player-status>{{ etat.status }}</span>
+      </p>
       <p class="text-sm text-muted-foreground">
         {{ t('volume') }} :
         <span class="text-foreground" data-volume>{{ etat ? etat.volume + ' %' : '' }}</span>

@@ -74,6 +74,16 @@ describe('PlayerCard', () => {
     expect(w.find('[data-player-preset-name]').exists()).toBe(false)
   })
 
+  it('affiche le statut déclaré par la source', () => {
+    const w = monteAvec({ status: 'PAS DE DISQUE' })
+    expect(w.find('[data-player-status]').text()).toBe('PAS DE DISQUE')
+  })
+
+  it('n affiche aucune ligne de statut quand il n y en a pas', () => {
+    const w = monteAvec({ status: null })
+    expect(w.find('[data-player-status]').exists()).toBe(false)
+  })
+
   it('signale le muet et la veille', () => {
     const w = monteAvec({ muted: true, standby: true })
     expect(w.find('[data-muted]').exists()).toBe(true)

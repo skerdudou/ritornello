@@ -101,6 +101,7 @@ impl RadioSource {
             SourceOutcome::new(SourceAction::Noop)
                 .with_view(self.view_for(self.preset, &empty))
                 .transient()
+                .status(empty)
                 .preset_count(count)
         }
     }
@@ -422,6 +423,9 @@ mod tests {
             "declarer un arret serait faux : le flux precedent continue"
         );
         assert!(outcome.view.is_some());
+        // Le mot ephemere est declare via `status` : c'est lui qui alimente
+        // l'incrustation cote coeur, pas la vue qui l'accompagne encore.
+        assert_eq!(outcome.status.as_deref(), Some("empty preset"));
         // Table vide : le compte declare est 0, pas absent.
         assert_eq!(outcome.preset_count, Some(0));
     }

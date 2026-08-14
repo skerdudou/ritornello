@@ -29,6 +29,8 @@ pub struct SourceOutcome {
     pub preset_count: Option<u8>,
     /// See `SourceMessage::preset_name`.
     pub preset_name: Option<String>,
+    /// See `SourceMessage::status`.
+    pub status: Option<String>,
 }
 
 impl SourceOutcome {
@@ -43,6 +45,7 @@ impl SourceOutcome {
             preset: None,
             preset_count: None,
             preset_name: None,
+            status: None,
         }
     }
 
@@ -91,6 +94,12 @@ impl SourceOutcome {
         self
     }
 
+    /// Declares the source's own state word (see `SourceMessage::status`).
+    pub fn status(mut self, mot: impl Into<String>) -> Self {
+        self.status = Some(mot.into());
+        self
+    }
+
     /// Déclare l'identité **opaque** de ce qui joue désormais.
     pub fn plays(mut self, identity: serde_json::Value) -> Self {
         self.identity = Some(IdentityUpdate::Playing(identity));
@@ -122,6 +131,10 @@ pub struct Notification {
     pub preset: Option<u8>,
     /// See `SourceMessage::preset_count`.
     pub preset_count: Option<u8>,
+    /// See `SourceMessage::preset_name`.
+    pub preset_name: Option<String>,
+    /// See `SourceMessage::status`.
+    pub status: Option<String>,
 }
 
 impl Notification {
@@ -137,6 +150,8 @@ impl Notification {
             transient: false,
             preset: None,
             preset_count: None,
+            preset_name: None,
+            status: None,
         }
     }
 
@@ -154,6 +169,18 @@ impl Notification {
     /// See `SourceMessage::preset_count`.
     pub fn preset_count(mut self, n: u8) -> Self {
         self.preset_count = Some(n);
+        self
+    }
+
+    /// Voir `SourceOutcome::preset_name`.
+    pub fn preset_name(mut self, nom: impl Into<String>) -> Self {
+        self.preset_name = Some(nom.into());
+        self
+    }
+
+    /// Declares the source's own state word (see `SourceMessage::status`).
+    pub fn status(mut self, mot: impl Into<String>) -> Self {
+        self.status = Some(mot.into());
         self
     }
 
@@ -283,6 +310,7 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                     preset: outcome.preset,
                     preset_count: outcome.preset_count,
                     preset_name: outcome.preset_name,
+                    status: outcome.status,
                 };
                 write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
             }
@@ -298,12 +326,8 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                             transient: n.transient,
                             preset: n.preset,
                             preset_count: n.preset_count,
-                            // Une notification spontanée ne nomme jamais de
-                            // présélection : le seul cas réel (l'annonce de
-                            // `preset_count` par le plugin radio après un
-                            // enregistrement admin) ne joue rien de nouveau,
-                            // donc n'a pas de nom à déclarer.
-                            preset_name: None,
+                            preset_name: n.preset_name,
+                            status: n.status,
                         };
                         write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
                     }
@@ -582,6 +606,15 @@ mod tests {
         let o = SourceOutcome::new(SourceAction::Noop).preset(4).preset_name("FIP");
         assert_eq!(o.preset, Some(4));
         assert_eq!(o.preset_name.as_deref(), Some("FIP"));
+    }
+
+    #[test]
+    fn le_statut_du_builder_atterrit_dans_la_trame() {
+        let o = SourceOutcome::new(SourceAction::Noop).status("PAS DE DISQUE");
+        assert_eq!(o.status.as_deref(), Some("PAS DE DISQUE"));
+        let n = Notification::new().status("FIP").preset_name("FIP");
+        assert_eq!(n.status.as_deref(), Some("FIP"));
+        assert_eq!(n.preset_name.as_deref(), Some("FIP"));
     }
 
     struct EchoSource;

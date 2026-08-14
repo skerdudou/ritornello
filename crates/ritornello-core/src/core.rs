@@ -6,7 +6,8 @@ use anyhow::Result;
 use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::SourceUpdate;
 use ritornello_proto::{
-    Command, Enrichment, IdentityUpdate, InputMessage, NowPlaying, SourceAction, SourceReq, View,
+    Command, Enrichment, IdentityUpdate, InputMessage, NowPlaying, Overlay, SourceAction,
+    SourceReq, View,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -90,11 +91,11 @@ pub struct Core<P: Player> {
     /// (voir `metadata::composer`). Mémorisé avec la vue, puisque c'est d'elle
     /// que la déclaration parle.
     view_line2_replaceable: bool,
-    /// Overlay temporaire (volume/muet) : vue à afficher + échéance. Tant
-    /// qu'il est actif, `push_view` l'affiche à la place de `view`, mais
-    /// `view` continue d'être tenue à jour par `handle_source_update` pour
-    /// réapparaître dès l'expiration.
-    overlay: Option<(View, Instant)>,
+    /// Overlay temporaire (volume/muet/message) : incrustation à afficher +
+    /// échéance. Tant qu'il est actif, `push_view` l'affiche à la place de
+    /// `view`, mais `view` continue d'être tenue à jour par
+    /// `handle_source_update` pour réapparaître dès l'expiration.
+    overlay: Option<(Overlay, Instant)>,
     /// Touche numérotée correspondant à ce qui joue, déclarée par la Source active
     /// (voir `SourceMessage::preset`). Oubliée dès que plus rien ne joue —
     /// c'est `set_identity(None)` qui fait foi, comme pour l'ardoise des
@@ -106,6 +107,15 @@ pub struct Core<P: Player> {
     /// — la mise en veille, le changement de source et l'arrêt appellent tous
     /// `set_identity(None)`, donc ce point unique les couvre déjà.
     preset_name: Option<String>,
+    /// Statut permanent déclaré par la Source active, déjà traduit (voir
+    /// `SourceMessage::status`). Remplacé à chaque trame non éphémère, y
+    /// compris par son absence — voir le test de convention.
+    source_status: Option<String>,
+    /// Mot de veille résolu, mémorisé au moment où la veille est posée : le
+    /// catalogue se lit derrière un verrou asynchrone, et `etat_lecteur` ne
+    /// l'est pas. Gagne sur `source_status` dans `etat_lecteur` — l'appareil
+    /// dort, ce que raconte la source n'a plus cours.
+    standby_status: Option<String>,
     /// How many numbered presets the active source offers (stations,
     /// tracks), as last declared. Forgotten on source change and standby —
     /// the next source re-declares it on activate/wake — but kept on stop:
@@ -171,6 +181,8 @@ impl<P: Player> Core<P> {
             overlay: None,
             preset: None,
             preset_name: None,
+            source_status: None,
+            standby_status: None,
             preset_count: None,
             pending_tens: 0,
             state_path,
@@ -231,32 +243,51 @@ impl<P: Player> Core<P> {
         if self.standby || name != self.active_source {
             return;
         }
+        // `status` est réaffirmé par chaque trame permanente : absent vaut
+        // effacé — convention **inverse** de celle de `preset`, et la seule
+        // qui permette d'effacer un statut (« PAS DE DISQUE » doit pouvoir
+        // disparaître à l'insertion d'un disque). Une trame éphémère, elle, ne
+        // touche pas au statut mémorisé : son mot va dans l'incrustation
+        // ci-dessous, pas ici.
+        if !update.transient {
+            self.source_status = update.status.clone();
+        }
         // La vue **avant** l'identité : `set_identity` rafraîchit l'affichage,
         // et l'ordre inverse le ferait composer l'ancienne vue avec l'ardoise
         // déjà vidée. Les deux venant de la même trame, aucun instant
         // observable ne les voit se contredire.
         if let Some(view) = update.view {
-            if update.transient {
-                // Message éphémère (« présélection vide ») : il emprunte
-                // l'emplacement et l'échéance de l'incrustation volume/muet,
-                // donc `self.view` — la vue permanente — est conservée et
-                // reparaît d'elle-même. Sans cela, le message restait à l'écran
-                // indéfiniment alors que la lecture continuait sur la station
-                // précédente : l'affichage décrivait durablement un état qui
-                // n'existait plus. `overlay_ms`, pas `tens_window_ms` : ce
-                // message n'a rien à voir avec le décalage `+NN` de la
-                // télécommande, seule l'incrustation volume/muet partage son
-                // échéance avec lui.
-                //
-                // Un décalage `+NN` en cours perd donc son emplacement
-                // d'affichage ici : le désarmer avec lui est ce qui évite
-                // qu'il survive derrière un écran qui ne le montre plus (même
-                // raison que le garde d'abandon d'`appliquer_commande`).
-                self.pending_tens = 0;
-                self.overlay = Some((view, Instant::now() + Duration::from_millis(self.settings.overlay_ms.into())));
-            } else {
+            if !update.transient {
                 self.view = view;
                 self.view_line2_replaceable = update.line2_replaceable;
+            }
+            // Vue éphémère : ignorée. Le mot affiché vient de `status`
+            // ci-dessous — la vue qui l'accompagne encore ne sert plus qu'à la
+            // rétrocompatibilité du protocole (voir Task 4).
+        }
+        if update.transient {
+            // Message éphémère (« présélection vide ») : il emprunte
+            // l'emplacement et l'échéance de l'incrustation volume/muet, donc
+            // `self.view` — la vue permanente — est conservée et reparaît
+            // d'elle-même. Sans cela, le message restait à l'écran
+            // indéfiniment alors que la lecture continuait sur la station
+            // précédente : l'affichage décrivait durablement un état qui
+            // n'existait plus. `overlay_ms`, pas `tens_window_ms` : ce message
+            // n'a rien à voir avec le décalage `+NN` de la télécommande, seule
+            // l'incrustation volume/muet partage son échéance avec lui.
+            //
+            // Un décalage `+NN` en cours perd donc son emplacement d'affichage
+            // ici : le désarmer avec lui est ce qui évite qu'il survive
+            // derrière un écran qui ne le montre plus (même raison que le
+            // garde d'abandon d'`appliquer_commande`) — que la trame porte ou
+            // non un mot à afficher.
+            self.pending_tens = 0;
+            if let Some(mot) = update.status.clone() {
+                let echeance = Instant::now() + Duration::from_millis(self.settings.overlay_ms.into());
+                self.overlay = Some((
+                    Overlay::Message { text: mot, remaining_ms: self.settings.overlay_ms },
+                    echeance,
+                ));
             }
         }
         if let Some(identity) = update.identity {
@@ -410,11 +441,17 @@ impl<P: Player> Core<P> {
             preset: self.preset,
             preset_name: self.preset_name.clone(),
             preset_count: self.preset_count,
-            // Personne ne remplit encore ces deux champs (chantier en cours) :
-            // rester à `None` reproduit exactement le comportement d'avant leur
-            // ajout, `Option::is_none` les faisant disparaître du JSON.
-            status: None,
-            overlay: None,
+            // La veille gagne sur le statut de la source : l'appareil dort, ce
+            // que raconte la source n'a plus cours.
+            status: if self.standby { self.standby_status.clone() } else { self.source_status.clone() },
+            overlay: self.overlay.as_ref().map(|(o, echeance)| {
+                let restant = echeance.saturating_duration_since(Instant::now()).as_millis();
+                // Le `remaining_ms` mémorisé n'est jamais lu : il est réécrit
+                // ici à chaque publication. L'égalité d'`Overlay` l'ignore,
+                // donc ce rafraîchissement ne défait pas la déduplication des
+                // trames.
+                o.clone().avec_restant(u32::try_from(restant).unwrap_or(u32::MAX))
+            }),
             morceau: self.metadonnees.etat(),
         }
     }
@@ -844,9 +881,24 @@ impl<P: Player> Core<P> {
     ///
     /// L'overlay volume/muet, lui, remplace tout : il est éphémère et n'a pas à
     /// porter le titre du morceau.
+    ///
+    /// État **transitoire** (Task 3 de « afficheurs, état structuré ») :
+    /// `self.overlay` porte maintenant un `Overlay` et non plus une `View` à
+    /// deux lignes, et cette méthode compose une vue d'une seule ligne depuis
+    /// son texte — l'afficheur console montre donc temporairement « VOLUME 65
+    /// % » sur `line1` au lieu de ses deux lignes d'avant. Task 4 supprime
+    /// `push_view` (et la vue console qu'il alimente) et restaure un affichage
+    /// identique à l'avant-chantier par un autre chemin.
     fn push_view(&self) {
         let view = match &self.overlay {
-            Some((v, _)) => v.clone(),
+            Some((o, _)) => {
+                let texte = match o {
+                    Overlay::Volume { text, .. } | Overlay::Tens { text, .. } | Overlay::Message { text, .. } => {
+                        text.clone()
+                    }
+                };
+                View { line1: texte, line2: String::new(), line3: String::new() }
+            }
             None => metadata::composer(
                 &self.view,
                 &self.metadonnees.etat(),
@@ -868,9 +920,13 @@ impl<P: Player> Core<P> {
         });
     }
 
-    async fn standby_view(&self) -> View {
-        let cat = self.catalog.read().await;
-        View { line1: cat.get("standby").to_string(), line2: String::new(), line3: String::new() }
+    /// Vue de veille, et mémorisation au passage du mot résolu dans
+    /// `standby_status` : c'est le seul endroit qui lit le catalogue pour la
+    /// veille (verrou asynchrone), et `etat_lecteur`, lui, ne l'est pas.
+    async fn standby_view(&mut self) -> View {
+        let mot = self.catalog.read().await.get("standby").to_string();
+        self.standby_status = Some(mot.clone());
+        View { line1: mot, line2: String::new(), line3: String::new() }
     }
 
     /// Affiche (ou prolonge) l'overlay temporaire volume/muet : ligne 1 le
@@ -885,15 +941,23 @@ impl<P: Player> Core<P> {
     /// laquelle des deux durées a posé l'échéance qu'il désarme : elle est
     /// stockée avec le message, dans `self.overlay`.
     async fn show_overlay(&mut self) {
-        let line2 = if self.muted {
+        let mot = if self.muted {
             let cat = self.catalog.read().await;
             cat.get("muted").to_string()
         } else {
             format!("{} %", self.volume)
         };
-        let line1 = self.catalog.read().await.get("volume_label").to_string();
+        let label = self.catalog.read().await.get("volume_label").to_string();
         let echeance = Instant::now() + Duration::from_millis(self.settings.overlay_ms.into());
-        self.overlay = Some((View { line1, line2, line3: String::new() }, echeance));
+        self.overlay = Some((
+            Overlay::Volume {
+                level: self.volume,
+                muted: self.muted,
+                text: format!("{label} {mot}"),
+                remaining_ms: self.settings.overlay_ms,
+            },
+            echeance,
+        ));
         self.push_view();
     }
 
@@ -907,10 +971,16 @@ impl<P: Player> Core<P> {
     /// the two stay aligned by construction whatever values the two
     /// settings take.
     async fn show_tens_overlay(&mut self) {
-        let line1 = self.catalog.read().await.get("preset_label").to_string();
-        let line2 = format!("+{}", self.pending_tens);
+        let label = self.catalog.read().await.get("preset_label").to_string();
         let echeance = Instant::now() + Duration::from_millis(self.settings.tens_window_ms.into());
-        self.overlay = Some((View { line1, line2, line3: String::new() }, echeance));
+        self.overlay = Some((
+            Overlay::Tens {
+                offset: self.pending_tens,
+                text: format!("{label} +{}", self.pending_tens),
+                remaining_ms: self.settings.tens_window_ms,
+            },
+            echeance,
+        ));
         self.push_view();
     }
 
@@ -1013,15 +1083,22 @@ mod tests {
         }
     }
 
+    /// Mise à jour ne portant rien : tous les champs à `None`/`false`. Base
+    /// commode pour composer une trame minimale dans un test (voir les tests
+    /// de statut).
+    fn update_nu() -> SourceUpdate {
+        SourceUpdate::default()
+    }
+
     /// Mise à jour ne portant qu'une vue, dont la `line2` est la ligne propre de
     /// la Source (non remplaçable) — le cas de la radio.
     fn vue(v: View) -> SourceUpdate {
-        SourceUpdate { view: Some(v), identity: None, line2_replaceable: false, transient: false, preset: None, preset_count: None, preset_name: None }
+        SourceUpdate { view: Some(v), identity: None, line2_replaceable: false, transient: false, preset: None, preset_count: None, preset_name: None, status: None }
     }
 
     /// Mise à jour dont la `line2` est un remplissage remplaçable — le cas du cd.
     fn vue_remplacable(v: View) -> SourceUpdate {
-        SourceUpdate { view: Some(v), identity: None, line2_replaceable: true, transient: false, preset: None, preset_count: None, preset_name: None }
+        SourceUpdate { view: Some(v), identity: None, line2_replaceable: true, transient: false, preset: None, preset_count: None, preset_name: None, status: None }
     }
 
     /// Mise à jour ne portant qu'une identité.
@@ -1034,6 +1111,7 @@ mod tests {
             preset: None,
             preset_count: None,
             preset_name: None,
+            status: None,
         }
     }
 
@@ -1436,8 +1514,11 @@ mod tests {
         rx.borrow_and_update();
         core.handle_command(Command::VolumeUp).await.unwrap();
         let v = rx.borrow_and_update().clone();
-        assert_eq!(v.line1, "VOLUME");
-        assert_eq!(v.line2, "65 %"); // PersistedState::default().volume == 60, VolumeUp += 5
+        // PersistedState::default().volume == 60, VolumeUp += 5. `push_view`
+        // compose désormais une vue d'une seule ligne depuis le texte de
+        // l'incrustation (état transitoire de Task 3, voir son commentaire).
+        assert_eq!(v.line1, "VOLUME 65 %");
+        assert!(v.line2.is_empty());
         assert!(v.line3.is_empty());
         assert!(core.overlay_deadline().is_some());
     }
@@ -1449,8 +1530,8 @@ mod tests {
         rx.borrow_and_update();
         core.handle_command(Command::Mute).await.unwrap();
         let v = rx.borrow_and_update().clone();
-        assert_eq!(v.line1, "VOLUME");
-        assert_eq!(v.line2, "MUTED");
+        assert_eq!(v.line1, "VOLUME MUTED");
+        assert!(v.line2.is_empty());
         assert!(core.overlay_deadline().is_some());
     }
 
@@ -1460,7 +1541,7 @@ mod tests {
         core.resume().await.unwrap();
         core.handle_command(Command::VolumeUp).await.unwrap();
         let overlay_view = rx.borrow_and_update().clone();
-        assert_eq!(overlay_view.line1, "VOLUME");
+        assert_eq!(overlay_view.line1, "VOLUME 65 %");
 
         // La vue source arrive pendant l'overlay : elle est memorisee mais pas affichee.
         core.handle_source_update("radio", vue(View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() }));
@@ -1501,7 +1582,7 @@ mod tests {
         let (mut core, _pc, _sc, mut rx, _d) = setup();
         core.resume().await.unwrap();
         core.handle_command(Command::VolumeUp).await.unwrap();
-        assert_eq!(rx.borrow_and_update().line1, "VOLUME");
+        assert_eq!(rx.borrow_and_update().line1, "VOLUME 65 %");
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(rx.borrow_and_update().line1, "STANDBY");
         assert!(core.overlay_deadline().is_none());
@@ -1570,6 +1651,7 @@ mod tests {
             preset: None,
             preset_count: compte,
             preset_name: None,
+            status: None,
         }
     }
 
@@ -1583,6 +1665,7 @@ mod tests {
             preset: None,
             preset_count: None,
             preset_name: nom.map(str::to_string),
+            status: None,
         }
     }
 
@@ -1989,16 +2072,97 @@ mod tests {
         let message = View { line1: "RADIO  P4".into(), line2: "empty preset".into(), line3: String::new() };
         core.handle_source_update(
             "radio",
-            SourceUpdate { view: Some(message), identity: None, line2_replaceable: false, transient: true, preset: None, preset_count: None, preset_name: None },
+            SourceUpdate {
+                view: Some(message),
+                identity: None,
+                line2_replaceable: false,
+                transient: true,
+                preset: None,
+                preset_count: None,
+                preset_name: None,
+                // Le mot affiché vient désormais de `status`, pas de la vue
+                // (voir Task 3) : c'est ainsi que le plugin radio le déclare
+                // réellement sur la branche « présélection vide ».
+                status: Some("empty preset".into()),
+            },
         );
         let affiche = vue_rx.borrow_and_update().clone();
-        assert_eq!(affiche.line2, "empty preset", "le message doit s'afficher");
+        assert_eq!(affiche.line1, "empty preset", "le message doit s'afficher");
         assert!(core.overlay_deadline().is_some(), "et porter une echeance");
 
         core.expire_overlay();
         let apres = vue_rx.borrow_and_update().clone();
         assert_eq!(apres.line2, "FIP", "la station qui joue doit reparaitre");
         assert_eq!(apres.line3, "Miles Davis — So What", "les metadonnees aussi");
+    }
+
+    #[tokio::test]
+    async fn un_statut_de_source_est_publie_puis_remplace() {
+        // Convention **différente** de celle de `preset` : dans une trame,
+        // `status` absent signifie « aucun statut », pas « garder le précédent ».
+        // C'est ce qui reproduit le comportement actuel — une source recompose sa
+        // vue entière à chaque trame — et la seule convention qui permette
+        // d'effacer un statut : sinon « PAS DE DISQUE » resterait affiché après
+        // l'insertion d'un disque, sans aucune façon de l'annuler.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        let mut update = update_nu();
+        update.status = Some("PAS DE DISQUE".into());
+        core.handle_source_update("radio", update);
+        assert_eq!(core.etat_lecteur().status.as_deref(), Some("PAS DE DISQUE"));
+
+        core.handle_source_update("radio", update_nu());
+        assert_eq!(core.etat_lecteur().status, None, "absent vaut effacé, pas conservé");
+    }
+
+    #[tokio::test]
+    async fn un_statut_ephemere_ne_touche_pas_au_statut_memorise() {
+        // Le cas « présélection vide » : un mot passager, alors que la station
+        // précédente continue de jouer. Il alimente l'incrustation, et le statut
+        // permanent doit reparaître à l'échéance.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        let mut permanent = update_nu();
+        permanent.status = Some("FIP".into());
+        core.handle_source_update("radio", permanent);
+
+        let mut ephemere = update_nu();
+        ephemere.status = Some("PRESELECTION VIDE".into());
+        ephemere.transient = true;
+        core.handle_source_update("radio", ephemere);
+        assert_eq!(
+            core.etat_lecteur().status.as_deref(),
+            Some("FIP"),
+            "le statut permanent survit à un message éphémère"
+        );
+        assert!(matches!(core.etat_lecteur().overlay, Some(Overlay::Message { .. })));
+
+        core.expire_overlay();
+        assert_eq!(core.etat_lecteur().status.as_deref(), Some("FIP"));
+        assert!(core.etat_lecteur().overlay.is_none());
+    }
+
+    #[tokio::test]
+    async fn la_veille_gagne_sur_le_statut_de_la_source() {
+        // L'appareil dort : ce que raconte la source n'a plus cours, même si
+        // elle continue (en pratique elle ne le fait pas) à en déclarer un.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        let mut update = update_nu();
+        update.status = Some("FIP".into());
+        core.handle_source_update("radio", update);
+        assert_eq!(core.etat_lecteur().status.as_deref(), Some("FIP"));
+
+        core.handle_command(Command::Power).await.unwrap();
+        assert_eq!(
+            core.etat_lecteur().status.as_deref(),
+            Some("STANDBY"),
+            "le mot de veille gagne sur le statut mémorisé de la source"
+        );
+
+        core.handle_command(Command::Power).await.unwrap();
+        assert_eq!(
+            core.etat_lecteur().status.as_deref(),
+            Some("FIP"),
+            "le réveil rend la main au statut mémorisé de la source, inchangé tant qu'elle n'en redéclare pas un nouveau"
+        );
     }
 
     #[tokio::test]
@@ -2009,7 +2173,7 @@ mod tests {
         core.handle_source_update("radio", vue(vue_radio()));
         core.handle_command(Command::VolumeUp).await.unwrap();
         let overlay = vue_rx.borrow_and_update().clone();
-        assert_eq!(overlay.line1, "VOLUME");
+        assert_eq!(overlay.line1, "VOLUME 65 %");
 
         core.handle_enrichment("ouifm", enrichissement(id, "Miles Davis", "So What"));
         assert_eq!(vue_rx.borrow().clone(), overlay, "l'overlay volume reste seul a l'ecran");
@@ -2149,9 +2313,9 @@ mod tests {
         let (mut core, _pc, _sc, mut rx, _d) = setup();
         core.handle_command(Command::Plus10).await.unwrap();
         assert!(core.overlay_deadline().is_some());
-        assert_eq!(rx.borrow_and_update().line2, "+10");
+        assert_eq!(rx.borrow_and_update().line1, "PRESET +10");
         core.handle_command(Command::Plus10).await.unwrap();
-        assert_eq!(rx.borrow_and_update().line2, "+20");
+        assert_eq!(rx.borrow_and_update().line1, "PRESET +20");
     }
 
     #[tokio::test]
@@ -2269,7 +2433,7 @@ mod tests {
         // plus +NN mais le message de la source.
         let (mut core, _pc, source_calls, mut rx, _d) = setup();
         core.handle_command(Command::Plus10).await.unwrap();
-        assert_eq!(rx.borrow_and_update().line2, "+10");
+        assert_eq!(rx.borrow_and_update().line1, "PRESET +10");
 
         let message = View { line1: "RADIO  P4".into(), line2: "empty preset".into(), line3: String::new() };
         core.handle_source_update(
@@ -2282,6 +2446,7 @@ mod tests {
                 preset: None,
                 preset_count: None,
                 preset_name: None,
+                status: Some("empty preset".into()),
             },
         );
 
