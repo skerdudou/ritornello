@@ -138,9 +138,13 @@ describe('SystemView', () => {
     const jiffies = prochainsJiffies()
     stub(() => payload(jiffies()))
     const w = await monter()
-    // Un seul échantillon : pas de ligne, le message d'attente à la place.
-    expect(w.find('[data-system-history-empty]').exists()).toBe(true)
-    expect(w.find('[data-system-history]').exists()).toBe(false)
+    // Un seul échantillon : le graphe est **déjà là** mais ne trace rien, et
+    // sa légende annonce « — » plutôt que « 0 % ». C'est ce qui évite le saut
+    // de mise en page au deuxième sondage, quand un message d'attente cédait
+    // d'un coup la place à une figure de 96 px.
+    expect(w.find('[data-system-history]').exists()).toBe(true)
+    expect(w.get('[data-system-history]').html()).not.toContain('M0.00,')
+    expect(w.get('[data-system-history-legend]').text()).toContain('—')
     // Un échantillon exige un delta de jiffies : le premier sondage ne fait
     // que poser la référence, sans rien pousser. Deux sondages
     // supplémentaires (10 s) en poussent donc deux, assez pour tracer une
@@ -605,6 +609,29 @@ describe('SystemView', () => {
     w.unmount()
   })
 
+  it('l étiquette de période se corrige quand le catalogue arrive après le montage', async () => {
+    // Reproduit l'ordre réel d'un premier chargement : `App.vue` lance le
+    // rechargement du catalogue à SON montage, donc la vue se monte avant que
+    // la réponse arrive. Tous les libellés se corrigent ensuite d'eux-mêmes,
+    // `t` étant une computed — sauf celui du déclencheur du Select, que
+    // `SelectValue` sans contenu figeait sur le texte capturé au montage : la
+    // liste affichait « 5 system_unit_second » pour toujours.
+    //
+    // Ce test échouerait donc en rendant `<SelectValue />` sans contenu.
+    // `monter()` ne peut pas le voir : il charge le catalogue AVANT de monter.
+    stub(payload(), {})
+    await useCatalog().reload()
+    const w = mount(SystemView, { attachTo: document.body })
+    await flushPromises()
+    expect(w.get('[data-system-period]').text()).toContain('system_unit_second')
+
+    stub(payload(), { ...CATALOGUE, system_unit_second: 's' })
+    await useCatalog().reload()
+    await flushPromises()
+    expect(w.get('[data-system-period]').text()).toBe('5 s')
+    w.unmount()
+  })
+
   it('le libellé de la fenêtre suit la période choisie', async () => {
     stub(payload())
     const w = await monter()
@@ -814,13 +841,20 @@ describe('SystemView', () => {
       w.unmount()
     })
 
-    it('rien ne s affiche tant que moins de deux échantillons existent', async () => {
-      // Un seul sondage : la référence de jiffies est posée mais aucun
-      // échantillon poussé, le graphe lui-même n'est pas dessiné.
+    it('survoler un graphe encore vide n affiche ni popin ni trait', async () => {
+      // Un seul sondage : la référence de jiffies est posée, aucun échantillon
+      // poussé. Le graphe est là quand même (il l'est désormais toujours, pour
+      // que la mise en page ne saute pas), donc il est **survolable** avant
+      // d'avoir la moindre donnée — ce que l'ancienne version rendait
+      // impossible en ne le dessinant pas. Le garde `< 2` de `survolPointeur`
+      // et celui de `xLigneSurvol` deviennent donc porteurs : ce test les
+      // épingle.
       stub(payload({ cpu_total_jiffies: 0, cpu_idle_jiffies: 0 }))
       const w = await monter()
-      expect(w.find('[data-system-history]').exists()).toBe(false)
+      const svg = w.get('[data-system-history]')
+      await svg.trigger('pointermove', { clientX: 100 })
       expect(w.find('[data-system-history-popin]').exists()).toBe(false)
+      expect(w.find('[data-system-history-line]').exists()).toBe(false)
       w.unmount()
     })
   })

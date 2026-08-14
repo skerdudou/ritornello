@@ -206,6 +206,19 @@ const periode = computed({
 })
 
 /**
+ * Libellé du déclencheur, calculé ici plutôt que laissé à `SelectValue` sans
+ * contenu : celui-ci affiche le texte de l'option sélectionnée **tel que
+ * capturé au montage**, or le catalogue arrive après (chargement asynchrone
+ * partagé, voir `useCatalog`). Le reste de la page se corrige tout seul quand
+ * il arrive, `t` étant une computed — mais ce texte-là restait figé sur
+ * « 5 system_unit_second », clé brute comprise. Une expression ici est relue
+ * à chaque rendu, donc immunisée contre cette capture.
+ */
+const etiquettePeriode = computed(
+  () => `${periodeMs.value / 1000} ${t.value('system_unit_second')}`,
+)
+
+/**
  * Fenêtre visible de l'historique, en minutes : la durée réelle couverte par
  * `historique`, mesurée par l'horodatage de son premier et de son dernier
  * échantillon, et non la capacité théorique (`CAPACITE` × période) qui
@@ -563,7 +576,7 @@ async function attendreRetour(avant: number | null) {
       <span class="text-sm text-muted-foreground">{{ t('system_period') }}</span>
       <Select v-model="periode">
         <SelectTrigger data-system-period class="w-24" :aria-label="t('system_period')">
-          <SelectValue />
+          <SelectValue>{{ etiquettePeriode }}</SelectValue>
         </SelectTrigger>
         <SelectContent>
           <SelectItem v-for="p in PERIODES_S" :key="p" :value="String(p)">
@@ -628,97 +641,98 @@ async function attendreRetour(avant: number | null) {
         </CardTitle>
       </CardHeader>
       <CardContent>
-        <p
-          v-if="historique.length < 2"
-          data-system-history-empty
-          class="text-sm text-muted-foreground"
-        >
-          {{ t('system_history_empty') }}
-        </p>
-        <template v-else>
-          <!-- `relative` : ancre le popin de survol au graphe, pas à la
-               carte entière. -->
-          <div class="relative">
-            <!-- `preserveAspectRatio="none"` étire le repère à la largeur
-                 disponible ; `vector-effect` empêche l'épaisseur du trait
-                 d'être étirée avec lui. Événements *pointer*, pas *mouse* :
-                 la page se consulte surtout au doigt, et `pointermove` seul
-                 couvre déjà le survol souris et le glisser tactile. Pas de
-                 `touch-action: none` ici : ça bloquerait le défilement
-                 vertical de la page au-dessus du graphe sur un téléphone. -->
-            <svg
-              data-system-history
-              :viewBox="`0 0 ${LARGEUR} ${HAUTEUR}`"
-              preserveAspectRatio="none"
-              class="h-24 w-full"
-              role="img"
-              :aria-label="t('system_history')"
-              @pointermove="survolPointeur"
-              @pointerdown="survolPointeur"
-              @pointerleave="finSurvol"
-              @pointercancel="finSurvol"
-            >
-              <path
-                :d="cheminCpu"
-                class="text-primary"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.5"
-                vector-effect="non-scaling-stroke"
-              />
-              <path
-                :d="cheminRam"
-                class="text-muted-foreground"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.5"
-                vector-effect="non-scaling-stroke"
-              />
-              <!-- Trait de survol seul, pas de point par série : un
-                   `<circle>` dans un viewBox étiré par
-                   `preserveAspectRatio="none"` se dessinerait en ellipse, pas
-                   en cercle. Le trait plus les valeurs du popin répondent à
-                   la demande sans ce défaut — ne pas « corriger » en ajoutant
-                   des cercles. -->
-              <line
-                v-if="xLigneSurvol !== null"
-                data-system-history-line
-                :x1="xLigneSurvol"
-                :x2="xLigneSurvol"
-                y1="0"
-                :y2="HAUTEUR"
-                class="text-muted-foreground"
-                stroke="currentColor"
-                stroke-width="1"
-                vector-effect="non-scaling-stroke"
-              />
-            </svg>
-            <!-- `pointer-events-none` : le popin suit le pointeur sans lui
-                 jamais faire écran, sans quoi il capterait les événements
-                 dont il dépend. -->
-            <div
-              v-if="echantillonSurvol && stylePopin"
-              data-system-history-popin
-              class="pointer-events-none absolute top-0 min-w-[100px] rounded-md border bg-popover px-2 py-1 text-xs whitespace-nowrap text-popover-foreground shadow-md"
-              :style="stylePopin"
-            >
-              <div>{{ new Date(echantillonSurvol.t).toLocaleTimeString() }}</div>
-              <div class="text-primary">{{ t('system_cpu') }} {{ Math.round(echantillonSurvol.cpu) }} %</div>
-              <div class="text-muted-foreground">{{ t('system_memory') }} {{ Math.round(echantillonSurvol.ram) }} %</div>
-            </div>
+        <!-- Le graphe est **toujours** rendu, vide tant qu'il n'y a pas deux
+             échantillons. Un message d'attente à sa place faisait sauter la
+             mise en page au deuxième sondage, le texte cédant d'un coup à une
+             figure de 96 px. Rien à ruser pour l'obtenir : `cheminSparkline`
+             rend une chaîne vide sous deux points, et un `d` vide est un
+             `<path>` invisible — c'est écrit dans son contrat.
+
+             `relative` : ancre le popin de survol au graphe, pas à la carte
+             entière. -->
+        <div class="relative">
+          <!-- `preserveAspectRatio="none"` étire le repère à la largeur
+               disponible ; `vector-effect` empêche l'épaisseur du trait
+               d'être étirée avec lui. Événements *pointer*, pas *mouse* :
+               la page se consulte surtout au doigt, et `pointermove` seul
+               couvre déjà le survol souris et le glisser tactile. Pas de
+               `touch-action: none` ici : ça bloquerait le défilement
+               vertical de la page au-dessus du graphe sur un téléphone. -->
+          <svg
+            data-system-history
+            :viewBox="`0 0 ${LARGEUR} ${HAUTEUR}`"
+            preserveAspectRatio="none"
+            class="h-24 w-full"
+            role="img"
+            :aria-label="t('system_history')"
+            @pointermove="survolPointeur"
+            @pointerdown="survolPointeur"
+            @pointerleave="finSurvol"
+            @pointercancel="finSurvol"
+          >
+            <path
+              :d="cheminCpu"
+              class="text-primary"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              vector-effect="non-scaling-stroke"
+            />
+            <path
+              :d="cheminRam"
+              class="text-muted-foreground"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              vector-effect="non-scaling-stroke"
+            />
+            <!-- Trait de survol seul, pas de point par série : un
+                 `<circle>` dans un viewBox étiré par
+                 `preserveAspectRatio="none"` se dessinerait en ellipse, pas
+                 en cercle. Le trait plus les valeurs du popin répondent à
+                 la demande sans ce défaut — ne pas « corriger » en ajoutant
+                 des cercles. -->
+            <line
+              v-if="xLigneSurvol !== null"
+              data-system-history-line
+              :x1="xLigneSurvol"
+              :x2="xLigneSurvol"
+              y1="0"
+              :y2="HAUTEUR"
+              class="text-muted-foreground"
+              stroke="currentColor"
+              stroke-width="1"
+              vector-effect="non-scaling-stroke"
+            />
+          </svg>
+          <!-- `pointer-events-none` : le popin suit le pointeur sans lui
+               jamais faire écran, sans quoi il capterait les événements
+               dont il dépend. -->
+          <div
+            v-if="echantillonSurvol && stylePopin"
+            data-system-history-popin
+            class="pointer-events-none absolute top-0 min-w-[100px] rounded-md border bg-popover px-2 py-1 text-xs whitespace-nowrap text-popover-foreground shadow-md"
+            :style="stylePopin"
+          >
+            <div>{{ new Date(echantillonSurvol.t).toLocaleTimeString() }}</div>
+            <div class="text-primary">{{ t('system_cpu') }} {{ Math.round(echantillonSurvol.cpu) }} %</div>
+            <div class="text-muted-foreground">{{ t('system_memory') }} {{ Math.round(echantillonSurvol.ram) }} %</div>
           </div>
-          <p class="mt-2 flex gap-4 text-xs">
-            <span class="text-primary">
-              {{ t('system_cpu') }} {{ dernier ? Math.round(dernier.cpu) : 0 }} %
-            </span>
-            <span class="text-muted-foreground">
-              {{ t('system_memory') }} {{ dernier ? Math.round(dernier.ram) : 0 }} %
-            </span>
-          </p>
-        </template>
-        <!-- Toujours visible, y compris pendant l'attente du graphe : une
-             figure moyennée dans le temps est disponible dès le premier
-             sondage, contrairement au delta CPU. -->
+        </div>
+        <!-- `—` et non « 0 % » sans échantillon : même convention que la
+             lecture du CPU plus haut, pour ne pas annoncer une mesure qu'on
+             n'a pas encore. -->
+        <p data-system-history-legend class="mt-2 flex gap-4 text-xs">
+          <span class="text-primary">
+            {{ t('system_cpu') }} {{ dernier ? `${Math.round(dernier.cpu)} %` : RIEN }}
+          </span>
+          <span class="text-muted-foreground">
+            {{ t('system_memory') }} {{ dernier ? `${Math.round(dernier.ram)} %` : RIEN }}
+          </span>
+        </p>
+        <!-- Disponible dès le premier sondage, contrairement au delta CPU :
+             une figure moyennée dans le temps n'a pas besoin de deux
+             mesures. -->
         <p class="mt-2 text-xs text-muted-foreground">
           {{ t('system_loadavg') }} : <span data-system-load>{{ charge }}</span>
         </p>
@@ -744,16 +758,21 @@ async function attendreRetour(avant: number | null) {
           <div>{{ t('system_os') }} : <span data-system-os>{{ texte(etat?.os) }}</span></div>
           <div>{{ t('system_kernel') }} : <span data-system-kernel>{{ texte(etat?.kernel) }}</span></div>
           <div>{{ t('system_version') }} : <span data-system-version>{{ texte(etat?.version) }}</span></div>
-          <div>{{ t('system_uptime') }} : <span data-system-uptime>{{ duree(etat?.uptime_s) }}</span></div>
-          <div>
-            {{ t('system_service_uptime') }} :
-            <span data-system-service-uptime>{{ duree(etat?.service_uptime_s) }}</span>
-          </div>
+          <!-- La tension remonte ici, en face de la version, pour que les deux
+               durées de fonctionnement se retrouvent côte à côte sur la ligne
+               suivante : ce sont elles qu'on lit ensemble (« la machine tourne
+               depuis X, le service depuis Y »), et la grille à deux colonnes
+               les séparait. -->
           <div>
             {{ t('system_voltage') }} :
             <span data-system-under-voltage :class="{ 'text-destructive': etat?.under_voltage === true }">
               {{ tension }}
             </span>
+          </div>
+          <div>{{ t('system_uptime') }} : <span data-system-uptime>{{ duree(etat?.uptime_s) }}</span></div>
+          <div>
+            {{ t('system_service_uptime') }} :
+            <span data-system-service-uptime>{{ duree(etat?.service_uptime_s) }}</span>
           </div>
         </div>
         <!-- Un seul endroit pour l'état (la ligne ci-dessus, courte : « Sous-tension »
