@@ -98,6 +98,68 @@ impl Enrichment {
     }
 }
 
+/// Ce qui est affichable du morceau en cours.
+///
+/// `origin` dit **qui** a fourni l'information (`"icy"` ou le nom du plugin
+/// gagnant) : sans elle, un affichage douteux ne serait attribuable à personne,
+/// et c'est exactement la question qu'on se pose devant un titre faux.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Morceau {
+    pub artist: Option<String>,
+    pub title: Option<String>,
+    pub album: Option<String>,
+    pub duration_s: Option<u32>,
+    pub origin: Option<String>,
+}
+
+/// État du lecteur diffusé à la SPA : ce qui est volatil, et qui a donc besoin
+/// d'être **poussé**.
+///
+/// Un seul état et un seul canal pour tout ce qui bouge — source active, volume,
+/// muet, veille, et le morceau quand on le connaît. La route `/api/status`, elle,
+/// porte le contrat de navigation (quels plugins existent, lesquels ont une page
+/// d'admin) : structurellement stable, lue une fois au montage. Y mêler du
+/// volatil obligerait la SPA à la resonder en boucle pour afficher un volume.
+///
+/// Le morceau est **aplati** dans le JSON (`serde(flatten)`) : l'IHM reçoit un
+/// objet plat, sans avoir à distinguer deux niveaux pour un même encart.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct PlayerState {
+    /// Nom de la Source active, pour que la SPA sache de quoi elle parle.
+    pub source: String,
+    pub volume: u8,
+    pub muted: bool,
+    pub standby: bool,
+    /// Touche numérotée correspondant à ce qui joue, telle que la Source active l'a
+    /// déclarée (présélection radio, piste cd) : c'est ce que la télécommande
+    /// de l'IHM met en évidence. `None` = rien ne joue, ou la Source n'a rien
+    /// déclaré.
+    pub preset: Option<u8>,
+    /// Nombre de présélections numérotées offertes par la Source active
+    /// (stations pour la radio, pistes pour le cd), tel qu'elle l'a déclaré.
+    /// `None` = rien déclaré : l'IHM retombe sur la grille 1-9 historique.
+    /// `Some(0)` = rien à numéroter (cd sans disque) : aucune touche.
+    pub preset_count: Option<u8>,
+    /// Nom lisible de la présélection donnée par `preset`, tel que la Source
+    /// active l'a déclaré (le nom configuré de la station pour la radio).
+    /// `None` : la Source ne nomme rien à cet emplacement (le cd, dont
+    /// « audio CD » n'a rien à voir avec une présélection nommée), ou rien ne
+    /// joue. Vit et meurt avec `preset` — voir `Core::set_identity`.
+    pub preset_name: Option<String>,
+    #[serde(flatten)]
+    pub morceau: Morceau,
+}
+
+impl Morceau {
+    /// Vrai si rien n'est connu du morceau.
+    ///
+    /// Réservé aux tests : côté IHM, c'est la SPA qui décide quoi montrer d'un
+    /// état partiel, et le cœur n'a aucune raison de trancher pour elle.
+    pub fn est_vide(&self) -> bool {
+        self.artist.is_none() && self.title.is_none() && self.album.is_none()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
