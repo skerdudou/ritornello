@@ -2,21 +2,26 @@ import { describe, expect, it } from 'vitest'
 import { abscisses, cheminSparkline, reperesMinute } from './sparkline'
 
 describe('reperesMinute', () => {
-  it('ne pose aucun repère tant qu une minute pleine n est pas couverte', () => {
-    expect(reperesMinute([0, 30_000], 100)).toEqual([])
+  it('marque les minutes pleines de l horloge, pas un décompte depuis la fin', () => {
+    // Fenêtre de 30 s à 2 min 30 : les minutes pleines qui tombent dedans sont
+    // 1 min et 2 min, au quart et aux trois quarts. Un décompte depuis la fin
+    // les aurait mises à 30 s et 1 min 30 de la fin, soit ailleurs.
+    expect(reperesMinute([30_000, 150_000], 100)).toEqual([25, 75])
   })
 
-  it('pose un repère par minute pleine, ancré sur le dernier échantillon', () => {
-    // Fenêtre de 2 min : t−1 min tombe au milieu, t−2 min sur le bord gauche.
-    // L'ordre est celui du comptage (t−1, t−2), sans importance à l'affichage.
-    expect(reperesMinute([0, 120_000], 100)).toEqual([50, 0])
+  it('ne pose rien quand aucune minute pleine ne tombe dans la fenêtre', () => {
+    expect(reperesMinute([10_000, 40_000], 100)).toEqual([])
   })
 
-  it('reste ancré à droite quand la fenêtre n est pas un multiple de la minute', () => {
-    // Fenêtre de 80 s : t−1 min tombe 20 s après le début, soit au quart. Un
-    // ancrage sur le premier échantillon l'aurait mis aux trois quarts, et les
-    // marques glisseraient à chaque échantillon sortant du tampon.
-    expect(reperesMinute([0, 80_000], 100)).toEqual([25])
+  it('pose une marque dans une fenêtre plus courte qu une minute qui en contient une', () => {
+    // 50 s → 1 min 10 : vingt secondes de fenêtre, et pourtant une minute
+    // pleine au milieu. L'ancienne règle, qui comptait les minutes écoulées,
+    // n'en montrait aucune.
+    expect(reperesMinute([50_000, 70_000], 100)).toEqual([50])
+  })
+
+  it('inclut les minutes pleines tombant sur les bords', () => {
+    expect(reperesMinute([0, 120_000], 100)).toEqual([0, 50, 100])
   })
 
   it('ne pose rien sur une étendue nulle ou un tableau vide', () => {

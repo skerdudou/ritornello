@@ -46,18 +46,26 @@ const MINUTE_MS = 60_000
 const MAX_REPERES = 240
 
 /**
- * Abscisses des repères de minute : une marque à chaque minute pleine avant le
- * dernier échantillon (t−1 min, t−2 min, …), tant qu'elle tombe dans la fenêtre
- * couverte.
+ * Abscisses des repères de minute : une marque à chaque **minute pleine de
+ * l'horloge** (secondes à zéro) tombant dans la fenêtre couverte, rendues de
+ * gauche à droite.
  *
- * Ancrés sur le **dernier** échantillon et non sur le premier : c'est le bord
- * droit qui est « maintenant », donc le seul repère temporel stable pour l'œil
- * — les marques y restent immobiles pendant que le tracé défile, au lieu de
- * glisser avec le début du tampon.
+ * Des minutes de l'horloge et non un décompte depuis « maintenant » : une
+ * marque désigne alors un instant réel, celui qu'on lit sur une montre, et deux
+ * captures d'écran prises à des moments différents parlent du même axe. La
+ * contrepartie est que les marques **glissent** vers la gauche à mesure que le
+ * temps passe, au lieu de rester immobiles — c'est le propre d'un instant fixe
+ * sur une fenêtre qui défile, pas un défaut.
+ *
+ * Le modulo suffit à trouver ces instants : l'époque Unix tombe elle-même sur
+ * une minute pleine et tous les décalages horaires usuels sont des multiples
+ * de la minute, donc `t % 60000 == 0` vaut « secondes à zéro » quelle que soit
+ * la zone.
  *
  * Même échelle que `abscisses`, forcément : un repère qui ne partagerait pas
  * l'échelle du tracé désignerait un autre instant que celui qu'il prétend.
- * Étendue nulle ou moins d'une minute couverte : aucune marque.
+ * Étendue nulle : aucune marque. Une fenêtre plus courte qu'une minute peut au
+ * contraire en porter une, si une minute pleine tombe dedans.
  */
 export function reperesMinute(horodatages: number[], largeur: number): number[] {
   const n = horodatages.length
@@ -66,10 +74,15 @@ export function reperesMinute(horodatages: number[], largeur: number): number[] 
   if (debut === undefined || fin === undefined) return []
   const etendue = fin - debut
   if (etendue <= 0) return []
-  const combien = Math.min(Math.floor(etendue / MINUTE_MS), MAX_REPERES)
+  const premier = Math.ceil(debut / MINUTE_MS) * MINUTE_MS
+  const combien = Math.min(
+    Math.floor((fin - premier) / MINUTE_MS) + 1,
+    MAX_REPERES,
+  )
+  if (combien <= 0) return []
   return Array.from(
     { length: combien },
-    (_, i) => ((etendue - (i + 1) * MINUTE_MS) / etendue) * largeur,
+    (_, i) => ((premier + i * MINUTE_MS - debut) / etendue) * largeur,
   )
 }
 

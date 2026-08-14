@@ -509,16 +509,22 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('pose un repère de minute sur l axe du graphe par minute couverte', async () => {
+  it('pose un repère sur chaque minute pleine de l horloge couverte par le graphe', async () => {
+    // Heure système figée à une minute pleine : les repères marquant des
+    // instants absolus, leur nombre dépend de la **phase** de la fenêtre par
+    // rapport à l'horloge. Sans cette ancre, le test serait tantôt vert
+    // tantôt rouge selon l'heure réelle de son exécution.
+    vi.setSystemTime(new Date('2026-08-14T12:00:00.000Z'))
     const jiffies = prochainsJiffies()
     stub(() => payload(jiffies()))
     const w = await monter()
-    // Trois sondages (15 s) : la fenêtre couverte n'atteint pas la minute.
+    // Premier échantillon à 12:00:10 (deux sondages pour un delta), dernier à
+    // 12:00:15 : aucune minute pleine dans cette fenêtre.
     await vi.advanceTimersByTimeAsync(3 * 5000)
     await flushPromises()
     expect(w.findAll('[data-system-history-tick]').length).toBe(0)
-    // 28 sondages de plus : environ 2 min 25 couvertes, donc deux minutes
-    // pleines et deux marques.
+    // 28 sondages de plus mènent à 12:02:35 : 12:01:00 et 12:02:00 tombent
+    // dans la fenêtre, 12:00:00 est avant son début.
     await vi.advanceTimersByTimeAsync(28 * 5000)
     await flushPromises()
     expect(w.findAll('[data-system-history-tick]').length).toBe(2)
