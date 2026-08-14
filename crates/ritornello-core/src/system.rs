@@ -166,9 +166,14 @@ pub fn parse_alarm(raw: &str) -> Option<bool> {
 /// guest_nice). Returns `(total, idle)` jiffy counters, cumulative since
 /// boot.
 ///
-/// `total` sums **every** field on the line, not just the ten named above:
+/// `total` sums **every** field on the line, not just the ten named above —
 /// a kernel that adds a column keeps being counted correctly rather than
-/// silently undercounted.
+/// silently undercounted — then subtracts `guest` and `guest_nice` (fields 8
+/// and 9, absent on kernels old enough not to report them, treated as 0
+/// there): the kernel already folds guest time into `user` and guest_nice
+/// into `nice`, so summing every column without correcting for that would
+/// double-count guest time and under-report utilisation on a virtualised
+/// host.
 ///
 /// `idle` is `idle + iowait`, not `idle` alone: `iowait` is time spent
 /// waiting on a disk, not doing work, and `top` treats it the same way.
@@ -190,9 +195,10 @@ pub fn parse_cpu_jiffies(raw: &str) -> Option<(u64, u64)> {
     if champs.len() < 4 {
         return None;
     }
-    let total = champs.iter().sum();
+    let total: u64 = champs.iter().sum();
+    let invite = champs.get(8).copied().unwrap_or(0) + champs.get(9).copied().unwrap_or(0);
     let idle = champs[3] + champs.get(4).copied().unwrap_or(0);
-    Some((total, idle))
+    Some((total - invite, idle))
 }
 
 /// Reads a pseudo-file, `None` on any error. Absence is the normal case for
@@ -521,6 +527,18 @@ mod tests {
         // Un noyau futur qui ajoute une colonne : la somme doit la compter.
         let raw = "cpu  100 200 300 400 500 0 0 0 0 0 999\n";
         assert_eq!(parse_cpu_jiffies(raw), Some((100 + 200 + 300 + 400 + 500 + 999, 400 + 500)));
+    }
+
+    #[test]
+    fn jiffies_cpu_soustrait_le_temps_invite_deja_compte_dans_user_et_nice() {
+        // Le noyau compte déjà le temps invité dans `user` (ici 1000) et le
+        // temps invité "nice" dans `nice` (ici 500) : les additionner aussi
+        // via `guest`/`guest_nice` (200 et 100) compterait ce temps deux
+        // fois. Somme brute des dix champs : 1000+500+300+400+500+0+0+0+200+
+        // 100 = 3000, moins les 300 de guest+guest_nice = 2700. idle reste
+        // idle + iowait : 400 + 500 = 900.
+        let raw = "cpu  1000 500 300 400 500 0 0 0 200 100\n";
+        assert_eq!(parse_cpu_jiffies(raw), Some((2700, 900)));
     }
 
     #[test]

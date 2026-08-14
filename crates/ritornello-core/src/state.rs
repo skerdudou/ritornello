@@ -188,8 +188,11 @@ mod tests {
     fn settings_roundtrip_et_bloc_partiel() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
+        // 900, not the default 800: the roundtrip assertion below must be
+        // able to tell "the written value survived" from "the default was
+        // applied regardless of what was written".
         let st = PersistedState {
-            settings: Settings { volume_repeat_initial_ms: 800, volume_repeat_interval_ms: 250, start_in_standby: true },
+            settings: Settings { volume_repeat_initial_ms: 900, volume_repeat_interval_ms: 250, start_in_standby: true },
             ..Default::default()
         };
         save(&path, &st).unwrap();
