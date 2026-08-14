@@ -333,6 +333,32 @@ async fn main() -> Result<()> {
             system: Arc::new(system::SystemInfo {
                 can_power_off,
                 can_reboot,
+                // Le crochet de relance tue mpv **avant** de sortir. Sans
+                // cela, mpv survivait au cœur et continuait de jouer : il est
+                // lancé en `kill_on_drop(true)`, mais `std::process::exit` ne
+                // déroule pas la pile et n'exécute donc aucun `Drop` — la
+                // garantie annoncée par `kill_on_drop` ne valait rien sur ce
+                // chemin.
+                //
+                // Le service ne le montrait pas : quand le processus principal
+                // d'une unité sort, systemd tue le reste du groupe de contrôle
+                // avant de relancer. C'est en développement, sans superviseur,
+                // que l'orphelin restait — à jouer, et à tenir le périphérique
+                // audio que le cœur relancé voulait reprendre.
+                //
+                // La mort de mpv fait aussi sortir la boucle principale (voir
+                // `mpv_child.wait()` plus bas) : les deux chemins courent,
+                // mais ils mènent au même endroit, et c'est l'`exit(0)`
+                // ci-dessous qui gagne en pratique. Le détail du signal et sa
+                // justification vivent dans `system::terminate_process`, où un
+                // test les épingle sur un vrai processus.
+                restart: {
+                    let pid = mpv_child.id();
+                    Arc::new(move || {
+                        system::terminate_process(pid);
+                        std::process::exit(0)
+                    })
+                },
                 ..Default::default()
             }),
         });

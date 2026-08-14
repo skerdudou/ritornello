@@ -211,10 +211,17 @@ when it refuses, carrying **logind's own message** whenever it wrote one —
 that sentence names the missing polkit rule, which a silent `202` would
 hide — or `systemctl a échoué (code N)` when stderr was empty; `500` when
 `systemctl` could not be started at all.
-`restart-service` answers `202` and exits the process 300 ms later; systemd
-restarts it because the unit says `Restart=always`. It needs no privilege,
-which is why there is no `can_restart_service` field. Outside systemd, that
-action stops the process for good.
+`restart-service` answers `202`, sends `SIGTERM` to mpv, and exits the process
+300 ms later; systemd restarts it because the unit says `Restart=always`. It
+needs no privilege, which is why there is no `can_restart_service` field.
+Outside systemd, that action stops the process for good.
+
+Killing mpv explicitly is not redundant: it is spawned with
+`kill_on_drop(true)`, but `std::process::exit` does not unwind and so runs no
+`Drop`. Without the signal mpv outlived the core and kept playing, holding the
+audio device the restarted core wants back. The service never showed it —
+systemd kills the unit's remaining cgroup processes before restarting — so the
+symptom only appeared in a development run, where nothing supervises.
 
 The page polls `GET /api/system` while it is open and visible, rather than
 receiving a stream: unlike the player state, which the core produces

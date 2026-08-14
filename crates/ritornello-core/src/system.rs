@@ -65,6 +65,28 @@ pub struct Metrics {
 /// really exited would kill the test binary.
 pub type RestartHook = Arc<dyn Fn() + Send + Sync>;
 
+/// Sends `SIGTERM` to `pid`, if there is one. No-op on `None`.
+///
+/// Exists as a named function so the service restart's cleanup can be tested
+/// on a real process. The bug it answers was a guarantee nobody had checked:
+/// mpv is spawned with `kill_on_drop(true)`, but the restart hook ends in
+/// `std::process::exit`, which does not unwind and therefore runs no `Drop` —
+/// so mpv outlived the core and kept playing, holding the audio device the
+/// restarted core wanted back. Under systemd nothing showed, the unit's
+/// remaining cgroup processes being killed before the restart; in a
+/// development run, with no supervisor, the orphan stayed.
+///
+/// `SIGTERM` rather than `SIGKILL`: mpv closes its stream and its audio
+/// device on the way out.
+pub fn terminate_process(pid: Option<u32>) {
+    let Some(pid) = pid.and_then(|p| libc::pid_t::try_from(p).ok()) else {
+        return;
+    };
+    // SAFETY: `kill` only reads the pid we hand it and shares no memory with
+    // us. A pid that is already gone yields `ESRCH`, which changes nothing.
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+}
+
 /// Process-lifetime facts the System tab's endpoints need.
 #[derive(Clone)]
 pub struct SystemInfo {
@@ -718,5 +740,34 @@ mod tests {
         // appelé par une tâche détachée, après le délai.
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
         assert!(declenche.load(Ordering::SeqCst), "le crochet de redémarrage doit être appelé");
+    }
+
+    #[tokio::test]
+    async fn terminate_process_tue_vraiment_le_processus_vise() {
+        // Régression constatée à l'usage : la relance du service laissait mpv
+        // vivant, à jouer, parce que `std::process::exit` n'exécute aucun
+        // `Drop` et donc jamais le `kill_on_drop(true)` de son lancement. Le
+        // test porte sur un vrai processus : une garantie de nettoyage qu'on
+        // ne vérifie pas est exactement ce qui a produit ce défaut.
+        let mut enfant = tokio::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("/bin/sleep doit exister");
+        terminate_process(enfant.id());
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), enfant.wait())
+            .await
+            .expect("le processus doit mourir bien avant ce délai")
+            .expect("attente du processus");
+        // Terminé par un signal, donc pas une sortie réussie : c'est la preuve
+        // que le signal est bien parti, et pas que `sleep 30` a fini tout seul.
+        assert!(!status.success(), "le processus doit être tué par le signal");
+    }
+
+    #[tokio::test]
+    async fn terminate_process_sans_pid_ne_fait_rien() {
+        // Le cas d'un enfant déjà moissonné (`Child::id()` rend alors `None`) :
+        // il ne doit pas paniquer, et surtout pas viser un pid par défaut — un
+        // `unwrap_or(0)` enverrait le signal à tout le groupe de processus.
+        terminate_process(None);
     }
 }
