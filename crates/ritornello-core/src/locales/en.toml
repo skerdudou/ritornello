@@ -1,5 +1,5 @@
 standby = "STANDBY"
-config_title = "configuration"
+config_title = "Configuration"
 plugins_title = "Plugins"
 active_source_label = "Active source"
 col_plugin = "Plugin"

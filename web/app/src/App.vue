@@ -29,11 +29,16 @@ onMounted(async () => {
         <RouterLink to="/" class="font-semibold">Ritornello</RouterLink>
         <RouterLink to="/config" class="text-sm text-muted-foreground">{{ t('config_title') }}</RouterLink>
         <RouterLink to="/system" class="text-sm text-muted-foreground">{{ t('system_title') }}</RouterLink>
+        <!-- `first-letter:uppercase` en CSS, pas en i18n : ces noms viennent
+             de plugins.toml (y compris des plugins tiers), aucun catalogue
+             ne pourrait les couvrir, et ajouter un champ de libellé au
+             protocole des plugins serait disproportionné pour une seule
+             capitale. -->
         <RouterLink
           v-for="name in admins"
           :key="name"
           :to="`/plugins/${name}/`"
-          class="text-sm text-muted-foreground"
+          class="text-sm text-muted-foreground first-letter:uppercase"
         >
           {{ name }}
         </RouterLink>
