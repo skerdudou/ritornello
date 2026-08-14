@@ -150,7 +150,8 @@ set of keys stays stable:
   "under_voltage": false, "uptime_s": 84213, "service_uptime_s": 3600,
   "hostname": "ritornello", "ip": "192.168.1.20",
   "os": "Debian GNU/Linux 12 (bookworm)", "kernel": "6.6.51+rpt-rpi-v7",
-  "version": "0.1.0", "can_power_off": true, "can_reboot": true
+  "version": "0.1.0", "can_power_off": true, "can_reboot": true,
+  "cpu_total_jiffies": 9880976, "cpu_idle_jiffies": 9877777
 }
 ```
 
@@ -159,10 +160,17 @@ Sources: `/sys/class/thermal/thermal_zone0/temp`,
 (`MemAvailable`, not `MemFree`), `statvfs("/")` (`f_bavail`, so the blocks
 reserved for root are not counted as free), the `rpi_volt` hwmon
 `in0_lcrit_alarm`, `/proc/uptime`, `/proc/sys/kernel/{hostname,osrelease}`,
-`/etc/os-release`. The IP address is the local end of a UDP socket
-*connected* to a routable address: no packet is sent and no internet access
-is needed — the kernel is merely asked which interface faces the default
-route.
+`/etc/os-release`, `/proc/stat`'s aggregate `cpu ` line. The IP address is
+the local end of a UDP socket *connected* to a routable address: no packet
+is sent and no internet access is needed — the kernel is merely asked
+which interface faces the default route.
+
+`cpu_total_jiffies` and `cpu_idle_jiffies` are cumulative counters since
+boot, not a percentage: a percentage is a delta, so the page differences
+its own successive polls rather than the core remembering a previous
+reading — shared state that two browser tabs polling out of phase would
+corrupt. `cpu_idle_jiffies` is `idle + iowait`, because `iowait` is time
+spent waiting on a disk, not doing work, the same way `top` treats it.
 
 `can_power_off` and `can_reboot` answer logind's `CanPowerOff`/`CanReboot`,
 asked **once at startup** and cached: the page polls, and spawning `busctl`

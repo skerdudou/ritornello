@@ -48,6 +48,16 @@ pub struct Metrics {
     pub version: String,
     pub can_power_off: bool,
     pub can_reboot: bool,
+    /// Cumulative CPU jiffies since boot: `total` includes every field of
+    /// `/proc/stat`'s aggregate line, `idle` is `idle + iowait`. A
+    /// percentage cannot be read, only computed from two readings taken
+    /// apart in time — the core exposes the raw counters rather than
+    /// differencing them itself, because that would need shared state to
+    /// remember the previous reading, and two browser tabs polling out of
+    /// phase would corrupt each other's delta. The page differences its own
+    /// successive polls instead.
+    pub cpu_total_jiffies: Option<u64>,
+    pub cpu_idle_jiffies: Option<u64>,
 }
 
 /// Called to restart the service. A field rather than a direct
@@ -151,6 +161,40 @@ pub fn parse_alarm(raw: &str) -> Option<bool> {
     }
 }
 
+/// `/proc/stat`'s first line: "cpu  123456 789 34567 9876543 1234 0 567 0 0
+/// 0" (user, nice, system, idle, iowait, irq, softirq, steal, guest,
+/// guest_nice). Returns `(total, idle)` jiffy counters, cumulative since
+/// boot.
+///
+/// `total` sums **every** field on the line, not just the ten named above:
+/// a kernel that adds a column keeps being counted correctly rather than
+/// silently undercounted.
+///
+/// `idle` is `idle + iowait`, not `idle` alone: `iowait` is time spent
+/// waiting on a disk, not doing work, and `top` treats it the same way.
+/// Counting it as busy would show a disk-bound appliance as CPU-saturated.
+///
+/// Only the aggregate line is read, matched on `"cpu "` with the trailing
+/// space the kernel writes (two spaces before the first number): `"cpu0"`,
+/// `"cpu1"`, etc. do not match that prefix and are skipped. `None` when
+/// that line is missing, holds a non-numeric field, or has fewer than four
+/// fields — not enough to know `idle` and `iowait`.
+pub fn parse_cpu_jiffies(raw: &str) -> Option<(u64, u64)> {
+    let ligne = raw.lines().find(|l| l.starts_with("cpu "))?;
+    let champs: Vec<u64> = ligne
+        .split_whitespace()
+        .skip(1)
+        .map(|v| v.parse::<u64>())
+        .collect::<Result<_, _>>()
+        .ok()?;
+    if champs.len() < 4 {
+        return None;
+    }
+    let total = champs.iter().sum();
+    let idle = champs[3] + champs.get(4).copied().unwrap_or(0);
+    Some((total, idle))
+}
+
 /// Reads a pseudo-file, `None` on any error. Absence is the normal case for
 /// most of these paths, not an incident worth a log line.
 fn lire(chemin: &str) -> Option<String> {
@@ -223,6 +267,10 @@ fn adresse_ip() -> Option<String> {
 
 /// Reads everything, once, for one HTTP response.
 pub fn collect(info: &SystemInfo) -> Metrics {
+    // A single read of /proc/stat feeds both counters below: two separate
+    // reads could straddle a tick and skew the delta the page computes
+    // between polls.
+    let cpu_jiffies = lire("/proc/stat").as_deref().and_then(parse_cpu_jiffies);
     Metrics {
         temperature_c: lire("/sys/class/thermal/thermal_zone0/temp")
             .as_deref()
@@ -244,6 +292,8 @@ pub fn collect(info: &SystemInfo) -> Metrics {
         version: env!("CARGO_PKG_VERSION").to_string(),
         can_power_off: info.can_power_off,
         can_reboot: info.can_reboot,
+        cpu_total_jiffies: cpu_jiffies.map(|(total, _)| total),
+        cpu_idle_jiffies: cpu_jiffies.map(|(_, idle)| idle),
     }
 }
 
@@ -457,6 +507,32 @@ mod tests {
     }
 
     #[test]
+    fn jiffies_cpu_ligne_agregee_et_coeurs_ignores() {
+        let raw = "cpu  123456 789 34567 9876543 1234 0 567 0 0 0\ncpu0 61728 394 17283 4938271 617 0 283 0 0 0\ncpu1 61728 395 17284 4938272 617 0 284 0 0 0\n";
+        // idle + iowait : 9876543 + 1234.
+        assert_eq!(
+            parse_cpu_jiffies(raw),
+            Some((123456 + 789 + 34567 + 9876543 + 1234 + 567, 9876543 + 1234))
+        );
+    }
+
+    #[test]
+    fn jiffies_cpu_colonnes_supplementaires_incluses_dans_le_total() {
+        // Un noyau futur qui ajoute une colonne : la somme doit la compter.
+        let raw = "cpu  100 200 300 400 500 0 0 0 0 0 999\n";
+        assert_eq!(parse_cpu_jiffies(raw), Some((100 + 200 + 300 + 400 + 500 + 999, 400 + 500)));
+    }
+
+    #[test]
+    fn jiffies_cpu_ligne_absente_ou_malformee() {
+        assert_eq!(parse_cpu_jiffies(""), None);
+        assert_eq!(parse_cpu_jiffies("cpu0 123 456 789 0\n"), None);
+        assert_eq!(parse_cpu_jiffies("cpu  123 bavard 789 0\n"), None);
+        // Moins de quatre champs : pas assez pour idle + iowait.
+        assert_eq!(parse_cpu_jiffies("cpu  123 456\n"), None);
+    }
+
+    #[test]
     fn collect_remplit_ce_que_la_machine_expose() {
         // Test de fumée : la suite tourne sous Linux, donc /proc existe et
         // ces trois mesures sont toujours lisibles. Les champs propres au
@@ -470,6 +546,8 @@ mod tests {
         assert!(m.kernel.is_some());
         assert_eq!(m.version, env!("CARGO_PKG_VERSION"));
         assert!(!m.can_power_off, "capacités à false par défaut");
+        assert!(m.cpu_total_jiffies.is_some(), "/proc/stat lisible sous Linux");
+        assert!(m.cpu_idle_jiffies.is_some());
     }
 
     use crate::status::{router, AppState};
@@ -500,7 +578,7 @@ mod tests {
         for cle in [
             "temperature_c", "cpu_mhz", "load", "cpus", "memory", "disk", "under_voltage",
             "uptime_s", "service_uptime_s", "hostname", "ip", "os", "kernel", "version",
-            "can_power_off", "can_reboot",
+            "can_power_off", "can_reboot", "cpu_total_jiffies", "cpu_idle_jiffies",
         ] {
             assert!(v.get(cle).is_some(), "clé {cle} absente");
         }
