@@ -175,6 +175,35 @@ describe('SystemView', () => {
     w.unmount()
   })
 
+  it('espace les points selon le temps réel quand la période change en cours de route', async () => {
+    // Le comportement demandé : après un passage de 5 s à 1 s, les
+    // échantillons anciens restent largement espacés et les récents se
+    // resserrent. Un placement par rang les aurait rendus tous égaux, faisant
+    // passer 5 s d'histoire pour 1 s. Ce test couvre le **câblage** (les deux
+    // tracés, le trait de survol et le popin partagent `abscissesGraphe`) ;
+    // le calcul lui-même est testé dans `sparkline.test.ts`.
+    const jiffies = prochainsJiffies()
+    stub(() => payload(jiffies()))
+    const w = await monter()
+    await vi.advanceTimersByTimeAsync(4 * 5000)
+    await flushPromises()
+    await w.findComponent(Select).vm.$emit('update:modelValue', '1')
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(4 * 1000)
+    await flushPromises()
+
+    const d = w.get('[data-system-history] path').attributes('d')!
+    const xs = [...d.matchAll(/[ML](-?\d+\.\d+),/g)].map((m) => Number(m[1]))
+    // Assez d'échantillons de part et d'autre du changement pour que la
+    // comparaison ait un sens.
+    expect(xs.length).toBeGreaterThanOrEqual(5)
+    const ecarts = xs.slice(1).map((x, i) => x - xs[i])
+    // Rapport théorique 5 (5 s contre 1 s) ; on exige 3 pour laisser passer le
+    // temps réel qui s'écoule aussi sous `shouldAdvanceTime`.
+    expect(ecarts[0]).toBeGreaterThan(ecarts[ecarts.length - 1] * 3)
+    w.unmount()
+  })
+
   it('arrête de sonder au démontage', async () => {
     const f = stub(payload())
     const w = await monter()

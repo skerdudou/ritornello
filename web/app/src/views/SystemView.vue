@@ -7,7 +7,7 @@ import {
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
 import type { SystemPayload, SystemUsage } from '../types'
-import { cheminSparkline } from './sparkline'
+import { abscisses, cheminSparkline } from './sparkline'
 
 const { t } = useCatalog()
 const etat = ref<SystemPayload | null>(null)
@@ -295,11 +295,19 @@ const tension = computed(() => {
   return etat.value.under_voltage ? t.value('system_voltage_low') : t.value('system_voltage_ok')
 })
 const dernier = computed(() => historique.value.at(-1) ?? null)
+/**
+ * Abscisses partagées par tout ce qui se place sur le graphe : les deux
+ * tracés, le trait de survol et le calage du popin. Une seule source, pour
+ * qu'aucun d'eux ne puisse dériver des autres.
+ */
+const abscissesGraphe = computed(() =>
+  abscisses(historique.value.map((h) => h.t), LARGEUR),
+)
 const cheminCpu = computed(() =>
-  cheminSparkline(historique.value.map((h) => h.cpu), LARGEUR, HAUTEUR),
+  cheminSparkline(historique.value.map((h) => h.cpu), abscissesGraphe.value, HAUTEUR),
 )
 const cheminRam = computed(() =>
-  cheminSparkline(historique.value.map((h) => h.ram), LARGEUR, HAUTEUR),
+  cheminSparkline(historique.value.map((h) => h.ram), abscissesGraphe.value, HAUTEUR),
 )
 
 /** Index de la colonne survolée dans `historique`, `null` si le pointeur
@@ -314,17 +322,34 @@ const survolIndex = ref<number | null>(null)
 const largeurGraphe = ref(0)
 
 /**
- * Traduit la position du pointeur en index d'échantillon : même mapping que
- * `cheminSparkline` (pas = `LARGEUR / (n - 1)`, inversé ici en repartant de
- * la fraction horizontale du rectangle réel de l'élément), pour que le
- * popin ne dérive jamais du tracé qu'il commente.
+ * Traduit la position du pointeur en index d'échantillon : l'échantillon dont
+ * l'abscisse est **la plus proche** du pointeur.
+ *
+ * Le calcul ne peut plus être un simple arrondi de rang (`frac × (n - 1)`) :
+ * les points ne sont plus équidistants depuis qu'ils se placent à leur
+ * horodatage, donc un rang proportionnel ne désigne plus la colonne qu'on voit
+ * sous le curseur. La recherche part des mêmes abscisses que le tracé, ce qui
+ * garantit par construction que le popin ne dérive pas de la courbe qu'il
+ * commente. Boucle linéaire sur 60 points au plus, à chaque `pointermove` :
+ * hors de portée de tout budget.
  */
 function indexSurvol(event: PointerEvent): number {
   const rect = (event.currentTarget as Element).getBoundingClientRect()
   largeurGraphe.value = rect.width
-  const n = historique.value.length
   const frac = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0
-  return Math.min(n - 1, Math.max(0, Math.round(frac * (n - 1))))
+  const cible = Math.min(1, Math.max(0, frac)) * LARGEUR
+  const xs = abscissesGraphe.value
+  let plusProche = 0
+  // `<=` et non `<` : à distance égale — pointeur exactement à cheval entre
+  // deux colonnes — c'est la colonne de droite qui gagne. Ce départage n'est
+  // pas un détail d'implémentation mais le comportement qu'épinglait déjà le
+  // test de l'arrondi, `Math.round` arrondissant les demis vers le haut. Le
+  // changer silencieusement en passant du rang à l'abscisse aurait été une
+  // régression invisible à l'œil.
+  for (let i = 1; i < xs.length; i += 1) {
+    if (Math.abs(xs[i] - cible) <= Math.abs(xs[plusProche] - cible)) plusProche = i
+  }
+  return plusProche
 }
 
 /**
@@ -353,11 +378,13 @@ function finSurvol() {
   survolIndex.value = null
 }
 
-/** Abscisse du trait de survol, en unités de `viewBox`. */
+/** Abscisse du trait de survol, en unités de `viewBox` : celle de
+ *  l'échantillon pointé, lue dans `abscissesGraphe` et non recalculée depuis
+ *  son rang — c'est ce qui le garde exactement sur la courbe. */
 const xLigneSurvol = computed(() => {
-  const n = historique.value.length
-  if (survolIndex.value === null || n < 2) return null
-  return survolIndex.value * (LARGEUR / (n - 1))
+  const i = survolIndex.value
+  if (i === null || historique.value.length < 2) return null
+  return abscissesGraphe.value[i] ?? null
 })
 
 /** Échantillon pointé, pour les deux valeurs affichées dans le popin. */
@@ -396,14 +423,19 @@ const stylePopin = computed(() => {
   const n = historique.value.length
   const i = survolIndex.value
   if (i === null || n < 2) return null
+  // Fraction lue dans les abscisses partagées, et non `i / (n - 1)` : les
+  // colonnes ne sont plus équidistantes, et un popin calé sur le rang se
+  // décalerait de la colonne qu'il commente dès que la période de sondage
+  // change en cours de route.
+  const fraction = (abscissesGraphe.value[i] ?? 0) / LARGEUR
   const largeur = largeurGraphe.value
   if (largeur <= 0) {
     // Largeur pas encore mesurée : repli non borné plutôt qu'une division
     // par zéro — un cas qui ne devrait pas survenir en pratique, l'événement
     // pointeur qui produit `i` ayant déjà mesuré cette largeur au passage.
-    return { left: `${(i / (n - 1)) * 100}%`, transform: 'translateX(-50%)' }
+    return { left: `${fraction * 100}%`, transform: 'translateX(-50%)' }
   }
-  const centre = (i / (n - 1)) * largeur
+  const centre = fraction * largeur
   const bordeSup = Math.max(largeur - DEMI_LARGEUR_POPIN_PX, DEMI_LARGEUR_POPIN_PX)
   const gauche = Math.min(Math.max(centre, DEMI_LARGEUR_POPIN_PX), bordeSup)
   return { left: `${gauche}px`, transform: 'translateX(-50%)' }
