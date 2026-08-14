@@ -18,7 +18,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: false }
+        Self { volume_repeat_initial_ms: 800, volume_repeat_interval_ms: 200, start_in_standby: false }
     }
 }
 
@@ -162,8 +162,8 @@ mod tests {
     #[test]
     fn settings_par_defaut() {
         let s = Settings::default();
-        assert_eq!(s.volume_repeat_initial_ms, 1000);
-        assert_eq!(s.volume_repeat_interval_ms, 500);
+        assert_eq!(s.volume_repeat_initial_ms, 800);
+        assert_eq!(s.volume_repeat_interval_ms, 200);
         assert!(!s.start_in_standby);
         assert_eq!(PersistedState::default().settings, Settings::default());
     }
@@ -198,6 +198,6 @@ mod tests {
         std::fs::write(&path, r#"{"active_source":"radio","volume":42,"settings":{"start_in_standby":true}}"#).unwrap();
         let st = load(&path);
         assert!(st.settings.start_in_standby);
-        assert_eq!(st.settings.volume_repeat_initial_ms, 1000);
+        assert_eq!(st.settings.volume_repeat_initial_ms, 800);
     }
 }

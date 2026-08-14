@@ -367,7 +367,10 @@ describe('ConfigView — réglages', () => {
 
   it('un /api/settings injoignable laisse les valeurs par défaut', async () => {
     const { w } = await monter({ '/api/settings': undefined })
-    expect((w.find('[data-hold-initial]').element as HTMLInputElement).value).toBe('1000')
+    // Même valeur que le `Default` de `Settings` côté cœur (state.rs) : les
+    // deux replis doivent rester alignés, sinon la page affiche brièvement
+    // autre chose que ce que l'appareil applique.
+    expect((w.find('[data-hold-initial]').element as HTMLInputElement).value).toBe('800')
   })
 })
 

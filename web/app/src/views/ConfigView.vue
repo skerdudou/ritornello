@@ -18,8 +18,8 @@ const device = ref('')
 const lang = ref('')
 const audioIndisponible = ref(false)
 const reglages = ref<SettingsPayload>({
-  volume_repeat_initial_ms: 1000,
-  volume_repeat_interval_ms: 500,
+  volume_repeat_initial_ms: 800,
+  volume_repeat_interval_ms: 200,
   start_in_standby: false,
 })
 // Le Select ne porte que des chaînes : « on »/« standby » traduits à

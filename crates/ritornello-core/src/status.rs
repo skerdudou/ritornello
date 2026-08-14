@@ -1058,8 +1058,8 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["volume_repeat_initial_ms"], 1000);
-        assert_eq!(v["volume_repeat_interval_ms"], 500);
+        assert_eq!(v["volume_repeat_initial_ms"], 800);
+        assert_eq!(v["volume_repeat_interval_ms"], 200);
         assert_eq!(v["start_in_standby"], false);
     }
 
@@ -1114,7 +1114,7 @@ mod tests {
             let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert!(v["error"].is_string());
         }
-        assert_eq!(settings_current.read().await.volume_repeat_initial_ms, 1000);
+        assert_eq!(settings_current.read().await.volume_repeat_initial_ms, 800);
         assert!(settings_rx.try_recv().is_err(), "rien ne doit partir dans le canal");
     }
 
