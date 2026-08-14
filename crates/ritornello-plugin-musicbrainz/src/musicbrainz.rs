@@ -26,13 +26,13 @@ pub fn mb_toc_param(raw: &str) -> Result<String> {
         .split_whitespace()
         .map(|s| s.parse::<u64>())
         .collect::<Result<_, _>>()
-        .context("TOC non numérique")?;
+        .context("non-numeric TOC")?;
     if nums.len() < 3 {
-        bail!("TOC trop courte: {raw:?}");
+        bail!("TOC too short: {raw:?}");
     }
     let ntracks = nums[0] as usize;
     if nums.len() != ntracks + 2 {
-        bail!("TOC incohérente ({} champs pour {} pistes)", nums.len(), ntracks);
+        bail!("inconsistent TOC ({} fields for {} tracks)", nums.len(), ntracks);
     }
     let leadout = nums[nums.len() - 1];
     let offsets: Vec<String> = nums[1..nums.len() - 1].iter().map(u64::to_string).collect();
@@ -92,7 +92,7 @@ pub async fn lookup(toc: &str, ntracks: usize) -> Result<Option<DiscInfo>> {
     let resp = match client.get(&url).send().await {
         Ok(r) => r,
         Err(e) => {
-            tracing::info!("MusicBrainz injoignable: {e}");
+            tracing::info!("MusicBrainz unreachable: {e}");
             return Ok(None);
         }
     };
@@ -102,7 +102,7 @@ pub async fn lookup(toc: &str, ntracks: usize) -> Result<Option<DiscInfo>> {
     let body = match resp.text().await {
         Ok(b) => b,
         Err(e) => {
-            tracing::info!("MusicBrainz: lecture de la réponse interrompue: {e}");
+            tracing::info!("MusicBrainz: response read interrupted: {e}");
             return Ok(None);
         }
     };

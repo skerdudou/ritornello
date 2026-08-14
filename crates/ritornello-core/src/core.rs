@@ -190,7 +190,7 @@ impl<P: Player> Core<P> {
             for name in self.source_order.clone() {
                 if let Some(src) = self.sources.get(&name) {
                     if let Err(e) = src.request(SourceReq::SetLocale(locale.clone())).await {
-                        tracing::warn!("SetLocale vers {name}: {e}");
+                        tracing::warn!("SetLocale to {name}: {e}");
                     }
                 }
             }
@@ -360,9 +360,9 @@ impl<P: Player> Core<P> {
         // où on le consulte — celui d'un affichage douteux à attribuer.
         match self.metadonnees.gagnant() {
             Some(gagnant) if gagnant != plugin => {
-                tracing::debug!("metadonnees affichees: {gagnant} (reponse de {plugin} gardee en reserve)");
+                tracing::debug!("metadata displayed: {gagnant} (response from {plugin} held in reserve)");
             }
-            Some(gagnant) => tracing::debug!("metadonnees affichees: {gagnant}"),
+            Some(gagnant) => tracing::debug!("metadata displayed: {gagnant}"),
             None => {}
         }
         self.publie_etat();
@@ -568,7 +568,7 @@ impl<P: Player> Core<P> {
                 // un morceau à l'arrêt. Au mieux : une Source muette n'empêche
                 // rien.
                 if let Err(e) = self.active().request(SourceReq::Stop).await {
-                    tracing::debug!("notification d'arret a la source: {e}");
+                    tracing::debug!("stop notification to source: {e}");
                 }
             }
             Command::Power => {
@@ -693,7 +693,7 @@ impl<P: Player> Core<P> {
             Event::TrackChanged(n) => {
                 if !self.standby {
                     if let Err(e) = self.active().request(SourceReq::PlayerTrack(n)).await {
-                        tracing::debug!("notification de piste a la source: {e}");
+                        tracing::debug!("track notification to source: {e}");
                     }
                 }
             }
@@ -713,7 +713,7 @@ impl<P: Player> Core<P> {
                 // déjà été prévenue par `Command::Stop`).
                 if !self.standby {
                     if let Err(e) = self.active().request(SourceReq::Stop).await {
-                        tracing::debug!("notification d'arret a la source: {e}");
+                        tracing::debug!("stop notification to source: {e}");
                     }
                 }
             }
@@ -725,7 +725,7 @@ impl<P: Player> Core<P> {
         self.sources
             .get(&self.active_source)
             .cloned()
-            .unwrap_or_else(|| panic!("source active inconnue: {}", self.active_source))
+            .unwrap_or_else(|| panic!("unknown active source: {}", self.active_source))
     }
 
     /// Nom de la source actuellement active (pour la page de statut vivante).
@@ -783,7 +783,7 @@ impl<P: Player> Core<P> {
         for name in self.source_order.clone() {
             if let Some(src) = self.sources.get(&name) {
                 if let Err(e) = src.request(SourceReq::SetLocale(locale.clone())).await {
-                    tracing::warn!("SetLocale vers {name}: {e}");
+                    tracing::warn!("SetLocale to {name}: {e}");
                 }
             }
         }
@@ -813,7 +813,7 @@ impl<P: Player> Core<P> {
             settings: self.settings.clone(),
         };
         if let Err(e) = state::save(&self.state_path, &st) {
-            tracing::warn!("persistance impossible: {e}");
+            tracing::warn!("persistence failed: {e}");
         }
     }
 

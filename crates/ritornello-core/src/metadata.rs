@@ -171,19 +171,19 @@ impl Metadonnees {
         // l'appelant.
         let e = e.cleaned();
         let Some(courante) = &self.identity else {
-            tracing::debug!("enrichissement de {plugin} ignore: plus rien ne joue");
+            tracing::debug!("enrichment from {plugin} ignored: nothing playing anymore");
             return false;
         };
         if &e.identity != courante {
-            tracing::debug!("enrichissement de {plugin} perime, ignore");
+            tracing::debug!("enrichment from {plugin} stale, ignored");
             return false;
         }
         if e.is_empty() {
-            tracing::debug!("enrichissement vide de {plugin}, compte comme non-reponse");
+            tracing::debug!("empty enrichment from {plugin}, counted as no response");
             return false;
         }
         if !self.ordre.iter().any(|n| n == plugin) {
-            tracing::warn!("enrichissement d'un plugin metadata non declare: {plugin}");
+            tracing::warn!("enrichment from an undeclared metadata plugin: {plugin}");
             return false;
         }
         // Rien de nouveau : ne pas le signaler. Un plugin qui rouvre sa

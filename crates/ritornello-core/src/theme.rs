@@ -67,12 +67,17 @@ pub fn from_persisted(theme: Option<&str>, mode: Option<&str>) -> ThemeState {
     // `validate` juge les deux champs d'un bloc : on l'appelle deux fois, en
     // neutralisant l'autre champ avec sa valeur par défaut, pour attribuer
     // l'erreur au bon champ.
-    if let Err(msg) = validate(&etat.theme, DEFAULT_MODE) {
-        tracing::warn!("theme persiste invalide ({msg}), repli sur {DEFAULT_THEME}");
+    // Le log nomme la **valeur rejetée**, pas la phrase de `validate` : celle-ci
+    // est destinée au lecteur d'un 422 et reste en français jusqu'à son passage
+    // par catalogue, alors que les logs sont en anglais — l'interpoler ici
+    // produirait un fragment français au milieu d'une ligne anglaise. La valeur
+    // fautive est de toute façon plus utile dans un journal que sa description.
+    if validate(&etat.theme, DEFAULT_MODE).is_err() {
+        tracing::warn!("invalid persisted theme {:?}, falling back to {DEFAULT_THEME}", etat.theme);
         etat.theme = DEFAULT_THEME.to_string();
     }
-    if let Err(msg) = validate(DEFAULT_THEME, &etat.mode) {
-        tracing::warn!("mode persiste invalide ({msg}), repli sur {DEFAULT_MODE}");
+    if validate(DEFAULT_THEME, &etat.mode).is_err() {
+        tracing::warn!("invalid persisted mode {:?}, falling back to {DEFAULT_MODE}", etat.mode);
         etat.mode = DEFAULT_MODE.to_string();
     }
     etat

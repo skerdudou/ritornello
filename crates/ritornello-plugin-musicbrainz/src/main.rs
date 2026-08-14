@@ -88,7 +88,7 @@ impl MusicBrainzPlugin {
         let Some(titre) = info.tracks.get(disque.piste) else {
             // Index hors bornes : le disque reconnu n'a pas ce nombre de pistes.
             // Mieux vaut se taire que d'annoncer le titre d'une autre piste.
-            tracing::info!("piste {} hors des {} titres connus", disque.piste, info.tracks.len());
+            tracing::info!("track {} beyond the {} known titles", disque.piste, info.tracks.len());
             return;
         };
         self.pret = Some(Enrichment {
@@ -116,7 +116,7 @@ impl MusicBrainzPlugin {
             Ok(p) => p,
             Err(e) => {
                 // TOC douteuse : on n'appelle pas un service tiers pour rien.
-                tracing::info!("TOC inexploitable, aucun appel: {e}");
+                tracing::info!("unusable TOC, no call made: {e}");
                 return;
             }
         };
@@ -129,7 +129,7 @@ impl MusicBrainzPlugin {
             let info = match musicbrainz::lookup(&param, ntracks).await {
                 Ok(info) => info,
                 Err(e) => {
-                    tracing::info!("lookup MusicBrainz: {e}");
+                    tracing::info!("MusicBrainz lookup: {e}");
                     None
                 }
             };

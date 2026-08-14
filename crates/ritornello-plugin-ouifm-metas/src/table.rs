@@ -71,13 +71,13 @@ impl Table {
         match std::fs::read_to_string(path) {
             Ok(texte) => match toml::from_str::<Self>(&texte) {
                 Ok(t) => {
-                    tracing::info!("{} webradio(s) declaree(s) dans {}", t.webradios.len(), path.display());
+                    tracing::info!("{} webradio(s) declared in {}", t.webradios.len(), path.display());
                     webradios.extend(t.webradios);
                 }
-                Err(e) => tracing::warn!("{} invalide ({e}) : table embarquee seule", path.display()),
+                Err(e) => tracing::warn!("{} invalid ({e}): embedded table only", path.display()),
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!("{} illisible ({e}) : table embarquee seule", path.display()),
+            Err(e) => tracing::warn!("{} unreadable ({e}): embedded table only", path.display()),
         }
         webradios.extend(Self::embarquee().webradios);
         Self { webradios }
@@ -87,7 +87,7 @@ impl Table {
     /// compilation du plugin, pas une erreur d'exploitation : d'où le `expect`,
     /// verrouillé par un test.
     pub fn embarquee() -> Self {
-        toml::from_str(EMBARQUEE).expect("table de webradios embarquee valide")
+        toml::from_str(EMBARQUEE).expect("valid embedded webradio table")
     }
 
     /// Webradio correspondant à cette URL de flux, s'il y en a une. Premier

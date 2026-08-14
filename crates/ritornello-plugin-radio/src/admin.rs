@@ -159,7 +159,7 @@ impl AdminPlugin for RadioAdmin {
                 if let Err(e) = crate::state::update(&self.state_path, |s| s.country = choisi) {
                     // Sans conséquence sur la recherche qui vient d'aboutir :
                     // seule la mémoire du choix est perdue.
-                    tracing::warn!("pays non memorise: {e}");
+                    tracing::warn!("country not saved: {e}");
                 }
                 Ok(())
             }

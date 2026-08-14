@@ -227,7 +227,7 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
     }
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)
-        .with_context(|| format!("liaison de {}", socket_path.display()))?;
+        .with_context(|| format!("binding {}", socket_path.display()))?;
     let (stream, _) = listener.accept().await?;
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
@@ -243,7 +243,7 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                 let req: SourceRequest = match serde_json::from_str(&line) {
                     Ok(r) => r,
                     Err(e) => {
-                        tracing::warn!("ligne source invalide ignoree: {e}");
+                        tracing::warn!("invalid source line ignored: {e}");
                         continue;
                     }
                 };
@@ -296,7 +296,7 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                     // soit. Le cas est réel : le plugin cd rend `None` si sa
                     // tâche de veille du lecteur meurt.
                     None => {
-                        tracing::warn!("plus de notifications spontanees (tache interne terminee)");
+                        tracing::warn!("no more spontaneous notifications (internal task ended)");
                         notifications_ouvertes = false;
                     }
                 }
@@ -319,7 +319,7 @@ pub async fn run_display_plugin(mut plugin: impl DisplayPlugin, socket_path: &Pa
     }
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)
-        .with_context(|| format!("liaison de {}", socket_path.display()))?;
+        .with_context(|| format!("binding {}", socket_path.display()))?;
     let (stream, _) = listener.accept().await?;
     let (read, _write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
@@ -327,7 +327,7 @@ pub async fn run_display_plugin(mut plugin: impl DisplayPlugin, socket_path: &Pa
         let view: View = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!("vue invalide ignoree: {e}");
+                tracing::warn!("invalid view ignored: {e}");
                 continue;
             }
         };
@@ -388,7 +388,7 @@ pub async fn run_metadata_plugin(mut plugin: impl MetadataPlugin, socket_path: &
     }
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)
-        .with_context(|| format!("liaison de {}", socket_path.display()))?;
+        .with_context(|| format!("binding {}", socket_path.display()))?;
     let (stream, _) = listener.accept().await?;
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
@@ -399,7 +399,7 @@ pub async fn run_metadata_plugin(mut plugin: impl MetadataPlugin, socket_path: &
                 let Some(line) = line? else { return Ok(()) };
                 match serde_json::from_str::<NowPlaying>(&line) {
                     Ok(np) => plugin.now_playing(np).await,
-                    Err(e) => tracing::warn!("ligne metadata invalide ignoree: {e}"),
+                    Err(e) => tracing::warn!("invalid metadata line ignored: {e}"),
                 }
             }
             enrichment = plugin.next_enrichment() => {
@@ -431,7 +431,7 @@ pub async fn run_admin_plugin(mut plugin: impl AdminPlugin, socket_path: &Path) 
     }
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)
-        .with_context(|| format!("liaison de {}", socket_path.display()))?;
+        .with_context(|| format!("binding {}", socket_path.display()))?;
     let (stream, _) = listener.accept().await?;
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
@@ -439,7 +439,7 @@ pub async fn run_admin_plugin(mut plugin: impl AdminPlugin, socket_path: &Path) 
         let req: AdminRequest = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("requete admin invalide ignoree: {e}");
+                tracing::warn!("invalid admin request ignored: {e}");
                 continue;
             }
         };

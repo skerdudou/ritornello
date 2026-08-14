@@ -73,7 +73,7 @@ impl RadioSource {
             // /var/lib en lecture seule perdrait la présélection à chaque
             // redémarrage sans que rien ne le dise.
             if let Err(e) = state::update(&self.state_path, |s| s.preset = n) {
-                tracing::warn!("persistance de la preselection: {e}");
+                tracing::warn!("failed to persist preset: {e}");
             }
             SourceOutcome::new(SourceAction::Play { uri: st.url.clone() })
                 .with_view(View {
@@ -189,14 +189,14 @@ async fn main() -> Result<()> {
     let admin_socket = ritornello_plugin_sdk::admin_socket_path();
     if admin_socket.is_none() {
         tracing::warn!(
-            "--admin-socket absent : la page de gestion des stations ne sera pas servie, seule la moitie Source tourne (il manque 'admin = true' dans plugins.toml)"
+            "--admin-socket absent: the station management page will not be served, only the Source half runs (missing 'admin = true' in plugins.toml)"
         );
     }
     let stations_path = PathBuf::from(env_or("RITORNELLO_RADIO_STATIONS", "/etc/ritornello/stations.toml"));
     let state_path = PathBuf::from(env_or("RITORNELLO_RADIO_STATE", "/var/lib/ritornello/plugin-radio.json"));
 
     let stations = Stations::load(&stations_path).unwrap_or_else(|e| {
-        tracing::warn!("stations.toml invalide ou absent ({e}) : demarrage sans stations");
+        tracing::warn!("stations.toml invalid or missing ({e}): starting without stations");
         Stations::default()
     });
     let preset = state::load(&state_path).preset;
@@ -226,7 +226,7 @@ async fn main() -> Result<()> {
     // `RITORNELLO_RADIO_DIRECTORY`. Journalisé au démarrage : sur un Pi sans
     // écran, savoir quels serveurs seront interrogés évite de deviner.
     let directory = directory::HttpDirectory::from_env();
-    tracing::info!("annuaire radio, serveurs candidats: {}", directory.bases.join(", "));
+    tracing::info!("radio directory, candidate servers: {}", directory.bases.join(", "));
     // La moitié admin n'est construite que si `--admin-socket` a été fourni
     // (mode dégradé sinon, voir plus haut).
     let admin = admin_socket.map(|admin_socket| {
@@ -261,11 +261,11 @@ async fn main() -> Result<()> {
         Some((admin, admin_socket)) => {
             let admin_handle = tokio::spawn(async move { run_admin_plugin(admin, &admin_socket).await });
             let (source_res, admin_res) = tokio::join!(source_handle, admin_handle);
-            log_half("moitie source", source_res);
-            log_half("moitie admin", admin_res);
+            log_half("source half", source_res);
+            log_half("admin half", admin_res);
         }
         None => {
-            log_half("moitie source", source_handle.await);
+            log_half("source half", source_handle.await);
         }
     }
 
@@ -276,9 +276,9 @@ async fn main() -> Result<()> {
 /// panique) sans jamais faire remonter l'échec d'une moitié sur l'autre.
 fn log_half(label: &str, res: std::result::Result<Result<()>, tokio::task::JoinError>) {
     match res {
-        Ok(Ok(())) => tracing::warn!("plugin radio ({label}) termine normalement"),
-        Ok(Err(e)) => tracing::warn!("plugin radio ({label}) erreur: {e}"),
-        Err(join_err) => tracing::error!("plugin radio ({label}) a panique: {join_err}"),
+        Ok(Ok(())) => tracing::warn!("radio plugin ({label}) exited normally"),
+        Ok(Err(e)) => tracing::warn!("radio plugin ({label}) error: {e}"),
+        Err(join_err) => tracing::error!("radio plugin ({label}) panicked: {join_err}"),
     }
 }
 

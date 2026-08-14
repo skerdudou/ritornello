@@ -106,7 +106,7 @@ impl Bindings {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!(
-                    "bindings {} illisibles ({e}) : demarrage sans binding, utiliser la page d'admin",
+                    "bindings {} unreadable ({e}): starting with no binding, use the admin page",
                     path.display()
                 );
                 return Bindings::default();
@@ -116,7 +116,7 @@ impl Bindings {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(
-                    "bindings {} invalides ({e}) : demarrage sans binding, utiliser la page d'admin",
+                    "bindings {} invalid ({e}): starting with no binding, use the admin page",
                     path.display()
                 );
                 Bindings::default()

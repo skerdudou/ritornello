@@ -344,7 +344,7 @@ pub async fn search_with_fallback(
     query: &str,
     country: Option<&str>,
 ) -> Result<Vec<DirectoryStation>, String> {
-    avec_repli(bases, "recherche", |base, delai| async move {
+    avec_repli(bases, "search", |base, delai| async move {
         search(&base, query, country, delai).await
     })
     .await
@@ -354,7 +354,7 @@ pub async fn search_with_fallback(
 /// requête part sur la même socket d'admin, avec le même plafond de 5 s du côté
 /// du cœur.
 pub async fn countries_with_fallback(bases: &[String]) -> Result<Vec<DirectoryCountry>, String> {
-    avec_repli(bases, "pays", |base, delai| async move { countries(&base, delai).await }).await
+    avec_repli(bases, "countries", |base, delai| async move { countries(&base, delai).await }).await
 }
 
 /// Essaie les serveurs **dans l'ordre**, sous budget, et renvoie la première
@@ -376,8 +376,8 @@ where
         let restant = SEARCH_BUDGET.saturating_sub(debut.elapsed());
         let Some(delai) = attempt_timeout(restant) else {
             tracing::warn!(
-                "budget de {quoi} epuise apres {essais} essai(s), \
-                 {} serveur(s) non essaye(s)",
+                "{quoi} budget exhausted after {essais} attempt(s), \
+                 {} server(s) not tried",
                 bases.len() - essais
             );
             break;
@@ -385,16 +385,16 @@ where
         essais += 1;
         match essai(base.clone(), delai).await {
             Ok(reponse) => {
-                tracing::debug!("annuaire {base}: {quoi} aboutie");
+                tracing::debug!("directory {base}: {quoi} succeeded");
                 return Ok(reponse);
             }
-            Err(e) => tracing::warn!("annuaire {base} en echec ({quoi}): {e}"),
+            Err(e) => tracing::warn!("directory {base} failed ({quoi}): {e}"),
         }
     }
     // Un seul message court, jamais la concaténation des erreurs : le détail
     // est dans le journal, la page d'admin n'a pas la place pour cinq causes.
     tracing::warn!(
-        "aucun serveur d'annuaire n'a repondu pour {quoi} ({essais} essaye(s) en {:?})",
+        "no directory server answered for {quoi} ({essais} tried in {:?})",
         debut.elapsed()
     );
     Err(format!("{NO_SERVER} ({essais} tried)"))

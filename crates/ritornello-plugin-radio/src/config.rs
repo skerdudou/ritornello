@@ -62,7 +62,7 @@ impl std::error::Error for ValidationError {}
 impl Stations {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
-            .with_context(|| format!("lecture de {}", path.display()))?;
+            .with_context(|| format!("reading {}", path.display()))?;
         let s: Stations = toml::from_str(&text)?;
         s.validate()?;
         Ok(s)
@@ -75,7 +75,7 @@ impl Stations {
         // échouait sur une erreur d'E/S brute.
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .with_context(|| format!("creation de {}", parent.display()))?;
+                .with_context(|| format!("creating {}", parent.display()))?;
         }
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, toml::to_string_pretty(self)?)?;

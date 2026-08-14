@@ -136,11 +136,11 @@ impl CdSource {
             let resultat = match lue {
                 Ok(Ok((raw, n))) => (epoch, Some(raw), n),
                 Ok(Err(e)) => {
-                    tracing::info!("TOC illisible: {e}");
+                    tracing::info!("TOC unreadable: {e}");
                     (epoch, None, 0)
                 }
                 Err(e) => {
-                    tracing::warn!("tache TOC interrompue: {e}");
+                    tracing::warn!("TOC task interrupted: {e}");
                     (epoch, None, 0)
                 }
             };

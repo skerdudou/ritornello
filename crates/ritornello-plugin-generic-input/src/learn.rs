@@ -51,7 +51,7 @@ impl LearnState {
         match &mut self.current {
             Some(l) if l.device == device && l.captured.is_none() => {
                 l.captured = Some(code);
-                tracing::info!("apprentissage: {device} -> code {code}");
+                tracing::info!("key learning: {device} -> code {code}");
                 true
             }
             _ => false,

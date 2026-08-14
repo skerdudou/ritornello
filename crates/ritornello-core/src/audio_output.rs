@@ -47,7 +47,7 @@ pub fn parse_device_list(raw: &str) -> Vec<AudioDevice> {
 pub fn list_devices() -> Result<Vec<AudioDevice>> {
     let out = std::process::Command::new("aplay").arg("-L").output()?;
     if !out.status.success() {
-        bail!("aplay -L a echoue: {}", String::from_utf8_lossy(&out.stderr));
+        bail!("aplay -L failed: {}", String::from_utf8_lossy(&out.stderr));
     }
     Ok(parse_device_list(&String::from_utf8_lossy(&out.stdout)))
 }

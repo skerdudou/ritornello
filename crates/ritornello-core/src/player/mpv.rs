@@ -31,7 +31,7 @@ impl MpvIpc {
                 let v = match serde_json::from_str::<Value>(&line) {
                     Ok(v) => v,
                     Err(e) => {
-                        tracing::debug!("ligne mpv non-JSON ignoree: {e}");
+                        tracing::debug!("non-JSON mpv line ignored: {e}");
                         continue;
                     }
                 };
@@ -76,7 +76,7 @@ impl MpvIpc {
                     }
                 }
             }
-            tracing::warn!("socket mpv fermée");
+            tracing::warn!("mpv socket closed");
         });
         ipc
     }
@@ -95,10 +95,10 @@ impl MpvIpc {
         }
         match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
             Ok(Ok(res)) => res,
-            Ok(Err(_)) => bail!("mpv: réponse abandonnée"),
+            Ok(Err(_)) => bail!("mpv: response abandoned"),
             Err(_) => {
                 self.pending.lock().await.remove(&id);
-                bail!("mpv: timeout de commande")
+                bail!("mpv: command timeout")
             }
         }
     }
@@ -173,11 +173,11 @@ fn duree_reglee(brut: Option<&str>, defaut: f64, max: f64, quoi: &str) -> f64 {
     match brut.trim().parse::<f64>() {
         Ok(v) if v.is_finite() && (0.0..=max).contains(&v) => v,
         Ok(v) => {
-            tracing::warn!("{quoi}={v} hors bornes (0..={max}), on garde {defaut}");
+            tracing::warn!("{quoi}={v} out of bounds (0..={max}), keeping {defaut}");
             defaut
         }
         Err(e) => {
-            tracing::warn!("{quoi}={brut:?} illisible ({e}), on garde {defaut}");
+            tracing::warn!("{quoi}={brut:?} unreadable ({e}), keeping {defaut}");
             defaut
         }
     }
@@ -231,7 +231,7 @@ pub async fn start(
         .args(mpv_args(socket, cd_dev, audio_buffer, readahead))
         .kill_on_drop(true)
         .spawn()
-        .context("lancement de mpv")?;
+        .context("starting mpv")?;
 
     let mut stream = None;
     for _ in 0..100 {
@@ -241,7 +241,7 @@ pub async fn start(
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    let stream = stream.context("connexion à la socket mpv (10 s)")?;
+    let stream = stream.context("connecting to mpv socket (10 s)")?;
     let ipc = MpvIpc::from_stream(stream, events);
     for propriete in OBSERVEES {
         ipc.observe(propriete).await?;

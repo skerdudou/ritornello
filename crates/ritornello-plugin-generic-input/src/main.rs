@@ -40,7 +40,7 @@ impl InputPlugin for EvdevInput {
         self.rx
             .recv()
             .await
-            .ok_or_else(|| anyhow::anyhow!("toutes les boucles evdev sont terminees"))
+            .ok_or_else(|| anyhow::anyhow!("all evdev loops have ended"))
     }
 }
 
@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
     let admin_socket = ritornello_plugin_sdk::admin_socket_path();
     if admin_socket.is_none() {
         tracing::warn!(
-            "--admin-socket absent : la page d'administration ne sera pas servie, seule la moitie Input tourne"
+            "--admin-socket absent: the admin page will not be served, only the Input half runs"
         );
     }
     let bindings_path =
@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
     let hub = Hub::new(Bindings::load(&bindings_path), tx);
     let input_root = PathBuf::from(devices::INPUT_DIR);
     let ouverts = hub.open_new_devices(&input_root);
-    tracing::info!("{ouverts} peripherique(s) d'entree ouvert(s)");
+    tracing::info!("{ouverts} input device(s) opened");
 
     // Les deux moitiés sont indépendantes : une panne de la socket admin ne
     // doit pas couper la télécommande, et réciproquement. Chaque moitié tourne
@@ -93,8 +93,8 @@ async fn main() -> Result<()> {
             let admin = GenericInputAdmin { bindings_path, presets_root, input_root, hub, catalog };
             let admin_handle = tokio::spawn(async move { run_admin_plugin(admin, &admin_socket).await });
             let (input_res, admin_res) = tokio::join!(input_handle, admin_handle);
-            log_half("moitie input", input_res);
-            log_half("moitie admin", admin_res);
+            log_half("input half", input_res);
+            log_half("admin half", admin_res);
         }
         None => {
             // Le hub doit rester vivant : il tient l'extrémité d'émission du
@@ -106,7 +106,7 @@ async fn main() -> Result<()> {
             // dégradé mort-né, avec pour seule trace « connexion au plugin
             // input fermee » côté cœur.
             let _hub = hub;
-            log_half("moitie input", input_handle.await);
+            log_half("input half", input_handle.await);
         }
     }
 
@@ -117,9 +117,9 @@ async fn main() -> Result<()> {
 /// panique) sans jamais faire remonter l'échec d'une moitié sur l'autre.
 fn log_half(label: &str, res: std::result::Result<Result<()>, tokio::task::JoinError>) {
     match res {
-        Ok(Ok(())) => tracing::warn!("plugin generic-input ({label}) termine normalement"),
-        Ok(Err(e)) => tracing::warn!("plugin generic-input ({label}) erreur: {e}"),
-        Err(join_err) => tracing::error!("plugin generic-input ({label}) a panique: {join_err}"),
+        Ok(Ok(())) => tracing::warn!("generic-input plugin ({label}) ended normally"),
+        Ok(Err(e)) => tracing::warn!("generic-input plugin ({label}) error: {e}"),
+        Err(join_err) => tracing::error!("generic-input plugin ({label}) panicked: {join_err}"),
     }
 }
 
@@ -150,7 +150,7 @@ mod tests {
         // Émetteur lâché : fin propre, l'erreur nomme la cause.
         drop(tx);
         let e = input.next_command().await.unwrap_err();
-        assert!(e.to_string().contains("boucles evdev"));
+        assert!(e.to_string().contains("evdev loops"));
     }
 
     // Le test `chemins_par_defaut` qui vivait ici ne testait que `env_or`,

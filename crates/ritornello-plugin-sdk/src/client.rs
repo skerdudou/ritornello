@@ -13,8 +13,8 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 async fn connect_with_retry(socket_path: &Path) -> Result<UnixStream> {
-    // La dernière erreur est conservée pour le rapport final : « connexion a
-    // <socket> (10 s) » seul cache la cause, et une erreur permanente (droits
+    // La dernière erreur est conservée pour le rapport final : « connecting to
+    // <socket> (10s) » seul cache la cause, et une erreur permanente (droits
     // refusés sur la socket) était retentée 100 fois puis rapportée comme un
     // simple délai dépassé — diagnostic inutilement difficile au démarrage.
     let mut derniere = None;
@@ -25,8 +25,8 @@ async fn connect_with_retry(socket_path: &Path) -> Result<UnixStream> {
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    Err(anyhow::anyhow!(derniere.expect("au moins un essai")))
-        .with_context(|| format!("connexion a {} (10 s)", socket_path.display()))
+    Err(anyhow::anyhow!(derniere.expect("at least one attempt")))
+        .with_context(|| format!("connecting to {} (10s)", socket_path.display()))
 }
 
 /// Ce qu'une Source rapporte spontanément ou en marge d'une réponse : une vue
@@ -74,7 +74,7 @@ impl SourceClient {
                 let msg = match serde_json::from_str::<SourceMessage>(&line) {
                     Ok(m) => m,
                     Err(e) => {
-                        tracing::warn!("message source invalide ignore: {e}");
+                        tracing::warn!("invalid source message ignored: {e}");
                         continue;
                     }
                 };
@@ -112,10 +112,10 @@ impl SourceClient {
                         // seconde d'appareil figé.
                         if porte_identite {
                             tracing::error!(
-                                "identite de {name} perdue (canal plein) : affichage et metadonnees possiblement perimes jusqu'au prochain changement"
+                                "identity update for {name} lost (channel full): display and metadata possibly stale until next change"
                             );
                         } else {
-                            tracing::warn!("vue de {name} perdue (canal plein)");
+                            tracing::warn!("view for {name} lost (channel full)");
                         }
                     }
                 }
@@ -123,7 +123,7 @@ impl SourceClient {
             // Déconnexion : drainer les requêtes en vol. Dropper chaque Sender
             // fait résoudre le rx.await de request() en Err immédiatement.
             pending.lock().await.clear();
-            tracing::warn!("connexion au plugin source fermee");
+            tracing::warn!("source plugin connection closed");
         });
         Ok(client)
     }
@@ -142,10 +142,10 @@ impl SourceClient {
         }
         match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
             Ok(Ok(action)) => Ok(action),
-            Ok(Err(_)) => bail!("plugin source: reponse abandonnee"),
+            Ok(Err(_)) => bail!("source plugin: response dropped"),
             Err(_) => {
                 self.pending.lock().await.remove(&id);
-                bail!("plugin source: timeout de requete")
+                bail!("source plugin: request timeout")
             }
         }
     }
@@ -192,7 +192,7 @@ impl AdminClient {
                 let resp = match serde_json::from_str::<AdminResponse>(&line) {
                     Ok(r) => r,
                     Err(e) => {
-                        tracing::warn!("reponse admin invalide ignoree: {e}");
+                        tracing::warn!("invalid admin response ignored: {e}");
                         continue;
                     }
                 };
@@ -202,7 +202,7 @@ impl AdminClient {
             }
             // Déconnexion : drainer les requêtes en vol (voir SourceClient).
             pending.lock().await.clear();
-            tracing::warn!("connexion au plugin admin fermee");
+            tracing::warn!("admin plugin connection closed");
         });
         Ok(client)
     }
@@ -221,10 +221,10 @@ impl AdminClient {
         }
         match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
             Ok(Ok(result)) => Ok(result),
-            Ok(Err(_)) => bail!("plugin admin: reponse abandonnee"),
+            Ok(Err(_)) => bail!("admin plugin: response dropped"),
             Err(_) => {
                 self.pending.lock().await.remove(&id);
-                bail!("plugin admin: timeout de requete")
+                bail!("admin plugin: request timeout")
             }
         }
     }
@@ -232,21 +232,21 @@ impl AdminClient {
     pub async fn get_asset(&self, path: &str) -> Result<Option<(String, String)>> {
         match self.request(AdminReq::GetAsset(path.to_string())).await? {
             AdminResult::Asset { mime, body } => Ok(body.map(|b| (mime, b))),
-            autre => anyhow::bail!("reponse inattendue a GetAsset: {autre:?}"),
+            autre => anyhow::bail!("unexpected response to GetAsset: {autre:?}"),
         }
     }
 
     pub async fn get_catalog(&self) -> Result<serde_json::Value> {
         match self.request(AdminReq::GetCatalog).await? {
             AdminResult::Catalog(v) => Ok(v),
-            autre => anyhow::bail!("reponse inattendue a GetCatalog: {autre:?}"),
+            autre => anyhow::bail!("unexpected response to GetCatalog: {autre:?}"),
         }
     }
 
     pub async fn get_data(&self) -> Result<serde_json::Value> {
         match self.request(AdminReq::GetData).await? {
             AdminResult::Data(v) => Ok(v),
-            other => bail!("reponse admin inattendue pour GetData: {other:?}"),
+            other => bail!("unexpected admin response for GetData: {other:?}"),
         }
     }
 
@@ -254,7 +254,7 @@ impl AdminClient {
         match self.request(AdminReq::SetData(data)).await? {
             AdminResult::Set { ok: true, .. } => Ok(Ok(())),
             AdminResult::Set { ok: false, error } => Ok(Err(error.unwrap_or_default())),
-            other => bail!("reponse admin inattendue pour SetData: {other:?}"),
+            other => bail!("unexpected admin response for SetData: {other:?}"),
         }
     }
 }
@@ -295,7 +295,7 @@ pub async fn run_metadata_client(
         tokio::select! {
             line = lines.next_line() => {
                 let Some(line) = line? else {
-                    bail!("connexion au plugin metadata {name} fermee");
+                    bail!("metadata plugin {name} connection closed");
                 };
                 match serde_json::from_str::<Enrichment>(&line) {
                     // `cleaned` ici, au plus près de l'entrée : le cœur n'a
@@ -303,15 +303,15 @@ pub async fn run_metadata_client(
                     // qui décide de l'arbitrage).
                     Ok(e) => {
                         if enrich_tx.send((name.clone(), e.cleaned())).await.is_err() {
-                            bail!("coeur ferme, arret du relais metadata {name}");
+                            bail!("core closed, stopping metadata relay {name}");
                         }
                     }
-                    Err(e) => tracing::warn!("enrichissement invalide de {name} ignore: {e}"),
+                    Err(e) => tracing::warn!("invalid enrichment from {name} ignored: {e}"),
                 }
             }
             change = np_rx.changed() => {
                 if change.is_err() {
-                    bail!("canal now-playing ferme, arret du relais metadata {name}");
+                    bail!("now-playing channel closed, stopping metadata relay {name}");
                 }
                 a_envoyer = Some(np_rx.borrow_and_update().clone());
             }
@@ -337,13 +337,13 @@ pub async fn run_input_client(socket_path: &Path, cmd_tx: mpsc::Sender<InputMess
                 // tâche. Même traitement que le cas symétrique du relais
                 // metadata (canal now-playing fermé).
                 if cmd_tx.send(msg).await.is_err() {
-                    bail!("coeur ferme, arret du relais input");
+                    bail!("core closed, stopping input relay");
                 }
             }
-            Err(e) => tracing::warn!("commande invalide recue du plugin input: {e}"),
+            Err(e) => tracing::warn!("invalid command received from input plugin: {e}"),
         }
     }
-    bail!("connexion au plugin input fermee")
+    bail!("input plugin connection closed")
 }
 
 #[cfg(test)]

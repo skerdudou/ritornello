@@ -33,13 +33,13 @@ fn overlay_from_disk(base: &mut HashMap<String, String>, path: &Path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
         Err(e) => {
-            tracing::warn!("pack i18n {} ignoré (lecture impossible): {e}", path.display());
+            tracing::warn!("i18n pack {} ignored (read failed): {e}", path.display());
             return;
         }
     };
     match toml::from_str::<HashMap<String, String>>(&text) {
         Ok(ext) => base.extend(ext),
-        Err(e) => tracing::warn!("pack i18n {} ignoré (TOML invalide): {e}", path.display()),
+        Err(e) => tracing::warn!("i18n pack {} ignored (invalid TOML): {e}", path.display()),
     }
 }
 
@@ -57,14 +57,14 @@ impl Catalog {
         let mut own = match try_parse(own_en) {
             Ok(m) => m,
             Err(e) => {
-                tracing::warn!("pack embarque {component} invalide: {e}");
+                tracing::warn!("embedded pack {component} invalid: {e}");
                 HashMap::new()
             }
         };
         let mut common = match try_parse(COMMON_EN) {
             Ok(m) => m,
             Err(e) => {
-                tracing::warn!("pack embarque common invalide: {e}");
+                tracing::warn!("embedded common pack invalid: {e}");
                 HashMap::new()
             }
         };

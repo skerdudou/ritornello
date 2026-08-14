@@ -65,7 +65,7 @@ impl OuiFmMetas {
     /// Arrête le suivi en cours, s'il y en a un.
     fn arrete(&mut self) {
         if let Some((id, tache)) = self.suivi.take() {
-            tracing::debug!("arret du suivi de la webradio {id}");
+            tracing::debug!("stopping tracking of webradio {id}");
             tache.abort();
         }
     }
@@ -99,7 +99,7 @@ impl MetadataPlugin for OuiFmMetas {
             .map(|w| (w.metas.clone(), w.label.clone()));
         match reconnue {
             Some((metas, label)) => {
-                tracing::debug!("webradio reconnue: {label} (metas {metas})");
+                tracing::debug!("webradio recognized: {label} (metas {metas})");
                 self.identite = np.identity;
                 self.suit(&metas);
             }
@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
         PathBuf::from(env_or("RITORNELLO_OUIFM_METAS", "/etc/ritornello/ouifm-metas.toml"));
     let table = Table::load(&table_path);
     tracing::info!(
-        "{} webradio(s) connues (table embarquee + {})",
+        "{} known webradio(s) (embedded table + {})",
         table.webradios.len(),
         table_path.display()
     );

@@ -69,7 +69,7 @@ pub async fn admin_asset(
             }
             Ok(None) => return (StatusCode::NOT_FOUND, "actif inconnu").into_response(),
             Err(e) => {
-                tracing::warn!("plugin {name} admin injoignable (asset {fichier}): {e}");
+                tracing::warn!("plugin {name} admin unreachable (asset {fichier}): {e}");
                 return (StatusCode::BAD_GATEWAY, "plugin injoignable").into_response();
             }
         },
@@ -98,7 +98,7 @@ pub async fn admin_i18n(State(st): State<AppState>, Path(name): Path<String>) ->
         Some(backend) => match backend.catalog().await {
             Ok(v) => Json(v).into_response(),
             Err(e) => {
-                tracing::warn!("plugin {name} admin injoignable (catalog): {e}");
+                tracing::warn!("plugin {name} admin unreachable (catalog): {e}");
                 (StatusCode::BAD_GATEWAY, "plugin injoignable").into_response()
             }
         },
@@ -111,7 +111,7 @@ pub async fn admin_get_data(State(st): State<AppState>, Path(name): Path<String>
         Some(backend) => match backend.get_data().await {
             Ok(value) => Json(value).into_response(),
             Err(e) => {
-                tracing::warn!("plugin {name} admin injoignable (get_data): {e}");
+                tracing::warn!("plugin {name} admin unreachable (get_data): {e}");
                 (StatusCode::BAD_GATEWAY, "plugin injoignable").into_response()
             }
         },
@@ -129,7 +129,7 @@ pub async fn admin_put_data(
             Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
             Ok(Err(msg)) => (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg }))).into_response(),
             Err(e) => {
-                tracing::warn!("plugin {name} admin injoignable (set_data): {e}");
+                tracing::warn!("plugin {name} admin unreachable (set_data): {e}");
                 (StatusCode::BAD_GATEWAY, "plugin injoignable").into_response()
             }
         },

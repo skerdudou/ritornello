@@ -378,11 +378,11 @@ async fn interroge_logind(methode: &str) -> bool {
             false
         }
         Ok(Err(e)) => {
-            tracing::info!("busctl indisponible ({e}): arrêt et redémarrage désactivés dans l'IHM");
+            tracing::info!("busctl unavailable ({e}): power off and reboot disabled in the UI");
             false
         }
         Err(_) => {
-            tracing::info!("logind {methode}: pas de réponse en 3 s");
+            tracing::info!("logind {methode}: no response within 3s");
             false
         }
     }
@@ -421,7 +421,7 @@ pub async fn power_post(
         PowerAction::PowerOff => "poweroff",
         PowerAction::Reboot => "reboot",
         PowerAction::RestartService => {
-            tracing::warn!("redémarrage du service demandé depuis l'IHM");
+            tracing::warn!("service restart requested from the UI");
             let info = state.system.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(info.restart_delay).await;
@@ -430,7 +430,7 @@ pub async fn power_post(
             return StatusCode::ACCEPTED.into_response();
         }
     };
-    tracing::warn!("{verbe} de l'OS demandé depuis l'IHM");
+    tracing::warn!("{verbe} of the OS requested from the UI");
     let appel = tokio::process::Command::new(&state.system.systemctl).arg(verbe).output();
     match tokio::time::timeout(std::time::Duration::from_secs(5), appel).await {
         // Still running after 5 s: the machine is on its way out, which is
@@ -443,9 +443,19 @@ pub async fn power_post(
             let msg = if stderr.is_empty() {
                 format!("systemctl a échoué (code {})", out.status.code().unwrap_or(-1))
             } else {
+                stderr.clone()
+            };
+            // Deux textes pour deux publics : le corps de la réponse garde la
+            // phrase destinée au lecteur (française jusqu'à son passage par
+            // catalogue), le log reste technique et entièrement en anglais.
+            // Interpoler `msg` ici mêlerait les deux langues dans une ligne de
+            // journal, et le code de sortie y est plus parlant qu'une phrase.
+            let detail = if stderr.is_empty() {
+                format!("exit code {}", out.status.code().unwrap_or(-1))
+            } else {
                 stderr
             };
-            tracing::warn!("{verbe} refusé: {msg}");
+            tracing::warn!("{verbe} refused: {detail}");
             (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": msg }))).into_response()
         }
         Ok(Err(e)) => (

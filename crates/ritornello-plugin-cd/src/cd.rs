@@ -23,7 +23,7 @@ pub fn drive_status(dev: &Path) -> Result<DriveStatus> {
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
         .open(dev)
-        .with_context(|| format!("ouverture de {}", dev.display()))?;
+        .with_context(|| format!("opening {}", dev.display()))?;
     // SAFETY: ioctl en lecture seule sur un fd valide ; l'argument est un int passé
     // par valeur comme le définit linux/cdrom.h pour CDROM_DRIVE_STATUS.
     let r = unsafe { libc::ioctl(f.as_raw_fd(), CDROM_DRIVE_STATUS, CDSL_CURRENT) };
@@ -54,7 +54,7 @@ pub async fn watch(dev: PathBuf, tx: tokio::sync::mpsc::Sender<bool>) {
             }
             Err(e) => {
                 if !derniere_erreur_signalee {
-                    tracing::warn!("sonde du lecteur cd {}: {e:#}", dev.display());
+                    tracing::warn!("cd drive probe {}: {e:#}", dev.display());
                     derniere_erreur_signalee = true;
                 }
                 false
@@ -79,9 +79,9 @@ pub fn read_toc(dev: &str) -> Result<String> {
         .arg("--musicbrainz")
         .arg(dev)
         .output()
-        .context("cd-discid introuvable (apt install cd-discid)")?;
+        .context("cd-discid not found (apt install cd-discid)")?;
     if !out.status.success() {
-        bail!("cd-discid a échoué: {}", String::from_utf8_lossy(&out.stderr));
+        bail!("cd-discid failed: {}", String::from_utf8_lossy(&out.stderr));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -97,13 +97,13 @@ pub fn toc_ntracks(raw: &str) -> Result<usize> {
         .split_whitespace()
         .map(|s| s.parse::<u64>())
         .collect::<Result<_, _>>()
-        .context("sortie cd-discid non numérique")?;
+        .context("non-numeric cd-discid output")?;
     if nums.len() < 3 {
-        bail!("sortie cd-discid trop courte: {raw:?}");
+        bail!("cd-discid output too short: {raw:?}");
     }
     let ntracks = nums[0] as usize;
     if nums.len() != ntracks + 2 {
-        bail!("sortie cd-discid incohérente ({} champs pour {} pistes)", nums.len(), ntracks);
+        bail!("inconsistent cd-discid output ({} fields for {} tracks)", nums.len(), ntracks);
     }
     Ok(ntracks)
 }
@@ -115,7 +115,7 @@ pub fn eject(dev: &str) {
     match std::process::Command::new("eject").arg(dev).status() {
         Ok(statut) if statut.success() => {}
         Ok(statut) => tracing::warn!("eject {dev}: {statut}"),
-        Err(e) => tracing::warn!("eject {dev}: {e} (paquet eject installe ?)"),
+        Err(e) => tracing::warn!("eject {dev}: {e} (eject package installed?)"),
     }
 }
 

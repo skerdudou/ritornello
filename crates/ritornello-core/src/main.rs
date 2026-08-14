@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
     let runtime_dir = env_or("RITORNELLO_RUNTIME_DIR", "/run/ritornello");
 
     let manifest = PluginManifest::load(&plugins_path)
-        .with_context(|| format!("chargement de {}", plugins_path.display()))?;
+        .with_context(|| format!("loading {}", plugins_path.display()))?;
     let persisted = state::load(&state_path);
 
     let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
     let (mpv_player, mut mpv_child) =
         player::mpv::start(&mpv_bin, &mpv_socket, &cd_dev, audio_buffer, readahead, ev_tx)
             .await
-            .context("démarrage de mpv")?;
+            .context("starting mpv")?;
 
     // Plugins `metadata` déclarés, **dans l'ordre du fichier** : cet ordre est
     // la priorité d'arbitrage. La liste est bâtie depuis le manifeste et non
@@ -164,7 +164,7 @@ async fn main() -> Result<()> {
                         match ritornello_plugin_sdk::AdminClient::connect(&admin_socket).await {
                             Ok(client) => (name, Some(client)),
                             Err(e) => {
-                                tracing::warn!("plugin admin {name} injoignable: {e}");
+                                tracing::warn!("admin plugin {name} unreachable: {e}");
                                 (name, None)
                             }
                         }
@@ -192,7 +192,7 @@ async fn main() -> Result<()> {
                         let name = p.name.clone();
                         tokio::spawn(async move {
                             if let Err(e) = run_input_client(&socket_for_task, tx).await {
-                                tracing::warn!("plugin input {name} deconnecte: {e}");
+                                tracing::warn!("input plugin {name} disconnected: {e}");
                             }
                         });
                         // `admin` est posé à faux partout ici : la détection
@@ -210,7 +210,7 @@ async fn main() -> Result<()> {
                         let name = p.name.clone();
                         tokio::spawn(async move {
                             if let Err(e) = run_metadata_client(&socket_for_task, name.clone(), tx, np_rx).await {
-                                tracing::warn!("plugin metadata {name} deconnecte: {e}");
+                                tracing::warn!("metadata plugin {name} disconnected: {e}");
                             }
                         });
                         plugin_statuses.push(PluginStatus { name: p.name.clone(), kind: "metadata".into(), connected: true, admin: false });
@@ -220,21 +220,21 @@ async fn main() -> Result<()> {
             Err(e) => {
                 // `{e:#}` et non `{e}` : la chaîne de contexte porte le chemin
                 // cherché, que le seul message d'erreur système n'indique pas.
-                tracing::warn!("lancement du plugin {} impossible: {e:#}", p.name);
+                tracing::warn!("failed to launch plugin {}: {e:#}", p.name);
                 plugin_statuses.push(PluginStatus { name: p.name.clone(), kind: format!("{:?}", p.kind).to_lowercase(), connected: false, admin: false });
             }
         }
     }
 
     for handle in source_connects {
-        let (name, result) = handle.await.context("tache de connexion plugin source interrompue")?;
+        let (name, result) = handle.await.context("source plugin connection task interrupted")?;
         match result {
             Ok(client) => {
                 sources.insert(name.clone(), client);
                 plugin_statuses.push(PluginStatus { name, kind: "source".into(), connected: true, admin: false });
             }
             Err(e) => {
-                tracing::warn!("plugin {} indisponible: {e}", name);
+                tracing::warn!("plugin {} unavailable: {e}", name);
                 plugin_statuses.push(PluginStatus { name, kind: "source".into(), connected: false, admin: false });
             }
         }
@@ -242,14 +242,14 @@ async fn main() -> Result<()> {
 
     let mut display_client: Option<Arc<DisplayClient>> = None;
     if let Some(handle) = display_connect {
-        let (name, result) = handle.await.context("tache de connexion plugin display interrompue")?;
+        let (name, result) = handle.await.context("display plugin connection task interrupted")?;
         match result {
             Ok(client) => {
                 display_client = Some(client);
                 plugin_statuses.push(PluginStatus { name, kind: "display".into(), connected: true, admin: false });
             }
             Err(e) => {
-                tracing::warn!("plugin display {name} indisponible: {e}");
+                tracing::warn!("display plugin {name} unavailable: {e}");
                 plugin_statuses.push(PluginStatus { name, kind: "display".into(), connected: false, admin: false });
             }
         }
@@ -259,7 +259,7 @@ async fn main() -> Result<()> {
     // suit ce qui a réellement été détecté, pas une déclaration de fichier.
     let mut admin_backends: HashMap<String, Arc<dyn admin::AdminBackend>> = HashMap::new();
     for handle in admin_connects {
-        let (name, backend) = handle.await.context("tache de detection admin interrompue")?;
+        let (name, backend) = handle.await.context("admin detection task interrupted")?;
         if let Some(client) = backend {
             if let Some(st) = plugin_statuses.iter_mut().find(|s| s.name == name) {
                 st.admin = true;
@@ -269,7 +269,7 @@ async fn main() -> Result<()> {
     }
 
     if sources.is_empty() {
-        anyhow::bail!("aucune source disponible (plugins.toml vide ou tous les plugins source indisponibles)");
+        anyhow::bail!("no source available (plugins.toml empty or all source plugins unavailable)");
     }
 
     // Relais des vues vers le plugin d'affichage, s'il est connecté.
@@ -282,12 +282,12 @@ async fn main() -> Result<()> {
                     }
                     let v = view_rx.borrow_and_update().clone();
                     if let Err(e) = display_client.send(&v).await {
-                        tracing::warn!("affichage: {e}");
+                        tracing::warn!("display: {e}");
                     }
                 }
             });
         }
-        None => tracing::warn!("pas de plugin display connecte, on continue sans affichage"),
+        None => tracing::warn!("no display plugin connected, continuing without display"),
     }
 
     // Page de statut du cœur (plugins, source active, dernières erreurs, sortie audio).
@@ -337,10 +337,10 @@ async fn main() -> Result<()> {
             }),
         });
         let listener = tokio::net::TcpListener::bind(&http_addr).await.with_context(|| format!("bind {http_addr}"))?;
-        tracing::info!("interface web sur http://{http_addr}/");
+        tracing::info!("web interface on http://{http_addr}/");
         tokio::spawn(async move {
             if let Err(e) = axum::serve(listener, app).await {
-                tracing::error!("serveur de statut: {e}");
+                tracing::error!("status server: {e}");
             }
         });
     }
@@ -369,7 +369,7 @@ async fn main() -> Result<()> {
     // source wake but still configures mpv, so the first `Power` starts right.
     let demarrage = if start_in_standby { core.start_in_standby().await } else { core.resume().await };
     if let Err(e) = demarrage {
-        tracing::warn!("reveil au demarrage: {e}");
+        tracing::warn!("startup wake: {e}");
     }
 
     let mut retry_at: Option<tokio::time::Instant> = None;
@@ -394,7 +394,7 @@ async fn main() -> Result<()> {
         tokio::select! {
             Some(msg) = cmd_rx.recv() => {
                 if let Err(e) = core.handle_input(msg).await {
-                    tracing::warn!("commande: {e}");
+                    tracing::warn!("command: {e}");
                 }
                 status_state.write().await.active_source = core.active_source().to_string();
             }
@@ -421,12 +421,12 @@ async fn main() -> Result<()> {
             }
             Some(device) = audio_rx.recv() => {
                 if let Err(e) = core.set_audio_device(device).await {
-                    tracing::warn!("changement de sortie audio: {e}");
+                    tracing::warn!("audio output change: {e}");
                 }
             }
             Some(locale) = locale_rx.recv() => {
                 if let Err(e) = core.set_locale(locale).await {
-                    tracing::warn!("changement de langue: {e}");
+                    tracing::warn!("locale change: {e}");
                 }
             }
             Some(t) = theme_rx.recv() => {
@@ -438,7 +438,7 @@ async fn main() -> Result<()> {
             _ = retry_sleep => {
                 retry_at = None;
                 if let Err(e) = core.retry_stream().await {
-                    tracing::warn!("retry flux: {e}");
+                    tracing::warn!("stream retry: {e}");
                 }
             }
             _ = overlay_sleep => {
@@ -452,11 +452,11 @@ async fn main() -> Result<()> {
             // la dégradation voulue. Avec `next()`, l'épuisement rend `None`,
             // le motif ne matche pas, et le bras est simplement désactivé.
             Some((name, status)) = plugin_waits.next() => {
-                tracing::warn!("plugin {name} termine: {status:?}");
+                tracing::warn!("plugin {name} exited: {status:?}");
                 crate::status::mark_plugin_disconnected(&mut *status_state.write().await, &name);
             }
             status = mpv_child.wait() => {
-                anyhow::bail!("mpv termine ({status:?}), arret pour relance par systemd");
+                anyhow::bail!("mpv exited ({status:?}), stopping for restart by systemd");
             }
         }
     }

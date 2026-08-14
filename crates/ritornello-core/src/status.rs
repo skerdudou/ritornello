@@ -92,7 +92,7 @@ async fn audio_output_json(State(state): State<AppState>) -> Json<AudioOutputRes
     let devices = match crate::audio_output::list_devices() {
         Ok(d) => d,
         Err(e) => {
-            tracing::warn!("liste des sorties audio indisponible: {e}");
+            tracing::warn!("audio output list unavailable: {e}");
             Vec::new()
         }
     };
@@ -273,7 +273,7 @@ async fn i18n_json(State(state): State<AppState>) -> Json<serde_json::Value> {
 /// maintenues quelle que soit leur origine (voir `Core::handle_input`).
 async fn command_post(State(state): State<AppState>, Json(msg): Json<ritornello_proto::InputMessage>) -> StatusCode {
     if state.cmd_tx.send(msg).await.is_err() {
-        tracing::warn!("télécommande web: canal de commandes fermé");
+        tracing::warn!("web remote: command channel closed");
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
     StatusCode::NO_CONTENT

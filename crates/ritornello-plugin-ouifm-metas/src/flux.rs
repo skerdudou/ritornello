@@ -120,7 +120,7 @@ async fn ecoute(id: &str, tx: &mpsc::Sender<(String, Meta)>) -> Result<usize> {
     let mut recues = 0usize;
     loop {
         let Ok(suivant) = tokio::time::timeout(SILENCE_MAX, octets.next()).await else {
-            bail!("aucune donnee depuis {} s", SILENCE_MAX.as_secs());
+            bail!("no data for {} s", SILENCE_MAX.as_secs());
         };
         // Fin de flux propre : le serveur a fermé.
         let Some(chunk) = suivant else { break };
@@ -128,7 +128,7 @@ async fn ecoute(id: &str, tx: &mpsc::Sender<(String, Meta)>) -> Result<usize> {
         // Garde-fou : un serveur qui n'enverrait jamais de fin de ligne ne doit
         // pas faire grossir ce tampon sans limite sur un appareil à 1 Go.
         if tampon.len() > 64 * 1024 {
-            bail!("flux sans fin de ligne, tampon abandonne");
+            bail!("stream with no line ending, buffer dropped");
         }
         for ligne in decoupe_lignes(&mut tampon) {
             if let Some(meta) = parse_data_line(&ligne) {
@@ -178,10 +178,10 @@ pub async fn suit(id: String, tx: mpsc::Sender<(String, Meta)>) {
         // trace dans `/api/logs` et personne ne verrait jamais rien.
         match resultat {
             Ok(recues) => {
-                tracing::info!("flux de metadonnees ferme apres {recues} trame(s) et {} s", duree.as_secs())
+                tracing::info!("metadata stream closed after {recues} frame(s) and {} s", duree.as_secs())
             }
             Err(e) => {
-                tracing::info!("flux de metadonnees interrompu apres {} s: {e}", duree.as_secs())
+                tracing::info!("metadata stream interrupted after {} s: {e}", duree.as_secs())
             }
         }
         // Le recul est recalculé **avant** de dormir : la coupure qui vient

@@ -33,7 +33,7 @@ impl ConsoleDisplay {
         let out = std::fs::OpenOptions::new()
             .write(true)
             .open(path)
-            .with_context(|| format!("ouverture de {}", path.display()))?;
+            .with_context(|| format!("opening {}", path.display()))?;
         Ok(Self { out })
     }
 

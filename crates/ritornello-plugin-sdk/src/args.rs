@@ -20,7 +20,7 @@ pub fn arg_value(args: &[String], flag: &str) -> Option<PathBuf> {
     args.iter().position(|a| a == flag).map(|i| {
         let valeur = args
             .get(i + 1)
-            .unwrap_or_else(|| panic!("{flag} requiert une valeur (aucun argument apres {flag})"));
+            .unwrap_or_else(|| panic!("{flag} requires a value (no argument after {flag})"));
         PathBuf::from(valeur)
     })
 }
@@ -28,7 +28,7 @@ pub fn arg_value(args: &[String], flag: &str) -> Option<PathBuf> {
 /// Chemin de la socket de genre (`--socket`), obligatoire pour tout plugin.
 pub fn socket_path() -> PathBuf {
     let args: Vec<String> = std::env::args().collect();
-    arg_value(&args, "--socket").expect("--socket <chemin> requis")
+    arg_value(&args, "--socket").expect("--socket <path> required")
 }
 
 /// Chemin de la socket d'admin (`--admin-socket`), présent si le plugin est

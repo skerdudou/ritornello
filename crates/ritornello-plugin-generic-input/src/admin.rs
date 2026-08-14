@@ -118,7 +118,7 @@ impl AdminPlugin for GenericInputAdmin {
             }
             Op::Rescan => {
                 let n = self.hub.open_new_devices(&self.input_root);
-                tracing::info!("rescan: {n} nouveau(x) peripherique(s) ouvert(s)");
+                tracing::info!("rescan: {n} new device(s) opened");
                 Ok(())
             }
         }

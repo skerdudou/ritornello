@@ -30,7 +30,7 @@ pub fn event_nodes(root: &Path, entries: &[String]) -> Vec<PathBuf> {
 /// vide et `warn` : jamais fatal.
 pub fn scan_event_nodes(root: &Path) -> Vec<PathBuf> {
     let Ok(rd) = std::fs::read_dir(root) else {
-        tracing::warn!("repertoire {} illisible : aucun peripherique d'entree", root.display());
+        tracing::warn!("directory {} unreadable: no input device", root.display());
         return Vec::new();
     };
     let entries: Vec<String> = rd
@@ -138,7 +138,7 @@ impl Hub {
             let dev = match Device::open(&path) {
                 Ok(d) => d,
                 Err(e) => {
-                    tracing::warn!("peripherique {} illisible, ignore: {e}", path.display());
+                    tracing::warn!("device {} unreadable, skipped: {e}", path.display());
                     self.open.write().unwrap().remove(&path);
                     continue;
                 }
@@ -158,19 +158,19 @@ impl Hub {
             let mut stream = match dev.into_event_stream() {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!("flux evdev {} indisponible: {e}", path.display());
+                    tracing::warn!("evdev stream {} unavailable: {e}", path.display());
                     hub.forget(&path);
                     return;
                 }
             };
-            tracing::info!("peripherique ecoute: {name} ({})", path.display());
+            tracing::info!("listening on device: {name} ({})", path.display());
             loop {
                 let ev = match stream.next_event().await {
                     Ok(ev) => ev,
                     Err(e) => {
                         // Débranchement : cette tâche se termine, les autres
                         // continuent.
-                        tracing::info!("lecture de {} terminee: {e}", path.display());
+                        tracing::info!("read from {} ended: {e}", path.display());
                         break;
                     }
                 };
@@ -194,7 +194,7 @@ impl Hub {
                     key_outcome_held(&b, learn.device(), &name, ev.code(), value == 2)
                 };
                 if let Some(msg) = msg {
-                    tracing::debug!("{name}: touche {} -> {:?}", ev.code(), msg.cmd);
+                    tracing::debug!("{name}: key {} -> {:?}", ev.code(), msg.cmd);
                     let _ = hub.tx.send(msg).await;
                 }
             }

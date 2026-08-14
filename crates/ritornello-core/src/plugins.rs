@@ -48,7 +48,7 @@ impl PluginManifest {
         match std::fs::read_to_string(path) {
             Ok(text) => Ok(toml::from_str(&text)?),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e).with_context(|| format!("lecture de {}", path.display())),
+            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
     }
 }
@@ -72,7 +72,7 @@ pub fn spawn(
 ) -> Result<tokio::process::Child> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)
-            .with_context(|| format!("creation du repertoire de sockets {}", parent.display()))?;
+            .with_context(|| format!("creating socket directory {}", parent.display()))?;
     }
     let _ = std::fs::remove_file(socket_path);
     let _ = std::fs::remove_file(admin_socket);

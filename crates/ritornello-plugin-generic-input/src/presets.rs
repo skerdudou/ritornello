@@ -54,7 +54,7 @@ pub fn parse_preset_names(entries: &[String]) -> Vec<String> {
 /// Noms des presets disponibles. Répertoire absent ou illisible → liste vide.
 pub fn list(root: &Path) -> Vec<String> {
     let Ok(rd) = std::fs::read_dir(root) else {
-        tracing::warn!("repertoire de presets {} illisible : aucun preset", root.display());
+        tracing::warn!("preset directory {} unreadable: no preset", root.display());
         return Vec::new();
     };
     let entries: Vec<String> = rd
@@ -77,16 +77,16 @@ pub fn parse_preset(content: &str) -> Result<Vec<Binding>, String> {
 /// illisible → `UnknownPreset` (avec un `warn` détaillant la vraie cause).
 pub fn load(root: &Path, name: &str) -> Result<Vec<Binding>, UnknownPreset> {
     if !nom_valide(name) {
-        tracing::warn!("nom de preset refuse: {name}");
+        tracing::warn!("preset name rejected: {name}");
         return Err(UnknownPreset(name.to_string()));
     }
     let path = root.join(format!("{name}.toml"));
     let text = std::fs::read_to_string(&path).map_err(|e| {
-        tracing::warn!("preset {} illisible: {e}", path.display());
+        tracing::warn!("preset {} unreadable: {e}", path.display());
         UnknownPreset(name.to_string())
     })?;
     parse_preset(&text).map_err(|e| {
-        tracing::warn!("preset {} invalide: {e}", path.display());
+        tracing::warn!("preset {} invalid: {e}", path.display());
         UnknownPreset(name.to_string())
     })
 }

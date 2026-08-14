@@ -58,6 +58,35 @@ The `metadata` plugins are added the same way (`kind = "metadata"`,
 executables `ritornello-plugin-musicbrainz` and
 `ritornello-plugin-ouifm-metas`).
 
+## Language
+
+Three audiences, three rules — the boundary is the audience, not the file:
+
+- **Code comments, commit messages, and the specs and plans under
+  `docs/superpowers/` are French.** Public `///` doc comments follow the
+  file they live in: files documenting an API surface (`state.rs`,
+  `core.rs`) are English throughout and keep internal `//` comments French.
+- **Logs are English**, at every level, including the `anyhow!` and
+  `.context(…)` strings they interpolate. They are read next to
+  `journalctl` and rustc — and they are visible in the UI: the config
+  page's "Recent errors" card serves the last 50 WARN/ERROR lines verbatim
+  (`GET /api/logs`), so a French log line would show up untranslated in an
+  English interface.
+- **Everything a user reads goes through the i18n catalogues**, never a
+  hard-coded string: the display, the SPA, and the `error` field of a `422`
+  (the kit turns it straight into a toast). English lives in the binary,
+  other languages in `deploy/locales/` — see [interface.md](interface.md).
+  Known exceptions, not yet converted: `validate_settings` and
+  `validate_audio_device` in `status.rs`, and the `422`/`502` bodies of
+  `system.rs`, still write French phrases inline. And one path leaks a log
+  message into a body instead of a catalogue phrase: `RadioAdmin::set_data`
+  turns an I/O failure from `Stations::save` into `{"error": …}` through
+  `e.to_string()`, so the reader gets the diagnostic text verbatim. Fixing
+  that one means a catalogue phrase for the user and the raw I/O detail left
+  in the log, where it belongs. The radio plugin's `config.rs` shows the
+  pattern to follow — it resolves its `ValidationError` against the plugin's
+  own catalogue, parameters included.
+
 ## Tests
 
     cargo test --workspace                              # Rust suites
