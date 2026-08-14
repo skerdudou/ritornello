@@ -14,7 +14,9 @@ use crate::admin::RadioAdmin;
 use anyhow::Result;
 use config::Stations;
 use ritornello_i18n::Catalog;
-use ritornello_plugin_sdk::{run_admin_plugin, run_source_plugin, SourceOutcome, SourcePlugin};
+use ritornello_plugin_sdk::{
+    run_admin_plugin, run_source_plugin, Notification, SourceOutcome, SourcePlugin,
+};
 use ritornello_proto::{SourceAction, View};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -32,6 +34,14 @@ struct RadioSource {
     preset: u8,
     catalog: Arc<RwLock<Catalog>>,
     locales_root: PathBuf,
+    /// Reçoit le nouveau `Stations::preset_count()` annoncé par la moitié
+    /// Admin après un enregistrement réussi (voir `RadioAdmin::set_data`).
+    /// `None` en mode dégradé (pas de `--admin-socket`, donc pas de moitié
+    /// Admin pour émettre) : `poll_notification` reste alors en attente pour
+    /// toujours plutôt que de rendre `None`, qui est **terminal** pour le
+    /// SDK et journaliserait un avertissement trompeur pour un déploiement
+    /// pourtant légitime.
+    preset_count_rx: Option<tokio::sync::watch::Receiver<u8>>,
 }
 
 impl RadioSource {
@@ -134,6 +144,37 @@ impl SourcePlugin for RadioSource {
     async fn set_locale(&mut self, locale: String) {
         *self.catalog.write().unwrap() = Catalog::load("radio", &locale, &self.locales_root, RADIO_EN);
     }
+
+    /// Annonce spontanément le nouveau `preset_count` quand la moitié Admin
+    /// vient d'enregistrer une table de stations — c'est ce qui met à jour la
+    /// grille de la télécommande web sans attendre qu'une présélection soit
+    /// jouée (défaut constaté à l'usage : la grille restait sur l'ancien jeu
+    /// de numéros jusque-là).
+    ///
+    /// Ne porte **que** `preset_count` : ni vue, ni identité, ni présélection,
+    /// jamais éphémère. C'est ce qui garantit que cette notification ne
+    /// perturbe ni l'affichage courant ni le morceau en cours de lecture —
+    /// `Core::handle_source_update` fusionne champ par champ, donc une trame
+    /// muette sur tout le reste ne touche à rien d'autre.
+    async fn poll_notification(&mut self) -> Option<Notification> {
+        let Some(rx) = &mut self.preset_count_rx else {
+            // Mode dégradé (pas de moitié Admin) : voir le commentaire sur le
+            // champ. Jamais `None` ici, qui serait terminal pour le SDK.
+            return std::future::pending().await;
+        };
+        match rx.changed().await {
+            Ok(()) => {
+                let n = *rx.borrow_and_update();
+                Some(Notification::new().preset_count(n))
+            }
+            // L'émetteur (moitié Admin) a disparu — ne devrait pas arriver en
+            // pratique tant que les deux moitiés partagent le même processus,
+            // mais rien ne justifie de traiter ça comme une fin définitive de
+            // notifications : on retombe sur la même attente indéfinie que le
+            // mode dégradé plutôt que de rendre `None`.
+            Err(_) => std::future::pending().await,
+        }
+    }
 }
 
 #[tokio::main]
@@ -163,12 +204,22 @@ async fn main() -> Result<()> {
     let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
     let catalog = Arc::new(RwLock::new(Catalog::load("radio", "en", &locales_root, RADIO_EN)));
 
+    // Canal Admin -> Source pour l'annonce spontanée de `preset_count` (voir
+    // `RadioAdmin::set_data` et `RadioSource::poll_notification`). La valeur
+    // initiale ne sert jamais : seuls les changements ultérieurs comptent, le
+    // compte de démarrage est déjà porté par `activate`/`select`.
+    let (preset_count_tx, preset_count_rx) = tokio::sync::watch::channel(0u8);
+
     let source = RadioSource {
         state_path: state_path.clone(),
         stations: stations_shared.clone(),
         preset,
         catalog: catalog.clone(),
         locales_root,
+        // Le récepteur n'a de sens que si une moitié Admin existe pour
+        // émettre dessus (voir plus bas) : sinon `poll_notification` doit
+        // rester en attente pour toujours, pas se rabattre sur un canal mort.
+        preset_count_rx: admin_socket.is_some().then_some(preset_count_rx),
     };
     // Annuaire en ligne : la liste intégrée de serveurs, essayés dans l'ordre
     // jusqu'au premier qui répond, ou l'unique serveur épinglé par
@@ -188,6 +239,7 @@ async fn main() -> Result<()> {
                 directory: Arc::new(directory),
                 search: RwLock::new(Vec::new()),
                 countries: RwLock::new(Vec::new()),
+                preset_count_tx,
             },
             admin_socket,
         )
@@ -248,6 +300,7 @@ mod tests {
             preset: 1,
             catalog: catalog.clone(),
             locales_root: dir.path().to_path_buf(),
+            preset_count_rx: None,
         };
         source.set_locale("fr".into()).await;
         // aucun preset chargé → branche "empty_preset"
@@ -268,6 +321,7 @@ mod tests {
             preset,
             catalog: Arc::new(RwLock::new(Catalog::load("radio", "en", dir.path(), RADIO_EN))),
             locales_root: dir.path().to_path_buf(),
+            preset_count_rx: None,
         }
     }
 
@@ -393,5 +447,40 @@ mod tests {
         let mut source = make_source(one_station(), 1);
         let outcome = source.activate().await;
         assert!(matches!(outcome.action, SourceAction::Play { .. }));
+    }
+
+    #[tokio::test]
+    async fn poll_notification_ne_declare_que_le_compte() {
+        // Propriete de surete : c'est ce qui garantit que l'annonce
+        // spontanee du nouveau compte (enregistrement depuis la page
+        // d'admin) ne perturbe ni l'affichage courant ni le morceau en
+        // cours de lecture. Voir le commentaire sur `poll_notification`.
+        let (tx, rx) = tokio::sync::watch::channel(0u8);
+        let mut source = make_source(two_stations(), 1);
+        source.preset_count_rx = Some(rx);
+        tx.send(5).unwrap();
+
+        let n = source.poll_notification().await.expect("notification attendue");
+        assert_eq!(n.preset_count, Some(5));
+        assert!(n.view.is_none(), "l'affichage ne doit pas bouger");
+        assert!(n.identity.is_none(), "le morceau en cours ne doit pas bouger");
+        assert!(n.preset.is_none());
+    }
+
+    #[tokio::test]
+    async fn sans_moitie_admin_poll_notification_reste_en_attente() {
+        // Mode dégradé (`--admin-socket` absent) : aucun émetteur n'existe
+        // pour ce plugin, donc rien ne doit jamais en sortir — surtout pas un
+        // `None`, terminal pour le SDK et source d'un avertissement trompeur
+        // pour un déploiement pourtant légitime (voir le commentaire sur le
+        // champ `preset_count_rx`).
+        let mut source = make_source(two_stations(), 1);
+        assert!(source.preset_count_rx.is_none());
+        let resultat = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            source.poll_notification(),
+        )
+        .await;
+        assert!(resultat.is_err(), "poll_notification n'aurait jamais du se terminer");
     }
 }

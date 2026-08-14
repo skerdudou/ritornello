@@ -1539,6 +1539,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn une_mise_a_jour_de_seul_compte_laisse_vue_et_identite_intactes() {
+        // Garantie de sûreté dont dépend l'annonce spontanée de `preset_count`
+        // par la radio après un enregistrement réussi côté admin (voir
+        // `RadioSource::poll_notification`) : une trame qui ne porte que le
+        // compte doit laisser l'affichage et le morceau en cours intacts, et
+        // tout de même publier l'état. Rien ne le vérifiait avant ce test.
+        let (mut core, mut view_rx, mut np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
+        let id = serde_json::json!({"kind": "stream", "url": "http://fip"});
+        core.handle_source_update("radio", joue(id.clone()));
+        core.handle_source_update("radio", vue(vue_radio()));
+        // Repères pris après l'installation de la vue et de l'identité : seuls
+        // les changements ultérieurs doivent être détectés.
+        view_rx.borrow_and_update();
+        np_rx.borrow_and_update();
+
+        core.handle_source_update("radio", update_avec_compte(Some(5)));
+
+        assert_eq!(etat_rx.borrow().preset_count, Some(5), "le compte doit etre publie");
+        assert!(!view_rx.has_changed().unwrap(), "la vue ne doit pas bouger");
+        assert!(!np_rx.has_changed().unwrap(), "l'identite ne doit pas bouger");
+        assert_eq!(np_rx.borrow().identity, Some(id));
+    }
+
+    #[tokio::test]
     async fn le_compte_est_oublie_en_veille() {
         let (mut core, _vue_rx, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
         core.handle_source_update("radio", update_avec_compte(Some(23)));

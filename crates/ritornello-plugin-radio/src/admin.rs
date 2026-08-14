@@ -56,6 +56,11 @@ pub struct RadioAdmin {
     /// Liste des pays, une fois récupérée. Vide tant que l'utilisateur n'a pas
     /// ouvert le sélecteur : aucun appel réseau n'est fait sans cela.
     pub countries: RwLock<Vec<DirectoryCountry>>,
+    /// Annonce le nouveau `Stations::preset_count()` à la moitié Source après
+    /// un enregistrement réussi : c'est ce qui permet à la grille de la
+    /// télécommande web de se mettre à jour sans attendre qu'une présélection
+    /// soit jouée. Voir `RadioSource::poll_notification` côté Source.
+    pub preset_count_tx: tokio::sync::watch::Sender<u8>,
 }
 
 #[async_trait::async_trait]
@@ -112,7 +117,16 @@ impl AdminPlugin for RadioAdmin {
                     .validate()
                     .map_err(|e| e.message(&self.catalog.read().unwrap()))?;
                 stations.save(&self.stations_path).map_err(|e| e.to_string())?;
+                let compte = stations.preset_count();
                 *self.stations.write().await = stations;
+                // Annonce spontanée à la moitié Source, sur **chaque**
+                // enregistrement réussi — même si le compte ne change pas : un
+                // renommage ou une renumérotation peut déplacer quels numéros
+                // existent sans changer combien il y en a, et la fusion côté
+                // cœur (`Core::handle_source_update`) est idempotente. Aucun
+                // récepteur en mode dégradé (pas d'admin) : `send` renvoie
+                // alors une erreur sans conséquence, ignorée.
+                let _ = self.preset_count_tx.send(compte);
                 Ok(())
             }
             Op::Search { query, country } => {
@@ -241,11 +255,27 @@ mod tests {
             directory,
             search: RwLock::new(Vec::new()),
             countries: RwLock::new(Vec::new()),
+            // Sans observateur : les tests qui ne s'intéressent pas au compte
+            // de présélections n'ont rien à câbler. Voir `admin_avec_canal`
+            // pour ceux qui l'observent.
+            preset_count_tx: tokio::sync::watch::channel(0).0,
         }
     }
 
     fn admin(dir: &std::path::Path) -> RadioAdmin {
         admin_avec(dir, StubDirectory::ok(Vec::new()))
+    }
+
+    /// Comme `admin_avec`, mais expose aussi le récepteur du canal de compte
+    /// de présélections, pour les tests qui vérifient ce qui y est publié.
+    fn admin_avec_canal(
+        dir: &std::path::Path,
+        directory: Arc<dyn Directory>,
+    ) -> (RadioAdmin, tokio::sync::watch::Receiver<u8>) {
+        let mut a = admin_avec(dir, directory);
+        let (tx, rx) = tokio::sync::watch::channel(0);
+        a.preset_count_tx = tx;
+        (a, rx)
     }
 
     #[test]
@@ -288,6 +318,40 @@ mod tests {
         assert!(a.set_data(nouveau).await.is_ok());
         assert_eq!(a.stations.read().await.stations[0].name, "Inter");
         assert_eq!(Stations::load(&a.stations_path).unwrap().stations[0].name, "Inter");
+    }
+
+    #[tokio::test]
+    async fn un_enregistrement_reussi_publie_le_nouveau_compte() {
+        // C'est ce qui permet a la grille de la telecommande web de se mettre
+        // a jour des l'enregistrement, sans attendre qu'une preselection soit
+        // jouee — voir le defaut constate a l'usage.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut a, mut rx) = admin_avec_canal(dir.path(), StubDirectory::ok(Vec::new()));
+        let nouveau = serde_json::json!({
+            "op": "save",
+            "stations": [
+                { "name": "A", "url": "http://a", "preset": 1 },
+                { "name": "B", "url": "http://b", "preset": 2 }
+            ]
+        });
+        assert!(a.set_data(nouveau).await.is_ok());
+        assert!(rx.has_changed().unwrap(), "le nouveau compte doit etre publie");
+        assert_eq!(*rx.borrow_and_update(), 2);
+    }
+
+    #[tokio::test]
+    async fn un_enregistrement_refuse_ne_publie_rien() {
+        // Un payload qui ne passe pas `Stations::validate` ne doit rien
+        // annoncer : rien n'a changé cote table.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut a, mut rx) = admin_avec_canal(dir.path(), StubDirectory::ok(Vec::new()));
+        rx.borrow_and_update();
+        let mauvais = serde_json::json!({
+            "op": "save",
+            "stations": [{ "name": "X", "url": "http://x", "preset": 200 }]
+        });
+        assert!(a.set_data(mauvais).await.is_err());
+        assert!(!rx.has_changed().unwrap(), "un enregistrement refuse ne doit rien publier");
     }
 
     #[tokio::test]

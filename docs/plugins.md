@@ -47,6 +47,14 @@ reach 1-9. The order is changed **by dragging a row** (or with the ▲▼
 arrows, which remain the keyboard-and-touch-accessible path): moving a
 station therefore changes its remote digit.
 
+Saving a new station list from the admin page announces the fresh
+`preset_count` to the core right away, as a spontaneous notification
+(`SourcePlugin::poll_notification`) rather than waiting for a preset to be
+played — otherwise the web grid kept showing the old set of numbers until
+something was played on the radio. That notification carries `preset_count`
+and **nothing else**: no view, no identity, no preset, so it disturbs
+neither the display nor whatever is currently playing.
+
 The search **country** is picked from a keyboard-filterable list,
 populated by the directory itself (241 countries at the last count, with
 each one's station count). Names are rendered by the browser from the ISO
