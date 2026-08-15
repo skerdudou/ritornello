@@ -51,8 +51,13 @@ defineProps<{ etat: PlayerPayload | null }>()
       </p>
       <!-- Le statut de la source, déjà traduit par elle. Invisible sur le web
            jusqu'ici pour la même raison que le nom de station l'était : il
-           n'existait que dans une ligne d'afficheur. -->
-      <p v-if="etat?.status" class="text-sm text-muted-foreground">
+           n'existait que dans une ligne d'afficheur.
+
+           Masqué en veille : le badge "VEILLE" juste au-dessus porte déjà ce
+           mot, et le statut publié en veille est exactement le même mot du
+           même catalogue — l'afficher aussi ici doublerait "VEILLE" sur la
+           carte, sans libellé la seconde fois. -->
+      <p v-if="etat?.status && !etat.standby" class="text-sm text-muted-foreground">
         <span class="text-foreground" data-player-status>{{ etat.status }}</span>
       </p>
       <p class="text-sm text-muted-foreground">

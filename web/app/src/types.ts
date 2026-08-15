@@ -59,8 +59,9 @@ export interface PlayerPayload {
    */
   status: string | null
   /**
-   * Incrustation en cours cote afficheur. La SPA l'ignore — elle montre le
-   * volume en clair et a ses propres toasts — mais le champ voyage parce que
+   * Incrustation en cours cote afficheur. La SPA l'ignore — elle montre deja
+   * le volume en clair, et un ecran de navigateur n'a pas les contraintes de
+   * largeur d'un afficheur de vingt colonnes — mais le champ voyage parce que
    * la charge utile est unique.
    */
   overlay: unknown | null

@@ -84,6 +84,16 @@ describe('PlayerCard', () => {
     expect(w.find('[data-player-status]').exists()).toBe(false)
   })
 
+  it('masque la ligne de statut en veille pour ne pas doubler le badge VEILLE', () => {
+    // Le statut publié en veille est le même mot du même catalogue que le
+    // badge "VEILLE" affiché juste au-dessus (voir M2, revue de branche) :
+    // sans ce masquage, la carte montrerait "VEILLE" deux fois, la seconde
+    // sans libellé contrairement à ses voisines ("Présélection :", "Volume :").
+    const w = monteAvec({ status: 'VEILLE', standby: true })
+    expect(w.find('[data-player-status]').exists()).toBe(false)
+    expect(w.find('[data-standby]').exists()).toBe(true)
+  })
+
   it('signale le muet et la veille', () => {
     const w = monteAvec({ muted: true, standby: true })
     expect(w.find('[data-muted]').exists()).toBe(true)
