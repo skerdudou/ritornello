@@ -126,16 +126,25 @@ for (const id of Object.keys(MOUNTS_HERITES).map(BigInt)) {
 // not the file.
 const rendu = toml(flux, new Date().toISOString().slice(0, 10))
 
+// Line endings, neutralized for comparison. The checkout is a Windows one
+// (the project is developed under Windows + WSL), so git hands this file back
+// with CRLF while this script composes with LF: comparing them raw reported a
+// drift on every run after a checkout or a rebase — a false alarm on the one
+// check meant to catch a real one.
+const memeFins = (t) => t.replace(/\r\n/g, '\n')
+const livre = readFileSync(CIBLE, 'utf8')
+
 if (process.argv.includes('--verifier')) {
   // Comparison excluding the date line: only the entries' content counts.
-  const sansDate = (t) => t.replace(/^# Relevé le .*$/m, '')
-  const livre = readFileSync(CIBLE, 'utf8')
+  const sansDate = (t) => memeFins(t).replace(/^# Relevé le .*$/m, '')
   if (sansDate(livre) !== sansDate(rendu)) {
     console.error(`${CIBLE} differe de la source (${flux.length} flux en ligne)`)
     process.exit(1)
   }
   console.log(`table a jour (${flux.length} flux)`)
 } else {
-  writeFileSync(CIBLE, rendu)
+  // Written back with the endings the file already uses, so a Windows checkout
+  // does not show the whole file as modified.
+  writeFileSync(CIBLE, livre.includes('\r\n') ? rendu.replace(/\n/g, '\r\n') : rendu)
   console.log(`${CIBLE} : ${flux.length} flux ecrits`)
 }
