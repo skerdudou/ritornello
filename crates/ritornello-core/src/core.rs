@@ -169,11 +169,26 @@ impl<P: Player> Core<P> {
         } else {
             source_order.first().cloned().unwrap_or_default()
         };
-        // Résolu tout de suite : rien d'autre ne détient encore ce verrou à la
-        // construction, donc `try_read` réussit toujours en pratique. Voir
-        // `resout_standby_status` pour la raison de ce choix (plus jamais
-        // résolu au moment de poser la veille).
-        let standby_status = catalog.try_read().ok().map(|c| resout_standby_status(&c));
+        // Résolu tout de suite : le seul écrivain de ce catalogue est
+        // `set_locale`, joignable uniquement depuis la boucle `select!` qui ne
+        // démarre qu'après le retour d'ici — aucun verrou concurrent ne peut
+        // donc exister à cet instant. Voir `resout_standby_status` pour la
+        // raison de ce choix (plus jamais résolu au moment de poser la veille).
+        //
+        // L'échec est malgré tout journalisé plutôt qu'avalé : il rendrait
+        // l'écran de veille entièrement vide jusqu'au prochain changement de
+        // langue — précisément le défaut que ce pré-calcul corrige. Un
+        // invariant qu'on croit tenu et que personne ne vérifie est ce qui a
+        // produit ce défaut la première fois.
+        let standby_status = match catalog.try_read() {
+            Ok(cat) => Some(resout_standby_status(&cat)),
+            Err(_) => {
+                tracing::warn!(
+                    "standby label unavailable at startup: the standby screen will stay blank until the next locale change"
+                );
+                None
+            }
+        };
         Self {
             player,
             sources,
