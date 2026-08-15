@@ -75,13 +75,28 @@ pub fn ligne_titre(artist: Option<&str>, title: Option<&str>) -> Option<String> 
 
 /// Rendu texte pour console (ANSI : efface l'écran, curseur en haut à gauche).
 /// \r\n car sur /dev/tty1 le mode canonique n'insère pas le retour chariot.
-pub fn render_console(etat: &PlayerState) -> String {
-    let [line1, line2, line3] = compose(etat);
+///
+/// `#[cfg(test)]` : depuis que `ConsoleDisplay::show` mémorise son dernier
+/// rendu (voir plus bas), la production appelle directement `rendu_des_lignes`
+/// sur les lignes déjà composées, pour les comparer aux précédentes avant
+/// d'écrire quoi que ce soit. Cette fonction reste la commodité des tests, qui
+/// n'ont pas cette comparaison à faire et raisonnent sur un `PlayerState`
+/// complet.
+#[cfg(test)]
+fn render_console(etat: &PlayerState) -> String {
+    rendu_des_lignes(&compose(etat))
+}
+
+/// Assemble le rendu ANSI à partir de lignes déjà composées : partagé par
+/// `render_console` (qui compose depuis un état complet, réservé aux tests) et
+/// `ConsoleDisplay::show` (qui a besoin des lignes à part pour les comparer
+/// aux précédentes avant d'écrire quoi que ce soit).
+fn rendu_des_lignes(lignes: &[String; 3]) -> String {
     format!(
         "\x1b[2J\x1b[H\r\n  {}\r\n\r\n  {}\r\n\r\n  {}\r\n",
-        assainit(&line1),
-        assainit(&line2),
-        assainit(&line3)
+        assainit(&lignes[0]),
+        assainit(&lignes[1]),
+        assainit(&lignes[2])
     )
 }
 
@@ -100,6 +115,14 @@ fn assainit(ligne: &str) -> String {
 
 pub struct ConsoleDisplay {
     out: std::fs::File,
+    /// Dernières lignes effectivement écrites sur le tty. Le canal du cœur
+    /// déduplique sur l'état *entier* (`PlayerState`) : une trame qui ne
+    /// change que `preset_count`, `duration_s` ou `origin` — invisibles de
+    /// `compose` — franchit donc cette garde et arrive jusqu'ici. Sans
+    /// mémoire de son propre rendu, ce plugin réimprimerait les trois mêmes
+    /// lignes, précédées de l'effacement d'écran : un clignotement visible
+    /// sur un tty pour une trame qu'il ne montre même pas.
+    dernieres_lignes: Option<[String; 3]>,
 }
 
 impl ConsoleDisplay {
@@ -108,12 +131,17 @@ impl ConsoleDisplay {
             .write(true)
             .open(path)
             .with_context(|| format!("opening {}", path.display()))?;
-        Ok(Self { out })
+        Ok(Self { out, dernieres_lignes: None })
     }
 
     pub fn show(&mut self, etat: &PlayerState) -> Result<()> {
-        self.out.write_all(render_console(etat).as_bytes())?;
+        let lignes = compose(etat);
+        if self.dernieres_lignes.as_ref() == Some(&lignes) {
+            return Ok(());
+        }
+        self.out.write_all(rendu_des_lignes(&lignes).as_bytes())?;
         self.out.flush()?;
+        self.dernieres_lignes = Some(lignes);
         Ok(())
     }
 }
@@ -245,5 +273,70 @@ mod tests {
         let s = render_console(&e);
         assert!(!s.contains("FI\x1b[2JP"));
         assert_eq!(s.matches('\x1b').count(), 2, "seuls les deux ESC de l'en-tête du rendu");
+    }
+
+    #[test]
+    fn un_bel_est_aussi_retire_pas_seulement_lesc() {
+        // Régression M4 (revue de branche) : l'ancien test épinglait aussi la
+        // disparition du BEL (`\x07`), en plus du compte d'ESC. Un `assainit`
+        // réduit par erreur au seul filtrage d'ESC passerait le test
+        // précédent sans être réellement sûr — `is_control` doit couvrir tous
+        // les caractères de contrôle, pas seulement celui du rendu lui-même.
+        let e = PlayerState {
+            source: "radio".into(),
+            preset_name: Some("FI\x07P".into()),
+            ..Default::default()
+        };
+        let s = render_console(&e);
+        assert!(!s.contains('\x07'), "le BEL doit disparaitre comme n'importe quel caractere de controle");
+    }
+
+    #[test]
+    fn une_deuxieme_trame_aux_memes_lignes_ne_reecrit_pas_lecran() {
+        // Régression M3 (revue de branche) : le canal du cœur déduplique sur
+        // l'état ENTIER, pas sur les lignes composées. Une trame qui ne change
+        // que `duration_s` — invisible de `compose` — franchit donc la garde
+        // du cœur et arrive jusqu'ici : sans mémoire de son propre rendu, le
+        // plugin réimprimerait les trois mêmes lignes, précédées de
+        // l'effacement d'écran (clignotement visible sur un tty).
+        //
+        // Le fichier n'est pas ouvert en écriture tronquante : une seconde
+        // écriture réelle se placerait après la première (le curseur a
+        // avancé) et doublerait le contenu du fichier, ce que l'égalité
+        // ci-dessous détecterait.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tty");
+        std::fs::write(&path, b"").unwrap();
+        let mut display = ConsoleDisplay::open(&path).unwrap();
+        let mut e = etat_radio();
+        display.show(&e).unwrap();
+        let apres_premiere = std::fs::read(&path).unwrap();
+        assert!(!apres_premiere.is_empty());
+
+        e.morceau.duration_s = Some(210);
+        display.show(&e).unwrap();
+        let apres_seconde = std::fs::read(&path).unwrap();
+        assert_eq!(
+            apres_premiere, apres_seconde,
+            "les trois lignes composees sont identiques : la seconde ecriture n'aurait pas du avoir lieu"
+        );
+    }
+
+    #[test]
+    fn une_trame_aux_lignes_differentes_reecrit_bien_lecran() {
+        // Garde-fou du test ci-dessus : la mémorisation ne doit pas empêcher
+        // un vrai changement visible de s'afficher.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tty");
+        std::fs::write(&path, b"").unwrap();
+        let mut display = ConsoleDisplay::open(&path).unwrap();
+        let mut e = etat_radio();
+        display.show(&e).unwrap();
+        let apres_premiere = std::fs::read(&path).unwrap();
+
+        e.preset = Some(4);
+        display.show(&e).unwrap();
+        let apres_seconde = std::fs::read(&path).unwrap();
+        assert!(apres_seconde.len() > apres_premiere.len(), "la seconde ecriture a bien eu lieu");
     }
 }

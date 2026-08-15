@@ -1065,6 +1065,7 @@ dependencies = [
  "ritornello-plugin-sdk",
  "ritornello-proto",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
