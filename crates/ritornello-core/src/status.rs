@@ -678,6 +678,42 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::util::ServiceExt;
 
+    /// Aucune clé de refus ne peut atteindre l'écran telle quelle.
+    ///
+    /// Les tests de `message()` résolvent contre un catalogue **ad hoc**, ce qui
+    /// prouve l'interpolation mais pas que la clé écrite dans le code existe
+    /// vraiment : `Catalog::get` rend la clé quand il ne la trouve pas, donc une
+    /// faute de frappe produirait un toast affichant
+    /// « settings_initial_delay_out_of_range » sans qu'aucun test ne s'en
+    /// plaigne. Le test de parité entre catalogues ne le voit pas non plus : il
+    /// compare les deux fichiers entre eux, pas au code qui les appelle.
+    ///
+    /// Celui-ci résout donc chaque variante contre le **catalogue anglais
+    /// réellement embarqué**, et refuse un message égal à sa propre clé.
+    #[test]
+    fn chaque_refus_resout_contre_le_catalogue_embarque() {
+        let catalog = Catalog::load("core", "en", std::path::Path::new("/inexistant"), crate::core::EN);
+        // Une clé absente se reconnaît à ce que le message **est** la clé : pas
+        // d'espace, et le préfixe qu'on lui a donné.
+        let messages = [
+            AudioOutputError::EmptyName.message(&catalog),
+            SettingsError::InitialDelay { min: 200, max: 5000 }.message(&catalog),
+            SettingsError::RepeatInterval { min: 100, max: 2000 }.message(&catalog),
+            SettingsError::Overlay { min: 1000, max: 15000 }.message(&catalog),
+            SettingsError::TensWindow { min: 1000, max: 15000 }.message(&catalog),
+        ];
+        for m in &messages {
+            assert!(
+                m.contains(' '),
+                "message réduit à une clé brute, donc absente du catalogue embarqué : {m:?}"
+            );
+        }
+        // Et les bornes arrivent bien interpolées, pas en jetons.
+        let borne = SettingsError::InitialDelay { min: 200, max: 5000 }.message(&catalog);
+        assert!(borne.contains("200") && borne.contains("5000"), "bornes non interpolées : {borne:?}");
+        assert!(!borne.contains("{min}") && !borne.contains("{max}"), "jeton laissé tel quel : {borne:?}");
+    }
+
     /// Variante avec un `theme_tx` observable, pour les tests de `/api/theme`.
     fn app_state_with_theme() -> (AppState, tokio::sync::mpsc::Receiver<crate::theme::ThemeState>) {
         let (state, _audio_rx) = app_state_with_audio();
