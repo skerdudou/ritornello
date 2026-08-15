@@ -198,8 +198,18 @@ impl SourcePlugin for CdSource {
     }
     async fn stop(&mut self) -> SourceOutcome {
         // Arrêt décidé par le cœur, que la Source n'aurait pas su autrement.
+        //
+        // Passe par `issue()`, comme `activate`/`wake`/`select` : une trame
+        // permanente sans statut EFFACE le statut mémorisé côté cœur (voir
+        // `SourceMessage::status`), elle ne le laisse pas tel quel. Avant ce
+        // correctif, l'écran se vidait ("CD" et deux lignes vides) à la fin
+        // du disque comme sur la touche Stop, le disque restant pourtant
+        // inséré — voir le registre de ce chantier. `issue()` ne déclare pas
+        // de préselection ici : `self.lecture` vient d'être mis à faux, donc
+        // sa branche `plays_nothing()` s'applique, sans `preset`, exactement
+        // comme avant.
         self.lecture = false;
-        SourceOutcome::new(SourceAction::Noop).plays_nothing()
+        self.issue(SourceAction::Noop)
     }
     async fn player_track(&mut self, n: i64) -> SourceOutcome {
         // Le disque avance seul en fin de piste : c'est le **seul** chemin par
@@ -491,6 +501,31 @@ mod tests {
         assert!(!source.lecture);
         // Et la consequence : plus rien n'est annonce, meme a l'arrivee d'une TOC.
         assert_eq!(source.issue(SourceAction::Noop).identity, Some(IdentityUpdate::Nothing));
+    }
+
+    #[tokio::test]
+    async fn un_disque_arrete_declare_encore_son_statut() {
+        // Régression I1 (revue de branche) : `stop()` ne passait pas par
+        // `issue()` et ne déclarait donc aucun statut. Une trame permanente
+        // sans statut EFFACE le statut mémorisé côté cœur (convention
+        // documentée de `SourceMessage::status`) : l'écran se vidait ("CD" et
+        // deux lignes vides) à la fin du disque comme sur la touche Stop,
+        // alors que le disque restait inséré. C'est cette garantie qui rend
+        // vraie la mitigation actée au registre ("le statut CD audio reste
+        // affiché") : sans elle, l'arbitrage du propriétaire sur la perte du
+        // numéro de piste à l'arrêt reposait sur une promesse inexistante.
+        let mut source = source_en_lecture();
+        let out = source.stop().await;
+        assert_eq!(out.status.as_deref(), Some("audio CD"), "le disque est toujours present");
+        assert_eq!(out.preset, None, "rien ne joue : aucune touche ne doit etre mise en evidence");
+    }
+
+    #[tokio::test]
+    async fn un_arret_sans_disque_declare_pas_de_disque() {
+        let (mut source, _p, _t) = source_with_channels();
+        source.present = false;
+        let out = source.stop().await;
+        assert_eq!(out.status.as_deref(), Some("no disc"));
     }
 
     #[tokio::test]
