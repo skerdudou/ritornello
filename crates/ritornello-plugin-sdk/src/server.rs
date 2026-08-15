@@ -175,9 +175,14 @@ pub trait SourcePlugin: Send + 'static {
     /// Le cœur a arrêté la lecture sans consulter la Source (touche Stop).
     ///
     /// Implémentation par défaut : déclarer que plus rien ne joue, ce qui est
-    /// vrai pour toute Source, et ne rien afficher de nouveau. Une Source qui
-    /// tient un état de lecture propre (le cd) surcharge pour le remettre à
-    /// jour ; les autres compilent inchangées.
+    /// vrai pour toute Source. Sans statut, cette trame **efface** le statut
+    /// mémorisé côté cœur (une trame permanente sans statut vaut effacement,
+    /// voir `SourceMessage::status`) — ce qui est correct ici, une Source sans
+    /// statut permanent n'ayant rien à perdre. Une Source qui en déclare un à
+    /// chaque trame (le cd) doit surcharger et repasser par sa propre logique
+    /// de statut, sous peine de le voir disparaître à l'arrêt ; une Source qui
+    /// tient par ailleurs un état de lecture propre (toujours le cd) surcharge
+    /// aussi pour le remettre à jour. Les autres compilent inchangées.
     async fn stop(&mut self) -> SourceOutcome {
         SourceOutcome::new(SourceAction::Noop).plays_nothing()
     }
@@ -185,8 +190,8 @@ pub trait SourcePlugin: Send + 'static {
     /// Le lecteur est passé de lui-même à la piste d'index `n`.
     ///
     /// Implémentation par défaut : rien — une radio n'a pas de pistes. Une Source
-    /// qui suit un index (le cd) surcharge pour se recaler et rendre une vue et
-    /// une identité à jour.
+    /// qui suit un index (le cd) surcharge pour se recaler et rendre une identité
+    /// (et, via son propre statut, un état) à jour.
     async fn player_track(&mut self, _n: i64) -> SourceOutcome {
         SourceOutcome::new(SourceAction::Noop)
     }

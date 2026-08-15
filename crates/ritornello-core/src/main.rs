@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
     // relance jusqu'à la prochaine action. Ici, canal plein = contre-pression
     // sur la pompe d'événements, jamais de perte.
     let (ev_tx, mut ev_rx) = mpsc::channel::<Event>(64);
-    let (source_view_tx, mut source_view_rx) = mpsc::channel::<(String, SourceUpdate)>(32);
+    let (source_update_tx, mut source_update_rx) = mpsc::channel::<(String, SourceUpdate)>(32);
     // Ce qui joue, vers les plugins `metadata` : un `watch`, parce que seule la
     // dernière valeur compte et qu'un plugin lent ne doit pas bloquer le cœur.
     let (now_playing_tx, now_playing_rx) = watch::channel(NowPlaying {
@@ -173,9 +173,9 @@ async fn main() -> Result<()> {
                 match p.kind {
                     PluginKind::Source => {
                         let name = p.name.clone();
-                        let view_tx = source_view_tx.clone();
+                        let update_tx = source_update_tx.clone();
                         source_connects.push(tokio::spawn(async move {
-                            let result = SourceClient::connect(&socket_path, name.clone(), view_tx).await;
+                            let result = SourceClient::connect(&socket_path, name.clone(), update_tx).await;
                             (name, result)
                         }));
                     }
@@ -441,7 +441,7 @@ async fn main() -> Result<()> {
                     core::EventOutcome::Nothing => {}
                 }
             }
-            Some((name, update)) = source_view_rx.recv() => {
+            Some((name, update)) = source_update_rx.recv() => {
                 core.handle_source_update(&name, update);
             }
             Some((plugin, enrichment)) = enrich_rx.recv() => {

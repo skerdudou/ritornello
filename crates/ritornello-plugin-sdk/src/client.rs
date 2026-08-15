@@ -62,7 +62,7 @@ impl SourceClient {
     pub async fn connect(
         socket_path: &Path,
         name: String,
-        view_tx: mpsc::Sender<(String, SourceUpdate)>,
+        update_tx: mpsc::Sender<(String, SourceUpdate)>,
     ) -> Result<Arc<Self>> {
         let stream = connect_with_retry(socket_path).await?;
         let (read, write) = stream.into_split();
@@ -98,7 +98,7 @@ impl SourceClient {
                         preset_name: msg.preset_name,
                         status: msg.status,
                     };
-                    if view_tx.try_send((name.clone(), update)).is_err() {
+                    if update_tx.try_send((name.clone(), update)).is_err() {
                         // Un statut ou une présélection perdus sont réparés par
                         // la trame suivante, une **identité** perdue ne l'est
                         // jamais — la Source ne la réémet que sur changement,
@@ -385,11 +385,11 @@ mod tests {
             let _ = socket_for_server; // garde le chemin vivant pour le débogage
         });
 
-        let (view_tx, mut view_rx) = tokio::sync::mpsc::channel(8);
-        let client = SourceClient::connect(&socket, "radio".into(), view_tx).await.unwrap();
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "radio".into(), update_tx).await.unwrap();
         let action = client.request(ritornello_proto::SourceReq::Activate).await.unwrap();
         assert_eq!(action, SourceAction::Play { uri: "http://fip".into() });
-        let (name, update) = view_rx.recv().await.unwrap();
+        let (name, update) = update_rx.recv().await.unwrap();
         assert_eq!(name, "radio");
         // L'identité et la présélection arrivent dans la même mise à jour :
         // c'est ce qui garantit qu'on n'annonce jamais une station en
@@ -432,10 +432,10 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let (view_tx, mut view_rx) = tokio::sync::mpsc::channel(8);
-        let client = SourceClient::connect(&socket, "radio".into(), view_tx).await.unwrap();
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "radio".into(), update_tx).await.unwrap();
         client.request(SourceReq::Activate).await.unwrap();
-        let (name, update) = view_rx.recv().await.unwrap();
+        let (name, update) = update_rx.recv().await.unwrap();
         assert_eq!(name, "radio");
         assert_eq!(update.preset_count, Some(5));
     }
@@ -469,10 +469,10 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let (view_tx, mut view_rx) = tokio::sync::mpsc::channel(8);
-        let client = SourceClient::connect(&socket, "radio".into(), view_tx).await.unwrap();
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "radio".into(), update_tx).await.unwrap();
         client.request(SourceReq::Activate).await.unwrap();
-        let (name, update) = view_rx.recv().await.unwrap();
+        let (name, update) = update_rx.recv().await.unwrap();
         assert_eq!(name, "radio");
         assert_eq!(update.preset_name.as_deref(), Some("FIP"));
     }
@@ -506,10 +506,10 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let (view_tx, mut view_rx) = tokio::sync::mpsc::channel(8);
-        let client = SourceClient::connect(&socket, "radio".into(), view_tx).await.unwrap();
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "radio".into(), update_tx).await.unwrap();
         client.request(SourceReq::Activate).await.unwrap();
-        let (name, update) = view_rx.recv().await.unwrap();
+        let (name, update) = update_rx.recv().await.unwrap();
         assert_eq!(name, "radio");
         assert_eq!(update.status.as_deref(), Some("PAS DE DISQUE"));
     }
@@ -541,10 +541,10 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let (view_tx, mut view_rx) = tokio::sync::mpsc::channel(8);
-        let client = SourceClient::connect(&socket, "radio".into(), view_tx).await.unwrap();
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "radio".into(), update_tx).await.unwrap();
         client.request(SourceReq::SetLocale("fr".into())).await.unwrap();
-        assert!(view_rx.try_recv().is_err(), "aucune mise a jour ne doit etre relayee");
+        assert!(update_rx.try_recv().is_err(), "aucune mise a jour ne doit etre relayee");
     }
 
     #[tokio::test]
@@ -745,8 +745,8 @@ mod tests {
             let _ = lines.next_line().await;
             // Fin du bloc : read et _write droppés -> EOF côté client.
         });
-        let (view_tx, _view_rx) = tokio::sync::mpsc::channel(8);
-        let client = SourceClient::connect(&socket, "radio".into(), view_tx).await.unwrap();
+        let (update_tx, _update_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "radio".into(), update_tx).await.unwrap();
         let start = std::time::Instant::now();
         let res = client.request(SourceReq::Activate).await;
         assert!(res.is_err());
