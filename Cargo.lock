@@ -1072,6 +1072,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ritornello-plugin-files"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "ritornello-i18n",
+ "ritornello-plugin-sdk",
+ "ritornello-proto",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ritornello-plugin-generic-input"
 version = "0.1.0"
 dependencies = [

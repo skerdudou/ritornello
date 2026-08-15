@@ -1,0 +1,37 @@
+[package]
+name = "ritornello-plugin-files"
+version = "0.1.0"
+edition = "2021"
+
+# Une cible `lib` est indispensable ici : deux `[[bin]]` d'un même crate ne
+# partagent pas leurs modules. Sans elle, le binaire racine de montage ne
+# pourrait pas employer `roots.rs`, et l'argument qui justifie de les loger
+# ensemble — le côté privilégié et le côté qui écrit la configuration lisent
+# exactement la même grammaire — tomberait.
+[lib]
+name = "ritornello_plugin_files"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ritornello-plugin-files"
+path = "src/main.rs"
+
+[[bin]]
+name = "ritornello-media-mount"
+path = "src/bin/media-mount.rs"
+
+[dependencies]
+ritornello-proto = { path = "../ritornello-proto" }
+ritornello-plugin-sdk = { path = "../ritornello-plugin-sdk" }
+ritornello-i18n = { path = "../ritornello-i18n" }
+anyhow = "1"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,23 @@
+# Catalogue anglais du plugin `files`, embarqué dans le binaire.
+#
+# Toute clé ajoutée ici doit l'être aussi dans deploy/locales/files/fr.toml, et
+# la variante d'erreur correspondante doit entrer dans le test
+# `chaque_refus_resout_contre_le_catalogue_embarque` de son module : sans lui,
+# une faute de frappe afficherait la clé brute à l'écran.
+
+# Statuts affichés par la Source.
+status_files = "FILES"
+no_playlist = "NO PLAYLIST"
+empty_track = "NO SUCH TRACK"
+
+# Refus de validation des racines.
+bad_root_name = "invalid root name \"{name}\": use lowercase letters, digits and dashes only, starting with a letter or digit"
+bad_host = "invalid server address \"{host}\": no commas, spaces or \"..\""
+bad_share = "invalid share name \"{share}\": no commas, spaces or \"..\""
+bad_subpath = "invalid subfolder \"{path}\": it must be relative and must not go up"
+duplicate_root = "a root named \"{name}\" already exists"
+relative_local_path = "the local folder \"{path}\" must be an absolute path"
+
+# Refus du parcours récursif.
+too_many_tracks = "this folder holds more than {cap} tracks: narrow it down, or add its subfolders one by one"
+scan_io_error = "could not read \"{path}\": the share may be unreachable"
