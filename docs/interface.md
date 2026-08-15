@@ -243,13 +243,15 @@ effect at the next service start (see
 [installation.md](installation.md#shutdown-and-reboot-from-the-web-ui)).
 
 `POST /api/system/power` takes `{"action": "poweroff" | "reboot" |
-"restart-service"}`. An unknown action is refused with `422` and an `error`
-message. `poweroff` and `reboot` run `systemctl` and wait up to 5 s: `202`
-when it succeeds or is still running (the machine is going away); `502`
-when it refuses, carrying **logind's own message** whenever it wrote one —
-that sentence names the missing polkit rule, which a silent `202` would
-hide — or `systemctl a échoué (code N)` when stderr was empty; `500` when
-`systemctl` could not be started at all.
+"restart-service"}`. An unknown action is refused with `422` and a
+catalogue-resolved `error` message. `poweroff` and `reboot` run `systemctl`
+and wait up to 5 s: `202` when it succeeds or is still running (the machine
+is going away); `502` when it refuses, carrying **logind's own message
+verbatim** whenever it wrote one — that sentence names the missing polkit
+rule, which a silent `202` would hide, and it is never translated — or a
+catalogue fallback naming the exit code when stderr was empty; `500` when
+`systemctl` could not be started at all, with the underlying error folded
+into a catalogue phrase.
 `restart-service` answers `202`, sends `SIGTERM` to mpv, and exits the process
 300 ms later; systemd restarts it because the unit says `Restart=always`. It
 needs no privilege, which is why there is no `can_restart_service` field.

@@ -76,16 +76,15 @@ Three audiences, three rules — the boundary is the audience, not the file:
   hard-coded string: the display, the SPA, and the `error` field of a `422`
   (the kit turns it straight into a toast). English lives in the binary,
   other languages in `deploy/locales/` — see [interface.md](interface.md).
-  Known exceptions, not yet converted: `validate_settings` and
-  `validate_audio_device` in `status.rs`, and the `422`/`502` bodies of
-  `system.rs`, still write French phrases inline. And one path leaks a log
-  message into a body instead of a catalogue phrase: `RadioAdmin::set_data`
-  turns an I/O failure from `Stations::save` into `{"error": …}` through
-  `e.to_string()`, so the reader gets the diagnostic text verbatim. Fixing
-  that one means a catalogue phrase for the user and the raw I/O detail left
-  in the log, where it belongs. The radio plugin's `config.rs` shows the
-  pattern to follow — it resolves its `ValidationError` against the plugin's
-  own catalogue, parameters included.
+  Validation stays pure and catalogue-free (`validate_settings`,
+  `validate_audio_device`, `theme::validate`, `system::parse_action` all
+  return a typed error); the HTTP route is what resolves it against the
+  core's current catalogue. The radio plugin's `config.rs` shows the pattern
+  every one of them follows — a typed `ValidationError` with a
+  `message(&Catalog)` and an English `Display` for logs. The same split
+  applies to a save that fails on disk: the plugin admin backends turn the
+  I/O failure into a catalogue phrase for the reader and log the raw detail,
+  never the other way around.
 
 ## Tests
 
