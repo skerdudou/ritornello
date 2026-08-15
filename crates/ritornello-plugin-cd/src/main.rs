@@ -145,7 +145,7 @@ impl SourcePlugin for CdSource {
     async fn activate(&mut self) -> SourceOutcome {
         self.lecture = self.present;
         if self.present {
-            self.issue(SourceAction::Play { uri: "cdda://".into() })
+            self.issue(SourceAction::play("cdda://").finite())
         } else {
             self.issue(SourceAction::Noop)
         }
@@ -170,7 +170,7 @@ impl SourcePlugin for CdSource {
         }
         self.track = (n - 1) as i64;
         self.lecture = true;
-        self.issue(SourceAction::Play { uri: format!("cdda://{n}") })
+        self.issue(SourceAction::play(format!("cdda://{n}")).finite())
     }
     async fn next(&mut self) -> SourceOutcome {
         // Rien en lecture : `playlist-next` sur un mpv à l'arrêt ne charge rien,

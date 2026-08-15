@@ -588,14 +588,14 @@ mod tests {
     #[async_trait::async_trait]
     impl SourcePlugin for EchoSource {
         async fn activate(&mut self) -> SourceOutcome {
-            SourceOutcome::new(SourceAction::Play { uri: "http://fip".into() })
+            SourceOutcome::new(SourceAction::play("http://fip"))
                 .plays(serde_json::json!({"kind": "stream", "url": "http://fip"}))
         }
         async fn deactivate(&mut self) -> SourceOutcome {
             SourceOutcome::new(SourceAction::Stop).plays_nothing()
         }
         async fn select(&mut self, n: u8) -> SourceOutcome {
-            SourceOutcome::new(SourceAction::Play { uri: format!("http://station-{n}") })
+            SourceOutcome::new(SourceAction::play(format!("http://station-{n}")))
         }
         async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
         async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
@@ -627,7 +627,7 @@ mod tests {
         let line = lines.next_line().await.unwrap().unwrap();
         let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(msg.id, Some(1));
-        assert_eq!(msg.action, Some(SourceAction::Play { uri: "http://fip".into() }));
+        assert_eq!(msg.action, Some(SourceAction::play("http://fip")));
         assert_eq!(
             msg.identity,
             Some(IdentityUpdate::Playing(serde_json::json!({"kind": "stream", "url": "http://fip"})))
@@ -637,7 +637,7 @@ mod tests {
         let line = lines.next_line().await.unwrap().unwrap();
         let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(msg.id, Some(2));
-        assert_eq!(msg.action, Some(SourceAction::Play { uri: "http://station-3".into() }));
+        assert_eq!(msg.action, Some(SourceAction::play("http://station-3")));
     }
 
     /// Source dont le flux de notifications se tarit : premier appel `None`,
@@ -721,7 +721,7 @@ mod tests {
         write.write_all(b"{\"id\":1,\"req\":\"Wake\"}\n").await.unwrap();
         let line = lines.next_line().await.unwrap().unwrap();
         let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
-        assert_eq!(msg.action, Some(SourceAction::Play { uri: "http://fip".into() }));
+        assert_eq!(msg.action, Some(SourceAction::play("http://fip")));
     }
 
     #[tokio::test]
@@ -729,13 +729,13 @@ mod tests {
         struct WakingSource;
         #[async_trait::async_trait]
         impl SourcePlugin for WakingSource {
-            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Play { uri: "http://activate".into() }) }
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::play("http://activate")) }
             async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
             async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
             async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
             async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
             async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
-            async fn wake(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Play { uri: "http://wake".into() }) }
+            async fn wake(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::play("http://wake")) }
         }
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("plugin.sock");
@@ -754,7 +754,7 @@ mod tests {
         let line = lines.next_line().await.unwrap().unwrap();
         let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
         // wake() dispatché (http://wake), PAS activate() (http://activate).
-        assert_eq!(msg.action, Some(SourceAction::Play { uri: "http://wake".into() }));
+        assert_eq!(msg.action, Some(SourceAction::play("http://wake")));
     }
 
     #[tokio::test]
@@ -871,7 +871,7 @@ mod tests {
         let line = lines.next_line().await.unwrap().unwrap();
         let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(msg.id, Some(7));
-        assert_eq!(msg.action, Some(SourceAction::Play { uri: "http://fip".into() }));
+        assert_eq!(msg.action, Some(SourceAction::play("http://fip")));
     }
 }
 

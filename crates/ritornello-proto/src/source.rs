@@ -44,10 +44,66 @@ pub struct SourceRequest {
 #[serde(tag = "action", content = "data")]
 pub enum SourceAction {
     Noop,
-    Play { uri: String },
+    Play {
+        uri: String,
+        /// Index de départ dans la liste que `uri` désigne, quand c'en est une.
+        ///
+        /// Absent = « commence au début », le comportement historique. Le cœur
+        /// applique `playlist-pos` juste après `loadfile` : mesuré fiable, mpv
+        /// résolvant un `.m3u` dès la commande, sans dépliage différé.
+        ///
+        /// C'est l'unique moyen pour une Source de reprendre une liste à la
+        /// piste n — chiffre de la télécommande, ou reprise après redémarrage.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start: Option<i64>,
+        /// Ce que `uri` désigne a une **fin normale** : un disque, une liste de
+        /// fichiers. Quand mpv devient inactif, c'est la fin du contenu, pas
+        /// une coupure de flux à relancer.
+        ///
+        /// Absent (= `false`) veut dire « flux live », le comportement
+        /// historique : c'est ce qui garde les trames de la radio inchangées.
+        /// Remplace le reniflage `uri.starts_with("cdda://")` du cœur, qui
+        /// devinait ce que seule la Source sait.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        finite: bool,
+    },
     Stop,
     PlayerNext,
     PlayerPrev,
+}
+
+impl SourceAction {
+    /// Lecture d'une URI, aux défauts historiques : depuis le début, flux live.
+    ///
+    /// Passer par ce constructeur plutôt que par la variante littérale évite
+    /// qu'un champ ajouté plus tard n'oblige à retoucher tous les appelants.
+    pub fn play(uri: impl Into<String>) -> Self {
+        SourceAction::Play { uri: uri.into(), start: None, finite: false }
+    }
+
+    /// Positionne la lecture sur l'élément d'index `n` de la liste. Sans effet
+    /// sur une action qui n'est pas un `Play`.
+    #[must_use]
+    pub fn starting_at(self, n: i64) -> Self {
+        match self {
+            SourceAction::Play { uri, finite, .. } => {
+                SourceAction::Play { uri, start: Some(n), finite }
+            }
+            autre => autre,
+        }
+    }
+
+    /// Déclare un contenu fini, dont l'inactivité de mpv signale la fin et non
+    /// une coupure. Sans effet sur une action qui n'est pas un `Play`.
+    #[must_use]
+    pub fn finite(self) -> Self {
+        match self {
+            SourceAction::Play { uri, start, .. } => {
+                SourceAction::Play { uri, start, finite: true }
+            }
+            autre => autre,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +211,50 @@ mod tests {
     }
 
     #[test]
+    fn play_sans_champs_neufs_reste_serialise_a_l_identique() {
+        // La garantie de compatibilité : une trame émise par le plugin radio
+        // ne doit pas changer d'un octet. Sans quoi les traces d'un
+        // `journalctl` deviendraient impossibles à comparer d'une version à
+        // l'autre, sur une liaison voulue lisible à l'œil.
+        let a = SourceAction::play("http://icecast.radiofrance.fr/fip-midfi.mp3");
+        assert_eq!(
+            serde_json::to_string(&a).unwrap(),
+            r#"{"action":"Play","data":{"uri":"http://icecast.radiofrance.fr/fip-midfi.mp3"}}"#
+        );
+    }
+
+    #[test]
+    fn start_et_finite_font_le_tour() {
+        let a = SourceAction::play("/var/lib/ritornello/plugin-files.m3u").starting_at(4).finite();
+        let json = serde_json::to_string(&a).unwrap();
+        assert!(json.contains(r#""start":4"#), "{json}");
+        assert!(json.contains(r#""finite":true"#), "{json}");
+        let back: SourceAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, a);
+    }
+
+    #[test]
+    fn une_trame_anterieure_se_relit_en_flux_live_depuis_le_debut() {
+        // Un plugin antérieur n'émet ni `start` ni `finite` : les défauts
+        // doivent reproduire exactement le comportement historique (flux live,
+        // début de liste), sans quoi une mise à jour partielle des binaires
+        // changerait silencieusement la lecture.
+        let back: SourceAction =
+            serde_json::from_str(r#"{"action":"Play","data":{"uri":"http://x"}}"#).unwrap();
+        assert_eq!(back, SourceAction::Play { uri: "http://x".into(), start: None, finite: false });
+    }
+
+    #[test]
+    fn les_constructeurs_ne_touchent_pas_aux_autres_actions() {
+        // `starting_at` et `finite` sont écrits pour être enchaînables sans
+        // que l'appelant ait à savoir quelle variante il tient. Le garde-fou :
+        // appliqués ailleurs, ils ne doivent rien transformer en `Play`.
+        assert_eq!(SourceAction::Stop.starting_at(3), SourceAction::Stop);
+        assert_eq!(SourceAction::Noop.finite(), SourceAction::Noop);
+        assert_eq!(SourceAction::PlayerNext.starting_at(1).finite(), SourceAction::PlayerNext);
+    }
+
+    #[test]
     fn request_roundtrip() {
         let r = SourceRequest { id: 7, req: SourceReq::Select(3) };
         let json = serde_json::to_string(&r).unwrap();
@@ -167,7 +267,7 @@ mod tests {
     fn message_reponse_avec_action_et_identite() {
         let m = SourceMessage {
             id: Some(1),
-            action: Some(SourceAction::Play { uri: "http://fip".into() }),
+            action: Some(SourceAction::play("http://fip")),
             identity: Some(IdentityUpdate::Playing(serde_json::json!({"kind": "stream"}))),
             transient: false,
             preset: None,
@@ -178,7 +278,7 @@ mod tests {
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, Some(1));
-        assert_eq!(back.action, Some(SourceAction::Play { uri: "http://fip".into() }));
+        assert_eq!(back.action, Some(SourceAction::play("http://fip")));
         assert_eq!(back.identity, m.identity);
     }
 

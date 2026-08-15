@@ -71,7 +71,7 @@ impl RadioSource {
             if let Err(e) = state::update(&self.state_path, |s| s.preset = n) {
                 tracing::warn!("failed to persist preset: {e}");
             }
-            SourceOutcome::new(SourceAction::Play { uri: st.url.clone() })
+            SourceOutcome::new(SourceAction::play(st.url.clone()))
                 .plays(Self::identite_du_flux(&st.url))
                 // La touche que l'IHM doit mettre en évidence : seule la
                 // Source sait à quelle présélection correspond ce qui joue.

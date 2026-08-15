@@ -371,7 +371,7 @@ mod tests {
             let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
             let msg = ritornello_proto::SourceMessage {
                 id: Some(req.id),
-                action: Some(SourceAction::Play { uri: "http://fip".into() }),
+                action: Some(SourceAction::play("http://fip")),
                 identity: Some(ritornello_proto::IdentityUpdate::Playing(
                     serde_json::json!({"kind": "stream", "url": "http://fip"}),
                 )),
@@ -388,7 +388,7 @@ mod tests {
         let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
         let client = SourceClient::connect(&socket, "radio".into(), update_tx).await.unwrap();
         let action = client.request(ritornello_proto::SourceReq::Activate).await.unwrap();
-        assert_eq!(action, SourceAction::Play { uri: "http://fip".into() });
+        assert_eq!(action, SourceAction::play("http://fip"));
         let (name, update) = update_rx.recv().await.unwrap();
         assert_eq!(name, "radio");
         // L'identité et la présélection arrivent dans la même mise à jour :

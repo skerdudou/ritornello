@@ -805,15 +805,27 @@ impl<P: Player> Core<P> {
     async fn apply(&mut self, action: SourceAction) -> Result<()> {
         match action {
             SourceAction::Noop => {}
-            SourceAction::Play { uri } => {
+            SourceAction::Play { uri, start, finite } => {
                 // La machinerie de relance (`expecting_stream` puis
                 // `PlaybackIdle` → retry) n'existe que pour les flux réseau :
-                // un disque qui se termine est une fin normale, pas une
-                // panne. Marquer `cdda://` « flux attendu » faisait
-                // redémarrer le disque en boucle : fin du disque → mpv idle
-                // → relance ~2 s → `Activate` → `Play cdda://` → piste 1.
-                self.expecting_stream = !uri.starts_with("cdda://");
+                // un contenu qui se termine est une fin normale, pas une
+                // panne. Le confondre avec une coupure faisait redémarrer le
+                // disque en boucle : fin du disque → mpv idle → relance ~2 s
+                // → `Activate` → `Play cdda://` → piste 1.
+                //
+                // C'est la Source qui le déclare, et non le cœur qui le
+                // devine : celui-ci reniflait `cdda://`, si bien qu'un chemin
+                // de fichier — mesuré au banc, mpv passant `idle` en fin de
+                // liste exactement comme lors d'une coupure — tombait du
+                // mauvais côté.
+                self.expecting_stream = !finite;
                 self.player.play(&uri).await?;
+                // Positionnement **après** le chargement, dans cet ordre : mpv
+                // résout un `.m3u` dès le `loadfile`, la liste est donc déjà
+                // là et il n'y a aucun dépliage différé à attendre.
+                if let Some(n) = start {
+                    self.player.set_playlist_pos(n).await?;
+                }
             }
             SourceAction::Stop => {
                 self.expecting_stream = false;
@@ -1000,6 +1012,10 @@ mod tests {
             self.calls.lock().unwrap().push("prev".into());
             Ok(())
         }
+        async fn set_playlist_pos(&self, n: i64) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push(format!("playlist-pos {n}"));
+            Ok(())
+        }
         async fn set_volume(&self, v: u8) -> anyhow::Result<()> {
             self.calls.lock().unwrap().push(format!("vol {v}"));
             Ok(())
@@ -1024,12 +1040,15 @@ mod tests {
         async fn request(&self, req: SourceReq) -> Result<SourceAction> {
             self.calls.lock().unwrap().push(format!("{}:{:?}", self.name, req));
             Ok(match (self.name, req) {
-                ("radio", SourceReq::Activate) => SourceAction::Play { uri: "http://fip".into() },
-                ("radio", SourceReq::Select(3)) => SourceAction::Play { uri: "http://inter".into() },
+                ("radio", SourceReq::Activate) => SourceAction::play("http://fip"),
+                ("radio", SourceReq::Select(3)) => SourceAction::play("http://inter"),
                 ("radio", SourceReq::Select(_)) => SourceAction::Noop,
-                ("cd", SourceReq::Activate) => SourceAction::Play { uri: "cdda://".into() },
+                // `.finite()` comme le vrai plugin cd : sans cette
+                // déclaration, la fin du disque passerait pour une coupure de
+                // flux et la relance rejouerait le disque en boucle.
+                ("cd", SourceReq::Activate) => SourceAction::play("cdda://").finite(),
                 (_, SourceReq::Eject) if self.name == "cd" => SourceAction::Stop,
-                ("radio", SourceReq::Wake) => SourceAction::Play { uri: "http://fip".into() },
+                ("radio", SourceReq::Wake) => SourceAction::play("http://fip"),
                 ("cd", SourceReq::Wake) => SourceAction::Noop,
                 _ => SourceAction::Noop,
             })
@@ -1417,6 +1436,49 @@ mod tests {
         let mut core = Core::new(player, Cablage { sources, persisted, state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata: cablage_muet(vec![]) });
         core.resume().await.unwrap();
         assert_eq!(core.handle_event(Event::PlaybackIdle).await, EventOutcome::Nothing);
+    }
+
+    #[tokio::test]
+    async fn un_contenu_fini_n_arme_pas_la_relance_un_flux_live_si() {
+        // Mesuré au banc mpv 0.37 : en fin de liste de fichiers, mpv passe
+        // `idle` exactement comme lors d'une coupure de flux. Tant que le cœur
+        // reniflait l'URI (`cdda://`), un chemin de fichier tombait du mauvais
+        // côté — relance exponentielle au lieu de l'arrêt propre, et la liste
+        // repartait en boucle depuis la première piste.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.apply(SourceAction::play("/var/lib/ritornello/plugin-files.m3u").finite())
+            .await
+            .unwrap();
+        assert!(!core.expecting_stream, "un contenu fini ne doit pas armer la relance");
+
+        core.apply(SourceAction::play("http://icecast/fip.mp3")).await.unwrap();
+        assert!(core.expecting_stream, "un flux live doit rester relançable");
+    }
+
+    #[tokio::test]
+    async fn un_play_avec_index_charge_puis_positionne() {
+        // L'ordre importe et il est celui-ci : mpv résout un `.m3u` dès le
+        // `loadfile`, donc la liste est déjà là et l'enchaînement immédiat
+        // atterrit sur la bonne piste — mesuré, plutôt que supposé.
+        let (mut core, player_calls, _sc, _rx, _d) = setup();
+        core.apply(SourceAction::play("/var/lib/ritornello/plugin-files.m3u").starting_at(4).finite())
+            .await
+            .unwrap();
+        assert_eq!(
+            *player_calls.lock().unwrap(),
+            vec![
+                "play /var/lib/ritornello/plugin-files.m3u".to_string(),
+                "playlist-pos 4".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn un_play_sans_index_ne_positionne_rien() {
+        // Le chemin de la radio : aucune commande superflue sur la socket mpv.
+        let (mut core, player_calls, _sc, _rx, _d) = setup();
+        core.apply(SourceAction::play("http://icecast/fip.mp3")).await.unwrap();
+        assert_eq!(*player_calls.lock().unwrap(), vec!["play http://icecast/fip.mp3".to_string()]);
     }
 
     #[tokio::test]

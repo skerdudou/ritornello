@@ -272,6 +272,10 @@ impl super::Player for MpvPlayer {
         self.ipc.command(&[json!("playlist-prev")]).await?;
         Ok(())
     }
+    async fn set_playlist_pos(&self, n: i64) -> Result<()> {
+        self.ipc.command(&[json!("set_property"), json!("playlist-pos"), json!(n)]).await?;
+        Ok(())
+    }
     async fn set_volume(&self, volume: u8) -> Result<()> {
         self.ipc.command(&[json!("set_property"), json!("volume"), json!(volume)]).await?;
         Ok(())
