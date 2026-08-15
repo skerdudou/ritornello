@@ -4,6 +4,7 @@ select_out_of_range = "preset {n} out of range 0-9 on {device}"
 unknown_command = "unknown command bound to code {code} on {device}"
 unknown_preset = "unknown preset: {preset}"
 bad_request = "invalid request: {detail}"
+save_failed = "the save failed"
 
 # page d'admin
 admin_title = "input bindings"

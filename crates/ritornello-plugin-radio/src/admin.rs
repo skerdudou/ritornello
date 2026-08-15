@@ -116,7 +116,14 @@ impl AdminPlugin for RadioAdmin {
                 stations
                     .validate()
                     .map_err(|e| e.message(&self.catalog.read().unwrap()))?;
-                stations.save(&self.stations_path).map_err(|e| e.to_string())?;
+                stations.save(&self.stations_path).map_err(|e| {
+                    // Le détail technique (chemin, cause I/O) reste dans le
+                    // journal : un `/var/lib` en lecture seule doit rester
+                    // diagnosticable, mais pas au prix de servir ce diagnostic
+                    // comme texte d'interface.
+                    tracing::warn!("failed to save stations: {e}");
+                    self.catalog.read().unwrap().get("save_failed").to_string()
+                })?;
                 let compte = stations.preset_count();
                 *self.stations.write().await = stations;
                 // Annonce spontanée à la moitié Source, sur **chaque**
@@ -319,6 +326,28 @@ mod tests {
         assert!(a.set_data(nouveau).await.is_ok());
         assert_eq!(a.stations.read().await.stations[0].name, "Inter");
         assert_eq!(Stations::load(&a.stations_path).unwrap().stations[0].name, "Inter");
+    }
+
+    #[tokio::test]
+    async fn un_echec_decriture_renvoie_une_phrase_de_catalogue_pas_le_detail_io() {
+        // `stations_path` vise un fichier ordinaire comme s'il s'agissait
+        // d'un répertoire parent : `create_dir_all` échoue avec une erreur
+        // d'E/S, sans jamais toucher au disque des stations réelles.
+        // Régression visée : `Stations::save(...).map_err(|e| e.to_string())`
+        // mettait cette erreur brute (chemins compris) dans le corps de la
+        // réponse — le texte destiné au lecteur doit rester une phrase de
+        // catalogue, le détail technique allant au journal.
+        let dir = tempfile::tempdir().unwrap();
+        let obstacle = dir.path().join("obstacle");
+        std::fs::write(&obstacle, b"pas un repertoire").unwrap();
+        let mut a = admin(dir.path());
+        a.stations_path = obstacle.join("stations.toml");
+        let nouveau = serde_json::json!({
+            "op": "save",
+            "stations": [{ "name": "Inter", "url": "http://inter", "preset": 1 }]
+        });
+        let err = a.set_data(nouveau).await.unwrap_err();
+        assert_eq!(err, "the save failed");
     }
 
     #[tokio::test]

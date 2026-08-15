@@ -73,7 +73,12 @@ impl AdminPlugin for GenericInputAdmin {
         match op {
             Op::Save { bindings } => {
                 bindings.validate().map_err(|e| e.message(&self.catalog.read().unwrap()))?;
-                bindings.save(&self.bindings_path).map_err(|e| e.to_string())?;
+                bindings.save(&self.bindings_path).map_err(|e| {
+                    // Même partage qu'en radio : le détail I/O va au journal,
+                    // pas dans le corps de la réponse.
+                    tracing::warn!("failed to save bindings: {e}");
+                    self.catalog.read().unwrap().get("save_failed").to_string()
+                })?;
                 *self.hub.bindings.write().unwrap() = bindings;
                 Ok(())
             }
@@ -248,6 +253,27 @@ mod tests {
             Bindings::load(&f.admin.bindings_path).resolve("USB Keyboard", 57),
             Some(Command::PlayPause)
         );
+    }
+
+    #[tokio::test]
+    async fn un_echec_decriture_renvoie_une_phrase_de_catalogue_pas_le_detail_io() {
+        // Même régression qu'en radio : `Bindings::save(...).map_err(|e|
+        // e.to_string())` mettait le détail I/O brut dans le corps de la
+        // réponse. `bindings_path` vise ici un fichier ordinaire comme s'il
+        // s'agissait d'un répertoire parent, pour faire échouer
+        // `create_dir_all` sans toucher au disque réel.
+        let mut f = fixture();
+        let obstacle = f.admin.presets_root.parent().unwrap().join("obstacle");
+        std::fs::write(&obstacle, b"pas un repertoire").unwrap();
+        f.admin.bindings_path = obstacle.join("input-bindings.toml");
+        let op = serde_json::json!({
+            "op": "save",
+            "bindings": { "devices": [
+                { "name": "USB Keyboard", "bindings": [{ "code": 57, "cmd": "PlayPause" }] }
+            ]}
+        });
+        let err = f.admin.set_data(op).await.unwrap_err();
+        assert_eq!(err, "the save failed");
     }
 
     #[tokio::test]

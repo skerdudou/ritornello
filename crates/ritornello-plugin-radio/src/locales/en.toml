@@ -4,6 +4,7 @@ preset_duplicate = "duplicate preset {p}"
 bad_url = "invalid URL for {name}: {url}"
 bad_request = "invalid request: {detail}"
 search_error = "Directory search failed: {detail}"
+save_failed = "the save failed"
 
 # page d'admin
 admin_title = "stations"

@@ -3,6 +3,7 @@ select_out_of_range = "présélection {n} hors bornes 0-9 sur {device}"
 unknown_command = "commande inconnue liée au code {code} sur {device}"
 unknown_preset = "preset inconnu : {preset}"
 bad_request = "requête invalide : {detail}"
+save_failed = "l'enregistrement a échoué"
 
 admin_title = "touches"
 device_label = "Périphérique"
