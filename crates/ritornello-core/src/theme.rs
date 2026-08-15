@@ -106,11 +106,12 @@ pub fn from_persisted(theme: Option<&str>, mode: Option<&str>) -> ThemeState {
     // `validate` juge les deux champs d'un bloc : on l'appelle deux fois, en
     // neutralisant l'autre champ avec sa valeur par défaut, pour attribuer
     // l'erreur au bon champ.
-    // Le log nomme la **valeur rejetée**, pas la phrase de `validate` : celle-ci
-    // est destinée au lecteur d'un 422 et reste en français jusqu'à son passage
-    // par catalogue, alors que les logs sont en anglais — l'interpoler ici
-    // produirait un fragment français au milieu d'une ligne anglaise. La valeur
-    // fautive est de toute façon plus utile dans un journal que sa description.
+    // Le log nomme la **valeur rejetée**, pas le message de `ThemeError` : ce
+    // message est destiné au lecteur d'un 422 et se résout contre le catalogue,
+    // donc dans la langue de l'appareil, alors que les logs sont en anglais.
+    // L'interpoler ici demanderait un catalogue que cette fonction pure n'a pas,
+    // et mêlerait deux langues dans une ligne de journal. La valeur fautive est
+    // de toute façon plus utile dans un journal que sa description.
     if validate(&etat.theme, DEFAULT_MODE).is_err() {
         tracing::warn!("invalid persisted theme {:?}, falling back to {DEFAULT_THEME}", etat.theme);
         etat.theme = DEFAULT_THEME.to_string();
