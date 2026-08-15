@@ -1,7 +1,7 @@
 # Lecture de fichiers audio depuis un partage réseau — design
 
 **Date :** 2026-08-15
-**État :** en attente de validation. Une décision reste ouverte (§7).
+**État :** validé par le propriétaire, prêt pour le plan d'implémentation.
 **Base :** `main` à `3a30023` (onglet Système et « afficheurs, état structuré »
 fusionnés).
 
@@ -126,7 +126,9 @@ sur une installation partielle à la main.
 |---|---|---|
 | `ritornello-plugin-files` | `source` + page d'admin | La Source, la page, le scan, les listes de lecture. |
 | `ritornello-media-mount` | binaire **racine** | Second `[[bin]]` du même crate : monte et démonte ce que la conf déclare. |
-| `ritornello-plugin-file-tags` | `metadata` | Les tags des fichiers — **sous réserve de la décision §7**. |
+
+Les tags ne donnent lieu à **aucun nouveau plugin** : le cœur les lit lui-même
+(§7). Le chantier livre donc un seul crate, portant deux binaires.
 
 Le binaire de montage est un second binaire du **même crate**, et non un crate
 séparé : il partage ainsi le module de configuration et ses tests avec le
@@ -294,25 +296,20 @@ l'écriture du m3u, et la playlist mpv.
 `wav`, `wma`, `aiff`, `ape`, `wv`, `mpc`. La comparaison est insensible à la
 casse.
 
-## 7. Les tags — **décision ouverte**
+## 7. Les tags : lus par le cœur
+
+**Décidé** : le cœur exploite les tags que mpv lui envoie déjà. Aucun plugin
+`metadata` n'est écrit pour ce chantier.
 
 Le banc d'essai (§1) a montré que la propriété `metadata` de mpv porte déjà
 `title`, `artist` et `album` d'un fichier local, et que **le cœur l'observe
-déjà** : `mpv.rs:50` en extrait `icy-title` et rien d'autre.
+déjà** : `mpv.rs:50` en extrait `icy-title` et rien d'autre. L'information
+arrive jusqu'au cœur, personne ne la ramasse.
 
-**Option A — un plugin `metadata` dédié `file-tags`** (le choix exprimé avant
-cette mesure). Nouveau crate, nouveau processus, dépendance `lofty`, entrée
-supplémentaire dans `plugins.toml`. Il reconnaît l'identité `{"kind":"file",
-"path":…}`, lit le fichier et renvoie artiste/titre/album/durée en réémettant
-l'identité. Son `next_enrichment` doit être **annulable sans perte** — le
-contrat du SDK, qui mord ici pour de vrai, lire un tag sur un NAS endormi
-pouvant prendre plusieurs secondes.
-
-**Option B — le cœur lit les tags que mpv lui donne déjà.** Une vingtaine de
-lignes à côté d'`icy_title`, une variante d'`Event`, et une couche
-d'arbitrage : plugin `metadata` > tags mpv > ICY. Aucun processus
-supplémentaire, aucune dépendance, aucune relecture du fichier par le réseau —
-mpv l'a déjà lu.
+Concrètement : une vingtaine de lignes à côté d'`icy_title`, une variante
+d'`Event`, et une couche d'arbitrage **plugin `metadata` > tags mpv > ICY**.
+Aucun processus supplémentaire, aucune dépendance, aucune relecture du fichier
+par le réseau — mpv l'a déjà lu.
 
 Le banc a vérifié que la portée est bien générale : mp3 (ID3), flac, ogg et
 opus (Vorbis comments), m4a (atomes iTunes) et wav (RIFF INFO) remontent
@@ -331,26 +328,41 @@ l'option :
   régression pour la radio. La présence d'une clé `icy-*` signe un flux, et
   le chemin ICY garde alors la main.
 
-**Recommandation : B**, sur le critère même qui avait motivé A. L'argument
-était « si demain une autre source lit des mp3 » : B sert **toute** source
+### L'alternative écartée, et pourquoi
+
+Un plugin `metadata` dédié (`file-tags`, crate séparé, dépendance `lofty`)
+avait d'abord été retenu, pour sa souplesse : « si demain une autre source lit
+des mp3 ». La mesure a retourné l'argument — le cœur sert **toute** source
 jouant un fichier taggé, y compris une future source Bluetooth ou UPnP, sans
-qu'aucune d'elles ne déclare quoi que ce soit. A ne sert que ce qui expose une
-identité `kind: "file"`.
+qu'aucune n'ait rien à déclarer, là où un plugin ne servirait que ce qui expose
+une identité `kind: "file"`. Il aurait par ailleurs rouvert par le réseau un
+fichier que mpv venait d'ouvrir.
 
-Ce que A garde pour lui, et qui pourrait faire pencher : l'indépendance vis-à-vis
-de ce que mpv veut bien exposer (pochette, ReplayGain, tags multivalués), et un
-badge d'origine qui nomme le plugin plutôt que le lecteur. Rien de tout cela
-n'est demandé aujourd'hui.
+Ce que le plugin gardait pour lui, et qui pourra le faire revenir un jour :
+l'indépendance vis-à-vis de ce que mpv expose (pochette, ReplayGain, tags
+multivalués), et un fichier de correction pour rattraper des tags faux, sur le
+modèle d'`ouifm-metas.toml`. Aucun de ces champs n'existe dans `Enrichment` ni
+`Morceau` aujourd'hui : les ajouter demanderait du travail de protocole quelle
+que soit l'option.
 
-Les deux options laissent le reste de la spec inchangé. Si B est retenue, il
-faudra choisir la valeur du badge `origin` (`"tags"` proposé, plutôt que
-`"mpv"` qui nomme un détail d'implémentation) et compléter `docs/plugins.md`,
-dont la section « deux couches se superposent » en compte alors trois.
+Le genre `metadata` n'est pas remis en cause pour autant : `musicbrainz`
+interroge une base en ligne à partir d'une TOC, `ouifm-metas` lit un flux
+séparé — des choses que mpv ne peut structurellement pas connaître.
 
-**Quelle que soit l'option**, le nom de ce qui joue s'affiche **sans aucune
-métadonnée** : la Source déclare `preset_name` (titre `#EXTINF` du m3u, sinon
-nom du fichier sans extension), champ apparu avec le chantier « afficheurs ».
-Les tags ne font qu'enrichir par-dessus.
+### Ce que la décision entraîne
+
+- le badge `origin` vaut **`"tags"`**, et non `"mpv"` qui nommerait un détail
+  d'implémentation ;
+- `docs/plugins.md` est à compléter : sa section « deux couches se superposent »
+  en compte désormais **trois**, et l'ordre de préséance y est à écrire ;
+- l'arbitrage existant du cœur (« un plugin l'emporte sur ICY en toutes
+  circonstances ») s'étend sans changer de forme : la nouvelle couche
+  s'intercale, elle ne déplace rien.
+
+Enfin, le nom de ce qui joue s'affiche **même sans aucune métadonnée** : la
+Source déclare `preset_name` (titre `#EXTINF` du m3u, sinon nom du fichier sans
+extension), champ apparu avec le chantier « afficheurs ». Les tags ne font
+qu'enrichir par-dessus, et leur absence ne laisse jamais un écran muet.
 
 ## 8. La Source : cycle de vie
 
@@ -422,7 +434,7 @@ symboliques** (ensemble des couples périphérique/inode visités).
 
 `deploy.sh` gagne : le binaire de montage, l'unité, la règle polkit, la
 création de `/mnt/ritornello`, et les deux entrées de `plugins.example.toml`
-(`files` en `source`, `file-tags` en `metadata` si l'option A est retenue).
+(`files` en `source` — une seule entrée, les tags ne passant par aucun plugin).
 Comme pour les autres plugins, un `plugins.toml` existant **n'est jamais
 écrasé** : une installation déjà en service ne verra pas la nouvelle source
 tant que ses deux lignes n'auront pas été ajoutées à la main. À dire dans
@@ -451,6 +463,11 @@ chaque test encodant une régression plausible.
 - **Cœur** : fin de liste (mpv inactif) sur un `Play { finite: true }` déclenche
   `SourceReq::Stop` et **non** la relance — le test qui aurait attrapé le
   reniflage `cdda://`.
+- **Couche tags** : les trois clés extraites d'une charge `metadata` réelle par
+  format (m4a compris, dont les clés de conteneur doivent être ignorées) ; une
+  charge portant `icy-title` **et** un `title` parasite laisse la main à ICY —
+  le test qui épingle la régression radio ; un plugin `metadata` l'emporte
+  toujours sur les tags.
 - **Page** : un parcours Playwright — déclarer une racine locale, ajouter un
   dossier, enregistrer, recharger.
 
