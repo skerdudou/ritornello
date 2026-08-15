@@ -1,4 +1,2 @@
 no_disc = "no disc"
 cd_audio = "audio CD"
-cd_track = "CD track {n}"
-cd_n_of_total = "CD {n}/{total}"

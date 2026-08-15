@@ -22,9 +22,23 @@ pub fn compose(etat: &PlayerState) -> [String; 3] {
     if etat.standby {
         return [etat.status.clone().unwrap_or_default(), String::new(), String::new()];
     }
-    let line1 = match etat.preset {
-        Some(n) => format!("{}  P{n}", etat.source.to_uppercase()),
-        None => etat.source.to_uppercase(),
+    // « SOURCE  n/total », et « SOURCE  n » quand le total est inconnu.
+    //
+    // Choix du propriétaire, arbitré pendant ce chantier. Chaque source avait
+    // avant son propre idiome, encodé dans son catalogue : la radio écrivait
+    // « RADIO  P3 », le cd « CD 1/3 ». Un afficheur unique ne peut pas les
+    // rejouer tous sans coder en dur des noms de plugins, ce qu'on refuse — donc
+    // un idiome commun, qui rend au cd le total qu'il avait perdu et apprend à
+    // la radio combien de stations sont configurées.
+    //
+    // Un total à zéro (« rien à numéroter » : tiroir vide) ne s'écrit pas :
+    // « 1/0 » serait absurde. Le cas est atteignable, `preset_count` valant
+    // `Some(0)` de façon significative dans ce protocole.
+    let nom = etat.source.to_uppercase();
+    let line1 = match (etat.preset, etat.preset_count) {
+        (Some(n), Some(total)) if total > 0 => format!("{nom}  {n}/{total}"),
+        (Some(n), _) => format!("{nom}  {n}"),
+        (None, _) => nom,
     };
     // Le nom de la présélection d'abord, puis l'album, puis le statut : du plus
     // spécifique au plus générique.
@@ -113,16 +127,43 @@ mod tests {
             source: "radio".into(),
             volume: 60,
             preset: Some(3),
+            preset_count: Some(12),
             preset_name: Some("France Inter".into()),
             ..Default::default()
         }
     }
 
     #[test]
-    fn compose_la_source_et_la_preselection_sur_la_premiere_ligne() {
+    fn compose_la_source_la_preselection_et_le_total_sur_la_premiere_ligne() {
         let l = compose(&etat_radio());
-        assert_eq!(l[0], "RADIO  P3");
+        assert_eq!(l[0], "RADIO  3/12");
         assert_eq!(l[1], "France Inter");
+    }
+
+    #[test]
+    fn la_premiere_ligne_omet_un_total_inconnu_ou_nul() {
+        // Sans total déclaré, le numéro seul. Et surtout : un total à zéro
+        // (« rien à numéroter », tiroir vide) ne s'écrit pas — « 1/0 » serait
+        // absurde, et `Some(0)` est une valeur significative de ce protocole,
+        // pas un accident.
+        let mut e = etat_radio();
+        e.preset_count = None;
+        assert_eq!(compose(&e)[0], "RADIO  3");
+        e.preset_count = Some(0);
+        assert_eq!(compose(&e)[0], "RADIO  3");
+    }
+
+    #[test]
+    fn le_cd_retrouve_sa_piste_sur_son_total() {
+        // Ce que le plugin cd composait lui-même avant ce chantier (« CD 1/3 »),
+        // rendu par l'afficheur depuis les seules données de la trame.
+        let e = PlayerState {
+            source: "cd".into(),
+            preset: Some(1),
+            preset_count: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(compose(&e)[0], "CD  1/3");
     }
 
     #[test]
@@ -170,7 +211,7 @@ mod tests {
         e.morceau.title = Some("So What".into());
         let s = render_console(&e);
         assert!(s.starts_with("\x1b[2J\x1b[H"));
-        assert!(s.contains("RADIO  P3\r\n"));
+        assert!(s.contains("RADIO  3/12\r\n"));
         assert!(s.contains("France Inter\r\n"));
         assert!(s.contains("Miles Davis — So What\r\n"));
         assert_eq!(s.matches("\r\n\r\n").count(), 2, "une ligne vide entre chacune des trois");
