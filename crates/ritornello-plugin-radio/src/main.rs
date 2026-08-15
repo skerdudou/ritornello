@@ -17,7 +17,7 @@ use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::{
     run_admin_plugin, run_source_plugin, Notification, SourceOutcome, SourcePlugin,
 };
-use ritornello_proto::{SourceAction, View};
+use ritornello_proto::SourceAction;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as AsyncRwLock;
@@ -45,10 +45,6 @@ struct RadioSource {
 }
 
 impl RadioSource {
-    fn view_for(&self, preset: u8, status: &str) -> View {
-        View { line1: format!("RADIO  P{preset}"), line2: status.to_string(), line3: String::new() }
-    }
-
     /// Identité de ce que joue la radio : le flux, désigné par son URL.
     ///
     /// Opaque pour le cœur, qui ne fait que la comparer et la relayer. C'est en
@@ -76,11 +72,6 @@ impl RadioSource {
                 tracing::warn!("failed to persist preset: {e}");
             }
             SourceOutcome::new(SourceAction::Play { uri: st.url.clone() })
-                .with_view(View {
-                    line1: format!("RADIO  P{n}"),
-                    line2: st.name.clone(),
-                    line3: String::new(),
-                })
                 .plays(Self::identite_du_flux(&st.url))
                 // La touche que l'IHM doit mettre en évidence : seule la
                 // Source sait à quelle présélection correspond ce qui joue.
@@ -99,7 +90,6 @@ impl RadioSource {
             // serait faux ici, puisque le flux précédent continue — cela aurait
             // fait cesser les plugins `metadata` et vidé le titre affiché.
             SourceOutcome::new(SourceAction::Noop)
-                .with_view(self.view_for(self.preset, &empty))
                 .transient()
                 .status(empty)
                 .preset_count(count)
@@ -155,7 +145,7 @@ impl SourcePlugin for RadioSource {
     /// jouée (défaut constaté à l'usage : la grille restait sur l'ancien jeu
     /// de numéros jusque-là).
     ///
-    /// Ne porte **que** `preset_count` : ni vue, ni identité, ni présélection,
+    /// Ne porte **que** `preset_count` : ni statut, ni identité, ni présélection,
     /// jamais éphémère. C'est ce qui garantit que cette notification ne
     /// perturbe ni l'affichage courant ni le morceau en cours de lecture —
     /// `Core::handle_source_update` fusionne champ par champ, donc une trame
@@ -309,7 +299,7 @@ mod tests {
         source.set_locale("fr".into()).await;
         // aucun preset chargé → branche "empty_preset"
         let outcome = source.select(1).await;
-        assert_eq!(outcome.view.unwrap().line2, "PRESET VIDE");
+        assert_eq!(outcome.status.as_deref(), Some("PRESET VIDE"));
     }
 
     #[test]
@@ -361,14 +351,12 @@ mod tests {
         let mut source = make_source(one_station(), 1);
         let outcome = source.next().await;
         assert!(matches!(outcome.action, SourceAction::Noop));
-        assert!(outcome.view.is_none());
         // Ne rien dire de l'identité : la station n'a pas changé, et annoncer un
         // changement remettrait à zéro les métadonnées du morceau en cours.
         assert!(outcome.identity.is_none());
 
         let outcome = source.prev().await;
         assert!(matches!(outcome.action, SourceAction::Noop));
-        assert!(outcome.view.is_none());
         assert!(outcome.identity.is_none());
     }
 
@@ -422,9 +410,8 @@ mod tests {
             outcome.identity.is_none(),
             "declarer un arret serait faux : le flux precedent continue"
         );
-        assert!(outcome.view.is_some());
         // Le mot ephemere est declare via `status` : c'est lui qui alimente
-        // l'incrustation cote coeur, pas la vue qui l'accompagne encore.
+        // l'incrustation cote coeur.
         assert_eq!(outcome.status.as_deref(), Some("empty preset"));
         // Table vide : le compte declare est 0, pas absent.
         assert_eq!(outcome.preset_count, Some(0));
@@ -472,7 +459,6 @@ mod tests {
 
         let n = source.poll_notification().await.expect("notification attendue");
         assert_eq!(n.preset_count, Some(5));
-        assert!(n.view.is_none(), "l'affichage ne doit pas bouger");
         assert!(n.identity.is_none(), "le morceau en cours ne doit pas bouger");
         assert!(n.preset.is_none());
     }

@@ -1,27 +1,23 @@
 use anyhow::{Context, Result};
 use ritornello_proto::{
     Enrichment, IdentityUpdate, NowPlaying, PlayerState, SourceAction, SourceMessage, SourceReq,
-    SourceRequest, View,
+    SourceRequest,
 };
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
 /// Issue d'une requête adressée à une Source : l'action que le cœur doit
-/// appliquer au lecteur, éventuellement une vue à afficher, éventuellement une
-/// correction de l'identité de ce qui joue.
+/// appliquer au lecteur, éventuellement une correction de l'identité de ce qui
+/// joue.
 pub struct SourceOutcome {
     pub action: SourceAction,
-    pub view: Option<View>,
     /// Laissé à `None`, l'identité courante du cœur est conservée. Une Source
     /// qui sait ce qu'elle vient de mettre en lecture doit la renseigner :
     /// sans elle, aucun plugin `metadata` n'apprend le changement, et un
     /// enrichissement en vol sur le morceau précédent resterait affiché.
     pub identity: Option<IdentityUpdate>,
-    /// `line2` de la vue est un remplissage que le cœur peut remplacer par une
-    /// métadonnée (voir `SourceMessage::line2_replaceable`).
-    pub line2_replaceable: bool,
-    /// La vue est un message éphémère (voir `SourceMessage::transient`).
+    /// Le statut est un message éphémère (voir `SourceMessage::transient`).
     pub transient: bool,
     /// Touche numérotée correspondant à ce qui joue (voir `SourceMessage::preset`).
     pub preset: Option<u8>,
@@ -34,13 +30,11 @@ pub struct SourceOutcome {
 }
 
 impl SourceOutcome {
-    /// Issue portant seulement une action (ni vue, ni identité).
+    /// Issue portant seulement une action (ni statut, ni identité).
     pub fn new(action: SourceAction) -> Self {
         Self {
             action,
-            view: None,
             identity: None,
-            line2_replaceable: false,
             transient: false,
             preset: None,
             preset_count: None,
@@ -49,22 +43,10 @@ impl SourceOutcome {
         }
     }
 
-    pub fn with_view(mut self, view: View) -> Self {
-        self.view = Some(view);
-        self
-    }
-
-    /// Déclare que la `line2` de la vue n'est qu'un remplissage : le cœur peut
-    /// y écrire une métadonnée s'il en connaît une, et la Source récupère sa
-    /// propre ligne dès qu'il n'en connaît plus.
-    pub fn line2_replaceable(mut self) -> Self {
-        self.line2_replaceable = true;
-        self
-    }
-
-    /// Déclare la vue comme un message **éphémère** : le cœur l'affiche quelques
-    /// secondes, puis fait reparaître la vue permanente précédente. À employer
-    /// pour signaler un incident sans détruire l'affichage de ce qui joue.
+    /// Déclare le statut comme un message **éphémère** : le cœur l'affiche
+    /// quelques secondes, puis fait reparaître le statut permanent précédent.
+    /// À employer pour signaler un incident sans détruire l'affichage de ce
+    /// qui joue.
     pub fn transient(mut self) -> Self {
         self.transient = true;
         self
@@ -121,10 +103,7 @@ impl SourceOutcome {
 /// initiative rendrait la lecture imprévisible depuis la télécommande.
 #[derive(Default)]
 pub struct Notification {
-    pub view: Option<View>,
     pub identity: Option<IdentityUpdate>,
-    /// Voir `SourceOutcome::line2_replaceable`.
-    pub line2_replaceable: bool,
     /// Voir `SourceMessage::transient`.
     pub transient: bool,
     /// Voir `SourceOutcome::preset`.
@@ -140,24 +119,6 @@ pub struct Notification {
 impl Notification {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn view(view: View) -> Self {
-        Self {
-            view: Some(view),
-            identity: None,
-            line2_replaceable: false,
-            transient: false,
-            preset: None,
-            preset_count: None,
-            preset_name: None,
-            status: None,
-        }
-    }
-
-    pub fn line2_replaceable(mut self) -> Self {
-        self.line2_replaceable = true;
-        self
     }
 
     /// Voir `SourceOutcome::preset`.
@@ -303,9 +264,7 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                 let msg = SourceMessage {
                     id: Some(req.id),
                     action: Some(outcome.action),
-                    view: outcome.view,
                     identity: outcome.identity,
-                    line2_replaceable: outcome.line2_replaceable,
                     transient: outcome.transient,
                     preset: outcome.preset,
                     preset_count: outcome.preset_count,
@@ -320,9 +279,7 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                         let msg = SourceMessage {
                             id: None,
                             action: None,
-                            view: n.view,
                             identity: n.identity,
-                            line2_replaceable: n.line2_replaceable,
                             transient: n.transient,
                             preset: n.preset,
                             preset_count: n.preset_count,
@@ -593,7 +550,7 @@ mod admin_server_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ritornello_proto::{SourceAction, View};
+    use ritornello_proto::SourceAction;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
 
@@ -627,7 +584,6 @@ mod tests {
     impl SourcePlugin for EchoSource {
         async fn activate(&mut self) -> SourceOutcome {
             SourceOutcome::new(SourceAction::Play { uri: "http://fip".into() })
-                .with_view(View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() })
                 .plays(serde_json::json!({"kind": "stream", "url": "http://fip"}))
         }
         async fn deactivate(&mut self) -> SourceOutcome {
@@ -667,7 +623,6 @@ mod tests {
         let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(msg.id, Some(1));
         assert_eq!(msg.action, Some(SourceAction::Play { uri: "http://fip".into() }));
-        assert_eq!(msg.view.unwrap().line2, "FIP");
         assert_eq!(
             msg.identity,
             Some(IdentityUpdate::Playing(serde_json::json!({"kind": "stream", "url": "http://fip"})))
@@ -839,12 +794,11 @@ mod tests {
         let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(msg.id, Some(1));
         assert_eq!(msg.action, Some(SourceAction::Noop));
-        assert!(msg.view.is_none());
         assert_eq!(vu.lock().unwrap().as_deref(), Some("fr"));
     }
 
     #[tokio::test]
-    async fn une_notification_spontanee_porte_vue_et_identite() {
+    async fn une_notification_spontanee_porte_lidentite() {
         // C'est le chemin du changement de piste d'un disque et de l'arrivée
         // différée d'une TOC : aucune requête du cœur, mais l'identité change.
         struct Spontanee {
@@ -863,10 +817,7 @@ mod tests {
                     std::future::pending::<()>().await;
                 }
                 self.emis = true;
-                Some(
-                    Notification::view(View { line1: "CD 3/12".into(), line2: String::new(), line3: String::new() })
-                        .plays(serde_json::json!({"kind": "disc", "track": 2})),
-                )
+                Some(Notification::new().plays(serde_json::json!({"kind": "disc", "track": 2})))
             }
         }
 
@@ -887,7 +838,6 @@ mod tests {
         let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(msg.id, None, "une notification n'est correlee a aucune requete");
         assert_eq!(msg.action, None, "une notification ne declenche jamais d'action");
-        assert_eq!(msg.view.unwrap().line1, "CD 3/12");
         assert_eq!(
             msg.identity,
             Some(IdentityUpdate::Playing(serde_json::json!({"kind": "disc", "track": 2})))

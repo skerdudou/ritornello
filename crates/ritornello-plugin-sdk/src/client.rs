@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use ritornello_proto::{
     AdminReq, AdminRequest, AdminResponse, AdminResult, Enrichment, IdentityUpdate, InputMessage,
-    NowPlaying, PlayerState, SourceAction, SourceMessage, SourceReq, SourceRequest, View,
+    NowPlaying, PlayerState, SourceAction, SourceMessage, SourceReq, SourceRequest,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -29,20 +29,16 @@ async fn connect_with_retry(socket_path: &Path) -> Result<UnixStream> {
         .with_context(|| format!("connecting to {} (10s)", socket_path.display()))
 }
 
-/// Ce qu'une Source rapporte spontanément ou en marge d'une réponse : une vue
-/// à afficher, une correction de l'identité de ce qui joue, ou les deux.
+/// Ce qu'une Source rapporte spontanément ou en marge d'une réponse : une
+/// correction de l'identité de ce qui joue, un statut, une présélection.
 ///
-/// Les deux voyagent ensemble parce qu'ils sont produits ensemble par le
-/// plugin, dans une seule trame : les séparer en deux canaux ferait exister des
-/// instants où la vue affichée et l'identité annoncée aux plugins `metadata` se
-/// contredisent.
+/// Tous ces champs voyagent ensemble parce qu'ils sont produits ensemble par
+/// le plugin, dans une seule trame : les séparer en plusieurs canaux ferait
+/// exister des instants où l'état affiché et l'identité annoncée aux plugins
+/// `metadata` se contredisent.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SourceUpdate {
-    pub view: Option<View>,
     pub identity: Option<IdentityUpdate>,
-    /// Voir `SourceMessage::line2_replaceable`. N'a de sens qu'accompagné d'une
-    /// `view`.
-    pub line2_replaceable: bool,
     /// Voir `SourceMessage::transient`.
     pub transient: bool,
     /// Voir `SourceMessage::preset`. Absent = rien déclaré, garder la valeur
@@ -87,8 +83,7 @@ impl SourceClient {
                         let _ = tx.send(action);
                     }
                 }
-                if msg.view.is_some()
-                    || msg.identity.is_some()
+                if msg.identity.is_some()
                     || msg.preset.is_some()
                     || msg.preset_count.is_some()
                     || msg.preset_name.is_some()
@@ -96,9 +91,7 @@ impl SourceClient {
                 {
                     let porte_identite = msg.identity.is_some();
                     let update = SourceUpdate {
-                        view: msg.view,
                         identity: msg.identity,
-                        line2_replaceable: msg.line2_replaceable,
                         transient: msg.transient,
                         preset: msg.preset,
                         preset_count: msg.preset_count,
@@ -106,13 +99,12 @@ impl SourceClient {
                         status: msg.status,
                     };
                     if view_tx.try_send((name.clone(), update)).is_err() {
-                        // Conséquence aggravée depuis que la trame porte aussi
-                        // l'identité : une vue perdue était réparée par la
-                        // suivante, une **identité** perdue ne l'est jamais — la
-                        // Source ne la réémet que sur changement, donc le cœur
-                        // garde celle du morceau précédent et les plugins
-                        // `metadata` continuent de l'enrichir, sans que le
-                        // garde-fou de péremption y voie quoi que ce soit.
+                        // Un statut ou une présélection perdus sont réparés par
+                        // la trame suivante, une **identité** perdue ne l'est
+                        // jamais — la Source ne la réémet que sur changement,
+                        // donc le cœur garde celle du morceau précédent et les
+                        // plugins `metadata` continuent de l'enrichir, sans que
+                        // le garde-fou de péremption y voie quoi que ce soit.
                         //
                         // Toujours `try_send` et non `send().await` : cette même
                         // tâche délivre les réponses corrélées aux requêtes du
@@ -127,7 +119,7 @@ impl SourceClient {
                                 "identity update for {name} lost (channel full): display and metadata possibly stale until next change"
                             );
                         } else {
-                            tracing::warn!("view for {name} lost (channel full)");
+                            tracing::warn!("source update for {name} lost (channel full)");
                         }
                     }
                 }
@@ -361,12 +353,12 @@ pub async fn run_input_client(socket_path: &Path, cmd_tx: mpsc::Sender<InputMess
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ritornello_proto::{SourceAction, View};
+    use ritornello_proto::SourceAction;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     #[tokio::test]
-    async fn source_client_correle_par_id_et_relaie_la_vue() {
+    async fn source_client_correle_par_id_et_relaie_lidentite_et_la_selection() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("plugin.sock");
         let listener = UnixListener::bind(&socket).unwrap();
@@ -380,11 +372,9 @@ mod tests {
             let msg = ritornello_proto::SourceMessage {
                 id: Some(req.id),
                 action: Some(SourceAction::Play { uri: "http://fip".into() }),
-                view: Some(View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() }),
                 identity: Some(ritornello_proto::IdentityUpdate::Playing(
                     serde_json::json!({"kind": "stream", "url": "http://fip"}),
                 )),
-                line2_replaceable: false,
                 transient: false,
                 preset: Some(1),
                 preset_count: None,
@@ -401,9 +391,9 @@ mod tests {
         assert_eq!(action, SourceAction::Play { uri: "http://fip".into() });
         let (name, update) = view_rx.recv().await.unwrap();
         assert_eq!(name, "radio");
-        assert_eq!(update.view.unwrap().line2, "FIP");
-        // La vue et l'identité arrivent dans la même mise à jour : c'est ce qui
-        // garantit qu'on n'affiche jamais une station en annonçant l'autre.
+        // L'identité et la présélection arrivent dans la même mise à jour :
+        // c'est ce qui garantit qu'on n'annonce jamais une station en
+        // affichant l'autre.
         assert_eq!(
             update.identity,
             Some(ritornello_proto::IdentityUpdate::Playing(
@@ -431,9 +421,7 @@ mod tests {
             let msg = ritornello_proto::SourceMessage {
                 id: Some(req.id),
                 action: Some(SourceAction::Noop),
-                view: None,
                 identity: None,
-                line2_replaceable: false,
                 transient: false,
                 preset: None,
                 preset_count: Some(5),
@@ -470,9 +458,7 @@ mod tests {
             let msg = ritornello_proto::SourceMessage {
                 id: Some(req.id),
                 action: Some(SourceAction::Noop),
-                view: None,
                 identity: None,
-                line2_replaceable: false,
                 transient: false,
                 preset: None,
                 preset_count: None,
@@ -509,9 +495,7 @@ mod tests {
             let msg = ritornello_proto::SourceMessage {
                 id: Some(req.id),
                 action: Some(SourceAction::Noop),
-                view: None,
                 identity: None,
-                line2_replaceable: false,
                 transient: false,
                 preset: None,
                 preset_count: None,
@@ -546,9 +530,7 @@ mod tests {
             let msg = ritornello_proto::SourceMessage {
                 id: Some(req.id),
                 action: Some(SourceAction::Noop),
-                view: None,
                 identity: None,
-                line2_replaceable: false,
                 transient: false,
                 preset: None,
                 preset_count: None,

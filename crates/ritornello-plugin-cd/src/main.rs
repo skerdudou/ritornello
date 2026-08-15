@@ -10,7 +10,7 @@ mod cd;
 
 use anyhow::Result;
 use ritornello_plugin_sdk::{run_source_plugin, Notification, SourceOutcome, SourcePlugin};
-use ritornello_proto::{SourceAction, View};
+use ritornello_proto::SourceAction;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
@@ -55,41 +55,9 @@ struct CdSource {
 }
 
 impl CdSource {
-    /// Vue du plugin : ce que le disque lui-même permet de dire.
-    ///
-    /// `line2` porte « audio CD » — un remplissage, que le plugin déclare
-    /// remplaçable (voir `issue`) : le cœur y écrira l'album s'il l'apprend d'un
-    /// plugin `metadata`, et « audio CD » revient dès qu'il ne le sait plus.
-    /// C'est ce qui évite deux lignes vides sur un disque absent de MusicBrainz,
-    /// hors ligne, ou sans plugin `metadata` déclaré. `line3` reste libre pour la
-    /// ligne artiste — titre.
-    fn view(&self) -> View {
-        if !self.present {
-            return View {
-                line1: "CD".into(),
-                line2: self.catalog.get("no_disc").to_string(),
-                line3: String::new(),
-            };
-        }
-        let n = self.track.max(0) as usize;
-        let line1 = if self.total_tracks > 0 {
-            self.catalog
-                .get("cd_n_of_total")
-                .replace("{n}", &(n + 1).to_string())
-                .replace("{total}", &self.total_tracks.to_string())
-        } else {
-            // TOC pas encore lue, ou illisible : le compte de pistes est inconnu.
-            self.catalog.get("cd_track").replace("{n}", &(n + 1).to_string())
-        };
-        View { line1, line2: self.catalog.get("cd_audio").to_string(), line3: String::new() }
-    }
-
-    /// Issue complète : action, vue, et identité de ce qui joue.
+    /// Issue complète : action, statut, présélection et identité de ce qui joue.
     fn issue(&self, action: SourceAction) -> SourceOutcome {
-        let sortie = SourceOutcome::new(action).with_view(self.view());
-        // « audio CD » et « pas de disque » sont tous deux des remplissages :
-        // l'album vaut mieux quand on le connaît, et l'étiquette revient sinon.
-        let sortie = sortie.line2_replaceable();
+        let sortie = SourceOutcome::new(action);
         // Le statut permanent de la Source : ce que la carte Lecteur de la SPA
         // affiche désormais (voir `SourceMessage::status`).
         let sortie = if self.present {
@@ -322,15 +290,13 @@ impl SourcePlugin for CdSource {
 }
 
 impl CdSource {
-    /// Notification spontanée portant la vue **et** l'identité, construite
+    /// Notification spontanée portant le statut **et** l'identité, construite
     /// depuis la même issue que les réponses aux requêtes (pour ne pas avoir
     /// deux règles d'identité à garder cohérentes).
     fn notification(&self) -> Notification {
         let issue = self.issue(SourceAction::Noop);
         Notification {
-            view: issue.view,
             identity: issue.identity,
-            line2_replaceable: issue.line2_replaceable,
             // Jamais éphémère : ce que le cd rapporte (disque inséré, TOC lue,
             // piste changée) décrit l'état durable de l'appareil.
             transient: false,
@@ -495,24 +461,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn la_ligne2_porte_une_etiquette_declaree_remplacable() {
-        // Deux exigences à la fois : ne jamais laisser deux lignes vides quand
-        // aucun album n'est connu (disque absent de MusicBrainz, hors ligne, ou
-        // aucun plugin `metadata` declare), et laisser le cœur y ecrire l'album
-        // quand il l'apprend. D'ou une etiquette **declaree remplacable**,
-        // plutot qu'une ligne vide qui demanderait l'album en se taisant.
-        let source = source_en_lecture();
-        let v = source.view();
-        assert_eq!(v.line1, "CD 1/3");
-        assert_eq!(v.line2, "audio CD");
-        assert_eq!(v.line3, "", "place laissee a la ligne artiste - titre");
-        assert!(
-            source.issue(SourceAction::Noop).line2_replaceable,
-            "sans cette declaration, l'album n'aurait nulle part ou s'afficher"
-        );
-    }
-
-    #[tokio::test]
     async fn sauter_une_piste_sans_lecture_en_cours_ne_declare_rien() {
         // Disque lu, mais rien lance : `playlist-next` sur un mpv a l'arret ne
         // charge rien. Declarer une lecture ici ferait interroger un service
@@ -546,14 +494,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lavance_automatique_de_piste_met_a_jour_vue_et_identite() {
+    async fn lavance_automatique_de_piste_met_a_jour_preset_et_identite() {
         // Fin de piste : le disque avance sans qu'aucune touche soit pressée.
         // Avant cette notification, l'affichage et les métadonnées restaient sur
         // la piste précédente jusqu'à la prochaine commande de l'utilisateur.
         let mut source = source_en_lecture();
         let out = source.player_track(2).await;
         assert_eq!(source.track, 2);
-        assert_eq!(out.view.expect("vue attendue").line1, "CD 3/3");
+        // « CD 3/3 » : la piste (preset) et le total (preset_count).
+        assert_eq!(out.preset, Some(3));
+        assert_eq!(out.preset_count, Some(3));
         assert_eq!(
             out.identity,
             Some(IdentityUpdate::Playing(serde_json::json!({
@@ -696,7 +646,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn view_utilise_le_catalogue_apres_set_locale() {
+    async fn le_statut_utilise_le_catalogue_apres_set_locale() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("cd")).unwrap();
         std::fs::write(dir.path().join("cd/fr.toml"), "no_disc = \"PAS DE DISQUE\"\n").unwrap();
@@ -705,7 +655,7 @@ mod tests {
         source.present = false;
         source.locales_root = dir.path().to_path_buf();
         source.set_locale("fr".into()).await;
-        assert_eq!(source.view().line2, "PAS DE DISQUE");
+        assert_eq!(source.issue(SourceAction::Noop).status.as_deref(), Some("PAS DE DISQUE"));
     }
 
     #[tokio::test]
@@ -724,12 +674,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn next_incremente_borne_et_renvoie_une_vue() {
+    async fn next_incremente_borne_et_renvoie_le_preset() {
         let mut source = source_en_lecture();
         source.track = 0;
         let out = source.next().await;
         assert_eq!(out.action, SourceAction::PlayerNext);
-        assert!(out.view.is_some(), "la vue doit suivre la piste");
+        assert_eq!(out.preset, Some(2), "le preset doit suivre la piste");
         assert_eq!(source.track, 1);
         // Bornage haut : sur la dernière piste, next ne reboucle pas.
         source.track = 2;
@@ -743,7 +693,7 @@ mod tests {
         source.track = 1;
         let out = source.prev().await;
         assert_eq!(out.action, SourceAction::PlayerPrev);
-        assert!(out.view.is_some());
+        assert_eq!(out.preset, Some(1));
         assert_eq!(source.track, 0);
         // Bornage bas : sur la première piste, prev reste à 0.
         let _ = source.prev().await;
@@ -756,7 +706,7 @@ mod tests {
         source.present = false;
         let out = source.wake().await;
         assert_eq!(out.action, SourceAction::Noop, "cd ne doit pas jouer au réveil");
-        assert!(out.view.is_some());
+        assert_eq!(out.status.as_deref(), Some("no disc"));
         assert_eq!(out.identity, Some(IdentityUpdate::Nothing));
     }
 

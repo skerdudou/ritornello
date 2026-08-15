@@ -1,5 +1,4 @@
 use crate::metadata::IdentityUpdate;
-use crate::view::View;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,36 +57,21 @@ pub struct SourceMessage {
     pub id: Option<u64>,
     #[serde(default)]
     pub action: Option<SourceAction>,
-    #[serde(default)]
-    pub view: Option<View>,
     /// Identité de ce qui joue **après** cette action, quand la Source a de
     /// quoi la mettre à jour.
     ///
-    /// Le champ voyage ici, à côté de la vue, et non dans `SourceAction::Play` :
-    /// un CD change de piste sans nouveau `Play` (`PlayerNext` fait avancer mpv),
-    /// donc l'identité changerait sans qu'aucun `Play` ne soit émis. Toute
-    /// occasion où une Source rapporte une vue devient ainsi une occasion de
-    /// corriger l'identité — ce qui couvre le changement de piste d'un disque,
-    /// la sélection d'une présélection et l'arrivée différée d'une TOC.
+    /// Un CD change de piste sans nouveau `Play` (`PlayerNext` fait avancer
+    /// mpv), donc l'identité changerait sans qu'aucun `Play` ne soit émis.
+    /// Toute occasion où une Source rapporte du neuf (statut, présélection)
+    /// devient ainsi une occasion de corriger l'identité — ce qui couvre le
+    /// changement de piste d'un disque, la sélection d'une présélection et
+    /// l'arrivée différée d'une TOC.
     ///
     /// Absent = « cette trame ne dit rien de l'identité, garde la précédente ».
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<IdentityUpdate>,
-    /// La Source déclare que la `line2` de la vue ci-dessus est un
-    /// **remplissage** : ce qu'elle a trouvé à écrire faute de mieux, que le
-    /// cœur peut remplacer s'il connaît une métadonnée pour cette place.
-    ///
-    /// Le plugin cd s'en sert : il écrit « audio CD », et l'album le remplace
-    /// quand un plugin `metadata` le rapporte. Sans cette déclaration
-    /// **explicite**, la seule façon pour le cœur de savoir s'il peut écrire là
-    /// serait de regarder si la ligne est vide — une négociation par l'absence,
-    /// où une Source qui veut une ligne vide (une entrée auxiliaire sobre) se
-    /// verrait imposer un album sans l'avoir demandé, et devrait écrire une
-    /// chaîne factice pour s'en protéger.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub line2_replaceable: bool,
-    /// La vue ci-dessus est un message **éphémère** : le cœur l'affiche quelques
-    /// secondes, puis fait reparaître la précédente.
+    /// Le statut ci-dessus est un message **éphémère** : le cœur l'affiche
+    /// quelques secondes, puis fait reparaître le statut permanent.
     ///
     /// Sans cela, un message d'incident (« présélection vide ») restait à l'écran
     /// indéfiniment, jusqu'à ce que l'utilisateur touche autre chose — alors que
@@ -95,8 +79,8 @@ pub struct SourceMessage {
     /// décrivait durablement un état qui n'existait plus.
     ///
     /// Le cœur emploie le même emplacement et la même échéance que l'incrustation
-    /// volume/muet, donc la vue permanente est conservée telle quelle et reparaît
-    /// d'elle-même.
+    /// volume/muet, donc le statut permanent est conservé tel quel et reparaît
+    /// de lui-même.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub transient: bool,
     /// La touche numérotée de la télécommande à laquelle correspond ce qui joue
@@ -180,13 +164,11 @@ mod tests {
     }
 
     #[test]
-    fn message_reponse_avec_action_et_vue() {
+    fn message_reponse_avec_action_et_identite() {
         let m = SourceMessage {
             id: Some(1),
             action: Some(SourceAction::Play { uri: "http://fip".into() }),
-            view: Some(View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() }),
             identity: Some(IdentityUpdate::Playing(serde_json::json!({"kind": "stream"}))),
-            line2_replaceable: false,
             transient: false,
             preset: None,
             preset_count: None,
@@ -202,7 +184,7 @@ mod tests {
 
     #[test]
     fn message_notification_sans_id() {
-        let m = SourceMessage { id: None, action: None, view: Some(View::default()), identity: None, line2_replaceable: false, transient: false, preset: None, preset_count: None, preset_name: None, status: None };
+        let m = SourceMessage { id: None, action: None, identity: None, transient: false, preset: None, preset_count: None, preset_name: None, status: None };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, None);
@@ -230,9 +212,7 @@ mod tests {
         let m = SourceMessage {
             id: Some(3),
             action: Some(SourceAction::Noop),
-            view: None,
             identity: None,
-            line2_replaceable: false,
             transient: false,
             preset: Some(4),
             preset_count: None,
@@ -252,8 +232,8 @@ mod tests {
         // La majorité des trames ne disent rien de l'identité (SetLocale,
         // Deactivate…) : les alourdir d'un `"identity":null` serait du bruit sur
         // une liaison volontairement lisible à l'œil.
-        let m = SourceMessage { id: Some(2), action: None, view: None, identity: None, line2_replaceable: false, transient: false, preset: None, preset_count: None, preset_name: None, status: None };
-        assert_eq!(serde_json::to_string(&m).unwrap(), r#"{"id":2,"action":null,"view":null}"#);
+        let m = SourceMessage { id: Some(2), action: None, identity: None, transient: false, preset: None, preset_count: None, preset_name: None, status: None };
+        assert_eq!(serde_json::to_string(&m).unwrap(), r#"{"id":2,"action":null}"#);
     }
 
     #[test]
@@ -261,9 +241,7 @@ mod tests {
         let m = SourceMessage {
             id: Some(3),
             action: Some(SourceAction::Noop),
-            view: None,
             identity: None,
-            line2_replaceable: false,
             transient: false,
             preset: None,
             preset_count: Some(23),
@@ -290,9 +268,7 @@ mod tests {
         let m = SourceMessage {
             id: Some(3),
             action: Some(SourceAction::Noop),
-            view: None,
             identity: None,
-            line2_replaceable: false,
             transient: false,
             preset: Some(4),
             preset_count: None,
@@ -325,9 +301,7 @@ mod tests {
         let m = SourceMessage {
             id: Some(3),
             action: Some(SourceAction::Noop),
-            view: None,
             identity: None,
-            line2_replaceable: false,
             transient: false,
             preset: None,
             preset_count: None,

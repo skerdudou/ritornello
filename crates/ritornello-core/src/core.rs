@@ -7,7 +7,7 @@ use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::SourceUpdate;
 use ritornello_proto::{
     Command, Enrichment, IdentityUpdate, InputMessage, NowPlaying, Overlay, SourceAction,
-    SourceReq, View,
+    SourceReq,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -83,16 +83,6 @@ pub struct Core<P: Player> {
     expecting_stream: bool,
     retry_count: u32,
     audio_device: Option<String>,
-    /// Vue brute annoncée par la Source active, encore alimentée par
-    /// `handle_source_update` mais plus lue par rien depuis cette tâche : la
-    /// mise en page vit désormais dans le plugin d'affichage, à partir de
-    /// `PlayerState`. Retiré avec le reste du protocole de vue composée en
-    /// Task 5 ; un champ **écrit** mais jamais lu ne fait pas échouer
-    /// `-D warnings` comme le ferait un champ jamais écrit.
-    view: View,
-    /// Même sort que `view` : déclaration de la Source, mémorisée mais plus
-    /// consultée depuis cette tâche. Retiré avec elle en Task 5.
-    view_line2_replaceable: bool,
     /// Overlay temporaire (volume/muet/message) : incrustation à afficher +
     /// échéance. Porté par `PlayerState::overlay`, que le plugin d'affichage
     /// dessine en priorité sur toute autre chose.
@@ -175,8 +165,6 @@ impl<P: Player> Core<P> {
             expecting_stream: false,
             retry_count: 0,
             audio_device: persisted.audio_device.clone(),
-            view: View::default(),
-            view_line2_replaceable: false,
             overlay: None,
             preset: None,
             preset_name: None,
@@ -230,7 +218,7 @@ impl<P: Player> Core<P> {
         Ok(())
     }
 
-    /// Applique ce qu'une Source rapporte : sa vue, et/ou l'identité de ce
+    /// Applique ce qu'une Source rapporte : son statut, et/ou l'identité de ce
     /// qu'elle joue désormais.
     ///
     /// Les deux arrivent dans la même trame et sont appliqués ensemble, sans
@@ -250,24 +238,11 @@ impl<P: Player> Core<P> {
         if !update.transient {
             self.source_status = update.status.clone();
         }
-        // La vue **avant** l'identité : `set_identity` rafraîchit l'affichage,
-        // et l'ordre inverse le ferait composer l'ancienne vue avec l'ardoise
-        // déjà vidée. Les deux venant de la même trame, aucun instant
-        // observable ne les voit se contredire.
-        if let Some(view) = update.view {
-            if !update.transient {
-                self.view = view;
-                self.view_line2_replaceable = update.line2_replaceable;
-            }
-            // Vue éphémère : ignorée. Le mot affiché vient de `status`
-            // ci-dessous — la vue qui l'accompagne encore ne sert plus qu'à la
-            // rétrocompatibilité du protocole (voir Task 4).
-        }
         if update.transient {
             // Message éphémère (« présélection vide ») : il emprunte
             // l'emplacement et l'échéance de l'incrustation volume/muet, donc
-            // `self.view` — la vue permanente — est conservée et reparaît
-            // d'elle-même. Sans cela, le message restait à l'écran
+            // `self.source_status` — le statut permanent — est conservé et
+            // reparaît d'elle-même. Sans cela, le message restait à l'écran
             // indéfiniment alors que la lecture continuait sur la station
             // précédente : l'affichage décrivait durablement un état qui
             // n'existait plus. `overlay_ms`, pas `tens_window_ms` : ce message
@@ -1036,18 +1011,10 @@ mod tests {
         SourceUpdate::default()
     }
 
-    /// Mise à jour ne portant qu'une vue, dont la `line2` est la ligne propre de
-    /// la Source (non remplaçable) — le cas de la radio.
-    fn vue(v: View) -> SourceUpdate {
-        SourceUpdate { view: Some(v), identity: None, line2_replaceable: false, transient: false, preset: None, preset_count: None, preset_name: None, status: None }
-    }
-
     /// Mise à jour ne portant qu'une identité.
     fn joue(identity: serde_json::Value) -> SourceUpdate {
         SourceUpdate {
-            view: None,
             identity: Some(IdentityUpdate::Playing(identity)),
-            line2_replaceable: false,
             transient: false,
             preset: None,
             preset_count: None,
@@ -1551,12 +1518,6 @@ mod tests {
         assert!(core.overlay_deadline().is_none());
     }
 
-    /// Vue de base de la radio : ligne 3 libre, c'est là que les métadonnées
-    /// viendront se poser.
-    fn vue_radio() -> View {
-        View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: String::new() }
-    }
-
     fn enrichissement(identity: serde_json::Value, artist: &str, title: &str) -> Enrichment {
         Enrichment {
             identity,
@@ -1607,9 +1568,7 @@ mod tests {
     /// Mise à jour ne portant qu'un compte de présélections déclaré par la Source.
     fn update_avec_compte(compte: Option<u8>) -> SourceUpdate {
         SourceUpdate {
-            view: None,
             identity: None,
-            line2_replaceable: false,
             transient: false,
             preset: None,
             preset_count: compte,
@@ -1621,9 +1580,7 @@ mod tests {
     /// Mise à jour ne portant qu'un nom de présélection déclaré par la Source.
     fn update_avec_nom(nom: Option<&str>) -> SourceUpdate {
         SourceUpdate {
-            view: None,
             identity: None,
-            line2_replaceable: false,
             transient: false,
             preset: None,
             preset_count: None,
@@ -1669,7 +1626,6 @@ mod tests {
         let (mut core, mut np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
         let id = serde_json::json!({"kind": "stream", "url": "http://fip"});
         core.handle_source_update("radio", joue(id.clone()));
-        core.handle_source_update("radio", vue(vue_radio()));
         // Repère pris après l'installation de l'identité : seuls les
         // changements ultérieurs doivent être détectés.
         np_rx.borrow_and_update();
@@ -1691,7 +1647,6 @@ mod tests {
         let (mut core, mut np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
         let id = serde_json::json!({"kind": "stream", "url": "http://fip"});
         core.handle_source_update("radio", joue(id.clone()));
-        core.handle_source_update("radio", vue(vue_radio()));
         np_rx.borrow_and_update();
         let morceau_avant = etat_rx.borrow().morceau.clone();
 
@@ -1739,7 +1694,6 @@ mod tests {
         // tout titre ICY, rien ne jouant.
         core.resume().await.unwrap();
         core.handle_source_update("radio", joue(serde_json::json!({"url": "un"})));
-        core.handle_source_update("radio", vue(vue_radio()));
         assert_eq!(etat_rx.borrow().morceau.title, None);
 
         core.handle_event(Event::IcyTitle("Mandrillus Sphynx - Bikwix".into())).await;
@@ -1754,7 +1708,6 @@ mod tests {
         core.resume().await.unwrap();
         let id = serde_json::json!({"url": "un"});
         core.handle_source_update("radio", joue(id.clone()));
-        core.handle_source_update("radio", vue(vue_radio()));
         // Texte de remplissage réellement émis par OUI FM sur son flux principal.
         core.handle_event(Event::IcyTitle("Now Playing info goes here".into())).await;
         // Sans ce contrôle, la suite du test passerait aussi bien si l'ICY
@@ -1772,7 +1725,6 @@ mod tests {
     async fn un_enrichissement_perime_ne_touche_pas_laffichage() {
         let (mut core, _np_rx, mut etat_rx, _d) = setup_metadonnees(vec!["ouifm".into()]);
         core.handle_source_update("radio", joue(serde_json::json!({"url": "deux"})));
-        core.handle_source_update("radio", vue(vue_radio()));
         etat_rx.borrow_and_update();
         core.handle_enrichment(
             "ouifm",
@@ -1789,7 +1741,6 @@ mod tests {
         let (mut core, _np_rx, etat_rx, _d) = setup_metadonnees(vec!["ouifm".into()]);
         let id = serde_json::json!({"url": "un"});
         core.handle_source_update("radio", joue(id.clone()));
-        core.handle_source_update("radio", vue(vue_radio()));
         core.handle_enrichment("ouifm", enrichissement(id, "Miles Davis", "So What"));
         assert_eq!(etat_rx.borrow().morceau.title.as_deref(), Some("So What"));
 
@@ -1808,7 +1759,6 @@ mod tests {
         let (mut core, np_rx, etat_rx, _d) = setup_metadonnees(vec!["ouifm".into()]);
         let id = serde_json::json!({"url": "un"});
         core.handle_source_update("radio", joue(id.clone()));
-        core.handle_source_update("radio", vue(vue_radio()));
         core.handle_enrichment("ouifm", enrichissement(id, "Miles Davis", "So What"));
         assert_eq!(etat_rx.borrow().morceau.title.as_deref(), Some("So What"));
 
@@ -1918,7 +1868,6 @@ mod tests {
         let (mut core, _np_rx, mut etat_rx, _d) = setup_metadonnees(vec![]);
         core.resume().await.unwrap();
         core.handle_source_update("radio", joue(serde_json::json!({"url": "un"})));
-        core.handle_source_update("radio", vue(vue_radio()));
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(etat_rx.borrow_and_update().status.as_deref(), Some("STANDBY"));
 
@@ -1938,7 +1887,6 @@ mod tests {
         let (mut core, _np_rx, mut etat_rx, _d) = setup_metadonnees(vec![]);
         core.resume().await.unwrap(); // pose `expecting_stream` (la radio joue)
         core.handle_source_update("radio", joue(serde_json::json!({"url": "un"})));
-        core.handle_source_update("radio", vue(vue_radio()));
         etat_rx.borrow_and_update();
         // Veille posée directement : c'est l'état atteint quand `Command::Power`
         // rend la main sur l'erreur de `player.stop()`, donc avec une lecture
@@ -1960,8 +1908,8 @@ mod tests {
         // fonctionner sans aucun plugin `metadata`.
         let (mut core, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
         core.resume().await.unwrap();
-        // Aucune identité n'est jamais déclarée : seule la vue arrive.
-        core.handle_source_update("radio", vue(vue_radio()));
+        // Aucune identité n'est jamais déclarée : seul le nom de présélection arrive.
+        core.handle_source_update("radio", update_avec_nom(Some("FIP")));
         core.handle_event(Event::IcyTitle("Made Up - TAHITI 80".into())).await;
         assert_eq!(etat_rx.borrow().morceau.title.as_deref(), Some("Made Up - TAHITI 80"));
         assert_eq!(etat_rx.borrow().morceau.origin.as_deref(), Some("icy"));
@@ -1972,7 +1920,6 @@ mod tests {
         let (mut core, _np_rx, mut etat_rx, _d) = setup_metadonnees(vec![]);
         core.resume().await.unwrap();
         core.handle_source_update("radio", joue(serde_json::json!({"url": "un"})));
-        core.handle_source_update("radio", vue(vue_radio()));
         core.handle_command(Command::Stop).await.unwrap();
         etat_rx.borrow_and_update();
 
@@ -2035,7 +1982,7 @@ mod tests {
 
         let mut ephemere = update_nu();
         ephemere.transient = true;
-        // Le mot affiché vient désormais de `status`, pas de la vue (voir
+        // Le mot affiché vient de `status`, jamais d'une vue composée (voir
         // Task 3) : c'est ainsi que le plugin radio le déclare réellement sur
         // la branche « présélection vide ».
         ephemere.status = Some("empty preset".into());
@@ -2126,7 +2073,6 @@ mod tests {
         let (mut core, _np_rx, mut etat_rx, _d) = setup_metadonnees(vec!["ouifm".into()]);
         let id = serde_json::json!({"url": "un"});
         core.handle_source_update("radio", joue(id.clone()));
-        core.handle_source_update("radio", vue(vue_radio()));
         core.handle_command(Command::VolumeUp).await.unwrap();
         let avec_overlay = etat_rx.borrow_and_update().clone();
         assert!(matches!(avec_overlay.overlay, Some(Overlay::Volume { .. })));
@@ -2148,7 +2094,6 @@ mod tests {
         let (mut core, _np_rx, etat_rx, _d) = setup_metadonnees(vec!["mort".into()]);
         core.resume().await.unwrap();
         core.handle_source_update("radio", joue(serde_json::json!({"url": "un"})));
-        core.handle_source_update("radio", vue(vue_radio()));
         core.handle_event(Event::IcyTitle("Mandrillus Sphynx - Bikwix".into())).await;
         let etat = etat_rx.borrow().clone();
         assert_eq!(etat.morceau.title.as_deref(), Some("Mandrillus Sphynx - Bikwix"));
