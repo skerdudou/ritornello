@@ -90,7 +90,13 @@ onUnmounted(arreterSondage)
 // cœur abandonne au bout de 5 s. Deux opérations déclenchées coup sur coup se
 // mettraient en file, la seconde dépassant le plafond — le cœur afficherait
 // « plugin injoignable » pour une action pourtant légitime.
-const enCours = ref(false)
+/** Un envoi est en vol : c'est ce qui interdit le double-envoi. */
+const envoiEnCours = ref(false)
+/** Une relecture suit un envoi : l'IHM reste grisée, mais un observateur a le
+ * droit d'émettre — voir le commentaire d'`envoyer`. */
+const rechargement = ref(false)
+/** Ce qui grise l'IHM : l'un ou l'autre. */
+const enCours = computed(() => envoiEnCours.value || rechargement.value)
 
 /**
  * Envoie une opération, puis relit l'état.
@@ -105,22 +111,41 @@ async function envoyer(charge: Record<string, unknown>): Promise<Donnees | null>
   // des boutons, qu'un outil de développement ou un futur remaniement du
   // gabarit pourrait contourner — alors que la conséquence (l'écrasement de
   // `media-roots.toml` par une table vide) est irréversible.
-  if (chargementEchoue.value || enCours.value) return null
-  enCours.value = true
+  //
+  // Le vol ne couvre que **l'envoi**, pas la relecture qui suit. Le rechargement
+  // met à jour `donnees`, ce qui déclenche le flush de rendu de Vue, donc les
+  // observateurs des volets — dont celui qui charge le premier niveau de
+  // l'arbre quand les racines changent. Tant que le vol couvrait aussi la
+  // relecture, cet observateur appelait `envoyer` alors que le verrou était
+  // encore pris : il recevait `null`, et rien ne le relançait ensuite (le
+  // sondage n'est armé que pendant un balayage). Symptôme mesuré au parcours
+  // e2e : après avoir enregistré une racine, le volet Parcourir restait
+  // désespérément vide.
+  if (chargementEchoue.value || envoiEnCours.value) return null
+  envoiEnCours.value = true
+  let err: string | null
   try {
-    const err = await api.put(url('api/data'), charge)
-    if (err) {
-      message.value = err
-      return null
-    }
-    message.value = ''
-    await recharger()
-    return donnees.value
+    err = await api.put(url('api/data'), charge)
   } finally {
-    // Dans un `finally` : une exception ne doit pas laisser la page bloquée
-    // sur un vol qui n'a plus lieu.
-    enCours.value = false
+    // Dans un `finally` : une exception ne doit pas laisser la page bloquée sur
+    // un vol qui n'a plus lieu.
+    envoiEnCours.value = false
   }
+  if (err) {
+    message.value = err
+    return null
+  }
+  message.value = ''
+  // `rechargement` remplace le vol pour ce qui est de griser l'IHM : les
+  // boutons restent inertes le temps de la relecture, sans pour autant
+  // empêcher un observateur d'émettre son propre envoi.
+  rechargement.value = true
+  try {
+    await recharger()
+  } finally {
+    rechargement.value = false
+  }
+  return donnees.value
 }
 
 const scan = computed(
