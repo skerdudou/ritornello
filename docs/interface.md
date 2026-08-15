@@ -29,6 +29,23 @@ standby, and the current track with where the information came from) is
 fed by a pushed stream from `GET /api/player` (SSE) — nothing is polled,
 and the state follows the infrared remote as well as other browser tabs.
 
+That stream and the display plugins' socket carry the very same
+payload — `PlayerState`, one structure serialized once and sent down two
+transports — rather than two views kept separately in sync. Two of its
+fields exist only for this: `status`, the appliance's current state as a
+sentence already translated by whoever produced it (the active source, e.g.
+"NO DISC", "AUDIO CD" — or the core itself in standby), which the Player
+card shows plainly when present, for the same reason `preset_name` below
+was added — a word that used to exist only on a display, invisible on the
+web exactly as a station name once was. And `overlay`, the transient
+overlay a display plugin is showing right now (the volume/mute readout, the
+remote's pending `+NN`, or a source's ephemeral message — see
+[plugins.md](plugins.md) for its shape): the payload carries it because the
+same structure feeds the displays, but the SPA **ignores** it — the web UI
+already shows the volume in plain sight and raises its own toasts for
+ephemeral messages, so re-showing an overlay meant for a small physical
+screen would be redundant here.
+
 On the preset grid, the key matching **what is playing** is highlighted:
 the preset for the radio, the track for the CD. The active source is what
 declares it (the `preset` field of its frames, see the protocol) — the
@@ -40,9 +57,10 @@ The Player card also shows the readable name the source gives that preset
 the configured station name for the radio. It lives and dies with `preset`:
 both clear together as soon as nothing is playing anymore, and neither
 survives a source change. The field exists because that name used to live
-only in a display line that a `metadata` plugin is free to overwrite (see
-[plugins.md](plugins.md)), so the SPA had nothing stable to show; the CD
-plugin never declares one, since a track number is not a name.
+only in a display line the core composed for itself, one a `metadata`
+plugin was free to overwrite (see [plugins.md](plugins.md)), so the SPA had
+nothing stable to show; the CD plugin never declares one, since a track
+number is not a name.
 
 The grid is not hardcoded to nine keys: the active source also declares
 **how many** presets it has (`preset_count` in its frames) — stations for

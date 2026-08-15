@@ -57,12 +57,12 @@ neither the display nor whatever is currently playing.
 
 Playing a preset also declares its `preset_name`: the configured station
 name, alongside the `preset` number, in the same frame. The field exists
-because the name used to live only in the displays' `line2` — which a
-`metadata` plugin is free to rewrite (see `line2_replaceable` below) and
-which the SPA never received in structured form — so the web Player card had
-no stable name to show. `preset_name` is absent (not cleared) on the "empty
-preset" branch: nothing new is playing there, the previous station carries
-on, so its name — if any — must stay exactly as it was.
+because the name used to live only in a display line the core composed for
+itself — one a `metadata` plugin was free to overwrite — and the SPA never
+received it in structured form, so the web Player card had no stable name to
+show. `preset_name` is absent (not cleared) on the "empty preset" branch:
+nothing new is playing there, the previous station carries on, so its name —
+if any — must stay exactly as it was.
 
 The search **country** is picked from a keyboard-filterable list,
 populated by the directory itself (241 countries at the last count, with
@@ -84,10 +84,14 @@ core's admin protocol, which abandons any request after 5 s, so a search
 that drags on is stopped on its own with an error message rather than
 ending in a timeout.
 
-Selecting an **empty** preset shows "empty preset" for a few seconds,
-then the display returns to the station that is playing: nothing was
+Selecting an **empty** preset declares a **transient** `status` — "empty
+preset" — for a few seconds, then whatever was already showing (the
+station's own status, or nothing at all) returns on its own: nothing was
 started, so nothing stopped, and the message must not durably describe a
-state that does not exist.
+state that does not exist. `transient` only ever qualifies `status`: it
+feeds a passing overlay message and leaves whatever a source has
+permanently declared untouched underneath, ready to reappear once the
+message's time is up.
 
 Variables: `RITORNELLO_RADIO_STATIONS`, `RITORNELLO_RADIO_STATE`,
 `RITORNELLO_RADIO_DIRECTORY` (**pins** a directory server: it becomes the
@@ -109,18 +113,84 @@ in for stations.
 
 It never fills `preset_name`: a track number is not a name, and what is
 interesting about a disc (album, title, artist) already arrives through the
-`metadata` path (see below), not through the preset name. At this slot it
-writes "audio CD" into `line2`, declared replaceable — a filler, not a
-name.
+`metadata` path (see below), not through the preset name.
+
+What it declares instead is a `status`: "audio CD" whenever a disc sits in
+the tray, "no disc" otherwise. Unlike `preset` and `preset_count`, whose
+absence means "this frame says nothing, keep the previous value", an absent
+`status` means **no status at all** — and the cd plugin restates one on
+every single frame precisely because of that convention: it is the only one
+that lets a status be cleared. Had absence meant "keep the previous one"
+instead, "no disc" would stay on screen forever after a disc was inserted,
+with no later frame able to cancel it. A display picks between this
+sentence and the album once a `metadata` plugin resolves one — see the
+plugin console's own choice below.
+
+**A known limitation.** `preset` only travels while playback is under way:
+a disc sitting in the tray, stopped, declares no preset at all, even though
+its track index is perfectly known. This is not an oversight — `preset`
+means "the key matching what is playing", the one the web remote
+highlights, and a stopped disc has nothing playing to highlight. Loosening
+that meaning to cover a merely-selected-but-stopped track would break the
+very property the field exists for. The practical consequence: where the
+console display used to show "CD 1/3" for a disc sitting idle in the tray,
+it now shows "CD" alone in that state — the "audio CD" status stays visible
+throughout, only the track number disappears until playback resumes.
 
 ## `ritornello-plugin-console` — the display
 
-Display plugin for the HDMI console (`RITORNELLO_CONSOLE_TTY` variable,
-default `/dev/tty1`). Three lines composed by the core; control
-characters coming from content (ICY titles…) are filtered before being
-written to the tty. A future display (an SSD1306 OLED over SPI/I2C, for
-example) would be a new plugin of the same kind, with no fallback rule to
-reimplement.
+A display plugin receives the appliance's full state — `PlayerState`, the
+same structured payload that feeds the SPA's Player card (see
+[interface.md](interface.md)) — through a single one-way call,
+`DisplayPlugin::show(state)`, no answer expected. **The core imposes no
+layout**: it hands over data, never composed lines, so a future display (an
+SSD1306 OLED over SPI/I2C, a wall panel with a scrolling ticker) is free to
+lay its own screen out, at whatever size, with no fallback rule to
+reimplement and no core change to request one.
+
+Every piece of information the core knows travels both raw and already
+resolved into words: `volume` is a number a display can turn into a gauge,
+`status` is a sentence a display can just print — no display ever needs a
+catalogue of its own to write what a source or the core already put into
+words. `overlay` works the same way for a transient overlay (`Volume {
+level, muted, text }`, `Tens { offset, text }`, `Message { text }`): the raw
+value for whoever wants to draw something, `text` for whoever wants to
+print it. Its `remaining_ms` is informative only — the core alone owns the
+deadline and pushes a fresh frame the instant an overlay expires — so a
+display may animate a countdown but must never decide for itself when the
+overlay ends.
+
+There is no `SetLocale` for displays: everything a display has to write
+already arrives translated, by the source's own catalogue or the core's, so
+a display plugin never has to resolve a word by itself. This is
+deliberately not built ahead of need: the day a display wants its own words
+(a scrolling ticker with an idiom no one else uses, say), adding
+`SetLocale` to the display protocol is a new message a plugin can ignore
+until it cares about it — non-breaking, unlike the rest of this protocol
+change, which was only safe to make because it happened before the project
+was published.
+
+This bundled plugin (`RITORNELLO_CONSOLE_TTY` variable, default
+`/dev/tty1`) targets a text screen of about twenty columns. Its layout is
+**its own choice**, not a contract every display must follow:
+
+- first line: `SOURCE  n/total` (just `SOURCE  n` when the source hasn't
+  declared a count, bare `SOURCE` when nothing is selected) — its own
+  idiom, standing in for what each source used to compose for itself
+  ("RADIO  P4", "CD 1/3");
+- second line: the source's preset name when it has one, else the album
+  once a `metadata` plugin has resolved one, else the source's `status` —
+  most specific first;
+- third line: `artist — title`, with the same four fallbacks (both, either
+  one alone, neither) it always had.
+
+An overlay, when present, takes the whole first line and blanks the rest —
+the display owner's own call, made and unchanged since before this
+protocol moved. Control characters coming from any field — a station name,
+a status word, an ICY title — are filtered before writing to the tty: now
+that the plugin composes from raw network-sourced strings itself, every one
+of its three lines is data that needs sanitizing, not just the title line
+as it used to be.
 
 The core's config page (`http://<host>:8080/config`, `/status` redirects
 there) also offers an **audio output** picker, based on the ALSA devices
@@ -255,18 +325,15 @@ version. The rest of the display is unchanged.
 
 ### Where it shows up
 
-On the displays, the core composes: `line3` carries `artist — title`
-(falling back to either one alone — partial information beats none), and
-`line2` receives the album **only if the Source declared its own `line2`
-as replaceable**, that is, wrote it for lack of anything better. The cd
-plugin uses this: it writes "audio CD", the album takes its place when a
-plugin reports it, and the label comes back as soon as it is no longer
-known. The criterion is that explicit declaration, not the line being
-empty: otherwise a Source would be asking for the album by staying
-silent, and one that wants an empty line would have no way to say so. The
-core never destroys information only the Source has, and the Display
-protocol stays unchanged: a future display has no fallback rule to
-reimplement.
+On the displays, arbitration's result lands in the same structured state as
+everything else: the resolved `artist`/`title`/`album` travel in
+`PlayerState`'s flattened `morceau`, right next to whatever `status` the
+active Source (or standby) declared. Which one a display shows, and how,
+is now the display's own call — see the plugin console's layout choice
+above for one example (preset name, then album, then status, most specific
+first). The core never destroys information only the Source has: `status`
+and `morceau.album` travel side by side, so a display that wants both can
+show both.
 
 In the web UI, the home page carries a **Player** card, above the remote:
 active source, volume, and two badges for mute and standby. The preset
@@ -275,8 +342,11 @@ when it declares one (`preset_name`) — "Preset: 4 — FIP" for the radio,
 just "Preset: 4" for a Source that names nothing at that slot. The track
 **joins it** when known — with a badge indicating its **origin** (`icy`,
 or the name of the winning plugin), the first question one asks in front
-of a wrong title. None of this is polled: the card updates over a pushed
-stream, so the volume follows the infrared remote and the other tabs.
+of a wrong title. The active Source's `status` sentence shows too, when
+there is one — see [interface.md](interface.md) for the full shape of
+that pushed payload. None of this is polled: the card updates over a
+pushed stream, so the volume follows the infrared remote and the other
+tabs.
 
 **Automatic track advance.** When a CD moves to the next track on its
 own, mpv informs the core, which relays it to the Source
