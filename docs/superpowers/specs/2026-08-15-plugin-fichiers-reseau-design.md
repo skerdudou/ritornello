@@ -2,8 +2,16 @@
 
 **Date :** 2026-08-15
 **État :** validé par le propriétaire, prêt pour le plan d'implémentation.
-**Base :** `main` à `3a30023` (onglet Système et « afficheurs, état structuré »
-fusionnés).
+**Base :** `main` à `b3cca84` (onglet Système, « afficheurs, état structuré » et
+i18n des messages serveur fusionnés).
+
+**Convention héritée du chantier i18n**, à respecter partout ici : une
+validation reste une **fonction pure rendant une erreur typée**, et c'est la
+frontière HTTP qui résout `message(&Catalog)`. `Display` ne sert qu'aux
+journaux, en anglais. Un test résout chaque variante contre le catalogue
+anglais réellement embarqué et **refuse un message égal à sa propre clé** —
+`Catalog::get` rendant la clé quand il ne la trouve pas, une faute de frappe
+afficherait sinon `bad_share_name` à l'écran sans qu'aucun test ne bronche.
 
 ## Le besoin
 
