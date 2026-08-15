@@ -102,10 +102,16 @@ pub struct Core<P: Player> {
     /// `SourceMessage::status`). Remplacé à chaque trame non éphémère, y
     /// compris par son absence — voir le test de convention.
     source_status: Option<String>,
-    /// Mot de veille résolu, mémorisé au moment où la veille est posée : le
-    /// catalogue se lit derrière un verrou asynchrone, et `etat_lecteur` ne
-    /// l'est pas. Gagne sur `source_status` dans `etat_lecteur` — l'appareil
-    /// dort, ce que raconte la source n'a plus cours.
+    /// Mot de veille résolu, mémorisé à la construction et à chaque
+    /// `set_locale` — jamais au moment de poser la veille : le catalogue se
+    /// lit derrière un verrou asynchrone, et `etat_lecteur` ne l'est pas. Le
+    /// résoudre à la pose de la veille exigeait deux `await` faillibles avant
+    /// de l'atteindre (`Command::Power`) : une Source ou mpv injoignables au
+    /// premier passage en veille publiaient `standby: true` sans aucun statut,
+    /// et l'écran devenait entièrement noir. Résolu en amont, le champ est
+    /// toujours frais et ce piège d'ordonnancement disparaît. Gagne sur
+    /// `source_status` dans `etat_lecteur` — l'appareil dort, ce que raconte
+    /// la source n'a plus cours.
     standby_status: Option<String>,
     /// How many numbered presets the active source offers (stations,
     /// tracks), as last declared. Forgotten on source change and standby —
@@ -142,6 +148,17 @@ pub struct Core<P: Player> {
     volume_deadline: Option<Instant>,
 }
 
+/// Résout le mot de veille depuis un catalogue déjà en main.
+///
+/// Fonction libre plutôt que méthode : elle sert à la fois à la construction
+/// (catalogue lu par `try_read`, avant que `self` n'existe) et à `set_locale`
+/// (catalogue tout juste chargé, avant qu'il ne remplace celui du cœur), donc
+/// aucune des deux n'a besoin de passer par le verrou asynchrone une seconde
+/// fois.
+fn resout_standby_status(catalog: &Catalog) -> String {
+    catalog.get("standby").to_string()
+}
+
 impl<P: Player> Core<P> {
     pub fn new(player: P, cablage: Cablage) -> Self {
         let Cablage { sources, persisted, state_path, catalog, locales_root, metadata } = cablage;
@@ -152,6 +169,11 @@ impl<P: Player> Core<P> {
         } else {
             source_order.first().cloned().unwrap_or_default()
         };
+        // Résolu tout de suite : rien d'autre ne détient encore ce verrou à la
+        // construction, donc `try_read` réussit toujours en pratique. Voir
+        // `resout_standby_status` pour la raison de ce choix (plus jamais
+        // résolu au moment de poser la veille).
+        let standby_status = catalog.try_read().ok().map(|c| resout_standby_status(&c));
         Self {
             player,
             sources,
@@ -169,7 +191,7 @@ impl<P: Player> Core<P> {
             preset: None,
             preset_name: None,
             source_status: None,
-            standby_status: None,
+            standby_status,
             preset_count: None,
             pending_tens: 0,
             state_path,
@@ -489,14 +511,16 @@ impl<P: Player> Core<P> {
 
     /// Startup in standby (`settings.start_in_standby`): mpv is configured
     /// (volume, audio device) so a later wake starts right, but the active
-    /// source is not woken and the display shows the standby view.
+    /// source is not woken and the display shows the standby status.
+    ///
+    /// `standby_status` is not resolved here: it already is, since
+    /// construction (see its doc) — no catalogue read on this path.
     pub async fn start_in_standby(&mut self) -> Result<()> {
         self.standby = true;
         self.player.set_volume(self.volume).await?;
         if let Some(device) = self.audio_device.clone() {
             self.player.set_audio_device(&device).await?;
         }
-        self.resout_standby_status().await;
         self.publie_etat();
         // A held key must re-press after standby: stale deadlines don't survive it.
         self.volume_deadline = None;
@@ -526,7 +550,7 @@ impl<P: Player> Core<P> {
                 let tens = std::mem::take(&mut self.pending_tens);
                 if tens != 0 {
                     // The consumed offset's overlay has said what it had to
-                    // say; the source's own view takes over.
+                    // say; the source's own status takes over.
                     self.overlay = None;
                 }
                 let n = n.saturating_add(tens);
@@ -601,16 +625,23 @@ impl<P: Player> Core<P> {
                     // `Deactivate` est ignorée, et la vue de veille qui suit
                     // passerait outre le garde-fou de `handle_source_update`.
                     self.set_identity(None);
-                    // Le compte de présélections n'a de sens que pour la
-                    // Source active : la veille l'oublie, et la prochaine
-                    // Source (activate/wake) le redéclarera si elle en a un.
+                    // Le compte de présélections et le statut n'ont de sens que
+                    // pour la Source active : la veille les oublie tous les
+                    // deux, et la prochaine Source (activate/wake) les
+                    // redéclarera si elle en a. Sans cet effacement, le statut
+                    // de l'ancienne source (« PAS DE DISQUE ») survivait à la
+                    // veille en mémoire, prêt à réapparaître au réveil avant
+                    // que la Source n'ait reparlé.
                     self.preset_count = None;
+                    self.source_status = None;
                     // L'incrustation volume/muet ne survit pas à la mise en
                     // veille : elle garde la priorité dans `etat_lecteur`, et
                     // « VOLUME 65 % » restait à l'écran jusqu'à 2 s après
                     // l'extinction avant que le mot de veille n'apparaisse.
                     self.overlay = None;
-                    self.resout_standby_status().await;
+                    // `standby_status` n'est pas résolu ici : il l'est déjà,
+                    // depuis la construction et chaque `set_locale` (voir sa
+                    // doc) — plus jamais au moment de poser la veille.
                     // A held key must re-press after standby: stale deadlines don't survive it.
                     self.volume_deadline = None;
                 } else {
@@ -643,11 +674,16 @@ impl<P: Player> Core<P> {
                 // laisserait l'identité de l'autre en place, et les plugins
                 // `metadata` continueraient d'enrichir le morceau précédent.
                 self.set_identity(None);
-                // Le compte de présélections annoncé par l'ancienne Source ne
-                // veut rien dire pour la nouvelle : la garder afficherait une
-                // fenêtre de numéros qui ne correspond à aucune présélection
-                // réelle tant que la nouvelle Source n'a pas parlé.
+                // Le compte de présélections et le statut annoncés par
+                // l'ancienne Source ne veulent rien dire pour la nouvelle : les
+                // garder afficherait une fenêtre de numéros qui ne correspond à
+                // aucune présélection réelle, ou un statut (« PAS DE DISQUE »)
+                // sous le nom d'une source qui n'a encore rien dit — tant que
+                // la nouvelle Source n'a pas parlé (ce qui peut ne jamais
+                // arriver : une présélection vide déclare une trame éphémère,
+                // qui ne touche pas au statut mémorisé).
                 self.preset_count = None;
+                self.source_status = None;
                 self.retry_count = 0;
                 // Persister **avant** `Activate` : si la nouvelle source ne
                 // répond pas (timeout de 5 s du SDK), l'état mémoire, l'état
@@ -794,9 +830,16 @@ impl<P: Player> Core<P> {
     ///
     /// Appelée depuis la boucle `select!` de `main` sur réception du canal
     /// `locale_rx`, lui-même alimenté par la route `PUT /api/locale`.
+    ///
+    /// Résout aussi `standby_status` dans le catalogue tout neuf, et publie
+    /// l'état : sans ce dernier, changer de langue pendant la veille laissait
+    /// le mot affiché dans l'ancienne langue jusqu'au prochain cycle
+    /// `Command::Power` (voir la doc de `standby_status`).
     pub async fn set_locale(&mut self, locale: String) -> Result<()> {
         self.locale = Some(locale.clone());
-        *self.catalog.write().await = Catalog::load("core", &locale, &self.locales_root, EN);
+        let nouveau = Catalog::load("core", &locale, &self.locales_root, EN);
+        self.standby_status = Some(resout_standby_status(&nouveau));
+        *self.catalog.write().await = nouveau;
         self.persist();
         for name in self.source_order.clone() {
             if let Some(src) = self.sources.get(&name) {
@@ -805,6 +848,7 @@ impl<P: Player> Core<P> {
                 }
             }
         }
+        self.publie_etat();
         Ok(())
     }
 
@@ -833,17 +877,6 @@ impl<P: Player> Core<P> {
         if let Err(e) = state::save(&self.state_path, &st) {
             tracing::warn!("persistence failed: {e}");
         }
-    }
-
-    /// Résout le mot de veille dans le catalogue et le mémorise dans
-    /// `standby_status` : c'est le seul endroit qui lit le catalogue pour la
-    /// veille (verrou asynchrone), et `etat_lecteur`, lui, ne l'est pas.
-    /// `etat_lecteur` fait ensuite gagner ce mot sur le statut de la source
-    /// tant que `standby` est vrai — nul besoin de composer une vue ici, le
-    /// plugin d'affichage s'en charge depuis l'état structuré.
-    async fn resout_standby_status(&mut self) {
-        let mot = self.catalog.read().await.get("standby").to_string();
-        self.standby_status = Some(mot);
     }
 
     /// Affiche (ou prolonge) l'overlay temporaire volume/muet : ligne 1 le
@@ -1273,6 +1306,83 @@ mod tests {
         core.resume().await.unwrap();
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(etat_rx.borrow_and_update().status.as_deref(), Some("VEILLE"));
+    }
+
+    #[tokio::test]
+    async fn changer_de_langue_en_veille_republie_aussitot_le_mot_de_veille() {
+        // Régression (M1+M9, revue de branche) : le mot de veille n'était
+        // résolu qu'au moment de poser la veille (`Command::Power`), et
+        // `set_locale` ne publiait de toute façon aucun état. Changer de
+        // langue *pendant* la veille laissait donc le mot affiché dans
+        // l'ancienne langue jusqu'au prochain cycle Power.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("core")).unwrap();
+        std::fs::write(dir.path().join("core/fr.toml"), "standby = \"VEILLE\"\n").unwrap();
+        let player = FakePlayer::default();
+        let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
+        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())) }));
+        let (etat_tx, mut etat_rx) = watch::channel(PlayerState::default());
+        let root = dir.path().to_path_buf();
+        // Construction en anglais : "STANDBY", la valeur embarquée de la clé.
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let metadata = MetadataCablage {
+            plugins: vec![],
+            now_playing: watch::channel(NowPlaying { source: String::new(), identity: None }).0,
+            etat: etat_tx,
+        };
+        let mut core = Core::new(player, Cablage { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata });
+        core.resume().await.unwrap();
+        core.handle_command(Command::Power).await.unwrap();
+        assert_eq!(etat_rx.borrow_and_update().status.as_deref(), Some("STANDBY"));
+        core.set_locale("fr".into()).await.unwrap();
+        assert_eq!(
+            etat_rx.borrow_and_update().status.as_deref(),
+            Some("VEILLE"),
+            "set_locale doit republier aussitot le nouveau mot de veille, sans attendre un nouveau cycle Power"
+        );
+    }
+
+    #[tokio::test]
+    async fn le_statut_de_lancienne_source_ne_survit_pas_a_un_changement_de_source() {
+        // Régression I2 (revue de branche) : `source_status` n'était effacé
+        // qu'à la trame suivante de la nouvelle Source. Un "cd" sans disque
+        // déclare "pas de disque" ; l'utilisateur bascule sur "radio" qui n'a
+        // aucune présélection configurée (une trame transitoire ne touche pas
+        // au statut mémorisé) : sans ce correctif, l'écran continuait
+        // d'afficher "pas de disque" sous la source "radio".
+        let (mut core, _pc, _sc, mut etat_rx, _d) = setup();
+        core.resume().await.unwrap();
+        let mut update = update_nu();
+        update.status = Some("pas de disque".into());
+        core.handle_source_update("radio", update);
+        assert_eq!(etat_rx.borrow_and_update().status.as_deref(), Some("pas de disque"));
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        assert_eq!(
+            etat_rx.borrow_and_update().status,
+            None,
+            "le statut de l'ancienne source ne doit pas survivre au changement de source"
+        );
+    }
+
+    #[tokio::test]
+    async fn le_statut_de_la_source_ne_survit_pas_a_la_mise_en_veille() {
+        // Second scénario d'I2 : sans effacement explicite, `source_status`
+        // restait en mémoire pendant la veille (masqué par la priorité du mot
+        // de veille dans `etat_lecteur`) et reparaissait au réveil tant que la
+        // Source n'avait pas reparlé — un mensonge prêt à resurgir.
+        let (mut core, _pc, _sc, mut etat_rx, _d) = setup();
+        core.resume().await.unwrap();
+        let mut update = update_nu();
+        update.status = Some("pas de disque".into());
+        core.handle_source_update("radio", update);
+        assert_eq!(etat_rx.borrow_and_update().status.as_deref(), Some("pas de disque"));
+        core.handle_command(Command::Power).await.unwrap(); // veille
+        core.handle_command(Command::Power).await.unwrap(); // reveil, source muette
+        assert_eq!(
+            etat_rx.borrow_and_update().status,
+            None,
+            "le statut de l'ancienne trame ne doit pas reapparaitre au reveil avant que la Source n'ait reparle"
+        );
     }
 
     #[tokio::test]
@@ -2060,11 +2170,18 @@ mod tests {
             "le mot de veille gagne sur le statut mémorisé de la source"
         );
 
+        // Révision I2 (revue de branche) : ce test affirmait auparavant que le
+        // réveil rendait la main au statut mémorisé ("FIP"), inchangé tant que
+        // la Source n'en redéclarait pas un nouveau. C'était exactement le
+        // bogue signalé par la revue — le statut d'une source pouvait survivre
+        // à la veille et réapparaître sous une source qui n'a encore rien dit
+        // (voir `le_statut_de_la_source_ne_survit_pas_a_la_mise_en_veille`).
+        // La veille l'oublie désormais, comme `preset_count`.
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(
-            core.etat_lecteur().status.as_deref(),
-            Some("FIP"),
-            "le réveil rend la main au statut mémorisé de la source, inchangé tant qu'elle n'en redéclare pas un nouveau"
+            core.etat_lecteur().status,
+            None,
+            "le réveil ne doit pas faire réapparaître un statut que la source n'a pas redéclaré"
         );
     }
 
