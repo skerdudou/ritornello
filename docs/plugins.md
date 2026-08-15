@@ -260,7 +260,7 @@ A `metadata` plugin enriches what the active Source is playing **without
 the Source knowing**. The core tells it what is playing, it answers with
 what it knows about it.
 
-Two layers stack up, and the second one wins:
+Three layers stack up, and the later one wins:
 
 1. **What the stream announces itself.** The core watches mpv's
    `metadata` property and reads the ICY header (`icy-title`), displayed
@@ -268,12 +268,32 @@ Two layers stack up, and the second one wins:
    guaranteed — OUI FM's webradios actually emit `Title - ARTIST`, in the
    reverse of the usual order. This layer works without any plugin, and
    without the Source having to declare anything.
-2. **What a `metadata` plugin has learned**, if it matches what is
+2. **What the file itself carries.** From that very same `metadata`
+   property, the core also reads a played file's tags — `title`, `artist`,
+   `album`. FFmpeg normalises the keys, so ID3 (mp3), Vorbis comments
+   (flac, ogg, opus), iTunes atoms (m4a) and RIFF INFO (wav) all surface
+   under those three names. Shown with origin `tags`. Like ICY, this layer
+   works **without any plugin** and serves *any* Source that plays a
+   tagged file — nothing has to be declared for it.
+
+   Two rules are worth knowing. The core picks **three named keys** rather
+   than absorbing the object: an m4a also carries container keys
+   (`major_brand`, `handler_name`) that have no place on a screen. And the
+   layer stays silent as soon as **any `icy-*` key is present**: some
+   stations fill in a `title` holding their own name next to an
+   `icy-title` carrying the actual track, so preferring the former would
+   replace the song by the station name. Stream and file tags therefore
+   never coexist.
+3. **What a `metadata` plugin has learned**, if it matches what is
    playing.
 
-**A plugin takes precedence over ICY under all circumstances**, as long
-as the station does not change: what it said stays displayed even if the
-stream announces a new title in the meantime. These streams' ICY is of
+**A plugin takes precedence over ICY and over file tags under all
+circumstances**, as long as the station does not change: what it said
+stays displayed even if the stream announces a new title in the meantime.
+The reason it outranks tags too is the same one that puts it on top at
+all — a plugin fetches what the file cannot say (an online database, a
+separate feed), so letting the file overrule it would discard the more
+informed answer. These streams' ICY is of
 lesser quality — reversed order (`Title - ARTIST`), sometimes just the
 station name as filler — and letting it take over on every track made the
 display change shape twice per track.

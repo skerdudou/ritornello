@@ -81,6 +81,16 @@ pub struct Core<P: Player> {
     muted: bool,
     standby: bool,
     expecting_stream: bool,
+    /// Quelque chose est en lecture, **quelle qu'en soit la nature**.
+    ///
+    /// Distinct d'`expecting_stream`, qui ne dit plus que « ce qui joue est un
+    /// flux live susceptible de tomber, donc à relancer ». Les deux
+    /// coïncidaient tant que seuls des flux étaient concernés ; depuis qu'une
+    /// Source peut déclarer un contenu fini (`Play { finite: true }`),
+    /// `expecting_stream` est faux pendant la lecture d'un disque ou d'une
+    /// liste de fichiers. S'en servir comme garde « ça joue » ferait taire
+    /// toute couche de métadonnées sur exactement ces contenus-là.
+    lecture: bool,
     retry_count: u32,
     audio_device: Option<String>,
     /// Overlay temporaire (volume/muet/message) : incrustation à afficher +
@@ -200,6 +210,7 @@ impl<P: Player> Core<P> {
             muted: false,
             standby: false,
             expecting_stream: false,
+            lecture: false,
             retry_count: 0,
             audio_device: persisted.audio_device.clone(),
             overlay: None,
@@ -390,6 +401,24 @@ impl<P: Player> Core<P> {
             return;
         }
         if !self.metadonnees.set_icy(titre) {
+            return;
+        }
+        self.publie_etat();
+    }
+
+    /// Tags portés par le fichier joué, tels que mpv les expose.
+    ///
+    /// Mêmes gardes que l'ICY, à une différence près qui est tout l'objet du
+    /// champ `lecture` : la garde « ça joue » ne peut pas être
+    /// `expecting_stream`, qui vaut **faux** précisément pendant la lecture
+    /// d'un contenu fini — donc pendant la seule lecture où des tags de
+    /// fichier existent. S'en servir aurait produit une couche qui ne
+    /// s'affiche jamais, sans rien dans les journaux.
+    fn handle_file_tags(&mut self, morceau: ritornello_proto::Morceau) {
+        if self.standby || !self.lecture {
+            return;
+        }
+        if !self.metadonnees.set_tags(morceau) {
             return;
         }
         self.publie_etat();
@@ -614,6 +643,7 @@ impl<P: Player> Core<P> {
             Command::PlayPause => self.player.toggle_pause().await?,
             Command::Stop => {
                 self.expecting_stream = false;
+                self.lecture = false;
                 self.player.stop().await?;
                 // Oublier l'identité **avant** de prévenir la Source : cet
                 // appel efface le titre de l'afficheur, et une Source
@@ -636,6 +666,7 @@ impl<P: Player> Core<P> {
                     let _ = self.active().request(SourceReq::Deactivate).await;
                     self.player.stop().await?;
                     self.expecting_stream = false;
+                    self.lecture = false;
                     // Même raison qu'au-dessus : la réponse de la Source à
                     // `Deactivate` est ignorée, et la vue de veille qui suit
                     // passerait outre le garde-fou de `handle_source_update`.
@@ -673,6 +704,7 @@ impl<P: Player> Core<P> {
                 // de jouer sous un affichage qui annonçait la nouvelle
                 // source, titres ICY compris.
                 self.expecting_stream = false;
+                self.lecture = false;
                 self.player.stop().await?;
                 // L'ancienne source est prévenue en best-effort : son arrêt
                 // est déjà fait, elle n'a plus qu'à recaler son propre état.
@@ -748,6 +780,9 @@ impl<P: Player> Core<P> {
             // une preuve de lecture (une station peut en envoyer un puis se
             // taire). Ici, uniquement des métadonnées.
             Event::IcyTitle(titre) => self.handle_icy_title(titre),
+            // Même statut que l'ICY vis-à-vis de `retry_count` : des
+            // métadonnées ne prouvent pas que la lecture est vivante.
+            Event::FileTags(morceau) => self.handle_file_tags(morceau),
             // Le lecteur a changé de piste de lui-même : fin de piste d'un
             // disque, pression sur aucune touche. Le cœur le sait (mpv le lui
             // dit) mais ne peut pas corriger l'identité — elle est opaque pour
@@ -780,6 +815,11 @@ impl<P: Player> Core<P> {
                 // piste et ses métadonnées affichées indéfiniment.
                 // Idempotent quand l'arrêt vient d'une commande (la Source a
                 // déjà été prévenue par `Command::Stop`).
+                //
+                // Plus rien ne joue : sans cela, les tags du dernier fichier
+                // resteraient recevables et un ultime rafraîchissement de mpv
+                // les remettrait à l'écran après la fin de la liste.
+                self.lecture = false;
                 if !self.standby {
                     if let Err(e) = self.active().request(SourceReq::Stop).await {
                         tracing::debug!("stop notification to source: {e}");
@@ -819,6 +859,7 @@ impl<P: Player> Core<P> {
                 // liste exactement comme lors d'une coupure — tombait du
                 // mauvais côté.
                 self.expecting_stream = !finite;
+                self.lecture = true;
                 self.player.play(&uri).await?;
                 // Positionnement **après** le chargement, dans cet ordre : mpv
                 // résout un `.m3u` dès le `loadfile`, la liste est donc déjà
@@ -829,6 +870,7 @@ impl<P: Player> Core<P> {
             }
             SourceAction::Stop => {
                 self.expecting_stream = false;
+                self.lecture = false;
                 self.player.stop().await?;
             }
             SourceAction::PlayerNext => self.player.next().await?,

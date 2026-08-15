@@ -21,6 +21,13 @@ use std::collections::HashMap;
 /// Origine retenue pour l'affichage quand elle vient du flux lui-même.
 pub const ORIGINE_ICY: &str = "icy";
 
+/// Origine retenue quand l'information vient des **tags du fichier joué**.
+///
+/// `tags` et non `mpv` : le badge affiché à l'utilisateur doit nommer ce qu'il
+/// regarde — d'où vient l'information — et non le composant qui l'a lue, qui
+/// est un détail d'implémentation susceptible de changer.
+pub const ORIGINE_TAGS: &str = "tags";
+
 /// État de résolution : ce qui joue, ce que le flux en dit, ce que les plugins
 /// en disent.
 #[derive(Debug, Default)]
@@ -33,6 +40,8 @@ pub struct Metadonnees {
     identity: Option<Value>,
     /// Dernier titre ICY vu, brut.
     icy: Option<String>,
+    /// Derniers tags vus sur le fichier joué (artiste, titre, album).
+    tags: Option<Morceau>,
     /// Enrichissements correspondant à `identity`, par plugin.
     enrichissements: HashMap<String, Enrichment>,
 }
@@ -58,7 +67,25 @@ impl Metadonnees {
         }
         self.identity = identity;
         self.icy = None;
+        self.tags = None;
         self.enrichissements.clear();
+        true
+    }
+
+    /// Retient les tags portés par le fichier joué. Renvoie `true` s'ils
+    /// apportent du nouveau — mpv republie la propriété `metadata` à chaque
+    /// changement de piste, et parfois à l'identique.
+    ///
+    /// Comme l'ICY, cette couche **ne conditionne rien à l'identité** : elle
+    /// doit fonctionner sans aucun plugin, et sans que la Source ait à
+    /// déclarer quoi que ce soit. C'est ce qui la rend utile à toute source
+    /// jouant un fichier taggé, y compris une source future qui ne saurait
+    /// rien de tout ceci.
+    pub fn set_tags(&mut self, morceau: Morceau) -> bool {
+        if self.tags.as_ref() == Some(&morceau) {
+            return false;
+        }
+        self.tags = Some(morceau);
         true
     }
 
@@ -155,7 +182,17 @@ impl Metadonnees {
     }
 
     /// Résolution, dans l'ordre : l'enrichissement du plugin le plus
-    /// prioritaire ayant répondu, sinon l'ICY brut, sinon rien.
+    /// prioritaire ayant répondu, sinon les **tags du fichier**, sinon l'ICY
+    /// brut, sinon rien.
+    ///
+    /// Les tags s'intercalent entre les deux couches préexistantes, et c'est
+    /// leur place naturelle : un plugin `metadata` va chercher au loin ce que
+    /// le fichier ne dit pas (une base en ligne, un flux séparé) et doit donc
+    /// garder la main ; l'ICY, lui, décrit un flux, pas un fichier. En
+    /// pratique tags et ICY ne coexistent jamais — l'extraction rend `None`
+    /// dès qu'une clé `icy-*` est présente, précisément pour qu'une station
+    /// annonçant son propre nom dans `title` ne vienne pas supplanter
+    /// l'`icy-title` qui porte le vrai morceau.
     ///
     /// L'ICY est repris **tel quel** dans `title`, sans découpage sur `" - "` :
     /// la convention existe mais n'est pas garantie, et un enrichissement de
@@ -173,6 +210,9 @@ impl Metadonnees {
                     origin: Some(plugin.clone()),
                 };
             }
+        }
+        if let Some(tags) = &self.tags {
+            return tags.clone();
         }
         match &self.icy {
             Some(icy) => Morceau {
@@ -229,6 +269,66 @@ mod tests {
         m.set_icy("Miles Davis - So What".into());
         assert!(!m.set_identity(Some(json!({"url": "un"}))));
         assert_eq!(m.etat().title.as_deref(), Some("Miles Davis - So What"));
+    }
+
+    #[test]
+    fn un_plugin_lemporte_sur_les_tags_du_fichier() {
+        // Même règle que face à l'ICY, et pour la même raison : un plugin va
+        // chercher au loin ce que le fichier ne dit pas, et ce qu'il a appris
+        // doit rester affiché.
+        let mut m = Metadonnees::new(vec!["musicbrainz".into()]);
+        m.set_identity(Some(json!({"kind": "file", "path": "/x/03.flac"})));
+        m.set_tags(Morceau {
+            title: Some("piste 03".into()),
+            origin: Some(ORIGINE_TAGS.to_string()),
+            ..Default::default()
+        });
+        m.ajoute(
+            "musicbrainz",
+            enrichissement(json!({"kind": "file", "path": "/x/03.flac"}), "Miles Davis", "So What"),
+        );
+        let etat = m.etat();
+        assert_eq!(etat.title.as_deref(), Some("So What"));
+        assert_eq!(etat.origin.as_deref(), Some("musicbrainz"));
+    }
+
+    #[test]
+    fn les_tags_lemportent_sur_licy_et_sont_attribues() {
+        // Les deux ne coexistent jamais en pratique (l'extraction se tait dès
+        // qu'une clé ICY est là), mais l'ordre doit être écrit : l'ICY décrit
+        // un flux, les tags décrivent le fichier réellement joué.
+        let mut m = Metadonnees::new(vec![]);
+        m.set_icy("Station - Jingle".into());
+        m.set_tags(Morceau {
+            artist: Some("Miles Davis".into()),
+            title: Some("So What".into()),
+            origin: Some(ORIGINE_TAGS.to_string()),
+            ..Default::default()
+        });
+        let etat = m.etat();
+        assert_eq!(etat.title.as_deref(), Some("So What"));
+        assert_eq!(etat.origin.as_deref(), Some("tags"));
+    }
+
+    #[test]
+    fn un_changement_didentite_vide_aussi_les_tags() {
+        // Sans cela, les tags de la piste précédente resteraient affichés le
+        // temps que mpv publie ceux de la suivante.
+        let mut m = Metadonnees::new(vec![]);
+        m.set_identity(Some(json!({"kind": "file", "path": "/x/01.mp3"})));
+        m.set_tags(Morceau { title: Some("Piste 1".into()), ..Default::default() });
+        assert!(m.set_identity(Some(json!({"kind": "file", "path": "/x/02.mp3"}))));
+        assert!(m.etat().est_vide());
+    }
+
+    #[test]
+    fn des_tags_repetes_ne_declenchent_rien() {
+        // mpv republie `metadata` plus souvent qu'il ne change : sans cette
+        // déduplication, chaque republication ferait repeindre les afficheurs.
+        let mut m = Metadonnees::new(vec![]);
+        let tags = Morceau { title: Some("So What".into()), ..Default::default() };
+        assert!(m.set_tags(tags.clone()));
+        assert!(!m.set_tags(tags));
     }
 
     #[test]

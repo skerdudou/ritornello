@@ -1,5 +1,6 @@
 use crate::types::Event;
 use anyhow::{bail, Context, Result};
+use ritornello_proto::Morceau;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
@@ -47,7 +48,14 @@ impl MpvIpc {
                 } else if v["event"] == json!("property-change") {
                     let ev = match (v["name"].as_str(), &v["data"]) {
                         (Some("media-title"), Value::String(t)) => Some(Event::Title(t.clone())),
-                        (Some("metadata"), data) => icy_title(data).map(Event::IcyTitle),
+                        // Une même propriété, deux couches : l'en-tête ICY d'un
+                        // flux, ou les tags d'un fichier. `file_tags` se tait
+                        // dès qu'une clé ICY est présente, les deux branches
+                        // sont donc exclusives — l'ordre ci-dessous n'est pas
+                        // une priorité déguisée.
+                        (Some("metadata"), data) => icy_title(data)
+                            .map(Event::IcyTitle)
+                            .or_else(|| file_tags(data).map(Event::FileTags)),
                         (Some("idle-active"), Value::Bool(true)) => Some(Event::PlaybackIdle),
                         (Some("idle-active"), Value::Bool(false)) => Some(Event::PlaybackActive),
                         // Deux propriétés pour un même fait, l'avance de piste :
@@ -130,6 +138,47 @@ pub fn icy_title(data: &Value) -> Option<String> {
         .and_then(|(_, valeur)| valeur.as_str())?;
     let elague = brut.trim();
     (!elague.is_empty()).then(|| elague.to_string())
+}
+
+/// Extrait les trois champs affichables des **tags du fichier joué**, depuis
+/// cette même propriété `metadata`. Fonction pure, testable sur une capture
+/// réelle.
+///
+/// FFmpeg **normalise** les clés : ID3 (mp3), Vorbis comments (flac, ogg,
+/// opus), atomes iTunes (m4a) et RIFF INFO (wav) remontent tous sous
+/// `title` / `artist` / `album`, ce qui a été vérifié format par format. Une
+/// seule grammaire suffit donc, et elle couvre toute la bibliothèque.
+///
+/// Deux précautions, l'une et l'autre nées d'une mesure :
+///
+/// - on **pioche trois clés nommées** au lieu d'absorber l'objet : un m4a y
+///   fait aussi remonter `major_brand`, `handler_name`, `vendor_id` et
+///   `compatible_brands`, qui n'ont rien à faire dans un affichage ;
+/// - la présence d'une clé `icy-*` **signe un flux** et rend `None`. Certaines
+///   stations renseignent un `title` valant leur propre nom à côté d'un
+///   `icy-title` qui porte le vrai morceau : préférer le premier serait une
+///   régression pour la radio, silencieuse et difficile à attribuer.
+pub fn file_tags(data: &Value) -> Option<Morceau> {
+    let map = data.as_object()?;
+    if map.keys().any(|cle| cle.to_ascii_lowercase().starts_with("icy-")) {
+        return None;
+    }
+    let champ = |nom: &str| {
+        map.iter()
+            .find(|(cle, _)| cle.eq_ignore_ascii_case(nom))
+            .and_then(|(_, valeur)| valeur.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let morceau = Morceau {
+        artist: champ("artist"),
+        title: champ("title"),
+        album: champ("album"),
+        duration_s: None,
+        origin: Some(crate::metadata::ORIGINE_TAGS.to_string()),
+    };
+    (!morceau.est_vide()).then_some(morceau)
 }
 
 pub struct MpvPlayer {
@@ -377,6 +426,59 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(rx.recv().await.unwrap(), Event::IcyTitle("Mandrillus Sphynx - Bikwix".into()));
+    }
+
+    #[test]
+    fn les_tags_dun_fichier_local_donnent_les_trois_champs() {
+        // Charge relevée au banc sur un mp3 (ID3). FFmpeg normalise les clés :
+        // flac, ogg, opus, m4a et wav ont été vérifiés et remontent sous les
+        // mêmes noms, donc une seule grammaire à connaître.
+        let data = serde_json::json!({
+            "title": "So What", "artist": "Miles Davis",
+            "album": "Kind of Blue", "encoder": "Lavf60.16.100"
+        });
+        let m = file_tags(&data).unwrap();
+        assert_eq!(m.title.as_deref(), Some("So What"));
+        assert_eq!(m.artist.as_deref(), Some("Miles Davis"));
+        assert_eq!(m.album.as_deref(), Some("Kind of Blue"));
+        assert_eq!(m.origin.as_deref(), Some("tags"));
+    }
+
+    #[test]
+    fn les_cles_de_conteneur_m4a_sont_ignorees() {
+        // Relevé au banc : un m4a fait aussi remonter des clés de conteneur.
+        // On pioche trois clés nommées, on n'absorbe jamais l'objet.
+        let data = serde_json::json!({
+            "title": "So What", "major_brand": "M4A ", "handler_name": "SoundHandler",
+            "vendor_id": "[0][0][0][0]", "compatible_brands": "M4A mp42isom"
+        });
+        let m = file_tags(&data).unwrap();
+        assert_eq!(m.title.as_deref(), Some("So What"));
+        assert_eq!(m.artist, None);
+        assert_eq!(m.album, None);
+    }
+
+    #[test]
+    fn une_charge_icy_ne_produit_aucun_tag() {
+        // La garde qui protège la radio : certaines stations renseignent un
+        // `title` valant le NOM DE LA STATION à côté d'un `icy-title` qui
+        // porte le vrai morceau. Préférer le premier serait une régression
+        // silencieuse — le titre du morceau remplacé par le nom de la station.
+        let data = serde_json::json!({
+            "icy-br": "128", "icy-title": "Mandrillus Sphynx - Bikwix", "title": "OUI FM"
+        });
+        assert!(file_tags(&data).is_none());
+        assert_eq!(icy_title(&data).as_deref(), Some("Mandrillus Sphynx - Bikwix"));
+    }
+
+    #[test]
+    fn une_charge_sans_rien_de_lisible_ne_produit_aucun_tag() {
+        // Un enrichissement vide compterait comme une réponse et masquerait
+        // l'ICY : il ne doit pas exister.
+        assert!(file_tags(&serde_json::json!({"encoder": "Lavf60.16.100"})).is_none());
+        assert!(file_tags(&serde_json::json!({"title": "   "})).is_none());
+        assert!(file_tags(&serde_json::json!({})).is_none());
+        assert!(file_tags(&Value::Null).is_none());
     }
 
     #[test]
