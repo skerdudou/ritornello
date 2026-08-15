@@ -148,6 +148,35 @@ mod tests {
     }
 
     #[test]
+    fn un_nom_de_preselection_n_est_jamais_supplante_par_un_album() {
+        // L'autre moitié de la règle ci-dessus, et la plus facile à casser : le
+        // cd laisse l'album gagner parce qu'il ne nomme pas ses pistes, mais une
+        // station nommée doit rester affichée même quand un plugin `metadata`
+        // finit par résoudre un album. Le cœur garantissait cela par
+        // `line2_replaceable`, que la radio ne déclarait pas ; ici c'est l'ordre
+        // de l'`or_else` qui le garantit, et rien ne signalerait son inversion.
+        let mut e = etat_radio();
+        e.morceau.album = Some("Kind of Blue".into());
+        assert_eq!(compose(&e)[1], "France Inter");
+    }
+
+    #[test]
+    fn le_rendu_efface_l_ecran_et_espace_les_trois_lignes() {
+        // Format du rendu lui-même, indépendamment de ce que `compose` décide :
+        // en-tête ANSI d'effacement, retours chariot explicites (sur /dev/tty1
+        // le mode canonique ne les insère pas), et une ligne vide entre chaque.
+        let mut e = etat_radio();
+        e.morceau.artist = Some("Miles Davis".into());
+        e.morceau.title = Some("So What".into());
+        let s = render_console(&e);
+        assert!(s.starts_with("\x1b[2J\x1b[H"));
+        assert!(s.contains("RADIO  P3\r\n"));
+        assert!(s.contains("France Inter\r\n"));
+        assert!(s.contains("Miles Davis — So What\r\n"));
+        assert_eq!(s.matches("\r\n\r\n").count(), 2, "une ligne vide entre chacune des trois");
+    }
+
+    #[test]
     fn une_incrustation_prend_toute_la_place() {
         let mut e = etat_radio();
         e.overlay = Some(Overlay::Volume { level: 65, muted: false, text: "VOLUME 65 %".into(), remaining_ms: 4000 });
