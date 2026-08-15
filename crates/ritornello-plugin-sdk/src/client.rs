@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use ritornello_proto::{
     AdminReq, AdminRequest, AdminResponse, AdminResult, Enrichment, IdentityUpdate, InputMessage,
-    NowPlaying, SourceAction, SourceMessage, SourceReq, SourceRequest, View,
+    NowPlaying, PlayerState, SourceAction, SourceMessage, SourceReq, SourceRequest, View,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -174,9 +174,9 @@ impl DisplayClient {
         Ok(Arc::new(Self { writer: Mutex::new(write) }))
     }
 
-    pub async fn send(&self, view: &View) -> Result<()> {
+    pub async fn send(&self, state: &PlayerState) -> Result<()> {
         let mut w = self.writer.lock().await;
-        w.write_all(format!("{}\n", serde_json::to_string(view)?).as_bytes()).await?;
+        w.write_all(format!("{}\n", serde_json::to_string(state)?).as_bytes()).await?;
         Ok(())
     }
 }
@@ -664,7 +664,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn display_client_envoie_la_vue_en_ligne() {
+    async fn display_client_envoie_letat_en_ligne() {
         // Les assertions de contenu vivent dans la tâche serveur : son
         // `JoinHandle` doit être **joint**, sans quoi une panique y serait
         // avalée et le test ne prouverait que « send() rend Ok » — il passait
@@ -677,12 +677,13 @@ mod tests {
             let (read, _write) = stream.into_split();
             let mut lines = BufReader::new(read).lines();
             let line = lines.next_line().await.unwrap().unwrap();
-            let v: View = serde_json::from_str(&line).unwrap();
-            assert_eq!(v.line2, "FIP");
+            let e: PlayerState = serde_json::from_str(&line).unwrap();
+            assert_eq!(e.preset_name.as_deref(), Some("FIP"));
         });
 
         let client = DisplayClient::connect(&socket).await.unwrap();
-        client.send(&View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() }).await.unwrap();
+        let etat = PlayerState { source: "radio".into(), preset: Some(1), preset_name: Some("FIP".into()), ..Default::default() };
+        client.send(&etat).await.unwrap();
         serveur.await.expect("les assertions du serveur ont paniqué");
     }
 

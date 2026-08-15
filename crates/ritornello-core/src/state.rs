@@ -26,7 +26,7 @@ pub struct Settings {
     /// shown as the `+NN` overlay: the time left to press the second
     /// digit. Independent from `overlay_ms` for the same reason in
     /// reverse — see that field's comment. The core stores each overlay's
-    /// own deadline (`overlay: Option<(View, Instant)>`), so
+    /// own deadline (`overlay: Option<(Overlay, Instant)>`), so
     /// `show_tens_overlay` reading this field and `expire_overlay`
     /// staying oblivious to which duration produced the deadline keeps
     /// the offset and its overlay disarming together **on expiry**,

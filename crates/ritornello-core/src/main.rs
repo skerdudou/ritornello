@@ -19,7 +19,7 @@ use crate::status::{AppState, LogBuffer, LogBufferWriter, PluginStatus, StatusSt
 use crate::types::Event;
 use anyhow::{Context, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
-use ritornello_proto::{Enrichment, InputMessage, NowPlaying, View};
+use ritornello_proto::{Enrichment, InputMessage, NowPlaying};
 use ritornello_plugin_sdk::{run_input_client, run_metadata_client, DisplayClient, SourceClient, SourceUpdate};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -82,7 +82,6 @@ async fn main() -> Result<()> {
     // relance jusqu'à la prochaine action. Ici, canal plein = contre-pression
     // sur la pompe d'événements, jamais de perte.
     let (ev_tx, mut ev_rx) = mpsc::channel::<Event>(64);
-    let (view_tx, mut view_rx) = watch::channel(View::default());
     let (source_view_tx, mut source_view_rx) = mpsc::channel::<(String, SourceUpdate)>(32);
     // Ce qui joue, vers les plugins `metadata` : un `watch`, parce que seule la
     // dernière valeur compte et qu'un plugin lent ne doit pas bloquer le cœur.
@@ -90,8 +89,9 @@ async fn main() -> Result<()> {
         source: persisted.active_source.clone(),
         identity: None,
     });
-    // État structuré du morceau, vers la SPA (route SSE). Canal distinct des
-    // vues : la SPA reçoit du structuré, les afficheurs des lignes composées.
+    // État structuré du lecteur : vers la SPA (route SSE) et vers les plugins
+    // Display, qui composent eux-mêmes leur mise en page depuis cette même
+    // trame (un seul canal depuis la Task 4 de « afficheurs, état structuré »).
     let (etat_tx, etat_rx) = watch::channel(PlayerState {
         source: persisted.active_source.clone(),
         ..Default::default()
@@ -272,16 +272,19 @@ async fn main() -> Result<()> {
         anyhow::bail!("no source available (plugins.toml empty or all source plugins unavailable)");
     }
 
-    // Relais des vues vers le plugin d'affichage, s'il est connecté.
+    // Relais de l'état vers le plugin d'affichage, s'il est connecté : le même
+    // canal qui alimente la route SSE de la SPA, le plugin composant lui-même
+    // sa mise en page depuis la trame reçue.
     match display_client {
         Some(display_client) => {
+            let mut display_rx = etat_rx.clone();
             tokio::spawn(async move {
                 loop {
-                    if view_rx.changed().await.is_err() {
+                    if display_rx.changed().await.is_err() {
                         break;
                     }
-                    let v = view_rx.borrow_and_update().clone();
-                    if let Err(e) = display_client.send(&v).await {
+                    let etat = display_rx.borrow_and_update().clone();
+                    if let Err(e) = display_client.send(&etat).await {
                         tracing::warn!("display: {e}");
                     }
                 }
@@ -380,7 +383,6 @@ async fn main() -> Result<()> {
             sources,
             persisted,
             state_path,
-            view_tx,
             catalog: catalog.clone(),
             locales_root: locales_root.clone(),
             metadata: MetadataCablage {

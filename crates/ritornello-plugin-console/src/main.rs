@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use display::ConsoleDisplay;
 use ritornello_plugin_sdk::{run_display_plugin, DisplayPlugin};
-use ritornello_proto::View;
+use ritornello_proto::PlayerState;
 use std::path::PathBuf;
 
 fn env_or(key: &str, default: &str) -> String {
@@ -17,8 +17,8 @@ struct ConsolePlugin {
 
 #[async_trait]
 impl DisplayPlugin for ConsolePlugin {
-    async fn show(&mut self, view: View) -> Result<()> {
-        self.display.show(&view)
+    async fn show(&mut self, state: PlayerState) -> Result<()> {
+        self.display.show(&state)
     }
 }
 

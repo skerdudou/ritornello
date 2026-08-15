@@ -1,17 +1,20 @@
-//! Résolution des métadonnées du morceau en cours, et composition de
-//! l'affichage qui en découle.
+//! Résolution des métadonnées du morceau en cours.
 //!
 //! Deux couches se superposent : ce que le flux annonce lui-même (l'en-tête ICY
 //! lu par mpv, affiché **brut**) et ce qu'un plugin `metadata` a appris. La
 //! seconde gagne sur la première quand elle correspond à ce qui joue.
 //!
 //! Tout est ici en fonctions et méthodes pures — aucune socket, aucun routeur,
-//! aucune horloge : l'arbitrage entre plugins et les replis d'affichage sont
-//! précisément la partie où une erreur ne se voit pas à l'œil sur l'appareil.
+//! aucune horloge : l'arbitrage entre plugins est précisément la partie où une
+//! erreur ne se voit pas à l'œil sur l'appareil.
+//!
+//! La mise en page de l'affichage, elle, ne vit plus ici : c'est au plugin
+//! d'affichage de composer ses lignes depuis `PlayerState` (voir
+//! `ritornello-plugin-console::display::compose`).
 
 pub use ritornello_proto::{Morceau, PlayerState};
 
-use ritornello_proto::{Enrichment, View};
+use ritornello_proto::Enrichment;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -182,50 +185,6 @@ impl Metadonnees {
     }
 }
 
-/// Ligne de métadonnées à afficher, ou `None` si rien n'est connu.
-///
-/// Le tiret cadratin est déjà la convention de l'affichage du cd. Une
-/// information partielle vaut mieux que rien : l'artiste seul reste affiché,
-/// parce qu'il dit déjà quelque chose de ce qu'on écoute.
-pub fn ligne_titre(artist: Option<&str>, title: Option<&str>) -> Option<String> {
-    match (artist, title) {
-        (Some(a), Some(t)) => Some(format!("{a} — {t}")),
-        (None, Some(t)) => Some(t.to_string()),
-        (Some(a), None) => Some(a.to_string()),
-        (None, None) => None,
-    }
-}
-
-/// Compose la vue affichée : les lignes écrites par la Source, complétées par
-/// ce qu'on sait du morceau.
-///
-/// Deux règles, et une invariante qui les gouverne : **le cœur ne détruit jamais
-/// une information que la Source seule possède.**
-///
-/// - `line3` est la ligne des métadonnées. Elle est libre sur la radio, et sur
-///   le cd elle portait le titre de piste — qui revient désormais précisément
-///   sous forme d'enrichissement. Rien n'entre donc en conflit.
-/// - `line2` reçoit l'album **seulement si la Source a déclaré sa propre
-///   `line2` remplaçable** (`line2_replaceable`), c'est-à-dire l'a écrite faute
-///   de mieux. Le remplacement est réversible : l'album disparaît-il, la ligne
-///   de la Source revient, puisque c'est elle qui est conservée dans `base`.
-///
-/// Le critère est une déclaration **explicite** et non le fait que la ligne soit
-/// vide : avec le vide pour signal, une Source demanderait l'album en se taisant,
-/// et celle qui veut une ligne vide n'aurait aucun moyen de le dire.
-pub fn composer(base: &View, etat: &Morceau, line2_replaceable: bool) -> View {
-    let mut vue = base.clone();
-    if let Some(ligne) = ligne_titre(etat.artist.as_deref(), etat.title.as_deref()) {
-        vue.line3 = ligne;
-    }
-    if line2_replaceable {
-        if let Some(album) = &etat.album {
-            vue.line2 = album.clone();
-        }
-    }
-    vue
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,75 +197,6 @@ mod tests {
             title: Some(title.into()),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn les_quatre_replis_de_la_ligne_de_titre() {
-        assert_eq!(ligne_titre(Some("Miles Davis"), Some("So What")).as_deref(), Some("Miles Davis — So What"));
-        assert_eq!(ligne_titre(None, Some("So What")).as_deref(), Some("So What"));
-        // Décision du propriétaire : on affiche toute information disponible,
-        // même partielle.
-        assert_eq!(ligne_titre(Some("Miles Davis"), None).as_deref(), Some("Miles Davis"));
-        assert_eq!(ligne_titre(None, None), None);
-    }
-
-    /// État complet, tel qu'un plugin `metadata` le fournit pour un disque.
-    fn etat_complet() -> Morceau {
-        Morceau {
-            artist: Some("Miles Davis".into()),
-            title: Some("So What".into()),
-            album: Some("Kind of Blue".into()),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn composer_laisse_la_ligne3_de_la_source_quand_rien_nest_connu() {
-        let base = View { line1: "CD 3/12".into(), line2: "audio CD".into(), line3: "deja la".into() };
-        let vue = composer(&base, &Morceau::default(), true);
-        assert_eq!(vue.line3, "deja la", "le coeur ne vide jamais une ligne ecrite par la Source");
-        // Ligne declaree remplacable, mais aucun album connu : l'etiquette de la
-        // Source reste. C'est ce qui evite un afficheur a moitie vide sur un
-        // disque absent de MusicBrainz ou un appareil hors ligne.
-        assert_eq!(vue.line2, "audio CD");
-    }
-
-    #[test]
-    fn composer_remplit_la_ligne3_sans_toucher_a_une_ligne2_non_declaree() {
-        let base = View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: String::new() };
-        let vue = composer(&base, &etat_complet(), false);
-        assert_eq!(vue.line3, "Miles Davis — So What");
-        assert_eq!(vue.line2, "FIP", "le nom de station ne doit jamais etre remplace par un album");
-        assert_eq!(vue.line1, "RADIO  P1");
-    }
-
-    #[test]
-    fn une_ligne2_vide_mais_non_declaree_reste_vide() {
-        // C'est la correction du critere : avec le vide pour signal, une Source
-        // sobre (une entree auxiliaire n'affichant que son nom) se verrait
-        // imposer un album sans l'avoir demande, et devrait ecrire une chaine
-        // factice pour s'en proteger.
-        let base = View { line1: "AUX".into(), line2: String::new(), line3: String::new() };
-        let vue = composer(&base, &etat_complet(), false);
-        assert_eq!(vue.line2, "", "sans declaration, le coeur n'ecrit pas ici");
-    }
-
-    #[test]
-    fn lalbum_remplace_une_ligne2_declaree_remplacable() {
-        let base = View { line1: "CD 3/12".into(), line2: "audio CD".into(), line3: String::new() };
-        let vue = composer(&base, &etat_complet(), true);
-        assert_eq!(vue.line2, "Kind of Blue");
-        assert_eq!(vue.line3, "Miles Davis — So What");
-    }
-
-    #[test]
-    fn le_remplacement_est_reversible() {
-        // La ligne de la Source est conservee dans `base`, donc l'album disparu
-        // (changement de disque, plugin qui se tait), l'etiquette revient d'elle-
-        // meme : le coeur n'a rien detruit.
-        let base = View { line1: "CD 3/12".into(), line2: "audio CD".into(), line3: String::new() };
-        assert_eq!(composer(&base, &etat_complet(), true).line2, "Kind of Blue");
-        assert_eq!(composer(&base, &Morceau::default(), true).line2, "audio CD");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use ritornello_proto::{
-    Enrichment, IdentityUpdate, NowPlaying, SourceAction, SourceMessage, SourceReq, SourceRequest,
-    View,
+    Enrichment, IdentityUpdate, NowPlaying, PlayerState, SourceAction, SourceMessage, SourceReq,
+    SourceRequest, View,
 };
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -349,12 +349,16 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
 
 #[async_trait::async_trait]
 pub trait DisplayPlugin: Send + 'static {
-    async fn show(&mut self, view: View) -> Result<()>;
+    async fn show(&mut self, state: PlayerState) -> Result<()>;
 }
 
-/// Lie `socket_path`, accepte une connexion (le cœur), puis affiche chaque
-/// vue reçue jusqu'à fermeture de la connexion. Protocole à sens unique :
-/// aucune réponse n'est attendue.
+/// Lie `socket_path`, accepte une connexion (le cœur), puis affiche chaque état
+/// reçu jusqu'à fermeture de la connexion. Protocole à sens unique : aucune
+/// réponse n'est attendue.
+///
+/// Chaque ligne est un `PlayerState` complet, pas une vue déjà composée : la
+/// mise en page appartient au plugin (voir `ritornello-plugin-console::display`),
+/// pas au cœur.
 pub async fn run_display_plugin(mut plugin: impl DisplayPlugin, socket_path: &Path) -> Result<()> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -366,14 +370,14 @@ pub async fn run_display_plugin(mut plugin: impl DisplayPlugin, socket_path: &Pa
     let (read, _write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
-        let view: View = match serde_json::from_str(&line) {
+        let state: PlayerState = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!("invalid view ignored: {e}");
+                tracing::warn!("invalid player state ignored: {e}");
                 continue;
             }
         };
-        plugin.show(view).await?;
+        plugin.show(state).await?;
     }
     Ok(())
 }
@@ -919,28 +923,28 @@ mod tests {
 #[cfg(test)]
 mod display_tests {
     use super::*;
-    use ritornello_proto::View;
+    use ritornello_proto::PlayerState;
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]
     struct RecordingDisplay {
-        views: Arc<Mutex<Vec<View>>>,
+        etats: Arc<Mutex<Vec<PlayerState>>>,
     }
 
     #[async_trait::async_trait]
     impl DisplayPlugin for RecordingDisplay {
-        async fn show(&mut self, view: View) -> Result<()> {
-            self.views.lock().unwrap().push(view);
+        async fn show(&mut self, state: PlayerState) -> Result<()> {
+            self.etats.lock().unwrap().push(state);
             Ok(())
         }
     }
 
     #[tokio::test]
-    async fn recoit_les_vues_en_ligne() {
+    async fn recoit_letat_du_lecteur_en_ligne() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("display.sock");
         let plugin = RecordingDisplay::default();
-        let views = plugin.views.clone();
+        let etats = plugin.etats.clone();
         let socket_for_server = socket.clone();
         tokio::spawn(async move {
             let _ = run_display_plugin(plugin, &socket_for_server).await;
@@ -956,16 +960,16 @@ mod display_tests {
         let stream = client.expect("connexion au plugin display");
         use tokio::io::AsyncWriteExt;
         let mut write = stream;
-        let v = View { line1: "RADIO  P1".into(), line2: "FIP".into(), line3: "".into() };
-        write.write_all(format!("{}\n", serde_json::to_string(&v).unwrap()).as_bytes()).await.unwrap();
+        let e = PlayerState { source: "radio".into(), preset: Some(1), preset_name: Some("FIP".into()), ..Default::default() };
+        write.write_all(format!("{}\n", serde_json::to_string(&e).unwrap()).as_bytes()).await.unwrap();
 
         for _ in 0..50 {
-            if !views.lock().unwrap().is_empty() {
+            if !etats.lock().unwrap().is_empty() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert_eq!(views.lock().unwrap().as_slice(), &[v]);
+        assert_eq!(etats.lock().unwrap().as_slice(), &[e]);
     }
 }
 
