@@ -30,8 +30,8 @@ fed by a pushed stream from `GET /api/player` (SSE) — nothing is polled,
 and the state follows the infrared remote as well as other browser tabs.
 
 That stream and the display plugins' socket carry the very same
-payload — `PlayerState`, one structure serialized once and sent down two
-transports — rather than two views kept separately in sync. Two of its
+payload — `PlayerState`, one structure serialized once per transport —
+rather than two views kept separately in sync. Two of its
 fields exist only for this: `status`, the appliance's current state as a
 sentence already translated by whoever produced it (the active source, e.g.
 "NO DISC", "AUDIO CD" — or the core itself in standby), which the Player
@@ -41,10 +41,16 @@ web exactly as a station name once was. And `overlay`, the transient
 overlay a display plugin is showing right now (the volume/mute readout, the
 remote's pending `+NN`, or a source's ephemeral message — see
 [plugins.md](plugins.md) for its shape): the payload carries it because the
-same structure feeds the displays, but the SPA **ignores** it — the web UI
-already shows the volume in plain sight and raises its own toasts for
-ephemeral messages, so re-showing an overlay meant for a small physical
-screen would be redundant here.
+same structure feeds the displays, but the SPA **ignores** it. The web UI
+already shows the volume in plain sight (see above), and a browser page has
+none of a twenty-column physical display's real-estate constraints, so
+there is no cramped "now playing" line for a transient message to interrupt
+in the first place. One practical consequence: selecting an empty preset
+from the web remote produces no on-screen feedback today — the "empty
+preset" message reaches only the physical display, through this same
+field. The home page's one toast (see `HomeView.vue`) is unrelated: it
+reports HTTP failures of `POST /api/command`, not source-declared
+overlays.
 
 On the preset grid, the key matching **what is playing** is highlighted:
 the preset for the radio, the track for the CD. The active source is what
@@ -62,16 +68,22 @@ plugin was free to overwrite (see [plugins.md](plugins.md)), so the SPA had
 nothing stable to show; the CD plugin never declares one, since a track
 number is not a name.
 
-The grid is not hardcoded to nine keys: the active source also declares
-**how many** presets it has (`preset_count` in its frames) — stations for
-the radio, tracks for the CD — and the web UI shows only the numbers that
-exist. Absent means the source says nothing on the subject, so the grid
-falls back to the historical 1-9 layout rather than being disarmed by a
-source that has not been updated; `Some(0)` is a distinct, meaningful
-answer ("nothing to number", an empty CD tray). The remembered count is
-forgotten on a source change and on standby (the newly active source
-re-declares it on activate/wake) but **not** on stop — a stopped radio
-still has its stations.
+The grid is not hardcoded to nine keys: the active source also declares, in
+`preset_count`, the **highest preset number it is currently using** —
+stations for the radio, tracks for the CD — not a literal count of how many
+exist, and the web UI shows only the numbers up to that ceiling. The
+distinction is usually invisible: through the admin pages presets are
+numbered contiguously (1..N), so the ceiling and the count coincide. A
+hand-edited, sparse configuration breaks that equivalence — two stations at
+presets 1 and 40 declare `preset_count: 40`, and the console display then
+reads "RADIO  1/40" — which is the field doing exactly what it promises,
+not a bug. Absent means the source says nothing on the subject,
+so the grid falls back to the historical 1-9 layout rather than being
+disarmed by a source that has not been updated; `Some(0)` is a distinct,
+meaningful answer ("nothing to number", an empty CD tray). The remembered
+count is forgotten on a source change and on standby (the newly active
+source re-declares it on activate/wake) but **not** on stop — a stopped
+radio still has its stations.
 
 Past the ninth preset, bare digits cannot reach further: the physical
 remote's **`+10`** key, once bound, accumulates a tens offset held by the

@@ -39,21 +39,29 @@ is written until "Save" has been clicked.
 
 Presets are numbered **automatically by position** (1 to 99): adding
 appends to the end of the list, deleting renumbers the following ones;
-beyond 99, adding is refused. The station count is declared to the core
-as `preset_count`, which is what lets the web grid show only the numbers
-that exist and reach past nine through its own `<`/`>` page arrows (see
-[interface.md](interface.md)) — the remote's bare digits alone only
-reach 1-9. The order is changed **by dragging a row** (or with the ▲▼
-arrows, which remain the keyboard-and-touch-accessible path): moving a
-station therefore changes its remote digit.
+beyond 99, adding is refused. The highest preset number in use is declared
+to the core as `preset_count` — through the admin page presets are
+contiguous 1..N, so this doubles as a plain station count in the normal
+case. A hand-edited, sparse `RITORNELLO_RADIO_STATIONS` file breaks that
+equivalence: stations at 1 and 40 declare `preset_count: 40`, and the
+console display then reads "RADIO  1/40" — not a bug, the field's contract
+is the highest number in use, not a count of how many exist (see
+[interface.md](interface.md) for the general rule). It is what lets the web
+grid show only the numbers that exist and reach past nine through its own
+`<`/`>` page arrows — the remote's bare digits alone only reach 1-9. The
+order is changed **by dragging a row** (or with the ▲▼ arrows, which remain
+the keyboard-and-touch-accessible path): moving a station therefore changes
+its remote digit.
 
 Saving a new station list from the admin page announces the fresh
 `preset_count` to the core right away, as a spontaneous notification
 (`SourcePlugin::poll_notification`) rather than waiting for a preset to be
 played — otherwise the web grid kept showing the old set of numbers until
-something was played on the radio. That notification carries `preset_count`
-and **nothing else**: no view, no identity, no preset, so it disturbs
-neither the display nor whatever is currently playing.
+something was played on the radio. That notification carries only
+`preset_count`: `identity`, `preset`, `preset_name` and `status` are all
+left unset (the radio plugin never fills the last two on this particular
+frame), so it disturbs neither the display nor whatever is currently
+playing.
 
 Playing a preset also declares its `preset_name`: the configured station
 name, alongside the `preset` number, in the same frame. The field exists
@@ -119,12 +127,14 @@ What it declares instead is a `status`: "audio CD" whenever a disc sits in
 the tray, "no disc" otherwise. Unlike `preset` and `preset_count`, whose
 absence means "this frame says nothing, keep the previous value", an absent
 `status` means **no status at all** — and the cd plugin restates one on
-every single frame precisely because of that convention: it is the only one
-that lets a status be cleared. Had absence meant "keep the previous one"
-instead, "no disc" would stay on screen forever after a disc was inserted,
-with no later frame able to cancel it. A display picks between this
-sentence and the album once a `metadata` plugin resolves one — see the
-plugin console's own choice below.
+every frame it produces through its own status-issuing path (`activate`,
+`wake`, `select`, `next`/`prev` while playing, `player_track`, `eject`, and
+`stop`) precisely because of that convention: it is the only one that lets
+a status be cleared. Had absence meant "keep the previous one" instead,
+"no disc" would stay on screen forever after a disc was inserted, with no
+later frame able to cancel it. A display picks between this sentence and
+the album once a `metadata` plugin resolves one — see the plugin console's
+own choice below.
 
 **A known limitation.** `preset` only travels while playback is under way:
 a disc sitting in the tray, stopped, declares no preset at all, even though
@@ -175,9 +185,10 @@ This bundled plugin (`RITORNELLO_CONSOLE_TTY` variable, default
 **its own choice**, not a contract every display must follow:
 
 - first line: `SOURCE  n/total` (just `SOURCE  n` when the source hasn't
-  declared a count, bare `SOURCE` when nothing is selected) — its own
-  idiom, standing in for what each source used to compose for itself
-  ("RADIO  P4", "CD 1/3");
+  declared a count, or declared it as zero — nothing to number, an empty CD
+  tray — since "1/0" would be absurd; bare `SOURCE` when nothing is
+  selected) — its own idiom, standing in for what each source used to
+  compose for itself ("RADIO  P4", "CD 1/3");
 - second line: the source's preset name when it has one, else the album
   once a `metadata` plugin has resolved one, else the source's `status` —
   most specific first;
@@ -185,12 +196,15 @@ This bundled plugin (`RITORNELLO_CONSOLE_TTY` variable, default
   one alone, neither) it always had.
 
 An overlay, when present, takes the whole first line and blanks the rest —
-the display owner's own call, made and unchanged since before this
-protocol moved. Control characters coming from any field — a station name,
-a status word, an ICY title — are filtered before writing to the tty: now
-that the plugin composes from raw network-sourced strings itself, every one
-of its three lines is data that needs sanitizing, not just the title line
-as it used to be.
+the display owner's own call. The volume/mute overlay used to span two
+lines ("VOLUME" then "65 %") before this protocol moved its text into a
+single `text` field; folding it onto one line is the one visual change
+accepted during that move — every other view stayed pixel-identical.
+Control characters coming from any field — a station name, a status word,
+an ICY title — are filtered before writing to the tty: now that the plugin
+composes from raw network-sourced strings itself, every one of its three
+lines is data that needs sanitizing, not just the title line as it used to
+be.
 
 The core's config page (`http://<host>:8080/config`, `/status` redirects
 there) also offers an **audio output** picker, based on the ALSA devices
@@ -351,8 +365,8 @@ tabs.
 **Automatic track advance.** When a CD moves to the next track on its
 own, mpv informs the core, which relays it to the Source
 (`SourceReq::PlayerTrack`): the Source is what realigns itself and sends
-back view and identity, since the core cannot modify an identity it has
-made a principle of never interpreting. Display and metadata therefore
+back its own identity and status, since the core cannot modify an identity
+it has made a principle of never interpreting. Display and metadata therefore
 follow the advance without any key being pressed. The **end of the disc**
 follows the same principle in reverse: the core signals the stop to the
 Source, which realigns its state — without which the last track would
