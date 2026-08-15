@@ -1,0 +1,31 @@
+# Pack français du plugin `files`.
+#
+# Le jeu de clés doit rester **identique** à celui du catalogue anglais embarqué
+# (`crates/ritornello-plugin-files/src/locales/en.toml`) : un test de parité le
+# vérifie, et une clé manquante ici afficherait l'anglais sans prévenir.
+
+# Statuts affichés par la Source.
+status_files = "FICHIERS"
+no_playlist = "AUCUNE LISTE"
+empty_track = "PISTE INEXISTANTE"
+
+# Refus de validation des racines.
+bad_root_name = "nom de racine invalide « {name} » : uniquement des minuscules, des chiffres et des tirets, en commençant par une lettre ou un chiffre"
+bad_host = "adresse de serveur invalide « {host} » : ni virgule, ni espace, ni « .. »"
+bad_share = "nom de partage invalide « {share} » : ni virgule, ni espace, ni « .. »"
+bad_subpath = "sous-dossier invalide « {path} » : il doit être relatif et ne pas remonter"
+duplicate_root = "une racine nommée « {name} » existe déjà"
+relative_local_path = "le dossier local « {path} » doit être un chemin absolu"
+
+# Refus du parcours récursif.
+too_many_tracks = "ce dossier contient plus de {cap} pistes : restreignez-le, ou ajoutez ses sous-dossiers un par un"
+scan_io_error = "lecture de « {path} » impossible : le partage est peut-être injoignable"
+
+# Refus du magasin de listes enregistrées.
+bad_playlist_name = "nom de liste invalide « {name} » : pas de barre oblique, et il ne doit pas commencer par un point"
+read_only_root = "la racine « {name} » est montée en lecture seule : autorisez-y l'écriture pour y enregistrer des listes"
+unknown_root = "aucune racine nommée « {name} »"
+store_io_error = "écriture ou lecture de « {path} » impossible"
+
+# Refus de la moitié Admin.
+bad_request = "la page a envoyé quelque chose que ce plugin n'a pas compris ({detail})"

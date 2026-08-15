@@ -487,12 +487,15 @@ actives à la fois ; découverte automatique des partages du réseau.
 
 ## 13. À vérifier sur la machine cible
 
-- **Propagation du montage.** L'unité est durcie (`ProtectSystem=strict`,
-  `ProtectHome=true`), donc elle tourne dans son propre espace de noms de
-  montage. systemd le monte en `rslave`, ce qui *doit* faire apparaître les
-  montages ultérieurs de l'hôte dans le service — cela se vérifie sur le Pi, et
-  non sur parole. Si la propagation ne se fait pas, le recours est un
-  `BindPaths=/mnt/ritornello` dans l'unité.
+- **Propagation du montage.** Formulation corrigée à l'implémentation : ce
+  n'est pas l'unité de montage qui est durcie — elle ne l'est délibérément pas,
+  puisqu'elle doit monter — mais **`ritornello.service`**, qui lit les fichiers
+  (`ProtectSystem=strict`, `ProtectHome=true`). C'est donc ce service-là qui
+  tourne dans son propre espace de noms de montage. systemd le monte en
+  `rslave`, ce qui *doit* faire apparaître les montages ultérieurs de l'hôte —
+  cela se vérifie sur le Pi, et non sur parole. Si la propagation ne se fait
+  pas, le recours est un `BindPaths=/mnt/ritornello` dans
+  `deploy/ritornello.service`.
 - **`mount.cifs`** est fourni par le paquet `cifs-utils`, à ajouter à la liste
   d'installation aux côtés de `mpv`, `cd-discid` et `eject`.
 - **Dialecte SMB** : aucun `vers=` n'est imposé, la négociation du noyau étant

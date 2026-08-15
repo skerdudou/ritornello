@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 
 # The plugin list exists only here: it drives the scp then the remote mv,
 # and a list duplicated between the two would end up diverging.
-PLUGINS=(radio cd generic-input console musicbrainz ouifm-metas radiofrance-metas)
+PLUGINS=(radio cd files generic-input console musicbrainz ouifm-metas radiofrance-metas)
 
 # One password prompt for the whole run: every ssh/scp call below shares a
 # single master connection (ControlMaster), opened by the first call and
@@ -84,6 +84,36 @@ scp "${SSHOPTS[@]}" deploy/ritornello.service deploy/50-ritornello-power.rules "
 # could no longer rewrite.
 ssh "${SSHOPTS[@]}" "$PI" 'sudo chown -R ritornello: /etc/ritornello \
   && if [ -d /var/lib/ritornello ]; then sudo chown -R ritornello: /var/lib/ritornello; fi'
+
+# The mount binary of the `files` source. It lands OUTSIDE the plugins
+# directory on purpose: the core launches everything it finds there, and this
+# one is not launched by the core but by systemd, as root.
+scp "${SSHOPTS[@]}" "$OUT/ritornello-media-mount" "$PI:/tmp/ritornello-media-mount"
+scp "${SSHOPTS[@]}" deploy/ritornello-media-mount.service deploy/51-ritornello-media.rules "$PI:/tmp/"
+ssh "${SSHOPTS[@]}" "$PI" 'sudo install -m 0755 -o root -g root \
+    /tmp/ritornello-media-mount /usr/local/lib/ritornello/ritornello-media-mount \
+  && sudo mkdir -p /etc/polkit-1/rules.d \
+  && sudo install -m 0644 -o root -g root \
+    /tmp/ritornello-media-mount.service /etc/systemd/system/ \
+  && sudo install -m 0644 -o root -g root \
+    /tmp/51-ritornello-media.rules /etc/polkit-1/rules.d/ \
+  && rm -f /tmp/ritornello-media-mount /tmp/ritornello-media-mount.service \
+    /tmp/51-ritornello-media.rules'
+
+# Mount points and credentials. The mount point of a share is imposed
+# (/mnt/ritornello/<name>), never read from the configuration. The credentials
+# directory belongs to the service — the page writes a <name>.cred file there
+# when a share is declared — and is readable by nobody else; the root binary,
+# for its part, reads everything.
+ssh "${SSHOPTS[@]}" "$PI" 'sudo mkdir -p /mnt/ritornello /etc/ritornello/media-credentials \
+  && sudo chown ritornello: /etc/ritornello/media-credentials \
+  && sudo chmod 0700 /etc/ritornello/media-credentials'
+
+# Enabled, not started: the unit is a `oneshot` that reconciles the declared
+# shares, and what it is enabled for is the boot of the machine. The plugin
+# starts it on demand the rest of the time.
+ssh "${SSHOPTS[@]}" "$PI" 'sudo systemctl daemon-reload \
+  && sudo systemctl enable ritornello-media-mount.service'
 
 DEPLACE_PLUGINS=$(printf '/tmp/ritornello-plugin-%s ' "${PLUGINS[@]}")
 ssh "${SSHOPTS[@]}" "$PI" "sudo mv /tmp/ritornello-core /usr/local/bin/ritornello-core \

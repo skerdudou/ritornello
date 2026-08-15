@@ -8,6 +8,7 @@
 //! pas comme une garantie, elle n'est qu'une politesse envers l'utilisateur.
 
 use anyhow::{Context, Result};
+use ritornello_plugin_files::mount::{est_monte_dans, points_de_montage};
 use ritornello_plugin_files::mount_options::mount_command;
 use ritornello_plugin_files::roots::{RootKind, Roots, MOUNT_ROOT};
 use std::path::{Path, PathBuf};
@@ -32,30 +33,14 @@ fn uid_gid(passwd: &str, utilisateur: &str) -> Option<(u32, u32)> {
     })
 }
 
-/// Vrai si `point` figure comme point de montage dans le contenu de
-/// `/proc/mounts`.
-///
-/// La deuxième colonne échappe l'espace en `\040` (et la tabulation en `\011`) :
-/// sans ce traitement, un partage monté sous un nom contenant un espace
-/// passerait pour non monté, et serait remonté à chaque réconciliation.
-fn est_monte_dans(proc_mounts: &str, point: &Path) -> bool {
-    proc_mounts.lines().any(|l| {
-        l.split_whitespace()
-            .nth(1)
-            .map(|p| p.replace("\\040", " ").replace("\\011", "\t"))
-            .map(|p| Path::new(&p) == point)
-            .unwrap_or(false)
-    })
-}
-
 /// Points de montage sous `MOUNT_ROOT` actuellement montés.
+///
+/// L'analyse de `/proc/mounts` et son déséchappement viennent de
+/// `mount::points_de_montage` : une seule implémentation de cette règle, sans
+/// quoi les deux binaires divergeraient sur un détail rare — l'un traitant la
+/// tabulation échappée et pas l'autre, par exemple.
 fn montes_sous_racine(proc_mounts: &str) -> Vec<PathBuf> {
-    proc_mounts
-        .lines()
-        .filter_map(|l| l.split_whitespace().nth(1))
-        .map(|p| PathBuf::from(p.replace("\\040", " ").replace("\\011", "\t")))
-        .filter(|p| p.starts_with(MOUNT_ROOT))
-        .collect()
+    points_de_montage(proc_mounts).filter(|p| p.starts_with(MOUNT_ROOT)).collect()
 }
 
 fn main() -> Result<()> {

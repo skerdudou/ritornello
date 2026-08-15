@@ -8,6 +8,22 @@ name = "cd"
 kind = "source"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-cd"
 
+# Audio files, read from a local folder or from an authenticated SMB share.
+# Its page declares the roots (a folder of the device, a share) and builds the
+# playlist; mpv holds that playlist, the plugin drives the index.
+#
+# Mounting is NOT done by this binary: it runs unprivileged. The page writes
+# /etc/ritornello/media-roots.toml (see media-roots.example.toml), then the
+# plugin asks systemd to run ritornello-media-mount.service, which is allowed
+# for the `ritornello` user — on that one unit only — by
+# /etc/polkit-1/rules.d/51-ritornello-media.rules. Without that rule the source
+# still works on local roots; shares simply never mount, and the page reports
+# systemctl's refusal verbatim.
+[[plugin]]
+name = "files"
+kind = "source"
+exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-files"
+
 # `metadata` plugins: they enrich what the active Source is playing (artist,
 # title, album) without the Source knowing. Without them, the core only shows
 # what the stream announces itself (ICY header), which is empty or unusable on

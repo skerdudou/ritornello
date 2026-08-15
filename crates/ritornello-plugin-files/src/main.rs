@@ -4,30 +4,48 @@
 //! mpv tient la liste de lecture : le plugin lui donne un m3u généré et pilote
 //! l'index. L'avance automatique passe donc par `playlist-pos`, exactement
 //! comme pour un disque, et le plugin n'a rien à cadencer lui-même.
+//!
+//! Deux moitiés indépendantes, sur le plan du plugin radio : la Source et la
+//! page d'admin, chacune dans sa tâche, partageant la table des racines et la
+//! liste en cours. Une panne de la page ne doit jamais couper l'audio.
 
+mod admin;
 mod state;
 
 use anyhow::Result;
 use ritornello_i18n::Catalog;
 use ritornello_plugin_files::m3u::Entry;
 use ritornello_plugin_files::playlist::Playlist;
+use ritornello_plugin_files::roots::Roots;
 use ritornello_plugin_files::FILES_EN;
-use ritornello_plugin_sdk::{run_source_plugin, SourceOutcome, SourcePlugin};
+use ritornello_plugin_sdk::{
+    run_admin_plugin, run_source_plugin, Notification, SourceOutcome, SourcePlugin,
+};
 use ritornello_proto::SourceAction;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use tokio::sync::RwLock as AsyncRwLock;
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
 struct FilesSource {
-    playlist: Playlist,
+    /// Partagée avec la moitié Admin, qui la modifie depuis la page.
+    playlist: Arc<AsyncRwLock<Playlist>>,
     state_path: PathBuf,
     /// Le m3u **généré** que mpv reçoit. Découplé de toute liste utilisateur.
     mpv_playlist_path: PathBuf,
     catalog: Arc<RwLock<Catalog>>,
     locales_root: PathBuf,
+    /// Compte de présélections annoncé par la moitié Admin après chaque
+    /// modification de la liste.
+    ///
+    /// `None` en mode dégradé (pas de moitié Admin, faute d'`--admin-socket`) :
+    /// `poll_notification` reste alors en attente pour toujours plutôt que de
+    /// rendre `None`, qui est **terminal** pour le SDK et journaliserait un
+    /// avertissement trompeur pour un déploiement pourtant légitime.
+    preset_count_rx: Option<tokio::sync::watch::Receiver<u8>>,
 }
 
 impl FilesSource {
@@ -53,28 +71,36 @@ impl FilesSource {
         self.mot("status_files")
     }
 
-    fn persiste(&self) {
-        // L'échec est journalisé et non propagé : un /var/lib en lecture seule
-        // doit coûter la reprise après redémarrage, pas la lecture en cours.
-        if let Err(e) = state::update(&self.state_path, |s| s.index = self.playlist.index) {
+    async fn persiste(&self) {
+        let index = self.playlist.read().await.index;
+        // `update` et non `save` : la moitié Admin écrit la liste dans ce même
+        // fichier, et un `save` reconstruit ici l'effacerait. L'échec est
+        // journalisé et non propagé — un `/var/lib` en lecture seule doit
+        // coûter la reprise après redémarrage, pas la lecture en cours.
+        if let Err(e) = state::update(&self.state_path, |s| s.index = index) {
             tracing::warn!("persisting the current track: {e}");
         }
     }
 
     /// Lance la liste à l'index courant, après avoir réécrit le m3u de mpv.
-    fn jouer(&mut self) -> SourceOutcome {
-        let count = self.playlist.preset_count();
-        let Some(entry) = self.playlist.current().cloned() else {
+    async fn jouer(&mut self) -> SourceOutcome {
+        let liste = self.playlist.read().await;
+        let count = liste.preset_count();
+        let Some(entry) = liste.current().cloned() else {
             return SourceOutcome::new(SourceAction::Noop)
                 .status(self.mot("no_playlist"))
                 .preset_count(0)
                 .plays_nothing();
         };
-        if let Err(e) = self.playlist.write_for_mpv(&self.mpv_playlist_path) {
+        if let Err(e) = liste.write_for_mpv(&self.mpv_playlist_path) {
             tracing::warn!("writing the mpv playlist: {e}");
         }
+        let index = liste.index;
+        let preset = liste.preset();
+        drop(liste);
+
         let action = SourceAction::play(self.mpv_playlist_path.to_string_lossy().to_string())
-            .starting_at(self.playlist.index as i64)
+            .starting_at(index as i64)
             // Une liste de fichiers a une fin normale : sans cette
             // déclaration, l'inactivité de mpv en fin de liste passerait pour
             // une coupure de flux et la relance rejouerait la liste en boucle.
@@ -84,21 +110,22 @@ impl FilesSource {
             .preset_name(entry.display_name())
             .preset_count(count)
             .status(self.statut());
-        if let Some(n) = self.playlist.preset() {
+        if let Some(n) = preset {
             issue = issue.preset(n);
         }
         issue
     }
 
     /// Trame qui ne fait que redire où on en est, sans rien relancer.
-    fn recale(&self) -> SourceOutcome {
+    async fn recale(&self) -> SourceOutcome {
+        let liste = self.playlist.read().await;
         let mut issue = SourceOutcome::new(SourceAction::Noop)
-            .preset_count(self.playlist.preset_count())
+            .preset_count(liste.preset_count())
             .status(self.statut());
-        if let Some(entry) = self.playlist.current() {
+        if let Some(entry) = liste.current() {
             issue = issue.plays(Self::identite(&entry.path)).preset_name(entry.display_name());
         }
-        if let Some(n) = self.playlist.preset() {
+        if let Some(n) = liste.preset() {
             issue = issue.preset(n);
         }
         issue
@@ -108,7 +135,7 @@ impl FilesSource {
 #[async_trait::async_trait]
 impl SourcePlugin for FilesSource {
     async fn activate(&mut self) -> SourceOutcome {
-        self.jouer()
+        self.jouer().await
     }
 
     async fn deactivate(&mut self) -> SourceOutcome {
@@ -116,18 +143,19 @@ impl SourcePlugin for FilesSource {
     }
 
     async fn select(&mut self, n: u8) -> SourceOutcome {
-        if self.playlist.select(n) {
-            self.persiste();
-            return self.jouer();
+        if self.playlist.write().await.select(n) {
+            self.persiste().await;
+            return self.jouer().await;
         }
         // Rien n'a été lancé : la piste précédente joue toujours. Message
         // éphémère, et surtout **aucune déclaration d'identité** — un
         // `plays_nothing()` ici ferait cesser les plugins `metadata` et
         // viderait le titre affiché alors que le son continue.
+        let compte = self.playlist.read().await.preset_count();
         SourceOutcome::new(SourceAction::Noop)
             .status(self.mot("empty_track"))
             .transient()
-            .preset_count(self.playlist.preset_count())
+            .preset_count(compte)
     }
 
     async fn next(&mut self) -> SourceOutcome {
@@ -147,13 +175,13 @@ impl SourcePlugin for FilesSource {
     }
 
     async fn player_track(&mut self, n: i64) -> SourceOutcome {
-        if !self.playlist.set_index(n) {
+        if !self.playlist.write().await.set_index(n) {
             // mpv dit `-1` en fin de liste : ne rien déclarer, l'arrêt sera
             // annoncé par `stop()` que le cœur envoie juste après.
             return SourceOutcome::new(SourceAction::Noop);
         }
-        self.persiste();
-        self.recale()
+        self.persiste().await;
+        self.recale().await
     }
 
     async fn stop(&mut self) -> SourceOutcome {
@@ -167,6 +195,27 @@ impl SourcePlugin for FilesSource {
         *self.catalog.write().unwrap() =
             Catalog::load("files", &locale, &self.locales_root, FILES_EN);
     }
+
+    async fn poll_notification(&mut self) -> Option<Notification> {
+        let Some(rx) = &mut self.preset_count_rx else {
+            // Mode dégradé (pas de moitié Admin) : voir le commentaire sur le
+            // champ. Jamais `None` ici, qui serait terminal pour le SDK.
+            return std::future::pending().await;
+        };
+        match rx.changed().await {
+            Ok(()) => {
+                let n = *rx.borrow_and_update();
+                // Uniquement le compte : ne rien dire de l'identité, de la
+                // présélection ni du statut, pour ne déranger ni l'affichage ni
+                // ce qui joue. Modifier la liste depuis la page ne doit pas
+                // interrompre la piste en cours.
+                Some(Notification::new().preset_count(n))
+            }
+            // L'émetteur a disparu (moitié Admin terminée) : plus rien à
+            // annoncer, mais la Source continue de jouer.
+            Err(_) => std::future::pending().await,
+        }
+    }
 }
 
 #[tokio::main]
@@ -174,10 +223,30 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
 
     let socket_path = ritornello_plugin_sdk::socket_path();
+    // `--admin-socket` n'est fourni par le cœur que si `admin = true` dans
+    // plugins.toml. Absent, on continue en mode dégradé : la moitié Source
+    // tourne seule, sans page de gestion.
+    let admin_socket = ritornello_plugin_sdk::admin_socket_path();
+    if admin_socket.is_none() {
+        tracing::warn!(
+            "no --admin-socket: the management page will not be served, only the Source half runs (add 'admin = true' to plugins.toml)"
+        );
+    }
+
     let state_path =
         PathBuf::from(env_or("RITORNELLO_FILES_STATE", "/var/lib/ritornello/plugin-files.json"));
-    let mpv_playlist_path =
-        PathBuf::from(env_or("RITORNELLO_FILES_MPV_PLAYLIST", "/var/lib/ritornello/plugin-files.m3u"));
+    let mpv_playlist_path = PathBuf::from(env_or(
+        "RITORNELLO_FILES_MPV_PLAYLIST",
+        "/var/lib/ritornello/plugin-files.m3u",
+    ));
+    let roots_path =
+        PathBuf::from(env_or("RITORNELLO_FILES_ROOTS", "/etc/ritornello/media-roots.toml"));
+    let creds_dir = PathBuf::from(env_or(
+        "RITORNELLO_FILES_CREDENTIALS",
+        "/etc/ritornello/media-credentials",
+    ));
+    let playlists_dir =
+        PathBuf::from(env_or("RITORNELLO_FILES_PLAYLISTS", "/var/lib/ritornello/playlists"));
     let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
 
     let etat = state::load(&state_path);
@@ -194,16 +263,70 @@ async fn main() -> Result<()> {
     }
     let index = if etat.index < entries.len() { etat.index } else { 0 };
 
+    let roots = Roots::load(&roots_path).unwrap_or_else(|e| {
+        tracing::warn!("no usable media-roots.toml ({e}): starting with no root");
+        Roots::default()
+    });
     let catalog = Arc::new(RwLock::new(Catalog::load("files", "en", &locales_root, FILES_EN)));
+    let playlist = Arc::new(AsyncRwLock::new(Playlist { entries, index }));
+    let roots = Arc::new(AsyncRwLock::new(roots));
+    let (preset_count_tx, preset_count_rx) =
+        tokio::sync::watch::channel(playlist.read().await.preset_count());
+
     let source = FilesSource {
-        playlist: Playlist { entries, index },
-        state_path,
+        playlist: playlist.clone(),
+        state_path: state_path.clone(),
         mpv_playlist_path,
-        catalog,
+        catalog: catalog.clone(),
         locales_root,
+        preset_count_rx: admin_socket.as_ref().map(|_| preset_count_rx),
     };
 
-    run_source_plugin(source, &socket_path).await
+    let admin = admin_socket.map(|socket| {
+        (
+            admin::FilesAdmin {
+                roots_path,
+                creds_dir,
+                internal_playlists: playlists_dir,
+                state_path,
+                roots,
+                playlist,
+                catalog,
+                scan: Arc::new(Mutex::new(admin::ScanProgress::default())),
+                scan_task: None,
+                unresolved: Arc::new(Mutex::new(Vec::new())),
+                browse: Arc::new(Mutex::new(serde_json::json!({}))),
+                preset_count_tx,
+            },
+            socket,
+        )
+    });
+
+    // Les deux moitiés sont indépendantes : une panne sur la socket admin ne
+    // doit pas tuer la lecture audio, et réciproquement. Chacune dans sa propre
+    // tâche, pour qu'une panique y soit capturée dans le JoinHandle au lieu de
+    // dérouler la pile de l'autre.
+    let source_handle = tokio::spawn(async move { run_source_plugin(source, &socket_path).await });
+    match admin {
+        Some((admin, socket)) => {
+            let admin_handle = tokio::spawn(async move { run_admin_plugin(admin, &socket).await });
+            let (source_res, admin_res) = tokio::join!(source_handle, admin_handle);
+            log_half("source half", source_res);
+            log_half("admin half", admin_res);
+        }
+        None => log_half("source half", source_handle.await),
+    }
+    Ok(())
+}
+
+/// Journalise le résultat d'une des deux moitiés (succès, erreur applicative,
+/// panique) sans jamais faire remonter l'échec de l'une sur l'autre.
+fn log_half(label: &str, res: std::result::Result<Result<()>, tokio::task::JoinError>) {
+    match res {
+        Ok(Ok(())) => tracing::warn!("files plugin ({label}) ended normally"),
+        Ok(Err(e)) => tracing::warn!("files plugin ({label}) error: {e}"),
+        Err(join_err) => tracing::error!("files plugin ({label}) panicked: {join_err}"),
+    }
 }
 
 #[cfg(test)]
@@ -218,11 +341,12 @@ mod tests {
         // et le laisser tomber effacerait les chemins qu'elle écrit.
         std::mem::forget(dir);
         FilesSource {
-            playlist,
+            playlist: Arc::new(AsyncRwLock::new(playlist)),
             state_path: racine.join("plugin-files.json"),
             mpv_playlist_path: racine.join("plugin-files.m3u"),
             catalog: Arc::new(RwLock::new(Catalog::load("files", "en", &racine, FILES_EN))),
             locales_root: racine,
+            preset_count_rx: None,
         }
     }
 
@@ -340,7 +464,7 @@ mod tests {
         let mut s = source_de_test(liste_de(3));
         assert_eq!(s.next().await.action, SourceAction::PlayerNext);
         assert_eq!(s.prev().await.action, SourceAction::PlayerPrev);
-        assert_eq!(s.playlist.index, 0, "l'index ne doit pas avoir bouge de lui-meme");
+        assert_eq!(s.playlist.read().await.index, 0, "l'index ne doit pas avoir bouge de lui-meme");
     }
 
     #[tokio::test]
@@ -348,6 +472,23 @@ mod tests {
         let mut s = source_de_test(liste_de(4));
         s.select(3).await;
         assert_eq!(state::load(&s.state_path).index, 2);
+    }
+
+    #[tokio::test]
+    async fn la_moitie_admin_annonce_le_compte_sans_deranger_la_lecture() {
+        // Modifier la liste depuis la page doit mettre à jour la grille de la
+        // télécommande web tout de suite, sans attendre qu'une piste soit
+        // jouée — et sans rien dire de l'identité ni du statut, sous peine
+        // d'interrompre ce qui joue.
+        let (tx, rx) = tokio::sync::watch::channel(0u8);
+        let mut s = source_de_test(liste_de(3));
+        s.preset_count_rx = Some(rx);
+        tx.send(7).unwrap();
+        let n = s.poll_notification().await.expect("une notification attendue");
+        assert_eq!(n.preset_count, Some(7));
+        assert!(n.identity.is_none());
+        assert!(n.status.is_none());
+        assert!(n.preset.is_none());
     }
 
     #[tokio::test]

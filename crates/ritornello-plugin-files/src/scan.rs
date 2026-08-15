@@ -37,11 +37,81 @@ pub fn is_audio(p: &Path) -> bool {
 /// jusqu'au plafond, avec un symptôme qui ressemble à une bibliothèque énorme
 /// plutôt qu'à un défaut.
 pub fn walk(dir: &Path, cap: usize) -> Result<Vec<PathBuf>, ScanError> {
+    walk_with(dir, cap, &|_, _| {})
+}
+
+/// Même marche, avec un **crochet de progression** appelé à chaque répertoire
+/// visité : le nombre de pistes trouvées jusque-là, et le répertoire en cours.
+///
+/// Il existe parce qu'une marche sur un partage SMB endormi peut durer
+/// longtemps, et que le protocole admin ne pousse rien : la page interroge, et
+/// il lui faut quelque chose à montrer entre-temps. Sans lui, l'utilisateur
+/// verrait un écran figé sans savoir si quelque chose avance.
+pub fn walk_with(
+    dir: &Path,
+    cap: usize,
+    progres: &dyn Fn(usize, &Path),
+) -> Result<Vec<PathBuf>, ScanError> {
     let mut out = Vec::new();
     let mut vus: HashSet<PathBuf> = HashSet::new();
-    marche(dir, cap, &mut out, &mut vus)?;
+    marche(dir, cap, &mut out, &mut vus, progres)?;
     out.sort();
     Ok(out)
+}
+
+/// Contenu d'un seul niveau : les sous-répertoires et les fichiers audio, tous
+/// deux triés. C'est ce que consomme l'arbre **paresseux** de la page, qui ne
+/// demande jamais toute l'arborescence d'un coup.
+pub fn list_dir(dir: &Path) -> Result<(Vec<String>, Vec<String>), ScanError> {
+    let lecture =
+        std::fs::read_dir(dir).map_err(|_| ScanError::Io { path: dir.display().to_string() })?;
+    let (mut dossiers, mut fichiers) = (Vec::new(), Vec::new());
+    for entree in lecture.flatten() {
+        let chemin = entree.path();
+        let Some(nom) = chemin.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+            continue;
+        };
+        // Les entrées cachées ne sont pas montrées : une bibliothèque en est
+        // pleine (`.DS_Store`, `@eaDir` d'un Synology) et elles n'ont rien à
+        // faire dans un arbre de navigation musicale.
+        if nom.starts_with('.') {
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(&chemin) else { continue };
+        if meta.is_dir() {
+            dossiers.push(nom);
+        } else if meta.is_file() && is_audio(&chemin) {
+            fichiers.push(nom);
+        }
+    }
+    dossiers.sort();
+    fichiers.sort();
+    Ok((dossiers, fichiers))
+}
+
+/// Cherche récursivement les fichiers audio dont le nom contient `motif`
+/// (comparaison insensible à la casse), plafonnés à `cap` résultats.
+///
+/// Le plafond est **silencieux côté résultat mais rendu à l'appelant** : une
+/// recherche large sur une grosse bibliothèque doit rendre la main, et la page
+/// doit pouvoir dire « affinez » plutôt que d'afficher une liste tronquée sans
+/// le signaler.
+pub fn search(dir: &Path, motif: &str, cap: usize) -> Result<(Vec<PathBuf>, bool), ScanError> {
+    let motif = motif.to_lowercase();
+    if motif.is_empty() {
+        return Ok((Vec::new(), false));
+    }
+    let tous = walk(dir, MAX_TRACKS)?;
+    let trouves: Vec<PathBuf> = tous
+        .into_iter()
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.to_lowercase().contains(&motif))
+        })
+        .collect();
+    let tronque = trouves.len() > cap;
+    Ok((trouves.into_iter().take(cap).collect(), tronque))
 }
 
 fn marche(
@@ -49,12 +119,14 @@ fn marche(
     cap: usize,
     out: &mut Vec<PathBuf>,
     vus: &mut HashSet<PathBuf>,
+    progres: &dyn Fn(usize, &Path),
 ) -> Result<(), ScanError> {
     let canon =
         dir.canonicalize().map_err(|_| ScanError::Io { path: dir.display().to_string() })?;
     if !vus.insert(canon) {
         return Ok(());
     }
+    progres(out.len(), dir);
     let lecture =
         std::fs::read_dir(dir).map_err(|_| ScanError::Io { path: dir.display().to_string() })?;
     let mut sous_dossiers = Vec::new();
@@ -78,7 +150,7 @@ fn marche(
     }
     sous_dossiers.sort();
     for d in sous_dossiers {
-        marche(&d, cap, out, vus)?;
+        marche(&d, cap, out, vus, progres)?;
     }
     Ok(())
 }

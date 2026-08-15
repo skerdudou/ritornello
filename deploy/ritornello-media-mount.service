@@ -1,0 +1,25 @@
+[Unit]
+Description=Ritornello: mount the declared media shares
+# The shares live on the network: mounting them before it is up produces a
+# failed unit and no share. `network-online.target` is pulled in, not merely
+# ordered against, because nothing else on a media appliance would.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Reconciles and exits: it mounts what is declared and missing, unmounts what
+# is no longer declared. Idempotent, so the plugin may start it as often as it
+# likes. RemainAfterExit=no keeps it that way -- an "active (exited)" unit
+# would make `systemctl start` a no-op, and the next share declared from the
+# web page would never be mounted.
+Type=oneshot
+RemainAfterExit=no
+# Runs as root: mount(2) is a privileged call. It consumes a configuration
+# written by the unprivileged service, and therefore revalidates everything it
+# reads -- see crates/ritornello-plugin-files/src/bin/media-mount.rs.
+ExecStart=/usr/local/lib/ritornello/ritornello-media-mount
+
+[Install]
+# Mounted again when the machine boots, without waiting for anyone to open the
+# web page.
+WantedBy=multi-user.target

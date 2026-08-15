@@ -2,7 +2,7 @@
 
 Plugin architecture: the core (`ritornello-core`) orchestrates plugins —
 separate processes communicating over Unix sockets (line-delimited JSON
-protocol) — of four kinds: **source** (content to play: radio, CD),
+protocol) — of four kinds: **source** (content to play: radio, CD, audio files),
 **input** (remote control), **display** (screens) and **metadata**
 (now-playing metadata). Each kind has a stable interface; adding a new
 plugin (e.g. a Bluetooth source, an OLED display) does not touch the core.
@@ -146,6 +146,130 @@ very property the field exists for. The practical consequence: where the
 console display used to show "CD 1/3" for a disc sitting idle in the tray,
 it now shows "CD" alone in that state — the "audio CD" status stays visible
 throughout, only the track number disappears until playback resumes.
+
+## `ritornello-plugin-files` — audio files, local or on a share
+
+It plays audio files sitting in a **root**: a folder of the device (a USB
+stick, an internal disk) or an authenticated SMB share. A local folder and
+a share are the same thing to the whole plugin — the mount is only a
+detail of `kind = "smb"` — which is what makes local playback come almost
+for free.
+
+Its page, `http://<host>:8080/plugins/files/`, is where roots are
+declared (host, share, subfolder, user, password, domain, whether writing
+is allowed), where a folder is browsed and added recursively to the
+current playlist, and where a playlist is saved and loaded again.
+Declaring a share writes two things: the root into
+`/etc/ritornello/media-roots.toml` (see `deploy/media-roots.example.toml`)
+and its password into `/etc/ritornello/media-credentials/<name>.cred`
+(mode `0600`) — the password is deliberately kept out of the roots file.
+
+**mpv holds the playlist**, the plugin only drives the index: it hands
+over a generated `.m3u` (`/var/lib/ritornello/plugin-files.m3u`, never
+shown to anyone) and a starting index. Automatic advance therefore comes
+back through `SourceReq::PlayerTrack`, exactly as for a disc, and the
+plugin has nothing to pace itself. The `Play` it issues is marked
+`finite`: a list of files ends normally, and without that word mpv going
+idle at the end would look like a dropped stream and the core would
+restart the list in a loop.
+
+### The privilege boundary
+
+The service is unprivileged and runs with `NoNewPrivileges=true`, so it
+cannot mount anything itself. It writes a configuration that a **root**
+binary consumes: `/usr/local/lib/ritornello/ritornello-media-mount`, run
+by `ritornello-media-mount.service`, which the plugin asks systemd to
+start (`systemctl start`, the same way the System tab talks to logind —
+no D-Bus dependency in Rust). A polkit rule,
+`deploy/51-ritornello-media.rules`, grants the `ritornello` user
+`manage-units` **on that one unit**.
+
+Said plainly: whoever reaches the web UI decides what root mounts. So the
+validation that counts lives on the **privileged side** — the plugin
+validates too, but only as a courtesy to whoever is typing. The mount
+binary re-reads and re-validates the whole file, and accepts only:
+
+- a `name` matching `^[a-z0-9][a-z0-9-]{0,31}$`: it becomes a path
+  component *and* a file name;
+- `kind = "smb"` (local roots are not mounted, they are read where they
+  are);
+- a `host` and a `share` with **no comma**, no space and no `..`. The
+  comma is the one to watch: `mount.cifs` separates its options with
+  commas, so a host `nas,uid=0` would add an option to the line root
+  executes;
+- a mount point that is **never read from the configuration** — it is
+  always `/mnt/ritornello/<name>`, built from a constant and the
+  validated name. A free-form path would be one more path to validate,
+  and root would be the one using it;
+- a **closed list** of mount options (`ro` unless the root is declared
+  writable, `soft`, `iocharset=utf8`, the service's `uid`/`gid`,
+  `credentials=<path>`). There is no pass-through to `mount -o`.
+
+The binary **reconciles**: it mounts what is declared and absent,
+unmounts what is no longer declared, and is idempotent — hence rerunnable
+without precaution, including at boot (the unit is enabled by
+`deploy.sh`). A single share failing to mount does not fail the service:
+the others still go up.
+
+systemd offers no equivalent of logind's `CanPowerOff` for `manage-units`
+— there is no "CanStartUnit" — so the plugin cannot grey a button out
+ahead of time. It tries, and **reports `systemctl`'s error output
+verbatim** on the page: a polkit refusal is explicit and actionable there
+("install `51-ritornello-media.rules`"), where a message of our own would
+have made it opaque.
+
+The NAS password sits in clear text in a file the service can read. Same
+level of trust as the rest of the appliance — whoever reaches the UI can
+already do everything — but it is worth writing down.
+
+### Two ceilings
+
+**99 presets.** `preset` is a `u8` in the 1–99 range, so a list longer
+than that declares `preset_count: 99` and numbers only its first 99
+tracks. The rest still plays: mpv walks the whole list, so next/previous
+reach every track, and the page lists them all — no digit designates
+them, that is all. (Same field as the radio's presets and the CD's
+tracks, driving the same web grid, see [interface.md](interface.md).)
+
+**2000 tracks per list.** A recursive add that would go past it is
+**refused with a message** naming the ceiling, rather than silently
+truncated: a playlist that quietly shrinks is a defect that takes months
+to attribute. Narrow the folder down, or add its subfolders one by one.
+The recursive walk filters by extension (`mp3`, `flac`, `ogg`, `oga`,
+`opus`, `m4a`, `aac`, `wav`, `wma`, `aiff`, `ape`, `wv`, `mpc`, case
+insensitively) and guards against symlink loops.
+
+Track titles need no plugin here: the core reads the file's own tags from
+mpv's `metadata` property (see the `metadata` section below), and the
+`preset_name` the source declares — the `#EXTINF` title, else the file
+name without its extension — makes sure the screen is never mute even
+with no tags at all.
+
+Variables: `RITORNELLO_FILES_ROOTS`, `RITORNELLO_FILES_CREDENTIALS` and
+`RITORNELLO_USER` (read by the **mount binary**, which runs on its own,
+outside the service's environment), `RITORNELLO_FILES_STATE`,
+`RITORNELLO_FILES_MPV_PLAYLIST`, `RITORNELLO_FILES_PLAYLISTS` (where
+playlists saved "internally" live, as opposed to those written onto a
+root) and `RITORNELLO_LOCALES` (read by the plugin).
+
+**Saving onto a share needs one extra word.** Shares are mounted `ro`, so
+saving a playlist onto one is refused with a message rather than a kernel
+I/O error nobody could attribute; a root has to be declared writable for
+that. Playlists are written as m3u with paths **relative** to the root
+they sit on, which is what makes them readable by any other player and
+survivable across a change of mount point. Reading back a playlist a NAS
+wrote is deliberately forgiving — a `Z:\Musique\…` or `/volume1/music/…`
+entry is retried under the root — and whatever stays unresolved is
+**reported on the page rather than dropped**: a playlist that silently
+shrinks is a defect that takes months to attribute.
+
+**Updating an existing installation.** As for every other plugin,
+`deploy.sh` installs the binaries but **never overwrites an existing**
+`/etc/ritornello/plugins.toml` — it only provisions the default one when
+the file is absent. A device already in service therefore does not see
+this source at all until its entry is added by hand (see
+`deploy/plugins.example.toml`). The unit, the polkit rule,
+`/mnt/ritornello` and the credentials directory are installed either way.
 
 ## `ritornello-plugin-console` — the display
 

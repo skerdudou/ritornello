@@ -21,6 +21,9 @@ separate processes**, replaceable without touching the core.
   country), stations reorderable by drag and drop.
 - **CD player**: disc detection, tracks, album recognition through
   MusicBrainz.
+- **Audio files**: from a USB stick, a folder of the device, or an
+  authenticated SMB share mounted on demand; playlists built by adding
+  folders recursively from the browser, saved and loaded again.
 - **Now-playing metadata**: the stream's ICY header, enriched by dedicated
   plugins (MusicBrainz for discs, OUI FM's metadata feed for its
   webradios, Radio France's live endpoint for its 74 stations — which
@@ -53,6 +56,7 @@ flowchart LR
         mpv["mpv (JSON-IPC)"]
         radio["radio plugin"] <--> core
         cd["cd plugin"] <--> core
+        files["files plugin<br/>(local folders, SMB)"] <--> core
         core <--> mb["musicbrainz plugin"]
         core <--> ouifm["ouifm-metas plugin"]
         core <--> rf["radiofrance-metas plugin"]
@@ -80,7 +84,8 @@ for ARM):
     ./deploy/build.sh                              # npm, then cargo, then cross ARM
     PI=pi@raspberrypi.local ./deploy/deploy.sh     # builds everything and installs over SSH
 
-On the target device: `sudo apt install mpv cd-discid eject`, plus the
+On the target device: `sudo apt install mpv cd-discid eject cifs-utils`
+(the last one only to mount network shares), plus the
 example configuration files — the step-by-step details are in
 [docs/installation.md](docs/installation.md). To try it without any
 hardware, a local instance runs in five minutes:

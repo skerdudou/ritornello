@@ -1,0 +1,49 @@
+# Roots of the `files` source: the folders the plugin is allowed to look into.
+#
+# THIS FILE IS NORMALLY WRITTEN BY THE PAGE
+# (http://<host>:8080/plugins/files/), not by hand. It is documented here
+# because it is also read by a ROOT binary — /usr/local/lib/ritornello/
+# ritornello-media-mount, run by ritornello-media-mount.service — which
+# revalidates everything it reads. What that binary refuses is listed below,
+# and a hand-edited file that trips one of those rules mounts nothing at all.
+#
+# Copy it to /etc/ritornello/media-roots.toml (or point elsewhere with
+# RITORNELLO_FILES_ROOTS). Missing file: the normal case, nothing to mount,
+# nothing is logged as an error.
+#
+# A local folder and a share are the same thing to the rest of the plugin; the
+# mount is only a detail of `kind = "smb"`.
+
+# A network share, mounted with mount.cifs (`cifs-utils` package).
+[[root]]
+name = "nas"            # a path component AND a file name: ^[a-z0-9][a-z0-9-]{0,31}$
+kind = "smb"
+host = "192.168.1.20"   # no comma, no space, no ".."
+share = "musique"       # likewise
+subpath = "Albums"      # optional: where to look INSIDE the share
+user = "steven"
+domain = ""             # optional
+writable = false        # default; set to true only to save playlists on the share
+# THE PASSWORD IS NOT IN THIS FILE. It lives in
+# /etc/ritornello/media-credentials/nas.cred (mode 0600, owned by the service
+# user, one file per root, named after it), in the format mount.cifs expects:
+#
+#     username=steven
+#     password=...
+#     domain=...
+#
+# THE MOUNT POINT IS NOT CONFIGURABLE either: it is always
+# /mnt/ritornello/<name>, never read from this file. A free-form path would be
+# a path to validate, and root is the one that would use it. The same goes for
+# the mount options, which are a closed list (ro unless `writable`, soft,
+# iocharset=utf8, uid/gid of the service, credentials=<path>) — there is no
+# pass-through to `mount -o`. The comma is the injection to guard against:
+# mount.cifs separates its options with commas, so a host "nas,uid=0" would add
+# an option to the line root executes. Hence the rules above.
+
+# A folder of the device itself: a USB stick, an internal disk. Nothing is
+# mounted for it — it is simply read where it already is.
+[[root]]
+name = "usb"
+kind = "local"
+path = "/media/usb"     # must be absolute

@@ -14,9 +14,12 @@
 // naming: a confirmed shutdown or reboot overrides shutdown inhibitors, so
 // it will not wait for an in-progress apt/dpkg run to finish.
 //
-// Nothing else is granted: not `manage-units`, because restarting
-// Ritornello itself needs no privilege (the process exits and systemd
-// restarts it, the unit saying Restart=always).
+// Nothing else is granted here: in particular not `manage-units`, because
+// restarting Ritornello itself needs no privilege (the process exits and
+// systemd restarts it, the unit saying Restart=always). That remains true of
+// the power actions; the Files plugin does need a `manage-units` grant, but a
+// narrow one restricted to a single mount unit -- see
+// 51-ritornello-media.rules.
 polkit.addRule(function (action, subject) {
   var autorisees = [
     "org.freedesktop.login1.power-off",

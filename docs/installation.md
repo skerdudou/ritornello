@@ -56,7 +56,7 @@ the initial tuning tools differ.
 
 On **Raspberry Pi OS Lite**:
 
-    sudo apt install mpv cd-discid eject
+    sudo apt install mpv cd-discid eject cifs-utils
     # analog jack as default output + hardware volume at maximum
     sudo raspi-config nonint do_audio 1
     amixer set PCM 100%
@@ -70,8 +70,12 @@ existing configuration is never overwritten (see
 
 Wifi: `sudo raspi-config` (System Options > Wireless LAN).
 
-On **DietPi**, same packages (`sudo apt install mpv cd-discid eject`),
-and two differences to know about:
+`cifs-utils` provides `mount.cifs`, which the `files` source needs to mount
+a network share; it is only useful if you intend to play files from a NAS
+(see [Network shares](#network-shares)).
+
+On **DietPi**, same packages (`sudo apt install mpv cd-discid eject
+cifs-utils`), and two differences to know about:
 
 - no `raspi-config`: the sound card is **enabled and picked** through
   `dietpi-config` (Audio Options) — DietPi ships with onboard sound
@@ -87,7 +91,7 @@ and two differences to know about:
 Same packages, minus the Pi-specific steps (no `raspi-config`, the audio
 output is picked directly through `/api/audio-output`):
 
-    sudo apt install mpv cd-discid eject
+    sudo apt install mpv cd-discid eject cifs-utils
 
 Configuration is provisioned by `deploy.sh` here too (see above).
 `deploy/deploy.sh` works identically: `TARGET=x86_64-unknown-linux-gnu
@@ -222,6 +226,66 @@ it manages the unit. Left running, they keep holding their sockets in
 fail confusingly. And systemd's start rate limit applies: five restarts
 within ten seconds leave the unit failed, cleared with
 `sudo systemctl reset-failed ritornello`.
+
+## Network shares
+
+The `files` source plays audio files from a folder of the device or from
+an SMB share. Only the share needs anything installed: `cifs-utils` (for
+`mount.cifs`) and the two files `deploy.sh` puts in place —
+`/etc/systemd/system/ritornello-media-mount.service` and
+`/etc/polkit-1/rules.d/51-ritornello-media.rules`. The script also creates
+`/mnt/ritornello` and `/etc/ritornello/media-credentials` (mode `0700`,
+owned by the service), and enables the mount unit so shares come back
+after a reboot. On a device already in service, remember the entry to add
+to `plugins.toml` by hand — see [plugins.md](plugins.md).
+
+**Declaring a share** happens in the browser, at
+`http://<host>:8080/plugins/files/`: name the root (lowercase letters,
+digits and dashes — it becomes a directory name), give the server, the
+share, optionally a subfolder, then the user and password. Saving writes
+`/etc/ritornello/media-roots.toml` and
+`/etc/ritornello/media-credentials/<name>.cred`, and asks systemd to run
+the mount unit. The mount point is not yours to pick: it is always
+`/mnt/ritornello/<name>`. `deploy/media-roots.example.toml` documents the
+file for the rare case of editing it by hand.
+
+The service does not mount anything itself — it is unprivileged, with
+`NoNewPrivileges=true`. It asks systemd to start
+`ritornello-media-mount.service`, a `oneshot` running as root that
+reconciles the declared shares (mounts what is missing, unmounts what is
+no longer declared). Why the boundary is drawn there, and what the root
+side revalidates, is in [plugins.md](plugins.md).
+
+**A refused mount** shows on the page with `systemctl`'s own error output,
+copied verbatim. A polkit refusal reads as such — "Interactive
+authentication required", or "Access denied" — and means the rule is
+missing or did not land: reinstall `51-ritornello-media.rules` into
+`/etc/polkit-1/rules.d/` (a `deploy.sh` run does it), and check polkit
+itself is installed (see the previous section — it is absent by default on
+DietPi). There is no capability probe here, unlike the power buttons:
+systemd offers no "CanStartUnit" equivalent to logind's `CanPowerOff`, so
+the plugin tries and reports. To check by hand, on the device:
+
+    sudo -u ritornello systemctl start ritornello-media-mount.service
+    journalctl -u ritornello-media-mount -n 30
+
+Any other error — bad password, unreachable host, `mount.cifs` missing —
+appears in that same journal, one line per share, since a share that fails
+does not fail the whole unit.
+
+**One point to verify on the target machine.** The mount unit itself is
+deliberately left unhardened, so that it mounts in the host's own
+namespace. `ritornello.service`, on the other hand, *is* hardened
+(`ProtectSystem=strict`, `ProtectHome=true`) and therefore runs in a mount
+namespace of its own. systemd mounts that namespace `rslave`, which
+*should* make mounts made later by the host visible inside it — expected
+behaviour, not something measured on this hardware yet. If a share mounts
+(the unit's journal says so) while the plugin keeps seeing an empty
+`/mnt/ritornello/<name>`, that propagation is the suspect, and the recourse
+is a `BindPaths=/mnt/ritornello` in `ritornello.service`. A second point to
+confirm against the NAS in use: no SMB dialect is forced (`vers=` is
+deliberately left out, the kernel's negotiation ageing better than a
+pinned version).
 
 ## Audio dropouts
 

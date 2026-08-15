@@ -1,0 +1,40 @@
+// The Files plugin lets network shares be declared from its web page, and
+// then asks systemd to mount them. The service runs as the unprivileged
+// `ritornello` user with NoNewPrivileges=true, so `sudo` and any setuid path
+// are structurally unavailable: starting a unit through polkit is the
+// mechanism, and this file is the authorisation.
+//
+// Scoped to ONE unit on purpose, via action.lookup("unit"). Granting
+// `manage-units` without that check would hand the web UI the right to start,
+// stop and restart every unit on the machine -- sshd and the firewall
+// included. The check is what keeps the grant proportionate to the need.
+//
+// The unit it does grant runs a root binary that mounts what
+// /etc/ritornello/media-roots.toml declares -- and that file is written by an
+// unprivileged process, from the web page. Whoever reaches the web UI
+// therefore decides what root mounts, which is why the binary revalidates
+// everything it reads rather than trusting the validation done on the writing
+// side: forced mount point (/mnt/ritornello/<name>, never read from the
+// configuration), a closed option list with no pass-through to `mount -o`, and
+// no comma, space or ".." allowed in a host or share name -- mount.cifs
+// options being comma-separated, a host "nas,uid=0" would otherwise inject an
+// option into the line root executes.
+//
+// Deliberately NOT merged into 50-ritornello-power.rules: that file grants the
+// power actions and says so. Keeping this grant separate means each file can
+// state exactly what it opens and why, and this one can be left out on an
+// appliance that has no network share.
+//
+// There is no capability probe on the caller's side: logind answers
+// CanPowerOff, systemd has no equivalent for manage-units. The plugin tries,
+// and reports systemctl's own words -- which name this file when it is
+// missing.
+polkit.addRule(function (action, subject) {
+  if (
+    subject.user === "ritornello" &&
+    action.id === "org.freedesktop.systemd1.manage-units" &&
+    action.lookup("unit") === "ritornello-media-mount.service"
+  ) {
+    return polkit.Result.YES;
+  }
+});
