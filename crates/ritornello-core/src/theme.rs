@@ -3,6 +3,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use ritornello_i18n::Catalog;
 use serde::{Deserialize, Serialize};
 
 /// Preset par défaut de l'installation. Le cœur n'en connaît que le nom.
@@ -25,20 +26,58 @@ impl Default for ThemeState {
     }
 }
 
+/// Erreur de validation du thème. Suit le modèle de `ValidationError`
+/// (`ritornello-plugin-radio/src/config.rs`) : le texte utilisateur est
+/// produit à la frontière via `message(&Catalog)`, `Display` fournit une
+/// version anglaise pour les journaux.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThemeError {
+    UnknownMode { mode: String },
+    InvalidNameLength,
+    InvalidNameChars,
+}
+
+impl ThemeError {
+    pub fn message(&self, catalog: &Catalog) -> String {
+        match self {
+            ThemeError::UnknownMode { mode } => {
+                catalog.get("theme_unknown_mode").replace("{mode}", mode)
+            }
+            ThemeError::InvalidNameLength => catalog.get("theme_name_invalid_length").to_string(),
+            ThemeError::InvalidNameChars => catalog.get("theme_name_invalid_chars").to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for ThemeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ThemeError::UnknownMode { mode } => write!(f, "unknown mode: {mode}"),
+            ThemeError::InvalidNameLength => write!(f, "invalid theme name length"),
+            ThemeError::InvalidNameChars => write!(f, "theme name outside [a-z0-9-]"),
+        }
+    }
+}
+
+impl std::error::Error for ThemeError {}
+
 /// Valide la **forme** seulement : le cœur ne connaît pas la liste des 42
 /// presets (elle vit dans la SPA) et ne peut donc pas vérifier l'existence du
 /// preset demandé. Il vérifie en revanche que le nom est un identifiant
 /// plausible — ce qui écarte au passage les valeurs qui n'auraient rien à
 /// faire dans un fichier d'état ou dans une page HTML.
-pub fn validate(theme: &str, mode: &str) -> Result<(), String> {
+///
+/// Fonction pure, sans catalogue : `theme_put` résout l'erreur rendue contre
+/// celui du cœur.
+pub fn validate(theme: &str, mode: &str) -> Result<(), ThemeError> {
     if mode != "light" && mode != "dark" {
-        return Err(format!("mode inconnu: {mode}"));
+        return Err(ThemeError::UnknownMode { mode: mode.to_string() });
     }
     if theme.is_empty() || theme.len() > MAX_NOM {
-        return Err("nom de theme de longueur invalide".to_string());
+        return Err(ThemeError::InvalidNameLength);
     }
     if !theme.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
-        return Err("nom de theme hors [a-z0-9-]".to_string());
+        return Err(ThemeError::InvalidNameChars);
     }
     Ok(())
 }
@@ -88,7 +127,8 @@ pub async fn theme_json(State(state): State<AppState>) -> Json<ThemeState> {
 }
 
 pub async fn theme_put(State(state): State<AppState>, Json(req): Json<ThemeState>) -> Response {
-    if let Err(msg) = validate(&req.theme, &req.mode) {
+    if let Err(e) = validate(&req.theme, &req.mode) {
+        let msg = e.message(&*state.catalog.read().await);
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg })))
             .into_response();
     }
@@ -176,5 +216,27 @@ mod tests {
         assert!(validate("Vercel", "light").is_err());
         assert!(validate("v e r c e l", "light").is_err());
         assert!(validate("../../etc/passwd", "light").is_err());
+    }
+
+    #[test]
+    fn validate_rend_la_bonne_variante() {
+        assert_eq!(validate("vercel", "system"), Err(ThemeError::UnknownMode { mode: "system".to_string() }));
+        assert_eq!(validate("", "light"), Err(ThemeError::InvalidNameLength));
+        assert_eq!(validate(&"a".repeat(65), "light"), Err(ThemeError::InvalidNameLength));
+        assert_eq!(validate("Vercel", "light"), Err(ThemeError::InvalidNameChars));
+    }
+
+    #[test]
+    fn message_de_theme_utilise_le_catalogue() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("core")).unwrap();
+        std::fs::write(
+            dir.path().join("core/fr.toml"),
+            "theme_unknown_mode = \"mode {mode} inconnu\"\n",
+        )
+        .unwrap();
+        let cat = ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::core::EN);
+        let err = ThemeError::UnknownMode { mode: "system".to_string() };
+        assert_eq!(err.message(&cat), "mode system inconnu");
     }
 }

@@ -13,6 +13,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use ritornello_i18n::Catalog;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -339,19 +340,84 @@ pub enum PowerAction {
     RestartService,
 }
 
+/// Action d'alimentation inconnue. Suit le modèle de `ValidationError`
+/// (`ritornello-plugin-radio/src/config.rs`) : le texte utilisateur est
+/// produit à la frontière via `message(&Catalog)`, `Display` fournit une
+/// version anglaise pour les journaux.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownPowerAction;
+
+impl UnknownPowerAction {
+    pub fn message(&self, catalog: &Catalog) -> String {
+        catalog.get("power_action_unknown").to_string()
+    }
+}
+
+impl std::fmt::Display for UnknownPowerAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown power action")
+    }
+}
+
+impl std::error::Error for UnknownPowerAction {}
+
 /// The action arrives as a string and is validated here rather than through
 /// serde's enum deserialization: an unknown value must answer with this
 /// project's `422 {"error": …}` shape, whereas a serde rejection would
 /// answer with axum's own plain-text 422. Same reasoning as
 /// `validate_audio_device`.
-pub fn parse_action(action: &str) -> Result<PowerAction, String> {
+pub fn parse_action(action: &str) -> Result<PowerAction, UnknownPowerAction> {
     match action {
         "poweroff" => Ok(PowerAction::PowerOff),
         "reboot" => Ok(PowerAction::Reboot),
         "restart-service" => Ok(PowerAction::RestartService),
-        _ => Err("action d'alimentation inconnue".to_string()),
+        _ => Err(UnknownPowerAction),
     }
 }
+
+/// `systemctl` a rendu la main avec un code d'échec et rien sur stderr. Le
+/// seul cas qui passe par catalogue : quand logind a écrit un message
+/// (branche voisine, non touchée), c'est celui-là qui est relayé mot pour
+/// mot — il nomme la règle polkit manquante, ce qu'aucune phrase générique
+/// ne pourrait faire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SystemctlFailed {
+    pub code: i32,
+}
+
+impl SystemctlFailed {
+    pub fn message(&self, catalog: &Catalog) -> String {
+        catalog.get("systemctl_failed").replace("{code}", &self.code.to_string())
+    }
+}
+
+impl std::fmt::Display for SystemctlFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "systemctl failed (exit code {})", self.code)
+    }
+}
+
+impl std::error::Error for SystemctlFailed {}
+
+/// `systemctl` n'a pas pu être lancé du tout (chemin absent, permissions…).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemctlUnreachable {
+    pub detail: String,
+}
+
+impl SystemctlUnreachable {
+    pub fn message(&self, catalog: &Catalog) -> String {
+        catalog.get("systemctl_unreachable").replace("{detail}", &self.detail)
+    }
+}
+
+impl std::fmt::Display for SystemctlUnreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "systemctl unreachable: {}", self.detail)
+    }
+}
+
+impl std::error::Error for SystemctlUnreachable {}
 
 /// `busctl` prints `s "yes"` for a granted action. Anything else — `"no"`,
 /// `"challenge"` (interactive authentication, which a system service can
@@ -434,9 +500,10 @@ pub async fn power_post(
 ) -> Response {
     let action = match parse_action(&req.action) {
         Ok(a) => a,
-        Err(msg) => {
+        Err(e) => {
+            let msg = e.message(&*state.catalog.read().await);
             return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg })))
-                .into_response()
+                .into_response();
         }
     };
     let verbe = match action {
@@ -462,29 +529,24 @@ pub async fn power_post(
         Ok(Ok(out)) if out.status.success() => StatusCode::ACCEPTED.into_response(),
         Ok(Ok(out)) => {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            let msg = if stderr.is_empty() {
-                format!("systemctl a échoué (code {})", out.status.code().unwrap_or(-1))
-            } else {
-                stderr.clone()
-            };
             // Deux textes pour deux publics : le corps de la réponse garde la
-            // phrase destinée au lecteur (française jusqu'à son passage par
-            // catalogue), le log reste technique et entièrement en anglais.
-            // Interpoler `msg` ici mêlerait les deux langues dans une ligne de
-            // journal, et le code de sortie y est plus parlant qu'une phrase.
-            let detail = if stderr.is_empty() {
-                format!("exit code {}", out.status.code().unwrap_or(-1))
+            // phrase destinée au lecteur (résolue par catalogue), le log
+            // reste technique et entièrement en anglais — `Display` fournit
+            // cette version-là dans le cas de repli.
+            let msg = if stderr.is_empty() {
+                let err = SystemctlFailed { code: out.status.code().unwrap_or(-1) };
+                tracing::warn!("{verbe} refused: {err}");
+                err.message(&*state.catalog.read().await)
             } else {
+                tracing::warn!("{verbe} refused: {stderr}");
                 stderr
             };
-            tracing::warn!("{verbe} refused: {detail}");
             (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": msg }))).into_response()
         }
-        Ok(Err(e)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("systemctl injoignable: {e}") })),
-        )
-            .into_response(),
+        Ok(Err(e)) => {
+            let msg = SystemctlUnreachable { detail: e.to_string() }.message(&*state.catalog.read().await);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": msg }))).into_response()
+        }
     }
 }
 
@@ -655,6 +717,38 @@ mod tests {
         // Pas de tolérance de casse ni d'alias : le seul client est la SPA,
         // qui envoie ces trois chaînes exactes.
         assert!(parse_action("PowerOff").is_err());
+    }
+
+    /// Catalogue minimal chargé depuis un répertoire temporaire, pour tester
+    /// l'interpolation sans dépendre des packs livrés.
+    fn catalogue_de_test(cles: &str) -> ritornello_i18n::Catalog {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("core")).unwrap();
+        std::fs::write(dir.path().join("core/fr.toml"), cles).unwrap();
+        // `Catalog::load` copie tout en mémoire, la racine temporaire peut
+        // donc être jetée à la fin de la fonction.
+        ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::core::EN)
+    }
+
+    #[test]
+    fn message_action_inconnue_utilise_le_catalogue() {
+        let cat = catalogue_de_test("power_action_unknown = \"action inconnue\"\n");
+        assert_eq!(UnknownPowerAction.message(&cat), "action inconnue");
+    }
+
+    #[test]
+    fn message_systemctl_echoue_interpole_le_code() {
+        let cat = catalogue_de_test("systemctl_failed = \"echec systemctl (code {code})\"\n");
+        assert_eq!(SystemctlFailed { code: 1 }.message(&cat), "echec systemctl (code 1)");
+    }
+
+    #[test]
+    fn message_systemctl_injoignable_interpole_le_detail() {
+        let cat = catalogue_de_test("systemctl_unreachable = \"injoignable : {detail}\"\n");
+        assert_eq!(
+            SystemctlUnreachable { detail: "No such file or directory".to_string() }.message(&cat),
+            "injoignable : No such file or directory"
+        );
     }
 
     #[test]

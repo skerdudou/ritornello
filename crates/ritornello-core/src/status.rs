@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use ritornello_i18n::Catalog;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -105,8 +106,36 @@ struct AudioOutputRequest {
     device: Option<String>,
 }
 
+/// Erreur de validation de la sortie audio. Suit le modèle de
+/// `ValidationError` (`ritornello-plugin-radio/src/config.rs`) : le texte
+/// utilisateur est produit à la frontière via `message(&Catalog)`, `Display`
+/// fournit une version anglaise pour les journaux.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AudioOutputError {
+    EmptyName,
+}
+
+impl AudioOutputError {
+    pub fn message(&self, catalog: &Catalog) -> String {
+        match self {
+            AudioOutputError::EmptyName => catalog.get("audio_output_name_empty").to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for AudioOutputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AudioOutputError::EmptyName => write!(f, "empty audio output name"),
+        }
+    }
+}
+
+impl std::error::Error for AudioOutputError {}
+
 /// Refuse un nom de sortie vide (ou uniquement blanc). Fonction pure, sur le
-/// modèle de `theme::validate`.
+/// modèle de `theme::validate` : elle ne connaît aucun catalogue, c'est la
+/// route HTTP qui résout l'erreur rendue contre celui du cœur.
 ///
 /// L'ancienne page de statut était rendue côté serveur : faute de sortie
 /// choisie, aucun `<option>` ne portait `selected`, donc le navigateur
@@ -116,9 +145,9 @@ struct AudioOutputRequest {
 /// installation neuve, `audio_current` valait `Some("")`,
 /// `GET /api/audio-output` renvoyait `current: ""` indéfiniment, et `""`
 /// était transmis à mpv puis persisté dans `state.json`.
-pub fn validate_audio_device(device: &str) -> Result<(), String> {
+pub fn validate_audio_device(device: &str) -> Result<(), AudioOutputError> {
     if device.trim().is_empty() {
-        return Err("nom de sortie audio vide".to_string());
+        return Err(AudioOutputError::EmptyName);
     }
     Ok(())
 }
@@ -127,7 +156,8 @@ async fn audio_output_put(State(state): State<AppState>, Json(req): Json<AudioOu
     // `null` (or absent) = follow the system default. A named device is
     // validated as before: the empty string stays refused.
     if let Some(device) = &req.device {
-        if let Err(msg) = validate_audio_device(device) {
+        if let Err(e) = validate_audio_device(device) {
+            let msg = e.message(&*state.catalog.read().await);
             return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg })))
                 .into_response();
         }
@@ -139,25 +169,98 @@ async fn audio_output_put(State(state): State<AppState>, Json(req): Json<AudioOu
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// Bornes des quatre réglages, définies une seule fois et prises à la
+/// comparaison elle-même : `SettingsError` les reporte telles quelles dans
+/// ses paramètres, pour qu'un changement de borne ne puisse plus laisser un
+/// message qui mente sur ses propres limites.
+const INITIAL_DELAY_MS: std::ops::RangeInclusive<u32> = 200..=5000;
+const REPEAT_INTERVAL_MS: std::ops::RangeInclusive<u32> = 100..=2000;
+// Same bounds for both overlay durations: under a second an overlay is
+// unreadable and the tens-offset capture becomes impractical (it takes two
+// presses inside the window); past roughly fifteen seconds an overlay
+// durably hides the "now playing" view.
+const OVERLAY_MS: std::ops::RangeInclusive<u32> = 1000..=15000;
+const TENS_WINDOW_MS: std::ops::RangeInclusive<u32> = 1000..=15000;
+
+/// Erreur de validation des réglages, une variante par borne violée. Même
+/// modèle que `AudioOutputError` : les paramètres `min`/`max` viennent de la
+/// borne effectivement comparée, jamais recopiés à la main.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsError {
+    InitialDelay { min: u32, max: u32 },
+    RepeatInterval { min: u32, max: u32 },
+    Overlay { min: u32, max: u32 },
+    TensWindow { min: u32, max: u32 },
+}
+
+impl SettingsError {
+    pub fn message(&self, catalog: &Catalog) -> String {
+        match self {
+            SettingsError::InitialDelay { min, max } => catalog
+                .get("settings_initial_delay_out_of_range")
+                .replace("{min}", &min.to_string())
+                .replace("{max}", &max.to_string()),
+            SettingsError::RepeatInterval { min, max } => catalog
+                .get("settings_repeat_interval_out_of_range")
+                .replace("{min}", &min.to_string())
+                .replace("{max}", &max.to_string()),
+            SettingsError::Overlay { min, max } => catalog
+                .get("settings_overlay_out_of_range")
+                .replace("{min}", &min.to_string())
+                .replace("{max}", &max.to_string()),
+            SettingsError::TensWindow { min, max } => catalog
+                .get("settings_tens_window_out_of_range")
+                .replace("{min}", &min.to_string())
+                .replace("{max}", &max.to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for SettingsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SettingsError::InitialDelay { min, max } => {
+                write!(f, "initial delay out of range ({min}-{max} ms)")
+            }
+            SettingsError::RepeatInterval { min, max } => {
+                write!(f, "repeat interval out of range ({min}-{max} ms)")
+            }
+            SettingsError::Overlay { min, max } => {
+                write!(f, "overlay duration out of range ({min}-{max} ms)")
+            }
+            SettingsError::TensWindow { min, max } => {
+                write!(f, "tens-offset entry window out of range ({min}-{max} ms)")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SettingsError {}
+
 /// Bounds for the hold-to-repeat timings. Pure function, same model as
 /// `validate_audio_device`: the core itself accepts anything (tests use tiny
 /// timings), the HTTP surface is where user input is checked.
-pub fn validate_settings(s: &crate::state::Settings) -> Result<(), String> {
-    if !(200..=5000).contains(&s.volume_repeat_initial_ms) {
-        return Err("délai initial hors bornes (200-5000 ms)".to_string());
+pub fn validate_settings(s: &crate::state::Settings) -> Result<(), SettingsError> {
+    if !INITIAL_DELAY_MS.contains(&s.volume_repeat_initial_ms) {
+        return Err(SettingsError::InitialDelay {
+            min: *INITIAL_DELAY_MS.start(),
+            max: *INITIAL_DELAY_MS.end(),
+        });
     }
-    if !(100..=2000).contains(&s.volume_repeat_interval_ms) {
-        return Err("intervalle de répétition hors bornes (100-2000 ms)".to_string());
+    if !REPEAT_INTERVAL_MS.contains(&s.volume_repeat_interval_ms) {
+        return Err(SettingsError::RepeatInterval {
+            min: *REPEAT_INTERVAL_MS.start(),
+            max: *REPEAT_INTERVAL_MS.end(),
+        });
     }
-    // Same bounds for both overlay durations: under a second an overlay is
-    // unreadable and the tens-offset capture becomes impractical (it takes
-    // two presses inside the window); past roughly fifteen seconds an
-    // overlay durably hides the "now playing" view.
-    if !(1000..=15000).contains(&s.overlay_ms) {
-        return Err("incrustation hors bornes (1000-15000 ms)".to_string());
+    if !OVERLAY_MS.contains(&s.overlay_ms) {
+        return Err(SettingsError::Overlay { min: *OVERLAY_MS.start(), max: *OVERLAY_MS.end() });
     }
-    if !(1000..=15000).contains(&s.tens_window_ms) {
-        return Err("fenêtre de saisie du cumul hors bornes (1000-15000 ms)".to_string());
+    if !TENS_WINDOW_MS.contains(&s.tens_window_ms) {
+        return Err(SettingsError::TensWindow {
+            min: *TENS_WINDOW_MS.start(),
+            max: *TENS_WINDOW_MS.end(),
+        });
     }
     Ok(())
 }
@@ -171,7 +274,8 @@ async fn settings_json(State(state): State<AppState>) -> Json<crate::state::Sett
 /// is `serde(default)`), which is the price of reusing the state type — fine
 /// on a single-user device.
 async fn settings_put(State(state): State<AppState>, Json(req): Json<crate::state::Settings>) -> Response {
-    if let Err(msg) = validate_settings(&req) {
+    if let Err(e) = validate_settings(&req) {
+        let msg = e.message(&*state.catalog.read().await);
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg })))
             .into_response();
     }
@@ -1160,5 +1264,59 @@ mod tests {
         assert!(validate_settings(&Settings { overlay_ms: 15001, ..Default::default() }).is_err());
         assert!(validate_settings(&Settings { tens_window_ms: 999, ..Default::default() }).is_err());
         assert!(validate_settings(&Settings { tens_window_ms: 15001, ..Default::default() }).is_err());
+    }
+
+    #[test]
+    fn validate_audio_device_rend_une_erreur_typee() {
+        assert_eq!(validate_audio_device(""), Err(AudioOutputError::EmptyName));
+        assert_eq!(validate_audio_device("   "), Err(AudioOutputError::EmptyName));
+    }
+
+    #[test]
+    fn message_audio_output_utilise_le_catalogue() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("core")).unwrap();
+        std::fs::write(
+            dir.path().join("core/fr.toml"),
+            "audio_output_name_empty = \"nom de sortie vide\"\n",
+        )
+        .unwrap();
+        let cat = ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::core::EN);
+        assert_eq!(AudioOutputError::EmptyName.message(&cat), "nom de sortie vide");
+    }
+
+    #[test]
+    fn validate_settings_rend_la_bonne_variante_avec_ses_bornes() {
+        use crate::state::Settings;
+        assert_eq!(
+            validate_settings(&Settings { volume_repeat_initial_ms: 1, ..Default::default() }),
+            Err(SettingsError::InitialDelay { min: 200, max: 5000 })
+        );
+        assert_eq!(
+            validate_settings(&Settings { volume_repeat_interval_ms: 1, ..Default::default() }),
+            Err(SettingsError::RepeatInterval { min: 100, max: 2000 })
+        );
+        assert_eq!(
+            validate_settings(&Settings { overlay_ms: 1, ..Default::default() }),
+            Err(SettingsError::Overlay { min: 1000, max: 15000 })
+        );
+        assert_eq!(
+            validate_settings(&Settings { tens_window_ms: 1, ..Default::default() }),
+            Err(SettingsError::TensWindow { min: 1000, max: 15000 })
+        );
+    }
+
+    #[test]
+    fn message_settings_interpole_les_bornes_contre_le_catalogue() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("core")).unwrap();
+        std::fs::write(
+            dir.path().join("core/fr.toml"),
+            "settings_initial_delay_out_of_range = \"delai hors bornes ({min}-{max})\"\n",
+        )
+        .unwrap();
+        let cat = ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::core::EN);
+        let err = SettingsError::InitialDelay { min: 200, max: 5000 };
+        assert_eq!(err.message(&cat), "delai hors bornes (200-5000)");
     }
 }
