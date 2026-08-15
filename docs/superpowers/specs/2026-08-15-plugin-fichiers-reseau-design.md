@@ -314,6 +314,23 @@ d'arbitrage : plugin `metadata` > tags mpv > ICY. Aucun processus
 supplémentaire, aucune dépendance, aucune relecture du fichier par le réseau —
 mpv l'a déjà lu.
 
+Le banc a vérifié que la portée est bien générale : mp3 (ID3), flac, ogg et
+opus (Vorbis comments), m4a (atomes iTunes) et wav (RIFF INFO) remontent
+**tous** sous les mêmes clés `title` / `artist` / `album` — FFmpeg normalise,
+le cœur n'a donc qu'une grammaire à connaître.
+
+Deux précautions que la mesure a fait apparaître, et qui conditionnent
+l'option :
+
+- **piocher trois clés nommées, jamais absorber l'objet** : en m4a, `metadata`
+  charrie aussi des clés de conteneur (`major_brand`, `handler_name`,
+  `vendor_id`…) qui n'ont rien à faire dans un affichage ;
+- **la couche ne s'applique que si aucune clé ICY n'est présente.** Certaines
+  stations renseignent un `title` valant le nom de la station, à côté d'un
+  `icy-title` qui porte le vrai morceau : préférer le premier serait une
+  régression pour la radio. La présence d'une clé `icy-*` signe un flux, et
+  le chemin ICY garde alors la main.
+
 **Recommandation : B**, sur le critère même qui avait motivé A. L'argument
 était « si demain une autre source lit des mp3 » : B sert **toute** source
 jouant un fichier taggé, y compris une future source Bluetooth ou UPnP, sans
