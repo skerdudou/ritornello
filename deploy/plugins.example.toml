@@ -27,6 +27,15 @@ name = "ouifm-metas"
 kind = "metadata"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-ouifm-metas"
 
+# `radiofrance-metas` likewise needs no configuration: the table of the 74
+# Radio France stations is embedded in its binary. Optional file:
+# /etc/ritornello/radiofrance-metas.toml (see radiofrance-metas.example.toml).
+# The two tables never overlap, so their relative order does not matter here.
+[[plugin]]
+name = "radiofrance-metas"
+kind = "metadata"
+exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-radiofrance-metas"
+
 [[plugin]]
 name = "musicbrainz"
 kind = "metadata"

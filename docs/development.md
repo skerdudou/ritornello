@@ -55,8 +55,9 @@ with the following variables added to the environment line:
     RITORNELLO_INPUT_BINDINGS=/tmp/rp/input-bindings.toml RITORNELLO_INPUT_PRESETS=deploy/input-presets
 
 The `metadata` plugins are added the same way (`kind = "metadata"`,
-executables `ritornello-plugin-musicbrainz` and
-`ritornello-plugin-ouifm-metas`).
+executables `ritornello-plugin-musicbrainz`,
+`ritornello-plugin-ouifm-metas` and
+`ritornello-plugin-radiofrance-metas`).
 
 ## Language
 
@@ -95,7 +96,8 @@ Three audiences, three rules — the boundary is the audience, not the file:
     npm run e2e -w app                                  # Playwright journeys
 
 The project's testing style: pure functions tested against **real
-captures** (mpv frames, radio-browser responses, OUI FM feeds), and
+captures** (mpv frames, radio-browser responses, OUI FM feeds, Radio
+France live answers), and
 **discriminating** tests — several encode a regression that actually
 happened, and say which one in a comment.
 
@@ -121,6 +123,11 @@ documented at the top of `serve.mjs`.
   `node crates/ritornello-plugin-ouifm-metas/scripts/fetch-webradios.mjs`
   (re-reads the site's `apidata` variable; `--verifier` reports a drift
   without writing anything).
+- **Radio France station table**:
+  `node crates/ritornello-plugin-radiofrance-metas/scripts/fetch-stations.mjs`
+  (re-reads the Open API documentation and the site's webradio cards, and
+  re-checks every mount not covered by the documentation; `--verifier`
+  reports a drift without writing anything).
 
 ## Build guardrails
 

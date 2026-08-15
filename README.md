@@ -23,8 +23,9 @@ separate processes**, replaceable without touching the core.
   MusicBrainz.
 - **Now-playing metadata**: the stream's ICY header, enriched by dedicated
   plugins (MusicBrainz for discs, OUI FM's metadata feed for its
-  webradios) — shown on the screen and in the web UI alike, along with
-  where the information came from.
+  webradios, Radio France's live endpoint for its 74 stations — which
+  broadcast no ICY at all) — shown on the screen and in the web UI alike,
+  along with where the information came from.
 - **Configurable remote control**: any Linux input device (evdev) will do;
   keys are learned from the browser, presets ship with the project (MCE,
   keyboard).
@@ -54,6 +55,7 @@ flowchart LR
         cd["cd plugin"] <--> core
         core <--> mb["musicbrainz plugin"]
         core <--> ouifm["ouifm-metas plugin"]
+        core <--> rf["radiofrance-metas plugin"]
         input["generic-input plugin<br/>(evdev)"] --> core
         core --> console["console plugin<br/>(HDMI screen)"]
         core <--> mpv

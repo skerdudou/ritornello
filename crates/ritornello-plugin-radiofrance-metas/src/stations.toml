@@ -1,0 +1,499 @@
+# Stations Radio France : correspondance entre le mount de diffusion (présent
+# dans l’URL du flux audio) et l’identifiant attendu par le point d’entrée du
+# direct.
+#
+# RELEVÉ, PAS DEVINÉ. Source principale : la documentation publique de l’Open
+# API de Radio France (https://developers.radiofrance.fr/doc/tutorial-by-example
+# /list-brands et /list-locals-and-webradios), dont les réponses d’exemple
+# donnent pour chaque station son `liveStream` (donc son mount Icecast) et son
+# `playerUrl`, qui porte `id_station=<n>`. Les deux champs viennent de la même
+# réponse : la correspondance est écrite par Radio France, pas reconstituée.
+#
+# Les 13 stations absentes de cette documentation — les webradios France
+# Musique, plus FIP Sacré français et FIP Cultes — sont relevées des cartes de
+# https://www.radiofrance.fr/francemusique et /fip, où le slug de marque et
+# l’identifiant se lisent sur la même carte. Leur mount est vérifié station par
+# station contre icecast.radiofrance.fr. `scripts/fetch-stations.mjs` régénère
+# ce fichier depuis ces mêmes sources.
+#
+# Chaque mount est cherché comme **jeton** de l’URL du flux : bordé de part et
+# d’autre par un caractère non alphanumérique. C’est ce qui permet une seule
+# entrée par station là où la même station se diffuse sous plusieurs formes
+# (`icecast.radiofrance.fr/<mount>-midfi.mp3`, le nom historique
+# `direct.fipradio.fr/live/<mount>-midfi.mp3`, le HLS
+# `stream.radiofrance.fr/<mount>/<mount>.m3u8`, et les qualités `-lofi`,
+# `-hifi.aac`) — et ce qui empêche `fip` de capturer `fipgroove`.
+#
+# `rules` est le **profil de rendu** demandé au serveur, et son choix n’est pas
+# cosmétique : c’est lui qui décide si le plugin dit quelque chose. Mesuré au
+# même instant sur Mouv’, `webrf_fip_player` répond « Le direct » / « Mouv’ »
+# (le slogan) quand `webrf_mouv_player` répond « La Playlist » / « SOOLKING -
+# Bye Bye (feat. TAYC) », qui était bien ce qui passait à l’antenne.
+#   - `webrf_fip_player` : la réponse est l’objet MORCEAU, titre et artiste
+#     déjà séparés, bornes du morceau. Seules FIP, ses webradios et celles de
+#     France Musique répondent ainsi.
+#   - `webrf_mouv_player` : la réponse est l’objet ÉMISSION, avec ce qui s’y
+#     joue en une seule chaîne « ARTISTE - Titre ». Seul profil qui sorte le
+#     morceau sur Mouv’, France Musique et les 45 locales ; sur les stations
+#     parlées il rend la même paire que le profil propre à la marque (vérifié
+#     sur France Inter, franceinfo et France Culture). Son nom est fortuit :
+#     c’est un profil du serveur, pas un point d’entrée de Mouv’.
+#
+# Relevé le 2026-08-14. 74 stations.
+
+# --- Les six marques nationales --------------------------------------------------
+
+[[station]]
+label = "France Inter"
+mounts = ["franceinter"]
+id = 1
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "franceinfo"
+mounts = ["franceinfo"]
+id = 2
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Musique"
+mounts = ["francemusique"]
+id = 4
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Culture"
+mounts = ["franceculture"]
+id = 5
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "Mouv'"
+mounts = ["mouv"]
+id = 6
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "FIP"
+mounts = ["fip"]
+id = 7
+rules = "webrf_fip_player"
+
+# --- Webradios FIP ---------------------------------------------------------------
+
+[[station]]
+label = "FIP Rock"
+mounts = ["fiprock"]
+id = 64
+rules = "webrf_fip_player"
+
+[[station]]
+label = "FIP Jazz"
+mounts = ["fipjazz"]
+id = 65
+rules = "webrf_fip_player"
+
+[[station]]
+label = "FIP Groove"
+mounts = ["fipgroove"]
+id = 66
+rules = "webrf_fip_player"
+
+[[station]]
+label = "FIP Monde"
+mounts = ["fipworld"]
+id = 69
+rules = "webrf_fip_player"
+
+[[station]]
+label = "FIP Nouveautés"
+mounts = ["fipnouveautes"]
+id = 70
+rules = "webrf_fip_player"
+
+[[station]]
+label = "FIP Reggae"
+mounts = ["fipreggae"]
+id = 71
+rules = "webrf_fip_player"
+
+[[station]]
+label = "FIP Electro"
+mounts = ["fipelectro"]
+id = 74
+rules = "webrf_fip_player"
+
+[[station]]
+label = "FIP Metal"
+mounts = ["fipmetal"]
+id = 77
+rules = "webrf_fip_player"
+
+[[station]]
+label = "FIP Pop"
+mounts = ["fippop"]
+id = 78
+rules = "webrf_fip_player"
+
+[[station]]
+label = "FIP Hip-Hop"
+mounts = ["fiphiphop"]
+id = 95
+rules = "webrf_fip_player"
+
+[[station]]
+label = "FIP Sacré français !"
+mounts = ["fipsacrefrancais"]
+id = 96
+rules = "webrf_fip_player"
+
+[[station]]
+label = "FIP Cultes"
+mounts = ["fipcultes"]
+id = 709
+rules = "webrf_fip_player"
+
+# --- Webradios France Musique ----------------------------------------------------
+
+[[station]]
+label = "France Musique Classique Easy"
+mounts = ["francemusiqueeasyclassique"]
+id = 401
+rules = "webrf_fip_player"
+
+[[station]]
+label = "France Musique Classique Plus"
+mounts = ["francemusiqueclassiqueplus"]
+id = 402
+rules = "webrf_fip_player"
+
+[[station]]
+label = "France Musique Concerts Radio France"
+mounts = ["francemusiqueconcertsradiofrance"]
+id = 403
+rules = "webrf_fip_player"
+
+[[station]]
+label = "France Musique Ocora"
+mounts = ["francemusiqueocoramonde"]
+id = 404
+rules = "webrf_fip_player"
+
+[[station]]
+label = "France Musique Jazz"
+mounts = ["francemusiquelajazz"]
+id = 405
+rules = "webrf_fip_player"
+
+[[station]]
+label = "France Musique Contemporaine"
+mounts = ["francemusiquelacontemporaine"]
+id = 406
+rules = "webrf_fip_player"
+
+# Mount « labo » = « la B.O. » (bandes originales), la webradio des musiques de
+# films — que le site appelle « Films » et dont le slug de marque est
+# `francemusique_evenementielle`. C’est la seule entrée dont le rapprochement
+# repose sur l’élimination : après attribution des dix autres webradios France
+# Musique, il restait exactement un mount et exactement une station.
+[[station]]
+label = "France Musique Films"
+mounts = ["francemusiquelabo"]
+id = 407
+rules = "webrf_fip_player"
+
+[[station]]
+label = "France Musique Baroque"
+mounts = ["francemusiquebaroque"]
+id = 408
+rules = "webrf_fip_player"
+
+[[station]]
+label = "France Musique Opéra"
+mounts = ["francemusiqueopera"]
+id = 409
+rules = "webrf_fip_player"
+
+[[station]]
+label = "France Musique Piano Zen"
+mounts = ["francemusiquepianozen"]
+id = 410
+rules = "webrf_fip_player"
+
+[[station]]
+label = "France Musique Classique Love"
+mounts = ["francemusiqueclassiquelove"]
+id = 411
+rules = "webrf_fip_player"
+
+# --- Les 45 locales ici (ex-France Bleu) -----------------------------------------
+
+[[station]]
+label = "France Bleu RCFM"
+mounts = ["fbfrequenzamora"]
+id = 11
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Alsace"
+mounts = ["fbalsace"]
+id = 12
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Armorique"
+mounts = ["fbarmorique"]
+id = 13
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Auxerre"
+mounts = ["fbauxerre"]
+id = 14
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Béarn Bigorre"
+mounts = ["fbbearn"]
+id = 15
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Belfort-Montbéliard"
+mounts = ["fbbelfort"]
+id = 16
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Berry"
+mounts = ["fbberry"]
+id = 17
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Besançon"
+mounts = ["fbbesancon"]
+id = 18
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Bourgogne"
+mounts = ["fbbourgogne"]
+id = 19
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Breizh Izel"
+mounts = ["fbbreizizel"]
+id = 20
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Champagne-Ardenne"
+mounts = ["fbchampagne"]
+id = 21
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Cotentin"
+mounts = ["fbcotentin"]
+id = 22
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Creuse"
+mounts = ["fbcreuse"]
+id = 23
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Drôme Ardèche"
+mounts = ["fbdromeardeche"]
+id = 24
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Gard Lozère"
+mounts = ["fbgardlozere"]
+id = 25
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Gascogne"
+mounts = ["fbgascogne"]
+id = 26
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Gironde"
+mounts = ["fbgironde"]
+id = 27
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Hérault"
+mounts = ["fbherault"]
+id = 28
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Isère"
+mounts = ["fbisere"]
+id = 29
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu La Rochelle"
+mounts = ["fblarochelle"]
+id = 30
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Limousin"
+mounts = ["fblimousin"]
+id = 31
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Loire Océan"
+mounts = ["fbloireocean"]
+id = 32
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Sud Lorraine"
+mounts = ["fbsudlorraine"]
+id = 33
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Mayenne"
+mounts = ["fbmayenne"]
+id = 34
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Nord"
+mounts = ["fbnord"]
+id = 36
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Normandie (Calvados - Orne)"
+mounts = ["fbbassenormandie"]
+id = 37
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Normandie (Seine-Maritime - Eure)"
+mounts = ["fbhautenormandie"]
+id = 38
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Orléans"
+mounts = ["fborleans"]
+id = 39
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Pays d'Auvergne"
+mounts = ["fbpaysdauvergne"]
+id = 40
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Pays Basque"
+mounts = ["fbpaysbasque"]
+id = 41
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Pays de Savoie"
+mounts = ["fbpaysdesavoie"]
+id = 42
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Périgord"
+mounts = ["fbperigord"]
+id = 43
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Picardie"
+mounts = ["fbpicardie"]
+id = 44
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Provence"
+mounts = ["fbprovence"]
+id = 45
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Roussillon"
+mounts = ["fbroussillon"]
+id = 46
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Touraine"
+mounts = ["fbtouraine"]
+id = 47
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Vaucluse"
+mounts = ["fbvaucluse"]
+id = 48
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Azur"
+mounts = ["fbazur"]
+id = 49
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Lorraine Nord"
+mounts = ["fblorrainenord"]
+id = 50
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Poitou"
+mounts = ["fbpoitou"]
+id = 54
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Paris"
+mounts = ["fb1071"]
+id = 68
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Elsass"
+mounts = ["fbelsass"]
+id = 90
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Maine"
+mounts = ["fbmaine"]
+id = 91
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Occitanie"
+mounts = ["fbtoulouse"]
+id = 92
+rules = "webrf_mouv_player"
+
+[[station]]
+label = "France Bleu Saint-Étienne Loire"
+mounts = ["fbstetienne"]
+id = 93
+rules = "webrf_mouv_player"

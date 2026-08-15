@@ -303,12 +303,15 @@ installation would display different things from one boot to the next.
 new binaries but never overwrites an existing
 `/etc/ritornello/plugins.toml` (it only provisions the default one when
 the file is absent): without
-manually adding the two `kind = "metadata"` entries (see
+manually adding the `kind = "metadata"` entries (see
 `deploy/plugins.example.toml`), a device already in service **loses the
 CD track titles**, which the cd plugin used to provide itself before this
-version. The rest of the display is unchanged.
+version. The rest of the display is unchanged. The same holds for
+`radiofrance-metas`, added later: an installation whose `plugins.toml`
+predates it keeps working, simply without Radio France titles, until its
+entry is added by hand.
 
-### The two bundled plugins
+### The three bundled plugins
 
 - `ritornello-plugin-musicbrainz` recognizes a disc through MusicBrainz.
   This is the code that used to live in `ritornello-plugin-cd`, where a
@@ -336,6 +339,73 @@ version. The rest of the display is unchanged.
   the day OUI FM changes something: its entries are consulted **before**
   the embedded table, which allows fixing a mapping gone stale or adding
   one, without recompiling.
+- `ritornello-plugin-radiofrance-metas` reads the *live* endpoint of Radio
+  France's stations. **Nothing to configure**: the table of the 74 stations
+  is embedded in the binary (`src/stations.toml`) — the six national brands,
+  FIP's 12 webradios, France Musique's 11, and the 45 `ici` (ex-France Bleu)
+  local stations.
+
+  This is the plugin with the strongest case of the three: Radio France's
+  streams carry **no ICY metadata at all** — no `icy-metaint` header, not even
+  filler text — so without it a Radio France station on the device shows
+  nothing. The endpoint states itself when to be called again
+  (`delayToRefresh`), so the polling rate is the server's own, not ours.
+
+  The last segment of the live URL is not the station but a **rendering
+  profile**, and the wrong one makes the plugin silent: measured on Mouv' at
+  one instant, `webrf_fip_player` answered `Le direct / Mouv'` — the station's
+  baseline — while `webrf_mouv_player` answered `La Playlist / SOOLKING - Bye
+  Bye (feat. TAYC)`, which was what actually aired. Each station therefore
+  carries its profile in the table. Two are in use: one returns the **song**
+  (title and artist already separated, and the time window is the song's, hence
+  a duration), the other the **programme** (its name, plus what is playing
+  inside it as a single `ARTIST - Title` string, and no duration — the window
+  is the programme's, an hour on Mouv'). Outside music the second one carries
+  the programme and its detail, and they are displayed too: there is no ICY to
+  fall back on, so the alternative is a blank line.
+
+  The **album** comes from a third place, the station's schedule, where the
+  current song is matched by its identifier. It is fetched **once per track**,
+  never per refresh, and it is best-effort: that schedule is frequently one
+  track behind, so the album comes and goes on the same station — observed
+  present on FIP, most of its webradios, France Musique's, Mouv' and France
+  Inter, absent on the local ones. When it is missing the enrichment goes out
+  without it, and after five consecutive tracks without an album the plugin
+  stops asking that station's schedule rather than doubling its requests to a
+  third party for nothing. It fills `morceau.album`, which a display is free to
+  show — the bundled console gives it its own line when the source names no
+  preset.
+
+  Recognition is based on the **mount** of the stream, matched as a *token* of
+  the URL (bordered by non-alphanumeric characters), not as a raw substring:
+  `fip` is a prefix of `fipgroove` and `francemusique` of
+  `francemusiquebaroque`, so a plain substring search would have made the first
+  entry capture the others and display the wrong station's titles, with no sign
+  of error. The token rule allows a single entry per station covering every
+  form the same station is served under: `icecast.radiofrance.fr`, the
+  historical `direct.fipradio.fr/live/` name — the one directories reference —
+  and the `stream.radiofrance.fr` HLS playlist, whatever the quality suffix.
+
+  The table's provenance is Radio France's own: the Open API documentation
+  publishes, in a single object per station, both the `liveStream` (hence the
+  mount) and the `playerUrl` carrying `id_station=<n>`. That covers 61 of the
+  74; the remaining 13 (France Musique's webradios, FIP Sacré français, FIP
+  Cultes) come from the site's own webradio cards, where the brand slug and the
+  identifier sit on the same card, and each of their mounts is verified against
+  the Icecast server at every run. `scripts/fetch-stations.mjs` regenerates the
+  file from those sources (with `--verifier`, it reports a drift without
+  writing anything).
+
+  The optional `/etc/ritornello/radiofrance-metas.toml` file
+  (`RITORNELLO_RADIOFRANCE_METAS` variable, example in `deploy/`) works exactly
+  like OUI FM's: consulted **before** the embedded table, to fix an entry gone
+  stale or add one without recompiling.
+
+  The plugin's own
+  [README](../crates/ritornello-plugin-radiofrance-metas/README.md) lists every
+  station covered — mount, identifier and profile — along with what is
+  deliberately left out and why. Its table is regenerated by the same script,
+  so it cannot drift from the embedded one.
 
 ### Where it shows up
 

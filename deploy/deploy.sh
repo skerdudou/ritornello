@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 
 # The plugin list exists only here: it drives the scp then the remote mv,
 # and a list duplicated between the two would end up diverging.
-PLUGINS=(radio cd generic-input console musicbrainz ouifm-metas)
+PLUGINS=(radio cd generic-input console musicbrainz ouifm-metas radiofrance-metas)
 
 # One password prompt for the whole run: every ssh/scp call below shares a
 # single master connection (ControlMaster), opened by the first call and

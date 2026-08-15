@@ -1,0 +1,71 @@
+# Radio France station -> live identifier mapping.
+#
+# THIS FILE IS OPTIONAL. The ritornello-plugin-radiofrance-metas plugin embeds
+# the table of the 74 Radio France stations (see
+# crates/ritornello-plugin-radiofrance-metas/src/stations.toml): with nothing
+# configured, titles show up for France Inter, franceinfo, France Culture,
+# France Musique and its 11 webradios, Mouv', FIP and its 12 webradios, and the
+# 45 "ici" (ex-France Bleu) local stations.
+#
+# It only serves two purposes, the day Radio France changes something without
+# the device having been recompiled:
+#
+#   1. FIX an entry gone stale — this file's entries are consulted BEFORE the
+#      embedded table, so declaring the same `mounts` here takes precedence;
+#   2. ADD a station missing from the bundled table.
+#
+# Copy it to /etc/ritornello/radiofrance-metas.toml (or point elsewhere with
+# RITORNELLO_RADIOFRANCE_METAS). Missing file: the normal case, nothing is
+# logged. Invalid file: a warning, and the embedded table carries on alone.
+#
+# HOW TO COLLECT THE TWO VALUES (one minute):
+#   1. open the Open API documentation, which publishes them side by side:
+#      https://developers.radiofrance.fr/doc/tutorial-by-example/list-brands
+#      https://developers.radiofrance.fr/doc/tutorial-by-example/list-locals-and-webradios
+#   2. in a station's example response, `liveStream` gives the Icecast mount
+#      (-> `mounts` below) and `playerUrl` carries `id_station=<n>`
+#      (-> `id` below).
+# Or, more simply, run:
+#   node crates/ritornello-plugin-radiofrance-metas/scripts/fetch-stations.mjs
+# which regenerates the embedded table from those same sources.
+#
+# Each `mounts` entry is matched as a TOKEN of the URL recorded in stations.toml
+# — bordered on both sides by a non-alphanumeric character. That is what lets a
+# single entry cover every form the same station is served under:
+#   https://icecast.radiofrance.fr/fipgroove-midfi.mp3
+#   https://icecast.radiofrance.fr/fipgroove-hifi.aac
+#   https://direct.fipradio.fr/live/fipgroove-midfi.mp3   (historical name)
+#   https://stream.radiofrance.fr/fipgroove/fipgroove.m3u8 (HLS)
+# and what stops `fip` from capturing `fipgroove`. Do NOT put a whole URL here:
+# the token rule would no longer apply as intended.
+#
+# `id` is the identifier the live endpoint expects. It is NOT a serial number of
+# your own choosing: an unknown one answers "Bad Request", and one belonging to
+# another station would display that other station's titles, with no sign of
+# error.
+#
+# `rules` is OPTIONAL and defaults to "webrf_fip_player". It is the rendering
+# profile the server applies to its answer, and the wrong one leaves the plugin
+# silent rather than failing:
+#
+#   webrf_fip_player   the answer is the SONG: title and artist already
+#                      separated, and its duration. Only FIP, its webradios and
+#                      France Musique's answer this way.
+#   webrf_mouv_player  the answer is the PROGRAMME, with what is playing inside
+#                      it as a single "ARTIST - Title" string. Use this for
+#                      anything else — it is the only profile that surfaces the
+#                      current song on Mouv', France Musique and the local
+#                      stations. Its name is incidental: it is a server-side
+#                      profile, not a Mouv' endpoint.
+#
+# If a station you add stays silent, try the other value before suspecting the
+# identifier.
+#
+# Example (these values are already in the embedded table, no need to copy
+# them — it is the shape that is being shown):
+#
+# [[station]]
+# label = "FIP Groove"
+# mounts = ["fipgroove"]
+# id = 66
+# rules = "webrf_fip_player"

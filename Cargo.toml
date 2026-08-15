@@ -9,6 +9,7 @@ members = [
     "crates/ritornello-plugin-cd",
     "crates/ritornello-plugin-musicbrainz",
     "crates/ritornello-plugin-ouifm-metas",
+    "crates/ritornello-plugin-radiofrance-metas",
     "crates/ritornello-plugin-console",
     "crates/ritornello-plugin-generic-input",
 ]
