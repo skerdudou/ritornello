@@ -413,4 +413,45 @@ mod tests {
         assert!(!json.contains("status"));
         assert!(!json.contains("overlay"));
     }
+
+    #[test]
+    fn playerstate_desyrialise_le_morceau_aplati_et_une_incrustation() {
+        // C'est le chemin réel des afficheurs (`run_display_plugin` désérialise
+        // exactement cette forme, voir le SDK) : `#[serde(flatten)]` sur le
+        // morceau combiné à un enum étiqueté en interne (`Overlay`, `kind`) est
+        // la conjonction la plus susceptible de surprendre avec serde. Les
+        // autres tests de ce fichier ne couvrent que l'un ou l'autre
+        // séparément ; en cas de régression ici, le symptôme serait muet côté
+        // utilisateur (un `warn!` dans les logs et un écran figé).
+        let json = r#"{
+            "source": "radio",
+            "volume": 65,
+            "muted": false,
+            "standby": false,
+            "preset": 3,
+            "preset_count": 12,
+            "preset_name": "France Inter",
+            "status": "RADIO",
+            "overlay": {"kind": "volume", "level": 65, "muted": false, "text": "VOLUME 65 %", "remaining_ms": 4000},
+            "artist": "Miles Davis",
+            "title": "So What",
+            "album": "Kind of Blue",
+            "duration_s": 545,
+            "origin": "icy"
+        }"#;
+        let etat: PlayerState = serde_json::from_str(json).unwrap();
+        assert_eq!(etat.source, "radio");
+        assert_eq!(etat.preset_name.as_deref(), Some("France Inter"));
+        assert_eq!(
+            etat.overlay,
+            Some(Overlay::Volume { level: 65, muted: false, text: "VOLUME 65 %".into(), remaining_ms: 4000 })
+        );
+        // Le morceau aplati : ces champs viennent du même niveau JSON que
+        // `source`/`preset`/`overlay`, pas d'un objet imbriqué.
+        assert_eq!(etat.morceau.artist.as_deref(), Some("Miles Davis"));
+        assert_eq!(etat.morceau.title.as_deref(), Some("So What"));
+        assert_eq!(etat.morceau.album.as_deref(), Some("Kind of Blue"));
+        assert_eq!(etat.morceau.duration_s, Some(545));
+        assert_eq!(etat.morceau.origin.as_deref(), Some("icy"));
+    }
 }
