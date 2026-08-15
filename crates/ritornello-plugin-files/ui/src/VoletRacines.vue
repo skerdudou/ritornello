@@ -78,16 +78,21 @@ function retirer(i: number): void {
 const aUnPartage = computed(() => lignes.value.some((l) => l.kind === 'smb'))
 
 async function enregistrer(): Promise<void> {
-  // La charge est **uniforme** : tous les champs partent quel que soit le
-  // genre. Les omettre selon le genre obligerait le plugin à distinguer
-  // « absent » de « vidé », distinction qu'il n'a aucune raison de porter.
+  // `path` et `subpath` partent à `null` quand ils sont vides, et non à `""` :
+  // côté plugin ce sont des `Option<String>`, et `Some("")` n'est pas « pas de
+  // sous-chemin » — c'est un sous-chemin vide, que `Roots::validate` refuse
+  // (`champ_sur` rejette la chaîne vide). Le partage serait alors impossible à
+  // enregistrer sans qu'aucun champ visible n'ait l'air fautif. Les autres
+  // champs partent toujours, même vides : ce sont des `String` côté plugin, et
+  // les omettre l'obligerait à distinguer « absent » de « vidé ».
+  const facultatif = (v: string) => (v.trim() ? v.trim() : null)
   const roots = lignes.value.map((l) => ({
     name: l.name.trim(),
     kind: l.kind,
-    path: l.path.trim(),
+    path: facultatif(l.path),
     host: l.host.trim(),
     share: l.share.trim(),
-    subpath: l.subpath.trim(),
+    subpath: facultatif(l.subpath),
     user: l.user.trim(),
     domain: l.domain.trim(),
     writable: l.writable,

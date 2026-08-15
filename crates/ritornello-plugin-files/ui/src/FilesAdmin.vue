@@ -123,7 +123,9 @@ async function envoyer(charge: Record<string, unknown>): Promise<Donnees | null>
   }
 }
 
-const scan = computed(() => donnees.value?.scan ?? { running: false, found: 0, dir: '' })
+const scan = computed(
+  () => donnees.value?.scan ?? { running: false, found: 0, dir: '', error: '' },
+)
 </script>
 
 <template>
@@ -145,6 +147,18 @@ const scan = computed(() => donnees.value?.scan ?? { running: false, found: 0, d
     <p v-if="scan.running" data-scan class="text-sm text-muted-foreground">
       {{ t('scan_progress', { found: scan.found, dir: scan.dir }) }}
     </p>
+
+    <!-- Incident du **dernier** balayage, déjà traduit par le plugin et affiché
+         verbatim. Il survit à la fin du balayage, et c'est le seul endroit où la
+         page peut apprendre qu'un ajout a échoué : `add_dir` rend la main bien
+         avant la fin de la marche récursive, donc son accusé de réception ne
+         dit rien de son issue. -->
+    <pre
+      v-if="scan.error"
+      data-scan-error
+      class="whitespace-pre-wrap rounded-md border border-destructive p-2 font-mono text-sm"
+      >{{ scan.error }}</pre
+    >
 
     <template v-if="donnees">
       <VoletRacines

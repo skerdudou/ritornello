@@ -3,8 +3,8 @@ import {
   cibleRacine,
   feuille,
   formaterDuree,
+  normaliserBrowse,
   normaliserDonnees,
-  normaliserEntrees,
   normaliserRacine,
 } from './donnees'
 
@@ -28,36 +28,50 @@ describe('normalisation des racines', () => {
   })
 })
 
-describe('normalisation des niveaux d’arborescence', () => {
-  it('accepte les trois formes plausibles rendues par le plugin', () => {
-    // Ce champ n'est pas décrit par le contrat écrit, seulement par
-    // l'implémentation du plugin. Un lecteur tolérant coûte dix lignes ; une
-    // page qui affiche « dossier vide » parce que le serveur a nommé son champ
-    // `dirs` au lieu d'`entries` coûte une séance de débogage à travers le
-    // socket d'admin.
-    const attendu = [
+describe('normalisation d’un parcours', () => {
+  it('recolle le chemin de chaque entrée, le plugin ne rendant que des noms', () => {
+    // Régression encodée : `scan::list_dir` rend `dirs` et `files` comme de
+    // **simples noms**, relatifs au répertoire lu. Une page qui les prendrait
+    // pour des chemins renverrait `Jazz` au lieu d'`Albums/Jazz` dans le
+    // `browse` suivant — donc un autre dossier, ou un refus.
+    const nav = normaliserBrowse({
+      root: 'nas',
+      path: 'Albums',
+      dirs: ['Jazz'],
+      files: ['01.mp3'],
+      results: [],
+    })
+    expect(nav.entrees).toEqual([
       { name: 'Jazz', path: 'Albums/Jazz', dir: true },
       { name: '01.mp3', path: 'Albums/01.mp3', dir: false },
-    ]
-    expect(normaliserEntrees(attendu)).toEqual(attendu)
-    expect(normaliserEntrees({ entries: attendu })).toEqual(attendu)
-    expect(
-      normaliserEntrees({
-        dirs: [{ name: 'Jazz', path: 'Albums/Jazz' }],
-        files: [{ name: '01.mp3', path: 'Albums/01.mp3' }],
-      }),
-    ).toEqual(attendu)
-  })
-
-  it('déduit le nom du chemin quand le plugin ne le donne pas', () => {
-    expect(normaliserEntrees({ files: ['Albums/Jazz/01.mp3'] })).toEqual([
-      { name: '01.mp3', path: 'Albums/Jazz/01.mp3', dir: false },
     ])
   })
 
-  it('rend une liste vide plutôt que de lever sur un champ absent', () => {
-    expect(normaliserEntrees(undefined)).toEqual([])
-    expect(normaliserEntrees(null)).toEqual([])
+  it('ne préfixe rien au niveau supérieur, dont le chemin est vide', () => {
+    const nav = normaliserBrowse({ root: 'nas', path: '', dirs: ['Albums'], files: [] })
+    expect(nav.entrees).toEqual([{ name: 'Albums', path: 'Albums', dir: true }])
+  })
+
+  it('prend les résultats de recherche pour des chemins complets', () => {
+    // À l'inverse d'un niveau : une recherche traverse l'arborescence, ses
+    // trouvailles ne sont pas dans le répertoire courant.
+    const nav = normaliserBrowse({
+      root: 'nas',
+      path: '',
+      dirs: [],
+      files: [],
+      results: ['Albums/Jazz/miles.flac'],
+      truncated: true,
+    })
+    expect(nav.resultats).toEqual([
+      { name: 'miles.flac', path: 'Albums/Jazz/miles.flac', dir: false },
+    ])
+    expect(nav.tronque).toBe(true)
+  })
+
+  it('rend un parcours vide plutôt que de lever sur un champ absent', () => {
+    expect(normaliserBrowse(undefined).entrees).toEqual([])
+    expect(normaliserBrowse({}).tronque).toBe(false)
   })
 })
 
@@ -66,15 +80,17 @@ describe('normalisation de la charge complète', () => {
     const d = normaliserDonnees({})
     expect(d.roots).toEqual([])
     expect(d.playlist).toEqual([])
-    expect(d.scan).toEqual({ running: false, found: 0, dir: '' })
+    expect(d.scan).toEqual({ running: false, found: 0, dir: '', error: '' })
     expect(d.unresolved).toEqual([])
   })
 
-  it('ramène les entrées non résolues à des chemins, quel que soit leur emballage', () => {
-    // Elles s'affichent dans un encart : une liste chargée qui rétrécit sans
-    // rien dire est un défaut qu'on met des mois à attribuer.
-    const d = normaliserDonnees({ unresolved: ['a/b.mp3', { path: 'c/d.flac' }] })
-    expect(d.unresolved).toEqual(['a/b.mp3', 'c/d.flac'])
+  it('reprend l’incident du dernier balayage, qui survit à sa fin', () => {
+    // `add_dir` rend la main bien avant la fin de la marche récursive : c'est
+    // le seul endroit où la page peut apprendre qu'un ajout a échoué.
+    const d = normaliserDonnees({
+      scan: { running: false, found: 0, dir: '', error: 'could not read "Albums"' },
+    })
+    expect(d.scan.error).toBe('could not read "Albums"')
   })
 
   it('replie une piste sans nom sur le dernier segment de son chemin', () => {

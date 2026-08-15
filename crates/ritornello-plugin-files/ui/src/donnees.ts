@@ -39,6 +39,15 @@ export interface Scan {
   running: boolean
   found: number
   dir: string
+  /**
+   * Refus ou incident du **dernier** balayage, déjà traduit par le plugin.
+   *
+   * Il survit à la fin du balayage, et c'est délibéré côté plugin : `add_dir`
+   * rend la main bien avant que la marche récursive ne se termine, donc c'est
+   * le seul endroit où la page peut apprendre qu'un ajout a échoué. La chaîne
+   * vide vaut « rien à signaler ».
+   */
+  error: string
 }
 
 export interface Enregistree {
@@ -47,11 +56,30 @@ export interface Enregistree {
   where: string
 }
 
-/** Une entrée d'un niveau d'arborescence. */
+/** Une entrée d'un niveau d'arborescence, chemin **relatif à la racine**. */
 export interface Entree {
   name: string
   path: string
   dir: boolean
+}
+
+/**
+ * Dernier parcours ou dernière recherche, tels que le plugin les range.
+ *
+ * `set_data` ne rend qu'un `Ok`/`Err`, sans charge utile : le contenu voyage
+ * par `get_data`, comme la recherche d'annuaire du plugin radio. Les deux
+ * opérations écrivent au même endroit — une recherche efface donc le niveau
+ * parcouru, et réciproquement.
+ */
+export interface Navigation {
+  root: string
+  path: string
+  /** Contenu du niveau `path`, dossiers d'abord puis fichiers. */
+  entrees: Entree[]
+  /** Résultats de la dernière recherche. */
+  resultats: Entree[]
+  /** Le plugin a plafonné la recherche : il y en avait davantage. */
+  tronque: boolean
 }
 
 export interface Donnees {
@@ -61,10 +89,7 @@ export interface Donnees {
   scan: Scan
   saved: Enregistree[]
   unresolved: string[]
-  /** Dernier niveau parcouru, rendu par le plugin après une opération `browse`. */
-  listing: Entree[]
-  /** Derniers résultats de recherche, après une opération `search`. */
-  search: Entree[]
+  browse: Navigation
 }
 
 /** Destination « stockage interne » du plugin, par opposition à un nom de racine. */
@@ -122,37 +147,36 @@ export function normaliserRacine(brut: unknown): Racine {
 }
 
 /**
- * Entrées d'un niveau, quelle que soit la forme rendue.
+ * Recompose un parcours ou une recherche.
  *
- * Trois formes sont acceptées — un tableau plat d'entrées portant `dir`, un
- * objet `{entries}`, ou un objet `{dirs, files}` — parce que ce champ n'est pas
- * décrit par le contrat écrit du plugin, seulement par son implémentation. Un
- * lecteur tolérant coûte dix lignes ; une page qui affiche un dossier vide
- * parce que le serveur a nommé son champ `dirs` au lieu d'`entries` coûte une
- * séance de débogage à travers le socket d'admin.
+ * Le plugin rend `dirs` et `files` comme de **simples noms**, pas des chemins :
+ * un niveau est toujours lu relativement à son répertoire, et répéter le
+ * préfixe sur chaque entrée gonflerait la réponse pour rien. C'est donc à la
+ * page de recoller `path/nom` — et c'est ce chemin-là, relatif à la racine, que
+ * les opérations `browse`, `add_dir` et `add_file` attendent en retour.
+ *
+ * `results`, à l'inverse, porte déjà des chemins complets relatifs à la racine :
+ * une recherche traverse l'arborescence, ses trouvailles ne sont donc pas dans
+ * le répertoire courant.
  */
-export function normaliserEntrees(brut: unknown): Entree[] {
-  if (brut == null) return []
-  if (Array.isArray(brut)) return brut.map((e) => entree(e, undefined))
-  const o = brut as Record<string, unknown>
-  if (Array.isArray(o.entries)) return o.entries.map((e) => entree(e, undefined))
-  const dossiers = tableau(o.dirs).map((e) => entree(e, true))
-  const fichiers = tableau(o.files).map((e) => entree(e, false))
-  return [...dossiers, ...fichiers]
-}
-
-function entree(brut: unknown, dossier: boolean | undefined): Entree {
-  // Une entrée réduite à une chaîne est acceptée : c'est le chemin, et le nom
-  // s'en déduit. Le plugin n'a alors rien à inventer pour les listes plates.
-  if (typeof brut === 'string') {
-    return { name: feuille(brut), path: brut, dir: dossier ?? false }
-  }
+export function normaliserBrowse(brut: unknown): Navigation {
   const o = (brut ?? {}) as Record<string, unknown>
-  const path = chaine(o.path)
+  const base = chaine(o.path)
+  const joindre = (nom: string) => (base ? `${base}/${nom}` : nom)
+  const entrees = [
+    ...tableau(o.dirs).map((n) => ({ name: chaine(n), path: joindre(chaine(n)), dir: true })),
+    ...tableau(o.files).map((n) => ({ name: chaine(n), path: joindre(chaine(n)), dir: false })),
+  ]
   return {
-    name: chaine(o.name) || feuille(path),
-    path,
-    dir: dossier ?? o.dir === true,
+    root: chaine(o.root),
+    path: base,
+    entrees,
+    resultats: tableau(o.results).map((p) => ({
+      name: feuille(chaine(p)),
+      path: chaine(p),
+      dir: false,
+    })),
+    tronque: o.truncated === true,
   }
 }
 
@@ -178,19 +202,20 @@ export function normaliserDonnees(brut: unknown): Donnees {
       }
     }),
     index: nombre(o.index),
-    scan: { running: scan.running === true, found: nombre(scan.found), dir: chaine(scan.dir) },
+    scan: {
+      running: scan.running === true,
+      found: nombre(scan.found),
+      dir: chaine(scan.dir),
+      error: chaine(scan.error),
+    },
     saved: tableau(o.saved).map((s) => {
       const e = (s ?? {}) as Record<string, unknown>
       return { name: chaine(e.name), where: chaine(e.where) || INTERNE }
     }),
-    // Les entrées non résolues d'un m3u : le plugin peut aussi bien rendre des
-    // chemins nus que des objets. Les deux se ramènent au chemin, seule chose
-    // que l'utilisateur peut rapprocher de son fichier.
-    unresolved: tableau(o.unresolved).map((u) =>
-      typeof u === 'string' ? u : chaine((u as Record<string, unknown>)?.path),
-    ),
-    listing: normaliserEntrees(o.listing),
-    search: normaliserEntrees(o.search),
+    // Les entrées d'un m3u chargé qu'aucune règle n'a su résoudre : des chemins
+    // bruts, seule chose que l'utilisateur puisse rapprocher de ses fichiers.
+    unresolved: tableau(o.unresolved).map(chaine),
+    browse: normaliserBrowse(o.browse),
   }
 }
 

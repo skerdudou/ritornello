@@ -52,6 +52,7 @@ export const CATALOGUE: Record<string, string> = {
   search_placeholder: 'chercher',
   btn_search: 'Chercher',
   no_results: 'Aucun résultat',
+  search_truncated: 'Seuls les {count} premiers sont affichés : affinez la recherche.',
   btn_add_dir: 'Ajouter ce dossier',
   btn_add_file: 'Ajouter ce fichier',
   btn_expand: 'Déplier',
@@ -79,15 +80,26 @@ export const CATALOGUE: Record<string, string> = {
   btn_load_playlist: 'Charger',
 }
 
+/** Contenu du champ `browse`, où le plugin range parcours **et** recherche. */
+export interface Navigue {
+  root: string
+  path: string
+  /** Noms nus, pas des chemins : c'est ce que `scan::list_dir` rend. */
+  dirs: string[]
+  files: string[]
+  /** Chemins relatifs à la racine, rendus par `search`. */
+  results: string[]
+  truncated?: boolean
+}
+
 export interface EtatServeur {
   roots?: unknown[]
   playlist?: unknown[]
   index?: number
-  scan?: { running: boolean; found: number; dir: string }
+  scan?: { running: boolean; found: number; dir: string; error?: string }
   saved?: unknown[]
-  unresolved?: unknown[]
-  listing?: unknown
-  search?: unknown
+  unresolved?: string[]
+  browse?: Navigue
 }
 
 export function etat(partiel: EtatServeur = {}): Required<EtatServeur> {
@@ -98,8 +110,7 @@ export function etat(partiel: EtatServeur = {}): Required<EtatServeur> {
     scan: { running: false, found: 0, dir: '' },
     saved: [],
     unresolved: [],
-    listing: [],
-    search: [],
+    browse: { root: '', path: '', dirs: [], files: [], results: [] },
     ...partiel,
   }
 }
