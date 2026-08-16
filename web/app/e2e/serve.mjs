@@ -45,7 +45,7 @@
 // *this* node process.
 import { randomBytes } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -127,6 +127,33 @@ const pistes = ['01', '02', '03']
   }
 }
 
+// The device wizard opens on the mounted volumes, read from `/proc/mounts`.
+// A journey has no privilege and can mount nothing, so it *describes* a volume
+// instead of creating one: the plugin reads the table through
+// `RITORNELLO_FILES_PROC_MOUNTS`, which exists for exactly this.
+//
+// `proc` is listed on purpose. Without it the journey would only prove that a
+// declared volume is browsable; with it, it also proves that a pseudo
+// filesystem is kept out of the list — the guard that stops a recursive add
+// from walking into `/proc/self`.
+const procMounts = `${dirConfig}/proc-mounts`
+writeFileSync(
+  join(dirConfigNative, 'proc-mounts'),
+  `/dev/sda1 ${dirConfig} ext4 rw,relatime 0 0\nproc /proc proc rw,relatime 0 0\n`,
+)
+
+// A fake `smbclient`, so the network wizard can be played end to end on a
+// machine with no NAS — and, more to the point, on anyone's machine. It prints
+// output *captured from a real Synology*, so the parsing is exercised against
+// what it will actually meet rather than against a reconstruction.
+const dirFauxBin = `${dirConfig}/bin`
+mkdirSync(join(dirConfigNative, 'bin'), { recursive: true })
+{
+  const cible = join(dirConfigNative, 'bin', 'smbclient')
+  copyFileSync(join(racineNative, 'web', 'app', 'e2e', 'faux-smbclient.sh'), cible)
+  chmodSync(cible, 0o755)
+}
+
 // `files` is declared **without** `admin = true`: that field no longer exists
 // (see plugins.rs) — the core offers `--admin-socket` to every plugin, and the
 // one with a page declares it by *binding* that socket. An old file carrying
@@ -184,6 +211,7 @@ const env = {
   RITORNELLO_FILES_STATE: `${dirExec}/plugin-files.json`,
   RITORNELLO_FILES_MPV_PLAYLIST: `${dirExec}/plugin-files.m3u`,
   RITORNELLO_FILES_PLAYLISTS: `${dirExec}/playlists`,
+  RITORNELLO_FILES_PROC_MOUNTS: procMounts,
 }
 
 // Fixed name (not the random one of the throwaway directory):
@@ -211,9 +239,13 @@ if (estWindows) {
   // `wsl.exe` call (WSL2 is a single VM, shared between all `wsl.exe`
   // calls, so PIDs stay valid from one call to the next).
   const scriptLancementNative = join(dirConfigNative, 'lancer.sh')
+  // `PATH` is exported rather than passed through `env KEY='value'`: the
+  // assignments above are single-quoted, so a `$PATH` written there would reach
+  // the plugin literally instead of expanded — and the fake `smbclient` would
+  // shadow nothing while the real `PATH` would be destroyed.
   writeFileSync(
     scriptLancementNative,
-    `#!/usr/bin/env bash\necho $$ > '${pidFile}'\nexec env ${affectations} '${racine}/target/debug/ritornello-core'\n`,
+    `#!/usr/bin/env bash\necho $$ > '${pidFile}'\nexport PATH='${dirFauxBin}':"$PATH"\nexec env ${affectations} '${racine}/target/debug/ritornello-core'\n`,
   )
   chmodSync(scriptLancementNative, 0o755)
   writeFileSync(
@@ -225,7 +257,9 @@ if (estWindows) {
   writeFileSync(etatPath, JSON.stringify({ estWindows, dirConfigNative, mediaRoot }, null, 2))
   enfant = spawn(`${racine}/target/debug/ritornello-core`, {
     stdio: 'inherit',
-    env: { ...process.env, ...env },
+    // Same reason as the `export PATH` of the Windows branch: the fake
+    // `smbclient` has to come first, without losing the real `PATH`.
+    env: { ...process.env, ...env, PATH: `${dirFauxBin}:${process.env.PATH ?? ''}` },
   })
 }
 
