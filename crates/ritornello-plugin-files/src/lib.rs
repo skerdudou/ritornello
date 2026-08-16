@@ -9,13 +9,16 @@
 //! placer lui imposerait des dépendances qu'un `oneshot` lancé par systemd n'a
 //! aucune raison de tirer.
 
+pub mod explore;
 pub mod m3u;
 pub mod mount;
 pub mod mount_options;
 pub mod playlist;
 pub mod roots;
 pub mod scan;
+pub mod smb;
 pub mod store;
+pub mod volumes;
 
 // Uniquement compilé sous `cargo test` : rien de ce module ne sert au runtime
 // dans ce crate. Il est employé par `build.rs` (compilation séparée, via
