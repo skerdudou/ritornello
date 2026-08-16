@@ -230,8 +230,18 @@ within ten seconds leave the unit failed, cleared with
 ## Network shares
 
 The `files` source plays audio files from a folder of the device or from
-an SMB share. Only the share needs anything installed: `cifs-utils` (for
-`mount.cifs`) and the two files `deploy.sh` puts in place —
+an SMB share. Only the share needs anything installed:
+
+    sudo apt install cifs-utils smbclient
+
+`cifs-utils` provides `mount.cifs`, without which a share is declared but
+never mounts; `smbclient` is **optional** — it is what lets the page browse
+a share *before* declaring it, and without it that wizard is greyed out
+while manual entry keeps working. [plugins.md](plugins.md) says what each
+one degrades when absent.
+
+Beyond those packages, a share needs the two files `deploy.sh` puts in
+place —
 `/etc/systemd/system/ritornello-media-mount.service` and
 `/etc/polkit-1/rules.d/51-ritornello-media.rules`. The script also creates
 `/mnt/ritornello` and `/etc/ritornello/media-credentials` (mode `0700`,

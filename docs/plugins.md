@@ -173,6 +173,49 @@ plugin has nothing to pace itself. The `Play` it issues is marked
 idle at the end would look like a dropped stream and the core would
 restart the list in a loop.
 
+### Package prerequisites
+
+Two system packages, only one of which is indispensable.
+
+| Package | Role | Without it |
+|---|---|---|
+| `cifs-utils` | mounting an SMB share | A network source is declared but never mounts: the plugin reports `mount`'s error and the source stays "not mounted". Folders of the device are unaffected. |
+| `smbclient` | browsing a share **before** mounting it | The network wizard is greyed out and says so. A share is still declared by entering host, share and subfolder by hand. Nothing else is affected. |
+
+```sh
+sudo apt install cifs-utils smbclient
+```
+
+The plugin **probes** for `smbclient` at startup and re-exposes the answer
+as `can_browse_smb`. The page greys the wizard out rather than failing on
+click, the same way the System tab greys out rebooting when logind refuses
+it. The probe is redone on every connection attempt: installing the package
+without restarting the service gives a correct answer, not a stale refusal.
+
+### Declaring a source
+
+No address is typed blind any more: you browse first, you declare after.
+
+- **A folder of the device** — the dialog opens on the mounted volumes,
+  read from `/proc/mounts` and filtered through a whitelist of filesystem
+  types. Pseudo-filesystems (`/proc`, `/sys`, `/run`, `/dev`) are neither
+  offered nor browsable: without that bound, an "add to playlist" launched
+  on `/` would wander off into `/proc/self`'s recursive links.
+- **A network share** — you enter an address, connect, `smbclient`
+  enumerates the shares, and you walk down the folders from there. Nothing
+  is mounted until you have confirmed.
+
+The root's technical name is **derived** from the share name or from the
+last segment of the chosen path, and deduplicated. It is no longer typed:
+it becomes a component of `/mnt/ritornello/<name>` *and* a credentials file
+name, so the derivation produces a valid name by construction rather than
+by luck.
+
+The mount **follows the declaration**: the plugin asks for reconciliation
+itself. A failure does not undo the declaration — everything just entered
+would be lost to a sleeping NAS — it is reported on the page, with a retry
+button.
+
 ### The privilege boundary
 
 The service is unprivileged and runs with `NoNewPrivileges=true`, so it
