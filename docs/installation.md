@@ -250,14 +250,21 @@ after a reboot. On a device already in service, remember the entry to add
 to `plugins.toml` by hand — see [plugins.md](plugins.md).
 
 **Declaring a share** happens in the browser, at
-`http://<host>:8080/plugins/files/`: name the root (lowercase letters,
-digits and dashes — it becomes a directory name), give the server, the
-share, optionally a subfolder, then the user and password. Saving writes
-`/etc/ritornello/media-roots.toml` and
-`/etc/ritornello/media-credentials/<name>.cred`, and asks systemd to run
-the mount unit. The mount point is not yours to pick: it is always
-`/mnt/ritornello/<name>`. `deploy/media-roots.example.toml` documents the
-file for the rare case of editing it by hand.
+`http://<host>:8080/plugins/files/`. Give the server address, connect, and
+the wizard lists the shares it exposes; pick one, walk down to the folder
+you want, and confirm. Nothing is mounted until you do.
+
+You are not asked to name anything. The internal name is derived from the
+share and de-duplicated, because it becomes both a directory name and a
+credentials filename — deriving it guarantees a valid one, where typing it
+allowed a refusal with no way to see why.
+
+Confirming writes `/etc/ritornello/media-roots.toml` and
+`/etc/ritornello/media-credentials/<name>.cred`, then asks systemd to run
+the mount unit on its own. The mount point is not yours to pick: it is
+always `/mnt/ritornello/<name>`.
+`deploy/media-roots.example.toml` documents the file for the rare case of
+editing it by hand.
 
 The service does not mount anything itself — it is unprivileged, with
 `NoNewPrivileges=true`. It asks systemd to start
