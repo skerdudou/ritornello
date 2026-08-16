@@ -169,9 +169,14 @@ refusé.
 **Le montage suit la déclaration.** `AddSource` écrit la table et les
 identifiants, puis appelle `mount::reconcile` lui-même. Un échec ne défait pas
 la déclaration — sinon l'utilisateur perdrait sa saisie à cause d'un NAS
-endormi ; il est rapporté dans un champ `mount_error` porté par la ligne de la
-source, comme `scan.error` rapporte l'échec d'un balayage terminé depuis
-longtemps.
+endormi ; il est rapporté dans un champ `mount_error`, comme `scan.error`
+rapporte l'échec d'un balayage terminé depuis longtemps.
+
+Ce champ est **global et non porté par chaque source**, parce que
+`systemctl start` réconcilie toutes les racines d'un coup et ne rend qu'un seul
+résultat : prétendre attribuer cet échec à une source précise serait une
+information inventée. Le détail par source reste le booléen `mounted`, lui
+observé dans `/proc/mounts`.
 
 `RemoveSource` retire la source, **efface son fichier d'identifiants** et
 réconcilie. L'effacement manque aujourd'hui : retirer un partage laisse un
@@ -282,7 +287,8 @@ Ajouts à `get_data` :
     "shares": [], "dirs": [], "audio_count": 0,
     "busy": false, "error": null
   },
-  "roots": [{ "…": "…", "mount_error": null }]
+  "mount_error": null,
+  "roots": [{ "…": "…", "mounted": true }]
 }
 ```
 
