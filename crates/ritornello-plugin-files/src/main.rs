@@ -282,9 +282,28 @@ async fn main() -> Result<()> {
         preset_count_rx: admin_socket.as_ref().map(|_| preset_count_rx),
     };
 
+    // Sonde au démarrage plutôt qu'à l'usage : la page doit pouvoir griser
+    // l'assistant réseau dès son ouverture, comme l'onglet Système grise le
+    // redémarrage sur `can_reboot`. La sonde est refaite à chaque tentative de
+    // connexion, pour qu'installer le paquet sans redémarrer donne un résultat
+    // juste.
+    let smb_ok = Arc::new(std::sync::atomic::AtomicBool::new(
+        ritornello_plugin_files::smb::available().await,
+    ));
+    if !smb_ok.load(std::sync::atomic::Ordering::Relaxed) {
+        tracing::info!("smbclient is not available: the network wizard will be offered read-only");
+    }
+
     let admin = admin_socket.map(|socket| {
         (
             admin::FilesAdmin {
+                explore: ritornello_plugin_files::explore::Explorateur::new(
+                    creds_dir.clone(),
+                    catalog.clone(),
+                    smb_ok.clone(),
+                ),
+                mount_error: Arc::new(Mutex::new(None)),
+                smb_ok,
                 roots_path,
                 creds_dir,
                 internal_playlists: playlists_dir,

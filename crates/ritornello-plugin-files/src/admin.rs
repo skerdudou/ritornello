@@ -15,6 +15,7 @@ use ritornello_plugin_files::m3u::Entry;
 use ritornello_plugin_files::playlist::Playlist;
 use ritornello_plugin_files::roots::{Root, RootKind, Roots};
 use ritornello_plugin_files::store::{self, Location};
+use ritornello_plugin_files::volumes;
 use ritornello_plugin_files::{mount, scan};
 use ritornello_plugin_sdk::AdminPlugin;
 use serde::{Deserialize, Serialize};
@@ -61,43 +62,81 @@ pub struct FilesAdmin {
     /// sans attendre qu'une piste soit jouée — sinon la grille de la
     /// télécommande web garderait l'ancien jeu de numéros.
     pub preset_count_tx: tokio::sync::watch::Sender<u8>,
-}
-
-/// Racine telle que la page l'envoie : comme `Root`, plus le mot de passe.
-///
-/// Type distinct, et c'est délibéré : le mot de passe ne doit exister que dans
-/// ce sens-là. `Root` ne le porte pas, donc `get_data` ne peut pas le rendre
-/// par inadvertance, même si quelqu'un ajoute un champ plus tard.
-#[derive(Debug, Clone, Deserialize)]
-pub struct RootInput {
-    pub name: String,
-    pub kind: RootKind,
-    #[serde(default)]
-    pub path: Option<String>,
-    #[serde(default)]
-    pub host: String,
-    #[serde(default)]
-    pub share: String,
-    #[serde(default)]
-    pub subpath: Option<String>,
-    #[serde(default)]
-    pub user: String,
-    #[serde(default)]
-    pub domain: String,
-    #[serde(default)]
-    pub writable: bool,
-    /// **Vide veut dire « garde celui déjà enregistré »**. Sans cette règle,
-    /// rouvrir la page et cliquer « Enregistrer » suffirait à casser le
-    /// montage, sans que rien ne l'annonce — la page ne peut pas réafficher un
-    /// mot de passe qu'elle ne reçoit jamais.
-    #[serde(default)]
-    pub password: String,
+    /// L'assistant en cours. Vit ici plutôt que dans son propre verrou : une
+    /// seule popin est ouverte à la fois, et le protocole admin est
+    /// séquentiel.
+    pub explore: ritornello_plugin_files::explore::Explorateur,
+    /// Résultat de la dernière réconciliation de montage.
+    ///
+    /// Le montage suit désormais la déclaration : l'utilisateur ne clique plus
+    /// « Monter ». Un échec ne doit donc pas se perdre — sans ce champ, une
+    /// source déclarée resterait « non montée » sans jamais dire pourquoi.
+    pub mount_error: Arc<Mutex<Option<String>>>,
+    /// `smbclient` est-il utilisable. Sondé au démarrage, resondé à chaque
+    /// tentative de connexion.
+    pub smb_ok: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
-    SaveRoots { roots: Vec<RootInput> },
+    /// Déclaration d'une source, d'un seul geste : l'assistant a déjà tout
+    /// recueilli, il n'y a plus de table à réécrire ni de nom à saisir.
+    ///
+    /// Le mot de passe ne voyage que dans ce sens-là : `Root` ne le porte pas,
+    /// donc `get_data` ne peut pas le rendre par inadvertance, même si
+    /// quelqu'un ajoute un champ plus tard.
+    AddSource {
+        kind: RootKind,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        host: String,
+        #[serde(default)]
+        share: String,
+        #[serde(default)]
+        subpath: Option<String>,
+        #[serde(default)]
+        user: String,
+        #[serde(default)]
+        domain: String,
+        /// **Vide veut dire « prends celui de la session, à défaut celui déjà
+        /// enregistré »**. La page ne peut pas renvoyer un secret qu'elle ne
+        /// reçoit jamais, et l'assistant ne doit pas le faire retaper à la
+        /// confirmation alors qu'il vient de servir à se connecter.
+        #[serde(default)]
+        password: String,
+        #[serde(default)]
+        writable: bool,
+    },
+    RemoveSource {
+        name: String,
+    },
+    SetWritable {
+        name: String,
+        writable: bool,
+    },
+    ExploreOpen {
+        kind: ritornello_plugin_files::explore::Kind,
+    },
+    ExploreClose,
+    ExploreLocal {
+        path: String,
+    },
+    SmbConnect {
+        host: String,
+        #[serde(default)]
+        user: String,
+        #[serde(default)]
+        password: String,
+        #[serde(default)]
+        domain: String,
+    },
+    SmbBrowse {
+        share: String,
+        #[serde(default)]
+        path: String,
+    },
     Mount,
     Browse { root: String, #[serde(default)] path: String },
     Search { root: String, query: String },
@@ -207,6 +246,25 @@ impl FilesAdmin {
         Ok(())
     }
 
+    /// Écrit la table des racines, atomiquement.
+    ///
+    /// Le fichier temporaire puis le renommage : une coupure de courant au
+    /// milieu d'une écriture directe laisserait une table tronquée, que le
+    /// démarrage suivant refuserait — donc plus aucune source.
+    fn ecrire_table(&self, table: &Roots) -> Result<(), String> {
+        let texte = toml::to_string_pretty(table).map_err(|e| {
+            tracing::warn!("serialising the roots table: {e}");
+            self.mot("store_io_error").replace("{path}", &self.roots_path.display().to_string())
+        })?;
+        let tmp = self.roots_path.with_extension("toml.tmp");
+        std::fs::write(&tmp, texte).and_then(|_| std::fs::rename(&tmp, &self.roots_path)).map_err(
+            |e| {
+                tracing::warn!("saving the roots table: {e}");
+                self.mot("store_io_error").replace("{path}", &self.roots_path.display().to_string())
+            },
+        )
+    }
+
     /// Relit le mot de passe déjà enregistré pour une racine.
     ///
     /// Employé quand la page en envoie un vide : elle ne peut pas renvoyer ce
@@ -284,8 +342,16 @@ impl AdminPlugin for FilesAdmin {
         let scan = self.scan.lock().unwrap().clone();
         let unresolved = self.unresolved.lock().unwrap().clone();
         let browse = self.browse.lock().unwrap().clone();
+        let volumes = volumes::volumes(&volumes::lire_proc_mounts());
+        let mount_error = self.mount_error.lock().unwrap().clone();
+        let can_browse_smb = self.smb_ok.load(std::sync::atomic::Ordering::Relaxed);
+        let explore = self.explore.vue();
         serde_json::json!({
             "roots": racines,
+            "volumes": volumes,
+            "can_browse_smb": can_browse_smb,
+            "explore": explore,
+            "mount_error": mount_error,
             "playlist": pistes,
             "index": index,
             "scan": scan,
@@ -305,57 +371,135 @@ impl AdminPlugin for FilesAdmin {
         let op: Op = serde_json::from_value(data)
             .map_err(|e| self.mot("bad_request").replace("{detail}", &e.to_string()))?;
         match op {
-            Op::SaveRoots { roots } => {
-                let table = Roots {
-                    root: roots
-                        .iter()
-                        .map(|i| Root {
-                            name: i.name.clone(),
-                            kind: i.kind,
-                            path: i.path.clone(),
-                            host: i.host.clone(),
-                            share: i.share.clone(),
-                            subpath: i.subpath.clone(),
-                            user: i.user.clone(),
-                            domain: i.domain.clone(),
-                            writable: i.writable,
-                        })
-                        .collect(),
-                };
-                // Valider **avant** d'écrire quoi que ce soit : un fichier
-                // d'identifiants posé pour une racine ensuite refusée resterait
-                // orphelin sur le disque.
-                table.validate().map_err(|e| e.message(&self.catalog.read().unwrap()))?;
-                for entree in &roots {
-                    if entree.kind != RootKind::Smb {
-                        continue;
-                    }
-                    let Some(r) = table.by_name(&entree.name) else { continue };
-                    let chemin = r.credentials_path(&self.creds_dir);
-                    let mot_de_passe = if entree.password.is_empty() {
-                        Self::mot_de_passe_existant(&chemin).unwrap_or_default()
-                    } else {
-                        entree.password.clone()
-                    };
-                    Self::ecrire_identifiants(&chemin, &entree.user, &mot_de_passe, &entree.domain)
-                        .map_err(|e| {
-                            tracing::warn!("writing credentials for {}: {e}", entree.name);
-                            self.mot("store_io_error").replace("{path}", &chemin.display().to_string())
-                        })?;
+            Op::AddSource {
+                kind,
+                path,
+                host,
+                share,
+                subpath,
+                user,
+                domain,
+                password,
+                writable,
+            } => {
+                let mut table = self.roots.read().await.clone();
+                // Le doublon exact seul est refusé : deux dossiers différents
+                // du même partage sont deux sources légitimes, qui montent le
+                // partage deux fois — ce qui est légal, peu coûteux, et surtout
+                // sans surprise. Fusionner en élargissant le sous-chemin commun
+                // modifierait en silence la portée d'une source déjà déclarée.
+                let deja = table.root.iter().any(|r| {
+                    r.kind == kind
+                        && r.host == host
+                        && r.share == share
+                        && r.subpath == subpath
+                        && r.path == path
+                });
+                if deja {
+                    return Err(self.mot("duplicate_source"));
                 }
-                let texte = toml::to_string_pretty(&table)
-                    .map_err(|e| {
-                        tracing::warn!("serialising the roots table: {e}");
-                        self.mot("store_io_error").replace("{path}", &self.roots_path.display().to_string())
+                let pris: Vec<&str> = table.root.iter().map(|r| r.name.as_str()).collect();
+                let indice = match kind {
+                    RootKind::Smb => share.clone(),
+                    RootKind::Local => path
+                        .clone()
+                        .unwrap_or_default()
+                        .rsplit('/')
+                        .find(|s| !s.is_empty())
+                        .unwrap_or("disque")
+                        .to_string(),
+                };
+                let name = ritornello_plugin_files::roots::derive_name(&indice, &pris);
+                let racine = Root {
+                    name: name.clone(),
+                    kind,
+                    path,
+                    host: host.clone(),
+                    share,
+                    subpath,
+                    user: user.clone(),
+                    domain: domain.clone(),
+                    writable,
+                };
+                table.root.push(racine);
+                // Valider **avant** d'écrire quoi que ce soit : un fichier
+                // d'identifiants posé pour une source ensuite refusée resterait
+                // orphelin sur le disque, avec un mot de passe dedans.
+                table.validate().map_err(|e| e.message(&self.catalog.read().unwrap()))?;
+
+                if kind == RootKind::Smb {
+                    let r = table.by_name(&name).expect("tout juste inseree");
+                    let chemin = r.credentials_path(&self.creds_dir);
+                    let secret = if !password.is_empty() {
+                        password
+                    } else if let Some(c) = self.explore.credentials(&host) {
+                        c.password
+                    } else {
+                        Self::mot_de_passe_existant(&chemin).unwrap_or_default()
+                    };
+                    Self::ecrire_identifiants(&chemin, &user, &secret, &domain).map_err(|e| {
+                        tracing::warn!("writing credentials for {name}: {e}");
+                        self.mot("store_io_error")
+                            .replace("{path}", &chemin.display().to_string())
                     })?;
-                let tmp = self.roots_path.with_extension("toml.tmp");
-                std::fs::write(&tmp, texte)
-                    .and_then(|_| std::fs::rename(&tmp, &self.roots_path))
-                    .map_err(|e| {
-                        tracing::warn!("saving the roots table: {e}");
-                        self.mot("store_io_error").replace("{path}", &self.roots_path.display().to_string())
-                    })?;
+                }
+                self.ecrire_table(&table)?;
                 *self.roots.write().await = table;
+                // Le montage suit la déclaration : plus de bouton à trouver.
+                // Un échec ne défait PAS la déclaration — l'utilisateur perdrait
+                // sa saisie à cause d'un NAS endormi — il est rapporté à part.
+                *self.mount_error.lock().unwrap() = mount::reconcile(mount::UNIT).await.err();
+                Ok(())
+            }
+
+            Op::RemoveSource { name } => {
+                let mut table = self.roots.read().await.clone();
+                let Some(i) = table.root.iter().position(|r| r.name == name) else {
+                    return Err(self.mot("unknown_source").replace("{name}", &name));
+                };
+                let partie = table.root.remove(i);
+                self.ecrire_table(&table)?;
+                // Le fichier d'identifiants part avec la source : le laisser
+                // ferait survivre un mot de passe à ce qui le justifiait.
+                let _ = std::fs::remove_file(partie.credentials_path(&self.creds_dir));
+                *self.roots.write().await = table;
+                *self.mount_error.lock().unwrap() = mount::reconcile(mount::UNIT).await.err();
+                Ok(())
+            }
+
+            Op::SetWritable { name, writable } => {
+                let mut table = self.roots.read().await.clone();
+                let Some(r) = table.root.iter_mut().find(|r| r.name == name) else {
+                    return Err(self.mot("unknown_source").replace("{name}", &name));
+                };
+                r.writable = writable;
+                self.ecrire_table(&table)?;
+                *self.roots.write().await = table;
+                *self.mount_error.lock().unwrap() = mount::reconcile(mount::UNIT).await.err();
+                Ok(())
+            }
+
+            Op::ExploreOpen { kind } => {
+                self.explore.ouvrir(kind);
+                Ok(())
+            }
+            Op::ExploreClose => {
+                self.explore.fermer();
+                Ok(())
+            }
+            Op::ExploreLocal { path } => self.explore.local(&path),
+            Op::SmbConnect { host, user, password, domain } => {
+                // Resonder ici : installer le paquet sans redémarrer le service
+                // doit donner un résultat juste plutôt qu'un refus périmé.
+                self.smb_ok.store(
+                    ritornello_plugin_files::smb::available().await,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                self.explore.connecter(host, user, password, domain);
+                Ok(())
+            }
+            Op::SmbBrowse { share, path } => {
+                self.explore.parcourir(share, path);
                 Ok(())
             }
 
@@ -579,6 +723,13 @@ mod tests {
         std::mem::forget(dir);
         std::fs::create_dir_all(racine.join("media")).unwrap();
         let (tx, _rx) = tokio::sync::watch::channel(0u8);
+        let catalogue = Arc::new(RwLock::new(Catalog::load(
+            "files",
+            "en",
+            &racine,
+            ritornello_plugin_files::FILES_EN,
+        )));
+        let smb_ok = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let admin = FilesAdmin {
             roots_path: racine.join("media-roots.toml"),
             creds_dir: racine.join("creds"),
@@ -586,52 +737,157 @@ mod tests {
             state_path: racine.join("plugin-files.json"),
             roots: Arc::new(AsyncRwLock::new(Roots::default())),
             playlist: Arc::new(AsyncRwLock::new(Playlist::default())),
-            catalog: Arc::new(RwLock::new(Catalog::load(
-                "files",
-                "en",
-                &racine,
-                ritornello_plugin_files::FILES_EN,
-            ))),
+            catalog: catalogue.clone(),
             scan: Arc::new(Mutex::new(ScanProgress::default())),
             scan_task: None,
             unresolved: Arc::new(Mutex::new(Vec::new())),
             browse: Arc::new(Mutex::new(serde_json::json!({}))),
             preset_count_tx: tx,
+            explore: ritornello_plugin_files::explore::Explorateur::new(
+                racine.join("creds"),
+                catalogue.clone(),
+                smb_ok.clone(),
+            ),
+            mount_error: Arc::new(Mutex::new(None)),
+            smb_ok,
         };
         (admin, racine)
     }
 
-    fn partage(password: &str) -> serde_json::Value {
+    fn ajout_partage(password: &str) -> serde_json::Value {
         serde_json::json!({
-            "op": "save_roots",
-            "roots": [{
-                "name": "nas", "kind": "smb", "host": "192.168.1.20",
-                "share": "musique", "user": "steven", "password": password
-            }]
+            "op": "add_source", "kind": "smb", "host": "192.168.1.20",
+            "share": "musique", "subpath": "Ma Musique", "user": "steven",
+            "domain": "", "writable": false, "password": password
         })
+    }
+
+    #[tokio::test]
+    async fn une_source_ajoutee_recoit_un_nom_derive() {
+        // L'utilisateur ne saisit plus de nom : il doit être dérivé, valide, et
+        // dérivé du partage pour rester lisible dans /mnt/ritornello.
+        let (mut admin, _) = admin_de_test();
+        admin.set_data(ajout_partage("p")).await.unwrap();
+        let roots = admin.roots.read().await;
+        assert_eq!(roots.root.len(), 1);
+        assert_eq!(roots.root[0].name, "musique");
+        assert_eq!(roots.root[0].subpath.as_deref(), Some("Ma Musique"));
+    }
+
+    #[tokio::test]
+    async fn deux_sources_du_meme_partage_ne_se_disputent_pas_leur_nom() {
+        // Sans dédoublonnage, la deuxième écraserait le fichier d'identifiants de
+        // la première et se disputerait son point de montage.
+        let (mut admin, _) = admin_de_test();
+        admin.set_data(ajout_partage("p")).await.unwrap();
+        let mut second = ajout_partage("p");
+        second["subpath"] = serde_json::json!("Rock");
+        admin.set_data(second).await.unwrap();
+        let roots = admin.roots.read().await;
+        assert_eq!(roots.root.len(), 2);
+        assert_ne!(roots.root[0].name, roots.root[1].name);
+    }
+
+    #[tokio::test]
+    async fn le_doublon_exact_est_refuse() {
+        // Deux sources identiques monteraient deux fois le même partage au même
+        // endroit logique, sans qu'aucune ne serve à rien de plus.
+        let (mut admin, _) = admin_de_test();
+        admin.set_data(ajout_partage("p")).await.unwrap();
+        let err = admin.set_data(ajout_partage("p")).await.unwrap_err();
+        assert!(err.contains(' '), "cle brute : {err}");
+    }
+
+    #[tokio::test]
+    async fn retirer_une_source_efface_son_fichier_d_identifiants() {
+        // Sinon un .cred contenant un mot de passe survivrait sur le disque à la
+        // source qui l'a justifié.
+        let (mut admin, _) = admin_de_test();
+        admin.set_data(ajout_partage("secret")).await.unwrap();
+        let cred = admin.creds_dir.join("musique.cred");
+        assert!(cred.exists());
+        admin
+            .set_data(serde_json::json!({"op": "remove_source", "name": "musique"}))
+            .await
+            .unwrap();
+        assert!(!cred.exists(), "le fichier d'identifiants a survecu a la source");
+        assert!(admin.roots.read().await.root.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_data_annonce_les_volumes_et_la_capacite_smb() {
+        let (admin, racine) = admin_de_test();
+        let faux = racine.join("mounts");
+        std::fs::write(&faux, "/dev/sda1 /media/usb vfat rw 0 0\nproc /proc proc rw 0 0\n").unwrap();
+        std::env::set_var("RITORNELLO_FILES_PROC_MOUNTS", &faux);
+        let d = admin.get_data().await;
+        assert_eq!(d["volumes"][0]["path"], "/media/usb");
+        assert_eq!(d["volumes"].as_array().unwrap().len(), 1, "proc ne doit pas etre propose");
+        assert!(d["can_browse_smb"].is_boolean());
+        assert!(d["explore"].is_object());
+        std::env::remove_var("RITORNELLO_FILES_PROC_MOUNTS");
+    }
+
+    #[tokio::test]
+    async fn basculer_l_inscriptibilite_ne_perd_pas_le_mot_de_passe() {
+        // Sans cette opération, changer d'avis imposerait de retirer puis
+        // redéclarer, donc de resaisir le mot de passe.
+        let (mut admin, _) = admin_de_test();
+        admin.set_data(ajout_partage("secret-du-nas")).await.unwrap();
+        admin
+            .set_data(serde_json::json!({"op": "set_writable", "name": "musique", "writable": true}))
+            .await
+            .unwrap();
+        assert!(admin.roots.read().await.by_name("musique").unwrap().writable);
+        let cred = std::fs::read_to_string(admin.creds_dir.join("musique.cred")).unwrap();
+        assert!(cred.contains("password=secret-du-nas"), "{cred}");
     }
 
     #[tokio::test]
     async fn get_data_ne_rend_jamais_le_mot_de_passe() {
         // Il n'a aucune raison de traverser vers le navigateur, et la page n'en
         // a pas besoin pour afficher l'état d'un partage. La garantie est
-        // portée par le type : `Root` ne contient pas le champ.
+        // portée par le type : ni `Root` ni la vue de l'assistant ne contiennent
+        // le champ.
         let (mut admin, _) = admin_de_test();
-        admin.set_data(partage("secret-du-nas")).await.unwrap();
+        admin.set_data(ajout_partage("secret-du-nas")).await.unwrap();
         let texte = serde_json::to_string(&admin.get_data().await).unwrap();
         assert!(!texte.contains("password"), "{texte}");
         assert!(!texte.contains("secret-du-nas"), "{texte}");
     }
 
     #[tokio::test]
-    async fn un_mot_de_passe_vide_conserve_celui_deja_enregistre() {
-        // Sinon rouvrir la page et cliquer « Enregistrer » suffirait à casser
-        // le montage, sans que rien ne l'annonce : la page ne peut pas
-        // renvoyer un mot de passe qu'elle ne reçoit jamais.
+    async fn un_mot_de_passe_vide_reprend_celui_de_la_session() {
+        // L'assistant vient de s'en servir pour se connecter : le faire retaper
+        // à la confirmation serait une saisie de plus pour rien, et la page ne
+        // peut pas renvoyer un secret qu'elle ne reçoit jamais.
         let (mut admin, _) = admin_de_test();
-        admin.set_data(partage("secret-du-nas")).await.unwrap();
-        admin.set_data(partage("")).await.unwrap();
-        let cred = std::fs::read_to_string(admin.creds_dir.join("nas.cred")).unwrap();
+        admin.explore.ouvrir(ritornello_plugin_files::explore::Kind::Smb);
+        admin.explore.connecter(
+            "192.168.1.20".into(),
+            "steven".into(),
+            "secret-du-nas".into(),
+            String::new(),
+        );
+        admin.set_data(ajout_partage("")).await.unwrap();
+        let cred = std::fs::read_to_string(admin.creds_dir.join("musique.cred")).unwrap();
+        assert!(cred.contains("password=secret-du-nas"), "{cred}");
+    }
+
+    #[tokio::test]
+    async fn un_mot_de_passe_vide_conserve_celui_deja_enregistre() {
+        // Dernier repli, quand la popin a été fermée entre-temps : redéclarer
+        // une source du même nom ne doit pas casser en silence un montage qui
+        // marchait, faute de mot de passe.
+        let (mut admin, _) = admin_de_test();
+        std::fs::create_dir_all(&admin.creds_dir).unwrap();
+        std::fs::write(
+            admin.creds_dir.join("musique.cred"),
+            "username=steven\npassword=secret-du-nas\n",
+        )
+        .unwrap();
+        admin.set_data(ajout_partage("")).await.unwrap();
+        let cred = std::fs::read_to_string(admin.creds_dir.join("musique.cred")).unwrap();
         assert!(cred.contains("password=secret-du-nas"), "{cred}");
     }
 
@@ -640,20 +896,22 @@ mod tests {
         // Garde-fou de la règle ci-dessus : « vide = garde » ne doit pas
         // devenir « on ne peut plus changer de mot de passe ».
         let (mut admin, _) = admin_de_test();
-        admin.set_data(partage("ancien")).await.unwrap();
-        admin.set_data(partage("nouveau")).await.unwrap();
-        let cred = std::fs::read_to_string(admin.creds_dir.join("nas.cred")).unwrap();
+        std::fs::create_dir_all(&admin.creds_dir).unwrap();
+        std::fs::write(admin.creds_dir.join("musique.cred"), "username=steven\npassword=ancien\n")
+            .unwrap();
+        admin.set_data(ajout_partage("nouveau")).await.unwrap();
+        let cred = std::fs::read_to_string(admin.creds_dir.join("musique.cred")).unwrap();
         assert!(cred.contains("password=nouveau"), "{cred}");
         assert!(!cred.contains("ancien"), "{cred}");
     }
 
     #[tokio::test]
-    async fn une_racine_invalide_est_refusee_par_une_phrase_qui_nomme_le_fautif() {
+    async fn une_source_invalide_est_refusee_par_une_phrase_qui_nomme_le_fautif() {
         let (mut admin, _) = admin_de_test();
         let err = admin
             .set_data(serde_json::json!({
-                "op": "save_roots",
-                "roots": [{"name":"nas","kind":"smb","host":"nas,uid=0","share":"s","user":"u"}]
+                "op": "add_source", "kind": "smb", "host": "nas,uid=0",
+                "share": "musique", "user": "u"
             }))
             .await
             .unwrap_err();
@@ -662,20 +920,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn une_racine_refusee_ne_laisse_aucun_fichier_d_identifiants() {
+    async fn une_source_refusee_ne_laisse_aucun_fichier_d_identifiants() {
         // La validation passe **avant** toute écriture : un fichier posé pour
-        // une racine ensuite refusée resterait orphelin sur le disque, avec un
+        // une source ensuite refusée resterait orphelin sur le disque, avec un
         // mot de passe dedans.
         let (mut admin, _) = admin_de_test();
         let _ = admin
             .set_data(serde_json::json!({
-                "op": "save_roots",
-                "roots": [{"name":"BAD NAME","kind":"smb","host":"h","share":"s",
-                           "user":"u","password":"p"}]
+                "op": "add_source", "kind": "smb", "host": "nas,uid=0",
+                "share": "musique", "user": "u", "password": "p"
             }))
             .await
             .unwrap_err();
-        assert!(!admin.creds_dir.join("BAD NAME.cred").exists());
+        assert!(!admin.creds_dir.join("musique.cred").exists());
         assert!(!admin.roots_path.exists(), "la table ne doit pas non plus avoir ete ecrite");
     }
 
@@ -687,22 +944,22 @@ mod tests {
         // lisible par tout le monde.
         use std::os::unix::fs::PermissionsExt;
         let (mut admin, _) = admin_de_test();
-        admin.set_data(partage("secret")).await.unwrap();
-        let meta = std::fs::metadata(admin.creds_dir.join("nas.cred")).unwrap();
+        admin.set_data(ajout_partage("secret")).await.unwrap();
+        let meta = std::fs::metadata(admin.creds_dir.join("musique.cred")).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     }
 
     #[tokio::test]
     async fn la_table_enregistree_se_relit_telle_quelle() {
         let (mut admin, _) = admin_de_test();
-        admin.set_data(partage("p")).await.unwrap();
+        admin.set_data(ajout_partage("p")).await.unwrap();
         let relue = Roots::load(&admin.roots_path).unwrap();
         assert_eq!(relue.root.len(), 1);
         assert_eq!(relue.root[0].host, "192.168.1.20");
         // Et le mot de passe n'y figure pas : il vit dans le fichier
         // d'identifiants, que `mount.cifs` lira seul.
         let toml = std::fs::read_to_string(&admin.roots_path).unwrap();
-        assert!(!toml.contains('p') || !toml.contains("password"), "{toml}");
+        assert!(!toml.contains("password"), "{toml}");
     }
 
     #[tokio::test]
