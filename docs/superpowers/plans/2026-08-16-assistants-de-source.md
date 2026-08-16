@@ -3591,6 +3591,36 @@ git commit -m "test(e2e): les deux assistants joues de bout en bout, sans NAS ni
 
 ---
 
+## Ce que la réalisation a corrigé du plan
+
+Trois choses que ce plan n'avait pas vues, et qui sont désormais dans le code.
+
+**Le contenu d'un `Dialog` vit dans un portail.** `wrapper.find()` ne le trouve
+jamais, et sans `attachTo` il n'est même pas rendu. Une sonde jetable l'a
+établi avant qu'un agent n'y perde du temps ; `harnais.ts` porte maintenant
+`dansPopin` / `cliquerPopin` / `saisirPopin` / `nettoyerPopins`, et la
+convention est inscrite dans les Global Constraints ci-dessus.
+
+**Le parcours de bout en bout a trouvé deux défauts qu'aucun test unitaire ne
+pouvait voir**, ce qui est exactement ce qu'on attend de lui :
+
+1. *La page ne sondait que pendant un balayage.* La connexion SMB est
+   asynchrone — c'était le bon choix, un NAS éteint dépasserait le plafond de
+   5 s du cœur — mais rien ne relisait son résultat : la popin restait bloquée
+   sur « Connexion… » indéfiniment alors que le plugin avait répondu. Le
+   sondage surveille désormais `explore.busy` autant que `scan.running`.
+2. *La réconciliation partait à chaque déclaration, même locale.* Elle exige
+   polkit, donc elle échouait, et ajouter une clé USB affichait « la dernière
+   tentative de montage a échoué — authentification interactive requise ». Elle
+   est maintenant conditionnée à la présence d'un partage.
+
+Les deux sont épinglés par un test unitaire, pas seulement par le parcours :
+celui-ci est trop lent pour être le seul filet.
+
+**Les popins ont gagné une `DialogDescription`** (clés `dlg_device_desc` et
+`dlg_share_desc`). reka-ui la réclamait ; son absence laissait un lecteur
+d'écran annoncer une boîte de dialogue dont il ne savait rien dire.
+
 ## Vérifications qui n'appartiennent pas à ce plan
 
 À faire sur le Pi, hors de portée d'ici :
