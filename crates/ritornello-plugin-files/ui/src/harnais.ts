@@ -227,10 +227,62 @@ export function serveur(initial: EtatServeur = {}): Serveur {
   return s
 }
 
-/** Monte la page sur un serveur simulé et attend son premier chargement. */
+/**
+ * Monte la page sur un serveur simulé et attend son premier chargement.
+ *
+ * `attachTo: document.body` n'est pas décoratif : le `Dialog` du kit rend son
+ * contenu à travers un `DialogPortal`, donc **hors** de l'arbre du composant.
+ * Sans rattachement, la popin n'est pas rendue du tout ; avec, elle atterrit
+ * dans `document.body` — et reste invisible à `wrapper.find()`. Voir
+ * `dansPopin` ci-dessous, qui est le seul moyen correct de l'atteindre.
+ */
 export async function monter(initial: EtatServeur = {}) {
   const s = serveur(initial)
-  const w = mount(FilesAdmin, { props: { catalog: CATALOGUE, base: BASE } })
+  const w = mount(FilesAdmin, {
+    props: { catalog: CATALOGUE, base: BASE },
+    attachTo: document.body,
+  })
   await flushPromises()
   return { w, s }
+}
+
+/**
+ * Un élément de la popin ouverte.
+ *
+ * `wrapper.find()` ne le trouvera **jamais** : le contenu d'un `Dialog` vit
+ * dans un portail vers `document.body`, en dehors de l'arbre monté. Mesuré sur
+ * ce dépôt — un test qui interroge le wrapper échoue avec « élément absent »
+ * alors que la popin est bien à l'écran, ce qui envoie chercher un défaut là
+ * où il n'y en a pas.
+ */
+export function dansPopin(selecteur: string): HTMLElement | null {
+  return document.querySelector<HTMLElement>(selecteur)
+}
+
+/** Clique dans la popin, puis laisse Vue et les promesses se dérouler. */
+export async function cliquerPopin(selecteur: string): Promise<void> {
+  const el = dansPopin(selecteur)
+  if (!el) throw new Error(`aucun élément « ${selecteur} » dans la popin`)
+  el.click()
+  await flushPromises()
+}
+
+/** Saisit dans un champ de la popin, en notifiant Vue du changement. */
+export async function saisirPopin(selecteur: string, valeur: string): Promise<void> {
+  const el = dansPopin(selecteur) as HTMLInputElement | null
+  if (!el) throw new Error(`aucun champ « ${selecteur} » dans la popin`)
+  el.value = valeur
+  el.dispatchEvent(new Event('input', { bubbles: true }))
+  await flushPromises()
+}
+
+/**
+ * Vide `document.body` entre deux tests.
+ *
+ * Les portails n'y sont pas nettoyés par le démontage du wrapper : sans cet
+ * appel, la popin d'un test précédent resterait dans le document et le test
+ * suivant interrogerait le mauvais panneau.
+ */
+export function nettoyerPopins(): void {
+  document.body.innerHTML = ''
 }
