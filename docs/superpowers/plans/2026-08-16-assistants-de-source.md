@@ -30,6 +30,51 @@
   - Un dossier inexistant rend `cd \X\: NT_STATUS_OBJECT_NAME_NOT_FOUND` avec `rc=1`. **Ce code ne signifie pas « hôte injoignable »** — le confondre ferait lire « la machine n'a pas répondu » devant un simple chemin périmé.
 - Commits en français, style du dépôt : `feat(plugin-files): …`, sujet à l'infinitif ou nominal, sans point final.
 
+### Convention des tests de page — à respecter à la lettre
+
+Les blocs de test des tâches 10 à 14 sont écrits ci-dessous dans une forme
+abrégée. **La forme réelle du dépôt est différente** et fait foi : les tests
+montent la **page entière** contre un serveur simulé, et vérifient les
+opérations émises. Adapte-les.
+
+```ts
+import { flushPromises } from '@vue/test-utils'
+import { afterEach, describe, expect, it } from 'vitest'
+import { cliquerPopin, dansPopin, monter, nettoyerPopins, saisirPopin } from './harnais'
+
+afterEach(nettoyerPopins)
+
+it('exemple', async () => {
+  const { w, s } = await monter({ roots: [], volumes: [{ path: '/media/usb', fstype: 'vfat' }] })
+  await w.find('[data-add-device]').trigger('click')
+  await flushPromises()
+  expect(s.putsDe('explore_open')[0]!.kind).toBe('local')
+  // Le contenu de la popin vit dans un portail : `w.find` ne le voit JAMAIS.
+  expect(dansPopin('[data-volume]')).not.toBeNull()
+  await cliquerPopin('[data-volume]')
+  expect(s.putsDe('explore_local')[0]!.path).toBe('/media/usb')
+})
+```
+
+Ce qu'il faut en retenir, et qui a été **mesuré sur ce dépôt** :
+
+- `monter(etatServeur)` monte `FilesAdmin` avec `attachTo: document.body` et
+  attend le premier chargement. `s.putsDe('op')` rend les corps des `PUT`
+  portant cette opération ; `s.data` est l'état que rendra le prochain `GET`.
+- **Le contenu d'un `Dialog` part dans un `DialogPortal` vers `document.body`.**
+  `wrapper.find()` ne le trouve jamais, et sans `attachTo` il n'est même pas
+  rendu. On l'atteint par `dansPopin` / `cliquerPopin` / `saisirPopin`, et on
+  vide le document entre deux tests avec `afterEach(nettoyerPopins)` — sinon la
+  popin d'un test précédent reste dans le document et le test suivant
+  interroge le mauvais panneau.
+- L'état initial se déclare en **forme serveur** (`snake_case` : `can_browse_smb`,
+  `audio_count`, `mount_error`), pas en forme normalisée.
+- `harnais.ts` porte déjà les libellés neufs et `EXPLORE_FERME` : **ne le
+  modifie pas**, il est partagé.
+- Les libellés du `CATALOGUE` de test sont volontairement distincts les uns des
+  autres : un test qui cherche un texte ne doit pas pouvoir réussir grâce à un
+  autre libellé.
+
 ---
 
 ## Structure des fichiers
