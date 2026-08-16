@@ -87,12 +87,31 @@ fn nom_valide(nom: &str) -> bool {
 /// séparées par des virgules, si bien qu'un hôte « nas,uid=0 » ajouterait une
 /// option à la ligne exécutée par root. L'espace casse l'analyse, `..` remonte
 /// l'arborescence, et l'octet nul tronque une chaîne C.
-fn champ_sur(valeur: &str) -> bool {
+pub fn champ_sur(valeur: &str) -> bool {
     !valeur.is_empty()
         && !valeur.contains(',')
         && !valeur.chars().any(char::is_whitespace)
         && !valeur.contains("..")
         && !valeur.contains('\0')
+}
+
+/// Grammaire d'un **sous-chemin** parcouru sous un point de montage.
+///
+/// Distincte de `champ_sur`, et c'est délibéré. `champ_sur` refuse la virgule
+/// et l'espace parce que ses valeurs atterrissent dans la ligne d'options de
+/// `mount.cifs`, qui les sépare par des virgules. **Un sous-chemin n'y entre
+/// jamais** : `mount_command` ne pose que l'hôte, le partage et
+/// `mount_point()`, lequel ignore le sous-chemin.
+///
+/// Leur appliquer la même règle rendait « Ma Musique » indéclarable pour une
+/// raison qui ne la concerne pas. Le défaut se voyait peu tant qu'on saisissait
+/// le sous-chemin à la main ; il deviendrait constant avec un assistant qui
+/// propose de choisir n'importe quel dossier d'un NAS.
+fn sous_chemin_sur(s: &str) -> bool {
+    !s.is_empty()
+        && !s.starts_with('/')
+        && !s.contains('\0')
+        && s.split('/').all(|c| !c.is_empty() && c != "." && c != "..")
 }
 
 impl Roots {
@@ -128,7 +147,7 @@ impl Roots {
                         return Err(RootError::BadShare { share: r.share.clone() });
                     }
                     if let Some(s) = &r.subpath {
-                        if !champ_sur(s) || s.starts_with('/') {
+                        if !sous_chemin_sur(s) {
                             return Err(RootError::BadSubpath { subpath: s.clone() });
                         }
                     }
@@ -206,6 +225,93 @@ impl std::fmt::Display for RootError {
 
 impl std::error::Error for RootError {}
 
+/// Replie un libellé quelconque en un nom de racine conforme à `nom_valide`.
+///
+/// L'utilisateur ne saisit plus ce nom : les assistants le dérivent du nom du
+/// partage ou du dernier segment du chemin choisi. Comme il devient **un
+/// composant du chemin de montage et un nom de fichier d'identifiants**, la
+/// dérivation doit produire du valide par construction — un refus après
+/// dérivation serait un défaut que rien dans l'IHM ne permettrait de corriger.
+///
+/// `pris` porte les noms déjà employés : sans dédoublonnage, une deuxième
+/// source écraserait le fichier d'identifiants de la première et se disputerait
+/// son point de montage.
+pub fn derive_name(indice: &str, pris: &[&str]) -> String {
+    let base = replie(indice);
+    if !pris.contains(&base.as_str()) {
+        return base;
+    }
+    for n in 2..1000 {
+        let suffixe = format!("-{n}");
+        // Tronquer **avant** de concaténer : ajouter le suffixe à un nom déjà
+        // long produirait un nom refusé, donc une source impossible à déclarer
+        // une deuxième fois.
+        let tete: String = base.chars().take(32 - suffixe.len()).collect();
+        let candidat = format!("{}{suffixe}", tete.trim_end_matches('-'));
+        if !pris.contains(&candidat.as_str()) {
+            return candidat;
+        }
+    }
+    base
+}
+
+/// Le repliage lui-même : minuscules ASCII, tiret pour tout le reste.
+///
+/// Le premier caractère est alphanumérique **par construction** — on ne pousse
+/// jamais de tiret sur une chaîne vide — ce qui satisfait la première règle de
+/// `nom_valide` sans avoir à la vérifier après coup.
+fn replie(indice: &str) -> String {
+    let mut out = String::new();
+    let mut tiret = false;
+    for c in indice.chars() {
+        let c = sans_accent(c);
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            tiret = false;
+        } else if !out.is_empty() && !tiret {
+            out.push('-');
+            tiret = true;
+        }
+    }
+    let tronque: String = out.chars().take(32).collect();
+    let net = tronque.trim_end_matches('-').to_string();
+    // Un indice entièrement non-ASCII ne laisse rien : mieux vaut un nom
+    // générique qu'une source impossible à déclarer.
+    if net.is_empty() {
+        "source".to_string()
+    } else {
+        net
+    }
+}
+
+/// Replie les accents latins courants.
+///
+/// Une table plutôt qu'une caisse de normalisation Unicode : quinze lignes
+/// couvrent le français, l'espagnol et l'allemand, et tout le reste tombe de
+/// toute façon sur le tiret. « Été » qui deviendrait « t » serait un nom exact
+/// mais illisible dans les journaux et sous `/mnt/ritornello`.
+fn sans_accent(c: char) -> char {
+    match c {
+        'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' => 'a',
+        'é' | 'è' | 'ê' | 'ë' => 'e',
+        'í' | 'ì' | 'î' | 'ï' => 'i',
+        'ó' | 'ò' | 'ô' | 'ö' | 'õ' => 'o',
+        'ú' | 'ù' | 'û' | 'ü' => 'u',
+        'ç' => 'c',
+        'ñ' => 'n',
+        'ý' | 'ÿ' => 'y',
+        'Á' | 'À' | 'Â' | 'Ä' | 'Ã' | 'Å' => 'A',
+        'É' | 'È' | 'Ê' | 'Ë' => 'E',
+        'Í' | 'Ì' | 'Î' | 'Ï' => 'I',
+        'Ó' | 'Ò' | 'Ô' | 'Ö' | 'Õ' => 'O',
+        'Ú' | 'Ù' | 'Û' | 'Ü' => 'U',
+        'Ç' => 'C',
+        'Ñ' => 'N',
+        'Ý' => 'Y',
+        _ => c,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,6 +379,78 @@ mod tests {
         assert!(matches!(r.validate(), Err(RootError::BadSubpath { .. })));
         let r = roots_avec(Root { subpath: Some("/etc".into()), ..racine_smb() });
         assert!(matches!(r.validate(), Err(RootError::BadSubpath { .. })));
+    }
+
+    #[test]
+    fn un_sous_chemin_a_espaces_est_accepte() {
+        // Le défaut corrigé. `champ_sur` refuse l'espace parce que ses valeurs
+        // atterrissent dans la ligne d'options de mount.cifs, séparée par des
+        // virgules. Un sous-chemin n'y entre JAMAIS : `mount_command` ne pose que
+        // l'hôte, le partage et `mount_point()`, qui l'ignore. Lui appliquer la
+        // même règle rendait « Ma Musique » indéclarable pour une raison qui ne le
+        // concerne pas — et l'assistant propose désormais n'importe quel dossier.
+        let r = roots_avec(Root { subpath: Some("Ma Musique/Jazz, live".into()), ..racine_smb() });
+        assert!(r.validate().is_ok(), "{:?}", r.validate());
+    }
+
+    #[test]
+    fn un_sous_chemin_qui_remonte_reste_refuse() {
+        for mauvais in ["../../etc", "/etc", "a/../../b", "a//b", "a/./b", "a\0b", ""] {
+            let r = roots_avec(Root { subpath: Some(mauvais.into()), ..racine_smb() });
+            assert!(
+                matches!(r.validate(), Err(RootError::BadSubpath { .. })),
+                "accepte a tort : {mauvais:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn un_nom_derive_est_toujours_accepte_par_la_grammaire() {
+        // L'invariant qui compte : ce nom devient un composant du chemin de
+        // montage ET un nom de fichier d'identifiants. La dérivation doit produire
+        // du valide par construction, jamais par chance — l'utilisateur ne voit
+        // plus ce nom et n'aurait aucun moyen de corriger un refus.
+        let hostiles = [
+            "../etc", "Ma Musique", "Éric's Jazz!", "///", "", "$$$", "3615",
+            "CamelCase", "a b c d e f g h i j k l m n o p q r s t u v w x y z 0 1 2 3",
+            "日本語", "-début-tiret-", "fin-tiret---",
+        ];
+        for h in hostiles {
+            let n = derive_name(h, &[]);
+            assert!(nom_valide(&n), "indice {h:?} a donne un nom refuse : {n:?}");
+        }
+    }
+
+    #[test]
+    fn deux_indices_identiques_donnent_deux_noms_distincts() {
+        // Sans dédoublonnage, la deuxième source écraserait le fichier
+        // d'identifiants de la première et se disputerait son point de montage.
+        let a = derive_name("Musique", &[]);
+        let b = derive_name("Musique", &[a.as_str()]);
+        let c = derive_name("Musique", &[a.as_str(), b.as_str()]);
+        assert_eq!(a, "musique");
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert!(nom_valide(&b) && nom_valide(&c));
+    }
+
+    #[test]
+    fn un_indice_tres_long_reste_dedoublonnable() {
+        // Le suffixe doit rentrer dans les 32 caractères : le concaténer sans
+        // tronquer d'abord produirait un nom refusé, donc une source impossible à
+        // déclarer une deuxième fois.
+        let long = "a".repeat(60);
+        let a = derive_name(&long, &[]);
+        let b = derive_name(&long, &[a.as_str()]);
+        assert!(nom_valide(&a) && nom_valide(&b), "{a:?} / {b:?}");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn les_accents_se_replient_au_lieu_de_disparaitre() {
+        // « Été » qui deviendrait « t » serait un nom exact mais illisible dans les
+        // journaux et dans /mnt/ritornello.
+        assert_eq!(derive_name("Été à Nîmes", &[]), "ete-a-nimes");
     }
 
     #[test]
