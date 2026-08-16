@@ -25,10 +25,6 @@ export const CATALOGUE: Record<string, string> = {
   load_error_2: '',
   scan_progress: 'Balayage de {dir} — {found} pistes trouvées',
 
-  roots_title: 'Racines',
-  no_roots: 'Aucune racine',
-  ph_root_name: 'nom',
-  ph_local_path: 'chemin absolu',
   ph_host: 'serveur',
   ph_share: 'partage',
   ph_subpath: 'sous-dossier',
@@ -40,12 +36,7 @@ export const CATALOGUE: Record<string, string> = {
   mounted_yes: 'monté',
   mounted_no: 'non monté',
   writable_label: 'autoriser écriture',
-  password_kept_hint: 'Laisser vide conserve le mot de passe enregistré.',
-  btn_add_local: 'Ajouter un dossier local',
   btn_add_share: 'Déclarer un partage',
-  btn_remove_root: 'Retirer la racine',
-  btn_save_roots: 'Enregistrer les racines',
-  btn_mount_now: 'Monter maintenant',
 
   sources_title: 'Sources',
   no_sources: 'Aucune source déclarée',
@@ -56,6 +47,7 @@ export const CATALOGUE: Record<string, string> = {
   mount_error_title: 'Le dernier montage a échoué :',
 
   dlg_device_title: 'Choisir un dossier de l’appareil',
+  dlg_device_desc: 'Choisissez un volume puis descendez.',
   volumes_label: 'Volume',
   no_volumes: 'Aucun volume exploitable',
   current_path_label: 'Dossier choisi',
@@ -65,6 +57,7 @@ export const CATALOGUE: Record<string, string> = {
   btn_cancel: 'Annuler',
 
   dlg_share_title: 'Choisir un partage réseau',
+  dlg_share_desc: 'Indiquez une adresse puis connectez-vous.',
   btn_connect: 'Se connecter',
   connecting: 'Connexion en cours',
   shares_label: 'Partage',
@@ -79,8 +72,6 @@ export const CATALOGUE: Record<string, string> = {
   btn_search: 'Chercher',
   no_results: 'Aucun résultat',
   search_truncated: 'Seuls les {count} premiers sont affichés : affinez la recherche.',
-  btn_add_dir: 'Ajouter ce dossier',
-  btn_add_file: 'Ajouter ce fichier',
   btn_expand: 'Déplier',
   btn_collapse: 'Replier',
   empty_folder: 'Dossier vide',

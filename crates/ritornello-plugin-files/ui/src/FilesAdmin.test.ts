@@ -38,9 +38,15 @@ describe('FilesAdmin, la page', () => {
     const sortie =
       'Job for ritornello-media-mount.service failed.\n' +
       'See "systemctl status ritornello-media-mount.service" and "journalctl -xeu ...".'
-    const { w, s } = await monter({ roots: [{ name: 'nas', kind: 'smb', host: 'h', share: 's' }] })
+    // Le réessai n'existe que si un montage a déjà échoué : le montage suit
+    // désormais la déclaration, il n'y a plus de bouton « Monter » permanent à
+    // aller chercher.
+    const { w, s } = await monter({
+      roots: [{ name: 'nas', kind: 'smb', host: 'h', share: 's', mounted: false }],
+      mount_error: sortie,
+    })
     s.refus = sortie
-    await w.find('[data-mount]').trigger('click')
+    await w.find('[data-retry-mount]').trigger('click')
     await flushPromises()
     const pre = w.find('[data-message]')
     expect(pre.element.tagName).toBe('PRE')
@@ -120,7 +126,7 @@ describe('FilesAdmin, la page', () => {
     await flushPromises()
     expect(w.find('[data-message]').text()).toContain('Erreur : ')
     // Les volets ne sont même pas montés : il n'y a rien de vrai à montrer.
-    expect(w.find('[data-volet-racines]').exists()).toBe(false)
+    expect(w.find('[data-volet-sources]').exists()).toBe(false)
     expect(spy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'PUT')).toBe(false)
   })
 

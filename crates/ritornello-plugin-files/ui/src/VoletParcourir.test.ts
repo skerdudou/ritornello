@@ -106,13 +106,12 @@ describe('volet de parcours', () => {
     expect(s.putsDe('add_file')).toEqual([{ op: 'add_file', root: 'nas', path: 'jingle.mp3' }])
   })
 
-  it('propose d’ajouter la racine entière, au chemin vide', async () => {
-    // Le cas courant sur un partage dédié à la musique : rien à parcourir, on
-    // prend tout.
-    const { w, s } = await monterArbre()
-    await w.find('[data-add-root-dir]').trigger('click')
-    await flushPromises()
-    expect(s.putsDe('add_dir')).toEqual([{ op: 'add_dir', root: 'nas', path: '' }])
+  it('n’offre plus d’ajouter la source entière : c’est le volet Sources qui le fait', async () => {
+    // Le geste n'a pas disparu, il a déménagé sur la ligne de la source (voir
+    // VoletSources). Le laisser aux deux endroits donnait deux boutons pour le
+    // même effet, et faisait chercher une différence qui n'existait pas.
+    const { w } = await monterArbre()
+    expect(w.find('[data-add-root-dir]').exists()).toBe(false)
   })
 
   it('cherche dans la racine choisie et affiche les chemins trouvés', async () => {
@@ -162,6 +161,8 @@ describe('volet de parcours', () => {
     const w = mount(FilesAdmin, { props: { catalog: CATALOGUE, base: BASE } })
     await flushPromises()
     expect(s.putsDe('browse')).toHaveLength(0)
-    expect(w.find('[data-volet-parcourir]').text()).toContain('Aucune racine')
+    // Même phrase que le volet Sources : deux formulations pour le même vide
+    // laisseraient croire à deux causes différentes.
+    expect(w.find('[data-volet-parcourir]').text()).toContain('Aucune source déclarée')
   })
 })

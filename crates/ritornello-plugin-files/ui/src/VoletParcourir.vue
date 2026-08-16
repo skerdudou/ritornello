@@ -138,7 +138,7 @@ function ajouterFichier(chemin: string): void {
     <h2 class="font-medium">{{ t('browse_title') }}</h2>
 
     <p v-if="!donnees.roots.length" class="text-sm text-muted-foreground">
-      {{ t('no_roots') }}
+      {{ t('no_sources') }}
     </p>
 
     <template v-else>
@@ -166,20 +166,10 @@ function ajouterFichier(chemin: string): void {
         <Button data-search :disabled="fige" @click="chercher">{{ t('btn_search') }}</Button>
       </div>
 
-      <!-- Ajouter la racine entière : le cas le plus courant sur un partage
-           dédié à la musique, où l'arborescence n'a pas à être parcourue. -->
-      <div class="flex items-center gap-2">
-        <span class="text-sm text-muted-foreground">{{ racine || '—' }}</span>
-        <Button
-          variant="secondary"
-          size="sm"
-          data-add-root-dir
-          :disabled="fige || !racine"
-          @click="ajouterDossier(SOMMET)"
-        >
-          {{ t('btn_add_dir') }}
-        </Button>
-      </div>
+      <!-- Ajouter la source entière ne vit plus ici : chaque ligne du volet
+           Sources porte son propre « Ajouter à la liste ». Deux boutons pour le
+           même geste, à deux endroits, faisaient hésiter sur leur différence —
+           il n'y en avait aucune. -->
 
       <ul class="space-y-1 text-sm" data-tree>
         <li
@@ -209,7 +199,7 @@ function ajouterFichier(chemin: string): void {
               :disabled="fige"
               @click="ajouterDossier(r.entree.path)"
             >
-              {{ t('btn_add_dir') }}
+              {{ t('btn_add_to_playlist') }}
             </Button>
           </template>
           <template v-else>
@@ -222,7 +212,7 @@ function ajouterFichier(chemin: string): void {
               :disabled="fige"
               @click="ajouterFichier(r.entree.path)"
             >
-              {{ t('btn_add_file') }}
+              {{ t('btn_add_to_playlist') }}
             </Button>
           </template>
         </li>
@@ -258,7 +248,7 @@ function ajouterFichier(chemin: string): void {
             :disabled="fige"
             @click="e.dir ? ajouterDossier(e.path) : ajouterFichier(e.path)"
           >
-            {{ e.dir ? t('btn_add_dir') : t('btn_add_file') }}
+            {{ t('btn_add_to_playlist') }}
           </Button>
         </div>
       </div>

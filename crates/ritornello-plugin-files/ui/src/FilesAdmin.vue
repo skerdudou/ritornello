@@ -4,7 +4,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { normaliserDonnees, type Donnees } from './donnees'
 import VoletListe from './VoletListe.vue'
 import VoletParcourir from './VoletParcourir.vue'
-import VoletRacines from './VoletRacines.vue'
+import VoletSources from './VoletSources.vue'
 
 // `base` fait partie du contrat des IHM de plugin, au même titre que
 // `catalog` : le préfixe **absolu** sous lequel le cœur sert les routes de ce
@@ -186,7 +186,7 @@ const scan = computed(
     >
 
     <template v-if="donnees">
-      <VoletRacines
+      <VoletSources
         :donnees="donnees"
         :t="t"
         :envoyer="envoyer"
