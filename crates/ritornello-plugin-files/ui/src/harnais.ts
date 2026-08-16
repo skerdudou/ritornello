@@ -47,6 +47,32 @@ export const CATALOGUE: Record<string, string> = {
   btn_save_roots: 'Enregistrer les racines',
   btn_mount_now: 'Monter maintenant',
 
+  sources_title: 'Sources',
+  no_sources: 'Aucune source déclarée',
+  btn_add_device: 'Ajouter un dossier de l’appareil',
+  btn_add_to_playlist: 'Ajouter à la liste',
+  btn_remove_source: 'Retirer cette source',
+  btn_retry_mount: 'Réessayer le montage',
+  mount_error_title: 'Le dernier montage a échoué :',
+
+  dlg_device_title: 'Choisir un dossier de l’appareil',
+  volumes_label: 'Volume',
+  no_volumes: 'Aucun volume exploitable',
+  current_path_label: 'Dossier choisi',
+  audio_here: '{count} fichiers audio ici',
+  btn_choose_folder: 'Choisir ce dossier',
+  btn_up: 'Remonter d’un niveau',
+  btn_cancel: 'Annuler',
+
+  dlg_share_title: 'Choisir un partage réseau',
+  btn_connect: 'Se connecter',
+  connecting: 'Connexion en cours',
+  shares_label: 'Partage',
+  no_shares: 'Aucun partage exploitable',
+  btn_manual: 'Saisir à la main',
+  btn_assistant: 'Revenir à l’assistant',
+  smb_unavailable: 'Le paquet smbclient manque pour parcourir un partage.',
+
   browse_title: 'Parcourir',
   root_label: 'Racine',
   search_placeholder: 'chercher',
@@ -100,6 +126,43 @@ export interface EtatServeur {
   saved?: unknown[]
   unresolved?: string[]
   browse?: Navigue
+  volumes?: { path: string; fstype: string }[]
+  can_browse_smb?: boolean
+  explore?: Explore
+  mount_error?: string | null
+}
+
+/**
+ * Champ `explore` du plugin : l'assistant en cours.
+ *
+ * Emplacement distinct de `browse`, comme côté plugin : la popin et le volet
+ * Parcourir sont deux curseurs indépendants.
+ */
+export interface Explore {
+  open?: boolean
+  kind?: 'local' | 'smb' | null
+  host?: string
+  share?: string
+  path?: string
+  shares?: string[]
+  dirs?: string[]
+  audio_count?: number
+  busy?: boolean
+  error?: string | null
+}
+
+/** Assistant fermé : l'état de repos, celui d'une page qui vient de charger. */
+export const EXPLORE_FERME: Explore = {
+  open: false,
+  kind: null,
+  host: '',
+  share: '',
+  path: '',
+  shares: [],
+  dirs: [],
+  audio_count: 0,
+  busy: false,
+  error: null,
 }
 
 export function etat(partiel: EtatServeur = {}): Required<EtatServeur> {
@@ -111,6 +174,12 @@ export function etat(partiel: EtatServeur = {}): Required<EtatServeur> {
     saved: [],
     unresolved: [],
     browse: { root: '', path: '', dirs: [], files: [], results: [] },
+    volumes: [],
+    // Faux par défaut, comme le plugin quand `smbclient` manque : c'est l'état
+    // qu'un test doit déclarer explicitement pour offrir l'assistant réseau.
+    can_browse_smb: false,
+    explore: EXPLORE_FERME,
+    mount_error: null,
     ...partiel,
   }
 }

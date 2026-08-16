@@ -133,3 +133,60 @@ describe('mise en forme', () => {
     expect(feuille('')).toBe('')
   })
 })
+
+describe('normalisation des volumes et de l’exploration', () => {
+  it('une charge utile sans les champs neufs ne casse pas la page', () => {
+    // Pendant un déploiement, le plugin peut être plus ancien que la page :
+    // absent doit valoir « rien », jamais un `undefined` qui, traversant un
+    // `v-for`, casserait le rendu entier au lieu d'une section vide.
+    const d = normaliserDonnees({})
+    expect(d.volumes).toEqual([])
+    expect(d.canBrowseSmb).toBe(false)
+    expect(d.mountError).toBeNull()
+    expect(d.explore.open).toBe(false)
+    expect(d.explore.kind).toBeNull()
+    expect(d.explore.dirs).toEqual([])
+    expect(d.explore.shares).toEqual([])
+    expect(d.explore.audioCount).toBe(0)
+  })
+
+  it('les volumes, la capacité et l’exploration se relisent', () => {
+    const d = normaliserDonnees({
+      volumes: [{ path: '/media/usb', fstype: 'vfat' }],
+      can_browse_smb: true,
+      mount_error: 'Interactive authentication required.',
+      explore: {
+        open: true,
+        kind: 'smb',
+        host: 'nas',
+        share: 'musique',
+        path: 'Albums',
+        shares: ['musique', 'photo'],
+        dirs: ['Jazz'],
+        audio_count: 12,
+        busy: false,
+        error: null,
+      },
+    })
+    expect(d.volumes[0]).toEqual({ path: '/media/usb', fstype: 'vfat' })
+    expect(d.canBrowseSmb).toBe(true)
+    expect(d.mountError).toBe('Interactive authentication required.')
+    expect(d.explore.kind).toBe('smb')
+    expect(d.explore.audioCount).toBe(12)
+    expect(d.explore.dirs).toEqual(['Jazz'])
+    expect(d.explore.shares).toEqual(['musique', 'photo'])
+  })
+
+  it('un genre d’assistant inconnu retombe sur « aucun »', () => {
+    // Le genre pilote l'affichage de la popin. Une valeur inattendue doit la
+    // laisser fermée plutôt qu'ouvrir un panneau à moitié composé.
+    expect(normaliserDonnees({ explore: { kind: 'ftp' } }).explore.kind).toBeNull()
+  })
+
+  it('une erreur vide vaut « rien à signaler », pas une erreur sans texte', () => {
+    // Le plugin rend `null` quand tout va bien ; une chaîne vide dit la même
+    // chose. Les lire différemment afficherait un bandeau d'erreur muet.
+    expect(normaliserDonnees({ explore: { error: '' } }).explore.error).toBeNull()
+    expect(normaliserDonnees({ mount_error: '' }).mountError).toBeNull()
+  })
+})

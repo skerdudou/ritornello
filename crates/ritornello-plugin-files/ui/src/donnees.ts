@@ -82,6 +82,51 @@ export interface Navigation {
   tronque: boolean
 }
 
+/** Un volume monté de l'appareil, tel que le plugin le lit dans `/proc/mounts`. */
+export interface Volume {
+  path: string
+  fstype: string
+}
+
+/**
+ * L'assistant de déclaration en cours.
+ *
+ * Emplacement **distinct** de `browse` : la popin et le volet Parcourir sont
+ * deux curseurs indépendants, et les faire partager un emplacement ferait
+ * qu'ouvrir une popin réinitialiserait l'arbre derrière elle.
+ *
+ * Aucun identifiant n'y figure. Le plugin ne les sérialise jamais : le mot de
+ * passe traverse le fil une fois, à la connexion, et vit ensuite dans une
+ * session en mémoire du plugin que la page ne relit pas.
+ */
+export interface Exploration {
+  open: boolean
+  kind: GenreRacine | null
+  host: string
+  share: string
+  /** Chemin absolu pour un volume, relatif au partage pour un partage. */
+  path: string
+  shares: string[]
+  dirs: string[]
+  /** Fichiers audio du niveau ouvert : c'est ce qui dit qu'on est au bon endroit. */
+  audioCount: number
+  busy: boolean
+  error: string | null
+}
+
+const EXPLORATION_VIDE: Exploration = {
+  open: false,
+  kind: null,
+  host: '',
+  share: '',
+  path: '',
+  shares: [],
+  dirs: [],
+  audioCount: 0,
+  busy: false,
+  error: null,
+}
+
 export interface Donnees {
   roots: Racine[]
   playlist: Piste[]
@@ -90,6 +135,19 @@ export interface Donnees {
   saved: Enregistree[]
   unresolved: string[]
   browse: Navigation
+  volumes: Volume[]
+  /** `smbclient` est-il utilisable. Faux grise l'assistant réseau, sans le retirer. */
+  canBrowseSmb: boolean
+  explore: Exploration
+  /**
+   * Échec de la dernière réconciliation de montage, déjà traduit.
+   *
+   * **Global et non porté par chaque source** : `systemctl start` réconcilie
+   * toutes les racines d'un coup et ne rend qu'un seul résultat. Prétendre
+   * attribuer cet échec à une source précise serait une information inventée —
+   * le détail par source reste le booléen `mounted`, lui observé.
+   */
+  mountError: string | null
 }
 
 /** Destination « stockage interne » du plugin, par opposition à un nom de racine. */
@@ -180,6 +238,31 @@ export function normaliserBrowse(brut: unknown): Navigation {
   }
 }
 
+/**
+ * Recompose l'état d'un assistant.
+ *
+ * Chaque champ absent vaut sa valeur vide, jamais `undefined` : pendant un
+ * déploiement le plugin peut être plus ancien que la page, et un `undefined`
+ * traversant un `v-for` casserait le rendu entier au lieu d'afficher une
+ * section vide.
+ */
+export function normaliserExploration(brut: unknown): Exploration {
+  if (!brut) return EXPLORATION_VIDE
+  const o = brut as Record<string, unknown>
+  return {
+    open: o.open === true,
+    kind: o.kind === 'local' || o.kind === 'smb' ? o.kind : null,
+    host: chaine(o.host),
+    share: chaine(o.share),
+    path: chaine(o.path),
+    shares: tableau(o.shares).map(chaine),
+    dirs: tableau(o.dirs).map(chaine),
+    audioCount: nombre(o.audio_count),
+    busy: o.busy === true,
+    error: typeof o.error === 'string' && o.error ? o.error : null,
+  }
+}
+
 /** Dernier segment d'un chemin relatif, séparateur `/` (celui du plugin). */
 export function feuille(chemin: string): string {
   const parts = chemin.split('/').filter(Boolean)
@@ -216,6 +299,15 @@ export function normaliserDonnees(brut: unknown): Donnees {
     // bruts, seule chose que l'utilisateur puisse rapprocher de ses fichiers.
     unresolved: tableau(o.unresolved).map(chaine),
     browse: normaliserBrowse(o.browse),
+    volumes: tableau(o.volumes).map((v) => {
+      const e = (v ?? {}) as Record<string, unknown>
+      return { path: chaine(e.path), fstype: chaine(e.fstype) }
+    }),
+    // Faux par défaut : mieux vaut griser un assistant utilisable que d'en
+    // offrir un qui échouera au clic sans dire pourquoi.
+    canBrowseSmb: o.can_browse_smb === true,
+    explore: normaliserExploration(o.explore),
+    mountError: typeof o.mount_error === 'string' && o.mount_error ? o.mount_error : null,
   }
 }
 
