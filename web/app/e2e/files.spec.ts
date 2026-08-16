@@ -43,28 +43,40 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   await page.goto('/plugins/files/')
   // Le module ESM du plugin est charge dynamiquement et resolu par l'import
   // map : c'est ce qu'aucun test unitaire ne peut verifier.
-  await expect(page.locator('[data-volet-racines]')).toBeVisible()
-  // Aucune racine : la preuve que le harnais a bien detourne
+  await expect(page.locator('[data-volet-sources]')).toBeVisible()
+  // Aucune source : la preuve que le harnais a bien detourne
   // `RITORNELLO_FILES_ROOTS` vers son repertoire jetable. Sans cela, une
   // execution sur une machine ou Ritornello est installe lirait — et
   // ecraserait — le `/etc/ritornello/media-roots.toml` du proprietaire.
-  await expect(page.locator('[data-no-roots]')).toBeVisible()
+  await expect(page.locator('[data-no-sources]')).toBeVisible()
 
-  // --- Declarer la racine locale -------------------------------------------
-  await page.locator('[data-add-local]').click()
-  await page.locator('[data-root-name]').last().fill('fixtures')
-  await page.locator('[data-root-path]').last().fill(racine)
-  await page.locator('[data-save-roots]').click()
+  // --- Declarer un dossier de l'appareil, par l'assistant -------------------
+  // Le coeur du chantier : on ne tape plus un chemin absolu qu'aucun ecran
+  // n'affiche, on part des volumes montes. Le harnais en *decrit* un dans un
+  // faux /proc/mounts, faute de pouvoir en monter un sans privilege.
+  await page.locator('[data-add-device]').click()
+  // Le contenu de la popin vit dans un portail : Playwright le voit (il
+  // interroge le document), la ou `wrapper.find` d'un test unitaire ne le
+  // verrait pas.
+  await expect(page.locator('[data-volume]')).toHaveCount(1)
+  await page.locator('[data-volume]').click()
+  // On descend dans `media`, le dossier des fixtures. `proc` n'est pas
+  // proposable : le volume unique est le repertoire jetable, et la liste
+  // blanche des systemes de fichiers ecarte les pseudo-systemes.
+  await page.locator('[data-choix-dossier]', { hasText: 'media' }).first().click()
+  await expect(page.locator('[data-audio-count]')).toBeVisible()
+  await page.locator('[data-choisir]').click()
   // Un refus s'affiche verbatim dans `[data-message]` : l'exiger absent donne
-  // un echec qui nomme la cause au lieu d'un simple « pas de racine ».
+  // un echec qui nomme la cause au lieu d'un simple « pas de source ».
   await expect(page.locator('[data-message]')).toHaveCount(0)
-  await expect(page.locator('[data-root]')).toHaveCount(1)
+  await expect(page.locator('[data-source-row]')).toHaveCount(1)
   // Relu depuis le plugin, et pas seulement affiche : c'est le seul moyen de
   // prouver que la table a bien atteint `media-roots.toml`, la page pouvant
-  // afficher la ligne qu'on vient de saisir meme si l'enregistrement a echoue.
+  // afficher la ligne qu'on vient de choisir meme si l'enregistrement a echoue.
   const apresRacines = await (await request.get('/plugins/files/api/data')).json()
   expect(apresRacines.roots).toHaveLength(1)
-  expect(apresRacines.roots[0].name).toBe('fixtures')
+  // Le nom n'est plus saisi : il est **derive** du dernier segment du chemin.
+  expect(apresRacines.roots[0].name).toBe('media')
   expect(apresRacines.roots[0].path).toBe(racine)
   // Le mot de passe ne traverse jamais vers le navigateur — garanti par le type
   // cote plugin (`Root` ne porte pas le champ), verifie ici de bout en bout.
@@ -147,4 +159,43 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   // qui exige la radio active. La remise est verifiee, pas esperee.
   await source.click()
   await expect(page.locator('[data-source]')).toHaveText('radio')
+
+  // --- L'assistant reseau, sans NAS ----------------------------------------
+  // En dernier, et deliberement : declarer un partage demande une
+  // reconciliation de montage qui echouera ici (ni polkit ni unite systemd
+  // dans le bac a sable), et cet echec ne doit surtout pas defaire ce que les
+  // etapes precedentes ont etabli.
+  //
+  // Le `smbclient` que le plugin trouve est celui du harnais, qui rend des
+  // sorties **captees sur un vrai NAS**. C'est ce qui rend cette etape jouable
+  // sur n'importe quelle machine tout en eprouvant l'analyse contre du reel.
+  await page.goto('/plugins/files/')
+  await page.locator('[data-add-share]').click()
+  await page.locator('[data-host]').fill('192.168.1.15')
+  await page.locator('[data-user]').fill('ritornello')
+  await page.locator('[data-password]').fill('peu-importe')
+  await page.locator('[data-connect]').click()
+  // Deux partages, pas trois : `IPC$` porte le type `IPC|` et non `Disk|`, et
+  // la ligne de bruit « SMB1 disabled » n'est pas un partage non plus.
+  await expect(page.locator('[data-share]')).toHaveCount(2, { timeout: 30_000 })
+  await page.locator('[data-share]', { hasText: 'music' }).first().click()
+  // Un nom de dossier a espaces survit a l'analyse par la droite du `ls` :
+  // c'est le cas qui condamne toute lecture par la gauche.
+  await expect(page.locator('[data-choix-dossier]', { hasText: 'Yann Tiersen' })).toHaveCount(1)
+  await page.locator('[data-choix-dossier]', { hasText: 'Yann Tiersen' }).click()
+  await page.locator('[data-choisir]').click()
+
+  // La source est declaree malgre l'echec du montage — c'est l'invariant :
+  // perdre la saisie parce qu'un NAS dort serait la pire des reponses.
+  await expect(page.locator('[data-source-row]')).toHaveCount(2)
+  const apresPartage = await (await request.get('/plugins/files/api/data')).json()
+  expect(apresPartage.roots).toHaveLength(2)
+  const partage = apresPartage.roots.find((r: { kind: string }) => r.kind === 'smb')
+  // Nom derive du partage, sous-chemin garde tel quel — espace compris, ce que
+  // l'ancienne regle de validation refusait.
+  expect(partage.name).toBe('music')
+  expect(partage.subpath).toBe('Yann Tiersen')
+  expect(partage.host).toBe('192.168.1.15')
+  // Et le mot de passe n'est toujours nulle part dans ce que la page recoit.
+  expect(JSON.stringify(apresPartage)).not.toContain('peu-importe')
 })

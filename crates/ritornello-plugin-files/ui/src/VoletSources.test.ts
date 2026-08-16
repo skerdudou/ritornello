@@ -33,7 +33,7 @@ describe('volet des sources', () => {
   it('sans source, invite à en ajouter une plutôt que de laisser un vide', async () => {
     const { w } = await monter()
     expect(w.find('[data-no-sources]').exists()).toBe(true)
-    expect(w.findAll('[data-source]')).toHaveLength(0)
+    expect(w.findAll('[data-source-row]')).toHaveLength(0)
   })
 
   it('affiche la cible d’une source et l’état observé de son montage', async () => {

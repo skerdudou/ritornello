@@ -59,7 +59,7 @@ function remonter(): void {
     <div
       v-for="r in donnees.roots"
       :key="r.name"
-      data-source
+      data-source-row
       class="flex flex-wrap items-center gap-2 rounded-md border border-border p-3"
     >
       <span class="text-xs text-muted-foreground" data-source-kind>

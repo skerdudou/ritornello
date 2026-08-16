@@ -85,6 +85,33 @@ describe('FilesAdmin, la page', () => {
     expect(gets()).toBe(3)
   })
 
+  it('sonde aussi pendant une connexion à un partage', async () => {
+    // Régression trouvée par le parcours de bout en bout, et par lui seul : la
+    // connexion SMB est asynchrone côté plugin — un NAS éteint dépasserait le
+    // plafond de 5 s du cœur — mais le sondage ne surveillait que le balayage.
+    // La popin restait donc bloquée sur « Connexion… » indéfiniment, alors que
+    // le plugin avait répondu depuis longtemps : plus personne ne le relisait.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const s = serveur({ explore: { open: true, kind: 'smb', busy: true, host: 'nas' } })
+    mount(FilesAdmin, { props: { catalog: CATALOGUE, base: BASE } })
+    await flushPromises()
+    const gets = () => s.spy.mock.calls.filter((c) => (c[1] as RequestInit)?.method !== 'PUT').length
+    expect(gets()).toBe(1)
+
+    vi.advanceTimersByTime(1000)
+    await flushPromises()
+    expect(gets()).toBe(2)
+
+    // Connexion terminée : le sondage s'arrête, comme après un balayage.
+    s.data.explore = { open: true, kind: 'smb', busy: false, host: 'nas', shares: ['music'] }
+    vi.advanceTimersByTime(1000)
+    await flushPromises()
+    expect(gets()).toBe(3)
+    vi.advanceTimersByTime(5000)
+    await flushPromises()
+    expect(gets()).toBe(3)
+  })
+
   it('montre l’incident du dernier balayage, qui survit à sa fin', async () => {
     // Régression encodée : `add_dir` rend la main **avant** la fin de la marche
     // récursive, donc son accusé de réception ne dit rien de son issue. Si la

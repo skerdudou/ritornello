@@ -58,9 +58,23 @@ function arreterSondage(): void {
   }
 }
 
+/**
+ * Y a-t-il un travail en cours dont la page attend la fin ?
+ *
+ * Deux, et il a fallu un parcours de bout en bout pour s'en souvenir : le
+ * balayage récursif, **et** la connexion à un partage. Le protocole admin ne
+ * pousse rien, donc tout ce qui est asynchrone côté plugin n'arrive à l'écran
+ * que par ce sondage. Ne surveiller que le balayage laissait la popin réseau
+ * bloquée sur « Connexion… » pour toujours — le plugin avait pourtant répondu,
+ * mais plus personne ne le relisait.
+ */
+function travailEnCours(): boolean {
+  return donnees.value?.scan.running === true || donnees.value?.explore.busy === true
+}
+
 function programmerSondage(): void {
   arreterSondage()
-  if (!donnees.value?.scan.running) return
+  if (!travailEnCours()) return
   minuterie = setTimeout(() => {
     void recharger()
   }, PERIODE_SONDAGE_MS)

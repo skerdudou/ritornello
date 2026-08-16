@@ -246,6 +246,26 @@ impl FilesAdmin {
         Ok(())
     }
 
+    /// Réconcilie les montages, **et seulement s'il y a quelque chose à
+    /// monter ou à démonter**.
+    ///
+    /// Sans cette garde, déclarer un simple dossier de l'appareil demandait à
+    /// systemd de lancer l'unité de montage, laquelle exige une autorisation
+    /// polkit : la page affichait alors « la dernière tentative de montage a
+    /// échoué — authentification interactive requise » à quelqu'un qui venait
+    /// d'ajouter une clé USB et n'avait rien demandé de tel. Un message
+    /// alarmant pour un travail qui n'avait pas lieu d'être.
+    ///
+    /// `aussi` couvre le retrait : la source qui part peut être le dernier
+    /// partage de la table, et il faut encore la démonter.
+    async fn reconcilier(&self, table: &Roots, aussi: bool) {
+        if !aussi && !table.root.iter().any(|r| r.kind == RootKind::Smb) {
+            *self.mount_error.lock().unwrap() = None;
+            return;
+        }
+        *self.mount_error.lock().unwrap() = mount::reconcile(mount::UNIT).await.err();
+    }
+
     /// Écrit la table des racines, atomiquement.
     ///
     /// Le fichier temporaire puis le renommage : une coupure de courant au
@@ -444,11 +464,11 @@ impl AdminPlugin for FilesAdmin {
                     })?;
                 }
                 self.ecrire_table(&table)?;
-                *self.roots.write().await = table;
                 // Le montage suit la déclaration : plus de bouton à trouver.
                 // Un échec ne défait PAS la déclaration — l'utilisateur perdrait
                 // sa saisie à cause d'un NAS endormi — il est rapporté à part.
-                *self.mount_error.lock().unwrap() = mount::reconcile(mount::UNIT).await.err();
+                self.reconcilier(&table, false).await;
+                *self.roots.write().await = table;
                 Ok(())
             }
 
@@ -462,8 +482,10 @@ impl AdminPlugin for FilesAdmin {
                 // Le fichier d'identifiants part avec la source : le laisser
                 // ferait survivre un mot de passe à ce qui le justifiait.
                 let _ = std::fs::remove_file(partie.credentials_path(&self.creds_dir));
+                // `aussi` : la source qui part peut être le dernier partage de
+                // la table, et il reste à la démonter.
+                self.reconcilier(&table, partie.kind == RootKind::Smb).await;
                 *self.roots.write().await = table;
-                *self.mount_error.lock().unwrap() = mount::reconcile(mount::UNIT).await.err();
                 Ok(())
             }
 
@@ -474,8 +496,12 @@ impl AdminPlugin for FilesAdmin {
                 };
                 r.writable = writable;
                 self.ecrire_table(&table)?;
+                // Remonter est indispensable : `ro` est une option de montage,
+                // pas un drapeau relu à chaque écriture. Sans réconciliation,
+                // autoriser l'écriture ne changerait rien jusqu'au prochain
+                // redémarrage.
+                self.reconcilier(&table, false).await;
                 *self.roots.write().await = table;
-                *self.mount_error.lock().unwrap() = mount::reconcile(mount::UNIT).await.err();
                 Ok(())
             }
 
@@ -772,6 +798,32 @@ mod tests {
         assert_eq!(roots.root.len(), 1);
         assert_eq!(roots.root[0].name, "musique");
         assert_eq!(roots.root[0].subpath.as_deref(), Some("Ma Musique"));
+    }
+
+    #[tokio::test]
+    async fn ajouter_un_dossier_local_ne_demande_aucun_montage() {
+        // Défaut trouvé par le parcours de bout en bout, et invisible ici sans
+        // ce test : la réconciliation partait à chaque déclaration, y compris
+        // pour un dossier de l'appareil. Elle exige polkit, donc elle échouait,
+        // et la page annonçait « la dernière tentative de montage a échoué —
+        // authentification interactive requise » à quelqu'un qui venait
+        // simplement de brancher une clé USB.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut admin, _) = admin_de_test();
+        admin
+            .set_data(serde_json::json!({
+                "op": "add_source", "kind": "local",
+                "path": dir.path().display().to_string(),
+                "host": "", "share": "", "user": "", "domain": "",
+                "password": "", "writable": false
+            }))
+            .await
+            .unwrap();
+        assert_eq!(admin.roots.read().await.root.len(), 1);
+        assert!(
+            admin.mount_error.lock().unwrap().is_none(),
+            "aucun montage n'a lieu d'etre tente sans le moindre partage declare"
+        );
     }
 
     #[tokio::test]
