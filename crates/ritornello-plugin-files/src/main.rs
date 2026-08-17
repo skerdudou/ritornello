@@ -459,6 +459,8 @@ async fn main() -> Result<()> {
                 smb_ok,
                 liste_changee,
                 joue,
+                durees: Arc::new(Mutex::new(admin::DureesProgress::default())),
+                durees_task: None,
                 roots_path,
                 creds_dir,
                 internal_playlists: playlists_dir,

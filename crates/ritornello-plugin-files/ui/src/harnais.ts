@@ -86,6 +86,7 @@ export const CATALOGUE: Record<string, string> = {
   empty_playlist: 'Liste vide',
   missing_badge: 'introuvable',
   reorder_hint: 'Glisser pour réordonner',
+  duration_progress: 'Lecture des durées ({done} sur {total})',
   btn_move_up: 'Monter la piste',
   btn_move_down: 'Descendre la piste',
   btn_remove_track: 'Retirer la piste',
@@ -126,6 +127,7 @@ export interface EtatServeur {
   volumes?: { path: string; fstype: string }[]
   can_browse_smb?: boolean
   playing?: boolean
+  durations?: { running: boolean; done: number; total: number }
   explore?: Explore
   mount_error?: string | null
 }
@@ -177,6 +179,7 @@ export function etat(partiel: EtatServeur = {}): Required<EtatServeur> {
     // qu'un test doit déclarer explicitement pour offrir l'assistant réseau.
     can_browse_smb: false,
     playing: false,
+    durations: { running: false, done: 0, total: 0 },
     explore: EXPLORE_FERME,
     mount_error: null,
     ...partiel,

@@ -36,6 +36,21 @@ pub struct ScanProgress {
     pub error: Option<String>,
 }
 
+/// Avancement du sondage des durées, tel que la page le lit.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DureesProgress {
+    pub running: bool,
+    pub done: usize,
+    pub total: usize,
+}
+
+/// Combien de pistes sont sondées avant de reprendre le verrou.
+///
+/// Ni une par une — le verrou serait pris des milliers de fois, en concurrence
+/// avec la lecture — ni toutes d'un coup, qui ne montrerait aucun avancement et
+/// perdrait tout si le sondage était abandonné en route.
+const LOT_DE_SONDAGE: usize = 25;
+
 pub struct FilesAdmin {
     pub roots_path: PathBuf,
     pub creds_dir: PathBuf,
@@ -85,6 +100,11 @@ pub struct FilesAdmin {
     /// Sert à la page pour décider si vider la liste doit aussi demander l'arrêt
     /// au cœur : le faire alors qu'une autre source joue couperait celle-là.
     pub joue: Arc<std::sync::atomic::AtomicBool>,
+    /// Avancement du sondage des durées.
+    pub durees: Arc<Mutex<DureesProgress>>,
+    /// Sondage en cours. En lancer un nouveau **abandonne** le précédent : après
+    /// un chargement de liste, sonder l'ancienne ne sert plus à rien.
+    pub durees_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -288,6 +308,111 @@ impl FilesAdmin {
         *self.mount_error.lock().unwrap() = mount::reconcile(mount::UNIT).await.err();
     }
 
+    /// Lance le sondage des durées manquantes, en tâche de fond.
+    ///
+    /// En tâche de fond parce qu'il n'y a pas le choix : le protocole admin a un
+    /// plafond de 5 s, et une liste de deux mille pistes venue d'un partage
+    /// demande davantage. La page suit l'avancement par sondage, exactement comme
+    /// pour le balayage.
+    ///
+    /// Ne sonde que ce qui manque : une durée venue d'un `#EXTINF` ou d'un
+    /// sondage antérieur est conservée, et `StoredEntry` la persiste — un
+    /// redémarrage ne resonde donc rien.
+    ///
+    /// Les résultats sont appliqués **par chemin** et non par index : la page
+    /// peut réordonner ou retirer des pistes pendant le sondage, et appliquer par
+    /// position écrirait la durée d'un fichier sur un autre.
+    fn lancer_sondage(
+        playlist: Arc<AsyncRwLock<Playlist>>,
+        durees: Arc<Mutex<DureesProgress>>,
+        state_path: PathBuf,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let a_sonder: Vec<PathBuf> = {
+                let liste = playlist.read().await;
+                let mut v: Vec<PathBuf> = liste
+                    .entries
+                    .iter()
+                    .filter(|e| e.duration_s.is_none())
+                    .map(|e| e.path.clone())
+                    .collect();
+                // Un même fichier peut figurer deux fois : le sonder une seule
+                // fois suffit, la durée sera posée sur toutes ses occurrences.
+                v.sort();
+                v.dedup();
+                v
+            };
+            if a_sonder.is_empty() {
+                *durees.lock().unwrap() = DureesProgress::default();
+                return;
+            }
+            *durees.lock().unwrap() =
+                DureesProgress { running: true, done: 0, total: a_sonder.len() };
+
+            let mut faits = 0usize;
+            for lot in a_sonder.chunks(LOT_DE_SONDAGE) {
+                let lot: Vec<PathBuf> = lot.to_vec();
+                // `spawn_blocking` : la lecture d'en-tête touche le disque, et
+                // sur un partage endormi elle peut attendre. Le faire sur le
+                // fil asynchrone bloquerait la moitié Admin, donc la page.
+                let mesures = tokio::task::spawn_blocking(move || {
+                    lot.into_iter()
+                        .map(|p| {
+                            let d = ritornello_plugin_files::duree::sonder(&p);
+                            (p, d)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+                let Ok(mesures) = mesures else { break };
+
+                {
+                    let mut liste = playlist.write().await;
+                    for (chemin, duree) in &mesures {
+                        let Some(d) = duree else { continue };
+                        for e in liste.entries.iter_mut() {
+                            // `is_none` à nouveau : entre le relevé et
+                            // maintenant, un chargement a pu poser une durée.
+                            if e.path == *chemin && e.duration_s.is_none() {
+                                e.duration_s = Some(*d);
+                            }
+                        }
+                    }
+                    let stockees: Vec<state::StoredEntry> =
+                        liste.entries.iter().map(state::StoredEntry::from).collect();
+                    let index = liste.index;
+                    drop(liste);
+                    // Persister à chaque lot : un sondage interrompu à mi-course
+                    // garde ce qu'il a déjà trouvé, au lieu de tout refaire.
+                    if let Err(e) = state::update(&state_path, |s| {
+                        s.playlist = stockees;
+                        s.index = index;
+                    }) {
+                        tracing::warn!("persisting track lengths: {e}");
+                    }
+                }
+
+                faits += mesures.len();
+                let mut p = durees.lock().unwrap();
+                p.done = faits;
+            }
+            let mut p = durees.lock().unwrap();
+            p.running = false;
+        })
+    }
+
+    /// Relance le sondage, en abandonnant celui qui tournait.
+    fn resonder(&mut self) {
+        if let Some(t) = self.durees_task.take() {
+            t.abort();
+        }
+        self.durees_task = Some(Self::lancer_sondage(
+            self.playlist.clone(),
+            self.durees.clone(),
+            self.state_path.clone(),
+        ));
+    }
+
     /// Écrit la table des racines, atomiquement.
     ///
     /// Le fichier temporaire puis le renommage : une coupure de courant au
@@ -396,6 +521,9 @@ impl AdminPlugin for FilesAdmin {
             // demander l'arrêt. Sans cette information elle couperait la radio
             // en vidant une liste de fichiers qui ne jouait pas.
             "playing": self.joue.load(std::sync::atomic::Ordering::Relaxed),
+            // Avancement du sondage des durées : c'est ce qui fait sonder la page
+            // le temps qu'elles arrivent, puis cesser.
+            "durations": self.durees.lock().unwrap().clone(),
             "explore": explore,
             "mount_error": mount_error,
             "playlist": pistes,
@@ -632,6 +760,9 @@ impl AdminPlugin for FilesAdmin {
                 let compteur = Arc::new(AtomicUsize::new(0));
                 let tx = self.preset_count_tx.clone();
                 let changee = self.liste_changee.clone();
+                let playlist_pour_durees = self.playlist.clone();
+                let durees = self.durees.clone();
+                let state_path_pour_durees = self.state_path.clone();
                 let state_path = self.state_path.clone();
                 self.scan_task = Some(tokio::spawn(async move {
                     let c = compteur.clone();
@@ -671,6 +802,17 @@ impl AdminPlugin for FilesAdmin {
                                 // canal vers la moitié Source.
                                 changee.store(true, Ordering::Relaxed);
                                 let _ = tx.send(compte);
+                                // Le sondage part d'ici et non du gestionnaire :
+                                // celui-ci a rendu la main bien avant que la
+                                // marche récursive n'ait ajouté quoi que ce soit.
+                                // Sa poignée n'est pas conservée — un sondage
+                                // concurrent ne fait que du travail en double, il
+                                // ne pose jamais de durée fausse.
+                                Self::lancer_sondage(
+                                    playlist_pour_durees,
+                                    durees,
+                                    state_path_pour_durees,
+                                );
                                 if let Err(e) = state::update(&state_path, |s| {
                                     s.playlist = stockees;
                                     s.index = index;
@@ -695,6 +837,7 @@ impl AdminPlugin for FilesAdmin {
                 let fichier = self.sous_racine(&root, &path).await?;
                 self.ajouter(vec![fichier]).await?;
                 self.liste_modifiee().await;
+                self.resonder();
                 Ok(())
             }
 
@@ -762,6 +905,9 @@ impl AdminPlugin for FilesAdmin {
                 drop(liste);
                 self.unresolved.lock().unwrap().clear();
                 self.liste_modifiee().await;
+                // Abandonne un sondage en cours : il portait sur des pistes qui
+                // ne sont plus là, et son avancement mentirait à l'écran.
+                self.resonder();
                 Ok(())
             }
 
@@ -793,6 +939,7 @@ impl AdminPlugin for FilesAdmin {
                 liste.index = 0;
                 drop(liste);
                 self.liste_modifiee().await;
+                self.resonder();
                 Ok(())
             }
 
@@ -833,6 +980,9 @@ impl AdminPlugin for FilesAdmin {
                 liste.index = 0;
                 drop(liste);
                 self.liste_modifiee().await;
+                // Un m3u peut porter des `#EXTINF`, mais rarement tous : le
+                // sondage ne comble que ce qui manque.
+                self.resonder();
                 Ok(())
             }
         }
@@ -874,6 +1024,8 @@ mod tests {
             preset_count_tx: tx,
             liste_changee: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             joue: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            durees: Arc::new(Mutex::new(DureesProgress::default())),
+            durees_task: None,
             explore: ritornello_plugin_files::explore::Explorateur::new(
                 racine.join("creds"),
                 catalogue.clone(),
@@ -1141,6 +1293,99 @@ mod tests {
         let liste = admin.playlist.read().await;
         assert_eq!(liste.entries.len(), 3);
         assert_eq!(liste.index, 1, "la piste ecoutee doit rester la meme");
+    }
+
+    /// Attend la fin du sondage des durées, ou abandonne au bout d'un délai.
+    ///
+    /// Le sondage est **asynchrone** à dessein : le protocole admin a un plafond
+    /// de 5 s, et une liste venue d'un partage demande davantage. Un test doit
+    /// donc l'attendre, et non supposer qu'il a fini au retour de l'opération.
+    async fn attendre_les_durees(admin: &FilesAdmin) {
+        for _ in 0..200 {
+            let p = admin.durees.lock().unwrap().clone();
+            if p.total > 0 && !p.running {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("le sondage des durees n'a jamais abouti");
+    }
+
+    /// Fabrique un mp3 réel, ou rend `None` si ffmpeg manque.
+    fn mp3_de(secondes: u32, chemin: &Path) -> Option<()> {
+        std::process::Command::new("ffmpeg")
+            .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i"])
+            .arg(format!("sine=frequency=440:duration={secondes}"))
+            .arg(chemin)
+            .status()
+            .ok()
+            .filter(|s| s.success())
+            .map(|_| ())
+    }
+
+    #[tokio::test]
+    async fn ajouter_un_fichier_sonde_sa_duree_en_tache_de_fond() {
+        // La demande : les durées manquantes se remplissent d'elles-mêmes, sans
+        // bloquer l'ajout — un dossier de mille pistes dépasserait le plafond de
+        // 5 s du cœur.
+        let (mut admin, racine) = admin_avec_racine_locale().await;
+        let media = racine.join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        if mp3_de(3, &media.join("piste.mp3")).is_none() {
+            eprintln!("ffmpeg absent : test saute");
+            return;
+        }
+        admin
+            .set_data(serde_json::json!({
+                "op": "add_file", "root": "local", "path": "piste.mp3"
+            }))
+            .await
+            .unwrap();
+        attendre_les_durees(&admin).await;
+        let liste = admin.playlist.read().await;
+        let d = liste.entries[0].duration_s.expect("une duree attendue");
+        assert!((2..=4).contains(&d), "duree lue {d}");
+    }
+
+    #[tokio::test]
+    async fn une_duree_deja_connue_nest_pas_ecrasee() {
+        // Celles d'un `#EXTINF` sont l'autorité : le fichier peut être un extrait,
+        // et resonder par-dessus effacerait ce que la liste affirmait.
+        let (admin, _) = admin_avec_racine_locale().await;
+        {
+            let mut liste = admin.playlist.write().await;
+            liste.entries = vec![Entry {
+                path: PathBuf::from("/m/inexistant.mp3"),
+                title: None,
+                duration_s: Some(245),
+            }];
+        }
+        let mut admin = admin;
+        admin.resonder();
+        // Rien à sonder : le sondage se termine sans rien toucher.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(admin.playlist.read().await.entries[0].duration_s, Some(245));
+        assert_eq!(admin.durees.lock().unwrap().total, 0, "rien n'avait a etre sonde");
+    }
+
+    #[tokio::test]
+    async fn les_durees_sondees_sont_persistees() {
+        // Sans persistance, chaque redémarrage resonderait toute la liste — des
+        // milliers de lectures d'en-tête sur un partage, pour rien.
+        let (mut admin, racine) = admin_avec_racine_locale().await;
+        let media = racine.join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        if mp3_de(2, &media.join("p.mp3")).is_none() {
+            eprintln!("ffmpeg absent : test saute");
+            return;
+        }
+        admin
+            .set_data(serde_json::json!({"op": "add_file", "root": "local", "path": "p.mp3"}))
+            .await
+            .unwrap();
+        attendre_les_durees(&admin).await;
+        let etat = state::load(&admin.state_path);
+        assert!(etat.playlist[0].duration_s.is_some(), "la duree doit survivre au redemarrage");
     }
 
     #[tokio::test]

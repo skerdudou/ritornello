@@ -32,6 +32,12 @@ toml = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
+# Lecture de la durée par l'en-tête, dans le processus.
+#
+# `default-features = false` a été essayé et **ne compile pas** : les types
+# d'erreur ID3v2 vivent derrière une caractéristique par défaut. Ne pas
+# retenter sans vérifier.
+lofty = "0.25.1"
 
 [dev-dependencies]
 tempfile = "3"

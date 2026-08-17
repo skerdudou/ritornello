@@ -133,6 +133,18 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   await expect(page.locator('[data-scan-error]')).toHaveCount(0)
   await expect(page.locator('[data-track-missing]')).toHaveCount(0)
 
+  // Les durees se relevent en tache de fond, par l'en-tete des fichiers.
+  //
+  // Un balayage ne fournit aucune duree — seul un `#EXTINF` en porte — donc la
+  // colonne affichait un tiret. Le plugin lit desormais les en-tetes, par lots,
+  // et la page sonde le temps que ca dure. Les fixtures font 30 s : c'est cette
+  // valeur qu'on doit voir arriver, ce qui prouve une lecture reelle et non une
+  // valeur inventee.
+  await expect(page.locator('[data-track-row]').first().locator('td').nth(2)).toHaveText(
+    /0:(29|30|31)/,
+    { timeout: 30_000 },
+  )
+
   // --- Enregistrer, vider, recharger ---------------------------------------
   await expect(page.locator('[data-no-saved]')).toBeVisible()
   await page.locator('[data-playlist-name]').fill('parcours')

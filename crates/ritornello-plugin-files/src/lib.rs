@@ -9,6 +9,7 @@
 //! placer lui imposerait des dépendances qu'un `oneshot` lancé par systemd n'a
 //! aucune raison de tirer.
 
+pub mod duree;
 pub mod explore;
 pub mod m3u;
 pub mod mount;

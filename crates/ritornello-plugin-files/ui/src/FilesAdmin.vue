@@ -69,7 +69,13 @@ function arreterSondage(): void {
  * mais plus personne ne le relisait.
  */
 function travailEnCours(): boolean {
-  return donnees.value?.scan.running === true || donnees.value?.explore.busy === true
+  return (
+    donnees.value?.scan.running === true ||
+    donnees.value?.explore.busy === true ||
+    // Le relevé des durées : elles arrivent par lots, et sans ce sondage la
+    // colonne resterait à « — » jusqu'au prochain geste de l'utilisateur.
+    donnees.value?.durations.running === true
+  )
 }
 
 /**
@@ -240,6 +246,22 @@ const scan = computed(
          avancer. -->
     <p v-if="scan.running" data-scan class="text-sm text-muted-foreground">
       {{ t('scan_progress', { found: scan.found, dir: scan.dir }) }}
+    </p>
+
+    <!-- Avancement du relevé des durées. Le dire plutôt que de laisser la
+         colonne se remplir toute seule : sur un partage lent, une liste qui
+         change sous les yeux sans explication inquiète. -->
+    <p
+      v-if="donnees?.durations.running"
+      data-durations
+      class="text-sm text-muted-foreground"
+    >
+      {{
+        t('duration_progress', {
+          done: donnees.durations.done,
+          total: donnees.durations.total,
+        })
+      }}
     </p>
 
     <!-- Incident du **dernier** balayage, déjà traduit par le plugin et affiché

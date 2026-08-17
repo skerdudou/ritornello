@@ -238,10 +238,14 @@ without restarting the service gives a correct answer, not a stale refusal.
 No address is typed blind any more: you browse first, you declare after.
 
 - **A folder of the device** — the dialog opens on the mounted volumes,
-  read from `/proc/mounts` and filtered through a whitelist of filesystem
-  types. Pseudo-filesystems (`/proc`, `/sys`, `/run`, `/dev`) are neither
-  offered nor browsable: without that bound, an "add to playlist" launched
-  on `/` would wander off into `/proc/self`'s recursive links.
+  read from `/proc/mounts`. Pseudo-filesystems (`/proc`, `/sys`, `/run`,
+  `/dev`) are neither offered nor browsable: without that bound, an "add to
+  playlist" launched on `/` would wander off into `/proc/self`'s recursive
+  links. The filter is a **blacklist of those pseudo types**, not a whitelist
+  of accepted ones — a whitelist was tried first and made real disks
+  unreachable with no workaround (`/mnt/c` under WSL is `9p`, an NTFS stick
+  mounted by ntfs-3g shows up as `fuseblk`). An incomplete blacklist merely
+  lets a stray entry into a list of choices.
 - **A network share** — you enter an address, connect, `smbclient`
   enumerates the shares, and you walk down the folders from there. Nothing
   is mounted until you have confirmed.
@@ -256,6 +260,28 @@ The mount **follows the declaration**: the plugin asks for reconciliation
 itself. A failure does not undo the declaration — everything just entered
 would be lost to a sleeping NAS — it is reported on the page, with a retry
 button.
+
+### Track lengths
+
+Only tracks **in the playlist** are measured, and only those whose length is
+still unknown. A scanned folder carries none — an `#EXTINF` line in an m3u is
+the only thing that does — so the column used to show a dash forever.
+
+Lengths are read from the file **header**, in-process, and the choice was
+measured on sixty files: 0.33 ms each that way, against 42 ms with one
+`ffprobe` per file. Over two thousand tracks that is under a second instead of
+a minute and a half, and it spares a Raspberry Pi two thousand process spawns
+while music is playing. No system package is involved.
+
+The work runs **in the background** and is polled by the page, like the
+recursive scan: the admin protocol has a 5 s ceiling and a playlist coming off
+a share needs longer. Results are applied by **path**, never by position — the
+page may reorder or remove tracks while measuring, and applying by index would
+write one file's length onto another. Each batch is persisted, so an
+interrupted pass keeps what it found and a restart re-measures nothing.
+
+A length that is already known is never overwritten: an `#EXTINF` is the
+authority, since the file may be an excerpt of what the list claims.
 
 ### The privilege boundary
 

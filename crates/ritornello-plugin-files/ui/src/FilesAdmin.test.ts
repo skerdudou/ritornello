@@ -7,6 +7,36 @@ describe('FilesAdmin, la page', () => {
   beforeEach(() => vi.unstubAllGlobals())
   afterEach(() => vi.useRealTimers())
 
+  it('sonde pendant le relevé des durées, et l’annonce', async () => {
+    // Les durées arrivent par lots, en tâche de fond : sans ce sondage la
+    // colonne resterait à « — » jusqu'au prochain geste de l'utilisateur. Et le
+    // dire compte — sur un partage lent, une liste qui change sous les yeux sans
+    // explication inquiète.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const s = serveur({
+      playlist: [{ path: '/m/1.mp3', name: '01' }],
+      durations: { running: true, done: 10, total: 40 },
+    })
+    const w = mount(FilesAdmin, { props: { catalog: CATALOGUE, base: BASE } })
+    await flushPromises()
+    expect(w.find('[data-durations]').text()).toBe('Lecture des durées (10 sur 40)')
+    const gets = () => s.spy.mock.calls.filter((c) => (c[1] as RequestInit)?.method !== 'PUT').length
+    expect(gets()).toBe(1)
+
+    vi.advanceTimersByTime(1000)
+    await flushPromises()
+    expect(gets()).toBe(2)
+
+    // Relevé terminé : le sondage s'arrête et l'annonce disparaît.
+    s.data.durations = { running: false, done: 40, total: 40 }
+    vi.advanceTimersByTime(1000)
+    await flushPromises()
+    expect(w.find('[data-durations]').exists()).toBe(false)
+    vi.advanceTimersByTime(5000)
+    await flushPromises()
+    expect(gets()).toBe(3)
+  })
+
   it('relit l’état quand le lecteur change, pour que la piste surlignée suive', async () => {
     // Défaut signalé : le surlignage vient d'`index`, que seul `api/data`
     // porte — et le sondage s'arrête dès qu'aucun travail n'est en cours. La

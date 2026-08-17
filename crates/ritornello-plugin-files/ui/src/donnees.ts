@@ -155,6 +155,14 @@ export interface Donnees {
    * fichiers qui ne jouait pas.
    */
   playing: boolean
+  /**
+   * Avancement du relevé des durées.
+   *
+   * Asynchrone côté plugin — lire l'en-tête de deux mille fichiers sur un
+   * partage dépasse le plafond de 5 s du cœur — donc la page sonde le temps
+   * qu'il tourne, exactement comme pour le balayage.
+   */
+  durations: { running: boolean; done: number; total: number }
   explore: Exploration
   /**
    * Échec de la dernière réconciliation de montage, déjà traduit.
@@ -375,6 +383,14 @@ export function normaliserDonnees(brut: unknown): Donnees {
     // offrir un qui échouera au clic sans dire pourquoi.
     canBrowseSmb: o.can_browse_smb === true,
     playing: o.playing === true,
+    durations: (() => {
+      const d = (o.durations ?? {}) as Record<string, unknown>
+      return {
+        running: d.running === true,
+        done: nombre(d.done),
+        total: nombre(d.total),
+      }
+    })(),
     explore: normaliserExploration(o.explore),
     mountError: typeof o.mount_error === 'string' && o.mount_error ? o.mount_error : null,
   }
