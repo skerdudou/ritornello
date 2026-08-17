@@ -35,14 +35,21 @@ act_select_7 = "Présélection 7"
 act_select_8 = "Présélection 8"
 act_select_9 = "Présélection 9"
 act_select_0 = "Touche 0"
-act_plus10 = "+10"
+# « Présélections » et non un « +10 » nu : cette touche décale le chiffre
+# suivant d'une dizaine (+10 puis 4 donne la station 14), elle ne déplace
+# pas la lecture. Sans ce mot, elle se lit comme « +10 secondes » dès que
+# les commandes de déplacement figurent dans la même liste — c'est arrivé.
+act_plus10 = "Présélections +10"
 act_volume_up = "Volume +"
 act_volume_down = "Volume -"
 act_mute = "Muet"
 act_play_pause = "Lecture/pause"
 act_stop = "Stop"
-act_seek_back = "Reculer"
-act_seek_forward = "Avancer"
+# « dans la piste » distingue ces deux touches de « Précédent »/« Suivant »,
+# qui changent de piste. Aucun nombre dans le libellé : le pas est réglable
+# sur la page de configuration, et « 10 s » deviendrait faux.
+act_seek_back = "Reculer dans la piste"
+act_seek_forward = "Avancer dans la piste"
 act_next = "Suivant"
 act_prev = "Précédent"
 act_eject = "Éjecter"

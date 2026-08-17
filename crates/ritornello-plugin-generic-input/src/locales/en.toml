@@ -38,14 +38,21 @@ act_select_7 = "Preset 7"
 act_select_8 = "Preset 8"
 act_select_9 = "Preset 9"
 act_select_0 = "Key 0"
-act_plus10 = "+10"
+# "Presets" rather than a bare "+10": this key shifts the next digit by ten
+# (+10 then 4 selects station 14), it does not move playback. Without that
+# word it reads as "+10 seconds" as soon as the seek actions sit in the same
+# list — which is exactly what happened.
+act_plus10 = "Presets +10"
 act_volume_up = "Volume +"
 act_volume_down = "Volume -"
 act_mute = "Mute"
 act_play_pause = "Play/pause"
 act_stop = "Stop"
-act_seek_back = "Rewind"
-act_seek_forward = "Fast forward"
+# "in track" tells these two apart from "Previous"/"Next", which change
+# track. No number in the label: the step is configurable on the config
+# page, and "10 s" would become a lie.
+act_seek_back = "Rewind in track"
+act_seek_forward = "Fast forward in track"
 act_next = "Next"
 act_prev = "Previous"
 act_eject = "Eject"
