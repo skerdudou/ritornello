@@ -216,6 +216,7 @@ set of keys stays stable:
   "hostname": "ritornello", "ip": "192.168.1.20",
   "os": "Debian GNU/Linux 12 (bookworm)", "kernel": "6.6.51+rpt-rpi-v7",
   "version": "0.1.0", "can_power_off": true, "can_reboot": true,
+  "logind_reachable": true,
   "cpu_total_jiffies": 9880976, "cpu_idle_jiffies": 9877777
 }
 ```
@@ -254,6 +255,13 @@ asked **once at startup** and cached: the page polls, and spawning `busctl`
 twice per poll would be absurd. Installing the polkit rule therefore takes
 effect at the next service start (see
 [installation.md](installation.md#shutdown-and-reboot-from-the-web-ui)).
+
+`logind_reachable` says whether that probe got an answer **at all**, and the
+page needs it to pick which sentence to show under the two disabled buttons.
+An answered "no" means the polkit rule is missing; no answer at all means
+logind itself is not there — a masked or unloadable `systemd-logind`, which
+no polkit rule will fix. The two look identical from the buttons alone, and
+naming the wrong one costs an evening.
 
 `POST /api/system/power` takes `{"action": "poweroff" | "reboot" |
 "restart-service"}`. An unknown action is refused with `422` and a

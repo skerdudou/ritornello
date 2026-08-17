@@ -240,9 +240,34 @@ To check, on the device:
 `s "yes"` means the rule is in effect. `s "challenge"` or `s "no"` means it
 is not: polkit is missing, or the rule did not land.
 
-Nothing breaks without it: the core asks logind the same question at
+**A third answer means something else entirely**, and no polkit rule will
+fix it:
+
+    Call failed: Unit dbus-org.freedesktop.login1.service failed to load
+    properly, please adjust/correct and reload service manager: File exists
+
+That is not a refusal — it is the D-Bus **activation** of logind failing,
+which means `systemd-logind` is not running and the alias that would start
+it cannot load (`File exists`: two units claiming the name). Seen on a
+DietPi image. Where to look:
+
+    systemctl is-active systemd-logind
+    ls -l /etc/systemd/system/dbus-org.freedesktop.login1.service \
+          /lib/systemd/system/dbus-org.freedesktop.login1.service \
+          /etc/systemd/system/systemd-logind.service
+
+The one in `/lib` is the alias shipped by the `systemd` package and belongs
+there; a second one in `/etc/systemd/system` is the usual culprit, and goes
+away with `sudo rm` followed by `sudo systemctl daemon-reload`. A
+`systemd-logind.service` pointing at `/dev/null` is a masked unit:
+`sudo systemctl unmask systemd-logind && sudo systemctl start
+systemd-logind`. Restart Ritornello afterwards — the probe is cached.
+
+Nothing breaks without any of it: the core asks logind the same question at
 startup, and the two system buttons stay **disabled**, with the reason shown
-on the page. That answer is cached for the lifetime of the process, so
+on the page — and the page distinguishes the two causes, since they call for
+different repairs (`logind_reachable` in
+[interface.md](interface.md#system-page)). That answer is cached for the lifetime of the process, so
 installing polkit takes effect at the next service start —
 `sudo systemctl restart ritornello`, or simply the next `deploy.sh`.
 

@@ -105,6 +105,13 @@ export interface SystemPayload {
   can_power_off: boolean
   can_reboot: boolean
   /**
+   * logind a-t-il répondu à la sonde de démarrage, quelle qu'ait été sa
+   * réponse ? Départage les deux causes d'un bouton grisé : un refus appelle
+   * la règle polkit, une absence de réponse appelle un `systemd-logind` qui
+   * tourne. Deux réparations différentes, donc deux phrases.
+   */
+  logind_reachable: boolean
+  /**
    * Compteurs cumulatifs de `/proc/stat` depuis le démarrage — jamais un
    * pourcentage : deux onglets sondant hors phase corrompraient un delta
    * calculé côté cœur. La vue les compare entre deux sondages successifs.

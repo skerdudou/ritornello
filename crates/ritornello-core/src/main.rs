@@ -315,7 +315,7 @@ async fn main() -> Result<()> {
         // Asked once, before serving: the answer gates the System tab's two
         // OS buttons, and asking per request would mean spawning `busctl`
         // twice every five seconds.
-        let (can_power_off, can_reboot) = system::probe_capabilities().await;
+        let sonde = system::probe_capabilities().await;
         let app = status::router(AppState {
             status: status_state.clone(),
             logs: log_buffer.clone(),
@@ -334,8 +334,9 @@ async fn main() -> Result<()> {
             settings_tx: settings_tx.clone(),
             player: etat_rx.clone(),
             system: Arc::new(system::SystemInfo {
-                can_power_off,
-                can_reboot,
+                can_power_off: sonde.can_power_off,
+                can_reboot: sonde.can_reboot,
+                logind_reachable: sonde.logind_reachable,
                 // Le crochet de relance tue mpv **avant** de sortir. Sans
                 // cela, mpv survivait au cœur et continuait de jouer : il est
                 // lancé en `kill_on_drop(true)`, mais `std::process::exit` ne

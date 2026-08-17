@@ -27,6 +27,7 @@ function payload(surcharge: Record<string, unknown> = {}) {
     version: '0.1.0',
     can_power_off: true,
     can_reboot: true,
+    logind_reachable: true,
     cpu_total_jiffies: null,
     cpu_idle_jiffies: null,
     ...surcharge,
@@ -225,6 +226,22 @@ describe('SystemView', () => {
     expect(w.get('[data-power-restart]').attributes('disabled')).toBeUndefined()
     expect(w.find('[data-power-unavailable]').exists()).toBe(true)
     w.unmount()
+  })
+
+  it('accuse polkit quand logind a repondu, logind quand il n a pas repondu', async () => {
+    // Les deux causes d'un bouton grisé ne se réparent pas pareil, et la
+    // phrase qui les confond envoie chercher une règle polkit déjà en place.
+    // Le catalogue de test ne porte pas ces clés : `t` rend la clé, ce qui
+    // suffit à distinguer les deux phrases.
+    stub(payload({ can_power_off: false, can_reboot: false, logind_reachable: true }))
+    const refus = await monter()
+    expect(refus.get('[data-power-unavailable]').text()).toContain('system_power_unavailable')
+    refus.unmount()
+
+    stub(payload({ can_power_off: false, can_reboot: false, logind_reachable: false }))
+    const absent = await monter()
+    expect(absent.get('[data-power-unavailable]').text()).toContain('system_power_no_logind')
+    absent.unmount()
   })
 
   it('n en désactive qu un seul quand une seule autorisation manque', async () => {

@@ -950,7 +950,7 @@ async function attendreRetour(avant: number | null) {
           data-power-unavailable
           class="text-sm text-muted-foreground"
         >
-          {{ t('system_power_unavailable') }}
+          {{ etat.logind_reachable ? t('system_power_unavailable') : t('system_power_no_logind') }}
         </p>
         <div class="flex flex-wrap gap-2">
           <Button

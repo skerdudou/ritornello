@@ -53,6 +53,17 @@ pub struct Metrics {
     pub version: String,
     pub can_power_off: bool,
     pub can_reboot: bool,
+    /// Did logind answer the capability probe at all?
+    ///
+    /// Distinct from the two booleans above, and the page needs both: logind
+    /// answering "no" means the polkit rule is missing, whereas logind not
+    /// answering means logind itself is unavailable — a masked or unloadable
+    /// `systemd-logind`, seen on a DietPi image as `Call failed: Unit
+    /// dbus-org.freedesktop.login1.service failed to load properly`. Both
+    /// leave the two buttons disabled, but they are not fixed by the same
+    /// thing, and a single sentence naming polkit sends the second case
+    /// looking for a rule that is already there.
+    pub logind_reachable: bool,
     /// Cumulative CPU jiffies since boot: `total` includes every field of
     /// `/proc/stat`'s aggregate line, `idle` is `idle + iowait`. A
     /// percentage cannot be read, only computed from two readings taken
@@ -104,6 +115,9 @@ pub struct SystemInfo {
     pub started: std::time::Instant,
     pub can_power_off: bool,
     pub can_reboot: bool,
+    /// See `Metrics::logind_reachable`: whether the startup probe got an
+    /// answer, whatever the answer was.
+    pub logind_reachable: bool,
     /// Command used for the OS power actions. A field rather than a
     /// constant **so the destructive routes can be tested**: a test that
     /// really ran `systemctl poweroff` would shut down the machine running
@@ -144,6 +158,9 @@ impl Default for SystemInfo {
             started: std::time::Instant::now(),
             can_power_off: false,
             can_reboot: false,
+            // Unreachable by default, like the capabilities: a development
+            // machine has no logind, and that is what the page should say.
+            logind_reachable: false,
             systemctl: "systemctl".to_string(),
             vcgencmd: "vcgencmd".to_string(),
             under_voltage_latched: std::sync::atomic::AtomicBool::new(false),
@@ -407,6 +424,7 @@ pub fn collect(info: &SystemInfo) -> Metrics {
         version: env!("CARGO_PKG_VERSION").to_string(),
         can_power_off: info.can_power_off,
         can_reboot: info.can_reboot,
+        logind_reachable: info.logind_reachable,
         cpu_total_jiffies: cpu_jiffies.map(|(total, _)| total),
         cpu_idle_jiffies: cpu_jiffies.map(|(_, idle)| idle),
     }
@@ -528,11 +546,40 @@ pub fn parse_can(raw: &str) -> bool {
 /// probe runs before the HTTP listener binds and before the core resumes, so
 /// a machine where `busctl` exists but D-Bus hangs would otherwise delay both
 /// the web interface and the audio wake by up to twice the 3 s timeout.
-pub async fn probe_capabilities() -> (bool, bool) {
-    tokio::join!(interroge_logind("CanPowerOff"), interroge_logind("CanReboot"))
+pub async fn probe_capabilities() -> PowerProbe {
+    let (off, reboot) =
+        tokio::join!(interroge_logind("CanPowerOff"), interroge_logind("CanReboot"));
+    resume_sonde(off, reboot)
 }
 
-async fn interroge_logind(methode: &str) -> bool {
+/// La règle de lecture des deux réponses, **séparée de leur obtention** : elle
+/// se teste alors sans logind, ce qu'aucune machine de développement n'a.
+pub fn resume_sonde(off: Option<bool>, reboot: Option<bool>) -> PowerProbe {
+    PowerProbe {
+        can_power_off: off == Some(true),
+        can_reboot: reboot == Some(true),
+        // Une seule réponse suffit à établir que logind est joignable : les
+        // deux appels ne peuvent diverger que sur la réponse, jamais sur
+        // l'existence de l'interlocuteur.
+        logind_reachable: off.is_some() || reboot.is_some(),
+    }
+}
+
+/// Ce que la sonde de démarrage a appris.
+///
+/// Trois faits et non deux : voir `Metrics::logind_reachable` pour ce que le
+/// troisième évite de dire à tort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PowerProbe {
+    pub can_power_off: bool,
+    pub can_reboot: bool,
+    pub logind_reachable: bool,
+}
+
+/// `Some(true)` autorisé, `Some(false)` refusé, `None` **pas de réponse** —
+/// les trois cas sont distincts, le dernier ne se rattrapant pas par une règle
+/// polkit.
+async fn interroge_logind(methode: &str) -> Option<bool> {
     let appel = tokio::process::Command::new("busctl")
         .args([
             "--system",
@@ -546,18 +593,20 @@ async fn interroge_logind(methode: &str) -> bool {
     // INFO and not WARN throughout: a development machine without logind is
     // a normal situation, and WARN lines are surfaced on the config page.
     match tokio::time::timeout(std::time::Duration::from_secs(3), appel).await {
-        Ok(Ok(out)) if out.status.success() => parse_can(&String::from_utf8_lossy(&out.stdout)),
+        Ok(Ok(out)) if out.status.success() => {
+            Some(parse_can(&String::from_utf8_lossy(&out.stdout)))
+        }
         Ok(Ok(out)) => {
             tracing::info!("logind {methode}: {}", String::from_utf8_lossy(&out.stderr).trim());
-            false
+            None
         }
         Ok(Err(e)) => {
             tracing::info!("busctl unavailable ({e}): power off and reboot disabled in the UI");
-            false
+            None
         }
         Err(_) => {
             tracing::info!("logind {methode}: no response within 3s");
-            false
+            None
         }
     }
 }
@@ -843,8 +892,8 @@ mod tests {
         for cle in [
             "temperature_c", "cpu_mhz", "load", "cpus", "memory", "disk", "under_voltage",
             "under_voltage_since_boot", "uptime_s", "service_uptime_s", "hostname", "ip", "os",
-            "kernel", "version", "can_power_off", "can_reboot", "cpu_total_jiffies",
-            "cpu_idle_jiffies",
+            "kernel", "version", "can_power_off", "can_reboot", "logind_reachable",
+            "cpu_total_jiffies", "cpu_idle_jiffies",
         ] {
             assert!(v.get(cle).is_some(), "clé {cle} absente");
         }
@@ -855,10 +904,43 @@ mod tests {
 
     #[tokio::test]
     async fn get_system_reflete_les_capacites_connues() {
-        let info = SystemInfo { can_power_off: true, can_reboot: true, ..Default::default() };
+        let info = SystemInfo {
+            can_power_off: true,
+            can_reboot: true,
+            logind_reachable: true,
+            ..Default::default()
+        };
         let v = corps_json(app(info), "/api/system").await;
         assert_eq!(v["can_power_off"], true);
         assert_eq!(v["can_reboot"], true);
+        assert_eq!(v["logind_reachable"], true);
+    }
+
+    #[test]
+    fn un_refus_de_logind_ne_se_confond_pas_avec_son_absence() {
+        // Les deux laissent les boutons grisés, mais ne se réparent pas de la
+        // même façon : le refus veut la règle polkit, l'absence veut un
+        // `systemd-logind` qui tourne. La page choisit sa phrase là-dessus.
+        let refus = resume_sonde(Some(false), Some(false));
+        assert!(refus.logind_reachable, "logind a bien répondu, fût-ce non");
+        assert!(!refus.can_power_off);
+
+        let absent = resume_sonde(None, None);
+        assert!(!absent.logind_reachable);
+        assert!(!absent.can_power_off);
+
+        let ouvert = resume_sonde(Some(true), Some(true));
+        assert!(ouvert.logind_reachable);
+        assert!(ouvert.can_power_off && ouvert.can_reboot);
+    }
+
+    #[test]
+    fn une_seule_reponse_suffit_a_dire_logind_joignable() {
+        // Cas mixte : un appel aboutit, l'autre expire. L'interlocuteur existe.
+        let m = resume_sonde(Some(true), None);
+        assert!(m.logind_reachable);
+        assert!(m.can_power_off);
+        assert!(!m.can_reboot, "sans réponse, on n'offre rien");
     }
 
     #[test]
