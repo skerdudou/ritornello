@@ -10,9 +10,24 @@ OUT="target/$TARGET/release"
 # script must be launchable from anywhere.
 cd "$(dirname "$0")/.."
 
-# The plugin list exists only here: it drives the scp then the remote mv,
-# and a list duplicated between the two would end up diverging.
+# The plugin list drives the scp then the remote mv, from this single place:
+# a list duplicated between the two would end up diverging.
 PLUGINS=(radio cd files generic-input console musicbrainz ouifm-metas radiofrance-metas)
+
+# deploy/plugins.example.toml names the same set, from the core's side — and
+# its entries are now installed one by one on a device already in service
+# (see further down). The two lists must therefore hold the same names: one
+# declared there without its binary here gives the core an exec that does not
+# exist, and one built here but absent there ships a plugin nothing launches.
+# Both are the mistake of a plugin added in a hurry, and both are silent, so
+# they are turned into a refusal to deploy.
+DECLARES=$(sed -n 's|^exec *= *".*/ritornello-plugin-\([^"]*\)".*|\1|p' \
+  deploy/plugins.example.toml | sort)
+if [ "$DECLARES" != "$(printf '%s\n' "${PLUGINS[@]}" | sort)" ]; then
+  echo "deploy.sh: PLUGINS and deploy/plugins.example.toml disagree" >&2
+  diff <(printf '%s\n' "${PLUGINS[@]}" | sort) <(echo "$DECLARES") >&2 || true
+  exit 1
+fi
 
 # One password prompt for the whole run: every ssh/scp call below shares a
 # single master connection (ControlMaster), opened by the first call and
@@ -61,15 +76,46 @@ ssh "${SSHOPTS[@]}" "$PI" 'sudo cp -r /tmp/input-presets/. /etc/ritornello/input
 # Default configuration, provisioned from the example files ONLY when the
 # target file is absent: a first installation works without any manual
 # copy, and an existing configuration (stations added from the browser,
-# learned bindings, a hand-edited plugin list) is never overwritten — an
-# update that introduces new plugins still requires adding their entries
-# by hand (see docs/plugins.md).
-scp "${SSHOPTS[@]}" deploy/plugins.example.toml deploy/stations.example.toml \
+# learned bindings) is never overwritten. These two files hold what the
+# user produced, so nothing here has any business completing them.
+scp "${SSHOPTS[@]}" deploy/stations.example.toml \
   deploy/input-bindings.example.toml "$PI:/tmp/"
-ssh "${SSHOPTS[@]}" "$PI" 'for f in plugins stations input-bindings; do
+ssh "${SSHOPTS[@]}" "$PI" 'for f in stations input-bindings; do
   [ -e "/etc/ritornello/$f.toml" ] || sudo cp "/tmp/$f.example.toml" "/etc/ritornello/$f.toml"
   rm -f "/tmp/$f.example.toml"
 done'
+
+# plugins.toml is the one configuration file the deployment also COMPLETES
+# instead of merely provisioning. It is not user data: it says which of the
+# binaries just installed the core is to launch. An entry missing there
+# means a plugin shipped and never started — silently, and for as long as
+# nobody happens to read the documentation. Every plugin added since a
+# device went into service (the `files` source, `radiofrance-metas`, the
+# metadata plugins split out of `cd`) needed a hand-written entry on that
+# device to exist at all, a step documented three times over precisely
+# because it kept being missed.
+#
+# Only the blocks whose `name` is absent are appended, never a rewrite: a
+# hand-edited exec (the mce -> generic-input migration), a metadata chain
+# reordered on purpose and any locally added plugin all survive untouched.
+# What this cannot read is intent — a plugin deliberately deleted from the
+# file comes back on the next deployment — so what gets appended is named
+# on the console rather than applied in silence.
+scp "${SSHOPTS[@]}" deploy/plugins.example.toml deploy/missing-plugins.awk "$PI:/tmp/"
+ssh "${SSHOPTS[@]}" "$PI" 'set -e
+  if [ -e /etc/ritornello/plugins.toml ]; then
+    awk -f /tmp/missing-plugins.awk /etc/ritornello/plugins.toml \
+      /tmp/plugins.example.toml > /tmp/plugins.ajouts
+    if [ -s /tmp/plugins.ajouts ]; then
+      sudo tee -a /etc/ritornello/plugins.toml < /tmp/plugins.ajouts > /dev/null
+      echo "plugins.toml completed with:$(sed -n "s/^name = \"\(.*\)\"/ \1/p" \
+        /tmp/plugins.ajouts | tr -d "\n")"
+    fi
+  else
+    sudo cp /tmp/plugins.example.toml /etc/ritornello/plugins.toml
+    echo "plugins.toml provisioned from the defaults"
+  fi
+  rm -f /tmp/plugins.example.toml /tmp/missing-plugins.awk /tmp/plugins.ajouts'
 
 scp "${SSHOPTS[@]}" "$OUT/ritornello-core" "$PI:/tmp/ritornello-core"
 scp "${SSHOPTS[@]}" "${PLUGINS[@]/#/$OUT/ritornello-plugin-}" "$PI:/tmp/"

@@ -119,13 +119,24 @@ it at all, install a key once — `ssh-keygen` if you have none, then
 
 Web interface: http://<host>:8080 — logs: `journalctl -u ritornello -f`.
 
-Configuration: `deploy.sh` provisions `plugins.toml`, `stations.toml` and
+Configuration: `deploy.sh` provisions `stations.toml` and
 `input-bindings.toml` from the `deploy/*.example.toml` defaults **only
 when the file is absent** — a first installation needs no manual copy,
 and a file that exists is **never overwritten**, whatever it contains.
-The flip side of that guarantee: when an update introduces new plugins,
-their entries must be added to the existing `plugins.toml` by hand (see
-[plugins.md](plugins.md)).
+Those two hold what you produced (stations added from the browser,
+learned bindings), so nothing may complete them.
+
+`plugins.toml` is the exception, because it holds no such thing: it lists
+which of the binaries just installed the core is to launch. It is
+provisioned the same way when absent, and otherwise **completed in
+place** — the entries of `deploy/plugins.example.toml` whose `name` the
+file does not already declare are appended, and the script prints which
+ones. Everything already there is left alone: a hand-edited `exec`, a
+metadata chain reordered on purpose, a plugin of your own. So an update
+that introduces a plugin no longer needs an edit on the device — but a
+plugin you deleted from the file on purpose comes back, and appended
+`metadata` entries land at the end of the chain, hence last in priority
+(see [plugins.md](plugins.md)).
 
 ## Unprivileged service
 
@@ -246,8 +257,8 @@ place —
 `/etc/polkit-1/rules.d/51-ritornello-media.rules`. The script also creates
 `/mnt/ritornello` and `/etc/ritornello/media-credentials` (mode `0700`,
 owned by the service), and enables the mount unit so shares come back
-after a reboot. On a device already in service, remember the entry to add
-to `plugins.toml` by hand — see [plugins.md](plugins.md).
+after a reboot. On a device already in service, the `files` entry of
+`plugins.toml` is appended by the same run — see [plugins.md](plugins.md).
 
 **Declaring a share** happens in the browser, at
 `http://<host>:8080/plugins/files/`. Give the server address, connect, and

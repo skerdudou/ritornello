@@ -25,6 +25,47 @@ only depend on generic Linux hardware (respectively a USB infrared
 receiver recognized by `evdev`, and a `/dev/ttyN` console) — not on GPIO
 or any Pi-specific bus.
 
+## Declaring the plugins
+
+`plugins.toml` is not user data — it is the list of which installed
+binaries the core launches — and `deploy/deploy.sh` treats it as such. On
+a device with no such file, it provisions `deploy/plugins.example.toml`
+whole. On a device already in service, it **completes** the file: the
+blocks of the reference list whose `name` is not already declared are
+appended, comments included, and the script prints the names it added.
+
+Nothing already present is rewritten, because the merge only ever
+appends: an `exec` edited by hand (the mce → generic-input migration
+below), a metadata chain deliberately reordered, a plugin of your own
+that the reference list knows nothing about — all survive a deployment
+untouched. Matching is on `name` alone, never on the exec path, so an
+entry whose binary you moved is still recognized as declared.
+
+Two consequences worth knowing, both coming from the same place: the
+script cannot tell a plugin you never had from one you removed on
+purpose.
+
+- A plugin **deleted** from `plugins.toml` comes back on the next
+  deployment, and commenting its block out changes nothing — a commented
+  `name` is not a declaration, so the block is simply appended again
+  below. Keeping a plugin off a device is therefore decided in the
+  repository, not on the device: remove it from
+  `deploy/plugins.example.toml` **and** from the `PLUGINS` list in
+  `deploy/deploy.sh`, which the script requires to name the same set and
+  refuses to run otherwise. The core has no `enabled = false`; a plugin
+  it is told to launch, it launches.
+- An appended `metadata` entry lands **at the end** of the chain, hence
+  last in priority (order matters for that kind only — see [Now-playing
+  metadata](#now-playing-metadata-the-metadata-kind)). The bundled ones
+  answer for disjoint stations, so the position is harmless today; move
+  the block by hand if you ever add two that overlap.
+
+Older versions of the script only ever provisioned the file, so every
+plugin added after a device went into service — the `files` source,
+`radiofrance-metas`, the `metadata` plugins split out of `cd` — needed an
+entry written by hand on the device before it existed at all. That step
+is gone.
+
 ## `ritornello-plugin-radio` — internet radio
 
 Its station management page is served by the core, under the single
@@ -307,12 +348,12 @@ entry is retried under the root — and whatever stays unresolved is
 shrinks is a defect that takes months to attribute.
 
 **Updating an existing installation.** As for every other plugin,
-`deploy.sh` installs the binaries but **never overwrites an existing**
-`/etc/ritornello/plugins.toml` — it only provisions the default one when
-the file is absent. A device already in service therefore does not see
-this source at all until its entry is added by hand (see
-`deploy/plugins.example.toml`). The unit, the polkit rule,
-`/mnt/ritornello` and the credentials directory are installed either way.
+`deploy.sh` installs the binary and, on a device already in service,
+appends the `files` entry to `/etc/ritornello/plugins.toml` if it is
+missing (it never rewrites what is already there — see [Declaring the
+plugins](#declaring-the-plugins)). The unit, the polkit rule,
+`/mnt/ritornello` and the credentials directory are installed by the same
+run, so the source is usable straight after a deployment.
 
 ## `ritornello-plugin-console` — the display
 
@@ -415,11 +456,14 @@ never sends held repeats can keep returning a bare `Command` — the wire
 format stays backward compatible either way.
 
 **Updating an existing installation** (old hard-coded-keyboard
-`ritornello-plugin-mce`): in `/etc/ritornello/plugins.toml`, replace the
-plugin's entry with `name = "generic-input"`, `exec =
-"/usr/local/lib/ritornello/plugins/ritornello-plugin-generic-input"`.
-`deploy/deploy.sh` automatically removes the old `ritornello-plugin-mce`
-binary on the target so it does not keep running after an update.
+`ritornello-plugin-mce`): `deploy/deploy.sh` removes the old
+`ritornello-plugin-mce` binary from the target, so it does not keep
+running after an update, and appends the `generic-input` entry to
+`/etc/ritornello/plugins.toml` if it is absent. What it does **not** do
+is delete the old entry — it never removes anything (see [Declaring the
+plugins](#declaring-the-plugins)) — and that entry now names a binary
+that no longer exists, which the core reports at every startup. Delete
+the `name = "mce"` block by hand, once.
 
 ## Now-playing metadata (the `metadata` kind)
 
@@ -487,16 +531,18 @@ debugging: "first to arrive" would depend on network latency, so the same
 installation would display different things from one boot to the next.
 
 **Updating an existing installation.** `deploy/deploy.sh` installs the
-new binaries but never overwrites an existing
-`/etc/ritornello/plugins.toml` (it only provisions the default one when
-the file is absent): without
-manually adding the `kind = "metadata"` entries (see
-`deploy/plugins.example.toml`), a device already in service **loses the
-CD track titles**, which the cd plugin used to provide itself before this
-version. The rest of the display is unchanged. The same holds for
-`radiofrance-metas`, added later: an installation whose `plugins.toml`
-predates it keeps working, simply without Radio France titles, until its
-entry is added by hand.
+new binaries and appends the missing `kind = "metadata"` entries to an
+existing `/etc/ritornello/plugins.toml` (see [Declaring the
+plugins](#declaring-the-plugins)), so a device already in service keeps
+its CD track titles — which the cd plugin used to provide itself before
+this version — and gains the Radio France ones. They are appended at the
+end, therefore last in priority; since the three answer for disjoint
+content, that costs nothing. Reorder the blocks by hand if you add a
+plugin that overlaps one of them.
+
+A `plugins.toml` completed by an older version of the script, which only
+ever provisioned the file, is brought up to date by the next deployment
+without anything being lost: the entries already there are not touched.
 
 ### The three bundled plugins
 
