@@ -240,6 +240,21 @@ impl Metadonnees {
         }
         None
     }
+
+    /// Durée déclarée par le **gagnant** de l'arbitrage, s'il en déclare une.
+    ///
+    /// Même raison d'être que `position_s` juste au-dessus : lire un entier ne
+    /// doit pas coûter la reconstruction d'un `Morceau` entier, chaînes
+    /// clonées comprises — ce que le plafonnement de la position ferait une
+    /// fois par seconde pendant toute la lecture d'un flux.
+    pub fn duration_s(&self) -> Option<u32> {
+        for plugin in &self.ordre {
+            if let Some(e) = self.enrichissements.get(plugin) {
+                return e.duration_s;
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]

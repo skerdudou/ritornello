@@ -464,7 +464,22 @@ impl<P: Player> Core<P> {
         }
         // Poser l'ancre à la réception : c'est le seul instant où l'écoulé
         // annoncé est exact.
-        self.ancre_position = self.metadonnees.position_s().map(|p| (p, Instant::now()));
+        //
+        // **Seulement quand c'est le gagnant qui vient de parler**, et c'est un
+        // défaut trouvé en relecture. Un plugin retenu en réserve peut répondre
+        // à tout moment (un titre corrigé, une pochette) sans rien apprendre de
+        // neuf sur l'avancement : réancrer alors relirait la position
+        // **inchangée** du gagnant en la datant de maintenant, et la barre
+        // reculerait d'un coup de tout ce qu'elle avait avancé. Le `match`
+        // ci-dessus distingue déjà les deux cas pour le journal.
+        //
+        // Un gagnant qui réémet à l'identique n'arrive jamais ici : `ajoute`
+        // déduplique et rend `false`. Et un plugin plus prioritaire qui répond
+        // pour la première fois **devient** le gagnant, donc son annonce ancre
+        // bien, ce qui est voulu.
+        if self.metadonnees.gagnant() == Some(plugin) {
+            self.ancre_position = self.metadonnees.position_s().map(|p| (p, Instant::now()));
+        }
         self.publie_etat();
     }
 
@@ -493,7 +508,7 @@ impl<P: Player> Core<P> {
                 // Plafonnée par la durée annoncée : un morceau qui finit avant
                 // que la station ne l'annonce ne doit pas afficher
                 // « 4:31 / 4:14 ».
-                match self.metadonnees.etat().duration_s {
+                match self.metadonnees.duration_s() {
                     Some(duree) => brute.min(duree),
                     None => brute,
                 }
@@ -3080,6 +3095,45 @@ mod tests {
         core.handle_source_update("radio", joue(serde_json::json!({"url": "deux"})));
         core.rafraichit_position().await;
         assert_eq!(core.etat_lecteur().position_s, None);
+    }
+
+    /// Régression : un plugin retenu en réserve qui répond (titre corrigé,
+    /// pochette trouvée plus tard) ne doit pas réancrer la position sur la
+    /// valeur — inchangée — du gagnant, faute de quoi la barre reculerait
+    /// brutalement de tout ce qu'elle avait avancé depuis la précédente
+    /// annonce du gagnant.
+    #[tokio::test]
+    async fn un_plugin_en_reserve_ne_fait_pas_reculer_la_position() {
+        let (mut core, _np_rx, _etat_rx, _dir) =
+            setup_metadonnees(vec!["radiofrance".into(), "ouifm".into()]);
+        // Flux : `radio` est déjà la source active de ce montage.
+        core.handle_command(Command::PlayPause).await.unwrap();
+        let id = serde_json::json!({"url": "http://fip"});
+        core.handle_source_update("radio", joue(id.clone()));
+        core.handle_enrichment(
+            "radiofrance",
+            Enrichment {
+                identity: id.clone(),
+                title: Some("Bikwix".into()),
+                position_s: Some(87),
+                ..Default::default()
+            },
+        );
+        core.avance_ancre_pour_test(std::time::Duration::from_secs(30));
+        core.rafraichit_position().await;
+        assert_eq!(core.etat_lecteur().position_s, Some(117));
+        // `ouifm` répond, mais n'est pas le gagnant : rien de neuf sur
+        // l'avancement.
+        core.handle_enrichment(
+            "ouifm",
+            Enrichment { identity: id, title: Some("Autre titre".into()), ..Default::default() },
+        );
+        core.rafraichit_position().await;
+        assert_eq!(
+            core.etat_lecteur().position_s,
+            Some(117),
+            "un plugin en reserve ne doit pas faire reculer la position"
+        );
     }
 
     /// Pack français livré dans le dépôt (invariant : mêmes clés que l'anglais embarqué).
