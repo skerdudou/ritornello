@@ -423,8 +423,8 @@ async fn main() -> Result<()> {
                 None => std::future::pending().await,
             }
         };
-        // Tick de position : une seconde, armé seulement pendant la lecture
-        // (voir `Core::tick_position`).
+        // Tick de position : une seconde, armé seulement quand il y a une
+        // position à publier (voir `Core::tick_position`).
         //
         // L'échéance est **absolue**, comme `retry_at` et `overlay_at`, et
         // c'est un défaut trouvé en relecture qui l'impose. Les trois futurs
@@ -437,12 +437,15 @@ async fn main() -> Result<()> {
         // après le dernier réveil du `select!`, et sur un appareil où les
         // événements se succèdent plus vite que cela, il serait repoussé
         // indéfiniment — la position ne bougerait jamais, précisément quand
-        // il se passe quelque chose.
-        if !core.tick_position() {
-            prochain_tick = None;
-        } else if prochain_tick.is_none() {
-            prochain_tick = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(1));
-        }
+        // il se passe quelque chose. Le calcul est extrait dans la fonction
+        // pure `core::prochaine_echeance`, testée : cette boucle `select!`
+        // elle-même n'a aucun filet.
+        prochain_tick = core::prochaine_echeance(
+            core.tick_position(),
+            prochain_tick.map(tokio::time::Instant::into_std),
+            tokio::time::Instant::now().into_std(),
+        )
+        .map(tokio::time::Instant::from);
         // Copie locale (`Instant` est `Copy`) : le futur ci-dessous n'emprunte
         // donc ni `core` ni la variable réassignée dans le bras.
         let position_at = prochain_tick;

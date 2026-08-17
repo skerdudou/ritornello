@@ -377,8 +377,12 @@ impl<P: Player> Core<P> {
             return;
         }
         // Le morceau a changé : l'ancre du précédent ne doit pas continuer
-        // d'avancer sous le titre du suivant.
+        // d'avancer sous le titre du suivant. La dernière position publiée
+        // doit disparaître avec elle, sans quoi la trame émise dans la
+        // foulée porterait la position de l'ancien morceau sous le titre du
+        // nouveau, jusqu'au prochain tick (jusqu'à une seconde).
         self.ancre_position = None;
+        self.position_s = None;
         let np = NowPlaying {
             source: self.active_source.clone(),
             identity: self.metadonnees.identity().cloned(),
@@ -1171,11 +1175,17 @@ impl<P: Player> Core<P> {
     /// Le cœur veut-il être rappelé dans une seconde pour rafraîchir la
     /// position ?
     ///
-    /// Armé seulement pendant la lecture : un appareil à l'arrêt ou en veille
-    /// ne doit pas produire une trame par seconde pour rien, et la
-    /// déduplication de `publie_etat` reprend alors tous ses droits.
+    /// Armé seulement quand il y a effectivement une position à publier : la
+    /// lecture en cours, hors veille, ET (un contenu fini — donc mpv a la
+    /// parole sur sa position — OU une ancre posée par un plugin `metadata`).
+    /// `!self.standby && self.lecture` seul armait à tort dans deux cas
+    /// trouvés en relecture : un flux qu'aucun plugin `metadata` ne suit (rien
+    /// ne fournira jamais de position, l'ancre ne se pose jamais) et la pause
+    /// (qui ne remet pas `lecture` à faux). Aucune trame n'en ressortait —
+    /// `publie_etat` déduplique — mais l'appareil interrogeait mpv deux fois
+    /// par seconde indéfiniment, pour rien à afficher.
     pub fn tick_position(&self) -> bool {
-        !self.standby && self.lecture
+        !self.standby && self.lecture && (!self.expecting_stream || self.ancre_position.is_some())
     }
 
     /// Efface l'overlay expiré et laisse réapparaître l'état permanent
@@ -1190,6 +1200,26 @@ impl<P: Player> Core<P> {
         self.overlay = None;
         self.pending_tens = 0;
         self.publie_etat();
+    }
+}
+
+/// Prochaine échéance du tick de position, à partir de l'état d'armement et
+/// de l'échéance courante.
+///
+/// Fonction pure, et c'est tout son intérêt : la boucle `select!` de `main`
+/// n'est couverte par aucun test, et le défaut que cette logique corrige — une
+/// échéance **relative**, recréée à chaque tour, qui repartait de zéro à chaque
+/// réveil de la boucle et repoussait le tick indéfiniment sur un appareil
+/// actif — ne se voit pas en lisant le code appelant.
+///
+/// `arme` = le cœur veut être rappelé ; `courante` = l'échéance déjà posée,
+/// s'il y en a une ; `maintenant` = l'instant de référence, injecté pour que
+/// le test n'ait pas d'horloge à attendre.
+pub fn prochaine_echeance(arme: bool, courante: Option<Instant>, maintenant: Instant) -> Option<Instant> {
+    match (arme, courante) {
+        (false, _) => None,
+        (true, Some(at)) => Some(at),
+        (true, None) => Some(maintenant + Duration::from_secs(1)),
     }
 }
 
@@ -2014,29 +2044,69 @@ mod tests {
     async fn le_tick_ne_s_arme_pas_quand_rien_ne_joue() {
         let (mut core, _, _, _, _dir) = setup();
         assert!(!core.tick_position(), "rien ne joue : rien à rafraîchir");
-        // `radio` est la source active de `setup()` : `PlayPause` la fait jouer.
-        // Le tick ne s'intéresse pas à la nature du contenu, seulement au fait
-        // que quelque chose joue.
-        core.handle_command(Command::PlayPause).await.unwrap();
-        assert!(core.tick_position(), "quelque chose joue : on suit sa position");
+        // Bascule vers `cd`, contenu fini : mpv a la parole sur sa position,
+        // le tick a donc quelque chose à publier.
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        assert!(core.tick_position(), "contenu fini en cours de lecture : on suit sa position");
         core.handle_command(Command::Stop).await.unwrap();
         assert!(!core.tick_position());
+    }
+
+    /// Cas trouvé en relecture : `radio` n'est pas un contenu fini (mpv ne
+    /// fournit pas sa position) et aucun plugin `metadata` n'a posé d'ancre —
+    /// personne ne suit ce flux, il n'y a rien à publier. Sans ce garde,
+    /// l'appareil interrogerait mpv deux fois par seconde indéfiniment pour
+    /// une trame que la déduplication absorbe systématiquement.
+    #[tokio::test]
+    async fn un_flux_sans_ancre_narme_pas_le_tick() {
+        let (mut core, _, _, _, _dir) = setup();
+        core.handle_command(Command::PlayPause).await.unwrap();
+        assert!(!core.tick_position(), "flux sans ancre : rien a publier");
     }
 
     #[tokio::test]
     async fn le_tick_ne_s_arme_pas_en_veille() {
         let (mut core, _, _, _, _dir) = setup();
-        core.handle_command(Command::PlayPause).await.unwrap();
+        // Bascule vers `cd`, contenu fini : le tick a une position à publier.
+        core.handle_command(Command::SourceCycle).await.unwrap();
         assert!(core.tick_position());
         core.handle_command(Command::Power).await.unwrap();
         assert!(!core.tick_position(), "l'appareil dort");
         // Le garde `!standby` est défensif : aucun chemin atteignable ne pose
         // aujourd'hui la veille en laissant `lecture` vrai (`Command::Power`
         // remet les deux). On construit donc l'état à la main, sans quoi ce
-        // test passerait à l'identique si le garde disparaissait.
+        // test passerait à l'identique si le garde disparaissait. `expecting_stream`
+        // reste `false` (contenu fini) pour isoler précisément le garde de veille.
         core.lecture = true;
         core.standby = true;
         assert!(!core.tick_position(), "la veille l'emporte, même si la lecture n'a pas été remise à zéro");
+    }
+
+    /// L'échéance déjà posée **survit** aux tours de boucle : c'est tout
+    /// l'objet du correctif. Une échéance relative recréée à chaque réveil du
+    /// `select!` — commande, événement mpv, enrichissement — repartait de zéro,
+    /// et le tick n'arrivait jamais sur un appareil actif.
+    #[test]
+    fn une_echeance_posee_ne_se_deplace_pas_aux_tours_suivants() {
+        let t0 = Instant::now();
+        let posee = prochaine_echeance(true, None, t0).unwrap();
+        assert_eq!(posee, t0 + Duration::from_secs(1));
+        // Trois tours de boucle plus tard, sur un appareil très occupé :
+        for retard in [10, 200, 900] {
+            let plus_tard = t0 + Duration::from_millis(retard);
+            assert_eq!(
+                prochaine_echeance(true, Some(posee), plus_tard),
+                Some(posee),
+                "l'échéance a glissé de {retard} ms"
+            );
+        }
+    }
+
+    #[test]
+    fn desarme_l_echeance_est_oubliee() {
+        let t0 = Instant::now();
+        assert_eq!(prochaine_echeance(false, Some(t0), t0), None);
+        assert_eq!(prochaine_echeance(false, None, t0), None);
     }
 
     /// La règle qui protège les messages éphémères : le tick republie l'état
@@ -3150,6 +3220,9 @@ mod tests {
         core.rafraichit_position().await;
         assert_eq!(core.etat_lecteur().position_s, Some(50));
         core.handle_source_update("radio", joue(serde_json::json!({"url": "deux"})));
+        // Avant meme le rafraichissement : la position du morceau precedent
+        // ne doit pas survivre sous le titre du suivant (defaut corrige).
+        assert_eq!(core.etat_lecteur().position_s, None, "position perimee sous le titre suivant");
         core.rafraichit_position().await;
         assert_eq!(core.etat_lecteur().position_s, None);
     }

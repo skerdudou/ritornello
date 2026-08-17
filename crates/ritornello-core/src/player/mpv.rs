@@ -367,6 +367,15 @@ impl super::Player for MpvPlayer {
         // `observe_property` parce que mpv ne cadence pas ses notifications de
         // `time-pos` — il en émettrait plusieurs par seconde pour une
         // information publiée une fois par seconde.
+        //
+        // Réserve non levée sur un `cdda://` ouvert en disque entier : mpv
+        // expose alors ses pistes comme des chapitres (voir plus haut, à
+        // propos de l'avance de piste). Que vaut `time-pos` dans ce cas —
+        // relatif au disque ou à la piste ? Ce n'est pas mesuré sur le
+        // matériel, seulement noté dans un document de conception archivé. Si
+        // la réponse est « relatif au disque », cette valeur doit retrancher
+        // le début du chapitre courant, et `duration_s` refléter celle du
+        // chapitre plutôt que celle du disque entier.
         let position = self.ipc.command(&[json!("get_property"), json!("time-pos")]).await;
         let duree = self.ipc.command(&[json!("get_property"), json!("duration")]).await;
         Ok(Progression { position_s: nombre_ou_none(position), duration_s: nombre_ou_none(duree) })

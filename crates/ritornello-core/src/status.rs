@@ -719,6 +719,7 @@ mod tests {
             SettingsError::RepeatInterval { min: 100, max: 2000 }.message(&catalog),
             SettingsError::Overlay { min: 1000, max: 15000 }.message(&catalog),
             SettingsError::TensWindow { min: 1000, max: 15000 }.message(&catalog),
+            SettingsError::SeekStep { min: 1, max: 120 }.message(&catalog),
         ];
         for m in &messages {
             assert!(
@@ -1358,6 +1359,10 @@ mod tests {
             validate_settings(&Settings { tens_window_ms: 1, ..Default::default() }),
             Err(SettingsError::TensWindow { min: 1000, max: 15000 })
         );
+        assert_eq!(
+            validate_settings(&Settings { seek_step_s: 0, ..Default::default() }),
+            Err(SettingsError::SeekStep { min: 1, max: 120 })
+        );
     }
 
     #[test]
@@ -1378,7 +1383,13 @@ mod tests {
     async fn le_pas_de_deplacement_hors_bornes_est_refuse() {
         for (pas, valide) in [(0u32, false), (1, true), (10, true), (120, true), (121, false)] {
             let s = crate::state::Settings { seek_step_s: pas, ..Default::default() };
-            assert_eq!(validate_settings(&s).is_ok(), valide, "pas = {pas}");
+            let resultat = validate_settings(&s);
+            assert_eq!(resultat.is_ok(), valide, "pas = {pas}");
+            // Discriminant : une mauvaise variante passerait le simple `is_ok`
+            // ci-dessus, et l'utilisateur lirait le message d'une autre borne.
+            if !valide {
+                assert_eq!(resultat, Err(SettingsError::SeekStep { min: 1, max: 120 }), "pas = {pas}");
+            }
         }
     }
 
