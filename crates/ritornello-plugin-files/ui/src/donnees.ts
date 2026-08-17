@@ -61,6 +61,15 @@ export interface Entree {
   name: string
   path: string
   dir: boolean
+  /**
+   * Fichier de liste de lecture (`.m3u`, `.m3u8`).
+   *
+   * Exclusif de `dir`. Il porte une action différente des autres : une liste se
+   * **charge** — elle remplace la liste en cours — là où un dossier ou une piste
+   * s'y ajoutent. Les confondre ferait ajouter un fichier texte que mpv
+   * tenterait de jouer.
+   */
+  playlist: boolean
 }
 
 /**
@@ -230,17 +239,38 @@ export function normaliserBrowse(brut: unknown): Navigation {
   const base = chaine(o.path)
   const joindre = (nom: string) => (base ? `${base}/${nom}` : nom)
   const entrees = [
-    ...tableau(o.dirs).map((n) => ({ name: chaine(n), path: joindre(chaine(n)), dir: true })),
-    ...tableau(o.files).map((n) => ({ name: chaine(n), path: joindre(chaine(n)), dir: false })),
+    ...tableau(o.dirs).map((n) => ({
+      name: chaine(n),
+      path: joindre(chaine(n)),
+      dir: true,
+      playlist: false,
+    })),
+    // Les listes avant les pistes : ce sont elles qu'on cherche quand un dossier
+    // en contient, et une liste noyée sous cent fichiers ne se voit pas.
+    ...tableau(o.playlists).map((n) => ({
+      name: chaine(n),
+      path: joindre(chaine(n)),
+      dir: false,
+      playlist: true,
+    })),
+    ...tableau(o.files).map((n) => ({
+      name: chaine(n),
+      path: joindre(chaine(n)),
+      dir: false,
+      playlist: false,
+    })),
   ]
   return {
     root: chaine(o.root),
     path: base,
     entrees,
+    // La recherche ne rapporte que des fichiers audio (voir `scan::search`) :
+    // aucun n'est une liste de lecture.
     resultats: tableau(o.results).map((p) => ({
       name: feuille(chaine(p)),
       path: chaine(p),
       dir: false,
+      playlist: false,
     })),
     tronque: o.truncated === true,
   }

@@ -43,14 +43,14 @@ describe('normalisation d’un parcours', () => {
       results: [],
     })
     expect(nav.entrees).toEqual([
-      { name: 'Jazz', path: 'Albums/Jazz', dir: true },
-      { name: '01.mp3', path: 'Albums/01.mp3', dir: false },
+      { name: 'Jazz', path: 'Albums/Jazz', dir: true, playlist: false },
+      { name: '01.mp3', path: 'Albums/01.mp3', dir: false, playlist: false },
     ])
   })
 
   it('ne préfixe rien au niveau supérieur, dont le chemin est vide', () => {
     const nav = normaliserBrowse({ root: 'nas', path: '', dirs: ['Albums'], files: [] })
-    expect(nav.entrees).toEqual([{ name: 'Albums', path: 'Albums', dir: true }])
+    expect(nav.entrees).toEqual([{ name: 'Albums', path: 'Albums', dir: true, playlist: false }])
   })
 
   it('prend les résultats de recherche pour des chemins complets', () => {
@@ -65,7 +65,7 @@ describe('normalisation d’un parcours', () => {
       truncated: true,
     })
     expect(nav.resultats).toEqual([
-      { name: 'miles.flac', path: 'Albums/Jazz/miles.flac', dir: false },
+      { name: 'miles.flac', path: 'Albums/Jazz/miles.flac', dir: false, playlist: false },
     ])
     expect(nav.tronque).toBe(true)
   })
@@ -73,6 +73,33 @@ describe('normalisation d’un parcours', () => {
   it('rend un parcours vide plutôt que de lever sur un champ absent', () => {
     expect(normaliserBrowse(undefined).entrees).toEqual([])
     expect(normaliserBrowse({}).tronque).toBe(false)
+  })
+
+  it('place les listes de lecture avant les pistes, et les marque comme telles', () => {
+    // Elles portent une action différente — charger, non ajouter — et une liste
+    // noyée sous cent fichiers ne se voit pas, alors que c'est souvent elle
+    // qu'on cherche dans un dossier d'album.
+    const nav = normaliserBrowse({
+      root: 'nas',
+      path: 'Albums',
+      dirs: ['Jazz'],
+      files: ['01.mp3'],
+      playlists: ['tout.m3u'],
+      results: [],
+    })
+    expect(nav.entrees.map((e) => e.name)).toEqual(['Jazz', 'tout.m3u', '01.mp3'])
+    expect(nav.entrees[1]).toEqual({
+      name: 'tout.m3u',
+      path: 'Albums/tout.m3u',
+      dir: false,
+      playlist: true,
+    })
+  })
+
+  it('un plugin plus ancien, sans le champ des listes, ne casse rien', () => {
+    // Pendant un déploiement, le binaire peut précéder la page ou l'inverse.
+    const nav = normaliserBrowse({ root: 'n', path: '', dirs: [], files: ['a.mp3'] })
+    expect(nav.entrees.map((e) => e.playlist)).toEqual([false])
   })
 })
 

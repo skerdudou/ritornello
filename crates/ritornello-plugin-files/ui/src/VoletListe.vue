@@ -103,8 +103,16 @@ function deposer(vers: number): void {
   glisse.value = null
 }
 
-function retirer(i: number): void {
-  void props.envoyer({ op: 'remove', index: i })
+async function retirer(i: number): Promise<void> {
+  // Retirer la piste qu'on écoute arrête la lecture, comme vider la liste :
+  // continuer à jouer un fichier qui n'y est plus serait la pire des réponses.
+  // La comparaison se fait sur l'index **affiché**, celui de la surbrillance que
+  // l'utilisateur voit ; `playing`, lui, est relu après coup pour ne pas dépendre
+  // d'un état de page périmé.
+  const cettePiste = props.donnees.index === i
+  const etat = await props.envoyer({ op: 'remove', index: i })
+  if (!etat) return
+  if (cettePiste && etat.playing) await api.post('/api/command', { cmd: 'Stop' })
 }
 
 async function vider(): Promise<void> {

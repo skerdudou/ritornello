@@ -59,13 +59,39 @@ pub fn walk_with(
     Ok(out)
 }
 
-/// Contenu d'un seul niveau : les sous-répertoires et les fichiers audio, tous
-/// deux triés. C'est ce que consomme l'arbre **paresseux** de la page, qui ne
+/// Extensions des fichiers de liste de lecture.
+///
+/// Écartées des extensions audio : un m3u ne s'ajoute pas à la liste, il la
+/// **remplace**. Les confondre ferait ajouter un fichier texte que mpv
+/// tenterait de jouer.
+const EXTENSIONS_LISTE: &[&str] = &["m3u", "m3u8"];
+
+pub fn is_playlist(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| EXTENSIONS_LISTE.iter().any(|k| k.eq_ignore_ascii_case(e)))
+        .unwrap_or(false)
+}
+
+/// Contenu d'un seul niveau, chaque catégorie triée.
+///
+/// Une structure nommée plutôt qu'un triplet : trois `Vec<String>` anonymes
+/// s'inversent au premier refactor, et l'erreur se voit seulement à l'écran.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Contenu {
+    pub dossiers: Vec<String>,
+    pub audio: Vec<String>,
+    /// Fichiers de liste de lecture, qui se **chargent** au lieu de s'ajouter.
+    pub listes: Vec<String>,
+}
+
+/// Contenu d'un seul niveau : sous-répertoires, fichiers audio et listes de
+/// lecture. C'est ce que consomme l'arbre **paresseux** de la page, qui ne
 /// demande jamais toute l'arborescence d'un coup.
-pub fn list_dir(dir: &Path) -> Result<(Vec<String>, Vec<String>), ScanError> {
+pub fn list_dir(dir: &Path) -> Result<Contenu, ScanError> {
     let lecture =
         std::fs::read_dir(dir).map_err(|_| ScanError::Io { path: dir.display().to_string() })?;
-    let (mut dossiers, mut fichiers) = (Vec::new(), Vec::new());
+    let mut out = Contenu::default();
     for entree in lecture.flatten() {
         let chemin = entree.path();
         let Some(nom) = chemin.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
@@ -79,14 +105,17 @@ pub fn list_dir(dir: &Path) -> Result<(Vec<String>, Vec<String>), ScanError> {
         }
         let Ok(meta) = std::fs::metadata(&chemin) else { continue };
         if meta.is_dir() {
-            dossiers.push(nom);
+            out.dossiers.push(nom);
         } else if meta.is_file() && is_audio(&chemin) {
-            fichiers.push(nom);
+            out.audio.push(nom);
+        } else if meta.is_file() && is_playlist(&chemin) {
+            out.listes.push(nom);
         }
     }
-    dossiers.sort();
-    fichiers.sort();
-    Ok((dossiers, fichiers))
+    out.dossiers.sort();
+    out.audio.sort();
+    out.listes.sort();
+    Ok(out)
 }
 
 /// Cherche récursivement les fichiers audio dont le nom contient `motif`
@@ -200,6 +229,34 @@ mod tests {
             .collect();
         noms.sort();
         assert_eq!(noms, vec!["a.mp3", "b.FLAC", "c.Opus"]);
+    }
+
+    #[test]
+    fn un_niveau_separe_dossiers_pistes_et_listes_de_lecture() {
+        // Les listes voyagent à part parce qu'elles portent une action
+        // différente : elles **remplacent** la liste en cours au lieu de s'y
+        // ajouter. Les ranger avec les pistes ferait ajouter un fichier texte
+        // que mpv tenterait de jouer.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("Album")).unwrap();
+        for nom in ["a.mp3", "tout.m3u", "autre.M3U8", "pochette.jpg", ".cache.m3u"] {
+            fichier(dir.path(), nom);
+        }
+        let c = list_dir(dir.path()).unwrap();
+        assert_eq!(c.dossiers, vec!["Album"]);
+        assert_eq!(c.audio, vec!["a.mp3"]);
+        // Casse indifférente, comme pour l'audio ; l'entrée cachée reste écartée.
+        assert_eq!(c.listes, vec!["autre.M3U8", "tout.m3u"]);
+    }
+
+    #[test]
+    fn un_m3u_nest_pas_un_fichier_audio() {
+        // Garde-fou de la séparation ci-dessus, du côté des prédicats : un
+        // balayage récursif ne doit pas ramasser les listes comme des pistes.
+        assert!(is_playlist(Path::new("x/tout.m3u")));
+        assert!(is_playlist(Path::new("x/tout.M3U8")));
+        assert!(!is_audio(Path::new("x/tout.m3u")));
+        assert!(!is_playlist(Path::new("x/piste.mp3")));
     }
 
     #[test]

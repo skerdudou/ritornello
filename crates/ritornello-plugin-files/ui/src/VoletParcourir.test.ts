@@ -7,6 +7,8 @@ import { BASE, CATALOGUE, serveur } from './harnais'
 interface Niveau {
   dirs: string[]
   files: string[]
+  /** Fichiers `.m3u`/`.m3u8` : ils se chargent, ils ne s'ajoutent pas. */
+  playlists?: string[]
 }
 
 /**
@@ -21,7 +23,14 @@ function arbre(niveaux: Record<string, Niveau>, trouvailles: string[] = [], tron
     const chemin = String(charge.path ?? '')
     if (charge.op === 'browse') {
       const n = niveaux[chemin] ?? { dirs: [], files: [] }
-      s.data.browse = { root: 'nas', path: chemin, dirs: n.dirs, files: n.files, results: [] }
+      s.data.browse = {
+        root: 'nas',
+        path: chemin,
+        dirs: n.dirs,
+        files: n.files,
+        playlists: n.playlists ?? [],
+        results: [],
+      }
     }
     // Parcours et recherche se rangent au **même endroit** côté plugin : une
     // recherche efface le niveau parcouru, et réciproquement.
@@ -41,7 +50,7 @@ function arbre(niveaux: Record<string, Niveau>, trouvailles: string[] = [], tron
 
 const NIVEAUX: Record<string, Niveau> = {
   '': { dirs: ['Albums'], files: ['jingle.mp3'] },
-  Albums: { dirs: ['Jazz'], files: ['01.mp3'] },
+  Albums: { dirs: ['Jazz'], files: ['01.mp3'], playlists: ['tout.m3u'] },
   'Albums/Jazz': { dirs: [], files: ['Kind of Blue.flac'] },
 }
 
@@ -70,8 +79,8 @@ describe('volet de parcours', () => {
     await w.find('[data-tree-toggle]').trigger('click')
     await flushPromises()
     expect(s.putsDe('browse').map((b) => b.path)).toEqual(['', 'Albums'])
-    // Albums, Jazz, 01.mp3, jingle.mp3
-    expect(w.findAll('[data-tree-row]')).toHaveLength(4)
+    // Albums, puis son contenu — Jazz, tout.m3u, 01.mp3 — puis jingle.mp3
+    expect(w.findAll('[data-tree-row]')).toHaveLength(5)
 
     // Replier puis rouvrir ne coûte aucune requête : le niveau est mémorisé.
     await w.find('[data-tree-toggle]').trigger('click')
@@ -79,7 +88,7 @@ describe('volet de parcours', () => {
     expect(w.findAll('[data-tree-row]')).toHaveLength(2)
     await w.find('[data-tree-toggle]').trigger('click')
     await flushPromises()
-    expect(w.findAll('[data-tree-row]')).toHaveLength(4)
+    expect(w.findAll('[data-tree-row]')).toHaveLength(5)
     expect(s.putsDe('browse')).toHaveLength(2)
   })
 
@@ -164,5 +173,37 @@ describe('volet de parcours', () => {
     // Même phrase que le volet Sources : deux formulations pour le même vide
     // laisseraient croire à deux causes différentes.
     expect(w.find('[data-volet-parcourir]').text()).toContain('Aucune source déclarée')
+  })
+
+  it('un m3u trouvé en parcourant se **charge**, il ne s’ajoute pas', async () => {
+    // L'action est délibérément différente de celle des pistes : une liste
+    // remplace la liste en cours. Les confondre ferait ajouter un fichier texte
+    // que mpv tenterait de jouer.
+    const { w, s } = await monterArbre()
+    await w.findAll('[data-tree-toggle]')[0]!.trigger('click')
+    await flushPromises()
+    const noms = w.findAll('[data-tree-name]').map((n) => n.text())
+    expect(noms).toContain('tout.m3u')
+
+    await w.find('[data-load-m3u]').trigger('click')
+    await flushPromises()
+    expect(s.putsDe('load_m3u')).toEqual([
+      { op: 'load_m3u', root: 'nas', path: 'Albums/tout.m3u' },
+    ])
+    // Et surtout : pas d'`add_file` sur ce fichier-là.
+    expect(s.putsDe('add_file')).toEqual([])
+  })
+
+  it('une liste de lecture n’offre pas l’ajout d’une piste', async () => {
+    // Garde-fou : les deux actions ne doivent pas coexister sur la même rangée,
+    // sinon le geste juste n'est plus qu'un choix parmi deux.
+    const { w } = await monterArbre()
+    await w.findAll('[data-tree-toggle]')[0]!.trigger('click')
+    await flushPromises()
+    const rangees = w.findAll('[data-tree-row]')
+    const rangeeM3u = rangees.find((r) => r.find('[data-tree-name]').text() === 'tout.m3u')
+    expect(rangeeM3u).toBeDefined()
+    expect(rangeeM3u!.find('[data-add-file]').exists()).toBe(false)
+    expect(rangeeM3u!.find('[data-load-m3u]').exists()).toBe(true)
   })
 })

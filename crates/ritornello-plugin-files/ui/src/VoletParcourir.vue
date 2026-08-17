@@ -131,6 +131,17 @@ function ajouterDossier(chemin: string): void {
 function ajouterFichier(chemin: string): void {
   void props.envoyer({ op: 'add_file', root: racine.value, path: chemin })
 }
+
+/**
+ * Charge un m3u trouvé en parcourant : il **remplace** la liste en cours.
+ *
+ * Distinct de la liste déroulante des listes *enregistrées* du volet Liste :
+ * celle-ci va chercher un nom dans un magasin, tandis qu'ici on désigne un
+ * fichier par son chemin, là où il se trouve sur la source.
+ */
+function chargerListe(chemin: string): void {
+  void props.envoyer({ op: 'load_m3u', root: racine.value, path: chemin })
+}
 </script>
 
 <template>
@@ -200,6 +211,22 @@ function ajouterFichier(chemin: string): void {
               @click="ajouterDossier(r.entree.path)"
             >
               {{ t('btn_add_to_playlist') }}
+            </Button>
+          </template>
+          <!-- Une liste de lecture porte une action **différente** : elle
+               remplace la liste en cours au lieu de s'y ajouter. Les confondre
+               ferait ajouter un fichier texte que mpv tenterait de jouer. -->
+          <template v-else-if="r.entree.playlist">
+            <span class="w-5 shrink-0 text-muted-foreground">☰</span>
+            <span class="flex-1 truncate" data-tree-name>{{ r.entree.name }}</span>
+            <Button
+              variant="secondary"
+              size="sm"
+              data-load-m3u
+              :disabled="fige"
+              @click="chargerListe(r.entree.path)"
+            >
+              {{ t('btn_load_m3u') }}
             </Button>
           </template>
           <template v-else>

@@ -131,6 +131,12 @@ const pistes = ['01', '02', '03']
   }
 }
 
+// A real `.m3u` sitting next to the tracks, with paths relative to itself — the
+// form the format prescribes. The journey loads it through the browse tree, so
+// this file is what proves the whole path: listed apart from the audio files,
+// carrying a different action, parsed and resolved by the plugin.
+writeFileSync(join(albumNative, 'tout.m3u'), pistes.map((n) => `${n}.mp3`).join('\n') + '\n')
+
 // The device wizard opens on the mounted volumes, read from `/proc/mounts`.
 // A journey has no privilege and can mount nothing, so it *describes* a volume
 // instead of creating one: the plugin reads the table through

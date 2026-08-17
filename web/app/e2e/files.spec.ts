@@ -109,8 +109,12 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   await expect(rangees.first().locator('[data-tree-name]')).toHaveText('Album')
   // Deplier : l'arbre est paresseux, ce niveau-la n'a pas encore ete demande.
   await rangees.first().locator('[data-tree-toggle]').click()
+  // Les listes de lecture viennent **avant** les pistes : c'est souvent elles
+  // qu'on cherche dans un dossier d'album, et une liste noyee sous cent
+  // fichiers ne se voit pas.
   await expect(page.locator('[data-tree-name]')).toHaveText([
     'Album',
+    'tout.m3u',
     '01.mp3',
     '02.mp3',
     '03.mp3',
@@ -141,6 +145,29 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   await page.locator('[data-clear]').click()
   await expect(pistes).toHaveCount(0)
   await expect(page.locator('[data-empty-playlist]')).toBeVisible()
+
+  // --- Charger un m3u trouve en parcourant ----------------------------------
+  // Un fichier de liste posé sur la source, avec des chemins relatifs a
+  // lui-meme. Il apparait dans l'arbre **a part** des pistes, et porte une
+  // action differente : il remplace la liste au lieu de s'y ajouter.
+  // L'arbre est deja deplie par l'etape de parcours ci-dessus : le replier ici
+  // ferait disparaitre la rangee qu'on cherche.
+  const ligneM3u = page
+    .locator('[data-tree-row]')
+    .filter({ has: page.locator('[data-tree-name]', { hasText: 'tout.m3u' }) })
+  await expect(ligneM3u).toHaveCount(1)
+  // Et surtout pas l'action d'ajout d'une piste : le geste juste ne doit pas
+  // etre un choix parmi deux.
+  await expect(ligneM3u.locator('[data-add-file]')).toHaveCount(0)
+  await ligneM3u.locator('[data-load-m3u]').click()
+  await expect(pistes).toHaveCount(3)
+  // Les chemins relatifs se sont resolus contre le repertoire du m3u : des
+  // pistes marquees introuvables signaleraient une resolution contre le mauvais
+  // repertoire.
+  await expect(page.locator('[data-track-missing]')).toHaveCount(0)
+
+  await page.locator('[data-clear]').click()
+  await expect(pistes).toHaveCount(0)
 
   await page.locator('[data-load-playlist]').click()
   await expect(pistes).toHaveCount(3)

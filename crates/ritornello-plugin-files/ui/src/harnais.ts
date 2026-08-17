@@ -42,6 +42,7 @@ export const CATALOGUE: Record<string, string> = {
   no_sources: 'Aucune source déclarée',
   btn_add_device: 'Ajouter un dossier de l’appareil',
   btn_add_to_playlist: 'Ajouter à la liste',
+  btn_load_m3u: 'Charger cette liste',
   btn_remove_source: 'Retirer cette source',
   btn_retry_mount: 'Réessayer le montage',
   mount_error_title: 'Le dernier montage a échoué :',
@@ -107,6 +108,8 @@ export interface Navigue {
   /** Noms nus, pas des chemins : c'est ce que `scan::list_dir` rend. */
   dirs: string[]
   files: string[]
+  /** Fichiers `.m3u`/`.m3u8` du niveau : ils se chargent, ils ne s'ajoutent pas. */
+  playlists?: string[]
   /** Chemins relatifs à la racine, rendus par `search`. */
   results: string[]
   truncated?: boolean

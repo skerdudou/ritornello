@@ -159,6 +159,10 @@ pub enum Op {
     Clear,
     SavePlaylist { name: String, r#where: String },
     LoadPlaylist { name: String, r#where: String },
+    /// Charge un `.m3u` **trouvé en parcourant une source**, désigné par son
+    /// chemin — par opposition à `LoadPlaylist`, qui va chercher une liste
+    /// *enregistrée* par son nom dans un magasin.
+    LoadM3u { root: String, path: String },
 }
 
 impl FilesAdmin {
@@ -560,16 +564,18 @@ impl AdminPlugin for FilesAdmin {
             Op::Browse { root, path } => {
                 let dir = self.sous_racine(&root, &path).await?;
                 let cat = self.catalog.clone();
-                let (dossiers, fichiers) =
-                    tokio::task::spawn_blocking(move || scan::list_dir(&dir))
-                        .await
-                        .map_err(|e| format!("browse task: {e}"))?
-                        .map_err(|e| e.message(&cat.read().unwrap()))?;
+                let contenu = tokio::task::spawn_blocking(move || scan::list_dir(&dir))
+                    .await
+                    .map_err(|e| format!("browse task: {e}"))?
+                    .map_err(|e| e.message(&cat.read().unwrap()))?;
                 *self.browse.lock().unwrap() = serde_json::json!({
                     "root": root,
                     "path": path,
-                    "dirs": dossiers,
-                    "files": fichiers,
+                    "dirs": contenu.dossiers,
+                    "files": contenu.audio,
+                    // Les listes de lecture voyagent à part : elles ne
+                    // s'ajoutent pas à la liste en cours, elles la remplacent.
+                    "playlists": contenu.listes,
                     "results": [],
                 });
                 Ok(())
@@ -718,6 +724,23 @@ impl AdminPlugin for FilesAdmin {
                 }
                 let e = liste.entries.remove(from);
                 liste.entries.insert(to, e);
+                // **L'index suit la piste écoutée.** Il ne le faisait pas, et le
+                // défaut était visible : réordonner la liste laissait la
+                // surbrillance sur une position qui contenait désormais une autre
+                // piste — et la moitié Source aurait relancé la mauvaise.
+                //
+                // Trois cas, et seulement trois : la piste écoutée est celle
+                // qu'on déplace, ou bien le déplacement l'enjambe dans un sens,
+                // ou dans l'autre.
+                liste.index = if liste.index == from {
+                    to
+                } else if from < liste.index && to >= liste.index {
+                    liste.index - 1
+                } else if from > liste.index && to <= liste.index {
+                    liste.index + 1
+                } else {
+                    liste.index
+                };
                 drop(liste);
                 self.liste_modifiee().await;
                 Ok(())
@@ -755,6 +778,46 @@ impl AdminPlugin for FilesAdmin {
                 let charge = store::load(&name, &from, &self.internal_playlists, &roots)
                     .map_err(|e| e.message(&self.catalog.read().unwrap()))?;
                 drop(roots);
+                *self.unresolved.lock().unwrap() = charge.unresolved;
+                let mut liste = self.playlist.write().await;
+                liste.entries = charge.entries;
+                liste.index = 0;
+                drop(liste);
+                self.liste_modifiee().await;
+                Ok(())
+            }
+
+            Op::LoadM3u { root, path } => {
+                // Un m3u trouvé en parcourant une source, par opposition aux
+                // listes **enregistrées** que `LoadPlaylist` va chercher par nom
+                // dans un magasin. Ici c'est un fichier comme un autre, désigné
+                // par son chemin, et la garde d'évasion s'applique donc.
+                let fichier = self.sous_racine(&root, &path).await?;
+                if !scan::is_playlist(&fichier) {
+                    return Err(self.mot("not_a_playlist").replace("{path}", &path));
+                }
+                let texte = std::fs::read_to_string(&fichier).map_err(|e| {
+                    tracing::warn!("reading {}: {e}", fichier.display());
+                    self.mot("store_io_error").replace("{path}", &path)
+                })?;
+                // Les chemins relatifs se résolvent d'abord contre le répertoire
+                // **du m3u**, comme le veut le format ; la racine ne sert qu'aux
+                // replis (chemin absolu venu d'une autre machine, lettre de
+                // lecteur Windows).
+                let dossier = fichier.parent().unwrap_or(&fichier).to_path_buf();
+                let base = {
+                    let roots = self.roots.read().await;
+                    roots.by_name(&root).map(|r| r.base_dir()).unwrap_or_else(|| dossier.clone())
+                };
+                let charge = ritornello_plugin_files::m3u::parse(&texte, &dossier, &base);
+                if charge.entries.len() > scan::MAX_TRACKS {
+                    return Err(self
+                        .mot("too_many_tracks")
+                        .replace("{cap}", &scan::MAX_TRACKS.to_string()));
+                }
+                // Rapportées, jamais supprimées en silence : une liste plus
+                // courte que son fichier est un défaut qu'on met des mois à
+                // attribuer.
                 *self.unresolved.lock().unwrap() = charge.unresolved;
                 let mut liste = self.playlist.write().await;
                 liste.entries = charge.entries;
@@ -1069,6 +1132,175 @@ mod tests {
         let liste = admin.playlist.read().await;
         assert_eq!(liste.entries.len(), 3);
         assert_eq!(liste.index, 1, "la piste ecoutee doit rester la meme");
+    }
+
+    #[tokio::test]
+    async fn reordonner_la_liste_garde_la_surbrillance_sur_la_piste_ecoutee() {
+        // Défaut signalé à l'usage : `move` échangeait les pistes sans toucher à
+        // l'index. La surbrillance restait sur une position qui contenait
+        // désormais autre chose, et la moitié Source aurait relancé la mauvaise
+        // piste.
+        //
+        // Les trois cas qui déplacent l'index, et un qui ne doit pas y toucher.
+        let cas = [
+            // (index avant, from, to, index attendu, ce qu'on éprouve)
+            (2usize, 2usize, 0usize, 0usize, "on deplace la piste ecoutee"),
+            (2, 0, 3, 1, "un deplacement l'enjambe vers l'aval"),
+            (1, 3, 0, 2, "un deplacement l'enjambe vers l'amont"),
+            (0, 2, 3, 0, "un deplacement qui ne la concerne pas"),
+        ];
+        for (avant, from, to, attendu, quoi) in cas {
+            let (admin, _) = admin_de_test();
+            {
+                let mut liste = admin.playlist.write().await;
+                liste.entries = (1..=4)
+                    .map(|i| Entry {
+                        path: PathBuf::from(format!("/m/{i}.mp3")),
+                        title: None,
+                        duration_s: None,
+                    })
+                    .collect();
+                liste.index = avant;
+            }
+            let mut admin = admin;
+            admin
+                .set_data(serde_json::json!({"op": "move", "from": from, "to": to}))
+                .await
+                .unwrap();
+            assert_eq!(admin.playlist.read().await.index, attendu, "{quoi}");
+        }
+    }
+
+    #[tokio::test]
+    async fn reordonner_ne_perd_jamais_la_piste_ecoutee() {
+        // Garde-fou du test précédent, exprimé sur ce qui compte vraiment : quel
+        // que soit le déplacement, l'index doit désigner **le même fichier**.
+        for from in 0..4usize {
+            for to in 0..4usize {
+                let (admin, _) = admin_de_test();
+                {
+                    let mut liste = admin.playlist.write().await;
+                    liste.entries = (1..=4)
+                        .map(|i| Entry {
+                            path: PathBuf::from(format!("/m/{i}.mp3")),
+                            title: None,
+                            duration_s: None,
+                        })
+                        .collect();
+                    liste.index = 2;
+                }
+                let mut admin = admin;
+                admin
+                    .set_data(serde_json::json!({"op": "move", "from": from, "to": to}))
+                    .await
+                    .unwrap();
+                let liste = admin.playlist.read().await;
+                assert_eq!(
+                    liste.entries[liste.index].path,
+                    PathBuf::from("/m/3.mp3"),
+                    "deplacement {from} -> {to} a perdu la piste ecoutee"
+                );
+            }
+        }
+    }
+
+    /// Un admin avec une racine locale déclarée sur `media`, et son chemin.
+    async fn admin_avec_racine_locale() -> (FilesAdmin, PathBuf) {
+        let (admin, racine) = admin_de_test();
+        *admin.roots.write().await = Roots {
+            root: vec![Root {
+                name: "local".into(),
+                kind: RootKind::Local,
+                path: Some(racine.join("media").display().to_string()),
+                host: String::new(),
+                share: String::new(),
+                subpath: None,
+                user: String::new(),
+                domain: String::new(),
+                writable: false,
+            }],
+        };
+        (admin, racine)
+    }
+
+    #[tokio::test]
+    async fn un_m3u_parcouru_se_charge_et_remplace_la_liste() {
+        // La demande : pouvoir charger un m3u **trouvé sur la source**, par son
+        // chemin, et non une liste enregistrée cherchée par nom dans un magasin.
+        let (mut admin, racine) = admin_avec_racine_locale().await;
+        let media = racine.join("media");
+        std::fs::create_dir_all(media.join("Album")).unwrap();
+        std::fs::write(media.join("Album/01.mp3"), b"").unwrap();
+        std::fs::write(media.join("Album/02.mp3"), b"").unwrap();
+        // Chemins **relatifs au m3u**, comme le veut le format.
+        std::fs::write(media.join("Album/tout.m3u"), "01.mp3\n02.mp3\n").unwrap();
+
+        admin
+            .set_data(serde_json::json!({
+                "op": "load_m3u", "root": "local", "path": "Album/tout.m3u"
+            }))
+            .await
+            .unwrap();
+        let liste = admin.playlist.read().await;
+        assert_eq!(liste.entries.len(), 2);
+        assert_eq!(liste.entries[0].path, media.join("Album/01.mp3"));
+        assert_eq!(liste.index, 0, "on repart du debut de la liste chargee");
+    }
+
+    #[tokio::test]
+    async fn un_m3u_signale_ce_qu_il_n_a_pas_su_retrouver() {
+        // Rapportées, jamais supprimées en silence : une liste plus courte que
+        // son fichier est un défaut qu'on met des mois à attribuer.
+        let (mut admin, racine) = admin_avec_racine_locale().await;
+        let media = racine.join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        std::fs::write(media.join("present.mp3"), b"").unwrap();
+        std::fs::write(media.join("liste.m3u"), "present.mp3\nZ:\\ailleurs\\absent.mp3\n").unwrap();
+
+        admin
+            .set_data(serde_json::json!({
+                "op": "load_m3u", "root": "local", "path": "liste.m3u"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(admin.playlist.read().await.entries.len(), 1);
+        assert_eq!(admin.unresolved.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn charger_autre_chose_qu_un_m3u_est_refuse() {
+        // Sans cette garde, on remplacerait la liste par le contenu interprété
+        // d'un fichier quelconque — un binaire audio lu comme du texte.
+        let (mut admin, racine) = admin_avec_racine_locale().await;
+        let media = racine.join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        std::fs::write(media.join("piste.mp3"), b"").unwrap();
+        let err = admin
+            .set_data(serde_json::json!({
+                "op": "load_m3u", "root": "local", "path": "piste.mp3"
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.contains(' '), "cle brute renvoyee a l'ecran : {err}");
+        assert!(err.contains("piste.mp3"), "le refus doit nommer le fautif : {err}");
+    }
+
+    #[tokio::test]
+    async fn charger_un_m3u_hors_de_la_racine_est_refuse() {
+        // La garde d'évasion s'applique comme pour tout chemin venu du
+        // navigateur : `load_m3u` ne doit pas devenir une lecture de fichier
+        // arbitraire.
+        let (mut admin, racine) = admin_avec_racine_locale().await;
+        std::fs::create_dir_all(racine.join("media")).unwrap();
+        std::fs::write(racine.join("dehors.m3u"), "x\n").unwrap();
+        let err = admin
+            .set_data(serde_json::json!({
+                "op": "load_m3u", "root": "local", "path": "../dehors.m3u"
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.contains(' '), "cle brute : {err}");
+        assert!(admin.playlist.read().await.entries.is_empty());
     }
 
     #[tokio::test]

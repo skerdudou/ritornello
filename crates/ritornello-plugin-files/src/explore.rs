@@ -139,12 +139,12 @@ impl Explorateur {
         if !volumes::parcourable(&mounts, &canon) {
             return Err(self.mot("bad_local_path").replace("{path}", path));
         }
-        let (dossiers, fichiers) =
+        let contenu =
             scan::list_dir(&canon).map_err(|e| e.message(&self.catalog.read().unwrap()))?;
         let mut v = self.vue.lock().unwrap();
         v.path = canon.display().to_string();
-        v.dirs = dossiers;
-        v.audio_count = fichiers.len();
+        v.dirs = contenu.dossiers;
+        v.audio_count = contenu.audio.len();
         v.error = None;
         v.busy = false;
         Ok(())
