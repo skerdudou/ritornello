@@ -247,6 +247,17 @@ async fn main() -> Result<()> {
     ));
     let playlists_dir =
         PathBuf::from(env_or("RITORNELLO_FILES_PLAYLISTS", "/var/lib/ritornello/playlists"));
+    // Répertoire de travail transitoire, où l'assistant réseau pose son fichier
+    // d'authentification le temps d'un appel à `smbclient`.
+    //
+    // Le **répertoire d'exécution**, et surtout pas celui des identifiants
+    // persistés : celui-là vit sous `/etc` et n'est inscriptible qu'en
+    // production. Le confondre faisait échouer l'assistant en développement
+    // avec un « Permission denied » qui semblait accuser SMB.
+    //
+    // Même défaut et même variable que le cœur (`RITORNELLO_RUNTIME_DIR`), pour
+    // que `docs/development.md` reste vrai d'un binaire à l'autre.
+    let runtime_dir = PathBuf::from(env_or("RITORNELLO_RUNTIME_DIR", "/run/ritornello"));
     let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
 
     let etat = state::load(&state_path);
@@ -298,7 +309,7 @@ async fn main() -> Result<()> {
         (
             admin::FilesAdmin {
                 explore: ritornello_plugin_files::explore::Explorateur::new(
-                    creds_dir.clone(),
+                    runtime_dir.clone(),
                     catalog.clone(),
                     smb_ok.clone(),
                 ),

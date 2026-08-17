@@ -24,13 +24,13 @@ afterEach(nettoyerPopins)
  * chemin que la vraie page emprunte, et le seul qui éprouve la normalisation
  * en même temps que le gabarit.
  */
-async function monter(partiel: EtatServeur = {}) {
+async function monter(partiel: EtatServeur = {}, message = '') {
   const donnees = normaliserDonnees(
     etat({ volumes: [{ path: '/media/usb', fstype: 'vfat' }], ...partiel }),
   )
   const envoyer = vi.fn<Envoyer>().mockResolvedValue(donnees)
   const w = mount(DialogueAppareil, {
-    props: { donnees, t, envoyer, fige: false, ouvert: true },
+    props: { donnees, t, envoyer, fige: false, ouvert: true, message },
     attachTo: document.body,
   })
   // Le portail n'est peuplé qu'au cycle suivant le montage : interroger le
@@ -70,12 +70,45 @@ describe('DialogueAppareil', () => {
     expect(envoyer).toHaveBeenCalledWith({ op: 'explore_local', path: '/media/usb/Albums' })
   })
 
-  it('remonter d’un niveau ne sort jamais de la racine', async () => {
-    // `/media` remonterait sur la chaîne vide, que le plugin lirait comme
-    // « pas de chemin » au lieu de « la racine ».
-    const { envoyer } = await monter(dansLArbre('/media', []))
+  it('remonter descend d’un cran tant qu’on reste dans le volume', async () => {
+    const { envoyer } = await monter(dansLArbre('/media/usb/Albums/Jazz', []))
     await cliquerPopin('[data-choix-remonter]')
-    expect(envoyer).toHaveBeenCalledWith({ op: 'explore_local', path: '/' })
+    expect(envoyer).toHaveBeenCalledWith({ op: 'explore_local', path: '/media/usb/Albums' })
+  })
+
+  it('au sommet d’un volume, remonter ramène à la liste des volumes', async () => {
+    // Défaut signalé : une fois un volume choisi, on ne pouvait plus en essayer
+    // un autre. Remonter emmenait dans `/media` puis `/` — on sortait du volume
+    // sans jamais retrouver la liste, et il fallait fermer la popin.
+    const { envoyer } = await monter(dansLArbre('/media/usb', []))
+    await cliquerPopin('[data-choix-remonter]')
+    expect(envoyer).toHaveBeenCalledWith({ op: 'explore_open', kind: 'local' })
+  })
+
+  it('un bouton explicite ramène aussi à la liste des volumes', async () => {
+    // Le retour ne doit pas se deviner : remonter jusqu'au sommet pour espérer
+    // retomber sur la liste n'est pas une manœuvre qu'on invente.
+    const { envoyer } = await monter(dansLArbre('/media/usb/Albums', []))
+    await cliquerPopin('[data-aux-volumes]')
+    expect(envoyer).toHaveBeenCalledWith({ op: 'explore_open', kind: 'local' })
+  })
+
+  it('un chemin hors de tout volume connu ramène à la liste', async () => {
+    // Plutôt que de remonter à l'aveugle : si on ne sait pas situer le chemin
+    // dans un volume déclaré, la liste est le seul repère sûr.
+    const { envoyer } = await monter(dansLArbre('/ailleurs', []))
+    await cliquerPopin('[data-choix-remonter]')
+    expect(envoyer).toHaveBeenCalledWith({ op: 'explore_open', kind: 'local' })
+  })
+
+  it('affiche le refus du plugin dans la popin, pas seulement sur la page', async () => {
+    // Défaut signalé : le message atterrissait sur la page principale, derrière
+    // le voile gris de la boîte de dialogue — donc illisible au moment précis
+    // où il compte, quand on vient de choisir un dossier interdit.
+    const refus = 'Ce chemin n’est pas parcourable : /root/prive'
+    const { w } = await monter(dansLArbre('/media/usb', []), refus)
+    expect(dansPopin('[data-dlg-message]')?.textContent).toContain(refus)
+    void w
   })
 
   it('confirmer déclare la source avec le chemin courant', async () => {

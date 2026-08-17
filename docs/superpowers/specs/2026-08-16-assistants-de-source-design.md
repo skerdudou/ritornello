@@ -57,15 +57,24 @@ Il subsiste en réessai discret sur la ligne d'un partage dont le montage a
 
 La popin ouvre sur la **liste des volumes**, jamais sur `/`.
 
-Un module pur `volumes.rs` lit `/proc/mounts` et rend les points de montage dont
-le type de système de fichiers figure dans une **liste blanche** (`ext2..4`,
-`vfat`, `exfat`, `ntfs`, `ntfs3`, `btrfs`, `xfs`, `f2fs`, `iso9660`, `udf`,
-`hfsplus`, `cifs`, `nfs`, `nfs4`).
+Un module pur `volumes.rs` lit `/proc/mounts` et écarte les points de montage
+dont le type de système de fichiers figure dans une **liste noire** de
+pseudo-systèmes (`proc`, `sysfs`, `tmpfs`, `devtmpfs`, `cgroup*`, `debugfs`,
+`squashfs`…).
 
-Liste blanche et non liste noire : une liste noire oublie le prochain
-pseudo-système de fichiers que le noyau inventera, et cet oubli ne se voit pas —
-il se traduit par un volume parasite dans une liste de choix, ou par un balayage
-qui part dans `/proc`.
+> **Décision revue après la première mise à l'épreuve.** Cette section
+> prescrivait au départ l'inverse — une liste *blanche* des types acceptés — au
+> motif qu'une liste noire oublierait le prochain pseudo-système du noyau. Le
+> raisonnement pesait le mauvais risque, et l'usage l'a démenti tout de suite :
+> `/mnt/c` sous WSL est un `9p`, et un disque USB en NTFS monté par ntfs-3g
+> apparaît en `fuseblk`. Aucun des deux n'était prévu, et chacun rendait **un
+> vrai disque inatteignable, sans contournement**. Une liste noire incomplète,
+> elle, ne laisse passer qu'une entrée parasite dans une liste de choix : visible,
+> réversible, mineur. `overlay` est délibérément absent de la liste noire, car
+> sur un système conteneurisé c'est la racine elle-même.
+
+L'écart n'est pas cosmétique : sans lui, un « ajouter à la liste » lancé sur `/`
+partirait balayer `/proc`. C'est bien ce que la liste noire garantit encore.
 
 Depuis un volume, on descend **dans les dossiers seuls**. Le dossier
 actuellement affiché annonce combien de fichiers audio il contient

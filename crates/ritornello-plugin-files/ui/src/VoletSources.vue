@@ -13,7 +13,14 @@ import { cibleRacine, type Donnees, type Envoyer, type T } from './donnees'
  * offrir les trois gestes qui portent sur une source, et ouvrir l'un des deux
  * assistants.
  */
-const props = defineProps<{ donnees: Donnees; t: T; envoyer: Envoyer; fige: boolean }>()
+const props = defineProps<{
+  donnees: Donnees
+  t: T
+  envoyer: Envoyer
+  fige: boolean
+  /** Dernier refus du plugin, relayé aux popins pour qu'il s'y affiche. */
+  message: string
+}>()
 
 const appareilOuvert = ref(false)
 const partageOuvert = ref(false)
@@ -132,6 +139,7 @@ function remonter(): void {
       :t="t"
       :envoyer="envoyer"
       :fige="fige"
+      :message="message"
       :ouvert="appareilOuvert"
       @fermer="appareilOuvert = false"
     />
@@ -140,6 +148,7 @@ function remonter(): void {
       :t="t"
       :envoyer="envoyer"
       :fige="fige"
+      :message="message"
       :ouvert="partageOuvert"
       @fermer="partageOuvert = false"
     />

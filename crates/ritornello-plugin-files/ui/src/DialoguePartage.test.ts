@@ -23,11 +23,11 @@ const t = createT(CATALOGUE)
 afterEach(nettoyerPopins)
 
 /** L'état initial se déclare en forme **serveur** (`snake_case`). */
-async function monter(partiel: EtatServeur = {}) {
+async function monter(partiel: EtatServeur = {}, message = '') {
   const donnees = normaliserDonnees(etat({ can_browse_smb: true, ...partiel }))
   const envoyer = vi.fn<Envoyer>().mockResolvedValue(donnees)
   const w = mount(DialoguePartage, {
-    props: { donnees, t, envoyer, fige: false, ouvert: true },
+    props: { donnees, t, envoyer, fige: false, ouvert: true, message },
     attachTo: document.body,
   })
   // Le portail n'est peuplé qu'au cycle suivant le montage.
@@ -158,5 +158,15 @@ describe('DialoguePartage', () => {
     await monter(connecte({ error: 'hôte injoignable' }))
     expect(dansPopin('[data-partage-erreur]')?.textContent ?? '').toContain('hôte injoignable')
     expect(dansPopin('[data-share]')).toBeNull()
+  })
+
+  it('affiche le refus du plugin dans la popin, pas seulement sur la page', async () => {
+    // Même défaut que pour l'assistant local : le bandeau de la page vit
+    // derrière le voile gris de la boîte de dialogue, donc illisible au moment
+    // où il compte. Ce chemin-ci porte les refus de `add_source` — un doublon,
+    // par exemple — que `explore.error` ne transporte pas.
+    const refus = 'Ce dossier est déjà déclaré comme source.'
+    await monter(connecte({}), refus)
+    expect(dansPopin('[data-dlg-message]')?.textContent).toContain(refus)
   })
 })

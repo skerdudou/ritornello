@@ -20,7 +20,7 @@ relative_local_path = "the local folder \"{path}\" must be an absolute path"
 
 # Refus du parcours récursif.
 too_many_tracks = "this folder holds more than {cap} tracks: narrow it down, or add its subfolders one by one"
-scan_io_error = "could not read \"{path}\": the share may be unreachable"
+scan_io_error = "could not read \"{path}\": check that it still exists, and that Ritornello is allowed to read it"
 
 # Refus du magasin de listes enregistrées.
 bad_playlist_name = "invalid playlist name \"{name}\": no slashes, and it must not start with a dot"

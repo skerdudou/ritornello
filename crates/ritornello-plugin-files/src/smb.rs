@@ -258,7 +258,30 @@ fn argument_sur(v: &str) -> bool {
 struct FichierAuth(PathBuf);
 
 impl FichierAuth {
+    /// Écrit le fichier dans `dir`, ou à défaut dans le répertoire temporaire.
+    ///
+    /// Le repli n'est pas une commodité, c'est la correction d'un défaut
+    /// rencontré : ce fichier atterrissait dans le répertoire des identifiants
+    /// **persistés** (`/etc/ritornello/media-credentials`), qui n'existe pas en
+    /// développement et qu'un utilisateur ordinaire ne peut pas créer. Le
+    /// symptôme était trompeur au possible — « smbclient: Permission denied
+    /// (os error 13) » — et envoyait chercher un problème de montage ou de
+    /// droits SMB là où il n'y en avait aucun.
+    ///
+    /// La sûreté ne vient pas du répertoire mais du **mode 0600 posé à la
+    /// création** : un fichier ainsi ouvert dans `/tmp` n'est pas plus lisible
+    /// qu'ailleurs. Et il disparaît à la libération.
     fn creer(dir: &Path, creds: &Credentials) -> std::io::Result<Self> {
+        match Self::creer_dans(dir, creds) {
+            Ok(f) => Ok(f),
+            Err(e) => {
+                tracing::debug!("{} is not writable ({e}): falling back to the temp dir", dir.display());
+                Self::creer_dans(&std::env::temp_dir(), creds)
+            }
+        }
+    }
+
+    fn creer_dans(dir: &Path, creds: &Credentials) -> std::io::Result<Self> {
         static COMPTEUR: AtomicU64 = AtomicU64::new(0);
         std::fs::create_dir_all(dir)?;
         let n = COMPTEUR.fetch_add(1, Ordering::Relaxed);
@@ -653,6 +676,31 @@ SMB1 disabled -- no workgroup available
         // Le fichier s'efface à la libération : un mot de passe ne doit pas
         // survivre à l'appel qui l'a demandé.
         assert!(!chemin.exists(), "le fichier d'authentification a survecu");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn un_repertoire_de_travail_non_inscriptible_ne_bloque_pas_l_assistant() {
+        // Le défaut rencontré, désormais épinglé. Ce fichier atterrissait dans
+        // le répertoire des identifiants *persistés*, sous /etc : inexistant en
+        // développement et impossible à créer sans privilège. L'assistant
+        // échouait alors sur « smbclient: Permission denied (os error 13) », un
+        // message qui envoyait chercher un problème de montage ou de droits SMB
+        // là où il n'y en avait aucun.
+        //
+        // Et le repli ne brade rien : le mode 0600 est posé à la création, un
+        // fichier ainsi ouvert dans le répertoire temporaire n'est pas plus
+        // lisible qu'ailleurs.
+        use std::os::unix::fs::PermissionsExt;
+        let creds = Credentials {
+            user: "steven".into(),
+            password: "secret-du-nas".into(),
+            domain: String::new(),
+        };
+        let f = FichierAuth::creer(Path::new("/proc/impossible/a/creer"), &creds)
+            .expect("le repli doit permettre d'ecrire malgre tout");
+        assert_eq!(std::fs::metadata(f.chemin()).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(std::fs::read_to_string(f.chemin()).unwrap().contains("password=secret-du-nas"));
     }
 
     #[tokio::test]

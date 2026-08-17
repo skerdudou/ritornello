@@ -24,6 +24,14 @@ const props = defineProps<{
   envoyer: Envoyer
   fige: boolean
   ouvert: boolean
+  /**
+   * Dernier refus du plugin, tel que la page l'a reçu.
+   *
+   * Il arrive ici parce qu'un refus né dans la popin doit s'y afficher : le
+   * bandeau de la page principale est derrière le voile gris de la boîte de
+   * dialogue, donc à peu près invisible au moment où il compte le plus.
+   */
+  message: string
 }>()
 const emit = defineEmits<{ fermer: [] }>()
 
@@ -31,8 +39,35 @@ const ex = computed(() => props.donnees.explore)
 /** Un volume a été choisi : on est dans l'arbre plutôt que dans la liste. */
 const dansLArbre = computed(() => ex.value.kind === 'local' && ex.value.path !== '')
 
+/**
+ * Volume contenant le chemin courant : le plus long préfixe déclaré.
+ *
+ * Sert à borner la remontée. Sans lui, « remonter » depuis le sommet d'une clé
+ * USB emmenait dans `/media`, puis `/` — on sortait du volume qu'on venait de
+ * choisir, sans jamais retrouver la liste.
+ */
+const volumeCourant = computed(() => {
+  const sous = (base: string) =>
+    ex.value.path === base || ex.value.path.startsWith(`${base.replace(/\/$/, '')}/`)
+  return (
+    props.donnees.volumes
+      .filter((v) => sous(v.path))
+      .sort((a, b) => b.path.length - a.path.length)[0] ?? null
+  )
+})
+
 function aller(chemin: string): void {
   void props.envoyer({ op: 'explore_local', path: chemin })
+}
+
+/**
+ * Revient au choix du volume.
+ *
+ * Rouvrir l'assistant remet son état à zéro côté plugin : c'est exactement ce
+ * qu'il faut, et cela évite d'inventer une opération pour le dire.
+ */
+function auxVolumes(): void {
+  void props.envoyer({ op: 'explore_open', kind: 'local' })
 }
 
 function descendre(nom: string): void {
@@ -42,8 +77,17 @@ function descendre(nom: string): void {
 }
 
 function remonter(): void {
+  const v = volumeCourant.value
+  // Au sommet d'un volume, remonter ramène à la **liste des volumes** et non au
+  // parent : on ne veut pas se retrouver à parcourir `/media` parce qu'on
+  // cherchait une clé USB, ni surtout rester enfermé dans le premier volume
+  // choisi sans pouvoir en essayer un autre.
+  if (!v || ex.value.path === v.path) {
+    auxVolumes()
+    return
+  }
   const parent = ex.value.path.replace(/\/[^/]+\/?$/, '')
-  aller(parent || '/')
+  aller(parent.startsWith(v.path) && parent !== '' ? parent : v.path)
 }
 
 async function choisir(): Promise<void> {
@@ -100,14 +144,31 @@ function fermer(): void {
         </button>
       </div>
 
-      <ChoixDossier
-        v-else
-        :exploration="ex"
-        :t="t"
-        :fige="fige"
-        @descendre="descendre"
-        @remonter="remonter"
-      />
+      <template v-else>
+        <!-- Retour explicite au choix du volume : le seul autre chemin est de
+             remonter jusqu'au sommet, ce qui ne se devine pas. -->
+        <button
+          type="button"
+          data-aux-volumes
+          class="self-start rounded px-2 py-1 text-left text-sm text-muted-foreground hover:bg-accent"
+          :disabled="fige"
+          @click="auxVolumes"
+        >
+          ← {{ t('volumes_label') }}
+        </button>
+        <ChoixDossier
+          :exploration="ex"
+          :t="t"
+          :fige="fige"
+          @descendre="descendre"
+          @remonter="remonter"
+        />
+      </template>
+
+      <!-- Le refus s'affiche **ici** et pas seulement sur la page : derrière le
+           voile gris de la boîte de dialogue, le bandeau de la page est à peu
+           près invisible au moment précis où il compte. -->
+      <p v-if="message" class="text-sm text-destructive" data-dlg-message>{{ message }}</p>
 
       <div class="flex justify-end gap-2">
         <Button variant="ghost" data-annuler @click="fermer">{{ t('btn_cancel') }}</Button>

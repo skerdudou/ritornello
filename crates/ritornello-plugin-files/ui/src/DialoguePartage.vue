@@ -25,6 +25,14 @@ const props = defineProps<{
   envoyer: Envoyer
   fige: boolean
   ouvert: boolean
+  /**
+   * Dernier refus du plugin, tel que la page l'a reçu.
+   *
+   * Il arrive ici parce qu'un refus né dans la popin doit s'y afficher : le
+   * bandeau de la page principale est derrière le voile gris de la boîte de
+   * dialogue, donc à peu près invisible au moment où il compte le plus.
+   */
+  message: string
 }>()
 const emit = defineEmits<{ fermer: [] }>()
 
@@ -175,6 +183,11 @@ function fermer(): void {
           @remonter="remonter"
         />
       </template>
+
+      <!-- Le refus s'affiche **ici** et pas seulement sur la page : derrière le
+           voile gris de la boîte de dialogue, le bandeau de la page est à peu
+           près invisible au moment précis où il compte. -->
+      <p v-if="message" class="text-sm text-destructive" data-dlg-message>{{ message }}</p>
 
       <div class="flex flex-wrap justify-end gap-2">
         <Button variant="ghost" data-manuel @click="manuel = !manuel">

@@ -19,7 +19,7 @@ relative_local_path = "le dossier local « {path} » doit être un chemin absolu
 
 # Refus du parcours récursif.
 too_many_tracks = "ce dossier contient plus de {cap} pistes : restreignez-le, ou ajoutez ses sous-dossiers un par un"
-scan_io_error = "lecture de « {path} » impossible : le partage est peut-être injoignable"
+scan_io_error = "lecture de « {path} » impossible : vérifiez qu'il existe encore, et que Ritornello a le droit de le lire"
 
 # Refus du magasin de listes enregistrées.
 bad_playlist_name = "nom de liste invalide « {name} » : pas de barre oblique, et il ne doit pas commencer par un point"

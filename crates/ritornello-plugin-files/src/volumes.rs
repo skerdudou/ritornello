@@ -8,16 +8,61 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-/// Types de systèmes de fichiers réputés porter des fichiers de l'utilisateur.
+/// Systèmes de fichiers qui ne portent pas de fichiers de l'utilisateur.
 ///
-/// **Liste blanche et non liste noire.** Une liste noire oublierait le prochain
-/// pseudo-système de fichiers que le noyau inventera, et cet oubli ne se
-/// verrait pas : il se traduirait par un volume parasite dans une liste de
-/// choix, ou par un balayage récursif parti dans `/proc`.
-const FS_REELS: &[&str] = &[
-    "ext2", "ext3", "ext4", "vfat", "exfat", "ntfs", "ntfs3", "btrfs", "xfs", "f2fs", "iso9660",
-    "udf", "hfsplus", "cifs", "nfs", "nfs4",
+/// **Liste noire, et non liste blanche — décision revue en cours de route.**
+///
+/// La première version énumérait au contraire les systèmes de fichiers
+/// acceptés. Le raisonnement était qu'une liste noire oublierait le prochain
+/// pseudo-système de fichiers du noyau. Il était faux, parce qu'il pesait le
+/// mauvais risque : l'asymétrie des conséquences va dans l'autre sens.
+///
+/// - Une liste blanche incomplète rend **un vrai disque inutilisable**, sans
+///   aucun contournement offert à l'utilisateur. C'est arrivé : `/mnt/c` sous
+///   WSL est un `9p`, et un disque USB en NTFS monté par ntfs-3g apparaît en
+///   `fuseblk` — deux types qu'on n'avait pas prévus, deux blocages nets.
+/// - Une liste noire incomplète laisse passer **une entrée parasite** dans une
+///   liste de choix. Le désagrément est visible, réversible et mineur.
+///
+/// Ce que la liste noire doit encore garantir tient : `proc` y figure, donc la
+/// garde refuse toujours `/proc/self` et son arborescence récursive.
+///
+/// `overlay` n'y est **pas** : sur un système conteneurisé, c'est la racine
+/// elle-même. L'exclure rendrait tout invisible, ce qui est exactement l'erreur
+/// qu'on vient de corriger. Ses quelques entrées parasites sous WSL sont le
+/// moindre mal.
+const FS_PSEUDO: &[&str] = &[
+    "autofs",
+    "binfmt_misc",
+    "bpf",
+    "cgroup",
+    "cgroup2",
+    "configfs",
+    "debugfs",
+    "devpts",
+    "devtmpfs",
+    "efivarfs",
+    "fusectl",
+    "hugetlbfs",
+    "mqueue",
+    "nsfs",
+    "proc",
+    "pstore",
+    "ramfs",
+    "rootfs",
+    "rpc_pipefs",
+    "securityfs",
+    "selinuxfs",
+    "squashfs",
+    "sysfs",
+    "tmpfs",
+    "tracefs",
 ];
+
+/// Vrai si ce type de montage peut porter la musique de quelqu'un.
+fn fs_utile(fstype: &str) -> bool {
+    !FS_PSEUDO.contains(&fstype)
+}
 
 const PROC_MOUNTS: &str = "/proc/mounts";
 
@@ -54,7 +99,7 @@ fn tous(proc_mounts: &str) -> Vec<Volume> {
 pub fn volumes(proc_mounts: &str) -> Vec<Volume> {
     let mut retenus: Vec<Volume> = Vec::new();
     for v in tous(proc_mounts) {
-        if !FS_REELS.contains(&v.fstype.as_str()) {
+        if !fs_utile(&v.fstype) {
             continue;
         }
         // Un même point monté deux fois n'apparaît qu'une fois, et c'est le
@@ -89,7 +134,7 @@ pub fn proprietaire(proc_mounts: &str, chemin: &Path) -> Option<Volume> {
 /// système de fichiers.
 pub fn parcourable(proc_mounts: &str, chemin: &Path) -> bool {
     proprietaire(proc_mounts, chemin)
-        .map(|v| FS_REELS.contains(&v.fstype.as_str()))
+        .map(|v| fs_utile(&v.fstype))
         .unwrap_or(false)
 }
 
@@ -123,12 +168,42 @@ tmpfs /run tmpfs rw,nosuid 0 0
 ";
 
     #[test]
-    fn seuls_les_vrais_systemes_de_fichiers_sont_proposes() {
-        // Liste blanche et non liste noire : une liste noire oublierait le
-        // prochain pseudo-système de fichiers du noyau, et l'oubli se verrait
-        // seulement sous la forme d'un volume parasite dans une liste de choix.
+    fn les_pseudo_systemes_de_fichiers_ne_sont_pas_proposes() {
+        // Liste noire, et non liste blanche : voir FS_PSEUDO pour l'asymétrie
+        // des conséquences qui a fait revoir ce choix.
         let v: Vec<String> = volumes(MOUNTS).iter().map(|v| v.path.display().to_string()).collect();
         assert_eq!(v, vec!["/", "/boot/firmware", "/media/ma cle", "/mnt/ritornello/nas"]);
+    }
+
+    #[test]
+    fn un_systeme_de_fichiers_inconnu_reste_proposable() {
+        // LE défaut que la liste blanche avait causé, désormais épinglé. Trois
+        // cas rencontrés pour de vrai :
+        //   - `9p` : /mnt/c sous WSL, donc tout le disque de la machine hôte ;
+        //   - `fuseblk` : un disque USB en NTFS monté par ntfs-3g, le cas le
+        //     plus banal d'une clé venue de Windows ;
+        //   - `virtiofs` : un partage de machine virtuelle.
+        // Aucun n'était prévu, et chacun rendait un vrai disque inatteignable
+        // sans le moindre contournement offert à l'utilisateur.
+        let m = "\
+C:\\134 /mnt/c 9p rw,noatime 0 0
+/dev/sdb1 /media/usb fuseblk rw,relatime 0 0
+partage /mnt/hote virtiofs rw 0 0
+";
+        let v: Vec<String> = volumes(m).iter().map(|v| v.path.display().to_string()).collect();
+        assert_eq!(v, vec!["/media/usb", "/mnt/c", "/mnt/hote"]);
+        assert!(parcourable(m, Path::new("/mnt/c/projets/musique")));
+        assert!(parcourable(m, Path::new("/media/usb/Albums")));
+    }
+
+    #[test]
+    fn un_recouvrement_conteneurise_reste_visible() {
+        // `overlay` est délibérément absent de la liste noire : sur un système
+        // conteneurisé, c'est la racine elle-même, et l'exclure rendrait tout
+        // invisible — exactement l'erreur que la liste blanche commettait.
+        let m = "overlay / overlay rw 0 0\nproc /proc proc rw 0 0\n";
+        assert!(parcourable(m, Path::new("/srv/musique")));
+        assert!(!parcourable(m, Path::new("/proc/self")));
     }
 
     #[test]

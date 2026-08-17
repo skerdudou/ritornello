@@ -72,6 +72,15 @@ function travailEnCours(): boolean {
   return donnees.value?.scan.running === true || donnees.value?.explore.busy === true
 }
 
+/**
+ * Un assistant est ouvert : c'est lui qui porte les refus, pas la page.
+ *
+ * Le bandeau de la page vit **derrière** le voile gris de la boîte de dialogue.
+ * L'y laisser en double revenait à afficher le refus là où on ne peut pas le
+ * lire, au moment précis où il compte.
+ */
+const popinOuverte = computed(() => donnees.value?.explore.open === true)
+
 function programmerSondage(): void {
   arreterSondage()
   if (!travailEnCours()) return
@@ -174,7 +183,7 @@ const scan = computed(
          replierait en un paragraphe illisible, et c'est pourtant la seule
          chose actionnable que l'utilisateur reçoive. -->
     <pre
-      v-if="message"
+      v-if="message && !popinOuverte"
       data-message
       class="whitespace-pre-wrap rounded-md border border-border bg-muted/40 p-2 font-mono text-sm"
       >{{ message }}</pre
@@ -205,6 +214,7 @@ const scan = computed(
         :t="t"
         :envoyer="envoyer"
         :fige="chargementEchoue || enCours"
+        :message="message"
       />
       <VoletParcourir
         :donnees="donnees"

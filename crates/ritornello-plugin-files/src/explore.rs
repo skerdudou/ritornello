@@ -52,7 +52,13 @@ pub struct Vue {
 }
 
 pub struct Explorateur {
-    creds_dir: PathBuf,
+    /// Où poser le fichier d'authentification transitoire de `smbclient`.
+    ///
+    /// Le répertoire **d'exécution**, jamais celui des identifiants persistés :
+    /// ce dernier vit sous `/etc` et n'est inscriptible qu'en production, ce qui
+    /// faisait échouer l'assistant en développement avec un « Permission
+    /// denied » qui semblait accuser SMB.
+    dir_travail: PathBuf,
     catalog: Arc<RwLock<Catalog>>,
     smb_ok: Arc<AtomicBool>,
     vue: Arc<Mutex<Vue>>,
@@ -66,12 +72,12 @@ pub struct Explorateur {
 
 impl Explorateur {
     pub fn new(
-        creds_dir: PathBuf,
+        dir_travail: PathBuf,
         catalog: Arc<RwLock<Catalog>>,
         smb_ok: Arc<AtomicBool>,
     ) -> Self {
         Self {
-            creds_dir,
+            dir_travail,
             catalog,
             smb_ok,
             vue: Arc::new(Mutex::new(Vue::default())),
@@ -168,7 +174,7 @@ impl Explorateur {
             v.error = None;
         }
         let creds = self.credentials(&host);
-        let dir = self.creds_dir.clone();
+        let dir = self.dir_travail.clone();
         let vue = self.vue.clone();
         let catalog = self.catalog.clone();
         self.tache = Some(tokio::spawn(async move {
@@ -206,7 +212,7 @@ impl Explorateur {
             v.error = None;
         }
         let creds = self.credentials(&host);
-        let dir = self.creds_dir.clone();
+        let dir = self.dir_travail.clone();
         let vue = self.vue.clone();
         let catalog = self.catalog.clone();
         self.tache = Some(tokio::spawn(async move {
