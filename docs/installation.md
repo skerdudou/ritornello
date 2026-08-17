@@ -78,11 +78,14 @@ On **DietPi**, one package more (`sudo apt install mpv cd-discid eject
 cifs-utils polkitd`), and three differences to know about:
 
 - polkit is **absent** on a DietPi image, where it is present on most other
-  Debian-based systems — hence `polkitd` in the line above. Two features
-  need it and only fail once the device is in service: the System tab's
-  shut-down and restart buttons, which stay disabled and say why, and
-  mounting a network share, refused with "Interactive authentication
-  required". See [Shutdown and reboot from the web
+  Debian-based systems — hence `polkitd` in the line above — **and
+  `systemd-logind` is masked**, to save memory. Both are needed by the
+  System tab's shut-down and restart buttons, and polkit alone is not
+  enough: those two actions are logind methods, so unmask logind as well
+  (`sudo systemctl unmask systemd-logind && sudo systemctl start
+  systemd-logind`). Mounting a network share needs polkit only, never
+  logind. None of this fails at install time — only once the device is in
+  service. See [Shutdown and reboot from the web
   UI](#shutdown-and-reboot-from-the-web-ui);
 - no `raspi-config`: the sound card is **enabled and picked** through
   `dietpi-config` (Audio Options) — DietPi ships with onboard sound
@@ -246,22 +249,36 @@ fix it:
     Call failed: Unit dbus-org.freedesktop.login1.service failed to load
     properly, please adjust/correct and reload service manager: File exists
 
-That is not a refusal — it is the D-Bus **activation** of logind failing,
-which means `systemd-logind` is not running and the alias that would start
-it cannot load (`File exists`: two units claiming the name). Seen on a
-DietPi image. Where to look:
+That is not a refusal — it is the D-Bus **activation** of logind failing.
+Nobody owns the `org.freedesktop.login1` name, so dbus tries to start
+`dbus-org.freedesktop.login1.service`, the alias of `systemd-logind.service`,
+and that load fails.
 
-    systemctl is-active systemd-logind
-    ls -l /etc/systemd/system/dbus-org.freedesktop.login1.service \
-          /lib/systemd/system/dbus-org.freedesktop.login1.service \
-          /etc/systemd/system/systemd-logind.service
+**On DietPi, the cause measured on the device is a masked unit** — the image
+ships `systemd-logind` masked, to save memory:
 
-The one in `/lib` is the alias shipped by the `systemd` package and belongs
-there; a second one in `/etc/systemd/system` is the usual culprit, and goes
-away with `sudo rm` followed by `sudo systemctl daemon-reload`. A
-`systemd-logind.service` pointing at `/dev/null` is a masked unit:
-`sudo systemctl unmask systemd-logind && sudo systemctl start
-systemd-logind`. Restart Ritornello afterwards — the probe is cached.
+    $ systemctl is-active systemd-logind; systemctl is-enabled systemd-logind
+    inactive
+    masked
+    $ ls -l /etc/systemd/system/systemd-logind.service
+    ... /etc/systemd/system/systemd-logind.service -> /dev/null
+
+The repair, then a Ritornello restart because the probe is cached:
+
+    sudo systemctl unmask systemd-logind
+    sudo systemctl start systemd-logind
+    systemctl is-enabled systemd-logind      # `enable` it if it says disabled
+    sudo systemctl restart ritornello
+
+Fix this **before** looking at polkit: shutting down and rebooting *are*
+logind's own methods, so no polkit rule can help while logind is down. A
+share mount is not affected — it goes through systemd's `manage-units`,
+never logind, and works with polkit alone. The same `File exists` can also
+come from a stray
+`/etc/systemd/system/dbus-org.freedesktop.login1.service` competing with the
+one in `/lib` (which is the alias shipped by the `systemd` package and
+belongs there) — `sudo rm` then `sudo systemctl daemon-reload`. That second
+case is reasoning, not something seen here.
 
 Nothing breaks without any of it: the core asks logind the same question at
 startup, and the two system buttons stay **disabled**, with the reason shown
