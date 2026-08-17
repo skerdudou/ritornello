@@ -2,9 +2,10 @@
 
 ## Web remote and command API
 
-The home page (`http://<host>:8080/`) embeds a remote control: the 12
+The home page (`http://<host>:8080/`) embeds a remote control: the 15
 commands of the protocol (presets 1-9 plus `+10`, next/previous, volume,
-mute, play/pause, stop, eject, source switch, standby).
+mute, play/pause, stop, eject, source switch, standby, seek forward/backward,
+and absolute seek).
 
 `Next`/`Prev` are interpreted by the active source: preset for the radio,
 track for the CD player — these are not two distinct command pairs, only a
@@ -121,6 +122,53 @@ should not require paging back each time. The browser always sends the
 absolute number to `Select`; only a source/count change resets the page to
 0 (the same guard that already resets the window on a source switch).
 
+Two more fields ride the same payload for a different purpose: `position_s`,
+where in what's playing sits, in seconds, at the instant the frame is
+published, and `seekable`, whether what's playing accepts being moved
+through. `seekable` is a field of its own rather than a deduction from
+`duration_s` being known, because the two diverge exactly where it matters:
+a Radio France station declares the duration of the song it names on a
+direct nobody can rewind, while a plain file carrying no duration tag can
+still be sought end to end. Deducing one from the other would make the bar
+below clickable on a station, or refuse to draw it on an untagged file —
+precisely the case where mpv knows the position best. `position_s` is
+absent when neither of the two position sources — mpv on a finite content,
+a `metadata` plugin on a stream — has an answer right now: a stopped
+device, standby, or a stream nobody follows.
+
+While something plays, one frame goes out every second carrying a fresh
+`position_s`, on top of whatever else changed; nothing goes out for this
+reason alone at rest, since deduplication already discards a frame
+identical to the last one and a stopped or standby device has no position
+left to advance. A transient `overlay` in flight rides along untouched by
+this ticking: the core refreshes its `remaining_ms` as it always does, but
+the tick neither shortens nor extends the deadline behind it, so a volume
+readout or a pending `+NN` lasts exactly as long as it always did, whether
+zero or fifty position frames cross it in the meantime.
+
+Under the Player card, a thin bar shows the elapsed time next to the total
+duration, both drawn from this same pushed payload. No known duration means
+no bar, the elapsed figure standing alone — a bar with no end to reach
+would teach nothing. When `seekable` is false the numbers still show, but
+the bar takes no click and no key: this is exactly the Radio France case,
+where knowing you are 1:27 into a 4:14 track has value even without being
+able to jump inside it. When it is true, clicking or dragging the bar seeks
+to that point, and the keyboard does the same (arrow keys move by one
+step, Home/End jump to the ends) — without that, the bar would be the only
+control on the page out of reach without a mouse, on a page where every
+other control is a button. It is named for a screen reader either way.
+
+Two commands drive the bar and a remote alike: `SeekForward` and
+`SeekBackward`, which move by a step rather than carrying one — the step
+lives in the core, not in the key, the same reasoning that already keeps
+the volume's 5% off the button itself — and `SeekTo`, an absolute second
+that only the bar's click and drag ever send, no physical key producing
+one. All three are silently ignored on content that isn't seekable: no
+error, no overlay, the key behaves exactly like one bound to nothing. The
+step is `seek_step_s`, adjustable on its own card of the config page,
+10 s by default and bounded 1-120 s under the same `422`-on-write contract
+as the timings described below.
+
 **Volume +/- respond to holding**, not just clicking: pointer-down sends
 one step immediately, then — after the initial delay set on the config
 page's volume-hold card — repeats at that card's interval until
@@ -143,7 +191,7 @@ The former status page is now the **config page**, at
 `http://<host>:8080/config` — `/status`, its historical URL, redirects
 there, so existing bookmarks and links keep working. It lists the
 plugins with their connection state and admin link, the audio output and
-language pickers (below), the three settings cards described here, and
+language pickers (below), the four settings cards described here, and
 the recent error log.
 
 A **sticky table of contents** sits alongside the cards (from the `lg`
@@ -198,6 +246,15 @@ entry window described above. They are deliberately two independent
 settings, not one shared timer: the volume/mute overlay may want to
 shrink one day without shortening the time left to key in a two-digit
 preset, and vice versa.
+
+### Seek step card
+
+One setting, `seek_step_s`: how far `SeekForward` and `SeekBackward` move
+in what's playing, in seconds. 10 s by default, bounded **1-120 s** (same
+`422`-on-write contract, backed by the same `GET`/`PUT /api/settings`).
+Living in the core rather than on the key means the same reasoning as the
+5% volume step: a remote never has to be reprogrammed just because the step
+it sends should now be bigger or smaller.
 
 ## System page
 

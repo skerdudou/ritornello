@@ -459,6 +459,16 @@ This bundled plugin (`RITORNELLO_CONSOLE_TTY` variable, default
 - third line: `artist — title`, with the same four fallbacks (both, either
   one alone, neither) it always had.
 
+The position that now rides in every `PlayerState` frame finds no line of
+its own here: all three are already spoken for — source and count, name or
+album or status, artist and title — and the core publishes one such frame
+per second throughout playback, so a fourth line built around a clock would
+cost a full screen erase every second it played. A test locks the choice
+down: a frame that only changes `position_s` composes the exact same three
+lines as the one before, so nothing is rewritten and nothing flickers. Any
+other display plugin is free to draw the field instead — the console is
+simply too narrow a screen to be the one that does.
+
 An overlay, when present, takes the whole first line and blanks the rest —
 the display owner's own call. The volume/mute overlay used to span two
 lines ("VOLUME" then "65 %") before this protocol moved its text into a
@@ -649,7 +659,11 @@ without anything being lost: the entries already there are not touched.
   (title and artist already separated, and the time window is the song's, hence
   a duration), the other the **programme** (its name, plus what is playing
   inside it as a single `ARTIST - Title` string, and no duration — the window
-  is the programme's, an hour on Mouv'). Outside music the second one carries
+  is the programme's, an hour on Mouv'). `position_s` follows the exact same
+  filter as `duration_s`, computed from that same `startTime` when it is a
+  song and left out when it is a programme (see the general `metadata`
+  contract above) — the programme's own hour-long window would make for a
+  position as meaningless as its duration. Outside music the second one carries
   the programme and its detail, and they are displayed too: there is no ICY to
   fall back on, so the alternative is a blank line.
 
@@ -746,6 +760,25 @@ and call `run_metadata_plugin`. Two points of contract:
   is playing, which prevents a slow answer from overwriting the next
   track. An enrichment whose text fields are all empty counts as a
   non-answer, and therefore lets a lower-priority plugin win.
+
+One more field of `Enrichment` needs attention from a plugin only if it can
+answer it: `position_s`, an elapsed number of seconds **in the track, at the
+instant the plugin sends it** — not a timestamp, so there is nothing to
+synchronise between the plugin's clock and the core's. The core anchors it
+the moment it arrives and advances it on its own between two answers, at the
+one-second pace described in [interface.md](interface.md); a plugin that
+only calls its source every few dozen seconds does not need to answer any
+faster than that to keep the figure moving on screen. It is discarded by the
+same identity check as the rest of the enrichment, position included, so a
+plugin need not track staleness for it separately — and only the plugin
+currently winning the arbitration gets to anchor it: one held in reserve
+answering with an unrelated correction (a fixed title, a late cover) must not
+be read as fresh progress, or the bar would jump backward the instant it
+spoke. `radiofrance-metas` is the only one of the three bundled plugins that
+fills it, computed from the same `startTime` it already reads for
+`duration_s`; the other two need no new logic for it — they already write
+out every field of `Enrichment` by name, so the addition is one more line
+reading `None`, not a decision to make.
 
 `next_enrichment` must be **cancellable without loss**: its future is
 dropped as soon as a `NowPlaying` arrives, so any durable state (open
