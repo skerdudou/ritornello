@@ -578,11 +578,18 @@ Ajouter, près de `publie_etat` :
 Dans `etat_lecteur`, remplacer la ligne `morceau: self.metadonnees.etat(),` par :
 
 ```rust
-            position_s: self.position_s,
+            // Gardée **ici**, à la publication, et non effacée dans chacun des
+            // cinq chemins qui posent `lecture = false` (arrêt, veille,
+            // changement de source, fin de contenu, `SourceAction::Stop`).
+            // Un point unique ne peut pas être oublié ; cinq appels
+            // sprinkled le seraient au sixième chemin ajouté, et la barre
+            // resterait figée sur la dernière valeur connue sans que rien ne
+            // le signale.
+            position_s: if self.lecture && !self.standby { self.position_s } else { None },
             // `lecture` et non `expecting_stream` : la première dit « quelque
             // chose joue », la seconde « c'est un flux relançable ». Un
             // contenu déplaçable est exactement ce qui joue sans être un flux.
-            seekable: self.lecture && !self.expecting_stream,
+            seekable: self.lecture && !self.standby && !self.expecting_stream,
             morceau: {
                 let mut m = self.metadonnees.etat();
                 // Précédence : la durée mesurée par mpv l'emporte sur celle
@@ -590,14 +597,14 @@ Dans `etat_lecteur`, remplacer la ligne `morceau: self.metadonnees.etat(),` par 
                 // fourni le **morceau** (artiste, titre, album) et non qui a
                 // fourni la durée — imprécision assumée plutôt qu'un second
                 // champ d'origine pour une seule valeur numérique.
-                if self.duree_mesuree_s.is_some() {
+                if self.lecture && !self.standby && self.duree_mesuree_s.is_some() {
                     m.duration_s = self.duree_mesuree_s;
                 }
                 m
             },
 ```
 
-Appeler `self.oublie_position();` dans les trois chemins qui arrêtent la lecture, juste après chaque `self.lecture = false;` : la branche `Command::Stop`, la branche `Command::Power` (mise en veille) et la branche `SourceAction::Stop` d'`apply`.
+`oublie_position` n'est donc appelée que depuis `rafraichit_position` : elle sert à ne pas garder de valeur périmée en mémoire, la garde ci-dessus se chargeant de ce qui sort.
 
 - [ ] **Étape 4 : voir les tests passer**
 
@@ -714,19 +721,11 @@ et le bras correspondant dans le `select!` :
                 // décide de sa place, et le cœur garde la main sur son
                 // échéance (bras `overlay_sleep`).
                 core.rafraichit_position().await;
-                core.publie_etat_public();
+                core.publie_etat();
             }
 ```
 
-`publie_etat` étant privée, exposer une façade dans `core.rs`, juste après elle :
-
-```rust
-    /// `publie_etat` pour la boucle `select!` de `main`, qui n'est pas dans ce
-    /// module. Même méthode, même déduplication.
-    pub fn publie_etat_public(&self) {
-        self.publie_etat();
-    }
-```
+`publie_etat` est privée au module `core` : la passer en `pub(crate)` (une seule ligne, `fn publie_etat` → `pub(crate) fn publie_etat`). Pas de méthode-façade autour d'elle : un enrobage qui ne fait qu'appeler l'autre serait du bruit, et la boucle `select!` appelle déjà `overlay_deadline` du même objet.
 
 - [ ] **Étape 4 : voir les tests passer**
 
@@ -954,17 +953,15 @@ Dans `rafraichit_position`, remplacer la branche `if self.expecting_stream` par 
         }
 ```
 
-Ajouter l'assistant de test, dans le module `tests`, à côté de `regle_progression` :
+Ajouter l'assistant de test **dans le bloc `impl Core<FakePlayer>` déjà créé à la tâche 3**, à côté de `regle_progression` — un seul bloc pour les assistants du cœur factice, pas deux :
 
 ```rust
-    impl Core<FakePlayer> {
         /// Recule l'ancre de `duree` : le test avance le temps sans dormir.
         fn avance_ancre_pour_test(&mut self, duree: std::time::Duration) {
             if let Some((p, pose)) = self.ancre_position {
                 self.ancre_position = Some((p, pose - duree));
             }
         }
-    }
 ```
 
 - [ ] **Étape 4 : voir les tests passer**
@@ -1623,7 +1620,17 @@ et, dans le bloc « En écoute », juste après la ligne `data-album` :
         />
 ```
 
-Dans `HomeView.vue`, passer `:pas-deplacement` depuis les réglages déjà chargés (ou `10` à défaut) et brancher `@deplacer` sur l'envoi de `{ cmd: 'SeekTo', arg: secondes }` par le même chemin que les boutons de la télécommande.
+Dans `HomeView.vue`, la ligne `<PlayerCard :etat="etat" />` devient :
+
+```vue
+    <PlayerCard
+      :etat="etat"
+      :pas-deplacement="reglages.seek_step_s"
+      @deplacer="(s: number) => send({ cmd: 'SeekTo', arg: s })"
+    />
+```
+
+`reglages` (un `ref<SettingsPayload>` alimenté par `/api/settings`) et `send` existent déjà dans ce fichier — ils servent l'auto-répétition du volume. Ajouter `seek_step_s: 10` à l'objet de repli de `reglages`, comme les autres réglages y ont déjà leur valeur de repli.
 
 - [ ] **Étape 4 : voir les tests passer**
 
