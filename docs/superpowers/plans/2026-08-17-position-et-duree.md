@@ -722,16 +722,44 @@ Dans `core.rs`, près de `overlay_deadline` :
 
 Dans `main.rs`, à côté des deux échéances déjà lues avant le `select!` :
 
+Déclarer, **avant** la boucle et à côté de `let mut retry_at` :
+
+```rust
+    /// Échéance du prochain rafraîchissement de position. Absolue, comme
+    /// `retry_at` : voir la raison au point d'armement, dans la boucle.
+    let mut prochain_tick: Option<tokio::time::Instant> = None;
+```
+
+puis, dans la boucle, à côté des deux autres échéances :
+
 ```rust
         // Tick de position : une seconde, armé seulement pendant la lecture
-        // (voir `Core::tick_position`). Lu avant le `select!` comme les deux
-        // autres échéances, pour ne pas garder d'emprunt sur `core`.
-        let position_arme = core.tick_position();
+        // (voir `Core::tick_position`).
+        //
+        // L'échéance est **absolue**, comme `retry_at` et `overlay_at`, et
+        // c'est un défaut trouvé en relecture qui l'impose. Les trois futurs
+        // d'attente sont recréés à chaque tour de boucle, donc chaque fois
+        // qu'un bras quelconque se résout — une commande, un événement mpv,
+        // un enrichissement, un changement de réglage. Recréer un
+        // `sleep_until(at)` sur la même échéance ne change rien ; recréer un
+        // `sleep(1 s)` relatif relance le compte à rebours depuis zéro. Le
+        // tick n'aurait donc pas lieu une fois par seconde mais une seconde
+        // après le dernier réveil du `select!`, et sur un appareil où les
+        // événements se succèdent plus vite que cela, il serait repoussé
+        // indéfiniment — la position ne bougerait jamais, précisément quand
+        // il se passe quelque chose.
+        if !core.tick_position() {
+            prochain_tick = None;
+        } else if prochain_tick.is_none() {
+            prochain_tick = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(1));
+        }
+        // Copie locale (`Instant` est `Copy`) : le futur ci-dessous n'emprunte
+        // donc ni `core` ni la variable réassignée dans le bras.
+        let position_at = prochain_tick;
         let position_sleep = async {
-            if position_arme {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            } else {
-                std::future::pending().await
+            match position_at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
             }
         };
 ```
@@ -740,6 +768,10 @@ et le bras correspondant dans le `select!` :
 
 ```rust
             _ = position_sleep => {
+                // Réarmer d'abord, depuis maintenant : la cadence reste d'une
+                // seconde quoi qu'il arrive sur les autres bras.
+                prochain_tick =
+                    Some(tokio::time::Instant::now() + std::time::Duration::from_secs(1));
                 // Rafraîchir puis publier : la position ayant changé, la trame
                 // franchit la déduplication et part vers la SPA comme vers les
                 // afficheurs. L'incrustation éventuellement en cours voyage
