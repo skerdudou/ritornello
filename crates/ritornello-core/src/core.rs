@@ -156,6 +156,15 @@ pub struct Core<P: Player> {
     /// a held event arriving out of nowhere (core restarted mid-hold) does
     /// nothing.
     volume_deadline: Option<Instant>,
+    /// Où en est ce qui joue, en secondes entières, tel que le dernier
+    /// rafraîchissement l'a établi. Publié tel quel par `etat_lecteur`.
+    position_s: Option<u32>,
+    /// Durée **mesurée par mpv**, distincte de celle qu'un plugin `metadata`
+    /// annonce. Gardée à part parce qu'elle la supplante : les fondre en un
+    /// seul champ ferait perdre la trace de qui a parlé, et la précédence
+    /// deviendrait un ordre d'écriture — le genre d'invariant qui se casse en
+    /// silence.
+    duree_mesuree_s: Option<u32>,
 }
 
 /// Résout le mot de veille depuis un catalogue déjà en main.
@@ -231,6 +240,8 @@ impl<P: Player> Core<P> {
             etat_tx: metadata.etat,
             settings: persisted.settings.clone(),
             volume_deadline: None,
+            position_s: None,
+            duree_mesuree_s: None,
         }
     }
 
@@ -445,6 +456,47 @@ impl<P: Player> Core<P> {
         self.publie_etat();
     }
 
+    /// Relit où on en est, auprès du fournisseur qui a le droit de parler.
+    ///
+    /// Deux fournisseurs, jamais en concurrence : mpv pour un contenu fini,
+    /// un plugin `metadata` pour un flux. Le `time-pos` d'un flux compte
+    /// depuis le début de la connexion et n'a aucun rapport avec le morceau —
+    /// il est lu et jeté, jamais publié.
+    ///
+    /// Ne publie rien : l'appelant décide (le tick publie, `handle_command`
+    /// publie déjà en sortie).
+    pub async fn rafraichit_position(&mut self) {
+        if self.standby || !self.lecture {
+            self.oublie_position();
+            return;
+        }
+        if self.expecting_stream {
+            // Flux : mpv ne sait rien d'utile. La position viendra de l'ancre
+            // d'un plugin `metadata` (tâche 5) ou de nulle part.
+            self.duree_mesuree_s = None;
+            return;
+        }
+        match self.player.progression().await {
+            Ok(p) => {
+                self.position_s = p.position_s.map(|s| s as u32);
+                self.duree_mesuree_s = p.duration_s.filter(|d| *d > 0.0).map(|s| s as u32);
+            }
+            Err(e) => {
+                // Une position illisible n'arrête pas la musique : on cesse
+                // simplement d'en annoncer une.
+                tracing::debug!("playback progress unavailable: {e}");
+                self.position_s = None;
+                self.duree_mesuree_s = None;
+            }
+        }
+    }
+
+    /// Plus rien ne joue : plus rien à situer.
+    fn oublie_position(&mut self) {
+        self.position_s = None;
+        self.duree_mesuree_s = None;
+    }
+
     /// Diffuse l'état structuré du lecteur : à la SPA, et aux plugins Display
     /// (qui composent eux-mêmes leur mise en page depuis cette même trame).
     fn publie_etat(&self) {
@@ -485,12 +537,30 @@ impl<P: Player> Core<P> {
                 // trames.
                 o.clone().avec_restant(u32::try_from(restant).unwrap_or(u32::MAX))
             }),
-            morceau: self.metadonnees.etat(),
-            // Renseignés par une tâche ultérieure du même chantier, qui
-            // interrogera `Player::progression` : ce champ n'existe ici que
-            // pour rendre le protocole exhaustif à compiler.
-            position_s: None,
-            seekable: false,
+            // Gardée **ici**, à la publication, et non effacée dans chacun des
+            // cinq chemins qui posent `lecture = false` (arrêt, veille,
+            // changement de source, fin de contenu, `SourceAction::Stop`).
+            // Un point unique ne peut pas être oublié ; cinq appels
+            // sprinkled le seraient au sixième chemin ajouté, et la barre
+            // resterait figée sur la dernière valeur connue sans que rien ne
+            // le signale.
+            position_s: if self.lecture && !self.standby { self.position_s } else { None },
+            // `lecture` et non `expecting_stream` : la première dit « quelque
+            // chose joue », la seconde « c'est un flux relançable ». Un
+            // contenu déplaçable est exactement ce qui joue sans être un flux.
+            seekable: self.lecture && !self.standby && !self.expecting_stream,
+            morceau: {
+                let mut m = self.metadonnees.etat();
+                // Précédence : la durée mesurée par mpv l'emporte sur celle
+                // qu'un plugin annonce. `origin` continue de désigner qui a
+                // fourni le **morceau** (artiste, titre, album) et non qui a
+                // fourni la durée — imprécision assumée plutôt qu'un second
+                // champ d'origine pour une seule valeur numérique.
+                if self.lecture && !self.standby && self.duree_mesuree_s.is_some() {
+                    m.duration_s = self.duree_mesuree_s;
+                }
+                m
+            },
         }
     }
 
@@ -1246,6 +1316,14 @@ mod tests {
             },
         );
         (core, np_rx, etat_rx, dir)
+    }
+
+    impl Core<FakePlayer> {
+        /// Règle ce que le lecteur factice prétend savoir de sa progression.
+        fn regle_progression(&self, position_s: Option<f64>, duration_s: Option<f64>) {
+            *self.player.progression.lock().unwrap() =
+                crate::player::Progression { position_s, duration_s };
+        }
     }
 
     #[tokio::test]
@@ -2740,6 +2818,78 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(40)).await;
         core.handle_input(InputMessage { cmd: Command::VolumeUp, held: true }).await.unwrap();
         assert_eq!(core.etat_lecteur().volume, 65, "pas de deadline restante : le held ne fait rien");
+    }
+
+    #[tokio::test]
+    async fn la_position_de_mpv_est_publiee_sur_un_contenu_fini() {
+        // La source active de `setup()` est `radio` (`PersistedState::default`) :
+        // `SourceCycle` bascule vers `cd`, qui répond `play("cdda://").finite()` —
+        // un contenu fini.
+        let (mut core, _, _, _, _dir) = setup();
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        core.regle_progression(Some(87.4), Some(254.0));
+        core.rafraichit_position().await;
+        let etat = core.etat_lecteur();
+        assert_eq!(etat.position_s, Some(87), "tronquée, jamais arrondie au-dessus");
+        assert_eq!(etat.morceau.duration_s, Some(254));
+        assert!(etat.seekable, "un disque se parcourt");
+    }
+
+    /// Sur un flux, `time-pos` compte depuis le début de la connexion et n'a
+    /// aucun rapport avec le morceau : il est lu et jeté. Sans cette garde, la
+    /// radio afficherait un compteur d'écoute croissant à la place de la
+    /// position dans le morceau.
+    #[tokio::test]
+    async fn la_position_de_mpv_est_ecartee_sur_un_flux() {
+        let (mut core, _, _, _, _dir) = setup();
+        // La source active est déjà `radio` : `PlayPause` sans rien qui joue
+        // lui redemande d'activer, et la factice répond `play("http://fip")`
+        // sans `finite`.
+        core.handle_command(Command::PlayPause).await.unwrap();
+        core.regle_progression(Some(1234.0), Some(0.0));
+        core.rafraichit_position().await;
+        let etat = core.etat_lecteur();
+        assert_eq!(etat.position_s, None);
+        assert!(!etat.seekable, "un direct ne se rembobine pas");
+    }
+
+    #[tokio::test]
+    async fn l_arret_oublie_la_position() {
+        let (mut core, _, _, _, _dir) = setup();
+        // Bascule vers `cd`, contenu fini : voir le test ci-dessus.
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        core.regle_progression(Some(87.0), Some(254.0));
+        core.rafraichit_position().await;
+        assert_eq!(core.etat_lecteur().position_s, Some(87));
+        core.handle_command(Command::Stop).await.unwrap();
+        let etat = core.etat_lecteur();
+        assert_eq!(etat.position_s, None, "plus rien ne joue, plus rien à situer");
+        assert_eq!(etat.morceau.duration_s, None);
+        assert!(!etat.seekable);
+    }
+
+    /// La durée mesurée par mpv l'emporte sur celle qu'un plugin annonce : le
+    /// disque réel prime sur ce qu'une base en ligne en dit.
+    #[tokio::test]
+    async fn la_duree_de_mpv_l_emporte_sur_celle_d_un_plugin() {
+        let (mut core, _np_rx, _etat_rx, _dir) = setup_metadonnees(vec!["musicbrainz".into()]);
+        // Bascule vers `cd`, contenu fini : sans quoi `rafraichit_position`
+        // écarterait la mesure de mpv comme s'il s'agissait d'un flux.
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        let id = serde_json::json!({"disc": "abc", "track": 2});
+        core.handle_source_update("cd", joue(id.clone()));
+        core.handle_enrichment(
+            "musicbrainz",
+            Enrichment {
+                identity: id,
+                title: Some("So What".into()),
+                duration_s: Some(999),
+                ..Default::default()
+            },
+        );
+        core.regle_progression(Some(10.0), Some(545.0));
+        core.rafraichit_position().await;
+        assert_eq!(core.etat_lecteur().morceau.duration_s, Some(545));
     }
 
     /// Pack français livré dans le dépôt (invariant : mêmes clés que l'anglais embarqué).
