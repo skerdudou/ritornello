@@ -309,11 +309,13 @@ fn under_voltage() -> Option<bool> {
 /// whole point of an appliance that keeps polling while it plays).
 ///
 /// `None` — not `Some(false)` — on anything short of a successful, parsable
-/// reply: `vcgencmd` absent (not a Pi), a permission refusal (`ritornello`
-/// not in the `video` group, see `deploy.sh`), or output this parser does
-/// not recognise. None of these are worth a log line; a machine that is not
-/// a Raspberry Pi is the ordinary case, not an incident, the same reasoning
-/// `lire()` already applies to missing pseudo-files.
+/// reply: `vcgencmd` absent (not a Pi), a permission refusal (the service not
+/// in the `video` group, granted by `SupplementaryGroups=` in
+/// `deploy/ritornello.service` alongside `audio`, `input`, `cdrom` and `tty`),
+/// or output this parser does not recognise. None of these are worth a log
+/// line; a machine that is not a Raspberry Pi is the ordinary case, not an
+/// incident, the same reasoning `lire()` already applies to missing
+/// pseudo-files.
 fn under_voltage_since_boot(info: &SystemInfo) -> Option<bool> {
     use std::sync::atomic::Ordering;
     if info.under_voltage_latched.load(Ordering::Relaxed) {
