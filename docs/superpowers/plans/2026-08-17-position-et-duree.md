@@ -26,12 +26,14 @@
 
 À connaître avant d'écrire le moindre test dans `crates/ritornello-core/src/core.rs` — ces assistants existent, il ne faut **pas** en créer d'autres :
 
-- `fn setup() -> Montage` — **synchrone**, pas de `.await`. Rend le quintuplet `(core, player_calls, source_calls, etat_rx, dir)`. Deux sources factices, `cd` et `radio` ; l'ordre étant trié, **la source active au départ est `cd`**.
+- `fn setup() -> Montage` — **synchrone**, pas de `.await`. Rend le quintuplet `(core, player_calls, source_calls, etat_rx, dir)`. Deux sources factices, `cd` et `radio` ; **la source active au départ est `radio`**, parce que `PersistedState::default()` la déclare ainsi (`state.rs`) — et non `cd`, que l'ordre trié laisserait croire.
 - `fn setup_metadonnees(plugins: Vec<String>) -> (Core<FakePlayer>, watch::Receiver<NowPlaying>, watch::Receiver<PlayerState>, TempDir)` — **synchrone** elle aussi, quadruplet.
 - `fn joue(identity: Value) -> SourceUpdate` et `fn update_nu() -> SourceUpdate` — les trames de source ; l'identité s'installe par `core.handle_source_update("cd", joue(id))`.
 - `fn enrichissement(identity, artist, title) -> Enrichment`.
-- **Faire jouer un contenu fini** : la source active étant `cd`, `core.handle_command(Command::PlayPause).await.unwrap()` suffit — la source factice répond `play("cdda://").finite()`.
-- **Faire jouer un flux** : `core.handle_command(Command::SourceCycle).await.unwrap()` bascule sur `radio`, qui répond `play("http://fip")` sans `finite` — donc `expecting_stream` vrai.
+- **Faire jouer un flux** (`expecting_stream` vrai, contenu non déplaçable) : la source active étant déjà `radio`, `core.handle_command(Command::PlayPause).await.unwrap()` suffit — elle répond `play("http://fip")` sans `finite`.
+- **Faire jouer un contenu fini** (déplaçable, mpv a la parole) : `core.handle_command(Command::SourceCycle).await.unwrap()` bascule de `radio` vers `cd`, qui répond `play("cdda://").finite()`.
+- Ces deux idiomes sont l'inverse l'un de l'autre et faciles à confondre : le flux est l'état par défaut, le contenu fini demande une bascule.
+- `PlayerState.duration_s` n'existe **pas** en accès direct : le champ vit dans `PlayerState.morceau.duration_s` (`serde(flatten)` aplatit le JSON, pas la structure Rust). Écrire `etat.duration_s` ne compile pas.
 - Il n'existe **pas** de `set_active_source` ni de `metadonnees_identity` : le module `tests` est un enfant du module `core`, donc `core.metadonnees` et les champs privés lui sont directement accessibles.
 - Les catalogues de test se construisent par `ritornello_i18n::Catalog::load("core", "en", std::path::Path::new("/inexistant"), crate::core::EN)` — le chemin inexistant force le repli sur le catalogue anglais embarqué. Il n'existe pas de `Catalog::from_pairs`.
 
@@ -639,8 +641,11 @@ Dans `crates/ritornello-core/src/core.rs`, module `tests` :
     async fn le_tick_ne_s_arme_pas_quand_rien_ne_joue() {
         let (mut core, _, _, _, _dir) = setup();
         assert!(!core.tick_position(), "rien ne joue : rien à rafraîchir");
+        // `radio` est la source active de `setup()` : `PlayPause` la fait jouer.
+        // Le tick ne s'intéresse pas à la nature du contenu, seulement au fait
+        // que quelque chose joue.
         core.handle_command(Command::PlayPause).await.unwrap();
-        assert!(core.tick_position(), "un disque joue : on suit sa position");
+        assert!(core.tick_position(), "quelque chose joue : on suit sa position");
         core.handle_command(Command::Stop).await.unwrap();
         assert!(!core.tick_position());
     }
@@ -661,7 +666,9 @@ Dans `crates/ritornello-core/src/core.rs`, module `tests` :
     #[tokio::test]
     async fn un_rafraichissement_de_position_laisse_l_incrustation_intacte() {
         let (mut core, _, _, _, _dir) = setup();
-        core.handle_command(Command::PlayPause).await.unwrap();
+        // Un contenu **fini** : c'est le seul cas où mpv fournit une position,
+        // donc le seul où le rafraîchissement a quelque chose à publier.
+        core.handle_command(Command::SourceCycle).await.unwrap();
         core.handle_command(Command::VolumeUp).await.unwrap();
         let echeance_avant = core.overlay_deadline();
         assert!(core.etat_lecteur().overlay.is_some(), "l'incrustation volume est là");
@@ -802,8 +809,8 @@ Dans `crates/ritornello-core/src/core.rs`, module `tests` :
     async fn l_ancre_d_un_enrichissement_avance_toute_seule() {
         let (mut core, _np_rx, _etat_rx, _dir) = setup_metadonnees(vec!["radiofrance".into()]);
         // Un **flux** : c'est le seul contexte où l'ancre parle (sur un
-        // contenu fini, mpv a la parole).
-        core.handle_command(Command::SourceCycle).await.unwrap();
+        // contenu fini, mpv a la parole). `radio` est déjà la source active.
+        core.handle_command(Command::PlayPause).await.unwrap();
         let id = serde_json::json!({"url": "http://fip"});
         core.handle_source_update("radio", joue(id.clone()));
         core.handle_enrichment(
@@ -828,7 +835,8 @@ Dans `crates/ritornello-core/src/core.rs`, module `tests` :
     #[tokio::test]
     async fn la_position_annoncee_est_plafonnee_par_la_duree() {
         let (mut core, _np_rx, _etat_rx, _dir) = setup_metadonnees(vec!["radiofrance".into()]);
-        core.handle_command(Command::SourceCycle).await.unwrap();
+        // Flux : `radio` est déjà la source active de ce montage.
+        core.handle_command(Command::PlayPause).await.unwrap();
         let id = serde_json::json!({"url": "http://fip"});
         core.handle_source_update("radio", joue(id.clone()));
         core.handle_enrichment(
@@ -851,7 +859,8 @@ Dans `crates/ritornello-core/src/core.rs`, module `tests` :
     #[tokio::test]
     async fn un_changement_d_identite_efface_l_ancre() {
         let (mut core, _np_rx, _etat_rx, _dir) = setup_metadonnees(vec!["radiofrance".into()]);
-        core.handle_command(Command::SourceCycle).await.unwrap();
+        // Flux : `radio` est déjà la source active de ce montage.
+        core.handle_command(Command::PlayPause).await.unwrap();
         let un = serde_json::json!({"url": "un"});
         core.handle_source_update("radio", joue(un.clone()));
         core.handle_enrichment(
@@ -1036,7 +1045,8 @@ Dans `crates/ritornello-core/src/core.rs`, module `tests` :
     #[tokio::test]
     async fn les_touches_de_deplacement_agissent_sur_un_contenu_fini() {
         let (mut core, calls, _, _, _dir) = setup();
-        core.handle_command(Command::PlayPause).await.unwrap();
+        // Contenu fini : bascule de `radio` (source active par défaut) vers `cd`.
+        core.handle_command(Command::SourceCycle).await.unwrap();
         core.handle_command(Command::SeekForward).await.unwrap();
         core.handle_command(Command::SeekBackward).await.unwrap();
         core.handle_command(Command::SeekTo(198)).await.unwrap();
@@ -1052,7 +1062,8 @@ Dans `crates/ritornello-core/src/core.rs`, module `tests` :
     #[tokio::test]
     async fn les_touches_de_deplacement_sont_ignorees_sur_un_flux() {
         let (mut core, calls, _, _, _dir) = setup();
-        core.handle_command(Command::SourceCycle).await.unwrap();
+        // Flux : `radio` est déjà la source active, `PlayPause` la fait jouer.
+        core.handle_command(Command::PlayPause).await.unwrap();
         calls.lock().unwrap().clear();
         core.handle_command(Command::SeekForward).await.unwrap();
         core.handle_command(Command::SeekTo(198)).await.unwrap();
@@ -1068,7 +1079,8 @@ Dans `crates/ritornello-core/src/core.rs`, module `tests` :
         let (mut core, calls, _, _, _dir) = setup();
         // `set_settings` existe déjà (elle sert la route `PUT /api/settings`).
         core.set_settings(crate::state::Settings { seek_step_s: 30, ..Default::default() });
-        core.handle_command(Command::PlayPause).await.unwrap();
+        // Contenu fini : bascule de `radio` vers `cd`.
+        core.handle_command(Command::SourceCycle).await.unwrap();
         core.handle_command(Command::SeekForward).await.unwrap();
         assert!(calls.lock().unwrap().contains(&"seek_relative 30".to_string()));
     }
