@@ -165,6 +165,11 @@ pub struct Core<P: Player> {
     /// deviendrait un ordre d'écriture — le genre d'invariant qui se casse en
     /// silence.
     duree_mesuree_s: Option<u32>,
+    /// Position annoncée par un plugin `metadata`, et l'instant où elle est
+    /// arrivée. Le cœur l'avance lui-même entre deux annonces — Radio France
+    /// n'interroge le direct que toutes les quelques dizaines de secondes, et
+    /// sans cette avance la barre resterait figée entre deux réponses.
+    ancre_position: Option<(u32, Instant)>,
 }
 
 /// Résout le mot de veille depuis un catalogue déjà en main.
@@ -242,6 +247,7 @@ impl<P: Player> Core<P> {
             volume_deadline: None,
             position_s: None,
             duree_mesuree_s: None,
+            ancre_position: None,
         }
     }
 
@@ -370,6 +376,9 @@ impl<P: Player> Core<P> {
         if !self.metadonnees.set_identity(identity) {
             return;
         }
+        // Le morceau a changé : l'ancre du précédent ne doit pas continuer
+        // d'avancer sous le titre du suivant.
+        self.ancre_position = None;
         let np = NowPlaying {
             source: self.active_source.clone(),
             identity: self.metadonnees.identity().cloned(),
@@ -453,6 +462,9 @@ impl<P: Player> Core<P> {
             Some(gagnant) => tracing::debug!("metadata displayed: {gagnant}"),
             None => {}
         }
+        // Poser l'ancre à la réception : c'est le seul instant où l'écoulé
+        // annoncé est exact.
+        self.ancre_position = self.metadonnees.position_s().map(|p| (p, Instant::now()));
         self.publie_etat();
     }
 
@@ -471,22 +483,21 @@ impl<P: Player> Core<P> {
             return;
         }
         if self.expecting_stream {
-            // Flux : mpv ne sait rien d'utile. La position viendra de l'ancre
-            // d'un plugin `metadata` (tâche 5) ou de nulle part.
-            //
-            // Les DEUX champs sont remis à zéro, et c'est un défaut trouvé en
-            // relecture : `lecture` reste vrai d'un bout à l'autre d'un
-            // changement de source (le cœur le repose aussitôt), si bien
-            // qu'une position mesurée sur un disque survivait au passage à la
-            // radio et s'affichait indéfiniment sous le flux. Le premier
-            // garde-fou (`!self.lecture`) ne se déclenche jamais dans cette
-            // séquence.
-            //
-            // `self.position_s = None` et non `self.oublie_position()` : cette
-            // dernière effacera aussi l'ancre en tâche 5, or c'est précisément
-            // l'ancre qui doit survivre ici.
-            self.position_s = None;
+            // Flux : le `time-pos` de mpv compte depuis le début de la
+            // connexion, sans rapport avec le morceau. La position vient donc
+            // d'un plugin `metadata`, ancrée à sa réception et avancée ici.
             self.duree_mesuree_s = None;
+            self.position_s = self.ancre_position.map(|(depart, pose)| {
+                let ecoule = pose.elapsed().as_secs();
+                let brute = depart.saturating_add(u32::try_from(ecoule).unwrap_or(u32::MAX));
+                // Plafonnée par la durée annoncée : un morceau qui finit avant
+                // que la station ne l'annonce ne doit pas afficher
+                // « 4:31 / 4:14 ».
+                match self.metadonnees.etat().duration_s {
+                    Some(duree) => brute.min(duree),
+                    None => brute,
+                }
+            });
             return;
         }
         match self.player.progression().await {
@@ -508,6 +519,7 @@ impl<P: Player> Core<P> {
     fn oublie_position(&mut self) {
         self.position_s = None;
         self.duree_mesuree_s = None;
+        self.ancre_position = None;
     }
 
     /// Diffuse l'état structuré du lecteur : à la SPA, et aux plugins Display
@@ -1346,6 +1358,13 @@ mod tests {
         fn regle_progression(&self, position_s: Option<f64>, duration_s: Option<f64>) {
             *self.player.progression.lock().unwrap() =
                 crate::player::Progression { position_s, duration_s };
+        }
+
+        /// Recule l'ancre de `duree` : le test avance le temps sans dormir.
+        fn avance_ancre_pour_test(&mut self, duree: std::time::Duration) {
+            if let Some((p, pose)) = self.ancre_position {
+                self.ancre_position = Some((p, pose - duree));
+            }
         }
     }
 
@@ -2989,6 +3008,78 @@ mod tests {
         core.regle_progression(Some(10.0), Some(545.0));
         core.rafraichit_position().await;
         assert_eq!(core.etat_lecteur().morceau.duration_s, Some(545));
+    }
+
+    /// Entre deux interrogations du direct — plusieurs dizaines de secondes
+    /// chez Radio France — c'est le cœur qui fait avancer la barre, depuis
+    /// l'ancre posée à la réception.
+    #[tokio::test]
+    async fn l_ancre_d_un_enrichissement_avance_toute_seule() {
+        let (mut core, _np_rx, _etat_rx, _dir) = setup_metadonnees(vec!["radiofrance".into()]);
+        // Un **flux** : c'est le seul contexte où l'ancre parle (sur un
+        // contenu fini, mpv a la parole). `radio` est déjà la source active.
+        core.handle_command(Command::PlayPause).await.unwrap();
+        let id = serde_json::json!({"url": "http://fip"});
+        core.handle_source_update("radio", joue(id.clone()));
+        core.handle_enrichment(
+            "radiofrance",
+            Enrichment {
+                identity: id,
+                title: Some("Bikwix".into()),
+                duration_s: Some(254),
+                position_s: Some(87),
+                ..Default::default()
+            },
+        );
+        core.rafraichit_position().await;
+        assert_eq!(core.etat_lecteur().position_s, Some(87));
+        core.avance_ancre_pour_test(std::time::Duration::from_secs(3));
+        core.rafraichit_position().await;
+        assert_eq!(core.etat_lecteur().position_s, Some(90));
+    }
+
+    /// Un morceau qui finit avant que la station ne l'annonce ne doit pas
+    /// afficher « 4:31 / 4:14 ».
+    #[tokio::test]
+    async fn la_position_annoncee_est_plafonnee_par_la_duree() {
+        let (mut core, _np_rx, _etat_rx, _dir) = setup_metadonnees(vec!["radiofrance".into()]);
+        // Flux : `radio` est déjà la source active de ce montage.
+        core.handle_command(Command::PlayPause).await.unwrap();
+        let id = serde_json::json!({"url": "http://fip"});
+        core.handle_source_update("radio", joue(id.clone()));
+        core.handle_enrichment(
+            "radiofrance",
+            Enrichment {
+                identity: id,
+                title: Some("Bikwix".into()),
+                duration_s: Some(100),
+                position_s: Some(98),
+                ..Default::default()
+            },
+        );
+        core.avance_ancre_pour_test(std::time::Duration::from_secs(30));
+        core.rafraichit_position().await;
+        assert_eq!(core.etat_lecteur().position_s, Some(100));
+    }
+
+    /// L'ancre du morceau précédent ne doit pas continuer d'avancer sous le
+    /// titre du suivant.
+    #[tokio::test]
+    async fn un_changement_d_identite_efface_l_ancre() {
+        let (mut core, _np_rx, _etat_rx, _dir) = setup_metadonnees(vec!["radiofrance".into()]);
+        // Flux : `radio` est déjà la source active de ce montage.
+        core.handle_command(Command::PlayPause).await.unwrap();
+        let un = serde_json::json!({"url": "un"});
+        core.handle_source_update("radio", joue(un.clone()));
+        core.handle_enrichment(
+            "radiofrance",
+            Enrichment { identity: un, title: Some("A".into()), position_s: Some(50), ..Default::default() },
+        );
+        core.rafraichit_position().await;
+        assert_eq!(core.etat_lecteur().position_s, Some(50));
+        core.handle_source_update("radio", joue(serde_json::json!({"url": "deux"})));
+        core.rafraichit_position().await;
+        assert_eq!(core.etat_lecteur().position_s, None);
     }
 
     /// Pack français livré dans le dépôt (invariant : mêmes clés que l'anglais embarqué).

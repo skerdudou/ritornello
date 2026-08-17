@@ -223,6 +223,23 @@ impl Metadonnees {
             None => Morceau::default(),
         }
     }
+
+    /// Position déclarée par le **gagnant** de l'arbitrage, s'il en déclare
+    /// une.
+    ///
+    /// Sortie à part de `etat()` plutôt que glissée dans `Morceau` : `Morceau`
+    /// décrit ce qui est affichable d'un morceau, valeurs stables tant qu'il
+    /// joue, alors qu'une position ne vaut que pour l'instant où elle a été
+    /// dite. Ce module n'a d'ailleurs aucune horloge, et c'est délibéré (voir
+    /// l'en-tête) : c'est au cœur d'ancrer cette valeur et de l'avancer.
+    pub fn position_s(&self) -> Option<u32> {
+        for plugin in &self.ordre {
+            if let Some(e) = self.enrichissements.get(plugin) {
+                return e.position_s;
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -518,6 +535,41 @@ mod tests {
         // Une nouvelle réponse du moins prioritaire ne change pas le gagnant.
         m.ajoute("secondaire", enrichissement(id, "Second bis", "T"));
         assert_eq!(m.gagnant(), Some("prioritaire"));
+    }
+
+    /// La position suit le **gagnant** de l'arbitrage, comme le reste du
+    /// morceau : un plugin moins prioritaire retenu en réserve ne doit pas
+    /// imposer sa propre horloge.
+    #[test]
+    fn la_position_est_celle_du_gagnant() {
+        let mut m = Metadonnees::new(vec!["radiofrance".into(), "ouifm".into()]);
+        m.set_identity(Some(json!({"url": "https://fip"})));
+        m.ajoute(
+            "ouifm",
+            Enrichment {
+                identity: json!({"url": "https://fip"}),
+                title: Some("depuis ouifm".into()),
+                position_s: Some(200),
+                ..Default::default()
+            },
+        );
+        assert_eq!(m.position_s(), Some(200));
+        m.ajoute(
+            "radiofrance",
+            Enrichment {
+                identity: json!({"url": "https://fip"}),
+                title: Some("depuis radiofrance".into()),
+                position_s: Some(12),
+                ..Default::default()
+            },
+        );
+        assert_eq!(m.position_s(), Some(12), "le plus prioritaire l'emporte");
+    }
+
+    #[test]
+    fn sans_enrichissement_il_n_y_a_pas_de_position() {
+        let m = Metadonnees::new(vec!["radiofrance".into()]);
+        assert_eq!(m.position_s(), None);
     }
 
     #[test]
