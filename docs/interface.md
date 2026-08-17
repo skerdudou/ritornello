@@ -211,7 +211,8 @@ set of keys stays stable:
   "temperature_c": 47.8, "cpu_mhz": 900, "load": [0.12, 0.15, 0.09], "cpus": 4,
   "memory": { "total_kb": 948000, "available_kb": 512000 },
   "disk": { "total_kb": 30000000, "available_kb": 24000000 },
-  "under_voltage": false, "uptime_s": 84213, "service_uptime_s": 3600,
+  "under_voltage": false, "under_voltage_since_boot": false,
+  "uptime_s": 84213, "service_uptime_s": 3600,
   "hostname": "ritornello", "ip": "192.168.1.20",
   "os": "Debian GNU/Linux 12 (bookworm)", "kernel": "6.6.51+rpt-rpi-v7",
   "version": "0.1.0", "can_power_off": true, "can_reboot": true,
@@ -228,6 +229,18 @@ reserved for root are not counted as free), the `rpi_volt` hwmon
 the local end of a UDP socket *connected* to a routable address: no packet
 is sent and no internet access is needed — the kernel is merely asked
 which interface faces the default route.
+
+`under_voltage` is the *instantaneous* alarm — it can flip back to `false`
+between two polls, and an episode lasting milliseconds is easy to miss
+entirely at a 5 s poll interval, or slower. `under_voltage_since_boot`
+answers a different question — has this ever happened since the device
+booted — from the firmware's own sticky flag (`vcgencmd get_throttled`,
+bit 16 of the mask; the kernel exposes no sysfs/procfs equivalent). It only
+ever turns `true`, never back to `false`, because the firmware itself only
+clears it at reboot: once seen `true`, the core stops spawning `vcgencmd`
+at all, since nothing further can change the answer. `null` on anything
+short of a Raspberry Pi with `vcgencmd` reachable (missing binary, `video`
+group not granted — see [installation.md](installation.md)).
 
 `cpu_total_jiffies` and `cpu_idle_jiffies` are cumulative counters since
 boot, not a percentage: a percentage is a delta, so the page differences

@@ -40,6 +40,10 @@ pub struct Metrics {
     pub memory: Option<Usage>,
     pub disk: Option<Usage>,
     pub under_voltage: Option<bool>,
+    /// Whether an under-voltage episode has happened since boot, even if the
+    /// supply is fine right now. See `under_voltage_since_boot()` below for
+    /// why this needs a source distinct from `under_voltage`.
+    pub under_voltage_since_boot: Option<bool>,
     pub uptime_s: Option<u64>,
     pub service_uptime_s: u64,
     pub hostname: Option<String>,
@@ -89,7 +93,13 @@ pub fn terminate_process(pid: Option<u32>) {
 }
 
 /// Process-lifetime facts the System tab's endpoints need.
-#[derive(Clone)]
+///
+/// No `#[derive(Clone)]`: nothing clones a `SystemInfo` directly, only the
+/// `Arc<SystemInfo>` that wraps the single shared instance (`status::AppState`),
+/// and `Arc::clone` needs no bound on `T`. Deriving it would also be wrong once
+/// `under_voltage_latched` exists below — an `AtomicBool` cannot implement
+/// `Clone` without silently deciding whether a clone shares the flag or starts
+/// its own, and nothing here needs that decision made.
 pub struct SystemInfo {
     pub started: std::time::Instant,
     pub can_power_off: bool,
@@ -100,6 +110,26 @@ pub struct SystemInfo {
     /// the suite. Tests point it at `/bin/true` and `/bin/false` and still
     /// exercise the real spawn/await/exit-code path.
     pub systemctl: String,
+    /// Command used to read the firmware's sticky under-voltage flag
+    /// (`vcgencmd get_throttled`). A field for the same reason `systemctl`
+    /// is: tests point it at a stub script instead of a real `vcgencmd`.
+    pub vcgencmd: String,
+    /// Latches to `true` the first time the sticky flag is seen set, and
+    /// never resets: the firmware itself only clears it at reboot, so once
+    /// this process has observed it, spawning `vcgencmd` again can only ever
+    /// confirm the same answer. See `under_voltage_since_boot()`.
+    ///
+    /// `AtomicBool` rather than a plain `bool` behind a `Mutex`: `SystemInfo`
+    /// lives behind an `Arc` shared by every poll, so recording the answer
+    /// needs interior mutability (`&self`, not `&mut self`), and a single
+    /// flag with no invariant linking it to another field needs nothing
+    /// heavier than atomic load/store — no lock, no poisoning to handle.
+    // `pub(crate)`, not private: struct-update syntax (`..Default::default()`,
+    // used both in `main.rs` and throughout this file's tests) requires every
+    // field to be visible at the construction site, even the ones filled from
+    // the base — a documented quirk of the syntax, not a relaxation of intent.
+    // Nothing outside the crate constructs a `SystemInfo` at all.
+    pub(crate) under_voltage_latched: std::sync::atomic::AtomicBool,
     /// Delay between the `202` and the process exit, so the response
     /// reaches the browser before the socket dies.
     pub restart_delay: std::time::Duration,
@@ -115,6 +145,8 @@ impl Default for SystemInfo {
             can_power_off: false,
             can_reboot: false,
             systemctl: "systemctl".to_string(),
+            vcgencmd: "vcgencmd".to_string(),
+            under_voltage_latched: std::sync::atomic::AtomicBool::new(false),
             restart_delay: std::time::Duration::from_millis(300),
             restart: Arc::new(|| std::process::exit(0)),
         }
@@ -184,6 +216,21 @@ pub fn parse_alarm(raw: &str) -> Option<bool> {
     }
 }
 
+/// `vcgencmd get_throttled`: "throttled=0x50000\n" — a bitmask whose low
+/// four bits (0-3) are the *current* state, already covered by
+/// `under_voltage()`'s hwmon alarm, and whose bits 16-19 are sticky: they
+/// latch when the matching low bit has fired even once since boot, and the
+/// firmware only clears them at the next reboot. Only bit 16, "under-voltage
+/// has occurred", is read here. Bit 18 ("throttling has occurred") is not
+/// exposed as its own field: on a Raspberry Pi it is, in practice, always
+/// the consequence of bit 16, and a second field for the same underlying
+/// event would read as two separate problems instead of one.
+pub fn parse_throttled(raw: &str) -> Option<bool> {
+    let valeur = raw.trim().strip_prefix("throttled=0x")?;
+    let masque = u32::from_str_radix(valeur, 16).ok()?;
+    Some(masque & (1 << 16) != 0)
+}
+
 /// `/proc/stat`'s first line: "cpu  123456 789 34567 9876543 1234 0 567 0 0
 /// 0" (user, nice, system, idle, iowait, irq, softirq, steal, guest,
 /// guest_nice). Returns `(total, idle)` jiffy counters, cumulative since
@@ -245,6 +292,42 @@ fn under_voltage() -> Option<bool> {
         }
     }
     None
+}
+
+/// Whether an under-voltage episode has occurred since boot, from the
+/// firmware's own sticky flag (see `parse_throttled`). The kernel does not
+/// publish this anywhere in `/sys` or `/proc` — `find /sys -name
+/// "*throttled*"` comes back empty on a real Pi, only `soc:firmware:vcio`
+/// shows up — so `vcgencmd` is the only source, unlike every other reading
+/// in this module.
+///
+/// Latched through `info.under_voltage_latched`: once this has answered
+/// `true` once, it answers `true` forever without spawning `vcgencmd` again
+/// — the flag cannot un-set itself before a reboot, so a second process
+/// could only ever learn what this one already knows. Before that, every
+/// call spawns the command again, because the answer can still change (the
+/// whole point of an appliance that keeps polling while it plays).
+///
+/// `None` — not `Some(false)` — on anything short of a successful, parsable
+/// reply: `vcgencmd` absent (not a Pi), a permission refusal (`ritornello`
+/// not in the `video` group, see `deploy.sh`), or output this parser does
+/// not recognise. None of these are worth a log line; a machine that is not
+/// a Raspberry Pi is the ordinary case, not an incident, the same reasoning
+/// `lire()` already applies to missing pseudo-files.
+fn under_voltage_since_boot(info: &SystemInfo) -> Option<bool> {
+    use std::sync::atomic::Ordering;
+    if info.under_voltage_latched.load(Ordering::Relaxed) {
+        return Some(true);
+    }
+    let sortie = std::process::Command::new(&info.vcgencmd).arg("get_throttled").output().ok()?;
+    if !sortie.status.success() {
+        return None;
+    }
+    let vu = parse_throttled(&String::from_utf8_lossy(&sortie.stdout))?;
+    if vu {
+        info.under_voltage_latched.store(true, Ordering::Relaxed);
+    }
+    Some(vu)
 }
 
 /// Root filesystem usage through `statvfs`, in kilobytes.
@@ -312,6 +395,7 @@ pub fn collect(info: &SystemInfo) -> Metrics {
         memory: lire("/proc/meminfo").as_deref().and_then(parse_meminfo),
         disk: disk_usage("/"),
         under_voltage: under_voltage(),
+        under_voltage_since_boot: under_voltage_since_boot(info),
         uptime_s: lire("/proc/uptime").as_deref().and_then(parse_uptime),
         service_uptime_s: info.started.elapsed().as_secs(),
         hostname: lire("/proc/sys/kernel/hostname").map(|s| s.trim().to_string()),
@@ -607,6 +691,73 @@ mod tests {
     }
 
     #[test]
+    fn bit_collant_de_sous_tension_lu_dans_le_masque_vcgencmd() {
+        // Valeur réelle constatée sur le Pi du propriétaire : bit 16 (sous-tension
+        // survenue depuis le démarrage) et bit 18 (throttling survenu, non exposé
+        // séparément — voir le commentaire de `parse_throttled`) à la fois.
+        assert_eq!(parse_throttled("throttled=0x50000\n"), Some(true));
+        assert_eq!(parse_throttled("throttled=0x0\n"), Some(false));
+        // Bit 0 seul : sous-tension *courante*, mais jamais vue depuis le
+        // démarrage — ce que ce bit collant ne doit pas affirmer.
+        assert_eq!(parse_throttled("throttled=0x1\n"), Some(false));
+        // Bit 16 seul, sans le 18 : le bit qui nous intéresse suffit.
+        assert_eq!(parse_throttled("throttled=0x10000\n"), Some(true));
+        // Entrées aberrantes : aucune affirmation plutôt qu'un mensonge.
+        assert_eq!(parse_throttled(""), None);
+        assert_eq!(parse_throttled("0x0\n"), None);
+        assert_eq!(parse_throttled("throttled=zz\n"), None);
+    }
+
+    /// Un script exécutable qui, à chaque appel, ajoute une ligne à
+    /// `compteur` (pour compter les lancements) et répond `reponse` sur
+    /// stdout. Sert à vérifier le verrouillage sans dépendre d'un vrai Pi.
+    fn stub_vcgencmd(dir: &std::path::Path, reponse: &str) -> (String, std::path::PathBuf) {
+        let script = dir.join("vcgencmd");
+        let compteur = dir.join("appels");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\necho x >> '{}'\necho '{reponse}'\n", compteur.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        (script.to_string_lossy().to_string(), compteur)
+    }
+
+    #[test]
+    fn sous_tension_depuis_le_demarrage_ne_relance_plus_vcgencmd_une_fois_vue_a_vrai() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vcgencmd, compteur) = stub_vcgencmd(dir.path(), "throttled=0x50000");
+        let info = SystemInfo { vcgencmd, ..Default::default() };
+        assert_eq!(under_voltage_since_boot(&info), Some(true));
+        assert_eq!(under_voltage_since_boot(&info), Some(true));
+        // Un seul appel malgré les deux lectures : le second passe par le
+        // verrou, pas par une nouvelle exécution.
+        assert_eq!(std::fs::read_to_string(&compteur).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn sous_tension_depuis_le_demarrage_relance_vcgencmd_tant_que_le_bit_reste_faux() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vcgencmd, compteur) = stub_vcgencmd(dir.path(), "throttled=0x0");
+        let info = SystemInfo { vcgencmd, ..Default::default() };
+        assert_eq!(under_voltage_since_boot(&info), Some(false));
+        assert_eq!(under_voltage_since_boot(&info), Some(false));
+        // Rien n'est encore acquis : chaque lecture relance la commande.
+        assert_eq!(std::fs::read_to_string(&compteur).unwrap().lines().count(), 2);
+    }
+
+    #[test]
+    fn sous_tension_depuis_le_demarrage_sans_vcgencmd_rend_rien() {
+        // Chemin inexistant : machine qui n'est simplement pas un Pi.
+        let info = SystemInfo { vcgencmd: "/nonexistent".to_string(), ..Default::default() };
+        assert_eq!(under_voltage_since_boot(&info), None);
+    }
+
+    #[test]
     fn jiffies_cpu_ligne_agregee_et_coeurs_ignores() {
         let raw = "cpu  123456 789 34567 9876543 1234 0 567 0 0 0\ncpu0 61728 394 17283 4938271 617 0 283 0 0 0\ncpu1 61728 395 17284 4938272 617 0 284 0 0 0\n";
         // idle + iowait : 9876543 + 1234.
@@ -689,8 +840,9 @@ mod tests {
         // présent, pour que la vue n'ait pas deux cas à distinguer.
         for cle in [
             "temperature_c", "cpu_mhz", "load", "cpus", "memory", "disk", "under_voltage",
-            "uptime_s", "service_uptime_s", "hostname", "ip", "os", "kernel", "version",
-            "can_power_off", "can_reboot", "cpu_total_jiffies", "cpu_idle_jiffies",
+            "under_voltage_since_boot", "uptime_s", "service_uptime_s", "hostname", "ip", "os",
+            "kernel", "version", "can_power_off", "can_reboot", "cpu_total_jiffies",
+            "cpu_idle_jiffies",
         ] {
             assert!(v.get(cle).is_some(), "clé {cle} absente");
         }
