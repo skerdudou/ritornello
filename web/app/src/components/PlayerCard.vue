@@ -90,14 +90,20 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
         <p v-if="etat?.title" class="text-lg font-medium leading-tight" data-titre>{{ etat.title }}</p>
         <p v-if="etat?.artist" class="text-sm text-foreground" data-artiste>{{ etat.artist }}</p>
         <p v-if="etat?.album" class="text-sm text-muted-foreground" data-album>{{ etat.album }}</p>
-        <BarreProgression
-          :position="etat?.position_s ?? null"
-          :duree="etat?.duration_s ?? null"
-          :deplacable="etat?.seekable ?? false"
-          :pas="pasDeplacement"
-          @deplacer="(s) => emit('deplacer', s)"
-        />
       </div>
+
+      <!-- Hors du bloc « en ecoute » ci-dessus, et c'est un defaut corrige :
+           ce bloc est garde par la presence de metadonnees, si bien que la
+           barre disparaissait sur un fichier sans etiquettes ou un disque non
+           reconnu — precisement les cas ou mpv connait le mieux la position.
+           Savoir ou l'on en est ne depend pas d'avoir un titre. -->
+      <BarreProgression
+        :position="etat?.position_s ?? null"
+        :duree="etat?.duration_s ?? null"
+        :deplacable="etat?.seekable ?? false"
+        :pas="pasDeplacement"
+        @deplacer="(s) => emit('deplacer', s)"
+      />
     </CardContent>
   </Card>
 </template>

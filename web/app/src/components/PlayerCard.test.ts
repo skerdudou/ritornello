@@ -192,4 +192,20 @@ describe('PlayerCard', () => {
     })
     expect(w.find('[data-position]').exists()).toBe(false)
   })
+
+  // Sans titre ni artiste ni album, le bloc « en ecoute » est masque : la
+  // progression, elle, doit rester visible. C'est le cas d'un fichier sans
+  // etiquettes ou d'un disque que MusicBrainz ne reconnait pas, ou mpv
+  // connait pourtant parfaitement la position.
+  it('montre la progression meme sans aucune metadonnee', () => {
+    const w = mount(PlayerCard, {
+      props: {
+        etat: complet({ position_s: 87, duration_s: 254, seekable: true }),
+        pasDeplacement: 10,
+      },
+    })
+    expect(w.find('[data-now-playing]').exists()).toBe(false)
+    expect(w.get('[data-position]').text()).toBe('1:27')
+    expect(w.find('[data-barre]').exists()).toBe(true)
+  })
 })
