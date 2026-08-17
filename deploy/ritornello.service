@@ -34,8 +34,16 @@ Environment=RITORNELLO_STATE=/var/lib/ritornello/state.json
 # there (atomic write: .tmp then rename, hence write access to the
 # directory itself, set up by deploy.sh). No PrivateDevices: the whole
 # point of the groups above is /dev access.
+#
+# PrivateTmp=true is what makes `strict` liveable: it mounts /tmp read-only
+# too, and mpv's PulseAudio probe writes there before falling back to ALSA —
+# `Failed to create random directory /tmp/pulse-XXXXXX: Read-only file
+# system`, an ERROR line in the journal at every start of a device that plays
+# through ALSA and never needed pulse at all. A private /tmp gives that probe
+# somewhere to write, and keeps the isolation rather than opening the real one.
 NoNewPrivileges=true
 ProtectSystem=strict
+PrivateTmp=true
 ReadWritePaths=/etc/ritornello
 ProtectHome=true
 RestrictSUIDSGID=true

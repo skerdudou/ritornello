@@ -194,10 +194,13 @@ function fermer(): void {
           class="w-40"
           :placeholder="t('ph_share')"
         />
+        <!-- Plus large que le champ « partage » : son marqueur « (optionnel) »
+             est ce qui distingue les deux cases, prises pour deux dossiers à
+             fournir tant qu'il manquait. Tronqué, il ne dirait plus rien. -->
         <Input
           v-model="sousCheminManuel"
           data-manual-subpath
-          class="w-40"
+          class="w-56"
           :placeholder="t('ph_subpath')"
         />
       </div>

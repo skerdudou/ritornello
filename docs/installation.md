@@ -74,9 +74,16 @@ Wifi: `sudo raspi-config` (System Options > Wireless LAN).
 a network share; it is only useful if you intend to play files from a NAS
 (see [Network shares](#network-shares)).
 
-On **DietPi**, same packages (`sudo apt install mpv cd-discid eject
-cifs-utils`), and two differences to know about:
+On **DietPi**, one package more (`sudo apt install mpv cd-discid eject
+cifs-utils polkitd`), and three differences to know about:
 
+- polkit is **absent** on a DietPi image, where it is present on most other
+  Debian-based systems — hence `polkitd` in the line above. Two features
+  need it and only fail once the device is in service: the System tab's
+  shut-down and restart buttons, which stay disabled and say why, and
+  mounting a network share, refused with "Interactive authentication
+  required". See [Shutdown and reboot from the web
+  UI](#shutdown-and-reboot-from-the-web-ui);
 - no `raspi-config`: the sound card is **enabled and picked** through
   `dietpi-config` (Audio Options) — DietPi ships with onboard sound
   disabled, so this step is required before anything plays; `amixer`
@@ -145,7 +152,7 @@ device access, which comes through groups. `deploy.sh` creates a
 dedicated `ritornello` system user on first deployment, and the systemd
 unit (`deploy/ritornello.service`) grants the groups and applies the
 usual hardening (`NoNewPrivileges`, `ProtectSystem=strict`,
-`ProtectHome`):
+`PrivateTmp`, `ProtectHome`):
 
 | Access | How |
 |---|---|
@@ -157,6 +164,7 @@ usual hardening (`NoNewPrivileges`, `ProtectSystem=strict`,
 | OS shutdown / reboot | polkit rule + logind (see the next section) |
 | plugin and mpv sockets (`/run/ritornello`) | `RuntimeDirectory` |
 | persisted state (`/var/lib/ritornello`) | `StateDirectory` |
+| a writable `/tmp` (mpv's PulseAudio probe wants one before falling back to ALSA) | `PrivateTmp` |
 | firmware under-voltage flag (`/dev/vcio`, read-only) | `video` group |
 
 Every group above is granted by `SupplementaryGroups=` in the unit — the user
@@ -308,9 +316,23 @@ the plugin tries and reports. To check by hand, on the device:
     sudo -u ritornello systemctl start ritornello-media-mount.service
     journalctl -u ritornello-media-mount -n 30
 
-Any other error — bad password, unreachable host, `mount.cifs` missing —
-appears in that same journal, one line per share, since a share that fails
-does not fail the whole unit.
+Any other error — bad password, unreachable host — appears in that same
+journal, one line per share, since a share that fails does not fail the
+whole unit.
+
+**A missing `cifs-utils` is checked before mounting**, and reported as
+`mount.cifs not found in /sbin or /usr/sbin: install cifs-utils`. The check
+exists because the error `mount` gives on its own names nothing useful:
+`mount -t cifs` does not mount by itself, it hands over to `mount.cifs`,
+the only side that reads a `credentials=` file. Without that program `mount`
+calls mount(2) directly, nobody reads the option, the session opened is
+anonymous — and the NAS refusing it surfaces as
+
+    mount: /mnt/ritornello/music: cannot mount //192.168.1.15/music read-only.
+
+which mentions neither authentication nor the missing package. Observed on
+DietPi bookworm; if you meet that line on an older build, install
+`cifs-utils` and start the unit again.
 
 **One point to verify on the target machine.** The mount unit itself is
 deliberately left unhardened, so that it mounts in the host's own

@@ -43,6 +43,20 @@ fn montes_sous_racine(proc_mounts: &str) -> Vec<PathBuf> {
     points_de_montage(proc_mounts).filter(|p| p.starts_with(MOUNT_ROOT)).collect()
 }
 
+/// Emplacements du programme d'aide `mount.cifs`. Les deux, et non le seul
+/// `/sbin` : sur une distribution à `/usr` fusionné c'est le même fichier, sur
+/// les autres ce ne l'est pas.
+const AIDES_CIFS: [&str; 2] = ["/sbin/mount.cifs", "/usr/sbin/mount.cifs"];
+
+/// `mount.cifs` est-il installé ?
+///
+/// Le prédicat d'existence est injecté plutôt que lu directement : la règle se
+/// teste alors sans dépendre de la machine qui lance les tests, laquelle n'a ni
+/// `cifs-utils` ni le droit d'en poser un fichier.
+fn aide_cifs<F: Fn(&str) -> bool>(existe: F) -> Option<&'static str> {
+    AIDES_CIFS.into_iter().find(|c| existe(c))
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
 
@@ -96,6 +110,34 @@ fn main() -> Result<()> {
             ),
             Err(e) => tracing::warn!("unmounting {}: {e}", monte.display()),
         }
+    }
+
+    // `mount -t cifs` ne monte pas par lui-même : il délègue à `mount.cifs`,
+    // seul à savoir lire un fichier `credentials=`. Sans ce programme, `mount`
+    // appelle mount(2) directement, l'option n'est plus lue par personne et la
+    // session ouverte est anonyme — refusée par le NAS. L'échec rendu est alors
+    // « cannot mount //hôte/partage read-only », qui ne nomme ni
+    // l'authentification ni le paquet manquant : constaté sur DietPi bookworm,
+    // une heure pour l'attribuer. D'où ce contrôle préalable, qui remplace une
+    // tentative dont le message égare par une ligne qui dit quoi installer.
+    //
+    // Après la boucle de démontage, et non avant : retirer un partage de la
+    // page doit continuer à le démonter, ce dont `umount` s'acquitte seul.
+    let a_monter = roots
+        .root
+        .iter()
+        .filter(|r| r.kind == RootKind::Smb)
+        .filter(|r| !est_monte_dans(&proc_mounts, &r.mount_point()))
+        .count();
+    if a_monter > 0 && aide_cifs(|c| Path::new(c).exists()).is_none() {
+        // `error!` puis sortie en succès : le service reste un réconciliateur
+        // qui rend compte, et l'unité en échec n'apporterait rien de plus que
+        // du bruit au démarrage de la machine.
+        tracing::error!(
+            "mount.cifs not found in /sbin or /usr/sbin: install cifs-utils \
+             (see docs/installation.md); {a_monter} declared share(s) left unmounted"
+        );
+        return Ok(());
     }
 
     for r in roots.root.iter().filter(|r| r.kind == RootKind::Smb) {
@@ -174,5 +216,19 @@ proc /proc proc rw,relatime 0 0
         // les fichiers à root, et le service ne pourrait plus les lire.
         assert_eq!(uid_gid("ritornello:x\n", "ritornello"), None);
         assert_eq!(uid_gid("ritornello:x:abc:997::/:/bin/sh\n", "ritornello"), None);
+    }
+
+    #[test]
+    fn l_aide_cifs_est_cherchee_dans_les_deux_sbin() {
+        assert_eq!(aide_cifs(|c| c == "/sbin/mount.cifs"), Some("/sbin/mount.cifs"));
+        // Une distribution sans /usr fusionné n'a que celui-là.
+        assert_eq!(aide_cifs(|c| c == "/usr/sbin/mount.cifs"), Some("/usr/sbin/mount.cifs"));
+    }
+
+    #[test]
+    fn sans_cifs_utils_l_aide_est_absente() {
+        // Le cas qui a coûté une heure sur l'appareil : `cifs-utils` non
+        // installé, et un « cannot mount … read-only » qui ne le disait pas.
+        assert_eq!(aide_cifs(|_| false), None);
     }
 }
