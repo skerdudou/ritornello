@@ -11,9 +11,18 @@ RestartSec=2
 # Unprivileged service: the `ritornello` system user is created by
 # deploy/deploy.sh. Nothing in the code needs root — only device access,
 # granted by groups: sound (audio), remote control (input), CD drive
-# (cdrom), HDMI console /dev/tty1 (tty).
+# (cdrom), HDMI console /dev/tty1 (tty), and the firmware mailbox
+# /dev/vcio (video).
+#
+# `video` is read-only in practice: it is what lets `vcgencmd get_throttled`
+# report an under-voltage that occurred since boot, a sticky flag the kernel
+# exposes through no sysfs or procfs file. Granted here rather than with
+# `usermod -aG` on the account, like its four neighbours: this way the
+# privilege belongs to **this service's processes**, not to anything that
+# ever runs as `ritornello`. Without it the flag stays `null` and the System
+# tab shows "—", the same as any absent sensor; nothing else breaks.
 User=ritornello
-SupplementaryGroups=audio input cdrom tty
+SupplementaryGroups=audio input cdrom tty video
 # /run/ritornello (plugin and mpv sockets) and /var/lib/ritornello
 # (persisted state) are created and owned by the service user.
 RuntimeDirectory=ritornello

@@ -161,16 +161,6 @@ ssh "${SSHOPTS[@]}" "$PI" 'sudo mkdir -p /mnt/ritornello /etc/ritornello/media-c
 ssh "${SSHOPTS[@]}" "$PI" 'sudo systemctl daemon-reload \
   && sudo systemctl enable ritornello-media-mount.service'
 
-# `video` grants read access to /dev/vcio, the firmware mailbox behind
-# `vcgencmd get_throttled` — the kernel exposes no sysfs/procfs equivalent of
-# the sticky under-voltage flag, so this is the only way the System tab can
-# ever learn one has occurred. Unlike the groups in `ritornello.service`
-# (`SupplementaryGroups=`), added here rather than there: /dev/vcio already
-# has the right permissions (`crw-rw---- root video`), no udev rule is
-# needed, and this single line is the whole privilege — it did not seem
-# worth touching the hardened unit for it. Without it, `under_voltage_since_boot`
-# in `GET /api/system` stays `null` and the tab shows "—", same as any other
-# absent sensor; nothing else breaks.
 DEPLACE_PLUGINS=$(printf '/tmp/ritornello-plugin-%s ' "${PLUGINS[@]}")
 ssh "${SSHOPTS[@]}" "$PI" "sudo mv /tmp/ritornello-core /usr/local/bin/ritornello-core \
   && sudo mv $DEPLACE_PLUGINS /usr/local/lib/ritornello/plugins/ \
@@ -181,7 +171,6 @@ ssh "${SSHOPTS[@]}" "$PI" "sudo mv /tmp/ritornello-core /usr/local/bin/ritornell
   && sudo mv /tmp/50-ritornello-power.rules /etc/polkit-1/rules.d/ \
   && sudo chown root: /etc/polkit-1/rules.d/50-ritornello-power.rules \
   && sudo chmod 644 /etc/polkit-1/rules.d/50-ritornello-power.rules \
-  && sudo usermod -aG video ritornello \
   && sudo systemctl daemon-reload \
   && sudo systemctl enable ritornello \
   && sudo systemctl restart ritornello \
