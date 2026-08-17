@@ -27,7 +27,7 @@ save_error = "Error: "
 load_error = "Loading error: "
 no_device = "No input device detected"
 
-# les 21 actions
+# les 23 actions
 act_select_1 = "Preset 1"
 act_select_2 = "Preset 2"
 act_select_3 = "Preset 3"
@@ -44,6 +44,8 @@ act_volume_down = "Volume -"
 act_mute = "Mute"
 act_play_pause = "Play/pause"
 act_stop = "Stop"
+act_seek_back = "Rewind"
+act_seek_forward = "Fast forward"
 act_next = "Next"
 act_prev = "Previous"
 act_eject = "Eject"

@@ -2,17 +2,24 @@ import { describe, expect, it } from 'vitest'
 import { ACTIONS, codesFor, collect, presetToml, sanitiseDeviceName } from './preset-toml'
 
 describe('ACTIONS', () => {
-  it('couvre les 21 actions du protocole', () => {
-    expect(ACTIONS).toHaveLength(21)
+  it('couvre les 23 actions du protocole', () => {
+    expect(ACTIONS).toHaveLength(23)
     expect(ACTIONS.slice(0, 9).map((a) => a.cmd.arg)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
     expect(ACTIONS.slice(0, 9).every((a) => a.cmd.cmd === 'Select')).toBe(true)
     expect(ACTIONS.slice(9).map((a) => a.cmd.cmd)).toEqual([
       'Select', 'Plus10', 'VolumeUp', 'VolumeDown', 'Mute', 'PlayPause', 'Stop',
-      'Next', 'Prev', 'Eject', 'SourceCycle', 'Power',
+      'SeekBackward', 'SeekForward', 'Next', 'Prev', 'Eject', 'SourceCycle', 'Power',
     ])
     // La touche 0 et +10 s'inserent juste apres act_select_9.
     expect(ACTIONS[9]).toEqual({ key: 'act_select_0', cmd: { cmd: 'Select', arg: 0 } })
     expect(ACTIONS[10]).toEqual({ key: 'act_plus10', cmd: { cmd: 'Plus10' } })
+  })
+
+  it('offre les deux actions de deplacement, apres le transport', () => {
+    const cles = ACTIONS.map((a) => a.key)
+    expect(cles).toContain('act_seek_back')
+    expect(cles).toContain('act_seek_forward')
+    expect(cles.indexOf('act_seek_back')).toBeLessThan(cles.indexOf('act_seek_forward'))
   })
 })
 

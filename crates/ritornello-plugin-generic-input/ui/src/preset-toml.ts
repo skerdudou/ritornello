@@ -3,7 +3,7 @@ export interface Binding extends Command { code: number }
 export interface DeviceBindings { name: string; bindings: Binding[] }
 export interface BindingTable { devices: DeviceBindings[] }
 
-// Les 21 actions, dans l'ordre de l'ancienne page (moins les deux entrees
+// Les 23 actions, dans l'ordre de l'ancienne page (moins les deux entrees
 // "preselection suivante/precedente", fusionnees sur `act_next`/`act_prev` :
 // meme commande de protocole, interpretee par la source active - preselection
 // pour la radio, piste pour le cd). Le libelle est traduit par le catalogue
@@ -23,6 +23,8 @@ export const ACTIONS: Array<{ key: string; cmd: Command }> = [
   { key: 'act_mute', cmd: { cmd: 'Mute' } },
   { key: 'act_play_pause', cmd: { cmd: 'PlayPause' } },
   { key: 'act_stop', cmd: { cmd: 'Stop' } },
+  { key: 'act_seek_back', cmd: { cmd: 'SeekBackward' } },
+  { key: 'act_seek_forward', cmd: { cmd: 'SeekForward' } },
   { key: 'act_next', cmd: { cmd: 'Next' } },
   { key: 'act_prev', cmd: { cmd: 'Prev' } },
   { key: 'act_eject', cmd: { cmd: 'Eject' } },

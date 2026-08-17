@@ -149,3 +149,18 @@ cmd = "Power"
 [[bindings]]
 code = 356
 cmd = "Power"
+
+# Retour et avance rapides. Codes evdev standards des touches
+# correspondantes d'une telecommande MCE, absents de l'ancienne table codee
+# en dur dont ce preset est la transcription : ils n'ont donc pas ete
+# verifies sur l'exemplaire du proprietaire. Une telecommande qui ne les
+# emet pas rend simplement ces deux lignes inertes, sans rien casser, et la
+# page d'apprentissage reste le moyen sur de les lier.
+
+[[bindings]]
+code = 168
+cmd = "SeekBackward"
+
+[[bindings]]
+code = 208
+cmd = "SeekForward"
