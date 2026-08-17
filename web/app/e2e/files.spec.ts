@@ -242,6 +242,25 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   await page.getByRole('button', { name: 'Play/Pause', exact: true }).click()
   await expect(page.locator('[data-player-preset]')).toHaveText('3')
 
+  // La progression, de bout en bout : mpv mesure, le coeur publie une trame
+  // par seconde, la SPA dessine. Aucun test unitaire ne couvre cette chaine —
+  // il n'y a pas de mpv dedans.
+  //
+  // Ces fixtures sont des sinusoides **sans aucune metadonnee** : elles
+  // prouvent au passage que la barre ne depend pas d'un titre. Tant qu'elle
+  // vivait dans le bloc « en ecoute », garde par la presence de metadonnees,
+  // elle etait invisible sur un fichier sans etiquettes — c'est-a-dire
+  // precisement quand mpv connait le mieux la position.
+  const position = page.locator('[data-position]')
+  await expect(position).toBeVisible({ timeout: 15_000 })
+  const premiere = await position.textContent()
+  await expect(position).not.toHaveText(premiere ?? '', { timeout: 10_000 })
+  // Un fichier local se parcourt : la barre est un curseur, nomme et
+  // atteignable au clavier.
+  const barre = page.locator('[data-barre]')
+  await expect(barre).toHaveAttribute('role', 'slider')
+  await expect(barre).toHaveAttribute('aria-label', /.+/)
+
   // Remettre le harnais dans l'etat ou on l'a trouve : les parcours partagent
   // un unique coeur et `files.spec.ts` s'execute **avant** `parcours.spec.ts`,
   // qui exige la radio active. La remise est verifiee, pas esperee.
