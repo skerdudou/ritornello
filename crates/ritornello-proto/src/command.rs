@@ -23,6 +23,15 @@ pub enum Command {
     /// The pending offset lives in the core — which also displays it and
     /// expires it; input plugins just relay the key press.
     Plus10,
+    /// Avancer d'un pas dans ce qui joue. Le pas vit dans le cœur (réglage
+    /// `seek_step_s`), exactement comme les 5 % du volume : la touche ne
+    /// porte aucune quantité, donc changer le pas ne demande pas de
+    /// reprogrammer une télécommande.
+    SeekForward,
+    SeekBackward,
+    /// Positionnement absolu, en secondes. Sert la barre cliquable de la SPA ;
+    /// aucune touche physique ne l'émet.
+    SeekTo(u32),
 }
 
 /// One line of the input protocol: the command, plus whether it comes from a
@@ -101,5 +110,18 @@ mod tests {
         let json = serde_json::to_string(&z).unwrap();
         assert_eq!(json, r#"{"cmd":"Select","arg":0}"#);
         assert_eq!(serde_json::from_str::<Command>(&json).unwrap(), z);
+    }
+
+    #[test]
+    fn roundtrip_des_commandes_de_deplacement() {
+        for (cmd, attendu) in [
+            (Command::SeekForward, r#"{"cmd":"SeekForward"}"#),
+            (Command::SeekBackward, r#"{"cmd":"SeekBackward"}"#),
+            (Command::SeekTo(198), r#"{"cmd":"SeekTo","arg":198}"#),
+        ] {
+            let json = serde_json::to_string(&cmd).unwrap();
+            assert_eq!(json, attendu);
+            assert_eq!(serde_json::from_str::<Command>(&json).unwrap(), cmd);
+        }
     }
 }

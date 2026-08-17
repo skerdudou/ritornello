@@ -64,6 +64,14 @@ pub struct Enrichment {
     pub album: Option<String>,
     #[serde(default)]
     pub duration_s: Option<u32>,
+    /// Écoulé dans le morceau **au moment de l'émission**, en secondes.
+    ///
+    /// Un écoulé relatif plutôt qu'un horodatage absolu : rien à synchroniser
+    /// entre deux horloges, et c'est la convention de `duration_s` juste
+    /// au-dessus. Le cœur l'ancre à la réception et l'avance lui-même ensuite
+    /// (voir `Core::rafraichit_position`).
+    #[serde(default)]
+    pub position_s: Option<u32>,
 }
 
 impl Enrichment {
@@ -220,6 +228,24 @@ pub struct PlayerState {
     /// and has its own toasts).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlay: Option<Overlay>,
+    /// Où en est ce qui joue, en secondes, **à l'instant de la publication**.
+    ///
+    /// `None` = personne n'a de quoi répondre : rien ne joue, ou c'est un flux
+    /// que nul plugin `metadata` ne suit. Deux fournisseurs alimentent ce
+    /// champ sans jamais se disputer — mpv pour un contenu fini, un plugin
+    /// `metadata` pour un flux — parce que le contexte décide lequel des deux
+    /// a le droit de parler (voir `Core::rafraichit_position`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_s: Option<u32>,
+    /// Ce qui joue accepte un déplacement : c'est le `finite` que la Source a
+    /// déclaré à son `Play`, rendu visible aux consommateurs.
+    ///
+    /// Un champ à part entière plutôt qu'une déduction de `duration_s` : les
+    /// deux notions divergent exactement là où ça compte — Radio France
+    /// annonce la durée d'un morceau sur un direct qu'on ne peut pas
+    /// rembobiner, un fichier sans étiquette de durée reste parcourable.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub seekable: bool,
     #[serde(flatten)]
     pub morceau: Morceau,
 }
@@ -272,6 +298,7 @@ mod tests {
             title: Some("So What".into()),
             album: Some("Kind of Blue".into()),
             duration_s: Some(545),
+            position_s: None,
         };
         let back: Enrichment = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
         assert_eq!(back, e);
@@ -309,6 +336,7 @@ mod tests {
             title: Some("  So What  ".into()),
             album: Some(String::new()),
             duration_s: None,
+            position_s: None,
         }
         .cleaned();
         assert_eq!(e.artist, None);
@@ -453,5 +481,46 @@ mod tests {
         assert_eq!(etat.morceau.album.as_deref(), Some("Kind of Blue"));
         assert_eq!(etat.morceau.duration_s, Some(545));
         assert_eq!(etat.morceau.origin.as_deref(), Some("icy"));
+    }
+
+    #[test]
+    fn player_state_serialise_position_et_seekable_quand_ils_disent_quelque_chose() {
+        let etat = PlayerState {
+            source: "cd".into(),
+            position_s: Some(87),
+            seekable: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&etat).unwrap();
+        assert!(json.contains(r#""position_s":87"#), "{json}");
+        assert!(json.contains(r#""seekable":true"#), "{json}");
+    }
+
+    /// Additif : une trame muette sur ces deux champs reste identique à
+    /// l'octet près à ce qu'elle était avant ce chantier, et une trame
+    /// écrite par un binaire antérieur se relit sans eux.
+    #[test]
+    fn player_state_tait_position_et_seekable_quand_ils_ne_disent_rien() {
+        let etat = PlayerState { source: "radio".into(), ..Default::default() };
+        let json = serde_json::to_string(&etat).unwrap();
+        assert!(!json.contains("position_s"), "{json}");
+        assert!(!json.contains("seekable"), "{json}");
+        let ancienne = r#"{"source":"radio","volume":50,"muted":false,"standby":false,"preset":null,"preset_count":null,"preset_name":null}"#;
+        let relue: PlayerState = serde_json::from_str(ancienne).unwrap();
+        assert_eq!(relue.position_s, None);
+        assert!(!relue.seekable);
+    }
+
+    #[test]
+    fn enrichment_porte_une_position() {
+        let e = Enrichment {
+            identity: json!({"kind": "stream"}),
+            position_s: Some(42),
+            ..Default::default()
+        };
+        let back: Enrichment = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(back.position_s, Some(42));
+        let sans = r#"{"identity":{"kind":"stream"}}"#;
+        assert_eq!(serde_json::from_str::<Enrichment>(sans).unwrap().position_s, None);
     }
 }
