@@ -246,6 +246,22 @@ impl SourcePlugin for FilesSource {
     }
 
     async fn player_track(&mut self, n: i64) -> SourceOutcome {
+        // mpv vient de passer à la piste suivante **de lui-même**. Si la liste a
+        // changé depuis qu'il l'a reçue, c'est le meilleur moment pour lui rendre
+        // la nouvelle : il démarre un fichier de toute façon, donc rien n'est
+        // interrompu — là où attendre un ordre explicite laissait la lecture
+        // enchaîner dans l'ancienne liste, et c'est exactement ce que l'usage a
+        // montré comme « les modifications ne font rien ».
+        //
+        // Seulement pour un index valide : à `-1` la liste est terminée, et
+        // recharger la relancerait au lieu de la laisser finir.
+        if n >= 0 {
+            // Le décalage part de **notre** index — la piste qui vient de
+            // s'achever — donc « la suivante » se lit dans la liste à jour.
+            if let Some(issue) = self.recharger_si_changee(1).await {
+                return issue;
+            }
+        }
         if !self.playlist.write().await.set_index(n) {
             // mpv dit `-1` en fin de liste — **et aussi transitoirement à chaque
             // rechargement de liste**, donc à chaque changement de piste : c'est
@@ -719,6 +735,45 @@ mod tests {
         let mut s = source_de_test(liste_de(3));
         s.liste_changee.store(true, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(s.prev().await.preset, Some(3), "on revient a la derniere piste");
+    }
+
+    #[tokio::test]
+    async fn le_changement_de_piste_automatique_rend_la_liste_a_jour() {
+        // Le défaut signalé à l'usage : ne resynchroniser qu'au prochain ordre
+        // explicite ne suffisait pas. Si l'on modifie la liste et qu'on laisse
+        // simplement la piste s'achever, mpv enchaînait dans l'ancienne — donc
+        // « les modifications de playlist, rien ».
+        //
+        // Le changement automatique est au contraire le meilleur moment : mpv
+        // démarre un fichier de toute façon, rien n'est interrompu.
+        let mut s = source_de_test(liste_de(4));
+        s.select(2).await;
+        s.liste_changee.store(true, std::sync::atomic::Ordering::Relaxed);
+        let issue = s.player_track(2).await;
+        assert!(matches!(issue.action, SourceAction::Play { .. }), "{:?}", issue.action);
+        assert_eq!(issue.preset, Some(3), "la piste qui suit, dans la liste a jour");
+    }
+
+    #[tokio::test]
+    async fn un_changement_de_piste_sans_modification_ne_recharge_rien() {
+        // Le cas ordinaire, et de loin le plus fréquent : recharger ici
+        // couperait le son à chaque changement de piste.
+        let mut s = source_de_test(liste_de(4));
+        s.select(1).await;
+        let issue = s.player_track(1).await;
+        assert!(matches!(issue.action, SourceAction::Noop), "{:?}", issue.action);
+        assert_eq!(issue.preset, Some(2), "on ne fait que redire ou mpv en est");
+    }
+
+    #[tokio::test]
+    async fn la_fin_de_liste_ne_relance_pas_une_liste_modifiee() {
+        // À `-1` la liste est terminée. Recharger là relancerait la lecture au
+        // lieu de la laisser finir — une liste qui boucle sans qu'on l'ait
+        // demandé.
+        let mut s = source_de_test(liste_de(3));
+        s.liste_changee.store(true, std::sync::atomic::Ordering::Relaxed);
+        let issue = s.player_track(-1).await;
+        assert!(matches!(issue.action, SourceAction::Noop), "{:?}", issue.action);
     }
 
     #[tokio::test]
