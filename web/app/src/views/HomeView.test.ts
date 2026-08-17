@@ -28,6 +28,8 @@ class FauxEventSource {
       album: null,
       duration_s: null,
       origin: null,
+      position_s: null,
+      seekable: false,
       ...etat,
     }
     this.onmessage?.({ data: JSON.stringify(complet) } as MessageEvent)

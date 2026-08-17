@@ -16,6 +16,19 @@ export function formateDuree(secondes: number | null | undefined): string | null
 }
 
 /**
+ * Meme forme que `formateDuree`, mais `0` est une valeur legitime : une
+ * position au tout debut d'une piste s'ecrit « 0:00 ». Une fonction distincte
+ * plutot qu'un assouplissement de l'autre, dont le refus des valeurs nulles
+ * evite d'afficher « 0:00 » comme duree d'un morceau dont on ignore la duree.
+ */
+export function formatePosition(secondes: number | null | undefined): string | null {
+  if (typeof secondes !== 'number' || !Number.isFinite(secondes) || secondes < 0) return null
+  const m = Math.floor(secondes / 60)
+  const s = Math.floor(secondes % 60)
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+/**
  * Vrai si l'etat n'apprend rien d'affichable.
  *
  * La duree seule ne compte pas : « 3:34 » sans titre ni artiste n'informe

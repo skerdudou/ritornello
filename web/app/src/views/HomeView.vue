@@ -91,6 +91,7 @@ const reglages = ref<SettingsPayload>({
   start_in_standby: false,
   overlay_ms: 5000,
   tens_window_ms: 5000,
+  seek_step_s: 10,
 })
 onMounted(async () => {
   reglages.value = await api.get<SettingsPayload>('/api/settings').catch(() => reglages.value)

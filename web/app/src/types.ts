@@ -16,6 +16,8 @@ export interface SettingsPayload {
   overlay_ms: number
   /** Fenêtre de saisie du cumul `+10` de la télécommande (temps laissé pour la seconde pression). */
   tens_window_ms: number
+  /** Pas des touches « avancer » / « reculer », en secondes. */
+  seek_step_s: number
 }
 /**
  * Etat du lecteur, tel que le pousse `/api/player` : tout ce qui est volatil.
@@ -70,6 +72,19 @@ export interface PlayerPayload {
   album: string | null
   duration_s: number | null
   origin: string | null
+  /**
+   * Ou en est ce qui joue, en secondes, a l'instant ou la trame a ete
+   * publiee — le coeur en pousse une par seconde pendant la lecture.
+   * `null` quand personne ne sait : rien ne joue, ou c'est un flux qu'aucun
+   * plugin `metadata` ne suit.
+   */
+  position_s: number | null
+  /**
+   * Ce qui joue accepte un deplacement. Distinct de « une duree est connue » :
+   * Radio France annonce la duree d'un morceau sur un direct qu'on ne peut pas
+   * rembobiner. C'est ce champ, et lui seul, qui rend la barre cliquable.
+   */
+  seekable: boolean
 }
 export type Command = { cmd: string; arg?: number }
 export interface SystemUsage { total_kb: number; available_kb: number }

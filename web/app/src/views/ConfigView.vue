@@ -22,6 +22,7 @@ const reglages = ref<SettingsPayload>({
   start_in_standby: false,
   overlay_ms: 5000,
   tens_window_ms: 5000,
+  seek_step_s: 10,
 })
 // Le Select ne porte que des chaînes : « on »/« standby » traduits à
 // l'affichage, le booléen reste la valeur envoyée au cœur.

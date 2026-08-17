@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { PlayerPayload } from '../types'
-import { formateDuree, riendAfficher, usePlayer } from './usePlayer'
+import { formateDuree, formatePosition, riendAfficher, usePlayer } from './usePlayer'
 
 /** Etat complet, dont chaque test retire ce qu'il veut eprouver. */
 function etat(partiel: Partial<PlayerPayload> = {}): PlayerPayload {
@@ -19,6 +19,8 @@ function etat(partiel: Partial<PlayerPayload> = {}): PlayerPayload {
     album: null,
     duration_s: 214,
     origin: 'ouifm-metas',
+    position_s: null,
+    seekable: false,
     ...partiel,
   }
 }
@@ -55,6 +57,25 @@ describe('formateDuree', () => {
     expect(formateDuree(-5)).toBeNull()
     expect(formateDuree(Number.NaN)).toBeNull()
     expect(formateDuree(Number.POSITIVE_INFINITY)).toBeNull()
+  })
+})
+
+describe('formatePosition', () => {
+  // `formateDuree` refuse les valeurs <= 0, ce qui est juste pour une duree
+  // et faux pour une position : `0:00` est un instant parfaitement legitime.
+  // Deux fonctions plutot qu'un assouplissement de la premiere, qui ferait
+  // reapparaitre des « 0:00 » la ou le refus servait.
+  it('accepte zero', () => {
+    expect(formatePosition(0)).toBe('0:00')
+  })
+  it('formate minutes et secondes', () => {
+    expect(formatePosition(87)).toBe('1:27')
+    expect(formatePosition(3725)).toBe('62:05')
+  })
+  it('rend null sur une absence', () => {
+    expect(formatePosition(null)).toBeNull()
+    expect(formatePosition(undefined)).toBeNull()
+    expect(formatePosition(-1)).toBeNull()
   })
 })
 

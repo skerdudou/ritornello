@@ -24,6 +24,8 @@ function complet(etat: Partial<PlayerPayload>): PlayerPayload {
     album: null,
     duration_s: null,
     origin: null,
+    position_s: null,
+    seekable: false,
     ...etat,
   }
 }
