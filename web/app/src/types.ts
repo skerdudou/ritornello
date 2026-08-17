@@ -89,6 +89,12 @@ export interface SystemPayload {
   memory: SystemUsage | null
   disk: SystemUsage | null
   under_voltage: boolean | null
+  /** Sous-tension survenue depuis le démarrage (bit collant du micrologiciel),
+   *  distincte de `under_voltage` (l'alarme instantanée) : un épisode dure
+   *  quelques millisecondes à quelques secondes et un sondage à 5 s a peu de
+   *  chances de tomber pile dessus, alors que ce bit reste vrai jusqu'au
+   *  prochain démarrage. */
+  under_voltage_since_boot: boolean | null
   uptime_s: number | null
   service_uptime_s: number
   hostname: string | null

@@ -17,6 +17,7 @@ function payload(surcharge: Record<string, unknown> = {}) {
     memory: { total_kb: 1_000_000, available_kb: 400_000 },
     disk: { total_kb: 30_000_000, available_kb: 24_000_000 },
     under_voltage: false,
+    under_voltage_since_boot: false,
     uptime_s: 90_061,
     service_uptime_s: 3_600,
     hostname: 'ritornello',
@@ -675,6 +676,27 @@ describe('SystemView', () => {
     w.unmount()
   })
 
+  it('affiche l antecedent quand la sonde est saine mais un episode a eu lieu depuis le demarrage', async () => {
+    // `under_voltage: false` (rien à l'instant) mais `under_voltage_since_boot:
+    // true` (le bit collant du micrologiciel) : un troisième état, distinct
+    // de la sous-tension en cours, sans le rouge de l'alerte immédiate.
+    stub(payload({ under_voltage: false, under_voltage_since_boot: true }))
+    const w = await monter()
+    const tension = w.get('[data-system-under-voltage]')
+    expect(tension.text()).toBe('system_voltage_since_boot')
+    expect(tension.classes()).not.toContain('text-destructive')
+    // La phrase de conseil reste réservée à l'alerte instantanée.
+    expect(w.find('[data-system-under-voltage-avis]').exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('l alerte instantanee l emporte sur l antecedent quand les deux sont vrais', async () => {
+    stub(payload({ under_voltage: true, under_voltage_since_boot: true }))
+    const w = await monter()
+    expect(w.get('[data-system-under-voltage]').text()).toBe('system_voltage_low')
+    w.unmount()
+  })
+
   it('affiche l alerte en rouge en cas de sous-tension detectee', async () => {
     stub(payload({ under_voltage: true }))
     const w = await monter()
@@ -699,6 +721,21 @@ describe('SystemView', () => {
     const avis = w.get('[data-system-under-voltage-avis]')
     expect(avis.text()).toBe('system_under_voltage')
     expect(avis.attributes('role')).toBe('status')
+    w.unmount()
+  })
+
+  it('le bouton d aide sur la tension porte un nom accessible et ouvre la popin', async () => {
+    stub(payload())
+    const w = await monter()
+    const bouton = w.get('[data-system-voltage-help]')
+    expect(bouton.attributes('aria-label')).toBe('system_voltage_help')
+    // Fermée au départ : la popin ne doit pas s'imposer à l'arrivée sur la page.
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull()
+    await bouton.trigger('click')
+    await flushPromises()
+    // Montée dans un portail, comme le dialogue d'alimentation.
+    expect(document.body.textContent).toContain('system_voltage_help_title')
+    expect(document.body.textContent).toContain('system_voltage_help_body')
     w.unmount()
   })
 

@@ -321,22 +321,40 @@ const cpuEnAlerte = computed(() => Math.round(utilisationCpuActuelle.value ?? 0)
 const largeurCpu = computed(() => Math.round(utilisationCpuActuelle.value ?? 0))
 /**
  * Ligne d'alimentation de la carte Appareil, toujours affichée — jamais
- * masquée derrière un `v-if` — pour distinguer trois situations que l'ancien
- * affichage confondait : aucune sonde (`null`, rendu « — » comme toute autre
- * métrique absente), une sonde qui rapporte une alimentation saine
- * (`false`), et une sous-tension réellement détectée (`true`). Une ligne
- * permanente qui passe au rouge se voit aussi bien qu'une bannière.
+ * masquée derrière un `v-if` — pour distinguer quatre situations que
+ * l'ancien affichage confondait : aucune sonde (`null`, rendu « — » comme
+ * toute autre métrique absente), une sonde qui rapporte une alimentation
+ * saine sans antécédent, une alimentation saine *à l'instant* mais qui a
+ * décroché au moins une fois depuis le démarrage (`under_voltage_since_boot`
+ * — le bit collant du micrologiciel, distinct de l'alarme instantanée
+ * `under_voltage` : un épisode dure de quelques millisecondes à quelques
+ * secondes, qu'un sondage à 5 s a très peu de chances de surprendre en
+ * train de se produire), et une sous-tension réellement détectée à
+ * l'instant (`under_voltage === true`, qui l'emporte sur l'antécédent —
+ * inutile de dire « déjà vu » quand c'est en train de se reproduire). Une
+ * ligne permanente qui passe au rouge se voit aussi bien qu'une bannière.
  *
  * Le mot est court (« Sous-tension », pas la phrase entière) : la phrase de
  * conseil (`system_under_voltage`) vit séparément, juste sous la grille, et
- * n'apparaît que lorsque l'alerte est active — un seul endroit pour l'état,
- * un seul pour le conseil, plutôt que les deux concaténés dans une cellule de
- * grille à deux colonnes qui les faisait déborder.
+ * n'apparaît que lorsque l'alerte **instantanée** est active — un seul
+ * endroit pour l'état, un seul pour le conseil, plutôt que les deux
+ * concaténés dans une cellule de grille à deux colonnes qui les faisait
+ * déborder. Le nouvel état, lui, ne déclenche pas cette phrase : il ne dit
+ * rien à faire dans l'instant, seulement ce qui s'est déjà produit — ce que
+ * l'aide (le bouton `(?)` ci-dessous) explique, sans répéter l'alerte.
  */
 const tension = computed(() => {
   if (etat.value?.under_voltage == null) return RIEN
-  return etat.value.under_voltage ? t.value('system_voltage_low') : t.value('system_voltage_ok')
+  if (etat.value.under_voltage) return t.value('system_voltage_low')
+  if (etat.value.under_voltage_since_boot) return t.value('system_voltage_since_boot')
+  return t.value('system_voltage_ok')
 })
+
+/** Ouverture de la popin d'aide sur la sous-tension (voir le bouton `(?)`
+ *  dans le gabarit) : un état local à la vue, comme `dialogue` pour les
+ *  actions d'alimentation, mais volontairement distinct — les deux popins
+ *  n'ont rien en commun à part le composant `Dialog` du kit. */
+const aideTensionOuverte = ref(false)
 const dernier = computed(() => historique.value.at(-1) ?? null)
 /**
  * Abscisses partagées par tout ce qui se place sur le graphe : les deux
@@ -877,6 +895,25 @@ async function attendreRetour(avant: number | null) {
             <span data-system-under-voltage :class="{ 'text-destructive': etat?.under_voltage === true }">
               {{ tension }}
             </span>
+            <!-- Bouton d'aide, pas un texte déplié ici : cette cellule vit
+                 dans la grille à deux colonnes dont on avait justement
+                 **sorti** la phrase de conseil (`system_under_voltage`,
+                 sous la grille ci-dessous) pendant le chantier système,
+                 parce qu'un texte long y débordait de sa cellule. L'aide est
+                 plus longue encore que ce conseil, elle n'a donc pas plus sa
+                 place ici — d'où la popin plutôt qu'un paragraphe en place.
+                 `size="icon-xs"` : assez petit pour rester un simple « (?) »
+                 accolé au libellé, pas un bouton qui rivalise avec lui. -->
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              data-system-voltage-help
+              :aria-label="t('system_voltage_help')"
+              @click="aideTensionOuverte = true"
+            >
+              ?
+            </Button>
           </div>
           <div>{{ t('system_uptime') }} : <span data-system-uptime>{{ duree(etat?.uptime_s) }}</span></div>
           <div>
@@ -943,6 +980,18 @@ async function attendreRetour(avant: number | null) {
         </div>
       </CardContent>
     </Card>
+
+    <!-- Popin d'aide sur la sous-tension, indépendante du dialogue
+         d'alimentation ci-dessous : mêmes composants du kit (`Dialog` gère
+         déjà le focus et l'échappement), aucun état ni contenu partagé. -->
+    <Dialog v-model:open="aideTensionOuverte">
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{{ t('system_voltage_help_title') }}</DialogTitle>
+          <DialogDescription>{{ t('system_voltage_help_body') }}</DialogDescription>
+        </DialogHeader>
+      </DialogContent>
+    </Dialog>
 
     <!-- Un seul dialogue pour les trois actions : le titre et la phrase de
          conséquence viennent de l'action en attente. -->
