@@ -895,10 +895,24 @@ impl<P: Player> Core<P> {
                     self.show_tens_overlay().await;
                 }
             }
-            // Traitement laissé à une tâche ultérieure : ce bras ne fait que
-            // rendre le `match` exhaustif après l'ajout de ces variantes au
-            // protocole.
-            Command::SeekForward | Command::SeekBackward | Command::SeekTo(_) => {}
+            Command::SeekForward | Command::SeekBackward => {
+                // Ignorée en silence sur un contenu non parcourable : la
+                // touche se comporte comme une touche non liée, ce que la
+                // télécommande sait déjà faire. Un message n'apprendrait rien
+                // à qui vient d'appuyer.
+                if self.lecture && !self.expecting_stream {
+                    let pas = i64::from(self.settings.seek_step_s);
+                    let delta = if cmd == Command::SeekForward { pas } else { -pas };
+                    self.player.seek_relative(delta).await?;
+                    self.rafraichit_position().await;
+                }
+            }
+            Command::SeekTo(position_s) => {
+                if self.lecture && !self.expecting_stream {
+                    self.player.seek_absolute(position_s).await?;
+                    self.rafraichit_position().await;
+                }
+            }
         }
         Ok(())
     }
@@ -2839,6 +2853,49 @@ mod tests {
         let st = crate::state::load(&dir.path().join("state.json"));
         assert_eq!(st.settings.volume_repeat_initial_ms, 800);
         assert!(st.settings.start_in_standby);
+    }
+
+    #[tokio::test]
+    async fn les_touches_de_deplacement_agissent_sur_un_contenu_fini() {
+        let (mut core, calls, _, _, _dir) = setup();
+        // Contenu fini : bascule de `radio` (source active par défaut) vers `cd`.
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        core.handle_command(Command::SeekForward).await.unwrap();
+        core.handle_command(Command::SeekBackward).await.unwrap();
+        core.handle_command(Command::SeekTo(198)).await.unwrap();
+        let journal = calls.lock().unwrap().clone();
+        assert!(journal.contains(&"seek_relative 10".to_string()), "{journal:?}");
+        assert!(journal.contains(&"seek_relative -10".to_string()), "{journal:?}");
+        assert!(journal.contains(&"seek_absolute 198".to_string()), "{journal:?}");
+    }
+
+    /// Sur un direct, la touche ne fait rien — comme une touche non liée. Pas
+    /// de message, pas de trame : le contenu n'est pas parcourable, et le dire
+    /// n'apprendrait rien à qui vient d'appuyer.
+    #[tokio::test]
+    async fn les_touches_de_deplacement_sont_ignorees_sur_un_flux() {
+        let (mut core, calls, _, _, _dir) = setup();
+        // Flux : `radio` est déjà la source active, `PlayPause` la fait jouer.
+        core.handle_command(Command::PlayPause).await.unwrap();
+        calls.lock().unwrap().clear();
+        core.handle_command(Command::SeekForward).await.unwrap();
+        core.handle_command(Command::SeekTo(198)).await.unwrap();
+        assert!(
+            calls.lock().unwrap().iter().all(|c| !c.starts_with("seek_")),
+            "{:?}",
+            calls.lock().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn le_pas_de_deplacement_suit_le_reglage() {
+        let (mut core, calls, _, _, _dir) = setup();
+        // `set_settings` existe déjà (elle sert la route `PUT /api/settings`).
+        core.set_settings(crate::state::Settings { seek_step_s: 30, ..Default::default() });
+        // Contenu fini : bascule de `radio` vers `cd`.
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        core.handle_command(Command::SeekForward).await.unwrap();
+        assert!(calls.lock().unwrap().contains(&"seek_relative 30".to_string()));
     }
 
     #[tokio::test]

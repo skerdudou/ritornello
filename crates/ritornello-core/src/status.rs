@@ -181,6 +181,10 @@ const REPEAT_INTERVAL_MS: std::ops::RangeInclusive<u32> = 100..=2000;
 // durably hides the "now playing" view.
 const OVERLAY_MS: std::ops::RangeInclusive<u32> = 1000..=15000;
 const TENS_WINDOW_MS: std::ops::RangeInclusive<u32> = 1000..=15000;
+/// Bornes du pas de déplacement, en secondes. Une seconde en bas parce qu'un
+/// pas nul ne déplace rien ; deux minutes en haut parce qu'au-delà, la touche
+/// ne sert plus à se déplacer dans une piste mais à en changer.
+const SEEK_STEP_S: std::ops::RangeInclusive<u32> = 1..=120;
 
 /// Erreur de validation des réglages, une variante par borne violée. Même
 /// modèle que `AudioOutputError` : les paramètres `min`/`max` viennent de la
@@ -191,6 +195,7 @@ pub enum SettingsError {
     RepeatInterval { min: u32, max: u32 },
     Overlay { min: u32, max: u32 },
     TensWindow { min: u32, max: u32 },
+    SeekStep { min: u32, max: u32 },
 }
 
 impl SettingsError {
@@ -212,6 +217,10 @@ impl SettingsError {
                 .get("settings_tens_window_out_of_range")
                 .replace("{min}", &min.to_string())
                 .replace("{max}", &max.to_string()),
+            SettingsError::SeekStep { min, max } => catalog
+                .get("settings_seek_step_out_of_range")
+                .replace("{min}", &min.to_string())
+                .replace("{max}", &max.to_string()),
         }
     }
 }
@@ -230,6 +239,9 @@ impl std::fmt::Display for SettingsError {
             }
             SettingsError::TensWindow { min, max } => {
                 write!(f, "tens-offset entry window out of range ({min}-{max} ms)")
+            }
+            SettingsError::SeekStep { min, max } => {
+                write!(f, "seek step out of range ({min}-{max} s)")
             }
         }
     }
@@ -260,6 +272,12 @@ pub fn validate_settings(s: &crate::state::Settings) -> Result<(), SettingsError
         return Err(SettingsError::TensWindow {
             min: *TENS_WINDOW_MS.start(),
             max: *TENS_WINDOW_MS.end(),
+        });
+    }
+    if !SEEK_STEP_S.contains(&s.seek_step_s) {
+        return Err(SettingsError::SeekStep {
+            min: *SEEK_STEP_S.start(),
+            max: *SEEK_STEP_S.end(),
         });
     }
     Ok(())
@@ -1354,5 +1372,32 @@ mod tests {
         let cat = ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::core::EN);
         let err = SettingsError::InitialDelay { min: 200, max: 5000 };
         assert_eq!(err.message(&cat), "delai hors bornes (200-5000)");
+    }
+
+    #[tokio::test]
+    async fn le_pas_de_deplacement_hors_bornes_est_refuse() {
+        for (pas, valide) in [(0u32, false), (1, true), (10, true), (120, true), (121, false)] {
+            let s = crate::state::Settings { seek_step_s: pas, ..Default::default() };
+            assert_eq!(validate_settings(&s).is_ok(), valide, "pas = {pas}");
+        }
+    }
+
+    /// Le refus est une phrase du catalogue, jamais une chaîne en dur, et il
+    /// **cite ses bornes** : c'est la règle « les bornes ne peuvent pas
+    /// mentir » que le chantier i18n a posée.
+    #[test]
+    fn le_refus_du_pas_cite_ses_bornes() {
+        // Chemin inexistant : le catalogue retombe sur l'anglais embarqué,
+        // celui-là même que la clé doit désormais contenir.
+        let catalogue = ritornello_i18n::Catalog::load(
+            "core",
+            "en",
+            std::path::Path::new("/inexistant"),
+            crate::core::EN,
+        );
+        let message = SettingsError::SeekStep { min: 1, max: 120 }.message(&catalogue);
+        assert!(message.contains('1') && message.contains("120"), "{message}");
+        assert!(!message.contains("{min}"), "clé non substituée : {message}");
+        assert_ne!(message, "settings_seek_step_out_of_range", "clé absente du catalogue");
     }
 }

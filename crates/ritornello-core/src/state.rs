@@ -37,6 +37,12 @@ pub struct Settings {
     /// clear the offset too, so it never survives behind a display that
     /// no longer shows it.
     pub tens_window_ms: u32,
+    /// Pas des touches « avancer » / « reculer », en secondes.
+    ///
+    /// Réglable là où le pas de volume est figé, parce que la bonne valeur
+    /// dépend de ce qu'on écoute : dix secondes pour rattraper une phrase,
+    /// une minute pour traverser un mouvement.
+    pub seek_step_s: u32,
 }
 
 impl Default for Settings {
@@ -47,6 +53,7 @@ impl Default for Settings {
             start_in_standby: false,
             overlay_ms: 5000,
             tens_window_ms: 5000,
+            seek_step_s: 10,
         }
     }
 }
@@ -196,6 +203,7 @@ mod tests {
         assert!(!s.start_in_standby);
         assert_eq!(s.overlay_ms, 5000);
         assert_eq!(s.tens_window_ms, 5000);
+        assert_eq!(s.seek_step_s, 10);
         assert_eq!(PersistedState::default().settings, Settings::default());
     }
 
@@ -230,6 +238,7 @@ mod tests {
                 start_in_standby: true,
                 overlay_ms: 6000,
                 tens_window_ms: 7000,
+                seek_step_s: 45,
             },
             ..Default::default()
         };
@@ -242,5 +251,6 @@ mod tests {
         assert_eq!(st.settings.volume_repeat_initial_ms, 800);
         assert_eq!(st.settings.overlay_ms, 5000);
         assert_eq!(st.settings.tens_window_ms, 5000);
+        assert_eq!(st.settings.seek_step_s, 10);
     }
 }
