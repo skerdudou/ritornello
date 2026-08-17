@@ -1699,7 +1699,7 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
 defineProps<{ etat: PlayerPayload | null; pasDeplacement: number }>()
 ```
 
-et, dans le bloc « En écoute », juste après la ligne `data-album` :
+et — **hors** du bloc « En écoute », juste après sa fermeture, encore dans le `CardContent`. C'est un défaut trouvé en relecture du montage e2e : ce bloc est gardé par `v-if="!riendAfficher(etat)"`, donc invisible quand ni artiste, ni titre, ni album ne sont connus. Y loger la barre rendait la progression invisible sur un fichier sans étiquettes ou sur un disque que MusicBrainz ne reconnaît pas — précisément les cas où mpv connaît parfaitement la position et où le contenu est déplaçable. Savoir où l'on en est ne dépend pas d'un titre :
 
 ```vue
         <BarreProgression
@@ -1991,28 +1991,39 @@ git commit -m "test(plugin-console): verrouiller que la position ne fait rien re
 ## Tâche 13 : le parcours de bout en bout
 
 **Files:**
-- Modify: `web/app/e2e/parcours.spec.ts`
+- Modify: `web/app/e2e/files.spec.ts`
 
 **Interfaces:**
 - Consomme : tout ce qui précède.
 
+**Pourquoi ce parcours-là, et pas l'autre.** Le montage e2e (`web/app/e2e/serve.mjs`) déclare trois plugins — `radio`, `files`, `generic-input` — et **aucun plugin `metadata`**. Sur une radio, la position ne peut donc structurellement jamais apparaître : mpv n'en sait rien d'utile, et personne n'annonce d'ancre. Le parcours des fichiers, lui, joue de **vrais mp3 avec un vrai mpv** : contenu fini, donc position et durée mesurées, et `seekable` vrai. C'est le seul endroit du dépôt où toute la chaîne — mpv, cœur, flux poussé, IHM — peut être éprouvée d'un bout à l'autre.
+
+**Et ces fixtures prouvent le défaut corrigé à la tâche 9 :** ce sont des sinusoïdes sans aucune métadonnée, donc sans titre ni artiste. Si la barre était restée dans le bloc « En écoute », gardé par la présence de métadonnées, elle n'apparaîtrait jamais ici. Ce test échouerait — et c'est exactement ce qu'on veut de lui.
+
 - [ ] **Étape 1 : écrire le test qui échoue**
 
-Ajouter au parcours existant, après l'étape qui démarre une lecture :
+Dans `web/app/e2e/files.spec.ts`, juste après l'étape « Stop, puis Lecture » et **avant** la remise du harnais sur la radio :
 
 ```ts
-  await test.step('la progression apparait et avance', async () => {
-    const position = page.locator('[data-position]')
-    await expect(position).toBeVisible({ timeout: 15_000 })
-    const premiere = await position.textContent()
-    // Le coeur publie une trame par seconde pendant la lecture : deux
-    // secondes suffisent a voir la valeur bouger, sans rendre le test
-    // dependant d'un rythme precis.
-    await expect(position).not.toHaveText(premiere ?? '', { timeout: 10_000 })
-  })
+  // La progression, de bout en bout : mpv mesure, le coeur publie une trame
+  // par seconde, la SPA dessine. Aucun test unitaire ne couvre cette chaine —
+  // il n'y a pas de mpv dedans.
+  //
+  // Ces fixtures sont des sinusoides **sans aucune metadonnee** : elles
+  // prouvent au passage que la barre ne depend pas d'un titre. Tant qu'elle
+  // vivait dans le bloc « en ecoute », garde par la presence de metadonnees,
+  // elle etait invisible sur un fichier sans etiquettes — c'est-a-dire
+  // precisement quand mpv connait le mieux la position.
+  const position = page.locator('[data-position]')
+  await expect(position).toBeVisible({ timeout: 15_000 })
+  const premiere = await position.textContent()
+  await expect(position).not.toHaveText(premiere ?? '', { timeout: 10_000 })
+  // Un fichier local se parcourt : la barre est un curseur, nomme et
+  // atteignable au clavier.
+  const barre = page.locator('[data-barre]')
+  await expect(barre).toHaveAttribute('role', 'slider')
+  await expect(barre).toHaveAttribute('aria-label', /.+/)
 ```
-
-Le parcours joue une **radio** : la position n'y apparaît que si un plugin `metadata` suit la station. Si le montage e2e ne déclare aucun plugin `metadata`, viser plutôt la source `files` du parcours si elle existe, ou marquer cette étape `test.skip` avec un commentaire disant pourquoi — lire `parcours.spec.ts` et `serve.mjs` avant de choisir.
 
 - [ ] **Étape 2 : lancer le parcours**
 
