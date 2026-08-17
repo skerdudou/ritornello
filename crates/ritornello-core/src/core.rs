@@ -473,6 +473,19 @@ impl<P: Player> Core<P> {
         if self.expecting_stream {
             // Flux : mpv ne sait rien d'utile. La position viendra de l'ancre
             // d'un plugin `metadata` (tâche 5) ou de nulle part.
+            //
+            // Les DEUX champs sont remis à zéro, et c'est un défaut trouvé en
+            // relecture : `lecture` reste vrai d'un bout à l'autre d'un
+            // changement de source (le cœur le repose aussitôt), si bien
+            // qu'une position mesurée sur un disque survivait au passage à la
+            // radio et s'affichait indéfiniment sous le flux. Le premier
+            // garde-fou (`!self.lecture`) ne se déclenche jamais dans cette
+            // séquence.
+            //
+            // `self.position_s = None` et non `self.oublie_position()` : cette
+            // dernière effacera aussi l'ancre en tâche 5, or c'est précisément
+            // l'ancre qui doit survivre ici.
+            self.position_s = None;
             self.duree_mesuree_s = None;
             return;
         }
@@ -2833,6 +2846,12 @@ mod tests {
         assert_eq!(etat.position_s, Some(87), "tronquée, jamais arrondie au-dessus");
         assert_eq!(etat.morceau.duration_s, Some(254));
         assert!(etat.seekable, "un disque se parcourt");
+        // 87.6 et non 87.4 : au-dessus de la demi-seconde, une troncature et un
+        // arrondi ne donnent plus le même entier, et le test distingue enfin
+        // les deux implémentations.
+        core.regle_progression(Some(87.6), Some(254.0));
+        core.rafraichit_position().await;
+        assert_eq!(core.etat_lecteur().position_s, Some(87));
     }
 
     /// Sur un flux, `time-pos` compte depuis le début de la connexion et n'a
@@ -2851,6 +2870,27 @@ mod tests {
         let etat = core.etat_lecteur();
         assert_eq!(etat.position_s, None);
         assert!(!etat.seekable, "un direct ne se rembobine pas");
+    }
+
+    /// Régression : `rafraichit_position` n'effaçait que `duree_mesuree_s`
+    /// dans la branche flux, laissant `position_s` figé sur la dernière
+    /// valeur mesurée pour un disque. `lecture` repasse à `true` aussitôt
+    /// qu'à `false` lors d'un `SourceCycle` (le cœur réactive la nouvelle
+    /// source dans la foulée), donc le garde-fou `!self.lecture` ne se
+    /// déclenche jamais entre les deux et la position du disque survivait,
+    /// affichée indéfiniment sous le flux qui a pris sa place.
+    #[tokio::test]
+    async fn une_position_de_disque_ne_survit_pas_au_passage_a_un_flux() {
+        let (mut core, _, _, _, _dir) = setup();
+        // Fait jouer le cd, mesure une position.
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        core.regle_progression(Some(87.0), Some(254.0));
+        core.rafraichit_position().await;
+        assert_eq!(core.etat_lecteur().position_s, Some(87));
+        // Retour vers la radio : un flux, sans rapport avec la position du disque.
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        core.rafraichit_position().await;
+        assert_eq!(core.etat_lecteur().position_s, None, "la position du disque ne doit pas survivre au flux");
     }
 
     #[tokio::test]
