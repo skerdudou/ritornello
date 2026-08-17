@@ -194,6 +194,25 @@ impl Explorateur {
         }));
     }
 
+    /// Revient à la liste des partages déjà obtenue, **sans se reconnecter**.
+    ///
+    /// Distincte de `connecter` à dessein : les partages sont déjà connus, et
+    /// relancer un appel réseau pour revenir en arrière ferait attendre — voire
+    /// échouer — un geste de navigation qui n'a besoin de rien.
+    ///
+    /// Sans cette opération, une fois un partage choisi il n'existait aucun
+    /// moyen d'en essayer un autre sans refermer la popin.
+    pub fn aux_partages(&mut self) {
+        self.annuler();
+        let mut v = self.vue.lock().unwrap();
+        v.share = String::new();
+        v.path = String::new();
+        v.dirs.clear();
+        v.audio_count = 0;
+        v.busy = false;
+        v.error = None;
+    }
+
     /// Liste un dossier d'un partage.
     pub fn parcourir(&mut self, share: String, path: String) {
         self.annuler();

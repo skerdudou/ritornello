@@ -57,7 +57,7 @@ onMounted(async () => {
 <template>
   <div class="min-h-screen">
     <header class="border-b border-border">
-      <nav class="mx-auto flex max-w-3xl items-center gap-4 px-4 py-3">
+      <nav class="mx-auto flex max-w-5xl items-center gap-4 px-4 py-3">
         <!-- La marque est le lien de l'accueil, donc elle porte le même
              marqueur : sans elle, la page d'accueil serait la seule sans rien
              de souligné. -->
@@ -95,7 +95,7 @@ onMounted(async () => {
         <ThemeToggle class="ml-auto" />
       </nav>
     </header>
-    <main class="mx-auto max-w-3xl px-4 py-6">
+    <main class="mx-auto max-w-5xl px-4 py-6">
       <RouterView />
     </main>
     <Toaster />

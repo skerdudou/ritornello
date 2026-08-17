@@ -160,6 +160,61 @@ describe('DialoguePartage', () => {
     expect(dansPopin('[data-share]')).toBeNull()
   })
 
+  it('le partage reste visible dans le chemin quand on descend dedans', async () => {
+    // Défaut signalé : `explore.path` est relatif au partage, donc le partage
+    // choisi n'apparaissait nulle part — il semblait « mangé » dès qu'on y
+    // entrait, et rien ne disait dans lequel on se trouvait.
+    await monter({
+      explore: {
+        ...EXPLORE_FERME,
+        open: true,
+        kind: 'smb',
+        host: '192.168.1.15',
+        share: 'music',
+        path: 'Yann Tiersen',
+        shares: ['music'],
+      },
+    })
+    expect(dansPopin('[data-choix-chemin]')?.getAttribute('title')).toBe(
+      '//192.168.1.15/music/Yann Tiersen',
+    )
+  })
+
+  it('au sommet d’un partage, remonter ramène à la liste des partages', async () => {
+    // Défaut signalé : là, remonter ne faisait rien du tout, et il fallait
+    // refermer la popin pour essayer un autre partage.
+    const { envoyer } = await monter(connecte({ share: 'music', path: '' }))
+    await cliquerPopin('[data-choix-remonter]')
+    expect(envoyer).toHaveBeenCalledWith({ op: 'smb_shares' })
+  })
+
+  it('un bouton explicite ramène aussi à la liste des partages', async () => {
+    const { envoyer } = await monter(connecte({ share: 'music', path: 'Yann Tiersen' }))
+    await cliquerPopin('[data-aux-partages]')
+    expect(envoyer).toHaveBeenCalledWith({ op: 'smb_shares' })
+  })
+
+  it('revenir aux partages ne relance aucun appel réseau', async () => {
+    // `smb_shares` et non `smb_connect` : les partages sont déjà connus, et
+    // refaire l'appel ferait attendre — voire échouer — un simple retour.
+    const { envoyer } = await monter(connecte({ share: 'music', path: 'Yann Tiersen' }))
+    await cliquerPopin('[data-aux-partages]')
+    expect(envoyer.mock.calls.some((c) => (c[0] as { op: string }).op === 'smb_connect')).toBe(false)
+  })
+
+  it('rouvrir la popin ne garde rien de la saisie précédente', async () => {
+    // Le `Dialog` reste monté quand il est fermé : sans remise à zéro, l'hôte et
+    // le mot de passe de la fois précédente réapparaissaient — un secret qui n'a
+    // rien à faire en mémoire une fois la popin refermée.
+    const { w } = await monter()
+    await saisirPopin('[data-host]', '192.168.1.15')
+    await saisirPopin('[data-password]', 'secret-du-nas')
+    await w.setProps({ ouvert: false })
+    await w.setProps({ ouvert: true })
+    expect((dansPopin('[data-host]') as HTMLInputElement).value).toBe('')
+    expect((dansPopin('[data-password]') as HTMLInputElement).value).toBe('')
+  })
+
   it('affiche le refus du plugin dans la popin, pas seulement sur la page', async () => {
     // Même défaut que pour l'assistant local : le bandeau de la page vit
     // derrière le voile gris de la boîte de dialogue, donc illisible au moment

@@ -263,6 +263,36 @@ export function normaliserExploration(brut: unknown): Exploration {
   }
 }
 
+/**
+ * Tronque un chemin **par le début** pour qu'il tienne en `max` caractères.
+ *
+ * Par le début, et c'est tout l'intérêt : sur un chemin, l'information utile est
+ * la fin — le dossier où l'on se trouve. Aucune propriété CSS ne sait faire
+ * cela : `text-overflow` ne coupe qu'à droite, et `direction: rtl`
+ * réordonnerait les segments au lieu de les tronquer.
+ *
+ * On retire des **segments entiers** tant que c'est trop long : couper au milieu
+ * d'un nom donnerait « …ents/Ma Musique », là où « …/Ma Musique » garde un sens.
+ * Le repli final ne coupe dans un nom que si ce nom dépasse à lui seul le
+ * budget, faute de mieux.
+ */
+export function tronquerDebut(chemin: string, max = 52): string {
+  if (chemin.length <= max) return chemin
+  const segments = chemin.split('/').filter(Boolean)
+  let queue = ''
+  for (let i = segments.length - 1; i >= 0; i -= 1) {
+    const essai = queue ? `${segments[i]}/${queue}` : segments[i]!
+    // Deux caractères réservés pour le « …/ » qui annonce la coupure.
+    if (essai.length + 2 > max) break
+    queue = essai
+  }
+  if (!queue) {
+    const dernier = segments[segments.length - 1] ?? chemin
+    return `…${dernier.slice(Math.max(0, dernier.length - max + 1))}`
+  }
+  return `…/${queue}`
+}
+
 /** Dernier segment d'un chemin relatif, séparateur `/` (celui du plugin). */
 export function feuille(chemin: string): string {
   const parts = chemin.split('/').filter(Boolean)

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Button } from '@ritornello/ui'
-import type { Exploration, T } from './donnees'
+import { computed } from 'vue'
+import { tronquerDebut, type Exploration, type T } from './donnees'
 
 /**
  * L'arbre de choix des deux assistants.
@@ -10,8 +11,30 @@ import type { Exploration, T } from './donnees'
  * dossier, jamais des chemins — la composition du chemin appartient à
  * l'appelant, un chemin local et un chemin SMB ne se composant pas pareil.
  */
-defineProps<{ exploration: Exploration; t: T; fige: boolean }>()
+const props = defineProps<{
+  exploration: Exploration
+  t: T
+  fige: boolean
+  /**
+   * Chemin **à afficher**, fourni par l'appelant.
+   *
+   * Il n'est plus déduit de `exploration.path`, et c'est le correctif d'un
+   * défaut signalé : côté partage, ce champ est relatif au partage, si bien que
+   * le partage choisi n'apparaissait nulle part — on le voyait « disparaître »
+   * en y entrant. Seul l'appelant sait composer l'adresse complète :
+   * `//hôte/partage/...` d'un côté, chemin absolu de l'autre.
+   */
+  chemin: string
+}>()
 defineEmits<{ descendre: [nom: string]; remonter: [] }>()
+
+/**
+ * Le chemin, tronqué **par le début** pour tenir dans la ligne.
+ *
+ * L'infobulle porte la valeur entière : tronquer sert à faire tenir, pas à
+ * cacher.
+ */
+const cheminCourt = computed(() => tronquerDebut(props.chemin))
 </script>
 
 <template>
@@ -34,16 +57,11 @@ defineEmits<{ descendre: [nom: string]; remonter: [] }>()
       >
         ↑ {{ t('btn_up') }}
       </Button>
-      <!-- Tronqué **par la gauche** serait l'idéal pour un chemin, mais aucune
-           propriété CSS ne le fait : `direction: rtl` réordonnerait les
-           segments. On garde donc la coupure à droite, et le titre porte le
-           chemin entier pour qui le survole. -->
-      <span
-        class="min-w-0 flex-1 truncate text-muted-foreground"
-        data-choix-chemin
-        :title="exploration.path || '/'"
-      >
-        {{ exploration.path || '/' }}
+      <!-- Tronqué **par le début**, par `tronquerDebut` : sur un chemin,
+           l'information utile est la fin, et aucune propriété CSS ne sait couper
+           de ce côté-là. Le titre porte le chemin entier. -->
+      <span class="min-w-0 flex-1 truncate text-muted-foreground" data-choix-chemin :title="chemin">
+        {{ cheminCourt }}
       </span>
     </div>
 

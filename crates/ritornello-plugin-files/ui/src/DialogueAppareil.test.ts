@@ -135,6 +135,16 @@ describe('DialogueAppareil', () => {
     expect(envoyer).not.toHaveBeenCalled()
   })
 
+  it('rouvrir la popin ne garde rien de la saisie précédente', async () => {
+    // Le `Dialog` reste monté quand il est fermé : sans remise à zéro, le chemin
+    // tapé la fois précédente réapparaissait, comme si on n'avait jamais fermé.
+    const { w } = await monter()
+    await saisirPopin('[data-manual-path]', '/srv/musique')
+    await w.setProps({ ouvert: false })
+    await w.setProps({ ouvert: true })
+    expect((dansPopin('[data-manual-path]') as HTMLInputElement).value).toBe('')
+  })
+
   it('affiche le refus du plugin dans la popin, pas seulement sur la page', async () => {
     // Défaut signalé : le message atterrissait sur la page principale, derrière
     // le voile gris de la boîte de dialogue — donc illisible au moment précis

@@ -25,9 +25,9 @@ const BASE: Exploration = {
   error: null,
 }
 
-function monter(surcharges: Partial<Exploration> = {}) {
+function monter(surcharges: Partial<Exploration> = {}, chemin = '/media/usb') {
   return mount(ChoixDossier, {
-    props: { exploration: { ...BASE, ...surcharges }, t, fige: false },
+    props: { exploration: { ...BASE, ...surcharges }, t, fige: false, chemin },
   })
 }
 
@@ -70,5 +70,24 @@ describe('ChoixDossier', () => {
     expect(w.get('[data-choix-erreur]').text()).toContain('hôte injoignable')
     expect(w.findAll('[data-choix-dossier]')).toHaveLength(0)
     expect(w.find('[data-choix-vide]').exists()).toBe(false)
+  })
+
+  it('affiche le chemin qu’on lui donne, pas celui de l’exploration', () => {
+    // Correctif d'un défaut signalé : côté partage, `exploration.path` est
+    // relatif au partage, si bien que le partage « disparaissait » du chemin dès
+    // qu'on entrait dedans. C'est l'appelant qui compose l'adresse complète.
+    const w = monter({ path: 'Yann Tiersen' }, '//192.168.1.15/music/Yann Tiersen')
+    expect(w.get('[data-choix-chemin]').text()).toBe('//192.168.1.15/music/Yann Tiersen')
+  })
+
+  it('tronque un chemin trop long par le début et garde le tout en infobulle', () => {
+    // Tronquer sert à faire tenir, pas à cacher : la valeur entière reste
+    // accessible au survol.
+    const long = '/mnt/c/Users/skerdudou/OneDrive - Klee Group/perso/steven prive/mp3/Muse'
+    const w = monter({}, long)
+    const span = w.get('[data-choix-chemin]')
+    expect(span.text().startsWith('…/')).toBe(true)
+    expect(span.text().endsWith('Muse')).toBe(true)
+    expect(span.attributes('title')).toBe(long)
   })
 })

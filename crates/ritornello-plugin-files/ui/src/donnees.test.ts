@@ -6,6 +6,7 @@ import {
   normaliserBrowse,
   normaliserDonnees,
   normaliserRacine,
+  tronquerDebut,
 } from './donnees'
 
 describe('normalisation des racines', () => {
@@ -131,6 +132,48 @@ describe('mise en forme', () => {
   it('extrait le dernier segment d’un chemin', () => {
     expect(feuille('a/b/c.mp3')).toBe('c.mp3')
     expect(feuille('')).toBe('')
+  })
+})
+
+describe('troncature d’un chemin par le début', () => {
+  it('laisse intact un chemin qui tient', () => {
+    expect(tronquerDebut('/media/usb/Albums', 52)).toBe('/media/usb/Albums')
+    expect(tronquerDebut('', 52)).toBe('')
+  })
+
+  it('coupe le début et garde la fin, qui est l’information utile', () => {
+    // C'est tout l'objet de cette fonction : sur un chemin, ce qui compte est le
+    // dossier où l'on se trouve, pas la racine d'où l'on vient. `text-overflow`
+    // ne sait couper qu'à droite, donc il ferait exactement l'inverse.
+    const chemin = '/mnt/c/Users/skerdudou/OneDrive - Klee Group/perso/steven prive/mp3'
+    const court = tronquerDebut(chemin, 30)
+    expect(court.startsWith('…/')).toBe(true)
+    expect(court.endsWith('mp3')).toBe(true)
+    expect(court.length).toBeLessThanOrEqual(30)
+  })
+
+  it('coupe sur des segments entiers, jamais au milieu d’un nom', () => {
+    // « …ents/Ma Musique » est illisible là où « …/Ma Musique » garde un sens.
+    // Et elle garde autant de queue que le budget le permet, pas seulement le
+    // dernier segment : le contexte immédiat aide à se situer.
+    expect(tronquerDebut('/a/bbbb/Documents/Ma Musique', 22)).toBe('…/Documents/Ma Musique')
+    expect(tronquerDebut('/a/bbbb/Documents/Ma Musique', 16)).toBe('…/Ma Musique')
+  })
+
+  it('un seul nom plus long que le budget est coupé dedans, faute de mieux', () => {
+    // Le repli : mieux vaut une fin lisible qu'un affichage qui déborde.
+    const court = tronquerDebut('/x/' + 'z'.repeat(80), 20)
+    expect(court.length).toBeLessThanOrEqual(20)
+    expect(court.startsWith('…')).toBe(true)
+    expect(court.endsWith('z')).toBe(true)
+  })
+
+  it('garde le préfixe d’un partage quand il tient', () => {
+    // Forme composée par l'assistant réseau : le partage doit rester visible,
+    // c'est le repère qui manquait.
+    expect(tronquerDebut('//192.168.1.15/music/Yann Tiersen', 52)).toBe(
+      '//192.168.1.15/music/Yann Tiersen',
+    )
   })
 })
 

@@ -8,7 +8,7 @@ import {
   DialogTitle,
   Input,
 } from '@ritornello/ui'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import ChoixDossier from './ChoixDossier.vue'
 import type { Donnees, Envoyer, T } from './donnees'
 
@@ -48,6 +48,34 @@ const ex = computed(() => props.donnees.explore)
 const dansLArbre = computed(() => ex.value.kind === 'smb' && ex.value.share !== '')
 const listeDePartages = computed(() => ex.value.shares.length > 0 && !dansLArbre.value)
 
+/**
+ * Adresse complète du dossier parcouru.
+ *
+ * `exploration.path` est relatif au partage : affiché seul, il faisait
+ * « disparaître » le partage dès qu'on entrait dedans, sans qu'aucun repère ne
+ * dise dans lequel on se trouvait.
+ */
+const cheminComplet = computed(() =>
+  [`//${ex.value.host}/${ex.value.share}`, ex.value.path].filter(Boolean).join('/'),
+)
+
+// Le `Dialog` reste **monté** quand il est fermé : sans cette remise à zéro, la
+// saisie d'une ouverture précédente réapparaîtrait à la suivante — mot de passe
+// compris, ce qui n'a rien à faire en mémoire une fois la popin refermée.
+watch(
+  () => props.ouvert,
+  (ouvert) => {
+    if (!ouvert) return
+    host.value = ''
+    user.value = ''
+    password.value = ''
+    domain.value = ''
+    manuel.value = false
+    partageManuel.value = ''
+    sousCheminManuel.value = ''
+  },
+)
+
 function connecter(): void {
   void props.envoyer({
     op: 'smb_connect',
@@ -67,7 +95,25 @@ function descendre(nom: string): void {
   void props.envoyer({ op: 'smb_browse', share: ex.value.share, path: suite })
 }
 
+/**
+ * Revient à la liste des partages, sans se reconnecter.
+ *
+ * Correctif d'un défaut signalé : au sommet d'un partage, remonter ne faisait
+ * rien du tout, et il n'existait aucun moyen d'en essayer un autre sans fermer
+ * la popin. L'opération est distincte de `smb_connect` parce qu'elle ne doit
+ * **pas** relancer un appel réseau : les partages sont déjà connus.
+ */
+function auxPartages(): void {
+  void props.envoyer({ op: 'smb_shares' })
+}
+
 function remonter(): void {
+  // Au sommet du partage, remonter ramène à la liste des partages plutôt que de
+  // ne rien faire.
+  if (!ex.value.path) {
+    auxPartages()
+    return
+  }
   void props.envoyer({
     op: 'smb_browse',
     share: ex.value.share,
@@ -108,7 +154,7 @@ function fermer(): void {
 
 <template>
   <Dialog :open="ouvert" @update:open="(v: boolean) => !v && fermer()">
-    <DialogContent data-dlg-partage>
+    <DialogContent class="sm:max-w-2xl" data-dlg-partage>
       <DialogHeader>
         <DialogTitle>{{ t('dlg_share_title') }}</DialogTitle>
         <!-- Pas décorative : reka-ui la rattache par `aria-describedby`, et son
@@ -179,14 +225,27 @@ function fermer(): void {
           </button>
         </div>
 
-        <ChoixDossier
-          v-else-if="dansLArbre"
-          :exploration="ex"
-          :t="t"
-          :fige="fige"
-          @descendre="descendre"
-          @remonter="remonter"
-        />
+        <template v-else-if="dansLArbre">
+          <!-- Retour explicite à la liste des partages : sans lui, on restait
+               enfermé dans le premier partage choisi. -->
+          <button
+            type="button"
+            data-aux-partages
+            class="self-start rounded px-2 py-1 text-left text-sm text-muted-foreground hover:bg-accent"
+            :disabled="fige"
+            @click="auxPartages"
+          >
+            ← {{ t('shares_label') }}
+          </button>
+          <ChoixDossier
+            :exploration="ex"
+            :t="t"
+            :fige="fige"
+            :chemin="cheminComplet"
+            @descendre="descendre"
+            @remonter="remonter"
+          />
+        </template>
       </template>
 
       <!-- Le refus s'affiche **ici** et pas seulement sur la page : derrière le

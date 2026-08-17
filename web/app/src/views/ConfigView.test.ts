@@ -438,7 +438,8 @@ describe('ConfigView — sommaire', () => {
     expect(liens.map((l) => l.text())).toEqual([
       'Plugins', 'Sortie audio', 'Langue', 'Démarrage', 'Volume maintenu', 'Incrustations', 'Dernières erreurs',
     ])
-    // Masqué sur petit écran : la colonne fait max-w-3xl, pas la place en mobile.
+    // Masqué sur petit écran : la colonne suit la largeur du shell, il n'y a
+    // pas la place en mobile.
     expect(w.find('[data-toc]').classes()).toContain('hidden')
   })
 

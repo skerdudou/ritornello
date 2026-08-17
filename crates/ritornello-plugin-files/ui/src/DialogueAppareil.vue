@@ -8,7 +8,7 @@ import {
   DialogTitle,
   Input,
 } from '@ritornello/ui'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import ChoixDossier from './ChoixDossier.vue'
 import type { Donnees, Envoyer, T } from './donnees'
 
@@ -58,6 +58,16 @@ const volumeCourant = computed(() => {
 })
 
 const saisie = ref('')
+
+// Le `Dialog` reste **monté** quand il est fermé : sans cette remise à zéro, la
+// saisie d'une ouverture précédente réapparaîtrait à la suivante, comme si on
+// n'avait jamais fermé.
+watch(
+  () => props.ouvert,
+  (ouvert) => {
+    if (ouvert) saisie.value = ''
+  },
+)
 
 function aller(chemin: string): void {
   void props.envoyer({ op: 'explore_local', path: chemin })
@@ -135,7 +145,10 @@ function fermer(): void {
 
 <template>
   <Dialog :open="ouvert" @update:open="(v: boolean) => !v && fermer()">
-    <DialogContent data-dlg-appareil>
+    <!-- Plus large que le défaut du kit : un arbre de dossiers vit mal dans une
+         colonne étroite, et c'est déjà la largeur que la popin des thèmes
+         emploie. -->
+    <DialogContent class="sm:max-w-2xl" data-dlg-appareil>
       <DialogHeader>
         <DialogTitle>{{ t('dlg_device_title') }}</DialogTitle>
         <!-- Pas décorative : reka-ui la rattache par `aria-describedby`, et son
@@ -187,6 +200,7 @@ function fermer(): void {
           :exploration="ex"
           :t="t"
           :fige="fige"
+          :chemin="ex.path"
           @descendre="descendre"
           @remonter="remonter"
         />

@@ -137,6 +137,8 @@ pub enum Op {
         #[serde(default)]
         path: String,
     },
+    /// Retour à la liste des partages déjà obtenue, sans nouvel appel réseau.
+    SmbShares,
     Mount,
     Browse { root: String, #[serde(default)] path: String },
     Search { root: String, query: String },
@@ -526,6 +528,10 @@ impl AdminPlugin for FilesAdmin {
             }
             Op::SmbBrowse { share, path } => {
                 self.explore.parcourir(share, path);
+                Ok(())
+            }
+            Op::SmbShares => {
+                self.explore.aux_partages();
                 Ok(())
             }
 
