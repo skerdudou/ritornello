@@ -7,13 +7,12 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { nomLangue } from '../composables/langues'
 import { useCatalog } from '../composables/useCatalog'
-import type { AudioPayload, LocalePayload, LogsPayload, SettingsPayload, StatusPayload } from '../types'
+import type { AudioPayload, LocalePayload, SettingsPayload, StatusPayload } from '../types'
 
 const { t, reload } = useCatalog()
 const status = ref<StatusPayload>({ plugins: [], active_source: '' })
 const audio = ref<AudioPayload>({ devices: [], current: null })
 const locale = ref<LocalePayload>({ locales: [], current: null })
-const logs = ref<string[]>([])
 const device = ref('')
 const lang = ref('')
 const audioIndisponible = ref(false)
@@ -62,7 +61,6 @@ async function chargerTout() {
     return audio.value
   })
   locale.value = await api.get<LocalePayload>('/api/locale').catch(() => locale.value)
-  logs.value = (await api.get<LogsPayload>('/api/logs').catch(() => ({ lines: [] }))).lines
   reglages.value = await api.get<SettingsPayload>('/api/settings').catch(() => reglages.value)
   // `current: null` = aucun choix enregistré : c'est l'entrée « Par défaut
   // (système) » qui le porte — plus de repli sur le premier périphérique
@@ -114,7 +112,6 @@ const SECTIONS = [
   { id: 'startup', key: 'startup_title' },
   { id: 'volume-hold', key: 'volume_hold_title' },
   { id: 'overlays', key: 'overlays_title' },
-  { id: 'logs', key: 'recent_errors' },
 ] as const
 
 const active = ref<string>(SECTIONS[0].id)
@@ -290,16 +287,6 @@ function aller(id: string) {
         </Card>
       </section>
 
-      <section id="logs" class="scroll-mt-6">
-        <Card>
-          <CardHeader><CardTitle>{{ t('recent_errors') }}</CardTitle></CardHeader>
-          <CardContent>
-            <ul class="space-y-1 font-mono text-xs text-muted-foreground">
-              <li v-for="(l, i) in logs" :key="i" data-log-line>{{ l }}</li>
-            </ul>
-          </CardContent>
-        </Card>
-      </section>
     </div>
 
     <nav data-toc :aria-label="t('toc_label')" class="sticky top-6 hidden w-40 shrink-0 self-start lg:block">

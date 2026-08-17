@@ -6,12 +6,26 @@ import {
 } from '@ritornello/ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
-import type { SystemPayload, SystemUsage } from '../types'
+import type { LogsPayload, SystemPayload, SystemUsage } from '../types'
 import { abscisses, cheminSparkline, reperesMinute } from './sparkline'
 
 const { t } = useCatalog()
 const etat = ref<SystemPayload | null>(null)
 const indisponible = ref(false)
+/**
+ * Les dernières erreurs journalisées, relevées **une fois au montage**.
+ *
+ * Elles vivaient sur la page Configuration ; leur place est ici, avec les
+ * métriques, quand on cherche pourquoi l'appareil se comporte mal.
+ *
+ * Volontairement hors de `sonder()`, malgré la tentation : le sondage tient un
+ * verrou « en vol » pour qu'un minuteur plus rapide que le réseau n'empile pas
+ * deux relevés, et il calcule l'utilisation CPU par delta entre deux réponses.
+ * Y greffer une seconde requête allonge la prise du verrou et change la cadence
+ * observée — mesuré, quatre tests de cadence sont tombés. Rafraîchir la liste
+ * demanderait donc son propre minuteur, pas un passager.
+ */
+const logs = ref<string[]>([])
 
 /**
  * Période de sondage, locale à la page : un confort de visualisation, pas un
@@ -281,6 +295,14 @@ const dureeFenetreMin = computed(() => {
 
 onMounted(() => {
   demarrer()
+  // Son propre `.catch` : un journal indisponible ne doit pas priver
+  // l'utilisateur des métriques, ni l'inverse.
+  void api
+    .get<LogsPayload>('/api/logs')
+    .then((j) => {
+      logs.value = j.lines ?? []
+    })
+    .catch(() => {})
   document.addEventListener('visibilitychange', visibilite)
 })
 onUnmounted(() => {
@@ -978,6 +1000,19 @@ async function attendreRetour(avant: number | null) {
             {{ t('system_restart_service') }}
           </Button>
         </div>
+      </CardContent>
+    </Card>
+
+    <!-- `data-logs-card` et pas seulement `data-log-line` : la carte doit être
+         repérable même quand le journal est vide, sans quoi le parcours de bout
+         en bout ne saurait pas distinguer « aucune erreur » de « carte
+         disparue ». -->
+    <Card data-logs-card>
+      <CardHeader><CardTitle>{{ t('recent_errors') }}</CardTitle></CardHeader>
+      <CardContent>
+        <ul class="space-y-1 font-mono text-xs text-muted-foreground">
+          <li v-for="(l, i) in logs" :key="i" data-log-line>{{ l }}</li>
+        </ul>
       </CardContent>
     </Card>
 

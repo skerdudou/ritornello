@@ -220,29 +220,17 @@ describe('ConfigView — langue', () => {
 describe('ConfigView — journaux', () => {
   beforeEach(reinitialiser)
 
-  it('rend une ligne par entrée de journal, dans l’ordre reçu', async () => {
-    // `/api/logs` renvoie deja les plus recentes en premier (le cœur inverse le
-    // tampon), la vue ne retrie pas : elle doit rendre l'ordre tel quel.
+  it('ne porte plus la carte des dernières erreurs', async () => {
+    // Déplacée vers l'onglet Système, où la page se rafraîchit : une liste
+    // d'erreurs figée au milieu de réglages ne se relit jamais. Vérifié ici, et
+    // pas seulement dans SystemView, pour qu'un retour en arrière se voie.
     const { w } = await monter({
-      '/api/logs': { lines: ['WARN la plus recente', 'WARN la plus ancienne'] },
+      '/api/logs': { lines: ['WARN plugin radio indisponible'] },
     })
-    const lignes = w.findAll('[data-log-line]').map((l) => l.text())
-    expect(lignes).toEqual(['WARN la plus recente', 'WARN la plus ancienne'])
-  })
-
-  it('aucune erreur récente : aucune ligne, et la carte reste rendue', async () => {
-    const { w } = await monter({ '/api/logs': { lines: [] } })
     expect(w.findAll('[data-log-line]')).toHaveLength(0)
-    expect(w.text()).toContain('Dernières erreurs')
-  })
-
-  it('une route injoignable ne casse pas la page', async () => {
-    // Chaque `api.get` a son `.catch` : un `/api/logs` en erreur ne doit pas
-    // priver l'utilisateur de la table des plugins, seul moyen de diagnostiquer
-    // justement ce genre de panne.
-    const { w } = await monter({ '/api/logs': undefined })
-    expect(w.findAll('[data-plugin-row]')).toHaveLength(2)
-    expect(w.findAll('[data-log-line]')).toHaveLength(0)
+    expect(w.text()).not.toContain('Dernières erreurs')
+    // Le sommaire n'a plus d'entrée qui pointe dans le vide.
+    expect(w.findAll('[data-toc-link]').map((l) => l.text())).not.toContain('Dernières erreurs')
   })
 })
 
@@ -435,8 +423,10 @@ describe('ConfigView — sommaire', () => {
   it('liste une entrée par section, avec le libellé de sa carte', async () => {
     const { w } = await monter()
     const liens = w.findAll('[data-toc-link]')
+    // Plus de « Dernières erreurs » : la carte est passée sur l'onglet Système,
+    // et le sommaire ne doit pas garder une entrée qui pointe dans le vide.
     expect(liens.map((l) => l.text())).toEqual([
-      'Plugins', 'Sortie audio', 'Langue', 'Démarrage', 'Volume maintenu', 'Incrustations', 'Dernières erreurs',
+      'Plugins', 'Sortie audio', 'Langue', 'Démarrage', 'Volume maintenu', 'Incrustations',
     ])
     // Masqué sur petit écran : la colonne suit la largeur du shell, il n'y a
     // pas la place en mobile.

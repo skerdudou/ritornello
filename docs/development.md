@@ -69,8 +69,8 @@ Three audiences, three rules — the boundary is the audience, not the file:
   `core.rs`) are English throughout and keep internal `//` comments French.
 - **Logs are English**, at every level, including the `anyhow!` and
   `.context(…)` strings they interpolate. They are read next to
-  `journalctl` and rustc — and they are visible in the UI: the config
-  page's "Recent errors" card serves the last 50 WARN/ERROR lines verbatim
+  `journalctl` and rustc — and they are visible in the UI: the System
+  tab's "Recent errors" card serves the last 50 WARN/ERROR lines verbatim
   (`GET /api/logs`), so a French log line would show up untranslated in an
   English interface.
 - **Everything a user reads goes through the i18n catalogues**, never a

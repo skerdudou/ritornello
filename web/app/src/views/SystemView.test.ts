@@ -67,12 +67,27 @@ const CATALOGUE = {
  * elle-même et les unités s'afficheraient « system_unit_day ». Le test
  * vérifierait alors le repli, pas la vue.
  */
-function stub(corps: unknown | (() => unknown), catalogue: Record<string, string> = CATALOGUE) {
+function stub(
+  corps: unknown | (() => unknown),
+  catalogue: Record<string, string> = CATALOGUE,
+  journal: unknown = { lines: [] },
+) {
   const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
     if (init?.method === 'POST') {
       return Promise.resolve({ ok: true, json: async () => ({}) } as Response)
     }
-    const j = String(url).includes('/api/i18n')
+    const u = String(url)
+    // `/api/logs` distingué de `/api/system` : la page sonde les deux à chaque
+    // tour, et servir la charge des métriques au journal lui donnerait un
+    // `lines` absent — le test échouerait alors pour une raison qui n'est pas
+    // la sienne.
+    if (u.includes('/api/logs')) {
+      if (journal === undefined) {
+        return Promise.resolve({ ok: false, status: 503, json: async () => ({}) } as Response)
+      }
+      return Promise.resolve({ ok: true, json: async () => journal } as Response)
+    }
+    const j = u.includes('/api/i18n')
       ? catalogue
       : typeof corps === 'function'
         ? (corps as () => unknown)()
@@ -502,6 +517,9 @@ describe('SystemView', () => {
     const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
       if (init?.method === 'POST') return Promise.resolve({ ok: true, json: async () => ({}) } as Response)
       if (String(url).includes('/api/i18n')) return Promise.resolve({ ok: true, json: async () => CATALOGUE } as Response)
+      // Le journal est relevé une fois au montage et ne passe pas par le verrou
+      // de sondage : le compter ici mesurerait autre chose que ce test.
+      if (String(url).includes('/api/logs')) return Promise.resolve({ ok: true, json: async () => ({ lines: [] }) } as Response)
       n += 1
       return new Promise((resolve) => differes.push({ resolve }))
     })
@@ -588,6 +606,9 @@ describe('SystemView', () => {
     const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
       if (init?.method === 'POST') return Promise.resolve({ ok: true, json: async () => ({}) } as Response)
       if (String(url).includes('/api/i18n')) return Promise.resolve({ ok: true, json: async () => CATALOGUE } as Response)
+      // Même raison que dans le test du verrou : le journal est relevé une seule
+      // fois au montage, hors du sondage, et n'a rien à faire dans `differes`.
+      if (String(url).includes('/api/logs')) return Promise.resolve({ ok: true, json: async () => ({ lines: [] }) } as Response)
       return new Promise((resolve, reject) => {
         const signal = init?.signal
         // Un `AbortSignal` réel rejette son `fetch` à l'annulation : le stub
@@ -1002,6 +1023,60 @@ describe('SystemView', () => {
       await svg.trigger('pointermove', { clientX: 100 })
       expect(w.find('[data-system-history-popin]').exists()).toBe(false)
       expect(w.find('[data-system-history-line]').exists()).toBe(false)
+      w.unmount()
+    })
+  })
+
+  describe('dernières erreurs', () => {
+    it('rend une ligne par entrée de journal, dans l’ordre reçu', async () => {
+      // `/api/logs` rend déjà les plus récentes en premier (le cœur inverse son
+      // tampon), la vue ne retrie pas : elle doit rendre l'ordre tel quel.
+      stub(payload(), CATALOGUE, {
+        lines: ['WARN la plus recente', 'WARN la plus ancienne'],
+      })
+      const w = await monter()
+      expect(w.findAll('[data-log-line]').map((l) => l.text())).toEqual([
+        'WARN la plus recente',
+        'WARN la plus ancienne',
+      ])
+      w.unmount()
+    })
+
+    it('aucune erreur récente : aucune ligne, et la carte reste rendue', async () => {
+      stub(payload(), { ...CATALOGUE, recent_errors: 'Dernières erreurs' })
+      const w = await monter()
+      expect(w.findAll('[data-log-line]')).toHaveLength(0)
+      expect(w.text()).toContain('Dernières erreurs')
+      w.unmount()
+    })
+
+    it('un journal injoignable ne prive pas la page de ses métriques', async () => {
+      // Les deux relevés sont indépendants, chacun avec son `.catch` : un
+      // `/api/logs` en panne ne doit pas faire passer la machine pour muette —
+      // ce sont justement les métriques qu'on regarde quand le journal manque.
+      stub(payload(), CATALOGUE, undefined)
+      const w = await monter()
+      expect(w.findAll('[data-log-line]')).toHaveLength(0)
+      expect(w.find('[data-system-unavailable]').exists()).toBe(false)
+      expect(w.get('[data-system-hostname]').text()).toBe('ritornello')
+      w.unmount()
+    })
+
+    it('le journal n est relevé qu au montage, hors du sondage périodique', async () => {
+      // Greffer le journal sur `sonder()` allongerait la prise du verrou « en
+      // vol » et changerait la cadence observée : mesuré, quatre tests de
+      // cadence tombaient. Ce test épingle la séparation.
+      const f = stub(payload(), CATALOGUE, { lines: ['WARN une erreur'] })
+      const w = await monter()
+      const auMontage = f.mock.calls.filter((c) => String(c[0]).includes('/api/logs')).length
+      expect(auMontage).toBe(1)
+      await vi.advanceTimersByTimeAsync(20000)
+      await flushPromises()
+      expect(f.mock.calls.filter((c) => String(c[0]).includes('/api/logs')).length).toBe(auMontage)
+      // Et les métriques, elles, ont bien continué d'être sondées.
+      expect(
+        f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length,
+      ).toBeGreaterThan(1)
       w.unmount()
     })
   })

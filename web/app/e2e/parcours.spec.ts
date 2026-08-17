@@ -178,6 +178,11 @@ test('onglet Système : métriques et boutons présents', async ({ page }) => {
   await expect(page.locator('[data-system-disk]')).toBeVisible()
   await expect(page.locator('[data-power-poweroff]')).toBeVisible()
   await expect(page.locator('[data-power-restart]')).toBeVisible()
+  // Les dernières erreurs vivent ici, plus sur la page Configuration : c'est la
+  // page qu'on ouvre quand l'appareil se comporte mal.
+  await expect(page.locator('[data-logs-card]')).toBeVisible()
+  await page.goto('/config')
+  await expect(page.locator('[data-logs-card]')).toHaveCount(0)
   // Le lien de navigation existe depuis la page d'accueil.
   await page.goto('/')
   await expect(page.locator('a[href="/system"]')).toBeVisible()
