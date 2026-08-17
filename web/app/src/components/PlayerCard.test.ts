@@ -32,7 +32,7 @@ function complet(etat: Partial<PlayerPayload>): PlayerPayload {
 
 function monteAvec(etat: Partial<PlayerPayload> | null) {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
-  return mount(PlayerCard, { props: { etat: etat ? complet(etat) : null } })
+  return mount(PlayerCard, { props: { etat: etat ? complet(etat) : null, pasDeplacement: 10 } })
 }
 
 describe('PlayerCard', () => {
@@ -170,5 +170,26 @@ describe('PlayerCard', () => {
     await w.setProps({ etat: complet({}) })
     expect(w.find('[data-now-playing]').exists()).toBe(false)
     expect(w.find('[data-player]').exists()).toBe(true)
+  })
+
+  it('montre la barre quand une position est connue', () => {
+    const w = mount(PlayerCard, {
+      props: {
+        etat: complet({ title: 'Bikwix', position_s: 87, duration_s: 254, seekable: true }),
+        pasDeplacement: 10,
+      },
+    })
+    expect(w.find('[data-barre]').exists()).toBe(true)
+    expect(w.get('[data-position]').text()).toBe('1:27')
+  })
+
+  it('ne montre rien de la progression quand aucune position n est connue', () => {
+    const w = mount(PlayerCard, {
+      props: {
+        etat: complet({ title: 'Bikwix', position_s: null, duration_s: 254 }),
+        pasDeplacement: 10,
+      },
+    })
+    expect(w.find('[data-position]').exists()).toBe(false)
   })
 })

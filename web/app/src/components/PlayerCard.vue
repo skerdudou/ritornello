@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { Badge, Card, CardContent, CardHeader, CardTitle } from '@ritornello/ui'
+import BarreProgression from './BarreProgression.vue'
 import { useCatalog } from '../composables/useCatalog'
 import { formateDuree, riendAfficher } from '../composables/usePlayer'
 import type { PlayerPayload } from '../types'
@@ -8,7 +9,10 @@ import type { PlayerPayload } from '../types'
 // la page : la telecommande en a besoin elle aussi (touche active), et ouvrir
 // une seconde connexion ici doublerait les flux pour le meme contenu.
 const { t } = useCatalog()
-defineProps<{ etat: PlayerPayload | null }>()
+defineProps<{ etat: PlayerPayload | null; pasDeplacement: number }>()
+// Remonte au parent : c'est HomeView qui poste les commandes (comme pour le
+// reste de la telecommande), la carte elle-meme n'en poste aucune.
+const emit = defineEmits<{ deplacer: [secondes: number] }>()
 </script>
 
 <template>
@@ -86,6 +90,13 @@ defineProps<{ etat: PlayerPayload | null }>()
         <p v-if="etat?.title" class="text-lg font-medium leading-tight" data-titre>{{ etat.title }}</p>
         <p v-if="etat?.artist" class="text-sm text-foreground" data-artiste>{{ etat.artist }}</p>
         <p v-if="etat?.album" class="text-sm text-muted-foreground" data-album>{{ etat.album }}</p>
+        <BarreProgression
+          :position="etat?.position_s ?? null"
+          :duree="etat?.duration_s ?? null"
+          :deplacable="etat?.seekable ?? false"
+          :pas="pasDeplacement"
+          @deplacer="(s) => emit('deplacer', s)"
+        />
       </div>
     </CardContent>
   </Card>

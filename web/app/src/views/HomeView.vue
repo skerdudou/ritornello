@@ -133,7 +133,11 @@ function toucheVolume(e: KeyboardEvent, cmd: Command) {
 
 <template>
   <div class="space-y-4">
-    <PlayerCard :etat="etat" />
+    <PlayerCard
+      :etat="etat"
+      :pas-deplacement="reglages.seek_step_s"
+      @deplacer="(s: number) => send({ cmd: 'SeekTo', arg: s })"
+    />
     <Card>
       <!-- La veille au coin de la carte : c'est la seule commande qui agisse sur
            l'appareil entier plutot que sur la lecture, et la plus consequente —
