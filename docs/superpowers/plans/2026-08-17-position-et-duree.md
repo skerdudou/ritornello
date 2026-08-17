@@ -1793,15 +1793,33 @@ Dans `remoteCommands.ts`, insérer une rangée après la rangée transport (`pla
 
 et corriger le commentaire de tête, qui annonce « dix commandes simples ».
 
-Dans `ConfigView.vue` : ajouter `seek_step_s: 10` à l'objet `reglages` initial, `seek_step_s: Number(reglages.value.seek_step_s)` au corps du `PUT`, et le champ dans la carte des réglages, sur le modèle exact du champ `tens_window_ms` :
+Dans `ConfigView.vue` : `seek_step_s: 10` a déjà été ajouté à l'objet `reglages` initial par la tâche 8 — vérifier plutôt que refaire. Ajouter `seek_step_s: Number(reglages.value.seek_step_s)` au corps du `PUT`.
+
+Le réglage reçoit **sa propre carte**, et non un champ de plus dans celle des incrustations : c'est ce que la spec demande, et c'est ce qui donne son emploi à la clé `seek_card_title` posée à la tâche 6. Une entrée de plus dans `SECTIONS`, après `overlays` et avant `logs` — la liste est une donnée que la vue parcourt à la fois pour le sommaire et pour l'observation du défilement, donc une seule ligne suffit à faire apparaître le lien :
+
+```ts
+  { id: 'seek', key: 'seek_card_title' },
+```
+
+et la section elle-même, calquée sur la carte `overlays` juste au-dessus :
 
 ```vue
-            <Label class="grid gap-1 text-sm">
+      <section id="seek" class="scroll-mt-6">
+        <Card>
+          <CardHeader><CardTitle>{{ t('seek_card_title') }}</CardTitle></CardHeader>
+          <CardContent class="flex flex-wrap items-end gap-4">
+            <label class="grid gap-1 text-sm">
               {{ t('seek_step_label') }}
-              <Input type="number" min="1" max="120" class="w-32"
+              <Input type="number" min="1" max="120" class="w-28" data-seek-step-s
                 v-model="reglages.seek_step_s" />
-            </Label>
+            </label>
+            <Button data-seek-change @click="enregistrerReglages">{{ t('change') }}</Button>
+          </CardContent>
+        </Card>
+      </section>
 ```
+
+Les bornes `min`/`max` du champ reprennent exactement celles que le cœur impose (1 à 120 s) : le navigateur décourage la saisie hors bornes, et le cœur la refuse de toute façon avec une phrase de catalogue — les deux disent la même chose, et c'est voulu.
 
 - [ ] **Étape 4 : voir les tests passer**
 
