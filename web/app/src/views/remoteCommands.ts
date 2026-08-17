@@ -9,7 +9,7 @@ export interface RemoteCommand {
 // canal que celui alimente par les plugins Input, donc aucune logique metier
 // n'est dupliquee ici.
 //
-// Dix commandes simples en tout — les deux entrees « preselection +/- » de
+// Douze commandes simples en tout — les deux entrees « preselection +/- » de
 // l'ancienne page ont ete fusionnees sur `Next`/`Prev` : meme commande de
 // protocole, interpretee par la source active (preselection pour la radio,
 // piste pour le cd).
@@ -42,6 +42,10 @@ export const REMOTE_ROWS: RemoteCommand[][] = [
     { key: 'remote_stop', cmd: { cmd: 'Stop' } },
   ],
   [
+    { key: 'remote_seek_back', cmd: { cmd: 'SeekBackward' } },
+    { key: 'remote_seek_forward', cmd: { cmd: 'SeekForward' } },
+  ],
+  [
     { key: 'remote_prev', cmd: { cmd: 'Prev' } },
     { key: 'remote_next', cmd: { cmd: 'Next' } },
   ],
@@ -59,6 +63,6 @@ export const REMOTE_ROWS: RemoteCommand[][] = [
 /**
  * Toutes les commandes, veille comprise : sert au garde-fou qui verifie que
  * chaque cle de traduction employee existe bien dans le catalogue, et a
- * verrouiller le compte de dix.
+ * verrouiller le compte de douze.
  */
 export const REMOTE_COMMANDS: RemoteCommand[] = [REMOTE_POWER, ...REMOTE_ROWS.flat()]

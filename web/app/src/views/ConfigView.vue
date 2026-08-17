@@ -86,6 +86,7 @@ async function enregistrerReglages() {
     volume_repeat_interval_ms: Number(reglages.value.volume_repeat_interval_ms),
     overlay_ms: Number(reglages.value.overlay_ms),
     tens_window_ms: Number(reglages.value.tens_window_ms),
+    seek_step_s: Number(reglages.value.seek_step_s),
   })
   toast[err ? 'error' : 'success'](err ?? t.value('ok'))
 }
@@ -113,6 +114,7 @@ const SECTIONS = [
   { id: 'startup', key: 'startup_title' },
   { id: 'volume-hold', key: 'volume_hold_title' },
   { id: 'overlays', key: 'overlays_title' },
+  { id: 'seek', key: 'seek_card_title' },
 ] as const
 
 const active = ref<string>(SECTIONS[0].id)
@@ -288,6 +290,19 @@ function aller(id: string) {
         </Card>
       </section>
 
+      <section id="seek" class="scroll-mt-6">
+        <Card>
+          <CardHeader><CardTitle>{{ t('seek_card_title') }}</CardTitle></CardHeader>
+          <CardContent class="flex flex-wrap items-end gap-4">
+            <label class="grid gap-1 text-sm">
+              {{ t('seek_step_label') }}
+              <Input type="number" min="1" max="120" class="w-28" data-seek-step-s
+                v-model="reglages.seek_step_s" />
+            </label>
+            <Button data-seek-change @click="enregistrerReglages">{{ t('change') }}</Button>
+          </CardContent>
+        </Card>
+      </section>
     </div>
 
     <nav data-toc :aria-label="t('toc_label')" class="sticky top-6 hidden w-40 shrink-0 self-start lg:block">

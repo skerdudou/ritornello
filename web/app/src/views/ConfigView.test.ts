@@ -25,6 +25,8 @@ const CATALOGUE = {
   overlays_title: 'Incrustations',
   overlay_ms_label: "Durée d'affichage (volume, messages) (ms)",
   tens_window_ms_label: 'Fenêtre de saisie du cumul +10 (ms)',
+  seek_card_title: 'Déplacement',
+  seek_step_label: 'Pas de déplacement (s)',
   toc_label: 'sections',
 }
 
@@ -49,7 +51,7 @@ function charges() {
     '/api/logs': { lines: ['WARN plugin radio indisponible'] } as unknown,
     '/api/settings': {
       volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: false,
-      overlay_ms: 5000, tens_window_ms: 5000,
+      overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
     } as unknown,
     '/api/i18n': CATALOGUE as unknown,
   }
@@ -337,7 +339,7 @@ describe('ConfigView — réglages', () => {
         url: '/api/settings',
         corps: {
           volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: true,
-          overlay_ms: 5000, tens_window_ms: 5000,
+          overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
         },
       },
     ])
@@ -355,7 +357,7 @@ describe('ConfigView — réglages', () => {
         url: '/api/settings',
         corps: {
           volume_repeat_initial_ms: 1500, volume_repeat_interval_ms: 300, start_in_standby: false,
-          overlay_ms: 5000, tens_window_ms: 5000,
+          overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
         },
       },
     ])
@@ -402,7 +404,7 @@ describe('ConfigView — incrustations', () => {
         url: '/api/settings',
         corps: {
           volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: false,
-          overlay_ms: 2000, tens_window_ms: 7000,
+          overlay_ms: 2000, tens_window_ms: 7000, seek_step_s: 10,
         },
       },
     ])
@@ -417,6 +419,19 @@ describe('ConfigView — incrustations', () => {
   })
 })
 
+describe('ConfigView — deplacement', () => {
+  beforeEach(reinitialiser)
+
+  it('envoie le pas de deplacement', async () => {
+    const { w, puts } = await monter()
+    await w.find('[data-seek-step-s]').setValue('30')
+    await w.find('[data-seek-change]').trigger('click')
+    await flushPromises()
+    const corpsEnvoye = puts[0]!.corps as { seek_step_s: number }
+    expect(corpsEnvoye.seek_step_s).toBe(30)
+  })
+})
+
 describe('ConfigView — sommaire', () => {
   beforeEach(reinitialiser)
 
@@ -426,7 +441,7 @@ describe('ConfigView — sommaire', () => {
     // Plus de « Dernières erreurs » : la carte est passée sur l'onglet Système,
     // et le sommaire ne doit pas garder une entrée qui pointe dans le vide.
     expect(liens.map((l) => l.text())).toEqual([
-      'Plugins', 'Sortie audio', 'Langue', 'Démarrage', 'Volume maintenu', 'Incrustations',
+      'Plugins', 'Sortie audio', 'Langue', 'Démarrage', 'Volume maintenu', 'Incrustations', 'Déplacement',
     ])
     // Masqué sur petit écran : la colonne suit la largeur du shell, il n'y a
     // pas la place en mobile.

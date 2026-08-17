@@ -37,12 +37,12 @@ class FauxEventSource {
 }
 
 describe('REMOTE_COMMANDS', () => {
-  it('couvre les 10 commandes simples du protocole, veille comprise', () => {
-    expect(REMOTE_COMMANDS).toHaveLength(10)
+  it('couvre les 12 commandes simples du protocole, veille comprise', () => {
+    expect(REMOTE_COMMANDS).toHaveLength(12)
     expect(REMOTE_COMMANDS.map((c) => c.cmd.cmd).sort()).toEqual(
       [
         'Eject', 'Mute', 'Next', 'PlayPause', 'Power',
-        'Prev', 'SourceCycle', 'Stop', 'VolumeDown', 'VolumeUp',
+        'Prev', 'SeekBackward', 'SeekForward', 'SourceCycle', 'Stop', 'VolumeDown', 'VolumeUp',
       ].sort(),
     )
   })
@@ -54,6 +54,7 @@ describe('REMOTE_COMMANDS', () => {
     // remaniement du gabarit le change sans qu'on s'en apercoive.
     expect(REMOTE_ROWS.map((r) => r.map((c) => c.cmd.cmd))).toEqual([
       ['PlayPause', 'Stop'],
+      ['SeekBackward', 'SeekForward'],
       ['Prev', 'Next'],
       ['VolumeDown', 'VolumeUp', 'Mute'],
       ['SourceCycle', 'Eject'],
@@ -67,6 +68,15 @@ describe('REMOTE_COMMANDS', () => {
 
   it('chaque commande porte une clé de traduction', () => {
     for (const c of REMOTE_COMMANDS) expect(c.key).toMatch(/^remote_/)
+  })
+
+  // Dans la rangee, l'ordre suit le sens du geste : reculer avant avancer,
+  // comme « precedent » avant « suivant » et « moins » avant « plus ».
+  it('offre les deux touches de deplacement, dans le sens du geste', () => {
+    const cles = REMOTE_ROWS.flat().map((c) => c.key)
+    expect(cles).toContain('remote_seek_back')
+    expect(cles).toContain('remote_seek_forward')
+    expect(cles.indexOf('remote_seek_back')).toBeLessThan(cles.indexOf('remote_seek_forward'))
   })
 })
 
