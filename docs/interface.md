@@ -2,10 +2,11 @@
 
 ## Web remote and command API
 
-The home page (`http://<host>:8080/`) embeds a remote control: the 15
-commands of the protocol (presets 1-9 plus `+10`, next/previous, volume,
-mute, play/pause, stop, eject, source switch, standby, seek forward/backward,
-and absolute seek).
+The home page (`http://<host>:8080/`) embeds a remote control: 14 of the
+protocol's 15 commands (presets 1-9 plus `+10`, next/previous, volume, mute,
+play/pause, stop, eject, source switch, standby, seek forward/backward). The
+15th, absolute seek, has no button of its own — it's the progress bar that
+sends it (see below).
 
 `Next`/`Prev` are interpreted by the active source: preset for the radio,
 track for the CD player — these are not two distinct command pairs, only a
@@ -152,8 +153,10 @@ no bar, the elapsed figure standing alone — a bar with no end to reach
 would teach nothing. When `seekable` is false the numbers still show, but
 the bar takes no click and no key: this is exactly the Radio France case,
 where knowing you are 1:27 into a 4:14 track has value even without being
-able to jump inside it. When it is true, clicking or dragging the bar seeks
-to that point, and the keyboard does the same (arrow keys move by one
+able to jump inside it. When it is true, clicking the bar seeks to that
+point — a drag lands there too, since releasing the mouse still fires a
+click, but nothing tracks the pointer or shows feedback while dragging — and
+the keyboard does the same (arrow keys move by one
 step, Home/End jump to the ends) — without that, the bar would be the only
 control on the page out of reach without a mouse, on a page where every
 other control is a button. It is named for a screen reader either way.
