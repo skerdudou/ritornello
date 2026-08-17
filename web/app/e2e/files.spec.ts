@@ -167,6 +167,22 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   await expect(page.locator('[data-preset-prev]')).toHaveCount(0)
   await expect(page.locator('[data-preset-next]')).toHaveCount(0)
 
+  // Choisir une piste par son numero doit reellement y aller.
+  //
+  // C'est le defaut central de ce chantier, et seul un parcours avec un vrai
+  // mpv pouvait le voir : le coeur chargeait le m3u par `loadfile`, que mpv ne
+  // deplie qu'**apres** coup (mesure : `playlist-count` vaut 1, puis 3 apres un
+  // `end-file`). Le `playlist-pos` enchaine tombait donc hors bornes, la
+  // lecture repartait de la piste 1, et l'affichage perdait numero et nom.
+  // `loadlist` deplie sur-le-champ. Aucun test unitaire ne pouvait l'attraper :
+  // il n'y a pas de mpv dedans.
+  await page.locator('[data-preset-button]').nth(1).click()
+  await expect(page.locator('[data-player-preset]')).toHaveText('2')
+  await expect(page.locator('[data-player-preset-name]')).toHaveText('02')
+  await page.locator('[data-preset-button]').nth(2).click()
+  await expect(page.locator('[data-player-preset]')).toHaveText('3')
+  await expect(page.locator('[data-player-preset-name]')).toHaveText('03')
+
   // Remettre le harnais dans l'etat ou on l'a trouve : les parcours partagent
   // un unique coeur et `files.spec.ts` s'execute **avant** `parcours.spec.ts`,
   // qui exige la radio active. La remise est verifiee, pas esperee.

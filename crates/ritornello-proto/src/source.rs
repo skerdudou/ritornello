@@ -48,14 +48,28 @@ pub enum SourceAction {
         uri: String,
         /// Index de départ dans la liste que `uri` désigne, quand c'en est une.
         ///
-        /// Absent = « commence au début », le comportement historique. Le cœur
-        /// applique `playlist-pos` juste après `loadfile` : mesuré fiable, mpv
-        /// résolvant un `.m3u` dès la commande, sans dépliage différé.
+        /// Absent = « commence au début », le comportement historique.
+        ///
+        /// **Exige `playlist: true`** pour fonctionner, et c'est une leçon
+        /// payée : un `loadfile` sur un `.m3u` ne le déplie qu'**après** coup —
+        /// mesuré, `playlist-count` vaut 1, puis 3 seulement après un
+        /// `end-file`/`start-file`. Le `playlist-pos` envoyé dans la foulée
+        /// arrivait donc hors bornes, la lecture repartait de la première piste,
+        /// et l'affichage perdait tout. `loadlist` déplie sur-le-champ.
         ///
         /// C'est l'unique moyen pour une Source de reprendre une liste à la
         /// piste n — chiffre de la télécommande, ou reprise après redémarrage.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         start: Option<i64>,
+        /// `uri` désigne une **liste de lecture** et non un média.
+        ///
+        /// Le cœur emploie alors `loadlist`, qui déplie la liste
+        /// **synchroniquement**, au lieu de `loadfile` qui la traite d'abord
+        /// comme une entrée unique. La distinction ne peut pas être devinée de
+        /// l'URI : un `.m3u8` est une liste pour un lecteur de fichiers et un
+        /// flux HLS pour une radio, et se tromper casse l'un ou l'autre.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        playlist: bool,
         /// Ce que `uri` désigne a une **fin normale** : un disque, une liste de
         /// fichiers. Quand mpv devient inactif, c'est la fin du contenu, pas
         /// une coupure de flux à relancer.
@@ -78,16 +92,30 @@ impl SourceAction {
     /// Passer par ce constructeur plutôt que par la variante littérale évite
     /// qu'un champ ajouté plus tard n'oblige à retoucher tous les appelants.
     pub fn play(uri: impl Into<String>) -> Self {
-        SourceAction::Play { uri: uri.into(), start: None, finite: false }
+        SourceAction::Play { uri: uri.into(), start: None, finite: false, playlist: false }
     }
 
     /// Positionne la lecture sur l'élément d'index `n` de la liste. Sans effet
     /// sur une action qui n'est pas un `Play`.
+    ///
+    /// À employer avec `playlist()` : sans lui, l'URI est chargée comme un média
+    /// unique et l'index arrive avant que la liste n'existe.
     #[must_use]
     pub fn starting_at(self, n: i64) -> Self {
         match self {
-            SourceAction::Play { uri, finite, .. } => {
-                SourceAction::Play { uri, start: Some(n), finite }
+            SourceAction::Play { uri, finite, playlist, .. } => {
+                SourceAction::Play { uri, start: Some(n), finite, playlist }
+            }
+            autre => autre,
+        }
+    }
+
+    /// Déclare que l'URI est une **liste de lecture**, à déplier comme telle.
+    #[must_use]
+    pub fn playlist(self) -> Self {
+        match self {
+            SourceAction::Play { uri, start, finite, .. } => {
+                SourceAction::Play { uri, start, finite, playlist: true }
             }
             autre => autre,
         }
@@ -98,8 +126,8 @@ impl SourceAction {
     #[must_use]
     pub fn finite(self) -> Self {
         match self {
-            SourceAction::Play { uri, start, .. } => {
-                SourceAction::Play { uri, start, finite: true }
+            SourceAction::Play { uri, start, playlist, .. } => {
+                SourceAction::Play { uri, start, finite: true, playlist }
             }
             autre => autre,
         }
@@ -241,7 +269,15 @@ mod tests {
         // changerait silencieusement la lecture.
         let back: SourceAction =
             serde_json::from_str(r#"{"action":"Play","data":{"uri":"http://x"}}"#).unwrap();
-        assert_eq!(back, SourceAction::Play { uri: "http://x".into(), start: None, finite: false });
+        assert_eq!(
+            back,
+            SourceAction::Play {
+                uri: "http://x".into(),
+                start: None,
+                finite: false,
+                playlist: false
+            }
+        );
     }
 
     #[test]

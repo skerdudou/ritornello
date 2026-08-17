@@ -305,6 +305,19 @@ impl super::Player for MpvPlayer {
         self.ipc.command(&[json!("set_property"), json!("pause"), json!(false)]).await?;
         Ok(())
     }
+    /// `loadlist` et non `loadfile` : la liste est dépliée **avant** que la
+    /// commande ne réponde (sa réponse porte même `num_entries`), si bien qu'un
+    /// `playlist-pos` envoyé juste après tombe dans les bornes.
+    ///
+    /// Avec `loadfile`, mesuré sur mpv 0.37 : `playlist-count` vaut d'abord 1,
+    /// la position 0, puis viennent un `end-file` et un `start-file` avant que
+    /// le compte ne passe à 3. Le `playlist-pos` demandé arrivait donc hors
+    /// bornes, et le dépliage rejouait la première piste.
+    async fn load_list(&self, uri: &str) -> Result<()> {
+        self.ipc.command(&[json!("loadlist"), json!(uri), json!("replace")]).await?;
+        self.ipc.command(&[json!("set_property"), json!("pause"), json!(false)]).await?;
+        Ok(())
+    }
     async fn stop(&self) -> Result<()> {
         self.ipc.command(&[json!("stop")]).await?;
         Ok(())

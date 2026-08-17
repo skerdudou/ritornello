@@ -33,6 +33,12 @@ fn env_or(key: &str, default: &str) -> String {
 struct FilesSource {
     /// Partagée avec la moitié Admin, qui la modifie depuis la page.
     playlist: Arc<AsyncRwLock<Playlist>>,
+    /// Le dernier arrêt vient-il de la **fin de la liste** ?
+    ///
+    /// mpv annonce `playlist-pos = -1` en fin de liste, puis le cœur envoie
+    /// `stop()`. Sans ce souvenir, `stop()` ne peut pas distinguer une liste
+    /// terminée d'un arrêt demandé, et affiche un statut muet dans les deux cas.
+    fin_de_liste: bool,
     state_path: PathBuf,
     /// Le m3u **généré** que mpv reçoit. Découplé de toute liste utilisateur.
     mpv_playlist_path: PathBuf,
@@ -84,6 +90,9 @@ impl FilesSource {
 
     /// Lance la liste à l'index courant, après avoir réécrit le m3u de mpv.
     async fn jouer(&mut self) -> SourceOutcome {
+        // On relance : la fin de liste précédente est de l'histoire ancienne, et
+        // la garder ferait annoncer « fin de liste » au prochain arrêt.
+        self.fin_de_liste = false;
         let liste = self.playlist.read().await;
         let count = liste.preset_count();
         let Some(entry) = liste.current().cloned() else {
@@ -100,6 +109,11 @@ impl FilesSource {
         drop(liste);
 
         let action = SourceAction::play(self.mpv_playlist_path.to_string_lossy().to_string())
+            // Sans cette déclaration, le cœur chargerait le m3u comme un média
+            // unique : mpv ne le déplierait qu'après coup, l'index de départ
+            // arriverait hors bornes, et toute sélection de piste rejouerait la
+            // première en perdant l'affichage. Mesuré, et corrigé ici.
+            .playlist()
             .starting_at(index as i64)
             // Une liste de fichiers a une fin normale : sans cette
             // déclaration, l'inactivité de mpv en fin de liste passerait pour
@@ -177,9 +191,13 @@ impl SourcePlugin for FilesSource {
     async fn player_track(&mut self, n: i64) -> SourceOutcome {
         if !self.playlist.write().await.set_index(n) {
             // mpv dit `-1` en fin de liste : ne rien déclarer, l'arrêt sera
-            // annoncé par `stop()` que le cœur envoie juste après.
+            // annoncé par `stop()` que le cœur envoie juste après. On retient
+            // seulement **pourquoi** cet arrêt vient, pour que `stop()` sache
+            // dire « fin de liste » plutôt qu'un statut muet.
+            self.fin_de_liste = n < 0;
             return SourceOutcome::new(SourceAction::Noop);
         }
+        self.fin_de_liste = false;
         self.persiste().await;
         self.recale().await
     }
@@ -188,7 +206,22 @@ impl SourcePlugin for FilesSource {
         // Le cœur a arrêté de sa propre initiative, ou la liste s'est terminée.
         // Le dire, sinon la dernière piste et ses métadonnées resteraient
         // affichées indéfiniment.
-        SourceOutcome::new(SourceAction::Noop).plays_nothing().status(self.statut())
+        //
+        // Et **dire lequel des trois**, ce qui n'était pas le cas : cette trame
+        // écrasait le « AUCUNE LISTE » que `jouer()` venait d'afficher. Sans
+        // piste, mpv reste inactif, le cœur envoie donc `stop()` aussitôt, et
+        // l'utilisateur ne voyait qu'un statut générique sans jamais apprendre
+        // que sa liste était vide.
+        let vide = self.playlist.read().await.entries.is_empty();
+        let mot = if vide {
+            self.mot("no_playlist")
+        } else if self.fin_de_liste {
+            self.mot("end_of_playlist")
+        } else {
+            self.statut()
+        };
+        self.fin_de_liste = false;
+        SourceOutcome::new(SourceAction::Noop).plays_nothing().status(mot)
     }
 
     async fn set_locale(&mut self, locale: String) {
@@ -286,6 +319,7 @@ async fn main() -> Result<()> {
 
     let source = FilesSource {
         playlist: playlist.clone(),
+        fin_de_liste: false,
         state_path: state_path.clone(),
         mpv_playlist_path,
         catalog: catalog.clone(),
@@ -372,6 +406,7 @@ mod tests {
         std::mem::forget(dir);
         FilesSource {
             playlist: Arc::new(AsyncRwLock::new(playlist)),
+            fin_de_liste: false,
             state_path: racine.join("plugin-files.json"),
             mpv_playlist_path: racine.join("plugin-files.m3u"),
             catalog: Arc::new(RwLock::new(Catalog::load("files", "en", &racine, FILES_EN))),
@@ -530,6 +565,65 @@ mod tests {
         s.locales_root = dir.path().to_path_buf();
         s.set_locale("fr".into()).await;
         assert_eq!(s.activate().await.status.as_deref(), Some("FICHIERS"));
+    }
+
+    #[tokio::test]
+    async fn un_arret_sur_liste_vide_dit_que_la_liste_est_vide() {
+        // Défaut signalé, et il était mesquin : `jouer()` affichait bien
+        // « AUCUNE LISTE », mais sans piste mpv reste inactif, le cœur envoyait
+        // donc `stop()` aussitôt — et cette trame écrasait le message par un
+        // statut générique. L'utilisateur ne pouvait pas apprendre que sa liste
+        // était vide.
+        let mut s = source_de_test(Playlist::default());
+        assert_eq!(s.activate().await.status.as_deref(), Some("NO PLAYLIST"));
+        assert_eq!(s.stop().await.status.as_deref(), Some("NO PLAYLIST"));
+    }
+
+    #[tokio::test]
+    async fn un_arret_en_fin_de_liste_le_dit() {
+        // mpv annonce `playlist-pos = -1` en fin de liste, puis le cœur envoie
+        // `stop()`. Sans souvenir de ce -1, l'arrêt était muet : la lecture
+        // s'arrêtait sans que rien ne distingue « c'est fini » de « on a
+        // appuyé sur stop ».
+        let mut s = source_de_test(liste_de(3));
+        s.activate().await;
+        s.player_track(-1).await;
+        assert_eq!(s.stop().await.status.as_deref(), Some("END OF PLAYLIST"));
+    }
+
+    #[tokio::test]
+    async fn un_arret_demande_reste_un_arret_ordinaire() {
+        // Garde-fou du test précédent : « fin de liste » ne doit pas devenir le
+        // message de tout arrêt.
+        let mut s = source_de_test(liste_de(3));
+        s.activate().await;
+        assert_eq!(s.stop().await.status.as_deref(), Some("FILES"));
+    }
+
+    #[tokio::test]
+    async fn relancer_efface_la_fin_de_liste_precedente() {
+        // Sans cette remise à zéro, le prochain arrêt annoncerait encore « fin
+        // de liste » alors qu'on vient de repartir sur une piste choisie.
+        let mut s = source_de_test(liste_de(3));
+        s.player_track(-1).await;
+        s.select(2).await;
+        assert_eq!(s.stop().await.status.as_deref(), Some("FILES"));
+    }
+
+    #[tokio::test]
+    async fn une_liste_est_declaree_comme_telle_au_coeur() {
+        // Le défaut central : sans `playlist`, le cœur chargeait le m3u par
+        // `loadfile`, que mpv ne déplie qu'après coup — l'index de départ
+        // arrivait hors bornes et toute sélection rejouait la première piste.
+        let mut s = source_de_test(liste_de(3));
+        match s.select(2).await.action {
+            SourceAction::Play { playlist, start, finite, .. } => {
+                assert!(playlist, "un m3u doit etre charge comme une liste");
+                assert_eq!(start, Some(1), "piste 2 = index 1");
+                assert!(finite, "une liste de fichiers a une fin normale");
+            }
+            autre => panic!("attendu un Play, recu {autre:?}"),
+        }
     }
 
     #[test]

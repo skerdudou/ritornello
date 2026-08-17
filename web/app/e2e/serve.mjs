@@ -104,7 +104,11 @@ const pistes = ['01', '02', '03']
     pistes
       .map(
         (n) =>
-          `ffmpeg -loglevel error -y -f lavfi -i 'sine=frequency=440:duration=1' ` +
+          // 30 s et non 1 s : avec des pistes d'une seconde, la liste
+          // s'epuisait avant que le parcours ait fini de l'observer, et l'etat
+          // « liste terminee » se confondait avec « selection en echec ». Une
+          // duree realiste est ce qui rend la lecture observable.
+          `ffmpeg -loglevel error -y -f lavfi -i 'sine=frequency=440:duration=30' ` +
           `'${mediaRoot}/Album/${n}.mp3' || exit 1`,
       )
       .join('\n') +

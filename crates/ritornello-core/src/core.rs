@@ -845,7 +845,7 @@ impl<P: Player> Core<P> {
     async fn apply(&mut self, action: SourceAction) -> Result<()> {
         match action {
             SourceAction::Noop => {}
-            SourceAction::Play { uri, start, finite } => {
+            SourceAction::Play { uri, start, finite, playlist } => {
                 // La machinerie de relance (`expecting_stream` puis
                 // `PlaybackIdle` → retry) n'existe que pour les flux réseau :
                 // un contenu qui se termine est une fin normale, pas une
@@ -860,10 +860,19 @@ impl<P: Player> Core<P> {
                 // mauvais côté.
                 self.expecting_stream = !finite;
                 self.lecture = true;
-                self.player.play(&uri).await?;
-                // Positionnement **après** le chargement, dans cet ordre : mpv
-                // résout un `.m3u` dès le `loadfile`, la liste est donc déjà
-                // là et il n'y a aucun dépliage différé à attendre.
+                // `loadlist` pour une liste, `loadfile` pour un média : c'est la
+                // Source qui le déclare, et le cœur ne le devine pas. Un `.m3u8`
+                // est une liste pour un lecteur de fichiers et un flux HLS pour
+                // une radio ; renifler l'URI casserait l'un ou l'autre.
+                if playlist {
+                    self.player.load_list(&uri).await?;
+                } else {
+                    self.player.play(&uri).await?;
+                }
+                // Positionnement après le chargement, et cet ordre n'est sûr que
+                // grâce à `loadlist` : avec `loadfile`, mpv ne déplie la liste
+                // qu'après coup — mesuré — et cet index tombait hors bornes
+                // avant que la lecture ne reparte de la première piste.
                 if let Some(n) = start {
                     self.player.set_playlist_pos(n).await?;
                 }
@@ -1036,6 +1045,10 @@ mod tests {
     impl crate::player::Player for FakePlayer {
         async fn play(&self, uri: &str) -> anyhow::Result<()> {
             self.calls.lock().unwrap().push(format!("play {uri}"));
+            Ok(())
+        }
+        async fn load_list(&self, uri: &str) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push(format!("load_list {uri}"));
             Ok(())
         }
         async fn stop(&self) -> anyhow::Result<()> {
@@ -1498,20 +1511,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn un_play_avec_index_charge_puis_positionne() {
-        // L'ordre importe et il est celui-ci : mpv résout un `.m3u` dès le
-        // `loadfile`, donc la liste est déjà là et l'enchaînement immédiat
-        // atterrit sur la bonne piste — mesuré, plutôt que supposé.
+    async fn une_liste_se_charge_par_load_list_puis_se_positionne() {
+        // Le défaut que ce test aurait dû attraper, et qu'il attrape désormais.
+        //
+        // Avec `loadfile`, mpv ne déplie un `.m3u` qu'**après** coup : mesuré
+        // sur mpv 0.37, `playlist-count` vaut 1, puis 3 seulement après un
+        // `end-file`/`start-file`. Le `playlist-pos` enchaîné arrivait donc hors
+        // bornes, la lecture repartait de la première piste, et l'affichage
+        // perdait présélection et titre. `loadlist` déplie sur-le-champ — sa
+        // réponse porte même `num_entries` — ce qui rend cet enchaînement sûr.
         let (mut core, player_calls, _sc, _rx, _d) = setup();
-        core.apply(SourceAction::play("/var/lib/ritornello/plugin-files.m3u").starting_at(4).finite())
-            .await
-            .unwrap();
+        core.apply(
+            SourceAction::play("/var/lib/ritornello/plugin-files.m3u")
+                .playlist()
+                .starting_at(4)
+                .finite(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             *player_calls.lock().unwrap(),
             vec![
-                "play /var/lib/ritornello/plugin-files.m3u".to_string(),
+                "load_list /var/lib/ritornello/plugin-files.m3u".to_string(),
                 "playlist-pos 4".to_string()
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn un_media_reste_charge_par_loadfile() {
+        // La distinction est déclarée par la Source, jamais devinée de l'URI :
+        // un `.m3u8` est une liste pour un lecteur de fichiers et un flux HLS
+        // pour une radio. Renifler l'extension casserait l'un des deux.
+        let (mut core, player_calls, _sc, _rx, _d) = setup();
+        core.apply(SourceAction::play("http://icecast/fip.m3u8")).await.unwrap();
+        assert_eq!(
+            *player_calls.lock().unwrap(),
+            vec!["play http://icecast/fip.m3u8".to_string()]
         );
     }
 

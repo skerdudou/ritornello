@@ -8,6 +8,7 @@
 status_files = "FICHIERS"
 no_playlist = "AUCUNE LISTE"
 empty_track = "PISTE INEXISTANTE"
+end_of_playlist = "FIN DE LISTE"
 
 # Refus de validation des racines.
 bad_root_name = "nom de racine invalide « {name} » : uniquement des minuscules, des chiffres et des tirets, en commençant par une lettre ou un chiffre"
