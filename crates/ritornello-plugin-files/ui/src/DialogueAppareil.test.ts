@@ -8,7 +8,15 @@ import { createT } from '@ritornello/ui'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import DialogueAppareil from './DialogueAppareil.vue'
 import { normaliserDonnees, type Envoyer } from './donnees'
-import { CATALOGUE, EXPLORE_FERME, cliquerPopin, dansPopin, etat, nettoyerPopins } from './harnais'
+import {
+  CATALOGUE,
+  EXPLORE_FERME,
+  cliquerPopin,
+  dansPopin,
+  etat,
+  nettoyerPopins,
+  saisirPopin,
+} from './harnais'
 import type { EtatServeur } from './harnais'
 
 const t = createT(CATALOGUE)
@@ -99,6 +107,32 @@ describe('DialogueAppareil', () => {
     const { envoyer } = await monter(dansLArbre('/ailleurs', []))
     await cliquerPopin('[data-choix-remonter]')
     expect(envoyer).toHaveBeenCalledWith({ op: 'explore_open', kind: 'local' })
+  })
+
+  it('un chemin saisi à la main ouvre ce dossier au lieu de le déclarer', async () => {
+    // Naviguer et non déclarer, à dessein : on garde la vérification qui fait
+    // l'intérêt de la popin — le contenu du dossier et son compte de fichiers
+    // audio — avant de valider quoi que ce soit.
+    const { envoyer } = await monter()
+    await saisirPopin('[data-manual-path]', '  /srv/musique  ')
+    await cliquerPopin('[data-manual-go]')
+    expect(envoyer).toHaveBeenCalledWith({ op: 'explore_local', path: '/srv/musique' })
+  })
+
+  it('la saisie manuelle reste offerte une fois dans l’arborescence', async () => {
+    // C'est même là qu'elle sert le plus : on s'est trompé de branche et on
+    // veut sauter ailleurs sans remonter clic par clic.
+    await monter(dansLArbre('/media/usb/Albums', []))
+    expect(dansPopin('[data-manual-path]')).not.toBeNull()
+  })
+
+  it('une saisie vide ne déclenche rien', async () => {
+    // Sinon le bouton enverrait un `explore_local` sur la chaîne vide, que le
+    // plugin refuserait — un refus provoqué par l'IHM elle-même.
+    const { envoyer } = await monter()
+    await saisirPopin('[data-manual-path]', '   ')
+    expect(dansPopin('[data-manual-go]')?.hasAttribute('disabled')).toBe(true)
+    expect(envoyer).not.toHaveBeenCalled()
   })
 
   it('affiche le refus du plugin dans la popin, pas seulement sur la page', async () => {

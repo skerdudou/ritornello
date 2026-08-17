@@ -96,6 +96,8 @@ current_path_label = "Selected folder"
 audio_here = "{count} audio files here"
 btn_choose_folder = "Use this folder"
 btn_up = "Up one level"
+ph_manual_path = "or type an absolute path"
+btn_go = "Open"
 btn_cancel = "Cancel"
 
 # --- Wizard: network share ---

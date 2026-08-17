@@ -54,6 +54,8 @@ export const CATALOGUE: Record<string, string> = {
   audio_here: '{count} fichiers audio ici',
   btn_choose_folder: 'Choisir ce dossier',
   btn_up: 'Remonter d’un niveau',
+  ph_manual_path: 'ou saisir un chemin absolu',
+  btn_go: 'Ouvrir',
   btn_cancel: 'Annuler',
 
   dlg_share_title: 'Choisir un partage réseau',

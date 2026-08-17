@@ -60,6 +60,19 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   // verrait pas.
   await expect(page.locator('[data-volume]')).toHaveCount(1)
   await page.locator('[data-volume]').click()
+
+  // La popin ne doit pas deborder de son propre cadre. `DialogContent` est une
+  // grille, et la largeur minimale d'un enfant de grille vaut par defaut celle
+  // de son contenu : un nom de dossier long poussait le panneau au-dela de son
+  // fond blanc, et la barre de defilement comme les boutons se retrouvaient
+  // peints dehors. jsdom n'a pas de moteur de mise en page et ne peut pas le
+  // voir — c'est mesurable ici, et nulle part ailleurs.
+  const popin = page.locator('[data-dlg-appareil]')
+  await expect(popin.locator('[data-choix-dossier]').first()).toBeVisible()
+  const debordement = await popin.evaluate(
+    (el) => el.scrollWidth - el.clientWidth,
+  )
+  expect(debordement, 'la popin deborde horizontalement de son cadre').toBeLessThanOrEqual(1)
   // On descend dans `media`, le dossier des fixtures. `proc` n'est pas
   // proposable : le volume unique est le repertoire jetable, et la liste
   // blanche des systemes de fichiers ecarte les pseudo-systemes.

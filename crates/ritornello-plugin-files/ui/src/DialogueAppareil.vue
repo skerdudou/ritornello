@@ -6,8 +6,9 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
+  Input,
 } from '@ritornello/ui'
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import ChoixDossier from './ChoixDossier.vue'
 import type { Donnees, Envoyer, T } from './donnees'
 
@@ -56,8 +57,28 @@ const volumeCourant = computed(() => {
   )
 })
 
+const saisie = ref('')
+
 function aller(chemin: string): void {
   void props.envoyer({ op: 'explore_local', path: chemin })
+}
+
+/**
+ * Ouvre le chemin saisi à la main.
+ *
+ * L'assistant **navigue** vers ce chemin au lieu de le déclarer directement, et
+ * c'est délibéré : on garde la vérification qui fait tout l'intérêt de la popin
+ * — on voit le contenu et le nombre de fichiers audio avant de valider. Un
+ * chemin refusé s'affiche ici même.
+ *
+ * Elle sert quand le dossier visé n'est sous aucun volume proposé, ou quand on
+ * a déjà le chemin sous la main et qu'il serait absurde de le retrouver clic
+ * par clic.
+ */
+function ouvrirSaisie(): void {
+  const chemin = saisie.value.trim()
+  if (!chemin) return
+  aller(chemin)
 }
 
 /**
@@ -123,7 +144,13 @@ function fermer(): void {
         <DialogDescription>{{ t('dlg_device_desc') }}</DialogDescription>
       </DialogHeader>
 
-      <div v-if="!dansLArbre" class="space-y-2">
+      <!-- `min-w-0` n'est pas décoratif : `DialogContent` est une grille, et la
+           largeur minimale d'un enfant de grille vaut par défaut celle de son
+           contenu. Un nom de dossier long poussait donc la grille au-delà du
+           fond de la popin, et la barre de défilement comme les boutons se
+           retrouvaient peints hors du cadre blanc. L'autoriser à rétrécir est ce
+           qui rend `truncate` opérant à l'intérieur. -->
+      <div v-if="!dansLArbre" class="min-w-0 space-y-2">
         <p class="text-sm text-muted-foreground">{{ t('volumes_label') }}</p>
         <!-- Une liste vide sans phrase se lirait comme un chargement qui n'a
              pas fini. -->
@@ -135,12 +162,12 @@ function fermer(): void {
           :key="v.path"
           type="button"
           data-volume
-          class="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-sm hover:bg-accent"
+          class="flex w-full min-w-0 items-center gap-2 rounded px-2 py-1 text-left text-sm hover:bg-accent"
           :disabled="fige"
           @click="aller(v.path)"
         >
-          <span class="flex-1 truncate">{{ v.path }}</span>
-          <span class="text-xs text-muted-foreground">{{ v.fstype }}</span>
+          <span class="min-w-0 flex-1 truncate">{{ v.path }}</span>
+          <span class="shrink-0 text-xs text-muted-foreground">{{ v.fstype }}</span>
         </button>
       </div>
 
@@ -165,10 +192,35 @@ function fermer(): void {
         />
       </template>
 
+      <!-- Saisie directe d'un chemin. Elle **navigue** au lieu de déclarer :
+           on garde ainsi la vérification qui fait l'intérêt de la popin — le
+           contenu du dossier et son compte de fichiers audio avant de valider.
+           Utile quand le dossier visé n'est sous aucun volume proposé, ou quand
+           on a déjà le chemin sous la main. -->
+      <form class="flex min-w-0 gap-2" @submit.prevent="ouvrirSaisie">
+        <Input
+          v-model="saisie"
+          data-manual-path
+          class="min-w-0 flex-1"
+          :placeholder="t('ph_manual_path')"
+        />
+        <Button
+          variant="secondary"
+          type="submit"
+          data-manual-go
+          class="shrink-0"
+          :disabled="fige || !saisie.trim()"
+        >
+          {{ t('btn_go') }}
+        </Button>
+      </form>
+
       <!-- Le refus s'affiche **ici** et pas seulement sur la page : derrière le
            voile gris de la boîte de dialogue, le bandeau de la page est à peu
            près invisible au moment précis où il compte. -->
-      <p v-if="message" class="text-sm text-destructive" data-dlg-message>{{ message }}</p>
+      <p v-if="message" class="min-w-0 break-words text-sm text-destructive" data-dlg-message>
+        {{ message }}
+      </p>
 
       <div class="flex justify-end gap-2">
         <Button variant="ghost" data-annuler @click="fermer">{{ t('btn_cancel') }}</Button>

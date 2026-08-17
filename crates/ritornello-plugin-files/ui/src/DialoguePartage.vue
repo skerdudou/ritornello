@@ -157,17 +157,22 @@ function fermer(): void {
       </div>
 
       <template v-else>
-        <p v-if="ex.error" class="text-sm text-destructive" data-partage-erreur>{{ ex.error }}</p>
+        <p v-if="ex.error" class="min-w-0 break-words text-sm text-destructive" data-partage-erreur>{{ ex.error }}</p>
 
-        <div v-if="listeDePartages" class="space-y-1">
+        <!-- `min-w-0` pour la même raison que dans l'assistant local : un enfant
+             de grille ne rétrécit pas sous la largeur de son contenu sans
+             autorisation, et un nom de partage long pousserait la popin hors de
+             son propre fond. -->
+        <div v-if="listeDePartages" class="min-w-0 space-y-1">
           <p class="text-sm text-muted-foreground">{{ t('shares_label') }}</p>
           <button
             v-for="s in ex.shares"
             :key="s"
             type="button"
             data-share
-            class="w-full truncate rounded px-2 py-1 text-left text-sm hover:bg-accent"
+            class="block w-full truncate rounded px-2 py-1 text-left text-sm hover:bg-accent"
             :disabled="fige || ex.busy"
+            :title="s"
             @click="choisirPartage(s)"
           >
             {{ s }}
@@ -187,7 +192,7 @@ function fermer(): void {
       <!-- Le refus s'affiche **ici** et pas seulement sur la page : derrière le
            voile gris de la boîte de dialogue, le bandeau de la page est à peu
            près invisible au moment précis où il compte. -->
-      <p v-if="message" class="text-sm text-destructive" data-dlg-message>{{ message }}</p>
+      <p v-if="message" class="min-w-0 break-words text-sm text-destructive" data-dlg-message>{{ message }}</p>
 
       <div class="flex flex-wrap justify-end gap-2">
         <Button variant="ghost" data-manuel @click="manuel = !manuel">

@@ -142,6 +142,18 @@ writeFileSync(
   `/dev/sda1 ${dirConfig} ext4 rw,relatime 0 0\nproc /proc proc rw,relatime 0 0\n`,
 )
 
+// A folder with a deliberately long name, sitting next to the fixtures inside
+// the volume the wizard opens on.
+//
+// It exists for one assertion only: that the dialog does not overflow its own
+// box. `DialogContent` is a grid, and a grid child's minimum width defaults to
+// its content's — so a long name used to push the panel past its white
+// background, painting the scrollbar and the buttons outside it. jsdom has no
+// layout engine and cannot see that; Playwright measures it.
+const NOM_LONG =
+  'Un nom de dossier volontairement tres long pour eprouver la mise en page de la popin'
+mkdirSync(join(dirConfigNative, NOM_LONG), { recursive: true })
+
 // A fake `smbclient`, so the network wizard can be played end to end on a
 // machine with no NAS — and, more to the point, on anyone's machine. It prints
 // output *captured from a real Synology*, so the parsing is exercised against
