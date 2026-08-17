@@ -7,6 +7,45 @@ describe('FilesAdmin, la page', () => {
   beforeEach(() => vi.unstubAllGlobals())
   afterEach(() => vi.useRealTimers())
 
+  it('relit l’état quand le lecteur change, pour que la piste surlignée suive', async () => {
+    // Défaut signalé : le surlignage vient d'`index`, que seul `api/data`
+    // porte — et le sondage s'arrête dès qu'aucun travail n'est en cours. La
+    // piste changeant d'elle-même à chaque fin de morceau, le surlignage restait
+    // figé sur celle du début.
+    //
+    // Un flux poussé plutôt qu'un sondage permanent : le cœur annonce déjà
+    // chaque changement. jsdom n'a pas d'`EventSource`, on le simule donc — sans
+    // quoi ce chemin ne serait éprouvé nulle part.
+    const flux: { onmessage: (() => void) | null } = { onmessage: null }
+    vi.stubGlobal(
+      'EventSource',
+      class {
+        onmessage: (() => void) | null = null
+        constructor() {
+          // eslint-disable-next-line @typescript-eslint/no-this-alias
+          const soi = this
+          Object.defineProperty(flux, 'onmessage', {
+            configurable: true,
+            get: () => soi.onmessage,
+            set: (v) => {
+              soi.onmessage = v
+            },
+          })
+        }
+        close(): void {}
+      },
+    )
+    const s = serveur({ playlist: [{ path: '/m/1.mp3', name: '01' }], index: 0 })
+    mount(FilesAdmin, { props: { catalog: CATALOGUE, base: BASE } })
+    await flushPromises()
+    const avant = s.urls().length
+
+    s.data.index = 1
+    flux.onmessage?.()
+    await flushPromises()
+    expect(s.urls().length).toBe(avant + 1)
+  })
+
   it('adresse toutes ses requêtes sous le préfixe absolu reçu par `base`', async () => {
     // Régression encodée : un `./api/data` relatif se résout contre l'URL du
     // navigateur, pas contre le préfixe du plugin. Sur `/plugins/files` (sans

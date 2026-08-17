@@ -1,6 +1,7 @@
 export { UI_CONTRACT } from './contract'
 export { createT, type Catalog } from './i18n'
 export { api } from './api'
+export { surLecteur } from './lecteur'
 export { cn } from './lib/utils'
 export {
   applyTheme,

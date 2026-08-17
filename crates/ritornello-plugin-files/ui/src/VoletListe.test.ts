@@ -53,6 +53,52 @@ describe('volet de la liste en cours', () => {
     expect((w.findAll('[data-track-down]')[2]!.element as HTMLButtonElement).disabled).toBe(true)
   })
 
+  it('réordonne au glisser-déposer, comme la grille des stations', async () => {
+    const { w, s } = await monter({ playlist: TROIS })
+    const lignes = w.findAll('[data-track-row]')
+    await lignes[2]!.trigger('dragstart')
+    await lignes[0]!.trigger('drop')
+    await flushPromises()
+    expect(s.putsDe('move')).toEqual([{ op: 'move', from: 2, to: 0 }])
+  })
+
+  it('déposer une piste sur elle-même ne demande rien', async () => {
+    // Sinon le moindre clic un peu appuyé sur une ligne déclencherait un
+    // déplacement sans effet, et une relecture complète de l'état avec.
+    const { w, s } = await monter({ playlist: TROIS })
+    const lignes = w.findAll('[data-track-row]')
+    await lignes[1]!.trigger('dragstart')
+    await lignes[1]!.trigger('drop')
+    await flushPromises()
+    expect(s.putsDe('move')).toEqual([])
+  })
+
+  it('déposer sans avoir rien pris ne demande rien', async () => {
+    const { w, s } = await monter({ playlist: TROIS })
+    await w.findAll('[data-track-row]')[0]!.trigger('drop')
+    await flushPromises()
+    expect(s.putsDe('move')).toEqual([])
+  })
+
+  it('les rangs envoyés au plugin sont absolus, pas ceux de la page', async () => {
+    // Au-delà de deux cents pistes la liste est paginée : confondre le rang
+    // affiché avec l'index réel déplacerait une tout autre piste.
+    const longue = Array.from({ length: 250 }, (_, i) => ({
+      path: `/m/${i}.mp3`,
+      name: `${i}`,
+      duration_s: 0,
+      missing: false,
+    }))
+    const { w, s } = await monter({ playlist: longue })
+    await w.find('[data-page-next]').trigger('click')
+    await flushPromises()
+    const lignes = w.findAll('[data-track-row]')
+    await lignes[1]!.trigger('dragstart')
+    await lignes[0]!.trigger('drop')
+    await flushPromises()
+    expect(s.putsDe('move')).toEqual([{ op: 'move', from: 101, to: 100 }])
+  })
+
   it('affiche ce qu’un m3u chargé n’a pas su retrouver', async () => {
     // Sans cet encart, la liste chargée est simplement plus courte que le
     // fichier, sans que rien ne le dise.

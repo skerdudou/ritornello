@@ -84,6 +84,7 @@ export const CATALOGUE: Record<string, string> = {
   col_duration: 'Durée',
   empty_playlist: 'Liste vide',
   missing_badge: 'introuvable',
+  reorder_hint: 'Glisser pour réordonner',
   btn_move_up: 'Monter la piste',
   btn_move_down: 'Descendre la piste',
   btn_remove_track: 'Retirer la piste',

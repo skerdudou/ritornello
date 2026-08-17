@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { api, createT, type Catalog } from '@ritornello/ui'
+import { api, createT, surLecteur, type Catalog } from '@ritornello/ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { normaliserDonnees, type Donnees } from './donnees'
 import VoletListe from './VoletListe.vue'
@@ -108,6 +108,29 @@ onMounted(recharger)
 // composant est détruit, et un `recharger()` continue de tourner toutes les
 // secondes contre un composant mort.
 onUnmounted(arreterSondage)
+
+/**
+ * Relit l'état quand le lecteur change, pour que la piste surlignée suive.
+ *
+ * Le surlignage vient d'`index`, que seul `api/data` porte — et le sondage
+ * s'arrête dès qu'aucun travail n'est en cours. La piste en cours changeant
+ * d'elle-même à chaque fin de morceau, le surlignage restait donc figé sur
+ * celle du début.
+ *
+ * Un flux poussé plutôt qu'un sondage permanent : le cœur annonce déjà chaque
+ * changement, et sonder en continu ferait marteler le plugin tant qu'un onglet
+ * reste ouvert. Une relecture de plus au moment du changement, et rien entre
+ * deux.
+ */
+let fermerLecteur: (() => void) | null = null
+onMounted(() => {
+  fermerLecteur = surLecteur(() => {
+    // Pas pendant un envoi : le SDK sert les requêtes en série, et une relecture
+    // qui s'y ajouterait ferait dépasser le plafond de 5 s du cœur.
+    if (!enCours.value && !chargementEchoue.value) void recharger()
+  })
+})
+onUnmounted(() => fermerLecteur?.())
 
 // Vol unique : le SDK sert les requêtes d'admin strictement en série, et le
 // cœur abandonne au bout de 5 s. Deux opérations déclenchées coup sur coup se

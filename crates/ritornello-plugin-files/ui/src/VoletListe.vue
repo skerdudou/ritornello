@@ -78,6 +78,31 @@ function deplacer(depuis: number, vers: number): void {
   void props.envoyer({ op: 'move', from: depuis, to: vers })
 }
 
+/**
+ * Rang **absolu** de la piste en cours de glissement, ou `null`.
+ *
+ * Absolu et non relatif à la page : c'est l'index que le plugin attend, et une
+ * liste paginée les fait diverger dès la deuxième page.
+ */
+const glisse = ref<number | null>(null)
+
+/**
+ * Dépose la piste glissée à la place de celle survolée.
+ *
+ * Le glisser-déposer ne couvre que les lignes **visibles** : au-delà de deux
+ * cents pistes la liste est paginée, et on ne peut pas glisser vers une page
+ * qu'on ne voit pas. Les boutons haut/bas, eux, franchissent les pages — ils
+ * restent donc là, et pas seulement pour le clavier.
+ */
+function deposer(vers: number): void {
+  if (glisse.value === null || glisse.value === vers) {
+    glisse.value = null
+    return
+  }
+  deplacer(glisse.value, vers)
+  glisse.value = null
+}
+
 function retirer(i: number): void {
   void props.envoyer({ op: 'remove', index: i })
 }
@@ -148,14 +173,34 @@ function charger(): void {
           </tr>
         </thead>
         <tbody>
+          <!-- Lignes déplaçables, comme la grille des stations du plugin radio.
+               `dragover.prevent` est indispensable : sans lui le navigateur
+               refuse le dépôt. Le rang envoyé au plugin est **absolu**
+               (`decalage + i`) et non celui de la page. -->
           <tr
             v-for="(p, i) in fenetre"
             :key="`${decalage + i}:${p.path}`"
             data-track-row
             class="border-t border-border"
-            :class="decalage + i === donnees.index ? 'bg-muted/50' : ''"
+            :class="[
+              decalage + i === donnees.index ? 'bg-muted/50' : '',
+              glisse === decalage + i ? 'opacity-50' : '',
+            ]"
+            :draggable="!fige"
+            @dragstart="glisse = decalage + i"
+            @dragover.prevent
+            @drop.prevent="deposer(decalage + i)"
+            @dragend="glisse = null"
           >
-            <td class="tabular-nums text-muted-foreground" data-track-num>{{ decalage + i + 1 }}</td>
+            <!-- `data-track-num` porte le **seul** numéro, et non la cellule :
+                 la poignée de glissement y vit aussi, et un test qui lirait le
+                 texte de la cellule y trouverait le glyphe. -->
+            <td class="whitespace-nowrap tabular-nums text-muted-foreground">
+              <span class="cursor-grab select-none pr-1" :title="t('reorder_hint')" data-drag-handle>
+                ⠿
+              </span>
+              <span data-track-num>{{ decalage + i + 1 }}</span>
+            </td>
             <td class="py-1 pr-2">
               <span data-track-name>{{ p.name }}</span>
               <!-- Une piste introuvable est **marquée, jamais masquée** : une
