@@ -512,7 +512,7 @@ impl<P: Player> Core<P> {
 
     /// Diffuse l'état structuré du lecteur : à la SPA, et aux plugins Display
     /// (qui composent eux-mêmes leur mise en page depuis cette même trame).
-    fn publie_etat(&self) {
+    pub(crate) fn publie_etat(&self) {
         let etat = self.etat_lecteur();
         // Publié généreusement (à la fin de chaque commande, en plus des
         // chemins de métadonnées), donc dédupliqué : sans cette garde, chaque
@@ -1125,6 +1125,16 @@ impl<P: Player> Core<P> {
     /// le `select!`, à l'image de `retry_at`, pour bâtir la temporisation).
     pub fn overlay_deadline(&self) -> Option<Instant> {
         self.overlay.as_ref().map(|(_, deadline)| *deadline)
+    }
+
+    /// Le cœur veut-il être rappelé dans une seconde pour rafraîchir la
+    /// position ?
+    ///
+    /// Armé seulement pendant la lecture : un appareil à l'arrêt ou en veille
+    /// ne doit pas produire une trame par seconde pour rien, et la
+    /// déduplication de `publie_etat` reprend alors tous ses droits.
+    pub fn tick_position(&self) -> bool {
+        !self.standby && self.lecture
     }
 
     /// Efface l'overlay expiré et laisse réapparaître l'état permanent
@@ -1950,6 +1960,48 @@ mod tests {
         assert!(veille.overlay.is_none());
         assert_eq!(veille.status.as_deref(), Some("STANDBY"));
         assert!(core.overlay_deadline().is_none());
+    }
+
+    #[tokio::test]
+    async fn le_tick_ne_s_arme_pas_quand_rien_ne_joue() {
+        let (mut core, _, _, _, _dir) = setup();
+        assert!(!core.tick_position(), "rien ne joue : rien à rafraîchir");
+        // `radio` est la source active de `setup()` : `PlayPause` la fait jouer.
+        // Le tick ne s'intéresse pas à la nature du contenu, seulement au fait
+        // que quelque chose joue.
+        core.handle_command(Command::PlayPause).await.unwrap();
+        assert!(core.tick_position(), "quelque chose joue : on suit sa position");
+        core.handle_command(Command::Stop).await.unwrap();
+        assert!(!core.tick_position());
+    }
+
+    #[tokio::test]
+    async fn le_tick_ne_s_arme_pas_en_veille() {
+        let (mut core, _, _, _, _dir) = setup();
+        core.handle_command(Command::PlayPause).await.unwrap();
+        assert!(core.tick_position());
+        core.handle_command(Command::Power).await.unwrap();
+        assert!(!core.tick_position(), "l'appareil dort");
+    }
+
+    /// La règle qui protège les messages éphémères : le tick republie l'état
+    /// **avec** l'incrustation en cours, intacte, et sans toucher à son
+    /// échéance. C'est l'afficheur qui décide de la mettre par-dessus ou à
+    /// côté ; le cœur reste seul maître du moment où elle disparaît.
+    #[tokio::test]
+    async fn un_rafraichissement_de_position_laisse_l_incrustation_intacte() {
+        let (mut core, _, _, _, _dir) = setup();
+        // Un contenu **fini** : c'est le seul cas où mpv fournit une position,
+        // donc le seul où le rafraîchissement a quelque chose à publier.
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        core.handle_command(Command::VolumeUp).await.unwrap();
+        let echeance_avant = core.overlay_deadline();
+        assert!(core.etat_lecteur().overlay.is_some(), "l'incrustation volume est là");
+        core.regle_progression(Some(30.0), Some(254.0));
+        core.rafraichit_position().await;
+        assert!(core.etat_lecteur().overlay.is_some(), "et elle y reste");
+        assert_eq!(core.overlay_deadline(), echeance_avant, "son échéance n'a pas bougé");
+        assert_eq!(core.etat_lecteur().position_s, Some(30));
     }
 
     fn enrichissement(identity: serde_json::Value, artist: &str, title: &str) -> Enrichment {

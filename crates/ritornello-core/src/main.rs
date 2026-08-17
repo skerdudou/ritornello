@@ -420,6 +420,17 @@ async fn main() -> Result<()> {
                 None => std::future::pending().await,
             }
         };
+        // Tick de position : une seconde, armé seulement pendant la lecture
+        // (voir `Core::tick_position`). Lu avant le `select!` comme les deux
+        // autres échéances, pour ne pas garder d'emprunt sur `core`.
+        let position_arme = core.tick_position();
+        let position_sleep = async {
+            if position_arme {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            } else {
+                std::future::pending().await
+            }
+        };
         tokio::select! {
             Some(msg) = cmd_rx.recv() => {
                 if let Err(e) = core.handle_input(msg).await {
@@ -472,6 +483,16 @@ async fn main() -> Result<()> {
             }
             _ = overlay_sleep => {
                 core.expire_overlay();
+            }
+            _ = position_sleep => {
+                // Rafraîchir puis publier : la position ayant changé, la trame
+                // franchit la déduplication et part vers la SPA comme vers les
+                // afficheurs. L'incrustation éventuellement en cours voyage
+                // dans cette même trame, intacte — c'est l'afficheur qui
+                // décide de sa place, et le cœur garde la main sur son
+                // échéance (bras `overlay_sleep`).
+                core.rafraichit_position().await;
+                core.publie_etat();
             }
             // `next()` et non `select_next_some()` : `tokio::select!` ne
             // consulte pas `is_terminated`, et re-poller un `FuturesUnordered`
