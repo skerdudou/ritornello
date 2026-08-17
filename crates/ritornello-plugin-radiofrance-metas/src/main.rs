@@ -143,9 +143,19 @@ impl MetadataPlugin for RadioFranceMetas {
                     // retard (voir `live::album_dans_grille`).
                     album: meta.album,
                     duration_s: meta.duration_s,
-                    // Renseigné par une tâche ultérieure : le direct annonce
-                    // le début du morceau, dont on déduira l'écoulé.
-                    position_s: None,
+                    // L'écoulé est calculé **ici**, au moment d'émettre : c'est
+                    // le seul instant où il est exact, et le cœur l'ancre à sa
+                    // réception. Une horloge décalée ou un `startTime` dans le
+                    // futur donnerait un écoulé négatif : `checked_sub` le
+                    // ramène à « je ne sais pas » plutôt qu'à zéro, qui
+                    // prétendrait savoir.
+                    position_s: meta.start_time.and_then(|debut| {
+                        let maintenant = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .ok()?
+                            .as_secs();
+                        maintenant.checked_sub(debut).and_then(|e| u32::try_from(e).ok())
+                    }),
                 };
             }
         }
@@ -214,6 +224,7 @@ mod tests {
                     title: Some("Fire".into()),
                     album: Some("At Last!".into()),
                     duration_s: Some(197),
+                    ..Default::default()
                 },
             ))
             .await

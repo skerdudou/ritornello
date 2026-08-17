@@ -22,6 +22,11 @@ pub struct Meta {
     pub title: Option<String>,
     pub album: Option<String>,
     pub duration_s: Option<u32>,
+    /// Début du morceau, en secondes depuis l'époque Unix, tel que le direct
+    /// l'annonce. Brut : c'est l'émission de l'enrichissement qui en déduit
+    /// l'écoulé, pour que ce module reste sans horloge et testable sur des
+    /// captures.
+    pub start_time: Option<u64>,
 }
 
 /// Une réponse lue : ce qui passe, et dans combien de temps rappeler.
@@ -145,6 +150,13 @@ pub fn parse_direct(charge: &str) -> Option<Direct> {
         // Le direct ne porte pas d'album : il se lit dans la grille, à part.
         album: None,
         duration_s: duree.filter(|_| est_un_morceau).filter(|d| *d <= DUREE_MAX_S).map(|d| d as u32),
+        // Même filtre que la durée : sans `firstLineSongUuid`, les bornes sont
+        // celles d'une tranche d'antenne, pas d'un morceau.
+        start_time: now
+            .get("startTime")
+            .and_then(Value::as_u64)
+            .filter(|_| est_un_morceau)
+            .filter(|_| duree.is_some_and(|d| d <= DUREE_MAX_S)),
     };
     // Une durée seule n'est pas affichable : ce n'est pas une réponse.
     let meta = (meta.artist.is_some() || meta.title.is_some()).then_some(meta);
@@ -445,6 +457,27 @@ mod tests {
             url_direct(6, "webrf_mouv_player"),
             "https://api.radiofrance.fr/livemeta/live/6/webrf_mouv_player"
         );
+    }
+
+    /// `startTime` est retenu **brut** : c'est au moment d'émettre
+    /// l'enrichissement qu'on en déduit l'écoulé, pas au moment d'analyser la
+    /// réponse — l'analyse reste pure, sans horloge, comme tout ce module.
+    #[test]
+    fn le_direct_retient_le_debut_du_morceau() {
+        let m = parse_direct(REPONSE_FIP).unwrap().meta.unwrap();
+        assert_eq!(m.start_time, Some(1786722565));
+        assert_eq!(m.duration_s, Some(197));
+    }
+
+    /// Même filtre que la durée : sans `firstLineSongUuid`, les bornes sont
+    /// celles d'une tranche d'antenne et non d'un morceau. En déduire une
+    /// position afficherait une progression fausse — mesuré à une heure sur
+    /// Mouv'.
+    #[test]
+    fn une_tranche_d_antenne_ne_donne_pas_de_debut_de_morceau() {
+        let m = parse_direct(REPONSE_MOUV).unwrap().meta.unwrap();
+        assert_eq!(m.start_time, None);
+        assert_eq!(m.duration_s, None);
     }
 
     #[test]
