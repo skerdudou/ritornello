@@ -150,12 +150,12 @@ cmd = "Power"
 code = 356
 cmd = "Power"
 
-# Retour et avance rapides. Codes evdev standards des touches
-# correspondantes d'une telecommande MCE, absents de l'ancienne table codee
-# en dur dont ce preset est la transcription : ils n'ont donc pas ete
-# verifies sur l'exemplaire du proprietaire. Une telecommande qui ne les
-# emet pas rend simplement ces deux lignes inertes, sans rien casser, et la
-# page d'apprentissage reste le moyen sur de les lier.
+# Rewind and fast forward. Standard evdev codes for the corresponding keys
+# on an MCE remote, absent from the old hard-coded table this preset is a
+# transcription of: they haven't been verified against the owner's actual
+# unit. A remote that doesn't emit them simply leaves these two lines inert,
+# without breaking anything, and the learning page remains the safe way to
+# bind them.
 
 [[bindings]]
 code = 168

@@ -144,19 +144,19 @@ pub fn parse_direct(charge: &str) -> Option<Direct> {
     // renvoie une locale hors musique (« Le 18/19, ICI Picardie » des deux
     // côtés), et l'afficher donnerait « X — X ».
     let artist = artist.filter(|a| !title.as_ref().is_some_and(|t| t.trim().eq_ignore_ascii_case(a.trim())));
+    // « C'est un morceau ET la durée est plausible » : une seule expression,
+    // employée pour `duration_s` comme pour `start_time`. Écrite deux fois,
+    // elle pourrait dériver ; `start_time` sortirait alors sans `duration_s`,
+    // et le plafonnement de la position côté cœur — qui a besoin des deux —
+    // disparaîtrait en silence, la barre franchissant la fin du morceau.
+    let morceau_plausible = est_un_morceau && duree.is_some_and(|d| d <= DUREE_MAX_S);
     let meta = Meta {
         title,
         artist,
         // Le direct ne porte pas d'album : il se lit dans la grille, à part.
         album: None,
-        duration_s: duree.filter(|_| est_un_morceau).filter(|d| *d <= DUREE_MAX_S).map(|d| d as u32),
-        // Même filtre que la durée : sans `firstLineSongUuid`, les bornes sont
-        // celles d'une tranche d'antenne, pas d'un morceau.
-        start_time: now
-            .get("startTime")
-            .and_then(Value::as_u64)
-            .filter(|_| est_un_morceau)
-            .filter(|_| duree.is_some_and(|d| d <= DUREE_MAX_S)),
+        duration_s: duree.filter(|_| morceau_plausible).map(|d| d as u32),
+        start_time: now.get("startTime").and_then(Value::as_u64).filter(|_| morceau_plausible),
     };
     // Une durée seule n'est pas affichable : ce n'est pas une réponse.
     let meta = (meta.artist.is_some() || meta.title.is_some()).then_some(meta);

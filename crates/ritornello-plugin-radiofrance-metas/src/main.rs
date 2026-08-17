@@ -224,7 +224,7 @@ mod tests {
                     title: Some("Fire".into()),
                     album: Some("At Last!".into()),
                     duration_s: Some(197),
-                    ..Default::default()
+                    start_time: None,
                 },
             ))
             .await

@@ -38,19 +38,20 @@ act_select_7 = "Preset 7"
 act_select_8 = "Preset 8"
 act_select_9 = "Preset 9"
 act_select_0 = "Key 0"
-# "Presets" rather than a bare "+10": this key shifts the next digit by ten
-# (+10 then 4 selects station 14), it does not move playback. Without that
-# word it reads as "+10 seconds" as soon as the seek actions sit in the same
-# list — which is exactly what happened.
+# « Presets » plutot qu'un simple « +10 » : cette touche decale le chiffre
+# suivant de dix (+10 puis 4 selectionne la station 14), elle ne deplace pas
+# la lecture. Sans ce mot, elle se lit comme « +10 secondes » des que les
+# actions de deplacement partagent la meme liste — ce qui est exactement ce
+# qui s'est produit.
 act_plus10 = "Presets +10"
 act_volume_up = "Volume +"
 act_volume_down = "Volume -"
 act_mute = "Mute"
 act_play_pause = "Play/pause"
 act_stop = "Stop"
-# "in track" tells these two apart from "Previous"/"Next", which change
-# track. No number in the label: the step is configurable on the config
-# page, and "10 s" would become a lie.
+# « in track » les distingue de « Previous »/« Next », qui changent de piste.
+# Pas de chiffre dans le libelle : le pas est reglable depuis la page de
+# configuration, et « 10 s » deviendrait un mensonge.
 act_seek_back = "Rewind in track"
 act_seek_forward = "Fast forward in track"
 act_next = "Next"
