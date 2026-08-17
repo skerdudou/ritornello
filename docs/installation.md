@@ -157,13 +157,25 @@ usual hardening (`NoNewPrivileges`, `ProtectSystem=strict`,
 | OS shutdown / reboot | polkit rule + logind (see the next section) |
 | plugin and mpv sockets (`/run/ritornello`) | `RuntimeDirectory` |
 | persisted state (`/var/lib/ritornello`) | `StateDirectory` |
+| firmware under-voltage flag (`/dev/vcio`, read-only) | `video` group (see below) |
 
-The groups are granted by `SupplementaryGroups=` in the unit — the user
-itself is not added to any group, so the unit is the single place to
-audit. `/etc/ritornello` is owned by the service user: the radio and
-generic-input plugins persist `stations.toml` and `input-bindings.toml`
-there through atomic writes (`.tmp` then rename), which requires write
-access to the directory itself.
+The groups above the last row are granted by `SupplementaryGroups=` in the
+unit — the user itself is not added to any group, so the unit is the single
+place to audit. `video` is the deliberate exception: `deploy.sh` runs
+`sudo usermod -aG video ritornello` instead, because the whole privilege
+fits in that one line and `/dev/vcio` already has the right permissions
+(`crw-rw---- root video`) — no udev rule to install, nothing to add to the
+hardened unit for it. It grants read access to the firmware's mailbox,
+which `vcgencmd get_throttled` uses: the kernel publishes no sysfs or procfs
+equivalent (`find /sys -name "*throttled*"` finds nothing on a real Pi, only
+`soc:firmware:vcio` shows up), so this is the only way to ever learn that an
+under-voltage episode has occurred since boot. Without it,
+`under_voltage_since_boot` in `GET /api/system` stays `null` and the System
+tab shows "—" for it, the same as any other sensor a machine does not
+expose — nothing else breaks. `/etc/ritornello` is owned by the service
+user: the radio and generic-input plugins persist `stations.toml` and
+`input-bindings.toml` there through atomic writes (`.tmp` then rename),
+which requires write access to the directory itself.
 
 Installing by hand instead of through `deploy.sh`? The two commands the
 script runs for this are:
@@ -171,6 +183,7 @@ script runs for this are:
     sudo useradd --system --home-dir /var/lib/ritornello --no-create-home \
       --shell /usr/sbin/nologin ritornello
     sudo chown -R ritornello: /etc/ritornello
+    sudo usermod -aG video ritornello
 
 An installation deployed before this change ran as root: the next
 `deploy.sh` migrates it (the user is created, `/etc/ritornello` and
