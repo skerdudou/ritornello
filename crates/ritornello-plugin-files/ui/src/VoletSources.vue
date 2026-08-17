@@ -80,6 +80,23 @@ function remonter(): void {
         {{ r.mounted ? t('mounted_yes') : t('mounted_no') }}
       </span>
 
+      <!-- Le réessai suit l'état **observé**, et non le souvenir de la dernière
+           tentative : `mount_error` vit en mémoire du plugin et repart vide à
+           chaque redémarrage, si bien qu'on retrouvait « non monté » sans plus
+           rien pour y remédier. `mounted`, lui, est lu dans /proc/mounts et dit
+           toujours la vérité.
+           Et il vit sur la ligne de la source, là où le problème s'affiche. -->
+      <Button
+        v-if="r.kind === 'smb' && !r.mounted"
+        variant="outline"
+        size="sm"
+        data-retry-mount
+        :disabled="fige"
+        @click="remonter"
+      >
+        {{ t('btn_retry_mount') }}
+      </Button>
+
       <label v-if="r.kind === 'smb'" class="flex items-center gap-1 text-sm">
         <input
           type="checkbox"
@@ -112,18 +129,17 @@ function remonter(): void {
       </Button>
     </div>
 
-    <!-- Le montage suit désormais la déclaration, sans que l'utilisateur ait un
-         bouton à trouver. Sans ce rapport, une source resterait « non montée »
-         sans jamais dire pourquoi — et le réessai n'aurait nulle part où
-         vivre. -->
-    <div v-if="donnees.mountError" class="space-y-1" data-mount-error>
-      <p class="text-sm text-destructive">
-        {{ t('mount_error_title') }} {{ donnees.mountError }}
-      </p>
-      <Button variant="outline" size="sm" data-retry-mount :disabled="fige" @click="remonter">
-        {{ t('btn_retry_mount') }}
-      </Button>
-    </div>
+    <!-- Le montage suit la déclaration, sans que l'utilisateur ait un bouton à
+         trouver. Sans ce rapport, une source resterait « non montée » sans
+         jamais dire pourquoi. Le texte seul : le réessai vit sur la ligne
+         concernée, et deux boutons pour le même geste feraient hésiter. -->
+    <p
+      v-if="donnees.mountError"
+      class="min-w-0 break-words text-sm text-destructive"
+      data-mount-error
+    >
+      {{ t('mount_error_title') }} {{ donnees.mountError }}
+    </p>
 
     <div class="flex flex-wrap items-center gap-2">
       <Button variant="secondary" data-add-device :disabled="fige" @click="ouvrir('local')">

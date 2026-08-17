@@ -99,6 +99,26 @@ describe('volet des sources', () => {
   it('ne montre aucun bandeau de montage quand tout va bien', async () => {
     const { w } = await monter({ roots: [NAS] })
     expect(w.find('[data-mount-error]').exists()).toBe(false)
+    expect(w.find('[data-retry-mount]').exists()).toBe(false)
+  })
+
+  it('offre le réessai sur une source non montée, même sans erreur mémorisée', async () => {
+    // Défaut signalé : au redémarrage de l'application, `mount_error` repart
+    // vide — il décrit la *dernière tentative*, et il n'y en a pas eu. On
+    // retrouvait donc « non monté » sans plus rien pour y remédier. Le réessai
+    // suit l'état **observé** dans /proc/mounts, qui lui survit au redémarrage.
+    const { w, s } = await monter({ roots: [{ ...NAS, mounted: false }], mount_error: null })
+    expect(w.find('[data-mount-error]').exists()).toBe(false)
+    await w.find('[data-retry-mount]').trigger('click')
+    await flushPromises()
+    expect(s.putsDe('mount')).toHaveLength(1)
+  })
+
+  it('n’offre pas de réessai sur un dossier de l’appareil', async () => {
+    // Il n'y a rien à monter : `mount::state` rend toujours « monté » pour une
+    // racine locale, et proposer un réessai laisserait croire à un problème.
+    const { w } = await monter({ roots: [{ ...USB, mounted: false }] })
+    expect(w.find('[data-retry-mount]').exists()).toBe(false)
   })
 
   it('ouvre l’assistant de l’appareil en prévenant le plugin', async () => {
