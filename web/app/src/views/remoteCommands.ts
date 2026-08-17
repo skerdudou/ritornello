@@ -40,8 +40,6 @@ export const REMOTE_ROWS: RemoteCommand[][] = [
   [
     { key: 'remote_play_pause', cmd: { cmd: 'PlayPause' } },
     { key: 'remote_stop', cmd: { cmd: 'Stop' } },
-  ],
-  [
     { key: 'remote_seek_back', cmd: { cmd: 'SeekBackward' } },
     { key: 'remote_seek_forward', cmd: { cmd: 'SeekForward' } },
   ],

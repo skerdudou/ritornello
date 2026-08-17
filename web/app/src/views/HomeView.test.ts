@@ -53,8 +53,7 @@ describe('REMOTE_COMMANDS', () => {
     // avant « suivant » et « moins » avant « plus ». Le figer ici evite qu'un
     // remaniement du gabarit le change sans qu'on s'en apercoive.
     expect(REMOTE_ROWS.map((r) => r.map((c) => c.cmd.cmd))).toEqual([
-      ['PlayPause', 'Stop'],
-      ['SeekBackward', 'SeekForward'],
+      ['PlayPause', 'Stop', 'SeekBackward', 'SeekForward'],
       ['Prev', 'Next'],
       ['VolumeDown', 'VolumeUp', 'Mute'],
       ['SourceCycle', 'Eject'],

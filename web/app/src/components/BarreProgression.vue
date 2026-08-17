@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
-import { formatePosition } from '../composables/usePlayer'
+import { formateDuree, formatePosition } from '../composables/usePlayer'
 
 // Composant local a la SPA plutot qu'element du kit : seule la carte Player
 // s'en sert, et le kit est le contrat des pages de plugins.
@@ -17,7 +17,9 @@ const props = defineProps<{
 const emit = defineEmits<{ deplacer: [secondes: number] }>()
 
 const texteEcoule = computed(() => formatePosition(props.position))
-const texteDuree = computed(() => formatePosition(props.duree))
+// formateDuree, pas formatePosition : ce dernier accepte zero, alors qu'une
+// duree totale de "0:00" n'en est pas une (voir sa doc dans usePlayer.ts).
+const texteDuree = computed(() => formateDuree(props.duree))
 // Une barre sans fin n'apprend rien : sans duree connue, seul l'ecoule
 // s'affiche.
 const barreVisible = computed(() => props.duree != null && props.duree > 0)

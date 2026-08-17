@@ -183,6 +183,20 @@ describe('PlayerCard', () => {
     expect(w.get('[data-position]').text()).toBe('1:27')
   })
 
+  it('n affiche pas la duree en en-tete quand la barre la porte deja', () => {
+    // Defaut corrige : titre + position connus (le cas nominal d'un CD
+    // reconnu) affichait "4:14" en en-tete ET "1:27 ... 4:14" dans la barre,
+    // deux fois la meme information.
+    const w = mount(PlayerCard, {
+      props: {
+        etat: complet({ title: 'Bikwix', position_s: 87, duration_s: 254, seekable: true }),
+        pasDeplacement: 10,
+      },
+    })
+    expect(w.find('[data-duree]').exists()).toBe(false)
+    expect(w.get('[data-duree-totale]').text()).toBe('4:14')
+  })
+
   it('ne montre rien de la progression quand aucune position n est connue', () => {
     const w = mount(PlayerCard, {
       props: {

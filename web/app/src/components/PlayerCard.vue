@@ -78,8 +78,12 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
           <Badge v-if="etat?.origin" variant="secondary" class="text-[10px]" data-origin>
             {{ etat.origin }}
           </Badge>
+          <!-- Seulement quand la position n'est pas connue : sinon la barre
+               juste en dessous affiche deja "ecoule ... duree", et repeter la
+               duree seule ici serait la meme information deux fois (defaut
+               corrige : "4:14" dans l'en-tete, "1:27 ... 4:14" dans la barre). -->
           <span
-            v-if="formateDuree(etat?.duration_s)"
+            v-if="etat?.position_s == null && formateDuree(etat?.duration_s)"
             class="text-xs text-muted-foreground"
             :title="t('track_length')"
             data-duree

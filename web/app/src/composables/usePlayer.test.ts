@@ -76,6 +76,8 @@ describe('formatePosition', () => {
     expect(formatePosition(null)).toBeNull()
     expect(formatePosition(undefined)).toBeNull()
     expect(formatePosition(-1)).toBeNull()
+    expect(formatePosition(Number.NaN)).toBeNull()
+    expect(formatePosition(Number.POSITIVE_INFINITY)).toBeNull()
   })
 })
 
