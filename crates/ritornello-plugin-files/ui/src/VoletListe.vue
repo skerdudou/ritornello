@@ -247,12 +247,24 @@ function charger(): void {
                    mois à attribuer, alors qu'un partage démonté se diagnostique
                    en une seconde quand les pistes restent là, signalées. -->
               <span
-                v-if="p.missing"
+                v-if="p.missing === true"
                 data-track-missing
                 :title="p.path"
                 class="ml-2 rounded border border-destructive px-1 text-xs text-destructive"
               >
                 {{ t('missing_badge') }}
+              </span>
+              <!-- `null` : le montage ne répondait pas, on ne sait donc pas. Un
+                   badge distinct et discret, en gris et non en rouge — dire
+                   « introuvable » ici accuserait le fichier d'une panne qui est
+                   celle du partage. La bannière au-dessus en donne la cause. -->
+              <span
+                v-else-if="p.missing === null"
+                data-track-unknown
+                :title="p.path"
+                class="ml-2 rounded border border-muted-foreground px-1 text-xs text-muted-foreground"
+              >
+                {{ t('missing_unknown') }}
               </span>
             </td>
             <td class="tabular-nums text-muted-foreground">{{ formaterDuree(p.duration_s) }}</td>

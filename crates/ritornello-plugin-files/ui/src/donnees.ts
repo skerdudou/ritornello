@@ -31,8 +31,15 @@ export interface Piste {
   path: string
   name: string
   duration_s: number
-  /** Piste dont le fichier n'a pas été retrouvé : marquée, jamais masquée. */
-  missing: boolean
+  /**
+   * Piste dont le fichier n'a pas été retrouvé : marquée, jamais masquée.
+   *
+   * Trois états, pas deux. `null` veut dire **indéterminé** : le point de
+   * montage de la piste ne répondait pas quand le plugin a regardé. Afficher
+   * « introuvable » dans ce cas accuserait le fichier d'une panne qui est celle
+   * du partage, et enverrait chercher le défaut au mauvais endroit.
+   */
+  missing: boolean | null
 }
 
 export interface Scan {
@@ -173,6 +180,14 @@ export interface Donnees {
    * le détail par source reste le booléen `mounted`, lui observé.
    */
   mountError: string | null
+  /**
+   * Points de montage dont une sonde n'est jamais revenue.
+   *
+   * Dits par le plugin pour que la page explique le silence : sans eux
+   * l'utilisateur voit des durées qui n'arrivent pas et des états indéterminés,
+   * sans aucune indication de cause.
+   */
+  unresponsive: string[]
 }
 
 /** Destination « stockage interne » du plugin, par opposition à un nom de racine. */
@@ -357,7 +372,10 @@ export function normaliserDonnees(brut: unknown): Donnees {
         path,
         name: chaine(e.name) || feuille(path),
         duration_s: nombre(e.duration_s),
-        missing: e.missing === true,
+        // `=== true` / `=== false` et non une coercition : c'est ce qui
+        // distingue « présent » de « on ne sait pas », le second devant rester
+        // `null` jusqu'à l'affichage.
+        missing: e.missing === true ? true : e.missing === false ? false : null,
       }
     }),
     index: nombre(o.index),
@@ -393,6 +411,7 @@ export function normaliserDonnees(brut: unknown): Donnees {
     })(),
     explore: normaliserExploration(o.explore),
     mountError: typeof o.mount_error === 'string' && o.mount_error ? o.mount_error : null,
+    unresponsive: tableau(o.unresponsive).map(chaine).filter((s) => s !== ''),
   }
 }
 

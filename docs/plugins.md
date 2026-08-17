@@ -233,6 +233,36 @@ click, the same way the System tab greys out rebooting when logind refuses
 it. The probe is redone on every connection attempt: installing the package
 without restarting the service gives a correct answer, not a stale refusal.
 
+### When a share stops answering
+
+A mounted share that goes quiet is not the same failure as a mount that
+failed, and the page says so separately. It is also the failure that once took
+the whole plugin down, so the reasoning is worth keeping.
+
+The kernel's cifs client does not notice a dead session until `echo_interval`
+elapses — 60 s by default — and only then does `soft` start counting its
+retries. A NAS that drops idle connections, or spins its disks down, therefore
+produces accesses that block for tens of seconds while answering a Windows
+machine instantly: Windows re-establishes the session itself, and has a user to
+show a dialog to. `mount.cifs` is given `echo_interval=10`, `retrans=1` and
+`actimeo=30` to shorten that window, but none of them bring the worst case
+under a second.
+
+That matters because the admin protocol is **serial** and the core abandons a
+request after 5 s. One blocking `stat` is enough to wedge the plugin, page
+included. So every filesystem access a request triggers goes through a circuit
+breaker (`sante.rs`): it runs off the async thread under a 1.5 s deadline, and a
+mount point whose probe never returned is remembered, so later requests are
+refused instantly instead of losing another thread — a syscall in
+uninterruptible sleep cannot be killed, not even with `SIGKILL`. The abandoned
+thread is also the only recovery detector: when the kernel finally releases it,
+the mount point is cleared.
+
+What you see while a share is quiet: the mount points are listed in a banner,
+affected tracks are badged *unknown* rather than *missing* — they are not gone,
+nobody could look — and their lengths simply do not arrive. Local sources and
+playback are unaffected.
+
 ### Declaring a source
 
 No address is typed blind any more: you browse first, you declare after.

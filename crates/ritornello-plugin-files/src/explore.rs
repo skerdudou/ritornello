@@ -68,6 +68,11 @@ pub struct Explorateur {
     /// une fois, à la connexion, et non à chaque clic dans l'arborescence.
     sessions: Arc<Mutex<HashMap<String, Credentials>>>,
     tache: Option<tokio::task::JoinHandle<()>>,
+    /// Disjoncteur des chemins média, partagé avec la moitié Admin.
+    ///
+    /// L'assistant local lit le disque à chaque descente : un volume qui ne
+    /// répond pas doit rendre un refus, pas coincer la boucle admin.
+    sante: Arc<crate::sante::Sante>,
 }
 
 impl Explorateur {
@@ -75,11 +80,13 @@ impl Explorateur {
         dir_travail: PathBuf,
         catalog: Arc<RwLock<Catalog>>,
         smb_ok: Arc<AtomicBool>,
+        sante: Arc<crate::sante::Sante>,
     ) -> Self {
         Self {
             dir_travail,
             catalog,
             smb_ok,
+            sante,
             vue: Arc::new(Mutex::new(Vue::default())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             tache: None,
@@ -130,17 +137,30 @@ impl Explorateur {
     /// Synchrone : un système de fichiers local répond bien en deçà du plafond
     /// du cœur, et rendre cela asynchrone n'ajouterait qu'un aller-retour de
     /// sondage entre chaque niveau ouvert.
-    pub fn local(&mut self, path: &str) -> Result<(), String> {
-        let chemin = std::path::Path::new(path);
+    pub async fn local(&mut self, path: &str) -> Result<(), String> {
+        let chemin = std::path::PathBuf::from(path);
         let mounts = volumes::lire_proc_mounts();
-        let canon = chemin
-            .canonicalize()
-            .map_err(|_| self.mot("bad_local_path").replace("{path}", path))?;
+        // Canonisation **et** listage sous un seul disjoncteur : les deux
+        // touchent le disque, et sur un volume en reconnexion aucun des deux ne
+        // rend la main. Un `None` ici est un refus, pas un dossier vide.
+        let c = chemin.clone();
+        let Some(lu) = self
+            .sante
+            .borne(&chemin, move || {
+                let canon = c.canonicalize().ok()?;
+                Some((canon.clone(), scan::list_dir(&canon)))
+            })
+            .await
+        else {
+            return Err(self.mot("root_unresponsive").replace("{path}", path));
+        };
+        let Some((canon, contenu)) = lu else {
+            return Err(self.mot("bad_local_path").replace("{path}", path));
+        };
         if !volumes::parcourable(&mounts, &canon) {
             return Err(self.mot("bad_local_path").replace("{path}", path));
         }
-        let contenu =
-            scan::list_dir(&canon).map_err(|e| e.message(&self.catalog.read().unwrap()))?;
+        let contenu = contenu.map_err(|e| e.message(&self.catalog.read().unwrap()))?;
         let mut v = self.vue.lock().unwrap();
         v.path = canon.display().to_string();
         v.dirs = contenu.dossiers;
@@ -281,6 +301,7 @@ mod tests {
                 crate::FILES_EN,
             ))),
             Arc::new(AtomicBool::new(true)),
+            Arc::new(crate::sante::Sante::new()),
         )
     }
 
@@ -321,7 +342,7 @@ mod tests {
         std::env::set_var("RITORNELLO_FILES_PROC_MOUNTS", &faux);
         let mut e = explorateur(dir.path());
         e.ouvrir(Kind::Local);
-        let err = e.local("/proc/self").unwrap_err();
+        let err = e.local("/proc/self").await.unwrap_err();
         assert!(err.contains(' '), "cle brute : {err}");
         std::env::remove_var("RITORNELLO_FILES_PROC_MOUNTS");
     }
@@ -341,7 +362,7 @@ mod tests {
         std::env::set_var("RITORNELLO_FILES_PROC_MOUNTS", &faux);
         let mut e = explorateur(dir.path());
         e.ouvrir(Kind::Local);
-        e.local(&media.display().to_string()).unwrap();
+        e.local(&media.display().to_string()).await.unwrap();
         let v = e.vue();
         assert_eq!(v["dirs"], serde_json::json!(["Album"]));
         assert_eq!(v["audio_count"], 2, "notes.txt n'est pas un fichier audio");

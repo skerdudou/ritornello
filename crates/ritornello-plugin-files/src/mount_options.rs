@@ -18,6 +18,25 @@ use std::path::Path;
 /// déconseille `soft` en écriture ne s'applique pas à un montage `ro` ; il est
 /// assumé sur une racine déclarée inscriptible, qui ne sert qu'à déposer un m3u.
 ///
+/// `soft` **ne suffit pas**, et c'est une leçon payée : il borne les tentatives
+/// d'une opération sur une session déjà établie, pas la reconnexion. Le
+/// 2026-08-17, un NAS qui coupait ses connexions inactives a laissé le client
+/// cifs bloqué dans le noyau assez longtemps pour figer un `ls` — bien au-delà
+/// des cinq secondes du protocole admin. Les trois options qui suivent
+/// raccourcissent ce pire cas, sans jamais l'amener sous la seconde ; la vraie
+/// borne vit côté appelant, dans `sante`. Ne pas les retirer en croyant que
+/// `soft` couvre le sujet, et ne pas croire qu'elles rendent `sante` inutile.
+///
+/// - `echo_interval=10` : le noyau s'aperçoit qu'une session est morte au bout
+///   de dix secondes au lieu de soixante, son défaut.
+/// - `retrans=1` : une seule reprise avant que `soft` ne rende son erreur.
+/// - `actimeo=30` : les attributs sont mis en cache une demi-minute. C'est celle
+///   qui compte le plus ici — la page vérifie l'existence de chaque piste à
+///   chaque sondage, et sans ce cache chacune repartirait sur le réseau.
+///
+/// Aucune des trois n'a pu être mesurée depuis le poste de développement : elles
+/// demandent un vrai partage qui cesse de répondre.
+///
 /// Aucun `vers=` : la négociation du noyau vaut mieux qu'une version figée qui
 /// vieillirait mal face à un NAS mis à jour.
 pub fn mount_command(root: &Root, creds_dir: &Path, uid: u32, gid: u32) -> Vec<String> {
@@ -26,6 +45,9 @@ pub fn mount_command(root: &Root, creds_dir: &Path, uid: u32, gid: u32) -> Vec<S
         options.push("ro".to_string());
     }
     options.push("soft".to_string());
+    options.push("echo_interval=10".to_string());
+    options.push("retrans=1".to_string());
+    options.push("actimeo=30".to_string());
     options.push("iocharset=utf8".to_string());
     options.push(format!("uid={uid}"));
     options.push(format!("gid={gid}"));
@@ -100,6 +122,12 @@ mod tests {
             options.contains(&"soft"),
             "soft doit rester : un NAS endormi ne doit pas bloquer la lecture"
         );
+        // Épinglées parce qu'elles ont l'air décoratives et ne le sont pas :
+        // elles raccourcissent le blocage noyau qui a coincé le plugin entier le
+        // 2026-08-17. Voir la documentation de `mount_command`.
+        for o in ["echo_interval=10", "retrans=1", "actimeo=30"] {
+            assert!(options.contains(&o), "{o} manque : {options:?}");
+        }
     }
 
     #[test]

@@ -14,6 +14,7 @@ use ritornello_i18n::Catalog;
 use ritornello_plugin_files::m3u::Entry;
 use ritornello_plugin_files::playlist::Playlist;
 use ritornello_plugin_files::roots::{Root, RootKind, Roots};
+use ritornello_plugin_files::sante::Sante;
 use ritornello_plugin_files::store::{self, Location};
 use ritornello_plugin_files::volumes;
 use ritornello_plugin_files::{mount, scan};
@@ -100,6 +101,13 @@ pub struct FilesAdmin {
     /// Sert à la page pour décider si vider la liste doit aussi demander l'arrêt
     /// au cœur : le faire alors qu'une autre source joue couperait celle-là.
     pub joue: Arc<std::sync::atomic::AtomicBool>,
+    /// Disjoncteur des chemins média.
+    ///
+    /// Toute lecture du système de fichiers déclenchée par une requête admin
+    /// **doit** passer par lui. Le protocole admin est sériel et le cœur
+    /// abandonne au bout de cinq secondes : un seul `is_file` qui n'aboutit pas
+    /// coince le plugin entier, page comprise. Voir `sante` pour la mesure.
+    pub sante: Arc<Sante>,
     /// Avancement du sondage des durées.
     pub durees: Arc<Mutex<DureesProgress>>,
     /// Sondage en cours. En lancer un nouveau **abandonne** le précédent : après
@@ -204,10 +212,23 @@ impl FilesAdmin {
             .ok_or_else(|| self.mot("unknown_root").replace("{name}", root))?;
         let base = r.base_dir();
         let cible = if path.is_empty() { base.clone() } else { base.join(path) };
+        drop(roots);
         // Comparaison sur les formes canonisées : c'est la seule qui résiste
         // aux liens symboliques, un `.` ou `..` textuel pouvant être neutralisé
         // par le système de fichiers lui-même.
-        let (Ok(base_c), Ok(cible_c)) = (base.canonicalize(), cible.canonicalize()) else {
+        //
+        // Sous disjoncteur, parce que `canonicalize` touche le disque : sur un
+        // partage en reconnexion il ne rend pas la main, et il est ici sur le
+        // chemin de **tout** `set_data` visant une racine. Un refus net vaut
+        // mieux qu'une boucle admin coincée, qui emporterait la page avec elle.
+        let (b, c) = (base.clone(), cible.clone());
+        let Some(canon) = self.sante.borne(&cible, move || Ok((b.canonicalize()?, c.canonicalize()?))).await
+        else {
+            return Err(self
+                .mot("root_unresponsive")
+                .replace("{path}", &cible.display().to_string()));
+        };
+        let Ok::<(PathBuf, PathBuf), std::io::Error>((base_c, cible_c)) = canon else {
             return Err(self.mot("scan_io_error").replace("{path}", &cible.display().to_string()));
         };
         if !cible_c.starts_with(&base_c) {
@@ -326,6 +347,7 @@ impl FilesAdmin {
         playlist: Arc<AsyncRwLock<Playlist>>,
         durees: Arc<Mutex<DureesProgress>>,
         state_path: PathBuf,
+        sante: Arc<Sante>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let a_sonder: Vec<PathBuf> = {
@@ -350,21 +372,44 @@ impl FilesAdmin {
                 DureesProgress { running: true, done: 0, total: a_sonder.len() };
 
             let mut faits = 0usize;
-            for lot in a_sonder.chunks(LOT_DE_SONDAGE) {
-                let lot: Vec<PathBuf> = lot.to_vec();
-                // `spawn_blocking` : la lecture d'en-tête touche le disque, et
-                // sur un partage endormi elle peut attendre. Le faire sur le
-                // fil asynchrone bloquerait la moitié Admin, donc la page.
-                let mesures = tokio::task::spawn_blocking(move || {
-                    lot.into_iter()
-                        .map(|p| {
-                            let d = ritornello_plugin_files::duree::sonder(&p);
-                            (p, d)
-                        })
-                        .collect::<Vec<_>>()
+            // Découpé en lots **par point de montage** : un lot ne mélange ainsi
+            // jamais deux partages, et le disjoncteur d'un montage muet écarte
+            // aussitôt tous ses lots suivants sans rien exécuter — sans quoi
+            // chaque lot repartirait attendre le même partage.
+            let lots: Vec<Vec<PathBuf>> = sante
+                .grouper(&a_sonder)
+                .into_iter()
+                .flat_map(|(_, indices)| {
+                    let chemins: Vec<PathBuf> =
+                        indices.iter().map(|&i| a_sonder[i].clone()).collect();
+                    chemins.chunks(LOT_DE_SONDAGE).map(<[PathBuf]>::to_vec).collect::<Vec<_>>()
                 })
-                .await;
-                let Ok(mesures) = mesures else { break };
+                .collect();
+            for lot in lots {
+                let repere = lot[0].clone();
+                // Sous disjoncteur, et pas seulement `spawn_blocking` : sortir
+                // du fil asynchrone protège la boucle admin, mais pas le pool.
+                // Sur un partage bloqué, chaque relance de `resonder` y perdait
+                // un fil de plus, sans jamais en récupérer un — le disjoncteur
+                // est ce qui borne cette fuite à un fil par point de montage.
+                let mesures = sante
+                    .borne(&repere, move || {
+                        lot.into_iter()
+                            .map(|p| {
+                                let d = ritornello_plugin_files::duree::sonder(&p);
+                                (p, d)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .await;
+                // Ce montage ne répond pas : passer au lot suivant, sans
+                // abandonner le sondage — les pistes locales de la même liste
+                // doivent aboutir. Les lots restants du même partage seront
+                // écartés sans frais par le disjoncteur.
+                //
+                // `faits` n'avance pas pour un lot sauté : la page affichera
+                // moins de durées relevées que de pistes, ce qui est la vérité.
+                let Some(mesures) = mesures else { continue };
 
                 {
                     let mut liste = playlist.write().await;
@@ -410,6 +455,7 @@ impl FilesAdmin {
             self.playlist.clone(),
             self.durees.clone(),
             self.state_path.clone(),
+            self.sante.clone(),
         ));
     }
 
@@ -483,26 +529,55 @@ impl AdminPlugin for FilesAdmin {
                 v
             })
             .collect();
-        let sauvegardees = store::list(&self.internal_playlists, &roots);
+        // Le stockage interne est local par construction (`/var/lib`) : il se
+        // lit directement. Les racines, elles, peuvent être des partages, donc
+        // chacune sous son propre disjoncteur — un `read_dir` par racine et par
+        // sondage de la page était l'un des deux appels qui ont coincé le
+        // plugin le 2026-08-17.
+        let mut sauvegardees = store::dans(&self.internal_playlists, Location::Internal);
+        let a_ramasser: Vec<(PathBuf, String)> =
+            roots.root.iter().map(|r| (r.base_dir(), r.name.clone())).collect();
         drop(roots);
+        for (dir, nom) in a_ramasser {
+            let d = dir.clone();
+            if let Some(v) =
+                self.sante.borne(&dir, move || store::dans(&d, Location::Root(nom))).await
+            {
+                sauvegardees.extend(v);
+            }
+        }
 
         let liste = self.playlist.read().await;
-        let pistes: Vec<serde_json::Value> = liste
+        let chemins: Vec<PathBuf> = liste.entries.iter().map(|e| e.path.clone()).collect();
+        let decrites: Vec<(String, String, Option<u32>)> = liste
             .entries
             .iter()
-            .map(|e| {
-                serde_json::json!({
-                    "path": e.path.to_string_lossy(),
-                    "name": e.display_name(),
-                    "duration_s": e.duration_s,
-                    // Marquée, jamais masquée : une liste qui rétrécit sans
-                    // rien dire est un défaut qu'on met des mois à attribuer.
-                    "missing": !e.path.is_file(),
-                })
-            })
+            .map(|e| (e.path.to_string_lossy().into_owned(), e.display_name(), e.duration_s))
             .collect();
         let index = liste.index;
         drop(liste);
+        // Groupé par point de montage et borné : un seul délai couvre toutes les
+        // pistes d'un partage, au lieu d'un appel bloquant par piste.
+        let manquants = self.sante.manquants(&chemins).await;
+        let pistes: Vec<serde_json::Value> = decrites
+            .into_iter()
+            .zip(manquants)
+            .map(|((path, name, duration_s), manque)| {
+                serde_json::json!({
+                    "path": path,
+                    "name": name,
+                    "duration_s": duration_s,
+                    // Marquée, jamais masquée : une liste qui rétrécit sans
+                    // rien dire est un défaut qu'on met des mois à attribuer.
+                    //
+                    // `null` quand le montage ne répond pas : dire
+                    // « introuvable » accuserait les fichiers d'une panne qui
+                    // est celle du partage, et enverrait chercher le défaut au
+                    // mauvais endroit. La page l'affiche comme indéterminé.
+                    "missing": manque,
+                })
+            })
+            .collect();
 
         // Gardes `std::sync` prises après le dernier `.await` : aucune ne
         // traverse un point d'attente.
@@ -526,6 +601,12 @@ impl AdminPlugin for FilesAdmin {
             "durations": self.durees.lock().unwrap().clone(),
             "explore": explore,
             "mount_error": mount_error,
+            // Points de montage dont une sonde n'est jamais revenue. Dits à la
+            // page pour qu'elle explique le silence : sans eux, l'utilisateur
+            // voit des durées qui n'arrivent pas et des états indéterminés sans
+            // aucune indication de cause.
+            "unresponsive": self.sante.muets().iter()
+                .map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "playlist": pistes,
             "index": index,
             "scan": scan,
@@ -667,7 +748,7 @@ impl AdminPlugin for FilesAdmin {
                 self.explore.fermer();
                 Ok(())
             }
-            Op::ExploreLocal { path } => self.explore.local(&path),
+            Op::ExploreLocal { path } => self.explore.local(&path).await,
             Op::SmbConnect { host, user, password, domain } => {
                 // Resonder ici : installer le paquet sans redémarrer le service
                 // doit donner un résultat juste plutôt qu'un refus périmé.
@@ -763,6 +844,7 @@ impl AdminPlugin for FilesAdmin {
                 let playlist_pour_durees = self.playlist.clone();
                 let durees = self.durees.clone();
                 let state_path_pour_durees = self.state_path.clone();
+                let sante_pour_durees = self.sante.clone();
                 let state_path = self.state_path.clone();
                 self.scan_task = Some(tokio::spawn(async move {
                     let c = compteur.clone();
@@ -812,6 +894,7 @@ impl AdminPlugin for FilesAdmin {
                                     playlist_pour_durees,
                                     durees,
                                     state_path_pour_durees,
+                                    sante_pour_durees,
                                 );
                                 if let Err(e) = state::update(&state_path, |s| {
                                     s.playlist = stockees;
@@ -1009,6 +1092,7 @@ mod tests {
             ritornello_plugin_files::FILES_EN,
         )));
         let smb_ok = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sante = Arc::new(ritornello_plugin_files::sante::Sante::new());
         let admin = FilesAdmin {
             roots_path: racine.join("media-roots.toml"),
             creds_dir: racine.join("creds"),
@@ -1030,9 +1114,11 @@ mod tests {
                 racine.join("creds"),
                 catalogue.clone(),
                 smb_ok.clone(),
+                sante.clone(),
             ),
             mount_error: Arc::new(Mutex::new(None)),
             smb_ok,
+            sante,
         };
         (admin, racine)
     }
@@ -1135,6 +1221,44 @@ mod tests {
         assert!(d["can_browse_smb"].is_boolean());
         assert!(d["explore"].is_object());
         std::env::remove_var("RITORNELLO_FILES_PROC_MOUNTS");
+    }
+
+    /// `/proc/mounts` de test : une racine locale et un partage à part, pour que
+    /// le silence de l'un n'emporte pas l'autre.
+    const MOUNTS_MUETS: &str = "/dev/root / ext4 rw 0 0\n\
+                                //192.168.1.15/musique /mnt/ritornello/nas cifs ro,soft 0 0\n";
+
+    #[tokio::test]
+    async fn get_data_rend_la_main_et_ne_mente_pas_quand_un_montage_est_muet() {
+        // Le test de non-régression de l'incident du 2026-08-17 : `get_data`
+        // faisait un `is_file` par piste et un `read_dir` par racine, sur le fil
+        // asynchrone. Le protocole admin étant sériel, un montage cifs bloqué
+        // dans le noyau y a coincé le plugin entier — jusqu'à faire expirer
+        // `ui.js`, qui n'est qu'un `include_str!`.
+        let (mut admin, _r) = admin_de_test();
+        admin.sante = Arc::new(ritornello_plugin_files::sante::Sante::pour_test(
+            std::time::Duration::from_millis(50),
+            MOUNTS_MUETS.to_string(),
+            vec![PathBuf::from("/mnt/ritornello/nas")],
+        ));
+        admin.playlist.write().await.entries = vec![
+            Entry { path: PathBuf::from("/mnt/ritornello/nas/a.mp3"), title: None, duration_s: None },
+            Entry { path: PathBuf::from("/home/pi/absent.mp3"), title: None, duration_s: None },
+        ];
+
+        let debut = std::time::Instant::now();
+        let d = admin.get_data().await;
+        assert!(debut.elapsed() < std::time::Duration::from_secs(1), "{:?}", debut.elapsed());
+
+        // `null` et non `true` : c'est tout l'objet du correctif. Dire
+        // « introuvable » pour un partage endormi accuserait les fichiers d'une
+        // panne qui est celle du montage. Un `is_file` direct rendrait `true`
+        // ici, et ce test tomberait — c'est ce qui le rend utile.
+        assert!(d["playlist"][0]["missing"].is_null(), "{}", d["playlist"][0]);
+        // La piste locale, elle, reste jugée : le disjoncteur d'un montage ne
+        // doit pas rendre les autres indéterminés.
+        assert_eq!(d["playlist"][1]["missing"], serde_json::json!(true));
+        assert_eq!(d["unresponsive"], serde_json::json!(["/mnt/ritornello/nas"]));
     }
 
     #[tokio::test]

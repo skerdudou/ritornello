@@ -16,6 +16,7 @@ pub mod mount;
 pub mod mount_options;
 pub mod playlist;
 pub mod roots;
+pub mod sante;
 pub mod scan;
 pub mod smb;
 pub mod store;

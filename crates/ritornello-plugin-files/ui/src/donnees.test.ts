@@ -127,7 +127,12 @@ describe('normalisation de la charge complète', () => {
       path: 'Albums/Jazz/01.mp3',
       name: '01.mp3',
       duration_s: 0,
-      missing: false,
+      // `null` et non `false` : une charge utile qui ne dit rien de l'existence
+      // du fichier ne permet pas d'affirmer qu'il est là. Prétendre « présent »
+      // par défaut ferait afficher une piste comme saine alors que le plugin
+      // n'a jamais pu la regarder — c'est le mensonge que le champ à trois
+      // états supprime.
+      missing: null,
     })
   })
 })

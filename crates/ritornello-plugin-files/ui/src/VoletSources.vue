@@ -141,6 +141,24 @@ function remonter(): void {
       {{ t('mount_error_title') }} {{ donnees.mountError }}
     </p>
 
+    <!-- Un montage qui ne répond plus n'est **pas** un échec de montage : il est
+         monté, il se tait. Deux causes distinctes, donc deux messages distincts
+         — les confondre enverrait réessayer un montage qui a réussi. C'est aussi
+         ce qui explique les états « indéterminé » de la liste et les durées qui
+         n'arrivent pas ; sans ce bloc, l'utilisateur n'a aucune cause à quoi les
+         rattacher. -->
+    <div
+      v-if="donnees.unresponsive.length"
+      class="min-w-0 rounded border border-destructive/50 p-2 text-sm"
+      data-unresponsive
+    >
+      <p class="text-destructive">{{ t('unresponsive_title') }}</p>
+      <ul class="ml-4 list-disc break-all font-mono text-xs">
+        <li v-for="m in donnees.unresponsive" :key="m">{{ m }}</li>
+      </ul>
+      <p class="mt-1 text-muted-foreground">{{ t('unresponsive_hint') }}</p>
+    </div>
+
     <div class="flex flex-wrap items-center gap-2">
       <Button variant="secondary" data-add-device :disabled="fige" @click="ouvrir('local')">
         {{ t('btn_add_device') }}

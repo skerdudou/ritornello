@@ -46,6 +46,9 @@ export const CATALOGUE: Record<string, string> = {
   btn_remove_source: 'Retirer cette source',
   btn_retry_mount: 'Réessayer le montage',
   mount_error_title: 'Le dernier montage a échoué :',
+  unresponsive_title: 'Ces points de montage ne répondent pas :',
+  unresponsive_hint: 'Informations incomplètes jusqu’à leur retour.',
+  missing_unknown: 'indéterminé',
 
   dlg_device_title: 'Choisir un dossier de l’appareil',
   dlg_device_desc: 'Choisissez un volume puis descendez.',
@@ -130,6 +133,7 @@ export interface EtatServeur {
   durations?: { running: boolean; done: number; total: number }
   explore?: Explore
   mount_error?: string | null
+  unresponsive?: string[]
 }
 
 /**
@@ -182,6 +186,7 @@ export function etat(partiel: EtatServeur = {}): Required<EtatServeur> {
     durations: { running: false, done: 0, total: 0 },
     explore: EXPLORE_FERME,
     mount_error: null,
+    unresponsive: [],
     ...partiel,
   }
 }

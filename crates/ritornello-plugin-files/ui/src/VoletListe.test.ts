@@ -48,6 +48,24 @@ describe('volet de la liste en cours', () => {
     expect(w.findAll('[data-track-missing]')[0]!.attributes('title')).toBe('Albums/Jazz/02.mp3')
   })
 
+  it('n’accuse pas une piste dont le montage ne répondait pas', async () => {
+    // `missing: null` veut dire « on ne sait pas » : le plugin n'a pas pu
+    // regarder, son disjoncteur ayant coupé sur un partage muet. Afficher
+    // « introuvable » accuserait le fichier d'une panne qui est celle du
+    // montage — et enverrait l'utilisateur chercher un fichier qui est là.
+    const { w } = await monter({
+      playlist: [{ path: '/mnt/ritornello/nas/a.mp3', name: 'Sur le NAS', duration_s: 0, missing: null }],
+      unresponsive: ['/mnt/ritornello/nas'],
+    })
+    expect(w.findAll('[data-track-missing]')).toHaveLength(0)
+    const inconnu = w.findAll('[data-track-unknown]')
+    expect(inconnu).toHaveLength(1)
+    expect(inconnu[0]!.attributes('title')).toBe('/mnt/ritornello/nas/a.mp3')
+    // La piste reste là, comme une piste introuvable : ce sont les listes qui
+    // rétrécissent en silence qui coûtent des mois à diagnostiquer.
+    expect(w.findAll('[data-track-row]')).toHaveLength(1)
+  })
+
   it('rend les durées, tiret compris pour une durée inconnue', async () => {
     const { w } = await monter({ playlist: TROIS })
     const texte = w.find('[data-volet-liste]').text()

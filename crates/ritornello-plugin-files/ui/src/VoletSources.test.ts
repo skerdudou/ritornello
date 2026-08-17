@@ -100,6 +100,24 @@ describe('volet des sources', () => {
     const { w } = await monter({ roots: [NAS] })
     expect(w.find('[data-mount-error]').exists()).toBe(false)
     expect(w.find('[data-retry-mount]').exists()).toBe(false)
+    expect(w.find('[data-unresponsive]').exists()).toBe(false)
+  })
+
+  it('distingue un montage muet d’un échec de montage', async () => {
+    // Deux pannes différentes, deux messages différents. Un partage qui ne
+    // répond plus **est** monté : le confondre avec un échec de montage
+    // enverrait réessayer un montage qui a réussi. C'est aussi ce bloc qui donne
+    // la cause des états « indéterminé » de la liste.
+    const { w } = await monter({
+      roots: [NAS],
+      mount_error: null,
+      unresponsive: ['/mnt/ritornello/musique'],
+    })
+    const bloc = w.find('[data-unresponsive]')
+    expect(bloc.exists()).toBe(true)
+    expect(bloc.text()).toContain('/mnt/ritornello/musique')
+    // Le réessai de montage n'a rien à faire là : la racine est montée.
+    expect(w.find('[data-mount-error]').exists()).toBe(false)
   })
 
   it('offre le réessai sur une source non montée, même sans erreur mémorisée', async () => {

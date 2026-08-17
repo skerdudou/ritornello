@@ -163,31 +163,36 @@ pub fn load(
 /// l'ordre de `read_dir` n'étant garanti par aucun système de fichiers — sans
 /// quoi la page réordonnerait ses listes d'un rafraîchissement à l'autre.
 pub fn list(internal_dir: &Path, roots: &Roots) -> Vec<Saved> {
-    let mut out = Vec::new();
-    let mut ramasse = |dir: &Path, loc: Location| {
-        let Ok(entrees) = std::fs::read_dir(dir) else { return };
-        let mut noms: Vec<String> = Vec::new();
-        for e in entrees.flatten() {
-            let p = e.path();
-            let m3u = p
-                .extension()
-                .and_then(|x| x.to_str())
-                .map(|x| x.eq_ignore_ascii_case("m3u"))
-                .unwrap_or(false);
-            if m3u {
-                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                    noms.push(stem.to_string());
-                }
-            }
-        }
-        noms.sort();
-        out.extend(noms.into_iter().map(|name| Saved { name, location: loc.clone() }));
-    };
-    ramasse(internal_dir, Location::Internal);
+    let mut out = dans(internal_dir, Location::Internal);
     for r in &roots.root {
-        ramasse(&r.base_dir(), Location::Root(r.name.clone()));
+        out.extend(dans(&r.base_dir(), Location::Root(r.name.clone())));
     }
     out
+}
+
+/// Les listes d'**un seul** répertoire.
+///
+/// Séparée de `list` pour que l'appelant puisse borner chaque répertoire
+/// individuellement : `read_dir` sur un partage en reconnexion ne rend pas la
+/// main, et la moitié Admin sert ses requêtes en série. Voir `sante`.
+pub fn dans(dir: &Path, loc: Location) -> Vec<Saved> {
+    let Ok(entrees) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut noms: Vec<String> = Vec::new();
+    for e in entrees.flatten() {
+        let p = e.path();
+        let m3u = p
+            .extension()
+            .and_then(|x| x.to_str())
+            .map(|x| x.eq_ignore_ascii_case("m3u"))
+            .unwrap_or(false);
+        if m3u {
+            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                noms.push(stem.to_string());
+            }
+        }
+    }
+    noms.sort();
+    noms.into_iter().map(|name| Saved { name, location: loc.clone() }).collect()
 }
 
 impl StoreError {

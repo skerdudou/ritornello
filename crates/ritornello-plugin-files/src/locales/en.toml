@@ -129,3 +129,13 @@ duplicate_source = "This folder is already declared as a source."
 not_a_playlist = "\"{path}\" is not a playlist file (.m3u or .m3u8)"
 btn_load_m3u = "Load this playlist"
 duration_progress = "Reading track lengths ({done} of {total})"
+
+# --- Unresponsive mount points ---
+#
+# Distinct from `bad_local_path` and from `missing_badge` on purpose: a share
+# that stopped answering is neither an invalid path nor a deleted file, and
+# saying either sends the user looking for the fault in the wrong place.
+root_unresponsive = "\"{path}\" is not answering: the share may be asleep or unreachable. Nothing was changed."
+unresponsive_title = "These mount points are not answering:"
+unresponsive_hint = "Displayed information about them is incomplete until they answer again. Playback of local sources is unaffected."
+missing_unknown = "unknown"

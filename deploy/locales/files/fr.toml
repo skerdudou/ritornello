@@ -128,3 +128,13 @@ duplicate_source = "Ce dossier est déjà déclaré comme source."
 not_a_playlist = "« {path} » n'est pas un fichier de liste de lecture (.m3u ou .m3u8)"
 btn_load_m3u = "Charger cette liste"
 duration_progress = "Lecture des durées ({done} sur {total})"
+
+# --- Points de montage muets ---
+#
+# Volontairement distinct de `bad_local_path` et de `missing_badge` : un partage
+# qui ne répond plus n'est ni un chemin invalide ni un fichier supprimé, et dire
+# l'un ou l'autre envoie chercher le défaut au mauvais endroit.
+root_unresponsive = "« {path} » ne répond pas : le partage est peut-être endormi ou injoignable. Rien n'a été modifié."
+unresponsive_title = "Ces points de montage ne répondent pas :"
+unresponsive_hint = "Les informations qui les concernent restent incomplètes jusqu'à leur retour. La lecture des sources locales n'est pas affectée."
+missing_unknown = "indéterminé"

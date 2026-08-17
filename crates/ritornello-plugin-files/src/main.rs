@@ -396,16 +396,18 @@ async fn main() -> Result<()> {
 
     let etat = state::load(&state_path);
     let entries: Vec<Entry> = etat.playlist.iter().map(Entry::from).collect();
-    // Les pistes absentes sont journalisées mais **conservées** : un partage
-    // momentanément injoignable (NAS endormi, montage pas encore fait au boot)
-    // effacerait sinon la liste de l'utilisateur.
-    let manquantes = entries.iter().filter(|e| !e.path.is_file()).count();
-    if manquantes > 0 {
-        tracing::warn!(
-            "{manquantes} of {} tracks are missing at startup: the share may not be mounted yet",
-            entries.len()
-        );
-    }
+    // Les pistes absentes sont **conservées** : un partage momentanément
+    // injoignable (NAS endormi, montage pas encore fait au boot) effacerait
+    // sinon la liste de l'utilisateur.
+    //
+    // Et surtout : elles ne sont **pas comptées ici**. Ce compte se faisait par
+    // un `is_file` sur chaque piste, avant que les deux moitiés ne soient
+    // lancées — donc avant que la socket d'admin n'existe. Le 2026-08-17, un
+    // montage cifs bloqué dans le noyau y a retenu le démarrage, et la page de
+    // gestion a purement disparu de l'IHM : le cœur ne voit un plugin d'admin
+    // que s'il a lié sa socket. Rien qui touche un chemin média n'a le droit de
+    // s'exécuter avant. La page rend la même information, sous disjoncteur,
+    // par le champ `missing` de `get_data`.
     let index = if etat.index < entries.len() { etat.index } else { 0 };
 
     let roots = Roots::load(&roots_path).unwrap_or_else(|e| {
@@ -447,6 +449,11 @@ async fn main() -> Result<()> {
         tracing::info!("smbclient is not available: the network wizard will be offered read-only");
     }
 
+    // Créé ici, sans rien sonder : le disjoncteur n'apprend qu'en servant les
+    // requêtes. Sonder au démarrage remettrait un accès disque avant la
+    // liaison de la socket, ce qui est précisément le défaut qu'il corrige.
+    let sante = Arc::new(ritornello_plugin_files::sante::Sante::new());
+
     let admin = admin_socket.map(|socket| {
         (
             admin::FilesAdmin {
@@ -454,7 +461,9 @@ async fn main() -> Result<()> {
                     runtime_dir.clone(),
                     catalog.clone(),
                     smb_ok.clone(),
+                    sante.clone(),
                 ),
+                sante,
                 mount_error: Arc::new(Mutex::new(None)),
                 smb_ok,
                 liste_changee,
