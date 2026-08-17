@@ -32,6 +32,14 @@ struct RadioSource {
     state_path: PathBuf,
     stations: Arc<AsyncRwLock<Stations>>,
     preset: u8,
+    /// URL du flux qui joue, quand quelque chose joue.
+    ///
+    /// La présélection est une **position** : remanier la table depuis la page
+    /// fait donc pointer le numéro mémorisé sur une autre station, et l'écran
+    /// annonçait le mauvais nom pour le flux qui continuait. L'URL, elle,
+    /// identifie durablement ce qui joue, et permet de retrouver le bon numéro
+    /// dans la table remaniée.
+    url_en_cours: Option<String>,
     catalog: Arc<RwLock<Catalog>>,
     locales_root: PathBuf,
     /// Reçoit le nouveau `Stations::preset_count()` annoncé par la moitié
@@ -63,6 +71,7 @@ impl RadioSource {
         let count = stations.preset_count();
         if let Some(st) = stations.by_preset(n) {
             self.preset = n;
+            self.url_en_cours = Some(st.url.clone());
             // `update` et non `save` : la moitié Admin écrit le pays choisi dans
             // ce même fichier, et un `save` construit ici l'effacerait.
             // L'échec est journalisé, comme le fait déjà la moitié Admin : un
@@ -104,6 +113,9 @@ impl SourcePlugin for RadioSource {
         self.play_preset(preset).await
     }
     async fn deactivate(&mut self) -> SourceOutcome {
+        // Plus rien ne joue : oublier l'URL, sinon un remaniement de la table
+        // corrigerait la présélection d'un flux arrêté.
+        self.url_en_cours = None;
         SourceOutcome::new(SourceAction::Stop).plays_nothing()
     }
     async fn select(&mut self, n: u8) -> SourceOutcome {
@@ -145,11 +157,17 @@ impl SourcePlugin for RadioSource {
     /// jouée (défaut constaté à l'usage : la grille restait sur l'ancien jeu
     /// de numéros jusque-là).
     ///
-    /// Ne porte **que** `preset_count` : ni statut, ni identité, ni présélection,
-    /// jamais éphémère. C'est ce qui garantit que cette notification ne
-    /// perturbe ni l'affichage courant ni le morceau en cours de lecture —
+    /// Elle corrige aussi le **numéro et le nom** de ce qui joue quand le
+    /// remaniement les a déplacés : la présélection est une position, donc
+    /// réordonner les stations faisait annoncer le nom d'une autre station pour
+    /// le flux qui continuait, et un redémarrage reprenait la mauvaise. Le flux
+    /// est retrouvé par son URL, seule chose qui l'identifie durablement.
+    ///
+    /// Ne porte **ni statut, ni identité, et jamais d'action** : la radio joue un
+    /// flux unique, il n'y a rien à recharger, seulement à redire juste.
     /// `Core::handle_source_update` fusionne champ par champ, donc une trame
-    /// muette sur tout le reste ne touche à rien d'autre.
+    /// muette sur le reste ne touche à rien d'autre — et le son n'est pas
+    /// interrompu.
     async fn poll_notification(&mut self) -> Option<Notification> {
         let Some(rx) = &mut self.preset_count_rx else {
             // Mode dégradé (pas de moitié Admin) : voir le commentaire sur le
@@ -159,7 +177,38 @@ impl SourcePlugin for RadioSource {
         match rx.changed().await {
             Ok(()) => {
                 let n = *rx.borrow_and_update();
-                Some(Notification::new().preset_count(n))
+                let mut avis = Notification::new().preset_count(n);
+                // La table vient d'être remaniée : retrouver **où est passé** le
+                // flux qui joue, et corriger le numéro et le nom affichés.
+                //
+                // Sans cela, la présélection étant une position, réordonner les
+                // stations faisait annoncer le nom d'une autre station pour le
+                // flux qui continuait — et un redémarrage reprenait la mauvaise.
+                //
+                // Aucune action ici, et c'est bien : la radio joue un flux
+                // unique, il n'y a rien à recharger, seulement à redire juste.
+                if let Some(url) = self.url_en_cours.clone() {
+                    let stations = self.stations.read().await;
+                    // Station retirée de la table : son numéro ne désigne plus
+                    // rien de sûr, et le protocole n'a pas de « plus aucune
+                    // présélection ». On se garde alors de mentir davantage en
+                    // ne touchant à rien.
+                    if let Some(st) = stations.by_url(&url) {
+                        let (p, nom) = (st.preset, st.name.clone());
+                        drop(stations);
+                        if p != self.preset {
+                            self.preset = p;
+                            // Persister aussi : sinon un redémarrage reprendrait
+                            // le numéro d'avant le remaniement, donc une autre
+                            // station.
+                            if let Err(e) = state::update(&self.state_path, |s| s.preset = p) {
+                                tracing::warn!("failed to persist preset: {e}");
+                            }
+                        }
+                        avis = avis.preset(p).preset_name(nom);
+                    }
+                }
+                Some(avis)
             }
             // L'émetteur (moitié Admin) a disparu — ne devrait pas arriver en
             // pratique tant que les deux moitiés partagent le même processus,
@@ -208,6 +257,8 @@ async fn main() -> Result<()> {
         state_path: state_path.clone(),
         stations: stations_shared.clone(),
         preset,
+        // Rien ne joue encore : renseigné au premier `Play`.
+        url_en_cours: None,
         catalog: catalog.clone(),
         locales_root,
         // Le récepteur n'a de sens que si une moitié Admin existe pour
@@ -292,6 +343,7 @@ mod tests {
             state_path: state_dir.path().join("plugin-radio.json"),
             stations: Arc::new(AsyncRwLock::new(Stations::default())),
             preset: 1,
+            url_en_cours: None,
             catalog: catalog.clone(),
             locales_root: dir.path().to_path_buf(),
             preset_count_rx: None,
@@ -313,6 +365,7 @@ mod tests {
             state_path: dir.path().join("plugin-radio.json"),
             stations: Arc::new(AsyncRwLock::new(stations)),
             preset,
+            url_en_cours: None,
             catalog: Arc::new(RwLock::new(Catalog::load("radio", "en", dir.path(), RADIO_EN))),
             locales_root: dir.path().to_path_buf(),
             preset_count_rx: None,
@@ -447,11 +500,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_notification_ne_declare_que_le_compte() {
-        // Propriete de surete : c'est ce qui garantit que l'annonce
-        // spontanee du nouveau compte (enregistrement depuis la page
-        // d'admin) ne perturbe ni l'affichage courant ni le morceau en
-        // cours de lecture. Voir le commentaire sur `poll_notification`.
+    async fn poll_notification_ne_touche_ni_a_l_identite_ni_au_son() {
+        // Propriete de surete : l'annonce spontanee (enregistrement depuis la
+        // page d'admin) ne doit ni couper le flux ni changer ce que les plugins
+        // `metadata` croient entendre. Rien ne joue ici, donc pas de
+        // presélection a corriger non plus.
         let (tx, rx) = tokio::sync::watch::channel(0u8);
         let mut source = make_source(two_stations(), 1);
         source.preset_count_rx = Some(rx);
@@ -460,7 +513,57 @@ mod tests {
         let n = source.poll_notification().await.expect("notification attendue");
         assert_eq!(n.preset_count, Some(5));
         assert!(n.identity.is_none(), "le morceau en cours ne doit pas bouger");
-        assert!(n.preset.is_none());
+        assert!(n.preset.is_none(), "rien ne joue : aucun numero a corriger");
+    }
+
+    #[tokio::test]
+    async fn un_remaniement_de_la_table_corrige_le_numero_de_ce_qui_joue() {
+        // Defaut de conception signale : la presélection est une **position**.
+        // Reordonner les stations depuis la page faisait pointer le numero
+        // memorisé sur une autre station — l'ecran annoncait le mauvais nom pour
+        // le flux qui continuait, et un redemarrage reprenait la mauvaise. Le
+        // flux est retrouve par son URL, seule chose qui l'identifie durablement.
+        let (tx, rx) = tokio::sync::watch::channel(0u8);
+        let mut source = make_source(two_stations(), 1);
+        source.preset_count_rx = Some(rx);
+        // La station 1 joue.
+        let url = match source.activate().await.action {
+            SourceAction::Play { uri, .. } => uri,
+            autre => panic!("attendu un Play, recu {autre:?}"),
+        };
+
+        // La page remanie la table : ce meme flux passe en presélection 2.
+        {
+            let mut st = source.stations.write().await;
+            for s in st.stations.iter_mut() {
+                s.preset = if s.url == url { 2 } else { 1 };
+            }
+        }
+        tx.send(2).unwrap();
+
+        let n = source.poll_notification().await.expect("notification attendue");
+        assert_eq!(n.preset, Some(2), "le numero doit suivre la station");
+        assert!(n.preset_name.is_some(), "et le nom avec");
+        assert_eq!(source.preset, 2, "memorise, pour que suivant/precedent partent de la");
+        // Et surtout : aucune action, donc le flux n'est pas coupe pour autant.
+        assert!(n.identity.is_none(), "l'identite du flux n'a pas change");
+    }
+
+    #[tokio::test]
+    async fn une_station_retiree_ne_fait_pas_inventer_de_numero() {
+        // Son numero ne designe plus rien de sur, et le protocole n'a pas de
+        // « plus aucune presélection » : mieux vaut ne rien dire que designer
+        // une station au hasard.
+        let (tx, rx) = tokio::sync::watch::channel(0u8);
+        let mut source = make_source(two_stations(), 1);
+        source.preset_count_rx = Some(rx);
+        source.activate().await;
+        source.stations.write().await.stations.clear();
+        tx.send(0).unwrap();
+
+        let n = source.poll_notification().await.expect("notification attendue");
+        assert_eq!(n.preset_count, Some(0));
+        assert!(n.preset.is_none(), "aucun numero invente");
     }
 
     #[tokio::test]

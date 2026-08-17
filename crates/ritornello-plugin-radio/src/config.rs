@@ -103,6 +103,17 @@ impl Stations {
         self.stations.iter().find(|s| s.preset == preset)
     }
 
+    /// La station dont l'URL est `url`, si elle est encore dans la table.
+    ///
+    /// Sert à retrouver **où est passé** ce qui joue après un remaniement de la
+    /// table : la présélection est une *position*, donc réordonner les stations
+    /// fait pointer le numéro mémorisé sur une autre station. L'URL, elle, est ce
+    /// qui identifie durablement un flux — le nom dépend de la configuration de
+    /// l'appareil, et le numéro de son ordre.
+    pub fn by_url(&self, url: &str) -> Option<&Station> {
+        self.stations.iter().find(|s| s.url == url)
+    }
+
     pub fn next_preset(&self, from: u8) -> Option<u8> {
         let mut p: Vec<u8> = self.stations.iter().map(|s| s.preset).collect();
         p.sort_unstable();

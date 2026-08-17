@@ -33,6 +33,16 @@ fn env_or(key: &str, default: &str) -> String {
 struct FilesSource {
     /// Partagée avec la moitié Admin, qui la modifie depuis la page.
     playlist: Arc<AsyncRwLock<Playlist>>,
+    /// La page a modifié la liste depuis qu'on l'a confiée à mpv.
+    ///
+    /// mpv joue une **copie**, écrite au dernier `Play`. Toute modification l'en
+    /// écarte, et la moitié Admin ne peut rien lui dire : les notifications du
+    /// SDK sont volontairement sans action. Ce drapeau est donc le seul canal, et
+    /// on s'en sert au prochain ordre reçu — c'est là qu'on peut légitimement
+    /// rendre à mpv une liste neuve.
+    liste_changee: Arc<std::sync::atomic::AtomicBool>,
+    /// Joue-t-on en ce moment. Lu par la page (voir `joue` côté Admin).
+    joue: Arc<std::sync::atomic::AtomicBool>,
     state_path: PathBuf,
     /// Le m3u **généré** que mpv reçoit. Découplé de toute liste utilisateur.
     mpv_playlist_path: PathBuf,
@@ -84,14 +94,19 @@ impl FilesSource {
 
     /// Lance la liste à l'index courant, après avoir réécrit le m3u de mpv.
     async fn jouer(&mut self) -> SourceOutcome {
+        // On rend à mpv la liste telle qu'elle est maintenant : l'écart est
+        // refermé, quelle qu'en fût la cause.
+        self.liste_changee.store(false, std::sync::atomic::Ordering::Relaxed);
         let liste = self.playlist.read().await;
         let count = liste.preset_count();
         let Some(entry) = liste.current().cloned() else {
+            self.joue.store(false, std::sync::atomic::Ordering::Relaxed);
             return SourceOutcome::new(SourceAction::Noop)
                 .status(self.mot("no_playlist"))
                 .preset_count(0)
                 .plays_nothing();
         };
+        self.joue.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Err(e) = liste.write_for_mpv(&self.mpv_playlist_path) {
             tracing::warn!("writing the mpv playlist: {e}");
         }
@@ -119,6 +134,37 @@ impl FilesSource {
             issue = issue.preset(n);
         }
         issue
+    }
+
+    /// Si la page a modifié la liste, la rend à mpv en se décalant de `pas`.
+    ///
+    /// `None` quand rien n'a changé : l'appelant délègue alors à mpv, comme
+    /// avant. Sans ce recalage, suivant/précédent marchaient dans la liste que
+    /// mpv tenait au dernier `Play` — les pistes ajoutées depuis étaient hors
+    /// d'atteinte, et celles retirées revenaient.
+    ///
+    /// Le décalage part de **notre** index, que la moitié Admin maintient à jour
+    /// au fil de ses modifications ; celui de mpv, lui, désigne une position dans
+    /// une liste périmée.
+    async fn recharger_si_changee(&mut self, pas: i64) -> Option<SourceOutcome> {
+        if !self.liste_changee.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        {
+            let mut liste = self.playlist.write().await;
+            if liste.entries.is_empty() {
+                // Rien à jouer : `jouer()` le dira, et il n'y a pas d'index à
+                // déplacer.
+                drop(liste);
+                return Some(self.jouer().await);
+            }
+            let n = liste.entries.len() as i64;
+            // Boucle sur les bornes, comme le fait mpv d'un bout à l'autre de sa
+            // propre liste : l'utilisateur ne doit pas se retrouver bloqué parce
+            // qu'une modification l'a laissé sur la dernière piste.
+            liste.index = (((liste.index as i64 + pas) % n + n) % n) as usize;
+        }
+        Some(self.jouer().await)
     }
 
     /// Trame qui ne fait que redire où on en est, sans rien relancer.
@@ -154,6 +200,7 @@ impl SourcePlugin for FilesSource {
     }
 
     async fn deactivate(&mut self) -> SourceOutcome {
+        self.joue.store(false, std::sync::atomic::Ordering::Relaxed);
         SourceOutcome::new(SourceAction::Stop).plays_nothing().status(self.statut())
     }
 
@@ -174,13 +221,22 @@ impl SourcePlugin for FilesSource {
     }
 
     async fn next(&mut self) -> SourceOutcome {
-        // mpv marche dans sa propre liste ; c'est lui qui nous dira où il est
-        // arrivé, par `player_track`. Rien à recaler ici, sous peine de le
+        // La liste a changé sous mpv : lui rendre la nouvelle, positionnée sur
+        // la piste qui suit. C'est le moment légitime pour le faire — un ordre
+        // explicite de l'utilisateur, qui s'attend à un changement de piste.
+        if let Some(issue) = self.recharger_si_changee(1).await {
+            return issue;
+        }
+        // Sinon mpv marche dans sa propre liste ; c'est lui qui nous dira où il
+        // est arrivé, par `player_track`. Rien à recaler ici, sous peine de le
         // faire deux fois et de se contredire.
         SourceOutcome::new(SourceAction::PlayerNext).status(self.statut())
     }
 
     async fn prev(&mut self) -> SourceOutcome {
+        if let Some(issue) = self.recharger_si_changee(-1).await {
+            return issue;
+        }
         SourceOutcome::new(SourceAction::PlayerPrev).status(self.statut())
     }
 
@@ -211,6 +267,7 @@ impl SourcePlugin for FilesSource {
         // piste, mpv reste inactif, le cœur envoie donc `stop()` aussitôt, et
         // l'utilisateur ne voyait qu'un statut générique sans jamais apprendre
         // que sa liste était vide.
+        self.joue.store(false, std::sync::atomic::Ordering::Relaxed);
         let vide = self.playlist.read().await.entries.is_empty();
         let mot = if vide { self.mot("no_playlist") } else { self.statut() };
         SourceOutcome::new(SourceAction::Noop).plays_nothing().status(mot)
@@ -309,8 +366,16 @@ async fn main() -> Result<()> {
     let (preset_count_tx, preset_count_rx) =
         tokio::sync::watch::channel(playlist.read().await.preset_count());
 
+    // Deux drapeaux partagés entre les deux moitiés : la page modifie la liste,
+    // la Source la joue, et rien d'autre ne les relie — les notifications du SDK
+    // sont volontairement sans action.
+    let liste_changee = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let joue = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     let source = FilesSource {
         playlist: playlist.clone(),
+        liste_changee: liste_changee.clone(),
+        joue: joue.clone(),
         state_path: state_path.clone(),
         mpv_playlist_path,
         catalog: catalog.clone(),
@@ -340,6 +405,8 @@ async fn main() -> Result<()> {
                 ),
                 mount_error: Arc::new(Mutex::new(None)),
                 smb_ok,
+                liste_changee,
+                joue,
                 roots_path,
                 creds_dir,
                 internal_playlists: playlists_dir,
@@ -397,6 +464,8 @@ mod tests {
         std::mem::forget(dir);
         FilesSource {
             playlist: Arc::new(AsyncRwLock::new(playlist)),
+            liste_changee: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            joue: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             state_path: racine.join("plugin-files.json"),
             mpv_playlist_path: racine.join("plugin-files.m3u"),
             catalog: Arc::new(RwLock::new(Catalog::load("files", "en", &racine, FILES_EN))),
@@ -615,6 +684,52 @@ mod tests {
         s.select(3).await;
         s.stop().await;
         assert_eq!(s.activate().await.preset, Some(3), "la piste ecoutee, pas la premiere");
+    }
+
+    #[tokio::test]
+    async fn suivant_delegue_a_mpv_quand_la_liste_na_pas_bouge() {
+        // Le cas ordinaire : mpv tient la même liste que nous, il sait avancer
+        // seul. Recharger ici couperait le son pour rien.
+        let mut s = source_de_test(liste_de(3));
+        assert_eq!(s.next().await.action, SourceAction::PlayerNext);
+    }
+
+    #[tokio::test]
+    async fn suivant_rend_la_liste_a_jour_quand_la_page_l_a_modifiee() {
+        // Défaut de conception signalé : mpv joue une **copie** de la liste,
+        // écrite au dernier `Play`. Une piste ajoutée depuis lui était hors
+        // d'atteinte, une piste retirée revenait. La moitié Admin ne pouvant rien
+        // lui dire, on saisit le premier ordre explicite pour lui rendre la liste
+        // neuve — un moment où l'utilisateur attend de toute façon un changement.
+        let mut s = source_de_test(liste_de(4));
+        s.select(2).await;
+        s.liste_changee.store(true, std::sync::atomic::Ordering::Relaxed);
+        let issue = s.next().await;
+        assert!(matches!(issue.action, SourceAction::Play { .. }), "{:?}", issue.action);
+        assert_eq!(issue.preset, Some(3), "la piste qui suit, dans la nouvelle liste");
+        // L'écart est refermé : l'ordre suivant redélègue à mpv.
+        assert_eq!(s.next().await.action, SourceAction::PlayerNext);
+    }
+
+    #[tokio::test]
+    async fn precedent_boucle_plutot_que_de_bloquer_apres_une_modification() {
+        // Sans bouclage, une modification qui laisse l'auditeur sur la première
+        // piste rendrait « précédent » inopérant, alors que mpv boucle d'un bout
+        // à l'autre de sa propre liste.
+        let mut s = source_de_test(liste_de(3));
+        s.liste_changee.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(s.prev().await.preset, Some(3), "on revient a la derniere piste");
+    }
+
+    #[tokio::test]
+    async fn suivant_sur_une_liste_videe_ne_joue_rien() {
+        // Vider pendant la lecture : l'arrêt est demandé par la page, mais si un
+        // ordre arrive quand même, il ne doit pas chercher une piste inexistante.
+        let mut s = source_de_test(Playlist::default());
+        s.liste_changee.store(true, std::sync::atomic::Ordering::Relaxed);
+        let issue = s.next().await;
+        assert_eq!(issue.status.as_deref(), Some("NO PLAYLIST"));
+        assert!(matches!(issue.action, SourceAction::Noop));
     }
 
     #[test]

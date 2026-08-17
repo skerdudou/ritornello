@@ -122,6 +122,7 @@ export interface EtatServeur {
   browse?: Navigue
   volumes?: { path: string; fstype: string }[]
   can_browse_smb?: boolean
+  playing?: boolean
   explore?: Explore
   mount_error?: string | null
 }
@@ -172,6 +173,7 @@ export function etat(partiel: EtatServeur = {}): Required<EtatServeur> {
     // Faux par défaut, comme le plugin quand `smbclient` manque : c'est l'état
     // qu'un test doit déclarer explicitement pour offrir l'assistant réseau.
     can_browse_smb: false,
+    playing: false,
     explore: EXPLORE_FERME,
     mount_error: null,
     ...partiel,

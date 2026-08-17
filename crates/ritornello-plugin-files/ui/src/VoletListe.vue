@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Button, Input } from '@ritornello/ui'
+import { api, Button, Input } from '@ritornello/ui'
 import { computed, ref, watch } from 'vue'
 import { formaterDuree, INTERNE, type Donnees, type Envoyer, type T } from './donnees'
 
@@ -107,8 +107,18 @@ function retirer(i: number): void {
   void props.envoyer({ op: 'remove', index: i })
 }
 
-function vider(): void {
-  void props.envoyer({ op: 'clear' })
+async function vider(): Promise<void> {
+  // Vider pendant la lecture laissait la musique continuer sur une liste
+  // désormais vide : le plugin ne peut rien demander à mpv — les notifications
+  // du SDK sont sans action — donc c'est la page qui demande l'arrêt au cœur, par
+  // la même voie que la télécommande. Un geste de l'utilisateur, pas une
+  // initiative du plugin.
+  //
+  // **Seulement si c'est bien cette source qui joue** : sans cette condition, on
+  // couperait la radio en vidant une liste de fichiers à l'arrêt.
+  const jouait = props.donnees.playing
+  if (!(await props.envoyer({ op: 'clear' }))) return
+  if (jouait) await api.post('/api/command', { cmd: 'Stop' })
 }
 
 function enregistrer(): void {

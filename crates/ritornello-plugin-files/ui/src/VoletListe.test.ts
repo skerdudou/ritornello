@@ -53,6 +53,28 @@ describe('volet de la liste en cours', () => {
     expect((w.findAll('[data-track-down]')[2]!.element as HTMLButtonElement).disabled).toBe(true)
   })
 
+  it('vider pendant la lecture demande aussi l’arrêt au cœur', async () => {
+    // Défaut de conception signalé : la moitié Admin ne peut rien demander à
+    // mpv — les notifications du SDK sont sans action — donc vider laissait la
+    // musique continuer sur une liste désormais vide. C'est la page qui demande
+    // l'arrêt, par la voie de la télécommande : un geste de l'utilisateur.
+    const { w, s } = await monter({ playlist: TROIS, playing: true })
+    await w.find('[data-clear]').trigger('click')
+    await flushPromises()
+    expect(s.putsDe('clear')).toHaveLength(1)
+    expect(s.urls()).toContain('/api/command')
+  })
+
+  it('vider une liste à l’arrêt ne coupe pas la source qui joue', async () => {
+    // Sans cette condition, vider une liste de fichiers inactive couperait la
+    // radio — le `Stop` du cœur s'applique à la source active, pas à la nôtre.
+    const { w, s } = await monter({ playlist: TROIS, playing: false })
+    await w.find('[data-clear]').trigger('click')
+    await flushPromises()
+    expect(s.putsDe('clear')).toHaveLength(1)
+    expect(s.urls()).not.toContain('/api/command')
+  })
+
   it('réordonne au glisser-déposer, comme la grille des stations', async () => {
     const { w, s } = await monter({ playlist: TROIS })
     const lignes = w.findAll('[data-track-row]')

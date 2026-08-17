@@ -75,6 +75,16 @@ pub struct FilesAdmin {
     /// `smbclient` est-il utilisable. Sondé au démarrage, resondé à chaque
     /// tentative de connexion.
     pub smb_ok: Arc<std::sync::atomic::AtomicBool>,
+    /// La liste a changé depuis que la moitié Source l'a confiée à mpv.
+    ///
+    /// Partagé avec elle : c'est le seul canal disponible, les notifications du
+    /// SDK ne pouvant pas porter d'action.
+    pub liste_changee: Arc<std::sync::atomic::AtomicBool>,
+    /// La moitié Source joue-t-elle en ce moment.
+    ///
+    /// Sert à la page pour décider si vider la liste doit aussi demander l'arrêt
+    /// au cœur : le faire alors qu'une autre source joue couperait celle-là.
+    pub joue: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -186,6 +196,12 @@ impl FilesAdmin {
     /// modification. Le compte part **avant** l'écriture disque : la grille web
     /// n'a pas à attendre un `/var/lib` lent.
     async fn liste_modifiee(&self) {
+        // mpv joue une **copie** de la liste, écrite au dernier `Play`. Toute
+        // modification l'en écarte, et la moitié Admin ne peut rien lui dire :
+        // le SDK interdit aux notifications de porter une action. Ce drapeau est
+        // donc le seul moyen de prévenir la moitié Source, qui rendra la liste à
+        // jour au prochain ordre qu'elle recevra.
+        self.liste_changee.store(true, Ordering::Relaxed);
         let liste = self.playlist.read().await;
         let _ = self.preset_count_tx.send(liste.preset_count());
         let stockees: Vec<state::StoredEntry> =
@@ -372,6 +388,10 @@ impl AdminPlugin for FilesAdmin {
             "roots": racines,
             "volumes": volumes,
             "can_browse_smb": can_browse_smb,
+            // Ce que la page en fait : décider si vider la liste doit aussi
+            // demander l'arrêt. Sans cette information elle couperait la radio
+            // en vidant une liste de fichiers qui ne jouait pas.
+            "playing": self.joue.load(std::sync::atomic::Ordering::Relaxed),
             "explore": explore,
             "mount_error": mount_error,
             "playlist": pistes,
@@ -605,6 +625,7 @@ impl AdminPlugin for FilesAdmin {
                 let etat = self.scan.clone();
                 let compteur = Arc::new(AtomicUsize::new(0));
                 let tx = self.preset_count_tx.clone();
+                let changee = self.liste_changee.clone();
                 let state_path = self.state_path.clone();
                 self.scan_task = Some(tokio::spawn(async move {
                     let c = compteur.clone();
@@ -639,6 +660,10 @@ impl AdminPlugin for FilesAdmin {
                                     liste.entries.iter().map(state::StoredEntry::from).collect();
                                 let index = liste.index;
                                 drop(liste);
+                                // Même raison que dans `liste_modifiee` : mpv
+                                // joue une copie, et ce drapeau est le seul
+                                // canal vers la moitié Source.
+                                changee.store(true, Ordering::Relaxed);
                                 let _ = tx.send(compte);
                                 if let Err(e) = state::update(&state_path, |s| {
                                     s.playlist = stockees;
@@ -775,6 +800,8 @@ mod tests {
             unresolved: Arc::new(Mutex::new(Vec::new())),
             browse: Arc::new(Mutex::new(serde_json::json!({}))),
             preset_count_tx: tx,
+            liste_changee: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            joue: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             explore: ritornello_plugin_files::explore::Explorateur::new(
                 racine.join("creds"),
                 catalogue.clone(),

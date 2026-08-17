@@ -138,6 +138,14 @@ export interface Donnees {
   volumes: Volume[]
   /** `smbclient` est-il utilisable. Faux grise l'assistant réseau, sans le retirer. */
   canBrowseSmb: boolean
+  /**
+   * Cette source joue-t-elle en ce moment.
+   *
+   * Sert à décider si vider la liste doit aussi demander l'arrêt au cœur :
+   * l'exiger sans condition couperait la radio quand on vide une liste de
+   * fichiers qui ne jouait pas.
+   */
+  playing: boolean
   explore: Exploration
   /**
    * Échec de la dernière réconciliation de montage, déjà traduit.
@@ -336,6 +344,7 @@ export function normaliserDonnees(brut: unknown): Donnees {
     // Faux par défaut : mieux vaut griser un assistant utilisable que d'en
     // offrir un qui échouera au clic sans dire pourquoi.
     canBrowseSmb: o.can_browse_smb === true,
+    playing: o.playing === true,
     explore: normaliserExploration(o.explore),
     mountError: typeof o.mount_error === 'string' && o.mount_error ? o.mount_error : null,
   }
