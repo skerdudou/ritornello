@@ -116,9 +116,14 @@ async function vider(): Promise<void> {
   //
   // **Seulement si c'est bien cette source qui joue** : sans cette condition, on
   // couperait la radio en vidant une liste de fichiers à l'arrêt.
-  const jouait = props.donnees.playing
-  if (!(await props.envoyer({ op: 'clear' }))) return
-  if (jouait) await api.post('/api/command', { cmd: 'Stop' })
+  // L'état lu est celui **rendu par le vidage**, pas celui qu'affichait la page
+  // avant. C'est une fragilité mesurée : `donnees` peut être périmé — la page ne
+  // sonde pas en continu — et un `playing` faussement à faux faisait taire la
+  // demande d'arrêt sans que rien ne le signale. Le vidage ne touche pas à
+  // `playing`, donc sa relecture dit encore la vérité sur ce qui joue.
+  const etat = await props.envoyer({ op: 'clear' })
+  if (!etat) return
+  if (etat.playing) await api.post('/api/command', { cmd: 'Stop' })
 }
 
 function enregistrer(): void {

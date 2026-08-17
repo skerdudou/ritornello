@@ -65,6 +65,20 @@ describe('volet de la liste en cours', () => {
     expect(s.urls()).toContain('/api/command')
   })
 
+  it('demande l’arrêt même si la page croyait à tort que rien ne jouait', async () => {
+    // Fragilité mesurée : la page ne sonde pas en continu, donc `playing` peut
+    // être périmé. Le lire avant le vidage faisait taire la demande d'arrêt sans
+    // que rien ne le signale. On lit donc l'état **rendu par le vidage**, qui ne
+    // touche pas à `playing`.
+    const { w, s } = await monter({ playlist: TROIS, playing: false })
+    s.surPut = () => {
+      s.data.playing = true
+    }
+    await w.find('[data-clear]').trigger('click')
+    await flushPromises()
+    expect(s.urls()).toContain('/api/command')
+  })
+
   it('vider une liste à l’arrêt ne coupe pas la source qui joue', async () => {
     // Sans cette condition, vider une liste de fichiers inactive couperait la
     // radio — le `Stop` du cœur s'applique à la source active, pas à la nôtre.
