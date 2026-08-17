@@ -640,7 +640,26 @@ impl<P: Player> Core<P> {
                 self.player.set_mute(self.muted).await?;
                 self.show_overlay().await;
             }
-            Command::PlayPause => self.player.toggle_pause().await?,
+            Command::PlayPause => {
+                if self.lecture {
+                    self.player.toggle_pause().await?;
+                } else {
+                    // Rien n'est chargé : `stop` **vide la liste de mpv**, si
+                    // bien que « basculer la pause » n'a plus rien à reprendre.
+                    // La touche Lecture ne faisait donc rien du tout après un
+                    // Stop, sur toutes les sources — mesuré sur la radio comme
+                    // sur les fichiers. On redemande à la source active de
+                    // jouer, ce qui est exactement ce que la touche promet.
+                    //
+                    // `lecture` et non `expecting_stream` : la première dit
+                    // « quelque chose joue, de quelque nature », la seconde ne
+                    // vaut que pour les flux relançables. Une pause, elle, ne
+                    // touche ni l'une ni l'autre — la reprise reste donc un
+                    // simple basculement, sans rechargement.
+                    let action = self.active().request(SourceReq::Activate).await?;
+                    self.apply(action).await?;
+                }
+            }
             Command::Stop => {
                 self.expecting_stream = false;
                 self.lecture = false;
@@ -1536,6 +1555,41 @@ mod tests {
                 "playlist-pos 4".to_string()
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn la_touche_lecture_relance_quand_rien_ne_joue() {
+        // Défaut signalé, et il touchait **toutes** les sources : `stop` vide la
+        // liste de mpv, donc « basculer la pause » n'avait plus rien à reprendre
+        // et la touche Lecture ne faisait rien du tout. Mesuré sur la radio comme
+        // sur les fichiers avant correction.
+        let (mut core, player_calls, _sc, _rx, _d) = setup();
+        core.apply(SourceAction::play("http://fip")).await.unwrap();
+        core.handle_command(Command::Stop).await.unwrap();
+        player_calls.lock().unwrap().clear();
+
+        core.handle_command(Command::PlayPause).await.unwrap();
+        assert_eq!(
+            *player_calls.lock().unwrap(),
+            vec!["play http://fip".to_string()],
+            "la source active doit etre redemandee, pas une pause dans le vide"
+        );
+    }
+
+    #[tokio::test]
+    async fn la_touche_lecture_bascule_la_pause_quand_ca_joue() {
+        // Garde-fou du test précédent : une pause doit rester une pause, et non
+        // devenir un rechargement qui repartirait du début de la piste.
+        let (mut core, player_calls, _sc, _rx, _d) = setup();
+        core.apply(SourceAction::play("http://fip")).await.unwrap();
+        player_calls.lock().unwrap().clear();
+
+        core.handle_command(Command::PlayPause).await.unwrap();
+        assert_eq!(*player_calls.lock().unwrap(), vec!["pause".to_string()]);
+        // Et une deuxième fois : mettre en pause ne fait pas « cesser de
+        // jouer », donc la reprise reste un simple basculement.
+        core.handle_command(Command::PlayPause).await.unwrap();
+        assert_eq!(*player_calls.lock().unwrap(), vec!["pause".to_string(), "pause".to_string()]);
     }
 
     #[tokio::test]

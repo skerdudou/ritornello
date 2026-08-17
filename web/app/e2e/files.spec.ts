@@ -183,6 +183,18 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   await expect(page.locator('[data-player-preset]')).toHaveText('3')
   await expect(page.locator('[data-player-preset-name]')).toHaveText('03')
 
+  // Stop, puis Lecture : la lecture doit repartir.
+  //
+  // `stop` vide la liste de mpv, si bien que « basculer la pause » n'avait plus
+  // rien a reprendre : la touche Lecture ne faisait rien du tout, sur toutes les
+  // sources. Elle redemande desormais a la source active de jouer. Et la piste
+  // ecoutee revient, pas la premiere : l'index vit dans le plugin et aucun arret
+  // ne le deplace.
+  await page.getByRole('button', { name: 'Stop', exact: true }).click()
+  await expect(page.locator('[data-player-preset]')).toHaveCount(0)
+  await page.getByRole('button', { name: 'Play/Pause', exact: true }).click()
+  await expect(page.locator('[data-player-preset]')).toHaveText('3')
+
   // Remettre le harnais dans l'etat ou on l'a trouve : les parcours partagent
   // un unique coeur et `files.spec.ts` s'execute **avant** `parcours.spec.ts`,
   // qui exige la radio active. La remise est verifiee, pas esperee.

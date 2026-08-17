@@ -9,7 +9,6 @@
 status_files = "FILES"
 no_playlist = "NO PLAYLIST"
 empty_track = "NO SUCH TRACK"
-end_of_playlist = "END OF PLAYLIST"
 
 # Refus de validation des racines.
 bad_root_name = "invalid root name \"{name}\": use lowercase letters, digits and dashes only, starting with a letter or digit"

@@ -33,12 +33,6 @@ fn env_or(key: &str, default: &str) -> String {
 struct FilesSource {
     /// Partagée avec la moitié Admin, qui la modifie depuis la page.
     playlist: Arc<AsyncRwLock<Playlist>>,
-    /// Le dernier arrêt vient-il de la **fin de la liste** ?
-    ///
-    /// mpv annonce `playlist-pos = -1` en fin de liste, puis le cœur envoie
-    /// `stop()`. Sans ce souvenir, `stop()` ne peut pas distinguer une liste
-    /// terminée d'un arrêt demandé, et affiche un statut muet dans les deux cas.
-    fin_de_liste: bool,
     state_path: PathBuf,
     /// Le m3u **généré** que mpv reçoit. Découplé de toute liste utilisateur.
     mpv_playlist_path: PathBuf,
@@ -90,9 +84,6 @@ impl FilesSource {
 
     /// Lance la liste à l'index courant, après avoir réécrit le m3u de mpv.
     async fn jouer(&mut self) -> SourceOutcome {
-        // On relance : la fin de liste précédente est de l'histoire ancienne, et
-        // la garder ferait annoncer « fin de liste » au prochain arrêt.
-        self.fin_de_liste = false;
         let liste = self.playlist.read().await;
         let count = liste.preset_count();
         let Some(entry) = liste.current().cloned() else {
@@ -149,6 +140,16 @@ impl FilesSource {
 #[async_trait::async_trait]
 impl SourcePlugin for FilesSource {
     async fn activate(&mut self) -> SourceOutcome {
+        // L'index est conservé : reprendre après un arrêt rend la piste qu'on
+        // écoutait, et non la première.
+        //
+        // Une version antérieure repartait du début quand la liste s'était
+        // terminée, en se fiant au `playlist-pos = -1` de mpv. Mesuré : ce -1
+        // arrive **aussi de façon transitoire à chaque rechargement de liste**,
+        // donc à chaque changement de piste. La reprise retombait alors sur la
+        // piste 1. Le signal n'étant pas fiable, la distinction est abandonnée
+        // plutôt que devinée — au prix d'un détail : après une liste allée à son
+        // terme, la touche Lecture rejoue la dernière piste.
         self.jouer().await
     }
 
@@ -190,14 +191,12 @@ impl SourcePlugin for FilesSource {
 
     async fn player_track(&mut self, n: i64) -> SourceOutcome {
         if !self.playlist.write().await.set_index(n) {
-            // mpv dit `-1` en fin de liste : ne rien déclarer, l'arrêt sera
-            // annoncé par `stop()` que le cœur envoie juste après. On retient
-            // seulement **pourquoi** cet arrêt vient, pour que `stop()` sache
-            // dire « fin de liste » plutôt qu'un statut muet.
-            self.fin_de_liste = n < 0;
+            // mpv dit `-1` en fin de liste — **et aussi transitoirement à chaque
+            // rechargement de liste**, donc à chaque changement de piste : c'est
+            // mesuré, et c'est pourquoi on n'en tire aucune conclusion. Ne rien
+            // déclarer ; l'arrêt éventuel sera annoncé par `stop()`.
             return SourceOutcome::new(SourceAction::Noop);
         }
-        self.fin_de_liste = false;
         self.persiste().await;
         self.recale().await
     }
@@ -213,14 +212,7 @@ impl SourcePlugin for FilesSource {
         // l'utilisateur ne voyait qu'un statut générique sans jamais apprendre
         // que sa liste était vide.
         let vide = self.playlist.read().await.entries.is_empty();
-        let mot = if vide {
-            self.mot("no_playlist")
-        } else if self.fin_de_liste {
-            self.mot("end_of_playlist")
-        } else {
-            self.statut()
-        };
-        self.fin_de_liste = false;
+        let mot = if vide { self.mot("no_playlist") } else { self.statut() };
         SourceOutcome::new(SourceAction::Noop).plays_nothing().status(mot)
     }
 
@@ -319,7 +311,6 @@ async fn main() -> Result<()> {
 
     let source = FilesSource {
         playlist: playlist.clone(),
-        fin_de_liste: false,
         state_path: state_path.clone(),
         mpv_playlist_path,
         catalog: catalog.clone(),
@@ -406,7 +397,6 @@ mod tests {
         std::mem::forget(dir);
         FilesSource {
             playlist: Arc::new(AsyncRwLock::new(playlist)),
-            fin_de_liste: false,
             state_path: racine.join("plugin-files.json"),
             mpv_playlist_path: racine.join("plugin-files.m3u"),
             catalog: Arc::new(RwLock::new(Catalog::load("files", "en", &racine, FILES_EN))),
@@ -580,34 +570,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn un_arret_en_fin_de_liste_le_dit() {
-        // mpv annonce `playlist-pos = -1` en fin de liste, puis le cœur envoie
-        // `stop()`. Sans souvenir de ce -1, l'arrêt était muet : la lecture
-        // s'arrêtait sans que rien ne distingue « c'est fini » de « on a
-        // appuyé sur stop ».
-        let mut s = source_de_test(liste_de(3));
-        s.activate().await;
-        s.player_track(-1).await;
-        assert_eq!(s.stop().await.status.as_deref(), Some("END OF PLAYLIST"));
-    }
-
-    #[tokio::test]
-    async fn un_arret_demande_reste_un_arret_ordinaire() {
-        // Garde-fou du test précédent : « fin de liste » ne doit pas devenir le
-        // message de tout arrêt.
+    async fn un_arret_sur_une_liste_pleine_reste_un_arret_ordinaire() {
+        // Garde-fou du test précédent : « aucune liste » doit rester réservé au
+        // cas où il n'y a vraiment rien à jouer.
         let mut s = source_de_test(liste_de(3));
         s.activate().await;
         assert_eq!(s.stop().await.status.as_deref(), Some("FILES"));
     }
 
     #[tokio::test]
-    async fn relancer_efface_la_fin_de_liste_precedente() {
-        // Sans cette remise à zéro, le prochain arrêt annoncerait encore « fin
-        // de liste » alors qu'on vient de repartir sur une piste choisie.
-        let mut s = source_de_test(liste_de(3));
+    async fn un_playlist_pos_negatif_ne_deplace_pas_l_index() {
+        // mpv annonce `-1` en fin de liste **et transitoirement à chaque
+        // rechargement**, donc à chaque changement de piste : c'est mesuré. En
+        // tirer une conclusion — « la liste est terminée, repartons du début » —
+        // faisait retomber toute reprise sur la piste 1.
+        let mut s = source_de_test(liste_de(4));
+        s.select(3).await;
         s.player_track(-1).await;
-        s.select(2).await;
-        assert_eq!(s.stop().await.status.as_deref(), Some("FILES"));
+        assert_eq!(s.activate().await.preset, Some(3), "le -1 ne doit rien conclure");
     }
 
     #[tokio::test]
@@ -624,6 +604,17 @@ mod tests {
             }
             autre => panic!("attendu un Play, recu {autre:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn reprendre_apres_un_arret_rend_la_piste_ecoutee() {
+        // La touche Lecture après un Stop redemande `activate()`. Elle doit
+        // rendre la piste qu'on écoutait — l'index vit dans le plugin et aucun
+        // arrêt ne le déplace — et non repartir de la première.
+        let mut s = source_de_test(liste_de(4));
+        s.select(3).await;
+        s.stop().await;
+        assert_eq!(s.activate().await.preset, Some(3), "la piste ecoutee, pas la premiere");
     }
 
     #[test]
