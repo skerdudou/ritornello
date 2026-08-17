@@ -143,6 +143,9 @@ impl MetadataPlugin for RadioFranceMetas {
                     // retard (voir `live::album_dans_grille`).
                     album: meta.album,
                     duration_s: meta.duration_s,
+                    // Renseigné par une tâche ultérieure : le direct annonce
+                    // le début du morceau, dont on déduira l'écoulé.
+                    position_s: None,
                 };
             }
         }

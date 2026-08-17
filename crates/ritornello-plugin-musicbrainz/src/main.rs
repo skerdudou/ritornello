@@ -99,6 +99,9 @@ impl MusicBrainzPlugin {
             // MusicBrainz donnerait les durées avec `inc=recordings`, mais la
             // durée n'est pas affichée : rien ne justifie d'alourdir la requête.
             duration_s: None,
+            // Ce plugin ne sait pas où en est la lecture : il répond
+            // sur l'identité d'un morceau, pas sur son déroulement.
+            position_s: None,
         });
     }
 

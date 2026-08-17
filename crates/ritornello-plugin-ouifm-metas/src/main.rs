@@ -139,6 +139,9 @@ impl MetadataPlugin for OuiFmMetas {
                     // Le flux ne donne pas d'album (ce sont des webradios).
                     album: None,
                     duration_s: meta.duration_s,
+                    // Ce plugin ne sait pas où en est la lecture : il répond
+                    // sur l'identité d'un morceau, pas sur son déroulement.
+                    position_s: None,
                 };
             }
         }
