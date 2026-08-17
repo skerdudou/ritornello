@@ -1982,6 +1982,13 @@ mod tests {
         assert!(core.tick_position());
         core.handle_command(Command::Power).await.unwrap();
         assert!(!core.tick_position(), "l'appareil dort");
+        // Le garde `!standby` est défensif : aucun chemin atteignable ne pose
+        // aujourd'hui la veille en laissant `lecture` vrai (`Command::Power`
+        // remet les deux). On construit donc l'état à la main, sans quoi ce
+        // test passerait à l'identique si le garde disparaissait.
+        core.lecture = true;
+        core.standby = true;
+        assert!(!core.tick_position(), "la veille l'emporte, même si la lecture n'a pas été remise à zéro");
     }
 
     /// La règle qui protège les messages éphémères : le tick republie l'état
