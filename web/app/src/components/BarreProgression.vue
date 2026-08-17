@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useCatalog } from '../composables/useCatalog'
 import { formatePosition } from '../composables/usePlayer'
 
 // Composant local a la SPA plutot qu'element du kit : seule la carte Player
 // s'en sert, et le kit est le contrat des pages de plugins.
+const { t } = useCatalog()
 const props = defineProps<{
   position: number | null
   duree: number | null
@@ -57,6 +59,7 @@ function auClavier(e: KeyboardEvent): void {
       :class="deplacable ? 'cursor-pointer' : ''"
       data-barre
       :role="deplacable ? 'slider' : undefined"
+      :aria-label="deplacable ? t('position_label') : undefined"
       :tabindex="deplacable ? 0 : undefined"
       :aria-valuemin="deplacable ? 0 : undefined"
       :aria-valuemax="deplacable ? duree ?? undefined : undefined"

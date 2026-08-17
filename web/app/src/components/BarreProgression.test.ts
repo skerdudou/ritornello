@@ -21,7 +21,11 @@ describe('BarreProgression', () => {
 
   it('remplit la barre au prorata', () => {
     const w = monte({})
-    expect(w.get('[data-remplissage]').attributes('style')).toContain('34')
+    const style = w.get('[data-remplissage]').attributes('style') ?? ''
+    const pourcent = Number(/width:\s*([\d.]+)%/.exec(style)?.[1])
+    // 87 / 254 = 34,25 %. Une valeur lue et comparee, plutot qu'une
+    // sous-chaine « 34 » qui passerait aussi bien sur « 3.4 » ou « 340 ».
+    expect(pourcent).toBeCloseTo(34.25, 1)
   })
 
   // C'est `deplacable` qui decide, pas la presence d'une duree : Radio France
@@ -58,5 +62,13 @@ describe('BarreProgression', () => {
     expect(w.emitted('deplacer')?.[2]).toEqual([0])
     await barre.trigger('keydown', { key: 'End' })
     expect(w.emitted('deplacer')?.[3]).toEqual([254])
+  })
+
+  // Un `role="slider"` sans nom est annonce « curseur » par un lecteur
+  // d'ecran, sans dire ce qu'il controle. Le libelle vient du catalogue, pas
+  // d'une chaine en dur.
+  it('porte un nom accessible quand il est deplacable', () => {
+    const w = monte({ deplacable: true })
+    expect(w.get('[data-barre]').attributes('aria-label')).toBeTruthy()
   })
 })

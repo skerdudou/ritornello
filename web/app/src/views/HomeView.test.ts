@@ -87,7 +87,7 @@ describe('HomeView', () => {
     // `preset_count: null` (defaut de FauxEventSource, jamais poussee ici) :
     // la source ne declare rien, on garde la grille nue historique et pas de
     // +10 (rien a decaler vers).
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     expect(w.findAll('[data-preset-button]')).toHaveLength(9)
@@ -96,7 +96,7 @@ describe('HomeView', () => {
   })
 
   it('rend une rangée par groupe et la veille dans l’en-tête', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     expect(w.findAll('[data-remote-row]')).toHaveLength(REMOTE_ROWS.length)
@@ -109,7 +109,7 @@ describe('HomeView', () => {
     // bouton tombe sur la deuxieme ligne, sous le titre — c'est exactement ce
     // qui s'etait produit, et aucune classe utilitaire ajoutee a la main ne le
     // corrigeait.
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     const action = w.find('[data-slot="card-action"]')
@@ -122,7 +122,7 @@ describe('HomeView', () => {
     // qui joue (déclarée par la source active via le flux poussé) porte
     // aria-current et la variante pleine ; les autres restent neutres.
     vi.stubGlobal('EventSource', FauxEventSource)
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     FauxEventSource.derniere!.pousse({ preset: 3 })
@@ -139,7 +139,7 @@ describe('HomeView', () => {
 
   it('annonce le nombre de présélections déclaré par la source', async () => {
     vi.stubGlobal('EventSource', FauxEventSource)
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     FauxEventSource.derniere!.pousse({ preset_count: 24 })
@@ -159,7 +159,7 @@ describe('HomeView', () => {
     // Grille nue 1-9 : c'est un repli, pas un inventaire — annoncer « 9 »
     // serait une affirmation que personne n'a faite.
     vi.stubGlobal('EventSource', FauxEventSource)
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     FauxEventSource.derniere!.pousse({ preset_count: null })
@@ -171,7 +171,7 @@ describe('HomeView', () => {
     // L'unique connexion SSE de la page vit dans HomeView : l'encart doit
     // recevoir le même état en prop (c'était son propre flux auparavant).
     vi.stubGlobal('EventSource', FauxEventSource)
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     FauxEventSource.derniere!.pousse({ volume: 45 })
@@ -194,7 +194,7 @@ describe('HomeView', () => {
 
 describe('HomeView — volume maintenu', () => {
   /** Monte la vue avec des timings servis par /api/settings et des faux minuteurs. */
-  async function monterAvecTimings(reglages = { volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: false }) {
+  async function monterAvecTimings(reglages = { volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: false, seek_step_s: 10 }) {
     vi.useFakeTimers()
     const posts: string[] = []
     const spy = vi.fn(async (url: string, init?: RequestInit) => {
@@ -203,7 +203,7 @@ describe('HomeView — volume maintenu', () => {
         return new Response(null, { status: 204 })
       }
       if (url === '/api/settings') return new Response(JSON.stringify(reglages), { status: 200 })
-      return new Response('{}', { status: 200 })
+      return new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })
     })
     vi.stubGlobal('fetch', spy)
     const HomeView = (await import('./HomeView.vue')).default
@@ -244,7 +244,7 @@ describe('HomeView — volume maintenu', () => {
   })
 
   it('les timings viennent de /api/settings', async () => {
-    const { w, posts } = await monterAvecTimings({ volume_repeat_initial_ms: 200, volume_repeat_interval_ms: 100, start_in_standby: false })
+    const { w, posts } = await monterAvecTimings({ volume_repeat_initial_ms: 200, volume_repeat_interval_ms: 100, start_in_standby: false, seek_step_s: 10 })
     await w.find('[data-remote-hold="VolumeUp"]').trigger('pointerdown')
     await vi.advanceTimersByTimeAsync(200)
     expect(posts).toHaveLength(2)
@@ -279,7 +279,7 @@ describe('HomeView — pagination des présélections', () => {
         posts.push(String(init.body))
         return new Response(null, { status: 204 })
       }
-      return new Response('{}', { status: 200 })
+      return new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })
     })
     vi.stubGlobal('fetch', spy)
     vi.stubGlobal('EventSource', FauxEventSource)
