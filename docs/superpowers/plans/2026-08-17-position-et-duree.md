@@ -979,7 +979,22 @@ Dans `handle_enrichment`, juste avant `self.publie_etat();` :
 ```rust
         // Poser l'ancre à la réception : c'est le seul instant où l'écoulé
         // annoncé est exact.
-        self.ancre_position = self.metadonnees.position_s().map(|p| (p, Instant::now()));
+        //
+        // **Seulement quand c'est le gagnant qui vient de parler**, et c'est un
+        // défaut trouvé en relecture. Un plugin retenu en réserve peut répondre
+        // à tout moment (un titre corrigé, une pochette) sans rien apprendre de
+        // neuf sur l'avancement : réancrer alors relirait la position
+        // **inchangée** du gagnant en la datant de maintenant, et la barre
+        // reculerait d'un coup de tout ce qu'elle avait avancé. Le `match`
+        // ci-dessus distingue déjà les deux cas pour le journal.
+        //
+        // Un gagnant qui réémet à l'identique n'arrive jamais ici : `ajoute`
+        // déduplique et rend `false`. Et un plugin plus prioritaire qui répond
+        // pour la première fois **devient** le gagnant, donc son annonce ancre
+        // bien, ce qui est voulu.
+        if self.metadonnees.gagnant() == Some(plugin) {
+            self.ancre_position = self.metadonnees.position_s().map(|p| (p, Instant::now()));
+        }
 ```
 
 Dans `set_identity`, dans la branche qui suit `if !self.metadonnees.set_identity(identity) { return; }` (donc quand l'identité a réellement changé), ajouter avant l'envoi de `NowPlaying` :
