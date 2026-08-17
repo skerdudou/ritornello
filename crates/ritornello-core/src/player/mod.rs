@@ -2,6 +2,18 @@ pub mod mpv;
 
 use anyhow::Result;
 
+/// Où en est la lecture et combien elle dure, telles que le lecteur les
+/// connaît à cet instant.
+///
+/// Les deux ensemble et non deux méthodes : elles sont lues au même moment,
+/// pour la même trame, et un appelant qui n'en prendrait qu'une publierait un
+/// couple incohérent (une position d'une piste, la durée de la suivante).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Progression {
+    pub position_s: Option<f64>,
+    pub duration_s: Option<f64>,
+}
+
 #[async_trait::async_trait]
 pub trait Player: Send + Sync + 'static {
     async fn play(&self, uri: &str) -> Result<()>;
@@ -26,4 +38,12 @@ pub trait Player: Send + Sync + 'static {
     async fn set_volume(&self, volume: u8) -> Result<()>;
     async fn set_mute(&self, mute: bool) -> Result<()>;
     async fn set_audio_device(&self, device: &str) -> Result<()>;
+    /// Position et durée courantes. `Ok` avec des champs à `None` quand le
+    /// lecteur ne sait pas : une position inconnue est un cas normal (rien
+    /// n'est chargé, le flux n'a pas de durée), jamais une panne.
+    async fn progression(&self) -> Result<Progression>;
+    /// Déplacement relatif, en secondes (négatif pour reculer).
+    async fn seek_relative(&self, delta_s: i64) -> Result<()>;
+    /// Déplacement absolu, en secondes depuis le début.
+    async fn seek_absolute(&self, position_s: u32) -> Result<()>;
 }

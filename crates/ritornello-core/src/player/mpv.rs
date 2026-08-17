@@ -1,3 +1,4 @@
+use crate::player::Progression;
 use crate::types::Event;
 use anyhow::{bail, Context, Result};
 use ritornello_proto::Morceau;
@@ -185,6 +186,16 @@ pub struct MpvPlayer {
     ipc: Arc<MpvIpc>,
 }
 
+/// Ramène une réponse de `get_property` à un nombre utilisable.
+///
+/// Trois façons pour mpv de dire « je ne sais pas », toutes ramenées à
+/// `None` : l'erreur (`property unavailable` sur un flux sans durée), le
+/// `null`, et la valeur négative que mpv produit brièvement au démarrage d'un
+/// fichier — mesuré à `-0.02`, et publier cela ferait reculer la barre.
+fn nombre_ou_none(res: Result<Value>) -> Option<f64> {
+    res.ok().and_then(|v| v.as_f64()).filter(|n| *n >= 0.0)
+}
+
 /// Tampon de sortie audio, en secondes. **On reprend le défaut de mpv**, donc
 /// ce module ne change rien au comportement tant que la variable n'est pas
 /// définie : la cause des microcoupures observées n'est pas établie, et élargir
@@ -349,6 +360,30 @@ impl super::Player for MpvPlayer {
     async fn set_audio_device(&self, device: &str) -> Result<()> {
         self.ipc.command(&[json!("set_property"), json!("audio-device"), json!(device)]).await?;
         Ok(())
+    }
+    async fn progression(&self) -> Result<Progression> {
+        // Deux allers-retours par seconde sur une socket Unix locale : le coût
+        // est nul devant l'intervalle. Un sondage plutôt qu'un
+        // `observe_property` parce que mpv ne cadence pas ses notifications de
+        // `time-pos` — il en émettrait plusieurs par seconde pour une
+        // information publiée une fois par seconde.
+        let position = self.ipc.command(&[json!("get_property"), json!("time-pos")]).await;
+        let duree = self.ipc.command(&[json!("get_property"), json!("duration")]).await;
+        Ok(Progression { position_s: nombre_ou_none(position), duration_s: nombre_ou_none(duree) })
+    }
+
+    async fn seek_relative(&self, delta_s: i64) -> Result<()> {
+        self.ipc
+            .command(&[json!("seek"), json!(delta_s), json!("relative")])
+            .await
+            .map(|_| ())
+    }
+
+    async fn seek_absolute(&self, position_s: u32) -> Result<()> {
+        self.ipc
+            .command(&[json!("seek"), json!(position_s), json!("absolute")])
+            .await
+            .map(|_| ())
     }
 }
 
@@ -581,5 +616,24 @@ mod tests {
         assert!(args.contains(&"--no-terminal".to_string()));
         assert!(args.contains(&"--input-ipc-server=/run/rp/mpv.sock".to_string()));
         assert!(args.contains(&"--cdda-device=/dev/sr0".to_string()));
+    }
+
+    /// mpv répond `null` sur `time-pos` quand rien n'est chargé, et une
+    /// **erreur** quand la propriété n'est pas disponible. Les deux disent la
+    /// même chose — « je ne sais pas » — et aucune n'est une panne à faire
+    /// remonter : une position inconnue est un cas normal, pas un incident.
+    #[test]
+    fn une_valeur_absente_ou_nulle_devient_none() {
+        assert_eq!(nombre_ou_none(Ok(serde_json::json!(87.4))), Some(87.4));
+        assert_eq!(nombre_ou_none(Ok(serde_json::Value::Null)), None);
+        assert_eq!(nombre_ou_none(Err(anyhow::anyhow!("property unavailable"))), None);
+    }
+
+    /// Une position négative n'existe pas, et mpv en produit brièvement au
+    /// démarrage d'un fichier (mesuré : `-0.02`). La publier ferait afficher
+    /// une barre qui recule.
+    #[test]
+    fn une_valeur_negative_devient_none() {
+        assert_eq!(nombre_ou_none(Ok(serde_json::json!(-0.02))), None);
     }
 }

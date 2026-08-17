@@ -533,6 +533,7 @@ mod tests {
                 title: Some("Wanna Get Free".into()),
                 album: None,
                 duration_s: Some(214),
+                position_s: None,
             },
         );
         let etat = m.etat();

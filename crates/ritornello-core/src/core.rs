@@ -486,6 +486,11 @@ impl<P: Player> Core<P> {
                 o.clone().avec_restant(u32::try_from(restant).unwrap_or(u32::MAX))
             }),
             morceau: self.metadonnees.etat(),
+            // Renseignés par une tâche ultérieure du même chantier, qui
+            // interrogera `Player::progression` : ce champ n'existe ici que
+            // pour rendre le protocole exhaustif à compiler.
+            position_s: None,
+            seekable: false,
         }
     }
 
@@ -780,6 +785,10 @@ impl<P: Player> Core<P> {
                     self.show_tens_overlay().await;
                 }
             }
+            // Traitement laissé à une tâche ultérieure : ce bras ne fait que
+            // rendre le `match` exhaustif après l'ajout de ces variantes au
+            // protocole.
+            Command::SeekForward | Command::SeekBackward | Command::SeekTo(_) => {}
         }
         Ok(())
     }
@@ -1055,9 +1064,13 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    #[derive(Clone, Default)]
+    #[derive(Default)]
     struct FakePlayer {
         calls: Arc<Mutex<Vec<String>>>,
+        /// Ce que le lecteur factice prétend savoir de sa progression.
+        /// `Mutex` et non champ simple : les tests le règlent après
+        /// construction, `Player` ne prenant que `&self`.
+        progression: Arc<Mutex<crate::player::Progression>>,
     }
 
     #[async_trait::async_trait]
@@ -1100,6 +1113,17 @@ mod tests {
         }
         async fn set_audio_device(&self, device: &str) -> anyhow::Result<()> {
             self.calls.lock().unwrap().push(format!("audio_device {device}"));
+            Ok(())
+        }
+        async fn progression(&self) -> anyhow::Result<crate::player::Progression> {
+            Ok(*self.progression.lock().unwrap())
+        }
+        async fn seek_relative(&self, delta_s: i64) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push(format!("seek_relative {delta_s}"));
+            Ok(())
+        }
+        async fn seek_absolute(&self, position_s: u32) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push(format!("seek_absolute {position_s}"));
             Ok(())
         }
     }
