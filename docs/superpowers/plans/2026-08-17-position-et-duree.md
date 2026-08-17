@@ -1892,7 +1892,28 @@ act_seek_back = "Reculer"
 act_seek_forward = "Avancer"
 ```
 
-Les presets livrés (`deploy/input-presets/mce.toml`, `keyboard.toml`) ne reçoivent une liaison par défaut **que si** une touche évidente existe dans leur table (les codes `evdev` `KEY_REWIND` / `KEY_FASTFORWARD`, 168 et 208). Vérifier la présence de ces codes dans les fichiers avant d'ajouter quoi que ce soit ; à défaut, ne rien ajouter — les deux actions restent apprenables, ce que la page sait déjà présenter.
+Pour les presets livrés, la question a été tranchée après lecture des deux fichiers :
+
+- **`deploy/input-presets/mce.toml` reçoit les deux liaisons.** Une télécommande MCE porte physiquement des touches de retour et d'avance rapides, aux codes `evdev` standards `KEY_REWIND` (168) et `KEY_FASTFORWARD` (208), qu'aucune liaison n'occupe aujourd'hui. Ajouter à la fin du fichier :
+
+```toml
+# Retour et avance rapides. Codes evdev standards des touches
+# correspondantes d'une telecommande MCE, absents de l'ancienne table codee
+# en dur dont ce preset est la transcription : ils n'ont donc pas ete
+# verifies sur l'exemplaire du proprietaire. Une telecommande qui ne les
+# emet pas rend simplement ces deux lignes inertes, sans rien casser, et la
+# page d'apprentissage reste le moyen sur de les lier.
+
+[[bindings]]
+code = 168
+cmd = "SeekBackward"
+
+[[bindings]]
+code = 208
+cmd = "SeekForward"
+```
+
+- **`deploy/input-presets/keyboard.toml` n'en reçoit aucune.** Les quatre flèches sont déjà prises (haut/bas au volume, droite/gauche aux présélections), et le fichier avertit lui-même qu'une lettre nue se déclenche aussi quand on tape à la console de connexion. Il n'y a pas de touche évidente à donner, et en inventer une coûterait plus qu'elle ne rapporte : les deux actions restent apprenables, ce que la page sait déjà présenter.
 
 - [ ] **Étape 4 : voir les tests passer**
 
