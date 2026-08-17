@@ -339,4 +339,34 @@ mod tests {
         let apres_seconde = std::fs::read(&path).unwrap();
         assert!(apres_seconde.len() > apres_premiere.len(), "la seconde ecriture a bien eu lieu");
     }
+
+    /// Décision de conception : cet afficheur **ne montre pas** la position.
+    /// Trois lignes d'une vingtaine de colonnes déjà pleines, et une horloge y
+    /// coûterait un effacement d'écran par seconde — or le cœur en publie une
+    /// trame par seconde pendant toute la lecture. Le champ voyage quand même
+    /// jusqu'ici : tout autre plugin d'affichage peut s'en servir.
+    #[test]
+    fn une_trame_qui_ne_change_que_la_position_compose_les_memes_lignes() {
+        let mut e = etat_radio();
+        let avant = compose(&e);
+        e.position_s = Some(87);
+        assert_eq!(compose(&e), avant);
+        e.position_s = Some(88);
+        assert_eq!(compose(&e), avant);
+    }
+
+    /// Et le corollaire sur l'incrustation : pendant un message éphémère, les
+    /// trames par seconde composent la même ligne unique, donc la garde
+    /// `dernieres_lignes` les absorbe — aucun clignotement pendant que le
+    /// message est à l'écran.
+    #[test]
+    fn une_incrustation_survit_aux_trames_par_seconde() {
+        let mut e = etat_radio();
+        e.overlay = Some(Overlay::Message { text: "PRESELECTION VIDE".into(), remaining_ms: 5000 });
+        e.position_s = Some(87);
+        let avant = compose(&e);
+        e.position_s = Some(88);
+        e.overlay = Some(Overlay::Message { text: "PRESELECTION VIDE".into(), remaining_ms: 4000 });
+        assert_eq!(compose(&e), avant);
+    }
 }
