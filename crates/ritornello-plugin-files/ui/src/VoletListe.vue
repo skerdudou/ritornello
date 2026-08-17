@@ -3,7 +3,23 @@ import { api, Button, Input } from '@ritornello/ui'
 import { computed, ref, watch } from 'vue'
 import { formaterDuree, INTERNE, type Donnees, type Envoyer, type T } from './donnees'
 
-const props = defineProps<{ donnees: Donnees; t: T; envoyer: Envoyer; fige: boolean }>()
+const props = defineProps<{
+  donnees: Donnees
+  t: T
+  envoyer: Envoyer
+  fige: boolean
+  /**
+   * Le cœur joue-t-il cette source, d'après son flux poussé.
+   *
+   * Consulté **en plus** de `donnees.playing`, et les deux ensemble décident s'il
+   * faut demander l'arrêt. Chacun couvre une faiblesse de l'autre : le drapeau du
+   * plugin pouvait rester à faux après un démarrage où mpv passe brièvement
+   * inactif avant de charger, et cette vue-ci est aveugle si `EventSource` est
+   * indisponible. Aucun des deux ne peut être un faux positif pour une *autre*
+   * source, donc les réunir ne risque pas de couper la radio.
+   */
+  estSourceActive: boolean
+}>()
 
 /**
  * Au-delà de ce nombre de pistes, la liste est paginée.
@@ -112,7 +128,7 @@ async function retirer(i: number): Promise<void> {
   const cettePiste = props.donnees.index === i
   const etat = await props.envoyer({ op: 'remove', index: i })
   if (!etat) return
-  if (cettePiste && etat.playing) await api.post('/api/command', { cmd: 'Stop' })
+  if (cettePiste && (etat.playing || props.estSourceActive)) await api.post('/api/command', { cmd: 'Stop' })
 }
 
 async function vider(): Promise<void> {
@@ -131,7 +147,7 @@ async function vider(): Promise<void> {
   // `playing`, donc sa relecture dit encore la vérité sur ce qui joue.
   const etat = await props.envoyer({ op: 'clear' })
   if (!etat) return
-  if (etat.playing) await api.post('/api/command', { cmd: 'Stop' })
+  if (etat.playing || props.estSourceActive) await api.post('/api/command', { cmd: 'Stop' })
 }
 
 function enregistrer(): void {

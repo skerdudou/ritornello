@@ -8,18 +8,26 @@
  * sondage (voir `usePlayer` du shell : « le cœur pousse déjà chaque
  * changement »).
  *
- * Volontairement **sans charge utile** : le rappel dit « quelque chose a
- * bougé », à charge pour l'appelant de relire sa propre source de vérité. Cela
- * évite de dupliquer ici le type de l'état du lecteur, qui appartient au cœur et
- * changera sans prévenir.
+ * La charge utile est passée **non typée**, à dessein : sa forme appartient au
+ * cœur et changera sans prévenir. Un appelant qui n'a besoin que du signal
+ * l'ignore ; celui qui a besoin d'un champ précis (la source active, par
+ * exemple) le lit à ses risques, sans qu'on figé ici un type qui mentirait.
  */
-export function surLecteur(rappel: () => void): () => void {
+export function surLecteur(rappel: (etat: unknown) => void): () => void {
   // `EventSource` n'existe pas partout (jsdom sous test, vieux moteurs) : son
   // absence doit coûter la fraîcheur de l'affichage, jamais le rendu de la page.
   if (typeof EventSource === 'undefined') return () => {}
 
   const flux = new EventSource('/api/player')
-  flux.onmessage = () => rappel()
+  flux.onmessage = (e: MessageEvent) => {
+    try {
+      rappel(JSON.parse(e.data as string))
+    } catch {
+      // Trame illisible : le signal vaut quand même, l'appelant relira sa
+      // propre source de vérité.
+      rappel(null)
+    }
+  }
   // Aucun traitement d'erreur : `EventSource` se reconnecte de lui-même, et
   // fermer ici priverait la page de toute reprise après un redémarrage du cœur
   // — le cas le plus courant étant `systemctl restart ritornello`.

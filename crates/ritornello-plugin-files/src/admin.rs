@@ -703,11 +703,20 @@ impl AdminPlugin for FilesAdmin {
                 if index >= liste.entries.len() {
                     return Err(self.mot("bad_request").replace("{detail}", "index"));
                 }
+                let ecoutee = liste.index == index;
                 liste.entries.remove(index);
                 // L'index de lecture suit : retirer une piste avant celle qui
                 // joue décalerait sinon toute la numérotation sous les pieds de
                 // l'auditeur.
-                if liste.index > index {
+                //
+                // Retirer **celle qu'on écoute** est le cas à part : la lecture
+                // s'arrête (la page le demande au cœur), et on repart du début.
+                // Laisser l'index sur la position libérée gardait la surbrillance
+                // sur une piste qu'on n'avait pas choisie — celle qui a glissé à
+                // la place de la disparue.
+                if ecoutee {
+                    liste.index = 0;
+                } else if liste.index > index {
                     liste.index -= 1;
                 } else if liste.index >= liste.entries.len() {
                     liste.index = 0;
@@ -1132,6 +1141,31 @@ mod tests {
         let liste = admin.playlist.read().await;
         assert_eq!(liste.entries.len(), 3);
         assert_eq!(liste.index, 1, "la piste ecoutee doit rester la meme");
+    }
+
+    #[tokio::test]
+    async fn retirer_la_piste_ecoutee_repart_du_debut() {
+        // Défaut signalé : l'index restait sur la position libérée, donc la
+        // surbrillance se posait sur la piste qui avait glissé à la place de la
+        // disparue — une piste que l'utilisateur n'avait pas choisie. On repart
+        // du début, ce qui va de pair avec l'arrêt que la page demande.
+        let (admin, _) = admin_de_test();
+        {
+            let mut liste = admin.playlist.write().await;
+            liste.entries = (1..=4)
+                .map(|i| Entry {
+                    path: PathBuf::from(format!("/m/{i}.mp3")),
+                    title: None,
+                    duration_s: None,
+                })
+                .collect();
+            liste.index = 2;
+        }
+        let mut admin = admin;
+        admin.set_data(serde_json::json!({"op": "remove", "index": 2})).await.unwrap();
+        let liste = admin.playlist.read().await;
+        assert_eq!(liste.index, 0, "on repart du debut");
+        assert_eq!(liste.entries.len(), 3);
     }
 
     #[tokio::test]

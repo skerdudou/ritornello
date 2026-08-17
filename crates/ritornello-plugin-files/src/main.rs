@@ -284,9 +284,29 @@ impl SourcePlugin for FilesSource {
         // l'utilisateur ne voyait qu'un statut générique sans jamais apprendre
         // que sa liste était vide.
         self.joue.store(false, std::sync::atomic::Ordering::Relaxed);
-        let vide = self.playlist.read().await.entries.is_empty();
-        let mot = if vide { self.mot("no_playlist") } else { self.statut() };
-        SourceOutcome::new(SourceAction::Noop).plays_nothing().status(mot)
+        let liste = self.playlist.read().await;
+        if liste.entries.is_empty() {
+            return SourceOutcome::new(SourceAction::Noop)
+                .plays_nothing()
+                .status(self.mot("no_playlist"))
+                .preset_count(0);
+        }
+        // **Arrêté, mais une piste armée.** L'ancienne trame n'annonçait qu'un
+        // statut : l'afficheur perdait numéro et nom, et ne montrait plus que
+        // « FILES » sans qu'on sache où on en était. Déclarer la piste courante
+        // sans identité de lecture dit exactement l'état réel — rien ne joue, et
+        // voilà ce qui repartira.
+        let mut issue = SourceOutcome::new(SourceAction::Noop)
+            .plays_nothing()
+            .status(self.statut())
+            .preset_count(liste.preset_count());
+        if let Some(entry) = liste.current() {
+            issue = issue.preset_name(entry.display_name());
+        }
+        if let Some(n) = liste.preset() {
+            issue = issue.preset(n);
+        }
+        issue
     }
 
     async fn set_locale(&mut self, locale: String) {
@@ -303,11 +323,27 @@ impl SourcePlugin for FilesSource {
         match rx.changed().await {
             Ok(()) => {
                 let n = *rx.borrow_and_update();
-                // Uniquement le compte : ne rien dire de l'identité, de la
-                // présélection ni du statut, pour ne déranger ni l'affichage ni
-                // ce qui joue. Modifier la liste depuis la page ne doit pas
-                // interrompre la piste en cours.
-                Some(Notification::new().preset_count(n))
+                // Le compte, **et le numéro et le nom de la piste courante**.
+                //
+                // Le numéro seul ne suffisait pas : réordonner la liste change la
+                // position de ce qu'on écoute, et le compteur de l'afficheur
+                // restait sur l'ancienne — la page du plugin était juste, le
+                // lecteur non. C'est le pendant exact du correctif de la radio,
+                // où la présélection est aussi une position.
+                //
+                // Toujours **aucune identité et aucune action** : la piste en
+                // cours ne doit être ni interrompue ni redéclarée, seulement
+                // renumérotée. Le cœur fusionne champ par champ, donc ce qui
+                // n'est pas dit reste tel quel.
+                let liste = self.playlist.read().await;
+                let mut avis = Notification::new().preset_count(n);
+                if let Some(entry) = liste.current() {
+                    avis = avis.preset_name(entry.display_name());
+                }
+                if let Some(p) = liste.preset() {
+                    avis = avis.preset(p);
+                }
+                Some(avis)
             }
             // L'émetteur a disparu (moitié Admin terminée) : plus rien à
             // annoncer, mais la Source continue de jouer.
@@ -617,18 +653,27 @@ mod tests {
     #[tokio::test]
     async fn la_moitie_admin_annonce_le_compte_sans_deranger_la_lecture() {
         // Modifier la liste depuis la page doit mettre à jour la grille de la
-        // télécommande web tout de suite, sans attendre qu'une piste soit
-        // jouée — et sans rien dire de l'identité ni du statut, sous peine
-        // d'interrompre ce qui joue.
+        // télécommande web tout de suite, sans attendre qu'une piste soit jouée.
+        //
+        // **Et renuméroter ce qui joue**, ce qui manquait : réordonner la liste
+        // change la position de la piste écoutée, et le compteur de l'afficheur
+        // restait sur l'ancienne — la page du plugin était juste, le lecteur non.
+        //
+        // Ce qui reste garanti, et c'est l'essentiel : ni identité, ni statut, ni
+        // action. La piste en cours n'est ni interrompue ni redéclarée, seulement
+        // renumérotée ; le cœur fusionne champ par champ, donc ce qui n'est pas
+        // dit reste tel quel.
         let (tx, rx) = tokio::sync::watch::channel(0u8);
         let mut s = source_de_test(liste_de(3));
         s.preset_count_rx = Some(rx);
+        s.select(2).await;
         tx.send(7).unwrap();
         let n = s.poll_notification().await.expect("une notification attendue");
         assert_eq!(n.preset_count, Some(7));
-        assert!(n.identity.is_none());
-        assert!(n.status.is_none());
-        assert!(n.preset.is_none());
+        assert_eq!(n.preset, Some(2), "le numero doit suivre la piste ecoutee");
+        assert!(n.preset_name.is_some(), "et le nom avec");
+        assert!(n.identity.is_none(), "ce qui joue ne doit pas etre redeclare");
+        assert!(n.status.is_none(), "ni le statut touche");
     }
 
     #[tokio::test]
@@ -656,11 +701,38 @@ mod tests {
 
     #[tokio::test]
     async fn un_arret_sur_une_liste_pleine_reste_un_arret_ordinaire() {
-        // Garde-fou du test précédent : « aucune liste » doit rester réservé au
-        // cas où il n'y a vraiment rien à jouer.
+        // Garde-fou : « aucune liste » doit rester réservé au cas où il n'y a
+        // vraiment rien à jouer.
         let mut s = source_de_test(liste_de(3));
         s.activate().await;
         assert_eq!(s.stop().await.status.as_deref(), Some("FILES"));
+    }
+
+    #[tokio::test]
+    async fn un_arret_annonce_la_piste_armee_et_non_un_statut_nu() {
+        // Défaut signalé : l'afficheur se retrouvait « perdu » — le statut deux
+        // fois, sans numéro ni nom — après un arrêt. Il doit dire l'état réel :
+        // rien ne joue, et voilà ce qui repartira.
+        let mut s = source_de_test(liste_de(3));
+        s.select(2).await;
+        let issue = s.stop().await;
+        assert_eq!(issue.preset, Some(2), "la piste armee reste designee");
+        assert!(issue.preset_name.is_some(), "et nommee");
+        assert_eq!(issue.preset_count, Some(3));
+        // Mais rien ne joue : c'est ce que `plays_nothing` déclare, et c'est ce
+        // qui fait disparaître le bloc « en cours de lecture » de l'afficheur.
+        assert!(issue.identity.is_some(), "l'arret doit etre declare, pas tu");
+    }
+
+    #[tokio::test]
+    async fn un_arret_sur_liste_vide_ne_designe_aucune_piste() {
+        // Rien à armer : annoncer un numéro désignerait une piste qui n'existe
+        // pas.
+        let mut s = source_de_test(Playlist::default());
+        let issue = s.stop().await;
+        assert_eq!(issue.status.as_deref(), Some("NO PLAYLIST"));
+        assert!(issue.preset.is_none());
+        assert_eq!(issue.preset_count, Some(0));
     }
 
     #[tokio::test]

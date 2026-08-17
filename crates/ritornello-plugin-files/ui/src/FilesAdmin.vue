@@ -123,8 +123,31 @@ onUnmounted(arreterSondage)
  * deux.
  */
 let fermerLecteur: (() => void) | null = null
+
+/**
+ * Nom sous lequel ce plugin est servi, déduit de `base`.
+ *
+ * Déduit et non écrit en dur : il vient de `plugins.toml`, donc du déploiement.
+ * `base` **est** cette information, il n'y a rien à reconstruire.
+ */
+const nomPlugin = computed(() => props.base.replace(/^\/plugins\//, '').replace(/\/+$/, ''))
+
+/**
+ * Cette source est-elle celle que le cœur joue, d'après le flux poussé.
+ *
+ * C'est la vérité du **cœur**, et elle ne peut pas dériver — contrairement au
+ * drapeau que le plugin tenait, qui pouvait rester à faux après un démarrage où
+ * mpv passe brièvement inactif avant de charger le premier fichier. Les deux
+ * sont consultés ensemble (voir `VoletListe`), pour couvrir aussi le cas où
+ * `EventSource` est indisponible.
+ */
+const sourceActive = ref<string | null>(null)
+const estSourceActive = computed(() => sourceActive.value === nomPlugin.value)
+
 onMounted(() => {
-  fermerLecteur = surLecteur(() => {
+  fermerLecteur = surLecteur((etat) => {
+    const s = (etat as { source?: unknown } | null)?.source
+    sourceActive.value = typeof s === 'string' ? s : null
     // Pas pendant un envoi : le SDK sert les requêtes en série, et une relecture
     // qui s'y ajouterait ferait dépasser le plafond de 5 s du cœur.
     if (!enCours.value && !chargementEchoue.value) void recharger()
@@ -250,6 +273,7 @@ const scan = computed(
         :t="t"
         :envoyer="envoyer"
         :fige="chargementEchoue || enCours"
+        :est-source-active="estSourceActive"
       />
     </template>
   </div>

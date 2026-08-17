@@ -210,15 +210,23 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   await expect(page.locator('[data-player-preset]')).toHaveText('3')
   await expect(page.locator('[data-player-preset-name]')).toHaveText('03')
 
-  // Stop, puis Lecture : la lecture doit repartir.
+  // Stop, puis Lecture : la lecture repart sur la piste ecoutee.
   //
   // `stop` vide la liste de mpv, si bien que « basculer la pause » n'avait plus
   // rien a reprendre : la touche Lecture ne faisait rien du tout, sur toutes les
-  // sources. Elle redemande desormais a la source active de jouer. Et la piste
-  // ecoutee revient, pas la premiere : l'index vit dans le plugin et aucun arret
-  // ne le deplace.
+  // sources. Elle redemande desormais a la source active de jouer.
+  //
+  // Et un arret **garde la piste armee** a l'affichage — numero et nom — au lieu
+  // de ne laisser qu'un statut nu : l'afficheur dit ainsi « rien ne joue, voila
+  // ce qui repartira ». C'est ce que cette etape verifie de bout en bout.
+  //
+  // Ce qu'elle ne sait **pas** distinguer : arrete ou en lecture, l'affichage est
+  // le meme sur ces fixtures (une sinusoide n'a aucune metadonnee, donc pas de
+  // bloc « en cours de lecture » a observer). La discrimination reelle est portee
+  // par les tests unitaires de `stop()` et de `PlayPause`.
   await page.getByRole('button', { name: 'Stop', exact: true }).click()
-  await expect(page.locator('[data-player-preset]')).toHaveCount(0)
+  await expect(page.locator('[data-player-preset]')).toHaveText('3')
+  await expect(page.locator('[data-player-preset-name]')).toHaveText('03')
   await page.getByRole('button', { name: 'Play/Pause', exact: true }).click()
   await expect(page.locator('[data-player-preset]')).toHaveText('3')
 

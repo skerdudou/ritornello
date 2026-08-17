@@ -8,6 +8,30 @@ const TROIS = [
   { path: 'Albums/Jazz/03.mp3', name: 'Piste 3', duration_s: 3725, missing: false },
 ]
 
+/**
+ * Simulacre du flux poussé du cœur : jsdom n'a pas d'`EventSource`.
+ *
+ * À installer **avant** le montage — la page s'y abonne dans `onMounted`, et un
+ * simulacre posé après ne serait jamais vu.
+ */
+function pousseurDeLecteur() {
+  const relais: { envoyer: ((e: MessageEvent) => void) | null } = { envoyer: null }
+  vi.stubGlobal(
+    'EventSource',
+    class {
+      set onmessage(f: (e: MessageEvent) => void) {
+        relais.envoyer = f
+      }
+      close(): void {}
+    },
+  )
+  return {
+    pousse: (etat: unknown) => {
+      relais.envoyer?.({ data: JSON.stringify(etat) } as MessageEvent)
+    },
+  }
+}
+
 describe('volet de la liste en cours', () => {
   beforeEach(() => vi.unstubAllGlobals())
 
@@ -77,6 +101,38 @@ describe('volet de la liste en cours', () => {
     await w.find('[data-clear]').trigger('click')
     await flushPromises()
     expect(s.urls()).toContain('/api/command')
+  })
+
+  it('demande l’arrêt quand le cœur joue cette source, même si le plugin l’ignore', async () => {
+    // Défaut signalé : au démarrage, le drapeau du plugin reste à faux — mpv
+    // passe brièvement inactif avant de charger le premier fichier, et le cœur
+    // envoie alors un `stop()` qui l'efface. La source active, elle, vient du
+    // **cœur** par le flux poussé, et ne peut donc pas dériver.
+    //
+    // Le nom attendu est celui de `BASE` (`mediatheque`), et non « files » :
+    // c'est le déploiement qui nomme un plugin, et la page le déduit de son
+    // préfixe au lieu de l'écrire en dur.
+    const flux = pousseurDeLecteur()
+    const { w, s } = await monter({ playlist: TROIS, playing: false })
+    flux.pousse({ source: 'mediatheque' })
+    await flushPromises()
+
+    await w.find('[data-clear]').trigger('click')
+    await flushPromises()
+    expect(s.urls()).toContain('/api/command')
+  })
+
+  it('ne coupe rien quand le cœur joue une autre source', async () => {
+    // Garde-fou : vider une liste de fichiers pendant que la radio joue ne doit
+    // surtout pas la faire taire.
+    const flux = pousseurDeLecteur()
+    const { w, s } = await monter({ playlist: TROIS, playing: false })
+    flux.pousse({ source: 'radio' })
+    await flushPromises()
+
+    await w.find('[data-clear]').trigger('click')
+    await flushPromises()
+    expect(s.urls()).not.toContain('/api/command')
   })
 
   it('vider une liste à l’arrêt ne coupe pas la source qui joue', async () => {
