@@ -47,12 +47,13 @@ describe('REMOTE_COMMANDS', () => {
 
   it('groupe les commandes par rangée, dans l’ordre voulu', () => {
     // L'ordre est une demande explicite du propriétaire : transport, contenu,
-    // son, appareil. Le figer ici evite qu'un remaniement du gabarit le change
-    // sans qu'on s'en apercoive.
+    // son, appareil — et dans chaque rangée le sens du geste, « précédent »
+    // avant « suivant » et « moins » avant « plus ». Le figer ici evite qu'un
+    // remaniement du gabarit le change sans qu'on s'en apercoive.
     expect(REMOTE_ROWS.map((r) => r.map((c) => c.cmd.cmd))).toEqual([
       ['PlayPause', 'Stop'],
-      ['Next', 'Prev'],
-      ['VolumeUp', 'VolumeDown', 'Mute'],
+      ['Prev', 'Next'],
+      ['VolumeDown', 'VolumeUp', 'Mute'],
       ['SourceCycle', 'Eject'],
     ])
   })

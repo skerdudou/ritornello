@@ -25,6 +25,14 @@ export const REMOTE_POWER: RemoteCommand = { key: 'remote_power', cmd: { cmd: 'P
  * Les autres commandes, **groupees par ligne** dans l'ordre voulu par le
  * proprietaire : transport, changement de contenu, son, puis appareil.
  *
+ * Dans chaque rangee, l'ordre suit le sens du geste et non celui du protocole :
+ * « precedent » avant « suivant », « moins » avant « plus », comme sur la
+ * facade d'un ampli ou la reglette d'un lecteur. L'inverse — l'ordre dans
+ * lequel ces commandes se sont trouvees ecrites d'abord — obligeait a lire les
+ * libelles pour viser, alors que la position suffit quand elle va dans le sens
+ * attendu. `remote_mute` reste en bout de sa rangee : ce n'est pas un cran de
+ * plus sur l'echelle du volume, c'est une bascule.
+ *
  * Le groupement est ici et non dans le gabarit : c'est une donnee, et la vue se
  * contente de la parcourir.
  */
@@ -34,12 +42,12 @@ export const REMOTE_ROWS: RemoteCommand[][] = [
     { key: 'remote_stop', cmd: { cmd: 'Stop' } },
   ],
   [
-    { key: 'remote_next', cmd: { cmd: 'Next' } },
     { key: 'remote_prev', cmd: { cmd: 'Prev' } },
+    { key: 'remote_next', cmd: { cmd: 'Next' } },
   ],
   [
-    { key: 'remote_vol_up', cmd: { cmd: 'VolumeUp' } },
     { key: 'remote_vol_down', cmd: { cmd: 'VolumeDown' } },
+    { key: 'remote_vol_up', cmd: { cmd: 'VolumeUp' } },
     { key: 'remote_mute', cmd: { cmd: 'Mute' } },
   ],
   [
