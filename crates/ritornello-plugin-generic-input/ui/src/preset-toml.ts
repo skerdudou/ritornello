@@ -40,6 +40,23 @@ export function codesFor(table: BindingTable, device: string, cmd: Command): str
   return d.bindings.filter((b) => memeCmd(b, cmd)).map((b) => b.code).join(', ')
 }
 
+// Extrait les codes d'un champ : `trim`, decoupage sur la virgule, chaque
+// partie passee a `Number.parseInt`, les non-numeriques ignores. Partagee par
+// `collect` (qui en fait des `Binding`), `conflits` (qui compare les nombres
+// bruts) et l'ajout d'un code capte par apprentissage (`appliquerCode`, dans
+// `InputAdmin.vue`, qui verifie si le code est deja la) : ces usages doivent
+// rester en accord sur ce qui compte comme un code valide, sous peine de
+// laisser la validation a chaud dire « aucun conflit » sur une table que le
+// serveur refuserait a l'enregistrement.
+export function parseChamp(brut: string): number[] {
+  const trimmed = brut.trim()
+  if (!trimmed) return []
+  return trimmed
+    .split(',')
+    .map((part) => Number.parseInt(part.trim(), 10))
+    .filter((code) => !Number.isNaN(code))
+}
+
 // Reconstruit la table complete : les autres peripheriques sont preserves
 // tels quels, seul le peripherique courant est reecrit depuis le tableau.
 // `codes` est indexe comme `ACTIONS`.
@@ -47,12 +64,7 @@ export function collect(table: BindingTable, device: string, codes: string[]): B
   const devices = table.devices.filter((d) => d.name !== device)
   const bindings: Binding[] = []
   ACTIONS.forEach((a, i) => {
-    const brut = (codes[i] ?? '').trim()
-    if (!brut) return
-    for (const part of brut.split(',')) {
-      const code = Number.parseInt(part.trim(), 10)
-      if (!Number.isNaN(code)) bindings.push({ code, ...a.cmd })
-    }
+    for (const code of parseChamp(codes[i] ?? '')) bindings.push({ code, ...a.cmd })
   })
   if (device) devices.push({ name: device, bindings })
   return { devices }
@@ -71,6 +83,56 @@ export function presetToml(bindings: Binding[]): string {
       return bloc
     })
     .join('\n')
+}
+
+export interface Conflit {
+  /** Le code fautif. */
+  code: number
+  /** Clés i18n des *autres* actions portant ce code, dans l'ordre d'`ACTIONS`. Vide si le doublon est interne au champ. */
+  autres: string[]
+}
+
+// Detecte, pour chaque action affichee, le premier code fautif de son champ :
+// soit un code deja porte par une autre action (exactement ce que le serveur
+// refuserait a l'enregistrement, `duplicate_code`, mais visible avant), soit
+// un code saisi plusieurs fois dans le meme champ. Un seul conflit par ligne,
+// choisi dans l'ordre du champ, pour qu'il n'y ait jamais qu'un message a
+// afficher sous un champ donne.
+export function conflits(codes: string[]): Array<Conflit | null> {
+  // Le parcours est celui d'`ACTIONS`, pas celui de `codes` : le resultat a
+  // toujours une entree par action, quelle que soit la longueur du tableau
+  // recu (`codes` est indexe comme `ACTIONS`, un tableau plus court signifie
+  // simplement des champs vides). Et chaque ligne porte sa propre cle i18n,
+  // ce qui remplace la recherche `ACTIONS[j]` d'un indice venu du tableau
+  // d'entree -- laquelle rendait `undefined`, donc levait une `TypeError`,
+  // pour tout appelant passant plus de codes qu'il n'existe d'actions.
+  const lignes = ACTIONS.map((a, i) => ({ cle: a.key, codes: parseChamp(codes[i] ?? '') }))
+
+  // Pour chaque code, les lignes qui le portent au moins une fois — sert a
+  // reperer les doublons inter-actions sans reparcourir toute la table pour
+  // chaque code candidat.
+  const lignesParCode = new Map<number, typeof lignes>()
+  for (const ligne of lignes) {
+    for (const code of new Set(ligne.codes)) {
+      const portees = lignesParCode.get(code) ?? []
+      portees.push(ligne)
+      lignesParCode.set(code, portees)
+    }
+  }
+
+  return lignes.map((ligne) => {
+    for (const code of ligne.codes) {
+      const autresLignes = (lignesParCode.get(code) ?? []).filter((l) => l !== ligne)
+      if (autresLignes.length > 0) {
+        return { code, autres: autresLignes.map((l) => l.cle) }
+      }
+      const occurrences = ligne.codes.filter((c) => c === code).length
+      if (occurrences >= 2) {
+        return { code, autres: [] }
+      }
+    }
+    return null
+  })
 }
 
 export function sanitiseDeviceName(name: string): string {

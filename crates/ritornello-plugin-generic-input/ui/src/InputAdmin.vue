@@ -4,7 +4,11 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@ritornello/ui'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ACTIONS, codesFor, collect, presetToml, sanitiseDeviceName, type BindingTable } from './preset-toml'
+import DialogueApprentissage from './DialogueApprentissage.vue'
+import {
+  ACTIONS, codesFor, collect, conflits, parseChamp, presetToml, sanitiseDeviceName,
+  type BindingTable, type Conflit,
+} from './preset-toml'
 
 // `base` fait partie du contrat des IHM de plugin, au meme titre que
 // `catalog` : le prefixe **absolu** sous lequel le coeur sert les routes de ce
@@ -32,7 +36,7 @@ function url(chemin: string): string {
 }
 
 const SONDAGE_MS = 300
-const DELAI_MS = 10_000
+const DELAI_MS = 30_000
 
 interface Data {
   devices: string[]
@@ -46,7 +50,20 @@ const device = ref('')
 const preset = ref('')
 const codes = ref<string[]>(ACTIONS.map(() => ''))
 const message = ref('')
-const apprend = ref(false)
+// Ligne (index dans `ACTIONS`) dont on apprend la touche, `null` sinon :
+// seule source de verite de l'etat « apprentissage en cours », elle pilote
+// l'ouverture de la popin. Ce n'est pas une cible d'ecriture : la destination
+// du code capture est la fermeture `i` d'`apprendre`.
+const ligneApprise = ref<number | null>(null)
+// Case « ajouter aux codes existants » de la popin, remise a faux a chaque
+// ouverture : le geste courant reste le remplacement.
+const ajouter = ref(false)
+/** Libelle traduit de l'action apprise, pour le titre de la popin. */
+const libelleActionApprise = computed(() => {
+  const i = ligneApprise.value
+  const cle = i === null ? undefined : ACTIONS[i]?.key
+  return cle ? t.value(cle) : ''
+})
 let timer: ReturnType<typeof setInterval> | null = null
 // Garde synchrone contre la course decrite en revue (round 1) : `timer` n'est
 // affecte qu'apres le `await` du PUT `learn`, donc un second declenchement
@@ -121,14 +138,48 @@ function stopTimer() {
 
 async function arreterApprentissage(texte: string) {
   stopTimer()
-  apprend.value = false
+  // Avant tout `await`, comme `stopTimer()` : la popin se referme des le
+  // geste (annulation, capture, changement de peripherique) et non a la fin
+  // de l'aller-retour reseau -- qui peut d'ailleurs echouer.
+  ligneApprise.value = null
   await api.put(url('api/data'), { op: 'cancel_learn' })
   message.value = texte
 }
 
+/**
+ * Annulation demandee par la popin — bouton, croix du kit, Échap, clic sur le
+ * voile : quatre gestes, un seul chemin, et une fonction nommee plutot qu'un
+ * appel asynchrone ecrit dans le gabarit.
+ *
+ * La promesse est explicitement abandonnee (`void`) et son echec avale. Rien
+ * de ce que voit l'utilisateur n'en depend : `arreterApprentissage` arrete le
+ * minuteur et referme la popin **avant** tout `await`. Une panne reseau ne
+ * rejette d'ailleurs pas ici -- `api.put` la convertit en valeur de retour
+ * (voir `web/kit/src/api.ts`, precisement pour qu'aucun appelant n'ait besoin
+ * d'un `try`) ; le `catch` est une ceinture pour le jour ou
+ * `arreterApprentissage` gagnerait une etape qui leve, la promesse d'un
+ * gestionnaire de gabarit n'ayant nulle part ou etre attendue.
+ */
+function annulerApprentissage() {
+  void arreterApprentissage('').catch(() => {})
+}
+
+/** Champ mis a jour pour un code capte : ajout en fin de liste ou remplacement. */
+function appliquerCode(champ: string, code: number, ajout: boolean): string {
+  if (!ajout || !champ.trim()) return String(code)
+  // Comparaison sur les codes analyses, pas sur le texte : `' 9 '` porte bien
+  // le code 9. Un `9, 9` serait de toute facon refuse a l'enregistrement
+  // (`duplicate_code`), et l'utilisateur n'a rien demande de plus.
+  if (parseChamp(champ).includes(code)) return champ
+  // Le champ est conserve tel qu'il est ecrit, espaces compris : l'utilisateur
+  // a tape ce qu'il a tape.
+  return `${champ}, ${code}`
+}
+
 // Apprentissage : le plugin capture la prochaine touche du peripherique, la
 // vue sonde `GetData` jusqu'a la voir arriver. Meme mecanique que l'ancienne
-// page — sondage court, delai de 10 s, annulation explicite.
+// page — sondage court, annulation explicite — mais 30 s de delai au lieu de
+// 10 : le temps de trouver la bonne touche sur une telecommande inconnue.
 async function apprendre(i: number) {
   if (!device.value) {
     message.value = t.value('no_device')
@@ -151,8 +202,15 @@ async function apprendre(i: number) {
     // entre le debut de cette fonction et ici, on ne remplace jamais `timer`
     // sans avoir explicitement arrete l'ancien.
     stopTimer()
-    apprend.value = true
-    message.value = t.value('learning_msg')
+    // La consigne « appuyez sur une touche » est portee par la popin, qui
+    // nomme l'action et le peripherique : rien a ecrire dans le bandeau du
+    // bas, que le voile recouvre de toute facon.
+    ligneApprise.value = i
+    // ... mais il faut l'effacer : sans cela, le « Delai depasse » de la
+    // session precedente y traine encore derriere le voile pendant qu'une
+    // popin fraiche attend un appui.
+    message.value = ''
+    ajouter.value = false
     const echeance = Date.now() + DELAI_MS
     // Garde de recouvrement : sur une machine lente, un GET qui depasse
     // l'intervalle empilerait des requetes dans la file serielle du plugin —
@@ -174,7 +232,7 @@ async function apprendre(i: number) {
         }
         const c = d.learning?.captured
         if (c !== null && c !== undefined) {
-          codes.value[i] = String(c)
+          codes.value[i] = appliquerCode(codes.value[i] ?? '', c, ajouter.value)
           await arreterApprentissage('')
         }
       } finally {
@@ -186,6 +244,26 @@ async function apprendre(i: number) {
   }
 }
 
+// Validation a chaud des doubles affectations : recalculee a chaque frappe,
+// `codes` etant un `ref` de tableau lie par `v-model` — un code arrive par
+// apprentissage y passe donc aussi, `appliquerCode` ecrivant dans ce meme
+// tableau.
+const conflitsParAction = computed(() => conflits(codes.value))
+const aDesConflits = computed(() => conflitsParAction.value.some((c) => c !== null))
+
+/** Phrase affichee sous un champ fautif. */
+function texteConflit(c: Conflit): string {
+  if (c.autres.length) {
+    // Les libelles **traduits** des autres actions, jamais leurs cles i18n.
+    return t.value('conflict_code', { code: c.code, action: c.autres.map((k) => t.value(k)).join(', ') })
+  }
+  return t.value('conflict_dup', { code: c.code })
+}
+
+// Pas de garde sur `aDesConflits` ici : le bouton desactive est la seule voie
+// d'appel, et redire la regle dans la fonction creerait deux verites a
+// maintenir. Le serveur refuserait de toute facon la table entiere
+// (`duplicate_code`).
 async function enregistrer() {
   if (!device.value) {
     message.value = t.value('no_device')
@@ -309,7 +387,15 @@ function exporter() {
       <tbody>
         <tr v-for="(a, i) in ACTIONS" :key="a.key" data-action-row class="border-t border-border">
           <td class="py-1">{{ t(a.key) }}</td>
-          <td class="py-1 pr-2"><Input v-model="codes[i]" inputmode="numeric" /></td>
+          <td class="py-1 pr-2">
+            <!-- Aucune classe rouge a ajouter : l'`Input` du kit porte deja
+                 `aria-invalid:border-destructive` et l'anneau rouge. Poser
+                 l'attribut est tout le signal. -->
+            <Input v-model="codes[i]" inputmode="numeric" :aria-invalid="!!conflitsParAction[i]" />
+            <p v-if="conflitsParAction[i]" data-conflict class="mt-1 text-xs text-destructive">
+              {{ texteConflit(conflitsParAction[i]!) }}
+            </p>
+          </td>
           <td><Button variant="secondary" size="sm" data-learn @click="apprendre(i)">{{ t('btn_learn') }}</Button></td>
           <td><Button variant="ghost" size="sm" data-clear @click="codes[i] = ''">{{ t('btn_clear') }}</Button></td>
         </tr>
@@ -333,11 +419,21 @@ function exporter() {
     </div>
 
     <div class="flex flex-wrap items-center gap-2">
-      <Button data-save @click="enregistrer">{{ t('btn_save') }}</Button>
-      <Button v-if="apprend" variant="ghost" @click="arreterApprentissage('')">
-        {{ t('btn_cancel') }}
-      </Button>
+      <Button data-save :disabled="aDesConflits" @click="enregistrer">{{ t('btn_save') }}</Button>
+      <span v-if="aDesConflits" data-save-blocked class="text-sm text-destructive">{{ t('save_conflicts') }}</span>
       <span class="text-sm text-muted-foreground">{{ message }}</span>
     </div>
+
+    <!-- L'annulation vit desormais dans la popin : un bouton laisse dans la
+         barre ci-dessus se retrouverait derriere le voile, donc
+         inatteignable. -->
+    <DialogueApprentissage
+      :ouvert="ligneApprise !== null"
+      :t="t"
+      :action="libelleActionApprise"
+      :device="device"
+      v-model:ajouter="ajouter"
+      @annuler="annulerApprentissage"
+    />
   </div>
 </template>

@@ -512,11 +512,22 @@ It opens **all** readable evdev devices (non-exclusively: the keyboard
 keeps working normally) and translates keys into commands according to
 `/etc/ritornello/input-bindings.toml`. Its page
 `http://<host>:8080/plugins/generic-input/` lists the detected devices,
-lets you learn one key per action, load a bundled preset (`mce`,
-`keyboard`) and save; it also lets you import a preset from an uploaded
-`.toml` file and export the selected device's current bindings to such a
-file. Variables: `RITORNELLO_INPUT_BINDINGS`, `RITORNELLO_INPUT_PRESETS`,
-`RITORNELLO_LOCALE`.
+lets you learn the key — or the keys — of each action, load a bundled preset
+(`mce`, `keyboard`) and save; it also lets you import a preset from an
+uploaded `.toml` file and export the selected device's current bindings to
+such a file. Variables: `RITORNELLO_INPUT_BINDINGS`,
+`RITORNELLO_INPUT_PRESETS`, `RITORNELLO_LOCALE`.
+
+Learning listens for thirty seconds, in a dialog naming the action and the
+device; the four ways out of that dialog — its "Cancel", the cross, Escape,
+a click on the veil — all cancel the listening session on the device, not
+just the box on screen. A checkbox there **adds** the captured code to the
+codes already on the row rather than replacing them, so a single action can
+answer to several keys. And a code claimed by two actions is flagged under
+both fields while it is being typed, each message naming the other action,
+with saving refused until one of them releases it — the very
+`duplicate_code` this plugin would answer with, said one round trip
+earlier.
 
 Each line an input plugin writes on its socket is an `InputMessage`: a
 `Command` plus an optional `"held": true` flag set when a key **repeats

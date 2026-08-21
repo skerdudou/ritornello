@@ -5,6 +5,11 @@ unknown_command = "unknown command bound to code {code} on {device}"
 unknown_preset = "unknown preset: {preset}"
 bad_request = "invalid request: {detail}"
 save_failed = "the save failed"
+# validation a chaud, cote client : le meme conflit que `duplicate_code`,
+# mais detecte avant l'aller-retour serveur.
+conflict_code = "code {code} is already assigned to {action}"
+conflict_dup = "code {code} is entered twice"
+save_conflicts = "Resolve the duplicate key codes before saving"
 
 # page d'admin
 admin_title = "input bindings"
@@ -20,7 +25,9 @@ btn_import = "Import…"
 btn_export = "Export"
 btn_save = "Save"
 btn_cancel = "Cancel"
-learning_msg = "Press a key on the device…"
+dlg_learn_title = "Key learning"
+dlg_learn_desc = "Press a key on the device “{device}”…"
+learn_append_label = "Add to the existing codes instead of replacing them"
 learn_timeout = "No key detected — cancelled"
 saved = "Saved ✓"
 save_error = "Error: "

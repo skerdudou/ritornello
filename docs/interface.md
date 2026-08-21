@@ -231,6 +231,21 @@ in), click "Learn" on the action's row, press the key, then "Save". No
 restart is needed: the table is re-read on every key press. To start from
 a base, load the `mce` or `keyboard` preset.
 
+The "press a key" prompt is a **dialog**, naming both the action and the
+device it is listening to, and it waits half a minute — long enough to hunt
+for the right key on an unfamiliar remote. Escape, the veil, the cross and
+"Cancel" all give up on it, and all cancel the listening session on the
+device rather than just closing the box. Its checkbox **adds** the captured
+code to the ones already on that row instead of replacing them, which is
+how one action ends up answering to several keys of the same device — that
+remote's "OK" and its "Play" both driving play/pause, say.
+
+One code on two actions is the mistake the page will not let you save: both
+fields turn red **as you type**, each naming the other action, and "Save"
+stays out of reach until one of them lets the code go. The plugin refuses
+such a table anyway; the page merely says so before the round trip rather
+than after it.
+
 ## Config page
 
 The former status page is now the **config page**, at

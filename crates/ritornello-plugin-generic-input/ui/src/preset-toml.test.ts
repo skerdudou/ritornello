@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ACTIONS, codesFor, collect, presetToml, sanitiseDeviceName } from './preset-toml'
+import { ACTIONS, codesFor, collect, conflits, presetToml, sanitiseDeviceName } from './preset-toml'
 
 describe('ACTIONS', () => {
   it('couvre les 23 actions du protocole', () => {
@@ -91,6 +91,92 @@ describe('presetToml', () => {
 
   it('produit une chaîne vide sans binding', () => {
     expect(presetToml([])).toBe('')
+  })
+})
+
+describe('conflits', () => {
+  const vide = () => ACTIONS.map(() => '')
+
+  it('sans code saisi, aucune ligne n’est en conflit', () => {
+    expect(conflits(vide())).toEqual(ACTIONS.map(() => null))
+  })
+
+  it('rend une entrée par action, quelle que soit la longueur du tableau reçu', () => {
+    // La longueur du resultat suit `ACTIONS`, jamais celle de l'entree : un
+    // tableau trop court, ce sont des champs vides…
+    expect(conflits([])).toHaveLength(ACTIONS.length)
+    // … et un tableau trop long ne fait pas lever la fonction. Les codes
+    // au-dela d'`ACTIONS` sont ignores : ils ne peuvent plus se retrouver
+    // rapportes comme conflit sous une cle d'action inexistante.
+    expect(conflits([...vide(), '9', '9'])).toEqual(ACTIONS.map(() => null))
+  })
+
+  it('des codes tous distincts ne produisent aucun conflit', () => {
+    const codes = vide()
+    codes[0] = '1'
+    codes[1] = '2'
+    codes[2] = '3'
+    expect(conflits(codes)).toEqual(ACTIONS.map(() => null))
+  })
+
+  it('un même code sur deux actions conflictualise les deux lignes, chacune nommant l’autre', () => {
+    const iMute = ACTIONS.findIndex((a) => a.key === 'act_mute')
+    const iPower = ACTIONS.findIndex((a) => a.key === 'act_power')
+    const codes = vide()
+    codes[iMute] = '42'
+    codes[iPower] = '42'
+    const res = conflits(codes)
+    expect(res[iMute]).toEqual({ code: 42, autres: ['act_power'] })
+    expect(res[iPower]).toEqual({ code: 42, autres: ['act_mute'] })
+    expect(res.filter((c) => c !== null)).toHaveLength(2)
+  })
+
+  it('un même code sur trois actions liste les deux autres clés, par indice croissant', () => {
+    const iMute = ACTIONS.findIndex((a) => a.key === 'act_mute')
+    const iPower = ACTIONS.findIndex((a) => a.key === 'act_power')
+    const iStop = ACTIONS.findIndex((a) => a.key === 'act_stop')
+    const tri = [iMute, iPower, iStop].sort((x, y) => x - y)
+    const [a, b, c] = [tri[0]!, tri[1]!, tri[2]!]
+    const codes = vide()
+    codes[iMute] = '7'
+    codes[iPower] = '7'
+    codes[iStop] = '7'
+    const res = conflits(codes)
+    expect(res[a]).toEqual({ code: 7, autres: [ACTIONS[b]!.key, ACTIONS[c]!.key] })
+    expect(res[b]).toEqual({ code: 7, autres: [ACTIONS[a]!.key, ACTIONS[c]!.key] })
+    expect(res[c]).toEqual({ code: 7, autres: [ACTIONS[a]!.key, ACTIONS[b]!.key] })
+  })
+
+  it('un doublon interne au champ ne nomme aucune autre action', () => {
+    const i = ACTIONS.findIndex((a) => a.key === 'act_mute')
+    const codes = vide()
+    codes[i] = '115, 115'
+    expect(conflits(codes)[i]).toEqual({ code: 115, autres: [] })
+  })
+
+  it('sur un champ multi-codes, rapporte le second code quand seul lui est en conflit inter-lignes', () => {
+    const iMute = ACTIONS.findIndex((a) => a.key === 'act_mute')
+    const iPower = ACTIONS.findIndex((a) => a.key === 'act_power')
+    const codes = vide()
+    codes[iMute] = '3, 8'
+    codes[iPower] = '8'
+    expect(conflits(codes)[iMute]).toEqual({ code: 8, autres: ['act_power'] })
+  })
+
+  it('quand le premier code du champ est un doublon interne et le second en conflit inter-lignes, rapporte le premier (ordre du champ)', () => {
+    const iMute = ACTIONS.findIndex((a) => a.key === 'act_mute')
+    const iPower = ACTIONS.findIndex((a) => a.key === 'act_power')
+    const codes = vide()
+    codes[iMute] = '5, 5, 8'
+    codes[iPower] = '8'
+    expect(conflits(codes)[iMute]).toEqual({ code: 5, autres: [] })
+  })
+
+  it('ignore les espaces et les entrées non numériques, ne rapporte que le doublon', () => {
+    const i = ACTIONS.findIndex((a) => a.key === 'act_mute')
+    const codes = vide()
+    codes[i] = ' 9 , x , 9 '
+    expect(conflits(codes)[i]).toEqual({ code: 9, autres: [] })
   })
 })
 
