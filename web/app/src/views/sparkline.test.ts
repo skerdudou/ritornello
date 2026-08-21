@@ -105,4 +105,37 @@ describe('cheminSparkline', () => {
       'M0.00,30.00 L25.00,15.00 L100.00,0.00',
     )
   })
+
+  it('ouvre un second sous-tracé après un trou au milieu de la série', () => {
+    // Un `null` referme le sous-tracé en cours ; le point présent suivant en
+    // rouvre un avec un nouveau `M` plutôt que de le relier par un `L`, ce qui
+    // dessinerait un trait par-dessus le trou.
+    expect(cheminSparkline([0, null, 100, 100], [0, 25, 50, 100], 30)).toBe(
+      'M0.00,30.00 M50.00,0.00 L100.00,0.00',
+    )
+  })
+
+  it('ignore un trou en tête de série, sans point fantôme au bord', () => {
+    expect(cheminSparkline([null, 0, 100], [0, 50, 100], 30)).toBe(
+      'M50.00,30.00 L100.00,0.00',
+    )
+  })
+
+  it('ignore un trou en fin de série', () => {
+    expect(cheminSparkline([0, 100, null], [0, 50, 100], 30)).toBe(
+      'M0.00,30.00 L50.00,0.00',
+    )
+  })
+
+  it('un point isolé entre deux trous ne dessine rien, sans être un cas à part', () => {
+    // Un `M` seul, sans `L` qui le suive : conforme au contrat documenté d'un
+    // sous-tracé d'un seul point, pas une anomalie à traiter séparément.
+    expect(cheminSparkline([null, 50, null], [0, 50, 100], 30)).toBe('M50.00,15.00')
+  })
+
+  it('ne dessine rien quand toutes les valeurs sont absentes', () => {
+    // Le cas d'une machine sans la sonde correspondante : jamais de courbe,
+    // pas même un `M` isolé.
+    expect(cheminSparkline([null, null, null], [0, 50, 100], 30)).toBe('')
+  })
 })

@@ -4,6 +4,7 @@ import { onMounted, ref } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
 import ThemeToggle from './components/ThemeToggle.vue'
 import { useCatalog } from './composables/useCatalog'
+import { useMetriques } from './composables/useMetriques'
 import type { StatusPayload } from './types'
 
 const { t, reload } = useCatalog()
@@ -42,6 +43,12 @@ const LIEN = [
 const LIEN_ACTIF = 'text-foreground after:scale-x-100'
 
 onMounted(async () => {
+  // Avant l'`await` du catalogue, et non après : un catalogue lent ne doit pas
+  // retarder le premier échantillon. Amorcé ici — la racine de la SPA — et pas
+  // dans `SystemView`, pour que l'historique existe avant la première visite de
+  // l'onglet système, survive à la navigation, et n'ait qu'un seul point de
+  // départ (deux se disputeraient le même minuteur).
+  useMetriques().demarrer()
   await reload()
   // Un `/api/status` injoignable prive silencieusement la navigation de tous
   // les plugins admin — le symptome le plus difficile a attribuer sans

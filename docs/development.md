@@ -70,8 +70,9 @@ Three audiences, three rules — the boundary is the audience, not the file:
 - **Logs are English**, at every level, including the `anyhow!` and
   `.context(…)` strings they interpolate. They are read next to
   `journalctl` and rustc — and they are visible in the UI: the System
-  tab's "Recent errors" card serves the last 50 WARN/ERROR lines verbatim
-  (`GET /api/logs`), so a French log line would show up untranslated in an
+  tab's "Recent errors" card serves them verbatim (`GET /api/logs` returns
+  the buffer's last 500 WARN/ERROR lines, of which the card shows 8 and a
+  dialog the rest), so a French log line would show up untranslated in an
   English interface.
 - **Everything a user reads goes through the i18n catalogues**, never a
   hard-coded string: the display, the SPA, and the `error` field of a `422`

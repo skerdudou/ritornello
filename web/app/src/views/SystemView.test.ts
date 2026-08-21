@@ -2,6 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CardTitle, Select } from '@ritornello/ui'
 import { useCatalog } from '../composables/useCatalog'
+import { reinitialiserMetriques, useMetriques } from '../composables/useMetriques'
 import SystemView from './SystemView.vue'
 
 // Charge utile complète, réutilisée en la modifiant par cas. Les jiffies CPU
@@ -61,8 +62,9 @@ const CATALOGUE = {
 
 /**
  * Stub de `fetch` qui répond selon l'URL : le catalogue i18n d'un côté,
- * `/api/system` de l'autre, `{}` pour les POST. `corps` accepte une fonction,
- * appelée à chaque sondage, pour faire varier les réponses successives.
+ * `/api/system` de l'autre, `{}` pour les POST (ou un refus, voir `refusPost`).
+ * `corps` accepte une fonction, appelée à chaque sondage, pour faire varier
+ * les réponses successives.
  *
  * Le catalogue est bel et bien servi : sans lui, `createT` renvoie la clé
  * elle-même et les unités s'afficheraient « system_unit_day ». Le test
@@ -72,9 +74,20 @@ function stub(
   corps: unknown | (() => unknown),
   catalogue: Record<string, string> = CATALOGUE,
   journal: unknown = { lines: [] },
+  refusPost?: string,
 ) {
   const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
     if (init?.method === 'POST') {
+      // `refusPost` fourni : le POST échoue avec ce message, comme le fait
+      // logind quand la règle polkit manque. Même convention que `journal`
+      // ci-dessous — un paramètre qui, renseigné, fait répondre `ok: false`.
+      if (refusPost !== undefined) {
+        return Promise.resolve({
+          ok: false,
+          status: 502,
+          json: async () => ({ error: refusPost }),
+        } as Response)
+      }
       return Promise.resolve({ ok: true, json: async () => ({}) } as Response)
     }
     const u = String(url)
@@ -100,10 +113,20 @@ function stub(
 }
 
 describe('SystemView', () => {
-  beforeEach(() => vi.useFakeTimers({ shouldAdvanceTime: true }))
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    // L'état des métriques vit au niveau module : sans remise à zéro, un test
+    // hérite de l'historique, de la période et du minuteur du précédent.
+    reinitialiserMetriques()
+  })
   afterEach(() => {
+    reinitialiserMetriques()
     vi.useRealTimers()
     vi.unstubAllGlobals()
+    // `unstubAllGlobals` ne défait pas un `spyOn` : sans ça, le
+    // `document.hidden` forcé à `true` par le test de l'arrière-plan fuiterait
+    // dans tous les tests suivants du fichier.
+    vi.restoreAllMocks()
     // Les dialogues sont montés dans un portail : sans ce nettoyage, le DOM
     // d'un test fuiterait dans les `document.body.querySelector` du suivant.
     document.body.innerHTML = ''
@@ -116,6 +139,9 @@ describe('SystemView', () => {
    */
   async function monter() {
     await useCatalog().reload()
+    // `App.vue` amorce le sondage au montage de la SPA, plus la vue : le
+    // harnais de test tient ce rôle, dans le même ordre que l'application.
+    useMetriques().demarrer()
     const w = mount(SystemView, { attachTo: document.body })
     await flushPromises()
     return w
@@ -174,22 +200,22 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('plafonne l historique à 60 échantillons', async () => {
+  it('plafonne l historique à 240 échantillons', async () => {
     const jiffies = prochainsJiffies()
     stub(() => payload(jiffies()))
     const w = await monter()
     // Le montage ne pousse aucun échantillon : il faut un delta de jiffies,
     // donc un premier sondage de référence avant que quoi que ce soit ne
-    // soit calculable. 61 sondages supplémentaires (période de 5 s) poussent
-    // donc 61 échantillons, le 61e faisant sortir le plus ancien par
-    // `shift()` : il doit en rester exactement 60, soit 59 commandes « L »
+    // soit calculable. 241 sondages supplémentaires (période de 5 s) poussent
+    // donc 241 échantillons, le 241e faisant sortir le plus ancien par
+    // `shift()` : il doit en rester exactement 240, soit 239 commandes « L »
     // dans le tracé (un « M » puis n-1 « L »).
-    await vi.advanceTimersByTimeAsync(61 * 5000)
+    await vi.advanceTimersByTimeAsync(241 * 5000)
     await flushPromises()
     // Le tracé est porté par le premier `<path>`, `[data-system-history]`
     // marquant le `<svg>` qui les contient tous les deux.
     const d = w.get('[data-system-history] path').attributes('d')!
-    expect((d.match(/L/g) ?? []).length).toBe(59)
+    expect((d.match(/L/g) ?? []).length).toBe(239)
     w.unmount()
   })
 
@@ -224,13 +250,70 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('arrête de sonder au démontage', async () => {
+  it('le sondage survit au démontage de la vue', async () => {
+    // Le sondage n'appartient plus à la page mais au store de module, partagé
+    // par toute la SPA : une vue qui s'en va n'est pas une raison de cesser de
+    // mesurer. Quitter la page Système pour la configuration et revenir doit
+    // retrouver un historique continu, pas un graphe vide.
     const f = stub(payload())
     const w = await monter()
     const appels = f.mock.calls.length
     w.unmount()
+    // Trois périodes de 5 s : le minuteur du store tique toujours.
     await vi.advanceTimersByTimeAsync(15000)
-    expect(f.mock.calls.length).toBe(appels)
+    expect(f.mock.calls.length).toBeGreaterThan(appels)
+  })
+
+  it('continue de sonder quand l onglet passe en arrière-plan, et démarre dans un onglet déjà caché', async () => {
+    const f = stub(payload())
+    const w = await monter()
+    const avant = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
+    // L'onglet passe en arrière-plan. Le sondage ne doit plus s'arrêter : le
+    // graphe est là pour dire ce qui s'est passé pendant qu'on regardait
+    // ailleurs.
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
+    document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(15000)
+    await flushPromises()
+    const apres = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
+    expect(apres).toBeGreaterThanOrEqual(avant + 3)
+    w.unmount()
+
+    // Ce qui précède prouve que le passage en arrière-plan n'arrête plus le
+    // minuteur déjà installé ; le cas propre à la garde de `demarrer()` est
+    // l'autre : la SPA qui s'amorce dans un onglet **déjà** caché — session
+    // restaurée, onglet ouvert en arrière-plan. `document.hidden` valant
+    // toujours `true`, `demarrer()` doit installer le minuteur quand même.
+    reinitialiserMetriques()
+    const repart = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
+    useMetriques().demarrer()
+    await vi.advanceTimersByTimeAsync(15000)
+    await flushPromises()
+    const cache = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
+    expect(cache).toBeGreaterThanOrEqual(repart + 3)
+  })
+
+  it('garde l historique quand on quitte la vue et qu on y revient', async () => {
+    const jiffies = prochainsJiffies()
+    stub(() => payload(jiffies()))
+    const w = await monter()
+    // Trois sondages : le premier pose la référence de jiffies, les deux
+    // suivants poussent deux échantillons — de quoi tracer une ligne.
+    await vi.advanceTimersByTimeAsync(15000)
+    await flushPromises()
+    const avant = (w.get('[data-system-history] path').attributes('d')!.match(/L/g) ?? []).length
+    expect(avant).toBeGreaterThanOrEqual(1)
+    w.unmount()
+
+    // La vue est démontée : le sondage continue pour autant, et la vue
+    // remontée retrouve un graphe déjà tracé au lieu de repartir de zéro.
+    await vi.advanceTimersByTimeAsync(15000)
+    await flushPromises()
+    const revenu = mount(SystemView, { attachTo: document.body })
+    await flushPromises()
+    const apres = (revenu.get('[data-system-history] path').attributes('d')!.match(/L/g) ?? []).length
+    expect(apres).toBeGreaterThan(avant)
+    revenu.unmount()
   })
 
   it('désactive les boutons système quand polkit n est pas configuré', async () => {
@@ -255,6 +338,11 @@ describe('SystemView', () => {
     refus.unmount()
 
     stub(payload({ can_power_off: false, can_reboot: false, logind_reachable: false }))
+    // Deuxième visite dans le même test : l'état des métriques vit au niveau
+    // module, donc l'échéance du sondage précédent lui survit et `demarrer()`
+    // attendrait la fin de la période au lieu de sonder tout de suite. On
+    // repart d'un démarrage de SPA, comme le fait le `beforeEach`.
+    reinitialiserMetriques()
     const absent = await monter()
     expect(absent.get('[data-power-unavailable]').text()).toContain('system_power_no_logind')
     absent.unmount()
@@ -306,7 +394,7 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('ne relance pas le sondage sur un retour de visibilité pendant un arrêt confirmé', async () => {
+  it('ne relance pas le sondage sur un changement de période pendant un arrêt confirmé', async () => {
     const f = stub(payload())
     const w = await monter()
     await w.get('[data-power-poweroff]').trigger('click')
@@ -315,10 +403,15 @@ describe('SystemView', () => {
     await flushPromises()
     expect(w.find('[data-power-progress]').exists()).toBe(true)
     const appels = f.mock.calls.length
-    // L'utilisateur change d'onglet puis revient : `visibilitychange` doit
-    // rappeler `demarrer()`, qui ne doit rien faire tant que l'arrêt est en
-    // cours, sans quoi la page sonderait un cœur déjà parti.
-    document.dispatchEvent(new Event('visibilitychange'))
+    // Le sélecteur de période reste affiché pendant l'arrêt : rien n'empêche
+    // l'utilisateur d'y toucher pendant que le cœur s'en va. C'est désormais le
+    // seul chemin à sa portée qui repasse par `demarrer()` (son setter fait
+    // `arreter()` puis `demarrer()`), et la garde `suspendu` doit refuser de
+    // repartir, sans quoi la page sonderait un cœur déjà parti et afficherait
+    // une erreur réseau sur un arrêt qui se déroule comme demandé. Une seconde
+    // de période contre cinq secondes d'avance : la garde absente, cinq
+    // sondages atterriraient ici.
+    await w.findComponent(Select).vm.$emit('update:modelValue', '1')
     await vi.advanceTimersByTimeAsync(5000)
     expect(f.mock.calls.length).toBe(appels)
     w.unmount()
@@ -377,13 +470,20 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('démonter pendant l attente ne relance pas le sondage ensuite', async () => {
+  it('démonter pendant l attente laisse le sondage reprendre', async () => {
     // L'ancien processus répond encore, donc son uptime **croît** avec
     // l'horloge — c'est ce que fait un processus toujours vivant. La condition
     // de retour le compare à `avant + écoulé` : un uptime qui suit l'horloge
     // ne peut jamais passer sous ce seuil, donc l'attente tourne jusqu'à ce
     // qu'on démonte la vue. Un échantillon figé, lui, finirait par être pris
     // pour un redémarrage réussi et ce test ne dirait plus ce qu'il annonce.
+    //
+    // Le sondage appartient au store, partagé par toute la SPA : quitter la
+    // page pendant un redémarrage de service ne peut pas figer la mesure pour
+    // toutes les autres. `attendreRetour` doit donc rendre la main à
+    // `reprendre()` sur sa sortie par démontage comme sur celle par plafond ;
+    // sans ça, `suspendu` reste vrai pour la vie de la page et aucun
+    // `demarrer()` ultérieur ne repart jamais.
     const debut = Date.now()
     const f = stub(() => payload({ service_uptime_s: 3600 + Math.floor((Date.now() - debut) / 1000) }))
     const w = await monter()
@@ -392,13 +492,71 @@ describe('SystemView', () => {
     document.body.querySelector<HTMLElement>('[data-power-confirm]')!.click()
     await flushPromises()
     w.unmount()
-    // Une requête déjà en vol au moment du démontage est normale (la boucle
-    // ne s'arrête qu'au tour suivant) ; ce qui ne doit jamais se produire,
-    // c'est un nouveau minuteur créé après coup par `demarrer()`.
+    // Assez de temps pour que la boucle constate le démontage au tour suivant
+    // et reprenne le sondage régulier.
     await vi.advanceTimersByTimeAsync(10000)
     const appels = f.mock.calls.length
     await vi.advanceTimersByTimeAsync(30000)
-    expect(f.mock.calls.length).toBe(appels)
+    expect(f.mock.calls.length).toBeGreaterThan(appels)
+  })
+
+  it('un redémarrage de l appareil confirmé reprend le sondage quand la machine revient', async () => {
+    // Le Pi s'en va puis **revient** en 20 à 40 s, et l'onglet, lui, n'a pas
+    // bougé : le redémarrage de la machine s'attend donc comme la relance du
+    // service, seul le plafond diffère. Sans cette attente, `suspendu` restait
+    // vrai pour la vie de la page — le graphe figé sur les échantillons
+    // d'avant le redémarrage, sur *toutes* les pages, `indisponible` toujours
+    // faux et donc rien à l'écran pour l'expliquer.
+    //
+    // Même gradation d'uptime que pour la relance du service : les deux
+    // premières réponses portent un uptime bien supérieur à `avant + écoulé`,
+    // seule la troisième prouve un service reparti de zéro — ce que
+    // `service_uptime_s` fait aussi après un redémarrage complet, puisque le
+    // service repart avec la machine.
+    const reponses = [payload(), payload({ service_uptime_s: 9999 }), payload({ service_uptime_s: 2 })]
+    let i = 0
+    const f = stub(() => reponses[Math.min(i++, reponses.length - 1)])
+    const w = await monter()
+    await w.get('[data-power-reboot]').trigger('click')
+    await flushPromises()
+    document.body.querySelector<HTMLElement>('[data-power-confirm]')!.click()
+    await flushPromises()
+    expect(w.get('[data-power-progress]').text()).toBeTruthy()
+    await vi.advanceTimersByTimeAsync(6000)
+    await flushPromises()
+    expect(w.find('[data-power-progress]').exists()).toBe(false)
+    // L'assertion qui compte : le sondage régulier a bien repris.
+    const appels = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
+    await vi.advanceTimersByTimeAsync(15000)
+    await flushPromises()
+    expect(
+      f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length,
+    ).toBeGreaterThan(appels)
+    w.unmount()
+  })
+
+  it('un refus du POST d alimentation rend la main au sondage', async () => {
+    // Chemin banal sur ce matériel, pas un cas limite : une installation
+    // DietPi sans la règle polkit — ou avec `systemd-logind` masqué — refuse
+    // le tout premier `POST /api/system/power`. C'est l'une des deux seules
+    // portes de sortie de la suspension globale, et rien ne s'arrête : le
+    // sondage doit reprendre comme si l'action n'avait jamais été demandée.
+    const f = stub(payload(), CATALOGUE, { lines: [] }, 'logind a refuse')
+    const w = await monter()
+    await w.get('[data-power-poweroff]').trigger('click')
+    await flushPromises()
+    document.body.querySelector<HTMLElement>('[data-power-confirm]')!.click()
+    await flushPromises()
+    // L'action ne court pas : son message a disparu.
+    expect(w.find('[data-power-progress]').exists()).toBe(false)
+    // L'assertion qui compte : la suspension a bien été levée.
+    const appels = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
+    await vi.advanceTimersByTimeAsync(15000)
+    await flushPromises()
+    expect(
+      f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length,
+    ).toBeGreaterThan(appels)
+    w.unmount()
   })
 
   it('calcule un pourcentage d utilisation CPU exact entre deux sondages', async () => {
@@ -790,6 +948,9 @@ describe('SystemView', () => {
     // `monter()` ne peut pas le voir : il charge le catalogue AVANT de monter.
     stub(payload(), {})
     await useCatalog().reload()
+    // `App.vue` amorce le sondage au montage de la SPA, plus la vue : le
+    // harnais de test tient ce rôle, dans le même ordre que l'application.
+    useMetriques().demarrer()
     const w = mount(SystemView, { attachTo: document.body })
     await flushPromises()
     expect(w.get('[data-system-period]').text()).toContain('system_unit_second')
@@ -804,20 +965,20 @@ describe('SystemView', () => {
   it('le libellé de la fenêtre suit la période choisie', async () => {
     stub(payload())
     const w = await monter()
-    expect(w.get('[data-system-history-span]').text()).toContain('5')
+    expect(w.get('[data-system-history-span]').text()).toBe('20 min')
     await w.findComponent(Select).vm.$emit('update:modelValue', '30')
     await flushPromises()
-    expect(w.get('[data-system-history-span]').text()).toContain('30')
+    expect(w.get('[data-system-history-span]').text()).toBe('120 min')
     w.unmount()
   })
 
   it('affiche la fenêtre de repli (capacité × période) tant que l historique ne mesure rien', async () => {
     // Page fraîche : aucun échantillon encore poussé (seul le premier sondage
     // de référence a eu lieu), donc rien à mesurer — repli sur la capacité
-    // théorique à la période par défaut (5 s × 60 = 5 min).
+    // théorique à la période par défaut (5 s × 240 = 20 min).
     stub(payload({ cpu_total_jiffies: 0, cpu_idle_jiffies: 0 }))
     const w = await monter()
-    expect(w.get('[data-system-history-span]').text()).toBe('5 min')
+    expect(w.get('[data-system-history-span]').text()).toBe('20 min')
     w.unmount()
   })
 
@@ -827,7 +988,7 @@ describe('SystemView', () => {
     const w = await monter()
     // Trois sondages supplémentaires à 5 s : le premier ne fait que poser la
     // référence de jiffies, les deux suivants poussent deux échantillons
-    // distants de 5 s réels — bien moins que les 5 min que promettrait la
+    // distants de 5 s réels — bien moins que les 20 min que promettrait la
     // capacité théorique à cette période.
     await vi.advanceTimersByTimeAsync(15000)
     await flushPromises()
@@ -1028,6 +1189,90 @@ describe('SystemView', () => {
     })
   })
 
+  describe('courbe de température', () => {
+    it('trace la température comme troisième courbe', async () => {
+      const jiffies = prochainsJiffies()
+      stub(() => payload({ ...jiffies(), temperature_c: 47.8 }))
+      const w = await monter()
+      await vi.advanceTimersByTimeAsync(15000)
+      await flushPromises()
+      const d = w.get('[data-system-history-temp]').attributes('d')!
+      expect(d).not.toBe('')
+      // Même échelle que les pourcentages : 47,8 °C se lit à mi-hauteur d'un
+      // repère de 30, donc autour de y = 15.
+      expect(d).toMatch(/^M[\d.]+,1[0-9]\.\d\d/)
+      w.unmount()
+    })
+
+    it('ne trace rien sans sonde de température', async () => {
+      const jiffies = prochainsJiffies()
+      stub(() => payload({ ...jiffies(), temperature_c: null }))
+      const w = await monter()
+      await vi.advanceTimersByTimeAsync(15000)
+      await flushPromises()
+      // Les deux autres courbes restent : une machine sans sonde ne perd pas
+      // son graphe.
+      expect(w.get('[data-system-history] path').attributes('d')).not.toBe('')
+      expect(w.get('[data-system-history-temp]').attributes('d')).toBe('')
+      w.unmount()
+    })
+
+    it('un trou passager dans la série creuse la courbe sans l effacer', async () => {
+      // Une lecture manquante n'efface plus la courbe entière : chaque
+      // température présente reste sur sa propre abscisse (son horodatage),
+      // exactement comme dans les deux autres courbes, donc rien ne dérive
+      // même quand la série a un trou au milieu. `cheminSparkline` referme le
+      // sous-tracé courant sur le `null` et rouvre un `M` au prochain point
+      // présent : deux sous-tracés SVG plutôt qu'un tracé absent.
+      const jiffies = prochainsJiffies()
+      let tour = 0
+      stub(() => payload({ ...jiffies(), temperature_c: tour++ === 2 ? null : 47.8 }))
+      const w = await monter()
+      await vi.advanceTimersByTimeAsync(20000)
+      await flushPromises()
+      const d = w.get('[data-system-history-temp]').attributes('d')!
+      expect(d).not.toBe('')
+      // Deux sous-tracés : celui d'avant le trou, celui d'après.
+      expect((d.match(/M/g) ?? []).length).toBe(2)
+      w.unmount()
+    })
+
+    it('annonce la température dans la légende', async () => {
+      const jiffies = prochainsJiffies()
+      stub(() => payload({ ...jiffies(), temperature_c: 47.8 }))
+      const w = await monter()
+      await vi.advanceTimersByTimeAsync(15000)
+      await flushPromises()
+      expect(w.get('[data-system-history-legend]').text()).toContain('47.8 °C')
+      w.unmount()
+    })
+
+    it('n annonce pas de température dans la légende sans sonde', async () => {
+      stub(payload({ temperature_c: null }))
+      const w = await monter()
+      // Pas de série annoncée quand aucune courbe ne peut exister : l'absence
+      // de sonde est connue dès le premier sondage, donc rien ne saute.
+      expect(w.get('[data-system-history-legend]').text()).not.toContain('°C')
+      w.unmount()
+    })
+
+    it('affiche la température dans le popin de survol', async () => {
+      const jiffies = prochainsJiffies()
+      stub(() => payload({ ...jiffies(), temperature_c: 47.8 }))
+      const w = await monter()
+      await vi.advanceTimersByTimeAsync(15000)
+      await flushPromises()
+      const svg = w.get('[data-system-history]')
+      vi.spyOn(svg.element, 'getBoundingClientRect').mockReturnValue({
+        left: 0, width: 200, top: 0, height: 0, right: 200, bottom: 0, x: 0, y: 0, toJSON: () => {},
+      } as DOMRect)
+      await svg.trigger('pointermove', { clientX: 10 })
+      await flushPromises()
+      expect(w.get('[data-system-history-popin]').text()).toContain('47.8 °C')
+      w.unmount()
+    })
+  })
+
   describe('dernières erreurs', () => {
     it('rend une ligne par entrée de journal, dans l’ordre reçu', async () => {
       // `/api/logs` rend déjà les plus récentes en premier (le cœur inverse son
@@ -1063,7 +1308,7 @@ describe('SystemView', () => {
       w.unmount()
     })
 
-    it('le journal n est relevé qu au montage, hors du sondage périodique', async () => {
+    it('le sondage périodique ne relève pas le journal', async () => {
       // Greffer le journal sur `sonder()` allongerait la prise du verrou « en
       // vol » et changerait la cadence observée : mesuré, quatre tests de
       // cadence tombaient. Ce test épingle la séparation.

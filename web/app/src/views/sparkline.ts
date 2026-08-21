@@ -38,7 +38,7 @@ const MINUTE_MS = 60_000
 
 /**
  * Nombre maximum de repères rendus. La fenêtre réelle plafonne bien en dessous
- * (60 échantillons à 30 s font 30 minutes), mais un horodatage aberrant — une
+ * (240 échantillons à 30 s font 120 minutes), mais un horodatage aberrant — une
  * horloge qui saute, chose banale sur une machine sans pile ni réseau au
  * démarrage — produirait sinon des milliers d'éléments pour un graphe large de
  * quelques centaines de pixels.
@@ -88,29 +88,56 @@ export function reperesMinute(horodatages: number[], largeur: number): number[] 
 
 /**
  * Construit l'attribut `d` d'un `<path>` SVG pour une série de pourcentages,
- * placée aux abscisses fournies par `abscisses`.
+ * placée aux abscisses fournies par `abscisses`. Une valeur `null` marque un
+ * échantillon dont la mesure a échoué (par exemple une température illisible)
+ * : elle ouvre un **trou** dans le tracé plutôt que d'être comblée.
  *
  * Toute la géométrie du graphe tient ici et dans `abscisses`, en fonctions
- * pures et testées : la vue n'a plus qu'à passer ses deux séries. Les
+ * pures et testées : la vue n'a plus qu'à passer ses séries. Les
  * abscisses arrivent en paramètre plutôt que d'être recalculées ici parce que
- * les deux séries, le trait de survol et le calage du popin doivent partager
+ * les trois séries, le trait de survol et le calage du popin doivent partager
  * exactement les mêmes — un popin décalé d'une colonne par rapport au tracé
  * qu'il commente serait pire qu'une absence de popin.
  *
- * Les valeurs sont bornées à 0-100 — une charge supérieure au nombre de
- * cœurs dépasse 100 % et ne doit pas sortir du cadre — et l'axe y est
- * inversé : 0 % en bas, comme on lit un graphe, alors que le repère SVG a
+ * Les valeurs présentes sont bornées à 0-100 — une charge supérieure au
+ * nombre de cœurs dépasse 100 % et ne doit pas sortir du cadre — et l'axe y
+ * est inversé : 0 % en bas, comme on lit un graphe, alors que le repère SVG a
  * son origine en haut.
  *
+ * Un `<path>` SVG accepte plusieurs sous-tracés : chaque `null` referme le
+ * sous-tracé courant, et l'échantillon présent suivant en rouvre un avec un
+ * nouveau `M` plutôt que de poursuivre avec un `L`. Deux points de part et
+ * d'autre du trou ne sont donc jamais reliés par un trait — la seule autre
+ * option praticable serait de recopier la dernière valeur connue sur le trou,
+ * ce qui dessinerait un plateau parfaitement horizontal, indiscernable à l'œil
+ * d'une mesure réelle et stable. Un trou visible dit « on ne sait pas » ; un
+ * plateau prétendrait le savoir.
+ *
  * Moins de deux points : chaîne vide. Un échantillon seul ne dessine pas de
- * ligne, et un `d` vide est un `<path>` invisible, pas une erreur. Autant
- * d'abscisses que de valeurs, sinon chaîne vide également : un appel mal
- * apparié dessinerait des `NaN`, une dégradation silencieuse vaut mieux.
+ * ligne, et un `d` vide est un `<path>` invisible, pas une erreur — c'est
+ * aussi ce qui se produit pour un sous-tracé d'un seul point isolé entre deux
+ * trous : un `M` sans `L` qui le suit, qui ne trace rien non plus, sans que ce
+ * soit un cas à part. Autant d'abscisses que de valeurs, sinon chaîne vide
+ * également : un appel mal apparié dessinerait des `NaN`, une dégradation
+ * silencieuse vaut mieux. Toutes les valeurs `null` : chaîne vide aussi,
+ * aucun sous-tracé ne s'ouvre jamais — le cas d'une machine sans la sonde
+ * correspondante.
  */
-export function cheminSparkline(valeurs: number[], xs: number[], hauteur: number): string {
+export function cheminSparkline(
+  valeurs: (number | null)[],
+  xs: number[],
+  hauteur: number,
+): string {
   if (valeurs.length < 2 || xs.length !== valeurs.length) return ''
+  let segment = true
   return valeurs
     .map((v, i) => {
+      if (v === null) {
+        // Referme le sous-tracé courant : le prochain point présent rouvrira
+        // avec un `M`, pas un `L` qui le relierait par-dessus le trou.
+        segment = true
+        return ''
+      }
       const borne = Math.min(100, Math.max(0, v))
       const y = hauteur - (borne / 100) * hauteur
       // Le `?? 0` est inatteignable — les deux longueurs viennent d'être
@@ -118,7 +145,10 @@ export function cheminSparkline(valeurs: number[], xs: number[], hauteur: number
       // quelqu'un relâche un jour ce contrôle, le tracé se décale au lieu de
       // se remplir de `NaN`.
       const x = xs[i] ?? 0
-      return `${i === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`
+      const commande = segment ? 'M' : 'L'
+      segment = false
+      return `${commande}${x.toFixed(2)},${y.toFixed(2)}`
     })
+    .filter((s) => s !== '')
     .join(' ')
 }

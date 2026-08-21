@@ -403,15 +403,41 @@ audio device the restarted core wants back. The service never showed it —
 systemd kills the unit's remaining cgroup processes before restarting — so the
 symptom only appeared in a development run, where nothing supervises.
 
-The page polls `GET /api/system` while it is open and visible, rather than
-receiving a stream: unlike the player state, which the core produces
-anyway, these metrics exist only because someone asked for them. The
-refresh period is chosen on the page itself — 1, 2, 5, 10, or 30 s,
-defaulting to 5 s — and is not persisted: it resets to 5 s on every
-arrival, like the history below. The CPU/RAM history graph lives in the
-page only — 60 samples at the chosen period (5 minutes at the default
-5 s, 1 minute at 1 s, 30 minutes at 30 s), lost on navigation and never
-stored.
+The SPA polls `GET /api/system` rather than receiving a stream: unlike the
+player state, which the core produces anyway, these metrics exist only
+because someone asked for them. The poll starts when the SPA loads and runs
+until the page closes — from any page, System tab open or not, hidden tab
+included — and only a confirmed power action suspends it. Only a shutdown
+leaves it suspended: after a service restart or a device reboot the page
+waits for the core to answer again — up to 30 s for the service, up to 120 s
+for a full reboot, a Pi taking 20 to 40 s on healthy hardware — and then
+resumes the poll. Leaving it suspended would freeze the graph on *every*
+page until a full reload, with nothing on screen to say why. That is a
+deliberate reversal of the rule that used to stand here ("do not make a
+mostly idle device work for nobody"): a history graph that measures only
+while someone watches it teaches nothing, and reading `/proc` every 5 s
+costs nothing measurable. One reservation, accepted: browsers throttle a
+hidden tab's timers, so samples taken while the tab is in the background are
+spaced out rather than regular — the graph stays truthful because its x axis
+comes from the sample timestamps, not from the rank of each point.
+
+The period is chosen on the System page — 1, 2, 5, 10, or 30 s, defaulting
+to 5 s — and lives with the poll rather than with the page: it survives
+navigation, and only a full reload brings it back to 5 s. It is persisted
+nowhere, neither in `localStorage` nor in `/api/settings`, being a viewing
+comfort rather than a device setting. The history graph carries three curves
+— CPU, RAM, and, on a machine with a sensor, temperature in °C plotted on
+the same 0-100 axis, a Pi's temperatures living in that range and the legend
+carrying the unit — over 240 samples at the chosen period: 20 minutes at the
+default 5 s, 4 minutes at 1 s, two hours at 30 s. Nothing is stored, and
+nothing is lost on navigation either — which is the whole reason the poll
+moved out of the page.
+
+The "Recent errors" card at the bottom shows the 8 most recent WARN/ERROR
+lines from `GET /api/logs`; a button opens a dialog over the whole buffer
+(500 lines), with a field that filters it. Eight lines rather than the
+buffer: unrolled in the page, they would push everything else off the
+screen.
 
 ## Internationalization (i18n)
 

@@ -86,6 +86,12 @@ describe('cles i18n utilisees par le shell', () => {
       // `t(...)` (c'est `t(erreur.value)`).
       'plugin_unavailable',
       'plugin_contract_mismatch',
+      // SystemView.vue : le message de succes de `attendreRetour` arrive en
+      // parametre (`t.value(cleSucces)`), la cle etant choisie par l'action
+      // confirmee. Les deux litteraux existent bien dans le fichier, mais au
+      // point d'appel et non dans un `t(...)` — la regex ne les voit donc pas.
+      'system_restarted',
+      'system_device_restarted',
     ])
 
     const manquantes = [...utilisees].filter((cle) => !catalogue.has(cle)).sort()

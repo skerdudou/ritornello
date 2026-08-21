@@ -28,7 +28,7 @@ async function send(method: 'PUT' | 'POST', url: string, body: unknown): Promise
 }
 
 export const api = {
-  // `init` optionnel : SystemView.vue s'en sert pour passer un `AbortSignal`
+  // `init` optionnel : `useMetriques.ts` s'en sert pour passer un `AbortSignal`
   // par sondage, sans quoi un changement de période ne pourrait pas annuler
   // une requête devenue obsolète.
   async get<T>(url: string, init?: RequestInit): Promise<T> {

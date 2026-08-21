@@ -6,15 +6,20 @@ import {
 } from '@ritornello/ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
+import { PERIODES_S, useMetriques } from '../composables/useMetriques'
 import type { LogsPayload, SystemPayload, SystemUsage } from '../types'
 import { filtreLignes } from './journal'
 import { abscisses, cheminSparkline, reperesMinute } from './sparkline'
 
 const { t } = useCatalog()
-const etat = ref<SystemPayload | null>(null)
-const indisponible = ref(false)
+const {
+  etat, indisponible, historique, utilisationCpuActuelle,
+  periodeMs, periode, dureeFenetreMin, suspendre, reprendre,
+} = useMetriques()
+
 /**
- * Les dernières erreurs journalisées, relevées **une fois au montage**.
+ * Les dernières erreurs journalisées, relevées au montage et à chaque
+ * ouverture de la popin (voir `releverJournal`).
  *
  * Elles vivaient sur la page Configuration ; leur place est ici, avec les
  * métriques, quand on cherche pourquoi l'appareil se comporte mal.
@@ -65,21 +70,6 @@ function ouvrirErreurs(): void {
   void releverJournal()
 }
 
-/**
- * Période de sondage, locale à la page : un confort de visualisation, pas un
- * réglage de l'appareil, donc ni `localStorage` ni `/api/settings` — cette
- * SPA ne garde aucun état côté navigateur, ses préférences vivent dans le
- * cœur. Elle revient donc à 5 s à chaque arrivée, comme l'historique qui
- * démarre vide. Le `Select` ne porte que des chaînes (voir `periode`
- * ci-dessous) ; la valeur réelle en millisecondes vit ici pour
- * `setInterval`.
- */
-const periodeMs = ref(5000)
-/** Options du sélecteur de période, en secondes. */
-const PERIODES_S = [1, 2, 5, 10, 30] as const
-/** Nombre d'échantillons conservés dans l'historique — voir `dureeFenetreMin`
- *  pour la fenêtre visible qui en découle à la période courante. */
-const CAPACITE = 60
 /** Repère du graphe, en unités de `viewBox`. */
 const LARGEUR = 100
 const HAUTEUR = 30
@@ -87,218 +77,12 @@ const HAUTEUR = 30
  *  qui se lirait comme une mesure. */
 const RIEN = '—'
 
-const historique = ref<{ cpu: number; ram: number; t: number }[]>([])
-/**
- * Sondage en vol, à double usage : `sonder()` s'en sert comme verrou pour
- * refuser de s'y superposer, `arreter()` pour l'annuler. Avant le delta CPU
- * stateful, une réponse en retard n'était qu'un affichage périmé ; désormais
- * une réponse qui atterrit dans le désordre écraserait `precedentJiffies`
- * avec une référence trop récente ou trop ancienne, et fausserait le delta
- * du sondage suivant (`Δtotal <= 0` ou une fenêtre bien plus longue que la
- * période affichée). D'où le verrou : un sondage déjà en vol en bloque un
- * second plutôt que de laisser deux réponses se doubler dans le désordre.
- */
-let sondageEnVol: AbortController | null = null
-let minuteur: ReturnType<typeof setInterval> | null = null
-/**
- * Attente unique avant de reprendre le rythme, quand `demarrer()` constate que
- * l'échéance de la période courante n'est pas encore atteinte. Distincte de
- * `minuteur` parce qu'elle ne tique qu'une fois, et arrêtée par `arreter()`
- * comme lui — un `setTimeout` oublié rallumerait le sondage après un démontage
- * ou en pleine action d'alimentation.
- */
-let attente: ReturnType<typeof setTimeout> | null = null
-/**
- * Horodatage du dernier sondage réellement lancé, qui datemarque l'échéance :
- * `dernierSondage + periodeMs` dit quand le prochain est dû. `null` tant
- * qu'aucun sondage n'a eu lieu — l'arrivée sur la page, où il n'y a rien à
- * attendre.
- */
-let dernierSondage: number | null = null
-/** Devient faux au démontage : empêche `demarrer()` de recréer un minuteur
- *  après coup (par ex. depuis `attendreRetour`, qui peut se terminer
- *  longtemps après que l'utilisateur a quitté la vue). */
+/** Devient faux au démontage. Ne garde plus que `attendreRetour` : sa boucle
+ *  de sondage rapproché s'arrête au tour suivant, et son message d'échec ne
+ *  s'affiche plus une fois la vue quittée. Le sondage régulier, lui, vit dans
+ *  le store et ne dépend plus de cet indicateur — `demarrer()` ne le consulte
+ *  pas. */
 let monte = true
-
-/**
- * Compteurs jiffies du sondage précédent, pour calculer un delta — à part de
- * l'historique, qui n'a de sens qu'entre deux sondages consécutifs et non
- * comme une série à afficher.
- */
-const precedentJiffies = ref<{ total: number; idle: number } | null>(null)
-
-/** Dernière utilisation CPU calculée par `sonder`, indépendamment de
- *  l'historique : la carte CPU l'affiche dès qu'elle existe, sans attendre
- *  que la mémoire soit elle aussi lisible (condition propre à l'historique).
- *  Déclarée ici, à côté de `precedentJiffies` plutôt que près de son usage
- *  d'affichage plus bas : `sonder()` l'assigne, et ne compte que sur l'ordre
- *  d'exécution (premier appel via `onMounted`) pour que ça reste sûr — un
- *  futur appel plus impatient tomberait sur la zone morte temporelle d'un
- *  `const` déclaré après coup. */
-const utilisationCpuActuelle = ref<number | null>(null)
-
-/**
- * Utilisation CPU réelle entre ce sondage et le précédent : les compteurs de
- * `/proc/stat` sont cumulatifs depuis le démarrage, seul un delta entre deux
- * sondages a un sens (`utilisation % = 100 × (1 − Δidle / Δtotal)`, bornée à
- * 0-100). `null` : pas encore de sondage précédent — le premier sondage
- * après l'arrivée sur la page ne peut pas afficher de pourcentage, ce n'est
- * pas une panne — ou `Δtotal <= 0` (deux sondages dans le même jiffy, ou des
- * compteurs revenus en arrière).
- */
-function utilisationCpu(s: SystemPayload): number | null {
-  const avant = precedentJiffies.value
-  const total = s.cpu_total_jiffies
-  const idle = s.cpu_idle_jiffies
-  if (total != null && idle != null) precedentJiffies.value = { total, idle }
-  if (total == null || idle == null || !avant) return null
-  const deltaTotal = total - avant.total
-  const deltaIdle = idle - avant.idle
-  if (deltaTotal <= 0) return null
-  return Math.min(100, Math.max(0, 100 * (1 - deltaIdle / deltaTotal)))
-}
-
-/**
- * Pourcentages retenus dans l'historique, avec l'horodatage du sondage (pour
- * un futur survol, pas encore affiché). `null` si l'un des deux manque : une
- * machine sans mémoire lisible, ou dont l'utilisation CPU n'est pas encore
- * calculable, garde un graphe vide plutôt qu'à moitié tracé. Une conséquence
- * à assumer : le premier échantillon exigeant lui-même un delta, le graphe
- * ne trace sa première ligne qu'au troisième sondage (deux pour produire un
- * échantillon, trois pour en avoir deux).
- */
-function pourcentages(s: SystemPayload, cpu: number | null): { cpu: number; ram: number; t: number } | null {
-  if (cpu == null || !s.memory || s.memory.total_kb === 0) return null
-  return {
-    cpu,
-    ram: ((s.memory.total_kb - s.memory.available_kb) / s.memory.total_kb) * 100,
-    t: Date.now(),
-  }
-}
-
-/**
- * Sondage, là où le reste de la SPA reçoit du SSE, et c'est délibéré : le
- * flux `/api/player` publie un état que le cœur produit de toute façon,
- * alors que ces métriques n'existent que parce qu'on les demande. Les
- * pousser ferait travailler en permanence un appareil le plus souvent
- * inactif, pour personne. Le sondage s'arrête donc au démontage de la vue
- * et quand l'onglet passe en arrière-plan.
- *
- * Un échec n'affiche pas de toast : répété toutes les 5 secondes, un cœur
- * injoignable en produirait un flot. Une ligne de diagnostic suffit, comme
- * le drapeau `audioIndisponible` de la page de configuration.
- */
-async function sonder() {
-  // Verrou d'entrée : un sondage déjà en vol (minuteur qui tique plus vite
-  // que la réponse n'arrive) n'en déclenche pas un second par-dessus, voir
-  // le commentaire sur `sondageEnVol`.
-  if (sondageEnVol) return
-  // Après le verrou, pas avant : un appel repoussé par le verrou n'a rien
-  // sondé, il ne doit donc pas repousser l'échéance.
-  dernierSondage = Date.now()
-  const controleur = new AbortController()
-  sondageEnVol = controleur
-  try {
-    const s = await api.get<SystemPayload>('/api/system', { signal: controleur.signal })
-    etat.value = s
-    indisponible.value = false
-    const cpu = utilisationCpu(s)
-    utilisationCpuActuelle.value = cpu
-    const p = pourcentages(s, cpu)
-    if (p) {
-      historique.value.push(p)
-      if (historique.value.length > CAPACITE) historique.value.shift()
-    }
-  } catch (e) {
-    // Une annulation par `arreter()` (changement de période, démontage,
-    // arrêt de l'appareil) rejette aussi le `fetch` : ce n'est pas un échec
-    // du cœur, juste notre propre requête coupée court, donc pas de ligne
-    // « indisponible » pour ça.
-    if (controleur.signal.aborted) return
-    indisponible.value = true
-    console.warn('GET /api/system indisponible', e)
-  } finally {
-    if (sondageEnVol === controleur) sondageEnVol = null
-  }
-}
-
-function demarrer() {
-  // `enCours` : une action d'alimentation en cours a déjà arrêté le sondage
-  // normal (voir `confirmer`) ; le laisser reprendre ici — par ex. au retour
-  // de visibilité pendant un arrêt ou un redémarrage du service — afficherait
-  // une erreur réseau alarmante sur un arrêt qui se déroule comme demandé,
-  // ou sonderait en double avec `attendreRetour`. `document.hidden` : une
-  // vue montée alors que l'onglet est déjà en arrière-plan ne doit pas
-  // sonder avant le premier `visibilitychange`.
-  if (!monte || document.hidden || enCours.value !== null || minuteur !== null) return
-  if (attente !== null) return
-  // Reprise à l'échéance, pas sur-le-champ : changer la période ne doit pas
-  // valoir un sondage. On ne sonde tout de suite que si le nouveau rythme rend
-  // le précédent sondage déjà périmé — passer de 30 s à 1 s deux secondes après
-  // le dernier, par exemple. Sinon on attend le temps qui restait à courir,
-  // puis le rythme régulier reprend.
-  //
-  // La règle vaut aussi pour le retour de visibilité, et c'est voulu : un
-  // aller-retour d'onglet plus court que la période laisse à l'écran des
-  // chiffres que la page elle-même juge encore frais, alors qu'une absence plus
-  // longue déclenche bien un sondage immédiat.
-  const restant =
-    dernierSondage === null ? 0 : Math.max(0, dernierSondage + periodeMs.value - Date.now())
-  if (restant === 0) {
-    void sonder()
-    minuteur = setInterval(sonder, periodeMs.value)
-    return
-  }
-  attente = setTimeout(() => {
-    attente = null
-    void sonder()
-    minuteur = setInterval(sonder, periodeMs.value)
-  }, restant)
-}
-
-function arreter() {
-  if (minuteur !== null) {
-    clearInterval(minuteur)
-    minuteur = null
-  }
-  if (attente !== null) {
-    clearTimeout(attente)
-    attente = null
-  }
-  // Annule un sondage encore en vol : sans ça, un changement de période
-  // laisserait une réponse plus ancienne atterrir après celle du nouveau
-  // rythme et écraser `etat`/`precedentJiffies` avec des données périmées.
-  if (sondageEnVol) {
-    sondageEnVol.abort()
-    sondageEnVol = null
-  }
-}
-
-function visibilite() {
-  if (document.hidden) arreter()
-  else demarrer()
-}
-
-/**
- * Valeur de vue (chaîne, secondes) pour le sélecteur de période. Le
- * changement redémarre le sondage en repassant par `demarrer()` — sans le
- * contourner : c'est lui qui refuse de repartir pendant une action
- * d'alimentation en cours ou onglet caché, et cette garde doit rester unique.
- */
-const periode = computed({
-  get: () => String(periodeMs.value / 1000),
-  set: (v: string) => {
-    const ms = Number(v) * 1000
-    // Choisir à nouveau la période déjà active ne doit rien redéclencher :
-    // sans ce garde-fou, chaque sélection — même sans changement — arrêtait
-    // et relançait le sondage, avec un sondage immédiat superflu et une
-    // fenêtre de delta CPU réinitialisée pour rien.
-    if (ms === periodeMs.value) return
-    periodeMs.value = ms
-    arreter()
-    demarrer()
-  },
-})
 
 /**
  * Libellé du déclencheur, calculé ici plutôt que laissé à `SelectValue` sans
@@ -313,33 +97,15 @@ const etiquettePeriode = computed(
   () => `${periodeMs.value / 1000} ${t.value('system_unit_second')}`,
 )
 
-/**
- * Fenêtre visible de l'historique, en minutes : la durée réelle couverte par
- * `historique`, mesurée par l'horodatage de son premier et de son dernier
- * échantillon, et non la capacité théorique (`CAPACITE` × période) qui
- * suppose un tampon déjà plein. Cette hypothèse est fausse à l'arrivée sur la
- * page (tampon vide) et pendant les `CAPACITE` sondages qui suivent tout
- * changement de période : passer de 30 s à 1 s avec un tampon plein
- * afficherait sinon « 1 min » alors que le graphe trace encore une demi-heure
- * d'échantillons espacés de 30 s, et resterait faux pendant les 60 sondages
- * suivants. Repli sur la capacité théorique seulement tant qu'il n'y a rien
- * à mesurer (moins de deux échantillons).
- */
-const dureeFenetreMin = computed(() => {
-  const h = historique.value
-  if (h.length >= 2) return Math.round((h.at(-1)!.t - h[0]!.t) / 60000)
-  return Math.round((CAPACITE * (periodeMs.value / 1000)) / 60)
-})
-
+// Le sondage des métriques n'est pas amorcé ici : il l'est une fois pour toute
+// la SPA par `App.vue`. Ne reste au montage que le journal — hors du sondage
+// périodique, mais pas pour autant relevé une seule fois dans la vie de la vue :
+// l'ouverture de la popin le relève à nouveau (voir `releverJournal`).
 onMounted(() => {
-  demarrer()
   void releverJournal()
-  document.addEventListener('visibilitychange', visibilite)
 })
 onUnmounted(() => {
   monte = false
-  arreter()
-  document.removeEventListener('visibilitychange', visibilite)
 })
 
 // « °C » et « MHz » ne sont pas traduits : ce sont des symboles SI,
@@ -410,7 +176,7 @@ const tension = computed(() => {
 const aideTensionOuverte = ref(false)
 const dernier = computed(() => historique.value.at(-1) ?? null)
 /**
- * Abscisses partagées par tout ce qui se place sur le graphe : les deux
+ * Abscisses partagées par tout ce qui se place sur le graphe : les trois
  * tracés, le trait de survol et le calage du popin. Une seule source, pour
  * qu'aucun d'eux ne puisse dériver des autres.
  */
@@ -422,6 +188,32 @@ const cheminCpu = computed(() =>
 )
 const cheminRam = computed(() =>
   cheminSparkline(historique.value.map((h) => h.ram), abscissesGraphe.value, HAUTEUR),
+)
+/**
+ * Tracé de la température, en °C sur le **même axe 0-100** que les deux
+ * pourcentages : les °C d'un Pi vivent dans cette plage (throttle à 80-85), la
+ * mi-hauteur se lit donc « 50 °C » sans second repère, et `cheminSparkline`
+ * borne déjà à 0-100 — une machine à plus de 100 °C s'aplatirait en haut du
+ * cadre, ce qui est le moindre de ses problèmes. C'est la légende qui porte
+ * l'unité, et c'est elle qui rend un axe mixte honnête.
+ *
+ * Une valeur manquante ouvre un **trou** dans le tracé plutôt que d'effacer
+ * la courbe entière ou de recopier la dernière température connue par-dessus
+ * — voir le contrat de `cheminSparkline`, qui accepte directement des `null`
+ * pour ça. L'ancienne version effaçait tout à la moindre lecture manquante,
+ * au motif que les trois tracés, le trait de survol et le popin partagent un
+ * seul jeu d'abscisses (`abscissesGraphe`) et qu'une série plus courte
+ * dériverait des autres ; ce motif ne tenait que pour une série *tronquée*
+ * (des valeurs retirées, donc décalées d'un rang). Un trou, lui, garde
+ * chaque température présente sur sa propre abscisse — celle de son
+ * horodatage, exactement comme dans les deux autres courbes — donc rien ne
+ * dérive. Une machine sans sonde n'a toujours aucune courbe (toutes les
+ * valeurs sont `null`), et un trou passager n'efface plus que le segment
+ * concerné, pas les vingt minutes ou les deux heures d'historique qui
+ * l'entourent.
+ */
+const cheminTemp = computed(() =>
+  cheminSparkline(historique.value.map((h) => h.temp), abscissesGraphe.value, HAUTEUR),
 )
 
 /** Hauteur des repères de minute, en unités de `viewBox` : une encoche sur le
@@ -452,7 +244,7 @@ const largeurGraphe = ref(0)
  * horodatage, donc un rang proportionnel ne désigne plus la colonne qu'on voit
  * sous le curseur. La recherche part des mêmes abscisses que le tracé, ce qui
  * garantit par construction que le popin ne dérive pas de la courbe qu'il
- * commente. Boucle linéaire sur 60 points au plus, à chaque `pointermove` :
+ * commente. Boucle linéaire sur 240 points au plus, à chaque `pointermove` :
  * hors de portée de tout budget.
  */
 function indexSurvol(event: PointerEvent): number {
@@ -517,7 +309,8 @@ const xLigneSurvol = computed(() => {
   return abscissesGraphe.value[i] ?? null
 })
 
-/** Échantillon pointé, pour les deux valeurs affichées dans le popin. */
+/** Échantillon pointé, pour les trois valeurs affichées dans le popin (la
+ *  température n'y figurant que si la machine en expose une). */
 const echantillonSurvol = computed(() => {
   if (survolIndex.value === null) return null
   return historique.value[survolIndex.value] ?? null
@@ -539,7 +332,7 @@ const DEMI_LARGEUR_POPIN_PX = LARGEUR_POPIN_PX / 2
  * pensé pour deux colonnes qui débordent, alors que le débordement touche en
  * réalité une bande entière de colonnes proches des bords (toutes celles à
  * moins d'un demi-popin du bord de la carte), pas seulement les deux
- * dernières. Sur un tampon plein (60 échantillons) dans une carte étroite,
+ * dernières. Sur un tampon plein (240 échantillons) dans une carte étroite,
  * ça laissait déborder les popins des index 1 à 4 environ, et symétriquement
  * en fin de série — précisément ce que la borne existe pour empêcher.
  *
@@ -610,9 +403,19 @@ function duree(secondes: number | null | undefined): string {
 
 type ActionPower = 'poweroff' | 'reboot' | 'restart-service'
 
-/** Sondage rapproché pendant le redémarrage du service, et son plafond. */
+/** Sondage rapproché pendant l'attente d'un retour, quelle que soit l'action. */
 const REPRISE_MS = 2000
+/** Plafond d'attente pour la relance du **service** : systemd relance le
+ *  process dans la seconde (`Restart=always`), 30 s couvrent largement un
+ *  démarrage lent. */
 const REPRISE_MAX_MS = 30000
+/** Plafond d'attente pour un redémarrage de la **machine** : quatre fois plus,
+ *  parce qu'un Pi ne repart pas comme un process — arrêt des services,
+ *  amorçage du noyau, montages, réseau, puis seulement le service. De l'ordre
+ *  de 20 à 40 s sur du matériel sain (non mesuré ici) ; 120 s laissent la
+ *  marge d'une carte SD lente ou d'un `fsck` au passage, sans laisser
+ *  l'utilisateur devant un message qui ne conclut jamais. */
+const REPRISE_MAX_REBOOT_MS = 120_000
 
 /** Action dont on attend la confirmation, et action en cours. */
 const dialogue = ref<ActionPower | null>(null)
@@ -646,29 +449,49 @@ const variantConfirmation = computed(() => (dialogue.value === 'restart-service'
  * Le cœur va disparaître : le sondage normal s'arrête avant l'envoi. Sans
  * cela, le sondage suivant échouerait et afficherait une erreur réseau
  * alarmante alors que l'arrêt se passe exactement comme demandé.
+ *
+ * Deux des trois actions attendent ensuite le retour, et une seule reste
+ * suspendue : l'arrêt. Le redémarrage de la machine s'attend comme la relance
+ * du service — plus longuement, voir `REPRISE_MAX_REBOOT_MS` — parce que
+ * l'appareil revient et que l'onglet, lui, est resté ouvert. Le laisser
+ * suspendu figerait le graphe de **toutes** les pages jusqu'au rechargement
+ * complet, sans rien à l'écran pour l'expliquer : `enCours` est local à la vue
+ * et disparaît avec elle, `indisponible` reste faux. Seul l'arrêt justifie la
+ * suspension définitive, l'appareil ne revenant que par un geste physique.
  */
 async function confirmer() {
   const action = dialogue.value
   if (!action) return
   dialogue.value = null
   enCours.value = action
-  arreter()
+  suspendre()
   const uptimeAvant = etat.value?.service_uptime_s ?? null
   const err = await api.post('/api/system/power', { action })
   if (err) {
     // Refus de logind (règle polkit absente) ou cœur injoignable : rien ne
-    // s'arrête, on rend la main.
+    // s'arrête, on rend la main. Chemin banal sur cette machine, pas un cas
+    // limite — une installation DietPi sans la règle polkit, ou avec
+    // `systemd-logind` masqué, refuse le tout premier appel.
     toast.error(err)
     enCours.value = null
-    demarrer()
+    reprendre()
     return
   }
-  if (action === 'restart-service') await attendreRetour(uptimeAvant)
+  if (action === 'restart-service') {
+    await attendreRetour(uptimeAvant, REPRISE_MAX_MS, 'system_restarted')
+  } else if (action === 'reboot') {
+    await attendreRetour(uptimeAvant, REPRISE_MAX_REBOOT_MS, 'system_device_restarted')
+  }
 }
 
 /**
- * Le service redémarre : on sonde plus vite en ignorant les erreurs (il est
- * arrêté, c'est attendu). On ne le considère revenu que lorsque son uptime
+ * Le service — ou la machine entière — redémarre : on sonde plus vite en
+ * ignorant les erreurs (il est arrêté, c'est attendu). Le plafond et le message
+ * de succès arrivent en paramètres plutôt que d'être déduits de l'action ici :
+ * la fonction n'a pas à connaître les trois actions de la page, et un plafond
+ * nommé au point d'appel se lit avec la raison qui le motive.
+ *
+ * On ne le considère revenu que lorsque son uptime
  * est *inférieur à ce que l'ancien process afficherait maintenant* — et non
  * simplement inférieur à `avant` : juste après un redémarrage réussi,
  * `service_uptime_s` vaut très souvent 0, et rien ne peut jamais être
@@ -680,21 +503,32 @@ async function confirmer() {
  * pourrait faire passer l'*ancien* process pour un process redémarré — soit
  * exactement le bug que cette comparaison d'uptime existe pour empêcher.
  *
- * `monte` dans la condition de boucle : si l'utilisateur a quitté la vue,
- * on cesse de sonder au tour suivant plutôt que de courir jusqu'au plafond
- * pour, à la fin, rappeler `demarrer()` sur une vue démontée — ce qui
- * recréerait un minuteur que plus personne ne pourrait jamais arrêter.
+ * Le même test vaut pour un redémarrage de la machine, et un lecteur pourrait
+ * en douter : c'est bien `service_uptime_s` qu'on compare, pas `uptime_s`, et
+ * il repart de zéro avec la machine puisque le service redémarre avec elle. Un
+ * redémarrage complet satisfait donc le seuil au moins aussi franchement qu'une
+ * simple relance de service — il n'y a rien à adapter.
+ *
+ * `monte` dans la condition de boucle : si l'utilisateur a quitté la vue, on
+ * cesse ce sondage rapproché au tour suivant plutôt que de courir jusqu'au
+ * plafond pour une page que plus personne ne regarde. Ce qui suit la boucle,
+ * en revanche, doit s'exécuter dans les deux cas : le sondage régulier vit
+ * dans le store, partagé par toute la SPA, et le laisser suspendu figerait le
+ * graphe de toutes les pages jusqu'au rechargement complet. Reprendre sur une
+ * vue démontée n'est plus le danger que ce commentaire redoutait — le minuteur
+ * survit de toute façon à chaque vue, c'est sa raison d'être. Seul le message
+ * d'échec reste conditionné à `monte`.
  */
-async function attendreRetour(avant: number | null) {
+async function attendreRetour(avant: number | null, maxMs: number, cleSucces: string) {
   const t0 = Date.now()
-  const limite = t0 + REPRISE_MAX_MS
+  const limite = t0 + maxMs
   while (monte && Date.now() < limite) {
     await new Promise((r) => setTimeout(r, REPRISE_MS))
     try {
       // Le sondage est mis en course avec un délai : sans lui, une requête
       // qui se connecte mais ne répond jamais (Wi-Fi capricieux, socket à
       // moitié ouverte) bloquerait l'attente ici, indéfiniment, au-delà du
-      // plafond de 30 s promis à l'utilisateur. La requête abandonnée reste
+      // plafond promis à l'utilisateur. La requête abandonnée reste
       // en vol mais n'a plus d'effet : la boucle a déjà tourné la page.
       const s = await Promise.race([
         api.get<SystemPayload>('/api/system'),
@@ -709,20 +543,44 @@ async function attendreRetour(avant: number | null) {
         // Pas de garde sur `monte` ici, contrairement au message de délai
         // ci-dessous : c'est délibéré. Un succès annoncé après que
         // l'utilisateur a quitté la vue reste une information utile ; un
-        // échec signalé 30 s trop tard n'est que du bruit. Ne pas
+        // échec signalé bien trop tard n'est que du bruit. Ne pas
         // « corriger » cette asymétrie en symétrie.
-        toast.success(t.value('system_restarted'))
-        demarrer()
+        toast.success(t.value(cleSucces))
+        reprendre()
         return
       }
     } catch {
       // Service arrêté, ou sondage sans réponse : on réessaie jusqu'au plafond.
     }
   }
+  // Sortie par plafond **ou** par démontage : dans les deux cas le sondage doit
+  // reprendre. Il est désormais partagé par toute la SPA, et un `return` sec sur
+  // `!monte` le laisserait suspendu pour de bon — le graphe de chaque page figé,
+  // sans rien à l'écran pour l'expliquer.
+  //
+  // Compromis vu et assumé, pas oublié : cette reprise est inconditionnelle,
+  // donc une boucle restée d'une instance démontée peut, en se réveillant de
+  // son sommeil de `REPRISE_MS`, reprendre une suspension qu'une action
+  // d'alimentation *tout juste* confirmée venait de prendre. La fenêtre est
+  // bornée à 2 s et le cas demande de quitter la vue pendant une attente puis
+  // de reconfirmer aussitôt ; le remède propre est un jeton de suspension
+  // plutôt qu'un booléen, et il est hors du périmètre ici. Entre ce risque-là
+  // et un `suspendu` figé pour la vie de la page, c'est celui-ci qu'on prend.
+  //
+  // Faire attendre `reboot` sur `attendreRetour` élargit ce risque sur deux
+  // plans, pas un seul : avant, seule la relance du service passait par cette
+  // boucle, donc seule une reconfirmation de relance de service pendant son
+  // attente pouvait le déclencher ; le redémarrage de la machine en ouvre un
+  // second déclencheur. Et la période pendant laquelle quitter la vue peut
+  // faire naître une telle boucle s'étire d'autant que son plafond : au plus
+  // 30 s auparavant (`REPRISE_MAX_MS`), au plus 120 s désormais
+  // (`REPRISE_MAX_REBOOT_MS`) pour un redémarrage confirmé puis abandonné.
+  enCours.value = null
+  reprendre()
+  // Le message d'échec, lui, reste conditionnel : un échec signalé une ou deux
+  // minutes après que l'utilisateur a quitté la vue n'est que du bruit.
   if (!monte) return
   toast.error(t.value('system_restart_timeout'))
-  enCours.value = null
-  demarrer()
 }
 </script>
 
@@ -866,6 +724,20 @@ async function attendreRetour(avant: number | null) {
               stroke-width="1.5"
               vector-effect="non-scaling-stroke"
             />
+            <!-- Troisième courbe distinguée par la couleur seule, sans
+                 pointillé : `destructive` est la seule teinte garantie
+                 distincte de `primary` et de `muted-foreground` dans les 42
+                 presets du kit. Elle ne signale pas une alerte ici — c'est la
+                 couleur d'une série, et la légende dit laquelle. -->
+            <path
+              data-system-history-temp
+              :d="cheminTemp"
+              class="text-destructive"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              vector-effect="non-scaling-stroke"
+            />
             <!-- Trait de survol seul, pas de point par série : un
                  `<circle>` dans un viewBox étiré par
                  `preserveAspectRatio="none"` se dessinerait en ellipse, pas
@@ -897,6 +769,9 @@ async function attendreRetour(avant: number | null) {
             <div>{{ new Date(echantillonSurvol.t).toLocaleTimeString() }}</div>
             <div class="text-primary">{{ t('system_cpu') }} {{ Math.round(echantillonSurvol.cpu) }} %</div>
             <div class="text-muted-foreground">{{ t('system_memory') }} {{ Math.round(echantillonSurvol.ram) }} %</div>
+            <div v-if="echantillonSurvol.temp !== null" class="text-destructive">
+              {{ t('system_temperature') }} {{ echantillonSurvol.temp.toFixed(1) }} °C
+            </div>
           </div>
         </div>
         <!-- `—` et non « 0 % » sans échantillon : même convention que la
@@ -908,6 +783,14 @@ async function attendreRetour(avant: number | null) {
           </span>
           <span class="text-muted-foreground">
             {{ t('system_memory') }} {{ dernier ? `${Math.round(dernier.ram)} %` : RIEN }}
+          </span>
+          <!-- Annoncée d'après `etat` et non d'après le dernier échantillon :
+               l'existence d'une sonde est connue dès le premier sondage, donc
+               la légende ne gagne pas une colonne en cours de route. La valeur,
+               elle, vient bien de l'échantillon, comme les deux autres. -->
+          <span v-if="etat?.temperature_c != null" class="text-destructive">
+            {{ t('system_temperature') }}
+            {{ dernier?.temp != null ? `${dernier.temp.toFixed(1)} °C` : RIEN }}
           </span>
         </p>
         <!-- Disponible dès le premier sondage, contrairement au delta CPU :
