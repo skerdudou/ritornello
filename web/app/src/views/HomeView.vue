@@ -7,7 +7,7 @@ import PlayerCard from '../components/PlayerCard.vue'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlayer } from '../composables/usePlayer'
 import type { Command, SettingsPayload } from '../types'
-import { REMOTE_POWER, REMOTE_ROWS } from './remoteCommands'
+import { indisponible, REMOTE_POWER, REMOTE_ROWS } from './remoteCommands'
 import type { RemoteCommand } from './remoteCommands'
 
 const { t } = useCatalog()
@@ -75,10 +75,43 @@ function choisir(n: number) {
   send({ cmd: 'Select', arg: n })
 }
 
-// Un changement de compte (autre source, disque éjecté) invalide la page :
-// c'est le mécanisme qui porte la garantie « changer de source revient à la
-// première page », demandée par le propriétaire — pas de minuterie séparée.
-watch(compte, () => { page.value = 0 })
+// Numéro mis en évidence, celui que la source active déclare.
+const presetActif = computed(() => etat.value?.preset ?? null)
+
+// Page contenant un numéro donné : mêmes bornes que la grille ci-dessus, donc
+// les mêmes que le décalage du cœur — page 0 pour 1-9, page k pour 10k à 10k+9.
+function pageDe(n: number) {
+  return n < 10 ? 0 : Math.floor(n / 10)
+}
+
+// La page suit ce qui joue : à l'ouverture de l'onglet comme quand la
+// présélection change ailleurs (télécommande infrarouge, `+10`, piste cd
+// suivante), la grille se place sur la page qui contient la touche en évidence.
+// Sans cela elle affirmait 1-9 pendant que la station 24 jouait, et la mise en
+// évidence — la réponse à « on ne sait pas sur quel preset on est » — n'était
+// visible qu'après avoir paginé à la main jusqu'à la retrouver.
+//
+// Faute de présélection déclarée, un changement de compte (autre source, disque
+// éjecté) ramène en première page : c'est ce qui porte la garantie « changer de
+// source revient à la première page ». Un simple arrêt ne bouge pas la page —
+// le compte y survit, la page aussi.
+//
+// Un seul observateur pour les deux champs, et non deux qui se marcheraient
+// dessus : ils arrivent dans la même trame, et deux callbacks se disputeraient
+// `page` dans un ordre qui n'est écrit nulle part.
+watch([compte, presetActif], (_, [compteAvant]) => {
+  if (presetActif.value !== null) {
+    // Borné : une source qui déclarerait un numéro au-delà de son propre compte
+    // ne doit pas ouvrir une page vide.
+    page.value = Math.min(pageDe(presetActif.value), dernierePage.value)
+    return
+  }
+  if (compte.value !== compteAvant) page.value = 0
+})
+
+// Grille des présélections : en veille, `Select` est ignoré comme le reste.
+// Calculé une fois plutôt qu'appelé par touche dans le gabarit.
+const presetsIndisponibles = computed(() => indisponible('Select', etat.value))
 
 // Timings du volume maintenu, servis par le cœur (modifiables sur la page
 // config). Les défauts couvrent le temps du GET et son éventuel échec.
@@ -168,6 +201,7 @@ function toucheVolume(e: KeyboardEvent, cmd: Command) {
             :data-preset-active="etat?.preset === n ? 'true' : undefined"
             :aria-current="etat?.preset === n ? 'true' : undefined"
             :variant="etat?.preset === n ? 'default' : 'secondary'"
+            :disabled="presetsIndisponibles"
             @click="choisir(n)"
           >
             {{ n }}
@@ -232,6 +266,7 @@ function toucheVolume(e: KeyboardEvent, cmd: Command) {
               :data-remote-hold="c.cmd.cmd"
               variant="outline"
               class="touch-none select-none"
+              :disabled="indisponible(c.cmd.cmd, etat)"
               @pointerdown="debutMaintien(c.cmd)"
               @pointerup="finMaintien"
               @pointercancel="finMaintien"
@@ -242,7 +277,15 @@ function toucheVolume(e: KeyboardEvent, cmd: Command) {
             >
               {{ t(c.key) }}
             </Button>
-            <Button v-else variant="outline" @click="send(c.cmd)">{{ t(c.key) }}</Button>
+            <Button
+              v-else
+              :data-remote-command="c.cmd.cmd"
+              variant="outline"
+              :disabled="indisponible(c.cmd.cmd, etat)"
+              @click="send(c.cmd)"
+            >
+              {{ t(c.key) }}
+            </Button>
           </template>
         </div>
       </CardContent>

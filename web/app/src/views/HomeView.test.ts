@@ -2,7 +2,7 @@ import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 import type { PlayerPayload } from '../types'
-import { REMOTE_COMMANDS, REMOTE_POWER, REMOTE_ROWS } from './remoteCommands'
+import { indisponible, REMOTE_COMMANDS, REMOTE_POWER, REMOTE_ROWS } from './remoteCommands'
 
 /** Faux `EventSource` : jsdom n'en fournit pas. */
 class FauxEventSource {
@@ -393,9 +393,176 @@ describe('HomeView — pagination des présélections', () => {
   })
 
   it('met en évidence la touche active au-delà de 9', async () => {
+    // Plus de `>` à cliquer ici : la page s'ouvre déjà sur celle qui contient
+    // le numéro qui joue (voir le bloc « la page suit ce qui joue »).
     const { w } = await monterAvec({ preset_count: 23, preset: 14 })
+    expect(w.find('[data-preset-button="14"]').attributes('data-preset-active')).toBe('true')
+  })
+})
+
+describe('HomeView — la page suit ce qui joue', () => {
+  /** Monte la vue, pousse un premier état, et rend de quoi en pousser d'autres. */
+  async function monterAvec(etat: Partial<PlayerPayload>) {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
+    vi.stubGlobal('EventSource', FauxEventSource)
+    const HomeView = (await import('./HomeView.vue')).default
+    const w = mount(HomeView)
+    FauxEventSource.derniere!.pousse(etat)
+    await nextTick()
+    return w
+  }
+
+  function numeros(w: Awaited<ReturnType<typeof monterAvec>>) {
+    return w.findAll('[data-preset-button]').map((b) => b.text())
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('s’ouvre sur la page de la présélection qui joue', async () => {
+    // Le cas qui motivait tout : arriver sur l'onglet pendant que la station 24
+    // joue montrait 1-9, sans aucune touche en évidence.
+    const w = await monterAvec({ preset_count: 40, preset: 24 })
+    expect(numeros(w)).toEqual(['20', '21', '22', '23', '24', '25', '26', '27', '28', '29'])
+    expect(w.findAll('[data-preset-active]')).toHaveLength(1)
+  })
+
+  it('suit un changement de page venu d’ailleurs (télécommande infrarouge, +10)', async () => {
+    const w = await monterAvec({ preset_count: 40, preset: 3 })
+    expect(numeros(w)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9'])
+    FauxEventSource.derniere!.pousse({ preset_count: 40, preset: 31 })
+    await nextTick()
+    expect(numeros(w)).toEqual(['30', '31', '32', '33', '34', '35', '36', '37', '38', '39'])
+  })
+
+  it('9 et 10 sont de part et d’autre de la frontière', async () => {
+    // Les bornes de la grille sont celles du décalage du cœur : la page 0
+    // s'arrête à 9, la page 1 commence à 10.
+    const w = await monterAvec({ preset_count: 40, preset: 9 })
+    expect(numeros(w)[0]).toBe('1')
+    FauxEventSource.derniere!.pousse({ preset_count: 40, preset: 10 })
+    await nextTick()
+    expect(numeros(w)[0]).toBe('10')
+  })
+
+  it('un arrêt laisse la page où elle est', async () => {
+    // `preset` retombe à null sans que le compte bouge : rien ne justifie de
+    // renvoyer l'utilisateur en première page, il regarde encore ce groupe.
+    const w = await monterAvec({ preset_count: 40, preset: 24 })
+    FauxEventSource.derniere!.pousse({ preset_count: 40, preset: null })
+    await nextTick()
+    expect(numeros(w)[0]).toBe('20')
+  })
+
+  it('une pagination à la main survit aux trames qui ne changent rien', async () => {
+    const w = await monterAvec({ preset_count: 40, preset: 3 })
     await w.find('[data-preset-next]').trigger('click')
     await nextTick()
-    expect(w.find('[data-preset-button="14"]').attributes('data-preset-active')).toBe('true')
+    expect(numeros(w)[0]).toBe('10')
+    // Même présélection, même compte, seul le volume change : la page reste.
+    FauxEventSource.derniere!.pousse({ preset_count: 40, preset: 3, volume: 42 })
+    await nextTick()
+    expect(numeros(w)[0]).toBe('10')
+  })
+
+  it('un numéro au-delà du compte n’ouvre pas une page vide', async () => {
+    // Source incohérente (le compte a rétréci avant que la présélection ne
+    // suive) : on borne sur la dernière page non vide plutôt que de n'afficher
+    // aucune touche.
+    const w = await monterAvec({ preset_count: 12, preset: 35 })
+    expect(numeros(w)).toEqual(['10', '11', '12'])
+  })
+})
+
+describe('HomeView — boutons indisponibles', () => {
+  async function monterAvec(etat: Partial<PlayerPayload>) {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
+    vi.stubGlobal('EventSource', FauxEventSource)
+    const HomeView = (await import('./HomeView.vue')).default
+    const w = mount(HomeView)
+    FauxEventSource.derniere!.pousse(etat)
+    await nextTick()
+    return w
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('en veille, tout est grisé sauf la veille elle-même', async () => {
+    // Le cœur ignore tout ce qui n'est pas `Power` en veille : les boutons le
+    // disent au lieu d'envoyer une commande sans effet. Pas de compte poussé
+    // ici : la veille l'efface côté cœur, la grille retombe donc sur 1-9 —
+    // désactivée elle aussi.
+    const w = await monterAvec({ standby: true })
+    for (const b of w.findAll('[data-remote-command]')) {
+      expect(b.attributes('disabled'), b.attributes('data-remote-command')).toBeDefined()
+    }
+    expect(w.get('[data-remote-hold="VolumeUp"]').attributes('disabled')).toBeDefined()
+    expect(w.get('[data-remote-hold="VolumeDown"]').attributes('disabled')).toBeDefined()
+    expect(w.get('[data-preset-button="1"]').attributes('disabled')).toBeDefined()
+    expect(w.get('[data-remote-power]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('hors veille, seul le déplacement dépend du contenu', async () => {
+    const w = await monterAvec({ standby: false, seekable: false, preset_count: 24 })
+    expect(w.get('[data-remote-command="SeekForward"]').attributes('disabled')).toBeDefined()
+    expect(w.get('[data-remote-command="SeekBackward"]').attributes('disabled')).toBeDefined()
+    // Le reste de la rangée transport n'a rien à voir avec `seekable`.
+    expect(w.get('[data-remote-command="PlayPause"]').attributes('disabled')).toBeUndefined()
+    expect(w.get('[data-remote-command="Stop"]').attributes('disabled')).toBeUndefined()
+    expect(w.get('[data-preset-button="1"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('un contenu déplaçable rend les deux touches de déplacement', async () => {
+    const w = await monterAvec({ standby: false, seekable: true })
+    expect(w.get('[data-remote-command="SeekForward"]').attributes('disabled')).toBeUndefined()
+    expect(w.get('[data-remote-command="SeekBackward"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('avant la première trame, rien n’est grisé', async () => {
+    // La télécommande s'ouvre utilisable : griser à l'aveugle, puis dégriser,
+    // ferait clignoter la carte entière à chaque ouverture d'onglet.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
+    vi.stubGlobal('EventSource', FauxEventSource)
+    const HomeView = (await import('./HomeView.vue')).default
+    const w = mount(HomeView)
+    for (const b of w.findAll('[data-remote-command]')) {
+      expect(b.attributes('disabled')).toBeUndefined()
+    }
+    expect(w.get('[data-preset-button="1"]').attributes('disabled')).toBeUndefined()
+  })
+})
+
+describe('indisponible', () => {
+  /** Charge utile complète, dont on ne surcharge que ce qui compte. */
+  function etat(champs: Partial<PlayerPayload>): PlayerPayload {
+    return {
+      source: 'radio', volume: 60, muted: false, standby: false, preset: null,
+      preset_count: null, preset_name: null, status: null, overlay: null,
+      artist: null, title: null, album: null, duration_s: null, origin: null,
+      position_s: null, seekable: false, ...champs,
+    }
+  }
+
+  it('la veille ne laisse passer que Power', () => {
+    const veille = etat({ standby: true, seekable: true })
+    for (const c of REMOTE_ROWS.flat()) expect(indisponible(c.cmd.cmd, veille)).toBe(true)
+    expect(indisponible('Select', veille)).toBe(true)
+    expect(indisponible('Power', veille)).toBe(false)
+  })
+
+  it('hors veille, seules les deux touches de déplacement peuvent tomber', () => {
+    const direct = etat({ seekable: false })
+    const indispo = REMOTE_COMMANDS.map((c) => c.cmd.cmd).filter((n) => indisponible(n, direct))
+    expect(indispo.sort()).toEqual(['SeekBackward', 'SeekForward'])
+    const disque = etat({ seekable: true })
+    expect(REMOTE_COMMANDS.filter((c) => indisponible(c.cmd.cmd, disque))).toEqual([])
+  })
+
+  it('un état inconnu ne grise rien', () => {
+    for (const c of REMOTE_COMMANDS) expect(indisponible(c.cmd.cmd, null)).toBe(false)
+    expect(indisponible('Select', null)).toBe(false)
   })
 })

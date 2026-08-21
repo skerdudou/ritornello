@@ -118,10 +118,36 @@ first page and `>` on the last, and there is no auto-return to page 0. The
 physical remote wraps because it has a single key and no way back, so
 wrapping is its only way to reach everything; a pair of arrows has a way
 back, so wrapping would just be gratuitous and confusing. Picking a preset
-no longer changes page either — trying several presets from the same group
+does not change page either — trying several presets from the same group
 should not require paging back each time. The browser always sends the
-absolute number to `Select`; only a source/count change resets the page to
-0 (the same guard that already resets the window on a source switch).
+absolute number to `Select`.
+
+**The page follows what is playing.** On arrival and whenever the highlighted
+preset moves to another decade — the infrared remote's `+10`, another browser
+tab, a CD stepping from track 9 to 10 — the grid places itself on the page
+containing that number. Without it the grid asserted 1-9 while station 24
+played, and the highlight that answers "which preset are we on" was only
+visible after paging to it by hand. The number is clamped to the last
+non-empty page, so a source declaring a preset beyond its own count cannot
+open an empty page. With no preset declared, a **count** change (another
+source, an ejected disc) resets to page 0 — that is what carries the "changing
+source returns to the first page" guarantee. A plain stop does not move the
+page: the count survives a stop, and so does the page. Paging by hand
+survives every frame that changes neither the preset nor the count.
+
+**Buttons the appliance would ignore are greyed out** rather than offered.
+Two rules, and only the two the payload lets us establish: in **standby** the
+core returns without doing anything for everything but `Power` (the first
+line of `handle_command`), preset grid included — those buttons used to lie,
+the request left, the server answered 204, and nothing happened; and a
+**non-seekable** content greys the two seek keys, the same `seekable` that
+makes the progress bar clickable, so both places on the page say the same
+thing about a direct nobody can rewind. Everything else stays live for lack
+of knowing: nothing in the payload says whether the active source can eject,
+or whether anything is playing. A greyed button *asserts* the action does not
+exist, so greying on a guess would be worse than a button without effect. A
+state not yet received (the fraction of a second before the first frame)
+greys nothing.
 
 Two more fields ride the same payload for a different purpose: `position_s`,
 where in what's playing sits, in seconds, at the instant the frame is

@@ -1,4 +1,4 @@
-import type { Command } from '../types'
+import type { Command, PlayerPayload } from '../types'
 
 export interface RemoteCommand {
   key: string
@@ -64,3 +64,34 @@ export const REMOTE_ROWS: RemoteCommand[][] = [
  * verrouiller le compte de douze.
  */
 export const REMOTE_COMMANDS: RemoteCommand[] = [REMOTE_POWER, ...REMOTE_ROWS.flat()]
+
+/**
+ * Une commande que l'appareil ignorerait dans l'état courant : son bouton doit
+ * être grisé plutôt qu'offert.
+ *
+ * Deux règles, et seulement celles que la charge utile de `/api/player` permet
+ * d'établir :
+ *
+ * - en **veille**, le cœur retourne sans rien faire sur tout ce qui n'est pas
+ *   `Power` (c'est la première ligne de `handle_command`), grille des
+ *   présélections comprise. Ces boutons mentaient : la requête partait, le
+ *   serveur répondait 204, et rien ne se passait.
+ * - un contenu **non déplaçable** ignore les deux touches de déplacement. C'est
+ *   le même `seekable` qui rend la barre de progression cliquable : les deux
+ *   endroits de la page doivent dire la même chose d'un direct qu'on ne
+ *   rembobine pas.
+ *
+ * Tout le reste reste actif, faute de savoir : rien dans la charge utile ne dit
+ * si la source active sait s'éjecter, ni si quelque chose joue. Un bouton grisé
+ * **affirme** que l'action n'existe pas ; le griser sur une supposition serait
+ * donc pire qu'un bouton sans effet.
+ *
+ * Un état pas encore reçu (`null` — la fraction de seconde avant la première
+ * trame) ne grise rien : la télécommande s'ouvre utilisable, et la trame
+ * corrige aussitôt.
+ */
+export function indisponible(nom: string, etat: PlayerPayload | null): boolean {
+  if (!etat) return false
+  if (etat.standby) return nom !== 'Power'
+  return (nom === 'SeekForward' || nom === 'SeekBackward') && !etat.seekable
+}
