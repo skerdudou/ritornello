@@ -213,6 +213,30 @@ pub struct SourceMessage {
     /// overlay and leaves the remembered status untouched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// Whether this source has a tray to open at all — a **capability of the
+    /// source**, not of what is loaded: an empty tray still ejects. It is what
+    /// lets the web remote grey out its Eject button on a source that has
+    /// nothing to eject, instead of sending a command the source will discard
+    /// in silence.
+    ///
+    /// The SDK stamps it on **every** frame from `SourcePlugin::can_eject`, so
+    /// a plugin author overrides one method and never has to remember a
+    /// builder call on each declaration path. Absent = "this frame says
+    /// nothing", keep the previous value — same convention as `preset_count`,
+    /// so a hand-written plugin that ignores the field keeps working (the core
+    /// then never leaves its `false` default, and offering nothing is the
+    /// right answer when nobody claims the capability).
+    ///
+    /// Deliberately **not** part of the "is this frame worth forwarding"
+    /// predicate in `SourceClient`: a frame carrying only a capability must
+    /// stay inert, because a permanent frame without `status` *erases* the
+    /// remembered status (see `status` above), and waking up frames that are
+    /// dropped today would wipe "NO DISC" off the display. The capability
+    /// therefore rides the frames the core already listens to — every path of
+    /// a real source (activate, wake, select, next, prev, track change)
+    /// declares an identity or a status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_eject: Option<bool>,
 }
 
 #[cfg(test)]
@@ -310,6 +334,7 @@ mod tests {
             preset_count: None,
             preset_name: None,
             status: None,
+            can_eject: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
@@ -320,7 +345,7 @@ mod tests {
 
     #[test]
     fn message_notification_sans_id() {
-        let m = SourceMessage { id: None, action: None, identity: None, transient: false, preset: None, preset_count: None, preset_name: None, status: None };
+        let m = SourceMessage { id: None, action: None, identity: None, transient: false, preset: None, preset_count: None, preset_name: None, status: None, can_eject: None };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, None);
@@ -354,6 +379,7 @@ mod tests {
             preset_count: None,
             preset_name: None,
             status: None,
+            can_eject: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"preset\":4"));
@@ -368,8 +394,35 @@ mod tests {
         // La majorité des trames ne disent rien de l'identité (SetLocale,
         // Deactivate…) : les alourdir d'un `"identity":null` serait du bruit sur
         // une liaison volontairement lisible à l'œil.
-        let m = SourceMessage { id: Some(2), action: None, identity: None, transient: false, preset: None, preset_count: None, preset_name: None, status: None };
+        let m = SourceMessage { id: Some(2), action: None, identity: None, transient: false, preset: None, preset_count: None, preset_name: None, status: None, can_eject: None };
         assert_eq!(serde_json::to_string(&m).unwrap(), r#"{"id":2,"action":null}"#);
+    }
+
+    #[test]
+    fn la_capacite_dejection_fait_le_tour_et_reste_absente_par_defaut() {
+        let m = SourceMessage {
+            id: Some(4),
+            action: Some(SourceAction::Noop),
+            identity: None,
+            transient: false,
+            preset: None,
+            preset_count: None,
+            preset_name: None,
+            status: None,
+            can_eject: Some(true),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"can_eject\":true"), "{json}");
+        let back: SourceMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.can_eject, Some(true));
+        // Trame d'un plugin antérieur au champ : rien déclaré, et non « faux ».
+        // Le cœur ne distingue pas les deux, mais le protocole doit — c'est ce
+        // qui permet à une trame muette de ne pas retirer la capacité.
+        let ancien: SourceMessage = serde_json::from_str(r#"{"id":4}"#).unwrap();
+        assert_eq!(ancien.can_eject, None);
+        // `false` explicite est distinct de l'absence, et voyage.
+        let refus: SourceMessage = serde_json::from_str(r#"{"id":4,"can_eject":false}"#).unwrap();
+        assert_eq!(refus.can_eject, Some(false));
     }
 
     #[test]
@@ -383,6 +436,7 @@ mod tests {
             preset_count: Some(23),
             preset_name: None,
             status: None,
+            can_eject: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"preset_count\":23"));
@@ -410,6 +464,7 @@ mod tests {
             preset_count: None,
             preset_name: Some("FIP".into()),
             status: None,
+            can_eject: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"preset_name\":\"FIP\""));
@@ -443,6 +498,7 @@ mod tests {
             preset_count: None,
             preset_name: None,
             status: Some("PAS DE DISQUE".into()),
+            can_eject: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"status\":\"PAS DE DISQUE\""));

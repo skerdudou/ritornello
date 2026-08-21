@@ -21,6 +21,7 @@ function etat(partiel: Partial<PlayerPayload> = {}): PlayerPayload {
     origin: 'ouifm-metas',
     position_s: null,
     seekable: false,
+    can_eject: false,
     ...partiel,
   }
 }

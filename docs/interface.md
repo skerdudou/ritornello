@@ -136,18 +136,28 @@ page: the count survives a stop, and so does the page. Paging by hand
 survives every frame that changes neither the preset nor the count.
 
 **Buttons the appliance would ignore are greyed out** rather than offered.
-Two rules, and only the two the payload lets us establish: in **standby** the
-core returns without doing anything for everything but `Power` (the first
-line of `handle_command`), preset grid included — those buttons used to lie,
-the request left, the server answered 204, and nothing happened; and a
-**non-seekable** content greys the two seek keys, the same `seekable` that
-makes the progress bar clickable, so both places on the page say the same
-thing about a direct nobody can rewind. Everything else stays live for lack
-of knowing: nothing in the payload says whether the active source can eject,
-or whether anything is playing. A greyed button *asserts* the action does not
-exist, so greying on a guess would be worse than a button without effect. A
-state not yet received (the fraction of a second before the first frame)
-greys nothing.
+Three rules, and only the three the payload lets us establish:
+
+- in **standby** the core returns without doing anything for everything but
+  `Power` (the first line of `handle_command`), preset grid included — those
+  buttons used to lie: the request left, the server answered 204, and nothing
+  happened;
+- a **non-seekable** content greys the two seek keys, the same `seekable` that
+  makes the progress bar clickable, so both places on the page say the same
+  thing about a direct nobody can rewind;
+- a source **with no tray** greys `Eject`. The source declares that itself
+  (`can_eject`, from `SourcePlugin::can_eject` — see
+  [plugins.md](plugins.md)); the page never compares `source` to `"cd"`, a
+  plugin name coming from `plugins.toml` and free to change without anything
+  here noticing. It is a capability of the **source**, not of what is loaded:
+  the cd player answers true with an empty tray too, since that is exactly
+  when one opens it.
+
+Everything else stays live for lack of knowing: nothing in the payload says
+whether anything is playing, so `PlayPause` and `Stop` stay offered. A greyed
+button *asserts* the action does not exist, so greying on a guess would be
+worse than a button without effect. A state not yet received (the fraction of
+a second before the first frame) greys nothing.
 
 Two more fields ride the same payload for a different purpose: `position_s`,
 where in what's playing sits, in seconds, at the instant the frame is
@@ -162,6 +172,13 @@ precisely the case where mpv knows the position best. `position_s` is
 absent when neither of the two position sources — mpv on a finite content,
 a `metadata` plugin on a stream — has an answer right now: a stopped
 device, standby, or a stream nobody follows.
+
+`can_eject` rides along the same way, and is remembered by the core on the
+same schedule as `preset_count`: forgotten on a source change and on standby
+(the next source re-declares it), kept on a stop — a stop does not remove the
+tray. It is a plain boolean rather than an `Option`, because "the source said
+nothing" and "the source cannot eject" call for the same greyed key, and a
+third state would have no rendering of its own.
 
 While something plays, one frame goes out every second carrying a fresh
 `position_s`, on top of whatever else changed; nothing goes out for this

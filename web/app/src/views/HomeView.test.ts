@@ -30,6 +30,7 @@ class FauxEventSource {
       origin: null,
       position_s: null,
       seekable: false,
+      can_eject: false,
       ...etat,
     }
     this.onmessage?.({ data: JSON.stringify(complet) } as MessageEvent)
@@ -521,6 +522,26 @@ describe('HomeView — boutons indisponibles', () => {
     expect(w.get('[data-remote-command="SeekBackward"]').attributes('disabled')).toBeUndefined()
   })
 
+  it('Eject suit la source : grisé sur la radio, actif sur le lecteur de cd', async () => {
+    // La source le déclare elle-même — la page ne compare jamais `source` à
+    // `'cd'`, ce nom venant de plugins.toml.
+    const radio = await monterAvec({ source: 'radio', can_eject: false })
+    expect(radio.get('[data-remote-command="Eject"]').attributes('disabled')).toBeDefined()
+    // Et la voisine de rangée reste intacte : le grisage vise une touche, pas
+    // le groupe « appareil ».
+    expect(radio.get('[data-remote-command="SourceCycle"]').attributes('disabled')).toBeUndefined()
+    vi.unstubAllGlobals()
+    const cd = await monterAvec({ source: 'cd', can_eject: true })
+    expect(cd.get('[data-remote-command="Eject"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('un tiroir s’ouvre sans disque : Eject ne dépend pas de ce qui joue', async () => {
+    // Cd sans disque : rien ne joue, aucune piste à numéroter, et c'est
+    // précisément le moment où l'on ouvre le tiroir.
+    const w = await monterAvec({ source: 'cd', can_eject: true, preset: null, preset_count: 0, seekable: false })
+    expect(w.get('[data-remote-command="Eject"]').attributes('disabled')).toBeUndefined()
+  })
+
   it('avant la première trame, rien n’est grisé', async () => {
     // La télécommande s'ouvre utilisable : griser à l'aveugle, puis dégriser,
     // ferait clignoter la carte entière à chaque ouverture d'onglet.
@@ -542,7 +563,7 @@ describe('indisponible', () => {
       source: 'radio', volume: 60, muted: false, standby: false, preset: null,
       preset_count: null, preset_name: null, status: null, overlay: null,
       artist: null, title: null, album: null, duration_s: null, origin: null,
-      position_s: null, seekable: false, ...champs,
+      position_s: null, seekable: false, can_eject: false, ...champs,
     }
   }
 
@@ -553,12 +574,26 @@ describe('indisponible', () => {
     expect(indisponible('Power', veille)).toBe(false)
   })
 
-  it('hors veille, seules les deux touches de déplacement peuvent tomber', () => {
-    const direct = etat({ seekable: false })
+  it('hors veille, seuls le déplacement et l’éjection peuvent tomber', () => {
+    // Le jeu exact, figé : c'est ce qui empêche une quatrième règle d'entrer
+    // sans qu'on l'ait décidée, `PlayPause` et `Stop` restant offerts faute de
+    // savoir si quelque chose joue.
+    const direct = etat({ seekable: false, can_eject: false })
     const indispo = REMOTE_COMMANDS.map((c) => c.cmd.cmd).filter((n) => indisponible(n, direct))
-    expect(indispo.sort()).toEqual(['SeekBackward', 'SeekForward'])
-    const disque = etat({ seekable: true })
+    expect(indispo.sort()).toEqual(['Eject', 'SeekBackward', 'SeekForward'])
+    const disque = etat({ seekable: true, can_eject: true })
     expect(REMOTE_COMMANDS.filter((c) => indisponible(c.cmd.cmd, disque))).toEqual([])
+  })
+
+  it('les deux capacités sont indépendantes', () => {
+    // Un cd sans disque n'est pas déplaçable et s'éjecte quand même ; un direct
+    // radio n'est ni l'un ni l'autre.
+    const tiroir_vide = etat({ seekable: false, can_eject: true })
+    expect(indisponible('Eject', tiroir_vide)).toBe(false)
+    expect(indisponible('SeekForward', tiroir_vide)).toBe(true)
+    const fichier = etat({ seekable: true, can_eject: false })
+    expect(indisponible('Eject', fichier)).toBe(true)
+    expect(indisponible('SeekForward', fichier)).toBe(false)
   })
 
   it('un état inconnu ne grise rien', () => {

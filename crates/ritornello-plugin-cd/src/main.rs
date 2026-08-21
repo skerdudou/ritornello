@@ -230,6 +230,13 @@ impl SourcePlugin for CdSource {
         self.lecture = true;
         self.issue(SourceAction::Noop)
     }
+    /// Le lecteur a un tiroir, disque ou pas : c'est même sans disque qu'on
+    /// l'ouvre le plus souvent. Rendre `self.present` ici griserait la touche
+    /// exactement quand on en a besoin.
+    fn can_eject(&self) -> bool {
+        true
+    }
+
     async fn eject(&mut self) -> SourceOutcome {
         let cd_dev = self.cd_dev.clone();
         // `spawn_blocking` seul suffit : la commande `eject` bloque le temps
@@ -459,6 +466,18 @@ mod tests {
             "track": 1,
         });
         assert_eq!(out.identity, Some(IdentityUpdate::Playing(attendue)));
+    }
+
+    #[tokio::test]
+    async fn le_lecteur_declare_pouvoir_ejecter_disque_ou_pas() {
+        // La capacité décrit le tiroir, pas son contenu : c'est justement sans
+        // disque qu'on ouvre le tiroir. La déduire de `present` griserait la
+        // touche exactement quand on en a besoin.
+        let source = source_en_lecture();
+        assert!(source.can_eject());
+        let (mut vide, _p, _t) = source_with_channels();
+        vide.present = false;
+        assert!(vide.can_eject(), "un tiroir vide s'ouvre aussi");
     }
 
     #[tokio::test]

@@ -85,6 +85,15 @@ export interface PlayerPayload {
    * rembobiner. C'est ce champ, et lui seul, qui rend la barre cliquable.
    */
   seekable: boolean
+  /**
+   * La source active a de quoi ejecter : c'est ce qui grise la touche Eject
+   * ailleurs que sur le lecteur de cd. Une capacite de la **source**, pas du
+   * contenu — un tiroir vide s'ouvre aussi.
+   *
+   * Faux par defaut, et absent de la trame quand il est faux (comme
+   * `seekable`) : ne pas savoir, c'est n'offrir rien.
+   */
+  can_eject: boolean
 }
 export type Command = { cmd: string; arg?: number }
 export interface SystemUsage { total_kb: number; available_kb: number }

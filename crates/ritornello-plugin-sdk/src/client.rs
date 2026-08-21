@@ -50,6 +50,10 @@ pub struct SourceUpdate {
     pub preset_name: Option<String>,
     /// See `SourceMessage::status`.
     pub status: Option<String>,
+    /// See `SourceMessage::can_eject`. Absent = rien déclaré, garder la valeur
+    /// courante. N'entre volontairement **pas** dans le prédicat ci-dessous
+    /// qui décide si une trame vaut d'être relayée : voir la doc du champ.
+    pub can_eject: Option<bool>,
 }
 
 pub struct SourceClient {
@@ -97,6 +101,7 @@ impl SourceClient {
                         preset_count: msg.preset_count,
                         preset_name: msg.preset_name,
                         status: msg.status,
+                        can_eject: msg.can_eject,
                     };
                     if update_tx.try_send((name.clone(), update)).is_err() {
                         // Un statut ou une présélection perdus sont réparés par
@@ -380,6 +385,7 @@ mod tests {
                 preset_count: None,
                 preset_name: Some("FIP".into()),
                 status: None,
+                can_eject: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             let _ = socket_for_server; // garde le chemin vivant pour le débogage
@@ -427,6 +433,7 @@ mod tests {
                 preset_count: Some(5),
                 preset_name: None,
                 status: None,
+                can_eject: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -438,6 +445,74 @@ mod tests {
         let (name, update) = update_rx.recv().await.unwrap();
         assert_eq!(name, "radio");
         assert_eq!(update.preset_count, Some(5));
+    }
+
+    #[tokio::test]
+    async fn trame_seule_avec_la_capacite_dejection_reste_inerte_mais_voyage_avec_le_reste() {
+        // Décision **volontaire**, et c'est ce test qui la tient : `can_eject`
+        // n'entre pas dans le prédicat qui décide qu'une trame vaut d'être
+        // relayée. Le sdk l'estampille sur chaque trame ; si elle rendait
+        // « intéressante » une trame par ailleurs vide, une réponse nue
+        // (`eject()` d'une radio, par exemple) atteindrait
+        // `handle_source_update` — où une trame permanente sans `status`
+        // **efface** le statut mémorisé. « PAS DE DISQUE » disparaîtrait de
+        // l'écran à la première commande sans effet.
+        //
+        // La capacité arrive donc à cheval sur les trames que le cœur écoute
+        // déjà : tous les chemins d'une vraie Source déclarent une identité ou
+        // un statut.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            // Première requête : réponse ne portant **que** la capacité.
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+            let nue = ritornello_proto::SourceMessage {
+                id: Some(req.id),
+                action: Some(SourceAction::Noop),
+                identity: None,
+                transient: false,
+                preset: None,
+                preset_count: None,
+                preset_name: None,
+                status: None,
+                can_eject: Some(true),
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&nue).unwrap()).as_bytes()).await.unwrap();
+            // Seconde requête : la même capacité, cette fois accompagnée d'un
+            // statut — c'est ainsi qu'elle atteint le cœur pour de vrai.
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+            let habillee = ritornello_proto::SourceMessage {
+                id: Some(req.id),
+                action: Some(SourceAction::Noop),
+                identity: None,
+                transient: false,
+                preset: None,
+                preset_count: None,
+                preset_name: None,
+                status: Some("AUDIO CD".into()),
+                can_eject: Some(true),
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&habillee).unwrap()).as_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "cd".into(), update_tx).await.unwrap();
+        client.request(SourceReq::Eject).await.unwrap();
+        client.request(SourceReq::Activate).await.unwrap();
+        // La **première** mise à jour reçue est celle de la seconde trame : la
+        // trame nue n'a rien produit. Sans quoi ce `recv` rendrait un statut
+        // vide, et l'assertion ci-dessous tomberait.
+        let (name, update) = update_rx.recv().await.unwrap();
+        assert_eq!(name, "cd");
+        assert_eq!(update.status.as_deref(), Some("AUDIO CD"), "la trame nue n'aurait pas du etre relayee");
+        assert_eq!(update.can_eject, Some(true), "la capacite voyage avec la trame qui compte");
     }
 
     #[tokio::test]
@@ -464,6 +539,7 @@ mod tests {
                 preset_count: None,
                 preset_name: Some("FIP".into()),
                 status: None,
+                can_eject: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -501,6 +577,7 @@ mod tests {
                 preset_count: None,
                 preset_name: None,
                 status: Some("PAS DE DISQUE".into()),
+                can_eject: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -536,6 +613,7 @@ mod tests {
                 preset_count: None,
                 preset_name: None,
                 status: None,
+                can_eject: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;

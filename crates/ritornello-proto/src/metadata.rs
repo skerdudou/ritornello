@@ -246,6 +246,17 @@ pub struct PlayerState {
     /// rembobiner, un fichier sans étiquette de durée reste parcourable.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub seekable: bool,
+    /// La Source active a de quoi éjecter (voir `SourceMessage::can_eject`) :
+    /// c'est ce qui permet à la télécommande web de griser sa touche Eject
+    /// plutôt que d'émettre une commande que la Source jettera en silence.
+    ///
+    /// **Faux par défaut** : ne pas savoir, c'est n'offrir rien — la même
+    /// convention que les capacités d'extinction de `system.rs`. Un booléen et
+    /// non un `Option` : côté consommateur, « la Source n'a rien déclaré » et
+    /// « la Source ne peut pas éjecter » appellent le même bouton grisé, et un
+    /// troisième état n'aurait aucun rendu propre.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_eject: bool,
     #[serde(flatten)]
     pub morceau: Morceau,
 }

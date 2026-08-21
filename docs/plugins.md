@@ -164,6 +164,26 @@ It never fills `preset_name`: a track number is not a name, and what is
 interesting about a disc (album, title, artist) already arrives through the
 `metadata` path (see below), not through the preset name.
 
+It is also the only source that overrides `SourcePlugin::can_eject` to return
+true — the capability that greys the web remote's Eject key everywhere else.
+It answers true **with or without a disc**: the capability describes the tray,
+not what sits in it, and an empty tray is exactly what one opens. Deriving it
+from "is a disc present" would grey the key precisely when it is wanted.
+
+That method is how a source declares an eject capability at all: the SDK
+stamps its result on every frame the plugin sends (`can_eject` in
+`SourceMessage`), so a plugin author overrides one method instead of
+remembering a builder call on each of the ten declaration paths — a capability
+forgotten on one path would give a key flickering between live and greyed. The
+default is **false**: not knowing means offering nothing, which is what leaves
+radio, files and generic-input compiling unchanged with a correctly greyed key.
+The field deliberately does **not** make a frame "interesting" enough to be
+forwarded to the core (see `SourceClient`): a frame carrying only a capability
+must stay inert, because a permanent frame without `status` *erases* the
+remembered status, so waking up frames that are dropped today would wipe "no
+disc" off the display. The capability rides the frames the core already
+listens to instead.
+
 What it declares instead is a `status`: "audio CD" whenever a disc sits in
 the tray, "no disc" otherwise. Unlike `preset` and `preset_count`, whose
 absence means "this frame says nothing, keep the previous value", an absent

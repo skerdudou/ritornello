@@ -165,6 +165,22 @@ pub trait SourcePlugin: Send + 'static {
     async fn prev(&mut self) -> SourceOutcome;
     async fn eject(&mut self) -> SourceOutcome;
 
+    /// Cette Source a-t-elle quelque chose à éjecter ?
+    ///
+    /// Une **capacité de la Source**, pas de ce qu'elle a chargé : un tiroir
+    /// vide s'ouvre quand même, donc le cd répond vrai sans disque. Le sdk
+    /// l'estampille sur chaque trame, le cœur la relaie dans `PlayerState`, et
+    /// la télécommande web grise sa touche Eject là où elle ne mène nulle
+    /// part — au lieu d'émettre une commande que `eject()` jette en silence.
+    ///
+    /// Défaut **faux** : ne pas savoir, c'est n'offrir rien. C'est ce qui rend
+    /// la capacité juste sans toucher aux plugins qui n'éjectent rien (radio,
+    /// fichiers, entrée générique) : ils compilent inchangés et leur touche
+    /// devient grise.
+    fn can_eject(&self) -> bool {
+        false
+    }
+
     /// Réveil (boot / sortie de veille). Par défaut, se comporte comme
     /// `activate()` (jouer) — adapté à la radio et à toute source simple.
     /// Un plugin qui ne doit pas jouer tout seul au réveil (cd) surcharge.
@@ -275,6 +291,12 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                     preset_count: outcome.preset_count,
                     preset_name: outcome.preset_name,
                     status: outcome.status,
+                    // Estampillé ici, une seule fois, plutôt que par un appel
+                    // de constructeur sur chacun des dix chemins de
+                    // déclaration d'un plugin : une capacité oubliée sur un
+                    // seul chemin donnerait un bouton qui clignote entre
+                    // actif et grisé au fil des trames.
+                    can_eject: Some(plugin.can_eject()),
                 };
                 write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
             }
@@ -290,6 +312,7 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
                             preset_count: n.preset_count,
                             preset_name: n.preset_name,
                             status: n.status,
+                            can_eject: Some(plugin.can_eject()),
                         };
                         write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
                     }

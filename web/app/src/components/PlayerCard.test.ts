@@ -26,6 +26,7 @@ function complet(etat: Partial<PlayerPayload>): PlayerPayload {
     origin: null,
     position_s: null,
     seekable: false,
+    can_eject: false,
     ...etat,
   }
 }

@@ -69,8 +69,8 @@ export const REMOTE_COMMANDS: RemoteCommand[] = [REMOTE_POWER, ...REMOTE_ROWS.fl
  * Une commande que l'appareil ignorerait dans l'état courant : son bouton doit
  * être grisé plutôt qu'offert.
  *
- * Deux règles, et seulement celles que la charge utile de `/api/player` permet
- * d'établir :
+ * Trois règles, et seulement celles que la charge utile de `/api/player`
+ * permet d'établir :
  *
  * - en **veille**, le cœur retourne sans rien faire sur tout ce qui n'est pas
  *   `Power` (c'est la première ligne de `handle_command`), grille des
@@ -80,11 +80,15 @@ export const REMOTE_COMMANDS: RemoteCommand[] = [REMOTE_POWER, ...REMOTE_ROWS.fl
  *   le même `seekable` qui rend la barre de progression cliquable : les deux
  *   endroits de la page doivent dire la même chose d'un direct qu'on ne
  *   rembobine pas.
+ * - une source **sans tiroir** ignore `Eject`. La source le déclare
+ *   elle-même (`can_eject`, voir `SourcePlugin::can_eject` du sdk) : la page
+ *   ne compare pas `source` à `'cd'`, un nom de plugin venant de
+ *   `plugins.toml` et pouvant changer sans que rien ici ne s'en aperçoive.
  *
- * Tout le reste reste actif, faute de savoir : rien dans la charge utile ne dit
- * si la source active sait s'éjecter, ni si quelque chose joue. Un bouton grisé
- * **affirme** que l'action n'existe pas ; le griser sur une supposition serait
- * donc pire qu'un bouton sans effet.
+ * Le reste reste actif, faute de savoir : rien dans la charge utile ne dit si
+ * quelque chose joue, donc `PlayPause` et `Stop` restent offerts. Un bouton
+ * grisé **affirme** que l'action n'existe pas ; le griser sur une supposition
+ * serait pire qu'un bouton sans effet.
  *
  * Un état pas encore reçu (`null` — la fraction de seconde avant la première
  * trame) ne grise rien : la télécommande s'ouvre utilisable, et la trame
@@ -93,5 +97,6 @@ export const REMOTE_COMMANDS: RemoteCommand[] = [REMOTE_POWER, ...REMOTE_ROWS.fl
 export function indisponible(nom: string, etat: PlayerPayload | null): boolean {
   if (!etat) return false
   if (etat.standby) return nom !== 'Power'
+  if (nom === 'Eject') return !etat.can_eject
   return (nom === 'SeekForward' || nom === 'SeekBackward') && !etat.seekable
 }

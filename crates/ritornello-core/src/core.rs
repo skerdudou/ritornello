@@ -128,6 +128,13 @@ pub struct Core<P: Player> {
     /// the next source re-declares it on activate/wake — but kept on stop:
     /// a stopped radio still has its stations.
     preset_count: Option<u8>,
+    /// Whether the active source has anything to eject, as last declared
+    /// (`SourceMessage::can_eject`). Forgotten with the same timing as
+    /// `preset_count` — source change and standby — for the same reason: it
+    /// describes the source that is gone. **False, not `None`**, when nobody
+    /// declares: not knowing means offering nothing, so the web remote greys
+    /// its Eject key rather than sending a command into the void.
+    can_eject: bool,
     /// Remote tens offset in flight: `Plus10` presses accumulate here until
     /// a digit key consumes them (`+10` then `4` selects 14). Cleared by the
     /// overlay's own deadline (`expire_overlay`) or by its consumption
@@ -233,6 +240,7 @@ impl<P: Player> Core<P> {
             source_status: None,
             standby_status,
             preset_count: None,
+            can_eject: false,
             pending_tens: 0,
             state_path,
             catalog,
@@ -347,6 +355,9 @@ impl<P: Player> Core<P> {
         }
         if let Some(c) = update.preset_count {
             self.preset_count = Some(c);
+        }
+        if let Some(e) = update.can_eject {
+            self.can_eject = e;
         }
         // Toujours publier : la sélection courante fait partie de l'état
         // diffusé, et cet appel couvre la trame qui ne change ni identité ni
@@ -593,6 +604,11 @@ impl<P: Player> Core<P> {
             // chose joue », la seconde « c'est un flux relançable ». Un
             // contenu déplaçable est exactement ce qui joue sans être un flux.
             seekable: self.lecture && !self.standby && !self.expecting_stream,
+            // Rien à voir avec ce qui joue : un tiroir vide s'ouvre quand
+            // même, et c'est la Source qui a le tiroir. La veille est le seul
+            // état qui l'annule, parce qu'elle n'y laisse passer aucune
+            // commande.
+            can_eject: self.can_eject && !self.standby,
             morceau: {
                 let mut m = self.metadonnees.etat();
                 // Précédence : la durée mesurée par mpv l'emporte sur celle
@@ -818,6 +834,10 @@ impl<P: Player> Core<P> {
                     // que la Source n'ait reparlé.
                     self.preset_count = None;
                     self.source_status = None;
+                    // Même sort pour la capacité d'éjection : en veille aucune
+                    // commande ne passe de toute façon (`handle_command`), et
+                    // la Source la redéclarera au réveil.
+                    self.can_eject = false;
                     // L'incrustation volume/muet ne survit pas à la mise en
                     // veille : elle garde la priorité dans `etat_lecteur`, et
                     // « VOLUME 65 % » restait à l'écran jusqu'à 2 s après
@@ -869,6 +889,11 @@ impl<P: Player> Core<P> {
                 // qui ne touche pas au statut mémorisé).
                 self.preset_count = None;
                 self.source_status = None;
+                // Idem pour l'éjection : la capacité décrit la Source qui
+                // s'en va. Sans cet effacement, quitter le cd pour la radio
+                // laissait la touche Eject active jusqu'à la première trame
+                // de la radio — et pour de bon si elle restait muette.
+                self.can_eject = false;
                 self.retry_count = 0;
                 // Persister **avant** `Activate` : si la nouvelle source ne
                 // répond pas (timeout de 5 s du SDK), l'état mémoire, l'état
@@ -1349,6 +1374,7 @@ mod tests {
             preset_count: None,
             preset_name: None,
             status: None,
+            can_eject: None,
         }
     }
 
@@ -2185,6 +2211,7 @@ mod tests {
             preset_count: compte,
             preset_name: None,
             status: None,
+            can_eject: None,
         }
     }
 
@@ -2197,6 +2224,7 @@ mod tests {
             preset_count: None,
             preset_name: nom.map(str::to_string),
             status: None,
+            can_eject: None,
         }
     }
 
@@ -2212,6 +2240,61 @@ mod tests {
         // Some(0) écrase : le cd sans disque dit « rien à numéroter ».
         core.handle_source_update("radio", update_avec_compte(Some(0)));
         assert_eq!(etat_rx.borrow().preset_count, Some(0));
+    }
+
+    /// Mise à jour ne portant que la capacité d'éjection déclarée par la Source.
+    fn update_avec_ejection(peut: Option<bool>) -> SourceUpdate {
+        SourceUpdate {
+            identity: None,
+            transient: false,
+            preset: None,
+            preset_count: None,
+            preset_name: None,
+            status: None,
+            can_eject: peut,
+        }
+    }
+
+    #[tokio::test]
+    async fn la_capacite_dejection_est_memorisee_et_publiee() {
+        // Fausse par défaut : ne pas savoir, c'est n'offrir rien — la
+        // télécommande web grise sa touche Eject tant que personne ne l'a
+        // réclamée. Une trame muette sur le sujet ne l'efface pas.
+        let (mut core, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
+        assert!(!etat_rx.borrow().can_eject, "rien de declare : rien d'offert");
+        core.handle_source_update("radio", update_avec_ejection(Some(true)));
+        assert!(etat_rx.borrow().can_eject);
+        core.handle_source_update("radio", update_avec_ejection(None));
+        assert!(etat_rx.borrow().can_eject, "une trame muette ne retire pas la capacite");
+        core.handle_source_update("radio", update_avec_ejection(Some(false)));
+        assert!(!etat_rx.borrow().can_eject);
+    }
+
+    #[tokio::test]
+    async fn lejection_survit_a_larret_mais_ni_au_changement_de_source_ni_a_la_veille() {
+        // Même calendrier d'oubli que `preset_count`, et pour la même raison :
+        // la capacité décrit la Source, pas ce qui joue. Un arrêt ne change
+        // pas le fait que le lecteur a un tiroir ; changer de source, si.
+        let (mut core, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
+        core.handle_source_update("radio", update_avec_ejection(Some(true)));
+        core.handle_command(Command::Stop).await.unwrap();
+        assert!(etat_rx.borrow().can_eject, "un tiroir ne disparait pas a l'arret");
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        assert!(!etat_rx.borrow().can_eject, "la capacite decrit la source qui s'en va");
+    }
+
+    #[tokio::test]
+    async fn la_veille_retire_la_capacite_dejection() {
+        // La veille ne laisse passer aucune commande (`handle_command`) : offrir
+        // Eject y serait un mensonge de plus. Un cœur neuf par test — après
+        // `SourceCycle`, plus rien ne garantit que « radio » soit encore la
+        // source active, donc plus rien ne garantit qu'une trame la concernant
+        // franchisse le garde-fou de `handle_source_update`.
+        let (mut core, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
+        core.handle_source_update("radio", update_avec_ejection(Some(true)));
+        assert!(etat_rx.borrow().can_eject);
+        core.handle_command(Command::Power).await.unwrap();
+        assert!(!etat_rx.borrow().can_eject);
     }
 
     #[tokio::test]
