@@ -1131,6 +1131,22 @@ mod tests {
         assert_eq!(buf.snapshot(), vec!["WARN plugin radio indisponible".to_string()]);
     }
 
+    /// La capacité de production, pas celle d'un montage de test : le tampon
+    /// doit retenir 500 lignes et jeter les plus anciennes, sinon la popin
+    /// « toutes les erreurs » de l'IHM n'a rien de plus à montrer que la carte
+    /// qui en affiche déjà les dernières.
+    #[test]
+    fn log_buffer_retient_cinq_cents_lignes() {
+        let buf = LogBuffer::new(500);
+        for i in 0..600 {
+            buf.push(format!("line {i}"));
+        }
+        let lines = buf.snapshot();
+        assert_eq!(lines.len(), 500);
+        assert_eq!(lines.first().map(String::as_str), Some("line 100"));
+        assert_eq!(lines.last().map(String::as_str), Some("line 599"));
+    }
+
     #[test]
     fn mark_plugin_disconnected_bascule_connected() {
         let mut st = StatusState {

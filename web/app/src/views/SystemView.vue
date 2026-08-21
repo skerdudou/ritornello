@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import {
   api, Button, Card, CardContent, CardHeader, CardTitle, Dialog, DialogContent,
-  DialogDescription, DialogHeader, DialogTitle, Select, SelectContent, SelectItem,
+  DialogDescription, DialogHeader, DialogTitle, Input, Select, SelectContent, SelectItem,
   SelectTrigger, SelectValue, toast,
 } from '@ritornello/ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
 import type { LogsPayload, SystemPayload, SystemUsage } from '../types'
+import { filtreLignes } from './journal'
 import { abscisses, cheminSparkline, reperesMinute } from './sparkline'
 
 const { t } = useCatalog()
@@ -26,6 +27,43 @@ const indisponible = ref(false)
  * demanderait donc son propre minuteur, pas un passager.
  */
 const logs = ref<string[]>([])
+
+/** Lignes d'erreur montrées directement dans la carte. Au-delà, la popin prend
+ *  le relais : le tampon du cœur en garde 500, et les dérouler dans la page
+ *  repousserait tout le reste hors de l'écran. */
+const LOGS_CARTE = 8
+const erreursOuvertes = ref(false)
+const requeteErreurs = ref('')
+const logsCarte = computed(() => logs.value.slice(0, LOGS_CARTE))
+const logsFiltres = computed(() => filtreLignes(logs.value, requeteErreurs.value))
+
+/**
+ * Relève le journal : au montage, et à chaque ouverture de la popin.
+ *
+ * Un geste utilisateur, donc toujours hors du sondage périodique — voir le
+ * commentaire de `logs` : `sonder()` tient un verrou « en vol » et calcule un
+ * delta CPU entre deux réponses, et y greffer une seconde requête change la
+ * cadence observée (mesuré, quatre tests de cadence sont tombés).
+ *
+ * Son propre `.catch` : un journal indisponible ne doit pas priver
+ * l'utilisateur des métriques, ni l'inverse. Un échec laisse la liste
+ * précédente en place plutôt que de la vider — même convention que `reload`
+ * de `useCatalog`.
+ */
+async function releverJournal(): Promise<void> {
+  const j = await api.get<LogsPayload>('/api/logs').catch(() => null)
+  if (j) logs.value = j.lines ?? []
+}
+
+function ouvrirErreurs(): void {
+  // Filtre remis à zéro : une popin qui s'ouvre montre tout. Garder la requête
+  // précédente la ferait rouvrir sur une liste tronquée, et le champ qui
+  // l'explique est en haut du dialogue, pas sous les yeux de qui vient de
+  // cliquer le bouton.
+  requeteErreurs.value = ''
+  erreursOuvertes.value = true
+  void releverJournal()
+}
 
 /**
  * Période de sondage, locale à la page : un confort de visualisation, pas un
@@ -295,14 +333,7 @@ const dureeFenetreMin = computed(() => {
 
 onMounted(() => {
   demarrer()
-  // Son propre `.catch` : un journal indisponible ne doit pas priver
-  // l'utilisateur des métriques, ni l'inverse.
-  void api
-    .get<LogsPayload>('/api/logs')
-    .then((j) => {
-      logs.value = j.lines ?? []
-    })
-    .catch(() => {})
+  void releverJournal()
   document.addEventListener('visibilitychange', visibilite)
 })
 onUnmounted(() => {
@@ -1009,12 +1040,50 @@ async function attendreRetour(avant: number | null) {
          disparue ». -->
     <Card data-logs-card>
       <CardHeader><CardTitle>{{ t('recent_errors') }}</CardTitle></CardHeader>
-      <CardContent>
+      <CardContent class="space-y-2">
         <ul class="space-y-1 font-mono text-xs text-muted-foreground">
-          <li v-for="(l, i) in logs" :key="i" data-log-line>{{ l }}</li>
+          <li v-for="(l, i) in logsCarte" :key="i" data-log-line>{{ l }}</li>
         </ul>
+        <!-- Bouton seulement quand la carte ne montre pas déjà tout : avec
+             trois erreurs au compteur, une popin n'aurait rien de plus à dire. -->
+        <Button
+          v-if="logs.length > LOGS_CARTE"
+          variant="outline"
+          size="sm"
+          data-logs-all
+          @click="ouvrirErreurs"
+        >
+          {{ t('system_errors_all', { count: logs.length }) }}
+        </Button>
       </CardContent>
     </Card>
+
+    <!-- Popin des erreurs : `Dialog` du kit, comme l'aide sur la sous-tension
+         et le dialogue d'alimentation, et rendue comme elles dans un portail —
+         son contenu vit donc dans `document.body`, ce que les tests savent.
+         Le compteur tient dans la `DialogDescription` : il décrit bien le
+         dialogue, et l'y mettre lui donne au passage son texte d'accessibilité. -->
+    <Dialog v-model:open="erreursOuvertes">
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{{ t('system_errors_title') }}</DialogTitle>
+          <DialogDescription data-logs-count>
+            {{ logsFiltres.length }} / {{ logs.length }}
+          </DialogDescription>
+        </DialogHeader>
+        <Input
+          v-model="requeteErreurs"
+          data-logs-filter
+          :placeholder="t('system_errors_filter')"
+        />
+        <ul class="max-h-[60vh] space-y-1 overflow-y-auto font-mono text-xs text-muted-foreground">
+          <li v-for="(l, i) in logsFiltres" :key="i" data-logs-dialog-line>{{ l }}</li>
+        </ul>
+        <p v-if="!logsFiltres.length" data-logs-empty class="text-sm text-muted-foreground">
+          {{ t('system_errors_none') }}
+        </p>
+      </DialogContent>
+    </Dialog>
 
     <!-- Popin d'aide sur la sous-tension, indépendante du dialogue
          d'alimentation ci-dessous : mêmes composants du kit (`Dialog` gère

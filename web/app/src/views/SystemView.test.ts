@@ -47,8 +47,8 @@ function prochainsJiffies() {
   }
 }
 
-/** Catalogue minimal : les unités et le gabarit de la fenêtre d'historique
- *  sont assertés à l'affichage. */
+/** Catalogue minimal : les unités, le gabarit de la fenêtre d'historique et
+ *  celui du bouton des erreurs sont assertés à l'affichage. */
 const CATALOGUE = {
   system_unit_mb: 'Mo',
   system_unit_gb: 'Go',
@@ -56,6 +56,7 @@ const CATALOGUE = {
   system_unit_hour: 'h',
   system_unit_minute: 'min',
   system_history_span: '{minutes} min',
+  system_errors_all: 'All errors ({count})',
 }
 
 /**
@@ -1077,6 +1078,113 @@ describe('SystemView', () => {
       expect(
         f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length,
       ).toBeGreaterThan(1)
+      w.unmount()
+    })
+  })
+
+  describe('popin des erreurs', () => {
+    /** Douze lignes : plus que les huit de la carte, assez pour que le filtre
+     *  ait quelque chose à écarter. */
+    const DOUZE = Array.from({ length: 12 }, (_, i) =>
+      i === 3 ? 'ERROR mpv socket closed' : `WARN ligne ${i}`,
+    )
+
+    it('la carte ne montre que les huit erreurs les plus récentes', async () => {
+      stub(payload(), CATALOGUE, { lines: DOUZE })
+      const w = await monter()
+      expect(w.findAll('[data-log-line]')).toHaveLength(8)
+      expect(w.findAll('[data-log-line]')[0]!.text()).toBe(DOUZE[0])
+      w.unmount()
+    })
+
+    it('le bouton annonce le total et n apparaît qu au-delà de la carte', async () => {
+      stub(payload(), CATALOGUE, { lines: DOUZE })
+      const w = await monter()
+      expect(w.get('[data-logs-all]').text()).toContain('12')
+      w.unmount()
+
+      // Trois erreurs : la carte les montre déjà toutes, une popin n'aurait
+      // rien de plus à dire.
+      stub(payload(), CATALOGUE, { lines: DOUZE.slice(0, 3) })
+      const peu = await monter()
+      expect(peu.find('[data-logs-all]').exists()).toBe(false)
+      peu.unmount()
+    })
+
+    it('la popin liste tout le journal', async () => {
+      stub(payload(), CATALOGUE, { lines: DOUZE })
+      const w = await monter()
+      await w.get('[data-logs-all]').trigger('click')
+      await flushPromises()
+      // La popin est rendue dans un portail : elle vit dans document.body.
+      expect(document.body.querySelectorAll('[data-logs-dialog-line]')).toHaveLength(12)
+      expect(document.body.querySelector('[data-logs-count]')!.textContent).toContain('12 / 12')
+      w.unmount()
+    })
+
+    it('le champ filtre la liste et met à jour le compteur', async () => {
+      stub(payload(), CATALOGUE, { lines: DOUZE })
+      const w = await monter()
+      await w.get('[data-logs-all]').trigger('click')
+      await flushPromises()
+      const champ = document.body.querySelector<HTMLInputElement>('[data-logs-filter]')!
+      champ.value = 'mpv'
+      champ.dispatchEvent(new Event('input'))
+      await flushPromises()
+      const lignes = document.body.querySelectorAll('[data-logs-dialog-line]')
+      expect(lignes).toHaveLength(1)
+      expect(lignes[0]!.textContent).toBe('ERROR mpv socket closed')
+      expect(document.body.querySelector('[data-logs-count]')!.textContent).toContain('1 / 12')
+      w.unmount()
+    })
+
+    it('annonce l absence de correspondance', async () => {
+      stub(payload(), CATALOGUE, { lines: DOUZE })
+      const w = await monter()
+      await w.get('[data-logs-all]').trigger('click')
+      await flushPromises()
+      const champ = document.body.querySelector<HTMLInputElement>('[data-logs-filter]')!
+      champ.value = 'zzz'
+      champ.dispatchEvent(new Event('input'))
+      await flushPromises()
+      expect(document.body.querySelectorAll('[data-logs-dialog-line]')).toHaveLength(0)
+      expect(document.body.querySelector('[data-logs-empty]')).not.toBeNull()
+      w.unmount()
+    })
+
+    it('relève le journal à l ouverture', async () => {
+      const f = stub(payload(), CATALOGUE, { lines: DOUZE })
+      const w = await monter()
+      const avant = f.mock.calls.filter((c) => String(c[0]).includes('/api/logs')).length
+      await w.get('[data-logs-all]').trigger('click')
+      await flushPromises()
+      // Une requête de plus, sur geste utilisateur : le journal reste hors du
+      // sondage périodique (verrou « en vol » et delta CPU de `sonder`).
+      expect(f.mock.calls.filter((c) => String(c[0]).includes('/api/logs')).length).toBe(avant + 1)
+      w.unmount()
+    })
+
+    it('rouvre sans le filtre précédent', async () => {
+      stub(payload(), CATALOGUE, { lines: DOUZE })
+      const w = await monter()
+      await w.get('[data-logs-all]').trigger('click')
+      await flushPromises()
+      const champ = document.body.querySelector<HTMLInputElement>('[data-logs-filter]')!
+      champ.value = 'mpv'
+      champ.dispatchEvent(new Event('input'))
+      await flushPromises()
+      expect(document.body.querySelectorAll('[data-logs-dialog-line]')).toHaveLength(1)
+
+      // Fermeture par le bouton du dialogue — le vrai geste, et le seul
+      // `[data-slot="dialog-close"]` présent puisque seul le dialogue ouvert
+      // est rendu dans le portail. Puis réouverture : le champ repart vide,
+      // sinon la popin s'ouvrirait sur une liste tronquée sans que rien à
+      // l'écran ne l'explique.
+      document.body.querySelector<HTMLElement>('[data-slot="dialog-close"]')!.click()
+      await flushPromises()
+      await w.get('[data-logs-all]').trigger('click')
+      await flushPromises()
+      expect(document.body.querySelectorAll('[data-logs-dialog-line]')).toHaveLength(12)
       w.unmount()
     })
   })

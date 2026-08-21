@@ -41,7 +41,11 @@ impl core::Source for SourceClient {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let log_buffer = Arc::new(LogBuffer::new(50));
+    // 500 et non 50 : l'IHM a désormais une popin qui liste tout le tampon
+    // derrière un filtre, et 50 lignes ne remontent pas plus loin que la carte
+    // qui en affiche déjà les dernières. 500 lignes pèsent quelques dizaines de
+    // kio, relevées une fois par ouverture de popin — pas à chaque sondage.
+    let log_buffer = Arc::new(LogBuffer::new(500));
     let log_buffer_for_writer = log_buffer.clone();
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_target(false))
