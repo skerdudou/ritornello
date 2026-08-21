@@ -20,6 +20,18 @@ describe('api', () => {
     await expect(api.get('/x')).rejects.toThrow('HTTP 502')
   })
 
+  it('get remonte la cause portée par le corps, pas le code nu', async () => {
+    // Mesuré : le cœur fait porter sa cause au corps d'un 502, mais seul `send`
+    // la lisait. Le chargement d'une page de plugin passe par `get`, et
+    // affichait « HTTP 502 » là où le même échec sur un PUT disait pourquoi.
+    mockFetch(
+      new Response(JSON.stringify({ error: 'le plugin a mis plus de 5 s à répondre' }), {
+        status: 502,
+      }),
+    )
+    await expect(api.get('/x')).rejects.toThrow('plus de 5 s')
+  })
+
   it('put renvoie null sur 204', async () => {
     const spy = mockFetch(new Response(null, { status: 204 }))
     await expect(api.put('/x', { a: 1 })).resolves.toBeNull()

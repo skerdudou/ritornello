@@ -30,7 +30,7 @@ export const CATALOGUE: Record<string, string> = {
   ph_subpath: 'sous-dossier',
   ph_user: 'utilisateur',
   ph_password: 'mot de passe',
-  ph_domain: 'domaine',
+  ph_domain: 'domaine Windows (optionnel)',
   kind_local: 'dossier local',
   kind_smb: 'partage réseau',
   mounted_yes: 'monté',
@@ -78,9 +78,11 @@ export const CATALOGUE: Record<string, string> = {
   btn_search: 'Chercher',
   no_results: 'Aucun résultat',
   search_truncated: 'Seuls les {count} premiers sont affichés : affinez la recherche.',
-  btn_expand: 'Déplier',
-  btn_collapse: 'Replier',
+  search_gave_up:
+    'la recherche s’est arrêtée avant d’avoir parcouru tout ce dossier : ouvrez un sous-dossier et cherchez-y.',
   empty_folder: 'Dossier vide',
+  btn_add_current_folder: 'Ajouter ce dossier',
+  search_scope: 'La recherche porte sur {path}',
 
   playlist_title: 'Liste en cours',
   col_num: 'N°',
@@ -109,6 +111,8 @@ export const CATALOGUE: Record<string, string> = {
 export interface Navigue {
   root: string
   path: string
+  /** Vide pour un parcours, le motif pour une recherche. */
+  query?: string
   /** Noms nus, pas des chemins : c'est ce que `scan::list_dir` rend. */
   dirs: string[]
   files: string[]
@@ -117,6 +121,8 @@ export interface Navigue {
   /** Chemins relatifs à la racine, rendus par `search`. */
   results: string[]
   truncated?: boolean
+  /** Le parcours a été interrompu avant d'avoir tout vu, distinct de `truncated`. */
+  gave_up?: boolean
 }
 
 export interface EtatServeur {
@@ -177,7 +183,7 @@ export function etat(partiel: EtatServeur = {}): Required<EtatServeur> {
     scan: { running: false, found: 0, dir: '' },
     saved: [],
     unresolved: [],
-    browse: { root: '', path: '', dirs: [], files: [], results: [] },
+    browse: { root: '', path: '', query: '', dirs: [], files: [], results: [] },
     volumes: [],
     // Faux par défaut, comme le plugin quand `smbclient` manque : c'est l'état
     // qu'un test doit déclarer explicitement pour offrir l'assistant réseau.

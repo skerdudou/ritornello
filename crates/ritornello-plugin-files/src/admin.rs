@@ -179,7 +179,7 @@ pub enum Op {
     SmbShares,
     Mount,
     Browse { root: String, #[serde(default)] path: String },
-    Search { root: String, query: String },
+    Search { root: String, #[serde(default)] path: String, query: String },
     AddDir { root: String, #[serde(default)] path: String },
     AddFile { root: String, path: String },
     Remove { index: usize },
@@ -700,9 +700,54 @@ impl AdminPlugin for FilesAdmin {
                 }
                 self.ecrire_table(&table)?;
                 // Le montage suit la déclaration : plus de bouton à trouver.
-                // Un échec ne défait PAS la déclaration — l'utilisateur perdrait
-                // sa saisie à cause d'un NAS endormi — il est rapporté à part.
                 self.reconcilier(&table, false).await;
+                // Et s'il n'a pas abouti, la déclaration se défait.
+                //
+                // Le critère est l'état **observé de cette source**, pas le code
+                // de retour de la réconciliation : `systemctl start` porte sur
+                // l'unité entière, il peut échouer à cause d'un partage tiers
+                // endormi, et annuler alors l'ajout d'un partage sain serait
+                // faux. Signalé à l'usage : une source restait inscrite après un
+                // montage refusé, et il fallait la retirer à la main avant de
+                // pouvoir réessayer.
+                //
+                // La portée s'arrête à la déclaration. Une source déjà acceptée
+                // reste jusqu'à suppression manuelle : un partage momentanément
+                // injoignable ne doit pas disparaître de la table.
+                if kind == RootKind::Smb
+                    && mount::state(table.by_name(&name).expect("tout juste inseree"))
+                        != mount::MountState::Mounted
+                {
+                    let detail = self
+                        .mount_error
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .unwrap_or_else(|| self.mot("mount_silent_failure"));
+                    let i = table
+                        .root
+                        .iter()
+                        .position(|r| r.name == name)
+                        .expect("la source vient d'etre inseree");
+                    let partie = table.root.remove(i);
+                    self.ecrire_table(&table)?;
+                    // Le fichier d'identifiants part avec elle : le laisser
+                    // ferait survivre un mot de passe à une source qui n'a
+                    // jamais existé.
+                    let _ = std::fs::remove_file(partie.credentials_path(&self.creds_dir));
+                    // Remis directement à `None`, sans repasser par
+                    // `reconcilier` : celui-ci exécuterait un vrai
+                    // `systemctl start` dès qu'il reste une AUTRE source SMB
+                    // dans la table, et son seul effet serait alors de
+                    // réécrire `mount_error` — la page afficherait « la
+                    // dernière tentative de montage a échoué » pour une
+                    // source qui n'est plus déclarée. Rien n'a de toute façon
+                    // besoin d'être démonté : le partage qu'on retire n'était
+                    // justement pas monté.
+                    *self.mount_error.lock().unwrap() = None;
+                    *self.roots.write().await = table;
+                    return Err(self.mot("share_not_declared").replace("{detail}", &detail));
+                }
                 *self.roots.write().await = table;
                 Ok(())
             }
@@ -786,37 +831,58 @@ impl AdminPlugin for FilesAdmin {
                     // s'ajoutent pas à la liste en cours, elles la remplacent.
                     "playlists": contenu.listes,
                     "results": [],
+                    // Vide, et c'est un marqueur, pas un oubli : la page s'en
+                    // sert pour distinguer la réponse à un parcours de celle à
+                    // une recherche portant sur le même dossier.
+                    "query": "",
                 });
                 Ok(())
             }
 
-            Op::Search { root, query } => {
+            Op::Search { root, path, query } => {
+                // Deux résolutions, deux rôles : `dir` est le dossier où l'on
+                // cherche, `base` la racine à laquelle les résultats sont
+                // rapportés. Les confondre rendrait des chemins relatifs au
+                // sous-dossier, qu'un `add_file` résoudrait ailleurs.
+                let dir = self.sous_racine(&root, &path).await?;
                 let base = self.sous_racine(&root, "").await?;
                 let cat = self.catalog.clone();
-                let base_pour_relatif = base.clone();
-                let (trouves, tronque) =
-                    tokio::task::spawn_blocking(move || scan::search(&base, &query, 200))
-                        .await
-                        .map_err(|e| format!("search task: {e}"))?
-                        .map_err(|e| e.message(&cat.read().unwrap()))?;
+                let motif = query.clone();
+                let (trouves, fin) = tokio::task::spawn_blocking(move || {
+                    scan::search(&dir, &motif, 200, scan::MAX_VISITES, scan::DELAI_RECHERCHE)
+                })
+                .await
+                .map_err(|e| format!("search task: {e}"))?
+                .map_err(|e| e.message(&cat.read().unwrap()))?;
                 // Chemins **relatifs à la racine** : c'est ce que la page
                 // renvoie ensuite dans un `add_file`, et un chemin absolu y
                 // serait refusé par la garde d'évasion.
                 let relatifs: Vec<String> = trouves
                     .iter()
-                    .filter_map(|p| p.strip_prefix(&base_pour_relatif).ok())
+                    .filter_map(|p| p.strip_prefix(&base).ok())
                     .map(|p| p.to_string_lossy().replace('\\', "/"))
                     .collect();
                 *self.browse.lock().unwrap() = serde_json::json!({
                     "root": root,
-                    "path": "",
+                    // Le dossier cherché, et non la chaîne vide : la page ne
+                    // retient que la réponse à la demande qu'elle vient de
+                    // faire, et ce couple (chemin, requête) est ce qui
+                    // l'identifie.
+                    "path": path,
+                    "query": query,
                     "dirs": [],
                     "files": [],
+                    "playlists": [],
                     "results": relatifs,
-                    // Dit à la page qu'il y en avait davantage, pour qu'elle
-                    // invite à affiner plutôt que de présenter une liste
-                    // tronquée comme si elle était complète.
-                    "truncated": tronque,
+                    // Deux champs et non un booléen : les deux causes d'arrêt
+                    // n'appellent pas le même conseil. « truncated » invite à
+                    // préciser le motif, « gave_up » invite à descendre dans un
+                    // sous-dossier. Les confondre faisait afficher « Aucun
+                    // résultat » — donc « ce fichier n'existe pas » — pour une
+                    // recherche qui avait simplement renoncé avant d'arriver
+                    // jusqu'à lui.
+                    "truncated": fin == scan::FinDeRecherche::TropDeResultats,
+                    "gave_up": fin == scan::FinDeRecherche::Interrompue,
                 });
                 Ok(())
             }
@@ -1135,7 +1201,11 @@ mod tests {
     async fn une_source_ajoutee_recoit_un_nom_derive() {
         // L'utilisateur ne saisit plus de nom : il doit être dérivé, valide, et
         // dérivé du partage pour rester lisible dans /mnt/ritornello.
-        let (mut admin, _) = admin_de_test();
+        let (mut admin, racine) = admin_de_test();
+        let _garde = detourner_proc_mounts(
+            &racine,
+            "//192.168.1.20/musique /mnt/ritornello/musique cifs ro,relatime 0 0\n",
+        );
         admin.set_data(ajout_partage("p")).await.unwrap();
         let roots = admin.roots.read().await;
         assert_eq!(roots.root.len(), 1);
@@ -1173,7 +1243,12 @@ mod tests {
     async fn deux_sources_du_meme_partage_ne_se_disputent_pas_leur_nom() {
         // Sans dédoublonnage, la deuxième écraserait le fichier d'identifiants de
         // la première et se disputerait son point de montage.
-        let (mut admin, _) = admin_de_test();
+        let (mut admin, racine) = admin_de_test();
+        let _garde = detourner_proc_mounts(
+            &racine,
+            "//192.168.1.20/musique /mnt/ritornello/musique cifs ro,relatime 0 0\n\
+             //192.168.1.20/musique /mnt/ritornello/musique-2 cifs ro,relatime 0 0\n",
+        );
         admin.set_data(ajout_partage("p")).await.unwrap();
         let mut second = ajout_partage("p");
         second["subpath"] = serde_json::json!("Rock");
@@ -1187,7 +1262,11 @@ mod tests {
     async fn le_doublon_exact_est_refuse() {
         // Deux sources identiques monteraient deux fois le même partage au même
         // endroit logique, sans qu'aucune ne serve à rien de plus.
-        let (mut admin, _) = admin_de_test();
+        let (mut admin, racine) = admin_de_test();
+        let _garde = detourner_proc_mounts(
+            &racine,
+            "//192.168.1.20/musique /mnt/ritornello/musique cifs ro,relatime 0 0\n",
+        );
         admin.set_data(ajout_partage("p")).await.unwrap();
         let err = admin.set_data(ajout_partage("p")).await.unwrap_err();
         assert!(err.contains(' '), "cle brute : {err}");
@@ -1197,7 +1276,11 @@ mod tests {
     async fn retirer_une_source_efface_son_fichier_d_identifiants() {
         // Sinon un .cred contenant un mot de passe survivrait sur le disque à la
         // source qui l'a justifié.
-        let (mut admin, _) = admin_de_test();
+        let (mut admin, racine) = admin_de_test();
+        let _garde = detourner_proc_mounts(
+            &racine,
+            "//192.168.1.20/musique /mnt/ritornello/musique cifs ro,relatime 0 0\n",
+        );
         admin.set_data(ajout_partage("secret")).await.unwrap();
         let cred = admin.creds_dir.join("musique.cred");
         assert!(cred.exists());
@@ -1209,18 +1292,125 @@ mod tests {
         assert!(admin.roots.read().await.root.is_empty());
     }
 
+    /// Sérialise les tests qui détournent `/proc/mounts`.
+    ///
+    /// `std::env::set_var` est global au processus, et les tests d'un binaire
+    /// tournent en parallèle dedans : sans ce verrou, le faux fichier d'un test
+    /// est lu par un autre, avec un échec qui ne se reproduit pas seul.
+    static VERROU_PROC_MOUNTS: Mutex<()> = Mutex::new(());
+
+    /// Garde rendu par `detourner_proc_mounts`.
+    ///
+    /// Porte le verrou de sérialisation **et** efface la variable
+    /// d'environnement à son tour, dans un `Drop` — pas dans une ligne répétée
+    /// en fin de test. Le verrou est bien relâché par son propre `Drop` même
+    /// si le test panique ; la variable d'environnement, elle, ne l'était pas
+    /// avant ce garde, et `mount::state` l'honore depuis cette branche : un
+    /// test qui paniquait laissait donc lire à toute la suite restante un faux
+    /// `/proc/mounts` pointant vers un tempdir déjà supprimé — un échec unique
+    /// se transformait en cascade illisible.
+    struct GardeProcMounts {
+        _verrou: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for GardeProcMounts {
+        fn drop(&mut self) {
+            std::env::remove_var("RITORNELLO_FILES_PROC_MOUNTS");
+        }
+    }
+
+    /// Écrit un faux `/proc/mounts` et le fait lire au code sous test.
+    ///
+    /// Rend le garde : l'appelant doit le garder vivant jusqu'à la fin du test
+    /// (`let _garde = ...`, jamais `let _ = ...`, qui le relâcherait aussitôt).
+    fn detourner_proc_mounts(racine: &std::path::Path, contenu: &str) -> GardeProcMounts {
+        let verrou = VERROU_PROC_MOUNTS.lock().unwrap_or_else(|e| e.into_inner());
+        let faux = racine.join("mounts");
+        std::fs::write(&faux, contenu).unwrap();
+        std::env::set_var("RITORNELLO_FILES_PROC_MOUNTS", &faux);
+        GardeProcMounts { _verrou: verrou }
+    }
+
     #[tokio::test]
     async fn get_data_annonce_les_volumes_et_la_capacite_smb() {
         let (admin, racine) = admin_de_test();
-        let faux = racine.join("mounts");
-        std::fs::write(&faux, "/dev/sda1 /media/usb vfat rw 0 0\nproc /proc proc rw 0 0\n").unwrap();
-        std::env::set_var("RITORNELLO_FILES_PROC_MOUNTS", &faux);
+        let _garde =
+            detourner_proc_mounts(&racine, "/dev/sda1 /media/usb vfat rw 0 0\nproc /proc proc rw 0 0\n");
         let d = admin.get_data().await;
         assert_eq!(d["volumes"][0]["path"], "/media/usb");
         assert_eq!(d["volumes"].as_array().unwrap().len(), 1, "proc ne doit pas etre propose");
         assert!(d["can_browse_smb"].is_boolean());
         assert!(d["explore"].is_object());
-        std::env::remove_var("RITORNELLO_FILES_PROC_MOUNTS");
+    }
+
+    #[tokio::test]
+    async fn un_partage_qui_ne_se_monte_pas_n_est_pas_declare() {
+        // Signalé à l'usage : la source apparaissait dans la liste alors que le
+        // montage avait échoué, et il fallait la retirer à la main avant de
+        // pouvoir réessayer. La déclaration se défait donc entièrement —
+        // table et fichier d'identifiants — et le refus remonte à la popin,
+        // qui garde la saisie.
+        let (mut admin, racine) = admin_de_test();
+        let _garde = detourner_proc_mounts(&racine, "proc /proc proc rw 0 0\n");
+        let err = admin.set_data(ajout_partage("p")).await.unwrap_err();
+        assert!(err.contains(' '), "cle brute renvoyee a l'ecran : {err}");
+        assert!(
+            admin.roots.read().await.root.is_empty(),
+            "la source est restee declaree malgre l'echec du montage"
+        );
+        assert!(
+            !admin.creds_dir.join("musique.cred").exists(),
+            "un mot de passe a survecu a une source qui n'existe pas"
+        );
+    }
+
+    #[tokio::test]
+    async fn un_partage_sain_ne_perd_pas_son_absence_de_bandeau_quand_un_voisin_est_refuse() {
+        // Défaut de revue : le second `reconcilier` de la branche du retour
+        // arrière exécute un vrai `systemctl start` dès qu'il reste une AUTRE
+        // source SMB dans la table -- le cas ici -- et son seul effet est
+        // alors de réécrire `mount_error`. La page pouvait afficher « la
+        // dernière tentative de montage a échoué » pour une source qui n'est
+        // plus déclarée, exactement ce que le commentaire prétendait éviter.
+        let (mut admin, racine) = admin_de_test();
+        let _garde = detourner_proc_mounts(
+            &racine,
+            "//192.168.1.20/musique /mnt/ritornello/musique cifs ro,relatime 0 0\n",
+        );
+        admin.set_data(ajout_partage("p")).await.unwrap();
+        assert_eq!(admin.roots.read().await.root.len(), 1, "la source saine doit etre declaree");
+
+        let mut second = ajout_partage("p");
+        second["share"] = serde_json::json!("absent");
+        second["subpath"] = serde_json::json!("Rien");
+        let err = admin.set_data(second).await.unwrap_err();
+        assert!(err.contains(' '), "cle brute renvoyee a l'ecran : {err}");
+
+        assert_eq!(
+            admin.roots.read().await.root.len(),
+            1,
+            "seule la source saine doit rester declaree"
+        );
+        assert!(
+            admin.mount_error.lock().unwrap().is_none(),
+            "aucun bandeau d'echec de montage ne doit survivre au refus d'une source voisine"
+        );
+    }
+
+    #[tokio::test]
+    async fn un_partage_effectivement_monte_reste_declare() {
+        // L'autre moitié, et la raison du critère : `systemctl` est global, il
+        // peut échouer pour un partage tiers en panne. Ce qui décide est l'état
+        // observé de CETTE source, pas le code de retour de la réconciliation.
+        // Sans cela, un NAS endormi ailleurs annulerait l'ajout d'un partage
+        // sain.
+        let (mut admin, racine) = admin_de_test();
+        let _garde = detourner_proc_mounts(
+            &racine,
+            "//192.168.1.20/musique /mnt/ritornello/musique cifs ro,relatime 0 0\n",
+        );
+        admin.set_data(ajout_partage("p")).await.unwrap();
+        assert_eq!(admin.roots.read().await.root.len(), 1);
     }
 
     /// `/proc/mounts` de test : une racine locale et un partage à part, pour que
@@ -1265,7 +1455,11 @@ mod tests {
     async fn basculer_l_inscriptibilite_ne_perd_pas_le_mot_de_passe() {
         // Sans cette opération, changer d'avis imposerait de retirer puis
         // redéclarer, donc de resaisir le mot de passe.
-        let (mut admin, _) = admin_de_test();
+        let (mut admin, racine) = admin_de_test();
+        let _garde = detourner_proc_mounts(
+            &racine,
+            "//192.168.1.20/musique /mnt/ritornello/musique cifs ro,relatime 0 0\n",
+        );
         admin.set_data(ajout_partage("secret-du-nas")).await.unwrap();
         admin
             .set_data(serde_json::json!({"op": "set_writable", "name": "musique", "writable": true}))
@@ -1282,7 +1476,11 @@ mod tests {
         // a pas besoin pour afficher l'état d'un partage. La garantie est
         // portée par le type : ni `Root` ni la vue de l'assistant ne contiennent
         // le champ.
-        let (mut admin, _) = admin_de_test();
+        let (mut admin, racine) = admin_de_test();
+        let _garde = detourner_proc_mounts(
+            &racine,
+            "//192.168.1.20/musique /mnt/ritornello/musique cifs ro,relatime 0 0\n",
+        );
         admin.set_data(ajout_partage("secret-du-nas")).await.unwrap();
         let texte = serde_json::to_string(&admin.get_data().await).unwrap();
         assert!(!texte.contains("password"), "{texte}");
@@ -1294,7 +1492,11 @@ mod tests {
         // L'assistant vient de s'en servir pour se connecter : le faire retaper
         // à la confirmation serait une saisie de plus pour rien, et la page ne
         // peut pas renvoyer un secret qu'elle ne reçoit jamais.
-        let (mut admin, _) = admin_de_test();
+        let (mut admin, racine) = admin_de_test();
+        let _garde = detourner_proc_mounts(
+            &racine,
+            "//192.168.1.20/musique /mnt/ritornello/musique cifs ro,relatime 0 0\n",
+        );
         admin.explore.ouvrir(ritornello_plugin_files::explore::Kind::Smb);
         admin.explore.connecter(
             "192.168.1.20".into(),
@@ -1312,7 +1514,11 @@ mod tests {
         // Dernier repli, quand la popin a été fermée entre-temps : redéclarer
         // une source du même nom ne doit pas casser en silence un montage qui
         // marchait, faute de mot de passe.
-        let (mut admin, _) = admin_de_test();
+        let (mut admin, racine) = admin_de_test();
+        let _garde = detourner_proc_mounts(
+            &racine,
+            "//192.168.1.20/musique /mnt/ritornello/musique cifs ro,relatime 0 0\n",
+        );
         std::fs::create_dir_all(&admin.creds_dir).unwrap();
         std::fs::write(
             admin.creds_dir.join("musique.cred"),
@@ -1328,7 +1534,11 @@ mod tests {
     async fn un_mot_de_passe_neuf_remplace_l_ancien() {
         // Garde-fou de la règle ci-dessus : « vide = garde » ne doit pas
         // devenir « on ne peut plus changer de mot de passe ».
-        let (mut admin, _) = admin_de_test();
+        let (mut admin, racine) = admin_de_test();
+        let _garde = detourner_proc_mounts(
+            &racine,
+            "//192.168.1.20/musique /mnt/ritornello/musique cifs ro,relatime 0 0\n",
+        );
         std::fs::create_dir_all(&admin.creds_dir).unwrap();
         std::fs::write(admin.creds_dir.join("musique.cred"), "username=steven\npassword=ancien\n")
             .unwrap();
@@ -1376,7 +1586,11 @@ mod tests {
         // laisserait une fenêtre pendant laquelle le mot de passe serait
         // lisible par tout le monde.
         use std::os::unix::fs::PermissionsExt;
-        let (mut admin, _) = admin_de_test();
+        let (mut admin, racine) = admin_de_test();
+        let _garde = detourner_proc_mounts(
+            &racine,
+            "//192.168.1.20/musique /mnt/ritornello/musique cifs ro,relatime 0 0\n",
+        );
         admin.set_data(ajout_partage("secret")).await.unwrap();
         let meta = std::fs::metadata(admin.creds_dir.join("musique.cred")).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
@@ -1384,7 +1598,11 @@ mod tests {
 
     #[tokio::test]
     async fn la_table_enregistree_se_relit_telle_quelle() {
-        let (mut admin, _) = admin_de_test();
+        let (mut admin, racine) = admin_de_test();
+        let _garde = detourner_proc_mounts(
+            &racine,
+            "//192.168.1.20/musique /mnt/ritornello/musique cifs ro,relatime 0 0\n",
+        );
         admin.set_data(ajout_partage("p")).await.unwrap();
         let relue = Roots::load(&admin.roots_path).unwrap();
         assert_eq!(relue.root.len(), 1);
@@ -1772,5 +1990,69 @@ mod tests {
         // `notes.txt` n'est pas un fichier audio : il n'a rien à faire dans un
         // arbre de navigation musicale.
         assert_eq!(data["browse"]["files"], serde_json::json!([]));
+    }
+
+    /// Déclare une racine locale peuplée, et rend son chemin.
+    async fn racine_locale_peuplee(admin: &mut FilesAdmin) -> PathBuf {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().to_path_buf();
+        std::mem::forget(dir);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        std::fs::create_dir_all(base.join("B")).unwrap();
+        std::fs::write(base.join("A/miles.mp3"), b"").unwrap();
+        std::fs::write(base.join("B/miles.mp3"), b"").unwrap();
+        admin
+            .set_data(serde_json::json!({
+                "op": "add_source", "kind": "local",
+                "path": base.display().to_string(),
+                "host": "", "share": "", "user": "", "domain": "",
+                "password": "", "writable": false
+            }))
+            .await
+            .unwrap();
+        base
+    }
+
+    #[tokio::test]
+    async fn une_recherche_se_limite_au_dossier_demande() {
+        // Signalé à l'usage : la recherche partait toujours de la racine, donc
+        // elle ratissait tout le NAS quel que soit le dossier ouvert — lent, et
+        // noyé d'homonymes venus d'ailleurs.
+        let (mut admin, _) = admin_de_test();
+        let base = racine_locale_peuplee(&mut admin).await;
+        let nom = admin.roots.read().await.root[0].name.clone();
+        admin
+            .set_data(serde_json::json!({"op": "search", "root": nom, "path": "A", "query": "miles"}))
+            .await
+            .unwrap();
+        let d = admin.get_data().await;
+        let resultats = d["browse"]["results"].as_array().unwrap().clone();
+        // Un seul : celui de B est hors du dossier demandé.
+        assert_eq!(resultats.len(), 1, "la recherche a debordé du dossier : {resultats:?}");
+        // Relatif à la RACINE et non au dossier cherché : c'est cette forme que
+        // la page renvoie ensuite dans un `add_file`, et un chemin relatif au
+        // sous-dossier y désignerait un fichier inexistant.
+        assert_eq!(resultats[0].as_str().unwrap(), "A/miles.mp3");
+        assert_eq!(d["browse"]["path"].as_str().unwrap(), "A");
+        assert_eq!(d["browse"]["query"].as_str().unwrap(), "miles");
+        drop(base);
+    }
+
+    #[tokio::test]
+    async fn un_parcours_se_distingue_d_une_recherche_par_sa_requete_vide() {
+        // Les deux se rangent au même endroit côté plugin. Sans ce marqueur, la
+        // page ne peut pas distinguer la réponse à son parcours de celle à une
+        // recherche portant sur le même dossier, et remplirait le niveau avec
+        // des résultats de recherche.
+        let (mut admin, _) = admin_de_test();
+        let base = racine_locale_peuplee(&mut admin).await;
+        let nom = admin.roots.read().await.root[0].name.clone();
+        admin
+            .set_data(serde_json::json!({"op": "browse", "root": nom, "path": "A"}))
+            .await
+            .unwrap();
+        let d = admin.get_data().await;
+        assert_eq!(d["browse"]["query"].as_str().unwrap(), "");
+        drop(base);
     }
 }

@@ -17,10 +17,6 @@ use std::path::{Path, PathBuf};
 /// polkit compare, une unité paramétrable serait une autorisation ouverte.
 pub const UNIT: &str = "ritornello-media-mount.service";
 
-/// Table des montages du noyau. Champ constant plutôt que littéral disséminé :
-/// l'analyse, elle, est une fonction pure et se teste sans ce fichier.
-const PROC_MOUNTS: &str = "/proc/mounts";
-
 /// Ce que le plugin sait de la disponibilité d'une racine.
 ///
 /// Volontairement binaire : rien ici ne distingue « pas encore monté » de
@@ -84,10 +80,13 @@ pub fn state(root: &Root) -> MountState {
     if root.kind == RootKind::Local {
         return MountState::Mounted;
     }
-    let Ok(contenu) = std::fs::read_to_string(PROC_MOUNTS) else {
-        return MountState::NotMounted;
-    };
-    if est_monte_dans(&contenu, &point_de_montage(root)) {
+    // Par `volumes::lire_proc_mounts` et non par un `read_to_string` en dur :
+    // c'est le seul lecteur de cette table, il honore
+    // `RITORNELLO_FILES_PROC_MOUNTS`, et c'est ce qui rend le retour arrière
+    // d'une déclaration ratée vérifiable sans monter quoi que ce soit. Une
+    // table illisible rend la chaîne vide, donc `NotMounted` : ne pas savoir,
+    // c'est ne pas pouvoir promettre que le partage est là.
+    if est_monte_dans(&crate::volumes::lire_proc_mounts(), &point_de_montage(root)) {
         MountState::Mounted
     } else {
         MountState::NotMounted

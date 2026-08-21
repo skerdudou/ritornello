@@ -240,18 +240,19 @@ Two system packages, only one of which is indispensable.
 
 | Package | Role | Without it |
 |---|---|---|
-| `cifs-utils` | mounting an SMB share | A network source is declared but never mounts: the plugin reports `mount`'s error and the source stays "not mounted". Folders of the device are unaffected. |
-| `smbclient` | browsing a share **before** mounting it | The network wizard is greyed out and says so. A share is still declared by entering host, share and subfolder by hand. Nothing else is affected. |
+| `cifs-utils` | mounting an SMB share | A share that fails to mount is refused, not declared: see below. Folders of the device are unaffected. |
+| `smbclient` | browsing a share **before** mounting it | The wizard opens straight into manual entry, no toggle or connect button. A share is still declared by entering host, share and subfolder by hand. Nothing else is affected. |
 
 ```sh
 sudo apt install cifs-utils smbclient
 ```
 
 The plugin **probes** for `smbclient` at startup and re-exposes the answer
-as `can_browse_smb`. The page greys the wizard out rather than failing on
-click, the same way the System tab greys out rebooting when logind refuses
-it. The probe is redone on every connection attempt: installing the package
-without restarting the service gives a correct answer, not a stale refusal.
+as `can_browse_smb`. Unlike the System tab greying out rebooting when logind
+refuses it, the wizard here offers no toggle to grey out: without the
+package it is manual entry from the start. The probe is redone on every
+connection attempt: installing the package without restarting the service
+gives a correct answer, not a stale refusal.
 
 ### When a share stops answering
 
@@ -270,7 +271,10 @@ under a second.
 
 That matters because the admin protocol is **serial** and the core abandons a
 request after 5 s. One blocking `stat` is enough to wedge the plugin, page
-included. So every filesystem access a request triggers goes through a circuit
+included. When it does, the core's `502` names the cause and distinguishes a
+request that ran past the 5 s ceiling from a plugin that is not answering at
+all — the two used to look identical on the page. So every filesystem access
+a request triggers goes through a circuit
 breaker (`sante.rs`): it runs off the async thread under a 1.5 s deadline, and a
 mount point whose probe never returned is remembered, so later requests are
 refused instantly instead of losing another thread — a syscall in
@@ -307,9 +311,14 @@ name, so the derivation produces a valid name by construction rather than
 by luck.
 
 The mount **follows the declaration**: the plugin asks for reconciliation
-itself. A failure does not undo the declaration — everything just entered
-would be lost to a sleeping NAS — it is reported on the page, with a retry
-button.
+itself. A failure **undoes** the declaration — the table entry and the
+credentials file both, and the refusal goes back to the wizard, which stays
+open with what was just typed still in it. It is precisely to avoid losing
+that entry to a sleeping NAS that the popin is kept open on refusal, rather
+than closing on a declaration that would then need to be found again and
+removed by hand. The rollback is scoped to `add_source` only: a source
+already accepted stays declared until removed by hand, so one sick share
+does not take an unrelated, healthy one down with it.
 
 ### Track lengths
 

@@ -178,6 +178,39 @@ impl DisplayClient {
     }
 }
 
+/// Panne du dialogue d'admin avec un plugin, **typée** pour que le cœur puisse
+/// la distinguer.
+///
+/// Une chaîne ne suffisait pas : le cœur aplatissait tout en « plugin
+/// injoignable », si bien qu'un plugin mort et un plugin qui répond trop
+/// lentement recevaient le même message — le premier appelle un redémarrage, le
+/// second envoie regarder le réseau.
+///
+/// Les libellés restent en **anglais** : ils partent dans les journaux, comme
+/// tous les messages de ce crate. Ce qui atteint l'écran vient du catalogue du
+/// cœur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminIpcError {
+    /// Le plafond de 5 s a été atteint : le plugin vit, mais répond trop tard.
+    Timeout,
+    /// Le socket est tombé, ou la requête a été drainée par une déconnexion.
+    Closed,
+}
+
+impl std::fmt::Display for AdminIpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Formulations inchangées : elles sont déjà dans les journaux des
+            // appareils en service, et les changer casserait toute recherche
+            // portant dessus.
+            Self::Timeout => write!(f, "admin plugin: request timeout"),
+            Self::Closed => write!(f, "admin plugin: response dropped"),
+        }
+    }
+}
+
+impl std::error::Error for AdminIpcError {}
+
 pub struct AdminClient {
     writer: Mutex<OwnedWriteHalf>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<AdminResult>>>>,
@@ -230,10 +263,10 @@ impl AdminClient {
         }
         match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
             Ok(Ok(result)) => Ok(result),
-            Ok(Err(_)) => bail!("admin plugin: response dropped"),
+            Ok(Err(_)) => Err(AdminIpcError::Closed.into()),
             Err(_) => {
                 self.pending.lock().await.remove(&id);
-                bail!("admin plugin: request timeout")
+                Err(AdminIpcError::Timeout.into())
             }
         }
     }

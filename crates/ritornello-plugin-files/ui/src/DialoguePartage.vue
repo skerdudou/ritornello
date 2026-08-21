@@ -40,7 +40,18 @@ const host = ref('')
 const user = ref('')
 const password = ref('')
 const domain = ref('')
-const manuel = ref(false)
+/**
+ * Le mode manuel est **imposé** quand l'assistant ne peut pas fonctionner.
+ *
+ * Sans `smbclient` il n'y a rien à parcourir : offrir une bascule vers un
+ * assistant inerte, et un bouton « Se connecter » grisé, donnait deux
+ * commandes à comprendre pour un choix qui n'existe pas. La raison reste
+ * affichée (`smb_unavailable`) : c'est elle qui explique pourquoi les champs
+ * remplacent l'assistant.
+ */
+const manuelForce = computed(() => !props.donnees.canBrowseSmb)
+const manuelChoisi = ref(false)
+const manuel = computed(() => manuelForce.value || manuelChoisi.value)
 const partageManuel = ref('')
 const sousCheminManuel = ref('')
 
@@ -70,7 +81,7 @@ watch(
     user.value = ''
     password.value = ''
     domain.value = ''
-    manuel.value = false
+    manuelChoisi.value = false
     partageManuel.value = ''
     sousCheminManuel.value = ''
   },
@@ -257,7 +268,7 @@ function fermer(): void {
       <p v-if="message" class="min-w-0 break-words text-sm text-destructive" data-dlg-message>{{ message }}</p>
 
       <div class="flex flex-wrap justify-end gap-2">
-        <Button variant="ghost" data-manuel @click="manuel = !manuel">
+        <Button v-if="!manuelForce" variant="ghost" data-manuel @click="manuelChoisi = !manuelChoisi">
           {{ manuel ? t('btn_assistant') : t('btn_manual') }}
         </Button>
         <Button variant="ghost" data-annuler @click="fermer">{{ t('btn_cancel') }}</Button>
@@ -265,7 +276,7 @@ function fermer(): void {
           v-if="!manuel"
           variant="secondary"
           data-connect
-          :disabled="fige || !donnees.canBrowseSmb || ex.busy"
+          :disabled="fige || ex.busy"
           @click="connecter"
         >
           {{ ex.busy ? t('connecting') : t('btn_connect') }}

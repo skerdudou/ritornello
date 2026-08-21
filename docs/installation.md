@@ -306,11 +306,11 @@ an SMB share. Only the share needs anything installed:
 
     sudo apt install cifs-utils smbclient
 
-`cifs-utils` provides `mount.cifs`, without which a share is declared but
-never mounts; `smbclient` is **optional** — it is what lets the page browse
-a share *before* declaring it, and without it that wizard is greyed out
-while manual entry keeps working. [plugins.md](plugins.md) says what each
-one degrades when absent.
+`cifs-utils` provides `mount.cifs`, without which a share fails to mount and
+is refused rather than declared (see below); `smbclient` is **optional** —
+it is what lets the page browse a share *before* declaring it, and without
+it the wizard opens straight into manual entry, which keeps working just the
+same. [plugins.md](plugins.md) says what each one degrades when absent.
 
 Beyond those packages, a share needs the two files `deploy.sh` puts in
 place —
@@ -345,10 +345,13 @@ reconciles the declared shares (mounts what is missing, unmounts what is
 no longer declared). Why the boundary is drawn there, and what the root
 side revalidates, is in [plugins.md](plugins.md).
 
-**A refused mount** shows on the page with `systemctl`'s own error output,
-copied verbatim. A polkit refusal reads as such — "Interactive
-authentication required", or "Access denied" — and means the rule is
-missing or did not land: reinstall `51-ritornello-media.rules` into
+**A refused mount** shows in the declaration popin, which stays open with
+what was just typed still in it, and the share is not declared: the table
+entry and the credentials file that were tentatively written are both
+undone. The message carries `systemctl`'s own error output, copied
+verbatim. A polkit refusal reads as such — "Interactive authentication
+required", or "Access denied" — and means the rule is missing or did not
+land: reinstall `51-ritornello-media.rules` into
 `/etc/polkit-1/rules.d/` (a `deploy.sh` run does it), and check polkit
 itself is installed (see the previous section — it is absent by default on
 DietPi). There is no capability probe here, unlike the power buttons:

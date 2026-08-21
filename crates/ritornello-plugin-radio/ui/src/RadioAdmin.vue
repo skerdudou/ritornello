@@ -200,10 +200,10 @@ async function enregistrer(): Promise<void> {
 // Vol unique : le SDK sert les requetes d'admin strictement en serie. Un
 // second declenchement pendant qu'une recherche court se mettrait en file
 // derriere la premiere et, l'annuaire etant en panne (budget de 4 s cote
-// plugin), depasserait le plafond de 5 s du coeur — qui afficherait
-// « plugin injoignable ». La garde est partagee par le bouton et la touche
-// Entree, et levee dans un `finally` pour se rétablir aussi bien apres une
-// erreur qu'apres un succes.
+// plugin), depasserait le plafond de 5 s du coeur — qui repondrait par un
+// message d'erreur (`plugin_timeout`) inapproprie pour une action legitime. La
+// garde est partagee par le bouton et la touche Entree, et levee dans un
+// `finally` pour se rétablir aussi bien apres une erreur qu'apres un succes.
 async function chercher(): Promise<void> {
   // Meme garde qu'`enregistrer()` (voir son commentaire) : `:disabled` sur
   // le bouton ne protege pas `@keydown.enter`, qui atteint `chercher()`

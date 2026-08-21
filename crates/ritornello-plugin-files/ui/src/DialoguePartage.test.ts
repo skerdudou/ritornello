@@ -100,26 +100,35 @@ describe('DialoguePartage', () => {
     })
   })
 
-  it('sans smbclient l’assistant est grisé et la raison est nommée', async () => {
-    // Comme l'onglet Système grise le redémarrage : jamais de plantage, jamais
-    // un bouton qui échoue sans dire pourquoi.
+  it('sans smbclient la popin est d’emblée en saisie manuelle', async () => {
+    // Plus de bouton grisé à comprendre : il n'y a rien à parcourir, donc rien
+    // à basculer. La raison reste nommée, elle explique pourquoi les champs
+    // remplacent l'assistant.
     const { envoyer } = await monter({ can_browse_smb: false })
     expect((dansPopin('[data-smb-unavailable]')?.textContent ?? '').length).toBeGreaterThan(0)
-    expect(dansPopin('[data-connect]')?.getAttribute('disabled')).not.toBeNull()
+    expect(dansPopin('[data-manual-share]')).not.toBeNull()
+    expect(dansPopin('[data-connect]')).toBeNull()
+    expect(dansPopin('[data-manuel]')).toBeNull()
     expect(envoyer).not.toHaveBeenCalled()
   })
 
-  it('le repli manuel reste offert sans smbclient', async () => {
-    // Sans lui, ce chantier RETIRERAIT une capacité qui existe aujourd'hui.
-    await monter({ can_browse_smb: false })
+  it('avec smbclient la bascule manuelle reste offerte, et l’assistant est le défaut', async () => {
+    await monter({ can_browse_smb: true })
     expect(dansPopin('[data-manual-share]')).toBeNull()
+    expect(dansPopin('[data-manuel]')).not.toBeNull()
     await cliquerPopin('[data-manuel]')
     expect(dansPopin('[data-manual-share]')).not.toBeNull()
   })
 
+  it('le champ domaine dit qu’il est optionnel', async () => {
+    // Signalé à l'usage : « domaine » seul ne dit pas à quoi il sert, et se lit
+    // comme un champ à remplir. Il ne sert qu'à un compte de domaine Windows.
+    await monter({ can_browse_smb: true })
+    expect(dansPopin('[data-domain]')?.getAttribute('placeholder')).toContain('optionnel')
+  })
+
   it('la saisie manuelle déclare la source directement', async () => {
     const { envoyer } = await monter({ can_browse_smb: false })
-    await cliquerPopin('[data-manuel]')
     await saisirPopin('[data-host]', 'nas')
     await saisirPopin('[data-manual-share]', 'musique')
     await saisirPopin('[data-manual-subpath]', 'Albums')
@@ -145,7 +154,6 @@ describe('DialoguePartage', () => {
     // sous-chemin » mais un sous-chemin vide, que la validation refuse — le
     // partage serait alors indéclarable sans qu'aucun champ n'ait l'air fautif.
     const { envoyer } = await monter({ can_browse_smb: false })
-    await cliquerPopin('[data-manuel]')
     await saisirPopin('[data-host]', 'nas')
     await saisirPopin('[data-manual-share]', 'musique')
     await cliquerPopin('[data-choisir]')

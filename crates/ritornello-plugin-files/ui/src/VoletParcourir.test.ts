@@ -13,11 +13,15 @@ interface Niveau {
 
 /**
  * Simulacre d'un partage : le plugin ne rend qu'**un** niveau par `browse`,
- * celui qu'on lui demande. C'est ce qui rend la paresse observable — un
- * simulacre qui rendrait tout l'arbre d'un coup laisserait passer une page qui
- * demande tout au chargement.
+ * celui qu'on lui demande, et il range parcours et recherche au même endroit.
+ * `query` est ce qui les distingue.
  */
-function arbre(niveaux: Record<string, Niveau>, trouvailles: string[] = [], tronque = false) {
+function arbre(
+  niveaux: Record<string, Niveau>,
+  trouvailles: string[] = [],
+  tronque = false,
+  abandon = false,
+) {
   const s = serveur({ roots: [{ name: 'nas', kind: 'smb', host: 'h', share: 'musique' }] })
   s.surPut = (charge) => {
     const chemin = String(charge.path ?? '')
@@ -26,22 +30,23 @@ function arbre(niveaux: Record<string, Niveau>, trouvailles: string[] = [], tron
       s.data.browse = {
         root: 'nas',
         path: chemin,
+        query: '',
         dirs: n.dirs,
         files: n.files,
         playlists: n.playlists ?? [],
         results: [],
       }
     }
-    // Parcours et recherche se rangent au **même endroit** côté plugin : une
-    // recherche efface le niveau parcouru, et réciproquement.
     if (charge.op === 'search') {
       s.data.browse = {
         root: 'nas',
-        path: '',
+        path: chemin,
+        query: String(charge.query ?? ''),
         dirs: [],
         files: [],
         results: trouvailles,
         truncated: tronque,
+        gave_up: abandon,
       }
     }
   }
@@ -54,58 +59,80 @@ const NIVEAUX: Record<string, Niveau> = {
   'Albums/Jazz': { dirs: [], files: ['Kind of Blue.flac'] },
 }
 
-async function monterArbre(trouvailles: string[] = [], tronque = false) {
-  const s = arbre(NIVEAUX, trouvailles, tronque)
+async function monterArbre(trouvailles: string[] = [], tronque = false, abandon = false) {
+  const s = arbre(NIVEAUX, trouvailles, tronque, abandon)
   const w = mount(FilesAdmin, { props: { catalog: CATALOGUE, base: BASE } })
   await flushPromises()
   return { w, s }
 }
 
-describe('volet de parcours', () => {
+/** Noms affichés dans le niveau courant, dossiers comme fichiers. */
+function noms(w: ReturnType<typeof mount>): string[] {
+  return w.findAll('[data-browse-name]').map((n) => n.text())
+}
+
+describe('navigateur de fichiers', () => {
   beforeEach(() => vi.unstubAllGlobals())
 
-  it('ne demande qu’un niveau à l’ouverture de la page', async () => {
+  it('n’ouvre qu’un niveau au chargement de la page', async () => {
     // Régression encodée : demander l'arborescence entière d'un partage de
     // plusieurs dizaines de milliers de fichiers dépasserait de loin le plafond
-    // de 5 s du cœur — la page n'afficherait rien du tout, et le seul indice
-    // serait « plugin injoignable ».
+    // de 5 s du cœur — la page n'afficherait rien du tout.
     const { w, s } = await monterArbre()
     expect(s.putsDe('browse')).toEqual([{ op: 'browse', root: 'nas', path: '' }])
-    expect(w.findAll('[data-tree-row]')).toHaveLength(2)
+    expect(noms(w)).toEqual(['Albums', 'jingle.mp3'])
   })
 
-  it('ne demande un niveau qu’à son ouverture, et une seule fois', async () => {
+  it('descend dans un dossier et REMPLACE le niveau affiché', async () => {
+    // Un navigateur, pas un arbre : c'est ce qui borne la hauteur de la liste.
+    // Le chemin envoyé est recomposé — `Albums/Jazz` et non `Jazz`, que le
+    // plugin résoudrait contre la racine, donc ailleurs.
     const { w, s } = await monterArbre()
-    await w.find('[data-tree-toggle]').trigger('click')
+    await w.find('[data-browse-dir]').trigger('click')
     await flushPromises()
     expect(s.putsDe('browse').map((b) => b.path)).toEqual(['', 'Albums'])
-    // Albums, puis son contenu — Jazz, tout.m3u, 01.mp3 — puis jingle.mp3
-    expect(w.findAll('[data-tree-row]')).toHaveLength(5)
-
-    // Replier puis rouvrir ne coûte aucune requête : le niveau est mémorisé.
-    await w.find('[data-tree-toggle]').trigger('click')
+    expect(noms(w)).toEqual(['Jazz', 'tout.m3u', '01.mp3'])
+    await w.find('[data-browse-dir]').trigger('click')
     await flushPromises()
-    expect(w.findAll('[data-tree-row]')).toHaveLength(2)
-    await w.find('[data-tree-toggle]').trigger('click')
-    await flushPromises()
-    expect(w.findAll('[data-tree-row]')).toHaveLength(5)
-    expect(s.putsDe('browse')).toHaveLength(2)
-  })
-
-  it('descend d’un niveau supplémentaire sans redemander les précédents', async () => {
-    const { w, s } = await monterArbre()
-    await w.find('[data-tree-toggle]').trigger('click')
-    await flushPromises()
-    // Le deuxième bouton de pliage est celui de « Jazz », affiché en retrait.
-    await w.findAll('[data-tree-toggle]')[1]!.trigger('click')
-    await flushPromises()
-    // Le chemin envoyé est bien recomposé — `Albums/Jazz` et non `Jazz`, que le
-    // plugin résoudrait contre la racine, donc ailleurs.
     expect(s.putsDe('browse').map((b) => b.path)).toEqual(['', 'Albums', 'Albums/Jazz'])
-    expect(w.text()).toContain('Kind of Blue.flac')
+    expect(noms(w)).toEqual(['Kind of Blue.flac'])
   })
 
-  it('ajoute un dossier de façon récursive, et un fichier seul', async () => {
+  it('remonte au parent, et ne le propose pas au sommet', async () => {
+    const { w, s } = await monterArbre()
+    expect(w.find('[data-browse-up]').attributes('disabled')).toBeDefined()
+    await w.find('[data-browse-dir]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-browse-up]').attributes('disabled')).toBeUndefined()
+    await w.find('[data-browse-up]').trigger('click')
+    await flushPromises()
+    expect(s.putsDe('browse').map((b) => b.path)).toEqual(['', 'Albums', ''])
+    expect(noms(w)).toEqual(['Albums', 'jingle.mp3'])
+  })
+
+  it('affiche le chemin ouvert, racine comprise', async () => {
+    // Sans le nom de la racine, un chemin relatif ne dit pas où l'on se trouve
+    // quand plusieurs sources sont déclarées.
+    const { w } = await monterArbre()
+    await w.find('[data-browse-dir]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-browse-path]').attributes('title')).toBe('nas/Albums')
+  })
+
+  it('ajoute le dossier ouvert, sauf au sommet', async () => {
+    // Au sommet le geste existe déjà sur la ligne de la source (volet Sources) :
+    // deux boutons pour le même effet faisaient chercher une différence qui
+    // n'existait pas.
+    const { w, s } = await monterArbre()
+    expect(w.find('[data-add-current]').exists()).toBe(false)
+    await w.find('[data-browse-dir]').trigger('click')
+    await flushPromises()
+    await w.find('[data-add-current]').trigger('click')
+    await flushPromises()
+    expect(s.putsDe('add_dir')).toEqual([{ op: 'add_dir', root: 'nas', path: 'Albums' }])
+  })
+
+  it('ajoute un dossier listé de façon récursive, et un fichier seul', async () => {
     const { w, s } = await monterArbre()
     await w.find('[data-add-dir]').trigger('click')
     await flushPromises()
@@ -115,23 +142,58 @@ describe('volet de parcours', () => {
     expect(s.putsDe('add_file')).toEqual([{ op: 'add_file', root: 'nas', path: 'jingle.mp3' }])
   })
 
-  it('n’offre plus d’ajouter la source entière : c’est le volet Sources qui le fait', async () => {
-    // Le geste n'a pas disparu, il a déménagé sur la ligne de la source (voir
-    // VoletSources). Le laisser aux deux endroits donnait deux boutons pour le
-    // même effet, et faisait chercher une différence qui n'existait pas.
-    const { w } = await monterArbre()
-    expect(w.find('[data-add-root-dir]').exists()).toBe(false)
+  it('un m3u se **charge**, il ne s’ajoute pas', async () => {
+    // L'action est délibérément différente de celle des pistes : une liste
+    // remplace la liste en cours. Les confondre ferait ajouter un fichier texte
+    // que mpv tenterait de jouer.
+    const { w, s } = await monterArbre()
+    await w.find('[data-browse-dir]').trigger('click')
+    await flushPromises()
+    const rangees = w.findAll('[data-browse-row]')
+    const rangeeM3u = rangees.find((r) => r.find('[data-browse-name]').text() === 'tout.m3u')
+    expect(rangeeM3u).toBeDefined()
+    expect(rangeeM3u!.find('[data-add-file]').exists()).toBe(false)
+    await rangeeM3u!.find('[data-load-m3u]').trigger('click')
+    await flushPromises()
+    expect(s.putsDe('load_m3u')).toEqual([
+      { op: 'load_m3u', root: 'nas', path: 'Albums/tout.m3u' },
+    ])
+    expect(s.putsDe('add_file')).toEqual([])
   })
 
-  it('cherche dans la racine choisie et affiche les chemins trouvés', async () => {
+  it('cherche dans le dossier ouvert, sans effacer le niveau affiché', async () => {
+    // Les deux vivent au même endroit côté plugin : si la page lisait le niveau
+    // dans la réponse, une recherche viderait la liste sous les yeux.
+    const { w, s } = await monterArbre(['Albums/Jazz/miles.flac'])
+    await w.find('[data-browse-dir]').trigger('click')
+    await flushPromises()
+    await w.find('[data-search-query]').setValue('miles')
+    await w.find('[data-search]').trigger('click')
+    await flushPromises()
+    expect(s.putsDe('search')).toEqual([
+      { op: 'search', root: 'nas', path: 'Albums', query: 'miles' },
+    ])
+    // Le chemin complet, pas seulement le nom : une recherche rapporte des
+    // homonymes venus de dossiers différents, et rien d'autre ne les distingue.
+    expect(w.find('[data-search-row]').text()).toContain('Albums/Jazz/miles.flac')
+    expect(noms(w)).toContain('Jazz')
+  })
+
+  it('dit sur quel dossier la recherche porte', async () => {
+    const { w } = await monterArbre()
+    expect(w.find('[data-search-scope]').text()).toContain('nas')
+  })
+
+  it('ajoute un résultat de recherche par son chemin', async () => {
     const { w, s } = await monterArbre(['Albums/Jazz/miles.flac'])
     await w.find('[data-search-query]').setValue('miles')
     await w.find('[data-search]').trigger('click')
     await flushPromises()
-    expect(s.putsDe('search')).toEqual([{ op: 'search', root: 'nas', query: 'miles' }])
-    // Le chemin complet, pas seulement le nom : une recherche rapporte des
-    // homonymes venus de dossiers différents, et rien d'autre ne les distingue.
-    expect(w.find('[data-search-row]').text()).toContain('Albums/Jazz/miles.flac')
+    await w.find('[data-add-result]').trigger('click')
+    await flushPromises()
+    expect(s.putsDe('add_file')).toEqual([
+      { op: 'add_file', root: 'nas', path: 'Albums/Jazz/miles.flac' },
+    ])
   })
 
   it('signale une recherche tronquée au lieu de la présenter comme complète', async () => {
@@ -145,12 +207,55 @@ describe('volet de parcours', () => {
     expect(w.find('[data-search-truncated]').text()).toContain('affinez')
   })
 
+  it('une recherche abandonnée ne se fait pas passer pour « aucun résultat »', async () => {
+    // Défaut de revue : la marche rend `Ok(true)` que le plafond atteint soit
+    // celui des visites ou celui des résultats, et « Aucun résultat » —
+    // « ce fichier n'existe pas » — s'affichait pour une recherche qui avait
+    // simplement renoncé avant d'arriver jusqu'au fichier cherché.
+    const { w } = await monterArbre([], false, true)
+    await w.find('[data-search-query]').setValue('miles')
+    await w.find('[data-search]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-no-results]').exists()).toBe(false)
+    expect(w.find('[data-search-gave-up]').exists()).toBe(true)
+  })
+
+  it('descendre après une recherche efface les résultats, pas seulement le niveau', async () => {
+    // Symptôme observé : `search_scope` est une légende vivante (`computed`
+    // sur le dossier ouvert). Sans effacer `resultats`/`query` au changement de
+    // dossier, on obtient des résultats de « miles » dans Albums affichés sous
+    // une légende qui annonce déjà « Jazz », et un champ de recherche qui
+    // semble toujours actif alors qu'il ne correspond plus à rien.
+    const { w } = await monterArbre(['Albums/Jazz/miles.flac'])
+    await w.find('[data-browse-dir]').trigger('click')
+    await flushPromises()
+    await w.find('[data-search-query]').setValue('miles')
+    await w.find('[data-search]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-search-results]').exists()).toBe(true)
+    await w.find('[data-browse-dir]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-search-results]').exists()).toBe(false)
+    expect((w.find('[data-search-query]').element as HTMLInputElement).value).toBe('')
+  })
+
   it('une recherche vide n’émet rien', async () => {
     const { w, s } = await monterArbre()
     await w.find('[data-search-query]').setValue('   ')
     await w.find('[data-search]').trigger('click')
     await flushPromises()
     expect(s.putsDe('search')).toHaveLength(0)
+  })
+
+  it('ne prend pas une réponse de recherche pour un niveau', async () => {
+    // Garde-fou du marqueur `query` : sans lui, la réponse d'une recherche
+    // portant sur le dossier ouvert remplirait le niveau avec ses résultats,
+    // c'est-à-dire avec rien du tout (`dirs` et `files` y sont vides).
+    const { w } = await monterArbre(['Albums/Jazz/miles.flac'])
+    await w.find('[data-search-query]').setValue('miles')
+    await w.find('[data-search]').trigger('click')
+    await flushPromises()
+    expect(noms(w)).toEqual(['Albums', 'jingle.mp3'])
   })
 
   it('un refus de parcours ne fait pas passer le dossier pour vide', async () => {
@@ -162,7 +267,7 @@ describe('volet de parcours', () => {
     const w = mount(FilesAdmin, { props: { catalog: CATALOGUE, base: BASE } })
     await flushPromises()
     expect(w.find('[data-message]').text()).toBe(s.refus)
-    expect(w.find('[data-tree-empty]').exists()).toBe(false)
+    expect(w.find('[data-browse-empty]').exists()).toBe(false)
   })
 
   it('sans racine déclarée, le volet le dit au lieu d’émettre un parcours', async () => {
@@ -173,37 +278,5 @@ describe('volet de parcours', () => {
     // Même phrase que le volet Sources : deux formulations pour le même vide
     // laisseraient croire à deux causes différentes.
     expect(w.find('[data-volet-parcourir]').text()).toContain('Aucune source déclarée')
-  })
-
-  it('un m3u trouvé en parcourant se **charge**, il ne s’ajoute pas', async () => {
-    // L'action est délibérément différente de celle des pistes : une liste
-    // remplace la liste en cours. Les confondre ferait ajouter un fichier texte
-    // que mpv tenterait de jouer.
-    const { w, s } = await monterArbre()
-    await w.findAll('[data-tree-toggle]')[0]!.trigger('click')
-    await flushPromises()
-    const noms = w.findAll('[data-tree-name]').map((n) => n.text())
-    expect(noms).toContain('tout.m3u')
-
-    await w.find('[data-load-m3u]').trigger('click')
-    await flushPromises()
-    expect(s.putsDe('load_m3u')).toEqual([
-      { op: 'load_m3u', root: 'nas', path: 'Albums/tout.m3u' },
-    ])
-    // Et surtout : pas d'`add_file` sur ce fichier-là.
-    expect(s.putsDe('add_file')).toEqual([])
-  })
-
-  it('une liste de lecture n’offre pas l’ajout d’une piste', async () => {
-    // Garde-fou : les deux actions ne doivent pas coexister sur la même rangée,
-    // sinon le geste juste n'est plus qu'un choix parmi deux.
-    const { w } = await monterArbre()
-    await w.findAll('[data-tree-toggle]')[0]!.trigger('click')
-    await flushPromises()
-    const rangees = w.findAll('[data-tree-row]')
-    const rangeeM3u = rangees.find((r) => r.find('[data-tree-name]').text() === 'tout.m3u')
-    expect(rangeeM3u).toBeDefined()
-    expect(rangeeM3u!.find('[data-add-file]').exists()).toBe(false)
-    expect(rangeeM3u!.find('[data-load-m3u]').exists()).toBe(true)
   })
 })

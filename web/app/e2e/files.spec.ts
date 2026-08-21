@@ -100,27 +100,30 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   // volet Parcourir demande son premier niveau depuis un observateur qui se
   // declenche **pendant** le rendu provoque par l'enregistrement. Tant que le
   // vol unique de la page couvrait aussi la relecture, cet observateur recevait
-  // `null` et l'arbre restait vide indefiniment — mesure : `[data-tree-row]`
+  // `null` et le niveau restait vide indefiniment — mesure : `[data-browse-row]`
   // bloque a 0 pendant les 5 s d'attente. Le vol ne couvre plus que l'envoi.
-  const rangees = page.locator('[data-tree-row]')
+  const rangees = page.locator('[data-browse-row]')
   // Un seul niveau demande a l'ouverture : la racine ne contient que `Album`,
   // et aucun fichier audio a son sommet.
   await expect(rangees).toHaveCount(1)
-  await expect(rangees.first().locator('[data-tree-name]')).toHaveText('Album')
-  // Deplier : l'arbre est paresseux, ce niveau-la n'a pas encore ete demande.
-  await rangees.first().locator('[data-tree-toggle]').click()
+  await expect(rangees.first().locator('[data-browse-name]')).toHaveText('Album')
+  // Entrer dans le dossier : le navigateur remplace le niveau affiche, il ne
+  // le deplie pas en dessous.
+  await rangees.first().locator('[data-browse-dir]').click()
   // Les listes de lecture viennent **avant** les pistes : c'est souvent elles
   // qu'on cherche dans un dossier d'album, et une liste noyee sous cent
-  // fichiers ne se voit pas.
-  await expect(page.locator('[data-tree-name]')).toHaveText([
-    'Album',
+  // fichiers ne se voit pas. Et `Album` a disparu de l'ecran : c'est le niveau
+  // precedent, remplace par celui qu'on vient d'ouvrir.
+  await expect(page.locator('[data-browse-name]')).toHaveText([
     'tout.m3u',
     '01.mp3',
     '02.mp3',
     '03.mp3',
   ])
-  // Le bouton « ajouter ce dossier » de la seule rangee qui soit un dossier.
-  await page.locator('[data-add-dir]').click()
+  // « Ajouter ce dossier » : au sommet d'une source ce bouton n'existe pas
+  // (l'ajout de la source entiere vit sur sa ligne, dans le volet Sources),
+  // mais une fois entre dans `Album` il designe le dossier ouvert.
+  await page.locator('[data-add-current]').click()
   // Le balayage est **asynchrone** cote plugin : `add_dir` rend la main avant
   // la fin de la marche, et le protocole d'admin ne pousse rien. C'est le
   // sondage a la seconde de la page qui fait arriver les pistes — on attend
@@ -160,13 +163,14 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
 
   // --- Charger un m3u trouve en parcourant ----------------------------------
   // Un fichier de liste posé sur la source, avec des chemins relatifs a
-  // lui-meme. Il apparait dans l'arbre **a part** des pistes, et porte une
+  // lui-meme. Il apparait dans le niveau **a part** des pistes, et porte une
   // action differente : il remplace la liste au lieu de s'y ajouter.
-  // L'arbre est deja deplie par l'etape de parcours ci-dessus : le replier ici
-  // ferait disparaitre la rangee qu'on cherche.
+  // Le niveau ouvert est toujours `Album`, etabli par l'etape de parcours
+  // ci-dessus : rien ne l'a fait changer depuis (ajouter, enregistrer, vider
+  // et recharger la liste ne navigue pas ailleurs).
   const ligneM3u = page
-    .locator('[data-tree-row]')
-    .filter({ has: page.locator('[data-tree-name]', { hasText: 'tout.m3u' }) })
+    .locator('[data-browse-row]')
+    .filter({ has: page.locator('[data-browse-name]', { hasText: 'tout.m3u' }) })
   await expect(ligneM3u).toHaveCount(1)
   // Et surtout pas l'action d'ajout d'une piste : le geste juste ne doit pas
   // etre un choix parmi deux.
@@ -292,17 +296,23 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   await page.locator('[data-choix-dossier]', { hasText: 'Yann Tiersen' }).click()
   await page.locator('[data-choisir]').click()
 
-  // La source est declaree malgre l'echec du montage — c'est l'invariant :
-  // perdre la saisie parce qu'un NAS dort serait la pire des reponses.
-  await expect(page.locator('[data-source-row]')).toHaveCount(2)
+  // La source n'est plus declaree quand le montage echoue : la declaration est
+  // defaite en entier (table, fichier d'identifiants), et le refus remonte a
+  // la popin plutot que de la fermer — perdre la saisie parce qu'un NAS dort
+  // serait la pire des reponses. Une seule source reste : celle du dossier
+  // local etabli au debut du parcours.
+  await expect(page.locator('[data-source-row]')).toHaveCount(1)
+  // Le refus s'affiche verbatim dans la popin, pas seulement sur la page
+  // (derriere son voile gris, le bandeau de la page serait invisible au
+  // moment ou il compte).
+  await expect(page.locator('[data-dlg-message]')).toContainText(
+    'the share was not mounted, so it has not been declared',
+  )
+  // La popin reste ouverte, saisie comprise : rien ne force a tout retaper.
+  await expect(page.locator('[data-dlg-partage]')).toBeVisible()
+  await expect(page.locator('[data-host]')).toHaveValue('192.168.1.15')
   const apresPartage = await (await request.get('/plugins/files/api/data')).json()
-  expect(apresPartage.roots).toHaveLength(2)
-  const partage = apresPartage.roots.find((r: { kind: string }) => r.kind === 'smb')
-  // Nom derive du partage, sous-chemin garde tel quel — espace compris, ce que
-  // l'ancienne regle de validation refusait.
-  expect(partage.name).toBe('music')
-  expect(partage.subpath).toBe('Yann Tiersen')
-  expect(partage.host).toBe('192.168.1.15')
-  // Et le mot de passe n'est toujours nulle part dans ce que la page recoit.
+  expect(apresPartage.roots).toHaveLength(1)
+  // Et le mot de passe n'a jamais atteint la page, meme dans ce refus.
   expect(JSON.stringify(apresPartage)).not.toContain('peu-importe')
 })

@@ -90,12 +90,29 @@ export interface Entree {
 export interface Navigation {
   root: string
   path: string
+  /**
+   * Motif de la dernière recherche, vide pour un parcours.
+   *
+   * Ce que la page en fait : distinguer la réponse à SON parcours de celle à
+   * une recherche portant sur le même dossier — les deux se rangent au même
+   * endroit côté plugin.
+   */
+  query: string
   /** Contenu du niveau `path`, dossiers d'abord puis fichiers. */
   entrees: Entree[]
   /** Résultats de la dernière recherche. */
   resultats: Entree[]
   /** Le plugin a plafonné la recherche : il y en avait davantage. */
   tronque: boolean
+  /**
+   * Le parcours a été interrompu avant d'avoir tout vu, distinct de `tronque`.
+   *
+   * Deux causes, deux conseils : `tronque` invite à préciser le motif,
+   * `abandon` invite à descendre dans un sous-dossier. Les confondre faisait
+   * afficher « Aucun résultat » — donc « ce fichier n'existe pas » — pour une
+   * recherche qui avait simplement renoncé avant d'arriver jusqu'à lui.
+   */
+  abandon: boolean
 }
 
 /** Un volume monté de l'appareil, tel que le plugin le lit dans `/proc/mounts`. */
@@ -286,6 +303,7 @@ export function normaliserBrowse(brut: unknown): Navigation {
   return {
     root: chaine(o.root),
     path: base,
+    query: chaine(o.query),
     entrees,
     // La recherche ne rapporte que des fichiers audio (voir `scan::search`) :
     // aucun n'est une liste de lecture.
@@ -296,6 +314,7 @@ export function normaliserBrowse(brut: unknown): Navigation {
       playlist: false,
     })),
     tronque: o.truncated === true,
+    abandon: o.gave_up === true,
   }
 }
 

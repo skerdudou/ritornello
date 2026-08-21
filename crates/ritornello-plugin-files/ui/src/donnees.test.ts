@@ -101,6 +101,11 @@ describe('normalisation d’un parcours', () => {
     const nav = normaliserBrowse({ root: 'n', path: '', dirs: [], files: ['a.mp3'] })
     expect(nav.entrees.map((e) => e.playlist)).toEqual([false])
   })
+
+  it('retient le motif de recherche, vide pour un parcours', () => {
+    expect(normaliserBrowse({ root: 'nas', path: 'A', query: 'miles' }).query).toBe('miles')
+    expect(normaliserBrowse({ root: 'nas', path: 'A' }).query).toBe('')
+  })
 })
 
 describe('normalisation de la charge complète', () => {

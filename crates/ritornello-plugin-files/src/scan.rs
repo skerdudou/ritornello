@@ -4,10 +4,45 @@
 use ritornello_i18n::Catalog;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// Plafond d'une liste. Protège trois choses à la fois : la charge utile JSON
 /// servie à la page, l'écriture du m3u, et la liste de lecture de mpv.
 pub const MAX_TRACKS: usize = 2000;
+
+/// Plafond de **visite** d'une recherche, distinct de `MAX_TRACKS`.
+///
+/// `MAX_TRACKS` borne ce que la liste de lecture peut contenir ; le confondre
+/// avec le coût d'un parcours faisait refuser toute recherche lancée dans un
+/// dossier de plus de 2000 pistes, avec le message de l'ajout — mesuré à la
+/// racine d'un NAS. Une recherche ne remplit rien : elle n'a besoin que d'une
+/// borne qui l'empêche de tourner sans fin, et le dépassement se rapporte
+/// comme « tronqué ».
+///
+/// Compte désormais **chaque entrée inspectée** — dossier ou fichier, audio ou
+/// non — et non plus seulement les fichiers audio rencontrés : un dossier
+/// plein de fichiers non-audio n'était borné par rien avant ce changement.
+/// Relevé en conséquence : c'est [`DELAI_RECHERCHE`] qui protège désormais un
+/// partage lent (le coût dominant y est le `read_dir` par dossier, pas le
+/// compte d'entrées) ; ce plafond reste un filet pour le cas local, rapide par
+/// entrée, où seul un nombre démesuré d'entrées doit être refusé.
+pub const MAX_VISITES: usize = 500_000;
+
+/// Délai maximal accordé à une recherche.
+///
+/// Franchement sous les 5 s du protocole d'admin, qui est **sériel** : passé
+/// ce délai, les `get_data` du sondage de la page s'empilent derrière la
+/// recherche en cours et expirent tous — c'est le mode de panne de l'incident
+/// du 2026-08-17, où la page disparaissait. La marge restante couvre la
+/// résolution des chemins et la sérialisation qui suivent la marche.
+pub const DELAI_RECHERCHE: Duration = Duration::from_secs(3);
+
+/// Nombre d'entrées inspectées entre deux mesures de l'échéance.
+///
+/// `Instant::elapsed` n'est pas gratuit : le mesurer à chaque entrée
+/// ajouterait un appel système par fichier, sur le chemin le plus chaud de la
+/// marche.
+const PAS_ECHEANCE: usize = 64;
 
 const EXTENSIONS: &[&str] = &[
     "mp3", "flac", "ogg", "oga", "opus", "m4a", "aac", "wav", "wma", "aiff", "ape", "wv", "mpc",
@@ -118,29 +153,135 @@ pub fn list_dir(dir: &Path) -> Result<Contenu, ScanError> {
     Ok(out)
 }
 
-/// Cherche récursivement les fichiers audio dont le nom contient `motif`
-/// (comparaison insensible à la casse), plafonnés à `cap` résultats.
+/// Pourquoi une recherche s'est arrêtée.
 ///
-/// Le plafond est **silencieux côté résultat mais rendu à l'appelant** : une
-/// recherche large sur une grosse bibliothèque doit rendre la main, et la page
-/// doit pouvoir dire « affinez » plutôt que d'afficher une liste tronquée sans
-/// le signaler.
-pub fn search(dir: &Path, motif: &str, cap: usize) -> Result<(Vec<PathBuf>, bool), ScanError> {
+/// Deux causes, deux conseils à donner : trop de correspondances invite à
+/// préciser le motif, un parcours interrompu invite à descendre dans un
+/// sous-dossier. Les confondre faisait afficher « Aucun résultat » — donc « ce
+/// fichier n'existe pas » — à quelqu'un dont la recherche avait simplement
+/// renoncé avant d'arriver jusqu'à lui.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinDeRecherche {
+    /// Tout le dossier a été parcouru.
+    Complete,
+    /// Le plafond de résultats est atteint : il y en avait davantage.
+    TropDeResultats,
+    /// Le parcours a été interrompu avant d'avoir tout vu.
+    Interrompue,
+}
+
+/// Cherche récursivement les fichiers audio dont le nom contient `motif`
+/// (comparaison insensible à la casse).
+///
+/// Deux bornes, et deux raisons distinctes : `cap` limite ce qu'on **rapporte**
+/// à la page, `plafond_visites` ce qu'on accepte de **parcourir**. L'une comme
+/// l'autre rend une [`FinDeRecherche`] distincte, jamais un refus : une liste
+/// partielle annoncée comme telle est utile, un refus ne l'est pas.
+///
+/// Le filtre s'applique **pendant** la marche : collecter d'abord tout le
+/// dossier pour ne garder ensuite qu'une poignée de noms était ce qui faisait
+/// buter la recherche sur le plafond de la liste de lecture.
+pub fn search(
+    dir: &Path,
+    motif: &str,
+    cap: usize,
+    plafond_visites: usize,
+    delai: Duration,
+) -> Result<(Vec<PathBuf>, FinDeRecherche), ScanError> {
     let motif = motif.to_lowercase();
     if motif.is_empty() {
-        return Ok((Vec::new(), false));
+        return Ok((Vec::new(), FinDeRecherche::Complete));
     }
-    let tous = walk(dir, MAX_TRACKS)?;
-    let trouves: Vec<PathBuf> = tous
-        .into_iter()
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.to_lowercase().contains(&motif))
-        })
-        .collect();
-    let tronque = trouves.len() > cap;
-    Ok((trouves.into_iter().take(cap).collect(), tronque))
+    let mut out = Vec::new();
+    let mut visites = 0usize;
+    let mut vus = HashSet::new();
+    let debut = Instant::now();
+    // `cap + 1` : on en cherche un de plus que ce qu'on rend, pour distinguer
+    // « exactement cap résultats » de « il y en avait davantage ». Sans cela une
+    // liste complète de cap éléments serait annoncée comme tronquée.
+    let arrete = marche_cherchant(
+        dir,
+        &motif,
+        cap + 1,
+        plafond_visites,
+        debut,
+        delai,
+        &mut out,
+        &mut visites,
+        &mut vus,
+    )?;
+    out.truncate(cap);
+    Ok((out, arrete.unwrap_or(FinDeRecherche::Complete)))
+}
+
+/// Marche filtrante. Rend la cause d'un arrêt anticipé, `None` si la marche a
+/// couvert tout le dossier.
+fn marche_cherchant(
+    dir: &Path,
+    motif: &str,
+    cap: usize,
+    plafond_visites: usize,
+    debut: Instant,
+    delai: Duration,
+    out: &mut Vec<PathBuf>,
+    visites: &mut usize,
+    vus: &mut HashSet<PathBuf>,
+) -> Result<Option<FinDeRecherche>, ScanError> {
+    let canon =
+        dir.canonicalize().map_err(|_| ScanError::Io { path: dir.display().to_string() })?;
+    // Même garde que `marche` : un lien pointant vers un ancêtre ferait tourner
+    // la marche en produisant des chemins de plus en plus longs.
+    if !vus.insert(canon) {
+        return Ok(None);
+    }
+    let lecture =
+        std::fs::read_dir(dir).map_err(|_| ScanError::Io { path: dir.display().to_string() })?;
+    let mut sous_dossiers = Vec::new();
+    for entree in lecture {
+        let Ok(entree) = entree else { continue };
+        let chemin = entree.path();
+        // Chaque entrée compte, dossier ou fichier, audio ou non : un dossier
+        // plein de fichiers non-audio n'était borné par rien tant que seuls
+        // les fichiers audio étaient comptés.
+        *visites += 1;
+        if *visites > plafond_visites {
+            return Ok(Some(FinDeRecherche::Interrompue));
+        }
+        // Mesurée toutes les `PAS_ECHEANCE` entrées, pas à chaque entrée :
+        // `Instant::elapsed` n'est pas gratuit.
+        if *visites % PAS_ECHEANCE == 0 && debut.elapsed() >= delai {
+            return Ok(Some(FinDeRecherche::Interrompue));
+        }
+        // `metadata` et non `symlink_metadata`, comme dans `marche` : un lien
+        // vers un dossier réel doit être suivi.
+        let Ok(meta) = std::fs::metadata(&chemin) else { continue };
+        if meta.is_dir() {
+            sous_dossiers.push(chemin);
+            continue;
+        }
+        if !(meta.is_file() && is_audio(&chemin)) {
+            continue;
+        }
+        let correspond = chemin
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.to_lowercase().contains(motif));
+        if correspond {
+            out.push(chemin);
+            if out.len() >= cap {
+                return Ok(Some(FinDeRecherche::TropDeResultats));
+            }
+        }
+    }
+    sous_dossiers.sort();
+    for d in sous_dossiers {
+        if let Some(raison) =
+            marche_cherchant(&d, motif, cap, plafond_visites, debut, delai, out, visites, vus)?
+        {
+            return Ok(Some(raison));
+        }
+    }
+    Ok(None)
 }
 
 fn marche(
@@ -303,6 +444,150 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = walk(&dir.path().join("absent"), MAX_TRACKS).unwrap_err();
         assert!(matches!(err, ScanError::Io { .. }));
+    }
+
+    #[test]
+    fn une_recherche_au_dela_du_plafond_tronque_au_lieu_de_refuser() {
+        // Symptôme mesuré sur un vrai NAS : chercher à la racine renvoyait « this
+        // folder holds more than 2000 tracks: narrow it down, or add its
+        // subfolders one by one » — le message de l'AJOUT — pour une recherche
+        // qui n'ajoute rien à la liste. La cause : `search` réutilisait
+        // `MAX_TRACKS`, le plafond de la liste de lecture, comme plafond de
+        // marche. Une recherche trop large se tronque et le dit ; elle ne se
+        // refuse pas.
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            fichier(dir.path(), &format!("{i}.mp3"));
+        }
+        let (trouves, fin) = search(dir.path(), "mp3", 200, 3, DELAI_RECHERCHE).expect("aucun refus attendu");
+        assert_ne!(fin, FinDeRecherche::Complete, "un plafond atteint doit se dire");
+        assert!(!trouves.is_empty(), "des resultats partiels valent mieux que rien");
+    }
+
+    #[test]
+    fn une_recherche_interrompue_par_le_plafond_de_visites_le_dit_comme_telle() {
+        // Défaut trouvé en revue : la marche rendait `Ok(true)` que le plafond
+        // atteint soit celui des VISITES ou celui des RÉSULTATS, et la page
+        // affichait alors « Aucun résultat » — donc « ce fichier n'existe pas »
+        // — pour une recherche qui avait simplement renoncé avant d'arriver
+        // jusqu'à lui. Ici le plafond de visites est atteint bien avant celui
+        // des résultats (200) : la cause doit se distinguer.
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            fichier(dir.path(), &format!("{i}.mp3"));
+        }
+        let (_, fin) = search(dir.path(), "mp3", 200, 3, DELAI_RECHERCHE).unwrap();
+        assert_eq!(fin, FinDeRecherche::Interrompue);
+    }
+
+    #[test]
+    fn une_recherche_qui_depasse_le_plafond_de_resultats_le_dit_comme_telle() {
+        // L'autre cause d'arrêt : ici le plafond de visites est large, seul
+        // celui des résultats est en cause.
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            fichier(dir.path(), &format!("miles{i}.mp3"));
+        }
+        let (trouves, fin) = search(dir.path(), "miles", 3, MAX_VISITES, DELAI_RECHERCHE).unwrap();
+        assert_eq!(fin, FinDeRecherche::TropDeResultats);
+        assert_eq!(trouves.len(), 3);
+    }
+
+    #[test]
+    fn une_recherche_qui_a_tout_parcouru_est_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        fichier(dir.path(), "A/miles.flac");
+        let (_, fin) = search(dir.path(), "miles", 200, MAX_VISITES, DELAI_RECHERCHE).unwrap();
+        assert_eq!(fin, FinDeRecherche::Complete);
+    }
+
+    #[test]
+    fn une_recherche_avec_exactement_cap_resultats_est_complete() {
+        // Régime non couvert avant la revue, et pourtant toute la raison du
+        // `cap + 1` : sans lui, une liste complète de `cap` éléments serait
+        // annoncée comme tronquée alors qu'elle est exhaustive.
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..3 {
+            fichier(dir.path(), &format!("miles{i}.mp3"));
+        }
+        let (trouves, fin) = search(dir.path(), "miles", 3, MAX_VISITES, DELAI_RECHERCHE).unwrap();
+        assert_eq!(trouves.len(), 3);
+        assert_eq!(fin, FinDeRecherche::Complete);
+    }
+
+    #[test]
+    fn une_recherche_avec_plus_de_cap_resultats_et_un_plafond_de_visites_large_est_tronquee() {
+        // L'autre régime non couvert : le plafond de visites n'entre pas en
+        // ligne de compte, seul celui des résultats doit se déclencher.
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..10 {
+            fichier(dir.path(), &format!("miles{i}.mp3"));
+        }
+        let (trouves, fin) = search(dir.path(), "miles", 3, 1_000_000, DELAI_RECHERCHE).unwrap();
+        assert_eq!(trouves.len(), 3);
+        assert_eq!(fin, FinDeRecherche::TropDeResultats);
+    }
+
+    #[test]
+    fn le_delai_de_recherche_est_franchement_sous_le_plafond_du_protocole() {
+        // Le protocole admin abandonne une requête après 5 s ; il faut de la
+        // marge pour la résolution des chemins et la sérialisation qui suivent
+        // la marche, sans quoi le délai lui-même dépasserait le plafond du
+        // cœur.
+        assert!(DELAI_RECHERCHE < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn une_recherche_qui_depasse_son_delai_est_interrompue_sans_attendre() {
+        // Le compte de visites ne protège pas un partage lent : le coût y est
+        // dominant par `read_dir`, pas par entrée. Un délai nul permet
+        // d'observer l'interruption sans faire dépendre le test d'une horloge.
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..(PAS_ECHEANCE * 2) {
+            fichier(dir.path(), &format!("{i}.mp3"));
+        }
+        let (_, fin) = search(dir.path(), "mp3", 200, MAX_VISITES, Duration::ZERO).unwrap();
+        assert_eq!(fin, FinDeRecherche::Interrompue);
+    }
+
+    #[test]
+    fn un_dossier_plein_de_fichiers_non_audio_est_borne_par_le_plafond_de_visites() {
+        // Défaut corrigé : `visites` ne comptait que les fichiers AUDIO, donc un
+        // dossier plein de fichiers non-audio n'était borné par rien — la
+        // marche pouvait inspecter un nombre de fichiers arbitraire sans jamais
+        // s'arrêter sur ce plafond.
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            fichier(dir.path(), &format!("{i}.txt"));
+        }
+        let (trouves, fin) = search(dir.path(), "txt", 200, 3, DELAI_RECHERCHE).unwrap();
+        assert_eq!(fin, FinDeRecherche::Interrompue);
+        assert!(trouves.is_empty(), "aucun fichier non-audio ne doit etre rapporte");
+    }
+
+    #[test]
+    fn le_plafond_de_visite_de_la_recherche_depasse_celui_de_la_liste() {
+        // Les deux plafonds ne mesurent pas la même chose : `MAX_TRACKS` borne ce
+        // qu'on peut AJOUTER, `MAX_VISITES` ce qu'on peut PARCOURIR en cherchant.
+        // Les confondre est exactement le défaut corrigé ici.
+        assert!(MAX_VISITES > MAX_TRACKS);
+    }
+
+    #[test]
+    fn une_recherche_rend_les_correspondances_et_seulement_elles() {
+        let dir = tempfile::tempdir().unwrap();
+        fichier(dir.path(), "A/miles.flac");
+        fichier(dir.path(), "A/autre.mp3");
+        fichier(dir.path(), "B/sous/MILES live.mp3");
+        let (trouves, fin) = search(dir.path(), "miles", 200, MAX_VISITES, DELAI_RECHERCHE).unwrap();
+        let mut relatifs: Vec<String> = trouves
+            .iter()
+            .map(|p| p.strip_prefix(dir.path()).unwrap().to_string_lossy().replace('\\', "/"))
+            .collect();
+        relatifs.sort();
+        // Insensible à la casse, et sur le nom de fichier seul.
+        assert_eq!(relatifs, vec!["A/miles.flac", "B/sous/MILES live.mp3"]);
+        assert_eq!(fin, FinDeRecherche::Complete, "trois fichiers ne remplissent aucun plafond");
     }
 
     #[test]

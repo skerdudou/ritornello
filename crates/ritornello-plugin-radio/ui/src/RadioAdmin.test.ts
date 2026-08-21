@@ -273,7 +273,8 @@ describe('RadioAdmin', () => {
   it('vol unique : un second déclenchement pendant une recherche n’émet rien', async () => {
     // Le SDK sert les requetes d'admin strictement en serie : une seconde
     // recherche mise en file derriere la premiere depasserait le plafond de
-    // 5 s du coeur, qui afficherait « plugin injoignable ».
+    // 5 s du coeur, qui repondrait par la phrase traduite de son catalogue
+    // (`plugin_timeout`) plutot qu'un code nu.
     let debloquer: () => void = () => {}
     const enCours = new Promise<void>((r) => (debloquer = r))
     const spy = vi.fn(async (_url: string, init?: RequestInit) => {

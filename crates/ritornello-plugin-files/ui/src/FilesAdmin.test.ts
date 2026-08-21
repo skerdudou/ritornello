@@ -247,8 +247,8 @@ describe('FilesAdmin, la page', () => {
   it('vol unique : deux opérations lancées coup sur coup n’en émettent qu’une', async () => {
     // Le SDK sert les requêtes d'admin strictement en série et le cœur
     // abandonne au bout de 5 s : la seconde, mise en file derrière la première,
-    // dépasserait le plafond et s'afficherait en « plugin injoignable » pour
-    // une action pourtant légitime.
+    // dépasserait le plafond et recevrait la phrase traduite du catalogue du
+    // cœur (`plugin_timeout`) pour une action pourtant légitime.
     let debloquer: () => void = () => {}
     const enCours = new Promise<void>((r) => (debloquer = r))
     const s = serveur({ playlist: [{ path: 'a.mp3', name: 'A' }] })
@@ -267,5 +267,15 @@ describe('FilesAdmin, la page', () => {
     await w.find('[data-clear]').trigger('click')
     await flushPromises()
     expect(s.putsDe('clear')).toHaveLength(2)
+  })
+
+  it('présente la liste en cours avant les deux autres volets', async () => {
+    // L'ordre est celui de l'usage : on regarde ce qui joue, puis on complète.
+    // Déclarer une source est rare, parcourir vient après avoir vu la liste.
+    const { w } = await monter({ roots: [{ name: 'nas', kind: 'local', path: '/m' }] })
+    const ordre = w
+      .findAll('[data-volet-liste],[data-volet-sources],[data-volet-parcourir]')
+      .map((s) => Object.keys(s.attributes()).find((a) => a.startsWith('data-volet')))
+    expect(ordre).toEqual(['data-volet-liste', 'data-volet-sources', 'data-volet-parcourir'])
   })
 })

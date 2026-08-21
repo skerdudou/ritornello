@@ -163,8 +163,9 @@ onUnmounted(() => fermerLecteur?.())
 
 // Vol unique : le SDK sert les requêtes d'admin strictement en série, et le
 // cœur abandonne au bout de 5 s. Deux opérations déclenchées coup sur coup se
-// mettraient en file, la seconde dépassant le plafond — le cœur afficherait
-// « plugin injoignable » pour une action pourtant légitime.
+// mettraient en file, la seconde dépassant le plafond — le cœur répondrait
+// par la phrase traduite de son catalogue (`plugin_timeout`) pour une action
+// pourtant légitime.
 /** Un envoi est en vol : c'est ce qui interdit le double-envoi. */
 const envoiEnCours = ref(false)
 /** Une relecture suit un envoi : l'IHM reste grisée, mais un observateur a le
@@ -277,6 +278,13 @@ const scan = computed(
     >
 
     <template v-if="donnees">
+      <VoletListe
+        :donnees="donnees"
+        :t="t"
+        :envoyer="envoyer"
+        :fige="chargementEchoue || enCours"
+        :est-source-active="estSourceActive"
+      />
       <VoletSources
         :donnees="donnees"
         :t="t"
@@ -289,13 +297,6 @@ const scan = computed(
         :t="t"
         :envoyer="envoyer"
         :fige="chargementEchoue || enCours"
-      />
-      <VoletListe
-        :donnees="donnees"
-        :t="t"
-        :envoyer="envoyer"
-        :fige="chargementEchoue || enCours"
-        :est-source-active="estSourceActive"
       />
     </template>
   </div>
