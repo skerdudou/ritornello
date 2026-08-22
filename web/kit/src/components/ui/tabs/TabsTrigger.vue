@@ -16,7 +16,10 @@ const forwardedProps = useForwardProps(delegatedProps)
     data-slot="tabs-trigger"
     v-bind="forwardedProps"
     :class="cn(
-      `data-[state=active]:bg-background data-[state=active]:text-foreground focus-visible:ring-ring/50 inline-flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1 text-sm font-medium whitespace-nowrap transition-[color,box-shadow] cursor-pointer data-[state=active]:shadow-sm outline-none focus-visible:ring-3 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4`,
+      // Souligne plutot que pilule : la barre d'onglets coiffe une page deja
+      // dense, et un bandeau gris a coins arrondis y pesait plus que le
+      // contenu qu'il annonce. Le trait actif suffit a dire ou l'on est.
+      `data-[state=active]:border-foreground data-[state=active]:text-foreground hover:text-foreground focus-visible:ring-ring/50 -mb-px inline-flex items-center justify-center gap-1.5 border-b-2 border-transparent px-1 pb-2 text-sm font-medium whitespace-nowrap transition-colors cursor-pointer outline-none focus-visible:ring-3 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4`,
       props.class,
     )"
   >

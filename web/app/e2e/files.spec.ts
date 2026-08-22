@@ -52,8 +52,20 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   await page.goto('/plugins/files/')
   // Le module ESM du plugin est charge dynamiquement et resolu par l'import
   // map : c'est ce qu'aucun test unitaire ne peut verifier.
+  // Un onglet ouvert doit en **fermer** un autre. Signale a l'usage : les
+  // panneaux restent montes (`force-mount`, pour ne pas perdre le dossier
+  // ouvert du navigateur), et reka-ui ne pose alors aucun `hidden` -- il laisse
+  // le consommateur masquer. Sans la classe qui s'en charge, les trois volets
+  // s'affichaient d'un coup et les onglets n'avaient aucun effet visible.
+  // Rien d'autre que ce parcours ne peut l'attraper : jsdom n'a pas de moteur
+  // de mise en page, et l'assertion unitaire equivalente passerait a tort.
+  await expect(page.locator('[data-volet-liste]')).toBeVisible()
+  await expect(page.locator('[data-volet-parcourir]')).toBeHidden()
+  await expect(page.locator('[data-volet-sources]')).toBeHidden()
+
   await ouvrirOnglet('sources')
   await expect(page.locator('[data-volet-sources]')).toBeVisible()
+  await expect(page.locator('[data-volet-liste]')).toBeHidden()
   // Aucune source : la preuve que le harnais a bien detourne
   // `RITORNELLO_FILES_ROOTS` vers son repertoire jetable. Sans cela, une
   // execution sur une machine ou Ritornello est installe lirait — et

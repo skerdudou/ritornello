@@ -16,7 +16,7 @@ const forwardedProps = useForwardProps(delegatedProps)
     data-slot="tabs-list"
     v-bind="forwardedProps"
     :class="cn(
-      'bg-muted text-muted-foreground inline-flex h-9 w-fit items-center justify-center rounded-lg p-1',
+      'text-muted-foreground border-border inline-flex w-full items-center justify-start gap-4 border-b',
       props.class,
     )"
   >
