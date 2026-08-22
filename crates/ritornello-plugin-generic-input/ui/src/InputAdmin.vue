@@ -55,6 +55,14 @@ const message = ref('')
 // l'ouverture de la popin. Ce n'est pas une cible d'ecriture : la destination
 // du code capture est la fermeture `i` d'`apprendre`.
 const ligneApprise = ref<number | null>(null)
+/**
+ * Secondes restantes avant l'abandon, pour la popin.
+ *
+ * Calculees ici et non dans la popin : l'echeance vit avec le sondage, et un
+ * second minuteur cote popin deriverait du premier -- il afficherait un
+ * chiffre que rien ne garantit. Zero vaut « pas d'apprentissage en cours ».
+ */
+const secondesRestantes = ref(0)
 // Case « ajouter aux codes existants » de la popin, remise a faux a chaque
 // ouverture : le geste courant reste le remplacement.
 const ajouter = ref(false)
@@ -134,6 +142,10 @@ watch(device, async () => {
 function stopTimer() {
   if (timer) clearInterval(timer)
   timer = null
+  // Remis a zero avec le minuteur qui l'alimente : sans cela le dernier
+  // chiffre affiche resterait fige derriere le voile, et reapparaitrait tel
+  // quel a l'ouverture suivante avant le premier tour de sondage.
+  secondesRestantes.value = 0
 }
 
 async function arreterApprentissage(texte: string) {
@@ -212,6 +224,9 @@ async function apprendre(i: number) {
     message.value = ''
     ajouter.value = false
     const echeance = Date.now() + DELAI_MS
+    // Pose des maintenant, avant le premier tour du minuteur : sans cela la
+    // popin s'ouvrirait sur un compte a rebours vide le temps d'un tour.
+    secondesRestantes.value = Math.ceil(DELAI_MS / 1000)
     // Garde de recouvrement : sur une machine lente, un GET qui depasse
     // l'intervalle empilerait des requetes dans la file serielle du plugin —
     // le meme risque que celui documente pour la recherche radio.
@@ -224,6 +239,10 @@ async function apprendre(i: number) {
           await arreterApprentissage(t.value('learn_timeout'))
           return
         }
+        // Arrondi au superieur : a 29,4 s restantes on affiche « 30 », jamais
+        // un « 0 » trompeur sur la derniere fraction de seconde -- l'abandon,
+        // lui, est decide par la comparaison ci-dessus, pas par ce chiffre.
+        secondesRestantes.value = Math.ceil((echeance - Date.now()) / 1000)
         let d: Data
         try {
           d = await api.get<Data>(url('api/data'))
@@ -432,6 +451,7 @@ function exporter() {
       :t="t"
       :action="libelleActionApprise"
       :device="device"
+      :secondes="secondesRestantes"
       v-model:ajouter="ajouter"
       @annuler="annulerApprentissage"
     />

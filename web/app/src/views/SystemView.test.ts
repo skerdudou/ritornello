@@ -1342,18 +1342,26 @@ describe('SystemView', () => {
       w.unmount()
     })
 
-    it('le bouton annonce le total et n apparaît qu au-delà de la carte', async () => {
+    it('le bouton annonce le total et s offre dès la première erreur', async () => {
       stub(payload(), CATALOGUE, { lines: DOUZE })
       const w = await monter()
       expect(w.get('[data-logs-all]').text()).toContain('12')
       w.unmount()
 
-      // Trois erreurs : la carte les montre déjà toutes, une popin n'aurait
-      // rien de plus à dire.
+      // Trois erreurs : la carte les montre déjà toutes, et le bouton reste
+      // offert quand même. Signalé à l'usage — reserve au journal long, le
+      // filtre ne se decouvrait qu'au pire moment, quand il y a trop a lire
+      // pour explorer l'ecran.
       stub(payload(), CATALOGUE, { lines: DOUZE.slice(0, 3) })
       const peu = await monter()
-      expect(peu.find('[data-logs-all]').exists()).toBe(false)
+      expect(peu.get('[data-logs-all]').text()).toContain('3')
       peu.unmount()
+
+      // Journal vide : il n'y a rien a ouvrir, le bouton disparait.
+      stub(payload(), CATALOGUE, { lines: [] })
+      const vide = await monter()
+      expect(vide.find('[data-logs-all]').exists()).toBe(false)
+      vide.unmount()
     })
 
     it('la popin liste tout le journal', async () => {

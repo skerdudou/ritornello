@@ -927,10 +927,13 @@ async function attendreRetour(avant: number | null, maxMs: number, cleSucces: st
         <ul class="space-y-1 font-mono text-xs text-muted-foreground">
           <li v-for="(l, i) in logsCarte" :key="i" data-log-line>{{ l }}</li>
         </ul>
-        <!-- Bouton seulement quand la carte ne montre pas déjà tout : avec
-             trois erreurs au compteur, une popin n'aurait rien de plus à dire. -->
+        <!-- Offert dès la première erreur, et non seulement quand la carte
+             déborde. Signalé à l'usage : réservé au journal long, le filtre ne
+             se découvrait qu'au moment où il y a trop à lire pour explorer
+             l'écran. Il ne disparaît que sur un journal vide, où il n'y aurait
+             rien à ouvrir. -->
         <Button
-          v-if="logs.length > LOGS_CARTE"
+          v-if="logs.length"
           variant="outline"
           size="sm"
           data-logs-all

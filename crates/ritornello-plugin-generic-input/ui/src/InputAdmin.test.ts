@@ -11,6 +11,7 @@ const CATALOGUE = {
   dlg_learn_title: 'Apprentissage d’une touche',
   dlg_learn_desc: 'Appuyez sur une touche du périphérique « {device} »…',
   learn_append_label: 'Ajouter aux codes existants',
+  learn_countdown: 'Il reste {s} s',
   saved: 'Enregistré', save_error: 'Échec : ', load_error: 'Erreur : ', no_device: 'Aucun périphérique',
   conflict_code: 'le code {code} est déjà affecté à {action}',
   conflict_dup: 'le code {code} est saisi deux fois',
@@ -187,6 +188,26 @@ describe('InputAdmin', () => {
     expect(contenu).not.toContain('Veille')
     // Et le peripherique courant, nomme par la description.
     expect(contenu).toContain('mce')
+  })
+
+  it('apprentissage : le compte à rebours part de 30 s et décroît', async () => {
+    // Sans lui, la popin se referme d'elle-même au bout de 30 s sans que rien
+    // n'ait laissé prévoir l'échéance : on croit l'appareil muet alors qu'on a
+    // simplement mis trop de temps à trouver la touche.
+    vi.useFakeTimers()
+    stub(() => ({ ...DATA, learning: { captured: null } }))
+    const w = monterVue()
+    await vi.advanceTimersByTimeAsync(0)
+    const muet = w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
+    await muet.find('[data-learn]').trigger('click')
+    await vi.advanceTimersByTimeAsync(0)
+    // Pose des l'ouverture, sans attendre le premier tour de sondage.
+    expect(popin()!.querySelector('[data-learn-countdown]')!.textContent).toContain('30')
+    // Dix tours entiers, et non « 3 000 ms » : le chiffre ne se rafraichit
+    // qu'au rythme du sondage, donc une avance qui tombe entre deux tours
+    // laisserait la valeur du tour precedent.
+    await vi.advanceTimersByTimeAsync(SONDAGE_MS * 10)
+    expect(popin()!.querySelector('[data-learn-countdown]')!.textContent).toContain('27')
   })
 
   it('apprentissage : case décochée, le code capturé remplace le champ', async () => {

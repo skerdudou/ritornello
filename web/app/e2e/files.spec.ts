@@ -39,10 +39,20 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   test.setTimeout(120_000)
   const racine = racineFixtures()
 
+  // Les trois volets vivent desormais dans des onglets. Ils restent tous
+  // montes (`force-mount`, pour ne pas perdre le dossier ouvert du navigateur
+  // en changeant d'onglet), donc presents dans le DOM mais masques : Playwright
+  // refuse de cliquer ce qui n'est pas visible, et chaque etape doit ouvrir
+  // l'onglet dont elle se sert. La valeur, jamais le libelle, qui est traduit.
+  const ouvrirOnglet = async (nom: 'liste' | 'parcourir' | 'sources') => {
+    await page.locator(`[data-onglet="${nom}"]`).click()
+  }
+
   // --- La page de gestion, sur un bac a sable vraiment vide -----------------
   await page.goto('/plugins/files/')
   // Le module ESM du plugin est charge dynamiquement et resolu par l'import
   // map : c'est ce qu'aucun test unitaire ne peut verifier.
+  await ouvrirOnglet('sources')
   await expect(page.locator('[data-volet-sources]')).toBeVisible()
   // Aucune source : la preuve que le harnais a bien detourne
   // `RITORNELLO_FILES_ROOTS` vers son repertoire jetable. Sans cela, une
@@ -102,6 +112,7 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   // vol unique de la page couvrait aussi la relecture, cet observateur recevait
   // `null` et le niveau restait vide indefiniment — mesure : `[data-browse-row]`
   // bloque a 0 pendant les 5 s d'attente. Le vol ne couvre plus que l'envoi.
+  await ouvrirOnglet('parcourir')
   const rangees = page.locator('[data-browse-row]')
   // Un seul niveau demande a l'ouverture : la racine ne contient que `Album`,
   // et aucun fichier audio a son sommet.
@@ -128,6 +139,7 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   // la fin de la marche, et le protocole d'admin ne pousse rien. C'est le
   // sondage a la seconde de la page qui fait arriver les pistes — on attend
   // donc l'etat observable, jamais un delai fixe.
+  await ouvrirOnglet('liste')
   const pistes = page.locator('[data-track-row]')
   await expect(pistes).toHaveCount(3, { timeout: 30_000 })
   await expect(page.locator('[data-track-name]')).toHaveText(['01', '02', '03'])
@@ -167,7 +179,10 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   // action differente : il remplace la liste au lieu de s'y ajouter.
   // Le niveau ouvert est toujours `Album`, etabli par l'etape de parcours
   // ci-dessus : rien ne l'a fait changer depuis (ajouter, enregistrer, vider
-  // et recharger la liste ne navigue pas ailleurs).
+  // et recharger la liste ne navigue pas ailleurs). Le detour par l'onglet
+  // Liste non plus, et c'est precisement ce que `force-mount` garantit — sans
+  // lui le volet serait remonte sur la racine de la source.
+  await ouvrirOnglet('parcourir')
   const ligneM3u = page
     .locator('[data-browse-row]')
     .filter({ has: page.locator('[data-browse-name]', { hasText: 'tout.m3u' }) })
@@ -176,6 +191,7 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   // etre un choix parmi deux.
   await expect(ligneM3u.locator('[data-add-file]')).toHaveCount(0)
   await ligneM3u.locator('[data-load-m3u]').click()
+  await ouvrirOnglet('liste')
   await expect(pistes).toHaveCount(3)
   // Les chemins relatifs se sont resolus contre le repertoire du m3u : des
   // pistes marquees introuvables signaleraient une resolution contre le mauvais
@@ -281,6 +297,8 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   // sorties **captees sur un vrai NAS**. C'est ce qui rend cette etape jouable
   // sur n'importe quelle machine tout en eprouvant l'analyse contre du reel.
   await page.goto('/plugins/files/')
+  // Le rechargement ramene l'onglet par defaut, la liste.
+  await ouvrirOnglet('sources')
   await page.locator('[data-add-share]').click()
   await page.locator('[data-host]').fill('192.168.1.15')
   await page.locator('[data-user]').fill('ritornello')
@@ -309,8 +327,11 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
     'the share was not mounted, so it has not been declared',
   )
   // La popin reste ouverte, saisie comprise : rien ne force a tout retaper.
+  // Les deux champs, et pas seulement l'hote : la promesse porte sur la
+  // saisie entiere.
   await expect(page.locator('[data-dlg-partage]')).toBeVisible()
   await expect(page.locator('[data-host]')).toHaveValue('192.168.1.15')
+  await expect(page.locator('[data-user]')).toHaveValue('ritornello')
   const apresPartage = await (await request.get('/plugins/files/api/data')).json()
   expect(apresPartage.roots).toHaveLength(1)
   // Et le mot de passe n'a jamais atteint la page, meme dans ce refus.

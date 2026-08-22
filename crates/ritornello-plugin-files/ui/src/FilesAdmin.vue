@@ -1,5 +1,14 @@
 <script setup lang="ts">
-import { api, createT, surLecteur, type Catalog } from '@ritornello/ui'
+import {
+  api,
+  createT,
+  surLecteur,
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+  type Catalog,
+} from '@ritornello/ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { normaliserDonnees, type Donnees } from './donnees'
 import VoletListe from './VoletListe.vue'
@@ -277,27 +286,55 @@ const scan = computed(
       >{{ scan.error }}</pre
     >
 
-    <template v-if="donnees">
-      <VoletListe
-        :donnees="donnees"
-        :t="t"
-        :envoyer="envoyer"
-        :fige="chargementEchoue || enCours"
-        :est-source-active="estSourceActive"
-      />
-      <VoletSources
-        :donnees="donnees"
-        :t="t"
-        :envoyer="envoyer"
-        :fige="chargementEchoue || enCours"
-        :message="message"
-      />
-      <VoletParcourir
-        :donnees="donnees"
-        :t="t"
-        :envoyer="envoyer"
-        :fige="chargementEchoue || enCours"
-      />
-    </template>
+    <!-- Trois onglets plutôt que trois volets bout à bout : la page demandait
+         un long défilement pour atteindre la déclaration d'une source, geste
+         rare, alors que la liste et le navigateur sont les deux écrans qu'on
+         ouvre vraiment.
+
+         `force-mount` partout, et ce n'est pas un détail : sans lui les
+         panneaux inactifs seraient démontés, si bien que revenir sur
+         « Parcourir » après un détour rouvrirait la racine de la source au
+         lieu du dossier où l'on se trouvait — et relancerait un `browse` à
+         chaque va-et-vient. Les volets restent donc vivants, seul l'affichage
+         change. -->
+    <Tabs v-if="donnees" default-value="liste">
+      <TabsList>
+        <!-- `data-onglet` porte la valeur et non seulement le marqueur : le
+             parcours de bout en bout doit désigner un onglet sans dépendre de
+             son libellé, qui est traduit. -->
+        <TabsTrigger value="liste" data-onglet="liste">{{ t('playlist_title') }}</TabsTrigger>
+        <TabsTrigger value="parcourir" data-onglet="parcourir">
+          {{ t('browse_title') }}
+        </TabsTrigger>
+        <TabsTrigger value="sources" data-onglet="sources">{{ t('sources_title') }}</TabsTrigger>
+      </TabsList>
+
+      <TabsContent value="liste" force-mount>
+        <VoletListe
+          :donnees="donnees"
+          :t="t"
+          :envoyer="envoyer"
+          :fige="chargementEchoue || enCours"
+          :est-source-active="estSourceActive"
+        />
+      </TabsContent>
+      <TabsContent value="parcourir" force-mount>
+        <VoletParcourir
+          :donnees="donnees"
+          :t="t"
+          :envoyer="envoyer"
+          :fige="chargementEchoue || enCours"
+        />
+      </TabsContent>
+      <TabsContent value="sources" force-mount>
+        <VoletSources
+          :donnees="donnees"
+          :t="t"
+          :envoyer="envoyer"
+          :fige="chargementEchoue || enCours"
+          :message="message"
+        />
+      </TabsContent>
+    </Tabs>
   </div>
 </template>

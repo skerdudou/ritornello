@@ -155,6 +155,37 @@ mod tests {
     }
 
     #[test]
+    fn le_preset_mce_couvre_les_dix_preselections_et_le_plus_dix() {
+        // La table livrée vient d'un relevé sur le matériel. Elle ne portait ni
+        // la touche 0 ni le « +10 » : deux touches de la télécommande ne
+        // faisaient rien alors que le cœur savait déjà les traiter.
+        let b = load(&presets_livres(), "mce").unwrap();
+        for n in 0..=9u8 {
+            assert!(
+                b.iter().any(|x| x.command() == Some(Command::Select(n))),
+                "aucune touche ne selectionne la preselection {n}"
+            );
+        }
+        assert!(b.iter().any(|x| x.command() == Some(Command::Plus10)), "pas de touche +10");
+    }
+
+    #[test]
+    fn le_preset_mce_porte_les_codes_de_transport_releves_sur_le_materiel() {
+        // La table précédente était transcrite d'une vieille keymap, jamais
+        // confrontée à un appareil : elle liait Stop à 166 et Eject à 161, que
+        // ce récepteur n'émet pas. Ces codes-ci sont mesurés.
+        let b = load(&presets_livres(), "mce").unwrap();
+        let cmd = |code: u16| b.iter().find(|x| x.code == code).and_then(Binding::command);
+        assert_eq!(cmd(128), Some(Command::Stop));
+        assert_eq!(cmd(174), Some(Command::Eject));
+        assert_eq!(cmd(142), Some(Command::Power));
+        assert_eq!(cmd(407), Some(Command::Next));
+        assert_eq!(cmd(412), Some(Command::Prev));
+        assert_eq!(cmd(105), Some(Command::SeekBackward));
+        assert_eq!(cmd(106), Some(Command::SeekForward));
+    }
+
+    #[test]
     fn load_lit_les_bindings_dun_preset() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -204,7 +235,10 @@ mod tests {
         assert!(!mce.is_empty());
         assert_eq!(mce.iter().find(|b| b.code == 115).unwrap().command(), Some(Command::VolumeUp));
         assert_eq!(mce.iter().find(|b| b.code == 513).unwrap().command(), Some(Command::Select(1)));
-        assert_eq!(mce.iter().find(|b| b.code == 356).unwrap().command(), Some(Command::Power));
+        // 142 (KEY_SLEEP) et non 356 : la table a été relevée sur l'appareil, et
+        // ce récepteur n'émet pas les codes que l'ancienne transcription lui
+        // prêtait.
+        assert_eq!(mce.iter().find(|b| b.code == 142).unwrap().command(), Some(Command::Power));
 
         let kbd = load(&root, "keyboard").unwrap();
         assert!(!kbd.is_empty());

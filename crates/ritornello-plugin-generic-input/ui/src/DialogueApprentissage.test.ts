@@ -11,6 +11,7 @@ const CATALOGUE: Record<string, string> = {
   dlg_learn_title: 'Apprentissage d’une touche',
   dlg_learn_desc: 'Appuyez sur une touche du périphérique « {device} »…',
   learn_append_label: 'Ajouter aux codes existants au lieu de les remplacer',
+  learn_countdown: 'Il reste {s} s',
   btn_cancel: 'Annuler',
 }
 // Le vrai traducteur du kit, et non un bouchon qui rendrait la valeur brute :
@@ -24,6 +25,7 @@ interface Props {
   action: string
   device: string
   ajouter: boolean
+  secondes: number
 }
 
 beforeEach(() => {
@@ -38,6 +40,7 @@ function monter(props: Partial<Props> = {}) {
       action: 'Muet',
       device: 'mce',
       ajouter: false,
+      secondes: 30,
       ...props,
     },
     attachTo: document.body,
@@ -122,5 +125,22 @@ describe('DialogueApprentissage', () => {
     monter({ ajouter: true })
     await flushPromises()
     expect((dansPopin('[data-learn-append]') as HTMLInputElement).checked).toBe(true)
+  })
+
+  it('affiche le temps qu’il reste pour appuyer', async () => {
+    // Sans compte à rebours, la popin se referme d'elle-même au bout de 30 s
+    // sans que rien n'ait laissé prévoir l'échéance : on croit l'appareil muet
+    // alors qu'on a simplement mis trop de temps à trouver la touche.
+    monter({ secondes: 27 })
+    await flushPromises()
+    expect(dansPopin('[data-learn-countdown]')?.textContent).toContain('27')
+  })
+
+  it('ne montre pas de compte à rebours une fois l’échéance atteinte', async () => {
+    // À zéro la page a déjà arrêté l'apprentissage : afficher « il reste 0 s »
+    // pendant la fermeture donnerait un décompte qui ment.
+    monter({ secondes: 0 })
+    await flushPromises()
+    expect(dansPopin('[data-learn-countdown]')).toBeNull()
   })
 })

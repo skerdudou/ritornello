@@ -32,6 +32,14 @@ const props = defineProps<{
   device: string
   /** État de la case « ajouter » (v-model:ajouter côté parent). */
   ajouter: boolean
+  /**
+   * Secondes restantes avant l'abandon, telles que la page les calcule.
+   *
+   * La popin ne les décompte pas elle-même : l'échéance appartient à la page,
+   * qui tient déjà le sondage et l'annulation côté plugin. Un second minuteur
+   * ici dériverait du premier, et afficherait un chiffre que rien ne garantit.
+   */
+  secondes: number
 }>()
 const emit = defineEmits<{ annuler: []; 'update:ajouter': [boolean] }>()
 
@@ -65,6 +73,18 @@ const titre = computed(() =>
           {{ props.t('dlg_learn_desc', { device: props.device }) }}
         </DialogDescription>
       </DialogHeader>
+
+      <!-- À zéro, plus rien : la page a déjà arrêté l'apprentissage, et un
+           « il reste 0 s » affiché pendant le fondu de fermeture serait un
+           décompte qui ment. -->
+      <p
+        v-if="props.secondes > 0"
+        data-learn-countdown
+        class="text-sm text-muted-foreground"
+        aria-live="polite"
+      >
+        {{ props.t('learn_countdown', { s: props.secondes }) }}
+      </p>
 
       <label class="flex items-center gap-2 text-sm">
         <input

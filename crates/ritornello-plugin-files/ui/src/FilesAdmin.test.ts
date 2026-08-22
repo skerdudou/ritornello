@@ -274,8 +274,37 @@ describe('FilesAdmin, la page', () => {
     // Déclarer une source est rare, parcourir vient après avoir vu la liste.
     const { w } = await monter({ roots: [{ name: 'nas', kind: 'local', path: '/m' }] })
     const ordre = w
-      .findAll('[data-volet-liste],[data-volet-sources],[data-volet-parcourir]')
+      .findAll('[data-volet-liste],[data-volet-parcourir],[data-volet-sources]')
       .map((s) => Object.keys(s.attributes()).find((a) => a.startsWith('data-volet')))
-    expect(ordre).toEqual(['data-volet-liste', 'data-volet-sources', 'data-volet-parcourir'])
+    expect(ordre).toEqual(['data-volet-liste', 'data-volet-parcourir', 'data-volet-sources'])
+  })
+
+  it('range les trois volets dans des onglets, la liste ouverte en premier', async () => {
+    // Les trois volets bout à bout faisaient une page qu'il fallait parcourir
+    // longuement pour atteindre la déclaration d'une source, alors qu'on n'y
+    // touche presque jamais.
+    const { w } = await monter({ roots: [{ name: 'nas', kind: 'local', path: '/m' }] })
+    const onglets = w.findAll('[data-onglet]')
+    expect(onglets.map((o) => o.text())).toEqual(['Liste en cours', 'Parcourir', 'Sources'])
+    expect(onglets[0]!.attributes('data-state')).toBe('active')
+    expect(onglets[1]!.attributes('data-state')).toBe('inactive')
+  })
+
+  it('change d’onglet sans démonter les autres volets', async () => {
+    // `force-mount` sur les panneaux, et c'est ce que ce test protège : sans
+    // lui, revenir sur Parcourir après un détour par la liste rouvrirait la
+    // racine de la source, perdant le dossier où l'on se trouvait — et
+    // relancerait un `browse` à chaque va-et-vient.
+    const { w, s } = await monter({ roots: [{ name: 'nas', kind: 'local', path: '/m' }] })
+    const browseAvant = s.putsDe('browse').length
+    const parcourir = w.findAll('[data-onglet]')[1]!
+    ;(parcourir.element as HTMLElement).focus()
+    await parcourir.trigger('click')
+    await flushPromises()
+    expect(parcourir.attributes('data-state')).toBe('active')
+    // Le volet Liste est toujours monté, simplement masqué.
+    expect(w.find('[data-volet-liste]').exists()).toBe(true)
+    // Et aucun parcours de plus n'a été demandé au changement d'onglet.
+    expect(s.putsDe('browse').length).toBe(browseAvant)
   })
 })

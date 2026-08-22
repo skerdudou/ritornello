@@ -38,5 +38,12 @@ export {
 export {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from './components/ui/table'
+// Les onglets ne montent que le panneau actif : `TabsContent` demonte les
+// autres. Une page qui y range des volets sondant le serveur cesse donc de
+// sonder ce qu'on ne regarde pas -- c'est voulu, mais un volet qui doit
+// survivre a l'onglet cache appartient a la page, pas au panneau.
+export {
+  Tabs, TabsContent, TabsList, TabsTrigger,
+} from './components/ui/tabs'
 export { Toaster } from './components/ui/sonner'
 export { toast } from 'vue-sonner'
