@@ -64,3 +64,12 @@ exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-generic-input"
 [[plugin]]
 name = "console"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-console"
+
+# MPD server: exposes the appliance on the local network (port 6600 by
+# default) so a phone's MPD client can act as a remote control. Settings live
+# in /etc/ritornello/mpd.toml, admin page at /plugins/mpd/. No password: any
+# MPD client on the local network can control the appliance — worth knowing
+# before exposing this on a network you do not trust.
+[[plugin]]
+name = "mpd"
+exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-mpd"

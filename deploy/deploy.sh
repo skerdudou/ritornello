@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 
 # The plugin list drives the scp then the remote mv, from this single place:
 # a list duplicated between the two would end up diverging.
-PLUGINS=(radio cd files generic-input console musicbrainz ouifm-metas radiofrance-metas)
+PLUGINS=(radio cd files generic-input console musicbrainz ouifm-metas radiofrance-metas mpd)
 
 # deploy/plugins.example.toml names the same set, from the core's side — and
 # its entries are now installed one by one on a device already in service
