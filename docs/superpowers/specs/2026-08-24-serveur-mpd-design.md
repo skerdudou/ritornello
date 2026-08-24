@@ -87,6 +87,15 @@ Deux d'entre elles méritent leur raison écrite :
 - **`kill`** est refusée et non ignorée : arrêter l'appareil depuis le réseau
   sans authentification serait une capacité qu'aucune télécommande n'a.
 
+**`albumart` et `readpicture` restent dehors aussi**, et pour une raison de
+conception. Le chantier des pochettes, mené en parallèle
+(`docs/superpowers/specs/2026-08-24-pochettes-album-design.md`), ajoute
+`Morceau.cover_href` — une URL du serveur HTTP **du cœur**, `/api/cover/{clé}`.
+Le greffon est un autre processus : servir ces octets lui demanderait un client
+HTTP et l'adresse du cœur, un couplage qu'aucun greffon n'a aujourd'hui et qui
+mérite sa propre décision. C'est pourtant le visuel principal de M.A.L.P., donc
+la suite naturelle de ce chantier.
+
 `repeat`, `random`, `single` et `consume` sont **rapportées à 0** par `status`
 — les clients les lisent toujours — mais les écrire est refusé. C'est le seul
 endroit où le greffon rapporte une valeur qu'il ne sait pas changer, et c'est
