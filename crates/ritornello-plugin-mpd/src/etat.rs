@@ -61,8 +61,12 @@ pub enum Sujet {
 /// de verrou successives les laisserait se contredire au milieu d'une réponse.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Instantane {
-    /// La dernière trame reçue du cœur, à ceci près qu'`acter_optimiste` y
-    /// pose le volume qu'une session vient de demander (voir là-bas).
+    /// La dernière trame reçue du cœur, **éventuellement recouverte d'un
+    /// calque optimiste** : `acter_optimiste` y pose le volume qu'une session
+    /// vient de demander, avant que le cœur ne l'ait confirmé (voir là-bas).
+    /// Ne pas lire ce champ comme le verbatim de ce que le cœur a envoyé — la
+    /// trame suivante rétablit la vérité de toute façon, et la comparaison
+    /// d'`appliquer_etat` réveille `Mixer` si elle la contredit.
     pub etat: PlayerState,
     /// Ce que le greffon **croit** de la lecture, y compris une bascule qu'il
     /// vient d'émettre et que la trame n'a pas encore confirmée : c'est la
@@ -178,6 +182,22 @@ impl EtatPartage {
                 // doit apprendre qu'on a changé de source.
                 marquer(&mut bouges, Sujet::Playlist);
                 marquer(&mut bouges, Sujet::Player);
+            }
+            if etat.preset_count != avant.preset_count {
+                // `preset_count` **est** la longueur de la file d'attente MPD,
+                // celle que `status` publie sous `playlistlength` : tant que le
+                // catalogue n'est pas là (Task 13), le nombre de présélections
+                // de la source active est tout ce que le greffon sait de la
+                // file. Un disque inséré passe de `None`/`Some(0)` à
+                // `Some(12)` sans changer de nom de source, et sans cette
+                // comparaison aucun client n'apprendrait qu'il y a douze
+                // pistes à jouer — l'action la plus ordinaire qui soit.
+                //
+                // `Playlist` seul, et **pas** `Player` : c'est la file qui a
+                // changé, pas ce qui joue. (`source` bouge les deux parce
+                // qu'elle change les deux ; `preset_count` seul ne touche pas
+                // au morceau courant.)
+                marquer(&mut bouges, Sujet::Playlist);
             }
             if etat.playback != avant.playback
                 || etat.preset != avant.preset
@@ -376,6 +396,7 @@ mod tests {
             source: "radio".into(),
             playback: Playback::Playing,
             preset: Some(3),
+            preset_count: Some(51),
             position_s: Some(12),
             ..Default::default()
         };
@@ -404,6 +425,50 @@ mod tests {
         assert_ne!(avant[Sujet::Playlist as usize], apres[Sujet::Playlist as usize]);
         assert_ne!(avant[Sujet::Player as usize], apres[Sujet::Player as usize]);
         assert_eq!(avant[Sujet::Mixer as usize], apres[Sujet::Mixer as usize], "le volume n'a pas bouge");
+    }
+
+    #[tokio::test]
+    async fn un_disque_insere_change_la_file_dattente() {
+        // `preset_count` est la longueur de la file MPD (`playlistlength`) :
+        // un disque insere fait passer le lecteur CD de « rien a numeroter » a
+        // douze pistes, sans changer de nom de source. Sans reveil de
+        // `Playlist` ni avance de `version_file`, un client reste sur une file
+        // vide et l'action la plus ordinaire du monde ne se voit pas depuis le
+        // telephone. Et `Player` ne doit pas bouger : la file a change, pas ce
+        // qui joue.
+        let e = EtatPartage::default();
+        e.appliquer_etat(PlayerState { source: "cd".into(), preset_count: Some(0), ..Default::default() })
+            .await;
+        let avant = e.versions().await;
+        let version_file = e.lire().await.version_file;
+
+        e.appliquer_etat(PlayerState { source: "cd".into(), preset_count: Some(12), ..Default::default() })
+            .await;
+
+        let apres = e.versions().await;
+        assert_ne!(avant[Sujet::Playlist as usize], apres[Sujet::Playlist as usize], "la file a change");
+        assert!(
+            e.lire().await.version_file > version_file,
+            "version_file doit avancer avec la file, sinon plchanges mentira"
+        );
+        assert_eq!(avant[Sujet::Player as usize], apres[Sujet::Player as usize], "ce qui joue n'a pas change");
+        assert_eq!(avant[Sujet::Mixer as usize], apres[Sujet::Mixer as usize]);
+    }
+
+    #[tokio::test]
+    async fn un_disque_retire_change_aussi_la_file_dattente() {
+        // Le sens inverse, et il n'est pas symetrique par accident : c'est
+        // `Some(12)` vers `None` (plus de disque, donc plus rien de declare),
+        // que le passage `Option` de `preset_count` rend distinct de
+        // `Some(0)`.
+        let e = EtatPartage::default();
+        e.appliquer_etat(PlayerState { source: "cd".into(), preset_count: Some(12), ..Default::default() })
+            .await;
+        let avant = e.versions().await;
+
+        e.appliquer_etat(PlayerState { source: "cd".into(), preset_count: None, ..Default::default() }).await;
+
+        assert_ne!(avant[Sujet::Playlist as usize], e.versions().await[Sujet::Playlist as usize]);
     }
 
     #[tokio::test]
