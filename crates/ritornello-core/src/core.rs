@@ -665,16 +665,24 @@ impl<P: Player> Core<P> {
         issue
     }
 
+    /// Volume absolu, la seule voie pour un réglage qui ne vient d'aucune touche :
+    /// le `setvol` de MPD. Mêmes effets de bord que le pas relatif — mpv, disque,
+    /// incrustation — parce qu'un volume changé depuis le réseau doit s'annoncer à
+    /// l'écran comme celui changé depuis la télécommande.
+    async fn set_volume(&mut self, v: u8) -> Result<()> {
+        self.volume = v.min(100);
+        self.player.set_volume(self.volume).await?;
+        self.persist();
+        self.show_overlay().await;
+        Ok(())
+    }
+
     /// One volume step (±5), applied to mpv, persisted, shown as an overlay.
     /// Shared by fresh presses and held repeats; only the caller decides how
     /// to re-arm `volume_deadline`.
     async fn step_volume(&mut self, up: bool) -> Result<()> {
         let v = self.volume as i16 + if up { 5 } else { -5 };
-        self.volume = v.clamp(0, 100) as u8;
-        self.player.set_volume(self.volume).await?;
-        self.persist();
-        self.show_overlay().await;
-        Ok(())
+        self.set_volume(v.clamp(0, 100) as u8).await
     }
 
     /// Entry point for everything that used to call `handle_command`: fresh
@@ -831,6 +839,11 @@ impl<P: Player> Core<P> {
                     Instant::now() + Duration::from_millis(self.settings.volume_repeat_initial_ms.into()),
                 );
             }
+            Command::SetVolume(v) => {
+                // Pas de `volume_deadline` a rearmer : ce n'est pas une touche,
+                // rien ne peut etre maintenu.
+                self.set_volume(v).await?;
+            }
             Command::Mute => {
                 self.muted = !self.muted;
                 self.player.set_mute(self.muted).await?;
@@ -922,57 +935,26 @@ impl<P: Player> Core<P> {
                 }
             }
             Command::SourceCycle => {
-                // Changer de source, c'est toujours changer de ce qui joue —
-                // et c'est le cœur qui arrête, sans dépendre des réponses des
-                // plugins. Avant, l'action renvoyée par `Deactivate` (le
-                // `Stop` du plugin radio) était ignorée, et l'arrêt reposait
-                // sur le `Play` de l'`Activate` suivant — que le cd sans
-                // disque ne renvoie pas (`Noop`) : l'ancien flux continuait
-                // de jouer sous un affichage qui annonçait la nouvelle
-                // source, titres ICY compris.
-                self.expecting_stream = false;
-                self.lecture = false;
-                self.player.stop().await?;
-                // L'ancienne source est prévenue en best-effort : son arrêt
-                // est déjà fait, elle n'a plus qu'à recaler son propre état.
-                if let Err(e) = self.demande_active(SourceReq::Deactivate).await {
-                    tracing::debug!("deactivate: {e}");
-                }
                 let idx = self.source_order.iter().position(|n| n == &self.active_source).unwrap_or(0);
-                let next_idx = (idx + 1) % self.source_order.len().max(1);
-                if let Some(next_name) = self.source_order.get(next_idx).cloned() {
-                    self.active_source = next_name;
+                let suivant = (idx + 1) % self.source_order.len().max(1);
+                if let Some(cible) = self.source_order.get(suivant).cloned() {
+                    self.basculer_vers(cible).await?;
                 }
-                // On l'acte ici sans attendre que la nouvelle Source le
-                // déclare : sinon une Source qui omettrait de le faire
-                // laisserait l'identité de l'autre en place, et les plugins
-                // `metadata` continueraient d'enrichir le morceau précédent.
-                self.set_identity(None);
-                // Le compte de présélections et le statut annoncés par
-                // l'ancienne Source ne veulent rien dire pour la nouvelle : les
-                // garder afficherait une fenêtre de numéros qui ne correspond à
-                // aucune présélection réelle, ou un statut (« PAS DE DISQUE »)
-                // sous le nom d'une source qui n'a encore rien dit — tant que
-                // la nouvelle Source n'a pas parlé (ce qui peut ne jamais
-                // arriver : une présélection vide déclare une trame éphémère,
-                // qui ne touche pas au statut mémorisé).
-                self.preset_count = None;
-                self.source_status = None;
-                // Idem pour l'éjection : la capacité décrit la Source qui
-                // s'en va. Sans cet effacement, quitter le cd pour la radio
-                // laissait la touche Eject active jusqu'à la première trame
-                // de la radio — et pour de bon si elle restait muette.
-                self.can_eject = false;
-                self.retry_count = 0;
-                // Persister **avant** `Activate` : si la nouvelle source ne
-                // répond pas (timeout de 5 s du SDK), l'état mémoire, l'état
-                // sur disque et l'affichage disent déjà tous la même chose —
-                // nouvelle source, rien ne joue. Sans cela, l'échec laissait
-                // la bascule à moitié faite : « cd » à l'écran, « radio »
-                // dans state.json.
-                self.persist();
-                if let Some(action) = self.demande_active(SourceReq::Activate).await? {
-                    self.apply(action).await?;
+            }
+            Command::SelectSource(nom) => {
+                // Inconnue : ignorée en silence, comme une touche non liée. Le
+                // greffon MPD a déjà répondu `ACK 50` de son côté — il ne
+                // propose que des noms reçus du catalogue, donc arriver ici
+                // veut dire que la source a disparu entre-temps.
+                if !self.source_order.iter().any(|n| n == &nom) {
+                    tracing::debug!("unknown source {nom} ignored");
+                    return Ok(());
+                }
+                // Déjà active : ne rien faire. Un `load` redondant ne doit pas
+                // couper ce qui joue, et c'est exactement ce qu'un client
+                // envoie en rouvrant son écran.
+                if nom != self.active_source {
+                    self.basculer_vers(nom).await?;
                 }
             }
             Command::Plus10 => {
@@ -1012,6 +994,63 @@ impl<P: Player> Core<P> {
                     self.rafraichit_position().await;
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Bascule effective vers `cible`, partagée par `SourceCycle` (qui calcule
+    /// le nom suivant dans l'ordre) et `SelectSource` (qui le reçoit déjà) :
+    /// arrêt du lecteur, `Deactivate` en best-effort, oubli de l'identité, du
+    /// compte de présélections, du statut et de l'éjection, `persist()` avant
+    /// `Activate`.
+    async fn basculer_vers(&mut self, cible: String) -> Result<()> {
+        // Changer de source, c'est toujours changer de ce qui joue —
+        // et c'est le cœur qui arrête, sans dépendre des réponses des
+        // plugins. Avant, l'action renvoyée par `Deactivate` (le
+        // `Stop` du plugin radio) était ignorée, et l'arrêt reposait
+        // sur le `Play` de l'`Activate` suivant — que le cd sans
+        // disque ne renvoie pas (`Noop`) : l'ancien flux continuait
+        // de jouer sous un affichage qui annonçait la nouvelle
+        // source, titres ICY compris.
+        self.expecting_stream = false;
+        self.lecture = false;
+        self.player.stop().await?;
+        // L'ancienne source est prévenue en best-effort : son arrêt
+        // est déjà fait, elle n'a plus qu'à recaler son propre état.
+        if let Err(e) = self.demande_active(SourceReq::Deactivate).await {
+            tracing::debug!("deactivate: {e}");
+        }
+        self.active_source = cible;
+        // On l'acte ici sans attendre que la nouvelle Source le
+        // déclare : sinon une Source qui omettrait de le faire
+        // laisserait l'identité de l'autre en place, et les plugins
+        // `metadata` continueraient d'enrichir le morceau précédent.
+        self.set_identity(None);
+        // Le compte de présélections et le statut annoncés par
+        // l'ancienne Source ne veulent rien dire pour la nouvelle : les
+        // garder afficherait une fenêtre de numéros qui ne correspond à
+        // aucune présélection réelle, ou un statut (« PAS DE DISQUE »)
+        // sous le nom d'une source qui n'a encore rien dit — tant que
+        // la nouvelle Source n'a pas parlé (ce qui peut ne jamais
+        // arriver : une présélection vide déclare une trame éphémère,
+        // qui ne touche pas au statut mémorisé).
+        self.preset_count = None;
+        self.source_status = None;
+        // Idem pour l'éjection : la capacité décrit la Source qui
+        // s'en va. Sans cet effacement, quitter le cd pour la radio
+        // laissait la touche Eject active jusqu'à la première trame
+        // de la radio — et pour de bon si elle restait muette.
+        self.can_eject = false;
+        self.retry_count = 0;
+        // Persister **avant** `Activate` : si la nouvelle source ne
+        // répond pas (timeout de 5 s du SDK), l'état mémoire, l'état
+        // sur disque et l'affichage disent déjà tous la même chose —
+        // nouvelle source, rien ne joue. Sans cela, l'échec laissait
+        // la bascule à moitié faite : « cd » à l'écran, « radio »
+        // dans state.json.
+        self.persist();
+        if let Some(action) = self.demande_active(SourceReq::Activate).await? {
+            self.apply(action).await?;
         }
         Ok(())
     }
@@ -1973,6 +2012,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn le_cycle_de_source_se_comporte_exactement_comme_avant_lextraction() {
+        // Filet de l'extraction : le corps a change de fonction, pas de sens.
+        // Memes assertions que `source_cycle_bascule_et_persiste`, la preuve
+        // que basculer_vers rejoue exactement le comportement du bloc qu'elle
+        // remplace.
+        let (mut core, player_calls, source_calls, _rx, dir) = setup();
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        assert!(source_calls.lock().unwrap().iter().any(|c| c == "radio:Deactivate"));
+        assert!(source_calls.lock().unwrap().iter().any(|c| c == "cd:Activate"));
+        assert!(player_calls.lock().unwrap().contains(&"play cdda://".to_string()));
+        let st = crate::state::load(&dir.path().join("state.json"));
+        assert_eq!(st.active_source, "cd");
+    }
+
+    #[tokio::test]
+    async fn la_source_par_son_nom_bascule_comme_le_cycle() {
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.handle_command(Command::SelectSource("cd".into())).await.unwrap();
+        assert_eq!(core.active_source(), "cd");
+    }
+
+    #[tokio::test]
+    async fn une_source_inconnue_est_ignoree_sans_rien_couper() {
+        // La garde qui compte : sans elle, un nom errant viderait la source active.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.handle_command(Command::SelectSource("nexistepas".into())).await.unwrap();
+        assert_eq!(core.active_source(), "radio");
+    }
+
+    #[tokio::test]
+    async fn selectionner_la_source_deja_active_ne_coupe_pas_ce_qui_joue() {
+        // C'est exactement ce qu'un client MPD envoie en rouvrant son ecran : un
+        // `load` redondant ne doit pas arreter la lecture.
+        let (mut core, player_calls, _sc, _rx, _d) = setup();
+        core.resume().await.unwrap();
+        assert_eq!(core.etat_lecteur().playback, Playback::Playing);
+        // La bascule complete (stop puis Activate) ramenerait aussi a `Playing`
+        // pour cette source factice : le champ `playback` seul ne distingue pas
+        // un redondant traite en no-op d'un redondant qui a coupe puis relance.
+        // L'absence de tout nouvel appel `stop` est la preuve qui bite.
+        player_calls.lock().unwrap().clear();
+        core.handle_command(Command::SelectSource("radio".into())).await.unwrap();
+        assert_eq!(core.etat_lecteur().playback, Playback::Playing);
+        assert!(
+            !player_calls.lock().unwrap().iter().any(|c| c == "stop"),
+            "un load redondant ne doit meme pas arreter puis relancer mpv"
+        );
+    }
+
+    #[tokio::test]
     async fn standby_bloque_tout_sauf_power() {
         let (mut core, player_calls, _sc, _rx, _d) = setup();
         core.resume().await.unwrap();
@@ -2322,9 +2411,11 @@ mod tests {
 
     #[tokio::test]
     async fn la_veille_dit_larret_meme_si_la_pause_etait_posee() {
-        // La veille court-circuite `playback` avant meme que `lecture` ne
-        // retombe (`Command::Power` le fait aussi, mais peu importe l'ordre :
-        // `etat_lecteur` consulte `standby` en premier).
+        // Ce test isole seulement l'oubli du drapeau `paused` : `Command::Power`
+        // pose `standby = true` et `lecture = false` dans le meme pas, donc il
+        // ne peut pas distinguer laquelle des deux conditions fait le travail.
+        // Ce qu'il prouve : un `paused` pose plus tot ne doit pas fuiter dans
+        // l'etat rapporte pendant la veille.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         core.handle_command(Command::PlayPause).await.unwrap(); // demarre la lecture
         core.handle_command(Command::PlayPause).await.unwrap(); // met en pause
@@ -2478,6 +2569,26 @@ mod tests {
         drop(calls);
         let st = crate::state::load(&dir.path().join("state.json"));
         assert_eq!(st.locale.as_deref(), Some("fr"));
+    }
+
+    #[tokio::test]
+    async fn le_volume_absolu_remplace_le_volume_et_le_borne() {
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.handle_command(Command::SetVolume(40)).await.unwrap();
+        assert_eq!(core.etat_lecteur().volume, 40);
+        core.handle_command(Command::SetVolume(200)).await.unwrap();
+        assert_eq!(core.etat_lecteur().volume, 100, "borne haute");
+        core.handle_command(Command::SetVolume(0)).await.unwrap();
+        assert_eq!(core.etat_lecteur().volume, 0);
+    }
+
+    #[tokio::test]
+    async fn le_volume_absolu_ecrit_une_incrustation_comme_le_pas_relatif() {
+        // Un volume change depuis le reseau doit s'annoncer a l'ecran comme celui
+        // change depuis la telecommande.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.handle_command(Command::SetVolume(40)).await.unwrap();
+        assert!(core.etat_lecteur().overlay.is_some());
     }
 
     #[tokio::test]

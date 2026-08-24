@@ -32,6 +32,19 @@ pub enum Command {
     /// Positionnement absolu, en secondes. Sert la barre cliquable de la SPA ;
     /// aucune touche physique ne l'émet.
     SeekTo(u32),
+    /// Volume absolu, en pourcent. Sert le `setvol` de MPD ; aucune touche
+    /// physique ne l'émet — même raison d'être que `SeekTo`.
+    ///
+    /// Empiler des `VolumeUp` ne remplacerait pas cette commande : le pas est
+    /// un réglage et non une constante, et chaque pas écrit une incrustation à
+    /// l'écran.
+    SetVolume(u8),
+    /// Source désignée par son **nom**, là où `SourceCycle` ne sait qu'avancer
+    /// d'un cran. Sert le `load "radio"` de MPD.
+    ///
+    /// Un nom inconnu est ignoré en silence par le cœur, comme une touche non
+    /// liée : c'est l'émetteur qui sait ce qu'il propose.
+    SelectSource(String),
 }
 
 /// One line of the input protocol: the command, plus whether it comes from a
@@ -118,6 +131,18 @@ mod tests {
             (Command::SeekForward, r#"{"cmd":"SeekForward"}"#),
             (Command::SeekBackward, r#"{"cmd":"SeekBackward"}"#),
             (Command::SeekTo(198), r#"{"cmd":"SeekTo","arg":198}"#),
+        ] {
+            let json = serde_json::to_string(&cmd).unwrap();
+            assert_eq!(json, attendu);
+            assert_eq!(serde_json::from_str::<Command>(&json).unwrap(), cmd);
+        }
+    }
+
+    #[test]
+    fn roundtrip_des_commandes_a_valeur_absolue() {
+        for (cmd, attendu) in [
+            (Command::SetVolume(40), r#"{"cmd":"SetVolume","arg":40}"#),
+            (Command::SelectSource("radio".into()), r#"{"cmd":"SelectSource","arg":"radio"}"#),
         ] {
             let json = serde_json::to_string(&cmd).unwrap();
             assert_eq!(json, attendu);
