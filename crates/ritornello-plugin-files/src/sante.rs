@@ -226,22 +226,42 @@ mod tests {
         assert!(s.muets().is_empty(), "un appel rendu ne doit marquer personne");
     }
 
+    /// L'appel ne revient **jamais** de lui-même : il bloque sur un canal que
+    /// le test ne libère qu'à la fin.
+    ///
+    /// La propriété gardée est la même qu'avant — la borne vaut son prix
+    /// seulement si elle rend la main *avant* la fin de l'appel — mais elle
+    /// était prouvée par une marge d'horloge murale : 300 ms mesurées contre un
+    /// délai de 50 ms et un appel de 400 ms. Une hypothèse d'exécution rapide,
+    /// donc un flake dès que les autres binaires de test chargent la machine.
+    ///
+    /// Un appel qui ne finit pas tant qu'on ne l'y autorise pas rend le `None`
+    /// vrai **par construction** : aucune charge ne peut faire gagner la course
+    /// à l'appel, là où un `sleep` de 400 ms pouvait la gagner. Le `timeout` du
+    /// test ne garde plus que la régression franche — une borne qui attendrait
+    /// l'appel au lieu de le borner ferait pendre ce test, et cette ligne le
+    /// sanctionne avec un message plutôt qu'en expirant sans rien dire.
+    ///
+    /// À ne pas remplacer par `tokio::time::pause()` : mesuré, l'horloge
+    /// virtuelle n'avance pas tant qu'une tâche de `spawn_blocking` est en vol,
+    /// donc l'appel gagnait et l'assertion s'inversait en `Some(7)`.
     #[tokio::test]
     async fn un_appel_qui_ne_revient_pas_rend_la_main_et_marque_son_montage() {
         let s = sante();
-        let debut = std::time::Instant::now();
-        let r = s
-            .borne(Path::new("/mnt/ritornello/nas/a.mp3"), || {
-                std::thread::sleep(Duration::from_millis(400));
+        let (liberation, attente) = std::sync::mpsc::channel::<()>();
+        let r = tokio::time::timeout(
+            Duration::from_secs(10),
+            s.borne(Path::new("/mnt/ritornello/nas/a.mp3"), move || {
+                let _ = attente.recv();
                 7
-            })
-            .await;
+            }),
+        )
+        .await
+        .expect("la borne doit rendre la main a son delai, pas attendre l'appel");
         assert_eq!(r, None);
-        // La borne vaut son prix seulement si elle rend la main *avant* la fin
-        // de l'appel : sans la mesure, un `None` pourrait venir d'un appel qui a
-        // simplement échoué au bout de ses 400 ms.
-        assert!(debut.elapsed() < Duration::from_millis(300), "{:?}", debut.elapsed());
         assert_eq!(s.muets(), vec![PathBuf::from("/mnt/ritornello/nas")]);
+        // Libère le fil bloquant, sinon l'arrêt du runtime l'attendrait.
+        let _ = liberation.send(());
     }
 
     #[tokio::test]

@@ -890,12 +890,21 @@ mod tests {
         });
         let (update_tx, _update_rx) = tokio::sync::mpsc::channel(8);
         let client = SourceClient::connect(&socket, "radio".into(), update_tx).await.unwrap();
-        let start = std::time::Instant::now();
         let res = client.request(SourceReq::Activate).await;
-        assert!(res.is_err());
+        let e = res.expect_err("une requête sans réponse doit échouer").to_string();
+        // Le **message** distingue les deux chemins, là où une mesure de durée
+        // ne le faisait que par une marge : « response dropped » vient du
+        // pending drainé à l'EOF, « request timeout » de l'expiration des 5 s.
+        // Asserter le message prouve donc exactement ce que ce test veut dire —
+        // que l'échec est immédiat et non attendu — sans dépendre de la charge
+        // de la machine, qui pouvait franchir la marge de 2 s contre 5 s.
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(2),
-            "la requête doit échouer AVANT le timeout de 5 s (pending drainé)"
+            e.contains("response dropped"),
+            "la requête doit échouer par le pending drainé, pas par le timeout de 5 s : {e}"
+        );
+        assert!(
+            !e.contains("timeout"),
+            "un échec par expiration signifierait que le pending n'a pas été drainé : {e}"
         );
     }
 }

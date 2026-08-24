@@ -1436,9 +1436,17 @@ mod tests {
             Entry { path: PathBuf::from("/home/pi/absent.mp3"), title: None, duration_s: None },
         ];
 
+        // Marge délibérément large. Le disjoncteur est **déjà ouvert** ici (le
+        // montage est passé en `muets` au montage du test), donc `borne` rend
+        // la main sans rien lancer : la promptitude est acquise par
+        // construction, et le vrai garde de ce test est l'assertion de valeur
+        // ci-dessous. Une seconde faisait de cette ligne une hypothèse
+        // d'exécution rapide — un flake sous la charge des autres binaires de
+        // test — pour ne rien prouver de plus. Elle ne sanctionne plus qu'une
+        // régression catastrophique, un `get_data` qui bloquerait vraiment.
         let debut = std::time::Instant::now();
         let d = admin.get_data().await;
-        assert!(debut.elapsed() < std::time::Duration::from_secs(1), "{:?}", debut.elapsed());
+        assert!(debut.elapsed() < std::time::Duration::from_secs(10), "{:?}", debut.elapsed());
 
         // `null` et non `true` : c'est tout l'objet du correctif. Dire
         // « introuvable » pour un partage endormi accuserait les fichiers d'une
