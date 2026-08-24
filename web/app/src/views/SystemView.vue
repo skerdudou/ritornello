@@ -644,7 +644,10 @@ async function attendreRetour(avant: number | null, maxMs: number, cleSucces: st
     <Card>
       <CardHeader><CardTitle>{{ t('system_memory') }}</CardTitle></CardHeader>
       <CardContent class="space-y-2 text-sm">
-        <div data-system-memory>{{ occupation(etat?.memory, 'mb') }}</div>
+        <div data-system-memory>
+          {{ occupation(etat?.memory, 'mb') }}
+          <span v-if="etat?.memory" class="text-muted-foreground">({{ pourcentOccupe(etat.memory) }} %)</span>
+        </div>
         <div class="h-2 w-full rounded bg-muted">
           <div class="h-2 rounded bg-primary" :style="{ width: `${pourcentOccupe(etat?.memory)}%` }" />
         </div>

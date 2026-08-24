@@ -236,10 +236,80 @@ function chargerListe(cible: string): void {
         </Button>
       </div>
 
-      <!-- Hauteur bornée et défilement propre : c'est tout l'objet du
-           navigateur. Un dossier de mille fichiers ne doit pas repousser la
-           recherche et le reste de la page hors de l'écran. -->
-      <ul class="max-h-96 min-w-0 space-y-1 overflow-y-auto text-sm" data-browse-list>
+      <!-- La recherche vit **au-dessus** du listing : elle porte sur le dossier
+           ouvert, et la ligne `data-search-scope` le nomme juste en dessous, ce
+           qui suffit à dire son périmètre. Sous une liste devenue aussi longue
+           que le dossier, il fallait la chercher en défilant. -->
+      <div class="flex flex-wrap items-center gap-2">
+        <Input
+          v-model="query"
+          data-search-query
+          class="min-w-48 flex-1"
+          :placeholder="t('search_placeholder')"
+          @keydown.enter="chercher"
+        />
+        <Button data-search :disabled="fige" @click="chercher">{{ t('btn_search') }}</Button>
+      </div>
+      <p class="text-xs text-muted-foreground" data-search-scope>
+        {{ t('search_scope', { path: cheminAffiche }) }}
+      </p>
+
+      <div v-if="resultats" class="space-y-1" data-search-results>
+        <!-- Réservé au parcours **complet** : un parcours interrompu avant
+             d'avoir tout vu ne dit rien sur la présence du fichier, et
+             l'annoncer comme « Aucun résultat » affirmerait le contraire. -->
+        <p
+          v-if="!resultats.length && !abandon"
+          class="text-sm text-muted-foreground"
+          data-no-results
+        >
+          {{ t('no_results') }}
+        </p>
+        <!-- Le plafond du plugin est silencieux dans la liste : sans cette
+             phrase, une recherche tronquée passerait pour complète et
+             l'utilisateur conclurait que son fichier n'est pas là. -->
+        <p v-if="tronque" class="text-sm text-muted-foreground" data-search-truncated>
+          {{ t('search_truncated', { count: resultats.length }) }}
+        </p>
+        <!-- Cause distincte de `tronque` : ici la marche a renoncé avant
+             d'avoir tout parcouru, elle n'a pas trouvé plus que ce qu'elle
+             rapporte. Le conseil est donc différent : descendre dans un
+             sous-dossier plutôt que préciser le motif. -->
+        <p v-if="abandon" class="text-sm text-muted-foreground" data-search-gave-up>
+          {{ t('search_gave_up') }}
+        </p>
+        <!-- Une recherche ne rapporte que des fichiers : `scan::search` filtre
+             sur l'audio, et `normaliserBrowse` pose `dir: false` en dur pour ses
+             résultats. Le ternaire qui distinguait un dossier ici avait donc une
+             branche prouvablement morte, et la clé n'a pas à porter un type qui
+             ne varie pas. -->
+        <div
+          v-for="e in resultats"
+          :key="e.path"
+          class="flex min-w-0 items-center gap-2 text-sm"
+          data-search-row
+        >
+          <!-- Le chemin complet, pas seulement le nom : une recherche rapporte
+               des homonymes de dossiers différents, et rien d'autre ne permet
+               de les distinguer. -->
+          <span class="min-w-0 flex-1 truncate">{{ e.path }}</span>
+          <Button
+            variant="secondary"
+            size="sm"
+            data-add-result
+            :disabled="fige"
+            @click="ajouterFichier(e.path)"
+          >
+            {{ t('btn_add_to_playlist') }}
+          </Button>
+        </div>
+      </div>
+
+      <!-- Aucune hauteur bornée ici : la liste défile **avec** la page. Un
+           cadre à barre propre imbriquait deux défilements, et la molette
+           s'arrêtait au bord de la liste au lieu de continuer la page. Rien
+           n'est repoussé hors de l'écran puisque la recherche est au-dessus. -->
+      <ul class="min-w-0 space-y-1 text-sm" data-browse-list>
         <li
           v-for="e in entrees ?? []"
           :key="`${e.dir ? 'd' : 'f'}:${e.path}`"
@@ -309,74 +379,6 @@ function chargerListe(cible: string): void {
           {{ t('empty_folder') }}
         </li>
       </ul>
-
-      <!-- La recherche vit **sous** le dossier ouvert, parce qu'elle porte sur
-           lui : la placer au-dessus laissait croire qu'elle ratissait toute la
-           source. -->
-      <div class="flex flex-wrap items-center gap-2">
-        <Input
-          v-model="query"
-          data-search-query
-          class="min-w-48 flex-1"
-          :placeholder="t('search_placeholder')"
-          @keydown.enter="chercher"
-        />
-        <Button data-search :disabled="fige" @click="chercher">{{ t('btn_search') }}</Button>
-      </div>
-      <p class="text-xs text-muted-foreground" data-search-scope>
-        {{ t('search_scope', { path: cheminAffiche }) }}
-      </p>
-
-      <div v-if="resultats" class="space-y-1" data-search-results>
-        <!-- Réservé au parcours **complet** : un parcours interrompu avant
-             d'avoir tout vu ne dit rien sur la présence du fichier, et
-             l'annoncer comme « Aucun résultat » affirmerait le contraire. -->
-        <p
-          v-if="!resultats.length && !abandon"
-          class="text-sm text-muted-foreground"
-          data-no-results
-        >
-          {{ t('no_results') }}
-        </p>
-        <!-- Le plafond du plugin est silencieux dans la liste : sans cette
-             phrase, une recherche tronquée passerait pour complète et
-             l'utilisateur conclurait que son fichier n'est pas là. -->
-        <p v-if="tronque" class="text-sm text-muted-foreground" data-search-truncated>
-          {{ t('search_truncated', { count: resultats.length }) }}
-        </p>
-        <!-- Cause distincte de `tronque` : ici la marche a renoncé avant
-             d'avoir tout parcouru, elle n'a pas trouvé plus que ce qu'elle
-             rapporte. Le conseil est donc différent : descendre dans un
-             sous-dossier plutôt que préciser le motif. -->
-        <p v-if="abandon" class="text-sm text-muted-foreground" data-search-gave-up>
-          {{ t('search_gave_up') }}
-        </p>
-        <!-- Une recherche ne rapporte que des fichiers : `scan::search` filtre
-             sur l'audio, et `normaliserBrowse` pose `dir: false` en dur pour ses
-             résultats. Le ternaire qui distinguait un dossier ici avait donc une
-             branche prouvablement morte, et la clé n'a pas à porter un type qui
-             ne varie pas. -->
-        <div
-          v-for="e in resultats"
-          :key="e.path"
-          class="flex min-w-0 items-center gap-2 text-sm"
-          data-search-row
-        >
-          <!-- Le chemin complet, pas seulement le nom : une recherche rapporte
-               des homonymes de dossiers différents, et rien d'autre ne permet
-               de les distinguer. -->
-          <span class="min-w-0 flex-1 truncate">{{ e.path }}</span>
-          <Button
-            variant="secondary"
-            size="sm"
-            data-add-result
-            :disabled="fige"
-            @click="ajouterFichier(e.path)"
-          >
-            {{ t('btn_add_to_playlist') }}
-          </Button>
-        </div>
-      </div>
     </template>
   </section>
 </template>

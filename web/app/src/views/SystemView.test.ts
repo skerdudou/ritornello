@@ -157,8 +157,8 @@ describe('SystemView', () => {
     expect(w.get('[data-system-kernel]').text()).toBe('6.6.51+rpt-rpi-v7')
     // 90 061 s = 1 jour 1 heure, au plus deux unités.
     expect(w.get('[data-system-uptime]').text()).toBe('1 j 1 h')
-    // 600 000 kio utilisés sur 1 000 000, arrondis en Mo.
-    expect(w.get('[data-system-memory]').text()).toBe('586 / 977 Mo')
+    // 600 000 kio utilisés sur 1 000 000, arrondis en Mo, puis le taux entre parenthèses.
+    expect(w.get('[data-system-memory]').text()).toBe('586 / 977 Mo (60 %)')
     w.unmount()
   })
 
