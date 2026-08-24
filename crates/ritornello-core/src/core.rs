@@ -6,7 +6,7 @@ use anyhow::Result;
 use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::SourceUpdate;
 use ritornello_proto::{
-    Command, Enrichment, IdentityUpdate, InputMessage, NowPlaying, Overlay, SourceAction,
+    Command, Enrichment, IdentityUpdate, InputMessage, NowPlaying, Overlay, Playback, SourceAction,
     SourceReq,
 };
 use std::collections::HashMap;
@@ -96,6 +96,14 @@ pub struct Core<P: Player> {
     /// liste de fichiers. S'en servir comme garde « ça joue » ferait taire
     /// toute couche de métadonnées sur exactement ces contenus-là.
     lecture: bool,
+    /// La lecture en cours est **suspendue**. N'a de sens que quand `lecture`
+    /// est vrai ; `etat_lecteur` ne le consulte pas autrement.
+    ///
+    /// Remis à faux **au seul endroit** où `lecture` passe à vrai. C'est la
+    /// doctrine que `etat_lecteur` défend déjà pour `position_s` : un point
+    /// unique ne peut pas être oublié, là où cinq effacements le seraient au
+    /// sixième chemin ajouté.
+    paused: bool,
     retry_count: u32,
     audio_device: Option<String>,
     /// Overlay temporaire (volume/muet/message) : incrustation à afficher +
@@ -238,6 +246,7 @@ impl<P: Player> Core<P> {
             veille_persistee: persisted.standby,
             expecting_stream: false,
             lecture: false,
+            paused: false,
             retry_count: 0,
             audio_device: persisted.audio_device.clone(),
             overlay: None,
@@ -608,6 +617,15 @@ impl<P: Player> Core<P> {
             // resterait figée sur la dernière valeur connue sans que rien ne
             // le signale.
             position_s: if self.lecture && !self.standby { self.position_s } else { None },
+            // Même raison qu'au-dessus : calculé à la publication plutôt
+            // qu'entretenu dans les cinq chemins qui posent `lecture = false`.
+            playback: if !self.lecture || self.standby {
+                Playback::Stopped
+            } else if self.paused {
+                Playback::Paused
+            } else {
+                Playback::Playing
+            },
             // `lecture` et non `expecting_stream` : la première dit « quelque
             // chose joue », la seconde « c'est un flux relançable ». Un
             // contenu déplaçable est exactement ce qui joue sans être un flux.
@@ -820,6 +838,7 @@ impl<P: Player> Core<P> {
             }
             Command::PlayPause => {
                 if self.lecture {
+                    self.paused = !self.paused;
                     self.player.toggle_pause().await?;
                 } else {
                     // Rien n'est chargé : `stop` **vide la liste de mpv**, si
@@ -1208,6 +1227,10 @@ impl<P: Player> Core<P> {
                 // mauvais côté.
                 self.expecting_stream = !finite;
                 self.lecture = true;
+                // Seul endroit où `lecture` passe à vrai : c'est ici, et
+                // nulle part ailleurs, que `paused` doit retomber, sans quoi
+                // une pause d'hier rendrait une lecture neuve « en pause ».
+                self.paused = false;
                 // `loadlist` pour une liste, `loadfile` pour un média : c'est la
                 // Source qui le déclare, et le cœur ne le devine pas. Un `.m3u8`
                 // est une liste pour un lecteur de fichiers et un flux HLS pour
@@ -2266,6 +2289,48 @@ mod tests {
         // jouer », donc la reprise reste un simple basculement.
         core.handle_command(Command::PlayPause).await.unwrap();
         assert_eq!(*player_calls.lock().unwrap(), vec!["pause".to_string(), "pause".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn la_pause_et_la_reprise_se_lisent_dans_letat_publie() {
+        // Le champ le plus lu de la commande `status` de MPD : sans lui, aucun
+        // client ne peut afficher le bon bouton.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.handle_command(Command::PlayPause).await.unwrap(); // demarre la lecture
+        assert_eq!(core.etat_lecteur().playback, Playback::Playing);
+        core.handle_command(Command::PlayPause).await.unwrap();
+        assert_eq!(core.etat_lecteur().playback, Playback::Paused);
+        core.handle_command(Command::PlayPause).await.unwrap();
+        assert_eq!(core.etat_lecteur().playback, Playback::Playing);
+        core.handle_command(Command::Stop).await.unwrap();
+        assert_eq!(core.etat_lecteur().playback, Playback::Stopped);
+    }
+
+    #[tokio::test]
+    async fn une_pause_ne_survit_pas_a_un_nouveau_play() {
+        // Le seul effacement de `paused` est celui du `Play` applique : si on
+        // l'oubliait, une pause d'hier rendrait une lecture neuve « en pause ».
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.handle_command(Command::PlayPause).await.unwrap(); // demarre la lecture (radio, http://fip)
+        core.handle_command(Command::PlayPause).await.unwrap(); // met en pause
+        assert_eq!(core.etat_lecteur().playback, Playback::Paused);
+        // Selectionne une autre preselection radio (`http://inter`) : un nouveau
+        // `Play` est applique, et `paused` doit retomber par ce seul chemin.
+        core.handle_command(Command::Select(3)).await.unwrap();
+        assert_eq!(core.etat_lecteur().playback, Playback::Playing);
+    }
+
+    #[tokio::test]
+    async fn la_veille_dit_larret_meme_si_la_pause_etait_posee() {
+        // La veille court-circuite `playback` avant meme que `lecture` ne
+        // retombe (`Command::Power` le fait aussi, mais peu importe l'ordre :
+        // `etat_lecteur` consulte `standby` en premier).
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.handle_command(Command::PlayPause).await.unwrap(); // demarre la lecture
+        core.handle_command(Command::PlayPause).await.unwrap(); // met en pause
+        assert_eq!(core.etat_lecteur().playback, Playback::Paused);
+        core.handle_command(Command::Power).await.unwrap();
+        assert_eq!(core.etat_lecteur().playback, Playback::Stopped);
     }
 
     #[tokio::test]

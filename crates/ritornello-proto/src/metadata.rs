@@ -184,6 +184,28 @@ impl Overlay {
     }
 }
 
+/// Ce que fait le lecteur, en un mot. `Stopped` par défaut : ne rien savoir,
+/// c'est ne rien jouer — la même convention que `can_eject`, où l'absence
+/// d'information vaut l'absence de capacité.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Playback {
+    #[default]
+    Stopped,
+    Playing,
+    Paused,
+}
+
+impl Playback {
+    /// Sert le `skip_serializing_if` du champ : la valeur par défaut ne
+    /// voyage pas, donc les trames existantes restent identiques à l'octet.
+    /// Une méthode et non une fermeture : `skip_serializing_if` exige un
+    /// chemin de fonction.
+    pub fn est_arrete(&self) -> bool {
+        matches!(self, Playback::Stopped)
+    }
+}
+
 /// État du lecteur diffusé à la SPA : ce qui est volatil, et qui a donc besoin
 /// d'être **poussé**.
 ///
@@ -237,6 +259,14 @@ pub struct PlayerState {
     /// a le droit de parler (voir `Core::rafraichit_position`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position_s: Option<u32>,
+    /// Ce que fait le lecteur. Additif, à l'idiome de `InputMessage.held` et
+    /// de `PluginStatus.stalled` : absent du JSON quand il vaut `Stopped`,
+    /// donc aucune trame existante ne change et une trame ancienne se relit.
+    ///
+    /// Distinct de `position_s.is_some()` : une lecture en pause garde sa
+    /// position, et un flux qui joue peut n'en avoir aucune.
+    #[serde(default, skip_serializing_if = "Playback::est_arrete")]
+    pub playback: Playback,
     /// Ce qui joue accepte un déplacement : c'est le `finite` que la Source a
     /// déclaré à son `Play`, rendu visible aux consommateurs.
     ///
@@ -520,6 +550,38 @@ mod tests {
         let relue: PlayerState = serde_json::from_str(ancienne).unwrap();
         assert_eq!(relue.position_s, None);
         assert!(!relue.seekable);
+    }
+
+    #[test]
+    fn playback_ne_voyage_pas_quand_il_est_arrete() {
+        // L'idiome additif : la valeur par défaut est absente du JSON, donc les
+        // trames d'avant ce champ sont inchangées à l'octet.
+        let etat = PlayerState::default();
+        let json = serde_json::to_string(&etat).unwrap();
+        assert!(!json.contains("playback"), "playback ne devrait pas etre serialise: {json}");
+    }
+
+    #[test]
+    fn playback_voyage_en_minuscules_quand_il_dit_quelque_chose() {
+        for (p, attendu) in
+            [(Playback::Playing, "\"playback\":\"playing\""), (Playback::Paused, "\"playback\":\"paused\"")]
+        {
+            let etat = PlayerState { playback: p, ..Default::default() };
+            let json = serde_json::to_string(&etat).unwrap();
+            assert!(json.contains(attendu), "{attendu} absent de {json}");
+            let retour: PlayerState = serde_json::from_str(&json).unwrap();
+            assert_eq!(retour.playback, p);
+        }
+    }
+
+    #[test]
+    fn une_trame_sans_playback_se_relit_en_arret() {
+        // Compatibilité descendante : une trame ecrite avant ce champ.
+        let etat: PlayerState = serde_json::from_str(
+            r#"{"source":"radio","volume":40,"muted":false,"standby":false,"preset":null,"preset_count":null,"preset_name":null}"#,
+        )
+        .unwrap();
+        assert_eq!(etat.playback, Playback::Stopped);
     }
 
     #[test]
