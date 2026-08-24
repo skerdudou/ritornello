@@ -351,9 +351,14 @@ function chargerListe(cible: string): void {
         <p v-if="abandon" class="text-sm text-muted-foreground" data-search-gave-up>
           {{ t('search_gave_up') }}
         </p>
+        <!-- Une recherche ne rapporte que des fichiers : `scan::search` filtre
+             sur l'audio, et `normaliserBrowse` pose `dir: false` en dur pour ses
+             résultats. Le ternaire qui distinguait un dossier ici avait donc une
+             branche prouvablement morte, et la clé n'a pas à porter un type qui
+             ne varie pas. -->
         <div
           v-for="e in resultats"
-          :key="`${e.dir ? 'd' : 'f'}:${e.path}`"
+          :key="e.path"
           class="flex min-w-0 items-center gap-2 text-sm"
           data-search-row
         >
@@ -366,7 +371,7 @@ function chargerListe(cible: string): void {
             size="sm"
             data-add-result
             :disabled="fige"
-            @click="e.dir ? ajouterDossier(e.path) : ajouterFichier(e.path)"
+            @click="ajouterFichier(e.path)"
           >
             {{ t('btn_add_to_playlist') }}
           </Button>

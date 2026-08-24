@@ -10,7 +10,7 @@
 //! de `/proc/mounts`), et demander la réconciliation. Ce qui est réellement
 //! monté, et avec quelles options, se décide du côté privilégié.
 
-use crate::roots::{Root, RootKind, MOUNT_ROOT};
+use crate::roots::{Root, RootKind};
 use std::path::{Path, PathBuf};
 
 /// L'unité que le plugin démarre. Fixe : c'est aussi le nom que la règle
@@ -31,12 +31,17 @@ pub enum MountState {
 
 /// Point de montage d'une racine, **imposé** : `/mnt/ritornello/<name>`.
 ///
+/// Simple relais vers `Root::mount_point`, et non une seconde implémentation :
+/// les deux existaient côte à côte, alors que le retour arrière d'une
+/// déclaration ratée repose désormais sur leur égalité — une divergence
+/// dé-déclarerait silencieusement un partage sain.
+///
 /// Ce n'est pas `Root::base_dir()`, qui y ajoute le sous-chemin déclaré. Le
 /// sous-chemin est parcouru *sous* le point monté et n'apparaît jamais dans
 /// `/proc/mounts` : le confondre avec le point de montage ferait passer une
 /// racine à sous-chemin pour éternellement non montée.
 fn point_de_montage(root: &Root) -> PathBuf {
-    PathBuf::from(MOUNT_ROOT).join(&root.name)
+    root.mount_point()
 }
 
 /// Vrai si `point` figure comme point de montage dans le contenu de
