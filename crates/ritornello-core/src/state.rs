@@ -2,6 +2,22 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// What the device does with the active source when the process starts.
+/// Read once, at launch, by `Core::demarrage`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupPower {
+    /// Wake the active source: the device plays again on its own.
+    #[default]
+    On,
+    /// Configure mpv but leave the source asleep, standby on the display.
+    Standby,
+    /// Whatever the device was doing when it last wrote its state
+    /// (`PersistedState::standby`) — on after a crash mid-listening,
+    /// standby after a power cut that followed a deliberate standby.
+    Previous,
+}
+
 /// Behavior settings, edited on the config page (`PUT /api/settings`).
 /// Container-level `serde(default)`: a partial block in a hand-edited
 /// state.json fills in with defaults instead of failing to load.
@@ -12,8 +28,8 @@ pub struct Settings {
     pub volume_repeat_initial_ms: u32,
     /// Hold-to-repeat: delay between subsequent volume steps.
     pub volume_repeat_interval_ms: u32,
-    /// Start in standby instead of waking the active source at launch.
-    pub start_in_standby: bool,
+    /// On, standby, or "as it was" at launch — see `StartupPower`.
+    pub startup_power: StartupPower,
     /// How long the volume/mute overlay and sources' transient messages
     /// (e.g. "empty preset") stay on screen before the permanent view
     /// reappears. Deliberately a separate field from `tens_window_ms`,
@@ -50,7 +66,7 @@ impl Default for Settings {
         Self {
             volume_repeat_initial_ms: 800,
             volume_repeat_interval_ms: 200,
-            start_in_standby: false,
+            startup_power: StartupPower::On,
             overlay_ms: 5000,
             tens_window_ms: 5000,
             seek_step_s: 10,
@@ -62,6 +78,12 @@ impl Default for Settings {
 pub struct PersistedState {
     pub active_source: String,
     pub volume: u8,
+    /// Whether the device was in standby when this state was last written.
+    /// Only `StartupPower::Previous` reads it; every path that toggles
+    /// standby writes it (see `Core::persist` callers), so it describes the
+    /// last observed reality rather than an intention.
+    #[serde(default)]
+    pub standby: bool,
     #[serde(default)]
     pub audio_device: Option<String>,
     #[serde(default)]
@@ -80,7 +102,7 @@ pub struct PersistedState {
 
 impl Default for PersistedState {
     fn default() -> Self {
-        Self { active_source: "radio".into(), volume: 60, audio_device: None, locale: None, theme: None, mode: None, settings: Settings::default() }
+        Self { active_source: "radio".into(), volume: 60, standby: false, audio_device: None, locale: None, theme: None, mode: None, settings: Settings::default() }
     }
 }
 
@@ -122,6 +144,7 @@ mod tests {
         let st = PersistedState {
             active_source: "cd".into(),
             volume: 35,
+            standby: false,
             audio_device: Some("bluealsa:DEV=XX".into()),
             locale: None,
             theme: None,
@@ -148,6 +171,7 @@ mod tests {
         let st = PersistedState {
             active_source: "radio".into(),
             volume: 50,
+            standby: false,
             audio_device: None,
             locale: Some("fr".into()),
             theme: None,
@@ -167,6 +191,7 @@ mod tests {
         let st = PersistedState {
             active_source: "radio".into(),
             volume: 50,
+            standby: false,
             audio_device: None,
             locale: None,
             theme: Some("cyberpunk".into()),
@@ -200,7 +225,7 @@ mod tests {
         let s = Settings::default();
         assert_eq!(s.volume_repeat_initial_ms, 800);
         assert_eq!(s.volume_repeat_interval_ms, 200);
-        assert!(!s.start_in_standby);
+        assert_eq!(s.startup_power, StartupPower::On);
         assert_eq!(s.overlay_ms, 5000);
         assert_eq!(s.tens_window_ms, 5000);
         assert_eq!(s.seek_step_s, 10);
@@ -235,7 +260,7 @@ mod tests {
             settings: Settings {
                 volume_repeat_initial_ms: 900,
                 volume_repeat_interval_ms: 250,
-                start_in_standby: true,
+                startup_power: StartupPower::Previous,
                 overlay_ms: 6000,
                 tens_window_ms: 7000,
                 seek_step_s: 45,
@@ -245,12 +270,24 @@ mod tests {
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
         // A hand-edited partial block falls back to defaults for what's missing.
-        std::fs::write(&path, r#"{"active_source":"radio","volume":42,"settings":{"start_in_standby":true}}"#).unwrap();
+        std::fs::write(&path, r#"{"active_source":"radio","volume":42,"settings":{"startup_power":"standby"}}"#).unwrap();
         let st = load(&path);
-        assert!(st.settings.start_in_standby);
+        assert_eq!(st.settings.startup_power, StartupPower::Standby);
         assert_eq!(st.settings.volume_repeat_initial_ms, 800);
         assert_eq!(st.settings.overlay_ms, 5000);
         assert_eq!(st.settings.tens_window_ms, 5000);
         assert_eq!(st.settings.seek_step_s, 10);
+    }
+
+    #[test]
+    fn la_veille_persistee_vaut_faux_sans_la_cle_et_survit_au_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#"{"active_source":"radio","volume":42}"#).unwrap();
+        assert!(!load(&path).standby, "sans la cle, on repart eveille");
+
+        let st = PersistedState { standby: true, ..Default::default() };
+        save(&path, &st).unwrap();
+        assert!(load(&path).standby);
     }
 }

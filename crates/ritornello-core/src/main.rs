@@ -381,7 +381,6 @@ async fn main() -> Result<()> {
 
     // Cœur. La source active affichée est tenue à jour en direct par la boucle
     // ci-dessous (mise à jour de status_state.active_source après chaque commande).
-    let start_in_standby = persisted.settings.start_in_standby;
     let mut core = core::Core::new(
         mpv_player,
         core::Cablage {
@@ -398,10 +397,10 @@ async fn main() -> Result<()> {
         },
     );
     // Best-effort, like the wake via `Power` (see the comment below): startup
-    // must never put systemd in a restart loop. `start_in_standby` skips the
-    // source wake but still configures mpv, so the first `Power` starts right.
-    let demarrage = if start_in_standby { core.start_in_standby().await } else { core.resume().await };
-    if let Err(e) = demarrage {
+    // must never put systemd in a restart loop. `demarrage` reads
+    // `settings.startup_power`; its standby branch skips the source wake but
+    // still configures mpv, so the first `Power` starts right.
+    if let Err(e) = core.demarrage().await {
         tracing::warn!("startup wake: {e}");
     }
 

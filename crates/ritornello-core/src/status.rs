@@ -1245,7 +1245,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["volume_repeat_initial_ms"], 800);
         assert_eq!(v["volume_repeat_interval_ms"], 200);
-        assert_eq!(v["start_in_standby"], false);
+        assert_eq!(v["startup_power"], "on");
         assert_eq!(v["overlay_ms"], 5000);
         assert_eq!(v["tens_window_ms"], 5000);
     }
@@ -1260,7 +1260,7 @@ mod tests {
                 Request::put("/api/settings")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"volume_repeat_initial_ms":800,"volume_repeat_interval_ms":250,"start_in_standby":true,"overlay_ms":3000,"tens_window_ms":9000}"#,
+                        r#"{"volume_repeat_initial_ms":800,"volume_repeat_interval_ms":250,"startup_power":"previous","overlay_ms":3000,"tens_window_ms":9000}"#,
                     ))
                     .unwrap(),
             )
@@ -1269,7 +1269,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         let recu = settings_rx.recv().await.unwrap();
         assert_eq!(recu.volume_repeat_initial_ms, 800);
-        assert!(recu.start_in_standby);
+        assert_eq!(recu.startup_power, crate::state::StartupPower::Previous);
         assert_eq!(recu.overlay_ms, 3000);
         assert_eq!(recu.tens_window_ms, 9000);
         assert_eq!(settings_current.read().await.volume_repeat_interval_ms, 250);
@@ -1284,13 +1284,13 @@ mod tests {
         let settings_current = state.settings_current.clone();
         let app = router(state);
         for corps in [
-            r#"{"volume_repeat_initial_ms":100,"volume_repeat_interval_ms":500,"start_in_standby":false,"overlay_ms":5000,"tens_window_ms":5000}"#,
-            r#"{"volume_repeat_initial_ms":1000,"volume_repeat_interval_ms":50,"start_in_standby":false,"overlay_ms":5000,"tens_window_ms":5000}"#,
-            r#"{"volume_repeat_initial_ms":9000,"volume_repeat_interval_ms":500,"start_in_standby":false,"overlay_ms":5000,"tens_window_ms":5000}"#,
-            r#"{"volume_repeat_initial_ms":800,"volume_repeat_interval_ms":200,"start_in_standby":false,"overlay_ms":999,"tens_window_ms":5000}"#,
-            r#"{"volume_repeat_initial_ms":800,"volume_repeat_interval_ms":200,"start_in_standby":false,"overlay_ms":15001,"tens_window_ms":5000}"#,
-            r#"{"volume_repeat_initial_ms":800,"volume_repeat_interval_ms":200,"start_in_standby":false,"overlay_ms":5000,"tens_window_ms":999}"#,
-            r#"{"volume_repeat_initial_ms":800,"volume_repeat_interval_ms":200,"start_in_standby":false,"overlay_ms":5000,"tens_window_ms":15001}"#,
+            r#"{"volume_repeat_initial_ms":100,"volume_repeat_interval_ms":500,"startup_power":"on","overlay_ms":5000,"tens_window_ms":5000}"#,
+            r#"{"volume_repeat_initial_ms":1000,"volume_repeat_interval_ms":50,"startup_power":"on","overlay_ms":5000,"tens_window_ms":5000}"#,
+            r#"{"volume_repeat_initial_ms":9000,"volume_repeat_interval_ms":500,"startup_power":"on","overlay_ms":5000,"tens_window_ms":5000}"#,
+            r#"{"volume_repeat_initial_ms":800,"volume_repeat_interval_ms":200,"startup_power":"on","overlay_ms":999,"tens_window_ms":5000}"#,
+            r#"{"volume_repeat_initial_ms":800,"volume_repeat_interval_ms":200,"startup_power":"on","overlay_ms":15001,"tens_window_ms":5000}"#,
+            r#"{"volume_repeat_initial_ms":800,"volume_repeat_interval_ms":200,"startup_power":"on","overlay_ms":5000,"tens_window_ms":999}"#,
+            r#"{"volume_repeat_initial_ms":800,"volume_repeat_interval_ms":200,"startup_power":"on","overlay_ms":5000,"tens_window_ms":15001}"#,
         ] {
             // `AppState` est `Clone` : chaque oneshot repart du même montage.
             let resp = app

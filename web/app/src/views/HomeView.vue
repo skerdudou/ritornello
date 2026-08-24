@@ -121,7 +121,7 @@ const presetsIndisponibles = computed(() => indisponible('Select', etat.value))
 const reglages = ref<SettingsPayload>({
   volume_repeat_initial_ms: 800,
   volume_repeat_interval_ms: 200,
-  start_in_standby: false,
+  startup_power: 'on',
   overlay_ms: 5000,
   tens_window_ms: 5000,
   seek_step_s: 10,

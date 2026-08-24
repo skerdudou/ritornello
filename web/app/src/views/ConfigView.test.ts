@@ -20,6 +20,7 @@ const CATALOGUE = {
   language: 'Langue', change: 'Changer', ok: 'OK',
   recent_errors: 'Dernières erreurs',
   startup_title: 'Démarrage', startup_on: 'allumé', startup_standby: 'veille',
+  startup_previous: 'état précédent',
   volume_hold_title: 'Volume maintenu',
   volume_hold_initial: 'Délai initial (ms)', volume_hold_interval: 'Intervalle de répétition (ms)',
   overlays_title: 'Incrustations',
@@ -50,7 +51,7 @@ function charges() {
     '/api/locale': { locales: ['en', 'fr'], current: 'fr' } as unknown,
     '/api/logs': { lines: ['WARN plugin radio indisponible'] } as unknown,
     '/api/settings': {
-      volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: false,
+      volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'on',
       overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
     } as unknown,
     '/api/i18n': CATALOGUE as unknown,
@@ -317,7 +318,7 @@ describe('ConfigView — réglages', () => {
   it('affiche les réglages lus depuis /api/settings', async () => {
     const { w } = await monter({
       '/api/settings': {
-        volume_repeat_initial_ms: 800, volume_repeat_interval_ms: 250, start_in_standby: true,
+        volume_repeat_initial_ms: 800, volume_repeat_interval_ms: 250, startup_power: 'standby',
         overlay_ms: 5000, tens_window_ms: 5000,
       },
     })
@@ -326,6 +327,34 @@ describe('ConfigView — réglages', () => {
     // Le sélecteur de démarrage reflète la veille.
     const demarrage = w.findAllComponents(Select).find((s) => s.props('modelValue') === 'standby')
     expect(demarrage).toBeDefined()
+  })
+
+  it('propose « état précédent » à côté de « allumé » et « veille »', async () => {
+    // Les trois valeurs du fil, pas seulement les libellés : c'est `value`
+    // que le PUT envoie au cœur.
+    const { w } = await monter()
+    const demarrage = w
+      .findAllComponents(SelectItem)
+      .filter((i) => ['on', 'standby', 'previous'].includes(String(i.props('value'))))
+    expect(demarrage.map((i) => String(i.props('value')))).toEqual(['on', 'standby', 'previous'])
+    expect(demarrage.map((i) => i.text())).toEqual(['allumé', 'veille', 'état précédent'])
+  })
+
+  it('enregistre « état précédent » par un PUT du bloc complet', async () => {
+    const { w, puts } = await monter()
+    const demarrage = w.findAllComponents(Select).find((s) => s.props('modelValue') === 'on')!
+    await demarrage.vm.$emit('update:modelValue', 'previous')
+    await w.find('[data-startup-change]').trigger('click')
+    await flushPromises()
+    expect(puts).toEqual([
+      {
+        url: '/api/settings',
+        corps: {
+          volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'previous',
+          overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
+        },
+      },
+    ])
   })
 
   it('enregistre le démarrage en veille par un PUT du bloc complet', async () => {
@@ -338,7 +367,7 @@ describe('ConfigView — réglages', () => {
       {
         url: '/api/settings',
         corps: {
-          volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: true,
+          volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'standby',
           overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
         },
       },
@@ -356,7 +385,7 @@ describe('ConfigView — réglages', () => {
       {
         url: '/api/settings',
         corps: {
-          volume_repeat_initial_ms: 1500, volume_repeat_interval_ms: 300, start_in_standby: false,
+          volume_repeat_initial_ms: 1500, volume_repeat_interval_ms: 300, startup_power: 'on',
           overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
         },
       },
@@ -385,7 +414,7 @@ describe('ConfigView — incrustations', () => {
   it('affiche les deux durées lues depuis /api/settings', async () => {
     const { w } = await monter({
       '/api/settings': {
-        volume_repeat_initial_ms: 800, volume_repeat_interval_ms: 250, start_in_standby: false,
+        volume_repeat_initial_ms: 800, volume_repeat_interval_ms: 250, startup_power: 'on',
         overlay_ms: 3000, tens_window_ms: 9000,
       },
     })
@@ -403,7 +432,7 @@ describe('ConfigView — incrustations', () => {
       {
         url: '/api/settings',
         corps: {
-          volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: false,
+          volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'on',
           overlay_ms: 2000, tens_window_ms: 7000, seek_step_s: 10,
         },
       },

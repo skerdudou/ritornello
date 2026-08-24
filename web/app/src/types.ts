@@ -7,11 +7,18 @@ export interface AudioPayload { devices: AudioDevice[]; current: string | null }
 export interface LocalePayload { locales: string[]; current: string | null }
 export interface ThemePayload { theme: string; mode: Mode }
 export interface LogsPayload { lines: string[] }
+/** Les trois valeurs de `settings.startup_power`, cote coeur comme cote IHM. */
+export type StartupPower = 'on' | 'standby' | 'previous'
 /** Réglages de comportement, tels que les sert `GET /api/settings`. */
 export interface SettingsPayload {
   volume_repeat_initial_ms: number
   volume_repeat_interval_ms: number
-  start_in_standby: boolean
+  /**
+   * Comportement au demarrage du service : `on` reveille la source active,
+   * `standby` laisse l'appareil en veille, `previous` reprend l'etat qu'il
+   * avait au dernier arret.
+   */
+  startup_power: StartupPower
   /** Durée d'affichage de l'incrustation volume/muet et des messages éphémères des sources. */
   overlay_ms: number
   /** Fenêtre de saisie du cumul `+10` de la télécommande (temps laissé pour la seconde pression). */

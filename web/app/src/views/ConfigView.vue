@@ -19,16 +19,10 @@ const audioIndisponible = ref(false)
 const reglages = ref<SettingsPayload>({
   volume_repeat_initial_ms: 800,
   volume_repeat_interval_ms: 200,
-  start_in_standby: false,
+  startup_power: 'on',
   overlay_ms: 5000,
   tens_window_ms: 5000,
   seek_step_s: 10,
-})
-// Le Select ne porte que des chaînes : « on »/« standby » traduits à
-// l'affichage, le booléen reste la valeur envoyée au cœur.
-const demarrage = computed({
-  get: () => (reglages.value.start_in_standby ? 'standby' : 'on'),
-  set: (v: string) => { reglages.value.start_in_standby = v === 'standby' },
 })
 
 /**
@@ -240,11 +234,12 @@ function aller(id: string) {
         <Card>
           <CardHeader><CardTitle>{{ t('startup_title') }}</CardTitle></CardHeader>
           <CardContent class="flex flex-wrap items-center gap-2">
-            <Select v-model="demarrage">
+            <Select v-model="reglages.startup_power">
               <SelectTrigger class="min-w-32" data-startup-select :aria-label="t('startup_title')"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="on">{{ t('startup_on') }}</SelectItem>
                 <SelectItem value="standby">{{ t('startup_standby') }}</SelectItem>
+                <SelectItem value="previous">{{ t('startup_previous') }}</SelectItem>
               </SelectContent>
             </Select>
             <Button data-startup-change @click="enregistrerReglages">{{ t('change') }}</Button>

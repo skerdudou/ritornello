@@ -204,7 +204,7 @@ describe('HomeView', () => {
 
 describe('HomeView — volume maintenu', () => {
   /** Monte la vue avec des timings servis par /api/settings et des faux minuteurs. */
-  async function monterAvecTimings(reglages = { volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, start_in_standby: false, seek_step_s: 10 }) {
+  async function monterAvecTimings(reglages = { volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'on', seek_step_s: 10 }) {
     vi.useFakeTimers()
     const posts: string[] = []
     const spy = vi.fn(async (url: string, init?: RequestInit) => {
@@ -254,7 +254,7 @@ describe('HomeView — volume maintenu', () => {
   })
 
   it('les timings viennent de /api/settings', async () => {
-    const { w, posts } = await monterAvecTimings({ volume_repeat_initial_ms: 200, volume_repeat_interval_ms: 100, start_in_standby: false, seek_step_s: 10 })
+    const { w, posts } = await monterAvecTimings({ volume_repeat_initial_ms: 200, volume_repeat_interval_ms: 100, startup_power: 'on', seek_step_s: 10 })
     await w.find('[data-remote-hold="VolumeUp"]').trigger('pointerdown')
     await vi.advanceTimersByTimeAsync(200)
     expect(posts).toHaveLength(2)

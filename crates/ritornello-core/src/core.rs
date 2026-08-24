@@ -1,6 +1,6 @@
 use crate::metadata::{Metadonnees, PlayerState};
 use crate::player::Player;
-use crate::state::{self, PersistedState};
+use crate::state::{self, PersistedState, StartupPower};
 use crate::types::Event;
 use anyhow::Result;
 use ritornello_i18n::Catalog;
@@ -80,6 +80,11 @@ pub struct Core<P: Player> {
     volume: u8,
     muted: bool,
     standby: bool,
+    /// Standby as `state.json` had it at launch — the only thing
+    /// `StartupPower::Previous` needs, and the reason it is a snapshot and
+    /// not a re-read: `demarrage` runs after `new`, and by then `persist`
+    /// may already have rewritten the file.
+    veille_persistee: bool,
     expecting_stream: bool,
     /// Quelque chose est en lecture, **quelle qu'en soit la nature**.
     ///
@@ -230,6 +235,7 @@ impl<P: Player> Core<P> {
             volume: persisted.volume.min(100),
             muted: false,
             standby: false,
+            veille_persistee: persisted.standby,
             expecting_stream: false,
             lecture: false,
             retry_count: 0,
@@ -688,7 +694,34 @@ impl<P: Player> Core<P> {
         self.persist();
     }
 
-    /// Startup in standby (`settings.start_in_standby`): mpv is configured
+    /// Startup: what the process does with the active source when it
+    /// launches, per `settings.startup_power`. Called once by `main`, which
+    /// treats a failure as best-effort — startup must never put systemd in a
+    /// restart loop.
+    ///
+    /// The `On` branch persists before waking: `start_in_standby` writes
+    /// `standby: true` on the other side, and without this the file would
+    /// keep saying "in standby" after a boot that woke everything up — a
+    /// later switch to `Previous` would then resurrect a standby the device
+    /// left behind long ago.
+    pub async fn demarrage(&mut self) -> Result<()> {
+        let en_veille = match self.settings.startup_power {
+            StartupPower::On => false,
+            StartupPower::Standby => true,
+            StartupPower::Previous => self.veille_persistee,
+        };
+        if en_veille {
+            return self.start_in_standby().await;
+        }
+        // `resume` est aussi la moitie « reveil » de `Command::Power`, ou le
+        // drapeau est deja baisse ; ici c'est cette methode qui le baisse,
+        // pour que le fichier decrive un appareil reveille.
+        self.standby = false;
+        self.persist();
+        self.resume().await
+    }
+
+    /// Startup in standby (`settings.startup_power`): mpv is configured
     /// (volume, audio device) so a later wake starts right, but the active
     /// source is not woken and the display shows the standby status.
     ///
@@ -696,6 +729,10 @@ impl<P: Player> Core<P> {
     /// construction (see its doc) — no catalogue read on this path.
     pub async fn start_in_standby(&mut self) -> Result<()> {
         self.standby = true;
+        // Written before touching mpv, like the standby half of
+        // `Command::Power`: what is on disk must describe the device even if
+        // the calls below fail.
+        self.persist();
         self.player.set_volume(self.volume).await?;
         if let Some(device) = self.audio_device.clone() {
             self.player.set_audio_device(&device).await?;
@@ -816,6 +853,12 @@ impl<P: Player> Core<P> {
             }
             Command::Power => {
                 self.standby = !self.standby;
+                // Persister **avant** de prevenir la Source, pour la meme
+                // raison qu'au `SourceCycle` plus bas : une Source
+                // injoignable fait attendre jusqu'a 5 s, et `StartupPower::
+                // Previous` doit retrouver la veille voulue meme si le
+                // courant est coupe pendant cette attente.
+                self.persist();
                 if self.standby {
                     let _ = self.active().request(SourceReq::Deactivate).await;
                     self.player.stop().await?;
@@ -1127,6 +1170,7 @@ impl<P: Player> Core<P> {
         let st = PersistedState {
             active_source: self.active_source.clone(),
             volume: self.volume,
+            standby: self.standby,
             audio_device: self.audio_device.clone(),
             locale: self.locale.clone(),
             theme: self.theme.clone(),
@@ -1379,6 +1423,12 @@ mod tests {
     }
 
     fn setup() -> Montage {
+        setup_persiste(PersistedState::default())
+    }
+
+    /// `setup` with a say on what `state.json` held at launch — what
+    /// `StartupPower::Previous` reads.
+    fn setup_persiste(persisted: PersistedState) -> Montage {
         let dir = tempfile::tempdir().unwrap();
         let player = FakePlayer::default();
         let player_calls = player.calls.clone();
@@ -1393,7 +1443,7 @@ mod tests {
             player,
             Cablage {
                 sources,
-                persisted: PersistedState::default(),
+                persisted,
                 state_path: dir.path().join("state.json"),
                 catalog,
                 locales_root: root,
@@ -1545,6 +1595,7 @@ mod tests {
         let persisted = PersistedState {
             active_source: "radio".into(),
             volume: 60,
+            standby: false,
             audio_device: Some("bluealsa:DEV=XX".into()),
             locale: None,
             theme: None,
@@ -3030,12 +3081,12 @@ mod tests {
         core.set_settings(crate::state::Settings {
             volume_repeat_initial_ms: 800,
             volume_repeat_interval_ms: 250,
-            start_in_standby: true,
+            startup_power: StartupPower::Previous,
             ..Default::default()
         });
         let st = crate::state::load(&dir.path().join("state.json"));
         assert_eq!(st.settings.volume_repeat_initial_ms, 800);
-        assert!(st.settings.start_in_standby);
+        assert_eq!(st.settings.startup_power, StartupPower::Previous);
     }
 
     #[tokio::test]
@@ -3149,6 +3200,54 @@ mod tests {
         core.handle_command(Command::Power).await.unwrap();
         assert!(!core.etat_lecteur().standby);
         assert!(source_calls.lock().unwrap().iter().any(|c| c.contains("Wake")));
+    }
+
+    /// Les trois valeurs de `startup_power`, sur le seul critere observable :
+    /// la source est-elle reveillee ? `Previous` est teste dans ses deux sens,
+    /// sinon un `Previous` traite comme `On` passerait la moitie du test.
+    #[tokio::test]
+    async fn le_demarrage_suit_le_reglage_de_mise_sous_tension() {
+        async fn reveille(startup_power: StartupPower, veille_persistee: bool) -> bool {
+            let persisted = PersistedState {
+                standby: veille_persistee,
+                settings: crate::state::Settings { startup_power, ..Default::default() },
+                ..Default::default()
+            };
+            let (mut core, _pc, source_calls, _rx, _d) = setup_persiste(persisted);
+            core.demarrage().await.unwrap();
+            // Le verrou est relache par cette liaison, pas garde jusqu'a la
+            // fin du bloc : sinon `source_calls` est libere avant lui.
+            let a_reveille = source_calls.lock().unwrap().iter().any(|c| c.contains("Wake"));
+            a_reveille
+        }
+
+        assert!(reveille(StartupPower::On, true).await, "« allume » ignore la veille sur disque");
+        assert!(!reveille(StartupPower::Standby, false).await, "« veille » ne reveille jamais");
+        assert!(reveille(StartupPower::Previous, false).await, "etait allume : on rallume");
+        assert!(!reveille(StartupPower::Previous, true).await, "etait en veille : on y reste");
+    }
+
+    /// La veille sur disque doit decrire l'appareil, pas une intention : c'est
+    /// tout ce que `StartupPower::Previous` a pour se decider au prochain
+    /// demarrage. Les deux sens de la bascule et les deux branches du
+    /// demarrage l'ecrivent.
+    #[tokio::test]
+    async fn la_veille_est_persistee_a_chaque_bascule() {
+        let (mut core, _pc, _sc, _rx, dir) = setup();
+        let sur_disque = || crate::state::load(&dir.path().join("state.json")).standby;
+
+        core.handle_command(Command::Power).await.unwrap(); // veille
+        assert!(sur_disque(), "la mise en veille s'ecrit");
+        core.handle_command(Command::Power).await.unwrap(); // reveil
+        assert!(!sur_disque(), "le reveil aussi");
+
+        // Et un demarrage remet le fichier d'accord avec ce qu'il a fait,
+        // dans les deux sens : sans cela, « etat precedent » choisi plus tard
+        // ressusciterait une veille que l'appareil a quittee depuis longtemps.
+        core.start_in_standby().await.unwrap();
+        assert!(sur_disque());
+        core.demarrage().await.unwrap(); // reglage par defaut : « allume »
+        assert!(!sur_disque());
     }
 
     #[tokio::test]

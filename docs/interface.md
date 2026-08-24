@@ -281,11 +281,18 @@ unplugged since), rather than leaving the picker blank.
 
 ### Startup card
 
-Whether the device starts **on** (resumes the active source) or in
-**standby** at launch — on by default. Persisted in `state.json`
-(`settings.start_in_standby`) and read once at process start, so a device
-configured for standby boot does not start playing again on its own after
-a power cut or a reboot.
+Whether the device starts **on** (resumes the active source), in
+**standby**, or in the **previous state** — whatever it was doing when it
+last stopped. On by default. Persisted in `state.json`
+(`settings.startup_power`, one of `on` / `standby` / `previous`) and read
+once at process start, so a device configured for standby boot does not
+start playing again on its own after a power cut or a reboot.
+
+"Previous state" reads a second persisted field, `standby`, written on
+every transition — the two halves of the `Power` key and both branches of
+startup — so it describes what the device was actually doing rather than an
+intention: on after a crash mid-listening, standby after a power cut that
+followed a deliberate standby.
 
 ### Volume-hold card
 
