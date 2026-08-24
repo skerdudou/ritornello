@@ -66,6 +66,13 @@ export default defineComponent({
   props: {
     name: { type: String, required: true },
     catalog: { type: Object as PropType<Catalog>, default: () => ({}) },
+    /**
+     * Cause du refus du cœur, recueillie par `PluginRoute` sur l'appel au
+     * catalogue — le seul dont le corps se lise. Elle n'est affichée qu'avec
+     * `plugin_unavailable` : un contrat qui ne correspond pas dit déjà quoi
+     * faire, et la cause d'un refus de catalogue n'a rien à voir avec lui.
+     */
+    cause: { type: String, default: '' },
     loadModule: {
       type: Function as PropType<(name: string) => Promise<unknown>>,
       default: (name: string) => import(/* @vite-ignore */ `/plugins/${name}/ui.js`),
@@ -140,7 +147,16 @@ export default defineComponent({
       // rester reactif : le catalogue du shell est charge en asynchrone par
       // `App.vue`, donc souvent apres le premier rendu de cette vue.
       const t = Object.keys(props.catalog).length > 0 ? createT(props.catalog) : tShell.value
-      if (erreur.value) return h('p', { class: 'text-muted-foreground' }, t(erreur.value))
+      if (erreur.value) {
+        // La cause ne se compose pas par concaténation mais par un
+        // `{cause}` du catalogue : l'ordre des mots et la ponctuation
+        // appartiennent au traducteur, comme partout ailleurs dans ce dépôt.
+        const message =
+          erreur.value === 'plugin_unavailable' && props.cause
+            ? t('plugin_unavailable_cause', { cause: props.cause })
+            : t(erreur.value)
+        return h('p', { class: 'text-muted-foreground' }, message)
+      }
       if (!composant.value) return h('p', { class: 'text-muted-foreground' }, t('loading'))
       // `catalog` doit etre transmis explicitement : `h()` ne fait pas
       // suivre les props de PluginView vers le composant qu'il monte (ce

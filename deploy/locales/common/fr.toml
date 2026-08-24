@@ -5,4 +5,5 @@ error = "Erreur"
 # Chargement d'une IHM de plugin (voir le commentaire de common_en.toml).
 loading = "Chargement…"
 plugin_unavailable = "IHM du plugin indisponible."
+plugin_unavailable_cause = "IHM du plugin indisponible : {cause}"
 plugin_contract_mismatch = "L'IHM de ce plugin doit être reconstruite : elle ne correspond pas au contrat d'IHM courant."

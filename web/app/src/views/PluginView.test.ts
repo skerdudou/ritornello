@@ -11,12 +11,13 @@ import PluginView from './PluginView'
 // celui du coeur comme celui de chaque plugin.
 const CATALOGUE = {
   plugin_unavailable: 'IHM indisponible',
+  plugin_unavailable_cause: 'IHM indisponible : {cause}',
   plugin_contract_mismatch: 'Plugin à reconstruire',
   loading: 'Chargement…',
 }
 
-function monter(loader: () => Promise<unknown>, name = 'demo') {
-  return mount(PluginView, { props: { name, loadModule: loader, catalog: CATALOGUE } })
+function monter(loader: () => Promise<unknown>, name = 'demo', cause = '') {
+  return mount(PluginView, { props: { name, loadModule: loader, catalog: CATALOGUE, cause } })
 }
 
 describe('PluginView', () => {
@@ -119,6 +120,46 @@ describe('PluginView', () => {
     await flushPromises()
     expect(w.text()).toContain('IHM indisponible')
     expect(avertir).toHaveBeenCalledWith(expect.stringContaining('aucun composant par defaut'))
+  })
+
+  it('nomme la cause du refus quand la route l’a recueillie', async () => {
+    // Le module est charge par `import()`, dont l'echec ne livre aucun corps
+    // exploitable : la cause ne peut venir que de l'appel a `api/i18n`, un
+    // `fetch` dont le corps se lit. `PluginRoute` la recueille et la passe
+    // ici. Sans elle, l'ecran disait « IHM indisponible » et rien de plus, au
+    // moment ou l'on a le plus besoin de savoir pourquoi.
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const w = monter(
+      async () => {
+        throw new Error('404')
+      },
+      'demo',
+      'le plugin a mis plus de 5 s a repondre',
+    )
+    await flushPromises()
+    expect(w.text()).toBe('IHM indisponible : le plugin a mis plus de 5 s a repondre')
+  })
+
+  it('sans cause connue, le message generique reste tel quel', async () => {
+    // Le module peut echouer alors que le plugin repond tres bien : un `dist`
+    // absent, un contrat qui ne correspond pas. Inventer une cause serait
+    // pire que de n'en donner aucune.
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const w = monter(async () => {
+      throw new Error('404')
+    })
+    await flushPromises()
+    expect(w.text()).toBe('IHM indisponible')
+  })
+
+  it('une cause ne s’ajoute pas à un contrat qui ne correspond pas', async () => {
+    // Ce message-la dit deja quoi faire (reconstruire l'IHM du plugin), et la
+    // cause d'un refus de catalogue n'a rien a voir avec lui.
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const vue = defineComponent({ render: () => h('p', 'ihm') })
+    const w = monter(async () => ({ contract: 99, default: vue }), 'demo', 'peu importe')
+    await flushPromises()
+    expect(w.text()).toBe('Plugin à reconstruire')
   })
 
   // --- IMPORTANT 4 de la revue finale : les trois messages etaient affiches

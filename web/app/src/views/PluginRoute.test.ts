@@ -10,7 +10,7 @@ vi.mock('vue-router', () => ({ useRoute: () => route }))
 // Le vrai PluginView charge un module ESM distant : hors sujet ici, on ne
 // vérifie que ce que PluginRoute lui transmet.
 const PluginViewStub = {
-  props: ['name', 'catalog'],
+  props: ['name', 'catalog', 'cause'],
   template: '<div data-stub />',
 }
 
@@ -49,5 +49,42 @@ describe('PluginRoute', () => {
     livrerRadio(new Response(JSON.stringify({ qui: 'radio' }), { status: 200 }))
     await flushPromises()
     expect(w.findComponent(PluginViewStub).props('catalog')).toEqual({ qui: 'generic-input' })
+  })
+
+  it('transmet la cause portée par un refus du cœur au lieu de l’avaler', async () => {
+    // Au premier chargement d'une page dont le plugin est mort, l'écran
+    // n'affichait qu'« IHM du plugin indisponible » : la cause partait dans un
+    // `console.warn`. Or le cœur la porte désormais dans le corps de ses 502
+    // (« le plugin a mis plus de 5 s à répondre… »), et c'est le seul canal qui
+    // la donne — le module, lui, est chargé par `import()`, dont l'échec ne
+    // livre aucun corps exploitable.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ error: 'le plugin a mis plus de 5 s a repondre' }), {
+          status: 502,
+        }),
+      ),
+    )
+    const PluginRoute = (await import('./PluginRoute.vue')).default
+    const w = mount(PluginRoute, { global: { stubs: { PluginView: PluginViewStub } } })
+    await flushPromises()
+    expect(w.findComponent(PluginViewStub).props('cause')).toBe(
+      'le plugin a mis plus de 5 s a repondre',
+    )
+    // Et le catalogue reste vide : `t()` retombe sur les clés, ce qui reste
+    // lisible. Un refus de catalogue n'empêche pas la page de s'afficher.
+    expect(w.findComponent(PluginViewStub).props('catalog')).toEqual({})
+  })
+
+  it('ne transmet aucune cause quand le catalogue arrive', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ btn: 'Enregistrer' }), { status: 200 })),
+    )
+    const PluginRoute = (await import('./PluginRoute.vue')).default
+    const w = mount(PluginRoute, { global: { stubs: { PluginView: PluginViewStub } } })
+    await flushPromises()
+    expect(w.findComponent(PluginViewStub).props('cause')).toBe('')
   })
 })

@@ -8,4 +8,5 @@ error = "Error"
 # plugin, qui est vide précisément quand le plugin est injoignable.
 loading = "Loading…"
 plugin_unavailable = "Plugin interface unavailable."
+plugin_unavailable_cause = "Plugin interface unavailable: {cause}"
 plugin_contract_mismatch = "This plugin's interface must be rebuilt: it does not match the current UI contract."
