@@ -4,9 +4,9 @@
 //!
 //! `ack` et `ligne` sont appelés par `commandes.rs` depuis la Task 6, qui a
 //! retiré du même geste les `#[allow(dead_code)]` que la Task 4 avait posés
-//! faute d'appelant. Deux subsistent, et le compilateur a tranché lequel :
-//! `decouper` attend la session (Task 8), qui lit les lignes, et `Ack::NoExist`
-//! attend `load` (Task 7). Chacun le dit à son emplacement.
+//! faute d'appelant. `Ack::NoExist` a rejoint le lot à la Task 7, dont le bras
+//! `load` le construit. Un seul subsiste : `decouper` attend la session
+//! (Task 8), qui lit les lignes. Chacun le dit à son emplacement.
 
 use std::fmt::Display;
 
@@ -21,11 +21,9 @@ pub enum Ack {
     Unknown = 5,
     /// Liste enregistrée nommée qui n'existe pas.
     ///
-    /// Seule variante encore sans constructeur : `commandes.rs` (Task 6) ne
-    /// répond qu'`Arg` et `Unknown`, et le seul refus qui vaut « ce nom n'existe
-    /// pas » est celui de `load`. **Task 7** retire cet attribut en rendant
-    /// `Refuser(NoExist)` pour `load` faute de catalogue (voir Ruling 3).
-    #[allow(dead_code)]
+    /// Construite par le bras `load` de `commandes.rs` (Task 7) : faute de
+    /// catalogue de sources, tout nom y est provisoirement « inexistant »
+    /// (voir Ruling 3 de la spec, et le commentaire sur place).
     NoExist = 50,
 }
 

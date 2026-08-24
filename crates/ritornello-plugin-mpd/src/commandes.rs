@@ -94,17 +94,28 @@ pub const COMMANDES: &[&str] = &[
     "currentsong",
     "decoders",
     "idle",
+    "next",
     "noidle",
     "notcommands",
     "outputs",
     "password",
+    "pause",
     "ping",
+    "play",
+    "playid",
     "playlistinfo",
     "plchanges",
+    "previous",
+    "seek",
+    "seekcur",
+    "seekid",
+    "setvol",
     "stats",
     "status",
+    "stop",
     "tagtypes",
     "urlhandlers",
+    "volume",
 ];
 
 /// Une entrée de la file d'attente : son indice de présélection (**creux**,
@@ -192,9 +203,48 @@ pub fn traiter(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
         // commandes est illégal. Le découpage des noms de sujets, lui, est pur.
         "idle" => idle(indice, reste),
         "noidle" => Issue::Annuler,
-        // **Task 7** insère ici les commandes d'action, **Task 13** `load` et
-        // les listes enregistrées.
-        //
+        // `play [POS]` : POS est le **rang** dans la file (base 0, celui que
+        // `Pos` publie), jamais l'indice de présélection moins un — les deux
+        // ne coïncident plus dès qu'une source sait énumérer une liste creuse
+        // (Task 13). Sans argument, ce n'est pas une sélection mais la touche
+        // Lecture : on relance ce qui était chargé.
+        "play" => play(inst, indice, reste),
+        // `playid <ID>` : l'indice tel quel, mais vérifié dans la file — un
+        // `ID` à l'intérieur du maximum (`preset_count`) sans y être une fois
+        // la file creuse (Task 13) doit refuser, pas seulement une borne.
+        "playid" => playid(inst, indice, reste),
+        // Bascule sans argument ; sinon n'agit que si l'état optimiste diffère
+        // de la cible — c'est ce qui ferme la course d'un client qui
+        // renverrait la même commande deux fois. Voir `pause`.
+        "pause" => pause(inst, indice, reste),
+        "stop" => Issue::agir(Command::Stop),
+        // La distinction présélection/piste n'est pas d'ici : c'est la source
+        // active qui l'interprète (voir la doc de `Command::Next`).
+        "next" => Issue::agir(Command::Next),
+        "previous" => Issue::agir(Command::Prev),
+        "setvol" => setvol(indice, reste),
+        // Dépréciée par MPD mais encore émise par de vieux clients : relative
+        // au volume courant, et bornée ici (voir `volume`) plutôt que de
+        // laisser déborder `Command::SetVolume`, qui lui est absolu.
+        "volume" => volume(inst, indice, reste),
+        // `seek`/`seekid` ignorent leur premier argument (position ou id) :
+        // `SeekTo` ne sait pas changer de piste en même temps, et MPD n'envoie
+        // ce genre de commande que sur ce qui joue déjà.
+        "seek" => seek(indice, "seek", reste),
+        "seekid" => seek(indice, "seekid", reste),
+        // Seule forme qui accepte un relatif (`+n`/`-n`), résolu ici depuis
+        // `position_s` puisque `Command::SeekTo` ne porte qu'un absolu.
+        "seekcur" => seekcur(inst, indice, reste),
+        // PROVISOIRE (Task 13) : `load <nom>` devrait choisir une source par
+        // son nom (`Command::SelectSource`), mais aucun catalogue de sources
+        // n'existe encore dans ce greffon pour vérifier qu'un tel nom existe
+        // — le catalogue n'arrive qu'à la Task 13. En attendant, tout nom est
+        // donc « inexistant », d'où le même refus qu'un vrai nom absent du
+        // futur catalogue rendrait — ce n'est pas un hasard. Volontairement
+        // **absent de `COMMANDES`** (voir la spec, Ruling 3) : y annoncer une
+        // commande qui refuse toujours romprait l'honnêteté que `commands`
+        // promet à un client correct.
+        "load" => Issue::Refuser(ack(Ack::NoExist, indice, "load", "no such playlist")),
         // Tout le reste est refusé du même refus, sans distinguer l'inconnu du
         // volontairement non géré — MPD ne les distingue pas non plus, et
         // `commands` dit déjà ce qui existe. Deux de ces refus méritent leur
@@ -518,6 +568,173 @@ fn idle(indice: usize, args: &[String]) -> Issue {
     Issue::Attendre(sujets)
 }
 
+// ----------------------------------------------------------------------
+// Les commandes d'action : ce qui demande quelque chose à l'appareil.
+// ----------------------------------------------------------------------
+
+/// Traduit une position MPD (le **rang**, base 0, celui que `Pos` publie) en
+/// l'indice de présélection qui s'y trouve. `None` si la position dépasse la
+/// file.
+///
+/// Extraite en fonction pure, séparée de `play`, pour se tester sur une file
+/// construite à la main : `file_attente` ne sait aujourd'hui que synthétiser
+/// une suite dense (`1..=preset_count`), où le rang et « l'indice moins un »
+/// coïncident toujours et ne peuvent donc jamais démasquer un décalage
+/// silencieux à travers `Instantane`. La Task 13 apporte la vraie liste,
+/// éventuellement creuse ; cette fonction est déjà correcte pour ce jour-là.
+fn position_vers_index(file: &[Entree], position: usize) -> Option<u8> {
+    file.get(position).map(|e| e.index)
+}
+
+/// Vrai si cet indice de présélection existe réellement dans la file — pas
+/// seulement dans les bornes de son maximum.
+///
+/// Distinction sans effet aujourd'hui (`file_attente` ne rend qu'une suite
+/// dense `1..=preset_count`, donc « exister » et « être ≤ au maximum » sont
+/// encore la même chose), mais qui cessera de l'être dès qu'une file peut être
+/// creuse (Task 13, où `preset_count` reste un maximum et non un compte) : un
+/// `playid` sur un trou de cette suite doit refuser, une comparaison de borne
+/// le laisserait passer à tort.
+fn index_existe(file: &[Entree], index: u8) -> bool {
+    file.iter().any(|e| e.index == index)
+}
+
+/// Un temps MPD absolu, en secondes tronquées. `None` si non numérique ou
+/// négatif — jamais un temps négatif ramené à zéro en silence pour cette forme
+/// (contrairement à la résolution du relatif de `seekcur`, où zéro est la
+/// bonne réponse à un recul trop grand).
+fn temps_absolu(s: &str) -> Option<u32> {
+    let v: f64 = s.parse().ok()?;
+    if v < 0.0 {
+        None
+    } else {
+        Some(v as u32)
+    }
+}
+
+fn play(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
+    let Some(arg) = args.first() else {
+        // La touche Lecture, pas une sélection : relance ce qui était chargé
+        // (ou démarre, pour une source qui sait quoi faire même à l'arrêt —
+        // c'est à elle de décider, pas à ce greffon).
+        return Issue::agir(Command::PlayPause);
+    };
+    let Ok(position) = arg.parse::<usize>() else {
+        return Issue::Refuser(ack(Ack::Arg, indice, "play", "need a positive integer"));
+    };
+    match position_vers_index(&file_attente(inst), position) {
+        Some(index) => Issue::agir(Command::Select(index)),
+        None => Issue::Refuser(ack(Ack::Arg, indice, "play", "bad song index")),
+    }
+}
+
+fn playid(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
+    let Some(id) = args.first().and_then(|a| a.parse::<u8>().ok()) else {
+        return Issue::Refuser(ack(Ack::Arg, indice, "playid", "need a positive integer"));
+    };
+    if index_existe(&file_attente(inst), id) {
+        Issue::agir(Command::Select(id))
+    } else {
+        Issue::Refuser(ack(Ack::Arg, indice, "playid", "no such song"))
+    }
+}
+
+/// `pause [0|1]`. Sans argument, bascule ; avec, n'émet que si l'état diffère
+/// de la cible — c'est ce qui ferme la course décrite dans la spec (§ `pause`
+/// dans `PlayerState.playback`) : un `pause 1` renvoyé deux fois par un client
+/// qui n'a pas vu la confirmation ne doit pas relancer la lecture.
+///
+/// **À l'arrêt, n'émet jamais rien**, quel que soit l'argument : `PlayPause`
+/// y démarrerait une lecture dont ni la source ni ce greffon ne savent ni quoi
+/// ni où (voir `EtatPartage::acter_optimiste`), ce qu'un client n'a pas
+/// demandé en appuyant sur « pause ». La validation de l'argument passe
+/// **avant** cette garde : un `pause 2` malformé doit rester un `ACK` même à
+/// l'arrêt, pas être avalé en silence.
+fn pause(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
+    let cible = match args.first().map(String::as_str) {
+        None => None,
+        Some("0") => Some(Playback::Playing),
+        Some("1") => Some(Playback::Paused),
+        Some(_) => return Issue::Refuser(ack(Ack::Arg, indice, "pause", "boolean expected")),
+    };
+    if inst.playback() == Playback::Stopped {
+        return Issue::ok();
+    }
+    match cible {
+        None => Issue::agir(Command::PlayPause),
+        Some(cible) if inst.playback() != cible => Issue::agir(Command::PlayPause),
+        Some(_) => Issue::ok(),
+    }
+}
+
+fn setvol(indice: usize, args: &[String]) -> Issue {
+    match args.first().and_then(|a| a.parse::<u8>().ok()) {
+        // `0` n'est **pas** traduit en `Mute` : voir la spec, § « La sourdine,
+        // un cas à ne pas rater ». `Mute` bascule, `SetVolume` pose ; les
+        // confondre ferait qu'un client remontant le volume après ce `setvol
+        // 0` trouverait le son toujours coupé.
+        Some(v) if v <= 100 => Issue::agir(Command::SetVolume(v)),
+        _ => Issue::Refuser(ack(Ack::Arg, indice, "setvol", "invalid volume")),
+    }
+}
+
+/// `volume <±n>` : dépréciée par MPD mais encore émise par de vieux clients.
+/// Relative au volume courant et **bornée ici** — `Command::SetVolume` est
+/// absolu, donc c'est ce module qui doit calculer et clamper, pas le cœur.
+fn volume(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
+    match args.first().and_then(|a| a.parse::<i16>().ok()) {
+        Some(delta) => {
+            let nouveau = (i16::from(inst.etat.volume) + delta).clamp(0, 100) as u8;
+            Issue::agir(Command::SetVolume(nouveau))
+        }
+        None => Issue::Refuser(ack(Ack::Arg, indice, "volume", "invalid volume")),
+    }
+}
+
+/// `seek <POS> <T>` / `seekid <ID> <T>` : le premier argument (position ou id)
+/// est ignoré — `Command::SeekTo` ne sait pas changer de piste en même temps,
+/// et MPD n'envoie ce genre de commande que sur ce qui joue déjà. `T` est
+/// toujours absolu ici ; seul `seekcur` accepte le relatif (voir `seekcur`).
+fn seek(indice: usize, cmd: &str, args: &[String]) -> Issue {
+    match args.get(1).and_then(|a| temps_absolu(a)) {
+        Some(t) => Issue::agir(Command::SeekTo(t)),
+        None => Issue::Refuser(ack(Ack::Arg, indice, cmd, "float expected")),
+    }
+}
+
+/// `seekcur <T>` : `T` est `+n`, `-n`, ou un absolu décimal. `Command` ne
+/// porte qu'un positionnement absolu, donc le relatif est résolu ici, depuis
+/// `position_s`, tronqué en secondes et **jamais négatif** — un recul plus
+/// grand que la position rend `0`, pas un temps négatif.
+fn seekcur(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
+    let refuser = |message: &str| Issue::Refuser(ack(Ack::Arg, indice, "seekcur", message));
+    let Some(arg) = args.first() else {
+        return refuser("float expected");
+    };
+    let secondes = if arg.starts_with('+') || arg.starts_with('-') {
+        let Ok(delta) = arg.parse::<f64>() else {
+            return refuser("float expected");
+        };
+        let Some(base) = inst.etat.position_s else {
+            // Rien à résoudre depuis : un relatif sans point de départ connu
+            // inventerait un temps, ce qu'aucun défaut silencieux ne doit
+            // faire (voir la règle du brief sur les arguments hors bornes).
+            return refuser("no current position");
+        };
+        // `.max(0.0)` est explicite plutôt qu'implicite : la conversion
+        // `f64 -> u32` sature déjà à 0 sur un flottant négatif depuis Rust
+        // 1.45, donc son retrait ne changerait rien à ce résultat-ci — mais
+        // rien ne doit dépendre à l'œil de le savoir pour lire cette ligne.
+        (f64::from(base) + delta).max(0.0) as u32
+    } else {
+        match temps_absolu(arg) {
+            Some(t) => t,
+            None => return refuser("float expected"),
+        }
+    };
+    Issue::agir(Command::SeekTo(secondes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,6 +831,37 @@ mod tests {
         })
     }
 
+    /// Une source dont les présélections sont nommées.
+    ///
+    /// **Limite actuelle, à lire avant de s'en servir** : `preset_count` est
+    /// le seul levier que porte `Instantane` avant la Task 13, et
+    /// `file_attente` n'en tire qu'une suite dense `1..=preset_count` — les
+    /// noms et indices donnés ici ne sont donc respectés que pour un jeu déjà
+    /// dense partant de 1 (`[(1, _), (2, _), (3, _), …]`), et seul le
+    /// *nombre* d'entrées compte alors, pas les indices ni les noms demandés.
+    /// Un jeu creux (`[(1, _), (5, _), (99, _)]`) ne peut **pas** être
+    /// construit par cette voie tant que la vraie liste n'existe pas : cette
+    /// distinction est couverte séparément, sur la fonction pure que
+    /// `play`/`playid` délèguent (`position_vers_index`, `index_existe`),
+    /// avec une file construite à la main plutôt qu'avec cet instantané.
+    fn instantane_avec_presets(source: &str, presets: &[(u8, &str)]) -> Instantane {
+        depuis(PlayerState {
+            source: source.into(),
+            preset_count: Some(presets.len() as u8),
+            ..Default::default()
+        })
+    }
+
+    /// Un volume donné, sans rien d'autre autour.
+    fn instantane_au_volume(volume: u8) -> Instantane {
+        depuis(PlayerState { volume, ..radio_arretee() })
+    }
+
+    /// Une position connue dans ce qui joue, sans rien d'autre autour.
+    fn instantane_a_la_position(position_s: u32) -> Instantane {
+        depuis(PlayerState { position_s: Some(position_s), ..radio_arretee() })
+    }
+
     fn traiter_mots(inst: &Instantane, indice: usize, mots: &[&str]) -> Issue {
         let args: Vec<String> = mots.iter().map(|m| (*m).to_string()).collect();
         traiter(inst, indice, &args)
@@ -624,6 +872,15 @@ mod tests {
     fn traiter_ok(inst: &Instantane, mots: &[&str]) -> Vec<String> {
         match traiter_mots(inst, 0, mots) {
             Issue::Repondre { lignes, .. } => lignes,
+            autre => panic!("attendu Repondre pour {mots:?}, obtenu {autre:?}"),
+        }
+    }
+
+    /// Les commandes émises par une réponse, ou une panique nommant ce qu'on a
+    /// eu à la place — le pendant de `traiter_ok` pour les tests de la Task 7.
+    fn cmds(inst: &Instantane, mots: &[&str]) -> Vec<Command> {
+        match traiter_mots(inst, 0, mots) {
+            Issue::Repondre { cmds, .. } => cmds,
             autre => panic!("attendu Repondre pour {mots:?}, obtenu {autre:?}"),
         }
     }
@@ -1246,6 +1503,245 @@ mod tests {
     #[test]
     fn noidle_rend_la_main_sans_attendre() {
         assert_eq!(traiter_mots(&instantane_arrete(), 0, &["noidle"]), Issue::Annuler);
+    }
+
+    // ------------------------------------------------------------------
+    // `play` / `playid`
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn position_vers_index_choisit_le_rang_et_non_lindice_moins_un() {
+        // Le décalage qui coûte cher : sur des indices 1, 5, 99, le rang 1
+        // (base 0, deuxième entrée) doit rendre 5 — pas 2 (le rang « plus
+        // un »), ni aucun autre calcul dérivé de la position. Une file
+        // construite à la main : voir la limite documentée sur
+        // `instantane_avec_presets`, `file_attente` ne sait pas encore
+        // synthétiser une suite creuse.
+        let file = vec![
+            Entree { index: 1, nom: "FIP".into() },
+            Entree { index: 5, nom: "France Inter".into() },
+            Entree { index: 99, nom: "Nova".into() },
+        ];
+        assert_eq!(position_vers_index(&file, 0), Some(1));
+        assert_eq!(position_vers_index(&file, 1), Some(5));
+        assert_eq!(position_vers_index(&file, 2), Some(99));
+        assert_eq!(position_vers_index(&file, 3), None, "hors de la file");
+    }
+
+    #[test]
+    fn index_existe_verifie_lappartenance_et_non_la_borne() {
+        // 2 est bien inférieur au maximum de la file (5), mais absent : un
+        // `playid 2` doit refuser, ce qu'une comparaison de borne laisserait
+        // passer à tort une fois la file creuse (Task 13).
+        let file = vec![Entree { index: 1, nom: "FIP".into() }, Entree { index: 5, nom: "France Inter".into() }];
+        assert!(index_existe(&file, 5));
+        assert!(!index_existe(&file, 2), "2 est sous le maximum (5) mais absent de la file");
+    }
+
+    #[test]
+    fn play_avec_une_position_selectionne_lentree_de_ce_rang() {
+        // Le chemin de bout en bout, dans les limites de ce que
+        // `instantane_avec_presets` peut construire aujourd'hui (voir sa
+        // doc) : une file dense où le rang est vérifié en passant par
+        // `traiter`, pas par un appel direct à `position_vers_index`.
+        let inst = instantane_avec_presets("radio", &[(1, "un"), (2, "deux"), (3, "trois")]);
+        assert_eq!(cmds(&inst, &["play", "0"]), vec![Command::Select(1)]);
+        assert_eq!(cmds(&inst, &["play", "2"]), vec![Command::Select(3)]);
+    }
+
+    #[test]
+    fn playid_verifie_lexistence_via_traiter() {
+        let inst = instantane_avec_presets("radio", &[(1, "un"), (2, "deux")]);
+        assert_eq!(cmds(&inst, &["playid", "2"]), vec![Command::Select(2)]);
+    }
+
+    #[test]
+    fn play_hors_bornes_est_refuse_et_nemet_rien() {
+        let inst = instantane_avec_presets("radio", &[(1, "FIP")]);
+        assert!(matches!(traiter(&inst, 0, &["play".into(), "7".into()]), Issue::Refuser(_)));
+    }
+
+    #[test]
+    fn playid_dun_indice_absent_est_refuse() {
+        let inst = instantane_avec_presets("radio", &[(1, "FIP")]);
+        assert!(matches!(traiter(&inst, 0, &["playid".into(), "9".into()]), Issue::Refuser(_)));
+    }
+
+    #[test]
+    fn play_et_playid_avec_un_argument_non_numerique_sont_refuses() {
+        // `play` sans argument n'est *pas* un refus (c'est la touche Lecture,
+        // voir le test suivant) ; c'est seulement un argument non numérique,
+        // ou l'absence du seul argument de `playid`, qui doivent l'être.
+        let inst = instantane_avec_presets("radio", &[(1, "FIP")]);
+        for mots in [vec!["play", "abc"], vec!["playid"], vec!["playid", "abc"]] {
+            assert!(matches!(traiter_mots(&inst, 0, &mots), Issue::Refuser(_)), "{mots:?}");
+        }
+    }
+
+    #[test]
+    fn play_sans_argument_relance_ce_qui_etait_charge() {
+        // La touche Lecture, pas une sélection.
+        let inst = instantane_arrete();
+        assert_eq!(cmds(&inst, &["play"]), vec![Command::PlayPause]);
+    }
+
+    // ------------------------------------------------------------------
+    // `pause`
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn pause_nemet_rien_quand_letat_est_deja_celui_demande() {
+        // C'est ce qui ferme la course : un `pause 1` sur une lecture déjà en
+        // pause ne doit pas la relancer.
+        let inst = instantane_en_pause();
+        assert_eq!(cmds(&inst, &["pause", "1"]), Vec::<Command>::new());
+        assert_eq!(cmds(&inst, &["pause", "0"]), vec![Command::PlayPause]);
+    }
+
+    #[test]
+    fn pause_sans_argument_bascule() {
+        assert_eq!(cmds(&instantane_en_lecture(), &["pause"]), vec![Command::PlayPause]);
+    }
+
+    #[test]
+    fn pause_sur_un_lecteur_a_larret_nemet_jamais_rien() {
+        // Règle distincte de la comparaison état/cible ci-dessus : `PlayPause`
+        // à l'arrêt démarrerait une lecture dont ni la source ni ce greffon ne
+        // savent rien (voir `EtatPartage::acter_optimiste`), ce qu'un client
+        // n'a pas demandé en appuyant sur « pause ».
+        let inst = instantane_arrete();
+        assert_eq!(cmds(&inst, &["pause"]), Vec::<Command>::new());
+        assert_eq!(cmds(&inst, &["pause", "0"]), Vec::<Command>::new());
+        assert_eq!(cmds(&inst, &["pause", "1"]), Vec::<Command>::new());
+    }
+
+    #[test]
+    fn pause_avec_un_argument_invalide_est_refusee_meme_a_larret() {
+        // La validation de l'argument passe avant la garde de l'arrêt : un
+        // `pause 2` malformé doit rester un `ACK`, pas être avalé en silence
+        // par « rien à faire à l'arrêt ».
+        assert!(matches!(
+            traiter_mots(&instantane_arrete(), 0, &["pause", "2"]),
+            Issue::Refuser(_)
+        ));
+    }
+
+    // ------------------------------------------------------------------
+    // `setvol` / `volume`
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn setvol_borne_et_refuse_hors_intervalle() {
+        let inst = instantane_arrete();
+        assert_eq!(cmds(&inst, &["setvol", "40"]), vec![Command::SetVolume(40)]);
+        assert!(matches!(traiter(&inst, 0, &["setvol".into(), "101".into()]), Issue::Refuser(_)));
+        assert!(matches!(traiter(&inst, 0, &["setvol".into(), "abc".into()]), Issue::Refuser(_)));
+        assert!(matches!(traiter(&inst, 0, &["setvol".into()]), Issue::Refuser(_)));
+    }
+
+    #[test]
+    fn setvol_zero_nest_pas_traduit_en_sourdine() {
+        // Ce serait deviner : `Mute` bascule, `SetVolume(0)` pose. Traduire
+        // ferait qu'un client remontant le volume tomberait sur un son
+        // toujours coupé.
+        assert_eq!(cmds(&instantane_au_volume(65), &["setvol", "0"]), vec![Command::SetVolume(0)]);
+    }
+
+    #[test]
+    fn volume_est_relatif_et_borne_sur_le_volume_courant() {
+        // Commande dépréciée mais encore émise. Bornée ici, pas laissée
+        // déborder.
+        let inst = instantane_au_volume(95);
+        assert_eq!(cmds(&inst, &["volume", "+10"]), vec![Command::SetVolume(100)]);
+        assert_eq!(cmds(&instantane_au_volume(3), &["volume", "-10"]), vec![Command::SetVolume(0)]);
+    }
+
+    // ------------------------------------------------------------------
+    // `seek` / `seekid` / `seekcur`
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn seekcur_resout_le_relatif_avant_demettre_un_absolu() {
+        // `Command` ne porte qu'un positionnement absolu : la résolution est
+        // ici.
+        let inst = instantane_a_la_position(30);
+        assert_eq!(cmds(&inst, &["seekcur", "+10"]), vec![Command::SeekTo(40)]);
+        assert_eq!(cmds(&inst, &["seekcur", "-10"]), vec![Command::SeekTo(20)]);
+        assert_eq!(cmds(&inst, &["seekcur", "12.5"]), vec![Command::SeekTo(12)]);
+        // Un recul plus grand que la position ne produit pas de temps négatif.
+        assert_eq!(cmds(&instantane_a_la_position(3), &["seekcur", "-10"]), vec![Command::SeekTo(0)]);
+    }
+
+    #[test]
+    fn seekcur_relatif_sans_position_connue_est_refuse() {
+        // Résoudre un relatif sans point de départ inventerait un temps : ni
+        // 0 ni aucune autre valeur silencieuse.
+        let inst = instantane_arrete();
+        assert_eq!(inst.etat.position_s, None, "l'instantane de reference n'a pas de position");
+        assert!(matches!(
+            traiter_mots(&inst, 0, &["seekcur", "+10"]),
+            Issue::Refuser(_)
+        ));
+    }
+
+    #[test]
+    fn seekcur_sans_argument_ou_non_numerique_est_refuse() {
+        let inst = instantane_a_la_position(10);
+        for mots in [vec!["seekcur"], vec!["seekcur", "abc"], vec!["seekcur", "+abc"]] {
+            assert!(matches!(traiter_mots(&inst, 0, &mots), Issue::Refuser(_)), "{mots:?}");
+        }
+    }
+
+    #[test]
+    fn seek_et_seekid_ignorent_leur_premier_argument() {
+        // `Command::SeekTo` ne sait pas changer de piste en même temps ; MPD
+        // n'envoie de toute façon `seek` que sur ce qui joue.
+        let inst = instantane_a_la_position(0);
+        assert_eq!(cmds(&inst, &["seek", "0", "42"]), vec![Command::SeekTo(42)]);
+        assert_eq!(cmds(&inst, &["seekid", "1", "42"]), vec![Command::SeekTo(42)]);
+    }
+
+    #[test]
+    fn seek_et_seekid_sans_temps_sont_refuses() {
+        let inst = instantane_a_la_position(0);
+        assert!(matches!(traiter_mots(&inst, 0, &["seek", "0"]), Issue::Refuser(_)));
+        assert!(matches!(traiter_mots(&inst, 0, &["seekid", "1"]), Issue::Refuser(_)));
+    }
+
+    // ------------------------------------------------------------------
+    // Les touches simples
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn les_touches_simples_passent_telles_quelles() {
+        let inst = instantane_en_lecture();
+        assert_eq!(cmds(&inst, &["next"]), vec![Command::Next]);
+        assert_eq!(cmds(&inst, &["previous"]), vec![Command::Prev]);
+        assert_eq!(cmds(&inst, &["stop"]), vec![Command::Stop]);
+    }
+
+    // ------------------------------------------------------------------
+    // `load`, provisoire (Task 13)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn load_est_provisoirement_refuse_faute_de_catalogue() {
+        // Voir le commentaire du bras `load` dans `traiter` : aucun catalogue
+        // de sources n'existe encore pour vérifier qu'un nom donné existe, la
+        // Task 13 remplace ce refus fixe par une vraie recherche.
+        assert_eq!(
+            traiter_mots(&instantane_arrete(), 0, &["load", "radio"]),
+            Issue::Refuser("ACK [50@0] {load} no such playlist".to_string())
+        );
+    }
+
+    #[test]
+    fn load_nest_pas_annoncee_dans_commands() {
+        // Ruling 3 : annoncer une commande qui refuse toujours romprait
+        // l'honnêteté que `commands` promet à un client correct.
+        assert!(!COMMANDES.contains(&"load"));
+        let lignes = traiter_ok(&instantane_arrete(), &["commands"]);
+        assert!(!lignes.contains(&"command: load".to_string()));
     }
 
     // ------------------------------------------------------------------
