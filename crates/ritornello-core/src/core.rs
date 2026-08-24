@@ -279,8 +279,9 @@ impl<P: Player> Core<P> {
                 }
             }
         }
-        let action = self.active().request(SourceReq::Wake).await?;
-        self.apply(action).await?;
+        if let Some(action) = self.demande_active(SourceReq::Wake).await? {
+            self.apply(action).await?;
+        }
         // L'IHM doit connaître le volume et la source dès le premier affichage,
         // sans attendre qu'on touche à quelque chose.
         self.publie_etat();
@@ -291,8 +292,9 @@ impl<P: Player> Core<P> {
     /// source de redonner l'URI en cours, pas de passer au contenu suivant).
     pub async fn retry_stream(&mut self) -> Result<()> {
         if !self.standby && self.expecting_stream {
-            let action = self.active().request(SourceReq::Activate).await?;
-            self.apply(action).await?;
+            if let Some(action) = self.demande_active(SourceReq::Activate).await? {
+                self.apply(action).await?;
+            }
         }
         Ok(())
     }
@@ -775,8 +777,9 @@ impl<P: Player> Core<P> {
                     return Ok(());
                 }
                 self.retry_count = 0;
-                let action = self.active().request(SourceReq::Select(n)).await?;
-                self.apply(action).await?;
+                if let Some(action) = self.demande_active(SourceReq::Select(n)).await? {
+                    self.apply(action).await?;
+                }
             }
             // `Next`/`Prev` portent maintenant les deux sémantiques : la
             // source active décide (préselection pour la radio, piste pour
@@ -789,17 +792,20 @@ impl<P: Player> Core<P> {
             // les deux sources sur ce point.
             Command::Next => {
                 self.retry_count = 0;
-                let action = self.active().request(SourceReq::Next).await?;
-                self.apply(action).await?;
+                if let Some(action) = self.demande_active(SourceReq::Next).await? {
+                    self.apply(action).await?;
+                }
             }
             Command::Prev => {
                 self.retry_count = 0;
-                let action = self.active().request(SourceReq::Prev).await?;
-                self.apply(action).await?;
+                if let Some(action) = self.demande_active(SourceReq::Prev).await? {
+                    self.apply(action).await?;
+                }
             }
             Command::Eject => {
-                let action = self.active().request(SourceReq::Eject).await?;
-                self.apply(action).await?;
+                if let Some(action) = self.demande_active(SourceReq::Eject).await? {
+                    self.apply(action).await?;
+                }
             }
             Command::VolumeUp | Command::VolumeDown => {
                 self.step_volume(cmd == Command::VolumeUp).await?;
@@ -828,8 +834,9 @@ impl<P: Player> Core<P> {
                     // vaut que pour les flux relançables. Une pause, elle, ne
                     // touche ni l'une ni l'autre — la reprise reste donc un
                     // simple basculement, sans rechargement.
-                    let action = self.active().request(SourceReq::Activate).await?;
-                    self.apply(action).await?;
+                    if let Some(action) = self.demande_active(SourceReq::Activate).await? {
+                        self.apply(action).await?;
+                    }
                 }
             }
             Command::Stop => {
@@ -847,7 +854,7 @@ impl<P: Player> Core<P> {
                 // garderait faux et annoncerait plus tard des métadonnées pour
                 // un morceau à l'arrêt. Au mieux : une Source muette n'empêche
                 // rien.
-                if let Err(e) = self.active().request(SourceReq::Stop).await {
+                if let Err(e) = self.demande_active(SourceReq::Stop).await {
                     tracing::debug!("stop notification to source: {e}");
                 }
             }
@@ -860,7 +867,7 @@ impl<P: Player> Core<P> {
                 // courant est coupe pendant cette attente.
                 self.persist();
                 if self.standby {
-                    let _ = self.active().request(SourceReq::Deactivate).await;
+                    let _ = self.demande_active(SourceReq::Deactivate).await;
                     self.player.stop().await?;
                     self.expecting_stream = false;
                     self.lecture = false;
@@ -909,7 +916,7 @@ impl<P: Player> Core<P> {
                 self.player.stop().await?;
                 // L'ancienne source est prévenue en best-effort : son arrêt
                 // est déjà fait, elle n'a plus qu'à recaler son propre état.
-                if let Err(e) = self.active().request(SourceReq::Deactivate).await {
+                if let Err(e) = self.demande_active(SourceReq::Deactivate).await {
                     tracing::debug!("deactivate: {e}");
                 }
                 let idx = self.source_order.iter().position(|n| n == &self.active_source).unwrap_or(0);
@@ -945,8 +952,9 @@ impl<P: Player> Core<P> {
                 // la bascule à moitié faite : « cd » à l'écran, « radio »
                 // dans state.json.
                 self.persist();
-                let action = self.active().request(SourceReq::Activate).await?;
-                self.apply(action).await?;
+                if let Some(action) = self.demande_active(SourceReq::Activate).await? {
+                    self.apply(action).await?;
+                }
             }
             Command::Plus10 => {
                 let next = self.pending_tens.saturating_add(10);
@@ -1020,7 +1028,7 @@ impl<P: Player> Core<P> {
             // identique n'est pas repoussée.
             Event::TrackChanged(n) => {
                 if !self.standby {
-                    if let Err(e) = self.active().request(SourceReq::PlayerTrack(n)).await {
+                    if let Err(e) = self.demande_active(SourceReq::PlayerTrack(n)).await {
                         tracing::debug!("track notification to source: {e}");
                     }
                 }
@@ -1045,7 +1053,7 @@ impl<P: Player> Core<P> {
                 // les remettrait à l'écran après la fin de la liste.
                 self.lecture = false;
                 if !self.standby {
-                    if let Err(e) = self.active().request(SourceReq::Stop).await {
+                    if let Err(e) = self.demande_active(SourceReq::Stop).await {
                         tracing::debug!("stop notification to source: {e}");
                     }
                 }
@@ -1054,16 +1062,132 @@ impl<P: Player> Core<P> {
         EventOutcome::Nothing
     }
 
-    fn active(&self) -> Arc<dyn Source> {
-        self.sources
-            .get(&self.active_source)
-            .cloned()
-            .unwrap_or_else(|| panic!("unknown active source: {}", self.active_source))
+    /// Requête à la source active, **s'il y en a une**.
+    ///
+    /// `Ok(None)` n'est pas une erreur : depuis l'enregistrement à chaud, le
+    /// cœur peut tourner sans aucune source. Un greffon `source` qui rate la
+    /// fenêtre de rendez-vous s'annonce à t+30 s et est câblé sans redémarrage,
+    /// et refuser de démarrer à t+10 s pour l'attendre supprimait la page de
+    /// statut précisément quand on voulait l'y voir figé.
+    ///
+    /// C'est ce que le `panic!("unknown active source")` d'avant interdisait :
+    /// il ne protégeait aucun invariant — `Core::new` retombe déjà sur la
+    /// première source triée, donc le nom n'est introuvable que si la table est
+    /// **vide** — et il aurait échangé un refus de démarrer lisible contre un
+    /// arrêt brutal au démarrage, sans page pour le raconter.
+    ///
+    /// Sans source, une commande **ne fait rien** et le dit en `debug` : ce
+    /// n'est pas une anomalie, seulement un appareil qui n'a rien à lire.
+    /// Un `warn` remplirait le tampon d'erreurs de l'IHM à chaque touche.
+    async fn demande_active(&self, req: SourceReq) -> Result<Option<SourceAction>> {
+        let Some(source) = self.sources.get(&self.active_source) else {
+            tracing::debug!("no active source, dropping {req:?}");
+            return Ok(None);
+        };
+        source.request(req).await.map(Some)
     }
 
     /// Nom de la source actuellement active (pour la page de statut vivante).
     pub fn active_source(&self) -> &str {
         &self.active_source
+    }
+
+    /// Ajoute une source découverte **après** le démarrage : un greffon qui a
+    /// raté le rendez-vous, ou qu'on a relancé à la main. Renvoie `true` si
+    /// c'est un remplacement (ré-annonce d'un greffon déjà câblé).
+    ///
+    /// `source_order` est **retrié** : le cycle de sources suit l'ordre
+    /// alphabétique, et une source arrivée en retard doit y prendre sa place
+    /// normale, pas la queue — sinon `SourceCycle` change de sens selon la
+    /// chronologie du démarrage.
+    ///
+    /// Si aucune source n'était active — un démarrage où *aucune* n'avait
+    /// répondu — la nouvelle le devient : c'est le seul cas où l'arrivée d'un
+    /// greffon change ce qui joue.
+    ///
+    /// **Ne réveille rien** : cette fonction n'affecte que la table et le nom
+    /// de l'active. Le câblage à chaud passe par `cable_source_a_chaud`, qui
+    /// enchaîne le réveil — sans quoi une première source arrivée en retard
+    /// serait active et muette.
+    pub fn add_source(&mut self, name: String, client: Arc<dyn Source>) -> bool {
+        let premiere = self.sources.is_empty();
+        let remplacement = self.sources.insert(name.clone(), client).is_some();
+        if !self.source_order.contains(&name) {
+            self.source_order.push(name.clone());
+            self.source_order.sort();
+        }
+        if premiere {
+            self.active_source = name;
+        }
+        remplacement
+    }
+
+    /// Câble une source qui s'annonce **après** le démarrage. Renvoie `true`
+    /// s'il s'agit d'un remplacement (ré-annonce d'un greffon déjà câblé).
+    ///
+    /// Deux chemins, et c'est tout l'intérêt de les tenir ensemble ici :
+    ///
+    /// - **Première source du cœur** (la table était vide) : le démarrage est
+    ///   rejoué par `resume`, donc `SetLocale` puis `Wake`, dans cet ordre.
+    ///   `add_source` ne fait que désigner l'active ; sans ce réveil, une source
+    ///   arrivée à t+30 s serait active et **muette** jusqu'à ce que
+    ///   l'utilisateur touche quelque chose — l'appareil aurait l'air en panne
+    ///   alors que tout est câblé.
+    /// - **Source supplémentaire, ou cœur en veille** : seule la langue est due.
+    ///   Réveiller ici rallumerait un appareil qu'on a volontairement éteint, et
+    ///   changerait ce qui joue parce qu'un greffon a fini de démarrer.
+    ///
+    /// L'état est publié dans les deux cas : le nom de la source vient
+    /// d'apparaître dans la trame, et la SPA comme les afficheurs annonçaient
+    /// jusque-là « aucune source ». (`resume` publie déjà pour le premier.)
+    pub async fn cable_source_a_chaud(
+        &mut self,
+        name: String,
+        client: Arc<dyn Source>,
+    ) -> Result<bool> {
+        let premiere = self.sources.is_empty();
+        let remplacement = self.add_source(name.clone(), client);
+        if premiere && !self.standby {
+            self.resume().await?;
+        } else {
+            self.envoie_locale_a(&name).await;
+            self.publie_etat();
+        }
+        Ok(remplacement)
+    }
+
+    /// Pousse la langue courante à **une seule** source : celle qui vient
+    /// d'être câblée à chaud.
+    ///
+    /// `resume` et `set_locale` ne servent que les sources présentes dans la
+    /// table au moment de leur appel. Une source arrivée après — greffon qui a
+    /// raté le rendez-vous, ou relancé à la main sans son argument de langue —
+    /// n'aurait jamais reçu `SetLocale` : sur un appareil en français, un `cd`
+    /// relancé revenait en affichant `NO DISC` dans sa ligne de statut, et le
+    /// serait resté jusqu'au prochain changement de langue.
+    ///
+    /// Sans effet si le cœur n'a pas de langue réglée : le greffon garde alors
+    /// son défaut, qui est le même que celui du cœur. Best-effort comme les
+    /// deux autres chemins — une source qui ne répond pas à `SetLocale` ne doit
+    /// pas empêcher son câblage.
+    pub async fn envoie_locale_a(&self, name: &str) {
+        let Some(locale) = self.locale.clone() else {
+            return;
+        };
+        if let Some(src) = self.sources.get(name) {
+            if let Err(e) = src.request(SourceReq::SetLocale(locale)).await {
+                tracing::warn!("SetLocale to {name}: {e}");
+            }
+        }
+    }
+
+    /// Remplace l'ordre d'arbitrage des plugins `metadata`.
+    ///
+    /// Appelé après chaque annonce tardive avec la liste **complète**
+    /// recalculée depuis le manifeste : la priorité est celle de
+    /// `plugins.toml`, jamais celle d'arrivée des annonces.
+    pub fn set_metadata_order(&mut self, ordre: Vec<String>) {
+        self.metadonnees.set_ordre(ordre);
     }
 
     async fn apply(&mut self, action: SourceAction) -> Result<()> {
@@ -1525,6 +1649,278 @@ mod tests {
         let (core, _pc, _sc, _rx, _d) = setup();
         // PersistedState::default().active_source == "radio".
         assert_eq!(core.active_source(), "radio");
+    }
+
+    /// Cœur sans aucune source : le démarrage où *aucune* n'a répondu. C'est
+    /// exactement la situation dont le câblage à chaud doit pouvoir sortir, et
+    /// celle que le cœur doit désormais savoir servir — la page de statut est là
+    /// pour montrer les greffons figés.
+    ///
+    /// Le récepteur d'état est rendu (et non lâché comme dans `cablage_muet`) :
+    /// « aucune source » est un état à observer, pas seulement à survivre.
+    fn setup_sans_source() -> (Core<FakePlayer>, watch::Receiver<PlayerState>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+            "core",
+            "en",
+            &root,
+            crate::core::EN,
+        )));
+        let (etat_tx, etat_rx) = watch::channel(PlayerState::default());
+        let core = Core::new(
+            FakePlayer::default(),
+            Cablage {
+                sources: HashMap::new(),
+                persisted: PersistedState::default(),
+                state_path: dir.path().join("state.json"),
+                catalog,
+                locales_root: root,
+                metadata: MetadataCablage {
+                    plugins: vec![],
+                    now_playing: watch::channel(NowPlaying {
+                        source: String::new(),
+                        identity: None,
+                    })
+                    .0,
+                    etat: etat_tx,
+                },
+            },
+        );
+        (core, etat_rx, dir)
+    }
+
+    #[test]
+    fn add_source_retrie_lordre_du_cycle_au_lieu_dajouter_en_queue() {
+        // `SourceCycle` suit l'ordre alphabétique. Une source arrivée en retard
+        // qui resterait en queue ferait changer le sens du cycle selon la
+        // chronologie du démarrage — l'utilisateur presserait la même touche et
+        // n'obtiendrait pas la même source d'un jour à l'autre.
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        let nouvelle = Arc::new(FakeSource { name: "files", calls: source_calls });
+        assert!(!core.add_source("files".into(), nouvelle), "ce n'est pas un remplacement");
+        assert_eq!(core.source_order, vec!["cd".to_string(), "files".into(), "radio".into()]);
+        assert_eq!(
+            core.active_source(),
+            "radio",
+            "une source deja active ne doit pas etre supplantee par une arrivee tardive"
+        );
+    }
+
+    #[test]
+    fn add_source_signale_un_remplacement_sans_dupliquer_lordre() {
+        // Ré-annonce d'un greffon déjà câblé : le client est remplacé, le cycle
+        // ne gagne pas une entrée en double.
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        let remplacant = Arc::new(FakeSource { name: "radio", calls: source_calls });
+        assert!(core.add_source("radio".into(), remplacant));
+        assert_eq!(core.source_order, vec!["cd".to_string(), "radio".into()]);
+        assert_eq!(core.active_source(), "radio");
+    }
+
+    #[test]
+    fn add_source_active_la_premiere_source_et_seulement_la_premiere() {
+        // Le seul cas où l'arrivée d'un greffon change ce qui joue : aucune
+        // source n'avait répondu au démarrage, donc rien n'était actif.
+        let (mut core, _rx, dir) = setup_sans_source();
+        assert_eq!(core.active_source(), "");
+        let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        core.add_source("radio".into(), Arc::new(FakeSource { name: "radio", calls: calls.clone() }));
+        assert_eq!(core.active_source(), "radio");
+        // La deuxième n'y touche pas, même si son nom passe avant dans l'ordre.
+        core.add_source("cd".into(), Arc::new(FakeSource { name: "cd", calls }));
+        assert_eq!(core.active_source(), "radio");
+        assert_eq!(core.source_order, vec!["cd".to_string(), "radio".into()]);
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn une_source_cablee_a_chaud_recoit_la_langue_courante() {
+        // `resume` et `set_locale` ne servent que les sources présentes dans la
+        // table au moment de leur appel. Sans ce chemin-là, une source arrivée
+        // après n'aurait jamais reçu `SetLocale` : sur un appareil en français,
+        // un `cd` relancé à la main revenait en affichant `NO DISC`.
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.set_locale("fr".into()).await.unwrap();
+
+        let tardives: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        core.cable_source_a_chaud(
+            "files".into(),
+            Arc::new(FakeSource { name: "files", calls: tardives.clone() }),
+        )
+        .await
+        .unwrap();
+
+        // La langue, et **rien d'autre** : `files` n'est pas la première source
+        // du cœur, donc elle n'est pas réveillée — ce qui joue ne change pas
+        // parce qu'un greffon a fini de démarrer.
+        assert_eq!(
+            tardives.lock().unwrap().as_slice(),
+            ["files:SetLocale(\"fr\")".to_string()]
+        );
+        assert_eq!(core.active_source(), "radio");
+        assert_eq!(
+            source_calls.lock().unwrap().iter().filter(|c| c.starts_with("radio:SetLocale")).count(),
+            1,
+            "seule la source cablee a chaud est concernee, les autres ne sont pas renotifiees"
+        );
+    }
+
+    #[tokio::test]
+    async fn sans_langue_reglee_rien_nest_pousse_a_la_source_cablee_a_chaud() {
+        // Aucune langue côté cœur : le greffon garde son défaut, qui est le
+        // même. Pousser `SetLocale(None)` n'existe pas, et pousser « en » de
+        // force écraserait un greffon lancé avec sa propre langue.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        let tardives: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        core.cable_source_a_chaud(
+            "files".into(),
+            Arc::new(FakeSource { name: "files", calls: tardives.clone() }),
+        )
+        .await
+        .unwrap();
+        assert!(tardives.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resume_sans_aucune_source_publie_letat_au_lieu_de_paniquer() {
+        // Le premier appelant de la source active au démarrage, et donc le
+        // premier à mourir : `active()` paniquait sur une table vide, et `resume`
+        // tourne avant que le serveur web n'ait servi une seule page. Un
+        // `panic!` là aurait supprimé la page de statut précisément quand on
+        // voulait y voir les greffons figés.
+        let (mut core, mut etat_rx, dir) = setup_sans_source();
+        core.resume().await.unwrap();
+        let etat = etat_rx.borrow_and_update().clone();
+        assert_eq!(etat.source, "", "la chaine vide EST l'absence, c'est au rendu de la nommer");
+        assert!(!etat.standby, "le coeur demarre, il n'entre pas en veille pour autant");
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn les_commandes_sans_aucune_source_ne_font_rien_et_ne_paniquent_pas() {
+        // Les treize requêtes à la source active passaient par le même
+        // `panic!` : la moindre touche de télécommande sur un appareil sans
+        // source arrêtait le cœur. Sans source, une commande **ne fait rien**,
+        // et le journal le dit en `debug` — ce n'est pas une anomalie.
+        let (mut core, _rx, dir) = setup_sans_source();
+        for cmd in [
+            Command::Select(1),
+            Command::Next,
+            Command::Prev,
+            Command::Eject,
+            Command::Stop,
+            Command::PlayPause,
+            Command::SourceCycle,
+            // Veille, puis réveil : le second repasse par `resume`.
+            Command::Power,
+            Command::Power,
+        ] {
+            let libelle = format!("{cmd:?}");
+            core.handle_command(cmd).await.unwrap_or_else(|e| panic!("{libelle}: {e}"));
+        }
+        // Les deux événements du lecteur qui notifient la source, et la relance
+        // de flux : mêmes appels, même table vide.
+        core.handle_event(Event::TrackChanged(2)).await;
+        core.handle_event(Event::PlaybackIdle).await;
+        core.retry_stream().await.unwrap();
+        assert_eq!(core.active_source(), "", "aucune commande n'a pu designer une source");
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn la_premiere_source_cablee_a_chaud_est_reveillee() {
+        // `add_source` ne fait que désigner l'active : ni `SetLocale`, ni `Wake`,
+        // ni `Activate`. Une source arrivée à t+30 s serait donc active et
+        // **muette** jusqu'à ce que l'utilisateur touche quelque chose —
+        // l'appareil aurait l'air en panne alors que tout est câblé.
+        let (mut core, mut etat_rx, dir) = setup_sans_source();
+        core.set_locale("fr".into()).await.unwrap();
+        let vus: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        assert!(
+            !core
+                .cable_source_a_chaud(
+                    "radio".into(),
+                    Arc::new(FakeSource { name: "radio", calls: vus.clone() })
+                )
+                .await
+                .unwrap(),
+            "premier cablage, pas un remplacement"
+        );
+
+        assert_eq!(
+            vus.lock().unwrap().as_slice(),
+            ["radio:SetLocale(\"fr\")".to_string(), "radio:Wake".into()],
+            "la langue AVANT le reveil, exactement comme au demarrage"
+        );
+        // Le `Play` renvoyé par `Wake` a bien été appliqué : quelque chose joue.
+        assert!(core.player.calls.lock().unwrap().contains(&"play http://fip".to_string()));
+        assert_eq!(etat_rx.borrow_and_update().source, "radio");
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn la_premiere_source_cablee_a_chaud_ne_reveille_pas_un_coeur_en_veille() {
+        // La veille est un état **voulu** : l'arrivée d'un greffon ne rallume pas
+        // l'appareil. Seule la langue est due, pour que la source ne compose pas
+        // sa première trame dans la langue de son lancement.
+        let (mut core, _rx, dir) = setup_sans_source();
+        core.set_locale("fr".into()).await.unwrap();
+        core.handle_command(Command::Power).await.unwrap();
+        let vus: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        core.cable_source_a_chaud(
+            "radio".into(),
+            Arc::new(FakeSource { name: "radio", calls: vus.clone() }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(vus.lock().unwrap().as_slice(), ["radio:SetLocale(\"fr\")".to_string()]);
+        assert!(
+            !core.player.calls.lock().unwrap().iter().any(|c| c.starts_with("play")),
+            "rien ne doit se mettre a jouer pendant la veille"
+        );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn un_metadata_tardif_prend_sa_place_du_manifeste_dans_larbitrage() {
+        // L'invariant le plus facile à casser du câblage à chaud : la priorité
+        // est celle de `plugins.toml`, jamais celle d'arrivée des annonces.
+        // Seul `musicbrainz` s'est annoncé à temps ; `ouifm` arrive après le
+        // démarrage alors que le manifeste le déclare **avant** lui. Un ajout en
+        // queue le ferait perdre l'arbitrage, et la priorité dépendrait de la
+        // chronologie du démarrage.
+        let (mut core, _np_rx, etat_rx, _d) = setup_metadonnees(vec!["musicbrainz".into()]);
+        let id = serde_json::json!({"url": "un"});
+        core.handle_source_update("radio", joue(id.clone()));
+        core.handle_enrichment("musicbrainz", enrichissement(id.clone(), "Base", "En ligne"));
+        assert_eq!(etat_rx.borrow().morceau.artist.as_deref(), Some("Base"));
+
+        // Ce que fait `main` à la réception d'une annonce tardive : recalculer la
+        // liste **complète** depuis le manifeste, puis la remettre au cœur. La
+        // logique d'ordre reste dans `register::metadata_order`, un seul endroit.
+        let manifeste = vec!["ouifm".to_string(), "musicbrainz".to_string()];
+        let mut rassemble = crate::register::Gathered::default();
+        for nom in ["musicbrainz", "ouifm"] {
+            rassemble.announcements.insert(
+                nom.to_string(),
+                ritornello_proto::Announcement {
+                    name: nom.to_string(),
+                    kinds: vec![ritornello_proto::PluginKind::Metadata],
+                    admin: false,
+                },
+            );
+        }
+        core.set_metadata_order(crate::register::metadata_order(&manifeste, &rassemble));
+
+        core.handle_enrichment("ouifm", enrichissement(id, "Station", "Direct"));
+        assert_eq!(
+            core.metadonnees.gagnant(),
+            Some("ouifm"),
+            "le tardif est declare avant dans le manifeste : il doit gagner"
+        );
+        assert_eq!(etat_rx.borrow().morceau.artist.as_deref(), Some("Station"));
     }
 
     #[test]

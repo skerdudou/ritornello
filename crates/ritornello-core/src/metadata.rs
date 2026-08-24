@@ -51,6 +51,21 @@ impl Metadonnees {
         Self { ordre, ..Default::default() }
     }
 
+    /// Remplace la liste des plugins `metadata`, donc la priorité d'arbitrage.
+    ///
+    /// **Remplace, n'ajoute pas** : un greffon `metadata` qui s'annonce après
+    /// le démarrage doit prendre sa place de `plugins.toml`, pas la dernière.
+    /// La liste est donc recalculée en entier par `register::metadata_order`,
+    /// qui reste le seul endroit où l'ordre est décidé.
+    ///
+    /// Les enrichissements déjà reçus sont conservés : ils décrivent ce qui
+    /// joue, ce que l'arrivée d'un greffon ne change pas. Ceux d'un plugin qui
+    /// sortirait de la liste cessent simplement d'être consultés — `gagnant`
+    /// ne parcourt que `ordre`.
+    pub fn set_ordre(&mut self, ordre: Vec<String>) {
+        self.ordre = ordre;
+    }
+
     pub fn identity(&self) -> Option<&Value> {
         self.identity.as_ref()
     }

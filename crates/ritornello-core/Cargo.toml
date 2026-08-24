@@ -28,5 +28,10 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# Horloge simulee : sans elle, la course entre une annonce prete et l'echeance
+# du rendez-vous ne se reproduit pas dans un test (voir
+# `register::tests::une_annonce_prete_a_lecheance_nest_jamais_perdue`), et le
+# test passerait aussi bien avec le defaut qu'il est cense interdire.
+tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"

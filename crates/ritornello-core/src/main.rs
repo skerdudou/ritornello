@@ -5,6 +5,7 @@ mod metadata;
 mod placeholder;
 mod player;
 mod plugins;
+mod register;
 mod state;
 mod status;
 mod system;
@@ -14,15 +15,17 @@ mod web;
 
 use crate::core::MetadataCablage;
 use crate::metadata::PlayerState;
-use crate::plugins::{PluginKind, PluginManifest};
+use crate::plugins::PluginManifest;
 use crate::status::{AppState, LogBuffer, LogBufferWriter, PluginStatus, StatusState};
 use crate::types::Event;
 use anyhow::{Context, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
-use ritornello_proto::{Enrichment, InputMessage, NowPlaying};
+// `PluginKind` vient du protocole partagé, pas du cœur : c'est le binaire du
+// greffon qui l'annonce, et `plugins.rs` n'a plus à le connaître.
+use ritornello_proto::{Announcement, Enrichment, InputMessage, NowPlaying, PluginKind};
 use ritornello_plugin_sdk::{run_input_client, run_metadata_client, DisplayClient, SourceClient, SourceUpdate};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch, RwLock};
 use tracing_subscriber::filter::LevelFilter;
@@ -36,6 +39,253 @@ fn env_or(key: &str, default: &str) -> String {
 impl core::Source for SourceClient {
     async fn request(&self, req: ritornello_proto::SourceReq) -> Result<ritornello_proto::SourceAction> {
         SourceClient::request(self, req).await
+    }
+}
+
+/// Relais de l'état vers **un** afficheur, dans sa propre tâche.
+///
+/// Une tâche par afficheur, et non une tâche qui boucle sur N clients : c'est
+/// ce qui empêche un afficheur lent — console occupée, écran bloqué en I/O — de
+/// retarder les autres. La contre-pression reste cloisonnée par socket, ce qui
+/// était l'argument retenu pour ne pas fusionner les sockets des genres.
+///
+/// Une fonction et non deux copies : le démarrage et le câblage à chaud
+/// servent un afficheur de la même façon, et un afficheur arrivé en retard ne
+/// doit pas être servi par un relais légèrement différent.
+///
+/// L'état courant est envoyé **d'abord**, avant toute attente : un afficheur
+/// câblé à chaud doit montrer ce qui joue sans attendre le prochain changement
+/// d'état. Ne compter que sur `changed()` marchait par accident — l'`etat_rx` de
+/// `main` n'est jamais avancé, donc le clone héritait d'une version périmée et
+/// rendait la main aussitôt. Un `borrow_and_update()` ajouté un jour dans `main`
+/// aurait laissé un afficheur tardif **noir** jusqu'au prochain changement, donc
+/// indéfiniment en veille où aucun tick n'est armé, et `publie_etat` n'aurait
+/// rien réparé puisqu'il est dédupliqué.
+///
+/// Un échec d'envoi **sort de la boucle**. Sur un socket dont le pair est mort
+/// l'erreur est permanente (EPIPE) : sans sortie, la tâche survivait au greffon
+/// et journalisait à chaque trame — une par seconde en lecture, par afficheur
+/// zombie. Deux relances à la main suffisaient à écraser en moins de quatre
+/// minutes le tampon de 500 lignes qui alimente la popin d'erreurs de l'IHM, et
+/// à y noyer le vrai diagnostic. Un client d'afficheur dont l'écriture échoue
+/// est inutilisable : on le nomme une fois, et on s'en va.
+fn relais_afficheur(
+    nom: String,
+    client: Arc<DisplayClient>,
+    mut etat_rx: watch::Receiver<PlayerState>,
+) {
+    tokio::spawn(async move {
+        let mut etat = etat_rx.borrow_and_update().clone();
+        loop {
+            if let Err(e) = client.send(&etat).await {
+                tracing::warn!("display plugin {nom} relay stopped: {e}");
+                break;
+            }
+            if etat_rx.changed().await.is_err() {
+                break;
+            }
+            etat = etat_rx.borrow_and_update().clone();
+        }
+    });
+}
+
+/// Les fils que le câblage à chaud doit tenir pour rejouer, après le
+/// démarrage, ce que la boucle de câblage initiale fait avec ses variables
+/// locales.
+struct FilsChaud {
+    sockets_dir: PathBuf,
+    /// Noms du manifeste dans l'ordre du fichier : autorité sur les noms
+    /// acceptés, et priorité d'arbitrage des `metadata`.
+    ordre_manifeste: Vec<String>,
+    source_update_tx: mpsc::Sender<(String, SourceUpdate)>,
+    cmd_tx: mpsc::Sender<InputMessage>,
+    enrich_tx: mpsc::Sender<(String, Enrichment)>,
+    now_playing_rx: watch::Receiver<NowPlaying>,
+    etat_rx: watch::Receiver<PlayerState>,
+    status_state: Arc<RwLock<StatusState>>,
+    admin_backends: admin::AdminBackends,
+}
+
+/// Câble un greffon qui s'annonce **après** le rendez-vous de démarrage.
+///
+/// Chaque genre reprend la forme du câblage initial. Deux différences, imposées
+/// par le fait que le cœur tourne déjà : la source passe par
+/// `Core::add_source`, et l'ordre d'arbitrage des `metadata` est **recalculé en
+/// entier** depuis le manifeste au lieu d'être complété.
+///
+/// Une ré-annonce d'un greffon déjà câblé suit le même chemin : on recâble.
+/// `add_source` remplace le client, et les relais précédents sortent d'eux-mêmes
+/// à leur premier échec d'envoi, leur socket ayant disparu — c'est ce que
+/// garantit la sortie de boucle de `relais_afficheur`, sans laquelle ils
+/// s'accumuleraient à chaque relance en journalisant à chaque trame.
+async fn cabler_a_chaud<P: player::Player>(
+    annonce: Announcement,
+    fils: &FilsChaud,
+    core: &mut core::Core<P>,
+    rassemble: &mut register::Gathered,
+) {
+    let nom = annonce.name.clone();
+    // Le nom fait autorité côté manifeste, à chaud comme au rendez-vous : une
+    // annonce qui en porte un autre est nommée puis écartée, jamais câblée.
+    if !fils.ordre_manifeste.contains(&nom) {
+        tracing::warn!("late announcement from unknown plugin {nom}, ignored");
+        return;
+    }
+    tracing::info!(
+        "{nom} announced late {:?} (admin: {}), wiring it now",
+        annonce.kinds,
+        annonce.admin
+    );
+    if rassemble.morts.contains(&nom) {
+        // Sa `child.wait()` a été consommée par le rendez-vous : `plugin_waits`
+        // ne la reverra jamais, donc ni son prochain code de sortie ni son
+        // `mark_plugin_disconnected`. Le `connected: true` qu'on va poser sera
+        // vrai à l'instant où on le pose, et ne se démentira plus jamais tout
+        // seul. Le dire, plutôt que de le laisser mentir en silence.
+        tracing::warn!(
+            "rewiring a plugin the core no longer supervises: {nom} was seen exiting, its next exit will go unnoticed"
+        );
+    }
+
+    // Le rassemblement et l'ordre d'arbitrage sont mis à jour **avant** de
+    // lancer quoi que ce soit. L'ordre d'abord parce que le client `metadata`
+    // lancé plus bas peut envoyer un enrichissement dès sa première trame, et
+    // le cœur rejette un enrichissement « from an undeclared metadata plugin » :
+    // aujourd'hui la boucle principale ne peut pas drainer `enrich_rx` pendant
+    // ce bras, mais compter là-dessus, c'est faire dépendre la correction d'une
+    // sérialisation implicite qu'un refactor — ce câblage sorti dans une tâche —
+    // ferait tomber sans bruit.
+    //
+    // La liste est recalculée en **entier** depuis le manifeste, jamais
+    // complétée en queue : la priorité est celle de `plugins.toml`, et un
+    // greffon `metadata` tardif y prend sa place du fichier. La logique d'ordre
+    // reste dans `register::metadata_order`, un seul endroit.
+    //
+    // Les deux `retain` gardent `Gathered` cohérent : un figé qui vient de
+    // parler n'est plus figé, un mort qui revient n'est plus mort. Rien ne lit
+    // ces deux listes après le démarrage — la page de statut vient de
+    // `status_state` — mais la structure est la mémoire de ce que le cœur sait
+    // des greffons, et un nom n'y appartient qu'à une seule des trois
+    // collections. Deux lignes pour qu'elle ne mente pas au prochain lecteur.
+    rassemble.figes.retain(|n| n != &nom);
+    rassemble.morts.retain(|n| n != &nom);
+    rassemble.announcements.insert(nom.clone(), annonce.clone());
+    core.set_metadata_order(register::metadata_order(&fils.ordre_manifeste, rassemble));
+
+    let prefix = fils.sockets_dir.join(&nom);
+    // Les lignes de statut sont composées à part puis **substituées** en bloc :
+    // voir `status::replace_plugin_lines`.
+    let mut lignes: Vec<PluginStatus> = Vec::new();
+
+    for kind in &annonce.kinds {
+        let socket = ritornello_plugin_sdk::genre_socket(&prefix, *kind);
+        match kind {
+            PluginKind::Source => {
+                match SourceClient::connect(&socket, nom.clone(), fils.source_update_tx.clone())
+                    .await
+                {
+                    Ok(client) => {
+                        // `cable_source_a_chaud` fait les trois choses que
+                        // `add_source` seul ne fait pas : la langue courante
+                        // (sinon un `cd` relancé à la main sur un appareil en
+                        // français revient en affichant `NO DISC`), le réveil si
+                        // c'est la **première** source du cœur (sinon elle est
+                        // active et muette), et la publication de l'état.
+                        //
+                        // Premier câblage ou recâblage : c'est précisément
+                        // l'événement que cherche qui débogue un greffon qui
+                        // bat, et le booléen le sait.
+                        match core.cable_source_a_chaud(nom.clone(), client).await {
+                            Ok(true) => {
+                                tracing::info!("{nom} source client replaced (plugin rewired)")
+                            }
+                            Ok(false) => tracing::info!("{nom} source wired for the first time"),
+                            // La source **est** câblée : seul son réveil a
+                            // échoué (mpv, ou la source elle-même). La ligne de
+                            // statut dit donc `connected: true`, et une commande
+                            // de la télécommande repassera par le même chemin.
+                            Err(e) => tracing::warn!("{nom} source wired, but waking it failed: {e:#}"),
+                        }
+                        lignes.push(PluginStatus::genre(&nom, "source", true, annonce.admin));
+                    }
+                    Err(e) => {
+                        tracing::warn!("plugin {nom} source unavailable: {e}");
+                        lignes.push(PluginStatus::genre(&nom, "source", false, annonce.admin));
+                    }
+                }
+            }
+            PluginKind::Display => match DisplayClient::connect(&socket).await {
+                Ok(client) => {
+                    relais_afficheur(nom.clone(), client, fils.etat_rx.clone());
+                    lignes.push(PluginStatus::genre(&nom, "display", true, annonce.admin));
+                }
+                Err(e) => {
+                    tracing::warn!("display plugin {nom} unavailable: {e}");
+                    lignes.push(PluginStatus::genre(&nom, "display", false, annonce.admin));
+                }
+            },
+            PluginKind::Input => {
+                let tx = fils.cmd_tx.clone();
+                let socket_for_task = socket.clone();
+                let name = nom.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = run_input_client(&socket_for_task, tx).await {
+                        tracing::warn!("input plugin {name} disconnected: {e}");
+                    }
+                });
+                lignes.push(PluginStatus::genre(&nom, "input", true, annonce.admin));
+            }
+            PluginKind::Metadata => {
+                let tx = fils.enrich_tx.clone();
+                let np_rx = fils.now_playing_rx.clone();
+                let socket_for_task = socket.clone();
+                let name = nom.clone();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        run_metadata_client(&socket_for_task, name.clone(), tx, np_rx).await
+                    {
+                        tracing::warn!("metadata plugin {name} disconnected: {e}");
+                    }
+                });
+                lignes.push(PluginStatus::genre(&nom, "metadata", true, annonce.admin));
+            }
+        }
+    }
+
+    // L'ancien dorsal est retiré **avant** la tentative de connexion, et quoi
+    // qu'annonce le greffon. Un dorsal survivant à une ré-annonce pointerait
+    // vers un socket disparu : `/api/admin/<nom>` rendrait une erreur au bout
+    // des 5 s du protocole d'admin — sériel, donc en retenant la page — là où un
+    // 404 franc dit tout de suite qu'il n'y a rien à cette adresse.
+    fils.admin_backends.write().await.remove(&nom);
+    let mut admin_joint = false;
+    if annonce.admin {
+        let chemin = ritornello_plugin_sdk::admin_socket(&prefix);
+        match ritornello_plugin_sdk::AdminClient::connect(&chemin).await {
+            Ok(client) => {
+                fils.admin_backends.write().await.insert(nom.clone(), client);
+                admin_joint = true;
+            }
+            Err(e) => tracing::warn!("admin plugin {nom} unreachable: {e}"),
+        }
+    }
+    // Même règle qu'au démarrage : le drapeau suit ce qui a été effectivement
+    // **joint**, pas ce que le greffon a annoncé — une annonce `admin: true`
+    // dont le `connect` échoue ne doit pas laisser l'IHM pointer vers une page
+    // qui répond 404. Réaffirmé sur toutes les lignes plutôt que corrigé dans le
+    // seul cas d'échec : une seule vérité, écrite une seule fois.
+    for ligne in lignes.iter_mut() {
+        ligne.admin = admin_joint;
+    }
+
+    // **Remplacer, jamais ajouter** : un greffon qui se réannonce accumulerait
+    // sinon une ligne de plus à chaque relance. Le remplacement par une liste
+    // vide garde le greffon visible en genre inconnu, voir
+    // `status::replace_plugin_lines` : une annonce à `kinds: []` doit signaler
+    // un greffon mal compilé, pas le faire disparaître de la page.
+    {
+        let mut statuts = fils.status_state.write().await;
+        status::replace_plugin_lines(&mut statuts, &nom, lignes, admin_joint);
     }
 }
 
@@ -117,36 +367,26 @@ async fn main() -> Result<()> {
             .await
             .context("starting mpv")?;
 
-    // Plugins `metadata` déclarés, **dans l'ordre du fichier** : cet ordre est
-    // la priorité d'arbitrage. La liste est bâtie depuis le manifeste et non
-    // depuis les plugins effectivement lancés — la priorité est une propriété
-    // de configuration, pas d'exécution ; un plugin qui n'a pas démarré ne
-    // répondra jamais, donc ne gagnera jamais, sans que l'ordre des autres
-    // change d'un démarrage à l'autre.
-    let metadata_plugins: Vec<String> = manifest
-        .plugins
-        .iter()
-        .filter(|p| p.kind == PluginKind::Metadata)
-        .map(|p| p.name.clone())
-        .collect();
+    // Répertoire neuf, puis le socket d'enregistrement lié AVANT tout
+    // lancement : un greffon qui démarre vite trouve toujours quelqu'un.
+    let sockets_dir = plugins::prepare_sockets_dir(Path::new(&runtime_dir))?;
+    let register_path = sockets_dir.join("register.sock");
+    let register_listener = tokio::net::UnixListener::bind(&register_path)
+        .with_context(|| format!("binding {}", register_path.display()))?;
 
-    // Spawn et connexion de chaque plugin déclaré.
-    let mut sources: HashMap<String, Arc<dyn core::Source>> = HashMap::new();
-    let mut plugin_statuses = Vec::new();
     let mut plugin_waits = FuturesUnordered::new();
-    let mut source_connects = Vec::new();
-    let mut display_connect = None;
-    let mut admin_connects = Vec::new();
+    let mut lances: Vec<String> = Vec::new();
+    let mut plugin_statuses = Vec::new();
 
     for p in &manifest.plugins {
-        let socket_path = PathBuf::from(format!("{runtime_dir}/{}.sock", p.name));
-        // La socket d'admin est proposée à **tous** les plugins : celui qui a
-        // une page la lie (c'est sa déclaration), les autres ignorent
-        // l'argument. Plus de champ `admin` dans plugins.toml — c'était une
-        // propriété du binaire que l'opérateur devait connaître, et son oubli
-        // produisait un mode dégradé silencieux.
-        let admin_socket = PathBuf::from(format!("{runtime_dir}/{}-admin.sock", p.name));
-        match plugins::spawn(&p.exec, &socket_path, &admin_socket, persisted.locale.as_deref()) {
+        let prefix = sockets_dir.join(&p.name);
+        match plugins::spawn(
+            &p.exec,
+            &register_path,
+            &p.name,
+            &prefix,
+            persisted.locale.as_deref(),
+        ) {
             Ok(child) => {
                 let wname = p.name.clone();
                 plugin_waits.push(async move {
@@ -154,147 +394,218 @@ async fn main() -> Result<()> {
                     let status = child.wait().await;
                     (wname, status)
                 });
-                {
-                    let name = p.name.clone();
-                    admin_connects.push(tokio::spawn(async move {
-                        // Le fichier a été supprimé avant le spawn : son
-                        // apparition ne peut venir que du plugin. La liaison
-                        // est la première chose que fait une moitié admin, la
-                        // fenêtre est donc large — et elle court en parallèle
-                        // des connexions de genre, pas après.
-                        if !plugins::attend_liaison(&admin_socket, std::time::Duration::from_secs(2)).await {
-                            return (name, None);
-                        }
-                        match ritornello_plugin_sdk::AdminClient::connect(&admin_socket).await {
-                            Ok(client) => (name, Some(client)),
-                            Err(e) => {
-                                tracing::warn!("admin plugin {name} unreachable: {e}");
-                                (name, None)
-                            }
-                        }
-                    }));
-                }
-                match p.kind {
-                    PluginKind::Source => {
-                        let name = p.name.clone();
-                        let update_tx = source_update_tx.clone();
-                        source_connects.push(tokio::spawn(async move {
-                            let result = SourceClient::connect(&socket_path, name.clone(), update_tx).await;
-                            (name, result)
-                        }));
-                    }
-                    PluginKind::Display => {
-                        let name = p.name.clone();
-                        display_connect = Some(tokio::spawn(async move {
-                            let result = DisplayClient::connect(&socket_path).await;
-                            (name, result)
-                        }));
-                    }
-                    PluginKind::Input => {
-                        let tx = cmd_tx.clone();
-                        let socket_for_task = socket_path.clone();
-                        let name = p.name.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = run_input_client(&socket_for_task, tx).await {
-                                tracing::warn!("input plugin {name} disconnected: {e}");
-                            }
-                        });
-                        // `admin` est posé à faux partout ici : la détection
-                        // (liaison de la socket d'admin) complète le drapeau
-                        // plus bas, une fois les tâches d'observation jointes.
-                        plugin_statuses.push(PluginStatus { name: p.name.clone(), kind: "input".into(), connected: true, admin: false });
-                    }
-                    PluginKind::Metadata => {
-                        // Relais dans les deux sens, dans sa propre tâche : sa
-                        // panne ne concerne que les métadonnées. **La lecture
-                        // n'est jamais affectée** par un plugin `metadata`.
-                        let tx = enrich_tx.clone();
-                        let np_rx = now_playing_rx.clone();
-                        let socket_for_task = socket_path.clone();
-                        let name = p.name.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = run_metadata_client(&socket_for_task, name.clone(), tx, np_rx).await {
-                                tracing::warn!("metadata plugin {name} disconnected: {e}");
-                            }
-                        });
-                        plugin_statuses.push(PluginStatus { name: p.name.clone(), kind: "metadata".into(), connected: true, admin: false });
-                    }
-                }
+                lances.push(p.name.clone());
             }
             Err(e) => {
                 // `{e:#}` et non `{e}` : la chaîne de contexte porte le chemin
                 // cherché, que le seul message d'erreur système n'indique pas.
                 tracing::warn!("failed to launch plugin {}: {e:#}", p.name);
-                plugin_statuses.push(PluginStatus { name: p.name.clone(), kind: format!("{:?}", p.kind).to_lowercase(), connected: false, admin: false });
+                // Un greffon qui n'a pas démarré n'a jamais annoncé de genre,
+                // et le manifeste ne le porte plus : la page de statut affiche
+                // un genre inconnu plutôt que d'en inventer un.
+                plugin_statuses.push(PluginStatus::genre_inconnu(&p.name, false));
             }
         }
     }
 
-    for handle in source_connects {
-        let (name, result) = handle.await.context("source plugin connection task interrupted")?;
-        match result {
-            Ok(client) => {
-                sources.insert(name.clone(), client);
-                plugin_statuses.push(PluginStatus { name, kind: "source".into(), connected: true, admin: false });
-            }
-            Err(e) => {
-                tracing::warn!("plugin {} unavailable: {e}", name);
-                plugin_statuses.push(PluginStatus { name, kind: "source".into(), connected: false, admin: false });
-            }
-        }
+    // Le canal des annonces, **unique pour les deux étages** : le rendez-vous
+    // l'emprunte, la tâche permanente en garde l'émetteur, et la boucle de
+    // sélection en consomme le reste. Un seul canal, et une annonce ne peut plus
+    // se perdre entre les deux : ce que `gather` n'a pas eu le temps de lire
+    // reste en file, et sera câblé à chaud un instant plus tard. Voir la doc de
+    // `register::gather` pour la course que cela supprime.
+    let (tardives_tx, mut tardives_rx) = mpsc::channel::<Announcement>(16);
+
+    // Une annonce par greffon lancé. Les morts précoces écourtent l'attente ;
+    // `plugin_waits` reste utilisable ensuite, seules les entrées consommées
+    // ici en sortent — et ce sont précisément celles dont on a déjà appris la
+    // mort.
+    let mut rassemble = register::gather(
+        &register_listener,
+        &lances,
+        (&mut plugin_waits).map(|(nom, _statut)| nom),
+        std::time::Duration::from_secs(10),
+        &tardives_tx,
+        &mut tardives_rx,
+    )
+    .await;
+
+    // `gather` a pris le listener par **référence** : le cœur en garde donc la
+    // propriété, et le socket d'enregistrement ne se ferme pas avec le
+    // rendez-vous. L'échéance ci-dessus ne condamne plus personne — elle sert à
+    // ne pas bloquer le démarrage et à nommer un greffon figé. Un greffon qui
+    // s'annonce à t+12 s (démarrage à froid sur carte SD, huit binaires qui
+    // montent leur runtime en même temps) est câblé à chaud, et un greffon
+    // relancé à la main est repris.
+    tokio::spawn(register::accept_forever(register_listener, tardives_tx));
+
+    // Une ligne « genre inconnu » par greffon non annoncé, en distinguant le
+    // figé du mort : le premier tourne toujours et peut encore s'annoncer, le
+    // second n'a plus rien à dire. C'est la différence que l'opérateur doit
+    // voir avant d'aller relancer quoi que ce soit.
+    for (nom, fige) in rassemble
+        .figes
+        .iter()
+        .map(|n| (n, true))
+        .chain(rassemble.morts.iter().map(|n| (n, false)))
+    {
+        plugin_statuses.push(PluginStatus::genre_inconnu(nom, fige));
     }
 
-    let mut display_client: Option<Arc<DisplayClient>> = None;
-    if let Some(handle) = display_connect {
-        let (name, result) = handle.await.context("display plugin connection task interrupted")?;
-        match result {
-            Ok(client) => {
-                display_client = Some(client);
-                plugin_statuses.push(PluginStatus { name, kind: "display".into(), connected: true, admin: false });
-            }
-            Err(e) => {
-                tracing::warn!("display plugin {name} unavailable: {e}");
-                plugin_statuses.push(PluginStatus { name, kind: "display".into(), connected: false, admin: false });
-            }
-        }
-    }
+    // Plugins `metadata` annoncés, **dans l'ordre du manifeste** : cet ordre
+    // est la priorité d'arbitrage, et c'est une propriété de configuration,
+    // pas d'exécution. La liste est donc reconstruite depuis le manifeste et
+    // jamais depuis l'ordre d'arrivée des annonces, qui rendrait l'affichage
+    // non reproductible d'un démarrage à l'autre.
+    let ordre_manifeste: Vec<String> = manifest.plugins.iter().map(|p| p.name.clone()).collect();
+    let metadata_plugins = register::metadata_order(&ordre_manifeste, &rassemble);
 
-    // La page d'admin est une capacité **observée** : le drapeau des statuts
-    // suit ce qui a réellement été détecté, pas une déclaration de fichier.
+    // La page d'admin est **annoncée** par le binaire, plus observée par une
+    // fenêtre d'attente : le drapeau des statuts part de la ligne
+    // d'enregistrement. Mais l'annonce n'est qu'une déclaration de fichier —
+    // c'est une capacité **observée** que l'IHM doit voir au final : si la
+    // connexion admin échoue plus bas, le drapeau est repassé à `false` sur
+    // toutes les lignes de ce nom, quel que soit leur genre.
+    let mut sources: HashMap<String, Arc<dyn core::Source>> = HashMap::new();
+    // Le nom voyage avec le client : c'est lui qui nomme le greffon dans le
+    // journal quand son relais s'arrête.
+    let mut display_clients: Vec<(String, Arc<DisplayClient>)> = Vec::new();
     let mut admin_backends: HashMap<String, Arc<dyn admin::AdminBackend>> = HashMap::new();
-    for handle in admin_connects {
-        let (name, backend) = handle.await.context("admin detection task interrupted")?;
-        if let Some(client) = backend {
-            if let Some(st) = plugin_statuses.iter_mut().find(|s| s.name == name) {
-                st.admin = true;
-            }
-            admin_backends.insert(name, client);
-        }
-    }
 
-    if sources.is_empty() {
-        anyhow::bail!("no source available (plugins.toml empty or all source plugins unavailable)");
-    }
+    for nom in &ordre_manifeste {
+        let Some(annonce) = rassemble.announcements.get(nom) else {
+            continue;
+        };
+        let prefix = sockets_dir.join(nom);
 
-    // Relais de l'état vers le plugin d'affichage, s'il est connecté : le même
-    // canal qui alimente la route SSE de la SPA, le plugin composant lui-même
-    // sa mise en page depuis la trame reçue.
-    match display_client {
-        Some(display_client) => {
-            let mut display_rx = etat_rx.clone();
-            tokio::spawn(async move {
-                loop {
-                    if display_rx.changed().await.is_err() {
-                        break;
-                    }
-                    let etat = display_rx.borrow_and_update().clone();
-                    if let Err(e) = display_client.send(&etat).await {
-                        tracing::warn!("display: {e}");
+        for kind in &annonce.kinds {
+            let socket = ritornello_plugin_sdk::genre_socket(&prefix, *kind);
+            // L'annonce prouve que le socket est lié : un `connect` nu suffit,
+            // plus de boucle de reprise. Un échec ici est une vraie anomalie,
+            // pas une course au démarrage — et il reste cantonné à ce genre,
+            // les autres genres du même greffon continuant d'être câblés.
+            match kind {
+                PluginKind::Source => {
+                    match SourceClient::connect(&socket, nom.clone(), source_update_tx.clone()).await
+                    {
+                        Ok(client) => {
+                            sources.insert(nom.clone(), client);
+                            plugin_statuses.push(PluginStatus::genre(nom, "source", true, annonce.admin));
+                        }
+                        Err(e) => {
+                            tracing::warn!("plugin {nom} source unavailable: {e}");
+                            plugin_statuses.push(PluginStatus::genre(nom, "source", false, annonce.admin));
+                        }
                     }
                 }
-            });
+                PluginKind::Display => match DisplayClient::connect(&socket).await {
+                    Ok(client) => {
+                        display_clients.push((nom.clone(), client));
+                        plugin_statuses.push(PluginStatus::genre(nom, "display", true, annonce.admin));
+                    }
+                    Err(e) => {
+                        tracing::warn!("display plugin {nom} unavailable: {e}");
+                        plugin_statuses.push(PluginStatus::genre(nom, "display", false, annonce.admin));
+                    }
+                },
+                PluginKind::Input => {
+                    let tx = cmd_tx.clone();
+                    let socket_for_task = socket.clone();
+                    let name = nom.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = run_input_client(&socket_for_task, tx).await {
+                            tracing::warn!("input plugin {name} disconnected: {e}");
+                        }
+                    });
+                    plugin_statuses.push(PluginStatus::genre(nom, "input", true, annonce.admin));
+                }
+                PluginKind::Metadata => {
+                    // Relais dans les deux sens, dans sa propre tâche : sa
+                    // panne ne concerne que les métadonnées. **La lecture
+                    // n'est jamais affectée** par un plugin `metadata`.
+                    let tx = enrich_tx.clone();
+                    let np_rx = now_playing_rx.clone();
+                    let socket_for_task = socket.clone();
+                    let name = nom.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            run_metadata_client(&socket_for_task, name.clone(), tx, np_rx).await
+                        {
+                            tracing::warn!("metadata plugin {name} disconnected: {e}");
+                        }
+                    });
+                    plugin_statuses.push(PluginStatus::genre(nom, "metadata", true, annonce.admin));
+                }
+            }
         }
-        None => tracing::warn!("no display plugin connected, continuing without display"),
+
+        if annonce.admin {
+            let chemin = ritornello_plugin_sdk::admin_socket(&prefix);
+            match ritornello_plugin_sdk::AdminClient::connect(&chemin).await {
+                Ok(client) => {
+                    admin_backends.insert(nom.clone(), client);
+                }
+                Err(e) => {
+                    tracing::warn!("admin plugin {nom} unreachable: {e}");
+                    // Le drapeau des statuts suit ce qui a ete effectivement
+                    // joint, pas ce que le greffon a annonce : une annonce
+                    // `admin: true` suivie d'un `connect` en echec ne doit
+                    // jamais laisser l'IHM pointer vers une page qui repond
+                    // 404. On repasse ici a `false` toutes les lignes de ce
+                    // nom, quel que soit leur genre, poussees plus haut dans
+                    // la boucle des genres qui precede cette connexion.
+                    for statut in plugin_statuses.iter_mut().filter(|s| s.name == *nom) {
+                        statut.admin = false;
+                    }
+                }
+            }
+        }
+    }
+
+    // Sous verrou à partir d'ici : le câblage de démarrage est fini, mais la
+    // table n'est plus figée pour autant — un greffon qui s'annonce en retard
+    // doit voir sa page d'admin apparaître sans redémarrage du cœur.
+    let admin_backends: admin::AdminBackends = Arc::new(RwLock::new(admin_backends));
+
+    // Démarrer **sans aucune source** est légitime depuis l'enregistrement à
+    // chaud, et c'était la dernière échéance qui condamnait : refuser de
+    // démarrer à t+10 s contredit l'idée qu'une source peut arriver à t+30 s, et
+    // supprime la page de statut précisément quand on voudrait y voir le greffon
+    // figé. Il n'y aura rien à lire, mais on peut déjà voir ce qui se passe.
+    //
+    // Reste un seul refus, qui n'est pas une lenteur mais une erreur de
+    // configuration : plus **aucun processus vivant** pour s'annoncer. Voir
+    // `register::un_greffon_vivant`.
+    if !register::un_greffon_vivant(&lances, &rassemble) {
+        anyhow::bail!(
+            "no plugin process alive (plugins.toml empty, or every plugin failed to launch or exited)"
+        );
+    }
+    if sources.is_empty() {
+        tracing::warn!(
+            "no source plugin connected, starting anyway: a source that announces itself later will be wired without a restart"
+        );
+    }
+
+    // Relais de l'état vers chaque afficheur connecté : le même canal qui
+    // alimente la route SSE de la SPA, chaque plugin composant lui-même sa
+    // mise en page depuis la trame reçue.
+    //
+    // **Une tâche par afficheur**, et non une tâche qui boucle sur N clients :
+    // c'est ce qui empêche un afficheur lent — console occupée, écran bloqué
+    // en I/O — de retarder les autres. La contre-pression reste cloisonnée par
+    // socket, ce qui était l'argument retenu pour ne pas fusionner les sockets
+    // des genres.
+    //
+    // Avant, cette variable était un `Option` : déclarer deux afficheurs ne
+    // produisait aucune erreur, mais le cœur ne gardait que le client du
+    // dernier déclaré et le premier attendait des lignes qui n'arrivaient
+    // jamais.
+    if display_clients.is_empty() {
+        tracing::warn!("no display plugin connected, continuing without display");
+    }
+    for (nom, display_client) in display_clients {
+        relais_afficheur(nom, display_client, etat_rx.clone());
     }
 
     // Page de statut du cœur (plugins, source active, dernières erreurs, sortie audio).
@@ -329,7 +640,7 @@ async fn main() -> Result<()> {
             locale_current: locale_current.clone(),
             locale_tx: locale_tx.clone(),
             locales_root: locales_root.clone(),
-            admin_backends: Arc::new(admin_backends),
+            admin_backends: admin_backends.clone(),
             admin_assets: Arc::new(Default::default()),
             cmd_tx: cmd_tx.clone(),
             theme_current: theme_current.clone(),
@@ -403,6 +714,20 @@ async fn main() -> Result<()> {
     if let Err(e) = core.demarrage().await {
         tracing::warn!("startup wake: {e}");
     }
+
+    // Tout ce qu'il faut pour câbler un greffon qui parlera plus tard : les
+    // mêmes fils que la boucle de câblage de démarrage, tenus au-delà d'elle.
+    let fils_chaud = FilsChaud {
+        sockets_dir: sockets_dir.clone(),
+        ordre_manifeste,
+        source_update_tx: source_update_tx.clone(),
+        cmd_tx: cmd_tx.clone(),
+        enrich_tx: enrich_tx.clone(),
+        now_playing_rx: now_playing_rx.clone(),
+        etat_rx: etat_rx.clone(),
+        status_state: status_state.clone(),
+        admin_backends: admin_backends.clone(),
+    };
 
     let mut retry_at: Option<tokio::time::Instant> = None;
     // Échéance du prochain rafraîchissement de position. Absolue, comme
@@ -479,6 +804,14 @@ async fn main() -> Result<()> {
                     }
                     core::EventOutcome::Nothing => {}
                 }
+            }
+            // Annonce arrivée **après** le rendez-vous : greffon lent au
+            // démarrage, ou relancé à la main. Le câblage est le même, genre
+            // par genre, et une ré-annonce est traitée comme une annonce
+            // tardive — on recâble.
+            Some(annonce) = tardives_rx.recv() => {
+                cabler_a_chaud(annonce, &fils_chaud, &mut core, &mut rassemble).await;
+                status_state.write().await.active_source = core.active_source().to_string();
             }
             Some((name, update)) = source_update_rx.recv() => {
                 core.handle_source_update(&name, update);

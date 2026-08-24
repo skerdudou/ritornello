@@ -10,12 +10,57 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
+/// Une ligne de la page de statut : un couple (nom, genre).
+///
+/// `stalled` distingue **trois** états là où deux ne suffisaient pas :
+///
+/// - `connected: true` — annoncé et câblé ;
+/// - `connected: false` seul — processus mort avant de s'annoncer ;
+/// - `connected: false` + `stalled: true` — processus **vivant**, muet à
+///   l'échéance du rendez-vous.
+///
+/// Un greffon figé n'est pas un greffon mort : il tourne, il n'a rien dit, et
+/// il peut encore parler — le socket d'enregistrement reste ouvert pour lui et
+/// le cœur le câblera à chaud. C'est cette différence que l'opérateur doit
+/// voir.
+///
+/// Le champ est additif, avec l'idiome déjà employé pour `InputMessage.held` :
+/// absent du JSON quand il est faux, donc aucune trame existante ne change et
+/// une trame ancienne se relit sans erreur.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginStatus {
     pub name: String,
     pub kind: String,
     pub connected: bool,
     pub admin: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stalled: bool,
+}
+
+impl PluginStatus {
+    /// Ligne d'un genre annoncé, joint (`connected: true`) ou non.
+    ///
+    /// `stalled` n'a pas de sens ici : le greffon a parlé. Pas de `Default`
+    /// dérivé sur cette structure pour la même raison — un statut sans nom ni
+    /// genre ne veut rien dire.
+    pub fn genre(name: &str, kind: &str, connected: bool, admin: bool) -> Self {
+        Self { name: name.to_string(), kind: kind.to_string(), connected, admin, stalled: false }
+    }
+
+    /// Ligne d'un greffon qui n'a annoncé **aucun** genre : jamais lancé, mort
+    /// avant l'annonce, ou vivant et muet (`stalled`).
+    ///
+    /// Le genre est rapporté « unknown » plutôt qu'inventé : le manifeste ne le
+    /// porte plus, c'est le binaire qui l'annonce.
+    pub fn genre_inconnu(name: &str, stalled: bool) -> Self {
+        Self {
+            name: name.to_string(),
+            kind: "unknown".into(),
+            connected: false,
+            admin: false,
+            stalled,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,7 +79,9 @@ pub struct AppState {
     pub locale_current: Arc<RwLock<Option<String>>>,
     pub locale_tx: mpsc::Sender<String>,
     pub locales_root: std::path::PathBuf,
-    pub admin_backends: Arc<std::collections::HashMap<String, Arc<dyn crate::admin::AdminBackend>>>,
+    /// Pages d'admin joignables. Sous verrou : un greffon qui s'annonce en
+    /// retard doit voir sa page apparaître sans redémarrage du cœur.
+    pub admin_backends: crate::admin::AdminBackends,
     pub admin_assets: Arc<crate::admin::AssetCache>,
     pub cmd_tx: mpsc::Sender<ritornello_proto::InputMessage>,
     pub theme_current: Arc<RwLock<crate::theme::ThemeState>>,
@@ -322,11 +369,58 @@ pub fn parse_available_locales(filenames: &[String]) -> Vec<String> {
 /// Marque le plugin `name` comme déconnecté dans l'état de statut : un plugin
 /// dont le processus s'est terminé n'est plus joignable (supervision, page de
 /// statut vivante). No-op si le nom est inconnu.
+/// Le drapeau `stalled` est retiré au passage : « figé » veut dire vivant et
+/// muet. Un processus dont on vient de voir la sortie n'est plus vivant, et
+/// laisser les deux drapeaux ensemble raconterait un état qui n'existe pas.
 pub fn mark_plugin_disconnected(state: &mut StatusState, name: &str) {
     for p in &mut state.plugins {
         if p.name == name {
             p.connected = false;
+            p.stalled = false;
         }
+    }
+}
+
+/// Remplace **toutes** les lignes du greffon `name` par `lignes`.
+///
+/// Employé au câblage à chaud. Le remplacement n'est pas un détail : un greffon
+/// relancé à la main se réannonce, et une insertion en plus des lignes
+/// existantes lui ferait accumuler des doublons dans la page de statut à chaque
+/// relance — jusqu'à une page illisible sur un appareil qu'on ne redémarre
+/// jamais.
+///
+/// Les nouvelles lignes sont posées là où étaient les anciennes, pour que
+/// l'ordre affiché ne saute pas d'un recâblage à l'autre.
+///
+/// Une liste **vide** ne fait pas disparaître le greffon : elle le laisse
+/// visible en genre inconnu, non joint. Une annonce à `kinds: []` vient d'un
+/// binaire mal compilé, et retirer ses lignes sans en insérer aucune le rendrait
+/// invisible juste après qu'il a parlé — l'inverse exact de ce que le câblage à
+/// chaud existe pour donner à voir. `stalled` reste faux : il vient de parler,
+/// il n'est pas muet.
+///
+/// `admin` ne sert **que** dans ce cas de repli, et il y est indispensable :
+/// `PluginStatus::genre_inconnu` met le drapeau à faux par construction, si bien
+/// qu'un greffon annonçant `kinds: []` **et** `admin: true` — un binaire mal
+/// compilé, mais dont la page d'admin est bel et bien jointe — voyait son dorsal
+/// câblé sans rien dans l'IHM pour y mener. Les lignes non vides portent déjà
+/// leur propre drapeau, l'appelant l'ayant posé genre par genre.
+pub fn replace_plugin_lines(
+    state: &mut StatusState,
+    name: &str,
+    lignes: Vec<PluginStatus>,
+    admin: bool,
+) {
+    let place = state.plugins.iter().position(|p| p.name == name);
+    state.plugins.retain(|p| p.name != name);
+    let place = place.unwrap_or(state.plugins.len()).min(state.plugins.len());
+    let lignes = if lignes.is_empty() {
+        vec![PluginStatus { admin, ..PluginStatus::genre_inconnu(name, false) }]
+    } else {
+        lignes
+    };
+    for (i, ligne) in lignes.into_iter().enumerate() {
+        state.plugins.insert(place + i, ligne);
     }
 }
 
@@ -546,8 +640,8 @@ pub(crate) mod tests_support {
     pub(crate) fn sample() -> StatusState {
         StatusState {
             plugins: vec![
-                PluginStatus { name: "radio".into(), kind: "source".into(), connected: true, admin: true },
-                PluginStatus { name: "cd".into(), kind: "source".into(), connected: false, admin: false },
+                PluginStatus::genre("radio", "source", true, true),
+                PluginStatus::genre("cd", "source", false, false),
             ],
             active_source: "radio".into(),
         }
@@ -571,7 +665,7 @@ pub(crate) mod tests_support {
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
             locales_root: std::path::PathBuf::from("/nonexistent"),
-            admin_backends: Arc::new(std::collections::HashMap::new()),
+            admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
@@ -601,7 +695,7 @@ pub(crate) mod tests_support {
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
             locales_root: std::path::PathBuf::from("/nonexistent"),
-            admin_backends: Arc::new(std::collections::HashMap::new()),
+            admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
@@ -633,7 +727,7 @@ pub(crate) mod tests_support {
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
             locales_root: std::path::PathBuf::from("/nonexistent"),
-            admin_backends: Arc::new(std::collections::HashMap::new()),
+            admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
@@ -673,7 +767,7 @@ pub(crate) mod tests_support {
             locale_current: Arc::new(tokio::sync::RwLock::new(Some("fr".to_string()))),
             locale_tx,
             locales_root: dir.path().to_path_buf(),
-            admin_backends: Arc::new(std::collections::HashMap::new()),
+            admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
@@ -1151,8 +1245,8 @@ mod tests {
     fn mark_plugin_disconnected_bascule_connected() {
         let mut st = StatusState {
             plugins: vec![
-                PluginStatus { name: "radio".into(), kind: "source".into(), connected: true, admin: true },
-                PluginStatus { name: "cd".into(), kind: "source".into(), connected: true, admin: false },
+                PluginStatus::genre("radio", "source", true, true),
+                PluginStatus::genre("cd", "source", true, false),
             ],
             active_source: "radio".into(),
         };
@@ -1161,6 +1255,172 @@ mod tests {
         assert!(st.plugins.iter().find(|p| p.name == "radio").unwrap().connected);
         // Nom inconnu : no-op, ne panique pas.
         mark_plugin_disconnected(&mut st, "inconnu");
+    }
+
+    #[test]
+    fn mark_plugin_disconnected_bascule_toutes_les_lignes_dun_greffon_a_plusieurs_genres() {
+        // Un greffon peut annoncer plusieurs genres (par exemple input et
+        // display) : la page de statut porte alors une ligne par (nom, genre)
+        // pour ce même nom. `admin` est un drapeau booléen porté par chaque
+        // ligne de genre, jamais un genre en soi. `mark_plugin_disconnected`
+        // boucle déjà sur toutes les lignes de même nom, mais rien ne le
+        // prouvait jusqu'ici.
+        let mut st = StatusState {
+            plugins: vec![
+                PluginStatus::genre("files", "input", true, true),
+                PluginStatus::genre("files", "display", true, true),
+                PluginStatus::genre("radio", "source", true, true),
+            ],
+            active_source: "files".into(),
+        };
+        mark_plugin_disconnected(&mut st, "files");
+        assert!(
+            st.plugins.iter().filter(|p| p.name == "files").all(|p| !p.connected),
+            "les deux lignes de files doivent basculer"
+        );
+        assert!(
+            st.plugins.iter().find(|p| p.name == "radio").unwrap().connected,
+            "les lignes d'un autre greffon ne doivent pas etre touchees"
+        );
+    }
+
+    #[test]
+    fn mark_plugin_disconnected_efface_le_drapeau_fige() {
+        // Un greffon figé qui meurt plus tard : `plugin_waits` le voit, et ses
+        // lignes doivent cesser d'annoncer « vivant mais muet ». Les deux
+        // drapeaux ensemble décriraient un état qui n'existe pas.
+        let mut st = StatusState {
+            plugins: vec![PluginStatus::genre_inconnu("files", true)],
+            active_source: "radio".into(),
+        };
+        mark_plugin_disconnected(&mut st, "files");
+        let ligne = &st.plugins[0];
+        assert!(!ligne.connected);
+        assert!(!ligne.stalled, "un processus dont on a vu la sortie n'est plus fige");
+    }
+
+    #[test]
+    fn une_reannonce_remplace_les_lignes_du_greffon_au_lieu_den_ajouter() {
+        // Un greffon relancé à la main se réannonce, et le cœur le recâble. S'il
+        // accumulait une ligne de plus à chaque fois, la page de statut d'un
+        // appareil qu'on ne redémarre jamais finirait illisible.
+        let mut st = StatusState {
+            plugins: vec![
+                PluginStatus::genre_inconnu("files", true),
+                PluginStatus::genre("radio", "source", true, true),
+            ],
+            active_source: "radio".into(),
+        };
+        // Première annonce : le figé devient deux lignes de genre.
+        replace_plugin_lines(
+            &mut st,
+            "files",
+            vec![
+                PluginStatus::genre("files", "source", true, true),
+                PluginStatus::genre("files", "input", true, true),
+            ],
+            true,
+        );
+        // Ré-annonce, cette fois sans le genre `input`.
+        replace_plugin_lines(
+            &mut st,
+            "files",
+            vec![PluginStatus::genre("files", "source", true, true)],
+            true,
+        );
+
+        assert_eq!(
+            st.plugins.iter().filter(|p| p.name == "files").count(),
+            1,
+            "les lignes ne doivent pas s'accumuler d'une reannonce a l'autre"
+        );
+        assert_eq!(st.plugins.len(), 2, "les autres greffons restent intacts");
+        assert!(st.plugins.iter().any(|p| p.name == "radio"));
+        // La place du greffon dans la liste ne saute pas d'un recablage à
+        // l'autre : `files` était premier, il le reste.
+        assert_eq!(st.plugins[0].name, "files");
+    }
+
+    #[test]
+    fn une_annonce_sans_aucun_genre_laisse_le_greffon_visible() {
+        // `kinds: []` : greffon mal compilé, ou binaire qui se trompe. Retirer
+        // ses lignes sans en insérer aucune le faisait **disparaître** de la
+        // page juste après qu'il a parlé — un greffon fautif devenu invisible,
+        // l'inverse de ce que ce câblage existe pour donner à voir.
+        let mut st = StatusState {
+            plugins: vec![
+                PluginStatus::genre("files", "source", true, false),
+                PluginStatus::genre("radio", "source", true, false),
+            ],
+            active_source: "radio".into(),
+        };
+        replace_plugin_lines(&mut st, "files", vec![], false);
+
+        assert_eq!(st.plugins.len(), 2, "le greffon reste dans la page");
+        let ligne = st.plugins.iter().find(|p| p.name == "files").unwrap();
+        assert_eq!(ligne.kind, "unknown");
+        assert!(!ligne.connected);
+        assert!(!ligne.stalled, "il vient de parler : il n'est pas muet");
+        assert_eq!(st.plugins[0].name, "files", "et il garde sa place");
+    }
+
+    #[test]
+    fn une_annonce_sans_genre_garde_son_drapeau_admin() {
+        // `kinds: []` **et** `admin: true` : le binaire est mal compilé mais sa
+        // page d'admin est jointe, donc le dorsal est câblé. La ligne de repli
+        // vient de `genre_inconnu`, dont `admin` est faux par construction : sans
+        // le drapeau porté jusqu'ici, l'IHM n'affichait aucun lien vers une page
+        // qui existe — l'inverse exact de ce que la règle « le drapeau suit ce
+        // qui a été joint » cherchait.
+        let mut st = StatusState { plugins: vec![], active_source: String::new() };
+        replace_plugin_lines(&mut st, "files", vec![], true);
+
+        let ligne = &st.plugins[0];
+        assert_eq!(ligne.kind, "unknown");
+        assert!(!ligne.connected, "aucun genre n'a ete joint");
+        assert!(ligne.admin, "la page d'admin est jointe : le lien doit apparaitre");
+    }
+
+    #[test]
+    fn le_drapeau_fige_est_absent_du_json_quand_il_est_faux() {
+        // Champ additif : la trame d'un greffon câblé ne change pas d'un octet,
+        // et une trame ancienne se relit sans erreur.
+        let cable = PluginStatus::genre("radio", "source", true, true);
+        assert_eq!(
+            serde_json::to_string(&cable).unwrap(),
+            r#"{"name":"radio","kind":"source","connected":true,"admin":true}"#
+        );
+        let fige = PluginStatus::genre_inconnu("files", true);
+        assert_eq!(
+            serde_json::to_string(&fige).unwrap(),
+            r#"{"name":"files","kind":"unknown","connected":false,"admin":false,"stalled":true}"#
+        );
+        let ancien: PluginStatus = serde_json::from_str(
+            r#"{"name":"radio","kind":"source","connected":false,"admin":false}"#,
+        )
+        .unwrap();
+        assert!(!ancien.stalled);
+    }
+
+    #[tokio::test]
+    async fn le_statut_json_porte_le_drapeau_fige() {
+        // Ce que l'IHM lit réellement : la route, pas seulement la structure.
+        let state = app_state();
+        state.status.write().await.plugins = vec![
+            PluginStatus::genre_inconnu("files", true),
+            PluginStatus::genre_inconnu("cd", false),
+        ];
+        let app = router(state);
+        let resp =
+            app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["plugins"][0]["stalled"], serde_json::json!(true));
+        assert_eq!(
+            v["plugins"][1].get("stalled"),
+            None,
+            "un greffon mort n'est pas fige, et le champ ne doit pas apparaitre"
+        );
     }
 
     #[tokio::test]

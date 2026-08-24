@@ -31,6 +31,18 @@ impl AdminBackend for ritornello_plugin_sdk::AdminClient {
     }
 }
 
+/// Pages d'admin joignables, par nom de greffon.
+///
+/// Sous verrou, et non plus figée au démarrage : un greffon peut s'annoncer
+/// **après** le rassemblement (voir `register`), et sa page doit alors
+/// apparaître sans redémarrer le cœur. Le `RwLock` est celui de tokio, comme le
+/// reste de l'état partagé avec le routeur.
+///
+/// Les routes ne gardent jamais le verrou pendant un aller-retour IPC : elles
+/// clonent l'`Arc` du dorsal et relâchent aussitôt.
+pub type AdminBackends =
+    std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, std::sync::Arc<dyn AdminBackend>>>>;
+
 /// Actifs d'IHM déjà récupérés, par `(plugin, chemin)` → `(mime, corps, etag)`.
 /// Un bundle est immuable pour la durée de vie du processus du plugin : on ne
 /// le relit pas par IPC à chaque rechargement de page.
@@ -76,7 +88,10 @@ pub async fn admin_asset(
     Path((name, fichier)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let Some(backend) = st.admin_backends.get(&name) else {
+    // Cloné puis verrou relâché : la suite fait des allers-retours IPC, et
+    // les tenir sous un verrou de lecture retarderait l'insertion d'un greffon
+    // qui s'annonce en retard.
+    let Some(backend) = st.admin_backends.read().await.get(&name).cloned() else {
         return (StatusCode::NOT_FOUND, "plugin inconnu").into_response();
     };
     let cle = (name.clone(), fichier.clone());
@@ -113,7 +128,11 @@ pub async fn admin_asset(
 }
 
 pub async fn admin_i18n(State(st): State<AppState>, Path(name): Path<String>) -> Response {
-    match st.admin_backends.get(&name) {
+    // Le verrou est relâché **avant** l'aller-retour IPC : un temporaire dans
+    // le scrutin d'un `match` vivrait jusqu'à la fin du match, donc pendant
+    // l'appel au greffon.
+    let backend = st.admin_backends.read().await.get(&name).cloned();
+    match backend {
         None => (StatusCode::NOT_FOUND, "plugin inconnu").into_response(),
         Some(backend) => match backend.catalog().await {
             Ok(v) => Json(v).into_response(),
@@ -123,7 +142,11 @@ pub async fn admin_i18n(State(st): State<AppState>, Path(name): Path<String>) ->
 }
 
 pub async fn admin_get_data(State(st): State<AppState>, Path(name): Path<String>) -> Response {
-    match st.admin_backends.get(&name) {
+    // Le verrou est relâché **avant** l'aller-retour IPC : un temporaire dans
+    // le scrutin d'un `match` vivrait jusqu'à la fin du match, donc pendant
+    // l'appel au greffon.
+    let backend = st.admin_backends.read().await.get(&name).cloned();
+    match backend {
         None => (StatusCode::NOT_FOUND, "plugin inconnu").into_response(),
         Some(backend) => match backend.get_data().await {
             Ok(value) => Json(value).into_response(),
@@ -137,7 +160,11 @@ pub async fn admin_put_data(
     Path(name): Path<String>,
     Json(data): Json<serde_json::Value>,
 ) -> Response {
-    match st.admin_backends.get(&name) {
+    // Le verrou est relâché **avant** l'aller-retour IPC : un temporaire dans
+    // le scrutin d'un `match` vivrait jusqu'à la fin du match, donc pendant
+    // l'appel au greffon.
+    let backend = st.admin_backends.read().await.get(&name).cloned();
+    match backend {
         None => (StatusCode::NOT_FOUND, "plugin inconnu").into_response(),
         Some(backend) => match backend.set_data(data).await {
             Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
@@ -216,7 +243,7 @@ mod tests {
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
             locales_root: std::path::PathBuf::from("/nonexistent"),
-            admin_backends: Arc::new(backends),
+            admin_backends: Arc::new(tokio::sync::RwLock::new(backends)),
             admin_assets: Arc::new(Default::default()),
             cmd_tx,
             player: crate::status::tests_support::player_inerte(),
