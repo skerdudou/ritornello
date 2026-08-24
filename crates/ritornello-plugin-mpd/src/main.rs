@@ -1,5 +1,6 @@
 mod config;
 mod etat;
+mod protocole;
 
 use anyhow::Result;
 use config::Config;
