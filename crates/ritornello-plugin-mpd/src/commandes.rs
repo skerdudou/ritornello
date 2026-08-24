@@ -7,20 +7,8 @@
 //! à l'œil. Une fonction qui ne fait que choisir se teste ligne par ligne ;
 //! la session (Task 8) garde pour elle tout ce qui touche la chaussette.
 //!
-//! **Sans appelant en production avant la Task 8.** Voir l'attribut de module
-//! juste en dessous.
-
-// Dans un crate binaire, la compilation non-test exclut le code `#[cfg(test)]`
-// : tant que la session (Task 8) n'appelle pas `traiter`, *tout* ce module est
-// mort de ce point de vue, y compris les variantes d'`Issue` qu'il construit —
-// le lint remonte de proche en proche depuis les racines atteignables par
-// `main`. D'où un attribut de module et non une dizaine d'attributs par
-// élément : la dette est unique, elle a un seul point de retrait.
-//
-// **À retirer à la Task 8**, qui câble l'appelant réel. Ce qui resterait mort
-// après ce retrait sera du code mort véritable, et c'est exactement ce qu'on
-// veut voir apparaître à ce moment-là.
-#![allow(dead_code)]
+//! Son appelant est `session.rs`, qui lit les lignes et écrit les réponses :
+//! c'est lui, et lui seul, qui appelle `traiter`.
 
 use crate::etat::{Instantane, Sujet};
 use crate::protocole::{ack, ligne, Ack};

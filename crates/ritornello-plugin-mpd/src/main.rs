@@ -2,12 +2,14 @@ mod commandes;
 mod config;
 mod etat;
 mod protocole;
+mod session;
 
 use anyhow::Result;
 use config::Config;
 use etat::EtatPartage;
 use ritornello_plugin_sdk::{DisplayPlugin, InputPlugin, Runtime};
 use ritornello_proto::{InputMessage, PlayerState};
+use session::accepter;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -18,7 +20,7 @@ fn env_ou(cle: &str, defaut: &str) -> String {
 }
 
 /// Moitié `display` : reçoit chaque trame du cœur et la dépose dans l'état
-/// partagé, lu par les sessions clientes (Task 8).
+/// partagé, lu par les sessions clientes.
 struct AfficheurMpd {
     etat: Arc<EtatPartage>,
 }
@@ -32,10 +34,6 @@ impl DisplayPlugin for AfficheurMpd {
 }
 
 /// Moitié `input` : dépile le canal alimenté par les sessions clientes.
-/// Pour cette tâche personne n'y écrit encore — `accepter` ferme aussitôt
-/// chaque connexion — donc `rx` ne reçoit rien tant que la Task 8 n'a pas
-/// câblé de vraie session. Il ne se termine pas pour autant : voir le
-/// commentaire sur `next_command`.
 struct EntreeMpd {
     rx: mpsc::Receiver<InputMessage>,
 }
@@ -43,34 +41,13 @@ struct EntreeMpd {
 #[async_trait::async_trait]
 impl InputPlugin for EntreeMpd {
     async fn next_command(&mut self) -> Result<InputMessage> {
-        // Tant qu'`accepter` tourne (boucle infinie, voir plus bas), il
-        // détient un clone de l'émetteur, donc ce `recv()` reste en attente
-        // indéfiniment plutôt que de rendre `None` — même contrat que
-        // `EvdevInput::next_command` côté `generic-input`, où l'oubli de
-        // cette propriété avait fait sortir le greffon en `exit 0` dès le
-        // démarrage (régression du 2026-07-27).
+        // Tant qu'`accepter` tourne (sa boucle est infinie, voir
+        // `session.rs`), il détient un clone de l'émetteur, donc ce `recv()`
+        // reste en attente indéfiniment plutôt que de rendre `None` — même
+        // contrat que `EvdevInput::next_command` côté `generic-input`, où
+        // l'oubli de cette propriété avait fait sortir le greffon en `exit 0`
+        // dès le démarrage (régression du 2026-07-27).
         self.rx.recv().await.ok_or_else(|| anyhow::anyhow!("no mpd session sends commands yet"))
-    }
-}
-
-/// Accepte les connexions TCP et les ferme aussitôt.
-///
-/// **Stub de la Task 3.** La Task 8 remplace ce corps par la vraie session
-/// MPD (lecture de lignes, réponses, écriture sur `cmd_tx`), déplacée dans
-/// `session.rs`. Ici, personne ne répond encore à rien : accepter puis
-/// fermer évite qu'un client MPD reste bloqué en écriture sur un port ouvert
-/// qui ne le lirait jamais.
-async fn accepter(ecoute: TcpListener, _etat: Arc<EtatPartage>, _cmd_tx: mpsc::Sender<InputMessage>) {
-    loop {
-        match ecoute.accept().await {
-            Ok((flux, adresse)) => {
-                tracing::info!("mpd client connected from {adresse}");
-                drop(flux);
-            }
-            Err(e) => {
-                tracing::warn!("mpd accept failed: {e}");
-            }
-        }
     }
 }
 
@@ -103,7 +80,6 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncReadExt;
 
     #[tokio::test]
     async fn afficheur_mpd_depose_letat_recu_dans_letat_partage() {
@@ -137,37 +113,5 @@ mod tests {
         drop(tx);
         let e = entree.next_command().await.unwrap_err();
         assert!(e.to_string().contains("mpd session"), "erreur inattendue: {e}");
-    }
-
-    #[tokio::test]
-    async fn accepter_ferme_aussitot_chaque_connexion_et_continue_a_ecouter() {
-        // Propriété observable de bout en bout : un client qui se connecte
-        // ne reçoit rien et voit son flux fermé (Task 8 y répondra), et la
-        // boucle continue d'accepter — un second client n'attend pas
-        // indéfiniment derrière le premier. `for _ in 0..2` est ce qui
-        // distingue ce test d'un simple test à connexion unique : une
-        // implémentation qui accepterait une seule fois (sans boucle) le
-        // ferait échouer par un blocage sur le second `connect`/`read`.
-        let ecoute = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let adresse = ecoute.local_addr().unwrap();
-        let etat = Arc::new(EtatPartage::default());
-        let (tx, _rx) = mpsc::channel::<InputMessage>(1);
-        tokio::spawn(accepter(ecoute, etat, tx));
-
-        for _ in 0..2 {
-            let mut flux = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                tokio::net::TcpStream::connect(adresse),
-            )
-            .await
-            .expect("connect n'a pas du bloquer")
-            .unwrap();
-            let mut octet = [0u8; 1];
-            let n = tokio::time::timeout(std::time::Duration::from_secs(5), flux.read(&mut octet))
-                .await
-                .expect("le flux doit se fermer, pas rester ouvert")
-                .unwrap();
-            assert_eq!(n, 0, "rien a lire : la session stub ferme aussitot");
-        }
     }
 }

@@ -2,11 +2,9 @@
 //! les réponses et les refus. Aucune E/S ici — c'est ce qui rend tout le reste
 //! testable sans socket.
 //!
-//! `ack` et `ligne` sont appelés par `commandes.rs` depuis la Task 6, qui a
-//! retiré du même geste les `#[allow(dead_code)]` que la Task 4 avait posés
-//! faute d'appelant. `Ack::NoExist` a rejoint le lot à la Task 7, dont le bras
-//! `load` le construit. Un seul subsiste : `decouper` attend la session
-//! (Task 8), qui lit les lignes. Chacun le dit à son emplacement.
+//! `ack` et `ligne` sont appelés par `commandes.rs`, `decouper` par la session
+//! — seule à lire des lignes. Plus aucun `#[allow(dead_code)]` ici : les trois
+//! ont leur appelant.
 
 use std::fmt::Display;
 
@@ -46,11 +44,9 @@ pub fn ligne(cle: &str, valeur: impl Display) -> String {
 /// ligne ferait exécuter une commande dont l'argument est tronqué, ce qui est
 /// pire qu'un refus lisible.
 ///
-/// Toujours sans appelant en production, et la Task 6 ne l'a pas changé : son
-/// appelant est celui qui **lit des lignes**, donc la session (Task 8).
+/// Son appelant est celui qui **lit des lignes**, donc la session.
 /// `commandes.rs` reçoit une commande déjà découpée — c'est ce qui lui permet
-/// de n'avoir aucune E/S. **Task 8 retire cet attribut.**
-#[allow(dead_code)]
+/// de n'avoir aucune E/S.
 pub fn decouper(ligne: &str) -> Result<Vec<String>, Ack> {
     let mut args = Vec::new();
     let mut chars = ligne.chars().peekable();

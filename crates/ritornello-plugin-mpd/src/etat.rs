@@ -135,9 +135,10 @@ impl EtatPartage {
     /// session ne doit retenir le verrou au-delà de l'instant de la lecture,
     /// même si elle compose ensuite une réponse longue.
     ///
-    /// Sans appelant en production avant la Task 8 : c'est chaque session
-    /// cliente qui l'invoquera pour répondre à `status`.
-    #[allow(dead_code)]
+    /// Chaque session cliente l'invoque une fois par commande, pour répondre
+    /// depuis la copie plutôt que sous le verrou. Les compteurs qu'un `idle`
+    /// mémorise sont dans cette même copie : c'est ce qui les rend cohérents
+    /// avec l'état publié dans la même réponse.
     pub async fn lire(&self) -> Instantane {
         self.inner.read().await.clone()
     }
@@ -150,7 +151,12 @@ impl EtatPartage {
     /// que tout ce qui bouge après cette lecture est nécessairement un
     /// changement qu'elle n'a pas encore vu.
     ///
-    /// Sans appelant en production avant la Task 8 (`idle`).
+    /// **Sans appelant en production**, et c'est délibéré : la session lit
+    /// `Instantane::versions` de la copie que `lire` lui rend déjà, ce qui
+    /// prend le verrou une fois au lieu de deux et rend les compteurs
+    /// cohérents avec l'état qu'elle publie. Gardée pour ce que les tests de
+    /// ce module en font, et pour un appelant qui n'aurait besoin que des
+    /// compteurs.
     #[allow(dead_code)]
     pub async fn versions(&self) -> [u64; NB_SUJETS] {
         self.inner.read().await.versions
@@ -262,8 +268,9 @@ impl EtatPartage {
     /// superflu coûte au client une interrogation `status` redondante, un
     /// réveil manquant lui coûte la justesse de son écran.
     ///
-    /// Sans appelant en production avant la Task 8, qui traduit les commandes.
-    #[allow(dead_code)]
+    /// Appelée par la session **après** avoir poussé les commandes sur le
+    /// canal, jamais avant : acter une bascule qu'on n'a pas émise ferait
+    /// mentir `status` jusqu'à la trame suivante.
     pub async fn acter_optimiste(&self, commandes: &[Command]) {
         let mut bouges = Vec::new();
         {
@@ -332,8 +339,8 @@ impl EtatPartage {
     /// tous les dormeurs, y compris ceux dont aucun sujet demandé n'a bougé,
     /// et ceux-là doivent se rendormir.
     ///
-    /// Sans appelant en production avant la Task 8 (`idle`).
-    #[allow(dead_code)]
+    /// Appelée par la session pour tenir un `idle`. Une liste de sujets vide
+    /// n'en sort jamais, et c'est le contrat : voir `Issue::Attendre`.
     pub async fn attendre(&self, sujets: &[Sujet], vues: [u64; NB_SUJETS]) -> Vec<Sujet> {
         loop {
             let notifie = self.reveil.notified();
