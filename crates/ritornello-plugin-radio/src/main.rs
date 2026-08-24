@@ -14,9 +14,7 @@ use crate::admin::RadioAdmin;
 use anyhow::Result;
 use config::Stations;
 use ritornello_i18n::Catalog;
-use ritornello_plugin_sdk::{
-    run_admin_plugin, run_source_plugin, Notification, SourceOutcome, SourcePlugin,
-};
+use ritornello_plugin_sdk::{Notification, Runtime, SourceOutcome, SourcePlugin};
 use ritornello_proto::SourceAction;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -44,11 +42,12 @@ struct RadioSource {
     locales_root: PathBuf,
     /// Reçoit le nouveau `Stations::preset_count()` annoncé par la moitié
     /// Admin après un enregistrement réussi (voir `RadioAdmin::set_data`).
-    /// `None` en mode dégradé (pas de `--admin-socket`, donc pas de moitié
-    /// Admin pour émettre) : `poll_notification` reste alors en attente pour
-    /// toujours plutôt que de rendre `None`, qui est **terminal** pour le
-    /// SDK et journaliserait un avertissement trompeur pour un déploiement
-    /// pourtant légitime.
+    /// `main()` construit toujours ce champ à `Some` : la page d'admin est
+    /// enregistrée sans condition auprès de `Runtime`. `None` n'apparaît que
+    /// dans les tests, qui construisent `RadioSource` directement sans passer
+    /// par `Runtime` et donc sans moitié Admin pour émettre sur ce canal ;
+    /// `poll_notification` reste alors en attente pour toujours plutôt que de
+    /// rendre `None`, qui est **terminal** pour le SDK.
     preset_count_rx: Option<tokio::sync::watch::Receiver<u8>>,
 }
 
@@ -170,8 +169,9 @@ impl SourcePlugin for RadioSource {
     /// interrompu.
     async fn poll_notification(&mut self) -> Option<Notification> {
         let Some(rx) = &mut self.preset_count_rx else {
-            // Mode dégradé (pas de moitié Admin) : voir le commentaire sur le
-            // champ. Jamais `None` ici, qui serait terminal pour le SDK.
+            // N'arrive qu'en test (voir le commentaire sur le champ) : `main()`
+            // construit toujours ce récepteur. Jamais `None` ici, qui serait
+            // terminal pour le SDK.
             return std::future::pending().await;
         };
         match rx.changed().await {
@@ -213,8 +213,8 @@ impl SourcePlugin for RadioSource {
             // L'émetteur (moitié Admin) a disparu — ne devrait pas arriver en
             // pratique tant que les deux moitiés partagent le même processus,
             // mais rien ne justifie de traiter ça comme une fin définitive de
-            // notifications : on retombe sur la même attente indéfinie que le
-            // mode dégradé plutôt que de rendre `None`.
+            // notifications : on retombe sur la même attente indéfinie que la
+            // branche `None` du champ plutôt que de rendre `None` nous-mêmes.
             Err(_) => std::future::pending().await,
         }
     }
@@ -224,17 +224,6 @@ impl SourcePlugin for RadioSource {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let socket_path = ritornello_plugin_sdk::socket_path();
-    // `--admin-socket` n'est fourni par le cœur que si `admin = true` dans
-    // plugins.toml. Absent (oubli lors d'une mise à jour de plugins.toml, ou
-    // usage volontaire sans page d'admin), on continue en mode dégradé :
-    // la moitié Source tourne seule, sans page de gestion des stations.
-    let admin_socket = ritornello_plugin_sdk::admin_socket_path();
-    if admin_socket.is_none() {
-        tracing::warn!(
-            "--admin-socket absent: the station management page will not be served, only the Source half runs (missing 'admin = true' in plugins.toml)"
-        );
-    }
     let stations_path = PathBuf::from(env_or("RITORNELLO_RADIO_STATIONS", "/etc/ritornello/stations.toml"));
     let state_path = PathBuf::from(env_or("RITORNELLO_RADIO_STATE", "/var/lib/ritornello/plugin-radio.json"));
 
@@ -264,7 +253,7 @@ async fn main() -> Result<()> {
         // Le récepteur n'a de sens que si une moitié Admin existe pour
         // émettre dessus (voir plus bas) : sinon `poll_notification` doit
         // rester en attente pour toujours, pas se rabattre sur un canal mort.
-        preset_count_rx: admin_socket.is_some().then_some(preset_count_rx),
+        preset_count_rx: Some(preset_count_rx),
     };
     // Annuaire en ligne : la liste intégrée de serveurs, essayés dans l'ordre
     // jusqu'au premier qui répond, ou l'unique serveur épinglé par
@@ -272,59 +261,17 @@ async fn main() -> Result<()> {
     // écran, savoir quels serveurs seront interrogés évite de deviner.
     let directory = directory::HttpDirectory::from_env();
     tracing::info!("radio directory, candidate servers: {}", directory.bases.join(", "));
-    // La moitié admin n'est construite que si `--admin-socket` a été fourni
-    // (mode dégradé sinon, voir plus haut).
-    let admin = admin_socket.map(|admin_socket| {
-        (
-            RadioAdmin {
-                stations_path,
-                state_path,
-                stations: stations_shared,
-                catalog,
-                directory: Arc::new(directory),
-                search: RwLock::new(Vec::new()),
-                countries: RwLock::new(Vec::new()),
-                preset_count_tx,
-            },
-            admin_socket,
-        )
-    });
-
-    // Les deux moitiés sont indépendantes : une panne (déconnexion, erreur
-    // d'écriture, voire panique sur un lock empoisonné) sur la socket admin ne
-    // doit pas tuer la lecture audio, et réciproquement. Chaque moitié tourne
-    // dans sa propre tâche tokio::spawn : une panique y est capturée dans le
-    // JoinHandle (JoinError) au lieu de dérouler la pile de l'autre moitié,
-    // ce qu'un simple tokio::join! sur des blocs async inline ne garantirait
-    // pas (les deux futures seraient pollées dans la même tâche). Quand
-    // `admin` est `None`, seule la moitié Source est lancée : jamais de
-    // `try_join!` ici, les deux tâches (quand les deux existent) restent
-    // suivies indépendamment.
-    let source_handle = tokio::spawn(async move { run_source_plugin(source, &socket_path).await });
-
-    match admin {
-        Some((admin, admin_socket)) => {
-            let admin_handle = tokio::spawn(async move { run_admin_plugin(admin, &admin_socket).await });
-            let (source_res, admin_res) = tokio::join!(source_handle, admin_handle);
-            log_half("source half", source_res);
-            log_half("admin half", admin_res);
-        }
-        None => {
-            log_half("source half", source_handle.await);
-        }
-    }
-
-    Ok(())
-}
-
-/// Logue le résultat d'une des deux moitiés (succès / erreur applicative /
-/// panique) sans jamais faire remonter l'échec d'une moitié sur l'autre.
-fn log_half(label: &str, res: std::result::Result<Result<()>, tokio::task::JoinError>) {
-    match res {
-        Ok(Ok(())) => tracing::warn!("radio plugin ({label}) exited normally"),
-        Ok(Err(e)) => tracing::warn!("radio plugin ({label}) error: {e}"),
-        Err(join_err) => tracing::error!("radio plugin ({label}) panicked: {join_err}"),
-    }
+    let admin = RadioAdmin {
+        stations_path,
+        state_path,
+        stations: stations_shared,
+        catalog,
+        directory: Arc::new(directory),
+        search: RwLock::new(Vec::new()),
+        countries: RwLock::new(Vec::new()),
+        preset_count_tx,
+    };
+    Runtime::from_args()?.source(source)?.admin(admin)?.run().await
 }
 
 #[cfg(test)]
@@ -591,11 +538,12 @@ mod tests {
 
     #[tokio::test]
     async fn sans_moitie_admin_poll_notification_reste_en_attente() {
-        // Mode dégradé (`--admin-socket` absent) : aucun émetteur n'existe
-        // pour ce plugin, donc rien ne doit jamais en sortir — surtout pas un
-        // `None`, terminal pour le SDK et source d'un avertissement trompeur
-        // pour un déploiement pourtant légitime (voir le commentaire sur le
-        // champ `preset_count_rx`).
+        // Source construite directement, sans passer par `Runtime` (comme le
+        // fait ce test), donc sans canal d'annonce de `preset_count` : aucun
+        // émetteur n'existe, donc rien ne doit jamais en sortir — surtout pas
+        // un `None`, terminal pour le SDK (voir le commentaire sur le champ
+        // `preset_count_rx`). `main()`, lui, enregistre toujours la page
+        // d'admin et fournit donc toujours ce canal.
         let mut source = make_source(two_stations(), 1);
         assert!(source.preset_count_rx.is_none());
         let resultat = tokio::time::timeout(

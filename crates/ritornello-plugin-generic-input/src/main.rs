@@ -16,7 +16,7 @@ use crate::bindings::Bindings;
 use crate::devices::Hub;
 use anyhow::Result;
 use ritornello_i18n::Catalog;
-use ritornello_plugin_sdk::{run_admin_plugin, run_input_plugin, InputPlugin};
+use ritornello_plugin_sdk::{InputPlugin, Runtime};
 use ritornello_proto::InputMessage;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -48,17 +48,6 @@ impl InputPlugin for EvdevInput {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let socket_path = ritornello_plugin_sdk::socket_path();
-    // `--admin-socket` n'est fourni par le cœur que si `admin = true` dans
-    // plugins.toml. Absent (oubli lors d'une mise à jour de plugins.toml, ou
-    // usage volontaire sans page d'admin), on continue en mode dégradé :
-    // la moitié Input tourne seule, sans page web.
-    let admin_socket = ritornello_plugin_sdk::admin_socket_path();
-    if admin_socket.is_none() {
-        tracing::warn!(
-            "--admin-socket absent: the admin page will not be served, only the Input half runs"
-        );
-    }
     let bindings_path =
         PathBuf::from(env_or("RITORNELLO_INPUT_BINDINGS", "/etc/ritornello/input-bindings.toml"));
     let presets_root =
@@ -80,47 +69,12 @@ async fn main() -> Result<()> {
     let ouverts = hub.open_new_devices(&input_root);
     tracing::info!("{ouverts} input device(s) opened");
 
-    // Les deux moitiés sont indépendantes : une panne de la socket admin ne
-    // doit pas couper la télécommande, et réciproquement. Chaque moitié tourne
-    // dans sa propre tâche tokio::spawn : une panique y est capturée dans le
-    // JoinHandle (JoinError) au lieu de dérouler la pile de l'autre moitié.
-    // Jamais de `try_join!` ici : les deux tâches (quand les deux existent)
-    // restent suivies indépendamment.
-    let input_handle = tokio::spawn(async move { run_input_plugin(EvdevInput { rx }, &socket_path).await });
-
-    match admin_socket {
-        Some(admin_socket) => {
-            let admin = GenericInputAdmin { bindings_path, presets_root, input_root, hub, catalog };
-            let admin_handle = tokio::spawn(async move { run_admin_plugin(admin, &admin_socket).await });
-            let (input_res, admin_res) = tokio::join!(input_handle, admin_handle);
-            log_half("input half", input_res);
-            log_half("admin half", admin_res);
-        }
-        None => {
-            // Le hub doit rester vivant : il tient l'extrémité d'émission du
-            // canal des commandes. Le lâcher — c'est ce que faisait l'ancien
-            // `admin_socket.map(...)`, dont la closure capturait `hub` même
-            // sans jamais être appelée — fermait le canal dès qu'aucun
-            // périphérique n'était ouvert (WSL, droits manquants sur
-            // /dev/input), et la moitié Input sortait aussitôt : exit 0, mode
-            // dégradé mort-né, avec pour seule trace « connexion au plugin
-            // input fermee » côté cœur.
-            let _hub = hub;
-            log_half("input half", input_handle.await);
-        }
-    }
-
-    Ok(())
-}
-
-/// Logue le résultat d'une des deux moitiés (succès / erreur applicative /
-/// panique) sans jamais faire remonter l'échec d'une moitié sur l'autre.
-fn log_half(label: &str, res: std::result::Result<Result<()>, tokio::task::JoinError>) {
-    match res {
-        Ok(Ok(())) => tracing::warn!("generic-input plugin ({label}) ended normally"),
-        Ok(Err(e)) => tracing::warn!("generic-input plugin ({label}) error: {e}"),
-        Err(join_err) => tracing::error!("generic-input plugin ({label}) panicked: {join_err}"),
-    }
+    // Les deux moitiés restent indépendantes : une panne de la page ne doit
+    // pas couper la télécommande. C'est `Runtime::run` qui les tient
+    // désormais, chacune dans sa tâche — la page n'est plus conditionnelle,
+    // puisque le greffon annonce lui-même qu'il en a une.
+    let admin = GenericInputAdmin { bindings_path, presets_root, input_root, hub, catalog };
+    Runtime::from_args()?.input(EvdevInput { rx })?.admin(admin)?.run().await
 }
 
 #[cfg(test)]

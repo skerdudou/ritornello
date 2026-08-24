@@ -3,6 +3,9 @@ use ritornello_proto::{Overlay, PlayerState};
 use std::io::Write;
 use std::path::Path;
 
+/// Ce qui s'écrit en place du nom de source quand le cœur n'en a aucune.
+const AUCUNE_SOURCE: &str = "—";
+
 /// Trois lignes pour un écran texte d'environ vingt colonnes, composées depuis
 /// l'état structuré.
 ///
@@ -34,7 +37,22 @@ pub fn compose(etat: &PlayerState) -> [String; 3] {
     // Un total à zéro (« rien à numéroter » : tiroir vide) ne s'écrit pas :
     // « 1/0 » serait absurde. Le cas est atteignable, `preset_count` valant
     // `Some(0)` de façon significative dans ce protocole.
-    let nom = etat.source.to_uppercase();
+    // `source` vide **est** l'absence de source : depuis l'enregistrement à
+    // chaud, le cœur démarre même si aucun greffon `source` n'a répondu, en
+    // attendant qu'un retardataire s'annonce. Sans ce repli, les trois lignes de
+    // l'écran étaient vides — indistinguable d'un afficheur mort, alors que
+    // justement tout fonctionne.
+    //
+    // Un tiret, et non un mot : cet afficheur ne traduit rien. Tout ce qu'il
+    // écrit lui arrive déjà traduit du cœur (le statut, le mot de veille), il n'a
+    // ni catalogue ni langue courante — un `NO SOURCE` codé en dur ici mentirait
+    // sur un appareil en français. Le tiret cadratin est déjà de ses caractères
+    // (voir `ligne_titre`).
+    let nom = if etat.source.is_empty() {
+        AUCUNE_SOURCE.to_string()
+    } else {
+        etat.source.to_uppercase()
+    };
     let line1 = match (etat.preset, etat.preset_count) {
         (Some(n), Some(total)) if total > 0 => format!("{nom}  {n}/{total}"),
         (Some(n), _) => format!("{nom}  {n}"),
@@ -179,6 +197,15 @@ mod tests {
         assert_eq!(compose(&e)[0], "RADIO  3");
         e.preset_count = Some(0);
         assert_eq!(compose(&e)[0], "RADIO  3");
+    }
+
+    #[test]
+    fn un_coeur_sans_aucune_source_dit_labsence_au_lieu_de_ne_rien_ecrire() {
+        // Le cœur démarre désormais sans source, en attendant qu'un greffon
+        // s'annonce. `source` vide, et rien d'autre à écrire : l'écran entier
+        // était vide, indistinguable d'un afficheur mort ou d'un tty perdu.
+        let e = PlayerState::default();
+        assert_eq!(compose(&e), ["—".to_string(), String::new(), String::new()]);
     }
 
     #[test]

@@ -9,7 +9,7 @@
 mod cd;
 
 use anyhow::Result;
-use ritornello_plugin_sdk::{run_source_plugin, Notification, SourceOutcome, SourcePlugin};
+use ritornello_plugin_sdk::{Notification, Runtime, SourceOutcome, SourcePlugin};
 use ritornello_proto::SourceAction;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
@@ -334,7 +334,6 @@ impl CdSource {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let socket_path = ritornello_plugin_sdk::socket_path();
     let cd_dev = env_or("RITORNELLO_CD_DEV", "/dev/sr0");
 
     let (presence_tx, presence_rx) = mpsc::channel(8);
@@ -359,7 +358,7 @@ async fn main() -> Result<()> {
         catalog: Catalog::load("cd", "en", &locales_root, CD_EN),
         locales_root,
     };
-    run_source_plugin(source, &socket_path).await
+    Runtime::from_args()?.source(source)?.run().await
 }
 
 #[cfg(test)]

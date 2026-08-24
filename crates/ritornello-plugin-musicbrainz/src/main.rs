@@ -12,7 +12,7 @@ mod musicbrainz;
 
 use anyhow::Result;
 use musicbrainz::DiscInfo;
-use ritornello_plugin_sdk::{run_metadata_plugin, MetadataPlugin};
+use ritornello_plugin_sdk::{MetadataPlugin, Runtime};
 use ritornello_proto::{Enrichment, NowPlaying};
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -201,8 +201,7 @@ impl MetadataPlugin for MusicBrainzPlugin {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
-    let socket_path = ritornello_plugin_sdk::socket_path();
-    run_metadata_plugin(MusicBrainzPlugin::new(), &socket_path).await
+    Runtime::from_args()?.metadata(MusicBrainzPlugin::new())?.run().await
 }
 
 #[cfg(test)]

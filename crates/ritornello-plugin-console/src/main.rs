@@ -3,7 +3,7 @@ mod display;
 use anyhow::Result;
 use async_trait::async_trait;
 use display::ConsoleDisplay;
-use ritornello_plugin_sdk::{run_display_plugin, DisplayPlugin};
+use ritornello_plugin_sdk::{DisplayPlugin, Runtime};
 use ritornello_proto::PlayerState;
 use std::path::PathBuf;
 
@@ -26,9 +26,7 @@ impl DisplayPlugin for ConsolePlugin {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let socket_path = ritornello_plugin_sdk::socket_path();
     let tty = PathBuf::from(env_or("RITORNELLO_CONSOLE_TTY", "/dev/tty1"));
-
     let display = ConsoleDisplay::open(&tty)?;
-    run_display_plugin(ConsolePlugin { display }, &socket_path).await
+    Runtime::from_args()?.display(ConsolePlugin { display })?.run().await
 }

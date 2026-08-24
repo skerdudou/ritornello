@@ -19,7 +19,7 @@ mod table;
 
 use anyhow::Result;
 use flux::Meta;
-use ritornello_plugin_sdk::{run_metadata_plugin, MetadataPlugin};
+use ritornello_plugin_sdk::{MetadataPlugin, Runtime};
 use ritornello_proto::{Enrichment, NowPlaying};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -151,7 +151,6 @@ impl MetadataPlugin for OuiFmMetas {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
-    let socket_path = ritornello_plugin_sdk::socket_path();
     let table_path =
         PathBuf::from(env_or("RITORNELLO_OUIFM_METAS", "/etc/ritornello/ouifm-metas.toml"));
     let table = Table::load(&table_path);
@@ -160,7 +159,7 @@ async fn main() -> Result<()> {
         table.webradios.len(),
         table_path.display()
     );
-    run_metadata_plugin(OuiFmMetas::new(table), &socket_path).await
+    Runtime::from_args()?.metadata(OuiFmMetas::new(table))?.run().await
 }
 
 #[cfg(test)]

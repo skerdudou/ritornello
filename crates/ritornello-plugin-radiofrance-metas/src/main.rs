@@ -20,7 +20,7 @@ mod table;
 
 use anyhow::Result;
 use live::Meta;
-use ritornello_plugin_sdk::{run_metadata_plugin, MetadataPlugin};
+use ritornello_plugin_sdk::{MetadataPlugin, Runtime};
 use ritornello_proto::{Enrichment, NowPlaying};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -165,14 +165,13 @@ impl MetadataPlugin for RadioFranceMetas {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
-    let socket_path = ritornello_plugin_sdk::socket_path();
     let table_path = PathBuf::from(env_or(
         "RITORNELLO_RADIOFRANCE_METAS",
         "/etc/ritornello/radiofrance-metas.toml",
     ));
     let table = Table::load(&table_path);
     tracing::info!("{} station(s) known (bundled table + {})", table.stations.len(), table_path.display());
-    run_metadata_plugin(RadioFranceMetas::new(table), &socket_path).await
+    Runtime::from_args()?.metadata(RadioFranceMetas::new(table))?.run().await
 }
 
 #[cfg(test)]

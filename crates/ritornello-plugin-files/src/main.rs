@@ -18,9 +18,7 @@ use ritornello_plugin_files::m3u::Entry;
 use ritornello_plugin_files::playlist::Playlist;
 use ritornello_plugin_files::roots::Roots;
 use ritornello_plugin_files::FILES_EN;
-use ritornello_plugin_sdk::{
-    run_admin_plugin, run_source_plugin, Notification, SourceOutcome, SourcePlugin,
-};
+use ritornello_plugin_sdk::{Notification, Runtime, SourceOutcome, SourcePlugin};
 use ritornello_proto::SourceAction;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -51,10 +49,12 @@ struct FilesSource {
     /// Compte de présélections annoncé par la moitié Admin après chaque
     /// modification de la liste.
     ///
-    /// `None` en mode dégradé (pas de moitié Admin, faute d'`--admin-socket`) :
+    /// `main()` construit toujours ce champ à `Some` : la page d'admin est
+    /// enregistrée sans condition auprès de `Runtime`. `None` n'apparaît que
+    /// dans les tests, qui construisent `FilesSource` directement sans passer
+    /// par `Runtime` et donc sans moitié Admin pour émettre sur ce canal ;
     /// `poll_notification` reste alors en attente pour toujours plutôt que de
-    /// rendre `None`, qui est **terminal** pour le SDK et journaliserait un
-    /// avertissement trompeur pour un déploiement pourtant légitime.
+    /// rendre `None`, qui est **terminal** pour le SDK.
     preset_count_rx: Option<tokio::sync::watch::Receiver<u8>>,
 }
 
@@ -316,8 +316,9 @@ impl SourcePlugin for FilesSource {
 
     async fn poll_notification(&mut self) -> Option<Notification> {
         let Some(rx) = &mut self.preset_count_rx else {
-            // Mode dégradé (pas de moitié Admin) : voir le commentaire sur le
-            // champ. Jamais `None` ici, qui serait terminal pour le SDK.
+            // N'arrive qu'en test (voir le commentaire sur le champ) : `main()`
+            // construit toujours ce récepteur. Jamais `None` ici, qui serait
+            // terminal pour le SDK.
             return std::future::pending().await;
         };
         match rx.changed().await {
@@ -355,17 +356,6 @@ impl SourcePlugin for FilesSource {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
-
-    let socket_path = ritornello_plugin_sdk::socket_path();
-    // `--admin-socket` n'est fourni par le cœur que si `admin = true` dans
-    // plugins.toml. Absent, on continue en mode dégradé : la moitié Source
-    // tourne seule, sans page de gestion.
-    let admin_socket = ritornello_plugin_sdk::admin_socket_path();
-    if admin_socket.is_none() {
-        tracing::warn!(
-            "no --admin-socket: the management page will not be served, only the Source half runs (add 'admin = true' to plugins.toml)"
-        );
-    }
 
     let state_path =
         PathBuf::from(env_or("RITORNELLO_FILES_STATE", "/var/lib/ritornello/plugin-files.json"));
@@ -434,7 +424,7 @@ async fn main() -> Result<()> {
         mpv_playlist_path,
         catalog: catalog.clone(),
         locales_root,
-        preset_count_rx: admin_socket.as_ref().map(|_| preset_count_rx),
+        preset_count_rx: Some(preset_count_rx),
     };
 
     // Sonde au démarrage plutôt qu'à l'usage : la page doit pouvoir griser
@@ -454,64 +444,34 @@ async fn main() -> Result<()> {
     // liaison de la socket, ce qui est précisément le défaut qu'il corrige.
     let sante = Arc::new(ritornello_plugin_files::sante::Sante::new());
 
-    let admin = admin_socket.map(|socket| {
-        (
-            admin::FilesAdmin {
-                explore: ritornello_plugin_files::explore::Explorateur::new(
-                    runtime_dir.clone(),
-                    catalog.clone(),
-                    smb_ok.clone(),
-                    sante.clone(),
-                ),
-                sante,
-                mount_error: Arc::new(Mutex::new(None)),
-                smb_ok,
-                liste_changee,
-                joue,
-                durees: Arc::new(Mutex::new(admin::DureesProgress::default())),
-                durees_task: None,
-                roots_path,
-                creds_dir,
-                internal_playlists: playlists_dir,
-                state_path,
-                roots,
-                playlist,
-                catalog,
-                scan: Arc::new(Mutex::new(admin::ScanProgress::default())),
-                scan_task: None,
-                unresolved: Arc::new(Mutex::new(Vec::new())),
-                browse: Arc::new(Mutex::new(serde_json::json!({}))),
-                preset_count_tx,
-            },
-            socket,
-        )
-    });
-
-    // Les deux moitiés sont indépendantes : une panne sur la socket admin ne
-    // doit pas tuer la lecture audio, et réciproquement. Chacune dans sa propre
-    // tâche, pour qu'une panique y soit capturée dans le JoinHandle au lieu de
-    // dérouler la pile de l'autre.
-    let source_handle = tokio::spawn(async move { run_source_plugin(source, &socket_path).await });
-    match admin {
-        Some((admin, socket)) => {
-            let admin_handle = tokio::spawn(async move { run_admin_plugin(admin, &socket).await });
-            let (source_res, admin_res) = tokio::join!(source_handle, admin_handle);
-            log_half("source half", source_res);
-            log_half("admin half", admin_res);
-        }
-        None => log_half("source half", source_handle.await),
-    }
-    Ok(())
-}
-
-/// Journalise le résultat d'une des deux moitiés (succès, erreur applicative,
-/// panique) sans jamais faire remonter l'échec de l'une sur l'autre.
-fn log_half(label: &str, res: std::result::Result<Result<()>, tokio::task::JoinError>) {
-    match res {
-        Ok(Ok(())) => tracing::warn!("files plugin ({label}) ended normally"),
-        Ok(Err(e)) => tracing::warn!("files plugin ({label}) error: {e}"),
-        Err(join_err) => tracing::error!("files plugin ({label}) panicked: {join_err}"),
-    }
+    let admin = admin::FilesAdmin {
+        explore: ritornello_plugin_files::explore::Explorateur::new(
+            runtime_dir.clone(),
+            catalog.clone(),
+            smb_ok.clone(),
+            sante.clone(),
+        ),
+        sante,
+        mount_error: Arc::new(Mutex::new(None)),
+        smb_ok,
+        liste_changee,
+        joue,
+        durees: Arc::new(Mutex::new(admin::DureesProgress::default())),
+        durees_task: None,
+        roots_path,
+        creds_dir,
+        internal_playlists: playlists_dir,
+        state_path,
+        roots,
+        playlist,
+        catalog,
+        scan: Arc::new(Mutex::new(admin::ScanProgress::default())),
+        scan_task: None,
+        unresolved: Arc::new(Mutex::new(Vec::new())),
+        browse: Arc::new(Mutex::new(serde_json::json!({}))),
+        preset_count_tx,
+    };
+    Runtime::from_args()?.source(source)?.admin(admin)?.run().await
 }
 
 #[cfg(test)]
