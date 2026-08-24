@@ -2,17 +2,16 @@
 //! les réponses et les refus. Aucune E/S ici — c'est ce qui rend tout le reste
 //! testable sans socket.
 //!
-//! **Sans appelant avant la Task 6** (`commandes.rs`/`session.rs`), donc les
-//! éléments publics ci-dessous ne sont exercés que par les tests de ce
-//! fichier. `#[allow(dead_code)]` le dit explicitement plutôt que de laisser
-//! `-D warnings` casser la compilation d'un module par ailleurs complet et
-//! testé : la Task 6 câble l'appelant réel et retire ces attributs.
+//! `ack` et `ligne` sont appelés par `commandes.rs` depuis la Task 6, qui a
+//! retiré du même geste les `#[allow(dead_code)]` que la Task 4 avait posés
+//! faute d'appelant. Deux subsistent, et le compilateur a tranché lequel :
+//! `decouper` attend la session (Task 8), qui lit les lignes, et `Ack::NoExist`
+//! attend `load` (Task 7). Chacun le dit à son emplacement.
 
 use std::fmt::Display;
 
 /// Les seuls codes d'erreur que ce serveur emploie. Les valeurs sont celles de
 /// `ack.h` de MPD et ne peuvent pas changer : les clients les lisent.
-#[allow(dead_code)] // Task 6 cable l'appelant qui choisit entre ces variantes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ack {
     /// Argument absent, non numérique, ou hors bornes.
@@ -21,18 +20,22 @@ pub enum Ack {
     /// les deux, et c'est tant mieux : `commands` dit déjà ce qui existe.
     Unknown = 5,
     /// Liste enregistrée nommée qui n'existe pas.
+    ///
+    /// Seule variante encore sans constructeur : `commandes.rs` (Task 6) ne
+    /// répond qu'`Arg` et `Unknown`, et le seul refus qui vaut « ce nom n'existe
+    /// pas » est celui de `load`. **Task 7** retire cet attribut en rendant
+    /// `Refuser(NoExist)` pour `load` faute de catalogue (voir Ruling 3).
+    #[allow(dead_code)]
     NoExist = 50,
 }
 
 /// `ACK [<code>@<indice>] {<commande>} <message>`. `indice` est le rang de la
 /// commande dans une liste de commandes, 0 hors liste.
-#[allow(dead_code)] // Task 6 en fait l'appelant reel, voir le commentaire de module.
 pub fn ack(code: Ack, indice: usize, commande: &str, message: &str) -> String {
     format!("ACK [{}@{indice}] {{{commande}}} {message}", code as u16)
 }
 
 /// Une ligne `clé: valeur` de réponse.
-#[allow(dead_code)] // Task 6 en fait l'appelant reel, voir le commentaire de module.
 pub fn ligne(cle: &str, valeur: impl Display) -> String {
     format!("{cle}: {valeur}")
 }
@@ -44,7 +47,12 @@ pub fn ligne(cle: &str, valeur: impl Display) -> String {
 /// Un guillemet non fermé est `Ack::Arg` et non une tolérance : accepter la
 /// ligne ferait exécuter une commande dont l'argument est tronqué, ce qui est
 /// pire qu'un refus lisible.
-#[allow(dead_code)] // Task 6 en fait l'appelant reel, voir le commentaire de module.
+///
+/// Toujours sans appelant en production, et la Task 6 ne l'a pas changé : son
+/// appelant est celui qui **lit des lignes**, donc la session (Task 8).
+/// `commandes.rs` reçoit une commande déjà découpée — c'est ce qui lui permet
+/// de n'avoir aucune E/S. **Task 8 retire cet attribut.**
+#[allow(dead_code)]
 pub fn decouper(ligne: &str) -> Result<Vec<String>, Ack> {
     let mut args = Vec::new();
     let mut chars = ligne.chars().peekable();
@@ -141,6 +149,31 @@ mod tests {
         // Un client MPD qui envoie un chemin Windows non guillemete (rare,
         // mais MALP le permet en pratique) doit le retrouver intact.
         assert_eq!(decouper(r"load C:\musique").unwrap(), vec!["load", r"C:\musique"]);
+    }
+
+    #[test]
+    fn une_contre_oblique_terminale_dans_une_chaine_est_un_argument_invalide() {
+        // Le cas limite que la relecture de la Task 4 a signalé : `"abc\` finit
+        // sur une contre-oblique qui appelle un caractere qui n'existe pas. Le
+        // tolerer rendrait `abc`, donc un argument **tronque** presente comme
+        // valide — exactement ce que le refus du guillemet non ferme evite.
+        assert_eq!(decouper(r#"load "abc\"#), Err(Ack::Arg));
+        // Et la variante ou l'echappement mange le guillemet fermant : la
+        // chaine n'est alors plus fermee du tout.
+        assert_eq!(decouper(r#"load "abc\""#), Err(Ack::Arg));
+    }
+
+    #[test]
+    fn un_nom_accentue_survit_a_laller_retour() {
+        // Les noms de stations francaises sont accentues : `Chérie FM` doit
+        // ressortir caractere pour caractere. Le decoupage travaille sur des
+        // `char` et non sur des octets, donc un `é` ne se coupe pas en deux —
+        // mais rien ne le disait, et c'est le genre de propriete qui se casse
+        // le jour ou quelqu'un passe aux octets pour aller plus vite.
+        let ligne = r#"load "Chérie FM""#;
+        assert_eq!(decouper(ligne).unwrap(), vec!["load", "Chérie FM"]);
+        // Un nom entierement non ASCII, guillemets et espaces compris.
+        assert_eq!(decouper(r#"load "Radio Nova — Résonances""#).unwrap()[1], "Radio Nova — Résonances");
     }
 
     #[test]
