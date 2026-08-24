@@ -248,6 +248,21 @@ impl EtatPartage {
     /// effet de bord est que la trame *confirmante* ne rebouge rien — d'où
     /// l'incrément fait ici même.
     ///
+    /// **L'asymétrie avec `PlayPause` est voulue**, et il faut l'écrire parce
+    /// qu'elle se lit comme un oubli : la bascule ne touche pas
+    /// `etat.playback`, donc la trame confirmante rebouge `Player` une seconde
+    /// fois — un `changed: player` redondant. C'est le choix conservateur.
+    /// `SetVolume` porte une valeur absolue que le cœur honore presque
+    /// toujours au bit près : sans l'incrément fait ici, la trame confirmante
+    /// serait identique et *personne* ne serait réveillé — il n'y avait donc
+    /// pas le choix. `PlayPause` ne porte aucune valeur : c'est le greffon qui
+    /// calcule la bascule, et la source active peut très bien finir ailleurs
+    /// (un direct qu'on ne met pas en pause). Laisser `etat.playback` intact
+    /// garde la trame comme seule autorité sur ce champ, et le prix est un
+    /// réveil de trop. Ce prix est le bon sens de la dissymétrie : un réveil
+    /// superflu coûte au client une interrogation `status` redondante, un
+    /// réveil manquant lui coûte la justesse de son écran.
+    ///
     /// Sans appelant en production avant la Task 8, qui traduit les commandes.
     #[allow(dead_code)]
     pub async fn acter_optimiste(&self, commandes: &[Command]) {
@@ -456,19 +471,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn un_disque_retire_change_aussi_la_file_dattente() {
-        // Le sens inverse, et il n'est pas symetrique par accident : c'est
-        // `Some(12)` vers `None` (plus de disque, donc plus rien de declare),
-        // que le passage `Option` de `preset_count` rend distinct de
-        // `Some(0)`.
-        let e = EtatPartage::default();
-        e.appliquer_etat(PlayerState { source: "cd".into(), preset_count: Some(12), ..Default::default() })
-            .await;
-        let avant = e.versions().await;
+    async fn chaque_transition_de_preset_count_bouge_la_file() {
+        // Les trois transitions que le type `Option<u8>` rend distinctes, a
+        // source constante. Celle qui porte tout le poids de ce test est
+        // **`None` -> `Some(0)`** : c'est la seule que perdrait une
+        // comparaison ecrite sur `unwrap_or(0)`, et les deux valeurs ne
+        // decrivent pas la meme file. `None` veut dire « la source n'a rien
+        // declare » — le consommateur retombe sur la grille historique 1-9,
+        // donc neuf entrees ; `Some(0)` veut dire « rien a numeroter » — un
+        // lecteur CD sans disque, donc zero entree. Les confondre ferait
+        // rater l'insertion d'un disque dans une source qui ne declarait rien
+        // auparavant.
+        //
+        // Les deux autres lignes couvrent les deux sens du mouvement, mais il
+        // faut savoir ce qu'elles valent comme preuve : elles passeraient
+        // aussi sous `unwrap_or(0)` (0 != 12, puis 12 != 0). Seule la premiere
+        // separe les deux implementations.
+        let transitions: [(&str, Option<u8>, Option<u8>); 3] = [
+            ("rien declare -> zero piste", None, Some(0)),
+            ("zero piste -> douze pistes", Some(0), Some(12)),
+            ("douze pistes -> rien declare", Some(12), None),
+        ];
+        for (nom, depart, arrivee) in transitions {
+            let e = EtatPartage::default();
+            e.appliquer_etat(PlayerState { source: "cd".into(), preset_count: depart, ..Default::default() })
+                .await;
+            let avant = e.versions().await;
+            let version_file = e.lire().await.version_file;
 
-        e.appliquer_etat(PlayerState { source: "cd".into(), preset_count: None, ..Default::default() }).await;
+            e.appliquer_etat(PlayerState { source: "cd".into(), preset_count: arrivee, ..Default::default() })
+                .await;
 
-        assert_ne!(avant[Sujet::Playlist as usize], e.versions().await[Sujet::Playlist as usize]);
+            let apres = e.versions().await;
+            assert_ne!(
+                avant[Sujet::Playlist as usize],
+                apres[Sujet::Playlist as usize],
+                "{nom} : la file doit bouger"
+            );
+            assert!(
+                e.lire().await.version_file > version_file,
+                "{nom} : version_file doit avancer avec la file"
+            );
+            assert_eq!(
+                avant[Sujet::Player as usize],
+                apres[Sujet::Player as usize],
+                "{nom} : ce qui joue n'a pas change"
+            );
+        }
     }
 
     #[tokio::test]
