@@ -210,10 +210,19 @@ mod tests {
         // qui est vide précisément quand le plugin est injoignable, le cas même
         // qui produit `plugin_unavailable`.
         let dir = tempfile::tempdir().unwrap();
-        // Catalogue d'un plugin dont le `own` ne définit rien : les trois clés
+        // Catalogue d'un plugin dont le `own` ne définit rien : les clés
         // doivent quand même se résoudre, et jamais renvoyer la clé elle-même.
+        //
+        // `plugin_unavailable_cause` a rejoint la liste : c'est la variante qui
+        // nomme la cause du refus, et elle s'affiche exactement dans le même cas
+        // — un plugin injoignable, donc un catalogue de plugin vide.
         let cat = Catalog::load("radio", "en", dir.path(), "");
-        for cle in ["loading", "plugin_unavailable", "plugin_contract_mismatch"] {
+        for cle in [
+            "loading",
+            "plugin_unavailable",
+            "plugin_unavailable_cause",
+            "plugin_contract_mismatch",
+        ] {
             assert_ne!(cat.get(cle), cle, "cle {cle} absente du vocabulaire commun");
             // `entries()` est ce qui part vers le navigateur : la clé doit y
             // être, sinon le `t()` de la SPA retombe sur la clé brute.
@@ -228,4 +237,5 @@ mod tests {
         let cat = Catalog::load("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
         assert_eq!(cat.entries().get("standby").copied(), Some("VEILLE"));
     }
+
 }
