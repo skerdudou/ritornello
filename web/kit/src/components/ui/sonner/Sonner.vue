@@ -3,6 +3,12 @@ import type { ToasterProps } from "vue-sonner"
 import { CheckCircledIcon, InfoCircledIcon, ReloadIcon, CrossCircledIcon, ExclamationTriangleIcon, Cross2Icon } from '@radix-icons/vue'
 import { Toaster as Sonner } from "vue-sonner"
 import { cn } from "@/lib/utils"
+// La feuille de style de vue-sonner n'est pas importée ici mais dans
+// `src/theme.css` : ce composant part dans `ui-kit.js`, que le shell
+// **externalise** (voir `rollupOptions.external` de `web/app/vite.config.ts`),
+// si bien qu'un import de CSS place ici n'atteindrait jamais la feuille servie.
+// Les variables posées ci-dessous n'habillent qu'un positionnement que cette
+// feuille est seule à fournir.
 
 const props = defineProps<ToasterProps>()
 </script>

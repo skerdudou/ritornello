@@ -23,6 +23,19 @@ test('navigation entre l’accueil, la config et les pages de plugin', async ({ 
   // plugins admin par leur nom (voir App.vue), donc « radio » y apparait en
   // plus de la cellule du tableau de statut — d'ou ce ciblage par role.
   await expect(page.getByRole('cell', { name: 'radio' })).toBeVisible()
+
+  // Une sauvegarde annonce son issue par une notification. Signale a l'usage :
+  // la feuille de style de vue-sonner n'etait importee nulle part, si bien que
+  // le message se rendait **dans le flux du document** -- un texte nu en bas de
+  // page, qu'il fallait faire defiler pour voir. Rien d'autre que ce parcours ne
+  // peut l'attraper : jsdom ne calcule aucun style, et l'assertion unitaire
+  // equivalente passerait a tort.
+  await page.locator('[data-seek-change]').click()
+  const notif = page.locator('[data-sonner-toast]').first()
+  await expect(notif).toBeVisible()
+  // `fixed` : c'est la preuve que la feuille est chargee. Sans elle, le
+  // conteneur reste en `static` et le message tombe au fil du document.
+  await expect(page.locator('[data-sonner-toaster]')).toHaveCSS('position', 'fixed')
   // Page de plugin : le module ESM est charge dynamiquement et resolu par
   // l'import map — c'est ce qu'aucun test unitaire ne peut verifier.
   await page.goto('/plugins/radio/')
