@@ -293,9 +293,11 @@ starts it again two seconds later. Run **outside** systemd (development),
 the same action merely stops the process — there is no supervisor to bring
 it back, and because the restart works by exiting the process, it leaves
 mpv and the plugin processes behind: only systemd's cgroup sweeps them when
-it manages the unit. Left running, they keep holding their sockets in
-`/run/ritornello` and the ALSA device, which makes the next manual start
-fail confusingly. And systemd's start rate limit applies: five restarts
+it manages the unit. Their sockets are harmless — the core wipes and
+recreates `{runtime_dir}/sockets` on every start (`prepare_sockets_dir` in
+`plugins.rs`) — but left running, the orphaned processes keep holding the
+ALSA device, the input devices, and the CD drive, which makes the next
+manual start fail confusingly. And systemd's start rate limit applies: five restarts
 within ten seconds leave the unit failed, cleared with
 `sudo systemctl reset-failed ritornello`.
 

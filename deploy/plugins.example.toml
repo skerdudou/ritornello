@@ -1,11 +1,9 @@
 [[plugin]]
 name = "radio"
-kind = "source"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-radio"
 
 [[plugin]]
 name = "cd"
-kind = "source"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-cd"
 
 # Audio files, read from a local folder or from an authenticated SMB share.
@@ -21,7 +19,6 @@ exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-cd"
 # systemctl's refusal verbatim.
 [[plugin]]
 name = "files"
-kind = "source"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-files"
 
 # `metadata` plugins: they enrich what the active Source is playing (artist,
@@ -29,10 +26,16 @@ exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-files"
 # what the stream announces itself (ICY header), which is empty or unusable on
 # most French stations.
 #
-# DECLARATION ORDER MATTERS HERE, and only here: if two plugins answer for the
-# same track, the first one declared wins, and a plugin declared lower down
-# never overwrites it. This is what makes the display reproducible from one
-# boot to the next, regardless of network latency.
+# DECLARATION ORDER STILL MATTERS, for the plugins that announce the
+# `metadata` kind: if two of them answer for the same track, the one declared
+# first in this file wins, and a plugin declared lower down never overwrites
+# it. This is what makes the display reproducible from one boot to the next,
+# regardless of network latency.
+#
+# The kind itself is no longer declared here: each binary announces its own
+# kinds — and whether it serves an admin page — on the core's register socket
+# when it starts. This file says what to launch and under which name; the
+# binary says what it can do.
 #
 # `ouifm-metas` needs no configuration: the table of the 21 OUI FM streams is
 # embedded in its binary. The /etc/ritornello/ouifm-metas.toml file is
@@ -40,7 +43,6 @@ exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-files"
 # (see ouifm-metas.example.toml).
 [[plugin]]
 name = "ouifm-metas"
-kind = "metadata"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-ouifm-metas"
 
 # `radiofrance-metas` likewise needs no configuration: the table of the 74
@@ -49,20 +51,16 @@ exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-ouifm-metas"
 # The two tables never overlap, so their relative order does not matter here.
 [[plugin]]
 name = "radiofrance-metas"
-kind = "metadata"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-radiofrance-metas"
 
 [[plugin]]
 name = "musicbrainz"
-kind = "metadata"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-musicbrainz"
 
 [[plugin]]
 name = "generic-input"
-kind = "input"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-generic-input"
 
 [[plugin]]
 name = "console"
-kind = "display"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-console"

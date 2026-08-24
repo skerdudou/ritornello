@@ -8,13 +8,14 @@ protocol) — of four kinds: **source** (content to play: radio, CD, audio files
 plugin (e.g. a Bluetooth source, an OLED display) does not touch the core.
 
 `ritornello-core` loads `/etc/ritornello/plugins.toml` at startup (see
-`deploy/plugins.example.toml`): each entry declares a plugin (`source`,
-`display`, `input` or `metadata`) and the path to its executable — nothing
-else. An **admin page** is a property of the binary, not of the
-deployment: the core offers `--admin-socket` to every plugin, and the one
-that has a page declares it by **binding that socket** at startup. The
-page is then served by the core under the same origin, with a link shown
-on the home page (`http://<host>:8080/`) — no configuration line to know
+`deploy/plugins.example.toml`): each entry only needs a `name` and the
+path to its `exec`utable. The kind(s) a plugin serves (`source`,
+`display`, `input`, `metadata`) and whether it ships an **admin page**
+are not written in the manifest — they are properties of the *binary*,
+which announces them to the core itself when it starts (see [Declaring
+the plugins](#declaring-the-plugins)). The admin page, when there is
+one, is served by the core under the same origin, with a link shown on
+the home page (`http://<host>:8080/`) — no configuration line to know
 about, hence nothing to forget.
 
 A plugin's death is tolerated: it is marked unavailable on the config
@@ -28,11 +29,91 @@ or any Pi-specific bus.
 ## Declaring the plugins
 
 `plugins.toml` is not user data — it is the list of which installed
-binaries the core launches — and `deploy/deploy.sh` treats it as such. On
-a device with no such file, it provisions `deploy/plugins.example.toml`
-whole. On a device already in service, it **completes** the file: the
-blocks of the reference list whose `name` is not already declared are
-appended, comments included, and the script prints the names it added.
+binaries the core launches — and `deploy/deploy.sh` treats it as such.
+Each entry now needs only two keys:
+
+```toml
+[[plugin]]
+name = "radio"
+exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-radio"
+```
+
+There is no `kind` key. The kind(s) a plugin serves, and whether it has
+an admin page, are announced by the *binary* over a **register socket**
+that the core opens before launching a single plugin:
+
+1. The core binds its register socket first, then launches every
+   plugin. Each one receives three arguments: `--register <path>` (the
+   core's register socket), `--name <name>` (the name under which the
+   manifest declared it — the plugin echoes this back verbatim in its
+   announcement rather than inventing its own identity), and
+   `--socket-prefix <prefix>` (the base path for the sockets *it* is
+   responsible for binding).
+2. The plugin binds its own sockets — `{prefix}-{kind}.sock` for each
+   kind it serves (`source`, `display`, `input`, `metadata`), plus
+   `{prefix}-admin.sock` if it has an admin page — and **only then**
+   connects to the register socket and writes a single line of JSON
+   describing exactly what it just bound, e.g.:
+
+   ```json
+   {"name":"mpd","kinds":["input","display"],"admin":true}
+   ```
+
+   before closing the connection.
+
+This "bind first, announce second" order is not merely a convention:
+the SDK's `Runtime` enforces it structurally (see [Writing a `metadata`
+plugin](#writing-a-metadata-plugin)) — each kind-specific builder method
+binds its socket the instant it is called, and only `run()` writes the
+announcement, once every requested socket already exists. The
+announcement line is therefore a **readiness barrier**: once the core
+has read it, it can connect to every socket it names with a single bare
+`connect`, no retry loop needed. This replaces two guesses the core used
+to make: retrying `connect` up to a hundred times, 100 ms apart, because
+a plugin's socket might not exist yet; and probing the filesystem for up
+to 2 s to learn whether a plugin had an admin page. Both of those delays
+were paid **on every healthy startup**; a plugin that dies before
+announcing, or never announces within the core's 10 s grace period, is
+now named in the logs, and the delay is paid only on that failure.
+
+That 10 s grace period **no longer condemns anyone**. The core owns the
+register socket, so it keeps accepting on it for the whole life of the
+process: the deadline only decides when startup stops waiting, never
+what ends up wired. A plugin that announces at t+12 s — a cold boot from
+an SD card, eight Rust binaries bringing up their runtimes at once — is
+wired the moment it speaks, and so is a plugin restarted by hand weeks
+later (its status lines are then **replaced**, not added to). A
+`metadata` plugin arriving late takes its place **from the file**, not
+the last one: the arbitration list is recomputed in full from
+`plugins.toml` rather than appended to.
+
+The status page therefore reports three states rather than two: wired
+(`connected: true`), dead before announcing (`connected: false`), and
+**stalled** (`connected: false`, `stalled: true`) — the process is
+alive, said nothing by the deadline, and may still speak. Only the third
+one is worth waiting on; the first two are worth acting on.
+
+This register/announce handshake is exercised end to end by the Rust
+test suite (bind ordering, a plugin dying mid-registration, an unknown
+or duplicate announcement, `metadata` ordering — see
+`ritornello-plugin-sdk::runtime` and `ritornello-core::register`), but
+has not yet been run on the actual Pi deployment: treat it as verified
+by tests, not by hardware, until it has.
+
+`plugins.toml`'s **order** still arbitrates one thing, and it is the
+only thing it ever arbitrated for `metadata`: between two plugins that
+both announce the `metadata` kind and answer for the same track, the
+one declared **first in the file** wins, whatever order they actually
+announced themselves in at startup — network and process-start jitter
+would otherwise make the display non-reproducible from one boot to the
+next (see [Now-playing metadata](#now-playing-metadata-the-metadata-kind)).
+
+`deploy/deploy.sh` treats `plugins.toml` as installed state, not user
+data. On a device with no such file, it provisions
+`deploy/plugins.example.toml` whole. On a device already in service, it
+**completes** the file: the blocks of the reference list whose `name` is
+not already declared are appended, comments included, and the script
+prints the names it added.
 
 Nothing already present is rewritten, because the merge only ever
 appends: an `exec` edited by hand (the mce → generic-input migration
@@ -637,7 +718,7 @@ debugging: "first to arrive" would depend on network latency, so the same
 installation would display different things from one boot to the next.
 
 **Updating an existing installation.** `deploy/deploy.sh` installs the
-new binaries and appends the missing `kind = "metadata"` entries to an
+new binaries and appends the missing `metadata` plugin entries to an
 existing `/etc/ritornello/plugins.toml` (see [Declaring the
 plugins](#declaring-the-plugins)), so a device already in service keeps
 its CD track titles — which the cd plugin used to provide itself before
@@ -787,8 +868,31 @@ stay displayed indefinitely.
 
 ### Writing a `metadata` plugin
 
-Implement the SDK's `MetadataPlugin` (`now_playing` / `next_enrichment`)
-and call `run_metadata_plugin`. Two points of contract:
+Implement the SDK's `MetadataPlugin` (`now_playing` / `next_enrichment`),
+chain it onto a `Runtime` and `run()` it:
+
+```rust
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt().with_target(false).init();
+    ritornello_plugin_sdk::Runtime::from_args()?
+        .metadata(MonGreffon::new())?
+        .run()
+        .await
+}
+```
+
+`Runtime::from_args()` reads the three arguments the core launches every
+plugin with (`--register`, `--name`, `--socket-prefix` — see [Declaring
+the plugins](#declaring-the-plugins)). Each kind-specific method
+(`.metadata()`, `.source()`, `.display()`, `.input()`, `.admin()`) binds
+that kind's socket the moment it is called and returns a `Result<Self>`,
+hence the trailing `?` on every one of them: a bind failure surfaces
+immediately, not once `run()` starts serving. A single binary can chain
+**several** of these methods — nothing stops a plugin from announcing
+`metadata` alongside `input` or `display` — and the announcement `run()`
+eventually writes describes exactly, and only, the kinds that were
+actually chained in. Two points of contract for `MetadataPlugin` itself:
 
 - the **identity** of what is playing is an **opaque** JSON produced by
   the Source, which the core only compares and relays. The radio plugin
@@ -828,11 +932,31 @@ future's local variables. (The same requirement holds for the Sources'
 
 ## A plugin's UI
 
-A plugin that binds the `--admin-socket` the core offers it can ship its
-own interface, without a single line of the core changing (the SDK does
-everything: `run_admin_plugin` on
-`ritornello_plugin_sdk::admin_socket_path()`). It answers three requests
-of the admin protocol:
+A plugin gets its own admin page by chaining `.admin(page)?` onto its
+`Runtime` before `.run()`, alongside whatever kind(s) it already serves
+(the two are independent: `.admin()` only adds a flag and a socket to
+the same announcement) — for instance a plugin serving both `input` and
+`display`, plus an admin page:
+
+```rust
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt().with_target(false).init();
+    ritornello_plugin_sdk::Runtime::from_args()?
+        .input(MesEntrees::new())?
+        .display(MonAffichage::new())?
+        .admin(MaPage::new()?)?
+        .run()
+        .await
+}
+```
+
+`.admin()` binds `{prefix}-admin.sock` at the call site, exactly like
+every other kind-specific method, which is what lets the resulting
+announcement (`{"name":"...","kinds":[...],"admin":true}`) truthfully
+say whether a page exists — no single line of the core changes to
+support it. The admin half then answers three requests of the admin
+protocol:
 
 - `GetAsset("ui.js")` → an **ESM module** exporting `contract` (the
   contract version, see `web/kit/src/contract.ts`) and, as default, a Vue

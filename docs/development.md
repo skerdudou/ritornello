@@ -12,12 +12,10 @@ Pi hardware:
     cat > /tmp/rp/plugins.toml <<'PLUGINS'
     [[plugin]]
     name = "radio"
-    kind = "source"
     exec = "target/debug/ritornello-plugin-radio"
 
     [[plugin]]
     name = "console"
-    kind = "display"
     exec = "target/debug/ritornello-plugin-console"
     PLUGINS
     cat > /tmp/rp/stations.toml <<'STATIONS'
@@ -47,17 +45,17 @@ The `generic-input` plugin can be added to the `plugins.toml` in
 
     [[plugin]]
     name = "generic-input"
-    kind = "input"
     exec = "target/debug/ritornello-plugin-generic-input"
 
 with the following variables added to the environment line:
 
     RITORNELLO_INPUT_BINDINGS=/tmp/rp/input-bindings.toml RITORNELLO_INPUT_PRESETS=deploy/input-presets
 
-The `metadata` plugins are added the same way (`kind = "metadata"`,
-executables `ritornello-plugin-musicbrainz`,
-`ritornello-plugin-ouifm-metas` and
-`ritornello-plugin-radiofrance-metas`).
+The `metadata` plugins are added the same way (`plugins.toml` only ever
+needs `name` and `exec`; the binary announces its own kind — `metadata`
+here — to the core when it starts), executables
+`ritornello-plugin-musicbrainz`, `ritornello-plugin-ouifm-metas` and
+`ritornello-plugin-radiofrance-metas`.
 
 ## Language
 
