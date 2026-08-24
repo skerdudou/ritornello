@@ -151,12 +151,20 @@ impl EtatPartage {
     /// que tout ce qui bouge après cette lecture est nécessairement un
     /// changement qu'elle n'a pas encore vu.
     ///
-    /// **Sans appelant en production**, et c'est délibéré : la session lit
-    /// `Instantane::versions` de la copie que `lire` lui rend déjà, ce qui
-    /// prend le verrou une fois au lieu de deux et rend les compteurs
-    /// cohérents avec l'état qu'elle publie. Gardée pour ce que les tests de
-    /// ce module en font, et pour un appelant qui n'aurait besoin que des
-    /// compteurs.
+    /// **Sans appelant en production, et la session ne doit pas en devenir
+    /// un.** C'est le point à retenir de ce commentaire, parce qu'une méthode
+    /// publique inutilisée donne envie de la câbler : la session lit
+    /// `Instantane::versions` de la copie que `lire` lui rend déjà, dans la
+    /// **même** prise de verrou que l'état qu'elle va publier. Appeler
+    /// `versions` à côté prendrait le verrou une seconde fois et pourrait lire
+    /// les compteurs d'un autre instant que l'état — c'est-à-dire rouvrir
+    /// exactement la course que ce module a été bâti pour fermer, et de la
+    /// façon la plus sournoise : un `idle` mémoriserait des compteurs plus
+    /// récents que le `status` qu'il vient de rendre, et dormirait sur un
+    /// changement que son client n'a jamais vu.
+    ///
+    /// Gardée malgré tout : ses propres tests l'emploient, et un appelant qui
+    /// n'aurait besoin que des compteurs (sans rien publier) serait légitime.
     #[allow(dead_code)]
     pub async fn versions(&self) -> [u64; NB_SUJETS] {
         self.inner.read().await.versions

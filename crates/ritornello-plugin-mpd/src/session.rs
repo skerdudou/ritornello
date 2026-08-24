@@ -19,7 +19,7 @@ use crate::protocole::{ack, decouper, ligne, Ack};
 use anyhow::Result;
 use ritornello_proto::InputMessage;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -47,6 +47,118 @@ const VERSION_ANNONCEE: &str = "0.23.5";
 /// le même effet. 2048 est très au-delà de ce qu'un client réel envoie —
 /// M.A.L.P. groupe une dizaine de commandes.
 const MAX_COMMANDES_LISTE: usize = 2048;
+
+/// Plafond d'une **ligne** de commande, en octets.
+///
+/// Sans lui, c'est la dernière surface non bornée d'un port ouvert sur tout le
+/// réseau local : un client qui se connecte et envoie des octets **sans jamais
+/// envoyer de retour à la ligne** fait allouer le greffon jusqu'à ce que
+/// l'allocateur renonce. Sur cet appareil — un Pi 2 B, un gigaoctet partagé
+/// entre mpv, le cœur, l'IHM web et huit greffons — cela n'emporte pas
+/// seulement le greffon, cela emporte la musique. Et cela ne demande aucune
+/// malveillance : un scanner de port ou un client bogué le fait par accident,
+/// et le port est atteignable de tout le réseau local sans mot de passe.
+///
+/// 8 Kio est deux fois le tampon d'entrée de MPD lui-même (4 Kio) et un ordre
+/// de grandeur au-dessus de la plus longue ligne légitime du protocole — un nom
+/// de liste entre guillemets dans une liste de commandes, quelques centaines
+/// d'octets au pire. Très au-dessus du réel, très en dessous de ce qui coûte :
+/// même cent connexions simultanées ne réservent ainsi qu'un mégaoctet.
+const MAX_LIGNE: usize = 8 * 1024;
+
+/// Le lecteur de lignes de la session : un `BufReader`, plus le plafond.
+///
+/// Écrit à la main (`fill_buf`/`consume`) plutôt qu'avec `BufReader::lines()`,
+/// pour la seule raison qui vaille : `lines()` accumule jusqu'au `\n` **sans
+/// borne**. Voir `MAX_LIGNE`.
+struct LecteurBorne {
+    lecture: BufReader<OwnedReadHalf>,
+    /// Les octets de la ligne en cours, entre deux `\n`.
+    ///
+    /// Il vit dans la structure et non dans la pile de `ligne_suivante`, et ce
+    /// n'est pas un détail : c'est ce qui rend cette fonction **sûre à
+    /// l'annulation**, exactement comme le tampon de `tokio::io::Lines`.
+    /// `attendre_idle` la met dans un `select!` avec le réveil, donc elle est
+    /// abandonnée en cours de route chaque fois qu'un dormeur se réveille — si
+    /// le tampon était local, la moitié de ligne déjà lue partirait avec lui,
+    /// et la commande suivante serait tronquée.
+    tampon: Vec<u8>,
+}
+
+impl LecteurBorne {
+    fn new(lecture: OwnedReadHalf) -> Self {
+        Self { lecture: BufReader::new(lecture), tampon: Vec::new() }
+    }
+
+    /// La ligne suivante sans son `\n`, ou `None` à la fin du flux.
+    ///
+    /// Une ligne qui dépasse `MAX_LIGNE` est une **erreur**, donc la fin de la
+    /// session : c'est ce que fait MPD, et c'est le seul choix défendable ici.
+    /// Un `ACK` supposerait de nommer la commande fautive — impossible, la
+    /// ligne est tronquée — puis de jeter un nombre inconnu d'octets jusqu'au
+    /// prochain `\n`, c'est-à-dire de garder une connexion qui a déjà quitté le
+    /// protocole. Fermer est immédiat, défini, et journalisé par `accepter`.
+    async fn ligne_suivante(&mut self) -> Result<Option<String>> {
+        loop {
+            let dispo = self.lecture.fill_buf().await?;
+            if dispo.is_empty() {
+                // Fin de flux. Une dernière ligne sans `\n` est rendue quand
+                // même, comme le faisait `Lines` : un client qui ferme sa
+                // moitié écriture juste après une commande doit voir cette
+                // commande traitée.
+                if self.tampon.is_empty() {
+                    return Ok(None);
+                }
+                let ligne = std::mem::take(&mut self.tampon);
+                return Ok(Some(Self::finir(ligne)?));
+            }
+            match dispo.iter().position(|octet| *octet == b'\n') {
+                Some(fin) => {
+                    // Le plafond est vérifié **avant** de recopier : un
+                    // dépassement ne doit pas d'abord allouer ce qu'il refuse.
+                    // Contrôlé dans les deux bras, et pas seulement dans celui
+                    // sans `\n`, pour que la borne tienne quelle que soit la
+                    // capacité du `BufReader`.
+                    if self.tampon.len() + fin > MAX_LIGNE {
+                        anyhow::bail!("command line longer than {MAX_LIGNE} bytes");
+                    }
+                    self.tampon.extend_from_slice(&dispo[..fin]);
+                    self.lecture.consume(fin + 1);
+                    let ligne = std::mem::take(&mut self.tampon);
+                    return Ok(Some(Self::finir(ligne)?));
+                }
+                None => {
+                    let recu = dispo.len();
+                    if self.tampon.len() + recu > MAX_LIGNE {
+                        anyhow::bail!(
+                            "command line longer than {MAX_LIGNE} bytes without a newline"
+                        );
+                    }
+                    self.tampon.extend_from_slice(dispo);
+                    self.lecture.consume(recu);
+                }
+            }
+        }
+    }
+
+    /// Les octets d'une ligne en `String`.
+    ///
+    /// Un `\r` terminal est retiré : `\r\n` est ce qu'envoient les clients
+    /// écrits sur Windows, et sans cela `ping\r` serait une commande inconnue.
+    /// C'est aussi ce que faisait `Lines` — le perdre en changeant de lecteur
+    /// aurait été une régression qu'aucun test existant ne voyait.
+    ///
+    /// Un octet non UTF-8 est une erreur, donc la fin de la session : là aussi
+    /// le comportement de `Lines`, conservé tel quel. Le protocole MPD est
+    /// textuel, et une commande dont les octets ne forment pas du texte ne se
+    /// découpe pas.
+    fn finir(mut ligne: Vec<u8>) -> Result<String> {
+        if ligne.last() == Some(&b'\r') {
+            ligne.pop();
+        }
+        Ok(String::from_utf8(ligne)?)
+    }
+}
 
 /// Ce que la session doit faire après un lot de commandes.
 enum Suite {
@@ -93,7 +205,7 @@ pub async fn accepter(ecoute: TcpListener, etat: Arc<EtatPartage>, cmd_tx: mpsc:
 /// liste ne se voient pas.
 pub async fn servir(flux: TcpStream, etat: Arc<EtatPartage>, cmd_tx: mpsc::Sender<InputMessage>) -> Result<()> {
     let (lecture, mut ecriture) = flux.into_split();
-    let mut lignes = BufReader::new(lecture).lines();
+    let mut lignes = LecteurBorne::new(lecture);
 
     // La bannière part sans qu'on demande rien : c'est le protocole, et un
     // client attend cette ligne avant d'écrire quoi que ce soit.
@@ -107,7 +219,7 @@ pub async fn servir(flux: TcpStream, etat: Arc<EtatPartage>, cmd_tx: mpsc::Sende
     let mut liste: Option<Vec<Vec<String>>> = None;
     let mut avec_ok = false;
 
-    while let Some(brute) = lignes.next_line().await? {
+    while let Some(brute) = lignes.ligne_suivante().await? {
         let args = match decouper(&brute) {
             Ok(args) => args,
             Err(code) => {
@@ -206,7 +318,7 @@ pub async fn servir(flux: TcpStream, etat: Arc<EtatPartage>, cmd_tx: mpsc::Sende
 /// `lignes` n'est là que pour `idle` : c'est la seule issue qui a besoin de
 /// continuer à lire (le `noidle` qui l'annule) avant d'avoir répondu.
 async fn executer(
-    lignes: &mut Lines<BufReader<OwnedReadHalf>>,
+    lignes: &mut LecteurBorne,
     ecriture: &mut OwnedWriteHalf,
     etat: &EtatPartage,
     cmd_tx: &mpsc::Sender<InputMessage>,
@@ -314,21 +426,21 @@ async fn executer(
 /// ce qu'il y a à faire. Répondre `OK` ferait boucler le client à pleine
 /// vitesse, ce qui est exactement le contraire de ce qu'`idle` sert à éviter.
 async fn attendre_idle(
-    lignes: &mut Lines<BufReader<OwnedReadHalf>>,
+    lignes: &mut LecteurBorne,
     ecriture: &mut OwnedWriteHalf,
     etat: &EtatPartage,
     sujets: &[Sujet],
     vues: [u64; 4],
 ) -> Result<Suite> {
     // Deux issues, et il faut écouter les deux : le réveil, et la seule
-    // commande que MPD autorise pendant une attente. `Lines::next_line` est
-    // sûre à l'annulation (son tampon vit dans le `Lines`), donc la branche
-    // perdante ne perd aucun octet ; et abandonner `attendre` ne perd aucun
-    // réveil, puisque `vues` reste la référence et que les compteurs sont
-    // monotones.
+    // commande que MPD autorise pendant une attente.
+    // `LecteurBorne::ligne_suivante` est sûre à l'annulation (son tampon vit
+    // dans la structure, voir là-bas), donc la branche perdante ne perd aucun
+    // octet ; et abandonner `attendre` ne perd aucun réveil, puisque `vues`
+    // reste la référence et que les compteurs sont monotones.
     let bouges = tokio::select! {
         bouges = etat.attendre(sujets, vues) => bouges,
-        lue = lignes.next_line() => {
+        lue = lignes.ligne_suivante() => {
             let Some(brute) = lue? else {
                 // Le client est parti pendant son attente : rien à écrire.
                 return Ok(Suite::Fermer);
@@ -415,6 +527,9 @@ mod tests {
     use super::*;
     use crate::etat::Instantane;
     use ritornello_proto::{Command, PlayerState};
+    // Le lecteur borné de la session n'en a plus besoin ; le client de test,
+    // lui, lit des lignes sans plafond à défendre.
+    use tokio::io::Lines;
 
     /// Un client de test : les lignes reçues d'un côté, la plume de l'autre.
     struct Client {
@@ -786,6 +901,73 @@ mod tests {
             "{recues:?}"
         );
         c.envoyer("ping").await;
+        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn une_ligne_plus_longue_que_le_plafond_ferme_la_connexion() {
+        // La dernière surface non bornée du greffon, et elle est atteignable
+        // sans mot de passe depuis tout le réseau local : un client qui envoie
+        // des octets sans jamais envoyer de `\n`. Sans plafond, la session
+        // accumule jusqu'à ce que l'allocateur renonce — sur un Pi d'un
+        // gigaoctet partagé avec mpv, cela emporte la musique et pas seulement
+        // le greffon.
+        //
+        // Sans horloge : la borne se mesure au fait que la connexion **finit**.
+        // Sans plafond, ce `next_line` attendrait le `\n` pour toujours et le
+        // test pendrait — vérifié, et c'est le mode d'échec voulu.
+        let (s, _rx) = serveur().await;
+        let mut c = s.client_pret().await;
+        let bourrage = vec![b'a'; MAX_LIGNE + 1];
+        // L'écriture peut échouer si le serveur a déjà fermé : c'est une fin
+        // acceptable et non un échec du test, d'où le résultat ignoré.
+        let _ = c.ecriture.write_all(&bourrage).await;
+        assert!(
+            c.lignes.next_line().await.unwrap().is_none(),
+            "une ligne au-dela du plafond ferme la connexion, sans ACK"
+        );
+    }
+
+    #[tokio::test]
+    async fn une_ligne_longue_mais_sous_le_plafond_est_traitee() {
+        // Le pendant du test précédent : un plafond qui coupe une ligne
+        // légitime serait pire que pas de plafond. La plus longue ligne
+        // plausible du protocole est un nom entre guillemets, et elle doit
+        // arriver entière — ici elle mesure exactement le plafond.
+        let (s, _rx) = serveur().await;
+        let mut c = s.client_pret().await;
+        let nom = "a".repeat(MAX_LIGNE - "load \"\"".len());
+        c.envoyer(&format!("load \"{nom}\"")).await;
+        // `load` refuse tout nom faute de catalogue (Task 13), et c'est
+        // justement une réponse qui prouve que la ligne a été **découpée** :
+        // un `ACK 2` ou une fermeture diraient qu'elle a été tronquée.
+        assert_eq!(c.reponse().await, vec!["ACK [50@0] {load} no such playlist".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn une_ligne_terminee_par_crlf_est_lue_sans_le_retour_chariot() {
+        // Les clients écrits sur Windows terminent par `\r\n`. Le lecteur
+        // écrit à la main devait reprendre ce que `Lines` faisait pour nous, et
+        // rien ne le disait : sans le `\r` retiré, la commande serait `ping\r`,
+        // donc un `ACK 5` — une régression qu'aucun test existant ne voyait.
+        let (s, _rx) = serveur().await;
+        let mut c = s.client_pret().await;
+        c.ecriture.write_all(b"ping\r\n").await.unwrap();
+        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn une_derniere_ligne_sans_fin_de_ligne_est_traitee_avant_la_fermeture() {
+        // Un client qui envoie sa commande puis ferme sa moitié écriture doit
+        // la voir traitée : la fin de flux termine la ligne. C'est ce que
+        // faisait `Lines`, et le chemin « tampon non vide à l'EOF » du nouveau
+        // lecteur n'a pas d'autre témoin que ce test.
+        let (s, _rx) = serveur().await;
+        let mut c = s.client_pret().await;
+        c.ecriture.write_all(b"ping").await.unwrap();
+        // `shutdown` et non un `drop` : la moitié lecture du client doit rester
+        // ouverte pour lire la réponse.
+        c.ecriture.shutdown().await.unwrap();
         assert_eq!(c.reponse().await, vec!["OK".to_string()]);
     }
 
