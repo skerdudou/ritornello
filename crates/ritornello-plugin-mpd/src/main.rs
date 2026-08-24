@@ -110,7 +110,7 @@ mod tests {
         let mut afficheur = AfficheurMpd { etat: etat.clone() };
         let envoye = PlayerState { volume: 17, ..Default::default() };
         afficheur.show(envoye.clone()).await.unwrap();
-        assert_eq!(etat.lire().await, envoye);
+        assert_eq!(etat.lire().await.etat, envoye);
     }
 
     #[tokio::test(start_paused = true)]
