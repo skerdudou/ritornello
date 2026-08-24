@@ -3562,22 +3562,35 @@ mod tests {
         // `tens_window_ms`. C'est l'assertion qui échouerait si quelqu'un
         // recouplait les deux durées derrière un seul champ. Échéances
         // comparées à `Instant::now()`, pas de sommeil.
+        //
+        // Les durées sont **délibérément énormes** au regard de ce que fait le
+        // test. Avec `overlay_ms: 1000` et un pivot à 2000 ms, l'assertion
+        // exigeait implicitement que `handle_command` rende la main en moins
+        // d'une seconde : une hypothèse d'exécution rapide, donc un flake en
+        // puissance dès que la machine est chargée par les autres binaires de
+        // test. Le pivot à 300 s entre 60 s et 600 s prouve exactement la même
+        // propriété, en laissant quatre minutes de marge à une commande qui
+        // prend des microsecondes.
         let (mut core, _pc, _sc, _rx, _d) = setup();
-        core.set_settings(crate::state::Settings { overlay_ms: 1000, tens_window_ms: 8000, ..Default::default() });
+        core.set_settings(crate::state::Settings {
+            overlay_ms: 60_000,
+            tens_window_ms: 600_000,
+            ..Default::default()
+        });
 
         let avant = Instant::now();
         core.handle_command(Command::VolumeUp).await.unwrap();
         let echeance_volume = core.overlay_deadline().unwrap();
         assert!(
-            echeance_volume < avant + Duration::from_millis(2000),
-            "l'incrustation volume doit suivre overlay_ms (1000 ms), pas tens_window_ms"
+            echeance_volume < avant + Duration::from_millis(300_000),
+            "l'incrustation volume doit suivre overlay_ms (60 s), pas tens_window_ms"
         );
 
         core.handle_command(Command::Plus10).await.unwrap();
         let echeance_decalage = core.overlay_deadline().unwrap();
         assert!(
-            echeance_decalage > avant + Duration::from_millis(2000),
-            "l'incrustation du cumul doit suivre tens_window_ms (8000 ms), pas overlay_ms"
+            echeance_decalage > avant + Duration::from_millis(300_000),
+            "l'incrustation du cumul doit suivre tens_window_ms (600 s), pas overlay_ms"
         );
     }
 

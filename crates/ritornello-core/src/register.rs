@@ -347,7 +347,13 @@ mod tests {
             &listener,
             &["radio".to_string(), "console".to_string()],
             aucun_mort(),
-            Duration::from_secs(10),
+            // Une heure : l'echeance est hors de portee, donc le seul moyen
+            // pour cette fonction de rendre la main est d'avoir rassemble tout
+            // le monde. La marge d'horloge ci-dessous n'a plus alors qu'a
+            // distinguer « rendu aussitot » de « a attendu une heure », au lieu
+            // d'arbitrer entre 2 s et 10 s — un rapport que la charge de la
+            // machine pouvait franchir, et le seul maillon fragile de ce test.
+            Duration::from_secs(3600),
             &tx,
             &mut rx,
         )
@@ -359,7 +365,7 @@ mod tests {
         assert!(g.announcements["radio"].admin);
         assert_eq!(g.announcements["console"].kinds, vec![PluginKind::Display]);
         assert!(
-            debut.elapsed() < Duration::from_secs(2),
+            debut.elapsed() < Duration::from_secs(60),
             "la boucle doit rendre la main des que tout le monde est la, pas a l'echeance"
         );
     }
@@ -410,7 +416,10 @@ mod tests {
             &listener,
             &["radio".to_string(), "plante".to_string()],
             Box::pin(futures::stream::iter(vec!["plante".to_string()])),
-            Duration::from_secs(30),
+            // Une heure, hors de portee : rendre la main prouve que la mort
+            // observee a ecourte l'attente, sans faire dependre le test d'un
+            // rapport entre deux durees que la charge machine pouvait franchir.
+            Duration::from_secs(3600),
             &tx,
             &mut rx,
         )
@@ -420,7 +429,7 @@ mod tests {
         assert_eq!(g.morts, vec!["plante".to_string()]);
         assert!(g.figes.is_empty());
         assert!(
-            debut.elapsed() < Duration::from_secs(2),
+            debut.elapsed() < Duration::from_secs(60),
             "la mort du processus doit ecourter l'attente, pas la subir"
         );
     }
@@ -578,7 +587,11 @@ mod tests {
             &listener,
             &["radio".to_string()],
             aucun_mort(),
-            Duration::from_secs(30),
+            // Une heure, hors de portee : si la connexion muette bloquait la
+            // file, l'annonce n'arriverait jamais et la marge ci-dessous
+            // sanctionnerait franchement, au lieu de dependre d'un rapport
+            // entre 5 s et 30 s que la charge machine pouvait franchir.
+            Duration::from_secs(3600),
             &tx,
             &mut rx,
         )
@@ -590,7 +603,7 @@ mod tests {
             "l'annonce doit passer malgre la connexion muette"
         );
         assert!(
-            debut.elapsed() < Duration::from_secs(5),
+            debut.elapsed() < Duration::from_secs(60),
             "une connexion muette ne doit pas retarder le rassemblement"
         );
     }
