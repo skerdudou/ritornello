@@ -2813,10 +2813,19 @@ mod tests {
 
     #[tokio::test]
     async fn volume_maintenu_est_ignore_avant_le_delai_initial() {
+        // Échéance **pilotée**, jamais attendue. La version precedente reposait
+        // sur le fait que deux lignes consecutives s'executent en moins des
+        // 30 ms du delai initial : sous charge -- un `cargo test --workspace`
+        // qui compile encore pendant qu'il teste -- l'ordonnancement depassait
+        // cette marge et le test tombait, une fois sur quelques dizaines. Ce
+        // qu'il verifie ne depend plus de la vitesse de la machine.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         core.set_settings(reglages_rapides());
         core.resume().await.unwrap();
-        core.handle_command(Command::VolumeUp).await.unwrap(); // 60 -> 65
+        core.handle_command(Command::VolumeUp).await.unwrap(); // 60 -> 65, arme l'echeance
+        // Repoussee loin : la repetition n'a aucune raison d'avoir lieu, quelle
+        // que soit la lenteur de ce qui precede.
+        core.volume_deadline = Some(Instant::now() + Duration::from_secs(60));
         core.handle_input(InputMessage { cmd: Command::VolumeUp, held: true }).await.unwrap();
         assert_eq!(core.etat_lecteur().volume, 65, "une repetition avant le delai initial ne fait rien");
     }
@@ -2827,13 +2836,30 @@ mod tests {
         core.set_settings(reglages_rapides());
         core.resume().await.unwrap();
         core.handle_command(Command::VolumeUp).await.unwrap(); // 65
-        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+
+        // Échéance atteinte : la premiere repetition passe. `Instant::now()` est
+        // deja dans le passe quand `handle_input` le relit -- le temps ne
+        // recule pas, donc ce declenchement est certain.
+        let posee = Instant::now();
+        core.volume_deadline = Some(posee);
         core.handle_input(InputMessage { cmd: Command::VolumeUp, held: true }).await.unwrap();
         assert_eq!(core.etat_lecteur().volume, 70, "premiere repetition apres le delai initial");
-        // Immediately after: the interval has not elapsed yet.
+
+        // Elle a rearme l'echeance pour l'intervalle suivant. Compare a celle
+        // qu'on avait **posee**, et non a `Instant::now()` : la nouvelle vaut
+        // « instant de la repetition + intervalle », donc elle est posterieure a
+        // `posee` quoi qu'il arrive. La comparer au present reintroduirait la
+        // course que ce test existe pour supprimer.
+        let rearmee = core.volume_deadline.expect("l'intervalle doit etre rearme");
+        assert!(rearmee > posee, "l'echeance n'a pas ete rearmee apres la repetition");
+
+        // Une echeance dans le futur bloque la repetition suivante.
+        core.volume_deadline = Some(Instant::now() + Duration::from_secs(60));
         core.handle_input(InputMessage { cmd: Command::VolumeUp, held: true }).await.unwrap();
         assert_eq!(core.etat_lecteur().volume, 70);
-        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        // Intervalle ecoule : une repetition de plus, et une seule.
+        core.volume_deadline = Some(Instant::now());
         core.handle_input(InputMessage { cmd: Command::VolumeUp, held: true }).await.unwrap();
         assert_eq!(core.etat_lecteur().volume, 75, "puis une par intervalle");
     }
@@ -2865,7 +2891,11 @@ mod tests {
         core.resume().await.unwrap();
         core.handle_command(Command::VolumeUp).await.unwrap(); // 65, arms the deadline
         core.handle_command(Command::Power).await.unwrap();    // standby
-        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        // Aucun sommeil : la veille court-circuite `handle_input` **avant** de
+        // regarder l'echeance, donc attendre qu'elle expire ne prouvait rien.
+        // L'echeance est posee au passe pour que le test echoue si ce
+        // court-circuit disparaissait.
+        core.volume_deadline = Some(Instant::now());
         core.handle_input(InputMessage { cmd: Command::VolumeUp, held: true }).await.unwrap();
         assert_eq!(core.etat_lecteur().volume, 65);
     }
@@ -3131,7 +3161,10 @@ mod tests {
         core.handle_command(Command::VolumeUp).await.unwrap(); // 65, arms the deadline
         core.handle_command(Command::Power).await.unwrap();    // standby, clears it
         core.handle_command(Command::Power).await.unwrap();    // wake
-        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        // L'absence d'echeance est affirmee directement, au lieu d'etre deduite
+        // d'un sommeil de 40 ms : c'est elle qu'on teste, et une assertion sur
+        // l'etat ne depend d'aucune horloge.
+        assert!(core.volume_deadline.is_none(), "la veille doit avoir efface l'echeance");
         core.handle_input(InputMessage { cmd: Command::VolumeUp, held: true }).await.unwrap();
         assert_eq!(core.etat_lecteur().volume, 65, "pas de deadline restante : le held ne fait rien");
     }
