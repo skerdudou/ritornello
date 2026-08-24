@@ -25,6 +25,7 @@
 use crate::etat::{Instantane, Sujet};
 use crate::protocole::{ack, ligne, Ack};
 use ritornello_proto::{Command, Playback};
+use std::ops::Range;
 
 /// Ce que le traitement d'une commande demande à la session de faire.
 ///
@@ -39,6 +40,13 @@ pub enum Issue {
     /// `ACK` déjà mis en forme. Dans une liste, elle interrompt la suite.
     Refuser(String),
     /// `idle` : attendre l'un de ces sujets.
+    ///
+    /// **La liste peut etre vide**, et cela ne veut pas dire « repondre tout de
+    /// suite » : un client qui n'a nomme que des sous-systemes que ce greffon
+    /// n'emet jamais (`idle database`) doit attendre pour toujours. C'est le
+    /// comportement MPD correct — il a demande a etre prevenu d'un changement
+    /// qui n'arrive jamais. La Task 8 ne doit donc pas traiter le vide comme un
+    /// `OK`.
     Attendre(Vec<Sujet>),
     /// `noidle` reçu hors attente : `OK` sec.
     Annuler,
@@ -87,6 +95,7 @@ pub const COMMANDES: &[&str] = &[
     "decoders",
     "idle",
     "noidle",
+    "notcommands",
     "outputs",
     "password",
     "ping",
@@ -145,6 +154,12 @@ pub fn traiter(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
         "playlistinfo" => playlistinfo(inst, indice, reste),
         "plchanges" => plchanges(inst, indice, reste),
         "commands" => Issue::lignes(COMMANDES.iter().map(|c| ligne("command", c)).collect()),
+        // Son pendant, que de vieux clients demandent juste apres `commands`.
+        // Vide, et c'est la reponse honnete : `notcommands` liste ce que le mot
+        // de passe courant *interdit*, or il n'y a pas de mot de passe ici (voir
+        // la spec, § Reseau), donc rien n'est interdit par permission. Ce qui
+        // n'existe pas est simplement absent de `commands`.
+        "notcommands" => Issue::ok(),
         // Les trois seules étiquettes que `Morceau` porte. En annoncer d'autres
         // ferait chercher au client des tris que rien n'alimente.
         "tagtypes" => {
@@ -323,25 +338,65 @@ fn entree_lignes(source: &str, position: usize, entree: &Entree) -> Vec<String> 
     ]
 }
 
-fn toute_la_file(inst: &Instantane, file: &[Entree]) -> Vec<String> {
-    file.iter()
+/// Les lignes d'une tranche de la file. `Pos` reste la position **absolue**
+/// dans la file et non le rang dans la tranche : c'est la clé avec laquelle le
+/// client désignera l'entrée ensuite, et la décaler ferait jouer autre chose que
+/// ce qu'il a touché à l'écran.
+fn lignes_de_file(inst: &Instantane, file: &[Entree], plage: Range<usize>) -> Vec<String> {
+    let debut = plage.start;
+    file[plage]
+        .iter()
         .enumerate()
-        .flat_map(|(position, entree)| entree_lignes(&inst.etat.source, position, entree))
+        .flat_map(|(decalage, entree)| entree_lignes(&inst.etat.source, debut + decalage, entree))
         .collect()
+}
+
+/// Analyse un argument de position MPD : soit une position seule (`3`), soit une
+/// plage `START:END` dont la **fin est exclue**, `START:` valant « jusqu'au
+/// bout ». Rend les bornes déjà ramenées à la file, ou `None` si l'argument est
+/// malformé.
+///
+/// La grammaire de MPD est `playlistinfo [[SONGPOS] | [START:END]]`, et un
+/// client qui fenêtre sa file (M.A.L.P. le fait) demande `0:100`. Refuser une
+/// requête bien formée lui ferait afficher une file vide sur les 51 stations de
+/// la radio : la plage s'implémente, elle ne se déclare pas non gérée.
+///
+/// **Trois hors-bornes qui ne se répondent pas pareil**, et l'asymétrie est
+/// celle de MPD :
+/// - une **plage** qui commence après la fin rend une tranche **vide**. Un
+///   client qui fenêtre peut demander `50:100` juste après que la file a
+///   rétréci ; sa requête est bien formée, la réponse est « il n'y a rien
+///   là-bas », pas une erreur.
+/// - une **position seule** hors bornes reste un refus : elle désigne une entrée
+///   précise qui n'existe pas, et un `OK` sec laisserait croire à un trou dans
+///   la file.
+/// - `START > END` est **malformé** : aucun client correct ne le produit, MPD le
+///   refuse aussi, et l'accepter masquerait le bogue de l'appelant.
+fn bornes(arg: &str, longueur: usize) -> Option<Range<usize>> {
+    if let Some((debut, fin)) = arg.split_once(':') {
+        let debut: usize = debut.parse().ok()?;
+        let fin = if fin.is_empty() { longueur } else { fin.parse::<usize>().ok()? };
+        if fin < debut {
+            return None;
+        }
+        Some(debut.min(longueur)..fin.min(longueur))
+    } else {
+        let position: usize = arg.parse().ok()?;
+        if position >= longueur {
+            return None;
+        }
+        Some(position..position + 1)
+    }
 }
 
 fn playlistinfo(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
     let file = file_attente(inst);
     let Some(arg) = args.first() else {
-        return Issue::lignes(toute_la_file(inst, &file));
+        return Issue::lignes(lignes_de_file(inst, &file, 0..file.len()));
     };
-    // Une position hors bornes est un refus et non une réponse vide : le client
-    // a une file périmée, et lui rendre `OK` le laisserait croire à un trou.
-    match arg.parse::<usize>() {
-        Ok(position) if position < file.len() => {
-            Issue::lignes(entree_lignes(&inst.etat.source, position, &file[position]))
-        }
-        _ => Issue::Refuser(ack(Ack::Arg, indice, "playlistinfo", "bad song index")),
+    match bornes(arg, file.len()) {
+        Some(plage) => Issue::lignes(lignes_de_file(inst, &file, plage)),
+        None => Issue::Refuser(ack(Ack::Arg, indice, "playlistinfo", "bad song index")),
     }
 }
 
@@ -351,13 +406,24 @@ fn plchanges(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
     };
     if version == inst.version_file {
         // Rien à dire, et c'est tout l'intérêt de la commande : un client qui
-        // détient la version courante n'a pas à recevoir 51 lignes.
+        // détient la version courante n'a pas à recevoir 51 lignes. Avant
+        // d'analyser la plage, donc : il n'y a rien à fenêtrer dans une réponse
+        // vide.
         return Issue::ok();
     }
-    // La file entière, faute de savoir ce qui a changé dedans : la file *est*
-    // la liste des présélections de la source active, et un changement de
-    // source la remplace en totalité.
-    Issue::lignes(toute_la_file(inst, &file_attente(inst)))
+    // La file entière, faute de savoir ce qui a changé dedans : la file *est* la
+    // liste des présélections de la source active, et un changement de source la
+    // remplace en totalité. La grammaire est `plchanges VERSION [START:END]` :
+    // la même fenêtre que `playlistinfo`.
+    let file = file_attente(inst);
+    let plage = match args.get(1) {
+        None => 0..file.len(),
+        Some(arg) => match bornes(arg, file.len()) {
+            Some(plage) => plage,
+            None => return Issue::Refuser(ack(Ack::Arg, indice, "plchanges", "bad song index")),
+        },
+    };
+    Issue::lignes(lignes_de_file(inst, &file, plage))
 }
 
 fn stats(inst: &Instantane) -> Vec<String> {
@@ -376,14 +442,44 @@ fn stats(inst: &Instantane) -> Vec<String> {
     ]
 }
 
+/// Ce que vaut un nom de sous-système écrit dans un `idle`.
+enum NomIdle {
+    /// Un des quatre que ce greffon sait faire bouger.
+    Notre(Sujet),
+    /// Un sous-système du vocabulaire MPD que nous n'émettrons **jamais**.
+    JamaisEmis,
+    /// Un mot que MPD lui-même ne connaît pas.
+    Inconnu,
+}
+
 /// Le nom MPD d'un sous-système, tel qu'un client l'écrit dans son `idle`.
-fn sujet(nom: &str) -> Option<Sujet> {
+///
+/// **Le vocabulaire entier de MPD, pas seulement le nôtre.** C'est la
+/// distinction qui décide si un client démarre : tout ce qui est bâti sur
+/// `mpd_send_idle_mask` de libmpdclient envoie une liste explicite — en
+/// pratique `database update stored_playlist playlist player mixer output
+/// options` — et un `ACK` sur son premier `idle` le fait boucler ou renoncer.
+/// Refuser un mot que MPD ignore est juste ; refuser un mot **légal** est le
+/// même défaut vu de l'autre côté.
+///
+/// Un sous-système légal que nous n'émettons jamais est donc accepté puis
+/// écarté en silence, et l'attente qui en résulte peut ne jamais se terminer.
+/// C'est le comportement MPD correct et non un oubli : le client a demandé
+/// qu'on le prévienne si ça changeait, et ça ne change jamais.
+fn nom_idle(nom: &str) -> NomIdle {
     match nom {
-        "player" => Some(Sujet::Player),
-        "mixer" => Some(Sujet::Mixer),
-        "playlist" => Some(Sujet::Playlist),
-        "stored_playlist" => Some(Sujet::StoredPlaylist),
-        _ => None,
+        "player" => NomIdle::Notre(Sujet::Player),
+        "mixer" => NomIdle::Notre(Sujet::Mixer),
+        "playlist" => NomIdle::Notre(Sujet::Playlist),
+        "stored_playlist" => NomIdle::Notre(Sujet::StoredPlaylist),
+        // Le reste du vocabulaire de MPD. Aucun n'a de déclencheur ici : il n'y
+        // a pas de base de données à indexer (`database`, `update`), une seule
+        // sortie qu'on ne pilote pas (`output`), aucune option modifiable
+        // (`options`), ni partition, ni étiquette collée, ni abonnement, ni
+        // message, ni voisinage, ni montage annoncé sur ce protocole.
+        "database" | "update" | "output" | "options" | "partition" | "sticker"
+        | "subscription" | "message" | "neighbor" | "mount" => NomIdle::JamaisEmis,
+        _ => NomIdle::Inconnu,
     }
 }
 
@@ -399,16 +495,24 @@ fn idle(indice: usize, args: &[String]) -> Issue {
     }
     let mut sujets = Vec::new();
     for nom in args {
-        // Un sujet inconnu est refusé et non ignoré : un client qui attend un
-        // sous-système que nous n'émettrions jamais resterait muet pour
-        // toujours, ce qui se diagnostique bien plus mal qu'un `ACK`.
-        let Some(s) = sujet(nom) else {
-            return Issue::Refuser(ack(Ack::Arg, indice, "idle", "unrecognized idle event"));
-        };
-        // Dédoublonné, comme `marquer` côté état : `idle player player` ne
-        // décrit qu'une seule attente.
-        if !sujets.contains(&s) {
-            sujets.push(s);
+        match nom_idle(nom) {
+            // Dédoublonné, comme `marquer` côté état : `idle player player` ne
+            // décrit qu'une seule attente.
+            NomIdle::Notre(s) => {
+                if !sujets.contains(&s) {
+                    sujets.push(s);
+                }
+            }
+            // Accepté puis écarté : voir `nom_idle`. La liste peut finir vide,
+            // et c'est une attente qui ne se terminera jamais — la bonne
+            // réponse, pas un oubli.
+            NomIdle::JamaisEmis => {}
+            // Un mot que MPD ne connaît pas : refusé et non ignoré, sinon un
+            // client qui a mal orthographié son sous-système resterait muet
+            // pour toujours, ce qui se diagnostique bien plus mal qu'un `ACK`.
+            NomIdle::Inconnu => {
+                return Issue::Refuser(ack(Ack::Arg, indice, "idle", "unrecognized idle event"))
+            }
         }
     }
     Issue::Attendre(sujets)
@@ -417,6 +521,7 @@ fn idle(indice: usize, args: &[String]) -> Issue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::etat::EtatPartage;
     use ritornello_proto::{Morceau, PlayerState};
 
     // ------------------------------------------------------------------
@@ -789,6 +894,89 @@ mod tests {
     }
 
     #[test]
+    fn playlistinfo_accepte_une_plage_dont_la_fin_est_exclue() {
+        // `playlistinfo [[SONGPOS] | [START:END]]` : un client qui fenetre sa
+        // file demande `0:100`, et un `ACK` sur une requete bien formee lui fait
+        // afficher une file vide. `1:3` rend deux entrees, pas trois, et leurs
+        // `Pos` restent **absolus** — c'est la cle avec laquelle le client
+        // designera l'entree ensuite.
+        assert_eq!(
+            traiter_ok(&instantane_sans_presets("cd", 4), &["playlistinfo", "1:3"]),
+            vec![
+                "file: ritornello://cd/2",
+                "Title: 2",
+                "Pos: 1",
+                "Id: 2",
+                "file: ritornello://cd/3",
+                "Title: 3",
+                "Pos: 2",
+                "Id: 3",
+            ]
+        );
+    }
+
+    #[test]
+    fn playlistinfo_accepte_une_plage_a_fin_ouverte() {
+        // `START:` veut dire « jusqu'au bout », et une fin au-dela de la file se
+        // ramene a la file plutot que de deborder.
+        let inst = instantane_sans_presets("cd", 4);
+        let ouverte = traiter_ok(&inst, &["playlistinfo", "2:"]);
+        assert_eq!(ouverte, traiter_ok(&inst, &["playlistinfo", "2:99"]));
+        assert_eq!(
+            ouverte,
+            vec![
+                "file: ritornello://cd/3",
+                "Title: 3",
+                "Pos: 2",
+                "Id: 3",
+                "file: ritornello://cd/4",
+                "Title: 4",
+                "Pos: 3",
+                "Id: 4",
+            ]
+        );
+    }
+
+    #[test]
+    fn une_plage_qui_commence_apres_la_fin_rend_une_tranche_vide() {
+        // Bien formee mais sans objet : un client qui fenetre peut demander
+        // `9:12` juste apres que la file a retreci. La reponse est « il n'y a
+        // rien la-bas », pas une erreur — contrairement a une position seule
+        // hors bornes, qui designe une entree precise et reste un refus.
+        let inst = instantane_sans_presets("cd", 3);
+        assert_eq!(traiter_ok(&inst, &["playlistinfo", "9:12"]), Vec::<String>::new());
+        assert_eq!(traiter_ok(&inst, &["playlistinfo", "3:3"]), Vec::<String>::new());
+        assert!(matches!(
+            traiter_mots(&inst, 0, &["playlistinfo", "9"]),
+            Issue::Refuser(_)
+        ));
+    }
+
+    #[test]
+    fn une_plage_inversee_est_refusee() {
+        // Aucun client correct ne produit `3:1` ; l'accepter masquerait le bogue
+        // de l'appelant, et MPD le refuse aussi.
+        assert_eq!(
+            traiter_mots(&instantane_sans_presets("cd", 4), 0, &["playlistinfo", "3:1"]),
+            Issue::Refuser("ACK [2@0] {playlistinfo} bad song index".to_string())
+        );
+    }
+
+    #[test]
+    fn plchanges_accepte_la_meme_fenetre_que_playlistinfo() {
+        // `plchanges VERSION [START:END]` : meme grammaire, meme reponse.
+        let inst = instantane_sans_presets("cd", 4);
+        assert_eq!(
+            traiter_ok(&inst, &["plchanges", "6", "0:2"]),
+            traiter_ok(&inst, &["playlistinfo", "0:2"])
+        );
+        assert_eq!(
+            traiter_mots(&inst, 0, &["plchanges", "6", "3:1"]),
+            Issue::Refuser("ACK [2@0] {plchanges} bad song index".to_string())
+        );
+    }
+
+    #[test]
     fn plchanges_rend_la_file_entiere_quand_la_version_differe() {
         let inst = instantane_sans_presets("cd", 1);
         assert_eq!(
@@ -845,6 +1033,15 @@ mod tests {
                 assert!(!refus.contains("unsupported"), "{nom} annoncee mais non geree : {refus}");
             }
         }
+    }
+
+    #[test]
+    fn notcommands_repond_vide() {
+        // Elle liste ce que le mot de passe courant **interdit**. Il n'y a pas de
+        // mot de passe ici, donc rien n'est interdit par permission : la reponse
+        // honnete est vide, et non un refus qui ferait renoncer un vieux client
+        // qui la demande juste apres `commands`.
+        assert_eq!(traiter_mots(&instantane_arrete(), 0, &["notcommands"]), Issue::ok());
     }
 
     #[test]
@@ -911,13 +1108,15 @@ mod tests {
         // qui agirait sur l'appareil serait un effet de bord invisible, et les
         // clients en envoient plusieurs par seconde.
         let inst = instantane_en_lecture();
-        let interrogations: [&[&str]; 12] = [
+        let interrogations: [&[&str]; 14] = [
             &["status"],
             &["currentsong"],
             &["playlistinfo"],
             &["playlistinfo", "0"],
+            &["playlistinfo", "0:2"],
             &["plchanges", "0"],
             &["commands"],
+            &["notcommands"],
             &["tagtypes"],
             &["outputs"],
             &["stats"],
@@ -961,14 +1160,87 @@ mod tests {
     }
 
     #[test]
-    fn un_sujet_inconnu_dans_idle_est_refuse_et_nattend_rien() {
-        // Un client qui attendrait un sous-systeme que nous n'emettons jamais
-        // resterait muet pour toujours : bien plus dur a diagnostiquer qu'un
-        // `ACK`.
+    fn un_mot_hors_du_vocabulaire_mpd_est_refuse() {
+        // Un mot que MPD lui-meme ne connait pas : un client qui a mal
+        // orthographie son sous-systeme resterait muet pour toujours, ce qui se
+        // diagnostique bien plus mal qu'un `ACK`.
+        for mot in ["jukebox", "Player", "stored_playlists", ""] {
+            assert_eq!(
+                traiter_mots(&instantane_arrete(), 2, &["idle", mot]),
+                Issue::Refuser("ACK [2@2] {idle} unrecognized idle event".to_string()),
+                "{mot:?} aurait du etre refuse"
+            );
+        }
+    }
+
+    #[test]
+    fn idle_accepte_les_sous_systemes_de_mpd_que_nous_nemettons_jamais() {
+        // Le defaut vu de l'autre cote : tout client bati sur
+        // `mpd_send_idle_mask` de libmpdclient envoie une liste explicite, en
+        // pratique `database update stored_playlist playlist player mixer output
+        // options`. Refuser un mot **legal** lui vaudrait un `ACK` sur son
+        // premier `idle`, donc une boucle ou un abandon.
+        let inst = instantane_arrete();
+        let mots = [
+            "idle",
+            "database",
+            "update",
+            "stored_playlist",
+            "playlist",
+            "player",
+            "mixer",
+            "output",
+            "options",
+        ];
         assert_eq!(
-            traiter_mots(&instantane_arrete(), 2, &["idle", "database"]),
-            Issue::Refuser("ACK [2@2] {idle} unrecognized idle event".to_string())
+            traiter_mots(&inst, 0, &mots),
+            Issue::Attendre(vec![Sujet::StoredPlaylist, Sujet::Playlist, Sujet::Player, Sujet::Mixer])
         );
+        // Et les quatre autres noms du vocabulaire, ceux qu'aucun client
+        // courant n'envoie mais que MPD connait.
+        for mot in ["partition", "sticker", "subscription", "message", "neighbor", "mount"] {
+            assert_eq!(
+                traiter_mots(&inst, 0, &["idle", mot]),
+                Issue::Attendre(Vec::new()),
+                "{mot} devrait etre accepte puis ecarte"
+            );
+        }
+    }
+
+    #[test]
+    fn une_attente_sur_un_sujet_quon_nemet_jamais_est_vide_et_non_immediate() {
+        // `Attendre(vec![])` n'est pas `OK` : le client a demande a etre prevenu
+        // d'un changement qui n'arrivera jamais, et attendre pour toujours est la
+        // reponse MPD correcte. Le contrat est note sur la variante, parce que
+        // c'est la Task 8 qui pourrait le trahir en traitant le vide comme un
+        // `OK` sec.
+        assert_eq!(
+            traiter_mots(&instantane_arrete(), 0, &["idle", "database"]),
+            Issue::Attendre(Vec::new())
+        );
+    }
+
+    #[tokio::test]
+    async fn une_liste_melangee_garde_le_reveil_du_sujet_quon_emet() {
+        // `idle database mixer` : `database` est accepte puis ecarte, et cet
+        // ecart ne doit pas emporter avec lui le reveil de `mixer`. Verifie de
+        // bout en bout contre l'etat partage, et pas seulement sur la charge
+        // utile de l'`Issue`.
+        let issue = traiter_mots(&instantane_arrete(), 0, &["idle", "database", "mixer"]);
+        let Issue::Attendre(sujets) = issue else {
+            panic!("attendu Attendre, obtenu {issue:?}");
+        };
+        assert_eq!(sujets, vec![Sujet::Mixer]);
+
+        let partage = EtatPartage::default();
+        let vues = partage.versions().await;
+        partage.appliquer_etat(PlayerState { volume: 55, ..Default::default() }).await;
+        // Aucune marge d'horloge : le changement a **deja** eu lieu, donc
+        // `attendre` rend la main par sa comparaison prealable sans jamais
+        // dormir. Si `mixer` avait ete ecarte avec `database`, la liste serait
+        // vide et ce test **pendrait** — l'echec est franc, a l'idiome des tests
+        // d'`etat.rs`.
+        assert_eq!(partage.attendre(&sujets, vues).await, vec![Sujet::Mixer]);
     }
 
     #[test]

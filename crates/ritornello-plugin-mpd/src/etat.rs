@@ -45,10 +45,10 @@ pub enum Sujet {
     ///
     /// **Rien ne l'incrémente encore.** Le sous-système existe dans le
     /// protocole dès maintenant — un client peut l'inclure dans son `idle` et
-    /// doit obtenir une attente valide, pas un refus — mais son déclencheur
-    /// est le catalogue, qui n'entre dans ce greffon qu'à la Task 13. C'est
-    /// elle qui l'incrémentera, depuis `appliquer_catalogue`.
-    #[allow(dead_code)]
+    /// doit obtenir une attente valide, pas un refus, et c'est ce que
+    /// `commandes::idle` en fait depuis la Task 6 — mais son déclencheur est le
+    /// catalogue, qui n'entre dans ce greffon qu'à la Task 13. C'est elle qui
+    /// l'incrémentera, depuis `appliquer_catalogue`.
     StoredPlaylist = 3,
 }
 
@@ -92,11 +92,10 @@ impl Instantane {
     /// Ce qu'il faut publier comme état de lecture : l'optimiste, pas le brut
     /// de la trame.
     ///
-    /// Sans appelant hors tests jusqu'à la Task 8, qui compose `status` et
-    /// `currentsong` : c'est le seul consommateur possible, et l'écrire ici
-    /// évite que chaque site de réponse ait à se souvenir *lequel* des deux
-    /// champs fait foi.
-    #[allow(dead_code)]
+    /// Appelé par le `status` de `commandes.rs` depuis la Task 6. L'écrire ici
+    /// plutôt qu'à chaque site de réponse évite que l'un d'eux ait à se
+    /// souvenir *lequel* des deux champs fait foi — et un test de ce module-là
+    /// échoue si `status` lit `etat.playback`.
     pub fn playback(&self) -> Playback {
         self.playback_optimiste
     }
