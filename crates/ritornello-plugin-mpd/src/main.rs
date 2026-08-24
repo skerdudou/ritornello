@@ -1,19 +1,31 @@
+mod admin;
 mod commandes;
 mod config;
 mod etat;
+// Uniquement compilé sous `cargo test` : `ui_placeholder_js` ne sert au
+// run-time nulle part dans ce crate, seulement à `build.rs` (compilation
+// séparée, via `include!`) et à ses propres tests. Le compiler en continu
+// dans le binaire déclencherait un `dead_code` que `-D warnings` refuserait
+// (voir `generic-input/src/main.rs`, même piège).
+#[cfg(test)]
+mod placeholder;
 mod protocole;
 mod session;
 
+use admin::MpdAdmin;
 use anyhow::Result;
 use config::Config;
 use etat::EtatPartage;
+use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::{DisplayPlugin, InputPlugin, Runtime};
 use ritornello_proto::{InputMessage, PlayerState};
 use session::accepter;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+
+pub(crate) const MPD_EN: &str = include_str!("locales/en.toml");
 
 fn env_ou(cle: &str, defaut: &str) -> String {
     std::env::var(cle).unwrap_or_else(|_| defaut.to_string())
@@ -70,9 +82,18 @@ async fn main() -> Result<()> {
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     tokio::spawn(accepter(ecoute, etat.clone(), cmd_tx));
 
+    // Un greffon Display/Input ne reçoit pas de `SetLocale` (le protocole ne
+    // le prévoit que pour les sources) : la langue de la page vient de
+    // l'environnement, comme en generic-input.
+    let locales_root = PathBuf::from(env_ou("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
+    let locale = env_ou("RITORNELLO_LOCALE", "en");
+    let catalog = Arc::new(RwLock::new(Catalog::load("mpd", &locale, &locales_root, MPD_EN)));
+    let admin = MpdAdmin { config_path: chemin, config: RwLock::new(config), catalog };
+
     Runtime::from_args()?
         .input(EntreeMpd { rx: cmd_rx })?
         .display(AfficheurMpd { etat })?
+        .admin(admin)?
         .run()
         .await
 }
@@ -80,6 +101,11 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn en_embarque_mpd_est_non_vide() {
+        assert!(!ritornello_i18n::try_parse(MPD_EN).unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn afficheur_mpd_depose_letat_recu_dans_letat_partage() {

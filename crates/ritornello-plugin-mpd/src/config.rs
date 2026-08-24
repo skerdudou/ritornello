@@ -77,11 +77,8 @@ impl Config {
     /// L'erreur renvoyée est, comme `valider`, une clé de catalogue — jamais
     /// une phrase ni un message d'E/S brut : la page d'admin la traduit.
     ///
-    /// Sans appelant en Task 3 : c'est la page d'admin (Task 9) qui
-    /// l'invoquera. Gardé public et testé dès maintenant, comme le demande
-    /// l'interface de cette tâche, plutôt que réécrit une seconde fois plus
-    /// tard.
-    #[allow(dead_code)]
+    /// Appelée par `admin.rs` (Task 9), qui résout la clé renvoyée en cas
+    /// d'échec en phrase de catalogue avant de répondre.
     pub fn enregistrer(&self, chemin: &Path) -> Result<(), String> {
         self.valider()?;
         let texte = toml::to_string_pretty(self).map_err(|_| "save_failed".to_string())?;
