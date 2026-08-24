@@ -201,7 +201,7 @@ impl Playback {
     /// voyage pas, donc les trames existantes restent identiques à l'octet.
     /// Une méthode et non une fermeture : `skip_serializing_if` exige un
     /// chemin de fonction.
-    pub fn est_arrete(&self) -> bool {
+    pub fn is_stopped(&self) -> bool {
         matches!(self, Playback::Stopped)
     }
 }
@@ -265,7 +265,7 @@ pub struct PlayerState {
     ///
     /// Distinct de `position_s.is_some()` : une lecture en pause garde sa
     /// position, et un flux qui joue peut n'en avoir aucune.
-    #[serde(default, skip_serializing_if = "Playback::est_arrete")]
+    #[serde(default, skip_serializing_if = "Playback::is_stopped")]
     pub playback: Playback,
     /// Ce qui joue accepte un déplacement : c'est le `finite` que la Source a
     /// déclaré à son `Play`, rendu visible aux consommateurs.
