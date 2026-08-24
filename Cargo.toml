@@ -13,4 +13,5 @@ members = [
     "crates/ritornello-plugin-files",
     "crates/ritornello-plugin-console",
     "crates/ritornello-plugin-generic-input",
+    "crates/ritornello-plugin-mpd",
 ]

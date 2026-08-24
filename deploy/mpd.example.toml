@@ -1,0 +1,5 @@
+# Adresse et port du serveur MPD. Tout client MPD du reseau local peut
+# commander l'appareil : pas de mot de passe, comme n'importe quelle
+# telecommande de la piece.
+listen = "0.0.0.0"
+port = 6600

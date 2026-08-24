@@ -1,0 +1,35 @@
+[package]
+name = "ritornello-plugin-mpd"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ritornello-plugin-mpd"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+# Caracteristiques enumerees, pas `full` : `net` pour le `TcpListener`,
+# `io-util` pour les lignes (Task 8), `sync` pour le `RwLock` et le `Notify`
+# (Task 5), `time` pour les delais. Voir le `Cargo.toml` de `files` — « une
+# dependance qu'on ne demande pas est une dependance qu'un jour on perd » —
+# et cela vaut pour les caracteristiques aussi.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "io-util", "time"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+ritornello-proto = { path = "../ritornello-proto" }
+ritornello-plugin-sdk = { path = "../ritornello-plugin-sdk" }
+ritornello-i18n = { path = "../ritornello-i18n" }
+
+[dev-dependencies]
+tempfile = "3"
+# Horloge simulee : le test qui verifie qu'`EntreeMpd::next_command` reste en
+# attente tant qu'un emetteur du canal vit ne doit pas deviner combien de
+# temps "assez longtemps" represente sur la machine qui l'execute (voir
+# `ritornello-core/Cargo.toml` pour le meme besoin). Sans elle, un delai reel
+# devrait etre choisi au hasard et resterait un flake en puissance.
+tokio = { version = "1", features = ["test-util"] }
