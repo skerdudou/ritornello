@@ -506,6 +506,21 @@ describe('HomeView — boutons indisponibles', () => {
     expect(w.get('[data-remote-power]').attributes('disabled')).toBeUndefined()
   })
 
+  it('la touche Muet montre son état, là où on agit sur le volume', async () => {
+    // Demandé à l'usage : le son coupé se lisait dans l'encart, en haut de la
+    // page, alors qu'on le coupe depuis cette rangée — en bas. La touche porte
+    // donc son propre état, en plus de la mention de l'encart.
+    const coupe = await monterAvec({ standby: false, muted: true })
+    const touche = coupe.get('[data-remote-command="Mute"]')
+    expect(touche.attributes('data-actif')).toBe('true')
+    expect(touche.attributes('aria-pressed')).toBe('true')
+
+    const audible = await monterAvec({ standby: false, muted: false })
+    const rendue = audible.get('[data-remote-command="Mute"]')
+    expect(rendue.attributes('data-actif')).toBeUndefined()
+    expect(rendue.attributes('aria-pressed')).toBe('false')
+  })
+
   it('hors veille, seul le déplacement dépend du contenu', async () => {
     const w = await monterAvec({ standby: false, seekable: false, preset_count: 24 })
     expect(w.get('[data-remote-command="SeekForward"]').attributes('disabled')).toBeDefined()

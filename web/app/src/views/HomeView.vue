@@ -277,10 +277,17 @@ function toucheVolume(e: KeyboardEvent, cmd: Command) {
             >
               {{ t(c.key) }}
             </Button>
+            <!-- La touche Muet porte son propre état, en plus de la mention de
+                 l'encart : demandé à l'usage, parce que le son se coupe depuis
+                 cette rangée — en bas de page — alors que l'encart est en haut.
+                 `aria-pressed` plutôt qu'une couleur seule : c'est une bascule,
+                 et un lecteur d'écran doit pouvoir l'annoncer. -->
             <Button
               v-else
               :data-remote-command="c.cmd.cmd"
-              variant="outline"
+              :data-actif="c.cmd.cmd === 'Mute' && etat?.muted ? 'true' : undefined"
+              :aria-pressed="c.cmd.cmd === 'Mute' ? String(etat?.muted ?? false) : undefined"
+              :variant="c.cmd.cmd === 'Mute' && etat?.muted ? 'secondary' : 'outline'"
               :disabled="indisponible(c.cmd.cmd, etat)"
               @click="send(c.cmd)"
             >
