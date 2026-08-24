@@ -27,7 +27,9 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
       <CardTitle class="flex items-center gap-2 text-base">
         {{ t('player_title') }}
         <Badge v-if="etat?.standby" variant="secondary" data-standby>{{ t('standby') }}</Badge>
-        <Badge v-if="etat?.muted" variant="secondary" data-muted>{{ t('muted') }}</Badge>
+        <!-- Le muet n'est plus annoncé ici mais sur la ligne du volume, seule
+             place où on le cherche. Deux mentions du même état seraient du
+             bruit, et c'est celle du titre qui passait inaperçue. -->
       </CardTitle>
     </CardHeader>
     <CardContent class="space-y-1 pb-4">
@@ -64,9 +66,22 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
       <p v-if="etat?.status && !etat.standby" class="text-sm text-muted-foreground">
         <span class="text-foreground" data-player-status>{{ etat.status }}</span>
       </p>
-      <p class="text-sm text-muted-foreground">
-        {{ t('volume') }} :
-        <span class="text-foreground" data-volume>{{ etat ? etat.volume + ' %' : '' }}</span>
+      <!-- La sourdine se dit **ici**, sur la ligne du volume, et non dans le
+           titre de l'encart : signalé à l'usage, on lisait « Volume : 60 % »
+           sans remarquer le badge deux lignes plus haut, donc sans comprendre
+           pourquoi rien ne sortait. La valeur est barrée plutôt que masquée —
+           elle reste vraie, et c'est celle qui revient au rétablissement. -->
+      <p class="flex items-center gap-2 text-sm text-muted-foreground" data-volume-ligne>
+        <span>
+          {{ t('volume') }} :
+          <span
+            class="text-foreground"
+            :class="{ 'line-through opacity-60': etat?.muted }"
+            data-volume
+            >{{ etat ? etat.volume + ' %' : '' }}</span
+          >
+        </span>
+        <Badge v-if="etat?.muted" variant="secondary" data-muted>{{ t('muted') }}</Badge>
       </p>
 
       <!-- Le morceau, quand il est connu. -->

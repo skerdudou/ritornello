@@ -109,6 +109,23 @@ describe('PlayerCard', () => {
     expect(w.find('[data-standby]').exists()).toBe(false)
   })
 
+  it('dit la sourdine sur la ligne du volume, et barre la valeur', () => {
+    // Signalé à l'usage : le son coupé ne se voyait pas. La mention vivait dans
+    // le titre de l'encart, à deux lignes de la valeur qu'elle contredit — on
+    // lisait « Volume : 60 % » sans jamais remarquer le badge. Elle se lit
+    // desormais là où on regarde le volume, et la valeur est barrée : elle
+    // reste vraie (elle reviendra au rétablissement) mais n'a pas cours.
+    const muet = monteAvec({ volume: 60, muted: true })
+    const ligne = muet.find('[data-volume-ligne]')
+    expect(ligne.text()).toContain('60 %')
+    expect(ligne.find('[data-muted]').exists()).toBe(true)
+    expect(muet.find('[data-volume]').classes()).toContain('line-through')
+
+    const audible = monteAvec({ volume: 60, muted: false })
+    expect(audible.find('[data-volume-ligne]').find('[data-muted]').exists()).toBe(false)
+    expect(audible.find('[data-volume]').classes()).not.toContain('line-through')
+  })
+
   it('suit les changements de volume sans rechargement', async () => {
     // Le volume peut changer depuis la telecommande infrarouge ou un autre
     // onglet : c'est tout l'objet du flux pousse, relaye ici par la prop.

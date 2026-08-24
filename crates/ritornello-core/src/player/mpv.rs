@@ -29,6 +29,21 @@ impl MpvIpc {
         let pending = ipc.pending.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(read).lines();
+            // Vrai jusqu'à la première notification d'`idle-active`.
+            //
+            // `observe_property` renvoie aussitôt la valeur courante, et mpv est
+            // lancé en démon **idle** : cette première valeur est donc toujours
+            // `true`, et elle décrit un état de départ, pas un arrêt de lecture.
+            // Le cœur, lui, lit `PlaybackIdle` comme la fin de ce qui jouait —
+            // il pose `lecture = false` et notifie `Stop` à la Source.
+            //
+            // Mesuré à l'usage : l'événement attend dans le canal pendant que le
+            // démarrage lance la première lecture, et il est traité juste après.
+            // Sur un contenu fini (un fichier), rien ne le rattrape — plus de
+            // « en écoute », rembobinage et avance grisés, position absente,
+            // jusqu'à ce qu'un play/pause recharge tout depuis le début. Un flux
+            // repassait par la relance et masquait le défaut.
+            let mut premier_idle = true;
             while let Ok(Some(line)) = lines.next_line().await {
                 let v = match serde_json::from_str::<Value>(&line) {
                     Ok(v) => v,
@@ -57,8 +72,20 @@ impl MpvIpc {
                         (Some("metadata"), data) => icy_title(data)
                             .map(Event::IcyTitle)
                             .or_else(|| file_tags(data).map(Event::FileTags)),
-                        (Some("idle-active"), Value::Bool(true)) => Some(Event::PlaybackIdle),
-                        (Some("idle-active"), Value::Bool(false)) => Some(Event::PlaybackActive),
+                        // La valeur initiale de l'observation est avalée (voir
+                        // `premier_idle`) ; les suivantes suivent une lecture et
+                        // sont de vrais arrêts, y compris la fin d'une liste.
+                        (Some("idle-active"), Value::Bool(true)) => {
+                            let initiale = std::mem::replace(&mut premier_idle, false);
+                            if initiale { None } else { Some(Event::PlaybackIdle) }
+                        }
+                        (Some("idle-active"), Value::Bool(false)) => {
+                            // Une entrée en lecture consomme aussi le droit
+                            // d'avaler : si mpv annonce l'activité d'abord, le
+                            // `true` qui suivra est un arrêt véritable.
+                            premier_idle = false;
+                            Some(Event::PlaybackActive)
+                        }
                         // Deux propriétés pour un même fait, l'avance de piste :
                         // mpv expose les pistes d'un CD comme des entrées de
                         // liste de lecture ou comme des chapitres selon la
@@ -446,9 +473,52 @@ mod tests {
             .unwrap();
 
         assert_eq!(rx.recv().await.unwrap(), Event::Title("FIP - Miles Davis".into()));
-        assert_eq!(rx.recv().await.unwrap(), Event::PlaybackIdle);
+        // Le `idle-active: true` envoyé ci-dessus est la **première** valeur
+        // observée : elle décrit l'état de départ du démon idle, pas un arrêt,
+        // et elle est donc avalée (voir
+        // `le_premier_idle_observe_n_est_pas_un_arret`). Ce test l'attendait
+        // autrefois comme un événement — il encodait le défaut.
         assert_eq!(rx.recv().await.unwrap(), Event::PlaybackActive);
         assert_eq!(rx.recv().await.unwrap(), Event::TrackChanged(3));
+    }
+
+    #[tokio::test]
+    async fn le_premier_idle_observe_n_est_pas_un_arret() {
+        // mpv est lancé en démon idle, et `observe_property` renvoie aussitôt la
+        // valeur courante : `idle-active = true` arrive donc avant toute
+        // lecture. C'est un état de départ, pas un arrêt — mais le cœur traite
+        // `PlaybackIdle` comme la fin de ce qui jouait (`lecture = false`, et
+        // `Stop` notifié à la Source).
+        //
+        // Défaut mesuré à l'usage : cet événement attend dans le canal pendant
+        // que le démarrage lance la première lecture, et il est traité juste
+        // après. Sur un contenu **fini** — un fichier — rien ne le rattrape :
+        // pas de « en écoute », rembobinage et avance grisés, position absente,
+        // jusqu'à ce qu'un play/pause recharge tout depuis le début. Un flux,
+        // lui, repassait par la branche de relance (`expecting_stream`) et
+        // rejouait tout seul, ce qui masquait le défaut côté radio.
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        let _ipc = MpvIpc::from_stream(client, tx);
+
+        let (_r, mut w) = server.into_split();
+        // Dans l'ordre : la valeur initiale de l'observation, un vrai
+        // chargement, puis un vrai arrêt en fin de liste.
+        for data in ["true", "false", "true"] {
+            w.write_all(
+                format!("{{\"event\":\"property-change\",\"name\":\"idle-active\",\"data\":{data}}}\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        }
+
+        // Le premier `true` est avalé : le premier événement reçu est l'entrée
+        // en lecture.
+        assert_eq!(rx.recv().await.unwrap(), Event::PlaybackActive);
+        // Le second, lui, suit une lecture : c'est un arrêt véritable, et il
+        // doit passer — sans quoi la fin d'une liste ne s'afficherait plus.
+        assert_eq!(rx.recv().await.unwrap(), Event::PlaybackIdle);
     }
 
     #[tokio::test]
