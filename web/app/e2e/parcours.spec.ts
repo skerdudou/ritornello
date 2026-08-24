@@ -35,7 +35,14 @@ test('navigation entre l’accueil, la config et les pages de plugin', async ({ 
   await expect(notif).toBeVisible()
   // `fixed` : c'est la preuve que la feuille est chargee. Sans elle, le
   // conteneur reste en `static` et le message tombe au fil du document.
-  await expect(page.locator('[data-sonner-toaster]')).toHaveCSS('position', 'fixed')
+  const conteneur = page.locator('[data-sonner-toaster]')
+  await expect(conteneur).toHaveCSS('position', 'fixed')
+  // Centree en haut et coloree par type, comme demande : ces deux attributs
+  // sont ce que vue-sonner pose d'apres les props du `<Toaster />`, et rien
+  // d'autre dans l'IHM ne les porte.
+  await expect(conteneur).toHaveAttribute('data-y-position', 'bottom')
+  await expect(conteneur).toHaveAttribute('data-x-position', 'center')
+  await expect(conteneur).toHaveAttribute('data-rich-colors', 'true')
   // Page de plugin : le module ESM est charge dynamiquement et resolu par
   // l'import map — c'est ce qu'aucun test unitaire ne peut verifier.
   await page.goto('/plugins/radio/')

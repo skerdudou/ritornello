@@ -105,6 +105,11 @@ onMounted(async () => {
     <main class="mx-auto max-w-5xl px-4 py-6">
       <RouterView />
     </main>
-    <Toaster />
+    <!-- Centrees en bas et colorees par type : sur un ecran de salon, une
+         notification discrete dans un coin passe inapercue, et « enregistre »
+         doit se distinguer d'un refus sans avoir a lire. `rich-colors` est ce
+         qui donne le vert et le rouge de vue-sonner ; sans lui les deux issues
+         se ressemblent. -->
+    <Toaster position="bottom-center" rich-colors />
   </div>
 </template>
