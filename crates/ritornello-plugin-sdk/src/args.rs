@@ -1,6 +1,6 @@
 //! Ligne de commande d'un plugin, telle que le cœur la construit
-//! (`plugins::spawn`) : `--socket <chemin>` toujours, `--admin-socket
-//! <chemin>` si `admin = true`.
+//! (`plugins::spawn`) : `--register <chemin>`, `--name <nom>`, et
+//! `--socket-prefix <préfixe>`, obligatoires.
 //!
 //! Un seul exemplaire ici plutôt qu'une copie par binaire : la revue de
 //! 2026-07-27 a compté six variantes de cette analyse dans les plugins, dont
@@ -9,6 +9,7 @@
 //! dernier argument.
 
 use std::path::PathBuf;
+use ritornello_proto::PluginKind;
 
 /// Valeur de l'option `flag` dans `args` (forme `--flag <valeur>`).
 ///
@@ -25,17 +26,48 @@ pub fn arg_value(args: &[String], flag: &str) -> Option<PathBuf> {
     })
 }
 
-/// Chemin de la socket de genre (`--socket`), obligatoire pour tout plugin.
-pub fn socket_path() -> PathBuf {
+/// Chemin du socket d'enregistrement du cœur (`--register`), obligatoire.
+pub fn register_socket() -> PathBuf {
     let args: Vec<String> = std::env::args().collect();
-    arg_value(&args, "--socket").expect("--socket <path> required")
+    arg_value(&args, "--register").expect("--register <path> required")
 }
 
-/// Chemin de la socket d'admin (`--admin-socket`), présent si le plugin est
-/// déclaré `admin = true` dans `plugins.toml`.
-pub fn admin_socket_path() -> Option<PathBuf> {
+/// Nom sous lequel le cœur connaît ce greffon (`--name`), obligatoire.
+///
+/// Le greffon le **renvoie** dans son annonce sans jamais l'inventer : c'est
+/// le manifeste qui a autorité, sinon deux binaires pourraient réclamer le
+/// même nom et collisionner sur les chemins de sockets.
+pub fn plugin_name() -> String {
     let args: Vec<String> = std::env::args().collect();
-    arg_value(&args, "--admin-socket")
+    arg_value(&args, "--name")
+        .expect("--name <name> required")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Préfixe des sockets que ce greffon doit lier (`--socket-prefix`).
+///
+/// Le cœur garde la maîtrise du répertoire et du préfixe ; le greffon n'a
+/// autorité que sur les suffixes, qui sont exactement ce qu'il annonce.
+pub fn socket_prefix() -> PathBuf {
+    let args: Vec<String> = std::env::args().collect();
+    arg_value(&args, "--socket-prefix").expect("--socket-prefix <path> required")
+}
+
+/// `{prefixe}-{genre}.sock`.
+pub fn genre_socket(prefix: &std::path::Path, kind: PluginKind) -> PathBuf {
+    let genre = match kind {
+        PluginKind::Source => "source",
+        PluginKind::Display => "display",
+        PluginKind::Input => "input",
+        PluginKind::Metadata => "metadata",
+    };
+    PathBuf::from(format!("{}-{genre}.sock", prefix.display()))
+}
+
+/// `{prefixe}-admin.sock`.
+pub fn admin_socket(prefix: &std::path::Path) -> PathBuf {
+    PathBuf::from(format!("{}-admin.sock", prefix.display()))
 }
 
 #[cfg(test)]
@@ -48,9 +80,9 @@ mod tests {
 
     #[test]
     fn extrait_la_valeur_qui_suit_le_drapeau() {
-        let a = args(&["plugin", "--socket", "/run/p.sock", "--admin-socket", "/run/a.sock"]);
-        assert_eq!(arg_value(&a, "--socket"), Some(PathBuf::from("/run/p.sock")));
-        assert_eq!(arg_value(&a, "--admin-socket"), Some(PathBuf::from("/run/a.sock")));
+        let a = args(&["plugin", "--register", "/run/register.sock", "--name", "radio"]);
+        assert_eq!(arg_value(&a, "--register"), Some(PathBuf::from("/run/register.sock")));
+        assert_eq!(arg_value(&a, "--name"), Some(PathBuf::from("radio")));
         assert_eq!(arg_value(&a, "--autre"), None);
     }
 
@@ -58,9 +90,41 @@ mod tests {
     fn drapeau_sans_valeur_panique_en_nommant_le_drapeau() {
         // C'était le défaut des cinq copies non robustes : « index out of
         // bounds » ne désigne rien.
-        let a = args(&["plugin", "--socket"]);
-        let e = std::panic::catch_unwind(|| arg_value(&a, "--socket")).unwrap_err();
+        let a = args(&["plugin", "--socket-prefix"]);
+        let e = std::panic::catch_unwind(|| arg_value(&a, "--socket-prefix")).unwrap_err();
         let msg = e.downcast_ref::<String>().cloned().unwrap_or_default();
-        assert!(msg.contains("--socket"), "le message doit nommer l'option: {msg}");
+        assert!(msg.contains("--socket-prefix"), "le message doit nommer l'option: {msg}");
+    }
+
+    #[test]
+    fn extrait_les_trois_options_du_nouveau_montage() {
+        let a = args(&[
+            "plugin",
+            "--register", "/run/ritornello/sockets/register.sock",
+            "--name", "radio",
+            "--socket-prefix", "/run/ritornello/sockets/radio",
+        ]);
+        assert_eq!(
+            arg_value(&a, "--register"),
+            Some(PathBuf::from("/run/ritornello/sockets/register.sock"))
+        );
+        assert_eq!(arg_value(&a, "--name"), Some(PathBuf::from("radio")));
+        assert_eq!(
+            arg_value(&a, "--socket-prefix"),
+            Some(PathBuf::from("/run/ritornello/sockets/radio"))
+        );
+    }
+
+    #[test]
+    fn suffixe_un_prefixe_par_genre_et_par_admin() {
+        let p = PathBuf::from("/run/ritornello/sockets/radio");
+        assert_eq!(
+            super::genre_socket(&p, ritornello_proto::PluginKind::Source),
+            PathBuf::from("/run/ritornello/sockets/radio-source.sock")
+        );
+        assert_eq!(
+            super::admin_socket(&p),
+            PathBuf::from("/run/ritornello/sockets/radio-admin.sock")
+        );
     }
 }

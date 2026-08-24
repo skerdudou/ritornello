@@ -12,23 +12,6 @@ use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-async fn connect_with_retry(socket_path: &Path) -> Result<UnixStream> {
-    // La dernière erreur est conservée pour le rapport final : « connecting to
-    // <socket> (10s) » seul cache la cause, et une erreur permanente (droits
-    // refusés sur la socket) était retentée 100 fois puis rapportée comme un
-    // simple délai dépassé — diagnostic inutilement difficile au démarrage.
-    let mut derniere = None;
-    for _ in 0..100 {
-        match UnixStream::connect(socket_path).await {
-            Ok(s) => return Ok(s),
-            Err(e) => derniere = Some(e),
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    Err(anyhow::anyhow!(derniere.expect("at least one attempt")))
-        .with_context(|| format!("connecting to {} (10s)", socket_path.display()))
-}
-
 /// Ce qu'une Source rapporte spontanément ou en marge d'une réponse : une
 /// correction de l'identité de ce qui joue, un statut, une présélection.
 ///
@@ -68,7 +51,9 @@ impl SourceClient {
         name: String,
         update_tx: mpsc::Sender<(String, SourceUpdate)>,
     ) -> Result<Arc<Self>> {
-        let stream = connect_with_retry(socket_path).await?;
+        let stream = UnixStream::connect(socket_path)
+            .await
+            .with_context(|| format!("connecting to {}", socket_path.display()))?;
         let (read, write) = stream.into_split();
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let client = Arc::new(Self { writer: Mutex::new(write), pending: pending.clone(), next_id: AtomicU64::new(1) });
@@ -166,7 +151,9 @@ pub struct DisplayClient {
 
 impl DisplayClient {
     pub async fn connect(socket_path: &Path) -> Result<Arc<Self>> {
-        let stream = connect_with_retry(socket_path).await?;
+        let stream = UnixStream::connect(socket_path)
+            .await
+            .with_context(|| format!("connecting to {}", socket_path.display()))?;
         let (_read, write) = stream.into_split();
         Ok(Arc::new(Self { writer: Mutex::new(write) }))
     }
@@ -219,7 +206,9 @@ pub struct AdminClient {
 
 impl AdminClient {
     pub async fn connect(socket_path: &Path) -> Result<Arc<Self>> {
-        let stream = connect_with_retry(socket_path).await?;
+        let stream = UnixStream::connect(socket_path)
+            .await
+            .with_context(|| format!("connecting to {}", socket_path.display()))?;
         let (read, write) = stream.into_split();
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<AdminResult>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -325,7 +314,9 @@ pub async fn run_metadata_client(
     enrich_tx: mpsc::Sender<(String, Enrichment)>,
     mut np_rx: tokio::sync::watch::Receiver<NowPlaying>,
 ) -> Result<()> {
-    let stream = connect_with_retry(socket_path).await?;
+    let stream = UnixStream::connect(socket_path)
+        .await
+        .with_context(|| format!("connecting to {}", socket_path.display()))?;
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
 
@@ -369,7 +360,9 @@ pub async fn run_metadata_client(
 /// forme nue d'avant Tâche 1 (`{"cmd":...}`) : `InputMessage` désérialise les
 /// deux, `held` retombant sur `false` en son absence.
 pub async fn run_input_client(socket_path: &Path, cmd_tx: mpsc::Sender<InputMessage>) -> Result<()> {
-    let stream = connect_with_retry(socket_path).await?;
+    let stream = UnixStream::connect(socket_path)
+        .await
+        .with_context(|| format!("connecting to {}", socket_path.display()))?;
     let mut lines = BufReader::new(stream).lines();
     while let Some(line) = lines.next_line().await? {
         match serde_json::from_str::<InputMessage>(&line) {
@@ -394,6 +387,45 @@ mod tests {
     use ritornello_proto::SourceAction;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
+
+    #[tokio::test]
+    async fn deux_afficheurs_coexistent_et_recoivent_le_meme_etat() {
+        // Le singleton d'avant (`display_connect = Some(...)`) faisait
+        // disparaitre le premier afficheur declare, sans erreur. Ce test
+        // verifie la seule chose qu'il peut verifier : deux `DisplayClient`
+        // vivent en parallele sur deux sockets et recoivent chacun le meme
+        // etat.
+        //
+        // Il ne prouve PAS l'absence d'interference entre eux : deux lignes de
+        // JSON n'emplissent pas le tampon d'un socket, donc l'afficheur jamais
+        // lu ne bloquerait pas non plus avec une tache unique bouclant sur N
+        // clients. La non-interference est garantie par construction cote
+        // coeur — une tache et un socket par afficheur — pas ici. La durcir
+        // par un remplissage de tampon serait lent et instable.
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.sock");
+        let b = dir.path().join("b.sock");
+        let la = UnixListener::bind(&a).unwrap();
+        let lb = UnixListener::bind(&b).unwrap();
+
+        let client_a = DisplayClient::connect(&a).await.unwrap();
+        let client_b = DisplayClient::connect(&b).await.unwrap();
+
+        // `a` est accepte puis LU ; `b` est accepte et jamais lu.
+        let (sa, _) = la.accept().await.unwrap();
+        let (_sb, _) = lb.accept().await.unwrap();
+
+        let etat = PlayerState::default();
+        client_a.send(&etat).await.unwrap();
+        client_b.send(&etat).await.unwrap();
+        // Un second envoi vers `a` apres celui vers `b` : les deux clients
+        // gardent chacun leur socket et leur verrou d'ecriture.
+        client_a.send(&etat).await.unwrap();
+
+        let mut lignes = BufReader::new(sa).lines();
+        assert!(lignes.next_line().await.unwrap().is_some());
+        assert!(lignes.next_line().await.unwrap().is_some());
+    }
 
     #[tokio::test]
     async fn source_client_correle_par_id_et_relaie_lidentite_et_la_selection() {

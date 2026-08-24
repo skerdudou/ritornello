@@ -238,16 +238,22 @@ pub trait SourcePlugin: Send + 'static {
     }
 }
 
-/// Lie `socket_path`, accepte une connexion (le cœur), puis traite les
-/// requêtes et les notifications spontanées jusqu'à fermeture de la
-/// connexion.
-pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path) -> Result<()> {
+/// Lie le socket d'une Source, sans servir encore.
+///
+/// Séparé de `serve_source` pour que le `Runtime` puisse lier **tous** ses
+/// sockets avant de s'annoncer : c'est cet ordre qui fait de l'annonce une
+/// barrière de disponibilité.
+pub fn bind_source(socket_path: &Path) -> Result<UnixListener> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let _ = std::fs::remove_file(socket_path);
-    let listener = UnixListener::bind(socket_path)
-        .with_context(|| format!("binding {}", socket_path.display()))?;
+    UnixListener::bind(socket_path).with_context(|| format!("binding {}", socket_path.display()))
+}
+
+/// Accepte la connexion du cœur, puis traite les requêtes et les
+/// notifications spontanées jusqu'à fermeture de la connexion.
+pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin) -> Result<()> {
     let (stream, _) = listener.accept().await?;
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
@@ -332,25 +338,36 @@ pub async fn run_source_plugin(mut plugin: impl SourcePlugin, socket_path: &Path
     }
 }
 
+/// Enveloppe historique : lie puis sert. Conservée pour les appels directs et
+/// pour les tests de protocole, qui ne doivent pas bouger.
+pub async fn run_source_plugin(plugin: impl SourcePlugin, socket_path: &Path) -> Result<()> {
+    serve_source(bind_source(socket_path)?, plugin).await
+}
+
 #[async_trait::async_trait]
 pub trait DisplayPlugin: Send + 'static {
     async fn show(&mut self, state: PlayerState) -> Result<()>;
 }
 
-/// Lie `socket_path`, accepte une connexion (le cœur), puis affiche chaque état
-/// reçu jusqu'à fermeture de la connexion. Protocole à sens unique : aucune
-/// réponse n'est attendue.
+/// Lie le socket d'un afficheur, sans servir encore.
 ///
-/// Chaque ligne est un `PlayerState` complet, pas une vue déjà composée : la
-/// mise en page appartient au plugin (voir `ritornello-plugin-console::display`),
-/// pas au cœur.
-pub async fn run_display_plugin(mut plugin: impl DisplayPlugin, socket_path: &Path) -> Result<()> {
+/// Séparé de `serve_display` pour que le `Runtime` puisse lier **tous** ses
+/// sockets avant de s'annoncer : c'est cet ordre qui fait de l'annonce une
+/// barrière de disponibilité.
+pub fn bind_display(socket_path: &Path) -> Result<UnixListener> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let _ = std::fs::remove_file(socket_path);
-    let listener = UnixListener::bind(socket_path)
-        .with_context(|| format!("binding {}", socket_path.display()))?;
+    UnixListener::bind(socket_path).with_context(|| format!("binding {}", socket_path.display()))
+}
+
+/// Accepte la connexion du cœur, puis affiche chaque état reçu jusqu'à
+/// fermeture. Protocole à sens unique : aucune réponse n'est attendue.
+///
+/// Chaque ligne est un `PlayerState` complet, pas une vue déjà composée : la
+/// mise en page appartient au plugin (voir `ritornello-plugin-console::display`).
+pub async fn serve_display(listener: UnixListener, mut plugin: impl DisplayPlugin) -> Result<()> {
     let (stream, _) = listener.accept().await?;
     let (read, _write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
@@ -367,6 +384,12 @@ pub async fn run_display_plugin(mut plugin: impl DisplayPlugin, socket_path: &Pa
     Ok(())
 }
 
+/// Enveloppe historique : lie puis sert. Conservée pour les appels directs et
+/// pour les tests de protocole, qui ne doivent pas bouger.
+pub async fn run_display_plugin(plugin: impl DisplayPlugin, socket_path: &Path) -> Result<()> {
+    serve_display(bind_display(socket_path)?, plugin).await
+}
+
 use ritornello_proto::InputMessage;
 
 #[async_trait::async_trait]
@@ -374,23 +397,37 @@ pub trait InputPlugin: Send + 'static {
     async fn next_command(&mut self) -> Result<InputMessage>;
 }
 
-/// Lie `socket_path`, accepte une connexion (le cœur), puis relaie chaque
-/// `InputMessage` produit par le plugin. `held: false` n'est pas sérialisé
-/// (voir `InputMessage`), donc les octets sur le fil restent inchangés pour
-/// les commandes non maintenues — un cœur d'avant Tâche 1 déserialiserait la
-/// trame sans rien y voir de nouveau.
-pub async fn run_input_plugin(mut plugin: impl InputPlugin, socket_path: &Path) -> Result<()> {
+/// Lie le socket d'une entrée, sans servir encore.
+///
+/// Séparé de `serve_input` pour que le `Runtime` puisse lier **tous** ses
+/// sockets avant de s'annoncer : c'est cet ordre qui fait de l'annonce une
+/// barrière de disponibilité.
+pub fn bind_input(socket_path: &Path) -> Result<UnixListener> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let _ = std::fs::remove_file(socket_path);
-    let listener = UnixListener::bind(socket_path)?;
+    UnixListener::bind(socket_path).with_context(|| format!("binding {}", socket_path.display()))
+}
+
+/// Accepte la connexion du cœur, puis relaie chaque `InputMessage` produit par
+/// le plugin. `held: false` n'est pas sérialisé (voir `InputMessage`), donc
+/// les octets sur le fil restent inchangés pour les commandes non maintenues
+/// — un cœur d'avant Tâche 1 déserialiserait la trame sans rien y voir de
+/// nouveau.
+pub async fn serve_input(listener: UnixListener, mut plugin: impl InputPlugin) -> Result<()> {
     let (stream, _) = listener.accept().await?;
     let (_read, mut write) = stream.into_split();
     loop {
         let msg = plugin.next_command().await?;
         write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
     }
+}
+
+/// Enveloppe historique : lie puis sert. Conservée pour les appels directs et
+/// pour les tests de protocole, qui ne doivent pas bouger.
+pub async fn run_input_plugin(plugin: impl InputPlugin, socket_path: &Path) -> Result<()> {
+    serve_input(bind_input(socket_path)?, plugin).await
 }
 
 #[async_trait::async_trait]
@@ -409,17 +446,24 @@ pub trait MetadataPlugin: Send + 'static {
     async fn next_enrichment(&mut self) -> Enrichment;
 }
 
-/// Lie `socket_path`, accepte une connexion (le cœur), puis relaie dans les
-/// deux sens jusqu'à fermeture : chaque ligne reçue est un `NowPlaying`, chaque
-/// enrichissement produit part sur le fil. Aucune corrélation par `id` : les
-/// deux sens sont indépendants.
-pub async fn run_metadata_plugin(mut plugin: impl MetadataPlugin, socket_path: &Path) -> Result<()> {
+/// Lie le socket d'un plugin de métadonnées, sans servir encore.
+///
+/// Séparé de `serve_metadata` pour que le `Runtime` puisse lier **tous** ses
+/// sockets avant de s'annoncer : c'est cet ordre qui fait de l'annonce une
+/// barrière de disponibilité.
+pub fn bind_metadata(socket_path: &Path) -> Result<UnixListener> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let _ = std::fs::remove_file(socket_path);
-    let listener = UnixListener::bind(socket_path)
-        .with_context(|| format!("binding {}", socket_path.display()))?;
+    UnixListener::bind(socket_path).with_context(|| format!("binding {}", socket_path.display()))
+}
+
+/// Accepte la connexion du cœur, puis relaie dans les deux sens jusqu'à
+/// fermeture : chaque ligne reçue est un `NowPlaying`, chaque enrichissement
+/// produit part sur le fil. Aucune corrélation par `id` : les deux sens sont
+/// indépendants.
+pub async fn serve_metadata(listener: UnixListener, mut plugin: impl MetadataPlugin) -> Result<()> {
     let (stream, _) = listener.accept().await?;
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
@@ -441,6 +485,12 @@ pub async fn run_metadata_plugin(mut plugin: impl MetadataPlugin, socket_path: &
     }
 }
 
+/// Enveloppe historique : lie puis sert. Conservée pour les appels directs et
+/// pour les tests de protocole, qui ne doivent pas bouger.
+pub async fn run_metadata_plugin(plugin: impl MetadataPlugin, socket_path: &Path) -> Result<()> {
+    serve_metadata(bind_metadata(socket_path)?, plugin).await
+}
+
 use ritornello_proto::{AdminReq, AdminRequest, AdminResponse, AdminResult};
 
 #[async_trait::async_trait]
@@ -454,15 +504,22 @@ pub trait AdminPlugin: Send + 'static {
     async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String>;
 }
 
-/// Lie `socket_path`, accepte une connexion (le cœur), puis traite les
-/// requêtes admin (requête/réponse corrélée par `id`) jusqu'à fermeture.
-pub async fn run_admin_plugin(mut plugin: impl AdminPlugin, socket_path: &Path) -> Result<()> {
+/// Lie le socket d'un plugin admin, sans servir encore.
+///
+/// Séparé de `serve_admin` pour que le `Runtime` puisse lier **tous** ses
+/// sockets avant de s'annoncer : c'est cet ordre qui fait de l'annonce une
+/// barrière de disponibilité.
+pub fn bind_admin(socket_path: &Path) -> Result<UnixListener> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let _ = std::fs::remove_file(socket_path);
-    let listener = UnixListener::bind(socket_path)
-        .with_context(|| format!("binding {}", socket_path.display()))?;
+    UnixListener::bind(socket_path).with_context(|| format!("binding {}", socket_path.display()))
+}
+
+/// Accepte la connexion du cœur, puis traite les requêtes admin
+/// (requête/réponse corrélée par `id`) jusqu'à fermeture.
+pub async fn serve_admin(listener: UnixListener, mut plugin: impl AdminPlugin) -> Result<()> {
     let (stream, _) = listener.accept().await?;
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
@@ -490,6 +547,12 @@ pub async fn run_admin_plugin(mut plugin: impl AdminPlugin, socket_path: &Path) 
         write.write_all(format!("{}\n", serde_json::to_string(&resp)?).as_bytes()).await?;
     }
     Ok(())
+}
+
+/// Enveloppe historique : lie puis sert. Conservée pour les appels directs et
+/// pour les tests de protocole, qui ne doivent pas bouger.
+pub async fn run_admin_plugin(plugin: impl AdminPlugin, socket_path: &Path) -> Result<()> {
+    serve_admin(bind_admin(socket_path)?, plugin).await
 }
 
 #[cfg(test)]
@@ -895,6 +958,52 @@ mod tests {
         let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(msg.id, Some(7));
         assert_eq!(msg.action, Some(SourceAction::play("http://fip")));
+    }
+
+    struct EnMemoire {
+        recus: std::sync::Arc<std::sync::Mutex<Vec<PlayerState>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DisplayPlugin for EnMemoire {
+        async fn show(&mut self, state: PlayerState) -> Result<()> {
+            self.recus.lock().unwrap().push(state);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_puis_serve_equivaut_a_run() {
+        // La scission ne doit rien changer au comportement observable : un
+        // socket lié par `bind_display` accepte une connexion AVANT que
+        // `serve_display` ne tourne (c'est le backlog du noyau, et c'est ce
+        // qui rend l'annonce du Runtime fiable).
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("d.sock");
+        let listener = bind_display(&socket).unwrap();
+
+        // Personne ne sert encore : la connexion doit néanmoins aboutir.
+        let stream = UnixStream::connect(&socket).await.expect("le backlog accepte avant accept()");
+
+        let recus = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recus_plugin = recus.clone();
+        tokio::spawn(async move {
+            serve_display(listener, EnMemoire { recus: recus_plugin }).await.unwrap();
+        });
+
+        let (_r, mut w) = stream.into_split();
+        let etat = PlayerState::default();
+        w.write_all(format!("{}\n", serde_json::to_string(&etat).unwrap()).as_bytes())
+            .await
+            .unwrap();
+
+        for _ in 0..100 {
+            if recus.lock().unwrap().len() == 1 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("l'etat n'a pas atteint le plugin");
     }
 }
 
