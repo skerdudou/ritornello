@@ -48,6 +48,39 @@ const VERSION_ANNONCEE: &str = "0.23.5";
 /// M.A.L.P. groupe une dizaine de commandes.
 const MAX_COMMANDES_LISTE: usize = 2048;
 
+/// Plafond des **octets** accumulés par une liste de commandes.
+///
+/// Le compte de commandes ne suffit pas : une ligne accumulée peut peser
+/// jusqu'à `MAX_LIGNE` en toute légitimité, donc 2048 commandes bornent la
+/// mémoire à 16 Mio par connexion — l'ordre de grandeur même que `MAX_LIGNE`
+/// existe pour interdire. C'est d'ailleurs en octets, et non en commandes, que
+/// MPD exprime la sienne (`max_command_list_size`, 2 Mio par défaut).
+///
+/// 256 Kio, soit 2048 commandes de 128 octets en moyenne : un `setvol 30` en
+/// pèse dix, et la plus longue commande réaliste — un nom entre guillemets — en
+/// pèse quelques centaines. Très au-dessus de ce qu'un client envoie, et un
+/// quart de mébioctet par connexion au pire.
+const MAX_OCTETS_LISTE: usize = 256 * 1024;
+
+/// Plafond des **octets** d'une réponse, avant l'écriture.
+///
+/// C'est la même fuite que `MAX_LIGNE` prise par l'autre bout, et le plafond de
+/// commandes d'une liste ne la borne pas du tout : il borne les commandes, pas
+/// ce qu'elles **produisent**. Une liste de 2048 `playlistinfo` — 26 Kio
+/// d'entrée, une boucle, aucune malveillance — rend quatre lignes par entrée de
+/// file, soit jusqu'à 1020 lignes par commande à `preset_count` maximal (255) :
+/// deux millions de `String` d'un côté, et surtout **une allocation contiguë de
+/// plusieurs dizaines de mébioctets** au moment de mettre tout cela à plat pour
+/// le `write_all`. Sur un Pi 2 B, une demande contiguë de cette taille échoue
+/// contre une mémoire fragmentée bien avant que le total ne soit atteint.
+///
+/// 1 Mio : la plus longue réponse légitime est un `playlistinfo` complet — 255
+/// entrées de quatre lignes, une quinzaine de kibioctets en tout — et le
+/// plafond en laisse donc passer une soixantaine dans une seule liste. Vérifié **après chaque commande** du lot et non à chaque ligne :
+/// le dépassement est constaté à au plus une réponse de commande près, ce qui
+/// borne le tampon à 1 Mio plus ces quelques dizaines de kibioctets.
+const MAX_REPONSE: usize = 1024 * 1024;
+
 /// Plafond d'une **ligne** de commande, en octets.
 ///
 /// Sans lui, c'est la dernière surface non bornée d'un port ouvert sur tout le
@@ -160,6 +193,37 @@ impl LecteurBorne {
     }
 }
 
+/// Les lignes d'une réponse en cours de composition, et leur poids en octets.
+///
+/// Le compte est tenu au fur et à mesure plutôt que recalculé : la vérification
+/// du plafond a lieu après chaque commande d'un lot, et resommer la réponse
+/// entière à chaque fois rendrait quadratique la composition d'une liste
+/// longue. Il compte le `\n` de chaque ligne, donc c'est exactement le nombre
+/// d'octets que `ecrire` va poser sur la chaussette.
+#[derive(Default)]
+struct Reponse {
+    lignes: Vec<String>,
+    octets: usize,
+}
+
+impl Reponse {
+    fn pousser(&mut self, ligne: String) {
+        self.octets += ligne.len() + 1;
+        self.lignes.push(ligne);
+    }
+
+    fn etendre(&mut self, lignes: Vec<String>) {
+        for ligne in lignes {
+            self.pousser(ligne);
+        }
+    }
+
+    /// Vrai quand la réponse dépasse `MAX_REPONSE`.
+    fn trop_grande(&self) -> bool {
+        self.octets > MAX_REPONSE
+    }
+}
+
 /// Ce que la session doit faire après un lot de commandes.
 enum Suite {
     /// Continuer à lire des lignes.
@@ -218,6 +282,9 @@ pub async fn servir(flux: TcpStream, etat: Arc<EtatPartage>, cmd_tx: mpsc::Sende
     // commande inconnue plutôt que rendre un `OK` de complaisance.
     let mut liste: Option<Vec<Vec<String>>> = None;
     let mut avec_ok = false;
+    // Les octets déjà accumulés par la liste en cours. Remis à zéro à chaque
+    // ouverture, comme `avec_ok`.
+    let mut octets_liste = 0usize;
 
     while let Some(brute) = lignes.ligne_suivante().await? {
         let args = match decouper(&brute) {
@@ -270,7 +337,12 @@ pub async fn servir(flux: TcpStream, etat: Arc<EtatPartage>, cmd_tx: mpsc::Sende
                 }
                 _ => {
                     let indice = liste.as_ref().map_or(0, Vec::len);
-                    if indice >= MAX_COMMANDES_LISTE {
+                    // Deux bornes pour un seul refus : le nombre de commandes
+                    // (qui borne le travail d'un lot) et leur poids en octets
+                    // (qui borne la mémoire, une ligne accumulée pouvant peser
+                    // jusqu'à `MAX_LIGNE`). Voir les deux constantes.
+                    octets_liste += brute.len() + 1;
+                    if indice >= MAX_COMMANDES_LISTE || octets_liste > MAX_OCTETS_LISTE {
                         liste = None;
                         let refus = ack(Ack::Unknown, indice, mot, "list too large");
                         ecrire(&mut ecriture, &[refus]).await?;
@@ -291,10 +363,12 @@ pub async fn servir(flux: TcpStream, etat: Arc<EtatPartage>, cmd_tx: mpsc::Sende
             "command_list_begin" => {
                 liste = Some(Vec::new());
                 avec_ok = false;
+                octets_liste = 0;
             }
             "command_list_ok_begin" => {
                 liste = Some(Vec::new());
                 avec_ok = true;
+                octets_liste = 0;
             }
             _ => {
                 let lot = std::slice::from_ref(&args);
@@ -325,7 +399,7 @@ async fn executer(
     lot: &[Vec<String>],
     avec_ok: bool,
 ) -> Result<Suite> {
-    let mut sortie: Vec<String> = Vec::new();
+    let mut sortie = Reponse::default();
     for (indice, args) in lot.iter().enumerate() {
         // **Un seul instantané, lu avant `traiter`.** Les compteurs qu'il
         // porte sont ceux qu'un `idle` mémorise, et les lire dans la même
@@ -360,16 +434,31 @@ async fn executer(
                     }
                 }
                 etat.acter_optimiste(&cmds).await;
-                sortie.extend(rendues);
+                sortie.etendre(rendues);
                 if avec_ok {
-                    sortie.push("list_OK".to_string());
+                    sortie.pousser("list_OK".to_string());
+                }
+                // Le plafond de réponse, vérifié ici parce que c'est le seul
+                // endroit où la réponse grandit. Rien n'a encore été écrit, donc
+                // le refus **remplace** tout ce qui était composé : le client
+                // reçoit un seul terminateur pour sa requête, sa comptabilité
+                // reste juste, et la connexion survit — contrairement à la ligne
+                // trop longue, où fermer était le seul choix défendable puisqu'on
+                // ne pouvait même pas nommer la commande fautive. Ici on la
+                // nomme, et son rang avec elle.
+                if sortie.trop_grande() {
+                    tracing::warn!("mpd response over {MAX_REPONSE} bytes; refusing");
+                    let nom = args.first().map_or("", String::as_str);
+                    let refus = ack(Ack::Unknown, indice, nom, "response too large");
+                    ecrire(ecriture, &[refus]).await?;
+                    return Ok(Suite::Continuer);
                 }
             }
             // `noidle` reçu hors attente : `OK` sec, et dans une liste un
             // `list_OK` comme n'importe quelle commande sans lignes.
             Issue::Annuler => {
                 if avec_ok {
-                    sortie.push("list_OK".to_string());
+                    sortie.pousser("list_OK".to_string());
                 }
             }
             // La première erreur produit son `ACK` et **rien de ce qui suit
@@ -377,8 +466,8 @@ async fn executer(
             // composées partent quand même, comme le fait MPD — un `ACK` ne
             // rétracte pas les réponses des commandes qui, elles, ont abouti.
             Issue::Refuser(refus) => {
-                sortie.push(refus);
-                ecrire(ecriture, &sortie).await?;
+                sortie.pousser(refus);
+                ecrire(ecriture, &sortie.lignes).await?;
                 return Ok(Suite::Continuer);
             }
             Issue::Attendre(sujets) => {
@@ -387,7 +476,7 @@ async fn executer(
                 // commande, donc `sortie` est vide — l'écrire quand même
                 // garde cette fonction juste si un jour un lot en contenait
                 // plusieurs, plutôt que d'avaler des lignes.
-                ecrire(ecriture, &sortie).await?;
+                ecrire(ecriture, &sortie.lignes).await?;
                 return attendre_idle(lignes, ecriture, etat, &sujets, vues).await;
             }
             Issue::Fermer => {
@@ -401,16 +490,16 @@ async fn executer(
                 // trouve sa réponse là où il l'attend. La divergence est sans
                 // effet observable puisque la connexion se ferme dans les deux
                 // cas ; ce qui compte est qu'elle soit délibérée.
-                sortie.push("OK".to_string());
-                ecrire(ecriture, &sortie).await?;
+                sortie.pousser("OK".to_string());
+                ecrire(ecriture, &sortie.lignes).await?;
                 return Ok(Suite::Fermer);
             }
         }
     }
     // Un seul `OK` clôt le lot entier : c'est ce qui distingue une liste de
     // commandes de la même suite de commandes envoyées une par une.
-    sortie.push("OK".to_string());
-    ecrire(ecriture, &sortie).await?;
+    sortie.pousser("OK".to_string());
+    ecrire(ecriture, &sortie.lignes).await?;
     Ok(Suite::Continuer)
 }
 
@@ -513,7 +602,12 @@ fn premier_mot(brute: &str) -> &str {
 /// par construction, mais une réponse à moitié écrite serait lue comme une
 /// réponse complète par un client qui compte ses terminateurs.
 async fn ecrire(ecriture: &mut OwnedWriteHalf, lignes: &[String]) -> Result<()> {
-    let mut tampon = String::new();
+    // Capacité exacte dès le départ : sans elle, mettre à plat une réponse
+    // proche du mébioctet la réallouerait une vingtaine de fois en doublant, en
+    // demandant chaque fois un bloc contigu plus grand que le précédent.
+    // `MAX_REPONSE` borne la taille de ce tampon ; cette ligne borne le nombre
+    // de fois qu'on la demande.
+    let mut tampon = String::with_capacity(lignes.iter().map(|l| l.len() + 1).sum());
     for l in lignes {
         tampon.push_str(l);
         tampon.push('\n');
@@ -713,17 +807,26 @@ mod tests {
         c.envoyer("status").await;
         c.envoyer("command_list_end").await;
         let recues = c.reponse().await;
-        // Le compte de lignes, et non une attente : le troisième `status`
-        // n'ayant pas été exécuté, il n'y a qu'un seul `volume:`. Deux
-        // signifieraient que la liste a continué après l'erreur.
-        assert_eq!(recues.iter().filter(|l| l.starts_with("volume: ")).count(), 1, "{recues:?}");
         assert_eq!(*recues.last().unwrap(), "ACK [5@1] {nawak} unsupported", "{recues:?}");
         assert!(!recues.iter().any(|l| l == "OK"), "un ACK remplace le OK: {recues:?}");
-        // La connexion survit à l'erreur : le client suivant n'a pas à se
-        // reconnecter, et l'état de liste a bien été rendu (sinon `ping`
-        // serait accumulé sans réponse et cette lecture pendrait).
+        // **Attention à ce qui prouve quoi ici**, la relecture s'est fait
+        // prendre et le commentaire précédent disait faux. `reponse()`
+        // s'arrête au **premier** terminateur, et un `ACK` en est un : compter
+        // les `volume:` de cette seule réponse ne prouve donc rien. Une session
+        // qui continuerait la liste après l'erreur écrirait tout d'un bloc, et
+        // `reponse()` rendrait exactement les mêmes lignes — jusqu'à l'`ACK`,
+        // en laissant le `status` suivant **derrière** dans le flux.
+        //
+        // Ce qui tue ce mutant, c'est la suite : la commande d'après doit
+        // recevoir sa propre réponse et rien d'autre. Un `status` fuité
+        // ressort ici, et le compte se fait sur les **deux** réponses. Ne pas
+        // « raccourcir » ce test en gardant le compte et en jetant le `ping` :
+        // c'est le `ping` qui travaille.
         c.envoyer("ping").await;
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        let apres = c.reponse().await;
+        assert_eq!(apres, vec!["OK".to_string()], "reponse fuitee: {apres:?}");
+        let volumes = recues.iter().chain(apres.iter()).filter(|l| l.starts_with("volume: ")).count();
+        assert_eq!(volumes, 1, "le troisieme status ne doit pas avoir tourne: {recues:?} {apres:?}");
     }
 
     #[tokio::test]
@@ -968,6 +1071,106 @@ mod tests {
         // `shutdown` et non un `drop` : la moitié lecture du client doit rester
         // ouverte pour lire la réponse.
         c.ecriture.shutdown().await.unwrap();
+        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn une_ligne_au_dela_du_plafond_avec_une_fin_de_ligne_ferme_aussi() {
+        // Le plafond est contrôlé dans les **deux** bras du lecteur, et le test
+        // précédent n'en visite qu'un (le morceau lu ne contient pas de `\n`).
+        // Celui-ci visite l'autre : la ligne dépasse le plafond *et* se termine
+        // bien. Sans ce cas, retirer le contrôle du bras `Some` laissait passer
+        // toute la suite — un plafond que personne n'exerce est un plafond
+        // qu'on retire par distraction.
+        let (s, _rx) = serveur().await;
+        let mut c = s.client_pret().await;
+        // Exactement `MAX_LIGNE` octets sans `\n` : légal, le tampon les garde.
+        c.ecriture.write_all(&vec![b'a'; MAX_LIGNE]).await.unwrap();
+        // Puis un octet de trop, cette fois suivi de sa fin de ligne : c'est le
+        // bras `Some` qui doit refuser, en comptant ce qui était déjà accumulé.
+        let _ = c.ecriture.write_all(b"b\n").await;
+        assert!(
+            c.lignes.next_line().await.unwrap().is_none(),
+            "une ligne au-dela du plafond ferme la connexion, meme terminee"
+        );
+    }
+
+    #[tokio::test]
+    async fn une_ligne_vide_est_refusee_sans_fermer() {
+        // Un `\n` nu. `traiter` sait déjà le refuser (elle est totale par
+        // construction), mais aucun test de session ne le montrait bout en
+        // bout : la session pourrait l'avaler en silence, et un client qui
+        // attend une réponse par ligne resterait pendu.
+        let (s, _rx) = serveur().await;
+        let mut c = s.client_pret().await;
+        c.ecriture.write_all(b"\n").await.unwrap();
+        assert_eq!(c.reponse().await, vec!["ACK [5@0] {} unsupported".to_string()]);
+        c.envoyer("ping").await;
+        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn une_reponse_trop_grosse_est_refusee_sans_fermer() {
+        // L'amplificateur : `MAX_COMMANDES_LISTE` borne les commandes, pas ce
+        // qu'elles **produisent**. Une liste de `playlistinfo` sur une file de
+        // 255 entrées rend une quinzaine de kibioctets par commande, et la
+        // réponse entière était mise à plat dans une seule `String` avant le
+        // `write_all` — donc une allocation contiguë de plusieurs dizaines de
+        // mébioctets, demandée à un Pi dont la mémoire est fragmentée. 26 Kio
+        // d'entrée suffisaient.
+        //
+        // Le refus arrive **avant** toute écriture, donc il remplace la réponse
+        // au lieu de s'y ajouter : un seul terminateur, et la connexion vit.
+        let (s, _rx) = serveur().await;
+        s.etat
+            .appliquer_etat(PlayerState {
+                source: "cd".to_string(),
+                preset_count: Some(255),
+                ..Default::default()
+            })
+            .await;
+        let mut c = s.client_pret().await;
+        let mut lot = String::from("command_list_begin\n");
+        for _ in 0..100 {
+            lot.push_str("playlistinfo\n");
+        }
+        lot.push_str("command_list_end\n");
+        c.ecriture.write_all(lot.as_bytes()).await.unwrap();
+        let recues = c.reponse().await;
+        assert_eq!(recues.len(), 1, "le refus remplace la reponse composee: {recues:?}");
+        // L'indice exact dépend de l'arithmétique des octets (une quinzaine de
+        // kibioctets par commande, un mébioctet de plafond) : ce qui compte est
+        // qu'il nomme la commande qui a débordé et son rang dans le lot.
+        let refus = &recues[0];
+        assert!(refus.starts_with("ACK [5@"), "{refus}");
+        assert!(refus.ends_with("] {playlistinfo} response too large"), "{refus}");
+        c.envoyer("ping").await;
+        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn une_liste_lourde_en_octets_est_refusee_bien_avant_le_compte() {
+        // L'autre moitié du même trou : une ligne accumulée peut légitimement
+        // peser `MAX_LIGNE`, donc 2048 commandes bornées **en nombre** pesaient
+        // 16 Mio par connexion. Ici trente-deux lignes de 8 Kio suffisent à
+        // franchir les 256 Kio, très loin des 2048 commandes — c'est donc bien
+        // la borne en octets qui refuse, et non celle en nombre.
+        let (s, _rx) = serveur().await;
+        let mut c = s.client_pret().await;
+        c.envoyer("command_list_begin").await;
+        let mut lot = String::new();
+        for _ in 0..MAX_OCTETS_LISTE.div_ceil(MAX_LIGNE) + 1 {
+            lot.push_str("ping ");
+            lot.push_str(&"a".repeat(MAX_LIGNE - 6));
+            lot.push('\n');
+        }
+        c.ecriture.write_all(lot.as_bytes()).await.unwrap();
+        let recues = c.reponse().await;
+        assert_eq!(recues.len(), 1, "{recues:?}");
+        assert!(recues[0].starts_with("ACK [5@"), "{recues:?}");
+        assert!(recues[0].ends_with("] {ping} list too large"), "{recues:?}");
+        // L'état de liste est rendu : la commande suivante répond seule.
+        c.envoyer("ping").await;
         assert_eq!(c.reponse().await, vec!["OK".to_string()]);
     }
 
