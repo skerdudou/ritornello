@@ -1,6 +1,6 @@
 import type { Mode } from '@ritornello/ui'
 
-export interface PluginStatus { name: string; kind: string; connected: boolean; admin: boolean }
+export interface PluginStatus { name: string; kind: string; connected: boolean; admin: boolean; stalled?: boolean }
 export interface StatusPayload { plugins: PluginStatus[]; active_source: string }
 export interface AudioDevice { name: string; description: string }
 export interface AudioPayload { devices: AudioDevice[]; current: string | null }

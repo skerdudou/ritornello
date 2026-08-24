@@ -15,7 +15,7 @@ const CATALOGUE = {
   config_title: 'Configuration',
   plugins_title: 'Plugins',
   col_plugin: 'Plugin', col_kind: 'Genre', col_state: 'État', col_admin: 'Admin',
-  connected: 'connecté', unavailable: 'indisponible', admin_link: 'admin',
+  connected: 'connecté', unavailable: 'indisponible', stalled: 'figé', admin_link: 'admin',
   audio_output: 'Sortie audio', audio_default_device: 'Par défaut (système)',
   language: 'Langue', change: 'Changer', ok: 'OK',
   recent_errors: 'Dernières erreurs',
@@ -154,6 +154,35 @@ describe('ConfigView — table des plugins', () => {
     expect(lignes[1]!.find('[data-plugin-state]').text()).toBe('indisponible')
   })
 
+  it('distingue l’état figé (processus vivant, muet à l’échéance) des deux autres', async () => {
+    // Trois situations que le cœur distingue desormais (voir /api/status) :
+    // annonce+cable, mort avant de s'annoncer, et vivant mais muet a
+    // l'echeance (peut encore s'annoncer plus tard, sans redemarrage). L'IHM
+    // ne doit plus les confondre.
+    const { w } = await monter({
+      '/api/status': {
+        plugins: [
+          { name: 'radio', kind: 'source', connected: true, admin: true },
+          { name: 'cd', kind: 'source', connected: false, admin: false },
+          { name: 'files', kind: 'source', connected: false, stalled: true, admin: false },
+        ],
+        active_source: 'radio',
+      },
+    })
+    const lignes = w.findAll('[data-plugin-row]')
+    const textes = lignes.map((l) => l.find('[data-plugin-state]').text())
+    expect(textes).toEqual(['connecté', 'indisponible', 'figé'])
+    // Trois libellés distincts...
+    expect(new Set(textes).size).toBe(3)
+    // ...portés par trois styles de badge distincts : un simple changement de
+    // texte sur la couleur « destructive » laisserait un greffon figé habillé
+    // comme un greffon mort.
+    const classes = lignes.map(
+      (l) => l.find('[data-plugin-state] [data-slot="badge"]').classes().join(' '),
+    )
+    expect(new Set(classes).size).toBe(3)
+  })
+
   it('ne rend le lien d’admin que pour les plugins admin, sur /plugins/<nom>/', async () => {
     const { w } = await monter()
     const lignes = w.findAll('[data-plugin-row]')
@@ -173,6 +202,27 @@ describe('ConfigView — table des plugins', () => {
     const { w } = await monter({ '/api/status': { plugins: [], active_source: '' } })
     expect(w.findAll('[data-plugin-row]')).toHaveLength(0)
     expect(w.text()).toContain('Plugins')
+  })
+
+  it('rend une ligne par (nom, genre) pour un greffon multi-genres', async () => {
+    // Un greffon peut annoncer plusieurs genres : chacun doit obtenir sa
+    // propre ligne. Ce test ne garantit PAS la cle de rendu par (nom, genre) —
+    // Vue rend les deux lignes meme avec une cle dupliquee (il n'avertit qu'a
+    // la mise a jour d'une liste, et celle des greffons est chargee une fois
+    // au montage puis ne se reordonne jamais). La cle reste une correction
+    // legitime, mais releve de l'hygiene et n'est pas gardee ici.
+    const { w } = await monter({
+      '/api/status': {
+        plugins: [
+          { name: 'mpd', kind: 'input', connected: true, admin: true },
+          { name: 'mpd', kind: 'display', connected: true, admin: true },
+        ],
+        active_source: '',
+      },
+    })
+    expect(w.findAll('[data-plugin-row]')).toHaveLength(2)
+    expect(w.text()).toContain('input')
+    expect(w.text()).toContain('display')
   })
 })
 

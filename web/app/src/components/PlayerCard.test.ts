@@ -43,6 +43,24 @@ describe('PlayerCard', () => {
     expect(w.find('[data-volume]').text()).toBe('45 %')
   })
 
+  it('nomme l absence de source au lieu d afficher un vide', () => {
+    // Le coeur demarre desormais sans aucune source (un greffon lent peut
+    // s'annoncer bien apres), et le protocole dit cette absence par la chaine
+    // vide. Sans libelle, on lisait « Source active : » suivi de rien — un
+    // affichage qu'on prend pour une panne d'IHM. La cle brute suffit ici : le
+    // catalogue n'est pas charge sous test, `createT` rend la cle.
+    const w = monteAvec({ source: '' })
+    expect(w.find('[data-source]').text()).toBe('no_source')
+  })
+
+  it('ne dit pas « aucune source » avant la premiere trame', () => {
+    // `etat` a `null`, c'est « l'etat n'est pas encore arrive » et non « il n'y
+    // a pas de source » : annoncer l'absence a cet instant serait faux, et
+    // c'est le piege d'un `||` pose sur `etat?.source`.
+    const w = monteAvec(null)
+    expect(w.find('[data-source]').text()).toBe('')
+  })
+
   it('affiche la présélection en cours quand la Source en déclare une', () => {
     const w = monteAvec({ preset: 4 })
     expect(w.find('[data-player-preset]').text()).toBe('4')

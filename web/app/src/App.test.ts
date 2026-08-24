@@ -84,6 +84,24 @@ describe('navigation du shell', () => {
     w.unmount()
   })
 
+  it('ne produit qu un seul lien pour un greffon annoncé sur plusieurs genres', async () => {
+    // Le cœur pousse une ligne de statut par (nom, genre) : un greffon
+    // `mpd` en `input` + `display` avec page d'admin donne deux lignes de
+    // même nom, toutes deux `admin: true`. La nav ne doit en tirer qu'un
+    // lien, sous peine de deux `RouterLink` sur la même clé (avertissement
+    // Vue de clés dupliquées).
+    stub([
+      { name: 'mpd', admin: true },
+      { name: 'mpd', admin: true },
+    ])
+    await router.push('/')
+    await router.isReady()
+    const w = mount(App, { global: { plugins: [router], stubs: { RouterView: true } } })
+    await flushPromises()
+    expect(w.findAll('a[href="/plugins/mpd/"]')).toHaveLength(1)
+    w.unmount()
+  })
+
   it('amorce le sondage des métriques au montage de la SPA', async () => {
     // L'historique doit exister avant la première visite de l'onglet système :
     // la vue l'affiche, elle ne le collecte plus. `RouterView` est bouché ici,

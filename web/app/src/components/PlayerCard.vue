@@ -33,9 +33,21 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
       </CardTitle>
     </CardHeader>
     <CardContent class="space-y-1 pb-4">
+      <!-- Depuis l'enregistrement a chaud, le coeur demarre sans source : un
+           greffon lent peut s'annoncer bien apres, et la page doit etre la pour
+           le montrer. La chaine vide **est** cette absence — le protocole ne
+           change pas, c'est au rendu de la nommer, sinon on lit « Source
+           active : » suivi de rien et on croit a une panne d'affichage.
+
+           Le ternaire distingue les deux vides : `etat` a `null`, c'est
+           « l'etat n'est pas encore arrive » (avant la premiere trame SSE), et
+           annoncer « Aucune source » a ce moment-la serait faux. Meme idiome
+           que la ligne du volume juste en dessous. -->
       <p class="text-sm text-muted-foreground">
         {{ t('active_source_label') }} :
-        <span class="text-foreground" data-source>{{ etat?.source }}</span>
+        <span class="text-foreground" data-source>{{
+          etat ? etat.source || t('no_source') : ''
+        }}</span>
       </p>
       <!-- La touche numérotée de ce qui joue, quand la Source en déclare une.
            Absente plutôt qu'affichée vide : `null` signifie « rien ne joue, ou

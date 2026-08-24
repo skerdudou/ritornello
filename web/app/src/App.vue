@@ -57,7 +57,12 @@ onMounted(async () => {
     console.warn('GET /api/status indisponible : navigation sans les plugins admin', e)
     return null
   })
-  admins.value = (s?.plugins ?? []).filter((p) => p.admin).map((p) => p.name)
+  // Une ligne de statut par (nom, genre) : un greffon multi-genres avec page
+  // d'admin (ex. `mpd` en `input` + `display`) pousse plusieurs lignes
+  // portant le même `admin: true`. Sans le `Set`, la nav afficherait autant
+  // de liens identiques que de genres — voir la même clé `${name}-${kind}`
+  // dans ConfigView.vue pour le tableau, qui lui doit garder les doublons.
+  admins.value = [...new Set((s?.plugins ?? []).filter((p) => p.admin).map((p) => p.name))]
 })
 </script>
 

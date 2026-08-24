@@ -162,12 +162,12 @@ function aller(id: string) {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="p in status.plugins" :key="p.name" data-plugin-row class="border-t border-border">
+                <tr v-for="p in status.plugins" :key="`${p.name}-${p.kind}`" data-plugin-row class="border-t border-border">
                   <td class="py-1" data-plugin-name>{{ p.name }}</td>
                   <td data-plugin-kind>{{ p.kind }}</td>
                   <td data-plugin-state>
-                    <Badge :variant="p.connected ? 'secondary' : 'destructive'">
-                      {{ p.connected ? t('connected') : t('unavailable') }}
+                    <Badge :variant="p.connected ? 'secondary' : p.stalled ? 'outline' : 'destructive'">
+                      {{ p.connected ? t('connected') : p.stalled ? t('stalled') : t('unavailable') }}
                     </Badge>
                   </td>
                   <td>

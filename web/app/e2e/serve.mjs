@@ -176,10 +176,13 @@ mkdirSync(join(dirConfigNative, 'bin'), { recursive: true })
   chmodSync(cible, 0o755)
 }
 
-// `files` is declared **without** `admin = true`: that field no longer exists
-// (see plugins.rs) — the core offers `--admin-socket` to every plugin, and the
-// one with a page declares it by *binding* that socket. An old file carrying
-// the field still loads, serde ignores it.
+// Neither `admin = true` nor `kind` appears here: both fields are gone from
+// the manifest (see plugins.rs). The core binds one registration socket per
+// plugin before spawning it, then launches the binary with `--register`,
+// `--name` and `--socket-prefix`; the plugin binds its own sockets and only
+// then announces itself on the registration socket with a single line of
+// JSON naming its kinds and whether it carries an admin page. An old file
+// still carrying `kind` loads fine, serde ignores it.
 //
 // Its position in the file does not decide the starting source: the core sorts
 // `source_order` by name and starts on the *persisted* source, which a fresh
@@ -190,17 +193,14 @@ writeFileSync(
   join(dirConfigNative, 'plugins.toml'),
   `[[plugin]]
 name = "radio"
-kind = "source"
 exec = "${racine}/target/debug/ritornello-plugin-radio"
 
 [[plugin]]
 name = "files"
-kind = "source"
 exec = "${racine}/target/debug/ritornello-plugin-files"
 
 [[plugin]]
 name = "generic-input"
-kind = "input"
 exec = "${racine}/target/debug/ritornello-plugin-generic-input"
 `,
 )
