@@ -684,7 +684,14 @@ fn setvol(indice: usize, args: &[String]) -> Issue {
 fn volume(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
     match args.first().and_then(|a| a.parse::<i16>().ok()) {
         Some(delta) => {
-            let nouveau = (i16::from(inst.etat.volume) + delta).clamp(0, 100) as u8;
+            // Élargi en `i32` avant l'addition : `delta` couvre tout `i16`
+            // (±32767), et un volume courant même faible (1) additionné à
+            // `i16::MAX` déborde `i16` avant que `.clamp` n'ait pu agir — un
+            // panic en debug/test (overflow checks actifs par défaut), une
+            // valeur fausse en release. `i32` contient les deux opérandes
+            // (volume ≤ 100, delta ≤ 32767) sans aucun risque de dépassement,
+            // donc le clamp reste le seul endroit qui borne.
+            let nouveau = (i32::from(inst.etat.volume) + i32::from(delta)).clamp(0, 100) as u8;
             Issue::agir(Command::SetVolume(nouveau))
         }
         None => Issue::Refuser(ack(Ack::Arg, indice, "volume", "invalid volume")),
@@ -1656,6 +1663,29 @@ mod tests {
         assert_eq!(cmds(&instantane_au_volume(3), &["volume", "-10"]), vec![Command::SetVolume(0)]);
     }
 
+    #[test]
+    fn volume_aux_bornes_de_i16_est_clampee_sans_deborder() {
+        // `delta` est parsé tel quel depuis l'argument client, donc n'importe
+        // où dans `±32767` : additionner ce maximum à un volume courant même
+        // faible dépasse `i16` avant que `.clamp` n'ait pu agir. Un panic en
+        // debug/test (les vérifications de dépassement sont actives par
+        // défaut dans ce profil), une valeur fausse en release — sur un port
+        // ouvert au réseau local, sans authentification. Les trois volumes de
+        // départ (faible, nul, fort) couvrent les deux sens du débordement.
+        assert_eq!(
+            cmds(&instantane_au_volume(1), &["volume", "32767"]),
+            vec![Command::SetVolume(100)]
+        );
+        assert_eq!(
+            cmds(&instantane_au_volume(0), &["volume", "32767"]),
+            vec![Command::SetVolume(100)]
+        );
+        assert_eq!(
+            cmds(&instantane_au_volume(50), &["volume", "-32768"]),
+            vec![Command::SetVolume(0)]
+        );
+    }
+
     // ------------------------------------------------------------------
     // `seek` / `seekid` / `seekcur`
     // ------------------------------------------------------------------
@@ -1699,6 +1729,16 @@ mod tests {
         let inst = instantane_a_la_position(0);
         assert_eq!(cmds(&inst, &["seek", "0", "42"]), vec![Command::SeekTo(42)]);
         assert_eq!(cmds(&inst, &["seekid", "1", "42"]), vec![Command::SeekTo(42)]);
+    }
+
+    #[test]
+    fn seek_normalise_un_signe_plus_redondant_en_tete_du_temps() {
+        // `seek`/`seekid` restent absolus : un `+` en tête n'y est qu'un signe
+        // de nombre comme un autre (`temps_absolu` ne distingue pas la forme
+        // relative, réservée à `seekcur`), donc `+5` et `5` doivent produire
+        // exactement la même commande.
+        let inst = instantane_a_la_position(0);
+        assert_eq!(cmds(&inst, &["seek", "0", "+5"]), cmds(&inst, &["seek", "0", "5"]));
     }
 
     #[test]
