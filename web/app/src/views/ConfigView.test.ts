@@ -1,4 +1,4 @@
-import { Select, SelectItem, toast } from '@ritornello/ui'
+import { api, Select, SelectItem, toast } from '@ritornello/ui'
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHistory, createRouter } from 'vue-router'
@@ -6,16 +6,24 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 // Meme approche que `useTheme.test.ts` : on garde le vrai module (composants,
 // `api`, ...) et on remplace uniquement les deux entrees de `toast` que cette
 // vue utilise, pour pouvoir les observer sans afficher de notification.
+// `api.put` est enveloppe (pas remplace) : la bascule doit vraiment passer par
+// le `fetch` espionne plus bas, tout en restant observable par les tests.
 vi.mock('@ritornello/ui', async () => {
   const reel = await vi.importActual<typeof import('@ritornello/ui')>('@ritornello/ui')
-  return { ...reel, toast: { ...reel.toast, error: vi.fn(), success: vi.fn() } }
+  return {
+    ...reel,
+    api: { ...reel.api, put: vi.fn(reel.api.put) },
+    toast: { ...reel.toast, error: vi.fn(), success: vi.fn() },
+  }
 })
 
 const CATALOGUE = {
   config_title: 'Configuration',
   plugins_title: 'Plugins',
-  col_plugin: 'Plugin', col_kind: 'Genre', col_state: 'État', col_admin: 'Admin',
-  connected: 'connecté', unavailable: 'indisponible', stalled: 'figé', admin_link: 'admin',
+  col_plugin: 'Plugin', col_kind: 'Genre', col_state: 'État', col_admin: 'Admin', col_enabled: 'Actif',
+  connected: 'connecté', unavailable: 'indisponible', stalled: 'figé', disabled: 'désactivé',
+  admin_link: 'admin', toggle_plugin: 'Activer ou désactiver {name}',
+  plugin_enabled: '{name} activé.', plugin_disabled: '{name} désactivé.',
   audio_output: 'Sortie audio', audio_default_device: 'Par défaut (système)',
   language: 'Langue', change: 'Changer', ok: 'OK',
   recent_errors: 'Dernières erreurs',
@@ -117,10 +125,21 @@ async function monter(surcharges: Partial<Charges> = {}, erreurPut?: string) {
   return { w, spy, puts, table }
 }
 
+/**
+ * Sucre pour les tests de bascule : ils ne surchargent que `/api/status`,
+ * contrairement a `monter` qui attend une charge par URL. Reprend le meme
+ * montage plutot que d'en inventer un second.
+ */
+async function monterAvecStatut(statut: unknown) {
+  const { w } = await monter({ '/api/status': statut })
+  return w
+}
+
 function reinitialiser() {
   vi.unstubAllGlobals()
   vi.mocked(toast.error).mockClear()
   vi.mocked(toast.success).mockClear()
+  vi.mocked(api.put).mockClear()
 }
 
 // La plus grande surface migree du chantier n'avait aucun test unitaire :
@@ -134,7 +153,7 @@ function reinitialiser() {
 describe('ConfigView — table des plugins', () => {
   beforeEach(reinitialiser)
 
-  it('rend une ligne par plugin avec ses quatre colonnes', async () => {
+  it('rend une ligne par plugin avec ses cinq colonnes', async () => {
     const { w } = await monter()
     const lignes = w.findAll('[data-plugin-row]')
     expect(lignes).toHaveLength(2)
@@ -142,9 +161,9 @@ describe('ConfigView — table des plugins', () => {
     expect(lignes[0]!.find('[data-plugin-kind]').text()).toBe('source')
     expect(lignes[1]!.find('[data-plugin-name]').text()).toBe('cd')
     expect(lignes[1]!.find('[data-plugin-kind]').text()).toBe('source')
-    // Les quatre en-tetes sont traduits depuis le catalogue du coeur.
+    // Les cinq en-tetes sont traduits depuis le catalogue du coeur.
     const entetes = w.findAll('th').map((h) => h.text())
-    expect(entetes).toEqual(['Plugin', 'Genre', 'État', 'Admin'])
+    expect(entetes).toEqual(['Plugin', 'Genre', 'État', 'Admin', 'Actif'])
   })
 
   it('distingue l’état connecté de l’état indisponible', async () => {
@@ -204,25 +223,117 @@ describe('ConfigView — table des plugins', () => {
     expect(w.text()).toContain('Plugins')
   })
 
-  it('rend une ligne par (nom, genre) pour un greffon multi-genres', async () => {
-    // Un greffon peut annoncer plusieurs genres : chacun doit obtenir sa
-    // propre ligne. Ce test ne garantit PAS la cle de rendu par (nom, genre) —
-    // Vue rend les deux lignes meme avec une cle dupliquee (il n'avertit qu'a
-    // la mise a jour d'une liste, et celle des greffons est chargee une fois
-    // au montage puis ne se reordonne jamais). La cle reste une correction
-    // legitime, mais releve de l'hygiene et n'est pas gardee ici.
-    const { w } = await monter({
-      '/api/status': {
-        plugins: [
-          { name: 'mpd', kind: 'input', connected: true, admin: true },
-          { name: 'mpd', kind: 'display', connected: true, admin: true },
-        ],
-        active_source: '',
-      },
+  it('regroupe les genres d un meme greffon sur une seule ligne', async () => {
+    // Le tableau doit montrer l'unité qu'on manipule : la bascule porte sur le
+    // greffon, pas sur un de ses genres.
+    const wrapper = await monterAvecStatut({
+      plugins: [
+        { name: 'files', kind: 'source', connected: true, admin: true },
+        { name: 'files', kind: 'metadata', connected: true, admin: true },
+        { name: 'cd', kind: 'unknown', connected: false, admin: false, disabled: true },
+      ],
+      active_source: 'files',
     })
-    expect(w.findAll('[data-plugin-row]')).toHaveLength(2)
-    expect(w.text()).toContain('input')
-    expect(w.text()).toContain('display')
+    const lignes = wrapper.findAll('[data-plugin-row]')
+    expect(lignes).toHaveLength(2)
+    expect(lignes[0].find('[data-plugin-kind]').text()).toBe('source, metadata')
+  })
+
+  it('bascule un greffon et recharge', async () => {
+    const wrapper = await monterAvecStatut({
+      plugins: [{ name: 'cd', kind: 'source', connected: true, admin: false }],
+      active_source: 'cd',
+    })
+    await wrapper.find('[data-plugin-toggle]').trigger('click')
+    await flushPromises()
+    expect(api.put).toHaveBeenCalledWith('/api/plugins/cd/enabled', { enabled: false })
+  })
+
+  it('dit pourquoi quand le coeur refuse', async () => {
+    vi.mocked(api.put).mockResolvedValueOnce('plugins.toml est en lecture seule')
+    const wrapper = await monterAvecStatut({
+      plugins: [{ name: 'cd', kind: 'source', connected: true, admin: false }],
+      active_source: 'cd',
+    })
+    await wrapper.find('[data-plugin-toggle]').trigger('click')
+    await flushPromises()
+    expect(toast.error).toHaveBeenCalledWith('plugins.toml est en lecture seule')
+  })
+
+  // Aujourd'hui, `replace_plugin_lines` cote coeur (status.rs) remplace toutes
+  // les lignes d'un nom d'un bloc : soit des genres reels, soit un unique
+  // « unknown » synthetique — jamais un melange. Ce garde-fou n'en depend pas :
+  // il verifie l'affichage pour un jeu de lignes que le serveur ne produit pas
+  // encore, dans les deux ordres, pour prouver que le regroupement ne se fie
+  // pas a l'ordre d'arrivee.
+  it('n affiche jamais unknown a cote d un vrai genre : reel puis unknown', async () => {
+    const wrapper = await monterAvecStatut({
+      plugins: [
+        { name: 'x', kind: 'source', connected: true, admin: false },
+        { name: 'x', kind: 'unknown', connected: true, admin: false },
+      ],
+      active_source: '',
+    })
+    expect(wrapper.find('[data-plugin-kind]').text()).toBe('source')
+  })
+
+  it('n affiche jamais unknown a cote d un vrai genre : unknown puis reel', async () => {
+    const wrapper = await monterAvecStatut({
+      plugins: [
+        { name: 'x', kind: 'unknown', connected: true, admin: false },
+        { name: 'x', kind: 'source', connected: true, admin: false },
+      ],
+      active_source: '',
+    })
+    expect(wrapper.find('[data-plugin-kind]').text()).toBe('source')
+  })
+
+  it('un greffon a moitie connecte ne se lit pas comme connecte', async () => {
+    // Seul le test de regroupement existant connecte les deux genres : sans
+    // celui-ci, une regression qui ferait un OU au lieu d'un ET passerait
+    // inapercue.
+    const wrapper = await monterAvecStatut({
+      plugins: [
+        { name: 'files', kind: 'source', connected: true, admin: false },
+        { name: 'files', kind: 'metadata', connected: false, admin: false },
+      ],
+      active_source: 'files',
+    })
+    expect(wrapper.find('[data-plugin-state]').text()).toBe('indisponible')
+  })
+
+  it('encode le nom du greffon dans l URL de la bascule', async () => {
+    const wrapper = await monterAvecStatut({
+      plugins: [{ name: 'my plugin', kind: 'source', connected: true, admin: false }],
+      active_source: 'my plugin',
+    })
+    await wrapper.find('[data-plugin-toggle]').trigger('click')
+    await flushPromises()
+    expect(api.put).toHaveBeenCalledWith('/api/plugins/my%20plugin/enabled', { enabled: false })
+  })
+
+  // Fix 4 de la revue finale : désactiver la source active peut coûter
+  // jusqu'à 15 s si l'entrante ou la sortante ne répond pas. Sans marqueur en
+  // vol, l'interrupteur restait cliquable — et cliquable deux fois — pendant
+  // toute cette fenêtre.
+  it('desactive l interrupteur tant que la bascule est en vol, le rend ensuite', async () => {
+    let resoudre: (v: string | null) => void = () => {}
+    const enVol = new Promise<string | null>((r) => { resoudre = r })
+    vi.mocked(api.put).mockReturnValueOnce(enVol)
+    const wrapper = await monterAvecStatut({
+      plugins: [{ name: 'cd', kind: 'source', connected: true, admin: false }],
+      active_source: 'cd',
+    })
+
+    await wrapper.find('[data-plugin-toggle]').trigger('click')
+    expect(wrapper.find('[data-plugin-toggle]').attributes('disabled')).toBeDefined()
+    // Toujours en vol : un second clic ne doit pas doubler l'appel.
+    await wrapper.find('[data-plugin-toggle]').trigger('click')
+    expect(api.put).toHaveBeenCalledTimes(1)
+
+    resoudre(null)
+    await flushPromises()
+    expect(wrapper.find('[data-plugin-toggle]').attributes('disabled')).toBeUndefined()
   })
 })
 
