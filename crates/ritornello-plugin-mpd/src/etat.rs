@@ -12,7 +12,7 @@
 //! comparaison **préalable** dans `attendre`. C'est cette comparaison qui
 //! interdit le réveil manqué ; le `Notify` ne sert qu'à ne pas sonder.
 
-use ritornello_proto::{Command, Playback, PlayerState};
+use ritornello_proto::{Catalogue, Command, Playback, PlayerState, Preset, SourceCatalogue};
 use tokio::sync::{Notify, RwLock};
 
 /// Nombre de sous-systèmes, donc taille du tableau de compteurs. Une constante
@@ -43,12 +43,10 @@ pub enum Sujet {
     Playlist = 2,
     /// Le catalogue des sources ou de leurs présélections change.
     ///
-    /// **Rien ne l'incrémente encore.** Le sous-système existe dans le
-    /// protocole dès maintenant — un client peut l'inclure dans son `idle` et
-    /// doit obtenir une attente valide, pas un refus, et c'est ce que
-    /// `commandes::idle` en fait depuis la Task 6 — mais son déclencheur est le
-    /// catalogue, qui n'entre dans ce greffon qu'à la Task 13. C'est elle qui
-    /// l'incrémentera, depuis `appliquer_catalogue`.
+    /// Son unique déclencheur est `appliquer_catalogue`, et c'est tout le sens
+    /// des deux canaux : une trame d'état, même changeant tout le reste, ne le
+    /// bouge jamais — sinon un client abonné aux seules listes enregistrées
+    /// serait réveillé à chaque seconde de lecture.
     StoredPlaylist = 3,
 }
 
@@ -86,9 +84,40 @@ pub struct Instantane {
     /// endormie a mémorisé ce tableau, le compare à celui-ci, et repart
     /// aussitôt si quelque chose a bougé pendant qu'elle s'installait.
     pub versions: [u64; NB_SUJETS],
+    /// Le dernier catalogue reçu du cœur : **toutes** les sources déclarées,
+    /// dans l'ordre de bascule de `SourceCycle`, et les présélections nommées
+    /// de chacune quand elle sait les énumérer.
+    ///
+    /// Il décrit toutes les sources et non la seule active, et c'est
+    /// indispensable : `listplaylistinfo "radio"` s'interroge pendant que le cd
+    /// joue. Il arrive par un canal distinct des trames d'état (voir
+    /// `appliquer_catalogue`), donc il survit à n'importe quel nombre de trames
+    /// sans être renvoyé.
+    ///
+    /// Vide avant la première trame de catalogue : un client verra alors une
+    /// liste de listes enregistrées vide, et la file d'attente retombe sur la
+    /// synthèse depuis `preset_count`. C'est bien la vérité de cet instant —
+    /// le greffon ne sait encore rien du catalogue.
+    pub catalogue: Catalogue,
 }
 
 impl Instantane {
+    /// Les présélections nommées de cette source, telles que le catalogue les
+    /// donne — ou `None` si le catalogue ne connaît pas ce nom.
+    ///
+    /// La distinction compte pour `listplaylistinfo` et `load` : un nom absent
+    /// du catalogue est un `ACK 50` (« cette liste n'existe pas »), alors qu'un
+    /// nom connu dont la liste est **vide** est une source qui ne sait pas
+    /// énumérer — une réponse vide et bien formée, pas une erreur.
+    pub fn catalogue_source(&self, nom: &str) -> Option<&SourceCatalogue> {
+        self.catalogue.sources.iter().find(|s| s.name == nom)
+    }
+
+    /// Les présélections de la source **active**, ou une tranche vide. C'est
+    /// d'elles que la file d'attente MPD est faite.
+    pub fn presets_actifs(&self) -> &[Preset] {
+        self.catalogue_source(&self.etat.source).map_or(&[], |s| s.presets.as_slice())
+    }
     /// Ce qu'il faut publier comme état de lecture : l'optimiste, pas le brut
     /// de la trame.
     ///
@@ -197,11 +226,11 @@ impl EtatPartage {
                 marquer(&mut bouges, Sujet::Player);
             }
             if etat.preset_count != avant.preset_count {
-                // `preset_count` **est** la longueur de la file d'attente MPD,
-                // celle que `status` publie sous `playlistlength` : tant que le
-                // catalogue n'est pas là (Task 13), le nombre de présélections
-                // de la source active est tout ce que le greffon sait de la
-                // file. Un disque inséré passe de `None`/`Some(0)` à
+                // `preset_count` est ce dont la file d'attente MPD est faite
+                // **à défaut de liste nommée** : pour une source qui ne sait
+                // pas énumérer (le cd, les fichiers), c'est tout ce que le
+                // greffon sait de la file. Un disque inséré passe de
+                // `None`/`Some(0)` à
                 // `Some(12)` sans changer de nom de source, et sans cette
                 // comparaison aucun client n'apprendrait qu'il y a douze
                 // pistes à jouer — l'action la plus ordinaire qui soit.
@@ -240,6 +269,66 @@ impl EtatPartage {
         }
         if !bouges.is_empty() {
             tracing::trace!("mpd frame moved subsystems {bouges:?}");
+            self.reveil.notify_waiters();
+        }
+    }
+
+    /// Applique un catalogue reçu du cœur : la liste des sources et leurs
+    /// présélections nommées.
+    ///
+    /// **Deux sujets, et pas toujours les deux.**
+    /// - `StoredPlaylist` bouge dès que le catalogue diffère du précédent :
+    ///   c'est le sous-système que MPD réserve aux listes enregistrées, et
+    ///   chaque source *est* une liste enregistrée ici.
+    /// - `Playlist` (et avec lui `version_file`) ne bouge que si les
+    ///   présélections de la source **active** ont changé — la file d'attente
+    ///   vient de là et de nulle part ailleurs. Renommer une station d'une
+    ///   source qui ne joue pas change les listes enregistrées sans toucher à
+    ///   la file : réveiller `Playlist` ferait retélécharger 51 lignes à tous
+    ///   les clients pour rien, et un `plchanges` répondrait une file
+    ///   identique sous une version neuve.
+    ///
+    /// Comparaison et non affectation sèche, exactement comme `appliquer_etat`
+    /// et pour la même raison : le cœur envoie la valeur courante **à la
+    /// connexion**, donc une reconnexion de la moitié `display` repasse ici
+    /// avec un catalogue identique, et cela ne doit pas passer pour un
+    /// changement — sinon chaque redémarrage du greffon réveillerait tous les
+    /// clients.
+    pub async fn appliquer_catalogue(&self, catalogue: Catalogue) {
+        let mut bouges = Vec::new();
+        {
+            let mut inst = self.inner.write().await;
+            if inst.catalogue == catalogue {
+                return;
+            }
+            // Tout changement réel du catalogue bouge `StoredPlaylist` : on est
+            // passé la déduplication ci-dessus, donc le catalogue diffère
+            // vraiment. C'est ce qui réveille un client endormi sur
+            // `idle stored_playlist` — le seul sous-système que rien
+            // n'incrémentait avant cette tâche.
+            marquer(&mut bouges, Sujet::StoredPlaylist);
+            // Lu avant l'écrasement, sur le nom de source de l'instantané
+            // courant : c'est la source active telle que la dernière trame
+            // d'état l'a dite, la seule autorité sur ce qui joue.
+            let presets_avant = inst.presets_actifs().to_vec();
+            inst.catalogue = catalogue;
+            if inst.presets_actifs() != presets_avant.as_slice() {
+                marquer(&mut bouges, Sujet::Playlist);
+            }
+
+            for sujet in &bouges {
+                inst.versions[*sujet as usize] += 1;
+            }
+            if bouges.contains(&Sujet::Playlist) {
+                // Le même appariement que dans `appliquer_etat` : les deux
+                // compteurs disent la même chose à deux publics (`idle` et le
+                // champ `playlist` de `status`), et les désynchroniser ferait
+                // répondre `plchanges` à côté du réveil qui vient de partir.
+                inst.version_file += 1;
+            }
+        }
+        if !bouges.is_empty() {
+            tracing::trace!("mpd catalogue moved subsystems {bouges:?}");
             self.reveil.notify_waiters();
         }
     }
@@ -375,6 +464,31 @@ impl EtatPartage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Un catalogue tel que le cœur en émet : chaque source déclarée est
+    /// nommée, et ses présélections sont celles qu'elle sait énumérer (vides
+    /// pour le cd et les fichiers, qui restent au corps par défaut de
+    /// `list_presets`).
+    fn catalogue_de(sources: &[(&str, &[(u8, &str)])]) -> Catalogue {
+        Catalogue {
+            sources: sources
+                .iter()
+                .map(|(nom, presets)| SourceCatalogue {
+                    name: (*nom).to_string(),
+                    presets: presets
+                        .iter()
+                        .map(|(index, nom)| Preset { index: *index, name: (*nom).to_string() })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Le plus petit catalogue que le cœur puisse émettre : une source nommée,
+    /// avec une présélection.
+    fn catalogue_a_une_source() -> Catalogue {
+        catalogue_de(&[("radio", &[(1, "FIP")])])
+    }
 
     #[tokio::test]
     async fn lire_rend_letat_par_defaut_avant_toute_application() {
@@ -576,9 +690,8 @@ mod tests {
 
     #[tokio::test]
     async fn aucune_trame_ne_bouge_stored_playlist() {
-        // Le sujet existe dans le protocole mais son declencheur est le
-        // catalogue, qui n'entre dans ce greffon qu'a la Task 13. Une trame
-        // qui change tout ne doit pas l'incrementer au passage.
+        // Le seul declencheur de ce sujet est `appliquer_catalogue`. Une trame
+        // qui change tout le reste ne doit pas l'incrementer au passage.
         let e = EtatPartage::default();
         let avant = e.versions().await;
 
@@ -597,6 +710,166 @@ mod tests {
             avant[Sujet::StoredPlaylist as usize],
             e.versions().await[Sujet::StoredPlaylist as usize]
         );
+    }
+
+    #[tokio::test]
+    async fn un_catalogue_neuf_reveille_stored_playlist() {
+        let e = EtatPartage::default();
+        let avant = e.versions().await;
+
+        e.appliquer_catalogue(catalogue_a_une_source()).await;
+
+        let apres = e.versions().await;
+        assert_ne!(avant[Sujet::StoredPlaylist as usize], apres[Sujet::StoredPlaylist as usize]);
+        assert_eq!(
+            e.lire().await.catalogue,
+            catalogue_a_une_source(),
+            "le catalogue doit aussi etre memorise, pas seulement compte"
+        );
+    }
+
+    #[tokio::test]
+    async fn un_catalogue_identique_ne_reveille_personne() {
+        // Le coeur envoie la valeur courante **a la connexion** : une
+        // reconnexion de la moitie `display` repasse ici avec le meme
+        // catalogue, et ne doit pas passer pour un changement — sinon chaque
+        // redemarrage du greffon reveille tous les clients.
+        let e = EtatPartage::default();
+        e.appliquer_catalogue(catalogue_a_une_source()).await;
+        let avant = e.versions().await;
+        let version_file = e.lire().await.version_file;
+
+        e.appliquer_catalogue(catalogue_a_une_source()).await;
+
+        assert_eq!(avant, e.versions().await);
+        assert_eq!(version_file, e.lire().await.version_file);
+    }
+
+    #[tokio::test]
+    async fn un_catalogue_qui_touche_la_source_active_bouge_aussi_la_file() {
+        // La file d'attente MPD *est* la liste des preselections de la source
+        // active : renommer une station de la radio pendant qu'elle joue
+        // change la file, donc `Playlist` et `version_file` avec elle.
+        let e = EtatPartage::default();
+        e.appliquer_etat(PlayerState { source: "radio".into(), ..Default::default() }).await;
+        e.appliquer_catalogue(catalogue_de(&[("radio", &[(1, "FIP")]), ("cd", &[])])).await;
+        let avant = e.versions().await;
+        let version_file = e.lire().await.version_file;
+
+        e.appliquer_catalogue(catalogue_de(&[("radio", &[(1, "FIP Rock")]), ("cd", &[])])).await;
+
+        let apres = e.versions().await;
+        assert_ne!(avant[Sujet::StoredPlaylist as usize], apres[Sujet::StoredPlaylist as usize]);
+        assert_ne!(avant[Sujet::Playlist as usize], apres[Sujet::Playlist as usize]);
+        assert!(
+            e.lire().await.version_file > version_file,
+            "version_file doit avancer avec la file, sinon plchanges mentira"
+        );
+    }
+
+    #[tokio::test]
+    async fn un_catalogue_qui_ne_touche_quune_source_inactive_laisse_la_file_tranquille() {
+        // Le pendant, et celui qui a une valeur : la radio se renomme une
+        // station pendant que le cd joue. Les listes enregistrees ont change,
+        // la file d'attente non — reveiller `Playlist` ferait retelecharger la
+        // file a tous les clients, et `plchanges` rendrait une file identique
+        // sous une version neuve.
+        let e = EtatPartage::default();
+        e.appliquer_etat(PlayerState { source: "cd".into(), ..Default::default() }).await;
+        e.appliquer_catalogue(catalogue_de(&[("radio", &[(1, "FIP")]), ("cd", &[])])).await;
+        let avant = e.versions().await;
+        let version_file = e.lire().await.version_file;
+
+        e.appliquer_catalogue(catalogue_de(&[("radio", &[(1, "FIP"), (5, "Nova")]), ("cd", &[])]))
+            .await;
+
+        let apres = e.versions().await;
+        assert_ne!(
+            avant[Sujet::StoredPlaylist as usize],
+            apres[Sujet::StoredPlaylist as usize],
+            "les listes enregistrees ont bel et bien change"
+        );
+        assert_eq!(
+            avant[Sujet::Playlist as usize],
+            apres[Sujet::Playlist as usize],
+            "la file d'attente vient de la source active, et elle n'a pas bouge"
+        );
+        assert_eq!(version_file, e.lire().await.version_file);
+        assert_eq!(
+            avant[Sujet::Player as usize],
+            apres[Sujet::Player as usize],
+            "un catalogue ne dit rien de ce qui joue"
+        );
+    }
+
+    #[tokio::test]
+    async fn le_catalogue_ne_voyage_pas_avec_chaque_trame_detat() {
+        // Non-regression du choix des deux canaux : dix trames d'etat, un seul
+        // catalogue. Les trames sont toutes differentes (le volume monte),
+        // donc chacune reveille bel et bien quelque chose — ce test ne peut
+        // pas passer parce qu'il n'y aurait rien eu a appliquer.
+        let e = EtatPartage::default();
+        e.appliquer_catalogue(catalogue_a_une_source()).await;
+        let apres_catalogue = e.versions().await;
+        for v in 1..=10u8 {
+            e.appliquer_etat(PlayerState { volume: v, ..Default::default() }).await;
+        }
+        let apres = e.versions().await;
+        assert_eq!(apres[Sujet::StoredPlaylist as usize], apres_catalogue[Sujet::StoredPlaylist as usize]);
+        assert_eq!(
+            apres[Sujet::Mixer as usize],
+            apres_catalogue[Sujet::Mixer as usize] + 10,
+            "les dix trames doivent avoir compte pour dix, sinon ce test ne prouve rien"
+        );
+        assert_eq!(e.lire().await.catalogue, catalogue_a_une_source(), "et le catalogue survit aux trames");
+    }
+
+    #[tokio::test]
+    async fn catalogue_source_distingue_le_nom_inconnu_de_la_liste_vide() {
+        // La distinction sur laquelle reposent `listplaylistinfo` et `load` :
+        // un nom absent du catalogue est un `ACK 50`, un nom connu sans
+        // preselection est une reponse vide et bien formee.
+        let e = EtatPartage::default();
+        e.appliquer_catalogue(catalogue_de(&[("radio", &[(1, "FIP")]), ("cd", &[])])).await;
+        let inst = e.lire().await;
+
+        assert!(inst.catalogue_source("nawak").is_none());
+        assert_eq!(inst.catalogue_source("cd").map(|s| s.presets.len()), Some(0));
+        assert_eq!(inst.catalogue_source("radio").map(|s| s.presets.len()), Some(1));
+    }
+
+    #[tokio::test]
+    async fn les_presets_actifs_suivent_la_source_que_la_trame_designe() {
+        // `presets_actifs` lit le nom de source de la derniere trame : c'est
+        // elle et non le catalogue qui dit ce qui joue.
+        let e = EtatPartage::default();
+        e.appliquer_catalogue(catalogue_de(&[("radio", &[(1, "FIP")]), ("cd", &[])])).await;
+
+        e.appliquer_etat(PlayerState { source: "cd".into(), ..Default::default() }).await;
+        assert!(e.lire().await.presets_actifs().is_empty());
+
+        e.appliquer_etat(PlayerState { source: "radio".into(), ..Default::default() }).await;
+        assert_eq!(e.lire().await.presets_actifs().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn un_catalogue_reveille_un_dormeur_inscrit_sur_les_listes_enregistrees() {
+        // La contrepartie utile : un client qui dort sur `stored_playlist`
+        // doit repartir quand le catalogue arrive, et c'est le seul evenement
+        // qui le reveillera jamais.
+        let e = std::sync::Arc::new(EtatPartage::default());
+        let vues = e.versions().await;
+        let dormeur = {
+            let e = e.clone();
+            tokio::spawn(async move { e.attendre(&[Sujet::StoredPlaylist], vues).await })
+        };
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        e.appliquer_catalogue(catalogue_a_une_source()).await;
+
+        assert_eq!(dormeur.await.unwrap(), vec![Sujet::StoredPlaylist]);
     }
 
     #[tokio::test]

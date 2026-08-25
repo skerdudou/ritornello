@@ -18,7 +18,7 @@ use config::Config;
 use etat::EtatPartage;
 use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::{DisplayPlugin, InputPlugin, Runtime};
-use ritornello_proto::{InputMessage, PlayerState};
+use ritornello_proto::{Catalogue, InputMessage, PlayerState};
 use session::accepter;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -41,6 +41,19 @@ struct AfficheurMpd {
 impl DisplayPlugin for AfficheurMpd {
     async fn show(&mut self, state: PlayerState) -> Result<()> {
         self.etat.appliquer_etat(state).await;
+        Ok(())
+    }
+
+    /// Le catalogue, sur son propre canal : c'est de lui que viennent les
+    /// listes enregistrées (`listplaylists`) et les vrais noms de la file
+    /// d'attente.
+    ///
+    /// Le corps par défaut du trait ignore cette trame ; ce greffon est le
+    /// premier afficheur à s'y intéresser. Un seul appel au démarrage, puis un
+    /// par changement réel — pas un par trame d'état, et c'est tout le sens des
+    /// deux canaux (voir `EtatPartage::appliquer_catalogue`).
+    async fn catalogue(&mut self, c: Catalogue) -> Result<()> {
+        self.etat.appliquer_catalogue(c).await;
         Ok(())
     }
 }
@@ -114,6 +127,45 @@ mod tests {
         let envoye = PlayerState { volume: 17, ..Default::default() };
         afficheur.show(envoye.clone()).await.unwrap();
         assert_eq!(etat.lire().await.etat, envoye);
+    }
+
+    #[tokio::test]
+    async fn afficheur_mpd_depose_le_catalogue_recu_dans_letat_partage() {
+        // Le seul chemin par lequel le catalogue entre dans le greffon : sans
+        // cette surcharge, le corps par défaut du trait l'ignorerait en
+        // silence et `listplaylists` resterait vide pour toujours.
+        let etat = Arc::new(EtatPartage::default());
+        let mut afficheur = AfficheurMpd { etat: etat.clone() };
+        let envoye = Catalogue {
+            sources: vec![ritornello_proto::SourceCatalogue {
+                name: "radio".into(),
+                presets: vec![ritornello_proto::Preset { index: 5, name: "Nova".into() }],
+            }],
+        };
+
+        afficheur.catalogue(envoye.clone()).await.unwrap();
+
+        assert_eq!(etat.lire().await.catalogue, envoye);
+    }
+
+    #[tokio::test]
+    async fn une_trame_detat_ne_touche_pas_au_catalogue_deja_recu() {
+        // Les deux moitiés d'un même afficheur écrivent dans le même état
+        // partagé, et chacune ne doit toucher que le sien : un `show` qui
+        // remettrait l'instantané à neuf effacerait le catalogue reçu au
+        // démarrage, et plus rien ne le renverrait.
+        let etat = Arc::new(EtatPartage::default());
+        let mut afficheur = AfficheurMpd { etat: etat.clone() };
+        let catalogue = Catalogue {
+            sources: vec![ritornello_proto::SourceCatalogue { name: "radio".into(), presets: vec![] }],
+        };
+        afficheur.catalogue(catalogue.clone()).await.unwrap();
+
+        afficheur.show(PlayerState { source: "radio".into(), volume: 17, ..Default::default() }).await.unwrap();
+
+        let inst = etat.lire().await;
+        assert_eq!(inst.catalogue, catalogue);
+        assert_eq!(inst.etat.volume, 17);
     }
 
     #[tokio::test(start_paused = true)]

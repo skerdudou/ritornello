@@ -12,7 +12,7 @@
 
 use crate::etat::{Instantane, Sujet};
 use crate::protocole::{ack, ligne, Ack};
-use ritornello_proto::{Command, Playback};
+use ritornello_proto::{Command, Playback, Preset, SourceCatalogue};
 use std::ops::Range;
 
 /// Ce que le traitement d'une commande demande à la session de faire.
@@ -71,17 +71,15 @@ impl Issue {
 /// Un test parcourt la liste et vérifie que chaque nom y est réellement traité.
 ///
 /// Ordre alphabétique : les clients n'en tirent rien, mais un trou se voit.
-///
-/// **Task 7** y ajoute les commandes d'action (`play`, `pause`, `setvol`,
-/// `seek`, `next`, …), **Task 13** `load`, `listplaylists` et
-/// `listplaylistinfo` quand le catalogue arrive. Tant qu'elles n'y sont pas,
-/// elles n'existent pas — et un client les grise plutôt que de les tenter.
 pub const COMMANDES: &[&str] = &[
     "close",
     "commands",
     "currentsong",
     "decoders",
     "idle",
+    "listplaylistinfo",
+    "listplaylists",
+    "load",
     "next",
     "noidle",
     "notcommands",
@@ -114,27 +112,55 @@ pub struct Entree {
     pub nom: String,
 }
 
+/// Les entrées d'une liste de présélections nommées, telle que le catalogue la
+/// donne. Les indices sont recopiés **tels quels**, y compris creux : rien ici
+/// ne dérive un rang d'un indice.
+fn entrees_nommees(presets: &[Preset]) -> Vec<Entree> {
+    presets.iter().map(|p| Entree { index: p.index, nom: p.name.clone() }).collect()
+}
+
 /// La file d'attente MPD : les présélections de la source active.
 ///
-/// Un seul cas aujourd'hui, la **synthèse** : à défaut de savoir énumérer, le
-/// greffon fabrique `1..=preset_count`, et la suite est alors dense par
-/// construction (`Pos = Id - 1`).
-///
-/// **Task 13 ajoute la branche « vraie liste » en tête**, dès que le catalogue
-/// entre dans le greffon : une source qui sait énumérer rend des indices
-/// éventuellement **creux** — `preset_count` est le *maximum* des numéros et
-/// non leur nombre, donc des stations 1, 5 et 99 sont légales — là où les
-/// positions MPD restent denses. C'est le piège du chantier, et la forme
-/// « retour anticipé, synthèse en dernier » est faite pour qu'il n'y ait rien
-/// à restructurer à ce moment-là.
+/// **Deux branches, et l'ordre entre elles est le sujet.**
+/// 1. La **vraie liste**, quand le catalogue en donne une non vide pour la
+///    source active. Ses indices sont ceux de la source, éventuellement
+///    **creux** : `preset_count` est le *maximum* des numéros et non leur
+///    nombre, donc des stations 1, 5 et 99 sont légales, là où les positions
+///    MPD restent denses. La correspondance passe donc par le **rang** dans
+///    cette liste (`position_vers_index`), jamais par une soustraction de 1.
+/// 2. La **synthèse**, à défaut : le greffon fabrique `1..=preset_count`, et la
+///    suite est alors dense par construction (`Pos = Id - 1`). C'est le cas du
+///    cd et des fichiers, qui ne savent pas énumérer — leur entrée de catalogue
+///    porte une liste vide, ce qui veut dire « je n'ai que des numéros » et non
+///    « je n'ai rien ». Retomber sur `preset_count` est alors la seule façon de
+///    voir les douze pistes d'un disque.
 ///
 /// `None` devient **zéro entrée** et non les neuf de la grille historique de
 /// l'IHM : cette grille est un pavé numérique, pas une liste. Annoncer neuf
 /// entrées ferait demander à un client neuf choses dont aucune n'existe.
 pub fn file_attente(inst: &Instantane) -> Vec<Entree> {
+    let presets = inst.presets_actifs();
+    if !presets.is_empty() {
+        return entrees_nommees(presets);
+    }
     let n = inst.etat.preset_count.unwrap_or(0);
     (1..=n).map(|i| Entree { index: i, nom: i.to_string() }).collect()
 }
+
+/// La date que MPD attend sur chaque entrée de `listplaylists`, faute d'en
+/// avoir une.
+///
+/// Aucune date n'existe côté appareil : une source n'est pas un fichier, elle
+/// n'a ni date de modification ni rien qui y ressemble, et en fabriquer une
+/// depuis l'horloge courante ferait croire à un client qu'une liste vient de
+/// changer chaque fois qu'il la relit. Une constante, donc — et l'époque plutôt
+/// qu'une date arbitraire, parce qu'elle se lit comme « inconnue ».
+///
+/// **Émise et non omise** : le champ est facultatif dans la documentation du
+/// protocole, mais des clients le lisent sans le garder (libmpdclient trie ses
+/// listes dessus), et son absence les fait trébucher. Le rendre coûte une ligne
+/// et ne mentira jamais, puisqu'il ne bougera jamais.
+const DATE_INCONNUE: &str = "1970-01-01T00:00:00Z";
 
 /// Traite une commande déjà découpée. `indice` est son rang dans une liste de
 /// commandes (0 hors liste) : il doit traverser jusqu'à l'`ACK`, sinon un
@@ -152,6 +178,13 @@ pub fn traiter(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
         "currentsong" => Issue::lignes(currentsong(inst)),
         "playlistinfo" => playlistinfo(inst, indice, reste),
         "plchanges" => plchanges(inst, indice, reste),
+        // Chaque source du catalogue **est** une liste enregistrée : c'est la
+        // correspondance qui rend l'appareil lisible depuis un client MPD, où
+        // « charger la liste radio » veut dire « écouter la radio ».
+        "listplaylists" => Issue::lignes(listplaylists(inst)),
+        // Interrogeable sur n'importe quelle source, y compris une qui ne joue
+        // pas : c'est un fait sur une source, pas sur ce qui joue.
+        "listplaylistinfo" => listplaylistinfo(inst, indice, reste),
         "commands" => Issue::lignes(COMMANDES.iter().map(|c| ligne("command", c)).collect()),
         // Son pendant, que de vieux clients demandent juste apres `commands`.
         // Vide, et c'est la reponse honnete : `notcommands` liste ce que le mot
@@ -193,13 +226,13 @@ pub fn traiter(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
         "noidle" => Issue::Annuler,
         // `play [POS]` : POS est le **rang** dans la file (base 0, celui que
         // `Pos` publie), jamais l'indice de présélection moins un — les deux
-        // ne coïncident plus dès qu'une source sait énumérer une liste creuse
-        // (Task 13). Sans argument, ce n'est pas une sélection mais la touche
+        // ne coïncident plus dès qu'une source énumère une liste creuse.
+        // Sans argument, ce n'est pas une sélection mais la touche
         // Lecture : on relance ce qui était chargé.
         "play" => play(inst, indice, reste),
         // `playid <ID>` : l'indice tel quel, mais vérifié dans la file — un
-        // `ID` à l'intérieur du maximum (`preset_count`) sans y être une fois
-        // la file creuse (Task 13) doit refuser, pas seulement une borne.
+        // `ID` à l'intérieur du maximum (`preset_count`) sans être une entrée
+        // réelle de la file creuse doit refuser ; une borne ne suffit pas.
         "playid" => playid(inst, indice, reste),
         // Bascule sans argument ; sinon n'agit que si l'état optimiste diffère
         // de la cible — c'est ce qui ferme la course d'un client qui
@@ -223,16 +256,11 @@ pub fn traiter(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
         // Seule forme qui accepte un relatif (`+n`/`-n`), résolu ici depuis
         // `position_s` puisque `Command::SeekTo` ne porte qu'un absolu.
         "seekcur" => seekcur(inst, indice, reste),
-        // PROVISOIRE (Task 13) : `load <nom>` devrait choisir une source par
-        // son nom (`Command::SelectSource`), mais aucun catalogue de sources
-        // n'existe encore dans ce greffon pour vérifier qu'un tel nom existe
-        // — le catalogue n'arrive qu'à la Task 13. En attendant, tout nom est
-        // donc « inexistant », d'où le même refus qu'un vrai nom absent du
-        // futur catalogue rendrait — ce n'est pas un hasard. Volontairement
-        // **absent de `COMMANDES`** (voir la spec, Ruling 3) : y annoncer une
-        // commande qui refuse toujours romprait l'honnêteté que `commands`
-        // promet à un client correct.
-        "load" => Issue::Refuser(ack(Ack::NoExist, indice, "load", "no such playlist")),
+        // `load <nom>` bascule de source. Elle n'ajoute pas à la file (MPD y
+        // *concatène* une liste enregistrée) : ici la file d'attente **est**
+        // la liste de la source active, donc la charger, c'est la choisir.
+        // Le refus n'est plus fixe : le catalogue dit quels noms existent.
+        "load" => load(inst, indice, reste),
         // Tout le reste est refusé du même refus, sans distinguer l'inconnu du
         // volontairement non géré — MPD ne les distingue pas non plus, et
         // `commands` dit déjà ce qui existe. Deux de ces refus méritent leur
@@ -295,8 +323,11 @@ fn status(inst: &Instantane) -> Vec<String> {
     }
     lignes.push(ligne("playlist", inst.version_file));
     // La **longueur de la file**, pas le maximum des indices : c'est le nombre
-    // d'entrées qu'un client va demander. (Les deux coïncident tant que la file
-    // est synthétisée ; Task 13 les sépare.)
+    // d'entrées qu'un client va demander. Les deux coïncident sur une file
+    // synthétisée, et **divergent** dès qu'une source énumère une liste creuse
+    // — trois stations numérotées 1, 5 et 99 font `playlistlength: 3`, jamais
+    // 99. Publier le maximum ferait demander à un client quatre-vingt-seize
+    // entrées qui n'existent pas.
     lignes.push(ligne("playlistlength", file.len()));
     // Aucun fondu enchaîné ici, mais le champ est lu par des clients qui
     // affichent un réglage. Trois décimales comme `elapsed` et `duration`.
@@ -464,6 +495,97 @@ fn plchanges(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
     Issue::lignes(lignes_de_file(inst, &file, plage))
 }
 
+/// `listplaylists` : une entrée par source du catalogue, **dans l'ordre reçu**
+/// — celui de la bascule de `SourceCycle`, donc celui que l'utilisateur voit
+/// sur sa télécommande. Ne pas trier : l'ordre porte une information.
+///
+/// Rien du tout avant la première trame de catalogue, et c'est la vérité de cet
+/// instant : le greffon ne connaît alors aucune source. Un client relira après
+/// son réveil sur `stored_playlist`.
+fn listplaylists(inst: &Instantane) -> Vec<String> {
+    inst.catalogue
+        .sources
+        .iter()
+        .flat_map(|s| [ligne("playlist", &s.name), ligne("Last-Modified", DATE_INCONNUE)])
+        .collect()
+}
+
+/// Les lignes d'une entrée de liste **enregistrée** : son URI et son nom, et
+/// rien de plus.
+///
+/// **Pas de `Pos` ni d'`Id` ici**, contrairement à `entree_lignes` : ces deux
+/// étiquettes désignent une entrée de la *file d'attente*, et une liste
+/// enregistrée n'est pas chargée. Les émettre pour une source qui ne joue pas
+/// donnerait à un client des positions qu'il ne retrouverait pas dans son
+/// `playlistinfo` — c'est aussi ce que fait MPD, qui ne les publie que pour la
+/// file.
+fn lignes_de_liste(source: &str, entree: &Entree) -> Vec<String> {
+    vec![ligne("file", uri(source, entree.index)), ligne("Title", &entree.nom)]
+}
+
+/// Le nom d'une liste enregistrée tel qu'un client l'a écrit, résolu en source
+/// du catalogue. `Err` est l'`ACK 50` déjà mis en forme.
+///
+/// Un seul endroit pour `listplaylistinfo` et `load` : les deux doivent
+/// répondre au *même* jeu de noms que `listplaylists` annonce, et les laisser
+/// chercher chacune de son côté les ferait diverger un jour.
+fn liste_nommee<'a>(
+    inst: &'a Instantane,
+    indice: usize,
+    cmd: &str,
+    args: &[String],
+) -> Result<&'a SourceCatalogue, String> {
+    let Some(nom) = args.first() else {
+        return Err(ack(Ack::Arg, indice, cmd, "wrong number of arguments"));
+    };
+    inst.catalogue_source(nom).ok_or_else(|| {
+        // `ACK 50` et non `ACK 2` : le nom est bien formé, c'est la liste qui
+        // n'existe pas — la distinction est celle que MPD fait, et un client
+        // qui la lit sait qu'il doit relire `listplaylists` plutôt que de
+        // corriger sa syntaxe.
+        ack(Ack::NoExist, indice, cmd, "no such playlist")
+    })
+}
+
+fn listplaylistinfo(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
+    let source = match liste_nommee(inst, indice, "listplaylistinfo", args) {
+        Ok(source) => source,
+        Err(refus) => return Issue::Refuser(refus),
+    };
+    // La même règle que `file_attente` là où elle peut s'appliquer, et il faut
+    // qu'elle soit la même : une source qui ne sait pas énumérer (le cd) porte
+    // une liste vide, et ses entrées se synthétisent depuis le compte. Mais
+    // `preset_count` ne décrit que la source **active** — pour une autre, le
+    // greffon ne sait rien du nombre, et une liste vide est alors la réponse
+    // honnête. C'est le seul endroit du module où les deux se distinguent, et
+    // il n'y a pas de meilleure réponse : le catalogue ne porte pas de compte.
+    let entrees = if source.presets.is_empty() && source.name == inst.etat.source {
+        file_attente(inst)
+    } else {
+        entrees_nommees(&source.presets)
+    };
+    Issue::lignes(entrees.iter().flat_map(|e| lignes_de_liste(&source.name, e)).collect())
+}
+
+/// `load <nom>` : choisir la source de ce nom.
+///
+/// Le greffon refuse lui-même un nom absent du catalogue plutôt que d'émettre
+/// un `SelectSource` que le cœur ignorerait en silence (voir la doc de
+/// `Command::SelectSource`) : il ne propose que des noms qu'il a reçus, donc
+/// c'est à lui de savoir lesquels existent. Un `OK` suivi de rien serait la
+/// pire réponse possible pour un client, qui attendrait un changement de file
+/// qui n'arrive jamais.
+fn load(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
+    match liste_nommee(inst, indice, "load", args) {
+        // Le nom du **catalogue** et non l'argument brut : les deux sont égaux
+        // par construction (`catalogue_source` compare exactement), mais
+        // émettre celui que le cœur nous a donné garde le greffon incapable
+        // d'inventer un nom de source.
+        Ok(source) => Issue::agir(Command::SelectSource(source.name.clone())),
+        Err(refus) => Issue::Refuser(refus),
+    }
+}
+
 fn stats(inst: &Instantane) -> Vec<String> {
     // `uptime` à 0 **délibérément** : le rendre juste demanderait de mémoriser
     // un instant de départ, donc une horloge de plus dans un module qui n'en a
@@ -564,12 +686,11 @@ fn idle(indice: usize, args: &[String]) -> Issue {
 /// l'indice de présélection qui s'y trouve. `None` si la position dépasse la
 /// file.
 ///
-/// Extraite en fonction pure, séparée de `play`, pour se tester sur une file
-/// construite à la main : `file_attente` ne sait aujourd'hui que synthétiser
-/// une suite dense (`1..=preset_count`), où le rang et « l'indice moins un »
-/// coïncident toujours et ne peuvent donc jamais démasquer un décalage
-/// silencieux à travers `Instantane`. La Task 13 apporte la vraie liste,
-/// éventuellement creuse ; cette fonction est déjà correcte pour ce jour-là.
+/// Extraite en fonction pure, séparée de `play`, pour se tester aussi sur une
+/// file construite à la main. Elle est le seul chemin autorisé de la position
+/// vers l'indice : dès qu'une source énumère une liste creuse, « l'indice moins
+/// un » n'est plus le rang, et le décalage qu'une soustraction introduirait
+/// ferait jouer une station voisine de celle qu'on a touchée à l'écran.
 fn position_vers_index(file: &[Entree], position: usize) -> Option<u8> {
     file.get(position).map(|e| e.index)
 }
@@ -577,12 +698,11 @@ fn position_vers_index(file: &[Entree], position: usize) -> Option<u8> {
 /// Vrai si cet indice de présélection existe réellement dans la file — pas
 /// seulement dans les bornes de son maximum.
 ///
-/// Distinction sans effet aujourd'hui (`file_attente` ne rend qu'une suite
-/// dense `1..=preset_count`, donc « exister » et « être ≤ au maximum » sont
-/// encore la même chose), mais qui cessera de l'être dès qu'une file peut être
-/// creuse (Task 13, où `preset_count` reste un maximum et non un compte) : un
-/// `playid` sur un trou de cette suite doit refuser, une comparaison de borne
-/// le laisserait passer à tort.
+/// La distinction est sans effet sur une file synthétisée (« exister » et
+/// « être ≤ au maximum » y sont la même chose) et décisive sur une file creuse,
+/// où `preset_count` reste un maximum et non un compte : un `playid` sur un
+/// trou de la suite doit refuser, là qu'une comparaison de borne le laisserait
+/// passer à tort.
 fn index_existe(file: &[Entree], index: u8) -> bool {
     file.iter().any(|e| e.index == index)
 }
@@ -734,7 +854,7 @@ fn seekcur(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
 mod tests {
     use super::*;
     use crate::etat::EtatPartage;
-    use ritornello_proto::{Morceau, PlayerState};
+    use ritornello_proto::{Catalogue, Morceau, PlayerState};
 
     // ------------------------------------------------------------------
     // Les instantanés de référence.
@@ -831,25 +951,77 @@ mod tests {
         })
     }
 
-    /// Une source dont les présélections sont nommées.
+    /// Une entrée de catalogue, telle que le cœur en émet une par source
+    /// déclarée. Une liste de présélections vide est la vérité du cd et des
+    /// fichiers, qui restent au corps par défaut de `list_presets`.
+    fn source_catalogue(nom: &str, presets: &[(u8, &str)]) -> SourceCatalogue {
+        SourceCatalogue {
+            name: nom.to_string(),
+            presets: presets
+                .iter()
+                .map(|(index, nom)| Preset { index: *index, name: (*nom).to_string() })
+                .collect(),
+        }
+    }
+
+    /// L'instantané d'un appareil dont le cœur a publié son catalogue, la
+    /// source `active` étant celle que la dernière trame d'état désigne.
     ///
-    /// **Limite actuelle, à lire avant de s'en servir** : `preset_count` est
-    /// le seul levier que porte `Instantane` avant la Task 13, et
-    /// `file_attente` n'en tire qu'une suite dense `1..=preset_count` — les
-    /// noms et indices donnés ici ne sont donc respectés que pour un jeu déjà
-    /// dense partant de 1 (`[(1, _), (2, _), (3, _), …]`), et seul le
-    /// *nombre* d'entrées compte alors, pas les indices ni les noms demandés.
-    /// Un jeu creux (`[(1, _), (5, _), (99, _)]`) ne peut **pas** être
-    /// construit par cette voie tant que la vraie liste n'existe pas : cette
-    /// distinction est couverte séparément, sur la fonction pure que
-    /// `play`/`playid` délèguent (`position_vers_index`, `index_existe`),
-    /// avec une file construite à la main plutôt qu'avec cet instantané.
+    /// **Deux détails de réalisme, parce qu'un instantané qu'aucun producteur
+    /// ne peut émettre ne prouve rien** :
+    /// - la source active est **ajoutée au catalogue** si elle n'y figure pas,
+    ///   avec une liste vide : le catalogue du cœur nomme *toutes* les sources
+    ///   déclarées, et le cd y est présent sans savoir énumérer. Un catalogue
+    ///   qui ignorerait la source qui joue n'existe pas.
+    /// - `preset_count` vaut le **maximum** des indices de la source active, et
+    ///   non leur nombre : c'est ce que `Stations::preset_count` renvoie
+    ///   vraiment (`radio/src/config.rs`). Trois stations 1, 5 et 99 font donc
+    ///   `preset_count: Some(99)` — la forme exacte qui piège une
+    ///   implémentation confondant compte et maximum. `None` quand la source
+    ///   active n'énumère rien, comme une source qui n'a rien déclaré.
+    fn instantane_catalogue(active: &str, sources: &[(&str, &[(u8, &str)])]) -> Instantane {
+        let mut catalogue =
+            Catalogue { sources: sources.iter().map(|(n, p)| source_catalogue(n, p)).collect() };
+        if !catalogue.sources.iter().any(|s| s.name == active) {
+            catalogue.sources.push(source_catalogue(active, &[]));
+        }
+        let maximum = catalogue
+            .sources
+            .iter()
+            .find(|s| s.name == active)
+            .and_then(|s| s.presets.iter().map(|p| p.index).max());
+        Instantane {
+            catalogue,
+            ..depuis(PlayerState { source: active.into(), preset_count: maximum, ..Default::default() })
+        }
+    }
+
+    /// Un catalogue de sources nommées sans présélections, la première étant
+    /// active.
+    ///
+    /// C'est la forme que le catalogue a **au démarrage** : le cœur connaît ses
+    /// sources dès le câblage et remplit leurs présélections au fur et à mesure
+    /// que les réponses à `ListPresets` arrivent par le canal de mises à jour.
+    fn instantane_avec_catalogue(noms: &[&str]) -> Instantane {
+        let sources: Vec<(&str, &[(u8, &str)])> = noms.iter().map(|n| (*n, &[][..])).collect();
+        instantane_catalogue(noms.first().copied().unwrap_or_default(), &sources)
+    }
+
+    /// Une source dont les présélections sont nommées, et qui joue.
+    ///
+    /// Les indices et les noms sont **respectés tels quels**, creux compris :
+    /// c'est le catalogue qui les porte, et `file_attente` les recopie sans
+    /// dériver un rang d'un indice.
     fn instantane_avec_presets(source: &str, presets: &[(u8, &str)]) -> Instantane {
-        depuis(PlayerState {
-            source: source.into(),
-            preset_count: Some(presets.len() as u8),
-            ..Default::default()
-        })
+        instantane_catalogue(source, &[(source, presets)])
+    }
+
+    /// Une source qui joue pendant qu'une autre est au catalogue : le cas qui a
+    /// motivé le contournement du garde côté cœur (`handle_source_update` rend
+    /// la main sur une trame qui ne vient pas de la source active, or le
+    /// catalogue décrit toutes les sources).
+    fn instantane_actif_sur(active: &str, sources: &[(&str, &[(u8, &str)])]) -> Instantane {
+        instantane_catalogue(active, sources)
     }
 
     /// Un volume donné, sans rien d'autre autour.
@@ -914,6 +1086,150 @@ mod tests {
         assert!(file_attente(&inst).is_empty());
         assert!(traiter_ok(&inst, &["status"]).contains(&"playlistlength: 0".to_string()));
         assert!(traiter_ok(&inst, &["playlistinfo"]).is_empty());
+    }
+
+    #[test]
+    fn une_vraie_liste_prend_le_pas_sur_la_synthese() {
+        // La branche que la Task 13 met **en tete** : des que le catalogue
+        // nomme les preselections de la source active, ce sont elles la file —
+        // avec leurs indices tels quels, creux compris, et leurs vrais noms.
+        // Une implementation restee sur la synthese rendrait 1..=99.
+        let inst = instantane_avec_presets("radio", &[(1, "FIP"), (5, "Nova"), (99, "TSF")]);
+        assert_eq!(
+            file_attente(&inst),
+            vec![
+                Entree { index: 1, nom: "FIP".into() },
+                Entree { index: 5, nom: "Nova".into() },
+                Entree { index: 99, nom: "TSF".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn une_source_active_qui_nenumere_pas_retombe_sur_la_synthese() {
+        // Le cd est bien au catalogue, avec une liste **vide** : cela veut dire
+        // « je n'ai que des numeros », pas « je n'ai rien ». Sans ce repli sur
+        // `preset_count`, les douze pistes d'un disque insere disparaitraient
+        // le jour ou le catalogue arrive — une regression que seule cette
+        // combinaison (catalogue present, liste vide) peut montrer.
+        let inst = Instantane {
+            catalogue: Catalogue { sources: vec![source_catalogue("cd", &[])] },
+            ..instantane_sans_presets("cd", 12)
+        };
+        assert_eq!(file_attente(&inst).len(), 12);
+        assert_eq!(file_attente(&inst)[11], Entree { index: 12, nom: "12".into() });
+    }
+
+    #[test]
+    fn la_file_suit_la_source_active_et_non_la_premiere_du_catalogue() {
+        // Le catalogue decrit toutes les sources ; la file d'attente n'est
+        // faite que de celle qui joue. Prendre la premiere entree du catalogue
+        // ferait publier les stations de la radio pendant qu'un disque tourne.
+        let inst = instantane_actif_sur("cd", &[("radio", &[(1, "FIP"), (5, "Nova")]), ("cd", &[])]);
+        assert!(file_attente(&inst).is_empty(), "le cd n'enumere pas et n'a rien declare");
+    }
+
+    #[test]
+    fn les_positions_sont_denses_la_ou_les_indices_sont_creux() {
+        // LE test du chantier, de bout en bout a travers `traiter` : sur des
+        // stations 1, 5 et 99, les positions publiees sont 0, 1, 2 — et les
+        // `Id` restent 1, 5, 99. Toute derivation d'un rang par soustraction
+        // (`Pos = Id - 1`) publierait ici 0, 4, 98.
+        let inst = instantane_avec_presets("radio", &[(1, "FIP"), (5, "Nova"), (99, "TSF")]);
+        assert_eq!(
+            traiter_ok(&inst, &["playlistinfo"]),
+            vec![
+                "file: ritornello://radio/1",
+                "Title: FIP",
+                "Pos: 0",
+                "Id: 1",
+                "file: ritornello://radio/5",
+                "Title: Nova",
+                "Pos: 1",
+                "Id: 5",
+                "file: ritornello://radio/99",
+                "Title: TSF",
+                "Pos: 2",
+                "Id: 99",
+            ]
+        );
+    }
+
+    #[test]
+    fn playlistlength_est_la_longueur_de_la_liste_pas_le_maximum_des_indices() {
+        // La propriete que rien ne pinçait avant qu'une file creuse existe :
+        // trois stations numerotees 1, 5 et 99 font `playlistlength: 3`. Une
+        // implementation qui publierait `preset_count` (99, le **maximum**)
+        // ferait demander a un client quatre-vingt-seize entrees inexistantes.
+        // Le fixe le confirme : `preset_count` vaut bien 99 ici, donc les deux
+        // valeurs sont franchement distinctes.
+        let inst = instantane_avec_presets("radio", &[(1, "FIP"), (5, "Nova"), (99, "TSF")]);
+        assert_eq!(inst.etat.preset_count, Some(99), "le fixe doit bien porter le maximum");
+        let lignes = traiter_ok(&inst, &["status"]);
+        assert!(lignes.contains(&"playlistlength: 3".to_string()), "{lignes:?}");
+        assert!(!lignes.contains(&"playlistlength: 99".to_string()), "{lignes:?}");
+    }
+
+    #[test]
+    fn stats_compte_les_entrees_et_non_le_maximum_des_indices() {
+        // Le jumeau du precedent sur `stats` : meme confusion possible, meme
+        // silence des tests avant qu'une file creuse existe. `songs` est un
+        // nombre d'entrees.
+        let inst = instantane_avec_presets("radio", &[(1, "FIP"), (5, "Nova"), (99, "TSF")]);
+        let lignes = traiter_ok(&inst, &["stats"]);
+        assert!(lignes.contains(&"songs: 3".to_string()), "{lignes:?}");
+        assert!(!lignes.contains(&"songs: 99".to_string()), "{lignes:?}");
+    }
+
+    #[test]
+    fn play_sur_une_liste_creuse_selectionne_lindice_du_rang_demande() {
+        // `position_vers_index` vu depuis `traiter`, avec une file creuse que
+        // le producteur peut vraiment emettre : `play 1` doit selectionner 5.
+        let inst = instantane_avec_presets("radio", &[(1, "FIP"), (5, "Nova"), (99, "TSF")]);
+        assert_eq!(cmds(&inst, &["play", "0"]), vec![Command::Select(1)]);
+        assert_eq!(cmds(&inst, &["play", "1"]), vec![Command::Select(5)]);
+        assert_eq!(cmds(&inst, &["play", "2"]), vec![Command::Select(99)]);
+        assert!(
+            matches!(traiter_mots(&inst, 0, &["play", "3"]), Issue::Refuser(_)),
+            "trois entrees, donc le rang 3 n'existe pas — meme si l'indice 3 est sous le maximum"
+        );
+    }
+
+    #[test]
+    fn playid_sur_un_trou_de_la_liste_creuse_est_refuse() {
+        // `index_existe` vu depuis `traiter` : 2 est sous le maximum (99) mais
+        // n'est pas une station. Une comparaison de borne le laisserait passer,
+        // et le coeur ignorerait le `Select` en silence.
+        let inst = instantane_avec_presets("radio", &[(1, "FIP"), (5, "Nova"), (99, "TSF")]);
+        assert_eq!(cmds(&inst, &["playid", "99"]), vec![Command::Select(99)]);
+        assert!(matches!(traiter_mots(&inst, 0, &["playid", "2"]), Issue::Refuser(_)));
+    }
+
+    #[test]
+    fn le_morceau_courant_dune_liste_creuse_publie_le_rang_et_lindice() {
+        // `status` et `currentsong` doivent s'accorder sur les deux nombres :
+        // `song`/`Pos` est le rang (1 pour la deuxieme entree), `songid`/`Id`
+        // l'indice (5). Les confondre ferait surligner la mauvaise ligne.
+        // La trame porte `preset: Some(5)` et le nom qui va avec, comme le
+        // coeur les publie ensemble ; le catalogue porte les trois stations.
+        let base = instantane_avec_presets("radio", &[(1, "FIP"), (5, "Nova"), (99, "TSF")]);
+        let inst = Instantane {
+            etat: PlayerState {
+                playback: Playback::Playing,
+                preset: Some(5),
+                preset_name: Some("Nova".into()),
+                ..base.etat
+            },
+            playback_optimiste: Playback::Playing,
+            ..base
+        };
+        let status = traiter_ok(&inst, &["status"]);
+        assert!(status.contains(&"song: 1".to_string()), "{status:?}");
+        assert!(status.contains(&"songid: 5".to_string()), "{status:?}");
+        let courant = traiter_ok(&inst, &["currentsong"]);
+        assert!(courant.contains(&"Pos: 1".to_string()), "{courant:?}");
+        assert!(courant.contains(&"Id: 5".to_string()), "{courant:?}");
+        assert!(courant.contains(&"Title: Nova".to_string()), "{courant:?}");
     }
 
     // ------------------------------------------------------------------
@@ -1754,27 +2070,177 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // `load`, provisoire (Task 13)
+    // Les listes enregistrées : `listplaylists`, `listplaylistinfo`, `load`
     // ------------------------------------------------------------------
 
     #[test]
-    fn load_est_provisoirement_refuse_faute_de_catalogue() {
-        // Voir le commentaire du bras `load` dans `traiter` : aucun catalogue
-        // de sources n'existe encore pour vérifier qu'un nom donné existe, la
-        // Task 13 remplace ce refus fixe par une vraie recherche.
+    fn listplaylists_nomme_une_liste_par_source() {
+        let inst = instantane_avec_catalogue(&["radio", "cd", "fichiers"]);
+        let lignes = traiter_ok(&inst, &["listplaylists"]);
+        assert_eq!(lignes.iter().filter(|l| l.starts_with("playlist: ")).count(), 3);
+        assert!(lignes.contains(&"playlist: radio".to_string()), "{lignes:?}");
+    }
+
+    #[test]
+    fn listplaylists_garde_lordre_du_catalogue() {
+        // L'ordre reçu est celui de la bascule de `SourceCycle`, donc celui que
+        // l'utilisateur voit sur sa télécommande : le trier alphabétiquement
+        // perdrait une information que le client peut afficher.
+        let inst = instantane_avec_catalogue(&["radio", "cd", "fichiers"]);
+        let noms: Vec<String> = traiter_ok(&inst, &["listplaylists"])
+            .into_iter()
+            .filter_map(|l| l.strip_prefix("playlist: ").map(str::to_string))
+            .collect();
+        assert_eq!(noms, vec!["radio", "cd", "fichiers"]);
+    }
+
+    #[test]
+    fn listplaylists_rend_une_date_par_entree() {
+        // `Last-Modified` est émis et non omis : des clients le lisent, et son
+        // absence les fait trébucher. La valeur est une constante — aucune date
+        // n'existe côté appareil, et une horloge ferait croire à un changement
+        // à chaque relecture.
+        let inst = instantane_avec_catalogue(&["radio", "cd"]);
         assert_eq!(
-            traiter_mots(&instantane_arrete(), 0, &["load", "radio"]),
+            traiter_ok(&inst, &["listplaylists"]),
+            vec![
+                "playlist: radio",
+                "Last-Modified: 1970-01-01T00:00:00Z",
+                "playlist: cd",
+                "Last-Modified: 1970-01-01T00:00:00Z",
+            ]
+        );
+    }
+
+    #[test]
+    fn listplaylists_est_vide_avant_le_premier_catalogue() {
+        // Un `OK` sec, pas un refus : le greffon ne connaît alors aucune
+        // source, et c'est la vérité de cet instant. Le client relira après son
+        // réveil sur `stored_playlist`.
+        assert_eq!(traiter_mots(&instantane_arrete(), 0, &["listplaylists"]), Issue::ok());
+    }
+
+    #[test]
+    fn listplaylistinfo_rend_les_vrais_noms() {
+        let inst = instantane_avec_presets("radio", &[(1, "FIP"), (5, "Nova")]);
+        let lignes = traiter_ok(&inst, &["listplaylistinfo", "radio"]);
+        assert!(lignes.contains(&"Title: FIP".to_string()), "{lignes:?}");
+        assert!(lignes.contains(&"Title: Nova".to_string()), "{lignes:?}");
+        // Et l'URI porte l'indice **creux**, pas un rang : c'est la clé stable
+        // avec laquelle le client retrouvera l'entrée dans la file.
+        assert!(lignes.contains(&"file: ritornello://radio/5".to_string()), "{lignes:?}");
+    }
+
+    #[test]
+    fn listplaylistinfo_interroge_une_source_qui_ne_joue_pas() {
+        // Le cas qui a motivé le contournement du garde côté cœur : le
+        // catalogue décrit toutes les sources, et un client peut lire la liste
+        // de la radio pendant qu'un disque tourne.
+        let inst = instantane_actif_sur("cd", &[("radio", &[(1, "FIP")])]);
+        assert_eq!(inst.etat.source, "cd", "le fixe doit bien jouer autre chose");
+        assert!(traiter_ok(&inst, &["listplaylistinfo", "radio"])
+            .contains(&"Title: FIP".to_string()));
+    }
+
+    #[test]
+    fn listplaylistinfo_nemet_ni_pos_ni_id() {
+        // `Pos` et `Id` désignent une entrée de la **file d'attente**, et une
+        // liste enregistrée n'est pas chargée : les émettre donnerait à un
+        // client des positions qu'il ne retrouverait pas dans son
+        // `playlistinfo`. MPD ne les publie pas non plus ici.
+        let inst = instantane_avec_presets("radio", &[(1, "FIP"), (5, "Nova")]);
+        let lignes = traiter_ok(&inst, &["listplaylistinfo", "radio"]);
+        assert!(
+            !lignes.iter().any(|l| l.starts_with("Pos: ") || l.starts_with("Id: ")),
+            "{lignes:?}"
+        );
+    }
+
+    #[test]
+    fn listplaylistinfo_de_la_source_active_sans_liste_dit_la_meme_chose_que_la_file() {
+        // Le cd qui joue : il ne sait pas énumérer, mais `preset_count` décrit
+        // bien ses douze pistes, et les deux réponses doivent s'accorder — un
+        // client qui compare la liste enregistrée à la file ne doit pas voir
+        // deux appareils différents.
+        let inst = Instantane {
+            catalogue: Catalogue { sources: vec![source_catalogue("cd", &[])] },
+            ..instantane_sans_presets("cd", 12)
+        };
+        let lignes = traiter_ok(&inst, &["listplaylistinfo", "cd"]);
+        assert_eq!(lignes.len(), 24, "deux lignes par piste : {lignes:?}");
+        assert!(lignes.contains(&"Title: 12".to_string()), "{lignes:?}");
+    }
+
+    #[test]
+    fn listplaylistinfo_dune_source_inactive_sans_liste_est_vide_et_non_devinee() {
+        // `preset_count` ne décrit que la source **active** : deviner le nombre
+        // de pistes d'un disque qui ne joue pas serait une invention, et une
+        // liste vide bien formée est la réponse honnête.
+        let inst = instantane_actif_sur("radio", &[("radio", &[(1, "FIP")]), ("cd", &[])]);
+        assert_eq!(traiter_mots(&inst, 0, &["listplaylistinfo", "cd"]), Issue::ok());
+    }
+
+    #[test]
+    fn un_nom_de_liste_inconnu_est_un_ack_50() {
+        let inst = instantane_avec_catalogue(&["radio"]);
+        assert_eq!(
+            traiter_mots(&inst, 0, &["listplaylistinfo", "nawak"]),
+            Issue::Refuser("ACK [50@0] {listplaylistinfo} no such playlist".to_string())
+        );
+    }
+
+    #[test]
+    fn un_nom_de_liste_absent_est_un_ack_2_et_non_un_50() {
+        // Le nom manquant n'est pas une liste inexistante mais une syntaxe
+        // fautive : `ACK 2`, avec l'indice de la commande dans sa liste.
+        let inst = instantane_avec_catalogue(&["radio"]);
+        for cmd in ["listplaylistinfo", "load"] {
+            assert_eq!(
+                traiter_mots(&inst, 3, &[cmd]),
+                Issue::Refuser(format!("ACK [2@3] {{{cmd}}} wrong number of arguments"))
+            );
+        }
+    }
+
+    #[test]
+    fn load_bascule_de_source() {
+        let inst = instantane_avec_catalogue(&["radio", "cd"]);
+        assert_eq!(cmds(&inst, &["load", "cd"]), vec![Command::SelectSource("cd".into())]);
+    }
+
+    #[test]
+    fn load_dun_nom_inconnu_est_refuse_et_nemet_rien() {
+        // Le greffon ne propose que des noms reçus du catalogue : c'est lui qui
+        // refuse, pas le cœur en silence (`SelectSource` d'un nom inconnu y est
+        // ignoré, et un `OK` suivi de rien est la pire réponse possible pour un
+        // client, qui attendrait un changement de file qui n'arrive jamais).
+        let inst = instantane_avec_catalogue(&["radio"]);
+        assert_eq!(
+            traiter_mots(&inst, 0, &["load", "nawak"]),
             Issue::Refuser("ACK [50@0] {load} no such playlist".to_string())
         );
     }
 
     #[test]
-    fn load_nest_pas_annoncee_dans_commands() {
-        // Ruling 3 : annoncer une commande qui refuse toujours romprait
-        // l'honnêteté que `commands` promet à un client correct.
-        assert!(!COMMANDES.contains(&"load"));
-        let lignes = traiter_ok(&instantane_arrete(), &["commands"]);
-        assert!(!lignes.contains(&"command: load".to_string()));
+    fn load_de_la_source_deja_active_bascule_quand_meme() {
+        // Aucune ruse ici : c'est le cœur qui sait si `SelectSource` sur la
+        // source courante relance ou ne fait rien, et deviner à sa place ferait
+        // avaler en silence le `load` d'un client qui vient de perdre son état.
+        let inst = instantane_avec_catalogue(&["radio", "cd"]);
+        assert_eq!(cmds(&inst, &["load", "radio"]), vec![Command::SelectSource("radio".into())]);
+    }
+
+    #[test]
+    fn les_trois_commandes_de_liste_sont_desormais_annoncees() {
+        // La Task 7 les taisait volontairement : `load` refusait tout nom,
+        // faute de catalogue, et l'annoncer aurait rompu l'honnêteté que
+        // `commands` promet. Le catalogue est là, elles marchent, elles se
+        // déclarent.
+        let lignes = traiter_ok(&instantane_avec_catalogue(&["radio"]), &["commands"]);
+        for nom in ["load", "listplaylists", "listplaylistinfo"] {
+            assert!(COMMANDES.contains(&nom), "{nom} absente de COMMANDES");
+            assert!(lignes.contains(&format!("command: {nom}")), "{nom} non annoncee");
+        }
     }
 
     // ------------------------------------------------------------------
