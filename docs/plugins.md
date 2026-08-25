@@ -100,13 +100,15 @@ or duplicate announcement, `metadata` ordering — see
 has not yet been run on the actual Pi deployment: treat it as verified
 by tests, not by hardware, until it has.
 
-`plugins.toml`'s **order** still arbitrates one thing, and it is the
-only thing it ever arbitrated for `metadata`: between two plugins that
-both announce the `metadata` kind and answer for the same track, the
-one declared **first in the file** wins, whatever order they actually
-announced themselves in at startup — network and process-start jitter
-would otherwise make the display non-reproducible from one boot to the
-next (see [Now-playing metadata](#now-playing-metadata-the-metadata-kind)).
+`plugins.toml`'s **order** still arbitrates one thing for `metadata`, and
+it is now the only thing it arbitrates: between two plugins that both
+*overwrite* the same track, the one declared **first in the file** wins,
+whatever order they actually announced themselves in at startup —
+network and process-start jitter would otherwise make the display
+non-reproducible from one boot to the next. It no longer decides anything
+beyond that tie — a plugin that only fills in what is missing never
+competes with one that overwrites (see [Now-playing
+metadata](#now-playing-metadata-the-metadata-kind)).
 
 `deploy/deploy.sh` treats `plugins.toml` as installed state, not user
 data. On a device with no such file, it provisions
@@ -136,10 +138,11 @@ purpose.
   refuses to run otherwise. The core has no `enabled = false`; a plugin
   it is told to launch, it launches.
 - An appended `metadata` entry lands **at the end** of the chain, hence
-  last in priority (order matters for that kind only — see [Now-playing
-  metadata](#now-playing-metadata-the-metadata-kind)). The bundled ones
-  answer for disjoint stations, so the position is harmless today; move
-  the block by hand if you ever add two that overlap.
+  last to break a tie should one ever arise (order matters for that kind
+  only, and only between two plugins that both overwrite — see
+  [Now-playing metadata](#now-playing-metadata-the-metadata-kind)). The
+  bundled ones answer for disjoint stations, so the position is harmless
+  today; move the block by hand if you ever add two that overlap.
 
 Older versions of the script only ever provisioned the file, so every
 plugin added after a device went into service — the `files` source,
@@ -658,7 +661,13 @@ A `metadata` plugin enriches what the active Source is playing **without
 the Source knowing**. The core tells it what is playing, it answers with
 what it knows about it.
 
-Three layers stack up, and the later one wins:
+**The current track is a partial state, completed by layers rather than
+overwritten by them.** `NowPlaying` carries `known` — what is already
+known of the track (artist, title, album, duration, plus a boolean saying
+whether a cover is already held) — so a contributor can see what is
+missing and either fill it in or abstain, instead of blindly declaring
+everything it knows and letting the freshest answer win. Three layers
+feed it, from least informed to most:
 
 1. **What the stream announces itself.** The core watches mpv's
    `metadata` property and reads the ICY header (`icy-title`), displayed
@@ -683,18 +692,36 @@ Three layers stack up, and the later one wins:
    replace the song by the station name. Stream and file tags therefore
    never coexist.
 3. **What a `metadata` plugin has learned**, if it matches what is
-   playing.
+   playing — and, since `known` travels alongside the identity, if
+   there is anything left worth answering at all.
 
-**A plugin takes precedence over ICY and over file tags under all
-circumstances**, as long as the station does not change: what it said
-stays displayed even if the stream announces a new title in the meantime.
-The reason it outranks tags too is the same one that puts it on top at
-all — a plugin fetches what the file cannot say (an online database, a
-separate feed), so letting the file overrule it would discard the more
-informed answer. These streams' ICY is of
-lesser quality — reversed order (`Title - ARTIST`), sometimes just the
-station name as filler — and letting it take over on every track made the
-display change shape twice per track.
+**Each contributor declares its own intention: overwrite, or merely
+complete.** `Enrichment` carries `fill_only`, whose default is `false` —
+"overwrites". That default is exactly what preserves the rule this
+project has always had: **a plugin still outranks ICY and file tags in
+all circumstances**, as long as the station does not change, because
+overwriting is the default and a plugin is the last layer to speak. What
+used to be stated as a rule in its own right is now a *consequence* of
+that default — and a deliberately chosen one, since it is what lets all
+three bundled plugins keep exactly the precedence they have today without
+a single line of theirs changing (only `musicbrainz` declares
+`fill_only`, and only on the path where it does not already know what is
+playing — see [the cover chain](#the-cover-chain) below). The reason a
+plugin outranks tags too is the same one that puts it on top at all — a
+plugin fetches what the file cannot say (an online database, a separate
+feed), so letting the file overrule it would discard the more informed
+answer. These streams' ICY is of lesser quality — reversed order (`Title
+- ARTIST`), sometimes just the station name as filler — and letting it
+take over on every track made the display change shape twice per track.
+
+**The first contributor that overwrites supplies its whole block, holes
+included; a `fill_only` contributor only fills whatever field stayed
+empty.** There is deliberately no field-by-field composition between two
+contributors that both overwrite: mixing one's artist with another's
+album would put two different readings of the same stream on screen at
+once and display a track that does not exist. A `fill_only` contributor
+never runs that risk in the first place — it only ever writes into a
+field nobody has touched yet.
 
 Accepted trade-off: on a track change, the previous title stays displayed
 until the plugin sends its frame — short in practice, both coming from
@@ -710,12 +737,27 @@ that starts but never serves its socket stays shown there as connected
 (same behavior as the `input` kind, whose connection is not awaited at
 startup).
 
-**Declaration order matters**, and this is the only kind for which it
-does: between two plugins answering for the same track, the first one
-declared in `plugins.toml` wins, and a plugin declared lower down never
-overwrites it. The chosen criterion is predictability for whoever is
-debugging: "first to arrive" would depend on network latency, so the same
+**Declaration order still matters, but only to break a tie**, and this
+remains the only kind for which it matters at all: between two plugins
+that both *overwrite* the same track, the first one declared in
+`plugins.toml` wins, and a plugin declared lower down never overwrites
+it. The chosen criterion is predictability for whoever is debugging:
+"first to arrive" would depend on network latency, so the same
 installation would display different things from one boot to the next.
+A `fill_only` plugin is never party to that tie: it only ever writes into
+a field an overwriting plugin left empty, whatever its own position in
+the file.
+
+**A Source can declare metadata too, on its own channel, without becoming
+a `metadata` plugin.** The channel already exists: `SourceMessage`
+accepts `id: None` as a spontaneous notification, and `SourcePlugin`
+already has `poll_notification` for it — the same mechanism the radio
+plugin uses above to announce a fresh `preset_count` outside the
+request/response cycle of `Play`. A Source's own declaration reaches
+`known` the same way, which matters whenever finding it takes time: see
+[the cover chain](#the-cover-chain) below for how `files` uses exactly
+this to announce a `folder.jpg` without making playback wait on an SMB
+`readdir`.
 
 **Updating an existing installation.** `deploy/deploy.sh` installs the
 new binaries and appends the missing `metadata` plugin entries to an
@@ -723,9 +765,9 @@ existing `/etc/ritornello/plugins.toml` (see [Declaring the
 plugins](#declaring-the-plugins)), so a device already in service keeps
 its CD track titles — which the cd plugin used to provide itself before
 this version — and gains the Radio France ones. They are appended at the
-end, therefore last in priority; since the three answer for disjoint
-content, that costs nothing. Reorder the blocks by hand if you add a
-plugin that overlaps one of them.
+end, hence last to break a tie should one ever arise; since the three
+answer for disjoint content, that costs nothing. Reorder the blocks by
+hand if you add a plugin that overlaps one of them.
 
 A `plugins.toml` completed by an older version of the script, which only
 ever provisioned the file, is brought up to date by the next deployment
@@ -831,6 +873,89 @@ without anything being lost: the entries already there are not touched.
   deliberately left out and why. Its table is regenerated by the same script,
   so it cannot drift from the embedded one.
 
+### The cover chain
+
+Five contributors can resolve a cover, and the order among them is not a
+list of priorities written anywhere — it falls out of the layers and
+intentions described above.
+
+1. **`files`** — a `folder.jpg` (or one of its aliases) sitting in the
+   file's own directory, announced as a `CoverRef::Path` **on the
+   Source's own channel** (see above): `files` stays a plain Source, and
+   sends this as a notification once its directory listing has resolved,
+   rather than as part of its answer to `Play` — resolving a folder can
+   mean a `readdir` on an SMB share, and playback must not wait on it.
+2. **The core** — a cover embedded in the file itself, read with
+   `lofty` once mpv names the path being played (the core never reads
+   the identity for this: it has made a principle of never interpreting
+   it). The core **completes** here rather than overwrites, which is
+   what gives the folder image its precedence without inverting any
+   convention: extraction is only attempted while the slot is still
+   empty.
+3. **`radiofrance-metas`** — the station's own image for the track,
+   overwriting, from the same live feed it already reads for the text.
+4. **`ouifm-metas`** — the stream's own cover, overwriting, from the
+   same SSE feed — a ready-made URL when the feed carries one, else one
+   composed from an identifier the same way the station's own player
+   composes it.
+5. **`musicbrainz`** — the generic resolver. On a disc it already
+   recognizes by its table of contents it overwrites, using the release
+   identifier its lookup already carries. Everywhere else it
+   **completes**: given both an artist and an album, and only while no
+   cover is held yet, it searches the release and asks the Cover Art
+   Archive.
+
+Two things about steps 3 and 5 are worth spelling out, because neither is
+guessable from the general model:
+
+- **`radiofrance-metas` stays silent when `songUuid` is null.** The
+  station serves a **generic antenna image** for "Le direct" and its
+  talk programmes — the same picture whatever is airing. Announcing it
+  would fill the cover slot and silence the generic resolver behind it,
+  since no higher layer can tell a filled field from a filled-but-wrong
+  one: once a contributor has declared a cover, that slot is considered
+  settled.
+- **`files` discards a lone image named like a back cover.** Only the
+  rule that *guesses* — the one that picks the sole image in a directory
+  when none matches a known name — consults that exclusion list; a
+  directory naming both `front.jpg` and `back.jpg` is already settled by
+  the preference list before a guess is ever needed. Without the
+  exclusion, a lone `back.jpg` or `Scan_verso.png` would be shown as the
+  album's face; with it, `files` says nothing and the generic resolver
+  gets its turn instead.
+
+What this produces in practice, for a file on the NAS:
+
+| What there is | What's displayed | Who |
+|---|---|---|
+| a `folder.jpg` | the `folder.jpg` | `files` |
+| no `folder.jpg`, an embedded cover | the embedded one | the core, which completes |
+| neither, but usable tags | Cover Art Archive | `musicbrainz`, which completes |
+| neither, and no tags | nothing | — |
+
+And for a radio: the station's metadata plugin overwrites the ICY and
+supplies the station's own image whenever it names a genuine track;
+lacking one, `musicbrainz` completes from the very artist and album that
+plugin just supplied.
+
+**`GET /api/cover/{key}`** serves the bytes. It is **the appliance** that
+fetches an image, never the browser — the same principle already stated
+for admin pages ("the page loads no external resource") — which also
+covers the one case a browser could never handle unaided: a cover
+embedded inside an audio file. A cover is only published once its bytes
+are actually in hand, so the page never receives the URL of a broken
+image: a 404 from the Cover Art Archive, common since many releases have
+none, becomes silence rather than an empty frame.
+
+The cache is a small table, bounded to four entries, **in memory**, and
+it does **not** survive a restart. This is a deliberate rejection of a
+disk cache, not an oversight: a radio changes track every few minutes, a
+disc's cover is already remembered per-disc inside `musicbrainz` itself,
+and a local file's cover is reread from disk in a fraction of a
+millisecond — a disk cache would buy almost nothing here, while adding a
+directory to provision, a size to police, and one more piece of state to
+reason about when something looks wrong.
+
 ### Where it shows up
 
 On the displays, arbitration's result lands in the same structured state as
@@ -903,7 +1028,10 @@ actually chained in. Two points of contract for `MetadataPlugin` itself:
   the staleness guard: the core discards one that no longer matches what
   is playing, which prevents a slow answer from overwriting the next
   track. An enrichment whose text fields are all empty counts as a
-  non-answer, and therefore lets a lower-priority plugin win.
+  non-answer, and therefore lets a lower-priority plugin win — among
+  those that overwrite; a `fill_only` plugin never competes on priority
+  in the first place (see [Now-playing
+  metadata](#now-playing-metadata-the-metadata-kind)).
 
 One more field of `Enrichment` needs attention from a plugin only if it can
 answer it: `position_s`, an elapsed number of seconds **in the track, at the
