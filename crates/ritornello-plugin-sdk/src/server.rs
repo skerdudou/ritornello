@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use ritornello_proto::{
-    Catalogue, DisplayFrame, Enrichment, IdentityUpdate, NowPlaying, PlayerState, Preset,
+    Catalogue, Cover, DisplayFrame, Enrichment, IdentityUpdate, NowPlaying, PlayerState, Preset,
     SourceAction, SourceMessage, SourceReq, SourceRequest,
 };
 use std::path::Path;
@@ -432,6 +432,34 @@ pub trait DisplayPlugin: Send + 'static {
     async fn catalogue(&mut self, _c: Catalogue) -> Result<()> {
         Ok(())
     }
+
+    /// Cet afficheur veut-il recevoir les octets des pochettes ?
+    ///
+    /// **Défaut : non.** Une pochette pèse jusqu'à
+    /// `ritornello_proto::COVER_MAX_BYTES`, et un afficheur de vingt colonnes
+    /// n'en a que faire : le cœur ne doit pas lui pousser des mégaoctets qu'il
+    /// jetterait. Un afficheur qui en veut redéfinit cette méthode, et c'est
+    /// **cette valeur-là** qui devient le drapeau de l'annonce — voir
+    /// `Runtime::display`. L'annonce est dérivée, jamais demandée : elle ne
+    /// peut donc pas mentir sur ce que le greffon fera des octets reçus.
+    ///
+    /// Lue une seule fois, au moment de l'enregistrement : le drapeau part sur
+    /// le socket d'enregistrement, et le cœur ne le relit jamais. Un afficheur
+    /// dont l'envie changerait en cours de route n'a donc rien à en attendre —
+    /// et n'en a pas besoin : `cover` peut simplement ignorer.
+    fn wants_covers(&self) -> bool {
+        false
+    }
+
+    /// Les octets de la pochette de ce qui joue.
+    ///
+    /// Défaut : **ignoré** — comme `catalogue` ci-dessus, et pour la même
+    /// raison. Reçue seulement si `wants_covers` rend vrai ; le corps par
+    /// défaut couvre un afficheur qui aurait demandé sans traiter, ce que le
+    /// cœur n'a aucun moyen de distinguer.
+    async fn cover(&mut self, _c: Cover) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Lie le socket d'un afficheur, sans servir encore.
@@ -450,9 +478,13 @@ pub fn bind_display(socket_path: &Path) -> Result<UnixListener> {
 /// Accepte la connexion du cœur, puis affiche chaque état reçu jusqu'à
 /// fermeture. Protocole à sens unique : aucune réponse n'est attendue.
 ///
-/// Chaque ligne est une `DisplayFrame` : soit un `PlayerState` complet — pas une
+/// Chaque ligne est une `DisplayFrame` : un `PlayerState` complet — pas une
 /// vue déjà composée, la mise en page appartient au plugin (voir
-/// `ritornello-plugin-console::display`) — soit un catalogue de sources.
+/// `ritornello-plugin-console::display`) —, un catalogue de sources, ou les
+/// octets d'une pochette. Cette dernière n'arrive **que** si le plugin a
+/// redéfini `wants_covers` : c'est le cœur qui ne l'envoie pas, pas ce SDK qui
+/// la filtre — un afficheur de vingt colonnes ne doit pas recevoir des
+/// mégaoctets sur son socket pour les jeter à l'arrivée.
 ///
 /// Une trame d'un genre que ce SDK ne connaît pas est traitée comme une ligne
 /// illisible : `warn` puis `continue`, la connexion survit. C'est la politique
@@ -472,6 +504,7 @@ pub async fn serve_display(listener: UnixListener, mut plugin: impl DisplayPlugi
         match frame {
             DisplayFrame::State(state) => plugin.show(state).await?,
             DisplayFrame::Catalogue(c) => plugin.catalogue(c).await?,
+            DisplayFrame::Cover(c) => plugin.cover(c).await?,
         }
     }
     Ok(())
@@ -1448,8 +1481,10 @@ mod display_tests {
     async fn une_trame_illisible_ne_ferme_pas_la_connexion() {
         // La politique de ligne illisible ne change pas avec l'enveloppe :
         // `warn` puis `continue`. Une trame d'un genre que ce SDK ne connaît pas
-        // (la variante `cover` d'un chantier à venir) tombe dans le même cas —
-        // c'est ce qui rend l'ajout d'un genre non cassant dans les deux sens.
+        // tombe dans le même cas — c'est ce qui rend l'ajout d'un genre non
+        // cassant dans les deux sens. Une trame d'un genre **connu** dont la
+        // charge utile est mal formée (le `cover` sans ses champs ci-dessous)
+        // aussi : c'est le même chemin d'erreur de serde.
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("display.sock");
         let listener = bind_display(&socket).unwrap();
@@ -1463,11 +1498,160 @@ mod display_tests {
         use tokio::io::AsyncWriteExt;
         w.write_all(b"ceci n'est pas du json\n").await.unwrap();
         w.write_all(b"{\"frame\":\"cover\",\"data\":{\"url\":\"x\"}}\n").await.unwrap();
+        w.write_all(b"{\"frame\":\"genre-inexistant\",\"data\":{}}\n").await.unwrap();
         let e = PlayerState { source: "cd".into(), ..Default::default() };
         let etat = DisplayFrame::State(e.clone());
         w.write_all(format!("{}\n", serde_json::to_string(&etat).unwrap()).as_bytes())
             .await
             .unwrap();
+        for _ in 0..100 {
+            if !etats.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(etats.lock().unwrap().as_slice(), &[e]);
+    }
+
+    // -- la trame de pochette ------------------------------------------------
+
+    /// Un afficheur qui n'a rien redéfini : ni `wants_covers`, ni `cover`.
+    /// C'est la console, et les trois autres bouchons de ce fichier.
+    #[tokio::test]
+    async fn un_afficheur_qui_ignore_les_pochettes_recoit_quand_meme_les_etats() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("display.sock");
+        let listener = bind_display(&socket).unwrap();
+        let plugin = RecordingDisplay::default();
+        assert!(!plugin.wants_covers(), "le corps par defaut doit refuser les octets");
+        let etats = plugin.etats.clone();
+        tokio::spawn(async move {
+            serve_display(listener, plugin).await.unwrap();
+        });
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (_r, mut w) = stream.into_split();
+        use tokio::io::AsyncWriteExt;
+        // Une pochette valide, que le corps par défaut doit avaler sans bruit…
+        let pochette = DisplayFrame::Cover(Cover {
+            href: "/api/cover/1a2b".into(),
+            mime: "image/jpeg".into(),
+            bytes: vec![0xFF, 0xD8, 0xFF, 0xE0],
+        });
+        w.write_all(format!("{}\n", serde_json::to_string(&pochette).unwrap()).as_bytes())
+            .await
+            .unwrap();
+        // …puis l'état, qui doit arriver : la connexion a survécu.
+        let e = PlayerState { source: "cd".into(), ..Default::default() };
+        w.write_all(
+            format!("{}\n", serde_json::to_string(&DisplayFrame::State(e.clone())).unwrap())
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+        for _ in 0..100 {
+            if !etats.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(etats.lock().unwrap().as_slice(), &[e]);
+    }
+
+    #[tokio::test]
+    async fn un_afficheur_interesse_recoit_les_octets_de_la_pochette() {
+        #[derive(Clone, Default)]
+        struct Interesse {
+            pochettes: Arc<Mutex<Vec<Cover>>>,
+        }
+        #[async_trait::async_trait]
+        impl DisplayPlugin for Interesse {
+            async fn show(&mut self, _state: PlayerState) -> Result<()> {
+                Ok(())
+            }
+            fn wants_covers(&self) -> bool {
+                true
+            }
+            async fn cover(&mut self, c: Cover) -> Result<()> {
+                self.pochettes.lock().unwrap().push(c);
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("display.sock");
+        let listener = bind_display(&socket).unwrap();
+        let plugin = Interesse::default();
+        assert!(plugin.wants_covers());
+        let vues = plugin.pochettes.clone();
+        tokio::spawn(async move {
+            serve_display(listener, plugin).await.unwrap();
+        });
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (_r, mut w) = stream.into_split();
+        use tokio::io::AsyncWriteExt;
+        // Des octets qui ne sont pas du texte, `0x0A` compris : c'est ce que le
+        // codage du fil doit rendre intact, et le saut de ligne est justement
+        // le séparateur du protocole.
+        let mut octets = vec![0xFFu8, 0xD8, 0xFF, 0xE0];
+        octets.extend((0u16..=255).map(|b| b as u8));
+        let attendue = Cover {
+            href: "/api/cover/1a2b3c4d".into(),
+            mime: "image/jpeg".into(),
+            bytes: octets,
+        };
+        w.write_all(
+            format!("{}\n", serde_json::to_string(&DisplayFrame::Cover(attendue.clone())).unwrap())
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+        for _ in 0..100 {
+            if !vues.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(vues.lock().unwrap().as_slice(), &[attendue]);
+    }
+
+    #[tokio::test]
+    async fn une_pochette_au_dela_du_plafond_est_une_ligne_illisible_et_la_connexion_survit() {
+        // Le plafond du transport vu du côté qui reçoit : un refus, traité par
+        // la politique de ligne illisible — `warn` puis `continue` — et non une
+        // allocation de la taille annoncée. La trame d'état qui suit prouve que
+        // la connexion a survécu.
+        //
+        // La ligne est fabriquée à la main : le producteur, lui, ne peut pas
+        // émettre cela (il ne matérialise jamais au-delà du plafond), donc
+        // seule une ligne écrite ici met le refus sur le chemin.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("display.sock");
+        let listener = bind_display(&socket).unwrap();
+        let plugin = RecordingDisplay::default();
+        let etats = plugin.etats.clone();
+        tokio::spawn(async move {
+            serve_display(listener, plugin).await.unwrap();
+        });
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (_r, mut w) = stream.into_split();
+        use tokio::io::AsyncWriteExt;
+        let trop = "A".repeat(ritornello_proto::COVER_MAX_BYTES / 3 * 4 + 8);
+        w.write_all(
+            format!(
+                r#"{{"frame":"cover","data":{{"href":"/api/cover/x","mime":"image/jpeg","bytes":"{trop}"}}}}{}"#,
+                "\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let e = PlayerState { source: "cd".into(), ..Default::default() };
+        w.write_all(
+            format!("{}\n", serde_json::to_string(&DisplayFrame::State(e.clone())).unwrap())
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
         for _ in 0..100 {
             if !etats.lock().unwrap().is_empty() {
                 break;

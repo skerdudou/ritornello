@@ -2972,6 +2972,7 @@ mod tests {
                     name: nom.to_string(),
                     kinds: vec![ritornello_proto::PluginKind::Metadata],
                     admin: false,
+                    covers: false,
                 },
             );
         }

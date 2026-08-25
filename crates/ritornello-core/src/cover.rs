@@ -26,6 +26,14 @@ const PLAFOND_RESEAU: usize = 2 * 1024 * 1024;
 /// Nombre d'entrées retenues : la pochette courante et quelques précédentes.
 const ENTREES: usize = 4;
 
+/// Préfixe de l'URL locale publiée dans `Morceau::cover_href`.
+///
+/// Partagé entre `metadata::Metadonnees::etat`, qui la **fabrique**, et
+/// `main::relais_afficheur`, qui la **relit** pour retrouver la clé du cache :
+/// deux littéraux auraient pu diverger en silence, et la conséquence aurait été
+/// un afficheur qui ne reçoit plus jamais de pochette, sans erreur nulle part.
+pub const PREFIXE_HREF: &str = "/api/cover/";
+
 /// Préfixe des fichiers temporaires d'extraction de pochette embarquée,
 /// posés dans `std::env::temp_dir()` par `player::mpv::pochette_embarquee`.
 ///
@@ -161,6 +169,99 @@ impl CoverCache {
     async fn lit(&self, cle: &str) -> Option<Pochette> {
         self.entrees.read().await.iter().find(|(k, _)| k == cle).map(|(_, p)| p.clone())
     }
+
+    /// Matérialise les octets d'une pochette : `(mime, octets)`.
+    ///
+    /// **Ce que la route HTTP évite justement de faire.** Elle, pour un fichier
+    /// local, ouvre, vérifie l'en-tête et *diffuse en flux* sans jamais tenir
+    /// l'image entière. Pousser sur un socket n'en laisse pas le choix, d'où
+    /// cette méthode — et d'où le plafond, qui n'existait pas côté local (voir
+    /// `COVER_MAX_BYTES` et la doc de `recupere`).
+    ///
+    /// `None` couvre indistinctement : clé inconnue, fichier disparu ou
+    /// illisible, partage qui ne répond pas, contenu qui n'est plus une image,
+    /// et **taille au-delà du plafond**. L'appelant n'a rien à en distinguer :
+    /// dans tous les cas l'afficheur n'a pas d'image, comme il n'en a pas quand
+    /// la récupération échoue.
+    pub async fn octets(&self, cle: &str) -> Option<(&'static str, Vec<u8>)> {
+        // Le verrou est rendu **avant** toute IO. Une pochette locale vit
+        // couramment sur un partage endormi : tenir le verrou de lecture
+        // pendant `DELAI_FICHIER` bloquerait les insertions du cache, donc la
+        // tâche détachée de `Core::lance_pochette`, pour une image.
+        //
+        // La branche `Octets` répond sous le verrou plutôt que de passer par
+        // `lit` : celui-ci clone la `Pochette` entière, ce qui ferait deux
+        // copies des octets au lieu d'une.
+        let chemin = {
+            let e = self.entrees.read().await;
+            match e.iter().find(|(k, _)| k == cle).map(|(_, p)| p) {
+                None => return None,
+                // Déjà en mémoire, et déjà borné par construction : ces
+                // octets viennent d'un corps HTTP que `telecharge` a coupé à
+                // `PLAFOND_RESEAU`.
+                Some(Pochette::Octets(v, mime)) => return Some((*mime, v.clone())),
+                Some(Pochette::Fichier(c)) => c.clone(),
+            }
+        };
+        lit_fichier_borne(&chemin).await
+    }
+}
+
+/// Lit un fichier de pochette pour le pousser, borné et validé.
+///
+/// **La validation d'en-tête est faite sur les octets rendus eux-mêmes**, et
+/// non sur une première lecture séparée. La route HTTP, elle, ne peut pas :
+/// elle doit vérifier puis diffuser, donc elle prend soin de garder le *même
+/// descripteur* entre les deux lectures — sans quoi un contributeur pourrait
+/// remplacer le contenu du partage entre la vérification et le service. Ici le
+/// contenu vérifié **est** le contenu rendu, un seul descripteur et une seule
+/// lecture : la fenêtre n'existe pas du tout, plutôt que d'être fermée. La
+/// garantie n'est donc pas affaiblie mais renforcée.
+///
+/// Deux bornes, et les deux comptent :
+///
+/// * `COVER_MAX_BYTES + 1` octets au plus sont lus. Le `+ 1` est ce qui permet
+///   de *savoir* qu'on a dépassé sans avoir tout lu : au-delà, refus. Un PNG
+///   de 150 Mo sur le partage — cas que `cover_get` cite comme réel — coûte
+///   donc 2 Mio, pas 150.
+/// * `DELAI_FICHIER`, comme partout où ce module touche un fichier : le
+///   partage peut être endormi, et l'attente doit être bornée par nous plutôt
+///   que par le noyau.
+async fn lit_fichier_borne(chemin: &std::path::Path) -> Option<(&'static str, Vec<u8>)> {
+    let lecture = tokio::time::timeout(DELAI_FICHIER, async {
+        let fichier = tokio::fs::File::open(chemin).await?;
+        let mut octets = Vec::new();
+        // `take` **avant** `read_to_end` : `read_to_end` seul lirait le
+        // fichier entier, et le contrôle de taille arriverait après
+        // l'allocation qu'il est censé éviter.
+        fichier
+            .take(ritornello_proto::COVER_MAX_BYTES as u64 + 1)
+            .read_to_end(&mut octets)
+            .await?;
+        Ok::<_, std::io::Error>(octets)
+    })
+    .await;
+    let octets = match lecture {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            tracing::debug!("cover file unreadable: {e}");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!("cover file {} did not answer in {DELAI_FICHIER:?}", chemin.display());
+            return None;
+        }
+    };
+    if octets.len() > ritornello_proto::COVER_MAX_BYTES {
+        tracing::warn!(
+            "cover file {} not pushed: over {} bytes",
+            chemin.display(),
+            ritornello_proto::COVER_MAX_BYTES
+        );
+        return None;
+    }
+    let mime = type_image(&octets)?;
+    Some((mime, octets))
 }
 
 /// Octets d'en-tête d'une image reconnue. Vérifiés avant de servir un fichier
@@ -589,6 +690,102 @@ mod tests {
             Some(Pochette::Fichier(p)) => assert_eq!(p, vrai),
             autre => panic!("une image locale doit rester un chemin, pas des octets : {autre:?}"),
         }
+    }
+
+    // -- `octets` : la matérialisation pour le protocole d'affichage ---------
+
+    /// En-tête JPEG minimal, suivi de `remplissage` octets quelconques.
+    fn jpeg(remplissage: usize) -> Vec<u8> {
+        let mut v = vec![0xFFu8, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        v.resize(6 + remplissage, 0x42);
+        v
+    }
+
+    #[tokio::test]
+    async fn octets_rend_les_octets_dune_pochette_reseau_avec_son_mime() {
+        let cache = CoverCache::new();
+        let image = jpeg(10);
+        cache.insere("k".into(), Pochette::Octets(image.clone(), "image/png")).await;
+        assert_eq!(cache.octets("k").await, Some(("image/png", image)));
+        assert_eq!(cache.octets("inconnue").await, None);
+    }
+
+    #[tokio::test]
+    async fn octets_lit_un_fichier_local_que_la_route_aurait_diffuse_en_flux() {
+        // La différence avec `cover_get` : ici les octets sont matérialisés,
+        // parce que pousser sur un socket n'offre pas d'autre choix.
+        let dir = tempfile::tempdir().unwrap();
+        let chemin = dir.path().join("folder.jpg");
+        let image = jpeg(1000);
+        std::fs::write(&chemin, &image).unwrap();
+        let cache = CoverCache::new();
+        cache.insere("k".into(), Pochette::Fichier(chemin)).await;
+        assert_eq!(cache.octets("k").await, Some(("image/jpeg", image)));
+    }
+
+    #[tokio::test]
+    async fn octets_revalide_len_tete_sur_les_octets_quil_rend() {
+        // `recupere` a validé l'en-tête à la découverte, mais entre les deux le
+        // partage n'est pas sous le contrôle de l'appareil. Comme la route HTTP,
+        // cette lecture-ci ne fait donc pas confiance à la découverte — et elle
+        // va plus loin : le contenu vérifié **est** le contenu rendu, une seule
+        // lecture sur un seul descripteur, donc il n'y a aucune fenêtre entre
+        // la vérification et l'usage.
+        let dir = tempfile::tempdir().unwrap();
+        let chemin = dir.path().join("folder.jpg");
+        std::fs::write(&chemin, jpeg(10)).unwrap();
+        let r = CoverRef::Path { path: chemin.to_string_lossy().into_owned() };
+        let Some(p) = recupere(&r).await else { panic!("une image locale doit etre acceptee") };
+        let cache = CoverCache::new();
+        cache.insere("k".into(), p).await;
+
+        // Quelqu'un remplace le contenu du partage après la découverte.
+        std::fs::write(&chemin, b"ceci n'est plus une image").unwrap();
+        assert_eq!(
+            cache.octets("k").await,
+            None,
+            "les octets rendus doivent etre ceux qui ont ete valides, jamais un contenu suppose"
+        );
+    }
+
+    #[tokio::test]
+    async fn octets_refuse_un_fichier_local_au_dela_du_plafond_et_accepte_le_plafond_pile() {
+        // Le plafond du transport, éprouvé sur sa borne exacte. Le local n'a par
+        // conception **aucune** limite de taille (voir `recupere`) : c'est donc
+        // ici, et nulle part ailleurs, que la borne existe. Un refus, pas une
+        // allocation de la taille du fichier — la lecture s'arrête à
+        // `COVER_MAX_BYTES + 1` octets, quelle que soit la taille réelle.
+        let plafond = ritornello_proto::COVER_MAX_BYTES;
+        let dir = tempfile::tempdir().unwrap();
+
+        let pile = dir.path().join("pile.jpg");
+        std::fs::write(&pile, jpeg(plafond - 6)).unwrap();
+        let cache = CoverCache::new();
+        cache.insere("pile".into(), Pochette::Fichier(pile)).await;
+        match cache.octets("pile").await {
+            Some((mime, o)) => {
+                assert_eq!(mime, "image/jpeg");
+                assert_eq!(o.len(), plafond, "le plafond pile doit passer, pas etre refuse");
+            }
+            None => panic!("une image de exactement COVER_MAX_BYTES doit passer"),
+        }
+
+        let trop = dir.path().join("trop.jpg");
+        std::fs::write(&trop, jpeg(plafond - 5)).unwrap();
+        cache.insere("trop".into(), Pochette::Fichier(trop)).await;
+        assert_eq!(
+            cache.octets("trop").await,
+            None,
+            "un seul octet au-dela du plafond doit suffire a refuser"
+        );
+    }
+
+    #[tokio::test]
+    async fn octets_rend_none_sur_un_fichier_disparu() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = CoverCache::new();
+        cache.insere("k".into(), Pochette::Fichier(dir.path().join("absent.jpg"))).await;
+        assert_eq!(cache.octets("k").await, None);
     }
 
     #[tokio::test]

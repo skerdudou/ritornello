@@ -820,12 +820,18 @@ mod tests {
                     name: nom.to_string(),
                     kinds: vec![PluginKind::Metadata],
                     admin: false,
+                    covers: false,
                 },
             );
         }
         announcements.insert(
             "radio".to_string(),
-            Announcement { name: "radio".into(), kinds: vec![PluginKind::Source], admin: true },
+            Announcement {
+                name: "radio".into(),
+                kinds: vec![PluginKind::Source],
+                admin: true,
+                covers: false,
+            },
         );
         let g = Gathered { announcements, ..Default::default() };
 

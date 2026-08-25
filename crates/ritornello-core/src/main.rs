@@ -85,13 +85,67 @@ impl core::Source for SourceClient {
 /// même raison que ci-dessus : un afficheur câblé à chaud doit connaître le
 /// catalogue sans attendre qu'il change, et le catalogue ne change presque
 /// jamais.
+/// **Les pochettes ne partent qu'aux afficheurs qui les ont demandées** dans
+/// leur annonce (`Announcement::covers`), et **seulement quand la pochette
+/// change** : ni sur chaque trame d'état — il y en a une par seconde en lecture
+/// —, ni vers l'afficheur de vingt colonnes, qui recevrait des mégaoctets pour
+/// les jeter. Le changement est détecté sur le `cover_href` de l'état, qui est
+/// justement l'identité de l'image (la clé du cache) et non un horodatage : une
+/// même pochette qui reste à l'écran ne repart donc jamais.
+///
+/// La matérialisation des octets — le seul moment où l'image entière existe en
+/// mémoire dans le cœur — est **derrière** ce filtre : un afficheur qui n'en
+/// veut pas ne fait pas payer la lecture du fichier non plus.
 fn relais_afficheur(
     nom: String,
     client: Arc<DisplayClient>,
+    veut_pochettes: bool,
+    covers: Arc<cover::CoverCache>,
     mut etat_rx: watch::Receiver<PlayerState>,
     mut catalogue_rx: watch::Receiver<Catalogue>,
 ) {
     tokio::spawn(async move {
+        /// Pousse la pochette que `href` désigne, si elle a changé depuis le
+        /// dernier envoi. Rend `Err` comme un envoi d'état, pour que le
+        /// contrôle d'erreur de la boucle soit le même : un socket mort doit
+        /// faire sortir, quel que soit le genre de trame qui l'a découvert.
+        ///
+        /// Une pochette introuvable, illisible ou trop grosse n'est **pas** une
+        /// erreur d'envoi : rien ne part, et `derniere` est quand même mise à
+        /// jour — sans quoi chaque trame d'état de la piste retenterait la
+        /// lecture d'un fichier qui vient d'échouer, une fois par seconde.
+        async fn pousse(
+            client: &DisplayClient,
+            covers: &cover::CoverCache,
+            derniere: &mut Option<String>,
+            href: Option<&str>,
+        ) -> anyhow::Result<()> {
+            if derniere.as_deref() == href {
+                return Ok(());
+            }
+            *derniere = href.map(str::to_owned);
+            // `None` (plus rien ne joue, ou pochette retirée) n'émet aucune
+            // trame : l'afficheur l'apprend par le `cover_href` absent de
+            // l'état, qu'il vient de recevoir. Inventer une trame de pochette
+            // vide ferait exister une image de zéro octet dans le protocole.
+            let Some(href) = href else { return Ok(()) };
+            let Some(cle) = href.strip_prefix(cover::PREFIXE_HREF) else {
+                tracing::debug!("cover href {href} has no key, nothing pushed");
+                return Ok(());
+            };
+            let Some((mime, octets)) = covers.octets(cle).await else {
+                // Déjà journalisé par `octets` avec sa raison.
+                return Ok(());
+            };
+            client
+                .send_cover(ritornello_proto::Cover {
+                    href: href.to_string(),
+                    mime: mime.to_string(),
+                    bytes: octets,
+                })
+                .await
+        }
+
         let etat = etat_rx.borrow_and_update().clone();
         let cat = catalogue_rx.borrow_and_update().clone();
         if let Err(e) = client.send(&etat).await {
@@ -102,12 +156,44 @@ fn relais_afficheur(
             tracing::warn!("display plugin {nom} relay stopped: {e}");
             return;
         }
+        // La pochette courante part d'emblée, comme l'état et le catalogue et
+        // pour la même raison : un afficheur câblé à chaud doit montrer ce qui
+        // joue sans attendre le prochain changement de piste.
+        let mut derniere_pochette: Option<String> = None;
+        if veut_pochettes {
+            if let Err(e) = pousse(
+                &client,
+                &covers,
+                &mut derniere_pochette,
+                etat.morceau.cover_href.as_deref(),
+            )
+            .await
+            {
+                tracing::warn!("display plugin {nom} relay stopped: {e}");
+                return;
+            }
+        }
         loop {
             let envoi = tokio::select! {
                 r = etat_rx.changed() => match r {
                     Ok(()) => {
                         let e = etat_rx.borrow_and_update().clone();
-                        client.send(&e).await
+                        let envoi = client.send(&e).await;
+                        // L'état d'abord, la pochette ensuite : l'afficheur
+                        // connaît ainsi le `cover_href` avant de recevoir les
+                        // octets qui s'en réclament.
+                        match (envoi, veut_pochettes) {
+                            (Ok(()), true) => {
+                                pousse(
+                                    &client,
+                                    &covers,
+                                    &mut derniere_pochette,
+                                    e.morceau.cover_href.as_deref(),
+                                )
+                                .await
+                            }
+                            (autre, _) => autre,
+                        }
                     }
                     Err(_) => break,
                 },
@@ -199,6 +285,10 @@ struct FilsChaud {
     /// Le second récepteur de `relais_afficheur` : un afficheur câblé à chaud
     /// doit être servi par un relais identique à celui du démarrage.
     catalogue_rx: watch::Receiver<Catalogue>,
+    /// **Le même** `Arc` que celui du cœur et de l'`AppState` HTTP (voir
+    /// `assemble_covers_et_core`) : un afficheur câblé à chaud doit lire les
+    /// pochettes que le cœur a déjà récupérées, pas un cache neuf et vide.
+    covers: Arc<cover::CoverCache>,
     status_state: Arc<RwLock<StatusState>>,
     admin_backends: admin::AdminBackends,
 }
@@ -343,6 +433,11 @@ async fn cabler_a_chaud<P: player::Player>(
                     relais_afficheur(
                         nom.clone(),
                         client,
+                        // Le drapeau **de l'annonce de ce greffon-là**, jamais
+                        // une valeur par défaut : c'est le binaire qui a dit
+                        // s'il voulait les octets (voir `Announcement::covers`).
+                        annonce.covers,
+                        fils.covers.clone(),
                         fils.etat_rx.clone(),
                         fils.catalogue_rx.clone(),
                     );
@@ -796,7 +891,11 @@ async fn main() -> Result<()> {
     let mut sources: HashMap<String, Arc<dyn core::Source>> = HashMap::new();
     // Le nom voyage avec le client : c'est lui qui nomme le greffon dans le
     // journal quand son relais s'arrête.
-    let mut display_clients: Vec<(String, Arc<DisplayClient>)> = Vec::new();
+    // Le drapeau `covers` de l'annonce voyage avec le client : au moment de
+    // spawner les relais (plus bas, après `Core::new`), l'annonce n'est plus
+    // sous la main, et rien ne doit reconstruire ce drapeau autrement qu'en le
+    // recopiant depuis ce que le greffon a annoncé.
+    let mut display_clients: Vec<(String, Arc<DisplayClient>, bool)> = Vec::new();
     let mut admin_backends: HashMap<String, Arc<dyn admin::AdminBackend>> = HashMap::new();
 
     for nom in &ordre_manifeste {
@@ -827,7 +926,7 @@ async fn main() -> Result<()> {
                 }
                 PluginKind::Display => match DisplayClient::connect(&socket).await {
                     Ok(client) => {
-                        display_clients.push((nom.clone(), client));
+                        display_clients.push((nom.clone(), client, annonce.covers));
                         plugin_statuses.push(PluginStatus::genre(nom, "display", true, annonce.admin));
                     }
                     Err(e) => {
@@ -971,6 +1070,11 @@ async fn main() -> Result<()> {
     // Cœur. La source active affichée est tenue à jour en direct par la boucle
     // ci-dessous (mise à jour de status_state.active_source après chaque commande).
     let mut core;
+    // Le cache de pochettes que `assemble_covers_et_core` construit, sorti du
+    // bloc ci-dessous : les relais d'afficheur (plus bas) et le câblage à chaud
+    // doivent lire **le même** `Arc` que le cœur et la route HTTP, jamais un
+    // second cache — c'est là que le cœur dépose les octets qu'il récupère.
+    let app_covers;
     {
         // Asked once, before serving: the answer gates the System tab's two
         // OS buttons, and asking per request would mean spawning `busctl`
@@ -1058,6 +1162,7 @@ async fn main() -> Result<()> {
             app_state_squelette,
         );
         core = coeur;
+        app_covers = app_state.covers.clone();
         let app = status::router(app_state);
         let listener = tokio::net::TcpListener::bind(&http_addr).await.with_context(|| format!("bind {http_addr}"))?;
         tracing::info!("web interface on http://{http_addr}/");
@@ -1099,8 +1204,15 @@ async fn main() -> Result<()> {
     if display_clients.is_empty() {
         tracing::warn!("no display plugin connected, continuing without display");
     }
-    for (nom, display_client) in display_clients {
-        relais_afficheur(nom, display_client, etat_rx.clone(), catalogue_rx.clone());
+    for (nom, display_client, veut_pochettes) in display_clients {
+        relais_afficheur(
+            nom,
+            display_client,
+            veut_pochettes,
+            app_covers.clone(),
+            etat_rx.clone(),
+            catalogue_rx.clone(),
+        );
     }
 
     // Tout ce qu'il faut pour câbler un greffon qui parlera plus tard : les
@@ -1114,6 +1226,7 @@ async fn main() -> Result<()> {
         now_playing_rx: now_playing_rx.clone(),
         etat_rx: etat_rx.clone(),
         catalogue_rx: catalogue_rx.clone(),
+        covers: app_covers.clone(),
         status_state: status_state.clone(),
         admin_backends: admin_backends.clone(),
     };
@@ -1380,5 +1493,285 @@ async fn main() -> Result<()> {
                 anyhow::bail!("mpv exited ({status:?}), stopping for restart by systemd");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod relais_tests {
+    //! Le relais d'afficheur, éprouvé sur le vrai chemin : un `DisplayClient`
+    //! du SDK d'un côté, `serve_display` de l'autre, et entre les deux
+    //! exactement la fonction que `main` appelle.
+    //!
+    //! Aucune marge de temps nulle part. Le sens positif est prouvé en
+    //! **attendant** ce qui doit arriver (un canal, donc l'attente est exacte).
+    //! Le sens négatif — « rien n'arrive » — ne peut pas se prouver par une
+    //! attente : il l'est par une **trame témoin** envoyée après, sur le même
+    //! socket. Les trames y arrivent dans l'ordre et `serve_display` les traite
+    //! dans l'ordre, donc voir le témoin prouve que ce qui le précédait a déjà
+    //! été traité — ou n'a jamais été envoyé.
+
+    use super::*;
+    use crate::cover::{CoverCache, Pochette};
+    use ritornello_plugin_sdk::{bind_display, serve_display, DisplayPlugin};
+    use ritornello_proto::Cover;
+
+    #[derive(Debug, PartialEq)]
+    enum Recu {
+        Etat(Box<PlayerState>),
+        Catalogue(Catalogue),
+        Pochette(Cover),
+    }
+
+    /// Un afficheur qui traite **tout** : c'est délibéré. Si le sens négatif
+    /// était prouvé par un afficheur incapable de recevoir une pochette, il ne
+    /// prouverait rien sur le filtre du cœur — seulement sur le bouchon.
+    struct Bouchon {
+        tx: mpsc::UnboundedSender<Recu>,
+    }
+
+    #[async_trait::async_trait]
+    impl DisplayPlugin for Bouchon {
+        async fn show(&mut self, state: PlayerState) -> Result<()> {
+            let _ = self.tx.send(Recu::Etat(Box::new(state)));
+            Ok(())
+        }
+        async fn catalogue(&mut self, c: Catalogue) -> Result<()> {
+            let _ = self.tx.send(Recu::Catalogue(c));
+            Ok(())
+        }
+        fn wants_covers(&self) -> bool {
+            true
+        }
+        async fn cover(&mut self, c: Cover) -> Result<()> {
+            let _ = self.tx.send(Recu::Pochette(c));
+            Ok(())
+        }
+    }
+
+    /// En-tête JPEG minimal puis du remplissage.
+    fn jpeg(remplissage: usize) -> Vec<u8> {
+        let mut v = vec![0xFFu8, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        v.resize(6 + remplissage, 0x42);
+        v
+    }
+
+    /// Un état **tel que le cœur l'émet** : `cover_href` y est toujours de la
+    /// forme `/api/cover/{clé}`, et la clé désigne une entrée du cache. Un
+    /// `Default::default()` avec un `cover_href` inventé prouverait une
+    /// causalité dans une trame que le producteur ne peut pas produire.
+    fn etat_avec_pochette(cle: &str) -> PlayerState {
+        PlayerState {
+            source: "files".into(),
+            morceau: ritornello_proto::Morceau {
+                cover_href: Some(format!("{}{cle}", cover::PREFIXE_HREF)),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// Monte un afficheur servi par le SDK, câble le relais dessus, et rend de
+    /// quoi piloter l'état et lire ce que l'afficheur reçoit.
+    struct Banc {
+        etat_tx: watch::Sender<PlayerState>,
+        recus: mpsc::UnboundedReceiver<Recu>,
+        /// Le dernier état poussé. Un témoin en est dérivé, pour n'en différer
+        /// que par un champ sans rapport avec la pochette (voir `temoin`).
+        dernier: PlayerState,
+        _catalogue_tx: watch::Sender<Catalogue>,
+        _dir: tempfile::TempDir,
+    }
+
+    async fn banc(
+        veut_pochettes: bool,
+        covers: Arc<CoverCache>,
+        etat_initial: PlayerState,
+    ) -> Banc {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("display.sock");
+        let listener = bind_display(&socket).unwrap();
+        let (tx, recus) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let _ = serve_display(listener, Bouchon { tx }).await;
+        });
+        let client = DisplayClient::connect(&socket).await.unwrap();
+        let (etat_tx, etat_rx) = watch::channel(etat_initial.clone());
+        let (catalogue_tx, catalogue_rx) = watch::channel(Catalogue::default());
+        relais_afficheur("banc".into(), client, veut_pochettes, covers, etat_rx, catalogue_rx);
+        let mut b = Banc {
+            etat_tx,
+            recus,
+            dernier: etat_initial,
+            _catalogue_tx: catalogue_tx,
+            _dir: dir,
+        };
+        // Attendre que le relais ait consommé la valeur initiale **avant** de
+        // rendre le banc. Un `watch` ne garde que la dernière valeur : sans
+        // cette attente, un `send` du test pouvait écraser l'état initial avant
+        // le `borrow_and_update()` du relais, et l'état porteur de la pochette
+        // n'aurait jamais existé pour lui. Ce n'est pas une marge de temps mais
+        // une synchronisation exacte — le catalogue est la **seconde** trame
+        // qu'envoie le relais, donc l'avoir vue prouve que l'état initial est
+        // passé. La pochette initiale, elle, part juste après : elle reste donc
+        // à collecter, ce que fait `temoin`.
+        loop {
+            match b.recus.recv().await.expect("le relais doit envoyer letat puis le catalogue") {
+                Recu::Catalogue(_) => break,
+                Recu::Etat(_) => {}
+                autre => panic!("trame inattendue avant le catalogue : {autre:?}"),
+            }
+        }
+        b
+    }
+
+    /// Clôt une collecte : envoie un état témoin et rend tout ce qui est arrivé
+    /// avant lui.
+    ///
+    /// Le témoin ne diffère du dernier état que par le **volume**, donc il porte
+    /// le même `cover_href`. C'est nécessaire : un témoin sans pochette
+    /// réinitialiserait la garde de déduplication du relais, et la pochette
+    /// repartirait à l'état suivant — ce qui masquerait exactement la propriété
+    /// que ces tests veulent voir.
+    async fn temoin(banc: &mut Banc) -> Vec<Recu> {
+        let mut t = banc.dernier.clone();
+        t.volume = t.volume.wrapping_add(1);
+        banc.dernier = t.clone();
+        banc.etat_tx.send(t.clone()).unwrap();
+        let mut avant = Vec::new();
+        loop {
+            match banc.recus.recv().await.expect("le relais doit rester vivant") {
+                Recu::Etat(e) if *e == t => return avant,
+                autre => avant.push(autre),
+            }
+        }
+    }
+
+    /// Provoque un changement d'état et rend **exactement** ce qu'il a
+    /// provoqué.
+    ///
+    /// Deux synchronisations, et les deux sont nécessaires. La première attend
+    /// l'arrivée de *cet* état : un `watch` ne conserve que la dernière valeur,
+    /// donc envoyer le témoin avant d'avoir vu celui-ci pourrait l'effacer sans
+    /// qu'il ait jamais existé pour le relais. La seconde est le témoin, qui
+    /// clôt la collecte. Comme le relais écrit l'état **puis** la pochette avant
+    /// de retourner attendre, ce qui arrive entre les deux ne peut venir que de
+    /// cet état-là.
+    async fn provoque(banc: &mut Banc, etat: PlayerState) -> Vec<Recu> {
+        banc.dernier = etat.clone();
+        banc.etat_tx.send(etat.clone()).unwrap();
+        // La trame **suivante** est nécessairement cet état : la fenêtre
+        // précédente a été close par son propre témoin, donc rien ne reste en
+        // vol. Une autre trame ici serait une anomalie, pas une attente à
+        // prolonger.
+        match banc.recus.recv().await.expect("le relais doit rester vivant") {
+            Recu::Etat(e) if *e == etat => {}
+            autre => panic!("trame inattendue avant letat envoye : {autre:?}"),
+        }
+        temoin(banc).await
+    }
+
+    fn pochettes(recus: &[Recu]) -> Vec<&Cover> {
+        recus
+            .iter()
+            .filter_map(|r| match r {
+                Recu::Pochette(c) => Some(c),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn un_afficheur_qui_na_pas_demande_les_pochettes_nen_recoit_aucune() {
+        // **La propriété qui protège la console.** Le bouchon sait recevoir une
+        // pochette ; c'est le cœur qui ne doit pas la lui envoyer.
+        let covers = Arc::new(CoverCache::new());
+        covers.insere("abcd".into(), Pochette::Octets(jpeg(10), "image/jpeg")).await;
+        let mut b = banc(false, covers, etat_avec_pochette("abcd")).await;
+
+        let recus = temoin(&mut b).await;
+        assert!(
+            pochettes(&recus).is_empty(),
+            "aucune pochette ne doit atteindre un afficheur qui n'en a pas demande : {recus:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn un_afficheur_qui_a_demande_recoit_les_octets_et_le_href_de_letat() {
+        let image = jpeg(1000);
+        let covers = Arc::new(CoverCache::new());
+        covers.insere("abcd".into(), Pochette::Octets(image.clone(), "image/png")).await;
+        let mut b = banc(true, covers, etat_avec_pochette("abcd")).await;
+
+        let recus = temoin(&mut b).await;
+        let vues = pochettes(&recus);
+        assert_eq!(vues.len(), 1, "une pochette, une seule : {recus:?}");
+        assert_eq!(vues[0].bytes, image);
+        assert_eq!(vues[0].mime, "image/png");
+        assert_eq!(
+            vues[0].href,
+            format!("{}abcd", cover::PREFIXE_HREF),
+            "le href doit etre exactement celui de la trame d'etat, sans quoi l'afficheur \
+             ne peut pas correler l'image avec ce qui joue"
+        );
+    }
+
+    #[tokio::test]
+    async fn la_pochette_ne_repart_pas_tant_quelle_ne_change_pas() {
+        // Une trame d'état sort jusqu'à une fois par seconde en lecture. Sans
+        // cette garde, chaque seconde de lecture pousserait l'image entière —
+        // et referait la lecture du fichier local qui la produit.
+        let covers = Arc::new(CoverCache::new());
+        covers.insere("abcd".into(), Pochette::Octets(jpeg(10), "image/jpeg")).await;
+        covers.insere("efgh".into(), Pochette::Octets(jpeg(20), "image/jpeg")).await;
+        let mut b = banc(true, covers, etat_avec_pochette("abcd")).await;
+
+        // La pochette initiale, qui part avec le premier état.
+        let recus = temoin(&mut b).await;
+        assert_eq!(pochettes(&recus).len(), 1, "la pochette initiale : {recus:?}");
+
+        // Le même `cover_href`, mais un état différent (le volume) : la trame
+        // d'état repart, la pochette non.
+        let mut encore = etat_avec_pochette("abcd");
+        encore.volume = 42;
+        let recus = provoque(&mut b, encore).await;
+        assert!(
+            pochettes(&recus).is_empty(),
+            "une pochette inchangee ne doit pas repartir avec chaque trame d'etat : {recus:?}"
+        );
+
+        // Une autre clé, en revanche, est une autre image : elle doit partir.
+        let recus = provoque(&mut b, etat_avec_pochette("efgh")).await;
+        let vues = pochettes(&recus);
+        assert_eq!(vues.len(), 1, "un changement de pochette doit en pousser une : {recus:?}");
+        assert_eq!(vues[0].href, format!("{}efgh", cover::PREFIXE_HREF));
+    }
+
+    #[tokio::test]
+    async fn une_pochette_au_dela_du_plafond_nest_pas_poussee_et_le_relais_survit() {
+        // La conséquence définie du plafond, vue du relais : rien n'est poussé,
+        // et surtout la tâche continue de servir l'état — un refus de pochette
+        // n'est pas un échec d'envoi, sinon l'afficheur perdrait *tout* pour le
+        // reste du processus.
+        let dir = tempfile::tempdir().unwrap();
+        let chemin = dir.path().join("enorme.jpg");
+        std::fs::write(&chemin, jpeg(ritornello_proto::COVER_MAX_BYTES)).unwrap();
+        let covers = Arc::new(CoverCache::new());
+        covers.insere("abcd".into(), Pochette::Fichier(chemin)).await;
+        let mut b = banc(true, covers, etat_avec_pochette("abcd")).await;
+
+        let recus = temoin(&mut b).await;
+        assert!(pochettes(&recus).is_empty(), "au-dela du plafond, rien ne doit partir : {recus:?}");
+        // Le témoin est arrivé, donc le relais vit : c'est l'autre moitié de la
+        // propriété, et `temoin` aurait bloqué indéfiniment sinon.
+    }
+
+    #[tokio::test]
+    async fn un_href_sans_pochette_en_cache_ne_casse_pas_le_relais() {
+        // Le cache est borné (`ENTREES` entrées) : la clé publiée dans l'état
+        // peut avoir été évincée entre-temps.
+        let covers = Arc::new(CoverCache::new());
+        let mut b = banc(true, covers, etat_avec_pochette("evincee")).await;
+        let recus = temoin(&mut b).await;
+        assert!(pochettes(&recus).is_empty(), "{recus:?}");
     }
 }

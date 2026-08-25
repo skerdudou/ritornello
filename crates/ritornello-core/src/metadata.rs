@@ -404,7 +404,7 @@ impl Metadonnees {
         // fois par seconde tant qu'un morceau joue.
         if let Some(cle) = &self.cover_cle {
             if let Some((_, origine)) = self.cover_retenue() {
-                m.cover_href = Some(format!("/api/cover/{cle}"));
+                m.cover_href = Some(format!("{}{cle}", crate::cover::PREFIXE_HREF));
                 m.cover_origin = Some(origine);
             }
         }

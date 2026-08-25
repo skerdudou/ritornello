@@ -23,6 +23,18 @@ use tokio::net::UnixStream;
 /// Une moitié prête à servir : son genre, pour l'annonce, et sa boucle.
 struct Moitie {
     kind: PluginKind,
+    /// Cette moitié veut-elle les octets des pochettes ? Toujours `false` hors
+    /// d'un afficheur.
+    ///
+    /// Retenu **ici**, dans le registre des moitiés, et non dans un champ à
+    /// part du `Runtime` : c'est ce qui fait de `covers` une valeur *dérivée*
+    /// de ce qui a été enregistré, exactement comme `kinds` et `admin` —
+    /// `run()` les calcule tous les trois depuis ce registre, en une
+    /// expression chacun, et l'annonce ne peut donc pas décrire autre chose
+    /// que ce qui sert réellement. La valeur est lue par `display()`, avant que
+    /// le plugin ne soit déplacé dans sa boucle : après, il n'est plus
+    /// interrogeable.
+    covers: bool,
     servir: Pin<Box<dyn Future<Output = Result<()>> + Send>>,
 }
 
@@ -56,6 +68,7 @@ impl Runtime {
         let l = bind_source(&crate::genre_socket(&self.prefix, PluginKind::Source))?;
         self.moities.push(Moitie {
             kind: PluginKind::Source,
+            covers: false,
             servir: Box::pin(serve_source(l, plugin)),
         });
         Ok(self)
@@ -63,8 +76,15 @@ impl Runtime {
 
     pub fn display(mut self, plugin: impl DisplayPlugin) -> Result<Self> {
         let l = bind_display(&crate::genre_socket(&self.prefix, PluginKind::Display))?;
+        // Lu **avant** le déplacement dans `serve_display`, seul ordre
+        // possible : après, le plugin appartient à la future qui le sert et
+        // plus personne ne peut l'interroger. C'est aussi ce qui rend le
+        // drapeau impossible à falsifier — il n'y a pas de paramètre à
+        // renseigner, seulement une méthode du plugin à lire.
+        let covers = plugin.wants_covers();
         self.moities.push(Moitie {
             kind: PluginKind::Display,
+            covers,
             servir: Box::pin(serve_display(l, plugin)),
         });
         Ok(self)
@@ -74,6 +94,7 @@ impl Runtime {
         let l = bind_input(&crate::genre_socket(&self.prefix, PluginKind::Input))?;
         self.moities.push(Moitie {
             kind: PluginKind::Input,
+            covers: false,
             servir: Box::pin(serve_input(l, plugin)),
         });
         Ok(self)
@@ -83,6 +104,7 @@ impl Runtime {
         let l = bind_metadata(&crate::genre_socket(&self.prefix, PluginKind::Metadata))?;
         self.moities.push(Moitie {
             kind: PluginKind::Metadata,
+            covers: false,
             servir: Box::pin(serve_metadata(l, plugin)),
         });
         Ok(self)
@@ -105,6 +127,10 @@ impl Runtime {
             name: self.name.clone(),
             kinds: self.moities.iter().map(|m| m.kind).collect(),
             admin: self.admin.is_some(),
+            // Dérivé, comme les deux au-dessus : la seule source est le
+            // registre des moitiés, donc aucun chemin ne peut annoncer des
+            // pochettes pour un afficheur qui n'en veut pas, ni l'inverse.
+            covers: self.moities.iter().any(|m| m.covers),
         };
         let mut flux = UnixStream::connect(&self.register)
             .await
@@ -182,6 +208,21 @@ mod tests {
         }
     }
 
+    /// Un afficheur qui **redéfinit** `wants_covers`, et rien d'autre. Le seul
+    /// écart avec `AfficheurBouchon` est cette méthode, donc c'est bien elle
+    /// que l'annonce doit refléter.
+    struct AfficheurQuiVeutLesPochettes;
+
+    #[async_trait::async_trait]
+    impl crate::DisplayPlugin for AfficheurQuiVeutLesPochettes {
+        async fn show(&mut self, _state: PlayerState) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn wants_covers(&self) -> bool {
+            true
+        }
+    }
+
     struct EntreeBouchon {
         rx: tokio::sync::mpsc::Receiver<ritornello_proto::InputMessage>,
     }
@@ -221,6 +262,63 @@ mod tests {
         assert_eq!(a.name, "mpd");
         assert_eq!(a.kinds, vec![PluginKind::Display, PluginKind::Input]);
         assert!(!a.admin, "aucun .admin() appele");
+        assert!(!a.covers, "aucun afficheur n'a redefini wants_covers");
+    }
+
+    /// L'invariant sur lequel repose tout le protocole d'enregistrement :
+    /// l'annonce est **dérivée** de ce qui a été enregistré, elle ne peut donc
+    /// pas mentir. Éprouvé dans les deux sens sur le seul drapeau que ce
+    /// chantier ajoute, avec deux afficheurs qui ne diffèrent *que* par
+    /// `wants_covers`.
+    ///
+    /// Le sens négatif est celui qui protège la console : un afficheur de vingt
+    /// colonnes n'a redéfini rien, et le cœur ne doit donc jamais lui pousser
+    /// de mégaoctets.
+    #[tokio::test]
+    async fn le_drapeau_des_pochettes_est_derive_de_lafficheur_enregistre() {
+        for (veut, plugin) in [(false, 0u8), (true, 1u8)] {
+            let dir = tempfile::tempdir().unwrap();
+            let register = dir.path().join("register.sock");
+            let listener = UnixListener::bind(&register).unwrap();
+            let prefixe = dir.path().join("afficheur");
+
+            let rt = Runtime::new("afficheur".into(), register.clone(), prefixe.clone());
+            let rt = if plugin == 0 {
+                // Ne redéfinit pas `wants_covers` : le corps par défaut décide.
+                rt.display(AfficheurBouchon { recus: Arc::new(Mutex::new(Vec::new())) }).unwrap()
+            } else {
+                rt.display(AfficheurQuiVeutLesPochettes).unwrap()
+            };
+            tokio::spawn(async move { rt.run().await.unwrap() });
+
+            let a = lire_annonce(&listener).await;
+            assert_eq!(a.kinds, vec![PluginKind::Display]);
+            assert_eq!(
+                a.covers, veut,
+                "l'annonce doit decrire exactement ce que l'afficheur enregistre veut"
+            );
+        }
+    }
+
+    /// Un genre sans afficheur ne peut pas annoncer de pochettes : le drapeau
+    /// est calculé depuis le registre des moitiés, où seul un afficheur peut
+    /// poser `covers: true`.
+    #[tokio::test]
+    async fn un_greffon_sans_afficheur_nannonce_jamais_de_pochettes() {
+        let dir = tempfile::tempdir().unwrap();
+        let register = dir.path().join("register.sock");
+        let listener = UnixListener::bind(&register).unwrap();
+        let prefixe = dir.path().join("entree");
+
+        let (_tx, rx) = tokio::sync::mpsc::channel(4);
+        let rt = Runtime::new("entree".into(), register.clone(), prefixe.clone())
+            .input(EntreeBouchon { rx })
+            .unwrap();
+        tokio::spawn(async move { rt.run().await.unwrap() });
+
+        let a = lire_annonce(&listener).await;
+        assert_eq!(a.kinds, vec![PluginKind::Input]);
+        assert!(!a.covers);
     }
 
     #[tokio::test]

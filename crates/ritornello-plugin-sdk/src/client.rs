@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use ritornello_proto::{
-    AdminReq, AdminRequest, AdminResponse, AdminResult, Catalogue, CoverRef, DisplayFrame,
+    AdminReq, AdminRequest, AdminResponse, AdminResult, Catalogue, Cover, CoverRef, DisplayFrame,
     Enrichment, IdentityUpdate, InputMessage, NowPlaying, PlayerState, Preset, SourceAction,
     SourceMessage, SourceReq, SourceRequest,
 };
@@ -220,8 +220,27 @@ impl DisplayClient {
         self.envoyer(&DisplayFrame::Catalogue(catalogue.clone())).await
     }
 
+    /// Pousse les octets d'une pochette. Réservé aux afficheurs qui l'ont
+    /// demandé dans leur annonce (`Announcement::covers`) : c'est l'appelant
+    /// qui filtre, ce client-ci ne sait pas qui il sert.
+    ///
+    /// Prend la pochette **par valeur**, contrairement à ses deux jumelles :
+    /// celles-là clonent un état de quelques centaines d'octets, celle-ci
+    /// porterait jusqu'à `COVER_MAX_BYTES`. Un clone doublerait le pic mesuré
+    /// pour rien — l'appelant vient tout juste de matérialiser ces octets et
+    /// n'en fait rien d'autre.
+    pub async fn send_cover(&self, cover: Cover) -> Result<()> {
+        self.envoyer(&DisplayFrame::Cover(cover)).await
+    }
+
     async fn envoyer(&self, frame: &DisplayFrame) -> Result<()> {
-        let ligne = format!("{}\n", serde_json::to_string(frame)?);
+        // `push` plutôt qu'un `format!("{}\n", …)` : celui-ci allouait une
+        // seconde chaîne et recopiait tout. Sans conséquence pour un état,
+        // mesurable pour une pochette — le pic résident d'une image de 2 Mio
+        // tombe de 3,9 × n à 2,6 × n rien qu'en supprimant cette recopie. Les
+        // octets écrits sur le socket sont identiques.
+        let mut ligne = serde_json::to_string(frame)?;
+        ligne.push('\n');
         let mut w = self.writer.lock().await;
         w.write_all(ligne.as_bytes()).await?;
         Ok(())
@@ -1118,6 +1137,44 @@ mod tests {
         let client = DisplayClient::connect(&socket).await.unwrap();
         client.send(&PlayerState { source: "radio".into(), ..Default::default() }).await.unwrap();
         client.send_catalogue(&attendu).await.unwrap();
+        serveur.await.expect("les assertions du serveur ont paniqué");
+    }
+
+    #[tokio::test]
+    async fn display_client_ecrit_une_pochette_sur_une_seule_ligne() {
+        // La propriété qui compte pour un protocole délimité par des sauts de
+        // ligne : des octets binaires — `0x0A` compris — ne doivent pas couper
+        // la ligne. Le serveur lit **une** ligne et doit y trouver toute
+        // l'image ; s'il en fallait deux, la première serait illisible et la
+        // seconde du bruit.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("display.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let mut octets = vec![0xFFu8, 0xD8, 0xFF, 0xE0];
+        octets.extend((0u16..=255).map(|b| b as u8));
+        let attendue = Cover {
+            href: "/api/cover/1a2b3c4d".into(),
+            mime: "image/jpeg".into(),
+            bytes: octets,
+        };
+        let attendue_srv = attendue.clone();
+        let serveur = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, _write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let ligne = lines.next_line().await.unwrap().unwrap();
+            match serde_json::from_str::<DisplayFrame>(&ligne).unwrap() {
+                DisplayFrame::Cover(c) => assert_eq!(c, attendue_srv),
+                autre => panic!("une trame de pochette etait attendue, obtenu {autre:?}"),
+            }
+            // Plus rien après : une seule ligne pour une image, jamais un
+            // découpage.
+            assert!(lines.next_line().await.unwrap().is_none(), "une pochette = une ligne");
+        });
+
+        let client = DisplayClient::connect(&socket).await.unwrap();
+        client.send_cover(attendue).await.unwrap();
+        drop(client);
         serveur.await.expect("les assertions du serveur ont paniqué");
     }
 
