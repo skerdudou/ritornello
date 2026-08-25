@@ -334,8 +334,23 @@ impl SourcePlugin for FilesSource {
                 //
                 // Toujours **aucune identité et aucune action** : la piste en
                 // cours ne doit être ni interrompue ni redéclarée, seulement
-                // renumérotée. Le cœur fusionne champ par champ, donc ce qui
-                // n'est pas dit reste tel quel.
+                // renumérotée.
+                //
+                // Attention : le cœur **ne fusionne pas** `status`, contrairement
+                // à ce que cette place affirmait. `preset`, `preset_name` et
+                // `preset_count` sont bien conservés quand ils sont absents —
+                // c'est ce qui rend cet avis partiel légitime — mais `status`,
+                // lui, est *remplacé* par ce que porte la trame, absence
+                // comprise (`Core::handle_source_update` : `if !update.transient
+                // { self.source_status = update.status.clone(); }`). C'est la
+                // seule convention qui permette d'effacer un statut.
+                //
+                // Cet avis n'en déclare donc aucun **et n'en efface aucun** : le
+                // cœur rend la main avant ce traitement pour une trame qui ne
+                // déclare ni identité ni statut. Sans ce garde — et c'était le
+                // cas en service — enregistrer une liste depuis cette page
+                // blanchissait le statut de la source sur la console et la SPA
+                // jusqu'à la commande suivante.
                 let liste = self.playlist.read().await;
                 let mut avis = Notification::new().preset_count(n);
                 if let Some(entry) = liste.current() {

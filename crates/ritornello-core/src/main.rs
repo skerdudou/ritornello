@@ -22,7 +22,7 @@ use anyhow::{Context, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
 // `PluginKind` vient du protocole partagé, pas du cœur : c'est le binaire du
 // greffon qui l'annonce, et `plugins.rs` n'a plus à le connaître.
-use ritornello_proto::{Announcement, Enrichment, InputMessage, NowPlaying, PluginKind};
+use ritornello_proto::{Announcement, Catalogue, Enrichment, InputMessage, NowPlaying, PluginKind};
 use ritornello_plugin_sdk::{run_input_client, run_metadata_client, DisplayClient, SourceClient, SourceUpdate};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -69,22 +69,56 @@ impl core::Source for SourceClient {
 /// minutes le tampon de 500 lignes qui alimente la popin d'erreurs de l'IHM, et
 /// à y noyer le vrai diagnostic. Un client d'afficheur dont l'écriture échoue
 /// est inutilisable : on le nomme une fois, et on s'en va.
+///
+/// **Deux** récepteurs, et deux genres de trame : l'état du lecteur, qui change
+/// jusqu'à une fois par seconde, et le catalogue des sources, structurel et
+/// rare. Deux canaux séparés plutôt qu'une charge utile élargie : élargir
+/// republierait l'état à chaque changement de catalogue et l'inverse, ce que la
+/// déduplication par égalité ne rattraperait pas — les deux valeurs changeraient
+/// ensemble par construction.
+///
+/// Les deux valeurs courantes partent d'emblée, avant toute attente, pour la
+/// même raison que ci-dessus : un afficheur câblé à chaud doit connaître le
+/// catalogue sans attendre qu'il change, et le catalogue ne change presque
+/// jamais.
 fn relais_afficheur(
     nom: String,
     client: Arc<DisplayClient>,
     mut etat_rx: watch::Receiver<PlayerState>,
+    mut catalogue_rx: watch::Receiver<Catalogue>,
 ) {
     tokio::spawn(async move {
-        let mut etat = etat_rx.borrow_and_update().clone();
+        let etat = etat_rx.borrow_and_update().clone();
+        let cat = catalogue_rx.borrow_and_update().clone();
+        if let Err(e) = client.send(&etat).await {
+            tracing::warn!("display plugin {nom} relay stopped: {e}");
+            return;
+        }
+        if let Err(e) = client.send_catalogue(&cat).await {
+            tracing::warn!("display plugin {nom} relay stopped: {e}");
+            return;
+        }
         loop {
-            if let Err(e) = client.send(&etat).await {
+            let envoi = tokio::select! {
+                r = etat_rx.changed() => match r {
+                    Ok(()) => {
+                        let e = etat_rx.borrow_and_update().clone();
+                        client.send(&e).await
+                    }
+                    Err(_) => break,
+                },
+                r = catalogue_rx.changed() => match r {
+                    Ok(()) => {
+                        let c = catalogue_rx.borrow_and_update().clone();
+                        client.send_catalogue(&c).await
+                    }
+                    Err(_) => break,
+                },
+            };
+            if let Err(e) = envoi {
                 tracing::warn!("display plugin {nom} relay stopped: {e}");
                 break;
             }
-            if etat_rx.changed().await.is_err() {
-                break;
-            }
-            etat = etat_rx.borrow_and_update().clone();
         }
     });
 }
@@ -102,6 +136,9 @@ struct FilsChaud {
     enrich_tx: mpsc::Sender<(String, Enrichment)>,
     now_playing_rx: watch::Receiver<NowPlaying>,
     etat_rx: watch::Receiver<PlayerState>,
+    /// Le second récepteur de `relais_afficheur` : un afficheur câblé à chaud
+    /// doit être servi par un relais identique à celui du démarrage.
+    catalogue_rx: watch::Receiver<Catalogue>,
     status_state: Arc<RwLock<StatusState>>,
     admin_backends: admin::AdminBackends,
 }
@@ -216,7 +253,12 @@ async fn cabler_a_chaud<P: player::Player>(
             }
             PluginKind::Display => match DisplayClient::connect(&socket).await {
                 Ok(client) => {
-                    relais_afficheur(nom.clone(), client, fils.etat_rx.clone());
+                    relais_afficheur(
+                        nom.clone(),
+                        client,
+                        fils.etat_rx.clone(),
+                        fils.catalogue_rx.clone(),
+                    );
                     lignes.push(PluginStatus::genre(&nom, "display", true, annonce.admin));
                 }
                 Err(e) => {
@@ -350,6 +392,12 @@ async fn main() -> Result<()> {
         source: persisted.active_source.clone(),
         ..Default::default()
     });
+    // Catalogue des sources : vers les plugins Display **seulement**, sur son
+    // propre canal. Vide au départ, `Core::new` le publie dès qu'il connaît ses
+    // sources — le relais d'un afficheur envoie la valeur courante à la
+    // connexion, donc un afficheur câblé avant cette publication reçoit le
+    // catalogue réel au changement qui suit.
+    let (catalogue_tx, catalogue_rx) = watch::channel(Catalogue::default());
     let (enrich_tx, mut enrich_rx) = mpsc::channel::<(String, Enrichment)>(32);
     let (audio_tx, mut audio_rx) = mpsc::channel::<Option<String>>(4);
     let (locale_tx, mut locale_rx) = mpsc::channel::<String>(4);
@@ -605,7 +653,7 @@ async fn main() -> Result<()> {
         tracing::warn!("no display plugin connected, continuing without display");
     }
     for (nom, display_client) in display_clients {
-        relais_afficheur(nom, display_client, etat_rx.clone());
+        relais_afficheur(nom, display_client, etat_rx.clone(), catalogue_rx.clone());
     }
 
     // Page de statut du cœur (plugins, source active, dernières erreurs, sortie audio).
@@ -690,6 +738,24 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Après le câblage : demander son catalogue à chaque source, **sans
+    // attendre**.
+    //
+    // Une tâche détachée par source, et aucune n'est jointe. La réponse
+    // corrélée à `ListPresets` est un `Noop` : elle n'apprend rien au cœur, les
+    // présélections arrivant par `source_update_rx` comme `preset_count`.
+    // Attendre ces réponses mettrait donc le délai de 5 s du protocole des
+    // sources sur le chemin de démarrage, une fois par source injoignable — et
+    // supprimer ces fenêtres-là était tout l'objet du chantier précédent.
+    for (nom, client) in &sources {
+        let (c, n) = (client.clone(), nom.clone());
+        tokio::spawn(async move {
+            if let Err(e) = c.request(ritornello_proto::SourceReq::ListPresets).await {
+                tracing::debug!("list_presets for {n}: {e}");
+            }
+        });
+    }
+
     // Cœur. La source active affichée est tenue à jour en direct par la boucle
     // ci-dessous (mise à jour de status_state.active_source après chaque commande).
     let mut core = core::Core::new(
@@ -705,6 +771,7 @@ async fn main() -> Result<()> {
                 now_playing: now_playing_tx,
                 etat: etat_tx,
             },
+            catalogue: catalogue_tx,
         },
     );
     // Best-effort, like the wake via `Power` (see the comment below): startup
@@ -725,6 +792,7 @@ async fn main() -> Result<()> {
         enrich_tx: enrich_tx.clone(),
         now_playing_rx: now_playing_rx.clone(),
         etat_rx: etat_rx.clone(),
+        catalogue_rx: catalogue_rx.clone(),
         status_state: status_state.clone(),
         admin_backends: admin_backends.clone(),
     };

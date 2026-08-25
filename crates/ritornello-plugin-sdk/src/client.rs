@@ -53,8 +53,11 @@ pub struct SourceUpdate {
     /// clause-ci rompt l'invariant qui rendait ce choix sûr (« tout chemin d'une
     /// vraie source déclare une identité ou un statut »).
     ///
-    /// Le cœur doit donc traiter les présélections **et rendre la main avant**
-    /// le traitement du statut quand la trame ne porte rien d'autre. Deux
+    /// Le cœur traite donc les présélections **et rend la main avant** le
+    /// traitement du statut quand la trame ne déclare ni identité ni statut
+    /// (`handle_source_update`, retour anticipé) : le prédicat y reprend
+    /// l'invariant mot pour mot, et couvre du même coup le cas de
+    /// `preset_count`, qui le rompait déjà en service. Deux
     /// atténuations existent déjà en amont, mais aucune ne suffit : le sdk
     /// n'émet jamais de liste vide (une source qui n'énumère pas reste donc
     /// inerte, voir le bras `ListPresets` de `serve_source`), et le catalogue
