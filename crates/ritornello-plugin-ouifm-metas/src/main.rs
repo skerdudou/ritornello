@@ -20,7 +20,7 @@ mod table;
 use anyhow::Result;
 use flux::Meta;
 use ritornello_plugin_sdk::{MetadataPlugin, Runtime};
-use ritornello_proto::{Enrichment, NowPlaying};
+use ritornello_proto::{CoverRef, Enrichment, NowPlaying};
 use serde_json::Value;
 use std::path::PathBuf;
 use table::Table;
@@ -142,6 +142,10 @@ impl MetadataPlugin for OuiFmMetas {
                     // Ce plugin ne sait pas où en est la lecture : il répond
                     // sur l'identité d'un morceau, pas sur son déroulement.
                     position_s: None,
+                    cover: meta.cover.as_deref().map(|u| CoverRef::Url { url: u.to_string() }),
+                    // Ce greffon lit le flux officiel de la station : il sait mieux que
+                    // l'ICY, par construction. Il écrase, donc `fill_only` reste faux.
+                    fill_only: false,
                     ..Default::default()
                 };
             }
@@ -211,6 +215,7 @@ mod tests {
                     artist: Some("Shaka Ponk".into()),
                     title: Some("Wanna Get Free".into()),
                     duration_s: Some(214),
+                    cover: None,
                 },
             ))
             .await
@@ -221,6 +226,22 @@ mod tests {
         assert_eq!(e.title.as_deref(), Some("Wanna Get Free"));
         assert_eq!(e.duration_s, Some(214));
         assert_eq!(e.album, None, "une webradio n'a pas d'album");
+    }
+
+    #[tokio::test]
+    async fn la_pochette_deja_composee_traverse_jusqua_lenrichissement() {
+        let mut p = plugin_suivant(METAS);
+        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)), ..Default::default() }).await;
+        p.metas_tx
+            .send((
+                METAS.into(),
+                Meta { title: Some("t".into()), cover: Some("https://www.lesindesradios.fr/x.jpg".into()), ..Default::default() },
+            ))
+            .await
+            .unwrap();
+        let e = p.next_enrichment().await;
+        assert_eq!(e.cover, Some(CoverRef::Url { url: "https://www.lesindesradios.fr/x.jpg".into() }));
+        assert!(!e.fill_only, "ce greffon sait mieux que l'ICY, il doit ecraser");
     }
 
     #[tokio::test]

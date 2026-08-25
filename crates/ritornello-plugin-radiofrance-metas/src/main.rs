@@ -21,7 +21,7 @@ mod table;
 use anyhow::Result;
 use live::Meta;
 use ritornello_plugin_sdk::{MetadataPlugin, Runtime};
-use ritornello_proto::{Enrichment, NowPlaying};
+use ritornello_proto::{CoverRef, Enrichment, NowPlaying};
 use serde_json::Value;
 use std::path::PathBuf;
 use table::Table;
@@ -143,6 +143,10 @@ impl MetadataPlugin for RadioFranceMetas {
                     // retard (voir `live::album_dans_grille`).
                     album: meta.album,
                     duration_s: meta.duration_s,
+                    cover: meta.cover.as_deref().map(|u| CoverRef::Url { url: live::url_pochette(u) }),
+                    // Ce greffon lit le flux officiel de la station : il sait mieux que
+                    // l'ICY, par construction. Il écrase, donc `fill_only` reste faux.
+                    fill_only: false,
                     // L'écoulé est calculé **ici**, au moment d'émettre : c'est
                     // le seul instant où il est exact, et le cœur l'ancre à sa
                     // réception. Une horloge décalée ou un `startTime` dans le
@@ -225,6 +229,7 @@ mod tests {
                     album: Some("At Last!".into()),
                     duration_s: Some(197),
                     start_time: None,
+                    cover: None,
                 },
             ))
             .await
@@ -238,6 +243,24 @@ mod tests {
         // jusqu'à l'enrichissement — c'est ce que le cœur place dans
         // `morceau.album`, dont un afficheur peut faire une ligne.
         assert_eq!(e.album.as_deref(), Some("At Last!"));
+    }
+
+    #[tokio::test]
+    async fn la_pochette_devient_une_url_composee_et_ecrase() {
+        let mut p = plugin_suivant(ID);
+        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)), ..Default::default() }).await;
+        p.metas_tx
+            .send((ID, Meta { title: Some("Fire".into()), cover: Some("uuid-test".into()), ..Default::default() }))
+            .await
+            .unwrap();
+        let e = p.next_enrichment().await;
+        assert_eq!(
+            e.cover,
+            Some(CoverRef::Url {
+                url: "https://api.radiofrance.fr/v1/services/embed/image/uuid-test?preset=400x400".into()
+            })
+        );
+        assert!(!e.fill_only, "ce greffon sait mieux que l'ICY, il doit ecraser");
     }
 
     #[tokio::test]

@@ -27,6 +27,11 @@ pub struct Meta {
     /// l'écoulé, pour que ce module reste sans horloge et testable sur des
     /// captures.
     pub start_time: Option<u64>,
+    /// UUID brut de la pochette, copié depuis `Direct.cover` dans `suit` — ce
+    /// champ est ce qui franchit le canal jusqu'au plugin, qui en fait une URL
+    /// (voir `url_pochette`). `None` inclut le cas où ce n'est pas un morceau,
+    /// la règle étant déjà tranchée en amont, dans `Direct.cover`.
+    pub cover: Option<String>,
 }
 
 /// Une réponse lue : ce qui passe, et dans combien de temps rappeler.
@@ -40,6 +45,13 @@ pub struct Direct {
     /// `album_dans_grille`), qui est la seule façon de l'obtenir — le direct
     /// ne porte pas d'album.
     pub song_uuid: Option<String>,
+    /// UUID de la pochette, **seulement quand un vrai morceau joue**.
+    ///
+    /// La station renseigne un `cover` même pour « Le direct » et pour ses
+    /// émissions : c'est l'image générique de l'antenne. L'annoncer ferait
+    /// taire le relai générique, puisqu'un champ rempli est un champ rempli et
+    /// qu'aucun étage supérieur ne peut savoir qu'il l'est mal.
+    pub cover: Option<String>,
     pub recontacter: Duration,
 }
 
@@ -100,6 +112,15 @@ fn url_grille(id: u32) -> String {
     format!("https://api.radiofrance.fr/livemeta/pull/{id}")
 }
 
+/// URL de la pochette d'un morceau.
+///
+/// `preset` n'est pas optionnel : sans lui, l'API rend un 400. Avec, elle rend
+/// un 301 vers le CDN, que le cœur suit. `400x400` est un compromis mesuré —
+/// 31 887 octets, contre un original de taille non bornée.
+pub fn url_pochette(uuid: &str) -> String {
+    format!("https://api.radiofrance.fr/v1/services/embed/image/{uuid}?preset=400x400")
+}
+
 /// Texte non vide d'un champ, `None` sinon.
 fn texte(v: &Value, cle: &str) -> Option<String> {
     let s = v.get(cle)?.as_str()?.trim();
@@ -131,7 +152,7 @@ pub fn parse_direct(charge: &str) -> Option<Direct> {
         .unwrap_or(RAPPEL_DEFAUT);
     let Some(now) = v.get("now") else {
         // Réponse bien formée mais sans direct : rien à dire, on repassera.
-        return Some(Direct { meta: None, song_uuid: None, recontacter });
+        return Some(Direct { meta: None, song_uuid: None, cover: None, recontacter });
     };
     let est_un_morceau = now.get("firstLineSongUuid").is_some_and(|u| !u.is_null());
     let duree = match (now.get("startTime").and_then(Value::as_u64), now.get("endTime").and_then(Value::as_u64)) {
@@ -157,10 +178,18 @@ pub fn parse_direct(charge: &str) -> Option<Direct> {
         album: None,
         duration_s: duree.filter(|_| morceau_plausible).map(|d| d as u32),
         start_time: now.get("startTime").and_then(Value::as_u64).filter(|_| morceau_plausible),
+        // Rempli plus tard, dans `suit`, depuis `Direct.cover` : à ce stade,
+        // l'analyse pure ne connaît que le morceau, pas encore le canal qui le
+        // porte jusqu'au plugin.
+        cover: None,
     };
     // Une durée seule n'est pas affichable : ce n'est pas une réponse.
     let meta = (meta.artist.is_some() || meta.title.is_some()).then_some(meta);
-    Some(Direct { meta, song_uuid: texte(now, "songUuid"), recontacter })
+    let song_uuid = texte(now, "songUuid");
+    // Le `songUuid` est le seul discriminant fiable entre un morceau et une
+    // émission — mesuré sur quatre stations.
+    let cover = song_uuid.as_ref().and_then(|_| texte(now, "cover"));
+    Some(Direct { meta, song_uuid, cover, recontacter })
 }
 
 /// Album du morceau `song_uuid` dans une réponse de la grille, s'il y figure.
@@ -246,7 +275,12 @@ pub async fn suit(id: u32, profil: String, tx: mpsc::Sender<(u32, Meta)>) {
         match interroge(&client, id, &profil).await {
             Ok(direct) => {
                 recul = RECUL_BASE / 2;
-                if let Some(meta) = direct.meta {
+                if let Some(mut meta) = direct.meta {
+                    // `direct.cover` n'est jamais reconstruit ici : la règle
+                    // « pas de pochette hors morceau » est déjà tranchée dans
+                    // `parse_direct`, ce champ n'est qu'un passage de témoin
+                    // jusqu'au plugin.
+                    meta.cover = direct.cover.clone();
                     if dernier.as_ref() != Some(&meta) {
                         dernier = Some(meta.clone());
                         // L'album se cherche **une fois par morceau**, et
@@ -478,6 +512,45 @@ mod tests {
         let m = parse_direct(REPONSE_MOUV).unwrap().meta.unwrap();
         assert_eq!(m.start_time, None);
         assert_eq!(m.duration_s, None);
+    }
+
+    #[test]
+    fn l_url_de_pochette_suit_le_motif_mesure() {
+        // Mesure du 2026-08-24 : ce motif rend un 301 vers le CDN, puis un
+        // JPEG de 31 887 octets. `preset` est obligatoire — sans lui, 400.
+        assert_eq!(
+            url_pochette("24abdb92-7220-45c6-8434-a325278efa2b"),
+            "https://api.radiofrance.fr/v1/services/embed/image/24abdb92-7220-45c6-8434-a325278efa2b?preset=400x400"
+        );
+    }
+
+    #[test]
+    fn la_pochette_d_un_vrai_morceau_est_retenue() {
+        let d = parse_direct(REPONSE_FIP).unwrap();
+        assert_eq!(d.cover.as_deref(), Some("5b93ce44-3ed6-4409-a2d7-4bd159c061f8"));
+    }
+
+    #[test]
+    fn la_pochette_est_tue_quand_ce_n_est_pas_un_morceau() {
+        // La station sert une image generique pour « Le direct » et pour ses
+        // emissions. L'annoncer ferait taire le relai generique : un champ
+        // rempli est un champ rempli, aucun etage superieur ne peut savoir
+        // qu'il l'est mal. Le critere est `songUuid`, deja extrait.
+        let d = parse_direct(REPONSE_LOCALE_MUETTE).unwrap();
+        assert_eq!(d.song_uuid, None, "prealable du test");
+        // Precondition, pas une preuve de la regle : REPONSE_LOCALE_MUETTE ne
+        // porte aucune cle "cover", donc cette assertion passerait meme sans
+        // le filtre sur songUuid. C'est l'entree « Le direct » ci-dessous,
+        // avec un cover rempli a cote d'un songUuid nul, qui exerce reellement
+        // la regle.
+        assert_eq!(d.cover, None);
+
+        // Une entree « Le direct » : songUuid nul a cote d'un cover rempli.
+        // Valeurs reprises de l'entree `prev` de REPONSE_FIP, capturee plus
+        // haut : ce n'est pas invente, c'est la meme forme que le direct sert
+        // reellement pour l'antenne generique.
+        let direct = r#"{"now":{"firstLine":"Le direct","secondLine":"La radio la plus eclectique du monde","songUuid":null,"cover":"7eee98cb-3f59-4a3b-b921-6a4be85af542"},"delayToRefresh":70000}"#;
+        assert_eq!(parse_direct(direct).unwrap().cover, None);
     }
 
     #[test]

@@ -8,12 +8,26 @@ use futures::StreamExt;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+/// Hôte des images, sous forme nue (sans schéma) : c'est l'**autorité** de
+/// l'URL qui est comparée à cette valeur plus bas, jamais un préfixe de la
+/// chaîne entière. Un `starts_with` sur `"https://{HOTE_IMAGES}"` laisserait
+/// passer `https://www.lesindesradios.fr.evil.example/x.jpg` — ce faux hôte a
+/// bien le vrai domaine en préfixe de chaîne sans en être un sous-domaine.
+/// `coverUrl` est un champ écrit par un tiers, dans un flux que l'appareil va
+/// ensuite chercher : c'est la seule barrière contre ce détournement, le cœur
+/// ne validant qu'un schéma https et l'absence d'IP littérale.
+const HOTE_IMAGES: &str = "www.lesindesradios.fr";
+
 /// Ce qu'une trame apprend du morceau.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Meta {
     pub artist: Option<String>,
     pub title: Option<String>,
     pub duration_s: Option<u32>,
+    /// URL finale de la pochette, déjà composée : `coverUrl` de la trame s'il
+    /// vient de l'hôte connu, sinon `coverId` recomposé selon le motif du
+    /// lecteur d'OUI FM lui-même.
+    pub cover: Option<String>,
 }
 
 /// Attente initiale avant reconnexion, puis doublée à chaque échec.
@@ -87,11 +101,25 @@ pub fn parse_data_line(ligne: &str) -> Option<Meta> {
         serde_json::Value::String(s) => s.trim().parse::<u64>().ok(),
         _ => None,
     });
+    // Le lecteur d'OUI FM fait exactement ceci : `coverUrl` s'il est là,
+    // sinon `coverId` composé. Les deux cas sont réels sur le flux.
+    let cover = texte(&v, "coverUrl")
+        .filter(|u| {
+            // Comparaison de l'autorité, pas prefixe de chaine (voir
+            // HOTE_IMAGES) : sinon "https://www.lesindesradios.fr.evil.example/x"
+            // serait accepte, le vrai domaine n'etant qu'un prefixe du faux.
+            u.strip_prefix("https://").and_then(|reste| reste.split(['/', '?', '#']).next()) == Some(HOTE_IMAGES)
+        })
+        .or_else(|| {
+            texte(&v, "coverId")
+                .map(|id| format!("https://{HOTE_IMAGES}/servicesimb/images?version=6&iid={id}&width=400"))
+        });
     let meta = Meta {
         artist: texte(&v, "artist"),
         title: texte(&v, "title"),
         // Une durée absurde vaut mieux ignorée qu'affichée : elle vient d'un tiers.
         duration_s: duree.filter(|d| *d > 0 && *d <= 24 * 3600).map(|d| d as u32),
+        cover,
     };
     // Une durée seule n'est pas affichable : ce n'est pas une réponse.
     (meta.artist.is_some() || meta.title.is_some()).then_some(meta)
@@ -211,6 +239,46 @@ mod tests {
         assert_eq!(m.title.as_deref(), Some("SHE'S A RAINBOW"));
         // La durée était perdue avant correction : le flux la donne en chaîne.
         assert_eq!(m.duration_s, Some(245));
+    }
+
+    #[test]
+    fn le_cover_id_est_compose_selon_le_motif_du_lecteur() {
+        // Motif pris dans le bundle `_app` de ouifm.fr/player, dans le code qui
+        // lit ce meme flux SSE. Mesure du 2026-08-24 : JPEG de 35 613 octets.
+        let m = parse_data_line(TRAME).unwrap();
+        assert_eq!(
+            m.cover.as_deref(),
+            Some("https://www.lesindesradios.fr/servicesimb/images?version=6&iid=3134161803443976427/t/th/therollingstones/shesarainbow/214198016_1702973462000&width=400")
+        );
+    }
+
+    #[test]
+    fn une_url_toute_faite_dans_la_trame_est_preferee_si_l_hote_est_connu() {
+        let connu = r#"data: {"title":"t","coverUrl":"https://www.lesindesradios.fr/x.jpg","coverId":"abc"}"#;
+        assert_eq!(
+            parse_data_line(connu).unwrap().cover.as_deref(),
+            Some("https://www.lesindesradios.fr/x.jpg")
+        );
+        // Un hote inconnu est refuse : ce champ est ecrit par un tiers, et
+        // c'est le coeur qui irait le chercher.
+        let inconnu = r#"data: {"title":"t","coverUrl":"https://ailleurs.example/x.jpg","coverId":"abc"}"#;
+        let compose = parse_data_line(inconnu).unwrap().cover.unwrap();
+        assert!(compose.starts_with("https://www.lesindesradios.fr/"), "{compose}");
+        assert!(compose.contains("iid=abc"), "{compose}");
+
+        // Le vrai domaine en simple prefixe de chaine d'un hote different :
+        // un `starts_with` sur la chaine entiere l'accepterait a tort, alors
+        // qu'une comparaison sur l'autorite le refuse. C'est le contournement
+        // que `HOTE_IMAGES` existe pour fermer.
+        let usurpe = r#"data: {"title":"t","coverUrl":"https://www.lesindesradios.fr.evil.example/x.jpg","coverId":"abc"}"#;
+        let compose = parse_data_line(usurpe).unwrap().cover.unwrap();
+        assert!(compose.starts_with("https://www.lesindesradios.fr/"), "{compose}");
+        assert!(compose.contains("iid=abc"), "{compose}");
+    }
+
+    #[test]
+    fn sans_pochette_la_trame_reste_exploitable() {
+        assert_eq!(parse_data_line(r#"data: {"title":"t"}"#).unwrap().cover, None);
     }
 
     #[test]

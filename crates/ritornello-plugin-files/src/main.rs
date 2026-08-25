@@ -10,6 +10,7 @@
 //! liste en cours. Une panne de la page ne doit jamais couper l'audio.
 
 mod admin;
+mod pochette;
 mod state;
 
 use anyhow::Result;
@@ -56,6 +57,62 @@ struct FilesSource {
     /// `poll_notification` reste alors en attente pour toujours plutôt que de
     /// rendre `None`, qui est **terminal** pour le SDK.
     preset_count_rx: Option<tokio::sync::watch::Receiver<u8>>,
+    /// Résultat en vol de la recherche de pochette pour la piste armée.
+    ///
+    /// **Portée par une tâche `tokio::spawn` indépendante**, lancée par
+    /// `arme_pochette` — et non par un appel direct à `sante.borne(...).await`
+    /// ici.
+    /// Une première version faisait cet appel directement dans
+    /// `poll_notification`, qui est le futur que le `select!` du SDK annule
+    /// dès qu'une requête du cœur arrive pendant l'attente — un événement
+    /// courant, pas un cas limite. Une annulation avant l'expiration du délai
+    /// de `sante` fait sauter son bras `Err` : rien n'est marqué muet, la
+    /// tâche `spawn_blocking` interne est simplement détachée (Tokio n'annule
+    /// rien à la destruction), et comme la piste armée n'est délibérément pas
+    /// oubliée sur annulation, l'appel suivant relançait une **deuxième**
+    /// sonde sur le même partage bloqué — un fil `spawn_blocking` de plus à
+    /// chaque cycle, là où `sante.rs` promet au plus un fil abandonné par
+    /// point de montage. En sortant la sonde de cette boucle annulable, elle
+    /// va toujours à son terme une seule fois, et la comptabilité de `sante`
+    /// reste exacte.
+    ///
+    /// `oneshot::Receiver::await` est documenté cancel-safe : si
+    /// `poll_notification` est annulé pendant l'attente, ce récepteur — gardé
+    /// ici et non dans une variable locale du futur — n'a rien perdu, et le
+    /// prochain appel reprend l'attente sur la même tâche en vol plutôt que
+    /// d'en relancer une autre.
+    ///
+    /// Un nouveau `Play` pendant qu'une sonde est en vol remplace ce champ par
+    /// un récepteur neuf : l'ancien est abandonné, et le résultat de l'ancienne
+    /// tâche — quand elle finira par arriver — tombera dans un `send` sans
+    /// personne à l'écoute. C'est délibéré : une pochette de la piste
+    /// précédente ne doit jamais s'annoncer pour la piste qui vient de
+    /// démarrer.
+    pochette_en_vol: Option<tokio::sync::oneshot::Receiver<Option<ritornello_proto::CoverRef>>>,
+    /// Pochette mémorisée **par répertoire** : le répertoire sondé, et ce
+    /// qu'on y a trouvé (`None` en second = sondé, rien de sûr).
+    ///
+    /// Le répertoire et non le fichier, parce que c'est la granularité de la
+    /// chose cherchée : un `folder.jpg` appartient à l'album, pas à la piste.
+    /// C'est ce qui permet de réannoncer la pochette à **chaque** déclaration
+    /// d'identité — l'avance automatique de mpv comprise, qui passe par
+    /// `player_track`/`recale` et non par `jouer()` — sans repayer un
+    /// `readdir` sur un partage SMB à chaque piste. Sans cette réannonce, un
+    /// album ripé montrait sa pochette sur la piste 1 et le repli ♫ sur les
+    /// suivantes : le cœur efface `cover_source` à tout changement d'identité
+    /// (voir `Metadonnees::set_identity`), et seul `jouer()` réarmait la
+    /// sonde.
+    ///
+    /// Partagée avec la tâche de sonde, qui l'écrit en fin de course, d'où
+    /// l'`Arc<Mutex<…>>`. Un seul répertoire mémorisé : on n'en écoute qu'un à
+    /// la fois, et revenir en arrière dans la liste ne coûte qu'un `readdir`.
+    pochette_par_repertoire: Arc<Mutex<Option<(PathBuf, Option<ritornello_proto::CoverRef>)>>>,
+    /// Disjoncteur des chemins média, partagé avec la moitié Admin.
+    ///
+    /// Le `read_dir` de la recherche de pochette porte sur un partage qui peut
+    /// rester muet indéfiniment (voir `sante`) : sans cette borne, un NAS
+    /// endormi figerait la tâche de sonde ci-dessus indéfiniment.
+    sante: Arc<ritornello_plugin_files::sante::Sante>,
 }
 
 impl FilesSource {
@@ -92,6 +149,71 @@ impl FilesSource {
         }
     }
 
+    /// Arme l'annonce de la pochette du répertoire de `fichier`.
+    ///
+    /// À appeler depuis **tout** chemin qui déclare une identité : le cœur
+    /// remet sa pochette à zéro à chaque changement d'identité, donc une
+    /// identité déclarée sans réannonce est une pochette perdue.
+    ///
+    /// Deux cas, et c'est là tout l'intérêt de la mémorisation :
+    /// - le répertoire est celui qu'on a déjà sondé — cas de l'immense
+    ///   majorité des changements de piste, un album étant un répertoire — et
+    ///   la réponse part **tout de suite**, sans aucun accès disque ;
+    /// - le répertoire change : on sonde, une fois.
+    ///
+    /// La sonde reste portée par une tâche `tokio::spawn` indépendante avec un
+    /// `oneshot`, et ce n'est pas un détail de style (voir la doc de
+    /// `pochette_en_vol`) : le `select!` du SDK annule `poll_notification` dès
+    /// qu'une requête du cœur arrive, et un appel à `sante.borne(...)` fait
+    /// depuis ce futur perdrait la comptabilité du disjoncteur. Le chemin
+    /// mémorisé passe par le même `oneshot`, déjà rempli : rien de neuf à
+    /// annuler, et surtout **aucun chemin par lequel `poll_notification`
+    /// pourrait rendre `None`**, qui est terminal pour le SDK — un `Err` du
+    /// récepteur comme un `Ok(None)` retombent tous deux dans la suite de la
+    /// fonction.
+    fn arme_pochette(&mut self, fichier: &Path) {
+        // Un récepteur neuf remplace celui d'une sonde encore en vol : c'est
+        // ce qui écarte la pochette d'une piste déjà quittée (voir la doc de
+        // `pochette_en_vol`).
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pochette_en_vol = Some(rx);
+        let Some(repertoire) = fichier.parent().map(Path::to_path_buf) else {
+            let _ = tx.send(None);
+            return;
+        };
+        if let Some((connu, trouvee)) = &*self.pochette_par_repertoire.lock().unwrap() {
+            if connu == &repertoire {
+                let _ = tx.send(trouvee.clone());
+                return;
+            }
+        }
+        let sante = self.sante.clone();
+        let memoire = self.pochette_par_repertoire.clone();
+        let chemin = fichier.to_path_buf();
+        tokio::spawn(async move {
+            let a_chercher = chemin.clone();
+            match sante.borne(&chemin, move || pochette::cherche(&a_chercher)).await {
+                Some(trouve) => {
+                    // Mémorisé y compris quand rien n'a été trouvé : c'est ce
+                    // qui évite de re-sonder un répertoire sans image à
+                    // chaque piste.
+                    *memoire.lock().unwrap() = Some((repertoire, trouve.clone()));
+                    let _ = tx.send(trouve);
+                }
+                // Le disjoncteur n'a pas su (partage muet, délai écoulé) :
+                // **rien n'est mémorisé**. Retenir « pas de pochette » ici
+                // condamnerait ce répertoire pour toute la session sur la
+                // seule foi d'un NAS momentanément endormi, alors que `sante`
+                // rend justement la main dès qu'il répond de nouveau.
+                None => {
+                    let _ = tx.send(None);
+                }
+            }
+            // Ignoré si personne n'écoute plus (piste déjà changée depuis) :
+            // c'est le mécanisme même qui écarte un résultat périmé.
+        });
+    }
+
     /// Lance la liste à l'index courant, après avoir réécrit le m3u de mpv.
     async fn jouer(&mut self) -> SourceOutcome {
         // On rend à mpv la liste telle qu'elle est maintenant : l'écart est
@@ -113,6 +235,10 @@ impl FilesSource {
         let index = liste.index;
         let preset = liste.preset();
         drop(liste);
+        // Armée ici, lue plus tard par `poll_notification`. Un `Play` réel
+        // seulement — la liste vide est sortie plus haut par le `return`, donc
+        // on ne sonde jamais pour rien.
+        self.arme_pochette(&entry.path);
 
         let action = SourceAction::play(self.mpv_playlist_path.to_string_lossy().to_string())
             // Sans cette déclaration, le cœur chargerait le m3u comme un média
@@ -168,16 +294,29 @@ impl FilesSource {
     }
 
     /// Trame qui ne fait que redire où on en est, sans rien relancer.
-    async fn recale(&self) -> SourceOutcome {
+    ///
+    /// « Sans rien relancer » côté audio ; côté pochette, au contraire, elle
+    /// **réannonce**. Cette trame déclare une identité, et le cœur efface ce
+    /// qu'il tenait à chaque changement d'identité : c'est le chemin de
+    /// l'avance automatique de mpv, donc de toutes les pistes d'un album sauf
+    /// celle que l'utilisateur a lancée lui-même. La sonde n'est repayée que
+    /// si le répertoire change (voir `arme_pochette`).
+    async fn recale(&mut self) -> SourceOutcome {
         let liste = self.playlist.read().await;
         let mut issue = SourceOutcome::new(SourceAction::Noop)
             .preset_count(liste.preset_count())
             .status(self.statut());
+        let mut fichier = None;
         if let Some(entry) = liste.current() {
             issue = issue.plays(Self::identite(&entry.path)).preset_name(entry.display_name());
+            fichier = Some(entry.path.clone());
         }
         if let Some(n) = liste.preset() {
             issue = issue.preset(n);
+        }
+        drop(liste);
+        if let Some(fichier) = fichier {
+            self.arme_pochette(&fichier);
         }
         issue
     }
@@ -315,6 +454,35 @@ impl SourcePlugin for FilesSource {
     }
 
     async fn poll_notification(&mut self) -> Option<Notification> {
+        // Une sonde est en vol : attendre son résultat, sans jamais la
+        // relancer depuis ce futur (voir la doc du champ — c'est `jouer()`
+        // qui la lance, sur une tâche que cette annulation-ci ne touche pas).
+        //
+        // `rx.await` et non `rx.try_recv()` : c'est justement l'attente
+        // elle-même qui doit survivre à l'annulation de `poll_notification`,
+        // pas la contourner. `oneshot::Receiver` documente son `.await` comme
+        // cancel-safe, et le récepteur vit dans `self` — pas dans une
+        // variable locale de ce futur — donc rien n'est perdu si ce tour est
+        // interrompu : le prochain reprend l'attente sur la même tâche.
+        if let Some(rx) = &mut self.pochette_en_vol {
+            let resultat = rx.await;
+            // Vidé seulement après que la sonde a répondu — c'est ce qui rend
+            // vraie la garantie ci-dessus : tant qu'aucune réponse n'est
+            // arrivée, le champ reste en place pour le prochain tour.
+            self.pochette_en_vol = None;
+            // Deux échecs distincts se rejoignent ici sans faire de
+            // différence : `Err` (la tâche a disparu sans répondre, par
+            // exemple si elle a paniqué) et un `Ok(None)` (le disjoncteur a
+            // dit « on ne sait pas », ou la recherche elle-même a dit « rien
+            // de sûr »). Dans tous les cas, il n'y a rien à annoncer —
+            // surtout pas une notification vide, et surtout pas `None`, qui
+            // est terminal pour le SDK (voir le commentaire sur
+            // `preset_count_rx` juste en dessous). On tombe simplement dans
+            // la suite de la fonction, qui attend le prochain événement.
+            if let Ok(Some(cover)) = resultat {
+                return Some(Notification::new().cover(cover));
+            }
+        }
         let Some(rx) = &mut self.preset_count_rx else {
             // N'arrive qu'en test (voir le commentaire sur le champ) : `main()`
             // construit toujours ce récepteur. Jamais `None` ici, qui serait
@@ -416,6 +584,15 @@ async fn main() -> Result<()> {
     let liste_changee = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let joue = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
+    // Créé ici, sans rien sonder : le disjoncteur n'apprend qu'en servant les
+    // requêtes. Sonder au démarrage remettrait un accès disque avant la
+    // liaison de la socket, ce qui est précisément le défaut qu'il corrige.
+    //
+    // Partagé avec la Source : la recherche de pochette fait un `read_dir` sur
+    // le même partage que la moitié Admin, et doit tomber sous le même
+    // disjoncteur plutôt que d'en inventer un second.
+    let sante = Arc::new(ritornello_plugin_files::sante::Sante::new());
+
     let source = FilesSource {
         playlist: playlist.clone(),
         liste_changee: liste_changee.clone(),
@@ -425,6 +602,9 @@ async fn main() -> Result<()> {
         catalog: catalog.clone(),
         locales_root,
         preset_count_rx: Some(preset_count_rx),
+        pochette_en_vol: None,
+        pochette_par_repertoire: Arc::new(Mutex::new(None)),
+        sante: sante.clone(),
     };
 
     // Sonde au démarrage plutôt qu'à l'usage : la page doit pouvoir griser
@@ -438,11 +618,6 @@ async fn main() -> Result<()> {
     if !smb_ok.load(std::sync::atomic::Ordering::Relaxed) {
         tracing::info!("smbclient is not available: the network wizard will be offered read-only");
     }
-
-    // Créé ici, sans rien sonder : le disjoncteur n'apprend qu'en servant les
-    // requêtes. Sonder au démarrage remettrait un accès disque avant la
-    // liaison de la socket, ce qui est précisément le défaut qu'il corrige.
-    let sante = Arc::new(ritornello_plugin_files::sante::Sante::new());
 
     let admin = admin::FilesAdmin {
         explore: ritornello_plugin_files::explore::Explorateur::new(
@@ -494,6 +669,9 @@ mod tests {
             catalog: Arc::new(RwLock::new(Catalog::load("files", "en", &racine, FILES_EN))),
             locales_root: racine,
             preset_count_rx: None,
+            pochette_en_vol: None,
+            pochette_par_repertoire: Arc::new(Mutex::new(None)),
+            sante: Arc::new(ritornello_plugin_files::sante::Sante::new()),
         }
     }
 
@@ -645,6 +823,183 @@ mod tests {
         assert!(n.preset_name.is_some(), "et le nom avec");
         assert!(n.identity.is_none(), "ce qui joue ne doit pas etre redeclare");
         assert!(n.status.is_none(), "ni le statut touche");
+    }
+
+    #[tokio::test]
+    async fn la_pochette_posee_a_cote_est_annoncee_apres_un_play() {
+        // Le cas nominal : un CD rippé pose son `cover.jpg` à côté des pistes.
+        // La recherche doit se faire après le `Play`, dans la notification
+        // spontanée — pas dans la réponse à `activate()`, qui ne déclare
+        // jamais de pochette (voir `serve_source`).
+        let dir = tempfile::tempdir().unwrap();
+        let piste = dir.path().join("01 - piste.flac");
+        std::fs::write(&piste, b"x").unwrap();
+        std::fs::write(dir.path().join("cover.jpg"), b"x").unwrap();
+        let mut s = source_de_test(Playlist {
+            entries: vec![Entry { path: piste, title: None, duration_s: None }],
+            index: 0,
+        });
+        let out = s.activate().await;
+        assert!(out.identity.is_some(), "la piste doit etre declaree comme telle");
+        let n = s.poll_notification().await.expect("une notification attendue");
+        assert_eq!(
+            n.cover,
+            Some(ritornello_proto::CoverRef::Path {
+                path: dir.path().join("cover.jpg").to_string_lossy().into_owned()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn l_avance_automatique_reannonce_la_pochette_sans_re_sonder() {
+        // Le cas d'usage phare de toute cette couche, et il etait faux : sur un
+        // album ripe, seule la piste que l'utilisateur lance passe par
+        // `jouer()`. Les suivantes arrivent par `player_track`, qui repond par
+        // `recale()` — une **nouvelle identite**, donc un `cover_source` remis
+        // a zero cote coeur (voir `Metadonnees::set_identity`) — sans jamais
+        // rearmer la sonde. Resultat : pochette sur la piste 1, repli ♫ sur
+        // les pistes 2..N.
+        let dir = tempfile::tempdir().unwrap();
+        let pochette = dir.path().join("cover.jpg");
+        std::fs::write(&pochette, b"x").unwrap();
+        let entrees: Vec<Entry> = (1..=3)
+            .map(|i| {
+                let p = dir.path().join(format!("{i:02} - piste.flac"));
+                std::fs::write(&p, b"x").unwrap();
+                Entry { path: p, title: None, duration_s: None }
+            })
+            .collect();
+        let mut s = source_de_test(Playlist { entries: entrees, index: 0 });
+        let attendue = Some(ritornello_proto::CoverRef::Path {
+            path: pochette.to_string_lossy().into_owned(),
+        });
+
+        s.activate().await;
+        assert_eq!(s.poll_notification().await.unwrap().cover, attendue, "piste 1");
+
+        // mpv avance de lui-meme. La pochette doit repartir avec la nouvelle
+        // identite.
+        let out = s.player_track(1).await;
+        assert!(out.identity.is_some(), "une nouvelle identite est bien declaree");
+        assert_eq!(s.poll_notification().await.unwrap().cover, attendue, "piste 2");
+
+        // Et **sans repayer le `readdir`** : le repertoire n'a pas change. La
+        // preuve se fait en retirant l'image du disque — une sonde reelle ne
+        // trouverait plus rien, la valeur memorisee est pourtant reannoncee.
+        // C'est ce qui evite un aller-retour SMB a chaque changement de piste.
+        std::fs::remove_file(&pochette).unwrap();
+        s.player_track(2).await;
+        assert_eq!(
+            s.poll_notification().await.unwrap().cover,
+            attendue,
+            "piste 3 : la valeur doit venir de la memoire, pas d'une nouvelle sonde"
+        );
+    }
+
+    #[tokio::test]
+    async fn changer_de_repertoire_resonde() {
+        // Le pendant du test ci-dessus : la memorisation est par repertoire,
+        // donc passer a un album voisin doit bien sonder de nouveau — sans
+        // quoi le second album afficherait la pochette du premier.
+        let dir = tempfile::tempdir().unwrap();
+        let un = dir.path().join("album-un");
+        let deux = dir.path().join("album-deux");
+        std::fs::create_dir_all(&un).unwrap();
+        std::fs::create_dir_all(&deux).unwrap();
+        std::fs::write(un.join("cover.jpg"), b"x").unwrap();
+        std::fs::write(deux.join("folder.png"), b"x").unwrap();
+        let entrees = vec![
+            Entry { path: un.join("01.flac"), title: None, duration_s: None },
+            Entry { path: deux.join("01.flac"), title: None, duration_s: None },
+        ];
+        let mut s = source_de_test(Playlist { entries: entrees, index: 0 });
+        s.activate().await;
+        assert_eq!(
+            s.poll_notification().await.unwrap().cover,
+            Some(ritornello_proto::CoverRef::Path {
+                path: un.join("cover.jpg").to_string_lossy().into_owned()
+            })
+        );
+        s.player_track(1).await;
+        assert_eq!(
+            s.poll_notification().await.unwrap().cover,
+            Some(ritornello_proto::CoverRef::Path {
+                path: deux.join("folder.png").to_string_lossy().into_owned()
+            }),
+            "un repertoire different doit etre sonde"
+        );
+    }
+
+    #[tokio::test]
+    async fn l_absence_de_pochette_ne_bloque_pas_les_autres_notifications() {
+        // Défendu par la revue : `poll_notification` ne doit jamais rendre
+        // `None` (terminal pour le SDK) ni une notification vide quand il n'y
+        // a rien à côté du fichier. La preuve : le mécanisme du compte de
+        // présélections, sans rapport, continue de fonctionner juste après.
+        let dir = tempfile::tempdir().unwrap();
+        let piste = dir.path().join("01 - piste.flac");
+        std::fs::write(&piste, b"x").unwrap(); // pas d'image a cote
+        let (tx, rx) = tokio::sync::watch::channel(0u8);
+        let mut s = source_de_test(Playlist {
+            entries: vec![Entry { path: piste, title: None, duration_s: None }],
+            index: 0,
+        });
+        s.preset_count_rx = Some(rx);
+        s.activate().await;
+        tx.send(3).unwrap();
+        let n = s.poll_notification().await.expect("une notification attendue, pas None");
+        assert_eq!(n.preset_count, Some(3));
+        assert!(n.cover.is_none(), "aucune pochette a cote, rien a annoncer");
+    }
+
+    #[tokio::test]
+    async fn annuler_puis_repoller_ne_relance_pas_une_seconde_sonde() {
+        // Défendu par la revue : un appel direct à `sante.borne(...).await`
+        // depuis `poll_notification` se ferait annuler par le `select!` du SDK
+        // dès qu'une requête du cœur arrive — un événement courant, pas un cas
+        // limite — perdant la comptabilité de `sante` et relançant une sonde
+        // de plus sur le même partage à chaque tour. La correction : la sonde
+        // vit sur une tâche indépendante (`jouer()` la lance), et
+        // `poll_notification` ne fait qu'attendre son résultat sur un
+        // `oneshot::Receiver`, cancel-safe par construction.
+        //
+        // Compter les sondes réellement lancées demanderait d'instrumenter
+        // `pochette::cherche` ou de forcer un vrai délai de `sante` — ce qui
+        // retombe sur une hypothèse de timing que ce crate vient justement
+        // d'expulser de ses tests (voir l'historique). À la place, ce test
+        // vérifie directement la propriété qui rend la seconde sonde
+        // impossible : le récepteur unique posé ici survit intact à
+        // l'annulation d'un premier tour de `poll_notification`, et le second
+        // tour lit sa réponse sur ce même canal — sans qu'aucun code de
+        // `poll_notification` n'ait besoin d'en ouvrir un autre (il n'y a tout
+        // simplement aucun `tokio::spawn` dans cette méthode).
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut s = source_de_test(Playlist::default());
+        s.pochette_en_vol = Some(rx);
+
+        // Premier tour : rien n'a encore été envoyé, `poll_notification` doit
+        // rester en attente. `yield_now()` borne l'observation à un seul
+        // passage du planificateur — une propriété déterministe du runtime,
+        // pas une horloge murale, donc aucune place pour un flake ici.
+        tokio::select! {
+            _ = s.poll_notification() => panic!("ne doit pas resoudre avant que quelque chose soit envoye"),
+            _ = tokio::task::yield_now() => {}
+        }
+
+        // Le futur précédent a été abandonné (l'équivalent exact de
+        // l'annulation par le `select!` du SDK). Le champ doit avoir survécu
+        // intact, toujours branché sur cet unique récepteur : si
+        // `poll_notification` en avait ouvert un second, ce `send` — le seul
+        // émetteur qui existe dans ce test — n'aurait personne côté second
+        // canal fictif à convaincre, et l'assertion suivante échouerait en
+        // rendant `None` plutôt que la pochette.
+        tx.send(Some(ritornello_proto::CoverRef::Path { path: "/nas/Album/cover.jpg".into() }))
+            .unwrap();
+        let n = s.poll_notification().await.expect("une notification attendue, pas None");
+        assert_eq!(
+            n.cover,
+            Some(ritornello_proto::CoverRef::Path { path: "/nas/Album/cover.jpg".into() })
+        );
     }
 
     #[tokio::test]
