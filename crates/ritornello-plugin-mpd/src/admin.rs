@@ -1,8 +1,23 @@
 use crate::config::Config;
 use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::AdminPlugin;
+use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+
+/// Corps de `SetData`, distinct de `Config` : les deux champs y sont
+/// **obligatoires**, sans `#[serde(default = ...)]`. Ces défauts sont justes
+/// pour `Config::charger`, qui complète un *fichier* partiel — mais faux pour
+/// une écriture, où un `PUT {"port": 6601}` sans `listen` doit être refusé,
+/// pas silencieusement compris comme « remettre `listen` à `0.0.0.0` ».
+/// Même séparation lecture/écriture que `generic-input::admin::Op::Save` et
+/// `radio::admin::Op::Save`, qui portent chacun un type dédié à la requête,
+/// distinct du type de configuration chargé depuis le disque.
+#[derive(Debug, Deserialize)]
+struct EcritureConfig {
+    listen: String,
+    port: u16,
+}
 
 pub struct MpdAdmin {
     pub config_path: PathBuf,
@@ -38,9 +53,13 @@ impl AdminPlugin for MpdAdmin {
     }
 
     async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String> {
-        let config: Config = serde_json::from_value(data).map_err(|e| {
+        // `EcritureConfig`, pas `Config` : voir le commentaire sur le type,
+        // un champ manquant doit refuser la requête (`bad_request`), pas se
+        // faire compléter par un défaut de *chargement*.
+        let ecriture: EcritureConfig = serde_json::from_value(data).map_err(|e| {
             self.catalog.read().unwrap().get("bad_request").replace("{detail}", &e.to_string())
         })?;
+        let config = Config { listen: ecriture.listen, port: ecriture.port };
         // `enregistrer` valide puis écrit atomiquement ; dans les deux cas
         // d'échec, elle renvoie une **clé** de catalogue (`listen_empty`,
         // `port_zero`, `save_failed`), jamais un détail d'E/S brut. C'est ici,
@@ -178,13 +197,32 @@ mod tests {
 
     #[tokio::test]
     async fn une_requete_mal_formee_renvoie_une_erreur_traduite() {
-        // `listen` et `port` portent tous deux un `#[serde(default = ...)]` :
-        // un objet incomplet désérialise avec succès (défauts), donc seul un
-        // type de champ incompatible (ici `port` en chaîne, pas en nombre)
-        // fait échouer `serde_json::from_value`.
+        // `EcritureConfig` (le type du corps de `SetData`, distinct de
+        // `Config`) n'a aucun `#[serde(default = ...)]` : un type de champ
+        // incompatible (ici `port` en chaîne, pas en nombre) fait échouer
+        // `serde_json::from_value`, tout comme un champ manquant (voir le
+        // test suivant).
         let mut f = fixture();
         let err =
             f.admin.set_data(serde_json::json!({ "listen": "0.0.0.0", "port": "beaucoup" })).await.unwrap_err();
         assert!(err.starts_with("Unexpected request:"), "message inattendu: {err}");
+    }
+
+    #[tokio::test]
+    async fn un_champ_manquant_est_refuse_plutot_que_complete_par_un_defaut() {
+        // La régression trouvée en revue : désérialiser directement en
+        // `Config` (qui porte `#[serde(default = ...)]` sur ses deux champs,
+        // corrects pour *charger un fichier* partiel) aurait laissé un `PUT
+        // {"port": 6601}` sans `listen` réussir silencieusement, en
+        // persistant `listen = "0.0.0.0"` comme si l'opérateur l'avait
+        // demandé — une remise à zéro de l'adresse d'écoute déguisée en
+        // enregistrement réussi. Avec `EcritureConfig` (champs obligatoires),
+        // ce corps doit être refusé comme mal formé, et rien ne doit changer
+        // sur disque ni en mémoire.
+        let mut f = fixture();
+        assert!(f.admin.set_data(serde_json::json!({ "listen": "192.168.1.10", "port": 6601 })).await.is_ok());
+        let err = f.admin.set_data(serde_json::json!({ "port": 6601 })).await.unwrap_err();
+        assert!(err.starts_with("Unexpected request:"), "message inattendu: {err}");
+        assert_eq!(f.admin.get_data().await["listen"], "192.168.1.10", "listen n'a pas du bouger");
     }
 }
