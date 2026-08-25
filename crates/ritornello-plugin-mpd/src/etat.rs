@@ -12,7 +12,8 @@
 //! comparaison **préalable** dans `attendre`. C'est cette comparaison qui
 //! interdit le réveil manqué ; le `Notify` ne sert qu'à ne pas sonder.
 
-use ritornello_proto::{Catalogue, Command, Playback, PlayerState, Preset, SourceCatalogue};
+use ritornello_proto::{Catalogue, Command, Cover, Playback, PlayerState, Preset, SourceCatalogue};
+use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
 
 /// Nombre de sous-systèmes, donc taille du tableau de compteurs. Une constante
@@ -48,6 +49,83 @@ pub enum Sujet {
     /// bouge jamais — sinon un client abonné aux seules listes enregistrées
     /// serait réveillé à chaque seconde de lecture.
     StoredPlaylist = 3,
+}
+
+/// La pochette courante, telle que le greffon la tient entre deux pistes.
+///
+/// **Les octets sont derrière un `Arc`, et c'est structurel** : `Instantane`
+/// est cloné à *chaque* commande de *chaque* session (voir `lire`), et une
+/// pochette pèse jusqu'à `ritornello_proto::COVER_MAX_BYTES` — 2 Mio. Un
+/// `Vec<u8>` nu ferait donc recopier deux mébioctets pour répondre `ping`.
+/// L'`Arc` rend le clone à un incrément de compteur, et l'image n'existe
+/// **qu'une fois** dans le processus quel que soit le nombre de sessions.
+///
+/// `Arc<Vec<u8>>` et non `Arc<[u8]>` : la conversion depuis le `Vec<u8>` de la
+/// trame est alors un déplacement, là où `Arc<[u8]>::from` réallouerait et
+/// recopierait les 2 Mio une fois de plus par piste.
+#[derive(Clone, PartialEq)]
+pub struct Pochette {
+    /// Exactement le `cover_href` que la trame d'état publie pour la même
+    /// image. C'est **la** corrélation entre l'image et ce qui joue : le cœur
+    /// envoie l'état d'abord et la pochette ensuite, donc il existe une
+    /// fenêtre où l'état désigne déjà la piste suivante et où la pochette
+    /// tenue est encore celle de la précédente. Comparer ce champ à
+    /// `etat.morceau.cover_href` est ce qui interdit de servir l'une pour
+    /// l'autre (voir le bras `albumart` de `commandes.rs`).
+    pub href: String,
+    /// Type MIME reconnu aux octets d'en-tête par le cœur, jamais à une
+    /// extension. C'est le `type:` que `readpicture` publie.
+    pub mime: String,
+    pub octets: Arc<Vec<u8>>,
+}
+
+/// `Debug` écrit à la main : le dérivé imprimerait les deux mébioctets de
+/// l'image, et `Instantane` est `Debug` — donc le moindre `assert_eq!` d'un
+/// test raté vomirait l'image entière dans la sortie.
+impl std::fmt::Debug for Pochette {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pochette")
+            .field("href", &self.href)
+            .field("mime", &self.mime)
+            .field("octets", &format_args!("{} o", self.octets.len()))
+            .finish()
+    }
+}
+
+impl From<Cover> for Pochette {
+    fn from(c: Cover) -> Self {
+        Self { href: c.href, mime: c.mime, octets: Arc::new(c.bytes) }
+    }
+}
+
+/// Une pochette **telle que le cœur en pousse une**, pour les tests des trois
+/// modules qui en ont besoin (celui-ci, `commandes`, `session`).
+///
+/// Le réalisme de cette fixe n'est pas une politesse : une pochette bâtie d'un
+/// `Default::default()` prouverait une causalité à l'intérieur d'une trame que
+/// le producteur ne peut pas émettre. Trois traits sont donc empruntés au vrai
+/// producteur :
+///
+/// * le `href` est de la forme `/api/cover/{clé}` que `cover::PREFIXE_HREF`
+///   fabrique, et l'appelant le repasse dans `etat.morceau.cover_href` — c'est
+///   la seule corrélation qui existe entre l'image et ce qui joue ;
+/// * les octets **commencent par un vrai en-tête JPEG**, parce que le cœur
+///   reconnaît le MIME aux octets d'en-tête et refuse tout ce qu'il ne
+///   reconnaît pas : une image dont l'en-tête serait faux ne serait jamais
+///   poussée, donc un test qui en emploierait une testerait l'impossible ;
+/// * la suite est du **bruit** d'un générateur congruentiel et non un motif
+///   régulier : c'est ce qui rend visible une tranche sautée, dupliquée ou
+///   décalée d'un octet, qu'un remplissage constant masquerait entièrement.
+#[cfg(test)]
+pub(crate) fn cover_de_test(href: &str, taille: usize) -> Cover {
+    let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xE0];
+    let mut x: u32 = 0x1234_5678;
+    while bytes.len() < taille {
+        x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        bytes.push((x >> 24) as u8);
+    }
+    bytes.truncate(taille);
+    Cover { href: href.to_string(), mime: "image/jpeg".to_string(), bytes }
 }
 
 /// Copie cohérente de tout ce qu'une session cliente a besoin de lire pour
@@ -99,6 +177,16 @@ pub struct Instantane {
     /// synthèse depuis `preset_count`. C'est bien la vérité de cet instant —
     /// le greffon ne sait encore rien du catalogue.
     pub catalogue: Catalogue,
+    /// La dernière pochette reçue du cœur, ou `None` tant qu'aucune n'est
+    /// arrivée — ce qui est le cas ordinaire d'un flux sans image, et non une
+    /// anomalie.
+    ///
+    /// **Une seule**, jamais un cache par piste : l'appareil ne sait publier
+    /// que la pochette de ce qui joue (voir `DisplayPlugin::cover`), et
+    /// mémoriser les précédentes ferait tenir plusieurs mébioctets pour servir
+    /// des URI que plus rien ne joue — exactement ce que le bras `albumart`
+    /// refuse de faire.
+    pub pochette: Option<Pochette>,
 }
 
 impl Instantane {
@@ -331,6 +419,53 @@ impl EtatPartage {
             tracing::trace!("mpd catalogue moved subsystems {bouges:?}");
             self.reveil.notify_waiters();
         }
+    }
+
+    /// Applique une pochette reçue du cœur : les octets que `albumart` et
+    /// `readpicture` serviront.
+    ///
+    /// **Le sujet déplacé est `Player`, et c'est le seul choix disponible.**
+    /// Le protocole MPD n'a pas de sous-système pour les pochettes : la liste
+    /// des noms que `idle` accepte est fixée par MPD et un `changed: cover`
+    /// ne serait compris par aucun client. Restait à choisir parmi les quatre
+    /// que ce greffon émet, et `Player` est celui que les clients relient
+    /// réellement à l'illustration : un client MPD redemande `currentsong`
+    /// **puis** l'image au réveil de `player`, parce que la pochette est un
+    /// fait sur le morceau courant. `Mixer` (le volume) et `Playlist` (la
+    /// file) ne provoquent aucun rafraîchissement d'image chez les clients
+    /// connus, et `StoredPlaylist` est réservé aux listes enregistrées.
+    ///
+    /// Ce réveil n'est pas décoratif, c'est lui qui rend la fonction utile :
+    /// le cœur envoie **l'état d'abord, la pochette ensuite** (voir
+    /// `relais_afficheur`). Un client réveillé par la seule trame d'état
+    /// demande donc son image pendant que le greffon tient encore celle de la
+    /// piste précédente — donc reçoit un refus — et sans ce second réveil il
+    /// n'apprendrait jamais que l'image est arrivée. Le prix est un
+    /// `changed: player` de plus par changement de piste, la même dissymétrie
+    /// assumée que `PlayPause` dans `acter_optimiste` : un réveil superflu
+    /// coûte au client une interrogation redondante, un réveil manquant lui
+    /// coûte une pochette vide jusqu'à la piste suivante.
+    ///
+    /// Comparaison et non affectation sèche, comme les deux fonctions
+    /// ci-dessus : le cœur ne pousse déjà que sur changement, mais il pousse
+    /// aussi la pochette courante **au câblage**, donc une reconnexion de la
+    /// moitié `display` repasse ici avec la même image et cela ne doit
+    /// réveiller personne. La comparaison porte sur les octets et pas
+    /// seulement sur le `href` : l'égalité de deux `Arc` de même contenu est
+    /// tranchée sans copie, et se fier au seul `href` ferait taire une image
+    /// réellement différente publiée sous la même clé.
+    pub async fn appliquer_pochette(&self, cover: Cover) {
+        {
+            let mut inst = self.inner.write().await;
+            let pochette = Pochette::from(cover);
+            if inst.pochette.as_ref() == Some(&pochette) {
+                return;
+            }
+            inst.pochette = Some(pochette);
+            inst.versions[Sujet::Player as usize] += 1;
+        }
+        tracing::trace!("mpd cover moved subsystem Player");
+        self.reveil.notify_waiters();
     }
 
     /// Acte ce que le greffon vient d'émettre, avant que le cœur ne le
@@ -1124,5 +1259,122 @@ mod tests {
             vus[i] = true;
         }
         assert!(vus.iter().all(|v| *v), "un indice du tableau n'a pas de sujet");
+    }
+
+    // ------------------------------------------------------------------
+    // Les pochettes
+    // ------------------------------------------------------------------
+
+    /// Le `href` que le cœur publie, dans les deux endroits qui doivent
+    /// coïncider : la trame d'état et la trame de pochette.
+    const HREF: &str = "/api/cover/1a2b3c";
+
+    #[tokio::test]
+    async fn une_pochette_recue_est_tenue_et_reveille_player() {
+        let e = EtatPartage::default();
+        let avant = e.versions().await;
+
+        e.appliquer_pochette(cover_de_test(HREF, 4096)).await;
+
+        let inst = e.lire().await;
+        let tenue = inst.pochette.expect("la pochette doit etre tenue");
+        assert_eq!(tenue.href, HREF);
+        assert_eq!(tenue.mime, "image/jpeg");
+        // Les octets au bit près : c'est ce que `albumart` servira.
+        assert_eq!(*tenue.octets, cover_de_test(HREF, 4096).bytes);
+        assert_ne!(
+            avant[Sujet::Player as usize],
+            e.versions().await[Sujet::Player as usize],
+            "une pochette est un fait sur le morceau courant"
+        );
+    }
+
+    #[tokio::test]
+    async fn une_pochette_ne_reveille_que_player() {
+        // Le pendant du test précédent : `Mixer` n'a rien à voir avec une
+        // image, et réveiller `Playlist` ferait retélécharger la file entière
+        // à tous les clients à chaque changement de piste. `StoredPlaylist`
+        // est réservé aux listes enregistrées.
+        let e = EtatPartage::default();
+        let avant = e.versions().await;
+        let file_avant = e.lire().await.version_file;
+
+        e.appliquer_pochette(cover_de_test(HREF, 4096)).await;
+
+        let apres = e.versions().await;
+        for sujet in [Sujet::Mixer, Sujet::Playlist, Sujet::StoredPlaylist] {
+            assert_eq!(
+                avant[sujet as usize], apres[sujet as usize],
+                "{sujet:?} n'a rien a apprendre d'une pochette"
+            );
+        }
+        // Et la version de file d'attente non plus : la file n'a pas changé,
+        // et l'incrémenter ferait répondre `plchanges` pour rien.
+        assert_eq!(file_avant, e.lire().await.version_file);
+    }
+
+    #[tokio::test]
+    async fn la_meme_pochette_deux_fois_ne_reveille_personne() {
+        // Le cœur pousse la pochette courante **au câblage**, donc une
+        // reconnexion de la moitié `display` repasse ici avec la même image.
+        // Sans la comparaison, chaque redémarrage du greffon réveillerait tous
+        // les clients — et leur ferait retélécharger deux mébioctets.
+        let e = EtatPartage::default();
+        e.appliquer_pochette(cover_de_test(HREF, 4096)).await;
+        let avant = e.versions().await;
+
+        e.appliquer_pochette(cover_de_test(HREF, 4096)).await;
+
+        assert_eq!(avant, e.versions().await);
+    }
+
+    #[tokio::test]
+    async fn des_octets_differents_sous_le_meme_href_sont_un_changement() {
+        // La comparaison porte sur les octets et pas seulement sur le `href` :
+        // se fier à la seule clé ferait taire une image réellement nouvelle
+        // publiée sous une clé recyclée, et le client garderait l'ancienne
+        // pour toujours.
+        let e = EtatPartage::default();
+        e.appliquer_pochette(cover_de_test(HREF, 4096)).await;
+        let avant = e.versions().await;
+
+        e.appliquer_pochette(cover_de_test(HREF, 8192)).await;
+
+        assert_ne!(avant[Sujet::Player as usize], e.versions().await[Sujet::Player as usize]);
+        assert_eq!(e.lire().await.pochette.unwrap().octets.len(), 8192);
+    }
+
+    #[tokio::test]
+    async fn une_trame_detat_ne_jette_pas_la_pochette_tenue() {
+        // Les deux canaux écrivent dans le même instantané et chacun ne doit
+        // toucher que le sien — la même propriété que pour le catalogue. Une
+        // trame d'état arrive **chaque seconde** de lecture : si elle remettait
+        // la pochette à `None`, `albumart` ne répondrait qu'entre deux trames,
+        // c'est-à-dire jamais.
+        let e = EtatPartage::default();
+        e.appliquer_pochette(cover_de_test(HREF, 4096)).await;
+
+        e.appliquer_etat(PlayerState { volume: 17, ..Default::default() }).await;
+
+        let inst = e.lire().await;
+        assert_eq!(inst.pochette.map(|p| p.octets.len()), Some(4096));
+        assert_eq!(inst.etat.volume, 17);
+    }
+
+    #[tokio::test]
+    async fn un_dormeur_sur_player_est_reveille_par_une_pochette() {
+        // Le bout en bout du réveil, dans ce module : `attendre` ne sonde pas,
+        // donc c'est bien le `notify_waiters` d'`appliquer_pochette` qui rend
+        // la main. Sans horloge : si l'implémentation ne réveillait pas, ce
+        // test **pendrait** — le mode d'échec voulu.
+        let e = Arc::new(EtatPartage::default());
+        let vues = e.versions().await;
+        let dormeur = e.clone();
+        let attente = tokio::spawn(async move { dormeur.attendre(&[Sujet::Player], vues).await });
+        // La comparaison préalable d'`attendre` interdit le réveil manqué : que
+        // la pochette arrive avant ou après l'inscription du dormeur, il
+        // repart. Aucune synchronisation n'est donc nécessaire ici.
+        e.appliquer_pochette(cover_de_test(HREF, 4096)).await;
+        assert_eq!(attente.await.unwrap(), vec![Sujet::Player]);
     }
 }

@@ -13,7 +13,7 @@
 //! suivantes veulent dire, et `idle` ne fait rien d'autre que suspendre la
 //! lecture des lignes. `commandes.rs` reste pur, et se teste sans socket.
 
-use crate::commandes::{traiter, Issue};
+use crate::commandes::{traiter, Binaire, Issue, MAX_TRANCHE};
 use crate::etat::{EtatPartage, Sujet};
 use crate::protocole::{ack, decouper, ligne, Ack};
 use anyhow::Result;
@@ -428,6 +428,40 @@ pub async fn servir(flux: TcpStream, etat: Arc<EtatPartage>, cmd_tx: mpsc::Sende
                     let refus = ack(Ack::Unknown, indice, "idle", "not allowed in command list");
                     ecrire(&mut ecriture, &[refus]).await?;
                 }
+                // **Une réponse binaire dans une liste de commandes : MPD
+                // l'autorise, ce greffon la refuse.** Trois raisons, dans
+                // l'ordre où elles pèsent :
+                //
+                // 1. Elle romprait la discipline d'écriture de cette session.
+                //    `executer` compose *tout* un lot en texte, vérifie le
+                //    plafond, puis écrit **une fois** — ce qui garantit qu'une
+                //    réponse à moitié écrite n'est jamais lue comme complète.
+                //    Insérer des octets au milieu obligerait soit à vider
+                //    l'accumulateur avant chaque image (donc à renoncer à cette
+                //    garantie), soit à faire passer les octets par
+                //    l'accumulateur de texte — ce qui est impossible, ils ne
+                //    sont pas de l'UTF-8.
+                // 2. Elle rouvrirait l'amplificateur que la Task 8 a fermé :
+                //    2048 `albumart` dans une liste, c'est 26 Kio d'entrée pour
+                //    16 Mio écrits, **accumulés avant la première écriture**.
+                //    C'est exactement la mesure qui a fait naître
+                //    `MAX_REPONSE`, sur ce même port sans authentification.
+                // 3. Personne n'en a besoin. Une pochette se récupère par une
+                //    suite d'allers-retours dont chaque offset dépend du `size:`
+                //    que le précédent a rendu — or une liste de commandes est
+                //    envoyée **entière avant** d'être lue. Le client ne peut
+                //    donc pas composer le lot qu'il faudrait.
+                //
+                // Refus à l'accumulation, comme `idle` et pour la même raison :
+                // le lot ne pourra jamais aboutir, donc exécuter d'abord les
+                // commandes qui le précèdent émettrait de vraies actions au nom
+                // d'un lot que le client ne verra jamais.
+                "albumart" | "readpicture" => {
+                    let indice = liste.as_ref().map_or(0, Vec::len);
+                    liste = None;
+                    let refus = ack(Ack::Unknown, indice, mot, "not allowed in command list");
+                    ecrire(&mut ecriture, &[refus]).await?;
+                }
                 _ => {
                     let indice = liste.as_ref().map_or(0, Vec::len);
                     // Deux bornes pour un seul refus : le nombre de commandes
@@ -581,6 +615,21 @@ async fn executer(
                 ecrire(ecriture, &sortie.lignes).await?;
                 return Ok(Suite::Continuer);
             }
+            // Une réponse binaire : elle est écrite **seule**, par son propre
+            // chemin, et elle clôt la requête — pas de `OK` ajouté par la
+            // suite de la boucle, `ecrire_octets` pose le sien.
+            //
+            // `sortie` est nécessairement vide ici : les deux commandes
+            // binaires sont refusées à l'accumulation d'une liste (voir
+            // `servir`), donc le lot n'a qu'une commande. L'écrire quand même
+            // garde cette fonction juste si un jour ce n'était plus le cas,
+            // plutôt que d'avaler des lignes — le même choix que le bras
+            // `Attendre` juste en dessous, pour la même raison.
+            Issue::Octets(binaire) => {
+                ecrire(ecriture, &sortie.lignes).await?;
+                ecrire_octets(ecriture, &binaire).await?;
+                return Ok(Suite::Continuer);
+            }
             Issue::Attendre(sujets) => {
                 // `idle` n'atteint jamais ce point dans une liste : la liste
                 // l'a refusé à l'accumulation. Hors liste, le lot n'a qu'une
@@ -727,11 +776,63 @@ async fn ecrire(ecriture: &mut OwnedWriteHalf, lignes: &[String]) -> Result<()> 
     Ok(())
 }
 
+/// Écrit une réponse **binaire** d'un seul coup : l'en-tête, les octets bruts,
+/// puis le terminateur.
+///
+/// La forme est celle de MPD, à l'octet près :
+///
+/// ```text
+/// size: <taille de l'image entière>
+/// type: <mime>            (readpicture seulement)
+/// binary: <taille de cette tranche>
+/// <les octets bruts>
+/// OK
+/// ```
+///
+/// Le `\n` qui suit les octets bruts n'est pas décoratif : c'est celui que MPD
+/// écrit (`Response::WriteBinary`), et libmpdclient le consomme avant de lire
+/// le terminateur. L'omettre ferait lire `<dernier octet>OK` comme une ligne
+/// inconnue.
+///
+/// **Un seul `write_all`, comme `ecrire`**, et la même raison : une réponse à
+/// moitié écrite serait lue comme une réponse complète par un client qui compte
+/// ses terminateurs. La recopie de la tranche dans le tampon coûte au plus
+/// `MAX_TRANCHE` octets — huit kibioctets, à comparer aux dizaines de
+/// mébioctets que le chemin texte a dû se voir interdire.
+///
+/// **Ce que cette fonction ne fait pas : allouer l'image.** `binaire.image` est
+/// un `Arc` partagé avec l'état ; seule la tranche est copiée. C'est ce qui rend
+/// le pire cas d'une connexion binaire indépendant de la taille de la pochette.
+async fn ecrire_octets(ecriture: &mut OwnedWriteHalf, binaire: &Binaire) -> Result<()> {
+    // Indexation sans contrôle : c'est `commandes::pochette` qui établit
+    // l'intervalle, et son contrat est qu'il tient dans l'image et dans
+    // `MAX_TRANCHE`. L'assertion de débogage le dit plutôt que de le supposer
+    // en silence, sans rien coûter en production.
+    let tranche = &binaire.image[binaire.tranche.clone()];
+    debug_assert!(tranche.len() <= MAX_TRANCHE, "une tranche depasse MAX_TRANCHE");
+    let binary = ligne("binary", tranche.len());
+    let entete: usize =
+        binaire.entete.iter().chain(std::iter::once(&binary)).map(|l| l.len() + 1).sum();
+    // Capacité exacte : en-tête, tranche, puis `\nOK\n`.
+    let mut tampon = Vec::with_capacity(entete + tranche.len() + 4);
+    for l in binaire.entete.iter().chain(std::iter::once(&binary)) {
+        tampon.extend_from_slice(l.as_bytes());
+        tampon.push(b'\n');
+    }
+    tampon.extend_from_slice(tranche);
+    tampon.extend_from_slice(b"\nOK\n");
+    ecriture.write_all(&tampon).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::etat::Instantane;
-    use ritornello_proto::{Command, PlayerState};
+    use ritornello_proto::{Command, Morceau, Playback, PlayerState};
+    // `AsyncReadExt` pour le `read_exact` des tranches binaires : le client de
+    // test est le seul du greffon à lire des octets bruts.
+    use tokio::io::AsyncReadExt;
     // Le lecteur borné de la session n'en a plus besoin ; le client de test,
     // lui, lit des lignes sans plafond à défendre.
     use tokio::io::Lines;
@@ -751,6 +852,68 @@ mod tests {
             self.lignes.next_line().await.unwrap().expect("le serveur a ferme la connexion")
         }
 
+        /// Lit exactement `n` octets **bruts**.
+        ///
+        /// Derrière le lecteur de lignes (`get_mut`) et non sur la chaussette :
+        /// les octets qui suivent un en-tête sont déjà dans le tampon du
+        /// `BufReader` au moment où la dernière ligne d'en-tête a été rendue,
+        /// et lire la chaussette directement les laisserait là — un test qui
+        /// se bloquerait sans que le serveur y soit pour rien.
+        async fn octets(&mut self, n: usize) -> Vec<u8> {
+            let mut tampon = vec![0u8; n];
+            self.lignes.get_mut().read_exact(&mut tampon).await.unwrap();
+            tampon
+        }
+
+        /// Rejoue la séquence d'un vrai client : une requête par tranche,
+        /// l'offset croissant, jusqu'à détenir `size` octets.
+        ///
+        /// C'est bien la boucle de M.A.L.P. et de libmpdclient : la première
+        /// réponse apprend la taille totale, chaque suivante est demandée à
+        /// l'offset de ce qu'on a déjà. La sortie de boucle ne dépend d'aucune
+        /// horloge ni d'aucun compte d'itérations — seulement de `size`.
+        async fn recuperer(&mut self, commande: &str, uri: &str) -> Recuperee {
+            let mut recuperee = Recuperee { image: Vec::new(), tailles: Vec::new(), mime: None };
+            loop {
+                self.envoyer(&format!("{commande} {uri} {}", recuperee.image.len())).await;
+                let taille = self.entier("size").await;
+                let mut entete = self.recevoir().await;
+                // `type:` n'est là que pour `readpicture` : c'est une ligne de
+                // plus, avant `binary:`, exactement comme MPD la place.
+                if let Some(mime) = entete.strip_prefix("type: ") {
+                    recuperee.mime = Some(mime.to_string());
+                    entete = self.recevoir().await;
+                }
+                let n: usize = entete
+                    .strip_prefix("binary: ")
+                    .unwrap_or_else(|| panic!("attendu binary:, obtenu {entete}"))
+                    .parse()
+                    .unwrap();
+                // Une tranche vide ne fait pas avancer la boucle : la refuser
+                // ici transforme un serveur qui piétine en échec franc, plutôt
+                // qu'en test qui tourne à vide.
+                assert!(n > 0, "une tranche vide ne termine jamais la recuperation");
+                recuperee.image.extend_from_slice(&self.octets(n).await);
+                recuperee.tailles.push(n);
+                // Le `\n` que MPD écrit après les octets bruts : lu comme une
+                // ligne vide. Son absence ferait lire `<dernier octet>OK`.
+                assert_eq!(self.recevoir().await, "", "un saut de ligne suit les octets bruts");
+                assert_eq!(self.recevoir().await, "OK", "chaque tranche est une reponse complete");
+                if recuperee.image.len() >= taille {
+                    return recuperee;
+                }
+            }
+        }
+
+        /// La valeur entière d'une ligne `clé: nombre` attendue.
+        async fn entier(&mut self, cle: &str) -> usize {
+            let l = self.recevoir().await;
+            l.strip_prefix(&format!("{cle}: "))
+                .unwrap_or_else(|| panic!("attendu {cle}:, obtenu {l}"))
+                .parse()
+                .unwrap()
+        }
+
         /// Lit jusqu'au terminateur inclus : `OK` ou un `ACK`. `list_OK` n'en
         /// est pas un — c'est ce qui permet de compter les deux.
         async fn reponse(&mut self) -> Vec<String> {
@@ -764,6 +927,15 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Ce qu'une récupération complète de pochette a produit : l'image
+    /// réassemblée, la taille de chaque tranche reçue dans l'ordre, et le MIME
+    /// si le serveur l'a annoncé.
+    struct Recuperee {
+        image: Vec<u8>,
+        tailles: Vec<usize>,
+        mime: Option<String>,
     }
 
     struct Serveur {
@@ -1436,5 +1608,205 @@ mod tests {
         // L'attente est retombée avec ce refus : la connexion reste utilisable.
         c.envoyer("noidle").await;
         assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+    }
+
+    // ------------------------------------------------------------------
+    // Les pochettes, sur une vraie chaussette
+    // ------------------------------------------------------------------
+
+    /// Le `href` que la trame d'état publie, et que la trame de pochette
+    /// reprend.
+    const HREF: &str = "/api/cover/1a2b3c";
+
+    /// L'URI que notre `currentsong` publie pour l'état ci-dessous.
+    const URI_COURANTE: &str = "ritornello://radio/2";
+
+    /// Une taille qui n'est pas un multiple de `MAX_TRANCHE` : trois tranches,
+    /// la dernière plus courte que les autres.
+    const TAILLE: usize = MAX_TRANCHE * 2 + 1234;
+
+    /// La trame d'état **telle que le cœur l'émet quand une pochette existe** :
+    /// elle porte le `cover_href`, et c'est lui que la trame de pochette
+    /// reprendra. Une trame sans `cover_href` accompagnée d'une pochette
+    /// n'existe pas côté producteur, et un test qui l'emploierait prouverait
+    /// une causalité impossible.
+    fn trame_avec_pochette() -> PlayerState {
+        PlayerState {
+            source: "radio".into(),
+            volume: 40,
+            playback: Playback::Playing,
+            preset: Some(2),
+            preset_count: Some(3),
+            preset_name: Some("France Inter".into()),
+            morceau: Morceau {
+                title: Some("So What".into()),
+                cover_href: Some(HREF.to_string()),
+                cover_origin: Some("files".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// Pousse l'état **puis** la pochette, dans cet ordre : c'est l'ordre du
+    /// cœur (`relais_afficheur` envoie l'état avant les octets), et l'inverse
+    /// laisserait le greffon dans un état qu'il ne connaît pas en production.
+    async fn avec_pochette(etat: &EtatPartage, taille: usize) -> Vec<u8> {
+        let cover = crate::etat::cover_de_test(HREF, taille);
+        etat.appliquer_etat(trame_avec_pochette()).await;
+        etat.appliquer_pochette(cover.clone()).await;
+        cover.bytes
+    }
+
+    #[tokio::test]
+    async fn albumart_rend_limage_entiere_et_elle_se_reassemble_a_lidentique() {
+        // **Le test central de cette tâche.** Il rejoue la séquence d'un vrai
+        // client sur une vraie chaussette, et il n'affirme pas « quelque chose
+        // est arrivé » : il compare les octets réassemblés à ceux qui ont été
+        // poussés. Un découpage qui saute, duplique ou décale un seul octet
+        // échoue ici — et l'image est du bruit, donc rien ne peut le masquer.
+        let (s, _rx) = serveur().await;
+        let attendus = avec_pochette(&s.etat, TAILLE).await;
+        let mut c = s.client_pret().await;
+
+        let r = c.recuperer("albumart", URI_COURANTE).await;
+
+        assert_eq!(r.image.len(), TAILLE, "taille reassemblee");
+        assert_eq!(r.image, attendus, "les octets doivent arriver intacts");
+        // Trois tranches : deux pleines, puis le reste. C'est la preuve que
+        // l'offset croissant est honoré (deux requêtes de plus que la première)
+        // et que la dernière tranche est plus courte que les autres.
+        assert_eq!(r.tailles, vec![MAX_TRANCHE, MAX_TRANCHE, 1234]);
+        // `albumart` n'annonce pas de type MIME, contrairement à `readpicture`.
+        assert_eq!(r.mime, None);
+        // Et la connexion reste utilisable après une réponse binaire : le
+        // chemin des octets ne doit pas laisser la session désalignée.
+        c.envoyer("ping").await;
+        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn readpicture_rend_les_memes_octets_et_annonce_le_type() {
+        // M.A.L.P. essaie l'un, puis l'autre : les deux doivent aboutir, et sur
+        // la même image. Seul le `type:` les distingue, comme chez MPD.
+        let (s, _rx) = serveur().await;
+        let attendus = avec_pochette(&s.etat, TAILLE).await;
+        let mut c = s.client_pret().await;
+
+        let r = c.recuperer("readpicture", URI_COURANTE).await;
+
+        assert_eq!(r.image, attendus);
+        assert_eq!(r.mime.as_deref(), Some("image/jpeg"));
+    }
+
+    #[tokio::test]
+    async fn une_image_plus_courte_quune_tranche_tient_en_un_seul_aller_retour() {
+        // Le cas réel et non le cas limite : la pochette mesurée du Cover Art
+        // Archive fait 75 Kio, mais une vignette peut tenir sous les 8 Kio
+        // d'une tranche. Une seule requête, une seule tranche, complète.
+        let (s, _rx) = serveur().await;
+        let attendus = avec_pochette(&s.etat, 1000).await;
+        let mut c = s.client_pret().await;
+
+        let r = c.recuperer("albumart", URI_COURANTE).await;
+
+        assert_eq!(r.tailles, vec![1000]);
+        assert_eq!(r.image, attendus);
+    }
+
+    #[tokio::test]
+    async fn un_offset_au_dela_de_la_fin_est_refuse_sans_fermer() {
+        let (s, _rx) = serveur().await;
+        avec_pochette(&s.etat, TAILLE).await;
+        let mut c = s.client_pret().await;
+
+        c.envoyer(&format!("albumart {URI_COURANTE} {}", TAILLE + 1)).await;
+
+        assert_eq!(
+            c.reponse().await,
+            vec!["ACK [2@0] {albumart} Offset too large".to_string()]
+        );
+        c.envoyer("ping").await;
+        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn sans_pochette_les_deux_commandes_refusent_et_la_connexion_survit() {
+        // Le cas ordinaire : un flux sans image. Le client doit recevoir un
+        // refus lisible et pouvoir continuer à parler — c'est ce refus qui le
+        // fait basculer sur l'autre nom, puis renoncer proprement.
+        let (s, _rx) = serveur().await;
+        s.etat.appliquer_etat(trame_avec_pochette()).await;
+        let mut c = s.client_pret().await;
+
+        for nom in ["albumart", "readpicture"] {
+            c.envoyer(&format!("{nom} {URI_COURANTE} 0")).await;
+            assert_eq!(
+                c.reponse().await,
+                vec![format!("ACK [50@0] {{{nom}}} No file exists")]
+            );
+        }
+        c.envoyer("ping").await;
+        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn une_reponse_binaire_dans_une_liste_est_refusee_a_son_rang() {
+        // MPD l'autorise, nous non : voir la justification sur place dans
+        // `servir`. Le refus arrive **à l'accumulation**, donc le `status` qui
+        // précède n'a pas été exécuté — c'est ce que l'absence de `volume:`
+        // prouve.
+        let (s, _rx) = serveur().await;
+        avec_pochette(&s.etat, TAILLE).await;
+        let mut c = s.client_pret().await;
+
+        c.envoyer("command_list_begin").await;
+        c.envoyer("status").await;
+        c.envoyer(&format!("albumart {URI_COURANTE} 0")).await;
+        let recues = c.reponse().await;
+
+        assert_eq!(recues, vec!["ACK [5@1] {albumart} not allowed in command list".to_string()]);
+        assert!(!recues.iter().any(|l| l.starts_with("volume: ")), "{recues:?}");
+        // L'état de liste a été rendu, et la commande répond bien hors liste :
+        // le refus ne condamne pas la commande, seulement son emballage.
+        let r = c.recuperer("albumart", URI_COURANTE).await;
+        assert_eq!(r.image.len(), TAILLE);
+    }
+
+    #[tokio::test]
+    async fn une_pochette_qui_arrive_reveille_un_dormeur_sur_player() {
+        // Le bout en bout du réveil, sur une chaussette. Il est **nécessaire**
+        // et non cosmétique : le cœur envoie l'état d'abord, donc un client
+        // réveillé par la seule trame d'état demande son image trop tôt et
+        // reçoit un refus. Sans ce second réveil, il ne saurait jamais que
+        // l'image est arrivée.
+        //
+        // Sans horloge : la boucle pousse des pochettes jusqu'à ce que le
+        // dormeur réponde, et une implémentation qui ne réveille pas fait
+        // *pendre* le test.
+        let (s, _rx) = serveur().await;
+        s.etat.appliquer_etat(trame_avec_pochette()).await;
+        let mut c = s.client_pret().await;
+        c.envoyer("idle player").await;
+
+        let mut i = 0usize;
+        let premiere = loop {
+            tokio::select! {
+                biased;
+                lue = c.lignes.next_line() => {
+                    break lue.unwrap().expect("le serveur a ferme la connexion");
+                }
+                // Deux tailles alternées : chaque poussée est donc un
+                // changement réel, que la déduplication ne peut pas avaler.
+                () = s.etat.appliquer_pochette(
+                    crate::etat::cover_de_test(HREF, 1000 + (i % 2) * 500),
+                ) => {
+                    i += 1;
+                    tokio::task::yield_now().await;
+                }
+            }
+        };
+        assert_eq!(premiere, "changed: player");
+        assert_eq!(c.recevoir().await, "OK");
     }
 }

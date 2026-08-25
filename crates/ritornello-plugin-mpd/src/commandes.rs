@@ -14,6 +14,7 @@ use crate::etat::{Instantane, Sujet};
 use crate::protocole::{ack, ligne, Ack};
 use ritornello_proto::{Command, Playback, Preset, SourceCatalogue};
 use std::ops::Range;
+use std::sync::Arc;
 
 /// Ce que le traitement d'une commande demande à la session de faire.
 ///
@@ -38,8 +39,50 @@ pub enum Issue {
     Attendre(Vec<Sujet>),
     /// `noidle` reçu hors attente : `OK` sec.
     Annuler,
+    /// Une réponse **binaire** : `albumart` et `readpicture`.
+    ///
+    /// Une issue à part, et non des `lignes` : les octets d'une image ne sont
+    /// pas de l'UTF-8, donc ils ne peuvent pas voyager dans le `Vec<String>`
+    /// de `Repondre` — et surtout ils ne doivent pas traverser l'accumulateur
+    /// de texte de la session, qui est ce qui a été trouvé amplificateur d'un
+    /// facteur 2048 sur ce même port. Voir `Binaire`.
+    Octets(Binaire),
     /// `close` : `OK` puis fermeture.
     Fermer,
+}
+
+/// Une réponse binaire toute décidée : l'en-tête textuel, l'image, et la
+/// fenêtre de cette réponse dans l'image.
+///
+/// **L'image est partagée, la tranche est un intervalle** : ce module reste
+/// pur (aucune E/S, aucune allocation d'image), la session n'a plus qu'à
+/// écrire. Le clone de l'`Arc` est un incrément de compteur, donc composer
+/// cette issue ne recopie **jamais** les octets, même pour une image de
+/// 2 Mio ; ce que la session écrira est borné par `MAX_TRANCHE` et par lui
+/// seul.
+#[derive(Clone, PartialEq)]
+pub struct Binaire {
+    /// `size: <total>`, et pour `readpicture` `type: <mime>` — dans cet ordre,
+    /// celui de MPD.
+    pub entete: Vec<String>,
+    /// L'image **entière**, partagée avec l'état (jamais copiée).
+    pub image: Arc<Vec<u8>>,
+    /// La fenêtre à écrire. Toujours dans les bornes de `image` et d'au plus
+    /// `MAX_TRANCHE` octets : c'est `albumart` qui l'établit, et la session
+    /// s'y fie pour indexer sans vérifier.
+    pub tranche: Range<usize>,
+}
+
+/// `Debug` écrit à la main, pour la même raison que celui de `Pochette` : le
+/// dérivé imprimerait deux mébioctets d'image dans le message d'un test raté.
+impl std::fmt::Debug for Binaire {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Binaire")
+            .field("entete", &self.entete)
+            .field("image", &format_args!("{} o", self.image.len()))
+            .field("tranche", &self.tranche)
+            .finish()
+    }
 }
 
 impl Issue {
@@ -72,6 +115,7 @@ impl Issue {
 ///
 /// Ordre alphabétique : les clients n'en tirent rien, mais un trou se voit.
 pub const COMMANDES: &[&str] = &[
+    "albumart",
     "close",
     "commands",
     "currentsong",
@@ -92,6 +136,7 @@ pub const COMMANDES: &[&str] = &[
     "playlistinfo",
     "plchanges",
     "previous",
+    "readpicture",
     "seek",
     "seekcur",
     "seekid",
@@ -256,6 +301,20 @@ pub fn traiter(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
         // Seule forme qui accepte un relatif (`+n`/`-n`), résolu ici depuis
         // `position_s` puisque `Command::SeekTo` ne porte qu'un absolu.
         "seekcur" => seekcur(inst, indice, reste),
+        // **Les deux noms répondent exactement la même chose, et ce n'est pas
+        // un raccourci.** Pour MPD ce sont deux origines différentes :
+        // `albumart` cherche un fichier *à côté* de la piste (un `cover.jpg`
+        // dans son dossier), `readpicture` une image *embarquée* dans ses
+        // étiquettes. Cet appareil, lui, n'a qu'**une** pochette par piste,
+        // quelle que soit son origine : le cœur l'a déjà arbitrée entre le
+        // fichier voisin, l'étiquette embarquée et le réseau, et n'en publie
+        // qu'une. Distinguer ici demanderait au greffon une information que le
+        // protocole d'affichage ne porte pas — et surtout, M.A.L.P. essaie l'un
+        // puis l'autre : répondre à un seul des deux ferait dépendre l'affichage
+        // de la pochette de l'ordre dans lequel le client s'y prend.
+        // Seule différence, celle de MPD : `readpicture` publie un `type:`.
+        "albumart" => pochette(inst, indice, "albumart", reste),
+        "readpicture" => pochette(inst, indice, "readpicture", reste),
         // `load <nom>` bascule de source. Elle n'ajoute pas à la file (MPD y
         // *concatène* une liste enregistrée) : ici la file d'attente **est**
         // la liste de la source active, donc la charger, c'est la choisir.
@@ -304,6 +363,117 @@ fn courant(inst: &Instantane, file: &[Entree]) -> Option<(usize, u8)> {
 /// un client n'a besoin que d'une clé stable pour distinguer deux entrées.
 fn uri(source: &str, index: u8) -> String {
     format!("ritornello://{source}/{index}")
+}
+
+/// Taille d'une tranche de réponse binaire, en octets.
+///
+/// **8 Kio, la valeur par défaut de MPD lui-même** (`binarylimit`), et le
+/// chiffre n'est pas repris par imitation : c'est le plafond qu'un client qui
+/// n'envoie pas de `binarylimit` — donc tous ceux que ce greffon peut servir,
+/// puisqu'il ne gère pas cette commande — s'attend à ne jamais voir dépassé.
+/// Servir 64 Kio à un client dimensionné pour 8 serait un dépassement de
+/// tampon chez lui, provoqué par nous.
+///
+/// **Confronté à `MAX_REPONSE` (1 Mio), le plafond du chemin texte.** Les deux
+/// bornent la même chose — les octets qu'une requête fait écrire — mais elles
+/// n'ont ni la même valeur ni le même rôle, et l'écart de 128 est délibéré :
+///
+/// * `MAX_REPONSE` doit être large parce qu'il borne une réponse **composée**,
+///   dont la taille est décidée par ce que le client a demandé (une liste de
+///   soixante `playlistinfo`) et non par nous. C'est un plafond de dernier
+///   recours, atteint par accumulation.
+/// * `MAX_TRANCHE` borne une réponse dont **nous** choisissons la taille : le
+///   client ne demande pas « toute l'image », il demande « à partir d'ici », et
+///   c'est le serveur qui décide combien il en donne. Rien n'oblige donc à
+///   laisser une seule requête écrire un mébioctet, et une image de 2 Mio se
+///   sert en 256 allers-retours dont chacun coûte 8 Kio de tampon transitoire
+///   au lieu d'un seul aller-retour qui en coûterait 2048.
+///
+/// Conséquence, et c'est le point : le chemin binaire **ne passe pas** par
+/// l'accumulateur de texte et n'a donc aucun facteur d'amplification à lui.
+/// Le pire cas d'une connexion qui ne fait que des `albumart` est
+/// `MAX_TRANCHE` + l'en-tête ≈ 8,3 Kio de tampon, contre les ≈ 2,3 Mio que le
+/// chemin texte autorise (voir `MAX_REPONSE`) — soit trois millièmes. Et
+/// l'image elle-même n'est pas comptée par connexion : elle vit **une fois**
+/// dans l'état partagé, derrière l'`Arc` de `Pochette`.
+pub const MAX_TRANCHE: usize = 8 * 1024;
+
+/// `albumart <uri> <offset>` et `readpicture <uri> <offset>` : une tranche de
+/// la pochette de ce qui joue.
+///
+/// **L'URI est vérifiée strictement contre ce qui joue à cet instant**, et
+/// c'est la décision de conception de ce bras. Notre `currentsong` publie
+/// `file: ritornello://<source>/<indice>`, donc `albumart ritornello://radio/17`
+/// veut dire « la pochette de ce que la présélection 17 joue *maintenant* » —
+/// une URI dont le contenu change sous elle, ce qui n'arrive jamais dans un MPD
+/// ordinaire où une URI est un fichier. Deux réponses étaient défendables :
+///
+/// * **Servir quand même** (ignorer l'URI). Le client obtient toujours une
+///   image, mais **la mauvaise** dès que sa demande est en retard d'une piste,
+///   et le dégât est durable : les clients mettent la pochette en cache **sous
+///   l'URI demandée** (M.A.L.P. le fait), donc répondre l'image de la station
+///   17 à une demande pour la station 3 empoisonne ce cache — la station 3
+///   montrera une image fausse tant que le client n'est pas relancé, et rien
+///   ne viendra jamais l'invalider.
+/// * **Refuser** (retenu). Le refus est transitoire et se répare tout seul :
+///   le client redemande au réveil de `player` suivant, qu'un changement de
+///   pochette provoque justement (voir `appliquer_pochette`). Et la rigueur ne
+///   coûte rien de légitime — un client demande l'image de ce qu'il vient de
+///   lire dans `currentsong`, c'est-à-dire l'URI courante.
+///
+/// La même exigence porte sur le `href` : la pochette tenue doit être celle que
+/// la trame d'état courante annonce. Sans ce second contrôle, la fenêtre entre
+/// l'état (envoyé d'abord) et la pochette (envoyée ensuite) ferait servir
+/// l'image de la piste précédente **sous l'URI de la nouvelle** — le cas
+/// empoisonnant décrit ci-dessus, atteint sans qu'aucun client n'ait rien fait
+/// de travers.
+fn pochette(inst: &Instantane, indice: usize, nom: &str, reste: &[String]) -> Issue {
+    let [demandee, offset] = reste else {
+        return Issue::Refuser(ack(Ack::Arg, indice, nom, "wrong number of arguments"));
+    };
+    let Ok(offset) = offset.parse::<usize>() else {
+        return Issue::Refuser(ack(Ack::Arg, indice, nom, "integer expected"));
+    };
+    // Le refus « il n'y a pas d'image ici », commun aux quatre gardes qui
+    // suivent : le client n'a pas à savoir *laquelle* a échoué, et le
+    // distinguer lui apprendrait l'état interne du greffon sans lui donner
+    // aucune conduite différente à tenir — dans les quatre cas il n'y a pas
+    // d'image à cette URI, et dans les quatre cas il redemandera au réveil
+    // suivant.
+    let absente = || Issue::Refuser(ack(Ack::NoExist, indice, nom, "No file exists"));
+    let Some(pochette) = inst.pochette.as_ref() else {
+        return absente();
+    };
+    // Rien ne joue de numéroté : aucune URI ne peut désigner quoi que ce soit,
+    // et `currentsong` n'en publie d'ailleurs aucune.
+    let Some(preset) = inst.etat.preset else {
+        return absente();
+    };
+    if *demandee != uri(&inst.etat.source, preset) {
+        return absente();
+    }
+    if Some(pochette.href.as_str()) != inst.etat.morceau.cover_href.as_deref() {
+        return absente();
+    }
+    let taille = pochette.octets.len();
+    // `>` et non `>=`, exactement comme MPD : à `offset == taille` le client a
+    // déjà tout, et la réponse bien formée est une tranche vide — la refuser
+    // ferait échouer un client qui ferme sa boucle par une requête de trop.
+    // Au-delà, l'offset est faux et c'est un défaut d'argument.
+    if offset > taille {
+        return Issue::Refuser(ack(Ack::Arg, indice, nom, "Offset too large"));
+    }
+    let fin = taille.min(offset + MAX_TRANCHE);
+    // `size:` est la taille de **l'image entière** et non de la tranche : c'est
+    // elle qui dit au client combien d'allers-retours il lui reste. Les
+    // confondre ferait s'arrêter le client à la première tranche.
+    let mut entete = vec![ligne("size", taille)];
+    if nom == "readpicture" {
+        // Le seul écart entre les deux commandes, et c'est celui de MPD :
+        // `readpicture` annonce le type MIME, `albumart` non.
+        entete.push(ligne("type", &pochette.mime));
+    }
+    Issue::Octets(Binaire { entete, image: pochette.octets.clone(), tranche: offset..fin })
 }
 
 fn status(inst: &Instantane) -> Vec<String> {
@@ -2294,8 +2464,17 @@ mod tests {
             "subscribe",
             "sendmessage",
             "kill",
-            "albumart",
-            "readpicture",
+            // `albumart` et `readpicture` figuraient ici, et n'y sont plus :
+            // elles sont désormais gérées, et c'est bien cette liste-là qui
+            // devait changer — la retirer d'ici est la moitié « traité ⊆
+            // COMMANDES » du couple d'invariants, l'autre étant
+            // `chaque_commande_annoncee_est_reellement_geree`.
+            // `binarylimit` prend leur place : c'est la commande que MPD
+            // associe aux réponses binaires (elle change la taille de tranche),
+            // et ce greffon ne la gère pas — sa tranche est fixée à
+            // `MAX_TRANCHE`. Un client qui l'envoie reçoit un refus lisible et
+            // garde la valeur par défaut, qui est justement la nôtre.
+            "binarylimit",
         ] {
             assert_eq!(
                 traiter_mots(&instantane_arrete(), 0, &[cmd]),
@@ -2313,5 +2492,228 @@ mod tests {
             traiter(&instantane_arrete(), 0, &[]),
             Issue::Refuser("ACK [5@0] {} unsupported".to_string())
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Les pochettes
+    // ------------------------------------------------------------------
+
+    /// Le `href` publié par la trame d'état, celui que la trame de pochette
+    /// doit porter aussi.
+    const HREF: &str = "/api/cover/1a2b3c";
+
+    /// L'URI que notre `currentsong` publie pour l'instantané ci-dessous : la
+    /// radio joue sa deuxième présélection.
+    const URI_COURANTE: &str = "ritornello://radio/2";
+
+    /// Une taille qui n'est **pas** un multiple de `MAX_TRANCHE` : trois
+    /// tranches, dont la dernière est plus courte. Une taille ronde laisserait
+    /// passer une implémentation qui rend toujours `MAX_TRANCHE` octets.
+    const TAILLE: usize = MAX_TRANCHE * 2 + 1234;
+
+    /// Un instantané où une pochette est arrivée, **cohérente avec l'état**.
+    ///
+    /// C'est la seule forme que le producteur peut émettre, et c'est le point :
+    /// le cœur envoie la trame d'état (qui porte `cover_href`) *puis* les
+    /// octets sous le même `href`. Un instantané dont la pochette et l'état ne
+    /// s'accorderaient pas existe aussi — c'est la fenêtre entre les deux
+    /// trames — mais c'est un autre cas, testé à part.
+    fn instantane_avec_pochette(taille: usize) -> Instantane {
+        let mut inst = instantane_en_lecture();
+        inst.etat.morceau.cover_href = Some(HREF.to_string());
+        inst.etat.morceau.cover_origin = Some("files".to_string());
+        inst.pochette = Some(crate::etat::cover_de_test(HREF, taille).into());
+        inst
+    }
+
+    /// La charge binaire d'une réponse, ou une panique nommant ce qu'on a eu à
+    /// la place.
+    fn octets_de(inst: &Instantane, mots: &[&str]) -> Binaire {
+        match traiter_mots(inst, 0, mots) {
+            Issue::Octets(b) => b,
+            autre => panic!("attendu Octets pour {mots:?}, obtenu {autre:?}"),
+        }
+    }
+
+    #[test]
+    fn albumart_annonce_la_taille_totale_et_rend_la_premiere_tranche() {
+        let inst = instantane_avec_pochette(TAILLE);
+        let b = octets_de(&inst, &["albumart", URI_COURANTE, "0"]);
+        // `size:` est la taille de l'**image entière**, pas de la tranche :
+        // c'est elle qui dit au client combien d'allers-retours il lui reste.
+        assert_eq!(b.entete, vec![format!("size: {TAILLE}")]);
+        assert_eq!(b.tranche, 0..MAX_TRANCHE);
+        assert_eq!(b.image.len(), TAILLE);
+    }
+
+    #[test]
+    fn readpicture_ajoute_le_type_mime_et_sert_les_memes_octets() {
+        // Les deux noms, une seule image : cet appareil n'a qu'une pochette par
+        // piste, quelle que soit son origine. M.A.L.P. essaie l'un puis
+        // l'autre, donc les deux doivent aboutir — et au même endroit.
+        let inst = instantane_avec_pochette(TAILLE);
+        let art = octets_de(&inst, &["albumart", URI_COURANTE, "0"]);
+        let pic = octets_de(&inst, &["readpicture", URI_COURANTE, "0"]);
+        assert_eq!(pic.entete, vec![format!("size: {TAILLE}"), "type: image/jpeg".to_string()]);
+        assert_eq!(pic.tranche, art.tranche);
+        assert_eq!(pic.image, art.image);
+    }
+
+    #[test]
+    fn les_tranches_se_suivent_et_la_derniere_est_plus_courte() {
+        // La propriété de découpage vue du module pur : les intervalles
+        // couvrent l'image **exactement une fois**, sans trou ni recouvrement.
+        // C'est ce qui rend un réassemblage juste possible, et le test de
+        // session le vérifie ensuite sur une vraie chaussette.
+        let inst = instantane_avec_pochette(TAILLE);
+        let mut attendu = 0usize;
+        let mut tailles = Vec::new();
+        while attendu < TAILLE {
+            let b = octets_de(&inst, &["albumart", URI_COURANTE, &attendu.to_string()]);
+            assert_eq!(b.tranche.start, attendu, "la tranche doit commencer a l'offset demande");
+            tailles.push(b.tranche.len());
+            attendu = b.tranche.end;
+        }
+        assert_eq!(attendu, TAILLE, "les tranches doivent couvrir l'image entiere");
+        assert_eq!(tailles, vec![MAX_TRANCHE, MAX_TRANCHE, 1234]);
+    }
+
+    #[test]
+    fn un_offset_egal_a_la_taille_rend_une_tranche_vide_et_non_un_refus() {
+        // Le comportement de MPD, et la raison est chez le client : une boucle
+        // qui ferme par une requête de trop ne doit pas se voir refuser ce
+        // qu'elle a déjà. La réponse est bien formée, simplement vide.
+        let inst = instantane_avec_pochette(TAILLE);
+        let b = octets_de(&inst, &["albumart", URI_COURANTE, &TAILLE.to_string()]);
+        assert_eq!(b.entete, vec![format!("size: {TAILLE}")]);
+        assert!(b.tranche.is_empty(), "{:?}", b.tranche);
+    }
+
+    #[test]
+    fn un_offset_au_dela_de_la_taille_est_un_defaut_dargument() {
+        let inst = instantane_avec_pochette(TAILLE);
+        let trop = (TAILLE + 1).to_string();
+        for nom in ["albumart", "readpicture"] {
+            assert_eq!(
+                traiter_mots(&inst, 4, &[nom, URI_COURANTE, &trop]),
+                Issue::Refuser(format!("ACK [2@4] {{{nom}}} Offset too large")),
+                "{nom} devrait refuser un offset hors image"
+            );
+        }
+    }
+
+    #[test]
+    fn sans_pochette_les_deux_commandes_refusent_de_la_meme_facon() {
+        // Le cas **ordinaire** et non l'exception : la plupart des flux n'ont
+        // aucune image. Un `ACK 50` est ce que MPD répond quand il n'y a pas
+        // d'art, et c'est ce qui fait basculer un client vers l'autre nom
+        // plutôt que de l'immobiliser — une réponse vide couronnée de succès
+        // ferait conclure « pas d'image » à un client qui n'essaie que
+        // `readpicture`.
+        let inst = instantane_en_lecture();
+        assert!(inst.pochette.is_none(), "la fixe de base n'a pas de pochette");
+        for nom in ["albumart", "readpicture"] {
+            assert_eq!(
+                traiter_mots(&inst, 0, &[nom, URI_COURANTE, "0"]),
+                Issue::Refuser(format!("ACK [50@0] {{{nom}}} No file exists"))
+            );
+        }
+    }
+
+    #[test]
+    fn une_uri_qui_nest_pas_ce_qui_joue_est_refusee() {
+        // La décision de conception de ce bras. Servir l'image courante sous
+        // une URI périmée empoisonnerait durablement le cache d'un client, qui
+        // range les pochettes **par URI** : la station 3 montrerait l'image de
+        // la 2 jusqu'à son prochain démarrage. Le refus, lui, se répare au
+        // réveil suivant.
+        let inst = instantane_avec_pochette(TAILLE);
+        for demandee in [
+            // Une autre présélection de la même source.
+            "ritornello://radio/3",
+            // La même présélection d'une autre source.
+            "ritornello://cd/2",
+            // Ce que demanderait un client qui parle à un vrai MPD.
+            "Musique/album/piste.flac",
+            "",
+        ] {
+            assert_eq!(
+                traiter_mots(&inst, 0, &["albumart", demandee, "0"]),
+                Issue::Refuser("ACK [50@0] {albumart} No file exists".to_string()),
+                "{demandee} servie a tort"
+            );
+        }
+        // Et l'URI courante, elle, est bien servie : sans cette moitié, le test
+        // passerait avec une implémentation qui refuse tout.
+        assert!(matches!(
+            traiter_mots(&inst, 0, &["albumart", URI_COURANTE, "0"]),
+            Issue::Octets(_)
+        ));
+    }
+
+    #[test]
+    fn une_pochette_qui_ne_decrit_plus_letat_courant_est_refusee() {
+        // **La fenêtre entre les deux trames.** Le cœur envoie l'état d'abord
+        // et la pochette ensuite : il existe donc un instant où l'état désigne
+        // la piste suivante et où la pochette tenue est celle de la
+        // précédente. Sans ce contrôle, `albumart` servirait l'ancienne image
+        // **sous la nouvelle URI** — précisément le cas qui empoisonne le
+        // cache du client, atteint sans que personne n'ait mal agi.
+        let mut inst = instantane_avec_pochette(TAILLE);
+        inst.etat.morceau.cover_href = Some("/api/cover/suivante".to_string());
+
+        assert_eq!(
+            traiter_mots(&inst, 0, &["albumart", URI_COURANTE, "0"]),
+            Issue::Refuser("ACK [50@0] {albumart} No file exists".to_string())
+        );
+    }
+
+    #[test]
+    fn sans_preselection_courante_aucune_uri_ne_designe_rien() {
+        // `currentsong` ne publie pas de `file:` dans cet état, donc aucun
+        // client ne peut avoir d'URI légitime à demander.
+        let mut inst = instantane_avec_pochette(TAILLE);
+        inst.etat.preset = None;
+        assert_eq!(
+            traiter_mots(&inst, 0, &["albumart", URI_COURANTE, "0"]),
+            Issue::Refuser("ACK [50@0] {albumart} No file exists".to_string())
+        );
+    }
+
+    #[test]
+    fn les_deux_commandes_exigent_une_uri_et_un_offset() {
+        let inst = instantane_avec_pochette(TAILLE);
+        for nom in ["albumart", "readpicture"] {
+            for mots in [vec![nom], vec![nom, URI_COURANTE], vec![nom, URI_COURANTE, "0", "0"]] {
+                assert_eq!(
+                    traiter_mots(&inst, 1, &mots),
+                    Issue::Refuser(format!("ACK [2@1] {{{nom}}} wrong number of arguments")),
+                    "{mots:?} acceptee a tort"
+                );
+            }
+            // Un offset non numérique est un autre défaut, et il se nomme
+            // autrement : le client saura lequel de ses deux arguments revoir.
+            for offset in ["abc", "-1", "1.5", ""] {
+                assert_eq!(
+                    traiter_mots(&inst, 1, &[nom, URI_COURANTE, offset]),
+                    Issue::Refuser(format!("ACK [2@1] {{{nom}}} integer expected")),
+                    "offset {offset:?} accepte a tort"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn les_deux_noms_sont_annonces_par_commands() {
+        // Les deux moitiés de l'honnêteté de `commands`, sur ces deux noms
+        // précis : ils sont dans la liste, et la liste est ce que la réponse
+        // publie. `chaque_commande_annoncee_est_reellement_geree` ferme le
+        // couple en vérifiant qu'aucun des deux ne retombe dans le refus par
+        // défaut.
+        let lignes = traiter_ok(&instantane_avec_pochette(TAILLE), &["commands"]);
+        for nom in ["albumart", "readpicture"] {
+            assert!(COMMANDES.contains(&nom), "{nom} absente de COMMANDES");
+            assert!(lignes.contains(&format!("command: {nom}")), "{nom} non annoncee");
+        }
     }
 }

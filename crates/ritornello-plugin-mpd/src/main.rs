@@ -18,7 +18,7 @@ use config::Config;
 use etat::EtatPartage;
 use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::{DisplayPlugin, InputPlugin, Runtime};
-use ritornello_proto::{Catalogue, InputMessage, PlayerState};
+use ritornello_proto::{Catalogue, Cover, InputMessage, PlayerState};
 use session::accepter;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -54,6 +54,29 @@ impl DisplayPlugin for AfficheurMpd {
     /// deux canaux (voir `EtatPartage::appliquer_catalogue`).
     async fn catalogue(&mut self, c: Catalogue) -> Result<()> {
         self.etat.appliquer_catalogue(c).await;
+        Ok(())
+    }
+
+    /// **C'est cette ligne qui allume la fonction pochettes de tout
+    /// l'appareil.** Le cœur ne pousse les octets qu'aux afficheurs qui les
+    /// demandent, l'annonce est dérivée de cette méthode (voir
+    /// `Runtime::display`), et ce greffon est le seul du dépôt à la redéfinir :
+    /// la console garde le corps par défaut et ne reçoit donc jamais de
+    /// mégaoctet qu'elle jetterait.
+    ///
+    /// Redéfinie parce qu'il en a un usage réel et non parce qu'il *peut* :
+    /// `albumart` et `readpicture` doivent rendre des octets, et aucune autre
+    /// voie ne les lui donne — le `cover_href` de la trame d'état est une URL
+    /// du serveur HTTP du cœur, que le greffon n'a ni le droit ni le moyen
+    /// d'aller lire.
+    fn wants_covers(&self) -> bool {
+        true
+    }
+
+    /// La pochette de ce qui joue. Déposée dans l'état partagé, d'où les
+    /// sessions la servent par tranches.
+    async fn cover(&mut self, c: Cover) -> Result<()> {
+        self.etat.appliquer_pochette(c).await;
         Ok(())
     }
 }
@@ -166,6 +189,42 @@ mod tests {
         let inst = etat.lire().await;
         assert_eq!(inst.catalogue, catalogue);
         assert_eq!(inst.etat.volume, 17);
+    }
+
+    #[test]
+    fn lafficheur_mpd_demande_les_pochettes() {
+        // **L'opt-in, épinglé.** C'est cette valeur qui allume la fonction pour
+        // tout l'appareil : le cœur dérive l'annonce de `wants_covers` (voir
+        // `Runtime::display`), et personne d'autre ne la redéfinit. Sans ce
+        // test, la remettre au corps par défaut ne casserait *aucun* autre
+        // test du greffon — les tests de session poussent la pochette dans
+        // l'état partagé directement — et `albumart` répondrait `ACK 50` sur
+        // l'appareil réel sans que rien ne le signale.
+        let afficheur = AfficheurMpd { etat: Arc::new(EtatPartage::default()) };
+        assert!(afficheur.wants_covers(), "le serveur MPD doit recevoir les octets");
+    }
+
+    #[tokio::test]
+    async fn afficheur_mpd_depose_la_pochette_recue_dans_letat_partage() {
+        // Le seul chemin par lequel une image entre dans le greffon. Sans cette
+        // surcharge, le corps par défaut du trait l'avalerait en silence et
+        // `albumart` ne répondrait jamais rien — un greffon qui *demande* les
+        // pochettes et les jette est exactement ce que le cœur ne peut pas
+        // distinguer tout seul.
+        let etat = Arc::new(EtatPartage::default());
+        let mut afficheur = AfficheurMpd { etat: etat.clone() };
+        let envoyee = Cover {
+            href: "/api/cover/1a2b3c".into(),
+            mime: "image/jpeg".into(),
+            bytes: vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3],
+        };
+
+        afficheur.cover(envoyee.clone()).await.unwrap();
+
+        let tenue = etat.lire().await.pochette.expect("la pochette doit etre tenue");
+        assert_eq!(tenue.href, envoyee.href);
+        assert_eq!(tenue.mime, envoyee.mime);
+        assert_eq!(*tenue.octets, envoyee.bytes);
     }
 
     #[tokio::test(start_paused = true)]
