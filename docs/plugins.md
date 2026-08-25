@@ -110,6 +110,32 @@ beyond that tie — a plugin that only fills in what is missing never
 competes with one that overwrites (see [Now-playing
 metadata](#now-playing-metadata-the-metadata-kind)).
 
+### Turning a plugin off
+
+A third key, `enabled`, is optional and absent by default — absence
+means active, so no `plugins.toml` in service changes meaning by
+gaining this feature. It is not meant to be typed by hand: the switch
+lives on the configuration page, and the core rewrites the file itself,
+preserving whatever comments it carries.
+
+Turning a plugin off **kills its process** — `SIGTERM`, then `SIGKILL`
+if it lingers past a two-second grace — which is what actually frees
+`/dev/sr0`, an evdev device, or a console: a plugin still running would
+keep holding it regardless of what the core stopped calling. Turning it
+back on relaunches the binary, which announces itself on the register
+socket exactly as at startup, and is wired by the same hot-wiring path
+a late announcement already takes — no restart of the core either way.
+
+Switching off the active source hands over to the next one in the
+cycle, or leaves the device with no source at all, which is a
+legitimate state. And switching everything off does not fail startup:
+if it did, the admin UI would disappear along with everything else, and
+nothing would ever be switchable back on.
+
+The file's order keeps arbitrating `metadata` priority even for a
+plugin currently switched off: a plugin turned back on regains the
+place its line occupies in the file, not the end of the queue.
+
 `deploy/deploy.sh` treats `plugins.toml` as installed state, not user
 data. On a device with no such file, it provisions
 `deploy/plugins.example.toml` whole. On a device already in service, it
@@ -135,8 +161,11 @@ purpose.
   repository, not on the device: remove it from
   `deploy/plugins.example.toml` **and** from the `PLUGINS` list in
   `deploy/deploy.sh`, which the script requires to name the same set and
-  refuses to run otherwise. The core has no `enabled = false`; a plugin
-  it is told to launch, it launches.
+  refuses to run otherwise. `enabled = false` (see [Turning a plugin
+  off](#turning-a-plugin-off)) is a different, reversible thing — it
+  stops a *declared* plugin from launching without touching the
+  declaration itself, so the entry stays exactly where it is and a
+  deployment leaves it alone, same as any other entry already present.
 - An appended `metadata` entry lands **at the end** of the chain, hence
   last to break a tie should one ever arise (order matters for that kind
   only, and only between two plugins that both overwrite — see
