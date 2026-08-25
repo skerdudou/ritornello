@@ -527,6 +527,16 @@ mod tests {
         assert!(r.is_err(), "aucun enrichissement ne doit sortir d'un resultat hors sujet");
     }
 
+    // `..Default::default()` derrière un littéral pourtant complet : clippy le
+    // dit sans effet (`needless_update`), et il a raison **aujourd'hui**. Ce
+    // n'est pas de la redondance mais de la compatibilité ascendante — un
+    // littéral qui se termine ainsi survit à l'ajout d'un champ dans la
+    // structure, celui qui les énumère tous casse. Le dépôt a payé cette
+    // leçon : un champ ajouté à une structure publique a cassé 44 littéraux
+    // ailleurs, qu'un `cargo test -p` ne compile jamais. Quand clippy et la
+    // compatibilité ascendante se contredisent ici, c'est la seconde qui
+    // gagne, et la règle qui reçoit un `allow`.
+    #[allow(clippy::needless_update)]
     #[tokio::test]
     async fn le_relai_generique_emet_une_pochette_seule_en_completion() {
         // La recherche est pré-mémorisée pour n'exercer aucun appel réseau :
@@ -543,6 +553,7 @@ mod tests {
                 album: Some("Kind of Blue".into()),
                 ..Default::default()
             },
+            ..Default::default()
         })
         .await;
         let e = p.next_enrichment().await;
@@ -558,6 +569,10 @@ mod tests {
         );
     }
 
+    // Voir `le_relai_generique_emet_une_pochette_seule_en_completion` : le
+    // `..Default::default()` est de la compatibilité ascendante, pas de la
+    // redondance.
+    #[allow(clippy::needless_update)]
     #[tokio::test]
     async fn un_couple_artiste_album_deja_recherche_nest_pas_interroge_a_nouveau() {
         // Mémorisé comme « recherché, rien trouvé » : ne doit pas relancer de
@@ -570,15 +585,20 @@ mod tests {
             source: "files".into(),
             identity: Some(identite_fichier("/x")),
             known: known.clone(),
+            ..Default::default()
         })
         .await;
         assert!(p.pret.is_none());
         assert!(p.pochette_en_vol.is_none());
-        p.now_playing(NowPlaying { source: "files".into(), identity: Some(identite_fichier("/x")), known })
+        p.now_playing(NowPlaying { source: "files".into(), identity: Some(identite_fichier("/x")), known, ..Default::default() })
             .await;
         assert!(p.pochette_en_vol.is_none(), "un couple deja recherche ne doit pas l'etre a nouveau");
     }
 
+    // Voir `le_relai_generique_emet_une_pochette_seule_en_completion` : le
+    // `..Default::default()` est de la compatibilité ascendante, pas de la
+    // redondance.
+    #[allow(clippy::needless_update)]
     #[tokio::test]
     async fn un_changement_dalbum_ne_reutilise_pas_lancienne_pochette() {
         // La mémorisation est clée par (artiste, album) : un nouvel album doit
@@ -594,6 +614,7 @@ mod tests {
             source: "files".into(),
             identity: Some(identite_fichier("/x")),
             known: ritornello_proto::Known { artist: Some("A".into()), album: Some("Nouveau".into()), ..Default::default() },
+            ..Default::default()
         })
         .await;
         assert!(p.pret.is_none(), "la pochette de l'ancien album ne doit pas s'appliquer au nouveau");

@@ -117,6 +117,16 @@ impl MetadataPlugin for RadioFranceMetas {
         }
     }
 
+    // `..Default::default()` derrière un littéral pourtant complet : clippy le
+    // dit sans effet (`needless_update`), et il a raison **aujourd'hui**. Ce
+    // n'est pas de la redondance mais de la compatibilité ascendante — un
+    // littéral qui se termine ainsi survit à l'ajout d'un champ dans la
+    // structure, celui qui les énumère tous casse. Le dépôt a payé cette
+    // leçon : un champ ajouté à une structure publique a cassé 44 littéraux
+    // ailleurs, qu'un `cargo test -p` ne compile jamais. Quand clippy et la
+    // compatibilité ascendante se contredisent ici, c'est la seconde qui
+    // gagne, et la règle qui reçoit un `allow`.
+    #[allow(clippy::needless_update)]
     async fn next_enrichment(&mut self) -> Enrichment {
         loop {
             // `recv` est annulable sans perte : si un `NowPlaying` arrive
@@ -160,6 +170,7 @@ impl MetadataPlugin for RadioFranceMetas {
                             .as_secs();
                         maintenant.checked_sub(debut).and_then(|e| u32::try_from(e).ok())
                     }),
+                    ..Default::default()
                 };
             }
         }
