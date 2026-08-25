@@ -398,17 +398,54 @@ impl<P: Player> Core<P> {
     ///   une identité ou un statut, ou un mot éphémère à incruster ;
     /// - celles qui **annoncent un fait** sans rien dire de ce qui joue — les
     ///   présélections nommées, leur nombre, le tiroir, la renumérotation de la
-    ///   piste en cours. Celles-là rendent la main avant le traitement du
-    ///   statut : voir le retour anticipé, et l'invariant qu'il répare.
-    pub fn handle_source_update(&mut self, name: &str, mut update: SourceUpdate) {
+    ///   piste en cours, la pochette. Celles-là rendent la main avant le
+    ///   traitement du statut : voir le retour anticipé.
+    ///
+    /// **En pratique, presque toute trame de production emprunte le second
+    /// chemin dès qu'elle ne déclare ni identité ni statut** : le prédicat qui
+    /// l'ouvre est une tautologie pour le SDK (voir le corps). Tout champ doit
+    /// donc être appliqué **sur les deux chemins** — ce qui n'est appliqué qu'en
+    /// bas de fonction n'est jamais appliqué. La déstructuration exhaustive en
+    /// tête de fonction est ce qui rend cette décision obligatoire pour tout
+    /// champ ajouté plus tard.
+    pub fn handle_source_update(&mut self, name: &str, update: SourceUpdate) {
+        // **Déstructuration exhaustive, et c'est le garde-fou principal de cette
+        // fonction.** Pas de `..` : ajouter un champ à `SourceUpdate` ne compile
+        // plus tant que quelqu'un n'a pas décidé, ici, à laquelle des deux
+        // moitiés il appartient — le prédicat `porte_un_fait` **et** son
+        // application sur les deux chemins.
+        //
+        // Dérivé plutôt que demandé, et c'est une leçon payée. La fusion du
+        // chantier des pochettes a ajouté `cover` au prédicat sans l'appliquer
+        // sur le chemin du retour anticipé : le champ était gardé, donc la trame
+        // passait, mais son application vivait tout en bas de la fonction, après
+        // un `return` que cette trame prenait toujours. Chaque pochette de Source
+        // était perdue **en silence**. Rien ne l'a signalé : le prédicat teste
+        // les champs un par un, et `SourceUpdate` dérive `Default`, si bien qu'un
+        // dixième champ ne casse aucun littéral et aucun test. Un commentaire
+        // réclamant « pensez aux deux moitiés » se lit après coup ; une
+        // déstructuration exhaustive, elle, ne peut pas être oubliée. Même
+        // principe que l'annonce d'un greffon, qui ne peut pas mentir sur ses
+        // genres parce qu'ils sont déduits et non déclarés.
+        let SourceUpdate {
+            identity,
+            transient,
+            preset,
+            preset_count,
+            preset_name,
+            status,
+            can_eject,
+            presets,
+            cover,
+        } = update;
         // Lu **avant** le garde ci-dessous, et c'est voulu : le catalogue décrit
         // toutes les sources, pas celle qui joue. Un client MPD interroge
         // `listplaylistinfo "radio"` pendant que le cd joue, et la veille ne
         // change rien à ce qu'une source contient. Le garde, lui, protège ce qui
         // décrit **ce qui joue** — identité, statut, message éphémère — et reste
         // en place pour tout le reste.
-        let porte_des_presets = update.presets.is_some();
-        if let Some(presets) = update.presets.take() {
+        let porte_des_presets = presets.is_some();
+        if let Some(presets) = presets {
             self.presets_par_source.insert(name.to_string(), presets);
             self.publie_catalogue();
         }
@@ -421,71 +458,70 @@ impl<P: Player> Core<P> {
         // bascule de source et à la veille. Appliqués ici, **avant** le retour
         // anticipé, pour que celui-ci ne puisse pas les avaler ; l'ordre
         // vis-à-vis de l'identité est sans effet, `set_identity` n'y touche pas.
-        if let Some(c) = update.preset_count {
+        if let Some(c) = preset_count {
             self.preset_count = Some(c);
         }
-        if let Some(e) = update.can_eject {
+        if let Some(e) = can_eject {
             self.can_eject = e;
         }
-        // **Le retour anticipé, et l'invariant qu'il répare.**
+        // **Les deux chemins, et lequel des deux porte réellement la sûreté.**
         //
         // Le traitement du statut, juste en dessous, *remplace* le statut
         // mémorisé par ce que porte la trame, absence comprise : une trame
-        // permanente muette **efface** ce que la source avait déclaré. Cela
-        // n'est sûr que sous l'invariant énoncé dans le SDK
-        // (`plugin-sdk/src/client.rs`, doc de `SourceUpdate::can_eject`) : *tout
-        // chemin d'une vraie source déclare une identité ou un statut*. C'est au
-        // nom de cet invariant que `can_eject` est resté **hors** du prédicat de
-        // trame intéressante — réveiller des trames aujourd'hui jetées
-        // effacerait « PAS DE DISQUE » de l'écran.
+        // permanente muette **efface** ce que la source avait déclaré. Le retour
+        // anticipé existe pour que les trames qui ne font qu'annoncer un fait ne
+        // l'atteignent pas.
         //
-        // Or `preset_count` est dans ce prédicat depuis toujours, et l'invariant
-        // était donc déjà rompu, en service : `plugin-files/src/main.rs` annonce
-        // le compte et la renumérotation de la piste courante **sans statut**
-        // quand sa page d'admin enregistre une liste, alors qu'il déclare un
-        // statut permanent sur presque tous ses autres chemins — la console et la
-        // SPA perdaient ce statut jusqu'à la commande suivante. `presets` prend
-        // le même chemin et aurait ajouté un second cas.
+        // **`porte_un_fait` est en pratique une tautologie, et il faut le
+        // savoir.** `serve_source` estampille
+        // `can_eject: Some(plugin.can_eject())` sur **chacune** des deux trames
+        // qu'il écrit — la réponse corrélée et la notification spontanée — et
+        // `SourceClient` le recopie tel quel (voir la doc de
+        // `SourceMessage::can_eject` : « The SDK stamps it on **every** frame »).
+        // Toute trame venue du SDK arme donc `can_eject.is_some()`, donc arme
+        // `porte_un_fait`. Les autres clauses ne changent rien pour une trame de
+        // production : elles sont une **assurance** au cas où l'estampille
+        // deviendrait conditionnelle, pas un garde vivant.
         //
-        // Le prédicat reprend donc **l'invariant mot pour mot** : seule une
+        // La conséquence est celle qui compte : ce n'est **pas** le prédicat qui
+        // protège quoi que ce soit, c'est le fait d'appliquer chaque champ **sur
+        // les deux chemins**. Une trame qui n'annonce qu'un fait prend le retour
+        // anticipé de toute façon ; ce qui n'est appliqué qu'en bas de fonction
+        // n'est donc jamais appliqué du tout. C'est exactement le défaut que la
+        // fusion du chantier des pochettes a produit — `cover` gardé mais
+        // appliqué seulement en bas, donc chaque pochette perdue en silence — et
+        // c'est la déstructuration en tête de fonction, non ce commentaire, qui
+        // empêche sa récurrence.
+        //
+        // Le cas historique du statut effacé, lui, ne peut plus venir du SDK :
+        // `preset_count` seul (la page d'admin de `plugin-files` enregistrant une
+        // liste) blanchissait « PAS DE DISQUE » sur la console et la SPA jusqu'à
+        // la commande suivante, et c'est le retour anticipé qui l'a réparé.
+        //
+        // `recompose_la_vue` reprend l'invariant du SDK mot pour mot : seule une
         // identité ou un statut déclarés attestent une recomposition de vue, et
         // `transient` s'y joint parce qu'un mot éphémère est un propos sur ce qui
         // joue (il doit garder son incrustation et désarmer un `+NN` en vol).
         // `preset`, `preset_name`, `preset_count`, `can_eject`, `presets` et
         // `cover` n'attestent rien : tous ont la convention « absent = garder »,
         // donc aucun ne peut prouver que la trame décrit la vue entière.
-        //
-        // `cover` a rejoint cette liste avec le chantier des pochettes, et c'est
-        // un **troisième** cas de l'invariant rompu, pire que les deux
-        // précédents : une pochette arrive volontairement seule, en notification
-        // spontanée, sans identité ni statut, plus tard que la réponse au `Play`
-        // (voir `SourceMessage::cover`) — c'est sa forme normale, pas un cas
-        // limite. Sans son entrée dans `porte_un_fait` ci-dessous, chaque
-        // pochette de source effacerait le statut mémorisé au passage.
-        //
-        // Une trame qui ne porte **rien du tout** n'arme pas ce garde : elle ne
-        // peut pas arriver du SDK, dont le prédicat de trame intéressante la
-        // jette, et c'est la forme que les tests de convention utilisent pour
-        // prouver qu'un statut absent vaut effacé.
-        let recompose_la_vue =
-            update.transient || update.identity.is_some() || update.status.is_some();
+        let recompose_la_vue = transient || identity.is_some() || status.is_some();
         let porte_un_fait = porte_des_presets
-            || update.preset_count.is_some()
-            || update.can_eject.is_some()
-            || update.preset.is_some()
-            || update.preset_name.is_some()
-            || update.cover.is_some();
+            || preset_count.is_some()
+            || can_eject.is_some()
+            || preset.is_some()
+            || preset_name.is_some()
+            || cover.is_some();
         if porte_un_fait && !recompose_la_vue {
             // La sélection déclarée est appliquée ici plutôt qu'en bas : la
             // fusion « absent = garder » vaut sur ce chemin aussi, et la trame
             // de renumérotation des fichiers ne porte que cela.
-            self.applique_selection(update.preset, update.preset_name);
-            // Même raison, et c'est le chemin **principal** de la pochette d'une
-            // Source : elle arrive seule, sans identité ni statut. L'appliquer
-            // seulement en bas la perdrait à chaque fois — et l'ajouter au
-            // prédicat sans l'appliquer ici l'aurait perdue en silence, ce que le
-            // retour anticipé rend indolore côté statut mais fatal côté image.
-            self.applique_pochette_de_source(update.cover.take(), name);
+            self.applique_selection(preset, preset_name);
+            // Et la pochette, pour qui ce chemin n'est pas un cas limite mais le
+            // **seul** : elle arrive seule, en notification spontanée, sans
+            // identité ni statut (voir `SourceMessage::cover`), donc elle passe
+            // toujours par ici. C'est cet appel-là qui la fait exister côté cœur.
+            self.applique_pochette_de_source(cover, name);
             // Publier quand même : compte, tiroir et sélection font partie de
             // l'état diffusé, et le canal déduplique si rien n'a bougé.
             self.publie_etat();
@@ -497,10 +533,10 @@ impl<P: Player> Core<P> {
         // disparaître à l'insertion d'un disque). Une trame éphémère, elle, ne
         // touche pas au statut mémorisé : son mot va dans l'incrustation
         // ci-dessous, pas ici.
-        if !update.transient {
-            self.source_status = update.status.clone();
+        if !transient {
+            self.source_status = status.clone();
         }
-        if update.transient {
+        if transient {
             // Message éphémère (« présélection vide ») : il emprunte
             // l'emplacement et l'échéance de l'incrustation volume/muet, donc
             // `self.source_status` — le statut permanent — est conservé et
@@ -517,7 +553,7 @@ impl<P: Player> Core<P> {
             // garde d'abandon d'`appliquer_commande`) — que la trame porte ou
             // non un mot à afficher.
             self.pending_tens = 0;
-            if let Some(mot) = update.status.clone() {
+            if let Some(mot) = status {
                 let echeance = Instant::now() + Duration::from_millis(self.settings.overlay_ms.into());
                 self.overlay = Some((
                     Overlay::Message { text: mot, remaining_ms: self.settings.overlay_ms },
@@ -525,7 +561,7 @@ impl<P: Player> Core<P> {
                 ));
             }
         }
-        if let Some(identity) = update.identity {
+        if let Some(identity) = identity {
             let valeur = match identity {
                 IdentityUpdate::Playing(v) => Some(v),
                 IdentityUpdate::Nothing => None,
@@ -538,16 +574,17 @@ impl<P: Player> Core<P> {
         // déclaration explicite. C'est cet ordre-là qui interdit de remonter cet
         // appel avec `preset_count` : le chemin du retour anticipé, lui, ne peut
         // pas porter d'identité par construction, donc l'y appeler est sûr.
-        self.applique_selection(update.preset, update.preset_name);
+        self.applique_selection(preset, preset_name);
         // La pochette suit exactement le même raisonnement d'ordre, et pour une
         // raison plus forte encore : `set_identity` remet à zéro tout ce que
         // `Metadonnees` retenait, pochette de la Source comprise. Voir
-        // `applique_pochette_de_source`, qui porte le détail — et qui est appelée
-        // ici **comme** sur le chemin du retour anticipé, une pochette arrivant
-        // seule, sans identité ni statut.
-        self.applique_pochette_de_source(update.cover, name);
+        // `applique_pochette_de_source`, qui porte le détail. Ce chemin-ci ne
+        // sert qu'aux trames qui recomposent la vue et porteraient une pochette
+        // en même temps qu'une identité ou un statut ; la pochette qui arrive
+        // seule, elle, passe par le retour anticipé ci-dessus.
+        self.applique_pochette_de_source(cover, name);
         // `preset_count` et `can_eject` sont appliqués **en tête** de cette
-        // fonction, avant le retour anticipé : voir l'invariant qu'il répare.
+        // fonction, avant le retour anticipé, pour la même raison.
         //
         // Toujours publier : la sélection courante fait partie de l'état
         // diffusé, et cet appel couvre la trame qui ne change ni identité ni
@@ -593,11 +630,16 @@ impl<P: Player> Core<P> {
     /// doit laisser l'identité parler d'abord — sans quoi la pochette tout juste
     /// déclarée serait effacée dans la foulée par ce reset. C'est exactement le
     /// piège que le commentaire d'`applique_selection`, plus haut, signale déjà
-    /// pour la sélection. Sur le chemin du
-    /// retour anticipé, il n'y a par construction ni identité ni statut, donc
-    /// l'ordre n'y a pas de sens : c'est le seul endroit où une pochette arrivée
-    /// **seule** peut être appliquée, et sans cet appel-là elle serait
-    /// silencieusement perdue (voir la note dans le retour anticipé).
+    /// pour la sélection.
+    ///
+    /// Sur le chemin du retour anticipé, il n'y a par construction ni identité ni
+    /// statut, donc l'ordre n'y a pas de sens. **C'est celui-là qui compte** : une
+    /// pochette de Source arrive seule, en notification spontanée, donc elle passe
+    /// par là presque toujours — le chemin qui recompose la vue ne sert qu'à la
+    /// trame qui porterait une pochette *en même temps* qu'une identité ou un
+    /// statut. Sans l'appel du retour anticipé, la pochette n'est pas « appliquée
+    /// plus tard » : elle est perdue en silence, et c'est le défaut réel que la
+    /// fusion du chantier des pochettes avait introduit.
     ///
     /// Appelée depuis `handle_source_update` et non depuis la boucle `select!`
     /// de `main` : la garde de tête (`standby || name != self.active_source`)
@@ -2599,6 +2641,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn une_source_disparue_ne_recoit_plus_de_bascule_et_sort_du_catalogue() {
+        // **Le danger sur le chemin de la mort spontanée d'un greffon** — celui
+        // que le bras `plugin_waits` de `main.rs` traite désormais comme
+        // l'extinction volontaire. Un greffon qui meurt de lui-même (panique,
+        // `SIGSEGV`, tué à la main) laissait son nom dans `source_order` et ses
+        // présélections dans `presets_par_source` : un client MPD gardait sa
+        // liste enregistrée en cache, et un `load` dessus **passait** le garde de
+        // `SelectSource`. La bascule partait alors vers un socket mort et payait
+        // jusqu'à deux délais de 5 s du protocole des sources — `Deactivate` puis
+        // `Activate` — dans la boucle principale, muette pendant ce temps.
+        //
+        // Le test épingle les deux moitiés à la suite : la sortie du catalogue,
+        // et le fait qu'un `SelectSource` sur ce nom ne parle plus à personne.
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.handle_source_update("radio", avec_presets(vec![pres(1, "FIP")]));
+        assert!(noms(&core.catalogue()).contains(&"radio".to_string()));
+
+        // Ce que fait le bras `plugin_waits` quand la mort n'était pas voulue.
+        assert!(core.remove_source("radio").await.unwrap());
+        // La bascule vers « cd » a déjà eu lieu et a parlé : on ne veut observer
+        // que ce qui suit.
+        source_calls.lock().unwrap().clear();
+
+        // Ce qu'un client MPD envoie encore, son catalogue étant en cache.
+        core.handle_command(Command::SelectSource("radio".into())).await.unwrap();
+
+        let appels = source_calls.lock().unwrap().clone();
+        assert!(
+            appels.is_empty(),
+            "aucune requete ne doit partir apres la disparition de la source, obtenu {appels:?}"
+        );
+        assert_eq!(core.active_source(), "cd", "et ce qui joue n'a pas bouge");
+        assert!(
+            !noms(&core.catalogue()).contains(&"radio".to_string()),
+            "la source disparue ne doit plus figurer au catalogue"
+        );
+        assert!(!core.presets_par_source.contains_key("radio"));
+    }
+
+    #[tokio::test]
     async fn le_catalogue_est_republie_quand_une_source_est_retiree() {
         // Le retrait ne suffit pas : sans la publication, les afficheurs déjà
         // connectés garderaient la version précédente du catalogue — le canal
@@ -4365,40 +4447,62 @@ mod tests {
         assert_eq!(noms(&core.catalogue()), vec!["cd".to_string(), "radio".into()]);
     }
 
+    /// Trame à la forme que `serve_source` produit vraiment : `can_eject`
+    /// estampillé, parce que le SDK l'estampille sur **chaque** trame qu'il
+    /// écrit (voir la doc de `SourceMessage::can_eject`).
+    ///
+    /// À préférer à `update_nu()` dans tout test qui prétend décrire une trame
+    /// venue d'un vrai greffon : `SourceUpdate::default()` laisse `can_eject` à
+    /// `None`, une forme que le SDK ne peut pas émettre, et un test bâti dessus
+    /// peut attester un mode de défaillance qui n'existe pas.
+    fn trame_du_sdk() -> SourceUpdate {
+        SourceUpdate { can_eject: Some(false), ..SourceUpdate::default() }
+    }
+
     #[tokio::test]
-    async fn une_pochette_seule_neffacce_pas_le_statut_et_arrive_quand_meme() {
-        // **Le troisième producteur du même piège, et celui que la fusion des
-        // deux chantiers a créé.** Une pochette de Source arrive volontairement
-        // seule, en notification spontanée, sans identité ni statut (voir
-        // `SourceMessage::cover`) : c'est sa forme normale. Sans son entrée dans
-        // `porte_un_fait`, chaque pochette tombait dans le traitement du statut,
-        // où une trame permanente muette **efface** le statut mémorisé —
-        // « PAS DE DISQUE » disparaissait de l'écran à la première pochette. Et
-        // sans son application sur le chemin du retour anticipé, l'entrée dans le
-        // prédicat aurait perdu l'image en silence : les deux moitiés sont
-        // nécessaires, et ce test tombe si l'une manque.
+    async fn une_pochette_seule_est_retenue_et_nefface_pas_le_statut() {
+        // **Le défaut que la fusion du chantier des pochettes a produit : chaque
+        // pochette de Source perdue en silence.** Une pochette arrive
+        // volontairement seule, en notification spontanée, sans identité ni
+        // statut (voir `SourceMessage::cover`) : c'est sa forme normale. Elle
+        // prend donc le retour anticipé — et l'application posée par la fusion
+        // vivait tout en bas de `handle_source_update`, après ce `return`. Elle
+        // n'était jamais atteinte.
+        //
+        // Ce qui est épinglé ici est donc **l'application sur le chemin du
+        // retour anticipé**, et non le fait que `cover` figure dans
+        // `porte_un_fait` : ce prédicat est une tautologie, `serve_source`
+        // estampillant `can_eject` sur chaque trame (voir le corps de
+        // `handle_source_update`). La trame passait déjà le garde avant qu'on y
+        // ajoute `cover`.
+        //
+        // La trame est donc construite par `trame_du_sdk()` et non `update_nu()` :
+        // avec `can_eject: None`, elle décrirait une forme que le SDK ne peut pas
+        // émettre, et l'assertion sur le statut y attesterait un mode de
+        // défaillance qui n'existe pas. Cette assertion reste, en second rang :
+        // elle vaudra si l'estampille devient un jour conditionnelle.
         let (mut core, _np_rx, _etat_rx, tmp) = core_de_test();
-        let mut permanent = update_nu();
+        let mut permanent = trame_du_sdk();
         permanent.status = Some("EN DIRECT".into());
         core.handle_source_update("radio", permanent);
 
         let image = tmp.path().join("folder.jpg");
         std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
-        let mut pochette_seule = update_nu();
+        let mut pochette_seule = trame_du_sdk();
         pochette_seule.cover = Some(ritornello_proto::CoverRef::Path {
             path: image.to_string_lossy().into_owned(),
         });
         core.handle_source_update("radio", pochette_seule);
 
+        assert!(
+            core.metadonnees.cover_retenue().is_some(),
+            "la pochette doit etre retenue : le retour anticipe est le seul chemin \
+             par lequel une pochette de Source atteint le coeur"
+        );
         assert_eq!(
             core.etat_lecteur().status.as_deref(),
             Some("EN DIRECT"),
-            "une pochette n'est pas un propos sur le statut : elle ne doit pas l'effacer"
-        );
-        assert!(
-            core.metadonnees.cover_retenue().is_some(),
-            "et elle doit tout de même être retenue : c'est l'unique chemin par lequel \
-             une pochette de Source atteint le cœur"
+            "et le statut memorise doit survivre"
         );
     }
 

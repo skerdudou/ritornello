@@ -87,12 +87,16 @@ impl SourceOutcome {
 
     /// Declares the source's named presets (see `SourceMessage::presets`).
     ///
-    /// Passing an empty list here declares one on the wire, which the
-    /// `ListPresets` arm deliberately never does: "no names" and "nothing said"
-    /// are the same statement, and only absence travels. Call this with a
-    /// non-empty list.
+    /// **An empty list normalizes to absence**, and that is deliberate: "this
+    /// source has no names" and "this frame says nothing about names" are the
+    /// same statement, so only one of the two writings may travel, and it is
+    /// absence. A caller cannot get this wrong, which is why nothing here asks
+    /// them to check first — the older wording did ask ("call this with a
+    /// non-empty list"), `Notification::presets` never did, and a source
+    /// following the docs literally would have relayed an empty list from the
+    /// spontaneous path. Deriving the property beats documenting it twice.
     pub fn presets(mut self, presets: Vec<Preset>) -> Self {
-        self.presets = Some(presets);
+        self.presets = if presets.is_empty() { None } else { Some(presets) };
         self
     }
 
@@ -166,8 +170,13 @@ impl Notification {
     /// See `SourceOutcome::presets`. C'est ce qui permet à une Source de
     /// **republier** son catalogue sans qu'on le lui redemande — renommer une
     /// station depuis sa page d'admin se propage ainsi.
+    ///
+    /// Une liste vide y devient une absence, exactement comme sur
+    /// `SourceOutcome` : ce constructeur-ci n'avait ni garde ni mise en garde,
+    /// et c'était le trou — une Source suivant la documentation à la lettre
+    /// relayait une liste vide par le chemin spontané.
     pub fn presets(mut self, presets: Vec<Preset>) -> Self {
-        self.presets = Some(presets);
+        self.presets = if presets.is_empty() { None } else { Some(presets) };
         self
     }
 
@@ -338,22 +347,14 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     // attendrait les 5 s du délai puis échouerait, alors que la
                     // liste est déjà là, à côté.
                     SourceReq::ListPresets => {
-                        let presets = plugin.list_presets().await;
-                        let issue = SourceOutcome::new(SourceAction::Noop);
-                        // Une liste **vide** veut dire « cette source n'a pas de
-                        // noms » — exactement ce que dit l'absence. Deux
-                        // écritures du même propos, dont une seule doit voyager :
-                        // c'est l'absence, et c'est ce qui garde inerte la trame
-                        // d'une source qui n'énumère pas.
-                        //
-                        // Ce n'est pas qu'une économie d'octets. Une trame
-                        // relayée qui ne déclare ni identité ni statut
-                        // **efface** le statut mémorisé du cœur (voir
-                        // `SourceUpdate::presets`) ; le corps par défaut de
-                        // `list_presets` rendant `Vec::new()`, un `Some([])` ici
-                        // ferait blanchir « PAS DE DISQUE » sur toute source qui
-                        // ne nomme rien.
-                        if presets.is_empty() { issue } else { issue.presets(presets) }
+                        // Plus de garde ici : `SourceOutcome::presets` normalise
+                        // lui-même une liste vide en absence, pour tous ses
+                        // appelants et non seulement pour ce bras (voir sa doc).
+                        // Le corps par défaut de `list_presets` rend `Vec::new()`,
+                        // donc une source qui n'énumère pas produit bien une trame
+                        // inerte — sans que ce chemin ait à y penser.
+                        SourceOutcome::new(SourceAction::Noop)
+                            .presets(plugin.list_presets().await)
                     }
                 };
                 let msg = SourceMessage {
@@ -736,6 +737,39 @@ mod tests {
     use ritornello_proto::SourceAction;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
+
+    #[test]
+    fn une_liste_vide_devient_une_absence_sur_les_deux_constructeurs() {
+        // Les **deux**, dans le même test, parce que c'est leur divergence qui
+        // était le défaut : `SourceOutcome::presets` se contentait de demander
+        // « appelez-moi avec une liste non vide » et `Notification::presets` ne
+        // disait rien du tout. Une Source suivant la documentation à la lettre
+        // relayait donc une liste vide par le chemin spontané — une trame qui ne
+        // déclare rien. La propriété est maintenant dérivée des deux côtés, et
+        // c'est ce que ce test épingle.
+        assert_eq!(
+            SourceOutcome::new(SourceAction::Noop).presets(Vec::new()).presets,
+            None,
+            "SourceOutcome doit normaliser la liste vide en absence"
+        );
+        assert_eq!(
+            Notification::new().presets(Vec::new()).presets,
+            None,
+            "Notification doit la normaliser de la meme facon"
+        );
+    }
+
+    #[test]
+    fn une_liste_non_vide_voyage_telle_quelle_sur_les_deux_constructeurs() {
+        // Le pendant du test ci-dessus : la normalisation ne doit pas avaler ce
+        // qu'une source déclare réellement.
+        let liste = vec![Preset { index: 5, name: "FIP".into() }];
+        assert_eq!(
+            SourceOutcome::new(SourceAction::Noop).presets(liste.clone()).presets,
+            Some(liste.clone())
+        );
+        assert_eq!(Notification::new().presets(liste.clone()).presets, Some(liste));
+    }
 
     #[test]
     fn le_compte_du_builder_atterrit_dans_la_trame() {

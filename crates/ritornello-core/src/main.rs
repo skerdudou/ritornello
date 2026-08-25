@@ -459,9 +459,18 @@ pub(crate) fn assemble_covers_et_core<P: player::Player>(
 /// tient un récepteur d'état et un récepteur de catalogue, et les deux bras de
 /// son `select!` reversent leur résultat d'envoi dans le même contrôle d'erreur
 /// — quel que soit celui qui se réveille le premier après la mort du socket, la
-/// tâche sort. Le canal du catalogue ne fait qu'ajouter une occasion de le
-/// remarquer plus tôt : en veille, aucun tick d'état n'est armé, mais le retrait
-/// de la source du greffon éteint republie le catalogue et réveille le relais.
+/// tâche sort.
+///
+/// Le canal du catalogue ajoute une occasion de le remarquer plus tôt, **mais
+/// seulement pour un greffon qui possédait une source** : c'est son retrait qui
+/// republie le catalogue. Pour un greffon purement afficheur — la console, et le
+/// greffon MPD lui-même — `remove_source` rend `Ok(false)`, rien n'est republié,
+/// et en veille (où aucun tick d'état n'est armé) le relais mort reste garé
+/// jusqu'au prochain réveil. Sans conséquence : il ne consomme rien en
+/// attendant, et il sortira au premier envoi. Mais la ligne de statut dit
+/// « déconnecté » avant que la tâche n'ait constaté quoi que ce soit, et c'est
+/// voulu — l'accusé décrit un état déjà vrai, pas l'instant où la tâche
+/// l'apprend.
 async fn eteindre_a_chaud<P: player::Player>(
     nom: &str,
     fils: &FilsChaud,
@@ -1334,7 +1343,36 @@ async fn main() -> Result<()> {
                         tracing::info!("plugin {name} stopped: disabled from the admin UI");
                     } else {
                         tracing::warn!("plugin {name} exited: {status:?}");
-                        crate::status::mark_plugin_disconnected(&mut *status_state.write().await, &name);
+                        // Décâblage de la source, **comme sur le chemin de
+                        // l'extinction volontaire**. Un greffon qui meurt de
+                        // lui-même — panique, `SIGSEGV`, tué à la main — laissait
+                        // sinon son nom dans `source_order` et ses présélections
+                        // dans `presets_par_source` : un client MPD gardait donc
+                        // une liste enregistrée pour une source qui n'existe plus,
+                        // et un `load` dessus **passait** le garde de
+                        // `Command::SelectSource` (qui ne consulte que
+                        // `source_order`). La bascule partait alors vers un socket
+                        // mort et payait jusqu'à deux délais de 5 s du protocole
+                        // des sources — `Deactivate` puis `Activate` — **dans la
+                        // boucle principale**, donc sans répondre à la
+                        // télécommande pendant ce temps.
+                        //
+                        // C'est le même danger que celui qu'on a écarté pour la
+                        // désactivation depuis l'IHM, sur le chemin qui avait été
+                        // oublié : la seule différence entre les deux est de
+                        // savoir qui a décidé de la mort, ce qui ne change rien à
+                        // ce que le cœur doit oublier. `remove_source` bascule
+                        // vers la source suivante s'il s'agissait de l'active,
+                        // évince les présélections et republie le catalogue.
+                        if let Err(e) = core.remove_source(&name).await {
+                            tracing::warn!("unwiring source {name} after it exited: {e:#}");
+                        }
+                        // Un seul verrou pour les deux écritures, comme
+                        // `eteindre_a_chaud` : la ligne « déconnecté » et le nom
+                        // de la source active décrivent le même instant.
+                        let mut statuts = status_state.write().await;
+                        crate::status::mark_plugin_disconnected(&mut statuts, &name);
+                        statuts.active_source = core.active_source().to_string();
                     }
                 }
             }
