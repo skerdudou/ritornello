@@ -274,7 +274,8 @@ mod tests {
             .await
             .unwrap();
         let (_r, mut w) = display.into_split();
-        w.write_all(format!("{}\n", serde_json::to_string(&PlayerState::default()).unwrap()).as_bytes())
+        let trame = ritornello_proto::DisplayFrame::State(PlayerState::default());
+        w.write_all(format!("{}\n", serde_json::to_string(&trame).unwrap()).as_bytes())
             .await
             .unwrap();
 

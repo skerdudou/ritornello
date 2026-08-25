@@ -485,11 +485,13 @@ mod tests {
 
     #[test]
     fn playerstate_desyrialise_le_morceau_aplati_et_une_incrustation() {
-        // C'est le chemin réel des afficheurs (`run_display_plugin` désérialise
-        // exactement cette forme, voir le SDK) : `#[serde(flatten)]` sur le
-        // morceau combiné à un enum étiqueté en interne (`Overlay`, `kind`) est
-        // la conjonction la plus susceptible de surprendre avec serde. Les
-        // autres tests de ce fichier ne couvrent que l'un ou l'autre
+        // C'est le chemin réel des afficheurs : `run_display_plugin` lit une
+        // `DisplayFrame`, dont le `data` d'une trame d'état est **exactement**
+        // cette forme (étiquetage adjacent, voir `display.rs`) — ce test reste
+        // donc bien celui du contenu qui traverse le socket. `#[serde(flatten)]`
+        // sur le morceau combiné à un enum étiqueté en interne (`Overlay`,
+        // `kind`) est la conjonction la plus susceptible de surprendre avec
+        // serde. Les autres tests de ce fichier ne couvrent que l'un ou l'autre
         // séparément ; en cas de régression ici, le symptôme serait muet côté
         // utilisateur (un `warn!` dans les logs et un écran figé).
         let json = r#"{

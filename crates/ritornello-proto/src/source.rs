@@ -14,6 +14,15 @@ pub enum SourceReq {
     Prev,
     Eject,
     SetLocale(String),
+    /// Énumérer les présélections nommées de cette source.
+    ///
+    /// La réponse corrélée est un `Noop` : rien dans ce tuyau ne porte de
+    /// liste, `SourceReq` se résolvant en exactement un `SourceAction` sur
+    /// trois couches, et `SourceClient` exigeant `(Some(id), Some(action))`
+    /// pour dénouer son `oneshot`. La liste voyage donc **à côté** de l'action,
+    /// dans `SourceMessage::presets`, par la même voie que `preset_count` — le
+    /// prédicat de trame intéressante, hors corrélation.
+    ListPresets,
     /// Le cœur a arrêté la lecture de sa propre initiative (touche Stop de la
     /// télécommande), **sans** que la Source ait été consultée.
     ///
@@ -31,6 +40,15 @@ pub enum SourceReq {
     /// ce qu'elle joue. Sans cette notification, l'affichage et les métadonnées
     /// restaient sur la piste précédente jusqu'à la prochaine commande.
     PlayerTrack(i64),
+}
+
+/// Une présélection nommée. `index` est **à base 1**, celui que
+/// `Command::Select` attend, et la suite peut être **creuse** : des stations 1,
+/// 5 et 99 sont légales. Ne jamais déduire un rang d'un index par soustraction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Preset {
+    pub index: u8,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,11 +255,122 @@ pub struct SourceMessage {
     /// declares an identity or a status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub can_eject: Option<bool>,
+    /// Les présélections nommées de cette source, quand elle sait les énumérer.
+    /// Hors corrélation, comme `preset_count` : c'est un fait sur la source, pas
+    /// une réponse à une question — et c'est ce qui évite d'élargir `pending`,
+    /// `Source::request` et `demande_active` pour transporter une liste.
+    ///
+    /// Absent = « cette trame ne dit rien des présélections, garde la valeur
+    /// courante ». La liste **vide** est distincte de l'absence et porteuse de
+    /// sens : « je n'ai que des numéros » — le cd par nature, une piste n'ayant
+    /// pas de nom sans base de données.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presets: Option<Vec<Preset>>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Trame ne déclarant rien. Les littéraux complets des tests plus anciens
+    /// sont laissés tels quels exprès : c'est ce qui force à revoir chaque cas
+    /// quand un champ apparaît.
+    fn message_vide() -> SourceMessage {
+        SourceMessage {
+            id: None,
+            action: None,
+            identity: None,
+            transient: false,
+            preset: None,
+            preset_count: None,
+            preset_name: None,
+            status: None,
+            can_eject: None,
+            presets: None,
+        }
+    }
+
+    #[test]
+    fn list_presets_fait_le_tour_comme_requete() {
+        let r = SourceReq::ListPresets;
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(json, r#"{"req":"ListPresets"}"#);
+        assert_eq!(serde_json::from_str::<SourceReq>(&json).unwrap(), r);
+    }
+
+    #[test]
+    fn les_preselections_voyagent_a_cote_de_laction_pas_dedans() {
+        // La propriété qui évite d'élargir quatre types : la réponse porte bien
+        // un `action` (donc la corrélation se dénoue côté `SourceClient`, qui
+        // exige `(Some(id), Some(action))`) ET la liste à côté. Sans action, le
+        // `oneshot` attendrait les 5 s du délai pour rien.
+        let msg = SourceMessage {
+            id: Some(7),
+            action: Some(SourceAction::Noop),
+            presets: Some(vec![Preset { index: 1, name: "FIP".into() }]),
+            ..message_vide()
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let retour: SourceMessage = serde_json::from_str(&json).unwrap();
+        assert!(retour.action.is_some(), "sans action, le oneshot attendrait 5 s pour rien");
+        assert_eq!(retour.id, Some(7));
+        assert_eq!(
+            retour.presets.as_deref(),
+            Some(&[Preset { index: 1, name: "FIP".into() }][..]),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn une_liste_creuse_voyage_telle_quelle() {
+        // Les présélections sont creuses (stations 1, 5, 99) : rien dans le
+        // transport ne doit les renuméroter ni les trier, le rang dense étant
+        // l'affaire du consommateur.
+        let msg = SourceMessage {
+            presets: Some(vec![
+                Preset { index: 5, name: "FIP".into() },
+                Preset { index: 1, name: "Inter".into() },
+                Preset { index: 99, name: "Info".into() },
+            ]),
+            ..message_vide()
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let retour: SourceMessage = serde_json::from_str(&json).unwrap();
+        let indices: Vec<u8> = retour.presets.unwrap().iter().map(|p| p.index).collect();
+        assert_eq!(indices, vec![5, 1, 99], "{json}");
+        // Et la forme sur le fil, nommément : `index` et `name`, sans
+        // renommage. Un consommateur écrit à la main (le greffon MPD) lit ces
+        // deux clés-là.
+        assert_eq!(
+            serde_json::to_string(&Preset { index: 5, name: "FIP".into() }).unwrap(),
+            r#"{"index":5,"name":"FIP"}"#
+        );
+    }
+
+    #[test]
+    fn liste_vide_et_liste_absente_ne_disent_pas_la_meme_chose() {
+        // « Je n'ai que des numéros » (le cd) est une réponse, pas un silence :
+        // un `Option<Vec<_>>` aplati en `Vec` aurait confondu les deux, et le
+        // consommateur n'aurait pas su distinguer une source qui a répondu
+        // d'une source qui n'a rien dit.
+        let vide = SourceMessage { presets: Some(Vec::new()), ..message_vide() };
+        let json = serde_json::to_string(&vide).unwrap();
+        assert!(json.contains(r#""presets":[]"#), "{json}");
+        let retour: SourceMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(retour.presets, Some(Vec::new()));
+        // Trame d'un plugin antérieur au champ : rien déclaré.
+        let ancien: SourceMessage = serde_json::from_str(r#"{"id":3}"#).unwrap();
+        assert_eq!(ancien.presets, None);
+    }
+
+    #[test]
+    fn une_liste_absente_nest_pas_serialisee() {
+        // La quasi-totalité des trames ne dit rien des présélections : les
+        // alourdir d'un `"presets":null` serait du bruit sur une liaison voulue
+        // lisible à l'œil.
+        let m = SourceMessage { id: Some(2), ..message_vide() };
+        assert_eq!(serde_json::to_string(&m).unwrap(), r#"{"id":2,"action":null}"#);
+    }
 
     #[test]
     fn wake_roundtrip() {
@@ -335,6 +464,7 @@ mod tests {
             preset_name: None,
             status: None,
             can_eject: None,
+            presets: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
@@ -345,7 +475,7 @@ mod tests {
 
     #[test]
     fn message_notification_sans_id() {
-        let m = SourceMessage { id: None, action: None, identity: None, transient: false, preset: None, preset_count: None, preset_name: None, status: None, can_eject: None };
+        let m = SourceMessage { id: None, action: None, identity: None, transient: false, preset: None, preset_count: None, preset_name: None, status: None, can_eject: None, presets: None };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, None);
@@ -380,6 +510,7 @@ mod tests {
             preset_name: None,
             status: None,
             can_eject: None,
+            presets: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"preset\":4"));
@@ -394,7 +525,7 @@ mod tests {
         // La majorité des trames ne disent rien de l'identité (SetLocale,
         // Deactivate…) : les alourdir d'un `"identity":null` serait du bruit sur
         // une liaison volontairement lisible à l'œil.
-        let m = SourceMessage { id: Some(2), action: None, identity: None, transient: false, preset: None, preset_count: None, preset_name: None, status: None, can_eject: None };
+        let m = SourceMessage { id: Some(2), action: None, identity: None, transient: false, preset: None, preset_count: None, preset_name: None, status: None, can_eject: None, presets: None };
         assert_eq!(serde_json::to_string(&m).unwrap(), r#"{"id":2,"action":null}"#);
     }
 
@@ -410,6 +541,7 @@ mod tests {
             preset_name: None,
             status: None,
             can_eject: Some(true),
+            presets: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"can_eject\":true"), "{json}");
@@ -437,6 +569,7 @@ mod tests {
             preset_name: None,
             status: None,
             can_eject: None,
+            presets: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"preset_count\":23"));
@@ -465,6 +598,7 @@ mod tests {
             preset_name: Some("FIP".into()),
             status: None,
             can_eject: None,
+            presets: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"preset_name\":\"FIP\""));
@@ -499,6 +633,7 @@ mod tests {
             preset_name: None,
             status: Some("PAS DE DISQUE".into()),
             can_eject: None,
+            presets: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"status\":\"PAS DE DISQUE\""));

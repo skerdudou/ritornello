@@ -532,6 +532,21 @@ SSD1306 OLED over SPI/I2C, a wall panel with a scrolling ticker) is free to
 lay its own screen out, at whatever size, with no fallback rule to
 reimplement and no core change to request one.
 
+Each line on that socket is a **frame**: `{"frame":"state","data":{…}}`
+carries the `PlayerState` (the `data` is byte-for-byte the payload that used
+to travel bare), and `{"frame":"catalogue","data":{…}}` carries the declared
+sources and, for each one that can enumerate them, its named presets. The
+tagging is adjacent rather than internal because `PlayerState` flattens
+`Morceau`, and flatten crossed with an internally-tagged enum is a known
+serde blind spot. The catalogue is a separate frame rather than a wider
+`PlayerState` on purpose: the state is a snapshot the core deduplicates by
+equality and rebuilds on every publication, so fifty station names would
+ride every frame of playback. `DisplayPlugin::catalogue` has a **default
+body that ignores it** — a twenty-column screen has no use for it — which is
+what makes each new kind of frame a non-breaking addition; a frame of a kind
+the SDK does not know is treated like an unreadable line (warn, then
+continue) and the connection survives.
+
 Every piece of information the core knows travels both raw and already
 resolved into words: `volume` is a number a display can turn into a gauge,
 `status` is a sentence a display can just print — no display ever needs a

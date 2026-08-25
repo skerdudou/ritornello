@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use ritornello_proto::{
-    Enrichment, IdentityUpdate, NowPlaying, PlayerState, SourceAction, SourceMessage, SourceReq,
-    SourceRequest,
+    Catalogue, DisplayFrame, Enrichment, IdentityUpdate, NowPlaying, PlayerState, Preset,
+    SourceAction, SourceMessage, SourceReq, SourceRequest,
 };
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -27,6 +27,8 @@ pub struct SourceOutcome {
     pub preset_name: Option<String>,
     /// See `SourceMessage::status`.
     pub status: Option<String>,
+    /// See `SourceMessage::presets`.
+    pub presets: Option<Vec<Preset>>,
 }
 
 impl SourceOutcome {
@@ -40,6 +42,7 @@ impl SourceOutcome {
             preset_count: None,
             preset_name: None,
             status: None,
+            presets: None,
         }
     }
 
@@ -82,6 +85,13 @@ impl SourceOutcome {
         self
     }
 
+    /// Declares the source's named presets (see `SourceMessage::presets`). An
+    /// empty list is an answer, not a silence: "I only have numbers".
+    pub fn presets(mut self, presets: Vec<Preset>) -> Self {
+        self.presets = Some(presets);
+        self
+    }
+
     /// Déclare l'identité **opaque** de ce qui joue désormais.
     pub fn plays(mut self, identity: serde_json::Value) -> Self {
         self.identity = Some(IdentityUpdate::Playing(identity));
@@ -114,6 +124,8 @@ pub struct Notification {
     pub preset_name: Option<String>,
     /// See `SourceMessage::status`.
     pub status: Option<String>,
+    /// See `SourceMessage::presets`.
+    pub presets: Option<Vec<Preset>>,
 }
 
 impl Notification {
@@ -142,6 +154,14 @@ impl Notification {
     /// Declares the source's own state word (see `SourceMessage::status`).
     pub fn status(mut self, mot: impl Into<String>) -> Self {
         self.status = Some(mot.into());
+        self
+    }
+
+    /// See `SourceOutcome::presets`. C'est ce qui permet à une Source de
+    /// **republier** son catalogue sans qu'on le lui redemande — renommer une
+    /// station depuis sa page d'admin se propage ainsi.
+    pub fn presets(mut self, presets: Vec<Preset>) -> Self {
+        self.presets = Some(presets);
         self
     }
 
@@ -217,6 +237,18 @@ pub trait SourcePlugin: Send + 'static {
     /// compilent inchangés tant qu'ils n'ont pas surchargé cette méthode.
     async fn set_locale(&mut self, _locale: String) {}
 
+    /// Les présélections nommées, si cette source sait les énumérer. Défaut : la
+    /// liste vide, qui veut dire « je n'ai que des numéros ». Le cd est dans ce
+    /// cas par nature — une piste n'a pas de nom sans base de données — et les
+    /// fichiers y restent pour l'instant : leur liste **est** la file d'attente,
+    /// pas un jeu de présélections.
+    ///
+    /// La liste peut être **creuse** (stations 1, 5, 99) : `Preset::index` est
+    /// l'indice que `Select` attend, jamais un rang.
+    async fn list_presets(&mut self) -> Vec<Preset> {
+        Vec::new()
+    }
+
     /// Notification spontanée (ex. changement de piste, arrivée différée d'une
     /// TOC). Par défaut ne se termine jamais : un plugin sans notification
     /// spontanée (Radio) n'a rien à écrire de plus.
@@ -287,6 +319,16 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                         plugin.set_locale(locale).await;
                         SourceOutcome::new(SourceAction::Noop)
                     }
+                    // Même précédent que `SetLocale` : une méthode qui ne rend
+                    // pas de `SourceOutcome`. Le `Noop` n'est pas décoratif —
+                    // c'est lui qui dénoue le `oneshot` du `SourceClient`, qui
+                    // exige `(Some(id), Some(action))`. Sans action, l'appelant
+                    // attendrait les 5 s du délai puis échouerait, alors que la
+                    // liste est déjà là, à côté.
+                    SourceReq::ListPresets => {
+                        let presets = plugin.list_presets().await;
+                        SourceOutcome::new(SourceAction::Noop).presets(presets)
+                    }
                 };
                 let msg = SourceMessage {
                     id: Some(req.id),
@@ -303,6 +345,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     // seul chemin donnerait un bouton qui clignote entre
                     // actif et grisé au fil des trames.
                     can_eject: Some(plugin.can_eject()),
+                    presets: outcome.presets,
                 };
                 write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
             }
@@ -319,6 +362,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                             preset_name: n.preset_name,
                             status: n.status,
                             can_eject: Some(plugin.can_eject()),
+                            presets: n.presets,
                         };
                         write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
                     }
@@ -347,6 +391,15 @@ pub async fn run_source_plugin(plugin: impl SourcePlugin, socket_path: &Path) ->
 #[async_trait::async_trait]
 pub trait DisplayPlugin: Send + 'static {
     async fn show(&mut self, state: PlayerState) -> Result<()>;
+
+    /// Le catalogue des sources et de leurs présélections nommées.
+    ///
+    /// Défaut : **ignoré** — un afficheur de vingt colonnes n'en a que faire, et
+    /// c'est ce corps par défaut qui fait de chaque nouveau genre de trame une
+    /// addition non cassante (voir `DisplayFrame`, fait pour grandir).
+    async fn catalogue(&mut self, _c: Catalogue) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Lie le socket d'un afficheur, sans servir encore.
@@ -365,21 +418,29 @@ pub fn bind_display(socket_path: &Path) -> Result<UnixListener> {
 /// Accepte la connexion du cœur, puis affiche chaque état reçu jusqu'à
 /// fermeture. Protocole à sens unique : aucune réponse n'est attendue.
 ///
-/// Chaque ligne est un `PlayerState` complet, pas une vue déjà composée : la
-/// mise en page appartient au plugin (voir `ritornello-plugin-console::display`).
+/// Chaque ligne est une `DisplayFrame` : soit un `PlayerState` complet — pas une
+/// vue déjà composée, la mise en page appartient au plugin (voir
+/// `ritornello-plugin-console::display`) — soit un catalogue de sources.
+///
+/// Une trame d'un genre que ce SDK ne connaît pas est traitée comme une ligne
+/// illisible : `warn` puis `continue`, la connexion survit. C'est la politique
+/// qui rend l'ajout d'un genre de trame non cassant dans les deux sens.
 pub async fn serve_display(listener: UnixListener, mut plugin: impl DisplayPlugin) -> Result<()> {
     let (stream, _) = listener.accept().await?;
     let (read, _write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
-        let state: PlayerState = match serde_json::from_str(&line) {
+        let frame: DisplayFrame = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!("invalid player state ignored: {e}");
+                tracing::warn!("invalid display frame ignored: {e}");
                 continue;
             }
         };
-        plugin.show(state).await?;
+        match frame {
+            DisplayFrame::State(state) => plugin.show(state).await?,
+            DisplayFrame::Catalogue(c) => plugin.catalogue(c).await?,
+        }
     }
     Ok(())
 }
@@ -889,6 +950,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_presets_repond_un_noop_correlable_et_la_liste_a_cote() {
+        // Les deux moitiés de la propriété, dans une seule trame : le `Noop`
+        // (sans lui, le `oneshot` du `SourceClient`, qui exige
+        // `(Some(id), Some(action))`, attendrait les 5 s du délai) et la liste,
+        // qui voyage à côté et non dans l'action.
+        struct SourceNommante;
+        #[async_trait::async_trait]
+        impl SourcePlugin for SourceNommante {
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn list_presets(&mut self) -> Vec<Preset> {
+                vec![
+                    Preset { index: 1, name: "FIP".into() },
+                    Preset { index: 5, name: "France Info".into() },
+                ]
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(SourceNommante, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = client.expect("connexion au plugin").into_split();
+        let mut lines = BufReader::new(read).lines();
+        write.write_all(b"{\"id\":1,\"req\":\"ListPresets\"}\n").await.unwrap();
+        let line = lines.next_line().await.unwrap().unwrap();
+        let msg: SourceMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(msg.id, Some(1));
+        assert_eq!(
+            msg.action,
+            Some(SourceAction::Noop),
+            "sans action, la correlation ne se denoue pas et l'appelant attend 5 s: {line}"
+        );
+        assert_eq!(
+            msg.presets.as_deref(),
+            Some(
+                &[
+                    Preset { index: 1, name: "FIP".into() },
+                    Preset { index: 5, name: "France Info".into() },
+                ][..]
+            ),
+            "{line}"
+        );
+    }
+
+    #[tokio::test]
+    async fn une_source_qui_ne_surcharge_pas_repond_la_liste_vide_pas_labsence() {
+        // `EchoSource` ne surcharge PAS `list_presets` : le corps par défaut
+        // doit rendre une liste **vide** et non un silence. La distinction
+        // porte du sens — « je n'ai que des numéros » (le cd) est une réponse,
+        // et le consommateur retombe alors sur `preset_count`.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(EchoSource, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = client.expect("connexion au plugin").into_split();
+        let mut lines = BufReader::new(read).lines();
+        write.write_all(b"{\"id\":1,\"req\":\"ListPresets\"}\n").await.unwrap();
+        let line = lines.next_line().await.unwrap().unwrap();
+        let msg: SourceMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(msg.action, Some(SourceAction::Noop));
+        assert_eq!(msg.presets, Some(Vec::new()), "{line}");
+    }
+
+    #[tokio::test]
+    async fn une_notification_spontanee_peut_republier_les_preselections() {
+        // Le chemin du renommage : la radio réenregistre sa configuration et
+        // repousse son catalogue sans qu'on le lui redemande. La trame est
+        // spontanée (aucun `id`) et ne porte aucune action.
+        struct Renommante {
+            emis: bool,
+        }
+        #[async_trait::async_trait]
+        impl SourcePlugin for Renommante {
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn poll_notification(&mut self) -> Option<Notification> {
+                if self.emis {
+                    std::future::pending::<()>().await;
+                }
+                self.emis = true;
+                Some(
+                    Notification::new()
+                        .presets(vec![Preset { index: 2, name: "Nova".into() }]),
+                )
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(Renommante { emis: false }, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, _write) = client.expect("connexion au plugin").into_split();
+        let mut lines = BufReader::new(read).lines();
+        let line = lines.next_line().await.unwrap().unwrap();
+        let msg: SourceMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(msg.id, None, "une notification spontanee n'est pas correlee: {line}");
+        assert_eq!(
+            msg.presets.as_deref(),
+            Some(&[Preset { index: 2, name: "Nova".into() }][..]),
+            "{line}"
+        );
+    }
+
+    #[tokio::test]
     async fn une_notification_spontanee_porte_lidentite() {
         // C'est le chemin du changement de piste d'un disque et de l'arrivée
         // différée d'une TOC : aucune requête du cœur, mais l'identité change.
@@ -992,8 +1187,8 @@ mod tests {
         });
 
         let (_r, mut w) = stream.into_split();
-        let etat = PlayerState::default();
-        w.write_all(format!("{}\n", serde_json::to_string(&etat).unwrap()).as_bytes())
+        let trame = DisplayFrame::State(PlayerState::default());
+        w.write_all(format!("{}\n", serde_json::to_string(&trame).unwrap()).as_bytes())
             .await
             .unwrap();
 
@@ -1048,9 +1243,143 @@ mod display_tests {
         use tokio::io::AsyncWriteExt;
         let mut write = stream;
         let e = PlayerState { source: "radio".into(), preset: Some(1), preset_name: Some("FIP".into()), ..Default::default() };
-        write.write_all(format!("{}\n", serde_json::to_string(&e).unwrap()).as_bytes()).await.unwrap();
+        let trame = DisplayFrame::State(e.clone());
+        write.write_all(format!("{}\n", serde_json::to_string(&trame).unwrap()).as_bytes()).await.unwrap();
 
         for _ in 0..50 {
+            if !etats.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(etats.lock().unwrap().as_slice(), &[e]);
+    }
+
+    #[tokio::test]
+    async fn un_afficheur_qui_ignore_le_catalogue_recoit_quand_meme_les_etats() {
+        // La propriété du corps par défaut : `RecordingDisplay` ne surcharge pas
+        // `catalogue` — comme `console` et les trois autres bouchons, qui n'ont
+        // pas été touchés — et une trame de catalogue ne doit ni le casser, ni
+        // lui faire perdre la trame suivante.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("display.sock");
+        let listener = bind_display(&socket).unwrap();
+        let plugin = RecordingDisplay::default();
+        let etats = plugin.etats.clone();
+        tokio::spawn(async move {
+            serve_display(listener, plugin).await.unwrap();
+        });
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (_r, mut w) = stream.into_split();
+        use tokio::io::AsyncWriteExt;
+
+        // D'abord le catalogue, que ce plugin ignore…
+        let cat = DisplayFrame::Catalogue(Catalogue {
+            sources: vec![ritornello_proto::SourceCatalogue {
+                name: "radio".into(),
+                presets: vec![Preset { index: 1, name: "FIP".into() }],
+            }],
+        });
+        w.write_all(format!("{}\n", serde_json::to_string(&cat).unwrap()).as_bytes())
+            .await
+            .unwrap();
+        // …puis l'état, qui doit arriver.
+        let e = PlayerState { source: "radio".into(), preset: Some(1), ..Default::default() };
+        let etat = DisplayFrame::State(e.clone());
+        w.write_all(format!("{}\n", serde_json::to_string(&etat).unwrap()).as_bytes())
+            .await
+            .unwrap();
+
+        for _ in 0..100 {
+            if !etats.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        // Un seul reçu, et c'est bien l'état : le catalogue n'a pas été pris
+        // pour un état vide, et n'a pas fait tomber la connexion.
+        assert_eq!(
+            etats.lock().unwrap().as_slice(),
+            &[e],
+            "l'etat doit passer malgre le catalogue, et le catalogue ne doit pas passer pour un etat"
+        );
+    }
+
+    #[tokio::test]
+    async fn un_afficheur_interesse_recoit_le_catalogue() {
+        // Le pendant : le corps par défaut ne doit pas *avaler* le catalogue.
+        // Sans le bras d'aiguillage de `serve_display`, ce plugin ne verrait
+        // jamais rien.
+        #[derive(Clone, Default)]
+        struct Interesse {
+            catalogues: Arc<Mutex<Vec<Catalogue>>>,
+        }
+        #[async_trait::async_trait]
+        impl DisplayPlugin for Interesse {
+            async fn show(&mut self, _state: PlayerState) -> Result<()> {
+                Ok(())
+            }
+            async fn catalogue(&mut self, c: Catalogue) -> Result<()> {
+                self.catalogues.lock().unwrap().push(c);
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("display.sock");
+        let listener = bind_display(&socket).unwrap();
+        let plugin = Interesse::default();
+        let vus = plugin.catalogues.clone();
+        tokio::spawn(async move {
+            serve_display(listener, plugin).await.unwrap();
+        });
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (_r, mut w) = stream.into_split();
+        use tokio::io::AsyncWriteExt;
+        let attendu = Catalogue {
+            sources: vec![ritornello_proto::SourceCatalogue {
+                name: "radio".into(),
+                presets: vec![Preset { index: 99, name: "Nova".into() }],
+            }],
+        };
+        let trame = DisplayFrame::Catalogue(attendu.clone());
+        w.write_all(format!("{}\n", serde_json::to_string(&trame).unwrap()).as_bytes())
+            .await
+            .unwrap();
+        for _ in 0..100 {
+            if !vus.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(vus.lock().unwrap().as_slice(), &[attendu]);
+    }
+
+    #[tokio::test]
+    async fn une_trame_illisible_ne_ferme_pas_la_connexion() {
+        // La politique de ligne illisible ne change pas avec l'enveloppe :
+        // `warn` puis `continue`. Une trame d'un genre que ce SDK ne connaît pas
+        // (la variante `cover` d'un chantier à venir) tombe dans le même cas —
+        // c'est ce qui rend l'ajout d'un genre non cassant dans les deux sens.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("display.sock");
+        let listener = bind_display(&socket).unwrap();
+        let plugin = RecordingDisplay::default();
+        let etats = plugin.etats.clone();
+        tokio::spawn(async move {
+            serve_display(listener, plugin).await.unwrap();
+        });
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (_r, mut w) = stream.into_split();
+        use tokio::io::AsyncWriteExt;
+        w.write_all(b"ceci n'est pas du json\n").await.unwrap();
+        w.write_all(b"{\"frame\":\"cover\",\"data\":{\"url\":\"x\"}}\n").await.unwrap();
+        let e = PlayerState { source: "cd".into(), ..Default::default() };
+        let etat = DisplayFrame::State(e.clone());
+        w.write_all(format!("{}\n", serde_json::to_string(&etat).unwrap()).as_bytes())
+            .await
+            .unwrap();
+        for _ in 0..100 {
             if !etats.lock().unwrap().is_empty() {
                 break;
             }

@@ -1605,6 +1605,7 @@ mod tests {
             preset_name: None,
             status: None,
             can_eject: None,
+            presets: None,
         }
     }
 
@@ -2835,6 +2836,7 @@ mod tests {
             preset_name: None,
             status: None,
             can_eject: None,
+            presets: None,
         }
     }
 
@@ -2848,6 +2850,7 @@ mod tests {
             preset_name: nom.map(str::to_string),
             status: None,
             can_eject: None,
+            presets: None,
         }
     }
 
@@ -2875,6 +2878,7 @@ mod tests {
             preset_name: None,
             status: None,
             can_eject: peut,
+            presets: None,
         }
     }
 

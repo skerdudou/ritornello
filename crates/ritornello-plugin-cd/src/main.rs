@@ -326,6 +326,10 @@ impl CdSource {
             preset_name: issue.preset_name,
             // Same status logic as any other frame: presence flips it.
             status: issue.status,
+            // The cd never enumerates named presets: a track has no name
+            // without a database. `list_presets` keeps the default empty list,
+            // and a spontaneous frame has nothing to republish here.
+            presets: None,
         }
     }
 }

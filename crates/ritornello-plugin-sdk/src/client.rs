@@ -1,7 +1,8 @@
 use anyhow::{bail, Context, Result};
 use ritornello_proto::{
-    AdminReq, AdminRequest, AdminResponse, AdminResult, Enrichment, IdentityUpdate, InputMessage,
-    NowPlaying, PlayerState, SourceAction, SourceMessage, SourceReq, SourceRequest,
+    AdminReq, AdminRequest, AdminResponse, AdminResult, Catalogue, DisplayFrame, Enrichment,
+    IdentityUpdate, InputMessage, NowPlaying, PlayerState, Preset, SourceAction, SourceMessage,
+    SourceReq, SourceRequest,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -37,6 +38,10 @@ pub struct SourceUpdate {
     /// courante. N'entre volontairement **pas** dans le prédicat ci-dessous
     /// qui décide si une trame vaut d'être relayée : voir la doc du champ.
     pub can_eject: Option<bool>,
+    /// See `SourceMessage::presets`. Entre volontairement **dans** le prédicat
+    /// ci-dessous : c'est la seule voie par laquelle une liste atteint le cœur,
+    /// la réponse corrélée à `ListPresets` n'étant qu'un `Noop`.
+    pub presets: Option<Vec<Preset>>,
 }
 
 pub struct SourceClient {
@@ -77,6 +82,7 @@ impl SourceClient {
                     || msg.preset_count.is_some()
                     || msg.preset_name.is_some()
                     || msg.status.is_some()
+                    || msg.presets.is_some()
                 {
                     let porte_identite = msg.identity.is_some();
                     let update = SourceUpdate {
@@ -87,6 +93,7 @@ impl SourceClient {
                         preset_name: msg.preset_name,
                         status: msg.status,
                         can_eject: msg.can_eject,
+                        presets: msg.presets,
                     };
                     if update_tx.try_send((name.clone(), update)).is_err() {
                         // Un statut ou une présélection perdus sont réparés par
@@ -158,9 +165,25 @@ impl DisplayClient {
         Ok(Arc::new(Self { writer: Mutex::new(write) }))
     }
 
+    /// Pousse un état. Sur le fil, c'est une `DisplayFrame::State` : l'ancienne
+    /// charge utile inchangée, dans une enveloppe à étiquetage adjacent.
     pub async fn send(&self, state: &PlayerState) -> Result<()> {
+        self.envoyer(&DisplayFrame::State(state.clone())).await
+    }
+
+    /// Pousse le catalogue des sources. Jumeau de `send`, sur son propre canal :
+    /// élargir la charge utile de l'état aurait republié l'état à chaque
+    /// changement de catalogue et l'inverse, ce que la déduplication par égalité
+    /// du cœur ne rattrape pas — les deux valeurs changeraient ensemble par
+    /// construction.
+    pub async fn send_catalogue(&self, catalogue: &Catalogue) -> Result<()> {
+        self.envoyer(&DisplayFrame::Catalogue(catalogue.clone())).await
+    }
+
+    async fn envoyer(&self, frame: &DisplayFrame) -> Result<()> {
+        let ligne = format!("{}\n", serde_json::to_string(frame)?);
         let mut w = self.writer.lock().await;
-        w.write_all(format!("{}\n", serde_json::to_string(state)?).as_bytes()).await?;
+        w.write_all(ligne.as_bytes()).await?;
         Ok(())
     }
 }
@@ -451,6 +474,7 @@ mod tests {
                 preset_name: Some("FIP".into()),
                 status: None,
                 can_eject: None,
+                presets: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             let _ = socket_for_server; // garde le chemin vivant pour le débogage
@@ -499,6 +523,7 @@ mod tests {
                 preset_name: None,
                 status: None,
                 can_eject: None,
+                presets: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -546,6 +571,7 @@ mod tests {
                 preset_name: None,
                 status: None,
                 can_eject: Some(true),
+                presets: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&nue).unwrap()).as_bytes()).await.unwrap();
             // Seconde requête : la même capacité, cette fois accompagnée d'un
@@ -562,6 +588,7 @@ mod tests {
                 preset_name: None,
                 status: Some("AUDIO CD".into()),
                 can_eject: Some(true),
+                presets: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&habillee).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -605,6 +632,7 @@ mod tests {
                 preset_name: Some("FIP".into()),
                 status: None,
                 can_eject: None,
+                presets: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -643,6 +671,7 @@ mod tests {
                 preset_name: None,
                 status: Some("PAS DE DISQUE".into()),
                 can_eject: None,
+                presets: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -654,6 +683,77 @@ mod tests {
         let (name, update) = update_rx.recv().await.unwrap();
         assert_eq!(name, "radio");
         assert_eq!(update.status.as_deref(), Some("PAS DE DISQUE"));
+    }
+
+    #[tokio::test]
+    async fn une_reponse_a_list_presets_denoue_la_correlation_et_relaie_la_liste() {
+        // Les deux moitiés dans le même aller-retour, et c'est le cœur du choix
+        // de conception : la liste ne peut pas voyager comme la **réponse** (le
+        // `oneshot` ne porte qu'un `SourceAction`), donc `request` doit rendre
+        // sans attendre, et la liste arriver par le canal de mises à jour.
+        // Le test **séquence** au lieu d'attendre : deux réponses, la première
+        // ne portant que `presets`, la seconde ne portant qu'un statut (que le
+        // prédicat relaie depuis toujours). La première mise à jour reçue doit
+        // être celle des présélections. Sans le `|| msg.presets.is_some()`, ce
+        // `recv` rendrait le **statut** et l'assertion tomberait tout de
+        // suite — au lieu d'attendre à jamais une trame qui ne viendra pas.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+            assert_eq!(req.req, SourceReq::ListPresets);
+            let liste = ritornello_proto::SourceMessage {
+                id: Some(req.id),
+                action: Some(SourceAction::Noop),
+                identity: None,
+                transient: false,
+                preset: None,
+                preset_count: None,
+                preset_name: None,
+                status: None,
+                can_eject: None,
+                presets: Some(vec![Preset { index: 5, name: "FIP".into() }]),
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&liste).unwrap()).as_bytes()).await.unwrap();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+            let statut = ritornello_proto::SourceMessage {
+                id: Some(req.id),
+                action: Some(SourceAction::Noop),
+                identity: None,
+                transient: false,
+                preset: None,
+                preset_count: None,
+                preset_name: None,
+                status: Some("RADIO".into()),
+                can_eject: None,
+                presets: None,
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&statut).unwrap()).as_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "radio".into(), update_tx).await.unwrap();
+        // La corrélation se dénoue : sans le `Noop`, cet `await` durerait les
+        // 5 s du délai puis échouerait.
+        assert_eq!(client.request(SourceReq::ListPresets).await.unwrap(), SourceAction::Noop);
+        client.request(SourceReq::Activate).await.unwrap();
+        let (name, update) = update_rx.recv().await.unwrap();
+        assert_eq!(name, "radio");
+        assert_eq!(
+            update.presets.as_deref(),
+            Some(&[Preset { index: 5, name: "FIP".into() }][..]),
+            "la premiere mise a jour doit etre celle des preselections, obtenu {update:?}"
+        );
+        // La seconde suit, et c'est bien le statut : l'ordre est celui du fil.
+        let (_, suivante) = update_rx.recv().await.unwrap();
+        assert_eq!(suivante.status.as_deref(), Some("RADIO"));
     }
 
     #[tokio::test]
@@ -679,6 +779,7 @@ mod tests {
                 preset_name: None,
                 status: None,
                 can_eject: None,
+                presets: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -802,13 +903,57 @@ mod tests {
             let (read, _write) = stream.into_split();
             let mut lines = BufReader::new(read).lines();
             let line = lines.next_line().await.unwrap().unwrap();
-            let e: PlayerState = serde_json::from_str(&line).unwrap();
-            assert_eq!(e.preset_name.as_deref(), Some("FIP"));
+            // Le cœur écrit désormais une enveloppe : le serveur doit lire une
+            // `DisplayFrame`, et la variante compte autant que le contenu — un
+            // état poussé en catalogue passerait inaperçu de l'afficheur.
+            match serde_json::from_str::<DisplayFrame>(&line).unwrap() {
+                DisplayFrame::State(e) => assert_eq!(e.preset_name.as_deref(), Some("FIP")),
+                autre => panic!("une trame d'etat etait attendue, obtenu {autre:?}"),
+            }
         });
 
         let client = DisplayClient::connect(&socket).await.unwrap();
         let etat = PlayerState { source: "radio".into(), preset: Some(1), preset_name: Some("FIP".into()), ..Default::default() };
         client.send(&etat).await.unwrap();
+        serveur.await.expect("les assertions du serveur ont paniqué");
+    }
+
+    #[tokio::test]
+    async fn display_client_envoie_le_catalogue_sur_le_meme_socket_apres_un_etat() {
+        // Deux trames de genres différents à la file sur la **même** connexion :
+        // c'est ce que fait le relais du cœur au câblage d'un afficheur. Les
+        // assertions vivent dans la tâche serveur, dont le `JoinHandle` est
+        // joint — sans quoi une panique y serait avalée et le test ne prouverait
+        // que « send_catalogue rend Ok ».
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("display.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let attendu = Catalogue {
+            sources: vec![ritornello_proto::SourceCatalogue {
+                name: "radio".into(),
+                presets: vec![Preset { index: 5, name: "FIP".into() }],
+            }],
+        };
+        let attendu_srv = attendu.clone();
+        let serveur = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, _write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let premiere = lines.next_line().await.unwrap().unwrap();
+            match serde_json::from_str::<DisplayFrame>(&premiere).unwrap() {
+                DisplayFrame::State(e) => assert_eq!(e.source, "radio"),
+                autre => panic!("la premiere trame doit etre un etat, obtenu {autre:?}"),
+            }
+            let seconde = lines.next_line().await.unwrap().unwrap();
+            match serde_json::from_str::<DisplayFrame>(&seconde).unwrap() {
+                DisplayFrame::Catalogue(c) => assert_eq!(c, attendu_srv),
+                autre => panic!("la seconde trame doit etre un catalogue, obtenu {autre:?}"),
+            }
+        });
+
+        let client = DisplayClient::connect(&socket).await.unwrap();
+        client.send(&PlayerState { source: "radio".into(), ..Default::default() }).await.unwrap();
+        client.send_catalogue(&attendu).await.unwrap();
         serveur.await.expect("les assertions du serveur ont paniqué");
     }
 
