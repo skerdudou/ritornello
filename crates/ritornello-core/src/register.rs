@@ -301,6 +301,20 @@ pub fn un_greffon_vivant(lances: &[String], g: &Gathered) -> bool {
     lances.iter().any(|nom| !g.morts.contains(nom))
 }
 
+/// Le démarrage doit-il être refusé ?
+///
+/// `un_greffon_vivant` ne suffit plus depuis qu'un greffon peut être éteint :
+/// tout éteindre ne lance aucun processus, et le refus mettrait alors le cœur
+/// en boucle de redémarrage systemd — **IHM comprise**, donc sans plus aucun
+/// moyen de rallumer quoi que ce soit. Tout éteint est une configuration, pas
+/// une panne.
+///
+/// Le refus ne reste que pour ce qu'il visait : des greffons déclarés actifs,
+/// et plus un seul processus vivant pour s'annoncer.
+pub fn demarrage_refuse(actifs_declares: usize, lances: &[String], g: &Gathered) -> bool {
+    actifs_declares > 0 && !un_greffon_vivant(lances, g)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -863,5 +877,23 @@ mod tests {
             ..Default::default()
         };
         assert!(un_greffon_vivant(&lances, &g));
+    }
+
+    #[test]
+    fn tout_eteindre_nest_pas_une_panne() {
+        let g = Gathered::default();
+        // Aucun greffon actif déclaré : rien n'a été lancé, et c'est voulu. Le
+        // cœur doit démarrer — sans son IHM, plus personne ne pourrait rallumer.
+        assert!(!demarrage_refuse(0, &[], &g));
+        // Des greffons actifs déclarés, mais plus aucun processus vivant : c'est
+        // l'erreur de configuration que le refus existe pour signaler.
+        assert!(demarrage_refuse(2, &[], &g));
+    }
+
+    #[test]
+    fn un_seul_vivant_suffit_a_demarrer() {
+        let mut g = Gathered::default();
+        g.morts.push("cd".into());
+        assert!(!demarrage_refuse(2, &["radio".into(), "cd".into()], &g));
     }
 }

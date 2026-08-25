@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref, watch } from 'vue'
 import { Badge, Card, CardContent, CardHeader, CardTitle } from '@ritornello/ui'
 import BarreProgression from './BarreProgression.vue'
 import { useCatalog } from '../composables/useCatalog'
@@ -9,7 +10,23 @@ import type { PlayerPayload } from '../types'
 // la page : la telecommande en a besoin elle aussi (touche active), et ouvrir
 // une seconde connexion ici doublerait les flux pour le meme contenu.
 const { t } = useCatalog()
-defineProps<{ etat: PlayerPayload | null; pasDeplacement: number }>()
+const props = defineProps<{ etat: PlayerPayload | null; pasDeplacement: number }>()
+// L'appareil a annonce une pochette, le navigateur n'a pas pu la charger.
+//
+// Le cas n'est pas theorique : la cle du cache du coeur est bornee a quelques
+// entrees, et le fichier lui-meme vit sur un partage qui peut disparaitre —
+// les deux rendent un 404 sous une URL deja publiee. Sans ce drapeau, le carre
+// reserve montrait le glyphe d'image cassee du navigateur au lieu du repli ♫
+// prevu pour exactement cette situation.
+const imageCassee = ref(false)
+// Remis a zero des que l'appareil designe une **autre** image : sans cela, un
+// seul echec condamnerait le carre pour le reste de la session.
+watch(
+  () => props.etat?.cover_href,
+  () => {
+    imageCassee.value = false
+  },
+)
 // Remonte au parent : c'est HomeView qui poste les commandes (comme pour le
 // reste de la telecommande), la carte elle-meme n'en poste aucune.
 const emit = defineEmits<{ deplacer: [secondes: number] }>()
@@ -97,30 +114,65 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
       </p>
 
       <!-- Le morceau, quand il est connu. -->
-      <div v-if="!riendAfficher(etat)" class="mt-3 border-t border-border pt-3" data-now-playing>
-        <div class="flex items-baseline gap-2">
-          <p class="text-xs uppercase tracking-wide text-muted-foreground">{{ t('now_playing') }}</p>
-          <!-- Qui a fourni l'information : c'est la premiere question qu'on se
-               pose devant un titre faux. -->
-          <Badge v-if="etat?.origin" variant="secondary" class="text-[10px]" data-origin>
-            {{ etat.origin }}
-          </Badge>
-          <!-- Seulement quand la position n'est pas connue : sinon la barre
-               juste en dessous affiche deja "ecoule ... duree", et repeter la
-               duree seule ici serait la meme information deux fois (defaut
-               corrige : "4:14" dans l'en-tete, "1:27 ... 4:14" dans la barre). -->
-          <span
-            v-if="etat?.position_s == null && formateDuree(etat?.duration_s)"
-            class="text-xs text-muted-foreground"
-            :title="t('track_length')"
-            data-duree
+      <div v-if="!riendAfficher(etat)" class="mt-3 flex gap-3 border-t border-border pt-3" data-now-playing>
+        <!-- Le carre est le meme quand l'image manque : elle arrive apres le
+             texte, parfois plusieurs secondes apres, et un carre qui apparait
+             decalerait toute la carte. -->
+        <div
+          class="size-20 shrink-0 overflow-hidden rounded-md border border-border bg-muted"
+          data-pochette
+        >
+          <!-- `@error` : toute voie par laquelle « la pochette a disparu »
+               (cle evincee du cache, fichier retire du partage) doit degrader
+               vers le repli ♫ ci-dessous, et non vers le glyphe d'image
+               cassee du navigateur, dans un carre qui est justement la pour
+               que rien ne bouge. -->
+          <img
+            v-if="etat?.cover_href && !imageCassee"
+            :src="etat.cover_href"
+            :alt="t('cover_alt')"
+            class="size-full object-cover"
+            @error="imageCassee = true"
+          />
+          <div
+            v-else
+            class="flex size-full items-center justify-center text-muted-foreground"
+            data-pochette-repli
+            aria-hidden="true"
           >
-            {{ formateDuree(etat?.duration_s) }}
-          </span>
+            ♫
+          </div>
         </div>
-        <p v-if="etat?.title" class="text-lg font-medium leading-tight" data-titre>{{ etat.title }}</p>
-        <p v-if="etat?.artist" class="text-sm text-foreground" data-artiste>{{ etat.artist }}</p>
-        <p v-if="etat?.album" class="text-sm text-muted-foreground" data-album>{{ etat.album }}</p>
+        <div class="min-w-0 flex-1">
+          <div class="flex items-baseline gap-2">
+            <p class="text-xs uppercase tracking-wide text-muted-foreground">{{ t('now_playing') }}</p>
+            <!-- Qui a fourni l'information : c'est la premiere question qu'on se
+                 pose devant un titre faux. -->
+            <Badge v-if="etat?.origin" variant="secondary" class="text-[10px]" data-origin>
+              {{ etat.origin }}
+            </Badge>
+            <!-- Meme question, posee cette fois sur la pochette : le texte et
+                 l'image peuvent venir de deux contributeurs differents. -->
+            <Badge v-if="etat?.cover_origin" variant="secondary" class="text-[10px]" data-cover-origin>
+              {{ etat.cover_origin }}
+            </Badge>
+            <!-- Seulement quand la position n'est pas connue : sinon la barre
+                 juste en dessous affiche deja "ecoule ... duree", et repeter la
+                 duree seule ici serait la meme information deux fois (defaut
+                 corrige : "4:14" dans l'en-tete, "1:27 ... 4:14" dans la barre). -->
+            <span
+              v-if="etat?.position_s == null && formateDuree(etat?.duration_s)"
+              class="text-xs text-muted-foreground"
+              :title="t('track_length')"
+              data-duree
+            >
+              {{ formateDuree(etat?.duration_s) }}
+            </span>
+          </div>
+          <p v-if="etat?.title" class="text-lg font-medium leading-tight" data-titre>{{ etat.title }}</p>
+          <p v-if="etat?.artist" class="text-sm text-foreground" data-artiste>{{ etat.artist }}</p>
+          <p v-if="etat?.album" class="text-sm text-muted-foreground" data-album>{{ etat.album }}</p>
+        </div>
       </div>
 
       <!-- Hors du bloc « en ecoute » ci-dessus, et c'est un defaut corrige :

@@ -784,6 +784,11 @@ mod tests {
                 album: Some("Kind of Blue".into()),
                 duration_s: Some(545),
                 origin: Some("musicbrainz".into()),
+                // Le protocole MPD n'a pas de champ de pochette : le greffon
+                // n'en lit aucun, mais le litteral doit rester complet — c'est
+                // ce qui force a revoir ce test quand un champ apparait.
+                cover_href: None,
+                cover_origin: None,
             },
             ..radio_arretee()
         }

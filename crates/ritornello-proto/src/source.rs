@@ -152,7 +152,7 @@ impl SourceAction {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SourceMessage {
     /// `Some(id)` = réponse corrélée à une requête ; `None` = notification spontanée.
     #[serde(default)]
@@ -270,6 +270,15 @@ pub struct SourceMessage {
     /// main pouvant déclarer `[]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presets: Option<Vec<Preset>>,
+    /// Pochette que la Source a trouvée pour ce qu'elle joue.
+    ///
+    /// C'est ce qui permet à une Source de déclarer ses métadonnées **sans
+    /// devenir un greffon `metadata`** : elle a l'information, elle la dit sur
+    /// son canal. Envoyée en notification (`id: None`) plutôt qu'en réponse au
+    /// `Play`, parce que la trouver peut demander un `readdir` sur un partage
+    /// SMB, et que la lecture ne doit pas attendre.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover: Option<crate::CoverRef>,
 }
 
 #[cfg(test)]
@@ -291,6 +300,7 @@ mod tests {
             status: None,
             can_eject: None,
             presets: None,
+            cover: None,
         }
     }
 
@@ -464,6 +474,7 @@ mod tests {
             status: None,
             can_eject: None,
             presets: None,
+            cover: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
@@ -474,7 +485,7 @@ mod tests {
 
     #[test]
     fn message_notification_sans_id() {
-        let m = SourceMessage { id: None, action: None, identity: None, transient: false, preset: None, preset_count: None, preset_name: None, status: None, can_eject: None, presets: None };
+        let m = SourceMessage { id: None, action: None, identity: None, transient: false, preset: None, preset_count: None, preset_name: None, status: None, can_eject: None, presets: None, cover: None };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, None);
@@ -510,6 +521,7 @@ mod tests {
             status: None,
             can_eject: None,
             presets: None,
+            cover: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"preset\":4"));
@@ -524,7 +536,7 @@ mod tests {
         // La majorité des trames ne disent rien de l'identité (SetLocale,
         // Deactivate…) : les alourdir d'un `"identity":null` serait du bruit sur
         // une liaison volontairement lisible à l'œil.
-        let m = SourceMessage { id: Some(2), action: None, identity: None, transient: false, preset: None, preset_count: None, preset_name: None, status: None, can_eject: None, presets: None };
+        let m = SourceMessage { id: Some(2), action: None, identity: None, transient: false, preset: None, preset_count: None, preset_name: None, status: None, can_eject: None, presets: None, cover: None };
         assert_eq!(serde_json::to_string(&m).unwrap(), r#"{"id":2,"action":null}"#);
     }
 
@@ -541,6 +553,7 @@ mod tests {
             status: None,
             can_eject: Some(true),
             presets: None,
+            cover: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"can_eject\":true"), "{json}");
@@ -569,6 +582,7 @@ mod tests {
             status: None,
             can_eject: None,
             presets: None,
+            cover: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"preset_count\":23"));
@@ -598,6 +612,7 @@ mod tests {
             status: None,
             can_eject: None,
             presets: None,
+            cover: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"preset_name\":\"FIP\""));
@@ -617,6 +632,29 @@ mod tests {
     }
 
     #[test]
+    fn le_message_de_source_porte_une_pochette_et_reste_muet_sans_elle() {
+        let msg = SourceMessage {
+            id: None,
+            cover: Some(ritornello_proto_cover_de_test()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""kind":"path""#), "{json}");
+        let back: SourceMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.cover, msg.cover);
+
+        // Additif : une trame muette reste identique a l'octet pres a ce
+        // qu'elle etait avant ce chantier.
+        let muet = SourceMessage::default();
+        assert!(!serde_json::to_string(&muet).unwrap().contains("cover"));
+    }
+
+    /// Fabrique locale : evite de repeter le chemin dans plusieurs tests.
+    fn ritornello_proto_cover_de_test() -> crate::CoverRef {
+        crate::CoverRef::Path { path: "/mnt/nas/Album/folder.jpg".into() }
+    }
+
+    #[test]
     fn le_statut_fait_le_tour_et_reste_absent_par_defaut() {
         // Convention différente de `preset`/`preset_name` : ici l'absence est
         // testée sur une trame qui déclare explicitement `status: None` (une
@@ -633,6 +671,7 @@ mod tests {
             status: Some("PAS DE DISQUE".into()),
             can_eject: None,
             presets: None,
+            cover: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"status\":\"PAS DE DISQUE\""));

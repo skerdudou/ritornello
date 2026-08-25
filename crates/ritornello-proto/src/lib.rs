@@ -8,6 +8,9 @@ pub mod source;
 pub use admin::{AdminReq, AdminRequest, AdminResponse, AdminResult};
 pub use command::{Command, InputMessage};
 pub use display::{Catalogue, DisplayFrame, SourceCatalogue};
-pub use metadata::{Enrichment, IdentityUpdate, Morceau, NowPlaying, Overlay, Playback, PlayerState};
+pub use metadata::{
+    CoverRef, Enrichment, IdentityUpdate, Known, Morceau, NowPlaying, Overlay, Playback,
+    PlayerState,
+};
 pub use register::{Announcement, PluginKind};
 pub use source::{Preset, SourceAction, SourceMessage, SourceReq, SourceRequest};

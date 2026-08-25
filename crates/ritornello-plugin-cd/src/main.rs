@@ -330,6 +330,9 @@ impl CdSource {
             // without a database. `list_presets` keeps the default empty list,
             // and a spontaneous frame has nothing to republish here.
             presets: None,
+            // Le cd n'est pas dans le périmètre de ce chantier : il ne
+            // déclare pas encore de pochette (voir `SourceMessage::cover`).
+            cover: None,
         }
     }
 }

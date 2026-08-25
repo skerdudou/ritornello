@@ -24,6 +24,8 @@ function complet(etat: Partial<PlayerPayload>): PlayerPayload {
     album: null,
     duration_s: null,
     origin: null,
+    cover_href: null,
+    cover_origin: null,
     position_s: null,
     seekable: false,
     can_eject: false,
@@ -231,6 +233,43 @@ describe('PlayerCard', () => {
     })
     expect(w.find('[data-duree]').exists()).toBe(false)
     expect(w.get('[data-duree-totale]').text()).toBe('4:14')
+  })
+
+  it("affiche la pochette quand l'appareil en sert une", () => {
+    const w = monteAvec({ title: 'So What', cover_href: '/api/cover/1a2b', cover_origin: 'files' })
+    const img = w.find('[data-pochette] img')
+    expect(img.exists()).toBe(true)
+    // L'IHM ne doit jamais pointer vers l'exterieur : le coeur sert l'image.
+    expect(img.attributes('src')).toBe('/api/cover/1a2b')
+    expect(w.find('[data-cover-origin]').text()).toContain('files')
+  })
+
+  it('garde le carre en place quand il n y a pas de pochette', () => {
+    const w = monteAvec({ title: 'So What' })
+    // Le carre existe toujours : la pochette arrive apres le texte, parfois
+    // plusieurs secondes apres, et un carre qui apparait decalerait tout.
+    expect(w.find('[data-pochette]').exists()).toBe(true)
+    expect(w.find('[data-pochette] img').exists()).toBe(false)
+    expect(w.find('[data-pochette-repli]').exists()).toBe(true)
+  })
+
+  it('retombe sur le repli quand le navigateur ne peut pas charger la pochette', async () => {
+    // Le cas reel : la cle du cache du coeur est bornee a quelques entrees, et
+    // le fichier lui-meme vit sur un partage qui peut disparaitre — les deux
+    // rendent un 404 sous une URL deja publiee. Sans `@error`, le carre
+    // reserve montrait le glyphe d'image cassee du navigateur au lieu du repli
+    // ♫ prevu pour exactement cette situation.
+    const w = monteAvec({ title: 'So What', cover_href: '/api/cover/1a2b' })
+    await w.get('[data-pochette] img').trigger('error')
+    expect(w.find('[data-pochette] img').exists()).toBe(false)
+    expect(w.find('[data-pochette-repli]').exists()).toBe(true)
+    // Le carre lui-meme ne bouge pas : rien ne doit se decaler.
+    expect(w.find('[data-pochette]').exists()).toBe(true)
+
+    // Et une **autre** image redonne sa chance a l'element : sans cela, un
+    // seul echec condamnerait le carre pour le reste de la session.
+    await w.setProps({ etat: complet({ title: 'So What', cover_href: '/api/cover/3c4d' }) })
+    expect(w.get('[data-pochette] img').attributes('src')).toBe('/api/cover/3c4d')
   })
 
   it('ne montre rien de la progression quand aucune position n est connue', () => {

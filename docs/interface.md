@@ -54,6 +54,16 @@ field. The home page's one toast (see `HomeView.vue`) is unrelated: it
 reports HTTP failures of `POST /api/command`, not source-declared
 overlays.
 
+Two more fields of the pushed `Morceau` carry the album cover, when there
+is one: `cover_href`, **always** a local URL of the appliance, of the
+form `/api/cover/{key}` — never the address the cover was actually found
+at, since it is the appliance that fetches an image, not the browser
+(see [plugins.md](plugins.md) for the chain that produces it) — and
+`cover_origin`, naming who supplied it (a Source, `"tags"` for one the
+core extracted itself, or a `metadata` plugin's name), shown next to the
+picture the same way `origin` is shown next to the text. Both are absent
+when no cover is held.
+
 On the preset grid, the key matching **what is playing** is highlighted:
 the preset for the radio, the track for the CD. The active source is what
 declares it (the `preset` field of its frames, see the protocol) — the

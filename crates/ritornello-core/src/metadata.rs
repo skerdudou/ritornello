@@ -14,7 +14,7 @@
 
 pub use ritornello_proto::{Morceau, PlayerState};
 
-use ritornello_proto::Enrichment;
+use ritornello_proto::{CoverRef, Enrichment};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -44,6 +44,31 @@ pub struct Metadonnees {
     tags: Option<Morceau>,
     /// Enrichissements correspondant à `identity`, par plugin.
     enrichissements: HashMap<String, Enrichment>,
+    /// Pochette déclarée par la Source sur son canal, avec son origine.
+    /// L'étage le plus bas, et pourtant le plus prioritaire pour l'image : le
+    /// `folder.jpg` posé dans le répertoire est celui qu'on a choisi à la main.
+    cover_source: Option<(CoverRef, String)>,
+    /// Pochette embarquée dans le fichier, lue par le cœur.
+    cover_tags: Option<CoverRef>,
+    /// Clé du cache, une fois les octets en main. Tant qu'elle est `None`, rien
+    /// n'est publié : l'IHM ne doit jamais recevoir l'URL d'une image cassée.
+    cover_cle: Option<String>,
+    /// Clés dont la récupération a **échoué** pour ce qui joue.
+    ///
+    /// Une référence retenue n'est qu'une promesse : `cover_retenue` la
+    /// désigne dès qu'un contributeur l'annonce, bien avant que les octets
+    /// soient en main. Sans mémoire de l'échec, une promesse non tenue
+    /// restait pourtant préférée pour toujours — un motif d'URL de station qui
+    /// a rouillé (« un motif qui casse rend un silence », dit la conception)
+    /// suffisait à faire taire `musicbrainz` définitivement : `known.cover`
+    /// restait vrai, donc il ne cherchait rien, et il aurait de toute façon
+    /// été distancé s'il avait parlé.
+    ///
+    /// Des clés et non des `CoverRef` : c'est ce que le canal de retour porte
+    /// (voir `Core::pochette_arrivee`), et c'est aussi la granularité juste —
+    /// deux contributeurs qui donnent la même URL décrivent la même image et
+    /// échouent ensemble.
+    pochettes_echouees: std::collections::HashSet<String>,
 }
 
 impl Metadonnees {
@@ -84,6 +109,14 @@ impl Metadonnees {
         self.icy = None;
         self.tags = None;
         self.enrichissements.clear();
+        self.cover_source = None;
+        self.cover_tags = None;
+        self.cover_cle = None;
+        // Vidé avec le reste de l'état par morceau : un échec vaut pour une
+        // référence *de ce morceau-là*. La même URL peut parfaitement
+        // répondre au morceau suivant — un CDN qui s'est réveillé — et une
+        // liste qui survivrait à l'identité empêcherait de la redemander.
+        self.pochettes_echouees.clear();
         true
     }
 
@@ -153,6 +186,16 @@ impl Metadonnees {
     /// - enrichissement entièrement vide : il compte comme une non-réponse,
     ///   sinon un plugin prioritaire qui reconnaît l'identité sans rien savoir
     ///   encore bloquerait un plugin moins prioritaire qui, lui, sait.
+    ///
+    /// « Entièrement vide » veut dire **rien du tout**, pochette comprise, et
+    /// c'est une jonction où deux mécanismes justes s'annulaient : ce refus
+    /// est antérieur aux pochettes et se fondait sur `Enrichment::is_empty`,
+    /// qui ignore délibérément `cover` pour qu'une pochette seule ne gagne
+    /// pas l'arbitrage du *texte*. Conséquence mesurée : le relai générique
+    /// de `musicbrainz` — qui émet précisément une pochette et rien d'autre,
+    /// et qui est la raison même du réétagement du protocole — était refusé à
+    /// la porte, sans autre trace qu'un `debug!`. Le fichier taggé sans image
+    /// et la radio qui donne du texte sans photo restaient donc noirs.
     pub fn ajoute(&mut self, plugin: &str, e: Enrichment) -> bool {
         // Normalisation ici plutôt qu'au seul site d'appel : `is_empty` n'a de
         // sens qu'après elle, et cette méthode est publique. Idempotent, et
@@ -167,7 +210,7 @@ impl Metadonnees {
             tracing::debug!("enrichment from {plugin} stale, ignored");
             return false;
         }
-        if e.is_empty() {
+        if e.is_empty() && e.cover.is_none() {
             tracing::debug!("empty enrichment from {plugin}, counted as no response");
             return false;
         }
@@ -183,7 +226,17 @@ impl Metadonnees {
         if self.enrichissements.get(plugin) == Some(&e) {
             return false;
         }
+        // `enrichissements` est la troisième entrée de `cover_retenue`, à
+        // égalité avec `cover_source` et `cover_tags` : un enrichissement qui
+        // change la référence retenue (un greffon qui écrase répond après un
+        // `fill_only`, par exemple) doit invalider la clé publiée exactement
+        // comme `set_cover_source`/`set_cover_tags` le font déjà, sous peine
+        // de republier une image périmée sous le nom du nouveau contributeur.
+        let avant = self.cover_retenue();
         self.enrichissements.insert(plugin.to_string(), e);
+        if self.cover_retenue() != avant {
+            self.cover_cle = None;
+        }
         true
     }
 
@@ -191,14 +244,207 @@ impl Metadonnees {
     ///
     /// C'est **le gagnant**, pas le dernier à avoir répondu : toute la règle
     /// d'ordre est justifiée par la prévisibilité pour qui débogue, et c'est le
-    /// seul instrument de ce débogage.
+    /// seul instrument de ce débogage. Un `fill_only` en est exclu : c'est un
+    /// complément, pas un gagnant, et le nommer comme tel désignerait le
+    /// mauvais coupable devant un affichage douteux.
     pub fn gagnant(&self) -> Option<&str> {
-        self.ordre.iter().find(|p| self.enrichissements.contains_key(*p)).map(String::as_str)
+        self.ordre
+            .iter()
+            .find(|p| self.enrichissements.get(*p).is_some_and(|e| !e.fill_only))
+            .map(String::as_str)
     }
 
-    /// Résolution, dans l'ordre : l'enrichissement du plugin le plus
-    /// prioritaire ayant répondu, sinon les **tags du fichier**, sinon l'ICY
-    /// brut, sinon rien.
+    /// Retient la pochette déclarée par la Source. `true` si c'est du neuf.
+    pub fn set_cover_source(&mut self, c: Option<CoverRef>, origine: &str) -> bool {
+        let neuf = c.map(|r| (r, origine.to_string()));
+        if self.cover_source == neuf {
+            return false;
+        }
+        self.cover_source = neuf;
+        // La référence retenue a changé : la clé publiée ne la décrit plus.
+        self.cover_cle = None;
+        true
+    }
+
+    /// Retient la pochette embarquée que le cœur a extraite. `true` si neuf.
+    pub fn set_cover_tags(&mut self, c: Option<CoverRef>) -> bool {
+        if self.cover_tags == c {
+            return false;
+        }
+        self.cover_tags = c;
+        self.cover_cle = None;
+        true
+    }
+
+    /// La pochette qui gagne, et qui l'a fournie.
+    ///
+    /// L'ordre n'est pas une liste de priorités arbitraire : il découle des
+    /// étages et des intentions. La Source d'abord — le fichier posé dans le
+    /// répertoire est l'image choisie à la main. Le cœur ensuite, qui
+    /// **complète** : il ne remplace pas ce que la Source a dit, et c'est ce
+    /// qui donne au `folder.jpg` sa préséance sans qu'aucune convention n'ait
+    /// à être inversée. Les greffons enfin, dans l'ordre de déclaration, un
+    /// `fill_only` ne prenant la place de personne.
+    ///
+    /// Une référence dont la récupération a **échoué** est sautée, à son étage
+    /// comme aux autres (voir `pochettes_echouees`) : la préséance dit qui l'on
+    /// préfère, elle ne dit pas de préférer indéfiniment une image que
+    /// l'appareil n'a pas réussi à obtenir.
+    pub fn cover_retenue(&self) -> Option<(CoverRef, String)> {
+        if let Some((r, o)) = &self.cover_source {
+            if !self.a_echoue(r) {
+                return Some((r.clone(), o.clone()));
+            }
+        }
+        if let Some(r) = &self.cover_tags {
+            if !self.a_echoue(r) {
+                return Some((r.clone(), ORIGINE_TAGS.to_string()));
+            }
+        }
+        // Un greffon qui écrase d'abord, puis un `fill_only`. Deux passes
+        // plutôt qu'une : sinon un `fill_only` déclaré haut dans
+        // `plugins.toml` passerait devant un greffon spécialisé déclaré plus
+        // bas, ce qui est exactement l'inverse de son intention.
+        for fill_only in [false, true] {
+            for plugin in &self.ordre {
+                if let Some(e) = self.enrichissements.get(plugin) {
+                    if e.fill_only == fill_only {
+                        if let Some(r) = &e.cover {
+                            if !self.a_echoue(r) {
+                                return Some((r.clone(), plugin.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Cette référence a-t-elle déjà échoué pour ce qui joue ?
+    fn a_echoue(&self, r: &CoverRef) -> bool {
+        !self.pochettes_echouees.is_empty()
+            && self.pochettes_echouees.contains(&crate::cover::cle(r))
+    }
+
+    /// Note qu'une récupération a échoué pour cette clé. Renvoie `true` si la
+    /// référence retenue en a changé — l'appelant doit alors relancer une
+    /// récupération et republier.
+    ///
+    /// Le cœur apprend l'échec sur son canal de retour (`succes == false`),
+    /// et c'est le seul endroit où il l'apprend : sans cette note, il
+    /// redésignerait la même référence morte à chaque passage.
+    pub fn marque_pochette_echouee(&mut self, cle: String) -> bool {
+        let avant = self.cover_retenue();
+        if !self.pochettes_echouees.insert(cle) {
+            return false;
+        }
+        let apres = self.cover_retenue();
+        if apres != avant {
+            // Même raison qu'ailleurs : la clé publiée ne décrit plus la
+            // référence retenue, et la laisser afficherait l'image d'un
+            // contributeur sous le nom d'un autre.
+            self.cover_cle = None;
+            return true;
+        }
+        false
+    }
+
+    /// Publie la clé du cache. `None` = plus rien à montrer.
+    pub fn set_cover_href(&mut self, cle: Option<String>) {
+        self.cover_cle = cle;
+    }
+
+    /// Clé déjà publiée, s'il y en a une. Sert à `Core::lance_pochette` pour
+    /// éviter de relancer une récupération dont le résultat est déjà à
+    /// l'écran — un enrichissement retenu qui republie à l'identique (une
+    /// station qui reconfirme ses métadonnées toutes les trente secondes,
+    /// par exemple) ne doit pas relancer une tâche pour un travail déjà fait.
+    pub fn cover_publiee(&self) -> Option<&str> {
+        self.cover_cle.as_deref()
+    }
+
+    /// Ce qui est déjà connu, tel qu'un contributeur a besoin de le voir.
+    ///
+    /// `cover` dit qu'une pochette est **tenue**, jamais laquelle : un
+    /// contributeur n'a pas besoin de l'image pour décider s'il doit en
+    /// chercher une.
+    ///
+    /// « Tenue » veut dire *une référence retenue dont la récupération n'a pas
+    /// échoué* — c'est `cover_retenue` qui écarte les échouées, donc ce booléen
+    /// redevient faux dès qu'une référence promise s'avère morte. C'est ce qui
+    /// rend vraie la promesse de la documentation : « faute d'une pochette,
+    /// `musicbrainz` complète depuis l'artiste et l'album que ce greffon vient
+    /// de fournir ».
+    ///
+    /// Passe par `texte_compose()` plutôt que par `etat()` : ce dernier
+    /// calcule aussi `cover_href`/`cover_origin`, qu'un greffon ne doit
+    /// jamais voir (voir la doc de `Known`), et recalculerait la pochette une
+    /// seconde fois après celle faite ici pour `cover`.
+    pub fn known(&self) -> ritornello_proto::Known {
+        let m = self.texte_compose();
+        ritornello_proto::Known {
+            artist: m.artist,
+            title: m.title,
+            album: m.album,
+            duration_s: m.duration_s,
+            cover: self.cover_retenue().is_some(),
+        }
+    }
+
+    /// Résolution, dans l'ordre : le bloc de texte du contributeur retenu,
+    /// complété par les `fill_only`, plus la pochette retenue si les octets
+    /// sont en main.
+    pub fn etat(&self) -> Morceau {
+        let mut m = self.texte_compose();
+        // Ne calculer `cover_retenue()` — un parcours de `ordre`, un clone de
+        // `CoverRef` et de son origine — que s'il y a une clé à publier :
+        // sans clé, aucune pochette n'atteint l'affichage de toute façon
+        // (voir `set_cover_href`), et cette méthode est appelée au moins une
+        // fois par seconde tant qu'un morceau joue.
+        if let Some(cle) = &self.cover_cle {
+            if let Some((_, origine)) = self.cover_retenue() {
+                m.cover_href = Some(format!("/api/cover/{cle}"));
+                m.cover_origin = Some(origine);
+            }
+        }
+        m
+    }
+
+    /// Le texte composé : le bloc du contributeur retenu (voir
+    /// `bloc_de_texte`), complété par les `fill_only`. Sans la pochette —
+    /// `etat()` l'ajoute pour l'affichage, `known()` n'en a pas besoin (voir
+    /// sa documentation).
+    ///
+    /// Les `fill_only` comblent les trous du bloc, sans jamais le contredire.
+    /// On ne compose pas champ par champ entre deux contributeurs qui
+    /// écrasent : cela mélangerait deux lectures du même flux — l'artiste de
+    /// l'un, l'album de l'autre — et afficherait un morceau qui n'existe pas.
+    fn texte_compose(&self) -> Morceau {
+        let mut m = self.bloc_de_texte();
+        for plugin in &self.ordre {
+            let Some(e) = self.enrichissements.get(plugin) else { continue };
+            if !e.fill_only {
+                continue;
+            }
+            if m.artist.is_none() {
+                m.artist = e.artist.clone();
+            }
+            if m.title.is_none() {
+                m.title = e.title.clone();
+            }
+            if m.album.is_none() {
+                m.album = e.album.clone();
+            }
+            if m.duration_s.is_none() {
+                m.duration_s = e.duration_s;
+            }
+        }
+        m
+    }
+
+    /// Le bloc de texte du contributeur retenu : le premier greffon qui
+    /// **écrase**, sinon les tags du fichier, sinon l'ICY brut, sinon rien.
     ///
     /// Les tags s'intercalent entre les deux couches préexistantes, et c'est
     /// leur place naturelle : un plugin `metadata` va chercher au loin ce que
@@ -214,15 +460,33 @@ impl Metadonnees {
     /// plugin fournit de toute façon des champs déjà séparés. Une station qui
     /// n'annonce que son propre nom ou ses jingles verra donc cela s'afficher —
     /// c'est ce qu'elle émet.
-    pub fn etat(&self) -> Morceau {
+    fn bloc_de_texte(&self) -> Morceau {
         for plugin in &self.ordre {
             if let Some(e) = self.enrichissements.get(plugin) {
+                // Deux exclusions, et la seconde n'est pas la première : un
+                // `fill_only` n'est pas candidat par intention, un
+                // enrichissement **sans aucun texte** ne l'est pas par
+                // contenu. Depuis que `ajoute` retient une pochette seule
+                // (voir sa doc), un greffon qui écrase peut n'apporter qu'une
+                // image — c'est le cas réel d'un relevé Radio France ou OUI FM
+                // qui porte `coverUrl` sans titre. Sans cette seconde
+                // exclusion, il deviendrait le bloc retenu avec des champs
+                // tous à `None` et effacerait le titre que les tags ou l'ICY
+                // affichaient : la pochette gagnée coûterait le texte.
+                //
+                // `is_empty()` et non « pas de titre » : c'est exactement le
+                // prédicat que le protocole utilise déjà pour dire « cette
+                // réponse ne dit rien du texte », pochette et durée exclues.
+                if e.fill_only || e.is_empty() {
+                    continue;
+                }
                 return Morceau {
                     artist: e.artist.clone(),
                     title: e.title.clone(),
                     album: e.album.clone(),
                     duration_s: e.duration_s,
                     origin: Some(plugin.clone()),
+                    ..Default::default()
                 };
             }
         }
@@ -242,6 +506,17 @@ impl Metadonnees {
     /// Position déclarée par le **gagnant** de l'arbitrage, s'il en déclare
     /// une.
     ///
+    /// Ignore les `fill_only`, exactement comme `gagnant()` : une position
+    /// n'a de sens que venant de qui suit réellement l'avancement du flux,
+    /// jamais d'un complément qui ne fait que combler un texte ou une
+    /// pochette. `Core::handle_enrichment` n'appelle cette méthode qu'après
+    /// avoir vérifié `gagnant() == Some(plugin)` pour décider s'il faut
+    /// réancrer : les deux méthodes doivent nommer le même gagnant, sinon le
+    /// garde-fou se déclencherait pour ancrer sur la valeur d'un contributeur
+    /// différent de celui qu'il vient d'identifier — ou sur `None` si ce
+    /// contributeur, déclaré avant le gagnant dans `plugins.toml`, ne
+    /// déclare pas lui-même de position.
+    ///
     /// Sortie à part de `etat()` plutôt que glissée dans `Morceau` : `Morceau`
     /// décrit ce qui est affichable d'un morceau, valeurs stables tant qu'il
     /// joue, alors qu'une position ne vaut que pour l'instant où elle a été
@@ -250,25 +525,67 @@ impl Metadonnees {
     pub fn position_s(&self) -> Option<u32> {
         for plugin in &self.ordre {
             if let Some(e) = self.enrichissements.get(plugin) {
+                if e.fill_only {
+                    continue;
+                }
                 return e.position_s;
             }
         }
         None
     }
 
-    /// Durée déclarée par le **gagnant** de l'arbitrage, s'il en déclare une.
+    /// Durée déclarée par le **gagnant** de l'arbitrage, s'il en déclare une,
+    /// complétée par un `fill_only` s'il n'en déclare pas.
     ///
-    /// Même raison d'être que `position_s` juste au-dessus : lire un entier ne
-    /// doit pas coûter la reconstruction d'un `Morceau` entier, chaînes
-    /// clonées comprises — ce que le plafonnement de la position ferait une
-    /// fois par seconde pendant toute la lecture d'un flux.
+    /// Volontairement **asymétrique** avec `position_s()` juste au-dessus,
+    /// et ce n'est pas un oubli : cette méthode laisse un `fill_only` combler
+    /// une durée que le gagnant ne déclare pas, là où `gagnant()` les ignore
+    /// purement. `etat()` fait de même (un fichier dont les tags ne portent
+    /// pas la durée, complétée par un greffon qui la connaît) et `known()`
+    /// republie cette valeur composée : un accesseur qui ignorerait les
+    /// `fill_only` plafonnerait la position (`Core::rafraichit_position`)
+    /// contre une durée différente de celle affichée à l'écran. Une position,
+    /// elle, n'a pas cet équivalent — personne ne « complète » un avancement
+    /// — d'où l'asymétrie avec `position_s()`.
+    ///
+    /// Elle ne compose donc **pas tout à fait** comme `etat()` : les
+    /// enrichissements seuls sont consultés, jamais `self.tags`. Une version
+    /// antérieure de ce commentaire promettait l'inverse. Inerte aujourd'hui,
+    /// et il faut le dire pour que la prochaine lecture ne s'y arrête pas :
+    /// `player::mpv::file_tags` met `duration_s: None` en dur — mpv ne
+    /// rapporte pas la durée dans sa propriété `metadata`, elle vient de sa
+    /// propre `Progression` — donc la couche des tags n'a jamais de durée à
+    /// apporter et la divergence n'a rien à mordre. Le jour où elle en
+    /// porterait une, c'est ici qu'il faudrait l'ajouter, entre le gagnant et
+    /// les `fill_only`, à la place exacte qu'occupent les tags dans
+    /// `bloc_de_texte`.
+    ///
+    /// Même raison d'être que `position_s` juste au-dessus pour la sortie à
+    /// part de `etat()` : lire un entier ne doit pas coûter la
+    /// reconstruction d'un `Morceau` entier, chaînes clonées comprises — ce
+    /// que le plafonnement de la position ferait une fois par seconde
+    /// pendant toute la lecture d'un flux.
     pub fn duration_s(&self) -> Option<u32> {
+        let mut duree = None;
         for plugin in &self.ordre {
             if let Some(e) = self.enrichissements.get(plugin) {
-                return e.duration_s;
+                if !e.fill_only {
+                    duree = e.duration_s;
+                    break;
+                }
             }
         }
-        None
+        if duree.is_none() {
+            for plugin in &self.ordre {
+                if let Some(e) = self.enrichissements.get(plugin) {
+                    if e.fill_only && e.duration_s.is_some() {
+                        duree = e.duration_s;
+                        break;
+                    }
+                }
+            }
+        }
+        duree
     }
 }
 
@@ -284,6 +601,384 @@ mod tests {
             title: Some(title.into()),
             ..Default::default()
         }
+    }
+
+    /// Fabrique : un enrichissement qui ecrase, avec les champs donnes.
+    fn ecrase(id: &Value, artist: Option<&str>, album: Option<&str>) -> Enrichment {
+        Enrichment {
+            identity: id.clone(),
+            artist: artist.map(str::to_string),
+            title: Some("T".into()),
+            album: album.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn un_contributeur_qui_ecrase_fournit_son_bloc_et_le_fill_only_comble() {
+        let id = json!({"kind": "stream"});
+        let mut m = Metadonnees::new(vec!["specifique".into(), "generique".into()]);
+        m.set_identity(Some(id.clone()));
+        // Le specifique connait l'artiste, pas l'album.
+        assert!(m.ajoute("specifique", ecrase(&id, Some("A"), None)));
+        // Le generique complete : il ne remplace pas l'artiste, il remplit
+        // l'album qui manquait.
+        assert!(m.ajoute(
+            "generique",
+            Enrichment {
+                identity: id.clone(),
+                artist: Some("PAS LUI".into()),
+                album: Some("ALBUM".into()),
+                fill_only: true,
+                ..Default::default()
+            }
+        ));
+        let etat = m.etat();
+        assert_eq!(etat.artist.as_deref(), Some("A"), "un fill_only ne remplace jamais");
+        assert_eq!(etat.album.as_deref(), Some("ALBUM"), "un fill_only comble un trou");
+        assert_eq!(etat.origin.as_deref(), Some("specifique"));
+    }
+
+    #[test]
+    fn deux_contributeurs_qui_ecrasent_ne_sont_pas_melanges() {
+        // Composer champ par champ entre deux qui ecrasent melangerait deux
+        // lectures du meme flux et afficherait un morceau qui n'existe pas.
+        let id = json!({"kind": "stream"});
+        let mut m = Metadonnees::new(vec!["premier".into(), "second".into()]);
+        m.set_identity(Some(id.clone()));
+        m.ajoute("premier", ecrase(&id, Some("A"), None));
+        m.ajoute("second", ecrase(&id, Some("B"), Some("ALBUM DU SECOND")));
+        let etat = m.etat();
+        assert_eq!(etat.artist.as_deref(), Some("A"));
+        assert_eq!(etat.album, None, "le bloc du premier fait foi, trous compris");
+    }
+
+    #[test]
+    fn la_pochette_suit_les_etages_source_puis_tags_puis_greffon() {
+        let id = json!({"kind": "file", "path": "/mnt/nas/a.flac"});
+        let mut m = Metadonnees::new(vec!["musicbrainz".into()]);
+        m.set_identity(Some(id.clone()));
+
+        // Le greffon seul : c'est lui qu'on retient.
+        assert!(m.ajoute(
+            "musicbrainz",
+            Enrichment {
+                identity: id.clone(),
+                title: Some("T".into()),
+                cover: Some(CoverRef::Url { url: "https://coverartarchive.org/x/front-500".into() }),
+                fill_only: true,
+                ..Default::default()
+            }
+        ));
+        let (_, origine) = m.cover_retenue().expect("le greffon fournit une pochette");
+        assert_eq!(origine, "musicbrainz");
+
+        // La pochette embarquee, lue par le coeur, passe devant le greffon.
+        assert!(m.set_cover_tags(Some(CoverRef::Path { path: "/tmp/embarquee.jpg".into() })));
+        assert_eq!(m.cover_retenue().unwrap().1, ORIGINE_TAGS);
+
+        // Le fichier pose a cote, declare par la Source, passe devant tout.
+        assert!(m.set_cover_source(
+            Some(CoverRef::Path { path: "/mnt/nas/Album/folder.jpg".into() }),
+            "files"
+        ));
+        let (r, origine) = m.cover_retenue().unwrap();
+        assert_eq!(origine, "files");
+        assert_eq!(r, CoverRef::Path { path: "/mnt/nas/Album/folder.jpg".into() });
+    }
+
+    #[test]
+    fn une_pochette_seule_est_retenue_et_nomme_son_contributeur() {
+        // Le defaut central de la couche : `Enrichment::is_empty` ignore
+        // deliberement `cover` — pour qu'une pochette seule ne gagne pas
+        // l'arbitrage du *texte* — et `ajoute` refusait tout enrichissement
+        // vide, un refus anterieur aux pochettes. Le relai generique de
+        // `musicbrainz` emet precisement une pochette et rien d'autre : il
+        // etait donc refuse a la porte, et le chemin du Cover Art Archive
+        // — la raison meme du reetagement du protocole — ne contribuait jamais
+        // rien. Tous les autres tests de pochette d'ici donnent un `title` a
+        // leur enrichissement, et c'est pourquoi aucun ne le voyait.
+        let id = json!({"kind": "file", "path": "/mnt/nas/a.flac"});
+        let mut m = Metadonnees::new(vec!["musicbrainz".into()]);
+        m.set_identity(Some(id.clone()));
+        assert!(m.ajoute(
+            "musicbrainz",
+            Enrichment {
+                identity: id,
+                cover: Some(CoverRef::Url {
+                    url: "https://coverartarchive.org/release/x/front-500".into()
+                }),
+                fill_only: true,
+                ..Default::default()
+            }
+        ));
+        let (r, origine) = m.cover_retenue().expect("une pochette seule doit etre retenue");
+        assert_eq!(origine, "musicbrainz");
+        assert_eq!(r, CoverRef::Url { url: "https://coverartarchive.org/release/x/front-500".into() });
+        assert!(m.known().cover);
+        // Et rien du texte : la convention de `is_empty` n'a pas bouge.
+        assert!(m.etat().est_vide(), "une pochette seule n'apporte aucun texte");
+    }
+
+    #[test]
+    fn une_pochette_seule_qui_ecrase_ne_vide_pas_le_titre_deja_affiche() {
+        // Le piege de la moitie 2, et il est reel : `radiofrance-metas` et
+        // `ouifm-metas` ecrasent (`fill_only` faux) et construisent leur trame
+        // depuis un releve qui peut porter `coverUrl` sans titre. Retenu pour
+        // sa pochette — il faut bien qu'il le soit, moitie 1 — un tel
+        // enrichissement ne doit pas pour autant devenir le bloc de texte
+        // retenu avec tous ses champs a `None` : ce serait echanger la ligne
+        // affichee contre une image.
+        let mut m = Metadonnees::new(vec!["radiofrance".into()]);
+        let id = json!({"kind": "stream", "url": "https://fip"});
+        m.set_identity(Some(id.clone()));
+        m.set_icy("Miles Davis - So What".into());
+        assert!(m.ajoute(
+            "radiofrance",
+            Enrichment {
+                identity: id.clone(),
+                cover: Some(CoverRef::Url { url: "https://www.radiofrance.fr/x.jpg".into() }),
+                ..Default::default()
+            }
+        ));
+        let etat = m.etat();
+        assert_eq!(etat.title.as_deref(), Some("Miles Davis - So What"), "l'ICY doit rester affiche");
+        assert_eq!(etat.origin.as_deref(), Some("icy"));
+        assert_eq!(m.cover_retenue().unwrap().1, "radiofrance", "et la pochette est bien la sienne");
+
+        // Meme garantie face aux tags du fichier, l'autre couche que ce bloc
+        // vide aurait recouverte.
+        let mut m = Metadonnees::new(vec!["radiofrance".into()]);
+        m.set_identity(Some(id.clone()));
+        m.set_tags(Morceau {
+            title: Some("So What".into()),
+            origin: Some(ORIGINE_TAGS.to_string()),
+            ..Default::default()
+        });
+        assert!(m.ajoute(
+            "radiofrance",
+            Enrichment {
+                identity: id,
+                cover: Some(CoverRef::Url { url: "https://www.radiofrance.fr/x.jpg".into() }),
+                ..Default::default()
+            }
+        ));
+        assert_eq!(m.etat().title.as_deref(), Some("So What"));
+        assert_eq!(m.etat().origin.as_deref(), Some(ORIGINE_TAGS));
+    }
+
+    #[test]
+    fn un_fill_only_declare_avant_ne_passe_pas_devant_un_greffon_specialise_pour_la_pochette() {
+        // Le mecanisme que le brief justifie explicitement : deux passes, pas
+        // une, sinon un `fill_only` declare haut dans `plugins.toml`
+        // passerait devant un greffon specialise declare plus bas, l'inverse
+        // de son intention. En collabant les deux passes en une seule boucle,
+        // ce test echoue alors que les autres n'en disent rien.
+        let id = json!({"kind": "file", "path": "/a.flac"});
+        let mut m = Metadonnees::new(vec!["filler".into(), "specialise".into()]);
+        m.set_identity(Some(id.clone()));
+        assert!(m.ajoute(
+            "filler",
+            Enrichment {
+                identity: id.clone(),
+                title: Some("T".into()),
+                cover: Some(CoverRef::Url { url: "https://coverartarchive.org/a/front-500".into() }),
+                fill_only: true,
+                ..Default::default()
+            }
+        ));
+        assert!(m.ajoute(
+            "specialise",
+            Enrichment {
+                identity: id,
+                title: Some("T".into()),
+                cover: Some(CoverRef::Url { url: "https://coverartarchive.org/b/front-500".into() }),
+                ..Default::default()
+            }
+        ));
+        let (r, origine) = m.cover_retenue().expect("le greffon specialise fournit une pochette");
+        assert_eq!(origine, "specialise", "declare plus bas, il ne doit pourtant pas ceder au fill_only");
+        assert_eq!(r, CoverRef::Url { url: "https://coverartarchive.org/b/front-500".into() });
+    }
+
+    #[test]
+    fn le_gagnant_ignore_un_fill_only_arrive_en_premier() {
+        let id = json!({"kind": "stream"});
+        let mut m = Metadonnees::new(vec!["filler".into(), "specialise".into()]);
+        m.set_identity(Some(id.clone()));
+        assert!(m.ajoute(
+            "filler",
+            Enrichment { identity: id.clone(), title: Some("T".into()), fill_only: true, ..Default::default() }
+        ));
+        assert_eq!(m.gagnant(), None, "un fill_only seul n'est jamais le gagnant");
+        assert!(m.ajoute(
+            "specialise",
+            Enrichment { identity: id, title: Some("T2".into()), ..Default::default() }
+        ));
+        assert_eq!(m.gagnant(), Some("specialise"));
+    }
+
+    #[test]
+    fn un_greffon_qui_ecrase_invalide_la_cle_dune_pochette_de_fill_only_deja_publiee() {
+        // Sequence qui echappait a la premiere version : un fill_only fournit
+        // une pochette, le coeur va chercher les octets et publie la cle ;
+        // puis un greffon specialise repond avec une pochette differente.
+        // `ajoute` est la troisieme voie de mutation de la reference retenue,
+        // a egalite avec `set_cover_source`/`set_cover_tags`, et doit donc
+        // invalider la cle exactement comme elles le font deja.
+        let id = json!({"kind": "file", "path": "/a.flac"});
+        let mut m = Metadonnees::new(vec!["specialise".into(), "musicbrainz".into()]);
+        m.set_identity(Some(id.clone()));
+        assert!(m.ajoute(
+            "musicbrainz",
+            Enrichment {
+                identity: id.clone(),
+                title: Some("T".into()),
+                cover: Some(CoverRef::Url { url: "https://coverartarchive.org/a/front-500".into() }),
+                fill_only: true,
+                ..Default::default()
+            }
+        ));
+        assert_eq!(m.cover_retenue().unwrap().1, "musicbrainz");
+        m.set_cover_href(Some("clea".into()));
+        assert_eq!(m.etat().cover_href.as_deref(), Some("/api/cover/clea"));
+
+        assert!(m.ajoute(
+            "specialise",
+            Enrichment {
+                identity: id,
+                title: Some("T".into()),
+                cover: Some(CoverRef::Url { url: "https://coverartarchive.org/b/front-500".into() }),
+                ..Default::default()
+            }
+        ));
+        let (r, origine) = m.cover_retenue().unwrap();
+        assert_eq!(origine, "specialise");
+        assert_eq!(r, CoverRef::Url { url: "https://coverartarchive.org/b/front-500".into() });
+        assert!(
+            m.etat().cover_href.is_none(),
+            "la cle perimee ne doit pas rester publiee sous la nouvelle origine"
+        );
+    }
+
+    #[test]
+    fn un_changement_didentite_vide_la_pochette_comme_le_reste() {
+        let id = json!({"kind": "file", "path": "/a.flac"});
+        let mut m = Metadonnees::new(vec![]);
+        m.set_identity(Some(id));
+        m.set_cover_source(Some(CoverRef::Path { path: "/a/folder.jpg".into() }), "files");
+        m.set_cover_tags(Some(CoverRef::Path { path: "/b/embarquee.jpg".into() }));
+        m.set_cover_href(Some("abcd".into()));
+        assert!(m.set_identity(Some(json!({"kind": "file", "path": "/b.flac"}))));
+        assert!(m.cover_retenue().is_none(), "laisser la pochette precedente serait plus trompeur que rien");
+        assert!(m.etat().cover_href.is_none());
+    }
+
+    #[test]
+    fn une_pochette_dont_la_recuperation_a_echoue_laisse_la_place_au_suivant() {
+        // La conception l'anticipe : « un motif qui casse rend un silence ».
+        // Sans memoire de l'echec, ce silence etait definitif — `known.cover`
+        // restait vrai parce qu'une reference etait *retenue*, donc
+        // `musicbrainz` se taisait, et il aurait de toute facon ete distance
+        // s'il avait parle.
+        let id = json!({"kind": "stream", "url": "https://fip"});
+        let mut m = Metadonnees::new(vec!["radiofrance".into(), "musicbrainz".into()]);
+        m.set_identity(Some(id.clone()));
+        let morte = CoverRef::Url { url: "https://api.radiofrance.fr/v1/embed/image/rouille".into() };
+        assert!(m.ajoute(
+            "radiofrance",
+            Enrichment {
+                identity: id.clone(),
+                artist: Some("Miles Davis".into()),
+                title: Some("So What".into()),
+                cover: Some(morte.clone()),
+                ..Default::default()
+            }
+        ));
+        assert!(m.known().cover, "tant qu'on ne sait pas, la reference est tenue");
+        // Une cle qui n'est pas la sienne ne change rien.
+        assert!(!m.marque_pochette_echouee("une-autre-cle".into()));
+        assert!(m.known().cover);
+
+        m.set_cover_href(Some(crate::cover::cle(&morte)));
+        assert!(m.marque_pochette_echouee(crate::cover::cle(&morte)));
+        assert!(!m.known().cover, "une promesse non tenue ne doit plus faire taire les autres");
+        assert!(m.cover_retenue().is_none());
+        assert!(m.etat().cover_href.is_none(), "la cle publiee ne decrit plus rien");
+        // Le texte, lui, n'a pas bouge : c'est la pochette qui a echoue.
+        assert_eq!(m.etat().title.as_deref(), Some("So What"));
+
+        // Ce qui permet enfin a `musicbrainz` de compenser.
+        let caa = CoverRef::Url { url: "https://coverartarchive.org/release/x/front-500".into() };
+        assert!(m.ajoute(
+            "musicbrainz",
+            Enrichment {
+                identity: id,
+                cover: Some(caa.clone()),
+                fill_only: true,
+                ..Default::default()
+            }
+        ));
+        let (r, origine) = m.cover_retenue().expect("le compensateur doit passer");
+        assert_eq!((r, origine.as_str()), (caa, "musicbrainz"));
+    }
+
+    #[test]
+    fn un_changement_didentite_oublie_les_echecs_de_pochette() {
+        // Un echec vaut pour une reference **de ce morceau-la** : la meme URL
+        // peut repondre au suivant (un CDN qui s'est reveille), et une liste
+        // qui survivrait a l'identite empecherait de la redemander.
+        let mut m = Metadonnees::new(vec!["radiofrance".into()]);
+        m.set_identity(Some(json!({"url": "un"})));
+        let r = CoverRef::Url { url: "https://www.radiofrance.fr/x.jpg".into() };
+        m.set_cover_source(Some(r.clone()), "radio");
+        assert!(m.marque_pochette_echouee(crate::cover::cle(&r)));
+        assert!(m.cover_retenue().is_none());
+
+        assert!(m.set_identity(Some(json!({"url": "deux"}))));
+        m.set_cover_source(Some(r.clone()), "radio");
+        assert_eq!(
+            m.cover_retenue().map(|(r, _)| r),
+            Some(r),
+            "l'ardoise des echecs doit etre remise a zero avec le reste"
+        );
+    }
+
+    #[test]
+    fn known_expose_ce_qui_est_connu_et_si_une_pochette_est_tenue() {
+        let id = json!({"kind": "stream"});
+        let mut m = Metadonnees::new(vec!["p".into()]);
+        m.set_identity(Some(id.clone()));
+        m.ajoute("p", ecrase(&id, Some("A"), None));
+        let k = m.known();
+        assert_eq!(k.artist.as_deref(), Some("A"));
+        assert_eq!(k.album, None, "un champ vide est ce qui invite un contributeur a chercher");
+        assert!(!k.cover);
+
+        m.set_cover_tags(Some(CoverRef::Path { path: "/x/c.jpg".into() }));
+        assert!(m.known().cover, "une pochette tenue doit faire taire un fill_only");
+    }
+
+    #[test]
+    fn le_cover_href_publie_est_l_url_locale() {
+        let id = json!({"kind": "file", "path": "/a.flac"});
+        let mut m = Metadonnees::new(vec![]);
+        m.set_identity(Some(id));
+        m.set_cover_source(Some(CoverRef::Path { path: "/a/folder.jpg".into() }), "files");
+        // Tant que les octets ne sont pas en main, rien n'est publie : l'IHM ne
+        // doit jamais recevoir l'URL d'une image cassee.
+        assert!(m.etat().cover_href.is_none());
+        m.set_cover_href(Some("1a2b3c4d".into()));
+        let etat = m.etat();
+        assert_eq!(etat.cover_href.as_deref(), Some("/api/cover/1a2b3c4d"));
+        assert_eq!(etat.cover_origin.as_deref(), Some("files"));
+
+        // La cle peut redevenir None (fetch invalide, pas encore refait)
+        // pendant que la reference elle-meme reste retenue : rien ne doit
+        // s'afficher tant qu'aucune cle valide n'est publiee.
+        m.set_cover_href(None);
+        assert!(m.etat().cover_href.is_none(), "cle effacee, la reference pourtant toujours retenue");
+        assert!(m.cover_retenue().is_some(), "la reference elle-meme n'a pas bouge");
     }
 
     #[test]
@@ -616,6 +1311,7 @@ mod tests {
                 album: None,
                 duration_s: Some(214),
                 position_s: None,
+                ..Default::default()
             },
         );
         let etat = m.etat();

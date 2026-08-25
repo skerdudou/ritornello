@@ -72,6 +72,9 @@ impl MpvIpc {
                         (Some("metadata"), data) => icy_title(data)
                             .map(Event::IcyTitle)
                             .or_else(|| file_tags(data).map(Event::FileTags)),
+                        // Le chemin réellement ouvert par mpv, jamais déduit
+                        // de l'identité opaque de la Source (voir `OBSERVEES`).
+                        (Some("path"), Value::String(p)) => Some(Event::Path(p.clone())),
                         // La valeur initiale de l'observation est avalée (voir
                         // `premier_idle`) ; les suivantes suivent une lecture et
                         // sont de vrais arrêts, y compris la fin d'une liste.
@@ -205,8 +208,61 @@ pub fn file_tags(data: &Value) -> Option<Morceau> {
         album: champ("album"),
         duration_s: None,
         origin: Some(crate::metadata::ORIGINE_TAGS.to_string()),
+        cover_href: None,
+        cover_origin: None,
     };
     (!morceau.est_vide()).then_some(morceau)
+}
+
+/// Extrait la pochette embarquée du fichier joué, dans un fichier temporaire.
+///
+/// **Strictement bloquante** (lecture de fichier via `lofty`, potentiellement
+/// sur un partage réseau) : à appeler uniquement sous `Sante::borne`, jamais
+/// directement depuis une tâche asynchrone — voir `Core::handle_path` et
+/// `sante.rs` pour la raison.
+///
+/// Un fichier plutôt que des octets en mémoire : cela garde **une seule
+/// nature** de pochette locale côté cache, qui ne charge alors rien en RAM.
+///
+/// Tenté uniquement sur un chemin **sans schéma** : un flux n'a pas de tag, et
+/// `lofty` n'a rien à ouvrir sur une URL.
+///
+/// Nommé d'après le chemin de la **piste**, pas de l'album ni du contenu de
+/// l'image : deux pistes distinctes écrivent donc chacune leur propre
+/// fichier, même si leur pochette embarquée est identique — seule la même
+/// piste rejouée retombe sur le même nom. Ce nom ne dépend donc pas du
+/// contenu, et un fichier resté d'une exécution précédente pourrait en
+/// théorie décrire une image qui ne correspond plus aux tags actuels (l'usager
+/// a réédité ses tags entre deux démarrages). Cela n'expose pourtant jamais
+/// une image périmée : cette fonction **réécrit systématiquement** le fichier
+/// avant d'en renvoyer la référence, donc rien n'est jamais servi sans être
+/// passé par une extraction fraîche de cette exécution-ci. `main` purge
+/// malgré tout ces fichiers au démarrage (`cover::purge_temporaires`) — pas
+/// pour cette raison, déjà couverte, mais parce que rien d'autre ne les
+/// efface jamais entre deux lancements (voir sa doc).
+pub fn pochette_embarquee(chemin: &str) -> Option<ritornello_proto::CoverRef> {
+    if chemin.contains("://") {
+        return None;
+    }
+    let fichier = lofty::probe::Probe::open(chemin).ok()?.read().ok()?;
+    let image = lofty::file::TaggedFileExt::primary_tag(&fichier)
+        .or_else(|| lofty::file::TaggedFileExt::first_tag(&fichier))?
+        .pictures()
+        .first()?
+        .clone();
+    let extension = match image.mime_type() {
+        Some(m) if m.as_str().contains("png") => "png",
+        Some(m) if m.as_str().contains("webp") => "webp",
+        _ => "jpg",
+    };
+    let mut cible = std::env::temp_dir();
+    cible.push(format!(
+        "{}{}.{extension}",
+        crate::cover::PREFIXE_TEMPORAIRE,
+        crate::cover::cle(&ritornello_proto::CoverRef::Path { path: chemin.to_string() })
+    ));
+    std::fs::write(&cible, image.data()).ok()?;
+    Some(ritornello_proto::CoverRef::Path { path: cible.to_string_lossy().into_owned() })
 }
 
 pub struct MpvPlayer {
@@ -296,9 +352,12 @@ pub fn mpv_args(socket: &Path, cd_dev: &str, audio_buffer: f64, readahead: f64) 
 
 /// Propriétés que le cœur demande à mpv de pousser. `metadata` porte l'en-tête
 /// ICY reçu de la station (clé `icy-title`), seule source de titre disponible
-/// pour une radio sans plugin `metadata` dédié.
-const OBSERVEES: [&str; 5] =
-    ["media-title", "metadata", "idle-active", "playlist-pos", "chapter"];
+/// pour une radio sans plugin `metadata` dédié. `path` est la seule façon dont
+/// le cœur apprend quel fichier joue : il a fait un principe de ne **jamais**
+/// interpréter l'identité opaque produite par la Source pour en tirer un
+/// chemin — c'est mpv, qui a réellement ouvert le fichier, qui le dit.
+const OBSERVEES: [&str; 6] =
+    ["media-title", "metadata", "idle-active", "playlist-pos", "chapter", "path"];
 
 /// Lance mpv en démon idle et s'y connecte. Le Child est rendu à l'appelant :
 /// s'il meurt, main quitte et systemd relance tout le service.
@@ -630,6 +689,77 @@ mod tests {
             Some("Miles Davis - So What")
         );
         assert_eq!(icy_title(&serde_json::json!({"ICY-TITLE": "x"})).as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn la_propriete_path_est_observee() {
+        // Sans elle, le coeur ne sait jamais quel fichier mpv joue, et la
+        // pochette embarquee n'est jamais lue. Le coeur ne lit pas le chemin
+        // dans l'identite : il a fait un principe de ne jamais l'interpreter.
+        assert!(OBSERVEES.contains(&"path"), "sans elle, aucune pochette embarquee");
+    }
+
+    #[test]
+    fn un_flux_ne_declenche_aucune_extraction() {
+        // Tente uniquement sur un chemin sans schema.
+        assert!(pochette_embarquee("https://icecast.radiofrance.fr/fip-midfi.mp3").is_none());
+        assert!(pochette_embarquee("http://ouifm3.ice.infomaniak.ch/ouifm3.mp3").is_none());
+        assert!(pochette_embarquee("/n/existe/pas.flac").is_none());
+    }
+
+    /// Fabrique un mp3 réel avec une pochette embarquée, via ffmpeg, ou rend
+    /// `None` s'il est absent.
+    ///
+    /// Comme dans `ritornello-plugin-files::duree` : pas de binaire versionné
+    /// dans le dépôt, et le test se saute plutôt que d'échouer là où ffmpeg
+    /// manque — c'est un outil de développement, pas une dépendance du cœur.
+    fn mp3_avec_pochette(dir: &Path) -> Option<std::path::PathBuf> {
+        let image = dir.join("cover.jpg");
+        let sortie = dir.join("avec_pochette.mp3");
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=16x16:d=1"])
+            .args(["-frames:v", "1"])
+            .arg(&image)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+            && std::process::Command::new("ffmpeg")
+                .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i"])
+                .arg("sine=frequency=440:duration=1")
+                .arg("-i")
+                .arg(&image)
+                .args(["-map", "0:a", "-map", "1:v", "-c:a", "libmp3lame", "-c:v", "copy"])
+                .args(["-id3v2_version", "3"])
+                .args(["-metadata:s:v", "title=Album cover", "-metadata:s:v", "comment=Cover (front)"])
+                .arg(&sortie)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+        ok.then_some(sortie)
+    }
+
+    #[test]
+    fn la_pochette_embarquee_dun_fichier_local_est_extraite_dans_un_fichier() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(f) = mp3_avec_pochette(dir.path()) else {
+            eprintln!("ffmpeg absent : test saute");
+            return;
+        };
+        let r = pochette_embarquee(f.to_str().unwrap()).expect("une pochette embarquee attendue");
+        let ritornello_proto::CoverRef::Path { path } = r else {
+            panic!("une pochette locale doit rendre un CoverRef::Path");
+        };
+        // Un vrai JPEG a été écrit sur disque, pas de bidon ni des octets en
+        // mémoire : c'est ce qui garde une seule nature de pochette locale
+        // côté cache.
+        let octets = std::fs::read(&path).expect("le fichier temporaire doit exister");
+        assert!(octets.starts_with(&[0xFF, 0xD8, 0xFF]), "en-tete JPEG attendu, lu {octets:?}");
+        assert!(path.ends_with(".jpg"), "{path}");
+
+        // Rejouer la même piste doit retomber sur le même fichier temporaire :
+        // c'est ce qui évite d'écrire deux fois la même image.
+        let r2 = pochette_embarquee(f.to_str().unwrap()).unwrap();
+        assert_eq!(r2, ritornello_proto::CoverRef::Path { path });
     }
 
     #[test]

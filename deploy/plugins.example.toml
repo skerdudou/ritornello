@@ -1,3 +1,7 @@
+# Each entry only needs `name` and `exec`. A third key, `enabled`, appears
+# when a plugin is switched off from the configuration page; its absence
+# means active. It is toggled from the admin UI — the core rewrites this
+# file while preserving these comments.
 [[plugin]]
 name = "radio"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-radio"

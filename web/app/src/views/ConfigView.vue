@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {
   api, Badge, Button, Card, CardContent, CardHeader, CardTitle, Input,
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue, toast,
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch, toast,
 } from '@ritornello/ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
@@ -65,6 +65,97 @@ async function chargerTout() {
 }
 
 onMounted(chargerTout)
+
+interface LigneGreffon {
+  name: string
+  kinds: string
+  connected: boolean
+  stalled: boolean
+  disabled: boolean
+  admin: boolean
+}
+
+/** Accumulateur intermediaire : les genres bruts, avant qu'on decide ce qui
+ * doit rester dans `kinds`. Un tableau plutot qu'une chaine construite au fil
+ * de l'eau, pour que ce choix ne depende pas de l'ordre d'arrivee. */
+interface AccGreffon {
+  name: string
+  kindsRecus: string[]
+  connected: boolean
+  stalled: boolean
+  disabled: boolean
+  admin: boolean
+}
+
+/**
+ * Une ligne par greffon, ses genres joints. Le tableau montrait un couple
+ * (nom, genre) par ligne ; la bascule porte sur le nom, et trois interrupteurs
+ * qui font tous la même chose ne veulent rien dire.
+ *
+ * Un greffon n'est « connecté » que si **tous** ses genres le sont : une
+ * moitié injoignable est un problème, et l'agrégat ne doit pas la cacher.
+ */
+const greffons = computed<LigneGreffon[]>(() => {
+  const parNom = new Map<string, AccGreffon>()
+  for (const p of status.value.plugins) {
+    const acc = parNom.get(p.name)
+    if (!acc) {
+      parNom.set(p.name, {
+        name: p.name,
+        kindsRecus: [p.kind],
+        connected: p.connected,
+        stalled: !!p.stalled,
+        disabled: !!p.disabled,
+        admin: p.admin,
+      })
+      continue
+    }
+    acc.kindsRecus.push(p.kind)
+    acc.connected = acc.connected && p.connected
+    acc.stalled = acc.stalled || !!p.stalled
+    acc.disabled = acc.disabled || !!p.disabled
+    acc.admin = acc.admin || p.admin
+  }
+  return [...parNom.values()].map((acc) => {
+    // « unknown » n'est jamais affiché à côté d'un vrai genre : on ne le
+    // garde que quand c'est la seule information reçue pour ce nom. Ça tient
+    // par construction, sur l'ensemble complet des genres reçus — pas en
+    // regardant seulement ce que l'accumulateur contenait à un instant donné,
+    // ce qui dépendrait de l'ordre d'arrivée des lignes.
+    const reels = acc.kindsRecus.filter((k) => k !== 'unknown')
+    const kinds = (reels.length > 0 ? reels : acc.kindsRecus).join(', ')
+    return { name: acc.name, kinds, connected: acc.connected, stalled: acc.stalled, disabled: acc.disabled, admin: acc.admin }
+  })
+})
+
+// Noms des greffons dont la bascule est en vol : désactiver l'unique source
+// peut coûter jusqu'à 15 s (stop + Deactivate + Activate, chacun capé à 5 s)
+// quand l'entrante ou la sortante ne répond pas — justement le cas
+// d'école qui pousse à désactiver un greffon (un `files` coincé sur un
+// partage mort). Sans ce marqueur, l'interrupteur restait cliquable et la
+// ligne semblait inerte pendant toute cette fenêtre.
+const enCours = ref<Set<string>>(new Set())
+
+async function basculerGreffon(ligne: LigneGreffon) {
+  if (enCours.value.has(ligne.name)) return
+  enCours.value.add(ligne.name)
+  try {
+    const actif = ligne.disabled
+    const err = await api.put(`/api/plugins/${encodeURIComponent(ligne.name)}/enabled`, {
+      enabled: actif,
+    })
+    if (err) {
+      toast.error(err)
+    } else {
+      toast.success(t.value(actif ? 'plugin_enabled' : 'plugin_disabled', { name: ligne.name }))
+    }
+    // Rechargement dans les deux cas : un refus a pu laisser l'état d'avant, et
+    // un succès change les lignes de plusieurs genres à la fois.
+    await chargerTout()
+  } finally {
+    enCours.value.delete(ligne.name)
+  }
+}
 
 async function changerSortie() {
   const err = await api.put('/api/audio-output', {
@@ -159,15 +250,18 @@ function aller(id: string) {
                   <th class="text-left font-normal">{{ t('col_kind') }}</th>
                   <th class="text-left font-normal">{{ t('col_state') }}</th>
                   <th class="text-left font-normal">{{ t('col_admin') }}</th>
+                  <th class="text-left font-normal">{{ t('col_enabled') }}</th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="p in status.plugins" :key="`${p.name}-${p.kind}`" data-plugin-row class="border-t border-border">
+                <tr v-for="p in greffons" :key="p.name" data-plugin-row class="border-t border-border">
                   <td class="py-1" data-plugin-name>{{ p.name }}</td>
-                  <td data-plugin-kind>{{ p.kind }}</td>
+                  <td data-plugin-kind>{{ p.kinds }}</td>
                   <td data-plugin-state>
-                    <Badge :variant="p.connected ? 'secondary' : p.stalled ? 'outline' : 'destructive'">
-                      {{ p.connected ? t('connected') : p.stalled ? t('stalled') : t('unavailable') }}
+                    <Badge
+                      :variant="p.disabled ? 'outline' : p.connected ? 'secondary' : p.stalled ? 'outline' : 'destructive'"
+                    >
+                      {{ p.disabled ? t('disabled') : p.connected ? t('connected') : p.stalled ? t('stalled') : t('unavailable') }}
                     </Badge>
                   </td>
                   <td>
@@ -175,6 +269,18 @@ function aller(id: string) {
                       {{ t('admin_link') }}
                     </RouterLink>
                     <span v-else>-</span>
+                  </td>
+                  <td>
+                    <!-- Pas de confirmation : l'action est réversible depuis
+                         cette même ligne, et la notification dit ce qui s'est
+                         passé. -->
+                    <Switch
+                      data-plugin-toggle
+                      :model-value="!p.disabled"
+                      :disabled="enCours.has(p.name)"
+                      :aria-label="t('toggle_plugin', { name: p.name })"
+                      @click="basculerGreffon(p)"
+                    />
                   </td>
                 </tr>
               </tbody>

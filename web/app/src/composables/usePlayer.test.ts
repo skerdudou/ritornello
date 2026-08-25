@@ -19,6 +19,8 @@ function etat(partiel: Partial<PlayerPayload> = {}): PlayerPayload {
     album: null,
     duration_s: 214,
     origin: 'ouifm-metas',
+    cover_href: null,
+    cover_origin: null,
     position_s: null,
     seekable: false,
     can_eject: false,
