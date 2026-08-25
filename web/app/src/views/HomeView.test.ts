@@ -28,6 +28,8 @@ class FauxEventSource {
       album: null,
       duration_s: null,
       origin: null,
+      cover_href: null,
+      cover_origin: null,
       position_s: null,
       seekable: false,
       can_eject: false,
@@ -578,6 +580,7 @@ describe('indisponible', () => {
       source: 'radio', volume: 60, muted: false, standby: false, preset: null,
       preset_count: null, preset_name: null, status: null, overlay: null,
       artist: null, title: null, album: null, duration_s: null, origin: null,
+      cover_href: null, cover_origin: null,
       position_s: null, seekable: false, can_eject: false, ...champs,
     }
   }

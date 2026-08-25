@@ -79,6 +79,10 @@ export interface PlayerPayload {
   album: string | null
   duration_s: number | null
   origin: string | null
+  /** URL locale de la pochette, servie par l'appareil. Jamais une URL externe. */
+  cover_href: string | null
+  /** Qui a fourni la pochette : nom de la Source, `tags`, ou nom du greffon. */
+  cover_origin: string | null
   /**
    * Ou en est ce qui joue, en secondes, a l'instant ou la trame a ete
    * publiee — le coeur en pousse une par seconde pendant la lecture.
