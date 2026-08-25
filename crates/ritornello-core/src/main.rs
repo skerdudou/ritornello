@@ -114,6 +114,11 @@ fn relais_afficheur(
         /// erreur d'envoi : rien ne part, et `derniere` est quand même mise à
         /// jour — sans quoi chaque trame d'état de la piste retenterait la
         /// lecture d'un fichier qui vient d'échouer, une fois par seconde.
+        ///
+        /// **N'encode rien elle-même** : `covers.ligne` construit la trame une
+        /// fois par publication et la partage par `Arc` ; ce relais, comme
+        /// tous les autres qui la redemandent, ne fait qu'écrire le même
+        /// buffer (`DisplayClient::send_cover_line`).
         async fn pousse(
             client: &DisplayClient,
             covers: &cover::CoverCache,
@@ -133,17 +138,11 @@ fn relais_afficheur(
                 tracing::debug!("cover href {href} has no key, nothing pushed");
                 return Ok(());
             };
-            let Some((mime, octets)) = covers.octets(cle).await else {
+            let Some(ligne) = covers.ligne(cle, href).await else {
                 // Déjà journalisé par `octets` avec sa raison.
                 return Ok(());
             };
-            client
-                .send_cover(ritornello_proto::Cover {
-                    href: href.to_string(),
-                    mime: mime.to_string(),
-                    bytes: octets,
-                })
-                .await
+            client.send_cover_line(&ligne).await
         }
 
         let etat = etat_rx.borrow_and_update().clone();

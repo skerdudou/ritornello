@@ -41,16 +41,27 @@ pub enum DisplayFrame {
 ///
 /// La valeur vient de la mesure : sérialiser une image de `n` octets en une
 /// ligne de ce protocole coûte, au pic, environ `3,6 × n` résidents (les
-/// octets, leur base64, la ligne rendue). À 2 Mio, cela fait ~7,4 Mio le
-/// temps d'un changement de piste, ce qu'un appareil à 1 Gio partagé absorbe ;
-/// à 150 Mio — le PNG de partage que la route HTTP du cœur cite comme cas
-/// réel — cela ferait 540 Mio, soit la moitié de la machine.
+/// octets, leur base64, la ligne rendue).
+///
+/// **20 Mio, relevé de 2 Mio.** L'utilisateur garde des pochettes sur son NAS
+/// qui dépassaient 2 Mio — des extraits d'album, pas de simples vignettes — et
+/// a explicitement accepté le coût mémoire après avoir vérifié que l'appareil
+/// reste sous 30 % de sa RAM à ce plafond. Au ratio mesuré, 20 Mio de pochette
+/// coûtent environ 72 Mio de pic transitoire le temps d'un changement de
+/// piste, par afficheur abonné — sous 7 % des 1024 Mio de l'appareil. Cette
+/// valeur couvre même un scan d'album en PNG sans perte, bien plus lourd qu'un
+/// JPEG comparable. Au-delà, ce n'est plus une pochette mais un accident : le
+/// PNG de 150 Mio sur un partage — le cas que la route HTTP du cœur cite
+/// nommément (`cover_get`) comme réel — coûterait, matérialisé sur ce
+/// protocole, 540 Mio, soit la moitié de la machine.
 ///
 /// Dépasser n'est pas une erreur d'allocation mais un refus : le producteur ne
-/// matérialise jamais au-delà (il lit `COVER_MAX_BYTES + 1` octets et s'arrête),
-/// aucune trame n'est émise, et l'afficheur n'a simplement pas d'image — la
-/// même politique d'échec silencieux que la récupération elle-même.
-pub const COVER_MAX_BYTES: usize = 2 * 1024 * 1024;
+/// matérialise jamais au-delà (il lit `COVER_MAX_BYTES + 1` octets et s'arrête,
+/// ou refuse sur la taille connue à l'avance quand elle est disponible sans
+/// lecture — voir `cover::lit_fichier_borne` côté cœur), aucune trame n'est
+/// émise, et l'afficheur n'a simplement pas d'image — la même politique
+/// d'échec silencieux que la récupération elle-même.
+pub const COVER_MAX_BYTES: usize = 20 * 1024 * 1024;
 
 /// La pochette de ce qui joue, poussée aux seuls afficheurs qui l'ont demandée
 /// (voir `Announcement::covers`).

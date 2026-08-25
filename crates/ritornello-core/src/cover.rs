@@ -14,7 +14,7 @@ use ritornello_proto::CoverRef;
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::RwLock;
 use tokio_util::io::ReaderStream;
@@ -134,6 +134,10 @@ pub fn cle(r: &CoverRef) -> String {
 #[derive(Default)]
 pub struct CoverCache {
     entrees: RwLock<VecDeque<(String, Pochette)>>,
+    /// La dernière ligne de protocole (`DisplayFrame::Cover`, encodée) déjà
+    /// construite, gardée derrière un `Arc` et partagée telle quelle : voir
+    /// `ligne`.
+    derniere_ligne: RwLock<Option<(String, Arc<str>)>>,
 }
 
 impl CoverCache {
@@ -205,6 +209,52 @@ impl CoverCache {
         };
         lit_fichier_borne(&chemin).await
     }
+
+    /// Construit — ou réutilise — la ligne de protocole `DisplayFrame::Cover`
+    /// déjà encodée pour `cle`/`href` : le JSON complet, base64 compris,
+    /// terminé par un saut de ligne, prêt à être écrit tel quel sur un socket.
+    ///
+    /// **Construite une fois, partagée par `Arc`.** Le coût d'une pochette —
+    /// matérialiser ses octets puis les encoder en base64, jusqu'à
+    /// `COVER_MAX_BYTES` — ne doit être payé qu'une fois par publication, pas
+    /// une fois par relais qui la redemande : un second appelant pour la même
+    /// clé, qu'il s'agisse d'un second afficheur abonné ou du même relais qui
+    /// revient sur un morceau déjà vu, reçoit le **même** `Arc`, sans recopier
+    /// les octets ni réencoder. C'est délibérément un cache à une seule entrée
+    /// (la dernière ligne construite) et non une table par clé : à un instant
+    /// donné, tous les relais s'intéressent à la pochette du morceau courant,
+    /// la même clé.
+    ///
+    /// **Jamais d'`Arc` dans un type sérialisé** : ce qui est partagé ici est
+    /// la ligne de texte déjà produite par `serde_json`, pas une valeur
+    /// `ritornello_proto::Cover` — ce type-là reste un type de fil ordinaire,
+    /// sans partage à exprimer.
+    ///
+    /// `None` couvre les mêmes cas que `octets` : rien à pousser.
+    pub async fn ligne(&self, cle: &str, href: &str) -> Option<Arc<str>> {
+        if let Some((k, l)) = self.derniere_ligne.read().await.as_ref() {
+            if k == cle {
+                return Some(l.clone());
+            }
+        }
+        let (mime, octets) = self.octets(cle).await?;
+        let cover =
+            ritornello_proto::Cover { href: href.to_string(), mime: mime.to_string(), bytes: octets };
+        let mut ligne = serde_json::to_string(&ritornello_proto::DisplayFrame::Cover(cover)).ok()?;
+        ligne.push('\n');
+        let ligne: Arc<str> = Arc::from(ligne);
+        *self.derniere_ligne.write().await = Some((cle.to_string(), ligne.clone()));
+        Some(ligne)
+    }
+}
+
+/// Ce que la lecture bornée d'un fichier de pochette rend, avant validation
+/// du type d'image.
+enum LectureBornee {
+    Octets(Vec<u8>),
+    /// La taille du fichier, **connue par `metadata`, avant toute lecture des
+    /// octets eux-mêmes** : voir la doc de `lit_fichier_borne`.
+    TropGros(u64),
 }
 
 /// Lit un fichier de pochette pour le pousser, borné et validé.
@@ -218,31 +268,59 @@ impl CoverCache {
 /// lecture : la fenêtre n'existe pas du tout, plutôt que d'être fermée. La
 /// garantie n'est donc pas affaiblie mais renforcée.
 ///
-/// Deux bornes, et les deux comptent :
+/// **La taille est vérifiée avant toute lecture des octets**, sur `metadata`,
+/// et c'est délibéré : une taille de fichier ne demande aucune connaissance du
+/// format — pas d'en-tête à interpréter, pas de décodeur, indifférente à un
+/// JPEG, un PNG, un WebP ou ce qui viendra ensuite. Un fichier du NAS
+/// démesuré (le PNG de 150 Mo que `cover_get` cite comme cas réel) est ainsi
+/// refusé sans qu'un seul octet de son contenu ne soit lu, plutôt que d'être
+/// découvert après une lecture bornée à `COVER_MAX_BYTES + 1` octets — un
+/// coût qui n'a de sens que si le fichier passe la borne. `take` avant
+/// `read_to_end` reste en place ensuite, en filet : si le fichier grossit
+/// *entre* le `metadata` et la lecture, la fenêtre TOCTOU rouverte ne laisse
+/// jamais lire plus de `COVER_MAX_BYTES + 1` octets.
 ///
-/// * `COVER_MAX_BYTES + 1` octets au plus sont lus. Le `+ 1` est ce qui permet
-///   de *savoir* qu'on a dépassé sans avoir tout lu : au-delà, refus. Un PNG
-///   de 150 Mo sur le partage — cas que `cover_get` cite comme réel — coûte
-///   donc 2 Mio, pas 150.
+/// Deux bornes de temps sous le même délai, et une de taille avant tout :
+///
+/// * `metadata` puis, si la taille passe, `COVER_MAX_BYTES + 1` octets au plus
+///   sont lus (le filet TOCTOU ci-dessus).
 /// * `DELAI_FICHIER`, comme partout où ce module touche un fichier : le
 ///   partage peut être endormi, et l'attente doit être bornée par nous plutôt
 ///   que par le noyau.
 async fn lit_fichier_borne(chemin: &std::path::Path) -> Option<(&'static str, Vec<u8>)> {
     let lecture = tokio::time::timeout(DELAI_FICHIER, async {
         let fichier = tokio::fs::File::open(chemin).await?;
+        let taille = fichier.metadata().await?.len();
+        if taille > ritornello_proto::COVER_MAX_BYTES as u64 {
+            return Ok::<_, std::io::Error>(LectureBornee::TropGros(taille));
+        }
         let mut octets = Vec::new();
         // `take` **avant** `read_to_end` : `read_to_end` seul lirait le
         // fichier entier, et le contrôle de taille arriverait après
-        // l'allocation qu'il est censé éviter.
+        // l'allocation qu'il est censé éviter. N'agit ici que sur la fenêtre
+        // TOCTOU (voir la doc au-dessus) : le cas courant a déjà été tranché
+        // par `metadata`.
         fichier
             .take(ritornello_proto::COVER_MAX_BYTES as u64 + 1)
             .read_to_end(&mut octets)
             .await?;
-        Ok::<_, std::io::Error>(octets)
+        Ok(LectureBornee::Octets(octets))
     })
     .await;
     let octets = match lecture {
-        Ok(Ok(v)) => v,
+        Ok(Ok(LectureBornee::Octets(v))) => v,
+        Ok(Ok(LectureBornee::TropGros(taille))) => {
+            // La taille exacte de l'offense, connue sans avoir rien lu de son
+            // contenu — c'est ce que la lecture bornée à `+ 1` octet ne
+            // pourrait jamais journaliser : elle ne verrait jamais que
+            // `COVER_MAX_BYTES + 1`, quelle que soit la taille réelle.
+            tracing::warn!(
+                "cover file {} not read: {taille} bytes over the {}-byte limit",
+                chemin.display(),
+                ritornello_proto::COVER_MAX_BYTES
+            );
+            return None;
+        }
         Ok(Err(e)) => {
             tracing::debug!("cover file unreadable: {e}");
             return None;
@@ -254,7 +332,7 @@ async fn lit_fichier_borne(chemin: &std::path::Path) -> Option<(&'static str, Ve
     };
     if octets.len() > ritornello_proto::COVER_MAX_BYTES {
         tracing::warn!(
-            "cover file {} not pushed: over {} bytes",
+            "cover file {} not pushed: grew past {} bytes while being read",
             chemin.display(),
             ritornello_proto::COVER_MAX_BYTES
         );
@@ -786,6 +864,113 @@ mod tests {
         let cache = CoverCache::new();
         cache.insere("k".into(), Pochette::Fichier(dir.path().join("absent.jpg"))).await;
         assert_eq!(cache.octets("k").await, None);
+    }
+
+    /// Prouve que le refus vient de `metadata`, appelé **avant** toute lecture
+    /// des octets — pas de la lecture bornée à `COVER_MAX_BYTES + 1` octets
+    /// qui reste en filet plus loin dans `lit_fichier_borne`. Un test qui se
+    /// contenterait de vérifier le `None` ne distinguerait pas les deux : la
+    /// lecture bornée refuse tout aussi bien. La preuve tient dans le
+    /// journal : il doit nommer la taille **réelle** du fichier, très au-delà
+    /// de `COVER_MAX_BYTES + 1` — un nombre que la lecture bornée ne pourrait
+    /// jamais rendre, puisqu'elle ne lit jamais plus que cette borne.
+    #[tokio::test]
+    async fn le_plafond_est_verifie_sur_la_taille_du_fichier_avant_toute_lecture() {
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct Tampon(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Tampon {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for Tampon {
+            type Writer = Tampon;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let chemin = dir.path().join("trop-gros.png");
+        // Bien au-dela de COVER_MAX_BYTES + 1 : une lecture bornee a cette
+        // limite ne pourrait jamais journaliser un nombre pareil. Fichier
+        // creux (`set_len`) : aucune ecriture reelle des octets, seul le
+        // metadata doit y suffire.
+        let taille_reelle = ritornello_proto::COVER_MAX_BYTES as u64 + 50_000_000;
+        let fichier = std::fs::File::create(&chemin).unwrap();
+        fichier.set_len(taille_reelle).unwrap();
+        drop(fichier);
+
+        let tampon = Tampon::default();
+        // `#[tokio::test]` est mono-thread par defaut : le repartiteur pose
+        // par thread reste donc valide a travers le `.await` qui suit.
+        let subscriber = tracing_subscriber::fmt().with_writer(tampon.clone()).with_ansi(false).finish();
+        let garde = tracing::subscriber::set_default(subscriber);
+        let resultat = lit_fichier_borne(&chemin).await;
+        drop(garde);
+
+        assert!(resultat.is_none(), "un fichier bien au-dela du plafond doit etre refuse");
+        let journal = String::from_utf8(tampon.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            journal.contains(&taille_reelle.to_string()),
+            "le journal doit nommer la taille reelle du fichier, connue par metadata avant toute lecture : {journal}"
+        );
+    }
+
+    // -- `ligne` : la trame de pochette construite une fois, partagee -------
+
+    #[tokio::test]
+    async fn ligne_construit_une_seule_fois_et_partage_larc_entre_deux_appelants() {
+        // La propriete du changement 3 : deux appelants pour la meme cle —
+        // deux relais abonnes, ou le meme relais qui redemande la pochette du
+        // morceau courant — ne doivent pas reconstruire la ligne chacun de
+        // leur cote. `Arc::ptr_eq` est la seule facon de le prouver : une
+        // simple egalite de contenu passerait tout aussi bien si `ligne`
+        // clonait les octets et reencodait a chaque appel.
+        let dir = tempfile::tempdir().unwrap();
+        let chemin = dir.path().join("folder.jpg");
+        std::fs::write(&chemin, jpeg(1000)).unwrap();
+        let cache = CoverCache::new();
+        cache.insere("k".into(), Pochette::Fichier(chemin)).await;
+
+        let premiere = cache.ligne("k", "/api/cover/k").await.expect("une image locale doit produire une ligne");
+        let seconde = cache.ligne("k", "/api/cover/k").await.expect("le second appel doit reussir aussi");
+        assert!(
+            Arc::ptr_eq(&premiere, &seconde),
+            "le second appel pour la meme cle doit rendre le meme Arc, pas une ligne reconstruite"
+        );
+    }
+
+    #[tokio::test]
+    async fn ligne_change_quand_la_cle_change_et_reste_une_trame_de_pochette_valide() {
+        // Le pendant du test ci-dessus : le cache a une seule entree ne doit
+        // pas continuer de rendre une ancienne ligne pour une cle differente.
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.jpg");
+        let b = dir.path().join("b.jpg");
+        std::fs::write(&a, jpeg(10)).unwrap();
+        std::fs::write(&b, jpeg(20)).unwrap();
+        let cache = CoverCache::new();
+        cache.insere("a".into(), Pochette::Fichier(a)).await;
+        cache.insere("b".into(), Pochette::Fichier(b)).await;
+
+        let ligne_a = cache.ligne("a", "/api/cover/a").await.unwrap();
+        let ligne_b = cache.ligne("b", "/api/cover/b").await.unwrap();
+        assert_ne!(&*ligne_a, &*ligne_b, "deux cles differentes doivent produire des lignes differentes");
+
+        match serde_json::from_str::<ritornello_proto::DisplayFrame>(&ligne_a).unwrap() {
+            ritornello_proto::DisplayFrame::Cover(c) => {
+                assert_eq!(c.href, "/api/cover/a");
+                assert_eq!(c.mime, "image/jpeg");
+            }
+            autre => panic!("une trame de pochette etait attendue : {autre:?}"),
+        }
     }
 
     #[tokio::test]

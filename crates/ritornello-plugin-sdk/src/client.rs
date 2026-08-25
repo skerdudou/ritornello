@@ -233,6 +233,24 @@ impl DisplayClient {
         self.envoyer(&DisplayFrame::Cover(cover)).await
     }
 
+    /// Écrit une ligne de pochette **déjà encodée** par l'appelant, partagée
+    /// entre tous les relais qui la poussent : contrairement à `send_cover`,
+    /// ce client ne sérialise ni n'encode rien ici, il écrit les octets tels
+    /// quels.
+    ///
+    /// Pensé pour le cœur, qui construit la ligne **une fois par publication**
+    /// (`CoverCache::ligne`) et la partage par `Arc` entre les relais des
+    /// afficheurs abonnés — plutôt que de refaire la copie et l'encodage une
+    /// fois par relais, ce que `send_cover` ferait s'il était rappelé avec la
+    /// même image pour chacun. Le `\n` terminal fait partie de `ligne` :
+    /// l'appelant l'a déjà pushé, comme `envoyer` le fait pour ses propres
+    /// trames.
+    pub async fn send_cover_line(&self, ligne: &Arc<str>) -> Result<()> {
+        let mut w = self.writer.lock().await;
+        w.write_all(ligne.as_bytes()).await?;
+        Ok(())
+    }
+
     async fn envoyer(&self, frame: &DisplayFrame) -> Result<()> {
         // `push` plutôt qu'un `format!("{}\n", …)` : celui-ci allouait une
         // seconde chaîne et recopiait tout. Sans conséquence pour un état,
