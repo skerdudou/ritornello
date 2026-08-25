@@ -1,4 +1,5 @@
 use crate::metadata::{Metadonnees, PlayerState};
+use crate::player::mpv;
 use crate::player::Player;
 use crate::state::{self, PersistedState, StartupPower};
 use crate::types::Event;
@@ -13,7 +14,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{mpsc, watch, RwLock};
 
 /// Anglais embarqué du cœur (base toujours présente).
 pub const EN: &str = include_str!("locales/en.toml");
@@ -182,6 +183,39 @@ pub struct Core<P: Player> {
     /// n'interroge le direct que toutes les quelques dizaines de secondes, et
     /// sans cette avance la barre resterait figée entre deux réponses.
     ancre_position: Option<(u32, Instant)>,
+    /// Cache partagé avec le routeur : la tâche détachée y dépose, la route y
+    /// lit. **Le même `Arc`** que celui remis à l'`AppState` HTTP — voir la
+    /// note à son lieu de construction dans `main.rs` — sans quoi une
+    /// pochette téléchargée par le cœur ne serait jamais lisible par la
+    /// route.
+    covers: Arc<crate::cover::CoverCache>,
+    /// Résultats des récupérations détachées, consommés par la boucle de
+    /// `main` (voir son bras `pochette_rx.recv()`). Le booléen dit si la
+    /// récupération a abouti — nécessaire pour que `pochette_arrivee` libère
+    /// `pochette_en_vol` même sur un échec, au lieu de laisser cette clé
+    /// bloquée pour le reste du processus.
+    pochette_tx: mpsc::Sender<(String, bool)>,
+    /// Clé dont la récupération est en vol, pour ne pas la lancer deux fois.
+    pochette_en_vol: Option<String>,
+    /// Dernier chemin annoncé par mpv (`Event::Path`), retenu **seulement**
+    /// pour comparaison à l'arrivée d'une extraction détachée — jamais
+    /// interprété, comme le veut le principe posé pour `OBSERVEES`. Une
+    /// extraction lancée pour un chemin peut revenir après que mpv soit
+    /// passé à un autre : sans cette trace, son résultat s'installerait
+    /// après coup sur la piste suivante.
+    chemin_courant: Option<String>,
+    /// Chemin dont l'extraction embarquée est actuellement en vol, pour ne
+    /// pas en relancer une deuxième pendant que la première tourne encore
+    /// sur ce même fichier.
+    extraction_en_vol: Option<String>,
+    /// Résultat d'une extraction détachée par `handle_path`, consommé par la
+    /// boucle `select!` de `main` (voir `extraction_arrivee`). Symétrique de
+    /// `pochette_tx` ci-dessus.
+    extraction_tx: mpsc::Sender<(String, Option<ritornello_proto::CoverRef>)>,
+    /// Disjoncteur qui borne l'appel `lofty`, strictement bloquant et
+    /// potentiellement sur un partage réseau : voir `sante.rs` et le
+    /// commentaire de `handle_path`.
+    sante: Arc<crate::sante::Sante>,
 }
 
 /// Résout le mot de veille depuis un catalogue déjà en main.
@@ -196,7 +230,13 @@ fn resout_standby_status(catalog: &Catalog) -> String {
 }
 
 impl<P: Player> Core<P> {
-    pub fn new(player: P, cablage: Cablage) -> Self {
+    pub fn new(
+        player: P,
+        cablage: Cablage,
+        covers: Arc<crate::cover::CoverCache>,
+        pochette_tx: mpsc::Sender<(String, bool)>,
+        extraction_tx: mpsc::Sender<(String, Option<ritornello_proto::CoverRef>)>,
+    ) -> Self {
         let Cablage { sources, persisted, state_path, catalog, locales_root, metadata } = cablage;
         let mut source_order: Vec<String> = sources.keys().cloned().collect();
         source_order.sort();
@@ -262,6 +302,13 @@ impl<P: Player> Core<P> {
             position_s: None,
             duree_mesuree_s: None,
             ancre_position: None,
+            covers,
+            pochette_tx,
+            pochette_en_vol: None,
+            chemin_courant: None,
+            extraction_en_vol: None,
+            extraction_tx,
+            sante: Arc::new(crate::sante::Sante::new()),
         }
     }
 
@@ -367,6 +414,37 @@ impl<P: Player> Core<P> {
         if let Some(e) = update.can_eject {
             self.can_eject = e;
         }
+        // La pochette suit la même convention que `preset`/`preset_count` :
+        // absente = rien de neuf, jamais « plus de pochette » — une Source
+        // n'en répète pas la déclaration sur chaque trame de statut qui suit
+        // (voir `SourceUpdate::cover`). Traitée **après** l'identité, comme
+        // le reste de cette trame : `set_identity` remet à zéro tout ce que
+        // `Metadonnees` retenait, y compris la pochette de la Source. Une
+        // trame qui porterait à la fois une nouvelle identité et sa pochette
+        // doit laisser l'identité parler d'abord, sans quoi la pochette tout
+        // juste déclarée serait effacée dans la foulée par ce reset — c'est
+        // exactement le piège que ce commentaire, plus haut sur `preset`,
+        // signale déjà pour la sélection.
+        //
+        // Câblée ici et non dans la boucle `select!` de `main` : cette garde
+        // de tête (`standby || name != self.active_source`) doit s'appliquer
+        // à la pochette comme à tout le reste de la trame. Une source non
+        // active pourrait sinon faire apparaître sa pochette sur le morceau
+        // que joue la source **active**.
+        //
+        // `validee` ici, comme `Enrichment::cleaned` le fait sur l'autre
+        // canal : une pochette entre dans le cœur par deux portes, et la
+        // couche `ritornello-proto` — celle qui possède la validation de
+        // forme — ne gardait que l'une des deux. Rien n'était exploitable, les
+        // contrôles propres du cœur couvrant ce chemin, mais une règle de
+        // forme appliquée à une porte sur deux finit par diverger. Une
+        // référence refusée vaut « rien de neuf », jamais « plus de
+        // pochette » : c'est la convention du champ (voir `SourceUpdate::
+        // cover`), et effacer sur une trame mal formée retirerait l'image
+        // valide qu'une trame précédente avait déclarée.
+        if let Some(cover) = update.cover.and_then(ritornello_proto::CoverRef::validee) {
+            self.set_cover_de_source(Some(cover), name);
+        }
         // Toujours publier : la sélection courante fait partie de l'état
         // diffusé, et cet appel couvre la trame qui ne change ni identité ni
         // métadonnées (les autres chemins publient déjà, et le canal
@@ -405,6 +483,13 @@ impl<P: Player> Core<P> {
         let np = NowPlaying {
             source: self.active_source.clone(),
             identity: self.metadonnees.identity().cloned(),
+            // Toujours vide à cet instant précis (le reset ci-dessus vient
+            // d'effacer tout ce que `Metadonnees` savait), mais lu depuis
+            // `known()` plutôt qu'un `Known::default()` figé : la valeur
+            // reste correcte si le reset venait un jour à changer, et
+            // `publie_etat` republie ce même champ dès qu'il cesse d'être
+            // vide.
+            known: self.metadonnees.known(),
         };
         // Échec impossible en pratique : un `watch::Sender::send` n'échoue que
         // quand plus aucun récepteur ne vit, et `main` garde le sien pour
@@ -467,6 +552,93 @@ impl<P: Player> Core<P> {
         self.publie_etat();
     }
 
+    /// Chemin du fichier que mpv a réellement ouvert (propriété `path`), pour
+    /// en tirer la pochette embarquée. N'arme **qu'**une extraction détachée :
+    /// voir `extraction_arrivee` pour la suite, à l'arrivée du résultat.
+    ///
+    /// Même garde « ça joue » que les tags (`lecture`, pas `expecting_stream`,
+    /// pour la même raison) : `path` est republié aussi bien pour un flux que
+    /// pour un fichier.
+    ///
+    /// **Le cœur complète, il n'écrase pas** : si une pochette est déjà tenue
+    /// — le `folder.jpg` d'une Source, notamment — l'extraction n'est même
+    /// pas lancée, ce qui économise une lecture de fichier pour rien et
+    /// préserve la préséance voulue par `Metadonnees::cover_retenue`.
+    ///
+    /// **Toujours détachée, jamais exécutée sur ce fil.** `mpv::
+    /// pochette_embarquee` ouvre et parcourt le fichier avec `lofty`, un
+    /// appel strictement bloquant, potentiellement sur un partage réseau qui
+    /// peut ne jamais répondre. L'exécuter ici figerait la boucle du cœur
+    /// entière — mpv, les commandes, l'HTTP — le temps du blocage, pas
+    /// seulement cette extraction. Ce projet a déjà vécu cet incident sur un
+    /// montage cifs muet (voir `sante.rs`), d'où `Sante::borne` : `spawn_blocking`
+    /// pour sortir du fil asynchrone, sous délai, avec un disjoncteur par
+    /// point de montage pour ne pas perdre un fil du pool à chaque nouvelle
+    /// piste tant que le partage reste muet.
+    fn handle_path(&mut self, chemin: String) {
+        // Retenu avant toute garde ci-dessous : c'est ce qu'`extraction_arrivee`
+        // compare à l'arrivée pour rejeter une réponse tardive sur une piste
+        // déjà remplacée, y compris quand `standby`/`lecture` ont changé
+        // entre-temps.
+        self.chemin_courant = Some(chemin.clone());
+        if self.standby || !self.lecture {
+            return;
+        }
+        if self.metadonnees.known().cover {
+            return;
+        }
+        // Un flux n'a pas de tags, et `lofty` n'a rien à ouvrir sur une URL :
+        // autant ne pas payer l'aller-retour tâche + canal pour un cas qui ne
+        // peut jamais aboutir (`pochette_embarquee` le refuserait de toute
+        // façon).
+        if chemin.contains("://") {
+            return;
+        }
+        if self.extraction_en_vol.as_deref() == Some(chemin.as_str()) {
+            return;
+        }
+        self.extraction_en_vol = Some(chemin.clone());
+        let tx = self.extraction_tx.clone();
+        let sante = self.sante.clone();
+        tokio::spawn(async move {
+            let a_lire = chemin.clone();
+            let r = sante
+                .borne(std::path::Path::new(&chemin), move || mpv::pochette_embarquee(&a_lire))
+                .await
+                .flatten();
+            let _ = tx.send((chemin, r)).await;
+        });
+    }
+
+    /// Une extraction détachée de pochette embarquée (`handle_path`) s'est
+    /// terminée. Symétrique de `pochette_arrivee` : la vérification de
+    /// péremption se fait ici, à l'arrivée, pas au lancement.
+    pub async fn extraction_arrivee(&mut self, chemin: String, r: Option<ritornello_proto::CoverRef>) {
+        // Libéré quelle que soit l'issue et avant toute vérification
+        // ci-dessous — même raison que `pochette_en_vol` dans
+        // `pochette_arrivee` : sans cela, cette même piste rejouée plus tard
+        // resterait bloquée pour le reste du processus.
+        if self.extraction_en_vol.as_deref() == Some(chemin.as_str()) {
+            self.extraction_en_vol = None;
+        }
+        // mpv est déjà passé à un autre fichier : cette réponse décrit une
+        // piste qui n'est plus jouée, et ne doit pas s'installer sur la
+        // suivante.
+        if self.chemin_courant.as_deref() != Some(chemin.as_str()) {
+            return;
+        }
+        // Une autre voie a fourni une pochette pendant que celle-ci était en
+        // vol (la Source, ou un greffon) : le cœur complète, il n'écrase pas.
+        if self.metadonnees.known().cover {
+            return;
+        }
+        if !self.metadonnees.set_cover_tags(r) {
+            return;
+        }
+        self.lance_pochette();
+        self.publie_etat();
+    }
+
     /// Enrichissement remonté par un plugin `metadata`. Rien ne se passe s'il
     /// est périmé, vide, ou émis par un plugin non déclaré (voir
     /// `Metadonnees::ajoute`).
@@ -503,7 +675,158 @@ impl<P: Player> Core<P> {
         if self.metadonnees.gagnant() == Some(plugin) {
             self.ancre_position = self.metadonnees.position_s().map(|p| (p, Instant::now()));
         }
+        // L'enrichissement qui vient d'être retenu peut avoir changé la
+        // pochette que `cover_retenue` désigne (un greffon qui écrase
+        // répondant après un `fill_only`, par exemple) : `ajoute` a déjà
+        // invalidé la clé publiée dans ce cas, à `lance_pochette` de relancer
+        // la récupération pour la nouvelle cible.
+        self.lance_pochette();
         self.publie_etat();
+    }
+
+    /// Retient la pochette qu'une Source vient de déclarer sur son propre
+    /// canal (voir `SourceMessage::cover`, Task 2).
+    pub fn set_cover_de_source(&mut self, c: Option<ritornello_proto::CoverRef>, origine: &str) {
+        if self.metadonnees.set_cover_source(c, origine) {
+            self.lance_pochette();
+            self.publie_etat();
+        }
+    }
+
+    /// Détache la récupération de la pochette retenue, si elle n'est pas déjà
+    /// en cache ni en vol.
+    ///
+    /// Détachée, parce qu'un téléchargement de dix secondes ne doit pas
+    /// retenir la boucle qui répond aux commandes. Et **abandonnée si
+    /// l'identité change** : c'est `pochette_arrivee` qui vérifie, à
+    /// l'arrivée, que la clé décrit encore ce qui joue — même garde-fou que
+    /// l'écho d'identité du texte (`Metadonnees::ajoute`), pour la même
+    /// raison : une réponse tardive sur le morceau précédent ne doit jamais
+    /// s'installer sur le suivant.
+    pub fn lance_pochette(&mut self) {
+        let Some((r, _)) = self.metadonnees.cover_retenue() else {
+            // Plus rien à montrer (identité changée, pochette retirée) :
+            // effacer l'URL publiée plutôt que de laisser pointer une image
+            // qui ne correspond plus à ce qui joue.
+            self.metadonnees.set_cover_href(None);
+            return;
+        };
+        let cle = crate::cover::cle(&r);
+        if self.metadonnees.cover_publiee() == Some(cle.as_str()) {
+            // Déjà publiée sous cette même clé : rien à refaire. Sans cette
+            // garde, un enrichissement retenu qui republie à l'identique (une
+            // station qui reconfirme ses métadonnées toutes les trente
+            // secondes, par exemple) relancerait une tâche, un `contient` et
+            // un aller-retour de canal pour un travail déjà fait — et
+            // réarmerait `pochette_en_vol` sans nécessité.
+            return;
+        }
+        if self.pochette_en_vol.as_deref() == Some(cle.as_str()) {
+            // Déjà en vol pour cette même cible : une seconde requête
+            // n'apprendrait rien de plus tôt, et doublerait le trafic réseau.
+            return;
+        }
+        let covers = self.covers.clone();
+        let tx = self.pochette_tx.clone();
+        self.pochette_en_vol = Some(cle.clone());
+        tokio::spawn(async move {
+            if covers.contient(&cle).await {
+                let _ = tx.send((cle, true)).await;
+                return;
+            }
+            match crate::cover::recupere(&r).await {
+                Some(p) => {
+                    covers.insere(cle.clone(), p).await;
+                    let _ = tx.send((cle, true)).await;
+                }
+                // Échec silencieux : l'appareil n'affiche pas d'image, et
+                // c'est tout. Un 404 du Cover Art Archive est le cas courant.
+                // Rapporté quand même (`false`) : c'est ce qui libère
+                // `pochette_en_vol`, sans quoi cette clé resterait bloquée
+                // pour le reste du processus — y compris si le même dossier
+                // (donc la même clé) redevient la cible plus tard.
+                None => {
+                    tracing::debug!("no cover for {cle}");
+                    let _ = tx.send((cle, false)).await;
+                }
+            }
+        });
+    }
+
+    /// Une récupération détachée s'est terminée (`succes`), qu'elle ait
+    /// abouti ou non. Publie l'URL locale, **si elle décrit encore ce qui
+    /// joue** : la vérification se fait ici, à l'arrivée, pas au lancement —
+    /// c'est ce qui empêche la pochette d'un morceau déjà remplacé de
+    /// s'installer sur le suivant.
+    pub async fn pochette_arrivee(&mut self, cle: String, succes: bool) {
+        // Le marqueur se libère dès que cette clé revient, **quelle que soit
+        // l'issue** — échec réseau, pochette qui n'est plus retenue, ou
+        // succès — et **avant** toute vérification de péremption ci-dessous.
+        // Sans cela, un échec ou un morceau déjà remplacé laissait cette clé
+        // bloquée pour le reste du processus : `lance_pochette` refusait
+        // ensuite de relancer une récupération pour cette même clé, même
+        // quand elle redevenait la cible (le même dossier d'album, donc la
+        // même clé, est rejoué plus tard) et même si les octets finissaient
+        // par être en cache.
+        if self.pochette_en_vol.as_deref() == Some(cle.as_str()) {
+            self.pochette_en_vol = None;
+        }
+        // Le contrôle de péremption vaut pour les **deux** issues, et c'est
+        // délibéré : un échec qui arrive après un changement de morceau décrit
+        // une référence que ce qui joue maintenant ne vise pas. L'inscrire au
+        // registre des échecs du morceau courant y noircirait une clé jamais
+        // essayée pour lui — et si un contributeur proposait cette même image
+        // ici, elle serait écartée sans qu'on l'ait tentée une seule fois.
+        // L'échec vaut pour le morceau où il a eu lieu, comme tout le reste de
+        // cet état (voir `Metadonnees::pochettes_echouees`).
+        let Some((r, _)) = self.metadonnees.cover_retenue() else {
+            // Plus rien ne joue, ou plus aucune pochette retenue : la
+            // réponse arrive trop tard pour avoir un sens.
+            return;
+        };
+        if crate::cover::cle(&r) != cle {
+            // La pochette du morceau précédent (ou d'une référence
+            // remplacée depuis) : sans cette vérification, elle s'installerait
+            // sur le morceau courant.
+            return;
+        }
+        if !succes {
+            // L'échec est **retenu**, et c'est ce qui débloque les
+            // contributeurs situés en dessous. Une référence retenue n'est
+            // qu'une promesse : sans cette note, `cover_retenue` continuait de
+            // préférer une URL morte, `known.cover` restait vrai, et
+            // `musicbrainz` — muet parce qu'il croit une pochette tenue —
+            // n'avait aucune chance de compenser. C'est exactement le cas que
+            // la conception anticipe : « un motif qui casse rend un silence ».
+            //
+            // Relancer et republier seulement si la référence retenue a
+            // réellement changé : c'est ce qui donne sa chance au contributeur
+            // du dessous, et ce qui évite de republier pour rien.
+            if self.metadonnees.marque_pochette_echouee(cle) {
+                self.lance_pochette();
+                self.publie_etat();
+            }
+            return;
+        }
+        // Recontrôlé plutôt que fait confiance à `succes` seul : le cache est
+        // borné (`ENTREES` entrées, éviction FIFO) et cette clé a pu être
+        // évincée entre le dépôt et la consommation de ce message par la
+        // boucle de `main` — un cas d'autant plus réel que le canal est
+        // volontairement étroit (capacité 4).
+        if !self.covers.contient(&cle).await {
+            return;
+        }
+        self.metadonnees.set_cover_href(Some(cle));
+        self.publie_etat();
+    }
+
+    /// Le cache que la tâche détachée de `lance_pochette` remplit — **le
+    /// même** que celui de l'`AppState` HTTP, voir la doc du champ `covers`.
+    /// Réservé aux tests : c'est ce qui leur permet de prouver le partage
+    /// sans passer par `main.rs`, qui n'est pas testable en tant que tel.
+    #[cfg(test)]
+    pub(crate) fn app_covers(&self) -> &Arc<crate::cover::CoverCache> {
+        &self.covers
     }
 
     /// Relit où on en est, auprès du fournisseur qui a le droit de parler.
@@ -573,6 +896,25 @@ impl<P: Player> Core<P> {
                 false
             } else {
                 *courant = etat;
+                true
+            }
+        });
+        // `known` republié au même point de passage que l'état structuré :
+        // c'est ici que tout chemin qui vient d'ajouter ou de corriger une
+        // information de métadonnées (ICY, tags, enrichissement, pochette)
+        // finit par converger, et c'est ce qui permet à un plugin `metadata`
+        // câblé à chaud — ou simplement lent à répondre — de voir ce qui est
+        // déjà connu sans attendre un hypothétique prochain changement
+        // d'identité, qui peut ne jamais survenir tant que le même morceau
+        // joue. `set_identity` construit lui-même son `NowPlaying` (source et
+        // identité en changent aussi) ; ce `send_if_modified` ne fait alors
+        // que constater l'égalité et ne republie rien en trop.
+        let known = self.metadonnees.known();
+        self.now_playing_tx.send_if_modified(|np| {
+            if np.known == known {
+                false
+            } else {
+                np.known = known;
                 true
             }
         });
@@ -1015,6 +1357,10 @@ impl<P: Player> Core<P> {
             // Même statut que l'ICY vis-à-vis de `retry_count` : des
             // métadonnées ne prouvent pas que la lecture est vivante.
             Event::FileTags(morceau) => self.handle_file_tags(morceau),
+            // Même statut que les tags vis-à-vis de `retry_count` : le chemin
+            // n'atteste rien de la vivacité du flux, il sert uniquement à la
+            // pochette embarquée.
+            Event::Path(chemin) => self.handle_path(chemin),
             // Le lecteur a changé de piste de lui-même : fin de piste d'un
             // disque, pression sur aucune touche. Le cœur le sait (mpv le lui
             // dit) mais ne peut pas corriger l'identité — elle est opaque pour
@@ -1521,9 +1867,17 @@ mod tests {
     fn cablage_muet(plugins: Vec<String>) -> MetadataCablage {
         MetadataCablage {
             plugins,
-            now_playing: watch::channel(NowPlaying { source: String::new(), identity: None }).0,
+            now_playing: watch::channel(NowPlaying { source: String::new(), identity: None, ..Default::default() }).0,
             etat: watch::channel(PlayerState::default()).0,
         }
+    }
+
+    /// Câblage minimal des pochettes pour les montages qui n'en ont pas
+    /// l'usage : un cache neuf, et un émetteur dont personne ne lit la
+    /// réception (le récepteur est lâché aussitôt — un envoi ultérieur
+    /// échoue alors en silence, ce que `lance_pochette` ignore déjà).
+    fn covers_de_test() -> (Arc<crate::cover::CoverCache>, mpsc::Sender<(String, bool)>) {
+        (Arc::new(crate::cover::CoverCache::new()), mpsc::channel(4).0)
     }
 
     /// Mise à jour ne portant rien : tous les champs à `None`/`false`. Base
@@ -1543,6 +1897,7 @@ mod tests {
             preset_name: None,
             status: None,
             can_eject: None,
+            cover: None,
         }
     }
 
@@ -1563,6 +1918,7 @@ mod tests {
         let (etat_tx, etat_rx) = watch::channel(PlayerState::default());
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let (covers, pochette_tx) = covers_de_test();
         let core = Core::new(
             player,
             Cablage {
@@ -1573,10 +1929,13 @@ mod tests {
                 locales_root: root,
                 metadata: MetadataCablage {
                     plugins: vec![],
-                    now_playing: watch::channel(NowPlaying { source: String::new(), identity: None }).0,
+                    now_playing: watch::channel(NowPlaying { source: String::new(), identity: None, ..Default::default() }).0,
                     etat: etat_tx,
                 },
             },
+            covers,
+            pochette_tx,
+            mpsc::channel(4).0,
         );
         (core, player_calls, source_calls, etat_rx, dir)
     }
@@ -1594,10 +1953,11 @@ mod tests {
         let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
         sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: source_calls.clone() }));
         sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls }));
-        let (np_tx, np_rx) = watch::channel(NowPlaying { source: "radio".into(), identity: None });
+        let (np_tx, np_rx) = watch::channel(NowPlaying { source: "radio".into(), identity: None, ..Default::default() });
         let (etat_tx, etat_rx) = watch::channel(PlayerState::default());
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let (covers, pochette_tx) = covers_de_test();
         let core = Core::new(
             FakePlayer::default(),
             Cablage {
@@ -1608,8 +1968,64 @@ mod tests {
                 locales_root: root,
                 metadata: MetadataCablage { plugins, now_playing: np_tx, etat: etat_tx },
             },
+            covers,
+            pochette_tx,
+            mpsc::channel(4).0,
         );
         (core, np_rx, etat_rx, dir)
+    }
+
+    /// Alias de `setup_metadonnees(vec![])` : les tests de l'état partiel
+    /// n'ont besoin d'aucun greffon `metadata`, seulement du montage que
+    /// `setup_metadonnees` sait déjà construire.
+    fn core_de_test() -> (Core<FakePlayer>, watch::Receiver<NowPlaying>, watch::Receiver<PlayerState>, tempfile::TempDir) {
+        setup_metadonnees(vec![])
+    }
+
+    /// Comme `core_de_test`, mais **garde** le récepteur du canal
+    /// d'extraction de pochette embarquée plutôt que de le lâcher.
+    ///
+    /// Nécessaire pour tout test qui laisse réellement tourner la tâche
+    /// détachée de `handle_path` sur un vrai fichier : celle-ci est l'unique
+    /// écrivaine légitime du fichier temporaire, et un test qui relirait les
+    /// tags une seconde fois de son côté (pour reconstituer le `CoverRef`
+    /// attendu) écrirait en concurrence avec elle sur le même chemin — une
+    /// vraie course entre deux écrivains, découverte à l'usage (voir le
+    /// rapport de tâche 6, ruling 1 de la revue).
+    #[allow(clippy::type_complexity)]
+    fn core_de_test_avec_extraction() -> (
+        Core<FakePlayer>,
+        watch::Receiver<PlayerState>,
+        mpsc::Receiver<(String, Option<ritornello_proto::CoverRef>)>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let source_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
+        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: source_calls.clone() }));
+        sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls }));
+        let (np_tx, _np_rx) =
+            watch::channel(NowPlaying { source: "radio".into(), identity: None, ..Default::default() });
+        let (etat_tx, etat_rx) = watch::channel(PlayerState::default());
+        let root = dir.path().to_path_buf();
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let (covers, pochette_tx) = covers_de_test();
+        let (extraction_tx, extraction_rx) = mpsc::channel(4);
+        let core = Core::new(
+            FakePlayer::default(),
+            Cablage {
+                sources,
+                persisted: PersistedState::default(),
+                state_path: dir.path().join("state.json"),
+                catalog,
+                locales_root: root,
+                metadata: MetadataCablage { plugins: vec![], now_playing: np_tx, etat: etat_tx },
+            },
+            covers,
+            pochette_tx,
+            extraction_tx,
+        );
+        (core, etat_rx, extraction_rx, dir)
     }
 
     impl Core<FakePlayer> {
@@ -1668,6 +2084,7 @@ mod tests {
             crate::core::EN,
         )));
         let (etat_tx, etat_rx) = watch::channel(PlayerState::default());
+        let (covers, pochette_tx) = covers_de_test();
         let core = Core::new(
             FakePlayer::default(),
             Cablage {
@@ -1681,11 +2098,15 @@ mod tests {
                     now_playing: watch::channel(NowPlaying {
                         source: String::new(),
                         identity: None,
+                        ..Default::default()
                     })
                     .0,
                     etat: etat_tx,
                 },
             },
+            covers,
+            pochette_tx,
+            mpsc::channel(4).0,
         );
         (core, etat_rx, dir)
     }
@@ -2000,7 +2421,8 @@ mod tests {
         };
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
-        let mut core = Core::new(player, Cablage { sources, persisted, state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata: cablage_muet(vec![]) });
+        let (covers, pochette_tx) = covers_de_test();
+        let mut core = Core::new(player, Cablage { sources, persisted, state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata: cablage_muet(vec![]) }, covers, pochette_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         assert!(player_calls.lock().unwrap().contains(&"audio_device bluealsa:DEV=XX".to_string()));
     }
@@ -2083,10 +2505,11 @@ mod tests {
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "fr", &root, crate::core::EN)));
         let metadata = MetadataCablage {
             plugins: vec![],
-            now_playing: watch::channel(NowPlaying { source: String::new(), identity: None }).0,
+            now_playing: watch::channel(NowPlaying { source: String::new(), identity: None, ..Default::default() }).0,
             etat: etat_tx,
         };
-        let mut core = Core::new(player, Cablage { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata });
+        let (covers, pochette_tx) = covers_de_test();
+        let mut core = Core::new(player, Cablage { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata }, covers, pochette_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(etat_rx.borrow_and_update().status.as_deref(), Some("VEILLE"));
@@ -2111,10 +2534,11 @@ mod tests {
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
         let metadata = MetadataCablage {
             plugins: vec![],
-            now_playing: watch::channel(NowPlaying { source: String::new(), identity: None }).0,
+            now_playing: watch::channel(NowPlaying { source: String::new(), identity: None, ..Default::default() }).0,
             etat: etat_tx,
         };
-        let mut core = Core::new(player, Cablage { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata });
+        let (covers, pochette_tx) = covers_de_test();
+        let mut core = Core::new(player, Cablage { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata }, covers, pochette_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(etat_rx.borrow_and_update().status.as_deref(), Some("STANDBY"));
@@ -2183,7 +2607,8 @@ mod tests {
         let persisted = PersistedState { active_source: "cd".into(), ..PersistedState::default() };
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
-        let mut core = Core::new(player, Cablage { sources, persisted, state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata: cablage_muet(vec![]) });
+        let (covers, pochette_tx) = covers_de_test();
+        let mut core = Core::new(player, Cablage { sources, persisted, state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata: cablage_muet(vec![]) }, covers, pochette_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         assert_eq!(core.handle_event(Event::PlaybackIdle).await, EventOutcome::Nothing);
     }
@@ -2313,7 +2738,8 @@ mod tests {
         let persisted = PersistedState { active_source: "cd".into(), ..PersistedState::default() };
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
-        let mut core = Core::new(player, Cablage { sources, persisted, state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata: cablage_muet(vec![]) });
+        let (covers, pochette_tx) = covers_de_test();
+        let mut core = Core::new(player, Cablage { sources, persisted, state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata: cablage_muet(vec![]) }, covers, pochette_tx, mpsc::channel(4).0);
         // Unique source : SourceCycle re-active « cd », qui répond `Play cdda://`.
         core.handle_command(Command::SourceCycle).await.unwrap();
         assert!(player_calls.lock().unwrap().contains(&"play cdda://".to_string()));
@@ -2351,10 +2777,11 @@ mod tests {
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
         let metadata = MetadataCablage {
             plugins: vec![],
-            now_playing: watch::channel(NowPlaying { source: String::new(), identity: None }).0,
+            now_playing: watch::channel(NowPlaying { source: String::new(), identity: None, ..Default::default() }).0,
             etat: etat_tx,
         };
-        let mut core = Core::new(player, Cablage { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata });
+        let (covers, pochette_tx) = covers_de_test();
+        let mut core = Core::new(player, Cablage { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata }, covers, pochette_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         core.handle_command(Command::SourceCycle).await.unwrap();
         // C'est le cœur qui a arrêté mpv, sans dépendre des plugins.
@@ -2393,7 +2820,8 @@ mod tests {
         sources.insert("cd".into(), Arc::new(SourceEnPanne));
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
-        let mut core = Core::new(player, Cablage { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata: cablage_muet(vec![]) });
+        let (covers, pochette_tx) = covers_de_test();
+        let mut core = Core::new(player, Cablage { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata: cablage_muet(vec![]) }, covers, pochette_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         assert!(core.handle_command(Command::SourceCycle).await.is_err());
         // L'état est cohérent : nouvelle source partout, et rien ne joue.
@@ -2659,6 +3087,7 @@ mod tests {
             preset_name: None,
             status: None,
             can_eject: None,
+            cover: None,
         }
     }
 
@@ -2672,6 +3101,7 @@ mod tests {
             preset_name: nom.map(str::to_string),
             status: None,
             can_eject: None,
+            cover: None,
         }
     }
 
@@ -2699,6 +3129,7 @@ mod tests {
             preset_name: None,
             status: None,
             can_eject: peut,
+            cover: None,
         }
     }
 
@@ -3887,6 +4318,517 @@ mod tests {
             core.etat_lecteur().position_s,
             Some(117),
             "un plugin en reserve ne doit pas faire reculer la position"
+        );
+    }
+
+    // -- État partiel (`known`) et pochette : tâche 5 -----------------------
+
+    #[tokio::test]
+    async fn une_pochette_de_source_mal_formee_ne_touche_pas_a_celle_qui_tient() {
+        // `CoverRef::validee` est la règle de forme de `ritornello-proto`, et
+        // elle ne s'appliquait qu'à un des deux canaux d'entrée (celui des
+        // greffons). Une référence refusée vaut « rien de neuf » — jamais
+        // « plus de pochette » : c'est la convention du champ, et effacer sur
+        // une trame mal formée retirerait l'image valide déjà déclarée.
+        let (mut core, _np_rx, _etat_rx, tmp) = core_de_test();
+        let image = tmp.path().join("folder.jpg");
+        std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
+        let bonne = ritornello_proto::CoverRef::Path { path: image.to_string_lossy().into_owned() };
+        let id = serde_json::json!({"kind": "file", "path": "/a.flac"});
+
+        let mut update = joue(id);
+        update.cover = Some(bonne.clone());
+        core.handle_source_update("radio", update.clone());
+        assert!(core.metadonnees.known().cover);
+
+        // Chemin relatif : refusé par la forme. Rien ne doit bouger.
+        update.identity = None;
+        update.cover = Some(ritornello_proto::CoverRef::Path { path: "relatif/folder.jpg".into() });
+        core.handle_source_update("radio", update.clone());
+        assert_eq!(
+            core.metadonnees.cover_retenue().map(|(r, _)| r),
+            Some(bonne),
+            "une reference mal formee ne doit ni s'installer ni effacer celle qui tient"
+        );
+
+        // Et une URL en clair vers une IP littérale non plus, l'autre moitié
+        // de ce que `validee` refuse.
+        update.cover =
+            Some(ritornello_proto::CoverRef::Url { url: "http://192.168.1.1/a.jpg".into() });
+        core.handle_source_update("radio", update);
+        assert_eq!(core.metadonnees.cover_retenue().map(|(_, o)| o), Some("radio".to_string()));
+    }
+
+    /// Un contributeur qui vient de se câbler à chaud, ou qui répond
+    /// lentement, doit voir ce qui est déjà connu — sinon il ne peut ni
+    /// compléter ce qui manque, ni s'abstenir sur ce qui est déjà rempli.
+    #[tokio::test]
+    async fn le_now_playing_emis_porte_letat_partiel() {
+        let (mut core, mut np_rx, _etat_rx, _tmp) = core_de_test();
+        core.set_identity(Some(serde_json::json!({"kind": "stream", "url": "u"})));
+        // `handle_icy_title` exige un flux effectivement attendu (voir sa
+        // garde) : sans cette ligne, le titre serait ignoré en silence et ce
+        // test n'éprouverait rien.
+        core.expecting_stream = true;
+        core.handle_icy_title("OUI FM".into());
+        core.publie_etat();
+        // Un contributeur doit voir ce qui est deja connu, sinon il ne peut ni
+        // completer ni s'abstenir.
+        let np = np_rx.borrow_and_update().clone();
+        assert_eq!(np.known.title.as_deref(), Some("OUI FM"));
+        assert!(!np.known.cover);
+    }
+
+    #[tokio::test]
+    async fn une_pochette_arrivee_devient_une_url_locale_dans_letat() {
+        let (mut core, _np_rx, mut etat_rx, tmp) = core_de_test();
+        let image = tmp.path().join("folder.jpg");
+        std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
+        let r = ritornello_proto::CoverRef::Path { path: image.to_string_lossy().into_owned() };
+
+        core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
+        core.set_cover_de_source(Some(r.clone()), "files");
+        // La recuperation est detachee : on l'attend explicitement dans le test
+        // plutot que de dormir, pour ne pas fabriquer un flake.
+        let cle = crate::cover::cle(&r);
+        let p = crate::cover::recupere(&r).await.expect("l'image de test doit etre lisible");
+        core.app_covers().insere(cle.clone(), p).await;
+        core.pochette_arrivee(cle.clone(), true).await;
+
+        let etat = etat_rx.borrow_and_update().clone();
+        assert_eq!(etat.morceau.cover_href.as_deref(), Some(&format!("/api/cover/{cle}")[..]));
+        assert_eq!(etat.morceau.cover_origin.as_deref(), Some("files"));
+    }
+
+    #[tokio::test]
+    async fn une_recuperation_echouee_libere_les_contributeurs_du_dessous() {
+        // La jonction que la revue a trouvée : `known.cover` était vrai dès
+        // qu'une référence était *retenue*, et `cover_retenue` continuait de
+        // préférer cette référence après l'échec de sa récupération. Un motif
+        // d'URL de station qui a rouillé faisait donc taire `musicbrainz`
+        // définitivement — cas que la conception anticipe explicitement.
+        let (mut core, mut np_rx, _etat_rx, _tmp) = setup_metadonnees(vec![
+            "radiofrance".into(),
+            "musicbrainz".into(),
+        ]);
+        let id = serde_json::json!({"url": "https://fip"});
+        core.handle_source_update("radio", joue(id.clone()));
+        let morte =
+            ritornello_proto::CoverRef::Url { url: "https://api.radiofrance.fr/rouille".into() };
+        core.handle_enrichment(
+            "radiofrance",
+            Enrichment {
+                identity: id,
+                artist: Some("Miles Davis".into()),
+                title: Some("So What".into()),
+                cover: Some(morte.clone()),
+                ..Default::default()
+            },
+        );
+        assert!(np_rx.borrow_and_update().known.cover, "une reference est tenue, on ne sait pas encore");
+
+        // Ce que la tâche détachée rapporte quand la récupération n'a rien
+        // rendu : `succes == false`.
+        core.pochette_arrivee(crate::cover::cle(&morte), false).await;
+        let np = np_rx.borrow_and_update().clone();
+        assert!(!np.known.cover, "une promesse non tenue doit rendre la parole aux autres");
+        // Et le texte que ce même greffon fournit n'a pas bougé : c'est bien
+        // ce qui permet à `musicbrainz` de chercher sur cet artiste et cet
+        // album, comme la documentation le promet.
+        assert_eq!(np.known.title.as_deref(), Some("So What"));
+        assert_eq!(np.known.artist.as_deref(), Some("Miles Davis"));
+    }
+
+    #[tokio::test]
+    async fn un_echec_arrive_apres_un_changement_de_morceau_nest_pas_inscrit() {
+        // Le registre des échecs vaut pour le morceau où ils ont eu lieu. Un
+        // échec en retard, arrivé après le changement d'identité, ne doit donc
+        // pas y entrer : il y noircirait une clé jamais essayée pour le
+        // morceau courant, et écarterait cette image alors qu'elle pourrait
+        // parfaitement répondre.
+        let (mut core, _np_rx, _etat_rx, _tmp) = setup_metadonnees(vec!["musicbrainz".into()]);
+        let une = serde_json::json!({"url": "un"});
+        core.handle_source_update("radio", joue(une.clone()));
+        let image = ritornello_proto::CoverRef::Url {
+            url: "https://coverartarchive.org/release/x/front-500".into(),
+        };
+        core.handle_enrichment(
+            "musicbrainz",
+            Enrichment {
+                identity: une,
+                title: Some("T".into()),
+                cover: Some(image.clone()),
+                ..Default::default()
+            },
+        );
+
+        // Morceau suivant, puis l'échec du précédent qui arrive enfin.
+        let deux = serde_json::json!({"url": "deux"});
+        core.handle_source_update("radio", joue(deux.clone()));
+        core.pochette_arrivee(crate::cover::cle(&image), false).await;
+
+        // Le même greffon propose la même image pour ce morceau-ci : jamais
+        // essayée ici, elle doit être retenue.
+        core.handle_enrichment(
+            "musicbrainz",
+            Enrichment { identity: deux, title: Some("T2".into()), cover: Some(image), ..Default::default() },
+        );
+        assert!(
+            core.metadonnees.known().cover,
+            "un echec perime ne doit pas condamner la reference du morceau suivant"
+        );
+    }
+
+    /// Le risque signalé par la revue de la tâche 3 : deux `Arc<CoverCache>`
+    /// distincts compileraient et laisseraient passer tous les autres tests
+    /// de ce module, mais la pochette que le cœur vient de déposer ne serait
+    /// jamais lisible par la vraie route HTTP. Ce test passe donc par
+    /// `status::router` et une vraie requête, avec exactement le même `Arc`
+    /// que celui exposé par `app_covers()`.
+    #[tokio::test]
+    async fn la_route_http_sert_ce_que_le_coeur_vient_de_deposer() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (mut core, _np_rx, _etat_rx, tmp) = core_de_test();
+        let image = tmp.path().join("folder.jpg");
+        std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
+        let r = ritornello_proto::CoverRef::Path { path: image.to_string_lossy().into_owned() };
+        let cle = crate::cover::cle(&r);
+
+        core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
+        core.set_cover_de_source(Some(r.clone()), "files");
+        let p = crate::cover::recupere(&r).await.expect("l'image de test doit etre lisible");
+        core.app_covers().insere(cle.clone(), p).await;
+        core.pochette_arrivee(cle.clone(), true).await;
+
+        // Le seul champ qui compte pour cette preuve : le reste de l'`AppState`
+        // vient du montage de test générique, jamais consulté par cette route.
+        let app = crate::status::router(crate::status::AppState {
+            covers: core.app_covers().clone(),
+            ..crate::status::tests_support::app_state()
+        });
+        let resp = app
+            .oneshot(Request::get(format!("/api/cover/{cle}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "la route doit lire dans le meme cache que celui rempli par le coeur"
+        );
+    }
+
+    /// La pochette d'un morceau déjà remplacé ne doit jamais s'installer sur
+    /// le suivant : la vérification de péremption se fait à l'arrivée, pas au
+    /// lancement — même garde-fou que l'écho d'identité des enrichissements.
+    #[tokio::test]
+    async fn une_pochette_perimee_ne_s_installe_pas_sur_le_morceau_suivant() {
+        let (mut core, _np_rx, mut etat_rx, tmp) = core_de_test();
+        let ancienne = tmp.path().join("ancienne.jpg");
+        std::fs::write(&ancienne, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
+        let r_ancienne = ritornello_proto::CoverRef::Path { path: ancienne.to_string_lossy().into_owned() };
+        let cle_ancienne = crate::cover::cle(&r_ancienne);
+
+        core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
+        core.set_cover_de_source(Some(r_ancienne.clone()), "files");
+
+        // Le morceau change avant que la récupération de l'ancienne pochette
+        // n'ait eu le temps d'arriver, et le nouveau déclare sa **propre**
+        // pochette (une référence différente) : la cible que `cover_retenue`
+        // désigne change avec l'identité, sans jamais redevenir `None` — c'est
+        // le comparaison de clé de `pochette_arrivee`, pas seulement l'absence
+        // de cible, qui doit rejeter la réponse tardive.
+        let nouvelle = tmp.path().join("nouvelle.jpg");
+        std::fs::write(&nouvelle, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
+        let r_nouvelle = ritornello_proto::CoverRef::Path { path: nouvelle.to_string_lossy().into_owned() };
+        core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/b.flac"})));
+        core.set_cover_de_source(Some(r_nouvelle), "files");
+        etat_rx.borrow_and_update();
+
+        // La réponse tardive de l'ANCIENNE pochette arrive quand même.
+        let p = crate::cover::recupere(&r_ancienne).await.expect("l'image de test doit etre lisible");
+        core.app_covers().insere(cle_ancienne.clone(), p).await;
+        core.pochette_arrivee(cle_ancienne, true).await;
+
+        assert!(
+            !etat_rx.has_changed().unwrap_or(false),
+            "la pochette perimee ne doit rien publier sur le morceau suivant"
+        );
+        assert_eq!(
+            core.etat_lecteur().morceau.cover_href, None,
+            "la pochette du morceau precedent ne doit pas s'installer sur le suivant"
+        );
+    }
+
+    /// Repro exacte du défaut critique relevé en revue (tâche 5) : le
+    /// marqueur en vol doit se libérer même quand l'arrivée ne publie rien
+    /// (morceau déjà remplacé), sans quoi revenir plus tard sur le même
+    /// dossier — donc la même clé, un `folder.jpg` est partagé par toutes
+    /// les pistes d'un album — ne relançait plus jamais rien : `lance_pochette`
+    /// voyait la clé perpétuellement « en vol » et abandonnait en silence.
+    #[tokio::test]
+    async fn le_marqueur_en_vol_se_libere_meme_quand_larrivee_ne_publie_rien() {
+        let (mut core, _np_rx, mut etat_rx, tmp) = core_de_test();
+        let image = tmp.path().join("folder.jpg");
+        std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
+        let r = ritornello_proto::CoverRef::Path { path: image.to_string_lossy().into_owned() };
+        let cle = crate::cover::cle(&r);
+
+        // 1. Un morceau d'album déclare la pochette K : `lance_pochette` arme
+        // le marqueur. La vraie tâche détachée tourne aussi en tâche de fond,
+        // mais rien ci-dessous n'attend son issue — comme les autres tests de
+        // ce module, celui-ci simule lui-même l'arrivée plutôt que de dormir.
+        core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
+        core.set_cover_de_source(Some(r.clone()), "files");
+        assert_eq!(core.pochette_en_vol.as_deref(), Some(cle.as_str()));
+
+        // 2. Le morceau change avant que la réponse n'arrive : plus rien
+        // n'est retenu, mais le marqueur, lui, ne bouge pas tout seul — c'est
+        // `pochette_arrivee` qui a la charge de le libérer, à l'arrivée.
+        core.set_identity(Some(serde_json::json!({"kind": "stream", "url": "u"})));
+        assert_eq!(core.pochette_en_vol.as_deref(), Some(cle.as_str()));
+        // Le changement d'identité publie déjà de son côté (titre effacé) :
+        // on consomme cette trame pour que l'assertion suivante ne juge que
+        // ce que `pochette_arrivee` publie, ou non, par elle-même.
+        etat_rx.borrow_and_update();
+
+        // 3. La réponse arrive quand même, en succès (les octets sont bien en
+        // main, seulement plus rien à montrer avec). Avant le correctif,
+        // cette méthode retournait ici sans jamais toucher au marqueur.
+        core.pochette_arrivee(cle.clone(), true).await;
+        assert_eq!(core.pochette_en_vol, None, "le marqueur doit se liberer meme sans rien publier");
+        assert!(
+            !etat_rx.has_changed().unwrap_or(false),
+            "rien n'est retenu : cette arrivee ne doit rien publier"
+        );
+
+        // 4. Le même dossier — donc la même clé — redevient la cible. Sans le
+        // correctif, `lance_pochette` restait bloquée à jamais sur cette clé
+        // et cet album n'affichait plus jamais de pochette avant redémarrage.
+        core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
+        core.set_cover_de_source(Some(r.clone()), "files");
+        assert_eq!(
+            core.pochette_en_vol.as_deref(),
+            Some(cle.as_str()),
+            "une nouvelle recuperation doit pouvoir repartir pour la meme cle"
+        );
+        let p = crate::cover::recupere(&r).await.expect("l'image de test doit etre lisible");
+        core.app_covers().insere(cle.clone(), p).await;
+        core.pochette_arrivee(cle.clone(), true).await;
+
+        let etat = etat_rx.borrow_and_update().clone();
+        assert_eq!(
+            etat.morceau.cover_href.as_deref(),
+            Some(&format!("/api/cover/{cle}")[..]),
+            "revenir sur la meme cle doit a nouveau pouvoir publier une pochette"
+        );
+    }
+
+    /// Une trame de couverture n'est traitée que si elle vient de la Source
+    /// **active** — même garde que le reste de la trame (identité, statut,
+    /// présélection). Régression relevée en revue : le câblage précédent
+    /// appelait `set_cover_de_source` en dehors de `handle_source_update`,
+    /// sans repasser par sa garde de tête, si bien qu'une Source inactive
+    /// pouvait faire apparaître sa pochette sur le morceau que joue la
+    /// Source active.
+    #[tokio::test]
+    async fn une_pochette_dune_source_inactive_nest_pas_retenue() {
+        let (mut core, _np_rx, etat_rx, tmp) = core_de_test();
+        let image = tmp.path().join("folder.jpg");
+        std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
+        let r = ritornello_proto::CoverRef::Path { path: image.to_string_lossy().into_owned() };
+
+        // `cd` n'est pas la source active (`radio` l'est, par défaut).
+        core.handle_source_update(
+            "cd",
+            SourceUpdate {
+                identity: None,
+                transient: false,
+                preset: None,
+                preset_count: None,
+                preset_name: None,
+                status: None,
+                can_eject: None,
+                cover: Some(r),
+            },
+        );
+        assert_eq!(core.pochette_en_vol, None, "une source inactive ne doit declencher aucune recuperation");
+        assert!(!etat_rx.has_changed().unwrap_or(false));
+    }
+
+    // -- Pochette embarquée, lue par le cœur : tâche 6 ----------------------
+
+    /// Fabrique un mp3 réel avec une pochette embarquée, via ffmpeg — même
+    /// principe que `player::mpv::tests::mp3_avec_pochette`, dupliqué ici
+    /// faute d'un moyen simple de partager un utilitaire de test entre
+    /// modules. Rend `None` si ffmpeg est absent : le test se saute plutôt
+    /// que d'échouer, ce n'est pas une dépendance du cœur.
+    fn mp3_avec_pochette_de_test(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+        let image = dir.join("cover.jpg");
+        let sortie = dir.join("avec_pochette.mp3");
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=16x16:d=1"])
+            .args(["-frames:v", "1"])
+            .arg(&image)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+            && std::process::Command::new("ffmpeg")
+                .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i"])
+                .arg("sine=frequency=440:duration=1")
+                .arg("-i")
+                .arg(&image)
+                .args(["-map", "0:a", "-map", "1:v", "-c:a", "libmp3lame", "-c:v", "copy"])
+                .args(["-id3v2_version", "3"])
+                .args(["-metadata:s:v", "title=Album cover", "-metadata:s:v", "comment=Cover (front)"])
+                .arg(&sortie)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+        ok.then_some(sortie)
+    }
+
+    /// Le chemin annoncé par mpv (`Event::Path`) arme une extraction
+    /// **détachée** : `handle_event` rend la main aussitôt, sans que rien ne
+    /// soit encore connu — la suite (`set_cover_tags` → `true`,
+    /// `lance_pochette`, `publie_etat`) n'a lieu qu'à l'arrivée du résultat
+    /// sur le canal.
+    ///
+    /// Le vrai canal est vidé ici, plutôt que rejoué à la main comme le fait
+    /// `pochette_arrivee` ailleurs dans ce fichier : relire les tags une
+    /// seconde fois pour reconstituer le `CoverRef` attendu écrirait en
+    /// concurrence avec la tâche détachée sur le **même** fichier temporaire
+    /// (défaut trouvé à l'usage, voir `core_de_test_avec_extraction`). La
+    /// tâche détachée doit rester l'unique écrivaine.
+    #[tokio::test]
+    async fn le_chemin_mpv_declenche_lextraction_et_larmement_de_la_recuperation() {
+        let (mut core, mut etat_rx, mut extraction_rx, tmp) = core_de_test_avec_extraction();
+        let Some(f) = mp3_avec_pochette_de_test(tmp.path()) else {
+            eprintln!("ffmpeg absent : test saute");
+            return;
+        };
+        let chemin = f.to_string_lossy().into_owned();
+
+        core.set_identity(Some(serde_json::json!({"kind": "file", "path": chemin})));
+        core.lecture = true;
+        etat_rx.borrow_and_update();
+
+        assert_eq!(
+            core.handle_event(Event::Path(chemin.clone())).await,
+            EventOutcome::Nothing,
+            "un chemin ne prouve rien de la vivacite du flux"
+        );
+
+        // C'est ICI, et seulement ici, que se vérifie que l'extraction est
+        // réellement détachée (ruling 1 de la revue de cette tâche) — sur un
+        // vrai mp3 à pochette embarquée, pas sur un chemin inexistant qui
+        // échouerait de toute façon aussi vite en synchrone qu'en détaché et
+        // ne prouverait donc rien. `#[tokio::test]` tourne sur un runtime
+        // **mono-fil** (`current_thread`), et le bras `Event::Path` de
+        // `handle_event` ne contient aucun `.await` avant de rendre la main :
+        // si `handle_path` exécutait encore `pochette_embarquee` en
+        // synchrone (régression qui supprimerait le `tokio::spawn` ou l'appel
+        // à `Sante::borne`), `known().cover` serait déjà vrai à cet instant
+        // précis, dans le même sondage (poll) que l'`.await` ci-dessus — il
+        // n'existe aucun univers d'exécution, rapide ou lent, où une
+        // extraction synchrone laisserait cette assertion passer. Ne pas
+        // affaiblir ni retirer cette ligne sans la remplacer par une preuve
+        // équivalente.
+        assert!(!core.metadonnees.known().cover, "l'extraction doit etre detachee, jamais synchrone");
+        assert!(!etat_rx.has_changed().unwrap_or(false));
+
+        // Attend le vrai résultat sur le vrai canal — pas d'horloge ici,
+        // c'est un rendez-vous asynchrone réel sur la tâche que `handle_path`
+        // a détachée.
+        let (chemin_recu, r) =
+            extraction_rx.recv().await.expect("le canal d'extraction doit livrer un resultat");
+        assert_eq!(chemin_recu, chemin);
+        let r = r.expect("l'extraction a du reussir sur ce fichier de test");
+        core.extraction_arrivee(chemin_recu, Some(r.clone())).await;
+
+        assert!(core.metadonnees.known().cover);
+        let (retenue, origine) = core.metadonnees.cover_retenue().expect("une pochette doit etre retenue");
+        assert_eq!(origine, crate::metadata::ORIGINE_TAGS);
+        assert_eq!(retenue, r);
+        assert!(etat_rx.has_changed().unwrap(), "set_cover_tags a renvoye vrai : une trame doit sortir");
+
+        // Rejoue la fin de la récupération détachée à la main, comme les
+        // autres tests de ce module : la clé armée par `lance_pochette` doit
+        // être celle du fichier temporaire écrit par l'extraction.
+        let cle = crate::cover::cle(&r);
+        assert_eq!(core.pochette_en_vol.as_deref(), Some(cle.as_str()));
+        let p = crate::cover::recupere(&r).await.expect("le fichier temporaire doit etre lisible");
+        core.app_covers().insere(cle.clone(), p).await;
+        core.pochette_arrivee(cle.clone(), true).await;
+
+        let etat = etat_rx.borrow_and_update().clone();
+        assert_eq!(etat.morceau.cover_href.as_deref(), Some(&format!("/api/cover/{cle}")[..]));
+        assert_eq!(etat.morceau.cover_origin.as_deref(), Some(crate::metadata::ORIGINE_TAGS));
+    }
+
+    /// Le cœur complète, il n'écrase pas : une pochette déjà tenue (ici celle
+    /// d'une Source, la plus prioritaire) empêche l'extraction, même quand
+    /// mpv annonce un fichier qui, lui, porte une pochette embarquée valide.
+    #[tokio::test]
+    async fn une_pochette_deja_connue_empeche_toute_extraction() {
+        let (mut core, _np_rx, mut etat_rx, tmp) = core_de_test();
+        let Some(f) = mp3_avec_pochette_de_test(tmp.path()) else {
+            eprintln!("ffmpeg absent : test saute");
+            return;
+        };
+        let folder = tmp.path().join("folder.jpg");
+        std::fs::write(&folder, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
+        let r = ritornello_proto::CoverRef::Path { path: folder.to_string_lossy().into_owned() };
+
+        core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
+        core.lecture = true;
+        core.set_cover_de_source(Some(r.clone()), "files");
+        etat_rx.borrow_and_update();
+
+        core.handle_event(Event::Path(f.to_string_lossy().into_owned())).await;
+
+        assert!(
+            !etat_rx.has_changed().unwrap(),
+            "aucune extraction tentee, donc aucune trame supplementaire"
+        );
+        let (retenue, origine) = core.metadonnees.cover_retenue().unwrap();
+        assert_eq!(origine, "files", "le folder.jpg de la Source garde la preseance");
+        assert_eq!(retenue, r);
+    }
+
+    /// C'est cette fonction, et non plus une relecture du code de `main`, qui
+    /// prouve le partage exigé par la tâche 5 : le `Core` et l'`AppState` HTTP
+    /// doivent recevoir **le même** `Arc<CoverCache>`. Un second
+    /// `Arc::new(CoverCache::new())` glissé pour l'un des deux compilerait et
+    /// laisserait passer tous les autres tests — y compris le test de route
+    /// HTTP ci-dessus, qui construit son propre `AppState` à la main — mais
+    /// romprait `Arc::ptr_eq` ici.
+    #[test]
+    fn le_coeur_et_lappstate_partagent_reellement_le_meme_arc() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let cablage = Cablage {
+            sources: HashMap::new(),
+            persisted: PersistedState::default(),
+            state_path: dir.path().join("state.json"),
+            catalog,
+            locales_root: root,
+            metadata: cablage_muet(vec![]),
+        };
+        let (pochette_tx, _pochette_rx) = mpsc::channel::<(String, bool)>(4);
+        let (app_state, core) = crate::assemble_covers_et_core(
+            FakePlayer::default(),
+            cablage,
+            pochette_tx,
+            mpsc::channel(4).0,
+            crate::status::tests_support::app_state(),
+        );
+        assert!(
+            Arc::ptr_eq(core.app_covers(), &app_state.covers),
+            "le coeur et l'AppState HTTP doivent partager le meme Arc<CoverCache>"
         );
     }
 

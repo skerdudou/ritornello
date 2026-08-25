@@ -25,6 +25,17 @@ rust-embed = { version = "8", features = ["debug-embed"] }
 # statvfs, for the root filesystem usage shown on the System tab. Already
 # in Cargo.lock (tokio depends on it), so this adds no compilation.
 libc = "0.2"
+# Le cœur va chercher les pochettes lui-même : le navigateur ne contacte
+# jamais l'extérieur. `rustls` comme les greffons, pas d'OpenSSL sur le Pi.
+# `chunk()` (le plafond appliqué en streaming) ne dépend pas de la fonctionnalité
+# `stream` : elle ne gate que `bytes_stream()`, qu'on n'utilise pas.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# Sert la pochette locale en flux plutôt qu'en un seul `Vec` : déjà dans le
+# graphe (reqwest en dépend), donc aucune nouvelle dépendance compilée.
+tokio-util = { version = "0.7", features = ["io"] }
+# Même version que le greffon `files`, pour ne pas dupliquer une branche dans
+# Cargo.lock. Sert à extraire la pochette embarquée dans le fichier joué.
+lofty = "0.25.1"
 
 [dev-dependencies]
 tempfile = "3"

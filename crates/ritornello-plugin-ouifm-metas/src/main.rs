@@ -142,6 +142,7 @@ impl MetadataPlugin for OuiFmMetas {
                     // Ce plugin ne sait pas où en est la lecture : il répond
                     // sur l'identité d'un morceau, pas sur son déroulement.
                     position_s: None,
+                    ..Default::default()
                 };
             }
         }
@@ -202,7 +203,7 @@ mod tests {
     #[tokio::test]
     async fn une_trame_devient_un_enrichissement_avec_echo_de_lidentite() {
         let mut p = plugin_suivant(METAS);
-        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)) }).await;
+        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)), ..Default::default() }).await;
         p.metas_tx
             .send((
                 METAS.into(),
@@ -228,6 +229,7 @@ mod tests {
         p.now_playing(NowPlaying {
             source: "radio".into(),
             identity: Some(identite_flux("http://icecast.radiofrance.fr/fip-midfi.mp3")),
+            ..Default::default()
         })
         .await;
         assert!(p.suivi.is_none(), "un flux laisse ouvert solliciterait un tiers pour rien");
@@ -237,7 +239,7 @@ mod tests {
     #[tokio::test]
     async fn larret_de_la_lecture_ferme_le_suivi() {
         let mut p = plugin_suivant(METAS);
-        p.now_playing(NowPlaying { source: "radio".into(), identity: None }).await;
+        p.now_playing(NowPlaying { source: "radio".into(), identity: None, ..Default::default() }).await;
         assert!(p.suivi.is_none());
     }
 
@@ -247,6 +249,7 @@ mod tests {
         p.now_playing(NowPlaying {
             source: "cd".into(),
             identity: Some(json!({"kind": "disc", "toc": "3 150 22767 41887 63000", "track": 0})),
+            ..Default::default()
         })
         .await;
         assert!(p.suivi.is_none(), "ce plugin ne traite pas les disques");
@@ -266,7 +269,7 @@ mod tests {
         // pour cette raison même.
         let mut p = plugin_suivant(METAS);
         let avant = p.suivi.as_ref().map(|(id, t)| (id.clone(), t.id()));
-        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)) }).await;
+        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)), ..Default::default() }).await;
         let apres = p.suivi.as_ref().map(|(id, t)| (id.clone(), t.id()));
         assert_eq!(avant, apres, "la meme tache doit continuer");
     }
@@ -274,7 +277,7 @@ mod tests {
     #[tokio::test]
     async fn une_trame_dune_station_quon_ne_suit_plus_est_ecartee() {
         let mut p = plugin_suivant(METAS);
-        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)) }).await;
+        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)), ..Default::default() }).await;
         // Trame en file au moment du changement de station.
         p.metas_tx
             .send(("99".into(), Meta { title: Some("ancien".into()), ..Default::default() }))
@@ -289,7 +292,7 @@ mod tests {
         // Cas dégénéré, atteignable si la table embarquée devenait vide : le
         // plugin doit rester muet, jamais deviner un identifiant.
         let mut p = OuiFmMetas::new(Table::default());
-        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)) }).await;
+        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)), ..Default::default() }).await;
         assert!(p.suivi.is_none());
     }
 

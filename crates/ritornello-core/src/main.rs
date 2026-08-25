@@ -1,11 +1,13 @@
 mod audio_output;
 mod admin;
 mod core;
+mod cover;
 mod metadata;
 mod placeholder;
 mod player;
 mod plugins;
 mod register;
+mod sante;
 mod state;
 mod status;
 mod system;
@@ -22,7 +24,7 @@ use anyhow::{Context, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
 // `PluginKind` vient du protocole partagé, pas du cœur : c'est le binaire du
 // greffon qui l'annonce, et `plugins.rs` n'a plus à le connaître.
-use ritornello_proto::{Announcement, Enrichment, InputMessage, NowPlaying, PluginKind};
+use ritornello_proto::{Announcement, Enrichment, InputMessage, Known, NowPlaying, PluginKind};
 use ritornello_plugin_sdk::{run_input_client, run_metadata_client, DisplayClient, SourceClient, SourceUpdate};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -289,6 +291,31 @@ async fn cabler_a_chaud<P: player::Player>(
     }
 }
 
+/// Construit le `Core` et l'`AppState` HTTP avec **le même** `Arc<CoverCache>`
+/// remis aux deux : c'est cette fonction qui construit ce cache, jamais
+/// `main` directement, et c'est elle — pas une relecture du code de `main` —
+/// qu'un test appelle pour vérifier le partage par `Arc::ptr_eq` (voir
+/// `core::tests::le_coeur_et_lappstate_partagent_reellement_le_meme_arc`).
+/// Une régression où `main` reconstruirait un second cache pour l'un des
+/// deux romprait cette égalité au premier appel, pas seulement à la lecture
+/// du diff.
+///
+/// `squelette.covers` est ignoré : il n'existe que pour éviter à l'appelant
+/// de construire l'`AppState` en deux morceaux — tous ses autres champs
+/// traversent inchangés.
+pub(crate) fn assemble_covers_et_core<P: player::Player>(
+    player: P,
+    cablage: core::Cablage,
+    pochette_tx: mpsc::Sender<(String, bool)>,
+    extraction_tx: mpsc::Sender<(String, Option<ritornello_proto::CoverRef>)>,
+    squelette: AppState,
+) -> (AppState, core::Core<P>) {
+    let covers = Arc::new(cover::CoverCache::new());
+    let coeur = core::Core::new(player, cablage, covers.clone(), pochette_tx, extraction_tx);
+    let app_state = AppState { covers, ..squelette };
+    (app_state, coeur)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // 500 et non 50 : l'IHM a désormais une popin qui liste tout le tampon
@@ -307,6 +334,12 @@ async fn main() -> Result<()> {
                 .with_filter(LevelFilter::WARN),
         )
         .init();
+
+    // Balaie les fichiers temporaires d'une exécution précédente avant que
+    // quoi que ce soit ne puisse en recréer : voir `cover::purge_temporaires`
+    // pour la raison (accumulation, pas fraîcheur — celle-ci est déjà
+    // garantie ailleurs).
+    cover::purge_temporaires();
 
     let plugins_path = PathBuf::from(env_or("RITORNELLO_PLUGINS", "/etc/ritornello/plugins.toml"));
     let state_path = PathBuf::from(env_or("RITORNELLO_STATE", "/var/lib/ritornello/state.json"));
@@ -342,6 +375,7 @@ async fn main() -> Result<()> {
     let (now_playing_tx, now_playing_rx) = watch::channel(NowPlaying {
         source: persisted.active_source.clone(),
         identity: None,
+        known: Known::default(),
     });
     // État structuré du lecteur : vers la SPA (route SSE) et vers les plugins
     // Display, qui composent eux-mêmes leur mise en page depuis cette même
@@ -626,12 +660,32 @@ async fn main() -> Result<()> {
         persisted.mode.as_deref(),
     )));
     let settings_current = Arc::new(RwLock::new(persisted.settings.clone()));
+    // Résultats des récupérations détachées du cœur : la tâche que
+    // `Core::lance_pochette` détache y dépose une clé une fois les octets en
+    // main (ou déjà en cache), et la boucle `select!` ci-dessous les
+    // consomme pour publier l'URL locale au bon morceau.
+    let (pochette_tx, mut pochette_rx) = mpsc::channel::<(String, bool)>(4);
+    // Résultat d'une extraction détachée de pochette embarquée (voir
+    // `Core::handle_path`) : même principe que `pochette_tx` ci-dessus, sur
+    // un canal séparé plutôt qu'un enrichissement du même — les deux portent
+    // des charges utiles différentes, et rien ne les synchronise entre elles.
+    let (extraction_tx, mut extraction_rx) =
+        mpsc::channel::<(String, Option<ritornello_proto::CoverRef>)>(4);
+    // Cœur. La source active affichée est tenue à jour en direct par la boucle
+    // ci-dessous (mise à jour de status_state.active_source après chaque commande).
+    let mut core;
     {
         // Asked once, before serving: the answer gates the System tab's two
         // OS buttons, and asking per request would mean spawning `busctl`
         // twice every five seconds.
         let sonde = system::probe_capabilities().await;
-        let app = status::router(AppState {
+        // `covers` ci-dessous n'est qu'un squelette : `assemble_covers_et_core`
+        // l'écrase par le seul `Arc<CoverCache>` qu'elle construit, remis
+        // identique au `Core` qu'elle renvoie — voir sa doc. Construire
+        // l'`AppState` en un seul littéral ici, plutôt qu'en deux morceaux,
+        // évite de dupliquer sa quinzaine de champs sans rapport avec les
+        // pochettes.
+        let app_state_squelette = AppState {
             status: status_state.clone(),
             logs: log_buffer.clone(),
             audio_current: audio_current.clone(),
@@ -680,7 +734,28 @@ async fn main() -> Result<()> {
                 },
                 ..Default::default()
             }),
-        });
+            covers: Arc::new(cover::CoverCache::default()),
+        };
+        let (app_state, coeur) = assemble_covers_et_core(
+            mpv_player,
+            core::Cablage {
+                sources,
+                persisted,
+                state_path,
+                catalog: catalog.clone(),
+                locales_root: locales_root.clone(),
+                metadata: MetadataCablage {
+                    plugins: metadata_plugins,
+                    now_playing: now_playing_tx,
+                    etat: etat_tx,
+                },
+            },
+            pochette_tx,
+            extraction_tx,
+            app_state_squelette,
+        );
+        core = coeur;
+        let app = status::router(app_state);
         let listener = tokio::net::TcpListener::bind(&http_addr).await.with_context(|| format!("bind {http_addr}"))?;
         tracing::info!("web interface on http://{http_addr}/");
         tokio::spawn(async move {
@@ -689,24 +764,6 @@ async fn main() -> Result<()> {
             }
         });
     }
-
-    // Cœur. La source active affichée est tenue à jour en direct par la boucle
-    // ci-dessous (mise à jour de status_state.active_source après chaque commande).
-    let mut core = core::Core::new(
-        mpv_player,
-        core::Cablage {
-            sources,
-            persisted,
-            state_path,
-            catalog: catalog.clone(),
-            locales_root: locales_root.clone(),
-            metadata: MetadataCablage {
-                plugins: metadata_plugins,
-                now_playing: now_playing_tx,
-                etat: etat_tx,
-            },
-        },
-    );
     // Best-effort, like the wake via `Power` (see the comment below): startup
     // must never put systemd in a restart loop. `demarrage` reads
     // `settings.startup_power`; its standby branch skips the source wake but
@@ -818,6 +875,21 @@ async fn main() -> Result<()> {
             }
             Some((plugin, enrichment)) = enrich_rx.recv() => {
                 core.handle_enrichment(&plugin, enrichment);
+            }
+            // Une récupération détachée par `Core::lance_pochette` s'est
+            // terminée, avec ou sans succès : `pochette_arrivee` libère le
+            // marqueur en vol dans tous les cas, et ne publie l'URL locale
+            // que sur succès et si elle décrit encore ce qui joue.
+            Some((cle, succes)) = pochette_rx.recv() => {
+                core.pochette_arrivee(cle, succes).await;
+            }
+            // Une extraction détachée par `Core::handle_path` s'est terminée
+            // (résultat borné par `Sante::borne`, voir `sante.rs`) :
+            // `extraction_arrivee` libère le marqueur en vol dans tous les
+            // cas, et ne retient le résultat que s'il décrit encore ce que
+            // mpv est en train de jouer.
+            Some((chemin, r)) = extraction_rx.recv() => {
+                core.extraction_arrivee(chemin, r).await;
             }
             Some(device) = audio_rx.recv() => {
                 if let Err(e) = core.set_audio_device(device).await {

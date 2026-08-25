@@ -326,6 +326,9 @@ impl CdSource {
             preset_name: issue.preset_name,
             // Same status logic as any other frame: presence flips it.
             status: issue.status,
+            // Le cd n'est pas dans le périmètre de ce chantier : il ne
+            // déclare pas encore de pochette (voir `SourceMessage::cover`).
+            cover: None,
         }
     }
 }

@@ -252,6 +252,7 @@ mod tests {
             settings_current: Arc::new(tokio::sync::RwLock::new(crate::state::Settings::default())),
             settings_tx: tokio::sync::mpsc::channel(4).0,
             system: Default::default(),
+            covers: Arc::new(crate::cover::CoverCache::new()),
         }
     }
 

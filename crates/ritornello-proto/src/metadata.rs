@@ -38,9 +38,115 @@ pub enum IdentityUpdate {
     Nothing,
 }
 
+/// L'état partiel du morceau, tel qu'un greffon a besoin de le voir.
+///
+/// Un type dédié plutôt que `Morceau` : ce dernier porte `cover_href` et
+/// `cover_origin`, qui sont des URL **locales de l'appareil** — elles n'ont
+/// aucun sens pour un greffon et l'inviteraient à croire qu'il peut les lire.
+///
+/// Un champ à `None` est un champ que personne n'a encore rempli. C'est ce qui
+/// permet à un greffon de ne travailler que sur ce qui manque.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Known {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_s: Option<u32>,
+    /// Une pochette est **déjà tenue**. Un booléen, jamais l'image : un greffon
+    /// n'a pas besoin de la voir pour décider s'il doit en chercher une, et la
+    /// transmettre alourdirait chaque trame pour rien.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cover: bool,
+}
+
+impl Known {
+    /// Vrai si personne n'a encore rien rempli.
+    ///
+    /// Sert de `skip_serializing_if` : une trame qui ne dit rien de ce qui est
+    /// connu doit rester identique à l'octet près à ce qu'elle était avant ce
+    /// chantier, et le protocole se veut lisible à l'œil dans un journalctl.
+    pub fn est_vide(&self) -> bool {
+        self.artist.is_none() && self.title.is_none() && self.album.is_none() && self.duration_s.is_none() && !self.cover
+    }
+}
+
+/// Ce qu'un contributeur a trouvé comme pochette, à charge pour le cœur
+/// d'aller la chercher.
+///
+/// Deux formes **explicitement distinctes** plutôt qu'une chaîne que le cœur
+/// devinerait : le chemin sert au `folder.jpg` posé sur un partage, qui existe
+/// déjà sur le disque — rien à extraire, aucun fichier temporaire.
+///
+/// Jamais des octets : le canal des greffons reste textuel, donc lisible à
+/// l'œil dans un `journalctl`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CoverRef {
+    /// URL externe, à télécharger. `https` uniquement, vers un nom d'hôte.
+    Url { url: String },
+    /// Chemin absolu d'un fichier image déjà présent sur le disque.
+    Path { path: String },
+}
+
+/// Extensions acceptées pour un `CoverRef::Path`.
+const EXTENSIONS_IMAGE: [&str; 4] = ["jpg", "jpeg", "png", "webp"];
+
+impl CoverRef {
+    /// Normalise et **valide**. `None` = à jeter.
+    ///
+    /// Ces valeurs arrivent d'un autre processus et le cœur va agir dessus : il
+    /// faut les traiter comme des entrées, pas comme des données de confiance.
+    ///
+    /// Publique, parce qu'une pochette entre dans le cœur par **deux** canaux :
+    /// l'enrichissement d'un greffon (`Enrichment::cleaned`, juste en dessous)
+    /// et la trame d'une Source (`SourceMessage::cover`). Privée, cette
+    /// méthode ne couvrait que le premier — la couche documentée comme
+    /// propriétaire de la validation de forme ne l'était donc que sur la
+    /// moitié de ses entrées, et le second canal reposait entièrement sur les
+    /// contrôles propres du cœur.
+    pub fn validee(self) -> Option<Self> {
+        match self {
+            Self::Url { url } => {
+                let url = url.trim();
+                let reste = url.strip_prefix("https://")?;
+                let hote = reste.split(['/', '?', '#']).next().unwrap_or("");
+                if hote.is_empty() || hote.contains('@') {
+                    return None;
+                }
+                // Une adresse IP littérale est refusée : un nom d'hôte, et rien
+                // d'autre. `[::1]` est écarté par le crochet, `192.168.1.1` par
+                // le fait que tous ses libellés sont numériques.
+                let sans_port = hote.split(':').next().unwrap_or("");
+                if sans_port.starts_with('[')
+                    || (!sans_port.is_empty()
+                        && sans_port.split('.').all(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_digit())))
+                {
+                    return None;
+                }
+                if !sans_port.contains('.') {
+                    return None;
+                }
+                Some(Self::Url { url: url.to_string() })
+            }
+            Self::Path { path } => {
+                let path = path.trim();
+                if !path.starts_with('/') {
+                    return None;
+                }
+                let ext = path.rsplit_once('.')?.1.to_ascii_lowercase();
+                EXTENSIONS_IMAGE.contains(&ext.as_str()).then(|| Self::Path { path: path.to_string() })
+            }
+        }
+    }
+}
+
 /// Cœur → plugin. Émis à chaque changement de ce qui joue, et à l'arrêt
 /// (`identity: None`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct NowPlaying {
     /// Nom de la Source active (`"radio"`, `"cd"`…), pour qu'un plugin puisse
     /// se taire d'emblée sur une source qu'il ne traite pas, sans avoir à
@@ -49,6 +155,15 @@ pub struct NowPlaying {
     /// `None` = plus rien ne joue.
     #[serde(default)]
     pub identity: Option<serde_json::Value>,
+    /// Ce qui est **déjà connu** du morceau, tous étages confondus.
+    ///
+    /// `#[serde(default)]` : une trame écrite par un binaire antérieur se
+    /// relit, et un greffon qui ignore le champ fonctionne exactement comme
+    /// avant — c'est ce qui rend la refonte déployable greffon par greffon.
+    /// `skip_serializing_if` : tant que rien n'est connu, la trame reste
+    /// identique à l'octet près à ce qu'elle était avant ce champ.
+    #[serde(default, skip_serializing_if = "Known::est_vide")]
+    pub known: Known,
 }
 
 /// Plugin → cœur. Émis quand le plugin apprend quelque chose.
@@ -72,6 +187,17 @@ pub struct Enrichment {
     /// (voir `Core::rafraichit_position`).
     #[serde(default)]
     pub position_s: Option<u32>,
+    /// La pochette que ce contributeur a trouvée.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover: Option<CoverRef>,
+    /// Ce contributeur ne fait que **compléter** : il ne remplace aucun champ
+    /// déjà renseigné.
+    ///
+    /// Défaut `false` = il écrase, ce qui est la règle actuelle du projet (« a
+    /// plugin takes precedence over ICY and over file tags under all
+    /// circumstances ») et ce qui évite de toucher aux greffons livrés.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fill_only: bool,
 }
 
 impl Enrichment {
@@ -93,6 +219,7 @@ impl Enrichment {
         vide(&mut self.artist);
         vide(&mut self.title);
         vide(&mut self.album);
+        self.cover = self.cover.take().and_then(CoverRef::validee);
         self
     }
 
@@ -118,6 +245,16 @@ pub struct Morceau {
     pub album: Option<String>,
     pub duration_s: Option<u32>,
     pub origin: Option<String>,
+    /// URL **locale** de la pochette, à mettre telle quelle dans un `src`.
+    /// Toujours de la forme `/api/cover/{clé}` : l'IHM ne contacte jamais
+    /// l'extérieur.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_href: Option<String>,
+    /// Qui a fourni cette pochette : le nom de la Source, `"tags"`, ou le nom
+    /// du greffon. Une seconde origine, parce que le texte et l'image peuvent
+    /// venir de deux contributeurs différents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_origin: Option<String>,
 }
 
 /// A transient overlay the appliance is showing right now, carrying **both**
@@ -288,6 +425,7 @@ mod tests {
         let np = NowPlaying {
             source: "radio".into(),
             identity: Some(json!({"kind": "stream", "url": "https://ouifm/ouifm-high.mp3"})),
+            known: Known::default(),
         };
         let back: NowPlaying = serde_json::from_str(&serde_json::to_string(&np).unwrap()).unwrap();
         assert_eq!(back, np);
@@ -295,7 +433,7 @@ mod tests {
 
     #[test]
     fn now_playing_roundtrip_sans_identite() {
-        let np = NowPlaying { source: "cd".into(), identity: None };
+        let np = NowPlaying { source: "cd".into(), identity: None, known: Known::default() };
         let json = serde_json::to_string(&np).unwrap();
         let back: NowPlaying = serde_json::from_str(&json).unwrap();
         assert_eq!(back.identity, None);
@@ -310,6 +448,8 @@ mod tests {
             album: Some("Kind of Blue".into()),
             duration_s: Some(545),
             position_s: None,
+            cover: None,
+            fill_only: false,
         };
         let back: Enrichment = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
         assert_eq!(back, e);
@@ -348,6 +488,8 @@ mod tests {
             album: Some(String::new()),
             duration_s: None,
             position_s: None,
+            cover: None,
+            fill_only: false,
         }
         .cleaned();
         assert_eq!(e.artist, None);
@@ -533,5 +675,172 @@ mod tests {
         assert_eq!(back.position_s, Some(42));
         let sans = r#"{"identity":{"kind":"stream"}}"#;
         assert_eq!(serde_json::from_str::<Enrichment>(sans).unwrap().position_s, None);
+    }
+
+    #[test]
+    fn known_fait_un_aller_retour_et_se_relit_absent() {
+        let np = NowPlaying {
+            source: "files".into(),
+            identity: Some(json!({"kind": "file", "path": "/mnt/nas/a.flac"})),
+            known: Known {
+                artist: Some("Lou Reed".into()),
+                title: Some("Oooh Baby".into()),
+                album: None,
+                duration_s: Some(218),
+                cover: true,
+            },
+        };
+        let back: NowPlaying = serde_json::from_str(&serde_json::to_string(&np).unwrap()).unwrap();
+        assert_eq!(back, np);
+
+        // Une trame ecrite par un binaire anterieur n'a pas de `known` : elle
+        // doit se relire, sinon la refonte ne peut pas se deployer greffon par
+        // greffon.
+        let ancienne = r#"{"source":"radio","identity":{"kind":"stream"}}"#;
+        let relue: NowPlaying = serde_json::from_str(ancienne).unwrap();
+        assert_eq!(relue.known, Known::default());
+        assert!(!relue.known.cover);
+    }
+
+    #[test]
+    fn known_vide_reste_muet_a_la_serialisation() {
+        // Contrainte dure du chantier : une trame qui ne dit rien de connu doit
+        // rester identique a l'octet pres a ce qu'elle etait avant l'ajout de
+        // ce champ, sans quoi chaque trame grossirait pour rien.
+        let muette = NowPlaying { source: "radio".into(), identity: None, known: Known::default() };
+        let json = serde_json::to_string(&muette).unwrap();
+        assert!(!json.contains("known"), "{json}");
+
+        let bavarde = NowPlaying {
+            source: "files".into(),
+            identity: None,
+            known: Known { artist: Some("Lou Reed".into()), ..Default::default() },
+        };
+        let json = serde_json::to_string(&bavarde).unwrap();
+        assert!(json.contains("known"), "{json}");
+        let back: NowPlaying = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, bavarde);
+    }
+
+    #[test]
+    fn cover_ref_a_deux_formes_distinctes() {
+        let url = CoverRef::Url { url: "https://coverartarchive.org/release/x/front-500".into() };
+        let json = serde_json::to_string(&url).unwrap();
+        assert!(json.contains(r#""kind":"url""#), "{json}");
+        assert_eq!(serde_json::from_str::<CoverRef>(&json).unwrap(), url);
+
+        let chemin = CoverRef::Path { path: "/mnt/nas/Album/folder.jpg".into() };
+        let json = serde_json::to_string(&chemin).unwrap();
+        assert!(json.contains(r#""kind":"path""#), "{json}");
+        assert_eq!(serde_json::from_str::<CoverRef>(&json).unwrap(), chemin);
+    }
+
+    #[test]
+    fn cleaned_refuse_une_url_qui_n_est_pas_https_vers_un_hote() {
+        // Ces valeurs viennent du reseau : le champ `coverUrl` de la trame SSE
+        // d'OUI FM est ecrit par un tiers, et c'est le coeur qui irait la
+        // chercher. Sans ce filtre, une trame hostile fait emettre a l'appareil
+        // une requete vers l'adresse de son choix sur le reseau local.
+        for mauvaise in [
+            "http://example.org/a.jpg",
+            "https://192.168.1.1/admin",
+            "https://[::1]/a.jpg",
+            "file:///etc/shadow",
+            "ftp://example.org/a.jpg",
+            "pas une url",
+            "",
+            // Confusion userinfo : tout avant le `@` est un nom d'utilisateur,
+            // pas l'hote — un navigateur irait bien sur evil.example.
+            "https://user@evil.example/a.jpg",
+            "https://",
+            "https://localhost/a.jpg",
+        ] {
+            let e = Enrichment {
+                identity: json!(1),
+                cover: Some(CoverRef::Url { url: mauvaise.into() }),
+                ..Default::default()
+            }
+            .cleaned();
+            assert!(e.cover.is_none(), "acceptee a tort : {mauvaise:?}");
+        }
+        let bonne = Enrichment {
+            identity: json!(1),
+            cover: Some(CoverRef::Url { url: " https://coverartarchive.org/x/front-500 ".into() }),
+            ..Default::default()
+        }
+        .cleaned();
+        assert_eq!(
+            bonne.cover,
+            Some(CoverRef::Url { url: "https://coverartarchive.org/x/front-500".into() })
+        );
+    }
+
+    #[test]
+    fn cleaned_refuse_un_chemin_relatif_ou_sans_extension_dimage() {
+        for mauvais in ["relatif/folder.jpg", "/mnt/nas/notes.txt", "/mnt/nas/folder", ""] {
+            let e = Enrichment {
+                identity: json!(1),
+                cover: Some(CoverRef::Path { path: mauvais.into() }),
+                ..Default::default()
+            }
+            .cleaned();
+            assert!(e.cover.is_none(), "accepte a tort : {mauvais:?}");
+        }
+        for bon in ["/mnt/nas/Album/folder.jpg", "/mnt/nas/A/Cover.JPEG", "/x/front.webp"] {
+            let e = Enrichment {
+                identity: json!(1),
+                cover: Some(CoverRef::Path { path: bon.into() }),
+                ..Default::default()
+            }
+            .cleaned();
+            assert!(e.cover.is_some(), "refuse a tort : {bon:?}");
+        }
+    }
+
+    #[test]
+    fn une_pochette_seule_reste_une_non_reponse_pour_le_texte() {
+        // Meme convention que `duration_s` : une pochette seule ne doit pas
+        // gagner l'arbitrage du texte.
+        let e = Enrichment {
+            identity: json!(1),
+            cover: Some(CoverRef::Url { url: "https://coverartarchive.org/x/front-500".into() }),
+            ..Default::default()
+        };
+        assert!(e.is_empty());
+    }
+
+    #[test]
+    fn fill_only_fait_le_tour_et_vaut_faux_par_defaut() {
+        // Le defaut est « ecrase » : c'est la regle actuelle du projet, et
+        // c'est ce qui evite de toucher aux trois greffons livres.
+        let sans: Enrichment = serde_json::from_str(r#"{"identity":{"k":1}}"#).unwrap();
+        assert!(!sans.fill_only);
+        let e = Enrichment { identity: json!(1), fill_only: true, ..Default::default() };
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains(r#""fill_only":true"#), "{json}");
+        assert!(serde_json::from_str::<Enrichment>(&json).unwrap().fill_only);
+        // Muet quand faux : la trame d'un greffon qui ecrase ne grossit pas.
+        let defaut = Enrichment { identity: json!(1), ..Default::default() };
+        assert!(!serde_json::to_string(&defaut).unwrap().contains("fill_only"));
+    }
+
+    #[test]
+    fn morceau_tait_la_pochette_quand_il_n_y_en_a_pas() {
+        let json = serde_json::to_string(&PlayerState::default()).unwrap();
+        assert!(!json.contains("cover_href"), "{json}");
+        assert!(!json.contains("cover_origin"), "{json}");
+
+        let etat = PlayerState {
+            source: "files".into(),
+            morceau: Morceau {
+                cover_href: Some("/api/cover/1a2b3c".into()),
+                cover_origin: Some("files".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&etat).unwrap();
+        assert!(json.contains(r#""cover_href":"/api/cover/1a2b3c""#), "{json}");
+        assert!(json.contains(r#""cover_origin":"files""#), "{json}");
     }
 }

@@ -114,6 +114,8 @@ pub struct Notification {
     pub preset_name: Option<String>,
     /// See `SourceMessage::status`.
     pub status: Option<String>,
+    /// Voir `SourceMessage::cover`.
+    pub cover: Option<ritornello_proto::CoverRef>,
 }
 
 impl Notification {
@@ -152,6 +154,12 @@ impl Notification {
 
     pub fn plays_nothing(mut self) -> Self {
         self.identity = Some(IdentityUpdate::Nothing);
+        self
+    }
+
+    /// Voir `SourceMessage::cover`.
+    pub fn cover(mut self, c: ritornello_proto::CoverRef) -> Self {
+        self.cover = Some(c);
         self
     }
 }
@@ -303,6 +311,10 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     // seul chemin donnerait un bouton qui clignote entre
                     // actif et grisé au fil des trames.
                     can_eject: Some(plugin.can_eject()),
+                    // Une réponse à une requête (Activate, Select…) ne porte
+                    // jamais de pochette : `SourceOutcome` ne le déclare pas,
+                    // seule la notification spontanée le fait (voir plus bas).
+                    cover: None,
                 };
                 write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
             }
@@ -319,6 +331,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                             preset_name: n.preset_name,
                             status: n.status,
                             can_eject: Some(plugin.can_eject()),
+                            cover: n.cover,
                         };
                         write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
                     }
@@ -658,6 +671,20 @@ mod tests {
         let o = SourceOutcome::new(SourceAction::Noop).preset(4).preset_name("FIP");
         assert_eq!(o.preset, Some(4));
         assert_eq!(o.preset_name.as_deref(), Some("FIP"));
+    }
+
+    #[test]
+    fn la_notification_porte_une_pochette_par_son_constructeur() {
+        let n = Notification::new()
+            .cover(ritornello_proto::CoverRef::Path { path: "/mnt/nas/A/cover.jpg".into() });
+        assert_eq!(
+            n.cover,
+            Some(ritornello_proto::CoverRef::Path { path: "/mnt/nas/A/cover.jpg".into() })
+        );
+        // Les autres champs ne bougent pas : c'est le piege d'un builder.
+        assert_eq!(n.preset, None);
+        assert_eq!(n.status, None);
+        assert!(!n.transient);
     }
 
     #[test]
@@ -1122,6 +1149,7 @@ mod metadata_tests {
         let np = NowPlaying {
             source: "cd".into(),
             identity: Some(serde_json::json!({"kind": "disc", "track": 0})),
+            ..Default::default()
         };
         write.write_all(format!("{}\n", serde_json::to_string(&np).unwrap()).as_bytes()).await.unwrap();
 

@@ -102,6 +102,7 @@ impl MusicBrainzPlugin {
             // Ce plugin ne sait pas où en est la lecture : il répond
             // sur l'identité d'un morceau, pas sur son déroulement.
             position_s: None,
+            ..Default::default()
         });
     }
 
@@ -245,7 +246,7 @@ mod tests {
     #[tokio::test]
     async fn emet_le_titre_de_la_piste_annoncee_avec_echo_de_lidentite() {
         let mut p = plugin_avec_disque_connu();
-        p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(1)) }).await;
+        p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(1)), ..Default::default() }).await;
         let e = p.next_enrichment().await;
         assert_eq!(e.identity, identite_disque(1), "l'identite doit etre reemise en echo");
         assert_eq!(e.artist.as_deref(), Some("Miles Davis"));
@@ -256,9 +257,9 @@ mod tests {
     #[tokio::test]
     async fn un_changement_de_piste_reemet_depuis_le_cache() {
         let mut p = plugin_avec_disque_connu();
-        p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(0)) }).await;
+        p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(0)), ..Default::default() }).await;
         assert_eq!(p.next_enrichment().await.title.as_deref(), Some("So What"));
-        p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(2)) }).await;
+        p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(2)), ..Default::default() }).await;
         let e = p.next_enrichment().await;
         assert_eq!(e.title.as_deref(), Some("Blue in Green"));
         assert_eq!(e.identity, identite_disque(2));
@@ -268,8 +269,8 @@ mod tests {
     #[tokio::test]
     async fn larret_efface_lenrichissement_prepare() {
         let mut p = plugin_avec_disque_connu();
-        p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(0)) }).await;
-        p.now_playing(NowPlaying { source: "cd".into(), identity: None }).await;
+        p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(0)), ..Default::default() }).await;
+        p.now_playing(NowPlaying { source: "cd".into(), identity: None, ..Default::default() }).await;
         assert!(p.pret.is_none(), "un enrichissement perime ne doit pas partir apres l'arret");
         assert!(p.identite.is_none());
     }
@@ -280,6 +281,7 @@ mod tests {
         p.now_playing(NowPlaying {
             source: "radio".into(),
             identity: Some(json!({"kind": "stream", "url": "http://fip"})),
+            ..Default::default()
         })
         .await;
         assert!(p.pret.is_none());
@@ -291,7 +293,7 @@ mod tests {
         // Disque reconnu à 3 pistes, mais l'identité annonce la piste 7 : se
         // taire vaut mieux qu'annoncer le titre d'une autre piste.
         let mut p = plugin_avec_disque_connu();
-        p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(7)) }).await;
+        p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(7)), ..Default::default() }).await;
         assert!(p.pret.is_none());
     }
 
@@ -301,10 +303,10 @@ mod tests {
         // de piste suivants ne doivent pas relancer de requête.
         let mut p = MusicBrainzPlugin::new();
         p.connu = Some((TOC.to_string(), None));
-        p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(0)) }).await;
+        p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(0)), ..Default::default() }).await;
         assert!(p.pret.is_none());
         assert!(p.en_vol.is_none());
-        p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(1)) }).await;
+        p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(1)), ..Default::default() }).await;
         assert!(p.en_vol.is_none(), "un disque deja interroge ne doit pas l'etre a nouveau");
     }
 
@@ -314,6 +316,7 @@ mod tests {
         p.now_playing(NowPlaying {
             source: "cd".into(),
             identity: Some(json!({"kind": "disc", "toc": "n'importe quoi", "track": 0})),
+            ..Default::default()
         })
         .await;
         assert!(p.en_vol.is_none());
@@ -328,7 +331,7 @@ mod tests {
         // Interrogation déclarée « en vol » : `cherche` ne lancera donc aucune
         // requête réseau, et le résultat est injecté à la main ci-dessous.
         p.en_vol = Some(TOC.to_string());
-        p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(0)) }).await;
+        p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(0)), ..Default::default() }).await;
         p.trouve_tx
             .send(("42 1 2 3".to_string(), musicbrainz::parse_lookup(FIXTURE, 3)))
             .await

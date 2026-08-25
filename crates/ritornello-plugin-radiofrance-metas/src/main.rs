@@ -156,6 +156,7 @@ impl MetadataPlugin for RadioFranceMetas {
                             .as_secs();
                         maintenant.checked_sub(debut).and_then(|e| u32::try_from(e).ok())
                     }),
+                    ..Default::default()
                 };
             }
         }
@@ -214,7 +215,7 @@ mod tests {
     #[tokio::test]
     async fn un_releve_devient_un_enrichissement_avec_echo_de_lidentite() {
         let mut p = plugin_suivant(ID);
-        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)) }).await;
+        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)), ..Default::default() }).await;
         p.metas_tx
             .send((
                 ID,
@@ -244,7 +245,7 @@ mod tests {
         // Cas le plus courant : la grille a un morceau de retard. L'absence
         // d'album ne doit rien retenir du reste.
         let mut p = plugin_suivant(ID);
-        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)) }).await;
+        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)), ..Default::default() }).await;
         p.metas_tx
             .send((ID, Meta { title: Some("Fire".into()), ..Default::default() }))
             .await
@@ -260,6 +261,7 @@ mod tests {
         p.now_playing(NowPlaying {
             source: "radio".into(),
             identity: Some(identite_flux("https://ouifm3.ice.infomaniak.ch/ouifm3.mp3")),
+            ..Default::default()
         })
         .await;
         assert!(p.suivi.is_none(), "une interrogation laissee en route solliciterait un tiers pour rien");
@@ -269,7 +271,7 @@ mod tests {
     #[tokio::test]
     async fn larret_de_la_lecture_ferme_le_suivi() {
         let mut p = plugin_suivant(ID);
-        p.now_playing(NowPlaying { source: "radio".into(), identity: None }).await;
+        p.now_playing(NowPlaying { source: "radio".into(), identity: None, ..Default::default() }).await;
         assert!(p.suivi.is_none());
     }
 
@@ -279,6 +281,7 @@ mod tests {
         p.now_playing(NowPlaying {
             source: "cd".into(),
             identity: Some(json!({"kind": "disc", "toc": "3 150 22767 41887 63000", "track": 0})),
+            ..Default::default()
         })
         .await;
         assert!(p.suivi.is_none(), "ce plugin ne traite pas les disques");
@@ -298,7 +301,7 @@ mod tests {
         // raison même.
         let mut p = plugin_suivant(ID);
         let avant = p.suivi.as_ref().map(|(id, t)| (*id, t.id()));
-        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)) }).await;
+        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)), ..Default::default() }).await;
         let apres = p.suivi.as_ref().map(|(id, t)| (*id, t.id()));
         assert_eq!(avant, apres, "la meme tache doit continuer");
     }
@@ -306,7 +309,7 @@ mod tests {
     #[tokio::test]
     async fn un_releve_dune_station_quon_ne_suit_plus_est_ecarte() {
         let mut p = plugin_suivant(ID);
-        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)) }).await;
+        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)), ..Default::default() }).await;
         // Relevé en file au moment du changement de station.
         p.metas_tx
             .send((99, Meta { title: Some("ancien".into()), ..Default::default() }))
@@ -321,7 +324,7 @@ mod tests {
         // Cas dégénéré, atteignable si la table embarquée devenait vide : le
         // plugin doit rester muet, jamais deviner un identifiant.
         let mut p = RadioFranceMetas::new(Table::default());
-        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)) }).await;
+        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)), ..Default::default() }).await;
         assert!(p.suivi.is_none());
     }
 }

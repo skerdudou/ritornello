@@ -15,6 +15,15 @@ pub enum Event {
     /// un fichier. Le champ `origin` du morceau est déjà renseigné à
     /// l'extraction, l'événement porte donc un morceau prêt à afficher.
     FileTags(ritornello_proto::Morceau),
+    /// Chemin du fichier que mpv a réellement ouvert (propriété `path`).
+    ///
+    /// La seule façon dont le cœur apprend ce détail : il ne l'extrait jamais
+    /// de l'identité opaque de la Source, par principe (voir `OBSERVEES` dans
+    /// `player::mpv`). Sert uniquement à tenter l'extraction de la pochette
+    /// embarquée — un flux n'a pas de chemin exploitable, et mpv le republie
+    /// alors telle quelle (son URL), sans que cela porte à conséquence : la
+    /// tentative d'extraction s'arrête d'elle-même sur un schéma.
+    Path(String),
     // idle-active=false : la lecture a démarré
     PlaybackActive,
     PlaybackIdle,

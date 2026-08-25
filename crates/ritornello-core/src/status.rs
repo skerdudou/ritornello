@@ -100,6 +100,9 @@ pub struct AppState {
     /// three loose ones: every test constructor below would otherwise grow
     /// by three lines.
     pub system: Arc<crate::system::SystemInfo>,
+    /// Pochettes retenues, servies sur `/api/cover/{clé}`. Un `Arc` : la
+    /// tâche de téléchargement du cœur y insère, le routeur y lit.
+    pub covers: Arc<crate::cover::CoverCache>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -115,6 +118,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/system", get(crate::system::system_json))
         .route("/api/system/power", axum::routing::post(crate::system::power_post))
         .route("/api/command", axum::routing::post(command_post))
+        .route("/api/cover/:cle", get(crate::cover::cover_get))
         .route(
             "/plugins/:name/api/data",
             get(crate::admin::admin_get_data).put(crate::admin::admin_put_data),
@@ -674,6 +678,7 @@ pub(crate) mod tests_support {
             settings_tx: tokio::sync::mpsc::channel(4).0,
             player: player_inerte(),
             system: Default::default(),
+            covers: Arc::new(crate::cover::CoverCache::new()),
         }
     }
 
@@ -704,6 +709,7 @@ pub(crate) mod tests_support {
             settings_tx: tokio::sync::mpsc::channel(4).0,
             player: player_inerte(),
             system: Default::default(),
+            covers: Arc::new(crate::cover::CoverCache::new()),
         };
         (state, audio_rx)
     }
@@ -736,6 +742,7 @@ pub(crate) mod tests_support {
             settings_tx: tokio::sync::mpsc::channel(4).0,
             player: player_inerte(),
             system: Default::default(),
+            covers: Arc::new(crate::cover::CoverCache::new()),
         };
         (state, cmd_rx)
     }
@@ -776,6 +783,7 @@ pub(crate) mod tests_support {
             settings_tx: tokio::sync::mpsc::channel(4).0,
             player: player_inerte(),
             system: Default::default(),
+            covers: Arc::new(crate::cover::CoverCache::new()),
         };
         (state, locale_rx, dir)
     }

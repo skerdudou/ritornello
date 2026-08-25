@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use ritornello_proto::{
-    AdminReq, AdminRequest, AdminResponse, AdminResult, Enrichment, IdentityUpdate, InputMessage,
-    NowPlaying, PlayerState, SourceAction, SourceMessage, SourceReq, SourceRequest,
+    AdminReq, AdminRequest, AdminResponse, AdminResult, CoverRef, Enrichment, IdentityUpdate,
+    InputMessage, NowPlaying, PlayerState, SourceAction, SourceMessage, SourceReq, SourceRequest,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -37,6 +37,17 @@ pub struct SourceUpdate {
     /// courante. N'entre volontairement **pas** dans le prédicat ci-dessous
     /// qui décide si une trame vaut d'être relayée : voir la doc du champ.
     pub can_eject: Option<bool>,
+    /// Voir `SourceMessage::cover`. **Absent = rien déclaré, garder la valeur
+    /// courante** — même convention que `preset`/`preset_count` : une Source
+    /// ne répète pas la pochette sur chaque trame de statut qui suit, et
+    /// `Core::set_cover_de_source` ne doit donc être appelé que lorsque ce
+    /// champ vaut `Some`, jamais à chaque trame relayée. Envoyée seule, en
+    /// notification spontanée (`id: None`), sans identité ni statut : **entre**
+    /// dans le prédicat ci-dessous, sans quoi cette trame-là serait jetée en
+    /// silence — c'est précisément la forme sous laquelle une pochette arrive
+    /// (voir la doc de `SourceMessage::cover`, qui explique pourquoi elle
+    /// n'attend pas la réponse au `Play`).
+    pub cover: Option<CoverRef>,
 }
 
 pub struct SourceClient {
@@ -77,6 +88,11 @@ impl SourceClient {
                     || msg.preset_count.is_some()
                     || msg.preset_name.is_some()
                     || msg.status.is_some()
+                    // Une pochette arrive seule, en notification spontanée
+                    // (voir la doc de `SourceUpdate::cover`) : sans cette
+                    // entrée, une trame qui ne porterait qu'elle serait jetée
+                    // par ce garde avant même d'atteindre `SourceUpdate`.
+                    || msg.cover.is_some()
                 {
                     let porte_identite = msg.identity.is_some();
                     let update = SourceUpdate {
@@ -87,6 +103,7 @@ impl SourceClient {
                         preset_name: msg.preset_name,
                         status: msg.status,
                         can_eject: msg.can_eject,
+                        cover: msg.cover,
                     };
                     if update_tx.try_send((name.clone(), update)).is_err() {
                         // Un statut ou une présélection perdus sont réparés par
@@ -451,6 +468,7 @@ mod tests {
                 preset_name: Some("FIP".into()),
                 status: None,
                 can_eject: None,
+                cover: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             let _ = socket_for_server; // garde le chemin vivant pour le débogage
@@ -499,6 +517,7 @@ mod tests {
                 preset_name: None,
                 status: None,
                 can_eject: None,
+                cover: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -546,6 +565,7 @@ mod tests {
                 preset_name: None,
                 status: None,
                 can_eject: Some(true),
+                cover: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&nue).unwrap()).as_bytes()).await.unwrap();
             // Seconde requête : la même capacité, cette fois accompagnée d'un
@@ -562,6 +582,7 @@ mod tests {
                 preset_name: None,
                 status: Some("AUDIO CD".into()),
                 can_eject: Some(true),
+                cover: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&habillee).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -605,6 +626,7 @@ mod tests {
                 preset_name: Some("FIP".into()),
                 status: None,
                 can_eject: None,
+                cover: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -643,6 +665,7 @@ mod tests {
                 preset_name: None,
                 status: Some("PAS DE DISQUE".into()),
                 can_eject: None,
+                cover: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -654,6 +677,46 @@ mod tests {
         let (name, update) = update_rx.recv().await.unwrap();
         assert_eq!(name, "radio");
         assert_eq!(update.status.as_deref(), Some("PAS DE DISQUE"));
+    }
+
+    #[tokio::test]
+    async fn trame_seule_avec_la_pochette_est_relayee() {
+        // C'est exactement la forme sous laquelle une pochette arrive en
+        // vrai (voir la doc de `SourceMessage::cover`, Task 2) : une
+        // notification spontanée, plus tard que la réponse au `Play`, sans
+        // rien d'autre. Sans l'entrée ajoutée au prédicat, elle serait jetée
+        // en silence avant même d'atteindre `SourceUpdate`.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+            let msg = ritornello_proto::SourceMessage {
+                id: Some(req.id),
+                action: Some(SourceAction::Noop),
+                identity: None,
+                transient: false,
+                preset: None,
+                preset_count: None,
+                preset_name: None,
+                status: None,
+                can_eject: None,
+                cover: Some(CoverRef::Path { path: "/mnt/nas/Album/folder.jpg".into() }),
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "files".into(), update_tx).await.unwrap();
+        client.request(SourceReq::Activate).await.unwrap();
+        let (name, update) = update_rx.recv().await.unwrap();
+        assert_eq!(name, "files");
+        assert_eq!(update.cover, Some(CoverRef::Path { path: "/mnt/nas/Album/folder.jpg".into() }));
     }
 
     #[tokio::test]
@@ -679,6 +742,7 @@ mod tests {
                 preset_name: None,
                 status: None,
                 can_eject: None,
+                cover: None,
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -717,6 +781,7 @@ mod tests {
         let (np_tx, np_rx) = tokio::sync::watch::channel(NowPlaying {
             source: "radio".into(),
             identity: Some(serde_json::json!({"kind": "stream", "url": "http://soma"})),
+            ..Default::default()
         });
         let (enrich_tx, mut enrich_rx) = tokio::sync::mpsc::channel(8);
         tokio::spawn(async move {
@@ -750,6 +815,7 @@ mod tests {
         let (np_tx, np_rx) = tokio::sync::watch::channel(NowPlaying {
             source: "radio".into(),
             identity: Some(serde_json::json!({"url": "un"})),
+            ..Default::default()
         });
         let (enrich_tx, _enrich_rx) = tokio::sync::mpsc::channel(8);
         tokio::spawn(async move {
@@ -776,13 +842,19 @@ mod tests {
         let recues = attendre(&vues, 1).await;
         assert_eq!(recues.first().and_then(|np| np.identity.clone()), Some(serde_json::json!({"url": "un"})));
 
-        np_tx.send(NowPlaying { source: "radio".into(), identity: Some(serde_json::json!({"url": "deux"})) }).unwrap();
+        np_tx
+            .send(NowPlaying {
+                source: "radio".into(),
+                identity: Some(serde_json::json!({"url": "deux"})),
+                ..Default::default()
+            })
+            .unwrap();
         let recues = attendre(&vues, 2).await;
         assert_eq!(recues.get(1).and_then(|np| np.identity.clone()), Some(serde_json::json!({"url": "deux"})));
 
         // L'arrêt descend aussi : c'est le signal qui fait cesser le travail du
         // plugin (couper une connexion HTTP ouverte, oublier son cache).
-        np_tx.send(NowPlaying { source: "radio".into(), identity: None }).unwrap();
+        np_tx.send(NowPlaying { source: "radio".into(), identity: None, ..Default::default() }).unwrap();
         let recues = attendre(&vues, 3).await;
         assert_eq!(recues.len(), 3, "{recues:?}");
         assert_eq!(recues[2].identity, None);
