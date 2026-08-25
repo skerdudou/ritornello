@@ -1245,58 +1245,10 @@ impl<P: Player> Core<P> {
                 }
             }
             Command::SourceCycle => {
-                // Changer de source, c'est toujours changer de ce qui joue —
-                // et c'est le cœur qui arrête, sans dépendre des réponses des
-                // plugins. Avant, l'action renvoyée par `Deactivate` (le
-                // `Stop` du plugin radio) était ignorée, et l'arrêt reposait
-                // sur le `Play` de l'`Activate` suivant — que le cd sans
-                // disque ne renvoie pas (`Noop`) : l'ancien flux continuait
-                // de jouer sous un affichage qui annonçait la nouvelle
-                // source, titres ICY compris.
-                self.expecting_stream = false;
-                self.lecture = false;
-                self.player.stop().await?;
-                // L'ancienne source est prévenue en best-effort : son arrêt
-                // est déjà fait, elle n'a plus qu'à recaler son propre état.
-                if let Err(e) = self.demande_active(SourceReq::Deactivate).await {
-                    tracing::debug!("deactivate: {e}");
-                }
                 let idx = self.source_order.iter().position(|n| n == &self.active_source).unwrap_or(0);
                 let next_idx = (idx + 1) % self.source_order.len().max(1);
-                if let Some(next_name) = self.source_order.get(next_idx).cloned() {
-                    self.active_source = next_name;
-                }
-                // On l'acte ici sans attendre que la nouvelle Source le
-                // déclare : sinon une Source qui omettrait de le faire
-                // laisserait l'identité de l'autre en place, et les plugins
-                // `metadata` continueraient d'enrichir le morceau précédent.
-                self.set_identity(None);
-                // Le compte de présélections et le statut annoncés par
-                // l'ancienne Source ne veulent rien dire pour la nouvelle : les
-                // garder afficherait une fenêtre de numéros qui ne correspond à
-                // aucune présélection réelle, ou un statut (« PAS DE DISQUE »)
-                // sous le nom d'une source qui n'a encore rien dit — tant que
-                // la nouvelle Source n'a pas parlé (ce qui peut ne jamais
-                // arriver : une présélection vide déclare une trame éphémère,
-                // qui ne touche pas au statut mémorisé).
-                self.preset_count = None;
-                self.source_status = None;
-                // Idem pour l'éjection : la capacité décrit la Source qui
-                // s'en va. Sans cet effacement, quitter le cd pour la radio
-                // laissait la touche Eject active jusqu'à la première trame
-                // de la radio — et pour de bon si elle restait muette.
-                self.can_eject = false;
-                self.retry_count = 0;
-                // Persister **avant** `Activate` : si la nouvelle source ne
-                // répond pas (timeout de 5 s du SDK), l'état mémoire, l'état
-                // sur disque et l'affichage disent déjà tous la même chose —
-                // nouvelle source, rien ne joue. Sans cela, l'échec laissait
-                // la bascule à moitié faite : « cd » à l'écran, « radio »
-                // dans state.json.
-                self.persist();
-                if let Some(action) = self.demande_active(SourceReq::Activate).await? {
-                    self.apply(action).await?;
-                }
+                let suivante = self.source_order.get(next_idx).cloned();
+                self.bascule_source(suivante).await?;
             }
             Command::Plus10 => {
                 let next = self.pending_tens.saturating_add(10);
@@ -1438,6 +1390,17 @@ impl<P: Player> Core<P> {
         &self.active_source
     }
 
+    /// Langue courante, à transmettre au lancement d'un greffon rallumé.
+    ///
+    /// La langue est passée au processus via `RITORNELLO_LOCALE` : un greffon
+    /// rallumé sur un appareil en français doit la retrouver au démarrage,
+    /// sans attendre un `SetLocale` — le piège déjà rencontré avec `cd`, qui
+    /// réaffichait `NO DISC` faute de langue tant qu'aucun changement de
+    /// langue ne survenait après coup.
+    pub fn locale_courante(&self) -> Option<String> {
+        self.locale.clone()
+    }
+
     /// Ajoute une source découverte **après** le démarrage : un greffon qui a
     /// raté le rendez-vous, ou qu'on a relancé à la main. Renvoie `true` si
     /// c'est un remplacement (ré-annonce d'un greffon déjà câblé).
@@ -1466,6 +1429,116 @@ impl<P: Player> Core<P> {
             self.active_source = name;
         }
         remplacement
+    }
+
+    /// Bascule vers `suivante` (ou vers **aucune** source si `None`) : arrêt,
+    /// `Deactivate` de la sortante, oublis, persistance, `Activate` de l'entrante.
+    ///
+    /// Extraite de `Command::SourceCycle` et non recopiée : la désactivation d'un
+    /// greffon fait exactement la même chose, et deux versions de cette séquence
+    /// divergeraient au premier oubli ajouté d'un côté.
+    async fn bascule_source(&mut self, suivante: Option<String>) -> Result<()> {
+        // Changer de source, c'est toujours changer de ce qui joue — et c'est
+        // le cœur qui arrête, sans dépendre des réponses des plugins. Avant,
+        // l'action renvoyée par `Deactivate` (le `Stop` du plugin radio) était
+        // ignorée, et l'arrêt reposait sur le `Play` de l'`Activate` suivant —
+        // que le cd sans disque ne renvoie pas (`Noop`) : l'ancien flux
+        // continuait de jouer sous un affichage qui annonçait la nouvelle
+        // source, titres ICY compris.
+        self.expecting_stream = false;
+        self.lecture = false;
+        self.player.stop().await?;
+        // L'ancienne source est prévenue en best-effort : son arrêt est déjà
+        // fait, elle n'a plus qu'à recaler son propre état.
+        if let Err(e) = self.demande_active(SourceReq::Deactivate).await {
+            tracing::debug!("deactivate: {e}");
+        }
+        self.active_source = suivante.unwrap_or_default();
+        // On l'acte ici sans attendre que la nouvelle Source le déclare :
+        // sinon une Source qui omettrait de le faire laisserait l'identité de
+        // l'autre en place, et les plugins `metadata` continueraient
+        // d'enrichir le morceau précédent.
+        self.set_identity(None);
+        // Le compte de présélections et le statut annoncés par l'ancienne
+        // Source ne veulent rien dire pour la nouvelle : les garder
+        // afficherait une fenêtre de numéros qui ne correspond à aucune
+        // présélection réelle, ou un statut (« PAS DE DISQUE ») sous le nom
+        // d'une source qui n'a encore rien dit — tant que la nouvelle Source
+        // n'a pas parlé (ce qui peut ne jamais arriver : une présélection
+        // vide déclare une trame éphémère, qui ne touche pas au statut
+        // mémorisé).
+        self.preset_count = None;
+        self.source_status = None;
+        // Idem pour l'éjection : la capacité décrit la Source qui s'en va.
+        // Sans cet effacement, quitter le cd pour la radio laissait la touche
+        // Eject active jusqu'à la première trame de la radio — et pour de bon
+        // si elle restait muette.
+        self.can_eject = false;
+        self.retry_count = 0;
+        // Persister **avant** `Activate` : si la nouvelle source ne répond
+        // pas (timeout de 5 s du SDK), l'état mémoire, l'état sur disque et
+        // l'affichage disent déjà tous la même chose — nouvelle source, rien
+        // ne joue. Sans cela, l'échec laissait la bascule à moitié faite :
+        // « cd » à l'écran, « radio » dans state.json.
+        self.persist();
+        if let Some(action) = self.demande_active(SourceReq::Activate).await? {
+            self.apply(action).await?;
+        }
+        // La séquence n'est complète qu'une fois le nouvel état publié : tous
+        // les chemins ci-dessus (`set_identity`, `apply`) ne publient que
+        // lorsqu'ils changent quelque chose, et rien ne garantit qu'au moins
+        // un d'eux le fasse — désactiver l'unique source, ou la désactiver
+        // pendant qu'elle joue sans qu'une Source muette ne réponde à temps,
+        // n'en déclenche aucun. `handle_command` publie déjà après chaque
+        // commande, mais un appelant hors de ce chemin (le décâblage à chaud
+        // d'un greffon) laisserait sinon les afficheurs décrire une source qui
+        // n'existe plus. Le canal déduplique (`publie_etat`), donc cet appel
+        // ne coûte rien de plus sur le chemin `SourceCycle`.
+        self.publie_etat();
+        Ok(())
+    }
+
+    /// Retire une source décâblée — un greffon qu'on vient d'éteindre depuis
+    /// l'IHM. Rend `false` si ce nom n'était pas une source.
+    ///
+    /// Si c'était l'active, la **suivante du cycle** prend sa place, ou aucune
+    /// s'il n'en reste pas : `demande_active` tolère déjà l'absence de source, et
+    /// démarrer sans source est légitime depuis l'enregistrement à chaud.
+    ///
+    /// L'ordre est délicat : la bascule doit avoir lieu **avant** le retrait de la
+    /// table, parce que c'est elle qui envoie `Deactivate` à la source sortante —
+    /// retirée d'abord, elle ne recevrait rien et le greffon garderait son état
+    /// interne pour sa prochaine vie.
+    pub async fn remove_source(&mut self, name: &str) -> Result<bool> {
+        let Some(pos) = self.source_order.iter().position(|n| n == name) else {
+            return Ok(false);
+        };
+        if self.active_source == name {
+            let suivante = if self.source_order.len() > 1 {
+                Some(self.source_order[(pos + 1) % self.source_order.len()].clone())
+            } else {
+                None
+            };
+            // Pas de `?` : la bascule peut échouer (l'entrante ne répond pas à
+            // `Activate`, ou l'arrêt lui-même échoue), mais le retrait qui suit
+            // doit avoir lieu quand même. Un greffon qu'on éteint doit finir
+            // entièrement décâblé — jamais à moitié, avec un `SourceCycle` qui
+            // pourrait encore retomber sur un processus qui n'existe plus —
+            // c'est tout le principe d'un accusé qui ne décrit qu'un état déjà
+            // vrai.
+            if let Err(e) = self.bascule_source(suivante.clone()).await {
+                tracing::warn!("switching away from {name} while removing it: {e:#}");
+                // `bascule_source` pose `active_source` **avant** son étage qui
+                // peut échouer (`Activate`) mais **après** un `stop()` qui peut
+                // lui aussi échouer : selon l'étage en cause, `active_source`
+                // peut encore nommer la source qu'on est en train de retirer de
+                // la table. La reposer ici est sans risque dans les deux cas.
+                self.active_source = suivante.unwrap_or_default();
+            }
+        }
+        self.sources.remove(name);
+        self.source_order.remove(pos);
+        Ok(true)
     }
 
     /// Câble une source qui s'annonce **après** le démarrage. Renvoie `true`
@@ -1840,6 +1913,13 @@ mod tests {
     impl Source for FakeSource {
         async fn request(&self, req: SourceReq) -> Result<SourceAction> {
             self.calls.lock().unwrap().push(format!("{}:{:?}", self.name, req));
+            // Un nom réservé pour simuler un greffon qui ne répond plus :
+            // `remove_source` doit rester correct même quand la bascule vers
+            // l'entrante échoue, et c'est le seul moyen de le tester sans
+            // truquer `FakePlayer`.
+            if self.name == "casse" {
+                anyhow::bail!("plugin casse ne répond pas");
+            }
             Ok(match (self.name, req) {
                 ("radio", SourceReq::Activate) => SourceAction::play("http://fip"),
                 ("radio", SourceReq::Select(3)) => SourceAction::play("http://inter"),
@@ -2153,6 +2233,124 @@ mod tests {
         assert_eq!(core.active_source(), "radio");
         assert_eq!(core.source_order, vec!["cd".to_string(), "radio".into()]);
         drop(dir);
+    }
+
+    #[tokio::test]
+    async fn remove_source_bascule_sur_la_suivante() {
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        assert_eq!(core.active_source(), "radio");
+
+        assert!(core.remove_source("radio").await.unwrap());
+
+        assert_eq!(core.active_source(), "cd", "la suivante du cycle prend la place");
+        assert_eq!(core.source_order, vec!["cd".to_string()]);
+        let calls = source_calls.lock().unwrap();
+        assert!(
+            calls.iter().any(|c| c == "radio:Deactivate"),
+            "la sortante est prévenue avant de disparaître : {calls:?}"
+        );
+        assert!(calls.iter().any(|c| c == "cd:Activate"), "l'entrante est activée : {calls:?}");
+    }
+
+    #[tokio::test]
+    async fn desactiver_la_source_active_republie_letat_sans_les_reliquats_de_la_sortante() {
+        // Fix de revue finale : `bascule_source` est emprunté par
+        // `remove_source` (donc par la désactivation à chaud d'un greffon)
+        // en dehors de `handle_command`, seul endroit qui publiait jusqu'ici.
+        // Sans un `publie_etat` propre à `bascule_source`, la trame reçue par
+        // la SPA et les afficheurs continuait de nommer la source sortante,
+        // avec son compte de présélections, son statut et sa capacité
+        // d'éjection.
+        let (mut core, _pc, _sc, etat_rx, _d) = setup();
+        core.handle_source_update(
+            "radio",
+            SourceUpdate {
+                identity: Some(IdentityUpdate::Playing(serde_json::json!({"kind": "stream"}))),
+                transient: false,
+                preset: Some(3),
+                preset_count: Some(23),
+                preset_name: Some("France Inter".into()),
+                status: Some("EN DIRECT".into()),
+                can_eject: Some(true),
+                cover: None,
+            },
+        );
+        assert_eq!(etat_rx.borrow().source, "radio");
+        assert_eq!(etat_rx.borrow().preset_count, Some(23));
+        assert!(etat_rx.borrow().can_eject);
+
+        assert!(core.remove_source("radio").await.unwrap());
+
+        let etat = etat_rx.borrow();
+        assert_eq!(etat.source, "cd", "la trame doit nommer l'entrante, pas la sortante");
+        assert_eq!(etat.preset_count, None, "le compte de preselections de la sortante ne doit pas survivre");
+        assert_eq!(etat.status, None, "le statut de la sortante ne doit pas survivre");
+        assert!(!etat.can_eject, "la capacite d'ejection decrit la sortante, pas l'entrante");
+    }
+
+    #[tokio::test]
+    async fn remove_source_de_la_derniere_laisse_le_coeur_sans_source() {
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        assert!(core.remove_source("cd").await.unwrap());
+        assert!(core.remove_source("radio").await.unwrap());
+
+        // Aucune source est un état légitime : `demande_active` le tolère, et
+        // démarrer sans source est accepté depuis l'enregistrement à chaud.
+        assert_eq!(core.active_source(), "");
+        assert!(core.source_order.is_empty());
+        // Et une commande dans cet état ne panique pas.
+        core.handle_input(InputMessage::from(Command::Next)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remove_source_dune_source_inactive_ne_touche_pas_a_ce_qui_joue() {
+        let (mut core, player_calls, _sc, _rx, _d) = setup();
+
+        assert!(core.remove_source("cd").await.unwrap());
+
+        assert_eq!(core.active_source(), "radio");
+        assert_eq!(core.source_order, vec!["radio".to_string()]);
+        assert!(
+            !player_calls.lock().unwrap().iter().any(|c| c == "stop"),
+            "retirer une source inactive n'arrête pas ce qui joue"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_source_dun_nom_inconnu_est_un_non_evenement() {
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        assert!(!core.remove_source("jamais-vu").await.unwrap());
+        assert_eq!(core.active_source(), "radio");
+        assert_eq!(core.source_order, vec!["cd".to_string(), "radio".into()]);
+    }
+
+    #[tokio::test]
+    async fn remove_source_reste_complet_quand_lentrante_echoue_a_lactivation() {
+        // Retirer la source active bascule vers la suivante du cycle ; ici la
+        // suivante est "casse", dont `Activate` échoue systématiquement (voir
+        // `FakeSource::request`). Le retrait doit malgré tout être complet :
+        // un greffon qu'on éteint ne doit jamais rester à moitié câblé, avec
+        // un `SourceCycle` qui pourrait retomber sur un processus déjà tué.
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.add_source("casse".into(), Arc::new(FakeSource { name: "casse", calls: source_calls }));
+        assert_eq!(core.source_order, vec!["casse".to_string(), "cd".into(), "radio".into()]);
+        assert_eq!(core.active_source(), "radio");
+
+        assert!(
+            core.remove_source("radio").await.unwrap(),
+            "le retrait a bien lieu malgré l'échec de la bascule vers l'entrante"
+        );
+
+        assert!(
+            !core.sources.contains_key("radio"),
+            "la source tuée ne doit plus figurer dans la table, même si la bascule a échoué"
+        );
+        assert!(!core.source_order.contains(&"radio".to_string()));
+        assert_ne!(
+            core.active_source(),
+            "radio",
+            "le cœur ne doit plus nommer une source qu'il vient de retirer de sa table"
+        );
     }
 
     #[tokio::test]
