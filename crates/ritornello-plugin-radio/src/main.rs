@@ -15,7 +15,7 @@ use anyhow::Result;
 use config::Stations;
 use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::{Notification, Runtime, SourceOutcome, SourcePlugin};
-use ritornello_proto::SourceAction;
+use ritornello_proto::{Preset, SourceAction};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as AsyncRwLock;
@@ -150,6 +150,15 @@ impl SourcePlugin for RadioSource {
         *self.catalog.write().unwrap() = Catalog::load("radio", &locale, &self.locales_root, RADIO_EN);
     }
 
+    /// Les présélections nommées de la radio : ses stations, sous la
+    /// `AsyncRwLock` partagée avec la moitié Admin. Seule source à surcharger
+    /// cette méthode pour l'instant — le cd n'a pas de nom par nature, et la
+    /// liste des fichiers est déjà la file d'attente, pas un jeu de
+    /// présélections.
+    async fn list_presets(&mut self) -> Vec<Preset> {
+        self.stations.read().await.presets()
+    }
+
     /// Annonce spontanément le nouveau `preset_count` quand la moitié Admin
     /// vient d'enregistrer une table de stations — c'est ce qui met à jour la
     /// grille de la télécommande web sans attendre qu'une présélection soit
@@ -162,9 +171,16 @@ impl SourcePlugin for RadioSource {
     /// le flux qui continuait, et un redémarrage reprenait la mauvaise. Le flux
     /// est retrouvé par son URL, seule chose qui l'identifie durablement.
     ///
+    /// Elle republie aussi les présélections nommées (`presets`) : la table
+    /// venant d'être réenregistrée, c'est ce qui fait propager le renommage
+    /// d'une station sans qu'un client MPD ait à la redemander.
+    ///
     /// Ne porte **ni statut, ni identité, et jamais d'action** : la radio joue un
     /// flux unique, il n'y a rien à recharger, seulement à redire juste — et le
-    /// son n'est pas interrompu.
+    /// son n'est pas interrompu. `presets`, `preset`, `preset_name` et
+    /// `preset_count` sont des faits sur la source, pas un statut ou une
+    /// identité : c'est justement ce qui garde cette trame hors du garde
+    /// d'effacement décrit ci-dessous.
     ///
     /// Attention : `Core::handle_source_update` ne fusionne **pas** tout, contre
     /// ce que cette place affirmait. `preset`, `preset_name` et `preset_count`
@@ -187,6 +203,17 @@ impl SourcePlugin for RadioSource {
             Ok(()) => {
                 let n = *rx.borrow_and_update();
                 let mut avis = Notification::new().preset_count(n);
+                // Même chemin que `preset_count` : la table vient d'être
+                // remaniée (page d'admin), donc republier les présélections
+                // nommées à côté, pour qu'une station renommée se propage sans
+                // qu'on la redemande. Liste vide non déclarée : c'est le même
+                // énoncé que l'absence (voir `SourceOutcome::presets`), et une
+                // trame qui ne porte que ça ne doit pas prétendre un fait
+                // qu'elle n'a pas.
+                let presets = self.stations.read().await.presets();
+                if !presets.is_empty() {
+                    avis = avis.presets(presets);
+                }
                 // La table vient d'être remaniée : retrouver **où est passé** le
                 // flux qui joue, et corriger le numéro et le nom affichés.
                 //
@@ -286,6 +313,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ritornello_plugin_sdk::AdminPlugin;
 
     #[tokio::test]
     async fn empty_preset_utilise_le_catalogue_apres_set_locale() {
@@ -561,5 +589,65 @@ mod tests {
         )
         .await;
         assert!(resultat.is_err(), "poll_notification n'aurait jamais du se terminer");
+    }
+
+    #[tokio::test]
+    async fn list_presets_lit_la_table_sous_le_verrou_partage() {
+        // Vérifie le branchement de `SourcePlugin::list_presets` sur
+        // `Stations::presets` (déjà couvert par ses propres tests dans
+        // `config.rs`) : ici, c'est le passage par le verrou partagé qui est
+        // sous test, pas le tri.
+        let mut source = make_source(two_stations(), 1);
+        assert_eq!(
+            source.list_presets().await,
+            vec![
+                Preset { index: 1, name: "FIP".into() },
+                Preset { index: 2, name: "France Inter".into() },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn enregistrer_les_stations_propage_la_nouvelle_liste() {
+        // Même canal que `preset_count` (voir la doc de `poll_notification`) :
+        // l'admin et la source partagent la même table et le même canal, donc
+        // un enregistrement réussi doit faire apparaître la nouvelle liste
+        // nommée sans qu'un client la redemande.
+        let dir = tempfile::tempdir().unwrap();
+        let stations_shared = Arc::new(AsyncRwLock::new(one_station()));
+        let (tx, rx) = tokio::sync::watch::channel(0u8);
+
+        let mut admin = RadioAdmin {
+            stations_path: dir.path().join("stations.toml"),
+            state_path: dir.path().join("plugin-radio.json"),
+            stations: stations_shared.clone(),
+            catalog: Arc::new(RwLock::new(Catalog::load("radio", "en", dir.path(), RADIO_EN))),
+            directory: Arc::new(crate::directory::HttpDirectory::from_env()),
+            search: RwLock::new(Vec::new()),
+            countries: RwLock::new(Vec::new()),
+            preset_count_tx: tx,
+        };
+        let mut source = RadioSource {
+            state_path: dir.path().join("plugin-radio.json"),
+            stations: stations_shared,
+            preset: 1,
+            url_en_cours: None,
+            catalog: Arc::new(RwLock::new(Catalog::load("radio", "en", dir.path(), RADIO_EN))),
+            locales_root: dir.path().to_path_buf(),
+            preset_count_rx: Some(rx),
+        };
+
+        let nouveau = serde_json::json!({
+            "op": "save",
+            "stations": [{
+                "name": "FIP renommée",
+                "url": "http://icecast.radiofrance.fr/fip-midfi.mp3",
+                "preset": 1,
+            }]
+        });
+        admin.set_data(nouveau).await.expect("enregistrement valide");
+
+        let n = source.poll_notification().await.expect("notification attendue");
+        assert_eq!(n.presets, Some(vec![Preset { index: 1, name: "FIP renommée".into() }]));
     }
 }

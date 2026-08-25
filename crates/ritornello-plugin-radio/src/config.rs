@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use ritornello_i18n::Catalog;
+use ritornello_proto::Preset;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -133,6 +134,20 @@ impl Stations {
     pub fn preset_count(&self) -> u8 {
         self.stations.iter().map(|s| s.preset).max().unwrap_or(0)
     }
+
+    /// Les présélections nommées de la table, **triées par numéro**.
+    ///
+    /// La liste peut être creuse (stations 1, 5, 99 : `preset_count` en est le
+    /// maximum, pas la longueur, et les deux divergent légitimement). L'ordre
+    /// des positions MPD suit cette liste : un `stations.toml` édité à la main,
+    /// dont l'ordre de fichier ne coïncide pas avec les numéros, ne doit donc
+    /// pas produire une liste en désordre chez le client.
+    pub fn presets(&self) -> Vec<Preset> {
+        let mut v: Vec<Preset> =
+            self.stations.iter().map(|s| Preset { index: s.preset, name: s.name.clone() }).collect();
+        v.sort_by_key(|p| p.index);
+        v
+    }
 }
 
 #[cfg(test)]
@@ -234,6 +249,64 @@ mod tests {
         };
         assert_eq!(s.preset_count(), 9);
         assert_eq!(Stations::default().preset_count(), 0);
+    }
+
+    #[test]
+    fn les_stations_senumerent_avec_leurs_noms_et_leurs_numeros() {
+        let s: Stations = toml::from_str(
+            r#"
+                [[stations]]
+                name = "FIP"
+                url = "https://exemple/fip.mp3"
+                preset = 1
+                [[stations]]
+                name = "Nova"
+                url = "https://exemple/nova.mp3"
+                preset = 5
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.presets(),
+            vec![
+                Preset { index: 1, name: "FIP".into() },
+                Preset { index: 5, name: "Nova".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn lenumeration_est_triee_par_numero_pas_par_ordre_de_fichier() {
+        // Les positions MPD suivront cet ordre : un stations.toml édité à la
+        // main ne doit pas donner une liste en désordre chez le client. Le
+        // fichier ci-dessous déclare Nova (5) avant FIP (1) : si `presets()`
+        // se contentait de l'ordre de la table, la liste rendue commencerait
+        // par Nova.
+        let s: Stations = toml::from_str(
+            r#"
+                [[stations]]
+                name = "Nova"
+                url = "https://exemple/nova.mp3"
+                preset = 5
+                [[stations]]
+                name = "FIP"
+                url = "https://exemple/fip.mp3"
+                preset = 1
+                [[stations]]
+                name = "France Inter"
+                url = "https://exemple/inter.mp3"
+                preset = 3
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.presets(),
+            vec![
+                Preset { index: 1, name: "FIP".into() },
+                Preset { index: 3, name: "France Inter".into() },
+                Preset { index: 5, name: "Nova".into() },
+            ]
+        );
     }
 
     #[test]
