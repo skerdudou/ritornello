@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 
 /// La version annoncée dans la bannière.
 ///
@@ -35,6 +35,36 @@ use tokio::sync::mpsc;
 /// Le risque inverse (annoncer trop haut) est borné par `commands`, qui dit la
 /// vérité, et par les `ACK 5` du reste.
 const VERSION_ANNONCEE: &str = "0.23.5";
+
+/// Plafond de **sessions simultanées**.
+///
+/// Le multiplicateur de tout ce qui suit : chaque plafond ci-dessous borne une
+/// connexion, et rien ne bornait le nombre de connexions. Or le résidu réel
+/// d'une session peut atteindre une dizaine de mébioctets (voir `MAX_REPONSE`
+/// pour le calcul), donc cent sessions font le gigaoctet de l'appareil — la
+/// panne que tous ces plafonds existent pour éviter, atteinte par le seul
+/// chemin qu'ils laissaient ouvert.
+///
+/// **16, justifié par la population réelle** : un téléphone, un deuxième
+/// téléphone, `mpc` sur l'appareil, à la rigueur une tablette et un client de
+/// bureau — cinq au grand maximum, et les clients MPD n'ouvrent qu'une
+/// connexion chacun (une seconde parfois, pour tenir un `idle` à part). 16
+/// laisse donc trois fois la marge de tout usage légitime, tout en bornant le
+/// pire cas à un peu moins de 200 Mio là où il était sans borne.
+///
+/// **Et ce n'est pas une protection contre la seule malveillance** : un client
+/// qui fuit ses connexions — qui en rouvre une à chaque reprise de réseau sans
+/// fermer la précédente — y arrive par accident, et c'est même le cas le plus
+/// probable des deux. Le refus est alors ce qui garde l'appareil en vie pendant
+/// que ce client se comporte mal, et le journal nomme le plafond pour que la
+/// cause se lise sans deviner.
+///
+/// Un plafond et non une file d'attente : faire patienter une connexion
+/// derrière un plafond atteint garderait un descripteur ouvert et laisserait le
+/// client croire qu'il est servi. Refuser aussitôt lui dit la vérité, et c'est
+/// une réponse qu'un client sait interpréter — un serveur MPD injoignable est
+/// un état que tous savent afficher.
+const MAX_SESSIONS: usize = 16;
 
 /// Plafond de commandes accumulées dans une liste, avant `command_list_end`.
 ///
@@ -58,8 +88,18 @@ const MAX_COMMANDES_LISTE: usize = 2048;
 ///
 /// 256 Kio, soit 2048 commandes de 128 octets en moyenne : un `setvol 30` en
 /// pèse dix, et la plus longue commande réaliste — un nom entre guillemets — en
-/// pèse quelques centaines. Très au-dessus de ce qu'un client envoie, et un
-/// quart de mébioctet par connexion au pire.
+/// pèse quelques centaines. Très au-dessus de ce qu'un client envoie.
+///
+/// **Ce plafond compte des octets de texte, pas des octets de tas**, et l'écart
+/// n'est pas cosmétique : ce qui est accumulé est un `Vec<Vec<String>>`, et
+/// `decouper` alloue une chaîne **par jeton**. Une ligne légale de 8 Kio faite
+/// de `"a a a a …"` devient ainsi ~4096 `String` d'un caractère, chacune coûtant
+/// ses 24 octets de structure dans le `Vec` plus une allocation que l'allocateur
+/// arrondit — de l'ordre de 50 octets pour un caractère utile, soit un facteur
+/// proche de trente. 256 Kio comptés peuvent donc peser plusieurs mébioctets
+/// réels. Le plafond n'en reste pas moins un plafond ; c'est son unité qu'il ne
+/// faut pas confondre avec de la mémoire, et `MAX_SESSIONS` est ce qui borne le
+/// produit.
 const MAX_OCTETS_LISTE: usize = 256 * 1024;
 
 /// Plafond des **octets** d'une réponse, avant l'écriture.
@@ -75,10 +115,36 @@ const MAX_OCTETS_LISTE: usize = 256 * 1024;
 /// contre une mémoire fragmentée bien avant que le total ne soit atteint.
 ///
 /// 1 Mio : la plus longue réponse légitime est un `playlistinfo` complet — 255
-/// entrées de quatre lignes, une quinzaine de kibioctets en tout — et le
-/// plafond en laisse donc passer une soixantaine dans une seule liste. Vérifié **après chaque commande** du lot et non à chaque ligne :
-/// le dépassement est constaté à au plus une réponse de commande près, ce qui
-/// borne le tampon à 1 Mio plus ces quelques dizaines de kibioctets.
+/// entrées de quatre lignes, une quinzaine de kibioctets en tout, `preset_count`
+/// étant un `Option<u8>` — et le plafond en laisse donc passer une soixantaine
+/// dans une seule liste.
+///
+/// **Ce que ce plafond borne, et ce qu'il ne borne pas.** Il est vérifié après
+/// chaque commande du lot et non à chaque ligne, donc le dépassement est
+/// constaté à au plus une réponse de commande près (une quinzaine de
+/// kibioctets), et le bras `Issue::Annuler` empile son `list_OK` sans le
+/// vérifier du tout — borné par le compte de commandes, donc 2048 × 8 octets,
+/// soit 16 Kio. Le résidu au-delà du plafond est ainsi d'une trentaine de
+/// kibioctets, et non « une réponse de commande ».
+///
+/// **Deux multiplicateurs à connaître pour recalculer ce que coûte vraiment une
+/// session** — les énoncer vaut mieux que d'inscrire un nombre que le prochain
+/// changement démentira :
+///
+/// 1. **La copie simultanée.** `ecrire` met la réponse à plat dans une `String`
+///    dont il réserve la capacité exacte *pendant que* `Reponse.lignes` vit
+///    encore : le texte existe donc deux fois à cet instant. Le pic **compté**
+///    d'une session est ainsi ≈ 2 × 1 Mio (la réponse et sa copie) + 256 Kio
+///    (la liste accumulée) ≈ 2,3 Mio, et non 1,3.
+/// 2. **Octets de texte contre octets de tas.** Comme pour `MAX_OCTETS_LISTE`,
+///    ces plafonds comptent du texte alors que les structures tiennent des
+///    `String` : une réponse d'un mébioctet en lignes d'une vingtaine d'octets
+///    est ~40 000 `String`, soit le double en tas. Bout à bout, une session
+///    poussée à ses deux plafonds tient de l'ordre de **6 à 12 Mio réels**.
+///
+/// Le lever qui compte, si ce chiffre devenait gênant, est `MAX_OCTETS_LISTE`
+/// (le terme dominant, à cause du facteur trente des jetons d'un caractère), et
+/// non `MAX_SESSIONS` — mais c'est `MAX_SESSIONS` qui borne le produit.
 const MAX_REPONSE: usize = 1024 * 1024;
 
 /// Plafond d'une **ligne** de commande, en octets.
@@ -96,7 +162,15 @@ const MAX_REPONSE: usize = 1024 * 1024;
 /// de grandeur au-dessus de la plus longue ligne légitime du protocole — un nom
 /// de liste entre guillemets dans une liste de commandes, quelques centaines
 /// d'octets au pire. Très au-dessus du réel, très en dessous de ce qui coûte :
-/// même cent connexions simultanées ne réservent ainsi qu'un mégaoctet.
+/// un tampon de ligne par session, donc 128 Kio pour les `MAX_SESSIONS`
+/// autorisées.
+///
+/// (Cette doc a porté un temps la phrase « même cent connexions simultanées ne
+/// réservent ainsi qu'un mégaoctet ». Elle était vraie quand ce tampon était
+/// toute l'histoire, et elle est devenue fausse d'un facteur mille dès que la
+/// liste accumulée et la réponse composée ont eu leurs propres plafonds : le
+/// tampon de ligne n'est plus qu'un terme mineur du résidu d'une session. Voir
+/// `MAX_REPONSE` pour le calcul complet.)
 const MAX_LIGNE: usize = 8 * 1024;
 
 /// Le lecteur de lignes de la session : un `BufReader`, plus le plafond.
@@ -238,9 +312,24 @@ enum Suite {
 /// épuisé ou une connexion réinitialisée avant l'`accept` ne doit pas emporter
 /// le serveur, sinon le port reste ouvert dans un processus qui n'écoute plus.
 pub async fn accepter(ecoute: TcpListener, etat: Arc<EtatPartage>, cmd_tx: mpsc::Sender<InputMessage>) {
+    // Une place par session, rendue quoi qu'il arrive : le permis vit dans la
+    // tâche, donc il repart avec elle — y compris si elle panique, puisque c'est
+    // son `Drop` qui le rend. Un `Semaphore` plutôt qu'un compteur atomique pour
+    // exactement cette raison : un compteur demanderait de se souvenir de le
+    // décrémenter sur chaque chemin de sortie, et le jour où l'un serait oublié
+    // l'appareil refuserait tout le monde après seize connexions.
+    let places = Arc::new(Semaphore::new(MAX_SESSIONS));
     loop {
         match ecoute.accept().await {
             Ok((flux, adresse)) => {
+                // `try_acquire_owned` et non `acquire` : au-delà du plafond la
+                // connexion est **refusée**, pas mise en attente. Voir
+                // `MAX_SESSIONS`.
+                let Ok(place) = places.clone().try_acquire_owned() else {
+                    tracing::warn!("mpd refusing {adresse}: {MAX_SESSIONS} sessions already open");
+                    drop(flux);
+                    continue;
+                };
                 tracing::info!("mpd client connected from {adresse}");
                 let etat = etat.clone();
                 let cmd_tx = cmd_tx.clone();
@@ -253,6 +342,10 @@ pub async fn accepter(ecoute: TcpListener, etat: Arc<EtatPartage>, cmd_tx: mpsc:
                         Ok(()) => tracing::info!("mpd client {adresse} disconnected"),
                         Err(e) => tracing::info!("mpd session with {adresse} ended: {e}"),
                     }
+                    // Explicite, alors que la portée s'en chargerait : c'est la
+                    // ligne qui dit qu'une place se libère ici, et la chercher
+                    // dans une accolade fermante serait une devinette.
+                    drop(place);
                 });
             }
             Err(e) => {
@@ -446,6 +539,18 @@ async fn executer(
                 // trop longue, où fermer était le seul choix défendable puisqu'on
                 // ne pouvait même pas nommer la commande fautive. Ici on la
                 // nomme, et son rang avec elle.
+                //
+                // **Ce que le refus coûte, et qu'il faut dire** : les commandes
+                // `0..=indice` ont déjà poussé leur `InputMessage` et été actées
+                // optimistiquement, donc leurs effets sur l'appareil
+                // **subsistent** alors que leur sortie est jetée. Un client qui
+                // groupe `setvol 40` puis un gros `playlistinfo` verra donc le
+                // volume changer sans recevoir la moindre ligne. C'est
+                // exactement le compromis que MPD fait sur une erreur en milieu
+                // de liste — les commandes déjà exécutées le restent — et il est
+                // acceptable pour la même raison : défaire ce qui est parti vers
+                // le cœur n'est pas en notre pouvoir, et le client peut toujours
+                // relire l'état.
                 if sortie.trop_grande() {
                     tracing::warn!("mpd response over {MAX_REPONSE} bytes; refusing");
                     let nom = args.first().map_or("", String::as_str);
@@ -456,6 +561,12 @@ async fn executer(
             }
             // `noidle` reçu hors attente : `OK` sec, et dans une liste un
             // `list_OK` comme n'importe quelle commande sans lignes.
+            //
+            // Empilé **sans vérifier le plafond**, à la différence du bras
+            // ci-dessus : huit octets par commande, donc 16 Kio au pire pour un
+            // lot entier de `noidle`, ce que le compte de commandes borne déjà.
+            // C'est ce qui porte le résidu au-delà du plafond à une trentaine de
+            // kibioctets, et non à la seule réponse d'une commande.
             Issue::Annuler => {
                 if avec_ok {
                     sortie.pousser("list_OK".to_string());
@@ -1152,9 +1263,12 @@ mod tests {
     async fn une_liste_lourde_en_octets_est_refusee_bien_avant_le_compte() {
         // L'autre moitié du même trou : une ligne accumulée peut légitimement
         // peser `MAX_LIGNE`, donc 2048 commandes bornées **en nombre** pesaient
-        // 16 Mio par connexion. Ici trente-deux lignes de 8 Kio suffisent à
-        // franchir les 256 Kio, très loin des 2048 commandes — c'est donc bien
-        // la borne en octets qui refuse, et non celle en nombre.
+        // 16 Mio par connexion. Ici trente-deux lignes de 8 Kio tombent
+        // *exactement* sur les 256 Kio — le plafond refuse au-delà, pas à
+        // égalité — donc c'est la trente-troisième qui franchit, et la boucle en
+        // envoie une de plus pour cette raison. Trente-trois, c'est très loin
+        // des 2048 commandes : la borne qui refuse ici est bien celle en octets
+        // et non celle en nombre.
         let (s, _rx) = serveur().await;
         let mut c = s.client_pret().await;
         c.envoyer("command_list_begin").await;
@@ -1172,6 +1286,68 @@ mod tests {
         // L'état de liste est rendu : la commande suivante répond seule.
         c.envoyer("ping").await;
         assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn au_dela_du_plafond_de_sessions_une_connexion_est_refusee_aussitot() {
+        // Le multiplicateur : chaque autre plafond borne une connexion, et le
+        // nombre de connexions ne l'était pas. Un client qui fuit ses
+        // connexions — qui en rouvre une à chaque reprise de réseau sans fermer
+        // la précédente — arrive ici par accident, sans le moindre script
+        // hostile.
+        //
+        // Sans horloge, et l'ordre est garanti par la bannière : elle est
+        // écrite par `servir`, donc *après* la prise de la place. Avoir lu
+        // `MAX_SESSIONS` bannières prouve que les `MAX_SESSIONS` places sont
+        // prises, et la connexion suivante est donc bien celle qui déborde.
+        let (s, _rx) = serveur().await;
+        let mut ouverts = Vec::new();
+        for _ in 0..MAX_SESSIONS {
+            ouverts.push(s.client_pret().await);
+        }
+        // Celle de trop : acceptée par le noyau (le port écoute toujours), puis
+        // fermée aussitôt par `accepter`. Aucune bannière, donc fin de flux.
+        let mut refuse = s.client().await;
+        assert!(
+            refuse.lignes.next_line().await.unwrap().is_none(),
+            "au-dela du plafond, la connexion doit etre fermee sans banniere"
+        );
+        // Et les sessions déjà ouvertes servent encore : le plafond refuse les
+        // nouvelles, il ne dégrade pas les anciennes. La première et la
+        // dernière, parce qu'un plafond mal câblé casse volontiers l'une des
+        // deux extrémités.
+        for indice in [0, MAX_SESSIONS - 1] {
+            ouverts[indice].envoyer("ping").await;
+            assert_eq!(ouverts[indice].reponse().await, vec!["OK".to_string()]);
+        }
+    }
+
+    #[tokio::test]
+    async fn un_client_qui_part_rend_sa_place() {
+        // Le pendant indispensable : si le permis ne repartait pas avec la
+        // tâche, l'appareil refuserait tout le monde après seize connexions
+        // dans la vie du processus — une panne qui n'apparaîtrait qu'après des
+        // jours, et qui ressemblerait à un défaut de réseau.
+        //
+        // Sans horloge : la boucle réessaie jusqu'à ce que la place soit rendue,
+        // et rien ne l'arrête d'autre que ce succès. Elle est nécessaire parce
+        // que rien n'ordonne la fermeture du client avec le moment où la session
+        // serveur la constate ; une implémentation qui ne rendrait jamais la
+        // place fait *pendre* le test, ce qui est le mode d'échec voulu.
+        let (s, _rx) = serveur().await;
+        let mut ouverts = Vec::new();
+        for _ in 0..MAX_SESSIONS {
+            ouverts.push(s.client_pret().await);
+        }
+        // Le premier s'en va pour de bon : ses deux moitiés sont lâchées.
+        ouverts.remove(0);
+        let banniere = loop {
+            let mut candidat = s.client().await;
+            if let Some(ligne) = candidat.lignes.next_line().await.unwrap() {
+                break ligne;
+            }
+        };
+        assert!(banniere.starts_with("OK MPD "), "banniere inattendue: {banniere}");
     }
 
     #[tokio::test]
