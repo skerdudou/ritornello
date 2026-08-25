@@ -647,8 +647,11 @@ mod tests {
         //
         // Ce qui reste garanti, et c'est l'essentiel : ni identité, ni statut, ni
         // action. La piste en cours n'est ni interrompue ni redéclarée, seulement
-        // renumérotée ; le cœur fusionne champ par champ, donc ce qui n'est pas
-        // dit reste tel quel.
+        // renumérotée. Le cœur conserve bien `preset`, `preset_name` et
+        // `preset_count` absents — mais **pas** `status`, qu'il remplace, absence
+        // comprise (voir le commentaire de `poll_notification`) : c'est son retour
+        // anticipé, pour une trame qui ne déclare ni identité ni statut, qui rend
+        // cet avis inoffensif.
         let (tx, rx) = tokio::sync::watch::channel(0u8);
         let mut s = source_de_test(liste_de(3));
         s.preset_count_rx = Some(rx);

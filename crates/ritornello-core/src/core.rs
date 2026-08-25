@@ -3701,6 +3701,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn le_catalogue_porte_les_sources_du_demarrage_sans_attendre_une_preselection() {
+        // Les sources cablees au rendez-vous sont connues des la construction :
+        // c'est `Core::new` qui publie, et sans cette publication le canal
+        // garderait son `Catalogue::default()` vide. Un afficheur relaye avant la
+        // premiere preselection — donc avant tout changement — lirait alors
+        // « aucune source », et un client MPD repondrait un `listplaylists` vide.
+        //
+        // Assere la valeur **courante** du canal, celle que le relais envoie a la
+        // connexion, et non un changement : c'est exactement ce que voit un
+        // afficheur qui arrive.
+        let (core, _pc, _sc, _rx, _d) = setup();
+        let cat_rx = core.catalogue_tx.subscribe();
+        assert_eq!(
+            noms(&cat_rx.borrow()),
+            vec!["cd".to_string(), "radio".into()],
+            "le catalogue doit porter les sources du demarrage des la construction"
+        );
+    }
+
+    #[tokio::test]
+    async fn une_source_cablee_a_chaud_finit_avec_ses_preselections() {
+        // Le chemin complet du greffon qui a rate le rendez-vous : il entre dans
+        // le catalogue avec une liste vide, puis sa reponse a `ListPresets` — que
+        // le cablage a chaud demande desormais, comme le demarrage — la remplit.
+        //
+        // La source cablee en second n'est **pas** l'active, ce qui est le cas
+        // reel (une `radio` tardive pendant que le `cd` joue) : la liste doit donc
+        // franchir le garde de source active, et la publication doit remplacer la
+        // liste vide au lieu d'etre dedoublonnee.
+        let (mut core, _rx, dir) = setup_sans_source();
+        let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        core.cable_source_a_chaud("cd".into(), Arc::new(FakeSource { name: "cd", calls: calls.clone() }))
+            .await
+            .unwrap();
+        core.cable_source_a_chaud("radio".into(), Arc::new(FakeSource { name: "radio", calls }))
+            .await
+            .unwrap();
+        assert_eq!(core.active_source(), "cd", "la premiere cablee reste l'active");
+        let mut cat_rx = core.catalogue_tx.subscribe();
+        assert_eq!(noms(&cat_rx.borrow()), vec!["cd".to_string(), "radio".into()]);
+
+        core.handle_source_update("radio", avec_presets(vec![pres(1, "FIP"), pres(9, "OUI FM")]));
+        assert!(cat_rx.has_changed().unwrap(), "les afficheurs doivent l'apprendre");
+        let cat = cat_rx.borrow_and_update().clone();
+        let radio = cat.sources.iter().find(|s| s.name == "radio").expect("radio est declaree");
+        assert_eq!(radio.presets, vec![pres(1, "FIP"), pres(9, "OUI FM")]);
+        drop(dir);
+    }
+
+    #[tokio::test]
     async fn le_catalogue_ne_republie_pas_pour_une_liste_identique() {
         // Meme deduplication que l'etat : une source qui reannonce la meme liste
         // — la radio le fait a chaque enregistrement de sa page d'admin — ne doit

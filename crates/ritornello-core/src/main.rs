@@ -222,6 +222,10 @@ async fn cabler_a_chaud<P: player::Player>(
                     .await
                 {
                     Ok(client) => {
+                        // Cloné avant que `cable_source_a_chaud` ne le prenne :
+                        // la demande de catalogue ci-dessous s'adresse au même
+                        // client.
+                        let client_catalogue = client.clone();
                         // `cable_source_a_chaud` fait les trois choses que
                         // `add_source` seul ne fait pas : la langue courante
                         // (sinon un `cd` relancé à la main sur un appareil en
@@ -243,6 +247,29 @@ async fn cabler_a_chaud<P: player::Player>(
                             // de la télécommande repassera par le même chemin.
                             Err(e) => tracing::warn!("{nom} source wired, but waking it failed: {e:#}"),
                         }
+                        // Son catalogue, comme au démarrage et pour la même
+                        // raison : une tâche détachée, la réponse corrélée
+                        // (`Noop`) n'apprenant rien — les présélections
+                        // arrivent par le canal de mises à jour. Sans cela une
+                        // source annoncée en retard entrait dans le catalogue
+                        // avec une liste **définitivement vide**, personne ne
+                        // redemandant jamais ; et un greffon recâblé après que
+                        // sa configuration a changé pendant qu'il était mort
+                        // laissait le cœur sur l'ancienne liste.
+                        //
+                        // Détachée, donc : ce bras tourne dans la boucle
+                        // principale, et l'attendre y ajouterait les 5 s du
+                        // protocole des sources — la boucle ne traiterait plus
+                        // une touche de télécommande pendant ce temps.
+                        let nom_catalogue = nom.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = client_catalogue
+                                .request(ritornello_proto::SourceReq::ListPresets)
+                                .await
+                            {
+                                tracing::debug!("list_presets for {nom_catalogue}: {e}");
+                            }
+                        });
                         lignes.push(PluginStatus::genre(&nom, "source", true, annonce.admin));
                     }
                     Err(e) => {
@@ -635,27 +662,6 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Relais de l'état vers chaque afficheur connecté : le même canal qui
-    // alimente la route SSE de la SPA, chaque plugin composant lui-même sa
-    // mise en page depuis la trame reçue.
-    //
-    // **Une tâche par afficheur**, et non une tâche qui boucle sur N clients :
-    // c'est ce qui empêche un afficheur lent — console occupée, écran bloqué
-    // en I/O — de retarder les autres. La contre-pression reste cloisonnée par
-    // socket, ce qui était l'argument retenu pour ne pas fusionner les sockets
-    // des genres.
-    //
-    // Avant, cette variable était un `Option` : déclarer deux afficheurs ne
-    // produisait aucune erreur, mais le cœur ne gardait que le client du
-    // dernier déclaré et le premier attendait des lignes qui n'arrivaient
-    // jamais.
-    if display_clients.is_empty() {
-        tracing::warn!("no display plugin connected, continuing without display");
-    }
-    for (nom, display_client) in display_clients {
-        relais_afficheur(nom, display_client, etat_rx.clone(), catalogue_rx.clone());
-    }
-
     // Page de statut du cœur (plugins, source active, dernières erreurs, sortie audio).
     let status_state = Arc::new(RwLock::new(StatusState {
         plugins: plugin_statuses,
@@ -780,6 +786,34 @@ async fn main() -> Result<()> {
     // still configures mpv, so the first `Power` starts right.
     if let Err(e) = core.demarrage().await {
         tracing::warn!("startup wake: {e}");
+    }
+
+    // Relais de l'état vers chaque afficheur connecté : le même canal qui
+    // alimente la route SSE de la SPA, chaque plugin composant lui-même sa
+    // mise en page depuis la trame reçue.
+    //
+    // **Une tâche par afficheur**, et non une tâche qui boucle sur N clients :
+    // c'est ce qui empêche un afficheur lent — console occupée, écran bloqué
+    // en I/O — de retarder les autres. La contre-pression reste cloisonnée par
+    // socket, ce qui était l'argument retenu pour ne pas fusionner les sockets
+    // des genres.
+    //
+    // **Après `Core::new`**, et c'est voulu : c'est lui qui publie le premier
+    // catalogue. Spawnés avant, les relais envoyaient à chaque afficheur un
+    // `Catalogue` vide suivi du vrai — sans conséquence pour un afficheur qui
+    // dessine, mais un client MPD connecté dans cette fenêtre lisait un
+    // `listplaylists` vide et pouvait le mettre en cache. L'ordre supprime la
+    // fenêtre au lieu de la rattraper en aval.
+    //
+    // Avant, cette variable était un `Option` : déclarer deux afficheurs ne
+    // produisait aucune erreur, mais le cœur ne gardait que le client du
+    // dernier déclaré et le premier attendait des lignes qui n'arrivaient
+    // jamais.
+    if display_clients.is_empty() {
+        tracing::warn!("no display plugin connected, continuing without display");
+    }
+    for (nom, display_client) in display_clients {
+        relais_afficheur(nom, display_client, etat_rx.clone(), catalogue_rx.clone());
     }
 
     // Tout ce qu'il faut pour câbler un greffon qui parlera plus tard : les

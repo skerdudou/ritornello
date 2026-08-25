@@ -163,10 +163,19 @@ impl SourcePlugin for RadioSource {
     /// est retrouvé par son URL, seule chose qui l'identifie durablement.
     ///
     /// Ne porte **ni statut, ni identité, et jamais d'action** : la radio joue un
-    /// flux unique, il n'y a rien à recharger, seulement à redire juste.
-    /// `Core::handle_source_update` fusionne champ par champ, donc une trame
-    /// muette sur le reste ne touche à rien d'autre — et le son n'est pas
-    /// interrompu.
+    /// flux unique, il n'y a rien à recharger, seulement à redire juste — et le
+    /// son n'est pas interrompu.
+    ///
+    /// Attention : `Core::handle_source_update` ne fusionne **pas** tout, contre
+    /// ce que cette place affirmait. `preset`, `preset_name` et `preset_count`
+    /// sont bien conservés quand ils sont absents, mais `status` est *remplacé*
+    /// par ce que porte la trame, absence comprise (`if !update.transient {
+    /// self.source_status = update.status.clone(); }`) : c'est la seule
+    /// convention qui permette d'effacer un statut. Cet avis n'en efface pourtant
+    /// aucun, parce que le cœur rend la main **avant** ce traitement pour une
+    /// trame qui ne déclare ni identité ni statut. La radio ne déclarant jamais
+    /// de statut permanent, le défaut était invisible ici ; il était bien réel
+    /// dans `plugin-files`, qui en déclare un.
     async fn poll_notification(&mut self) -> Option<Notification> {
         let Some(rx) = &mut self.preset_count_rx else {
             // N'arrive qu'en test (voir le commentaire sur le champ) : `main()`
