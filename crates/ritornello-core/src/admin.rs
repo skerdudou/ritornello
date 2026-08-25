@@ -253,6 +253,11 @@ mod tests {
             settings_tx: tokio::sync::mpsc::channel(4).0,
             system: Default::default(),
             covers: Arc::new(crate::cover::CoverCache::new()),
+            greffons: Arc::new(crate::status::GreffonsControle {
+                manifeste: std::path::PathBuf::from("/nonexistent"),
+                noms: Vec::new(),
+                tx: tokio::sync::mpsc::channel(1).0,
+            }),
         }
     }
 

@@ -35,6 +35,14 @@ pub struct PluginStatus {
     pub admin: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stalled: bool,
+    /// Greffon éteint depuis l'IHM : aucun processus, aucun câblage, et le
+    /// manifeste porte `enabled = false`. La ligne reste affichée — sans elle,
+    /// on ne pourrait plus le rallumer.
+    ///
+    /// Additif comme `stalled` : absent du JSON quand il est faux, donc aucune
+    /// trame existante ne change.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
 }
 
 impl PluginStatus {
@@ -44,7 +52,14 @@ impl PluginStatus {
     /// dérivé sur cette structure pour la même raison — un statut sans nom ni
     /// genre ne veut rien dire.
     pub fn genre(name: &str, kind: &str, connected: bool, admin: bool) -> Self {
-        Self { name: name.to_string(), kind: kind.to_string(), connected, admin, stalled: false }
+        Self {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            connected,
+            admin,
+            stalled: false,
+            disabled: false,
+        }
     }
 
     /// Ligne d'un greffon qui n'a annoncé **aucun** genre : jamais lancé, mort
@@ -59,8 +74,50 @@ impl PluginStatus {
             connected: false,
             admin: false,
             stalled,
+            disabled: false,
         }
     }
+
+    /// Ligne d'un greffon éteint. Ni genre ni page d'admin : il n'a rien
+    /// annoncé et n'annoncera rien tant qu'il ne sera pas rallumé.
+    pub fn desactive(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            kind: "unknown".into(),
+            connected: false,
+            admin: false,
+            stalled: false,
+            disabled: true,
+        }
+    }
+}
+
+/// Ordre d'allumage ou d'extinction, de la couche HTTP vers la boucle du cœur.
+///
+/// L'accusé est un `oneshot` et non un simple envoi : la page attend une
+/// réponse qui décrive un état déjà vrai, sinon elle se rafraîchirait sur un
+/// état intermédiaire. `bool` et non `Result` : la seule chose que le cœur
+/// puisse rater est le lancement d'un binaire, dont la cause exacte part au
+/// journal — que l'IHM montre déjà — pendant que l'écran reçoit un message du
+/// catalogue.
+pub struct OrdreGreffon {
+    pub nom: String,
+    pub actif: bool,
+    pub ack: tokio::sync::oneshot::Sender<bool>,
+}
+
+/// Ce que la couche HTTP doit connaître des greffons pour les basculer.
+///
+/// Un seul champ d'`AppState` plutôt que trois, pour la raison déjà retenue
+/// pour `system` : chaque constructeur de test grossirait sinon de trois
+/// lignes.
+pub struct GreffonsControle {
+    /// Chemin de `plugins.toml` : c'est là qu'est écrit le choix.
+    pub manifeste: std::path::PathBuf,
+    /// Noms déclarés, dans l'ordre du fichier. Autorité sur ce qui peut être
+    /// basculé : un nom absent est refusé **avant** toute écriture.
+    pub noms: Vec<String>,
+    pub tx: mpsc::Sender<OrdreGreffon>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +160,9 @@ pub struct AppState {
     /// Pochettes retenues, servies sur `/api/cover/{clé}`. Un `Arc` : la
     /// tâche de téléchargement du cœur y insère, le routeur y lit.
     pub covers: Arc<crate::cover::CoverCache>,
+    /// Bascule actif/inactif des greffons : le manifeste à réécrire, les noms
+    /// acceptés, et l'oreille du cœur.
+    pub greffons: Arc<GreffonsControle>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -125,6 +185,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/plugins/:name/api/i18n", get(crate::admin::admin_i18n))
         .route("/plugins/:name/:fichier", get(crate::admin::admin_asset))
+        .route("/api/plugins/:name/enabled", axum::routing::put(plugin_enabled_put))
         .merge(crate::web::routes())
         .fallback(crate::web::shell)
         .with_state(state)
@@ -353,6 +414,51 @@ async fn settings_put(State(state): State<AppState>, Json(req): Json<crate::stat
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct PluginEnabledReq {
+    enabled: bool,
+}
+
+/// Bascule un greffon, **persistance d'abord**.
+///
+/// L'ordre des trois étapes est le fond de l'affaire : un nom refusé
+/// n'écrit rien, une écriture qui échoue ne tue aucun processus, et le cœur
+/// n'est prévenu que d'un choix déjà sur le disque. Un greffon éteint dont
+/// l'extinction n'aurait pas été écrite reviendrait au prochain démarrage —
+/// un mensonge silencieux, pire qu'un refus franc.
+async fn plugin_enabled_put(
+    State(state): State<AppState>,
+    axum::extract::Path(nom): axum::extract::Path<String>,
+    Json(req): Json<PluginEnabledReq>,
+) -> Response {
+    if !state.greffons.noms.iter().any(|n| n == &nom) {
+        let msg = state.catalog.read().await.get("plugin_unknown").replace("{name}", &nom);
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": msg })))
+            .into_response();
+    }
+    if let Err(e) = crate::plugins::set_enabled(&state.greffons.manifeste, &nom, req.enabled) {
+        tracing::warn!("persisting the enabled flag of {nom}: {e:#}");
+        let msg = state.catalog.read().await.get("plugin_persist_failed").replace("{name}", &nom);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": msg })))
+            .into_response();
+    }
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    let ordre = OrdreGreffon { nom: nom.clone(), actif: req.enabled, ack: ack_tx };
+    if state.greffons.tx.send(ordre).await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    match ack_rx.await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        // Le cœur a refusé (binaire introuvable au rallumage) ou n'a pas
+        // répondu. La cause exacte est au journal, que l'IHM montre déjà.
+        _ => {
+            let msg = state.catalog.read().await.get("plugin_action_failed").replace("{name}", &nom);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": msg })))
+                .into_response()
+        }
+    }
 }
 
 /// Noms de langues disponibles à partir des noms de fichiers d'un répertoire
@@ -679,6 +785,11 @@ pub(crate) mod tests_support {
             player: player_inerte(),
             system: Default::default(),
             covers: Arc::new(crate::cover::CoverCache::new()),
+            greffons: Arc::new(GreffonsControle {
+                manifeste: std::path::PathBuf::from("/nonexistent"),
+                noms: Vec::new(),
+                tx: tokio::sync::mpsc::channel(1).0,
+            }),
         }
     }
 
@@ -710,6 +821,11 @@ pub(crate) mod tests_support {
             player: player_inerte(),
             system: Default::default(),
             covers: Arc::new(crate::cover::CoverCache::new()),
+            greffons: Arc::new(GreffonsControle {
+                manifeste: std::path::PathBuf::from("/nonexistent"),
+                noms: Vec::new(),
+                tx: tokio::sync::mpsc::channel(1).0,
+            }),
         };
         (state, audio_rx)
     }
@@ -743,6 +859,11 @@ pub(crate) mod tests_support {
             player: player_inerte(),
             system: Default::default(),
             covers: Arc::new(crate::cover::CoverCache::new()),
+            greffons: Arc::new(GreffonsControle {
+                manifeste: std::path::PathBuf::from("/nonexistent"),
+                noms: Vec::new(),
+                tx: tokio::sync::mpsc::channel(1).0,
+            }),
         };
         (state, cmd_rx)
     }
@@ -784,6 +905,11 @@ pub(crate) mod tests_support {
             player: player_inerte(),
             system: Default::default(),
             covers: Arc::new(crate::cover::CoverCache::new()),
+            greffons: Arc::new(GreffonsControle {
+                manifeste: std::path::PathBuf::from("/nonexistent"),
+                noms: Vec::new(),
+                tx: tokio::sync::mpsc::channel(1).0,
+            }),
         };
         (state, locale_rx, dir)
     }
@@ -797,6 +923,145 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
     use tower::util::ServiceExt;
+
+    /// Montage avec un vrai `plugins.toml` temporaire et l'oreille du cœur
+    /// conservée : les deux choses que la route touche.
+    fn app_state_avec_greffons(
+    ) -> (AppState, tempfile::TempDir, tokio::sync::mpsc::Receiver<OrdreGreffon>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins.toml");
+        std::fs::write(
+            &path,
+            "[[plugin]]\nname = \"radio\"\nexec = \"/bin/true\"\n\n\
+             [[plugin]]\nname = \"cd\"\nexec = \"/bin/true\"\n",
+        )
+        .unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let state = AppState {
+            greffons: Arc::new(GreffonsControle {
+                manifeste: path,
+                noms: vec!["radio".into(), "cd".into()],
+                tx,
+            }),
+            ..app_state()
+        };
+        (state, dir, rx)
+    }
+
+    #[tokio::test]
+    async fn eteindre_persiste_puis_previent_le_coeur() {
+        let (state, dir, mut rx) = app_state_avec_greffons();
+        let app = router(state.clone());
+        // Le cœur : il accuse réception, comme la boucle principale.
+        let coeur = tokio::spawn(async move {
+            let ordre = rx.recv().await.unwrap();
+            assert_eq!(ordre.nom, "cd");
+            assert!(!ordre.actif);
+            let _ = ordre.ack.send(true);
+        });
+
+        let resp = app
+            .oneshot(
+                Request::put("/api/plugins/cd/enabled")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        coeur.await.unwrap();
+        let apres = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
+        assert!(apres.contains("enabled = false"), "{apres}");
+    }
+
+    #[tokio::test]
+    async fn un_refus_explicite_du_coeur_renvoie_500_avec_un_message_du_catalogue() {
+        // Rallumage sans binaire au chemin `exec` : le cœur répond `false`,
+        // pas un canal fermé. Le seul branchement d'`ack_rx` qui restait non
+        // couvert.
+        let (state, _dir, mut rx) = app_state_avec_greffons();
+        let app = router(state);
+        let coeur = tokio::spawn(async move {
+            let ordre = rx.recv().await.unwrap();
+            let _ = ordre.ack.send(false);
+        });
+
+        let resp = app
+            .oneshot(
+                Request::put("/api/plugins/radio/enabled")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        coeur.await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // Un message du catalogue, jamais une clé brute.
+        assert!(v["error"].as_str().unwrap().contains("radio"));
+    }
+
+    #[tokio::test]
+    async fn un_nom_non_declare_est_refuse_sans_rien_ecrire() {
+        let (state, dir, _rx) = app_state_avec_greffons();
+        let avant = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::put("/api/plugins/jamais-vu/enabled")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // Un message, jamais une clé de catalogue.
+        assert!(v["error"].as_str().unwrap().contains("jamais-vu"));
+        assert_eq!(std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap(), avant);
+    }
+
+    #[tokio::test]
+    async fn une_persistance_impossible_ne_touche_pas_au_runtime() {
+        let (mut state, dir, mut rx) = app_state_avec_greffons();
+        // Manifeste introuvable : l'écriture échouera.
+        state.greffons = Arc::new(GreffonsControle {
+            manifeste: dir.path().join("absent.toml"),
+            noms: vec!["radio".into()],
+            tx: state.greffons.tx.clone(),
+        });
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::put("/api/plugins/radio/enabled")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        // Rien n'a été demandé au cœur : un greffon tué dont l'extinction n'est
+        // pas persistée reviendrait au prochain démarrage.
+        assert!(rx.try_recv().is_err());
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // Un message du catalogue, jamais une clé brute : sans cette
+        // assertion, une faute de frappe dans `plugin_persist_failed`
+        // laisserait passer la suite verte avec une clé crue à l'écran.
+        assert!(v["error"].as_str().unwrap().contains("radio"));
+    }
 
     /// Aucune clé de refus ne peut atteindre l'écran telle quelle.
     ///
@@ -1305,6 +1570,25 @@ mod tests {
         let ligne = &st.plugins[0];
         assert!(!ligne.connected);
         assert!(!ligne.stalled, "un processus dont on a vu la sortie n'est plus fige");
+    }
+
+    #[test]
+    fn une_ligne_desactivee_ne_promet_rien() {
+        let l = PluginStatus::desactive("cd");
+        assert!(l.disabled);
+        assert!(!l.connected, "aucun processus : rien n'est joint");
+        assert!(!l.stalled, "il ne se tait pas, il n'existe pas");
+        assert!(!l.admin, "pas de page d'admin à atteindre");
+        assert_eq!(l.kind, "unknown");
+    }
+
+    #[test]
+    fn disabled_est_omis_quand_il_est_faux() {
+        // Idiome de `stalled` : aucune trame existante ne change de forme.
+        let json = serde_json::to_string(&PluginStatus::genre("radio", "source", true, false)).unwrap();
+        assert!(!json.contains("disabled"), "{json}");
+        let json = serde_json::to_string(&PluginStatus::desactive("cd")).unwrap();
+        assert!(json.contains("\"disabled\":true"), "{json}");
     }
 
     #[test]

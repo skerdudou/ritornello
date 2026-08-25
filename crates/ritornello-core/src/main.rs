@@ -91,6 +91,62 @@ fn relais_afficheur(
     });
 }
 
+/// Ce qu'une future de supervision rend : nom, génération, statut de sortie,
+/// et si la mort avait été demandée.
+///
+/// Boxée, donc **nommée** : le démarrage et le rallumage poussent tous deux
+/// dans le même `FuturesUnordered`, et deux fonctions rendant chacune un
+/// `impl Future` rendent deux types opaques distincts, qu'aucune collection
+/// n'accepte ensemble. Une allocation par lancement de greffon, huit au
+/// démarrage.
+type SortieGreffon =
+    futures::future::BoxFuture<'static, (String, u64, std::io::Result<std::process::ExitStatus>, bool)>;
+
+/// Surveille un greffon jusqu'à sa mort, qu'elle soit subie ou demandée.
+///
+/// Une fonction, et non un `async move` recopié aux deux endroits qui lancent
+/// un greffon (démarrage et rallumage) : c'est le seul endroit qui sait que
+/// `kill_rx` veut dire « termine-le ».
+///
+/// Le `select!` ne fait que **choisir** — aucun de ses bras ne touche à
+/// `child` — pour que l'emprunt mutable des futures soit rendu avant le
+/// `termine` qui suit. Rappeler `wait()` après coup est sans risque : tokio
+/// mémorise le statut du processus déjà moissonné.
+///
+/// Rend `(nom, génération, statut, voulue)`. La génération est ce qui permet à
+/// la boucle principale d'ignorer la mort d'une incarnation précédente,
+/// arrivée après le rallumage de la suivante.
+fn supervise(
+    nom: String,
+    generation: u64,
+    child: tokio::process::Child,
+    kill_rx: tokio::sync::oneshot::Receiver<()>,
+) -> SortieGreffon {
+    use futures::FutureExt;
+    async move {
+        let mut child = child;
+        // `r.is_ok()` et non `_` : seul un envoi réel veut dire « demandée ».
+        // Un `kill_rx` dont l'émetteur a été abandonné rend aussi `Err`, ce
+        // qui arrive quand deux entrées de `plugins.toml` partagent le même
+        // `name` — toléré à dessein par le chargeur de manifeste — et que le
+        // second `kill_triggers.insert` écrase le `kill_tx` du premier :
+        // sans ce test, la mort naturelle du premier serait prise pour une
+        // extinction demandée, `termine` enverrait `SIGTERM` à un processus
+        // sain, et `mark_plugin_disconnected` ne serait jamais appelé.
+        let voulue = tokio::select! {
+            r = kill_rx => r.is_ok(),
+            _ = child.wait() => false,
+        };
+        let statut = if voulue {
+            plugins::termine(&mut child, plugins::GRACE_ARRET).await
+        } else {
+            child.wait().await
+        };
+        (nom, generation, statut, voulue)
+    }
+    .boxed()
+}
+
 /// Les fils que le câblage à chaud doit tenir pour rejouer, après le
 /// démarrage, ce que la boucle de câblage initiale fait avec ses variables
 /// locales.
@@ -316,6 +372,96 @@ pub(crate) fn assemble_covers_et_core<P: player::Player>(
     (app_state, coeur)
 }
 
+/// Éteint un greffon : on demande sa mort, puis on retire **tout** ce que le
+/// cœur tenait de lui.
+///
+/// Le décâblage est fait ici et non au retour de sa mort : la page attend une
+/// réponse, et elle doit décrire un état déjà vrai. Le processus, lui, meurt à
+/// son rythme — au pire deux secondes plus tard, `SIGKILL` en main — et sa
+/// sortie ne fera plus que produire une ligne de journal.
+///
+/// Les afficheurs et les entrées n'ont rien d'explicite à retirer : leurs
+/// relais sortent de boucle au premier échec d'envoi ou sur EOF, ce que la
+/// mort du socket provoque.
+async fn eteindre_a_chaud<P: player::Player>(
+    nom: &str,
+    fils: &FilsChaud,
+    core: &mut core::Core<P>,
+    rassemble: &mut register::Gathered,
+    kill_triggers: &mut HashMap<String, tokio::sync::oneshot::Sender<()>>,
+) {
+    tracing::info!("disabling plugin {nom}: killing it and unwiring everything it served");
+    if let Some(tx) = kill_triggers.remove(nom) {
+        // Le récepteur est dans la future de supervision : une erreur
+        // d'envoi voudrait dire qu'elle est déjà finie, donc que le processus
+        // est déjà mort. Rien à rattraper.
+        let _ = tx.send(());
+    }
+    if let Err(e) = core.remove_source(nom).await {
+        tracing::warn!("unwiring source {nom}: {e:#}");
+    }
+    // Le nom sort du rassemblement, puis l'ordre d'arbitrage est recalculé en
+    // **entier** depuis le manifeste — le chemin qu'emprunte déjà toute
+    // annonce tardive, et la seule façon qu'un greffon rallumé retrouve sa
+    // priorité de fichier.
+    rassemble.announcements.remove(nom);
+    rassemble.figes.retain(|n| n != nom);
+    rassemble.morts.retain(|n| n != nom);
+    core.set_metadata_order(register::metadata_order(&fils.ordre_manifeste, rassemble));
+    // Retiré, sinon `/plugins/<nom>/` attendrait les 5 s du protocole d'admin
+    // — sériel, donc en retenant la page — pour finir en erreur, là où un 404
+    // franc dit tout de suite qu'il n'y a rien à cette adresse.
+    fils.admin_backends.write().await.remove(nom);
+    let mut statuts = fils.status_state.write().await;
+    status::replace_plugin_lines(&mut statuts, nom, vec![PluginStatus::desactive(nom)], false);
+    statuts.active_source = core.active_source().to_string();
+}
+
+/// Rallume un greffon : on relance son binaire, et c'est tout.
+///
+/// Le câblage n'est **pas** fait ici : le greffon va s'annoncer sur le socket
+/// d'enregistrement, que le cœur tient ouvert pour la vie du processus, et
+/// `cabler_a_chaud` fera le reste. C'est le chemin d'un greffon relancé à la
+/// main, déjà éprouvé.
+///
+/// D'ici là, la ligne dit « figé » : lancé, pas encore annoncé. C'est
+/// exactement ce que le mot veut dire, et la page n'a pas besoin d'un
+/// quatrième état pour une poignée de secondes.
+///
+/// Rend `false` si le binaire n'a pas pu être lancé — le chemin d'`exec` a
+/// changé, le fichier n'est plus exécutable. La cause précise part au journal,
+/// que l'IHM affiche déjà dans sa popin d'erreurs.
+async fn rallume(
+    nom: &str,
+    exec: &str,
+    generation: u64,
+    fils: &FilsChaud,
+    register_path: &Path,
+    locale: Option<&str>,
+    kill_triggers: &mut HashMap<String, tokio::sync::oneshot::Sender<()>>,
+) -> Option<SortieGreffon> {
+    let prefix = fils.sockets_dir.join(nom);
+    match plugins::spawn(exec, register_path, nom, &prefix, locale) {
+        Ok(child) => {
+            tracing::info!("plugin {nom} re-enabled, launched again");
+            let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
+            kill_triggers.insert(nom.to_string(), kill_tx);
+            let mut statuts = fils.status_state.write().await;
+            status::replace_plugin_lines(
+                &mut statuts,
+                nom,
+                vec![PluginStatus::genre_inconnu(nom, true)],
+                false,
+            );
+            Some(supervise(nom.to_string(), generation, child, kill_rx))
+        }
+        Err(e) => {
+            tracing::warn!("failed to launch plugin {nom}: {e:#}");
+            None
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // 500 et non 50 : l'IHM a désormais une popin qui liste tout le tampon
@@ -389,6 +535,7 @@ async fn main() -> Result<()> {
     let (locale_tx, mut locale_rx) = mpsc::channel::<String>(4);
     let (theme_tx, mut theme_rx) = mpsc::channel::<theme::ThemeState>(4);
     let (settings_tx, mut settings_rx) = mpsc::channel::<state::Settings>(4);
+    let (greffon_tx, mut greffon_rx) = mpsc::channel::<status::OrdreGreffon>(4);
 
     // mpv. Les deux durées de tampon sont réglables sans recompiler : la bonne
     // valeur dépend du réseau et de la charge de la machine, pas du code.
@@ -408,11 +555,41 @@ async fn main() -> Result<()> {
     let register_listener = tokio::net::UnixListener::bind(&register_path)
         .with_context(|| format!("binding {}", register_path.display()))?;
 
-    let mut plugin_waits = FuturesUnordered::new();
+    let mut plugin_waits: FuturesUnordered<SortieGreffon> = FuturesUnordered::new();
     let mut lances: Vec<String> = Vec::new();
     let mut plugin_statuses = Vec::new();
+    // Déclencheurs d'extinction, un par lancement : c'est la seule prise sur
+    // un `Child` déplacé dans sa future de supervision. L'invariant visé —
+    // une entrée vit exactement le temps d'un processus lancé et non encore
+    // moissonné — est tenu par **trois** points de purge, pas un seul : le
+    // bras `plugin_waits.next()` la retire dès qu'une mort qu'il traite
+    // concerne l'incarnation courante (génération qui correspond, une mort
+    // périmée n'y touche pas, l'entrée appartenant déjà au processus
+    // relancé) ; le nettoyage juste après le rendez-vous de démarrage
+    // (`rassemble.morts`) la retire pour les greffons morts *pendant* ce
+    // rendez-vous, dont `plugin_waits` ne reverra jamais la mort — voir
+    // `gather` et le commentaire de `cabler_a_chaud` sur les annonces
+    // tardives ; et `eteindre_a_chaud` la retire elle-même dès l'extinction
+    // demandée depuis l'IHM, sans attendre que le processus tué soit
+    // effectivement moissonné. Envoyer malgré tout à une supervision déjà
+    // terminée échoue simplement, sans effet : c'est pour cela que le
+    // résultat de l'envoi est ignoré partout où on l'utilise.
+    let mut kill_triggers: HashMap<String, tokio::sync::oneshot::Sender<()>> = HashMap::new();
+    // Génération de lancement, par nom. Éteindre puis rallumer aussitôt fait
+    // arriver la mort de l'**ancien** processus après le câblage du nouveau :
+    // sans ce compteur, cette mort effacerait des lignes de statut qui
+    // décrivent déjà le nouveau. Voir le bras `plugin_waits.next()`.
+    let mut generations: HashMap<String, u64> = HashMap::new();
 
     for p in &manifest.plugins {
+        generations.insert(p.name.clone(), 0);
+        if !p.enabled {
+            // Éteint : on ne lance rien, mais la ligne reste — sans elle, la
+            // page ne le montrerait plus et il serait irrécupérable.
+            tracing::info!("plugin {} is disabled, not launching it", p.name);
+            plugin_statuses.push(PluginStatus::desactive(&p.name));
+            continue;
+        }
         let prefix = sockets_dir.join(&p.name);
         match plugins::spawn(
             &p.exec,
@@ -422,12 +599,9 @@ async fn main() -> Result<()> {
             persisted.locale.as_deref(),
         ) {
             Ok(child) => {
-                let wname = p.name.clone();
-                plugin_waits.push(async move {
-                    let mut child = child;
-                    let status = child.wait().await;
-                    (wname, status)
-                });
+                let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
+                kill_triggers.insert(p.name.clone(), kill_tx);
+                plugin_waits.push(supervise(p.name.clone(), 0, child, kill_rx));
                 lances.push(p.name.clone());
             }
             Err(e) => {
@@ -457,12 +631,25 @@ async fn main() -> Result<()> {
     let mut rassemble = register::gather(
         &register_listener,
         &lances,
-        (&mut plugin_waits).map(|(nom, _statut)| nom),
+        (&mut plugin_waits).map(|(nom, _gen, _statut, _voulue)| nom),
         std::time::Duration::from_secs(10),
         &tardives_tx,
         &mut tardives_rx,
     )
     .await;
+
+    // Les morts de ce rassemblement ont été consommées directement sur
+    // `plugin_waits` par `gather` (voir sa doc, et le commentaire de
+    // `cabler_a_chaud` sur les annonces tardives) : la boucle principale ne
+    // les reverra donc jamais sur son bras `plugin_waits.next()`, qui est
+    // l'un des deux autres endroits purgeant `kill_triggers` (le troisième
+    // étant `eteindre_a_chaud`). Sans ce nettoyage-ci, un greffon mort
+    // *pendant* le rendez-vous laisserait une entrée périmée, et un allumage
+    // ultérieur la prendrait pour un processus vivant sans jamais relancer le
+    // binaire.
+    for nom in &rassemble.morts {
+        kill_triggers.remove(nom);
+    }
 
     // `gather` a pris le listener par **référence** : le cœur en garde donc la
     // propriété, et le socket d'enregistrement ne se ferme pas avec le
@@ -493,6 +680,10 @@ async fn main() -> Result<()> {
     // non reproductible d'un démarrage à l'autre.
     let ordre_manifeste: Vec<String> = manifest.plugins.iter().map(|p| p.name.clone()).collect();
     let metadata_plugins = register::metadata_order(&ordre_manifeste, &rassemble);
+    // L'ordre du fichier arbitre les `metadata` ; l'`exec`, lui, ne servait
+    // qu'au lancement initial. Rallumer un greffon le redemande.
+    let execs: HashMap<String, String> =
+        manifest.plugins.iter().map(|p| (p.name.clone(), p.exec.clone())).collect();
 
     // La page d'admin est **annoncée** par le binaire, plus observée par une
     // fenêtre d'attente : le drapeau des statuts part de la ligne
@@ -608,11 +799,17 @@ async fn main() -> Result<()> {
     // figé. Il n'y aura rien à lire, mais on peut déjà voir ce qui se passe.
     //
     // Reste un seul refus, qui n'est pas une lenteur mais une erreur de
-    // configuration : plus **aucun processus vivant** pour s'annoncer. Voir
-    // `register::un_greffon_vivant`.
-    if !register::un_greffon_vivant(&lances, &rassemble) {
+    // configuration : des greffons déclarés actifs, et plus **aucun
+    // processus vivant** pour s'annoncer. Voir `register::demarrage_refuse`.
+    let actifs_declares = manifest.plugins.iter().filter(|p| p.enabled).count();
+    if register::demarrage_refuse(actifs_declares, &lances, &rassemble) {
         anyhow::bail!(
-            "no plugin process alive (plugins.toml empty, or every plugin failed to launch or exited)"
+            "no plugin process alive (every enabled plugin failed to launch or exited)"
+        );
+    }
+    if actifs_declares == 0 {
+        tracing::warn!(
+            "every plugin is disabled in plugins.toml: starting anyway so they can be re-enabled from the admin UI"
         );
     }
     if sources.is_empty() {
@@ -735,6 +932,11 @@ async fn main() -> Result<()> {
                 ..Default::default()
             }),
             covers: Arc::new(cover::CoverCache::default()),
+            greffons: Arc::new(status::GreffonsControle {
+                manifeste: plugins_path.clone(),
+                noms: ordre_manifeste.clone(),
+                tx: greffon_tx,
+            }),
         };
         let (app_state, coeur) = assemble_covers_et_core(
             mpv_player,
@@ -907,6 +1109,59 @@ async fn main() -> Result<()> {
             Some(s) = settings_rx.recv() => {
                 core.set_settings(s);
             }
+            Some(ordre) = greffon_rx.recv() => {
+                let ok = if ordre.actif {
+                    // Un allumage redondant (double clic, page restée ouverte)
+                    // doit être un non-événement, pas un second processus
+                    // volant le préfixe de sockets du premier : le cœur ne
+                    // peut pas compter sur l'appelant pour ne jamais renvoyer
+                    // un ordre déjà en vigueur.
+                    if kill_triggers.contains_key(&ordre.nom) {
+                        true
+                    } else {
+                        let generation = generations.entry(ordre.nom.clone()).or_insert(0);
+                        *generation += 1;
+                        let generation = *generation;
+                        match execs.get(&ordre.nom) {
+                            Some(exec) => {
+                                match rallume(
+                                    &ordre.nom,
+                                    exec,
+                                    generation,
+                                    &fils_chaud,
+                                    &register_path,
+                                    core.locale_courante().as_deref(),
+                                    &mut kill_triggers,
+                                )
+                                .await
+                                {
+                                    Some(fut) => {
+                                        plugin_waits.push(fut);
+                                        true
+                                    }
+                                    None => false,
+                                }
+                            }
+                            // Nom refusé bien avant ici par la couche HTTP :
+                            // c'est une garde, pas un cas d'usage.
+                            None => false,
+                        }
+                    }
+                } else {
+                    eteindre_a_chaud(
+                        &ordre.nom,
+                        &fils_chaud,
+                        &mut core,
+                        &mut rassemble,
+                        &mut kill_triggers,
+                    )
+                    .await;
+                    true
+                };
+                // Le demandeur attend : un accusé perdu laisserait sa requête
+                // HTTP pendre jusqu'au bout de son propre délai.
+                let _ = ordre.ack.send(ok);
+            }
             _ = retry_sleep => {
                 retry_at = None;
                 if let Err(e) = core.retry_stream().await {
@@ -937,9 +1192,30 @@ async fn main() -> Result<()> {
             // plugin tuait le cœur à l'itération suivante, l'inverse exact de
             // la dégradation voulue. Avec `next()`, l'épuisement rend `None`,
             // le motif ne matche pas, et le bras est simplement désactivé.
-            Some((name, status)) = plugin_waits.next() => {
-                tracing::warn!("plugin {name} exited: {status:?}");
-                crate::status::mark_plugin_disconnected(&mut *status_state.write().await, &name);
+            Some((name, generation, status, voulue)) = plugin_waits.next() => {
+                // Mort d'une incarnation périmée : le greffon a été rallumé
+                // entre-temps, et les lignes de statut décrivent déjà le
+                // nouveau processus. Marquer « déconnecté » ici les
+                // effacerait au profit d'une mort qui n'a plus cours.
+                if generations.get(&name).copied() != Some(generation) {
+                    tracing::debug!("plugin {name} generation {generation} exited after being replaced");
+                } else {
+                    // Une entrée vit exactement le temps d'un processus lancé
+                    // et non encore moissonné : celui-ci vient de l'être. La
+                    // retirer ici, et seulement ici (jamais dans la branche
+                    // périmée ci-dessus), c'est ce qui permet à un allumage
+                    // ultérieur de distinguer un greffon vivant d'un greffon
+                    // mort — `eteindre_a_chaud` l'a déjà retirée quand
+                    // `voulue` est vrai, donc ce retrait est alors un second
+                    // passage sans effet.
+                    kill_triggers.remove(&name);
+                    if voulue {
+                        tracing::info!("plugin {name} stopped: disabled from the admin UI");
+                    } else {
+                        tracing::warn!("plugin {name} exited: {status:?}");
+                        crate::status::mark_plugin_disconnected(&mut *status_state.write().await, &name);
+                    }
+                }
             }
             status = mpv_child.wait() => {
                 anyhow::bail!("mpv exited ({status:?}), stopping for restart by systemd");
