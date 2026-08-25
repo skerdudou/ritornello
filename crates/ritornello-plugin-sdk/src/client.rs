@@ -39,8 +39,28 @@ pub struct SourceUpdate {
     /// qui décide si une trame vaut d'être relayée : voir la doc du champ.
     pub can_eject: Option<bool>,
     /// See `SourceMessage::presets`. Entre volontairement **dans** le prédicat
-    /// ci-dessous : c'est la seule voie par laquelle une liste atteint le cœur,
-    /// la réponse corrélée à `ListPresets` n'étant qu'un `Noop`.
+    /// ci-dessous, à l'inverse de `can_eject` : c'est la seule voie par laquelle
+    /// une liste atteint le cœur, la réponse corrélée à `ListPresets` n'étant
+    /// qu'un `Noop`.
+    ///
+    /// **Danger, à l'attention du cœur.** Une trame ne portant que des
+    /// présélections ne déclare **ni identité ni statut**, et une trame
+    /// permanente sans statut vaut *effacement* du statut mémorisé
+    /// (`Core::handle_source_update` : `if !update.transient { self.source_status
+    /// = update.status.clone(); }`). C'est la raison exacte pour laquelle
+    /// `can_eject` est resté **hors** du prédicat — réveiller des trames
+    /// aujourd'hui jetées effacerait « PAS DE DISQUE » de l'écran — et cette
+    /// clause-ci rompt l'invariant qui rendait ce choix sûr (« tout chemin d'une
+    /// vraie source déclare une identité ou un statut »).
+    ///
+    /// Le cœur doit donc traiter les présélections **et rendre la main avant**
+    /// le traitement du statut quand la trame ne porte rien d'autre. Deux
+    /// atténuations existent déjà en amont, mais aucune ne suffit : le sdk
+    /// n'émet jamais de liste vide (une source qui n'énumère pas reste donc
+    /// inerte, voir le bras `ListPresets` de `serve_source`), et le catalogue
+    /// est un fait sur une source, pas sur ce qui joue — il se lit donc avant le
+    /// garde de source active. Une source qui **énumère** (la radio) atteint
+    /// bien, elle, ce chemin.
     pub presets: Option<Vec<Preset>>,
 }
 
@@ -754,6 +774,72 @@ mod tests {
         // La seconde suit, et c'est bien le statut : l'ordre est celui du fil.
         let (_, suivante) = update_rx.recv().await.unwrap();
         assert_eq!(suivante.status.as_deref(), Some("RADIO"));
+    }
+
+    #[tokio::test]
+    async fn une_source_qui_nenumere_pas_ne_reveille_pas_le_coeur() {
+        // Le vrai `serve_source` face au vrai `SourceClient`, parce que le
+        // défaut se joue **entre** les deux : une source qui ne surcharge pas
+        // `list_presets` rend `Vec::new()`, et si cette liste vide voyageait,
+        // elle passerait le prédicat de trame intéressante. Or une trame
+        // relayée sans identité ni statut **efface** le statut mémorisé du
+        // cœur (`Core::handle_source_update`) : « PAS DE DISQUE » disparaîtrait
+        // de l'écran à la première énumération, sur toute source qui ne nomme
+        // rien.
+        //
+        // Le test **séquence** au lieu d'attendre : après le `ListPresets`, un
+        // `Activate` dont la réponse porte une identité — donc relayée à coup
+        // sûr. La première mise à jour reçue doit être celle-là. Avec un
+        // `Some([])`, ce serait la trame de `ListPresets`, sans identité, et
+        // l'assertion tomberait sur-le-champ au lieu d'attendre en vain.
+        struct SansNoms;
+        #[async_trait::async_trait]
+        impl crate::SourcePlugin for SansNoms {
+            async fn activate(&mut self) -> crate::SourceOutcome {
+                crate::SourceOutcome::new(SourceAction::play("http://fip"))
+                    .plays(serde_json::json!({"kind": "stream"}))
+            }
+            async fn deactivate(&mut self) -> crate::SourceOutcome {
+                crate::SourceOutcome::new(SourceAction::Noop)
+            }
+            async fn select(&mut self, _n: u8) -> crate::SourceOutcome {
+                crate::SourceOutcome::new(SourceAction::Noop)
+            }
+            async fn next(&mut self) -> crate::SourceOutcome {
+                crate::SourceOutcome::new(SourceAction::Noop)
+            }
+            async fn prev(&mut self) -> crate::SourceOutcome {
+                crate::SourceOutcome::new(SourceAction::Noop)
+            }
+            async fn eject(&mut self) -> crate::SourceOutcome {
+                crate::SourceOutcome::new(SourceAction::Noop)
+            }
+            // `list_presets` n'est PAS surchargé : c'est tout l'objet du test.
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let listener = crate::bind_source(&socket).unwrap();
+        tokio::spawn(async move {
+            crate::serve_source(listener, SansNoms).await.unwrap();
+        });
+
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "cd".into(), update_tx).await.unwrap();
+        // La corrélation se dénoue malgré l'absence de liste : le `Noop` est là.
+        assert_eq!(client.request(SourceReq::ListPresets).await.unwrap(), SourceAction::Noop);
+        client.request(SourceReq::Activate).await.unwrap();
+
+        let (nom, premiere) = update_rx.recv().await.unwrap();
+        assert_eq!(nom, "cd");
+        assert!(
+            premiere.identity.is_some(),
+            "la premiere mise a jour doit etre celle de l'activate: la reponse a \
+             ListPresets ne doit rien relayer, obtenu {premiere:?}"
+        );
+        assert_eq!(premiere.presets, None);
+        // Et il n'y en a pas eu d'autre : une seule trame a valu la peine.
+        assert!(update_rx.try_recv().is_err(), "aucune autre mise a jour ne doit etre relayee");
     }
 
     #[tokio::test]

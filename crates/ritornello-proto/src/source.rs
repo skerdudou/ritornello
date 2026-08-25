@@ -261,9 +261,13 @@ pub struct SourceMessage {
     /// `Source::request` et `demande_active` pour transporter une liste.
     ///
     /// Absent = « cette trame ne dit rien des présélections, garde la valeur
-    /// courante ». La liste **vide** est distincte de l'absence et porteuse de
-    /// sens : « je n'ai que des numéros » — le cd par nature, une piste n'ayant
-    /// pas de nom sans base de données.
+    /// courante ». Une liste **vide** dit le même propos — « cette source n'a
+    /// pas de noms », le cd par nature, une piste n'ayant pas de nom sans base
+    /// de données — et c'est l'absence qui voyage : le sdk convertit une liste
+    /// vide en absence (voir le bras `ListPresets` de `serve_source`), pour que
+    /// la trame d'une source qui n'énumère pas reste inerte côté cœur. Les deux
+    /// formes restent **lisibles** en désérialisation, un greffon écrit à la
+    /// main pouvant déclarer `[]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presets: Option<Vec<Preset>>,
 }
@@ -347,21 +351,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn liste_vide_et_liste_absente_ne_disent_pas_la_meme_chose() {
-        // « Je n'ai que des numéros » (le cd) est une réponse, pas un silence :
-        // un `Option<Vec<_>>` aplati en `Vec` aurait confondu les deux, et le
-        // consommateur n'aurait pas su distinguer une source qui a répondu
-        // d'une source qui n'a rien dit.
-        let vide = SourceMessage { presets: Some(Vec::new()), ..message_vide() };
-        let json = serde_json::to_string(&vide).unwrap();
-        assert!(json.contains(r#""presets":[]"#), "{json}");
-        let retour: SourceMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(retour.presets, Some(Vec::new()));
-        // Trame d'un plugin antérieur au champ : rien déclaré.
-        let ancien: SourceMessage = serde_json::from_str(r#"{"id":3}"#).unwrap();
-        assert_eq!(ancien.presets, None);
-    }
+    // Il n'y a **pas** de test ici sur « liste vide contre liste absente ».
+    // Les deux disent le même propos (« cette source n'a pas de noms »), et le
+    // choix de n'en faire voyager qu'une seule se prend dans le sdk, où deux
+    // tests le mordent (`une_source_qui_nenumere_pas_ne_declare_aucune_liste`
+    // côté serveur, `une_source_qui_nenumere_pas_ne_reveille_pas_le_coeur` de
+    // bout en bout). Au niveau du protocole, il ne resterait rien à mordre :
+    // serde relit déjà un champ `Option` manquant comme `None` de lui-même,
+    // `#[serde(default)]` ou non — mesuré en le retirant, aucun test ne bouge —
+    // et normaliser `[]` en `None` à la lecture serait légitime plutôt que
+    // fautif. Un test l'interdisant serait un obstacle, pas un garde-fou.
 
     #[test]
     fn une_liste_absente_nest_pas_serialisee() {

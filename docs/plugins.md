@@ -525,8 +525,10 @@ run, so the source is usable straight after a deployment.
 
 A display plugin receives the appliance's full state — `PlayerState`, the
 same structured payload that feeds the SPA's Player card (see
-[interface.md](interface.md)) — through a single one-way call,
-`DisplayPlugin::show(state)`, no answer expected. **The core imposes no
+[interface.md](interface.md)) — through a one-way call,
+`DisplayPlugin::show(state)`, no answer expected. It is not the only call:
+the protocol carries a second kind of frame, described just below, which a
+plugin may ignore. **The core imposes no
 layout**: it hands over data, never composed lines, so a future display (an
 SSD1306 OLED over SPI/I2C, a wall panel with a scrolling ticker) is free to
 lay its own screen out, at whatever size, with no fallback rule to
@@ -535,7 +537,11 @@ reimplement and no core change to request one.
 Each line on that socket is a **frame**: `{"frame":"state","data":{…}}`
 carries the `PlayerState` (the `data` is byte-for-byte the payload that used
 to travel bare), and `{"frame":"catalogue","data":{…}}` carries the declared
-sources and, for each one that can enumerate them, its named presets. The
+sources and, for each one that can enumerate them, its named presets —
+the protocol and the SDK carry catalogue frames as of this writing, but
+nothing produces one yet; the core starts sending them once it keeps a
+catalogue of its own, and no shipped source enumerates its presets before
+the radio does. The
 tagging is adjacent rather than internal because `PlayerState` flattens
 `Morceau`, and flatten crossed with an internally-tagged enum is a known
 serde blind spot. The catalogue is a separate frame rather than a wider

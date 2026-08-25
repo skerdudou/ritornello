@@ -85,8 +85,12 @@ impl SourceOutcome {
         self
     }
 
-    /// Declares the source's named presets (see `SourceMessage::presets`). An
-    /// empty list is an answer, not a silence: "I only have numbers".
+    /// Declares the source's named presets (see `SourceMessage::presets`).
+    ///
+    /// Passing an empty list here declares one on the wire, which the
+    /// `ListPresets` arm deliberately never does: "no names" and "nothing said"
+    /// are the same statement, and only absence travels. Call this with a
+    /// non-empty list.
     pub fn presets(mut self, presets: Vec<Preset>) -> Self {
         self.presets = Some(presets);
         self
@@ -327,7 +331,21 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     // liste est déjà là, à côté.
                     SourceReq::ListPresets => {
                         let presets = plugin.list_presets().await;
-                        SourceOutcome::new(SourceAction::Noop).presets(presets)
+                        let issue = SourceOutcome::new(SourceAction::Noop);
+                        // Une liste **vide** veut dire « cette source n'a pas de
+                        // noms » — exactement ce que dit l'absence. Deux
+                        // écritures du même propos, dont une seule doit voyager :
+                        // c'est l'absence, et c'est ce qui garde inerte la trame
+                        // d'une source qui n'énumère pas.
+                        //
+                        // Ce n'est pas qu'une économie d'octets. Une trame
+                        // relayée qui ne déclare ni identité ni statut
+                        // **efface** le statut mémorisé du cœur (voir
+                        // `SourceUpdate::presets`) ; le corps par défaut de
+                        // `list_presets` rendant `Vec::new()`, un `Some([])` ici
+                        // ferait blanchir « PAS DE DISQUE » sur toute source qui
+                        // ne nomme rien.
+                        if presets.is_empty() { issue } else { issue.presets(presets) }
                     }
                 };
                 let msg = SourceMessage {
@@ -1007,11 +1025,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn une_source_qui_ne_surcharge_pas_repond_la_liste_vide_pas_labsence() {
+    async fn une_source_qui_nenumere_pas_ne_declare_aucune_liste() {
         // `EchoSource` ne surcharge PAS `list_presets` : le corps par défaut
-        // doit rendre une liste **vide** et non un silence. La distinction
-        // porte du sens — « je n'ai que des numéros » (le cd) est une réponse,
-        // et le consommateur retombe alors sur `preset_count`.
+        // rend `Vec::new()`, et le bras doit le taire — « pas de noms » et
+        // « rien dit » étant le même propos, une seule des deux écritures
+        // voyage.
+        //
+        // Ce n'est pas cosmétique : un `"presets":[]` sur le fil passerait le
+        // prédicat de trame intéressante du `SourceClient`, et une trame relayée
+        // qui ne déclare ni identité ni statut **efface** le statut mémorisé du
+        // cœur. Chaque source qui ne nomme rien blanchirait ainsi son
+        // « PAS DE DISQUE » à la première énumération. La preuve de bout en
+        // bout est côté client :
+        // `une_source_qui_nenumere_pas_ne_reveille_pas_le_coeur`.
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("plugin.sock");
         let socket_for_server = socket.clone();
@@ -1028,8 +1054,10 @@ mod tests {
         write.write_all(b"{\"id\":1,\"req\":\"ListPresets\"}\n").await.unwrap();
         let line = lines.next_line().await.unwrap().unwrap();
         let msg: SourceMessage = serde_json::from_str(&line).unwrap();
+        // La corrélation se dénoue quand même : le `Noop` est là.
         assert_eq!(msg.action, Some(SourceAction::Noop));
-        assert_eq!(msg.presets, Some(Vec::new()), "{line}");
+        assert_eq!(msg.presets, None, "{line}");
+        assert!(!line.contains("presets"), "rien de la liste ne doit voyager: {line}");
     }
 
     #[tokio::test]
