@@ -25,14 +25,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::RwLock as AsyncRwLock;
 
-/// Le répertoire dont on a déjà cherché la pochette, et ce qu'on y a trouvé
-/// (`None` à l'intérieur = cherché, rien trouvé — distinct de « pas encore
-/// cherché », qui est le `None` extérieur).
-///
-/// Nommé plutôt qu'écrit en place : le type imbriqué est illisible au point
-/// que `clippy::type_complexity` le refuse, et il apparaît à trois endroits.
-type PochetteParRepertoire = Arc<Mutex<Option<(PathBuf, Option<ritornello_proto::CoverRef>)>>>;
-
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -114,7 +106,17 @@ struct FilesSource {
     /// Partagée avec la tâche de sonde, qui l'écrit en fin de course, d'où
     /// l'`Arc<Mutex<…>>`. Un seul répertoire mémorisé : on n'en écoute qu'un à
     /// la fois, et revenir en arrière dans la liste ne coûte qu'un `readdir`.
-    pochette_par_repertoire: PochetteParRepertoire,
+    // Type volontairement laissé tel que le chantier des pochettes l'a écrit.
+    // `clippy::type_complexity` le refuse, et un alias nommé aurait été le
+    // correctif que la règle suggère — mais le nommer obligeait à en documenter
+    // le sens, donc à interpréter la sémantique du double `Option` d'un autre
+    // chantier depuis un commit de fusion qu'il n'a pas relu. Une affirmation
+    // erronée posée à côté du code d'autrui est pire qu'une règle tue : la
+    // règle, elle, est honnête sur ce qu'elle est, alors que le commentaire se
+    // lit comme du savoir. La doc du champ ci-dessus est la leur, et elle
+    // suffit.
+    #[allow(clippy::type_complexity)]
+    pochette_par_repertoire: Arc<Mutex<Option<(PathBuf, Option<ritornello_proto::CoverRef>)>>>,
     /// Disjoncteur des chemins média, partagé avec la moitié Admin.
     ///
     /// Le `read_dir` de la recherche de pochette porte sur un partage qui peut
