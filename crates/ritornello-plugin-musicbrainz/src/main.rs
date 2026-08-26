@@ -16,6 +16,7 @@
 //! partageait le processus qui doit répondre aux commandes de piste. Ici, son
 //! échec ou sa lenteur ne concernent que les métadonnées.
 
+mod icy;
 mod musicbrainz;
 
 use anyhow::Result;
