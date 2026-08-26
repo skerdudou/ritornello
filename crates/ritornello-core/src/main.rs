@@ -28,7 +28,7 @@ use ritornello_proto::{
     Announcement, Catalogue, Enrichment, InputMessage, Known, NowPlaying, PluginKind,
 };
 use ritornello_plugin_sdk::{run_input_client, run_metadata_client, DisplayClient, SourceClient, SourceUpdate};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch, RwLock};
@@ -370,6 +370,8 @@ async fn cabler_a_chaud<P: player::Player>(
     fils: &FilsChaud,
     core: &mut core::Core<P>,
     rassemble: &mut register::Gathered,
+    kill_triggers: &HashMap<String, tokio::sync::oneshot::Sender<()>>,
+    non_supervises: &mut HashSet<String>,
 ) {
     let nom = annonce.name.clone();
     // Le nom fait autorité côté manifeste, à chaud comme au rendez-vous : une
@@ -383,15 +385,27 @@ async fn cabler_a_chaud<P: player::Player>(
         annonce.kinds,
         annonce.admin
     );
-    if rassemble.morts.contains(&nom) {
-        // Sa `child.wait()` a été consommée par le rendez-vous : `plugin_waits`
-        // ne la reverra jamais, donc ni son prochain code de sortie ni son
-        // `mark_plugin_disconnected`. Le `connected: true` qu'on va poser sera
-        // vrai à l'instant où on le pose, et ne se démentira plus jamais tout
-        // seul. Le dire, plutôt que de le laisser mentir en silence.
+    // Le cœur ne tient pas le `child` de ce greffon : `plugin_waits` ne reverra
+    // ni son prochain code de sortie ni son `mark_plugin_disconnected`. Le
+    // `connected: true` qu'on va poser sera vrai à l'instant où on le pose, et
+    // ne se démentira plus jamais tout seul.
+    //
+    // La condition était `rassemble.morts.contains(&nom)`, deux fois trop
+    // étroite : `morts` n'est rempli que par le rendez-vous de démarrage, donc
+    // elle manquait les morts observées par la boucle principale **et** les
+    // processus que le cœur n'a jamais lancés. `kill_triggers` répond exactement
+    // à la question posée, puisqu'il ne signifie que « lancé par nous et pas
+    // encore moissonné » — et une annonce prouve la vie de son émetteur.
+    //
+    // Le nom est **retenu**, et c'est là tout l'apport : les `retain` juste
+    // au-dessus effaçaient `morts` dans la foulée du `warn`, donc la seule trace
+    // disparaissait à l'instant du recâblage. Un défaut dont le programme avait
+    // conscience et dont il détruisait la preuve.
+    if vivacite(&nom, kill_triggers, non_supervises) != Vivacite::Supervise {
         tracing::warn!(
-            "rewiring a plugin the core no longer supervises: {nom} was seen exiting, its next exit will go unnoticed"
+            "wiring {nom}, which is alive but not supervised by the core: its next exit will go unnoticed, and it cannot be started or stopped from the admin UI until the core restarts"
         );
+        non_supervises.insert(nom.clone());
     }
 
     // Le rassemblement et l'ordre d'arbitrage sont mis à jour **avant** de
@@ -617,6 +631,58 @@ pub(crate) fn assemble_covers_et_core<P: player::Player>(
 /// tâche sort.
 ///
 /// Le canal du catalogue ajoute une occasion de le remarquer plus tôt, **mais
+/// Ce que le cœur sait d'un greffon, une fois ses **deux** registres croisés.
+///
+/// `kill_triggers` ne signifie que « lancé par nous et pas encore moissonné » —
+/// son propre commentaire le dit. Les deux gardes de la bascule s'en servaient
+/// pourtant comme oracle de vie, et manquaient donc exactement le cas pour
+/// lequel elles avaient été écrites : un greffon **vivant** que le cœur ne
+/// supervise pas. L'allumage relançait un second processus qui volait le préfixe
+/// de sockets du premier ; l'extinction décâblait tout, posait `desactive` et
+/// rendait `true`, si bien que l'IHM affichait « inactif » pendant que le
+/// processus tournait avec ses sockets.
+///
+/// `announcements` ne pouvait pas servir d'oracle non plus, et c'est contre
+/// l'intuition : la branche de décès de la boucle principale **ne le purge
+/// pas** (seule `eteindre_a_chaud` le fait). Un greffon planté y garde son
+/// annonce, donc s'y fier aurait fait *refuser* l'extinction d'un greffon
+/// planté — le cas le plus courant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Vivacite {
+    /// Aucun processus connu : ni lancé par le cœur, ni annoncé hors de sa
+    /// supervision.
+    Eteint,
+    /// Lancé par le cœur et pas encore moissonné : il tient de quoi l'arrêter.
+    Supervise,
+    /// Vivant et **hors d'atteinte** : il a parlé, le cœur ne tient pas son
+    /// `child`. Relance à la main, superviseur système, ou `child.wait()` déjà
+    /// consommée par le rendez-vous de démarrage.
+    HorsAtteinte,
+}
+
+/// Croise les deux registres pour un nom.
+///
+/// `Supervise` l'emporte quand les deux répondent : ce que le cœur peut
+/// arrêter primerait sur ce qu'il ne peut que constater. La conjonction est en
+/// fait **inatteignable** — un nom n'entre dans `non_supervises` que s'il est
+/// absent de `kill_triggers`, et la garde d'allumage refuse de lancer un
+/// processus pour un nom déjà classé `HorsAtteinte`, donc il ne peut pas y
+/// revenir. L'ordre est écrit quand même : il rend la fonction totale sans
+/// dépendre de cet argument.
+fn vivacite(
+    nom: &str,
+    kill_triggers: &HashMap<String, tokio::sync::oneshot::Sender<()>>,
+    non_supervises: &HashSet<String>,
+) -> Vivacite {
+    if kill_triggers.contains_key(nom) {
+        Vivacite::Supervise
+    } else if non_supervises.contains(nom) {
+        Vivacite::HorsAtteinte
+    } else {
+        Vivacite::Eteint
+    }
+}
+
 /// seulement pour un greffon qui possédait une source** : c'est son retrait qui
 /// republie le catalogue. Pour un greffon purement afficheur — la console, et le
 /// greffon MPD lui-même — `remove_source` rend `Ok(false)`, rien n'est republié,
@@ -632,7 +698,17 @@ async fn eteindre_a_chaud<P: player::Player>(
     core: &mut core::Core<P>,
     rassemble: &mut register::Gathered,
     kill_triggers: &mut HashMap<String, tokio::sync::oneshot::Sender<()>>,
-) {
+    non_supervises: &HashSet<String>,
+) -> bool {
+    // Rien pour l'arrêter : décâbler quand même et poser `desactive` rendrait
+    // « inactif » un greffon qui tourne toujours avec son port et ses sockets.
+    // Le refus est la seule réponse vraie, et le journal nomme le remède.
+    if vivacite(nom, kill_triggers, non_supervises) == Vivacite::HorsAtteinte {
+        tracing::warn!(
+            "refusing to disable {nom}: it is alive but the core does not own its process, so it cannot be stopped — kill it yourself, or restart the core to let it take ownership again"
+        );
+        return false;
+    }
     tracing::info!("disabling plugin {nom}: killing it and unwiring everything it served");
     if let Some(tx) = kill_triggers.remove(nom) {
         // Le récepteur est dans la future de supervision : une erreur
@@ -658,6 +734,7 @@ async fn eteindre_a_chaud<P: player::Player>(
     let mut statuts = fils.status_state.write().await;
     status::replace_plugin_lines(&mut statuts, nom, vec![PluginStatus::desactive(nom)], false);
     statuts.active_source = core.active_source().to_string();
+    true
 }
 
 /// Rallume un greffon : on relance son binaire, et c'est tout.
@@ -832,6 +909,20 @@ async fn main() -> Result<()> {
     // terminée échoue simplement, sans effet : c'est pour cela que le
     // résultat de l'envoi est ignoré partout où on l'utilise.
     let mut kill_triggers: HashMap<String, tokio::sync::oneshot::Sender<()>> = HashMap::new();
+    // L'autre moitié de l'oracle de vie : les greffons qui se sont annoncés
+    // sans que le cœur tienne leur processus. Voir `Vivacite`, qui dit pourquoi
+    // `kill_triggers` seul mentait dans les deux sens.
+    //
+    // **Ce registre ne se purge jamais**, et c'est assumé plutôt que subi : la
+    // mort d'un processus que le cœur ne supervise pas est par définition
+    // inobservable, donc aucun site ne pourrait retirer un nom sans deviner. Un
+    // greffon classé ici reste donc ingérable depuis l'IHM jusqu'au prochain
+    // démarrage du cœur — les deux gardes rendent `false` et le disent au
+    // journal. Le gel est honnête ; le faire passer pour un non-événement, non.
+    // La vraie réponse est de sortir la vivacité de `kill_triggers`
+    // (« suite documentée » du chantier greffons actifs/inactifs), ce qui
+    // redessine leur table et appartient à la session qui possède ce code.
+    let mut non_supervises: HashSet<String> = HashSet::new();
     // Génération de lancement, par nom. Éteindre puis rallumer aussitôt fait
     // arriver la mort de l'**ancien** processus après le câblage du nouveau :
     // sans ce compteur, cette mort effacerait des lignes de statut qui
@@ -1372,7 +1463,15 @@ async fn main() -> Result<()> {
             // par genre, et une ré-annonce est traitée comme une annonce
             // tardive — on recâble.
             Some(annonce) = tardives_rx.recv() => {
-                cabler_a_chaud(annonce, &fils_chaud, &mut core, &mut rassemble).await;
+                cabler_a_chaud(
+                    annonce,
+                    &fils_chaud,
+                    &mut core,
+                    &mut rassemble,
+                    &kill_triggers,
+                    &mut non_supervises,
+                )
+                .await;
                 status_state.write().await.active_source = core.active_source().to_string();
             }
             Some((name, update)) = source_update_rx.recv() => {
@@ -1419,35 +1518,55 @@ async fn main() -> Result<()> {
                     // volant le préfixe de sockets du premier : le cœur ne
                     // peut pas compter sur l'appelant pour ne jamais renvoyer
                     // un ordre déjà en vigueur.
-                    if kill_triggers.contains_key(&ordre.nom) {
-                        true
-                    } else {
-                        let generation = generations.entry(ordre.nom.clone()).or_insert(0);
-                        *generation += 1;
-                        let generation = *generation;
-                        match execs.get(&ordre.nom) {
-                            Some(exec) => {
-                                match rallume(
-                                    &ordre.nom,
-                                    exec,
-                                    generation,
-                                    &fils_chaud,
-                                    &register_path,
-                                    core.locale_courante().as_deref(),
-                                    &mut kill_triggers,
-                                )
-                                .await
-                                {
-                                    Some(fut) => {
-                                        plugin_waits.push(fut);
-                                        true
+                    //
+                    // Le prédicat était `kill_triggers.contains_key`, donc faux
+                    // précisément dans le cas que cette garde existe pour
+                    // couvrir. Voir `Vivacite`, qui écrit pourquoi il fallait
+                    // croiser deux registres.
+                    match vivacite(&ordre.nom, &kill_triggers, &non_supervises) {
+                        // Lancé par le cœur : l'ordre est déjà en vigueur, et
+                        // l'accusé décrit un état vrai.
+                        Vivacite::Supervise => true,
+                        // Un processus tourne pour ce nom et le cœur n'a aucune
+                        // prise sur lui. En lancer un second lui volerait son
+                        // préfixe de sockets — bruyant sur le greffon MPD, qui
+                        // échoue à lier son port et meurt, mais silencieux
+                        // partout ailleurs. Refuser, et nommer le remède.
+                        Vivacite::HorsAtteinte => {
+                            tracing::warn!(
+                                "refusing to enable {}: a process for it is already running outside the core's control — kill it yourself, or restart the core to let it take ownership again",
+                                ordre.nom
+                            );
+                            false
+                        }
+                        Vivacite::Eteint => {
+                            let generation = generations.entry(ordre.nom.clone()).or_insert(0);
+                            *generation += 1;
+                            let generation = *generation;
+                            match execs.get(&ordre.nom) {
+                                Some(exec) => {
+                                    match rallume(
+                                        &ordre.nom,
+                                        exec,
+                                        generation,
+                                        &fils_chaud,
+                                        &register_path,
+                                        core.locale_courante().as_deref(),
+                                        &mut kill_triggers,
+                                    )
+                                    .await
+                                    {
+                                        Some(fut) => {
+                                            plugin_waits.push(fut);
+                                            true
+                                        }
+                                        None => false,
                                     }
-                                    None => false,
                                 }
+                                // Nom refusé bien avant ici par la couche HTTP :
+                                // c'est une garde, pas un cas d'usage.
+                                None => false,
                             }
-                            // Nom refusé bien avant ici par la couche HTTP :
-                            // c'est une garde, pas un cas d'usage.
-                            None => false,
                         }
                     }
                 } else {
@@ -1457,9 +1576,9 @@ async fn main() -> Result<()> {
                         &mut core,
                         &mut rassemble,
                         &mut kill_triggers,
+                        &non_supervises,
                     )
-                    .await;
-                    true
+                    .await
                 };
                 // Le demandeur attend : un accusé perdu laisserait sa requête
                 // HTTP pendre jusqu'au bout de son propre délai.
@@ -1567,6 +1686,275 @@ async fn main() -> Result<()> {
                 anyhow::bail!("mpv exited ({status:?}), stopping for restart by systemd");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod bascule_tests {
+    //! La bascule allumer/éteindre, et ce que le cœur sait de la vie d'un
+    //! greffon.
+    //!
+    //! Ce qui est éprouvé ici : la classification (`vivacite`), et sur le
+    //! **vrai** chemin le refus d'`eteindre_a_chaud` quand le processus est
+    //! hors d'atteinte. Ce refus doit arriver **avant** toute mutation, et
+    //! c'est tout le constat : décâbler puis rendre `false` laisserait un
+    //! greffon vivant, décâblé, et affiché « inactif » — le pire des trois
+    //! états. Le contrôle positif juste à côté est ce qui donne son mordant
+    //! au test du refus : sans le retour anticipé, il échoue.
+    //!
+    //! Ce qui **ne l'est pas**, et autant l'écrire : la garde d'*allumage* vit
+    //! dans le `select!` de `main`, hors d'atteinte d'un test. Elle consulte la
+    //! même fonction, mais son câblage n'est vérifié que par lecture.
+
+    use super::*;
+    use crate::core::{Cablage, MetadataCablage};
+    use crate::cover::CoverCache;
+    use ritornello_proto::{Announcement, PluginKind};
+
+    /// Un `Player` qui ne fait rien : aucun test d'ici ne regarde le lecteur.
+    /// `eteindre_a_chaud` ne le touche que par `remove_source`, et la carte des
+    /// sources est vide — ce qui est délibéré, faute de quoi il faudrait aussi
+    /// un bouchon de `Source` pour un chemin que ces tests ne visitent pas.
+    struct LecteurMuet;
+
+    #[async_trait::async_trait]
+    impl crate::player::Player for LecteurMuet {
+        async fn play(&self, _uri: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn load_list(&self, _uri: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn stop(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn toggle_pause(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn next(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn prev(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn set_playlist_pos(&self, _n: i64) -> Result<()> {
+            Ok(())
+        }
+        async fn set_volume(&self, _volume: u8) -> Result<()> {
+            Ok(())
+        }
+        async fn set_mute(&self, _mute: bool) -> Result<()> {
+            Ok(())
+        }
+        async fn set_audio_device(&self, _device: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn progression(&self) -> Result<crate::player::Progression> {
+            Ok(crate::player::Progression::default())
+        }
+        async fn seek_relative(&self, _delta_s: i64) -> Result<()> {
+            Ok(())
+        }
+        async fn seek_absolute(&self, _position_s: u32) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct Banc {
+        fils: FilsChaud,
+        core: core::Core<LecteurMuet>,
+        rassemble: register::Gathered,
+        kill_triggers: HashMap<String, tokio::sync::oneshot::Sender<()>>,
+        non_supervises: HashSet<String>,
+        /// Tenu jusqu'à la fin du test : `state_path` et `locales_root` en
+        /// dépendent.
+        _dir: tempfile::TempDir,
+    }
+
+    /// Un greffon `mpd` **annoncé et câblé**, dans l'état où le laisse
+    /// `cabler_a_chaud` : présent dans `announcements`, une ligne de statut
+    /// connectée, et le manifeste qui reconnaît son nom.
+    ///
+    /// C'est cet état-là qui rend le test réaliste. Un `Gathered::default()`
+    /// prouverait un refus sur une forme que le producteur n'émet pas.
+    fn banc() -> Banc {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        let (now_playing_tx, now_playing_rx) = watch::channel(NowPlaying::default());
+        let (etat_tx, etat_rx) = watch::channel(PlayerState::default());
+        let (catalogue_tx, catalogue_rx) = watch::channel(Catalogue::default());
+
+        let covers = Arc::new(CoverCache::new());
+        let catalog = Arc::new(RwLock::new(ritornello_i18n::Catalog::load(
+            "core",
+            "en",
+            &root,
+            crate::core::EN,
+        )));
+
+        let core = core::Core::new(
+            LecteurMuet,
+            Cablage {
+                sources: HashMap::new(),
+                persisted: Default::default(),
+                state_path: root.join("state.json"),
+                catalog,
+                locales_root: root.clone(),
+                catalogue: catalogue_tx,
+                metadata: MetadataCablage {
+                    plugins: vec![],
+                    now_playing: now_playing_tx,
+                    etat: etat_tx,
+                },
+            },
+            covers.clone(),
+            mpsc::channel(4).0,
+            mpsc::channel(4).0,
+        );
+
+        let fils = FilsChaud {
+            sockets_dir: root.clone(),
+            ordre_manifeste: vec!["mpd".to_string()],
+            source_update_tx: mpsc::channel(4).0,
+            cmd_tx: mpsc::channel(4).0,
+            enrich_tx: mpsc::channel(4).0,
+            now_playing_rx,
+            etat_rx,
+            catalogue_rx,
+            covers,
+            status_state: Arc::new(RwLock::new(StatusState {
+                plugins: vec![PluginStatus {
+                    name: "mpd".into(),
+                    kind: "display".into(),
+                    connected: true,
+                    admin: true,
+                    stalled: false,
+                    disabled: false,
+                }],
+                active_source: String::new(),
+            })),
+            admin_backends: Arc::new(RwLock::new(HashMap::new())),
+        };
+
+        let mut rassemble = register::Gathered::default();
+        rassemble.announcements.insert(
+            "mpd".to_string(),
+            Announcement {
+                name: "mpd".into(),
+                kinds: vec![PluginKind::Display],
+                admin: true,
+                covers: false,
+            },
+        );
+
+        Banc {
+            fils,
+            core,
+            rassemble,
+            kill_triggers: HashMap::new(),
+            non_supervises: HashSet::new(),
+            _dir: dir,
+        }
+    }
+
+    async fn ligne(b: &Banc) -> PluginStatus {
+        let statuts = b.fils.status_state.read().await;
+        statuts.plugins.iter().find(|l| l.name == "mpd").cloned().expect("ligne mpd")
+    }
+
+    async fn eteindre(b: &mut Banc) -> bool {
+        eteindre_a_chaud(
+            "mpd",
+            &b.fils,
+            &mut b.core,
+            &mut b.rassemble,
+            &mut b.kill_triggers,
+            &b.non_supervises,
+        )
+        .await
+    }
+
+    #[test]
+    fn un_greffon_lance_par_le_coeur_est_supervise() {
+        let mut kt = HashMap::new();
+        kt.insert("mpd".to_string(), tokio::sync::oneshot::channel::<()>().0);
+        assert_eq!(vivacite("mpd", &kt, &HashSet::new()), Vivacite::Supervise);
+    }
+
+    #[test]
+    fn un_greffon_annonce_hors_supervision_est_hors_datteinte() {
+        let non_supervises: HashSet<String> = ["mpd".to_string()].into_iter().collect();
+        assert_eq!(
+            vivacite("mpd", &HashMap::new(), &non_supervises),
+            Vivacite::HorsAtteinte
+        );
+    }
+
+    #[test]
+    fn un_nom_absent_des_deux_registres_est_eteint() {
+        assert_eq!(vivacite("mpd", &HashMap::new(), &HashSet::new()), Vivacite::Eteint);
+    }
+
+    /// La conjonction est inatteignable en production (voir la doc de
+    /// `vivacite`), mais la fonction est totale : c'est ce que dit ce test, et
+    /// il fige l'ordre pour qui ajouterait un registre.
+    #[test]
+    fn ce_que_le_coeur_peut_arreter_prime_sur_ce_quil_constate() {
+        let mut kt = HashMap::new();
+        kt.insert("mpd".to_string(), tokio::sync::oneshot::channel::<()>().0);
+        let non_supervises: HashSet<String> = ["mpd".to_string()].into_iter().collect();
+        assert_eq!(vivacite("mpd", &kt, &non_supervises), Vivacite::Supervise);
+    }
+
+    /// Le contrôle positif : le cœur tient le déclencheur, donc il éteint pour
+    /// de bon. Sans ce test, celui du refus passerait aussi avec une fonction
+    /// qui refuse **toujours**.
+    #[tokio::test]
+    async fn un_greffon_supervise_seteint_et_lannonce_disparait() {
+        let mut b = banc();
+        b.kill_triggers.insert("mpd".to_string(), tokio::sync::oneshot::channel::<()>().0);
+
+        assert!(eteindre(&mut b).await, "l'extinction d'un greffon supervisé doit réussir");
+        assert!(!b.kill_triggers.contains_key("mpd"), "le déclencheur est consommé");
+        assert!(!b.rassemble.announcements.contains_key("mpd"), "l'annonce est retirée");
+        assert!(ligne(&b).await.disabled, "la ligne de statut dit « désactivé »");
+    }
+
+    /// Le constat lui-même. Un processus vivant que le cœur ne peut pas
+    /// arrêter : la bascule doit rendre `false` **et** ne rien avoir touché.
+    ///
+    /// Les trois assertions d'immobilité ne sont pas décoratives. Un correctif
+    /// qui journaliserait puis décâblerait quand même passerait la première et
+    /// échouerait sur les suivantes — or c'est précisément la demi-mesure qui
+    /// produit l'état le plus trompeur de la page de statut.
+    #[tokio::test]
+    async fn un_greffon_hors_datteinte_nest_pas_eteint_et_rien_nest_decable() {
+        let mut b = banc();
+        b.non_supervises.insert("mpd".to_string());
+
+        assert!(
+            !eteindre(&mut b).await,
+            "annoncer un arrêt qu'on n'a pas obtenu est le défaut à corriger"
+        );
+        assert!(
+            b.rassemble.announcements.contains_key("mpd"),
+            "l'annonce reste : le greffon tourne toujours"
+        );
+        let l = ligne(&b).await;
+        assert!(!l.disabled, "la page ne doit pas le montrer désactivé");
+        assert!(l.connected, "il est toujours joignable, la ligne le dit");
+    }
+
+    /// Éteindre un greffon déjà éteint reste un succès : le demandeur voulait
+    /// cet état, il l'obtient. Symétrique du non-événement de l'allumage, et ce
+    /// qui distingue `Eteint` de `HorsAtteinte` — sans quoi un double clic sur
+    /// « désactiver » remonterait une erreur.
+    #[tokio::test]
+    async fn eteindre_un_greffon_deja_eteint_reussit() {
+        let mut b = banc();
+        assert!(eteindre(&mut b).await);
+        assert!(ligne(&b).await.disabled);
     }
 }
 
