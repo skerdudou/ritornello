@@ -35,11 +35,14 @@ pub struct SourceUpdate {
     /// See `SourceMessage::status`.
     pub status: Option<String>,
     /// See `SourceMessage::can_eject`. Absent = rien déclaré, garder la valeur
-    /// courante. N'entre volontairement **pas** dans le prédicat ci-dessous
-    /// qui décide si une trame vaut d'être relayée : voir la doc du champ.
+    /// courante. Le **seul** champ qui n'arme pas à lui seul le prédicat de
+    /// trame relayable, parce qu'il est le seul que le SDK estampille sur
+    /// *chaque* trame : ce prédicat est dérivé d'une comparaison avec une trame
+    /// ne portant que lui (voir plus bas), donc son exception n'a pas à être
+    /// écrite deux fois. Voir la doc du champ pour le pourquoi.
     pub can_eject: Option<bool>,
-    /// See `SourceMessage::presets`. Entre volontairement **dans** le prédicat
-    /// ci-dessous, à l'inverse de `can_eject` : c'est la seule voie par laquelle
+    /// See `SourceMessage::presets`. Arme à lui seul le prédicat de trame
+    /// relayable, à l'inverse de `can_eject` : c'est la seule voie par laquelle
     /// une liste atteint le cœur, la réponse corrélée à `ListPresets` n'étant
     /// qu'un `Noop`.
     ///
@@ -48,10 +51,10 @@ pub struct SourceUpdate {
     /// permanente sans statut vaut *effacement* du statut mémorisé
     /// (`Core::handle_source_update` : `if !update.transient { self.source_status
     /// = update.status.clone(); }`). C'est la raison exacte pour laquelle
-    /// `can_eject` est resté **hors** du prédicat — réveiller des trames
-    /// aujourd'hui jetées effacerait « PAS DE DISQUE » de l'écran — et cette
-    /// clause-ci rompt l'invariant qui rendait ce choix sûr (« tout chemin d'une
-    /// vraie source déclare une identité ou un statut »).
+    /// `can_eject` seul laisse une trame inerte — réveiller ces trames-là
+    /// effacerait « PAS DE DISQUE » de l'écran — et pour laquelle ce champ-ci
+    /// rompt l'invariant qui rendait ce choix sûr (« tout chemin d'une vraie
+    /// source déclare une identité ou un statut »).
     ///
     /// Le cœur traite donc les présélections **et rend la main avant** le
     /// traitement du statut quand la trame ne déclare ni identité ni statut
@@ -70,11 +73,13 @@ pub struct SourceUpdate {
     /// ne répète pas la pochette sur chaque trame de statut qui suit, et
     /// `Core::set_cover_de_source` ne doit donc être appelé que lorsque ce
     /// champ vaut `Some`, jamais à chaque trame relayée. Envoyée seule, en
-    /// notification spontanée (`id: None`), sans identité ni statut : **entre**
-    /// dans le prédicat ci-dessous, sans quoi cette trame-là serait jetée en
-    /// silence — c'est précisément la forme sous laquelle une pochette arrive
-    /// (voir la doc de `SourceMessage::cover`, qui explique pourquoi elle
-    /// n'attend pas la réponse au `Play`).
+    /// notification spontanée (`id: None`), sans identité ni statut — c'est
+    /// précisément la forme sous laquelle une pochette arrive (voir la doc de
+    /// `SourceMessage::cover`, qui explique pourquoi elle n'attend pas la réponse
+    /// au `Play`). Ce champ arme donc à lui seul le prédicat de trame relayable,
+    /// et il l'arme désormais **par dérivation**, sans être nommé nulle part.
+    /// Il a fallu l'ajouter à la main à une disjonction, et jusque-là chaque
+    /// pochette de Source était jetée en silence.
     pub cover: Option<CoverRef>,
 }
 
@@ -111,53 +116,79 @@ impl SourceClient {
                         let _ = tx.send(action);
                     }
                 }
-                if msg.identity.is_some()
-                    || msg.preset.is_some()
-                    || msg.preset_count.is_some()
-                    || msg.preset_name.is_some()
-                    || msg.status.is_some()
-                    || msg.presets.is_some()
-                    // Une pochette arrive seule, en notification spontanée
-                    // (voir la doc de `SourceUpdate::cover`) : sans cette
-                    // entrée, une trame qui ne porterait qu'elle serait jetée
-                    // par ce garde avant même d'atteindre `SourceUpdate`.
-                    || msg.cover.is_some()
-                {
-                    let porte_identite = msg.identity.is_some();
-                    let update = SourceUpdate {
-                        identity: msg.identity,
-                        transient: msg.transient,
-                        preset: msg.preset,
-                        preset_count: msg.preset_count,
-                        preset_name: msg.preset_name,
-                        status: msg.status,
-                        can_eject: msg.can_eject,
-                        presets: msg.presets,
-                        cover: msg.cover,
-                    };
-                    if update_tx.try_send((name.clone(), update)).is_err() {
-                        // Un statut ou une présélection perdus sont réparés par
-                        // la trame suivante, une **identité** perdue ne l'est
-                        // jamais — la Source ne la réémet que sur changement,
-                        // donc le cœur garde celle du morceau précédent et les
-                        // plugins `metadata` continuent de l'enrichir, sans que
-                        // le garde-fou de péremption y voie quoi que ce soit.
-                        //
-                        // Toujours `try_send` et non `send().await` : cette même
-                        // tâche délivre les réponses corrélées aux requêtes du
-                        // cœur. Attendre ici sur un canal plein retiendrait la
-                        // réponse que le cœur attend, et le cœur ne draine le
-                        // canal qu'en revenant à sa boucle — soit un blocage
-                        // croisé jusqu'au timeout de 5 s de `request`. Perdre
-                        // une trame en le signalant fort vaut mieux qu'une
-                        // seconde d'appareil figé.
-                        if porte_identite {
-                            tracing::error!(
-                                "identity update for {name} lost (channel full): display and metadata possibly stale until next change"
-                            );
-                        } else {
-                            tracing::warn!("source update for {name} lost (channel full)");
-                        }
+                let porte_identite = msg.identity.is_some();
+                // Littéral **exhaustif**, sans `..` : ajouter un champ à
+                // `SourceUpdate` ne compile plus tant que personne ne l'a
+                // recopié ici. C'est la moitié « la question est forcée » du
+                // garde-fou.
+                let update = SourceUpdate {
+                    identity: msg.identity,
+                    transient: msg.transient,
+                    preset: msg.preset,
+                    preset_count: msg.preset_count,
+                    preset_name: msg.preset_name,
+                    status: msg.status,
+                    can_eject: msg.can_eject,
+                    presets: msg.presets,
+                    cover: msg.cover,
+                };
+                // Et voici la moitié « la réponse est forcée aussi ». Le
+                // prédicat qui décide si cette trame vaut d'être relayée est
+                // **dérivé**, jamais énuméré : une trame est intéressante si
+                // elle porte quelque chose de plus que ce que `serve_source`
+                // estampille sur *toutes* ses trames.
+                //
+                // Il y avait ici une disjonction écrite à la main, et elle a
+                // coûté deux fois : `presets` puis `cover` ont dû y être
+                // rétro-ajoutés, et entre-temps une trame ne portant que le
+                // champ neuf était jetée **en silence** — le littéral
+                // ci-dessus forçait à nommer le champ, le `if` non. Une
+                // condition qu'il faut penser à étendre finit toujours par ne
+                // pas l'être. `SourceUpdate` dérive `PartialEq` et `Default`,
+                // donc la comparaison suffit et un champ ajouté entre dans le
+                // prédicat sans que personne y pense.
+                //
+                // Le `..Default::default()` de la référence est correct **et**
+                // nécessaire ici, à l'inverse du littéral ci-dessus : la valeur
+                // par défaut d'un champ, c'est précisément « rien déclaré », ce
+                // qu'une trame inerte doit porter.
+                //
+                // `can_eject` est le seul champ estampillé sur chaque trame
+                // (voir sa doc côté `SourceMessage`), donc le seul à reprendre
+                // de la trame reçue. Une trame qui ne porterait que lui reste
+                // ainsi jetée, ce qui était le choix d'origine et doit le
+                // rester : réveiller ces trames-là effacerait « PAS DE DISQUE »
+                // de l'écran, une trame permanente sans statut valant
+                // effacement côté cœur.
+                //
+                // Une différence assumée avec l'ancienne disjonction : une trame
+                // qui ne porterait que `transient: true`, sans mot à afficher,
+                // était jetée et passe désormais. C'est plus juste — le cœur y
+                // désarme un `+NN` en vol, et rien d'autre : `recompose_la_vue`
+                // est vrai, donc le statut mémorisé n'est pas touché.
+                let inerte = SourceUpdate { can_eject: update.can_eject, ..Default::default() };
+                if update != inerte && update_tx.try_send((name.clone(), update)).is_err() {
+                    // Un statut ou une présélection perdus sont réparés par
+                    // la trame suivante, une **identité** perdue ne l'est
+                    // jamais — la Source ne la réémet que sur changement,
+                    // donc le cœur garde celle du morceau précédent et les
+                    // plugins `metadata` continuent de l'enrichir, sans que
+                    // le garde-fou de péremption y voie quoi que ce soit.
+                    //
+                    // Toujours `try_send` et non `send().await` : cette même
+                    // tâche délivre les réponses corrélées aux requêtes du
+                    // cœur. Attendre ici sur un canal plein retiendrait la
+                    // réponse que le cœur attend, et le cœur ne draine le
+                    // canal qu'en revenant à sa boucle — soit un blocage
+                    // croisé jusqu'au timeout de 5 s de `request`. Perdre
+                    // une trame en le signalant fort vaut mieux qu'une
+                    // seconde d'appareil figé.
+                    if porte_identite {
+                        tracing::error!(
+                            "identity update for {name} lost (channel full): display and metadata possibly stale until next change"
+                        );
+                    } else {
+                        tracing::warn!("source update for {name} lost (channel full)");
                     }
                 }
             }

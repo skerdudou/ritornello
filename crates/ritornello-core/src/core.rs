@@ -409,6 +409,30 @@ impl<P: Player> Core<P> {
     /// tête de fonction est ce qui rend cette décision obligatoire pour tout
     /// champ ajouté plus tard.
     pub fn handle_source_update(&mut self, name: &str, update: SourceUpdate) {
+        // **Une trame d'une source que le cœur ne connaît plus est jetée, et
+        // entière.** Le fan-out des requêtes de catalogue est détaché : un
+        // `ListPresets` part dans sa propre tâche, et `remove_source` peut
+        // s'exécuter entre la requête et la réponse — un greffon éteint depuis
+        // l'IHM, ou mort de lui-même. Sans ce garde, la réponse encore en vol
+        // ré-insérait la liste dans `presets_par_source` **après** l'éviction,
+        // parce que cette insertion se fait délibérément avant le garde de
+        // source active (le catalogue décrit toutes les sources, pas celle qui
+        // joue). Le catalogue republié annonçait alors une liste enregistrée
+        // pour une source qui n'existe plus, un client MPD la mettait en cache,
+        // et un `load` dessus n'était refusé qu'au dernier moment par le garde
+        // de `Command::SelectSource` — donc après avoir menti à l'utilisateur.
+        //
+        // `sources` et non `source_order` : les deux sont retirés ensemble par
+        // `remove_source`, mais `sources` est la table qui dit ce que le cœur
+        // peut encore joindre. Le garde ne peut pas refuser une trame
+        // légitimement précoce : au démarrage les clients sont câblés avant que
+        // la boucle ne drame le canal, et le câblage à chaud est *awaité* depuis
+        // la boucle principale, qui ne traite donc aucune trame pendant ce
+        // temps.
+        if !self.sources.contains_key(name) {
+            tracing::debug!("source update for {name} dropped: no longer a wired source");
+            return;
+        }
         // **Déstructuration exhaustive, et c'est le garde-fou principal de cette
         // fonction.** Pas de `..` : ajouter un champ à `SourceUpdate` ne compile
         // plus tant que quelqu'un n'a pas décidé, ici, à laquelle des deux
@@ -513,15 +537,14 @@ impl<P: Player> Core<P> {
             || preset_name.is_some()
             || cover.is_some();
         if porte_un_fait && !recompose_la_vue {
-            // La sélection déclarée est appliquée ici plutôt qu'en bas : la
-            // fusion « absent = garder » vaut sur ce chemin aussi, et la trame
-            // de renumérotation des fichiers ne porte que cela.
-            self.applique_selection(preset, preset_name);
-            // Et la pochette, pour qui ce chemin n'est pas un cas limite mais le
-            // **seul** : elle arrive seule, en notification spontanée, sans
-            // identité ni statut (voir `SourceMessage::cover`), donc elle passe
-            // toujours par ici. C'est cet appel-là qui la fait exister côté cœur.
-            self.applique_pochette_de_source(cover, name);
+            // Un **seul** appel, et c'est le point : les champs « absent =
+            // garder » qui doivent être appliqués après l'identité vivent tous
+            // dans `applique_les_faits_declares`, appelée ici et une seule autre
+            // fois en bas de fonction. Un champ ajouté là-dedans atterrit donc
+            // sur les deux chemins par construction, au lieu de dépendre de
+            // quelqu'un qui se souvienne de le recopier — c'est exactement
+            // l'oubli qui a fait perdre chaque pochette de Source en silence.
+            self.applique_les_faits_declares(preset, preset_name, cover, name);
             // Publier quand même : compte, tiroir et sélection font partie de
             // l'état diffusé, et le canal déduplique si rien n'a bougé.
             self.publie_etat();
@@ -568,21 +591,15 @@ impl<P: Player> Core<P> {
             };
             self.set_identity(valeur);
         }
-        // Après l'identité : `set_identity(None)` efface la sélection, et une
-        // trame qui porterait « rien ne joue » **et** une sélection (ça
-        // n'arrive pas, mais rien ne l'interdit) doit laisser gagner la
-        // déclaration explicite. C'est cet ordre-là qui interdit de remonter cet
-        // appel avec `preset_count` : le chemin du retour anticipé, lui, ne peut
+        // Le second — et dernier — appelant de `applique_les_faits_declares`,
+        // ici **après** l'identité : `set_identity(None)` efface la sélection, et
+        // `set_identity` tout court remet à zéro tout ce que `Metadonnees`
+        // retenait, pochette de la Source comprise. Une trame qui déclare
+        // explicitement l'un ou l'autre doit gagner sur ce reset, donc elle est
+        // appliquée derrière lui. C'est cet ordre-là qui interdit de remonter cet
+        // appel avec `preset_count` ; le chemin du retour anticipé, lui, ne peut
         // pas porter d'identité par construction, donc l'y appeler est sûr.
-        self.applique_selection(preset, preset_name);
-        // La pochette suit exactement le même raisonnement d'ordre, et pour une
-        // raison plus forte encore : `set_identity` remet à zéro tout ce que
-        // `Metadonnees` retenait, pochette de la Source comprise. Voir
-        // `applique_pochette_de_source`, qui porte le détail. Ce chemin-ci ne
-        // sert qu'aux trames qui recomposent la vue et porteraient une pochette
-        // en même temps qu'une identité ou un statut ; la pochette qui arrive
-        // seule, elle, passe par le retour anticipé ci-dessus.
-        self.applique_pochette_de_source(cover, name);
+        self.applique_les_faits_declares(preset, preset_name, cover, name);
         // `preset_count` et `can_eject` sont appliqués **en tête** de cette
         // fonction, avant le retour anticipé, pour la même raison.
         //
@@ -596,15 +613,46 @@ impl<P: Player> Core<P> {
         self.publie_etat();
     }
 
+    /// Tout ce qu'une trame de Source déclare et qui doit être appliqué
+    /// **après** l'identité, en un seul endroit.
+    ///
+    /// **C'est la place, et non un commentaire, qui rend la règle tenable.**
+    /// `handle_source_update` a deux sorties — le retour anticipé des trames qui
+    /// n'annoncent qu'un fait, et le bas de fonction pour celles qui recomposent
+    /// la vue — et un champ appliqué à un seul des deux endroits est perdu en
+    /// silence sur l'autre. C'est arrivé deux fois : `presets`, puis `cover`, ce
+    /// dernier gardé par le prédicat mais appliqué seulement en bas, donc jamais,
+    /// puisque une pochette de Source arrive toujours seule et prend toujours le
+    /// retour anticipé. La déstructuration exhaustive en tête de fonction force
+    /// la *question* (« à laquelle des deux moitiés ce champ appartient-il ? »)
+    /// mais pas la *réponse* : deux appels côte à côte pouvaient toujours
+    /// diverger. Avec un seul corps appelé aux deux sorties, la réponse est
+    /// structurelle pour tout champ ajouté ici.
+    ///
+    /// La limite, dite franchement : rien n'empêche d'écrire un jour un nouveau
+    /// champ *à côté* de cet appel plutôt que dedans. Ce qui est acquis, c'est
+    /// qu'aucun champ déjà passé par ici ne peut manquer sur un chemin.
+    fn applique_les_faits_declares(
+        &mut self,
+        preset: Option<u8>,
+        preset_name: Option<String>,
+        cover: Option<ritornello_proto::CoverRef>,
+        name: &str,
+    ) {
+        self.applique_selection(preset, preset_name);
+        self.applique_pochette_de_source(cover, name);
+    }
+
     /// Applique la sélection qu'une trame déclare : le numéro de présélection et
     /// son nom lisible. Convention « absent = garder la valeur courante », à
     /// l'inverse de `status`.
     ///
-    /// Deux appelants dans `handle_source_update`, et c'est la raison d'être de
-    /// cette méthode : la trame qui recompose la vue l'applique **après**
-    /// l'identité (`set_identity(None)` efface la sélection, une déclaration
-    /// explicite doit gagner), celle qui ne fait qu'annoncer un fait l'applique
-    /// avant de rendre la main. Deux copies de ces quatre lignes divergeraient.
+    /// Appelée par `applique_les_faits_declares` seule, qui la relaie aux deux
+    /// sorties de `handle_source_update` : la trame qui recompose la vue
+    /// l'applique **après** l'identité (`set_identity(None)` efface la sélection,
+    /// une déclaration explicite doit gagner), celle qui ne fait qu'annoncer un
+    /// fait l'applique avant de rendre la main. Deux copies de ces quatre lignes
+    /// divergeraient.
     fn applique_selection(&mut self, preset: Option<u8>, nom: Option<String>) {
         if let Some(p) = preset {
             self.preset = Some(p);
@@ -622,8 +670,9 @@ impl<P: Player> Core<P> {
     /// `SourceUpdate::cover`). C'est pourquoi `set_cover_de_source` ne doit être
     /// appelée que lorsque le champ vaut `Some`.
     ///
-    /// **Deux appelants dans `handle_source_update`**, exactement comme
-    /// `applique_selection` et pour la même raison. Sur le chemin qui recompose
+    /// **Appelée par `applique_les_faits_declares`**, exactement comme
+    /// `applique_selection` et pour la même raison — c'est elle qui la relaie aux
+    /// deux sorties de `handle_source_update`. Sur le chemin qui recompose
     /// la vue, l'appel vient **après** l'identité : `set_identity` remet à zéro
     /// tout ce que `Metadonnees` retenait, pochette de la Source comprise, donc
     /// une trame qui porterait à la fois une nouvelle identité et sa pochette
@@ -1446,8 +1495,16 @@ impl<P: Player> Core<P> {
             }
             Command::PlayPause => {
                 if self.lecture {
-                    self.paused = !self.paused;
+                    // Basculer la croyance **après** que mpv a accepté, jamais
+                    // avant. Le `?` propage un échec de `toggle_pause` et laisse
+                    // `paused` intact : c'est cette valeur-là que
+                    // `PlayerState.playback` publie, et à laquelle le greffon
+                    // MPD compare ses `pause 0`/`pause 1` — un cœur qui se croit
+                    // en pause devant un mpv qui joue fait répondre « paused » à
+                    // un client dont la musique continue, et le `pause 0`
+                    // suivant est alors jugé sans effet et ignoré.
                     self.player.toggle_pause().await?;
+                    self.paused = !self.paused;
                 } else {
                     // Rien n'est chargé : `stop` **vide la liste de mpv**, si
                     // bien que « basculer la pause » n'a plus rien à reprendre.
@@ -1530,9 +1587,18 @@ impl<P: Player> Core<P> {
                 }
             }
             Command::SourceCycle => {
-                let idx = self.source_order.iter().position(|n| n == &self.active_source).unwrap_or(0);
-                let next_idx = (idx + 1) % self.source_order.len().max(1);
-                let suivante = self.source_order.get(next_idx).cloned();
+                // La source active peut ne plus être dans l'ordre : c'est l'état
+                // que laisse `oublie_source_morte` — le greffon a disparu, la
+                // musique continue, et son nom reste affiché. Dans ce cas, la
+                // touche Source doit repartir de la **première** source
+                // disponible. Un `position().unwrap_or(0)` suivi du `+ 1`
+                // sautait la première pour aller à la seconde, ce qui rendait
+                // une source inatteignable au clavier tant qu'on n'avait pas
+                // fait un tour complet.
+                let suivante = match self.source_order.iter().position(|n| n == &self.active_source) {
+                    Some(idx) => self.source_order.get((idx + 1) % self.source_order.len()).cloned(),
+                    None => self.source_order.first().cloned(),
+                };
                 self.bascule_source(suivante).await?;
             }
             Command::SelectSource(nom) => {
@@ -1815,8 +1881,71 @@ impl<P: Player> Core<P> {
         Ok(())
     }
 
+    /// Oublie une source dont le greffon est mort **de lui-même** — panique,
+    /// `SIGSEGV`, tué à la main. Rend `false` si ce nom n'était pas une source.
+    ///
+    /// **La différence avec `remove_source` est délibérée, et elle tient en une
+    /// phrase : celui-là bascule, celui-ci non.** Les deux évincent la même
+    /// chose du catalogue, pour la même raison (un client MPD ne doit pas voir
+    /// une liste enregistrée pour une source qu'il ne peut plus atteindre) ;
+    /// seule diffère la conséquence sur ce qui joue, parce que seule diffère la
+    /// question de qui a décidé.
+    ///
+    /// * `remove_source` : **l'opérateur a demandé** que cette source s'en aille.
+    ///   Basculer vers la suivante est la suite de son geste, et arrêter le
+    ///   lecteur d'abord est ce qui empêche l'ancien flux de continuer sous le
+    ///   nom de la nouvelle source.
+    /// * ici : **personne n'a rien demandé**. Un greffon de Source est un
+    ///   *contrôleur* — il dit quoi jouer, il ne joue pas. Le flux est tenu par
+    ///   mpv, qui est un enfant du cœur et que la mort du greffon ne touche pas.
+    ///   Arrêter mpv et basculer sur le cd, c'est transformer la panne d'un
+    ///   contrôleur en silence, puis présenter à l'écran une source que
+    ///   l'utilisateur n'a pas choisie : deux fautes, dont la seconde est du
+    ///   mensonge. On ne fait donc ni l'un ni l'autre — la musique continue,
+    ///   `active_source` garde le nom de la source qui a disparu, et la page de
+    ///   statut dit la vérité entière (« radio », active, non joint).
+    ///
+    /// Ce qui est quand même oublié : les présélections nommées (le catalogue ne
+    /// doit pas proposer d'agir sur un greffon mort) et, si c'était l'active, les
+    /// deux **capacités** qu'elle avait déclarées — `preset_count` et
+    /// `can_eject`. Celles-là décrivent ce qu'un greffon sait faire, et il n'est
+    /// plus là pour le faire : laisser la touche Eject allumée ou la grille de
+    /// présélections ouverte donnerait des commandes qui ne peuvent plus aboutir.
+    /// `bascule_source` les efface déjà pour ce motif exact.
+    ///
+    /// Ce qui est gardé, et c'est aussi voulu : `source_status` et l'identité de
+    /// ce qui joue. Elles décrivent **le morceau en cours**, qui joue encore ;
+    /// les effacer noircirait l'afficheur au milieu d'un titre. `persist()` n'est
+    /// pas appelée : `active_source` n'a pas changé, et l'état sur disque nomme
+    /// donc toujours la source que l'utilisateur a choisie — au prochain
+    /// démarrage le greffon est relancé et la retrouve.
+    ///
+    /// Non-`async` : c'est la conséquence directe de ne pas basculer. Aucun
+    /// `Deactivate` à envoyer (le pair est mort), aucun `Activate` à attendre.
+    pub fn oublie_source_morte(&mut self, name: &str) -> bool {
+        let Some(pos) = self.source_order.iter().position(|n| n == name) else {
+            return false;
+        };
+        self.sources.remove(name);
+        self.source_order.remove(pos);
+        self.presets_par_source.remove(name);
+        if self.active_source == name {
+            self.preset_count = None;
+            self.can_eject = false;
+        }
+        self.publie_catalogue();
+        // Publier l'état aussi : `can_eject` et `preset_count` en font partie, et
+        // aucun autre chemin ne le fera — ce bras-ci n'est pas une commande.
+        self.publie_etat();
+        true
+    }
+
     /// Retire une source décâblée — un greffon qu'on vient d'éteindre depuis
     /// l'IHM. Rend `false` si ce nom n'était pas une source.
+    ///
+    /// **À ne pas confondre avec `oublie_source_morte`**, qui traite la mort
+    /// *subie* du même greffon : celle-là ne bascule pas et n'arrête pas le
+    /// lecteur. La doc de l'autre porte la comparaison des deux chemins.
     ///
     /// Si c'était l'active, la **suivante du cycle** prend sa place, ou aucune
     /// s'il n'en reste pas : `demande_active` tolère déjà l'absence de source, et
@@ -2187,6 +2316,10 @@ mod tests {
         /// `Mutex` et non champ simple : les tests le règlent après
         /// construction, `Player` ne prenant que `&self`.
         progression: Arc<Mutex<crate::player::Progression>>,
+        /// Quand c'est vrai, `toggle_pause` échoue — mpv absent, socket coupé.
+        /// Partagé et posé après construction, pour la même raison que
+        /// `progression`.
+        pause_echoue: Arc<std::sync::atomic::AtomicBool>,
     }
 
     #[async_trait::async_trait]
@@ -2205,6 +2338,9 @@ mod tests {
         }
         async fn toggle_pause(&self) -> anyhow::Result<()> {
             self.calls.lock().unwrap().push("pause".into());
+            if self.pause_echoue.load(std::sync::atomic::Ordering::SeqCst) {
+                anyhow::bail!("mpv injoignable");
+            }
             Ok(())
         }
         async fn next(&self) -> anyhow::Result<()> {
@@ -2642,15 +2778,17 @@ mod tests {
 
     #[tokio::test]
     async fn une_source_disparue_ne_recoit_plus_de_bascule_et_sort_du_catalogue() {
-        // **Le danger sur le chemin de la mort spontanée d'un greffon** — celui
-        // que le bras `plugin_waits` de `main.rs` traite désormais comme
-        // l'extinction volontaire. Un greffon qui meurt de lui-même (panique,
-        // `SIGSEGV`, tué à la main) laissait son nom dans `source_order` et ses
-        // présélections dans `presets_par_source` : un client MPD gardait sa
-        // liste enregistrée en cache, et un `load` dessus **passait** le garde de
-        // `SelectSource`. La bascule partait alors vers un socket mort et payait
-        // jusqu'à deux délais de 5 s du protocole des sources — `Deactivate` puis
-        // `Activate` — dans la boucle principale, muette pendant ce temps.
+        // **Le danger commun aux deux chemins de disparition d'un greffon.** Un
+        // greffon disparu qui laissait son nom dans `source_order` et ses
+        // présélections dans `presets_par_source` faisait garder à un client MPD
+        // sa liste enregistrée en cache, et un `load` dessus **passait** le garde
+        // de `SelectSource`. La bascule partait alors vers un socket mort et
+        // payait jusqu'à deux délais de 5 s du protocole des sources —
+        // `Deactivate` puis `Activate` — dans la boucle principale, muette
+        // pendant ce temps. Ce test-ci prend le chemin volontaire
+        // (`remove_source`) ; son jumeau juste en dessous prend celui de la mort
+        // subie (`oublie_source_morte`), et c'est leur *différence* qui est
+        // épinglée là-bas.
         //
         // Le test épingle les deux moitiés à la suite : la sortie du catalogue,
         // et le fait qu'un `SelectSource` sur ce nom ne parle plus à personne.
@@ -2678,6 +2816,125 @@ mod tests {
             "la source disparue ne doit plus figurer au catalogue"
         );
         assert!(!core.presets_par_source.contains_key("radio"));
+    }
+
+    #[tokio::test]
+    async fn la_mort_subie_du_greffon_actif_evince_sans_arreter_la_musique_ni_changer_de_source() {
+        // **La décision du constat 3, épinglée.** Le bras de sortie de processus
+        // appelait `remove_source`, qui bascule quand c'était l'active : une
+        // panique du greffon radio arrêtait donc mpv et affichait « cd » sur un
+        // appareil dont l'utilisateur avait choisi la radio. Or un greffon de
+        // Source est un *contrôleur* — le flux est tenu par mpv, enfant du cœur,
+        // que la mort du greffon ne touche pas.
+        //
+        // Trois propriétés dans un seul test, parce que c'est leur conjonction
+        // qui est la décision : rien ne s'arrête, rien ne bascule, et le
+        // catalogue oublie quand même.
+        let (mut core, player_calls, source_calls, etat_rx, _d) = setup();
+        core.handle_command(Command::PlayPause).await.unwrap(); // la radio joue
+        core.handle_source_update("radio", avec_presets(vec![pres(1, "FIP")]));
+        assert_eq!(etat_rx.borrow().playback, Playback::Playing);
+        player_calls.lock().unwrap().clear();
+        source_calls.lock().unwrap().clear();
+
+        assert!(core.oublie_source_morte("radio"));
+
+        assert_eq!(
+            core.active_source(),
+            "radio",
+            "personne n'a demande de changer de source : le nom affiche doit rester celui \
+             que l'utilisateur a choisi, greffon mort ou non"
+        );
+        assert_eq!(
+            etat_rx.borrow().playback,
+            Playback::Playing,
+            "la panne d'un controleur ne doit pas faire taire mpv, qui n'est pas dans le greffon"
+        );
+        assert!(
+            player_calls.lock().unwrap().is_empty(),
+            "aucun ordre au lecteur : obtenu {:?}",
+            player_calls.lock().unwrap()
+        );
+        assert!(
+            source_calls.lock().unwrap().is_empty(),
+            "ni Deactivate ni Activate : le pair est mort et l'autre source n'a rien demande, \
+             obtenu {:?}",
+            source_calls.lock().unwrap()
+        );
+        // Et l'eviction, elle, a bien eu lieu : c'est la moitie commune aux deux
+        // chemins.
+        assert_eq!(noms(&core.catalogue()), vec!["cd".to_string()]);
+        assert!(!core.presets_par_source.contains_key("radio"));
+        // Les capacites de la source morte sont oubliees : une touche Eject
+        // allumee ou une grille de preselections ouverte proposeraient des
+        // commandes qui ne peuvent plus aboutir.
+        assert!(!etat_rx.borrow().can_eject);
+        assert_eq!(etat_rx.borrow().preset_count, None);
+    }
+
+    #[tokio::test]
+    async fn apres_la_mort_de_la_source_active_la_touche_source_repart_de_la_premiere() {
+        // Le corollaire de la décision ci-dessus : `active_source` ne figure plus
+        // dans `source_order`, et `SourceCycle` doit quand même mener quelque
+        // part d'utile. Un `position().unwrap_or(0)` suivi d'un `+ 1` sautait la
+        // première source, qui devenait inatteignable au clavier.
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        let files = Arc::new(FakeSource { name: "files", calls: source_calls });
+        core.add_source("files".into(), files);
+        assert_eq!(core.source_order, vec!["cd".to_string(), "files".into(), "radio".into()]);
+        assert!(core.oublie_source_morte("radio"));
+
+        core.handle_command(Command::SourceCycle).await.unwrap();
+
+        assert_eq!(core.active_source(), "cd", "la premiere source restante, pas la seconde");
+    }
+
+    #[tokio::test]
+    async fn une_reponse_de_catalogue_encore_en_vol_ne_ressuscite_pas_une_source_evincee() {
+        // Le fan-out des `ListPresets` est **détaché** : la requête part dans sa
+        // propre tâche, et `remove_source` peut s'exécuter entre elle et sa
+        // réponse. Cette réponse-là arrive donc pour de vrai après l'éviction, et
+        // `presets_par_source.insert` se fait délibérément **avant** le garde de
+        // source active (le catalogue décrit toutes les sources, pas celle qui
+        // joue) : la liste était donc ré-insérée après coup, le catalogue
+        // republié annonçait une liste enregistrée pour une source qui n'existe
+        // plus, et un client MPD pouvait `load` dessus.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        assert!(core.remove_source("radio").await.unwrap());
+        assert!(!noms(&core.catalogue()).contains(&"radio".to_string()));
+
+        // La réponse en vol, telle que le `SourceClient` la relaie : une liste
+        // non vide, sans identité ni statut — la forme exacte qu'une trame de
+        // `ListPresets` prend sur le fil.
+        core.handle_source_update("radio", avec_presets(vec![pres(1, "FIP"), pres(5, "OUI FM")]));
+
+        assert!(
+            !core.presets_par_source.contains_key("radio"),
+            "une reponse pour une source que le coeur ne connait plus doit etre jetee"
+        );
+        assert!(
+            !noms(&core.catalogue()).contains(&"radio".to_string()),
+            "et le catalogue ne doit pas la faire reapparaitre"
+        );
+    }
+
+    #[tokio::test]
+    async fn une_reponse_de_catalogue_pour_une_source_inactive_mais_vivante_est_toujours_prise() {
+        // Le pendant du test ci-dessus, et il est nécessaire : un garde trop
+        // large aurait aussi jeté les listes des sources **vivantes mais non
+        // actives**, ce qui est justement le cas que `presets_par_source` existe
+        // pour servir — `listplaylistinfo "radio"` pendant que le cd joue.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        assert_eq!(core.active_source(), "cd");
+
+        core.handle_source_update("radio", avec_presets(vec![pres(1, "FIP")]));
+
+        assert_eq!(
+            core.presets_par_source.get("radio").map(|p| p.len()),
+            Some(1),
+            "la source n'est pas active, mais elle existe : sa liste doit entrer au catalogue"
+        );
     }
 
     #[tokio::test]
@@ -3399,6 +3656,36 @@ mod tests {
         assert_eq!(core.etat_lecteur().playback, Playback::Playing);
         core.handle_command(Command::Stop).await.unwrap();
         assert_eq!(core.etat_lecteur().playback, Playback::Stopped);
+    }
+
+    #[tokio::test]
+    async fn un_echec_de_mpv_ne_change_pas_la_croyance_du_coeur_sur_la_pause() {
+        // `paused` était basculé **avant** `toggle_pause`, donc un échec de mpv
+        // laissait le cœur croire l'inverse de la vérité. Ce n'est pas cosmétique
+        // : c'est cette valeur que `PlayerState.playback` publie, et à laquelle le
+        // greffon MPD compare ses `pause 0`/`pause 1`. Un cœur qui se croit en
+        // pause devant un mpv qui joue répond « paused » à un client dont la
+        // musique continue, puis juge le `pause 0` suivant sans effet.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.handle_command(Command::PlayPause).await.unwrap(); // demarre la lecture
+        assert_eq!(core.etat_lecteur().playback, Playback::Playing);
+
+        core.player.pause_echoue.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            core.handle_command(Command::PlayPause).await.is_err(),
+            "l'echec de mpv doit remonter, il ne doit pas etre avale"
+        );
+        assert_eq!(
+            core.etat_lecteur().playback,
+            Playback::Playing,
+            "mpv a refuse : le coeur doit continuer de dire ce qui est vrai"
+        );
+
+        // Et la reprise du dialogue remet la bascule en marche : le drapeau n'a
+        // pas ete abime, il n'a simplement pas bouge.
+        core.player.pause_echoue.store(false, std::sync::atomic::Ordering::SeqCst);
+        core.handle_command(Command::PlayPause).await.unwrap();
+        assert_eq!(core.etat_lecteur().playback, Playback::Paused);
     }
 
     #[tokio::test]

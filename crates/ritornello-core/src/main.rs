@@ -105,44 +105,105 @@ fn relais_afficheur(
     mut catalogue_rx: watch::Receiver<Catalogue>,
 ) {
     tokio::spawn(async move {
+        /// Nombre de tentatives accordées à un même `cover_href` avant de
+        /// l'abandonner pour de bon.
+        ///
+        /// **Le compromis exact entre deux défauts symétriques.** Marquer la
+        /// tentative comme faite avant de l'avoir faite sacrifiait la pochette
+        /// pour **toute la piste** sur un seul délai dépassé : un partage SMB
+        /// endormi met une poignée de secondes à répondre au premier accès et
+        /// répond ensuite, si bien que la seule tentative jamais accordée était
+        /// justement celle qui ne pouvait pas réussir. À l'inverse, retenter sans
+        /// borne relirait le fichier **une fois par seconde** — la cadence des
+        /// trames d'état en lecture — pour une image dont l'absence peut être
+        /// définitive (un 404 du Cover Art Archive, un fichier au-delà du
+        /// plafond). Trois essais couvrent le réveil d'un partage sans installer
+        /// de boucle de relecture.
+        const ESSAIS_POCHETTE: u8 = 3;
+
+        /// Ce que le relais retient de ses tentatives de pochette.
+        ///
+        /// Deux champs et non un, parce que « poussée » et « tentée sans
+        /// succès » sont deux faits différents : c'est leur confusion qui faisait
+        /// perdre la pochette de toute une piste sur un unique échec.
+        #[derive(Default)]
+        struct SuiviPochette {
+            /// Le `cover_href` de la dernière pochette **réellement écrite** sur
+            /// le socket. Une trame d'état qui répète ce href ne redéclenche
+            /// rien : c'est cette garde qui évite de pousser des mégaoctets à
+            /// chaque seconde de lecture.
+            poussee: Option<String>,
+            /// Le `cover_href` en échec et le nombre d'essais déjà consommés.
+            /// Remis à zéro dès qu'un autre href apparaît : le budget est par
+            /// pochette, pas par relais.
+            echecs: Option<(String, u8)>,
+        }
+
         /// Pousse la pochette que `href` désigne, si elle a changé depuis le
-        /// dernier envoi. Rend `Err` comme un envoi d'état, pour que le
-        /// contrôle d'erreur de la boucle soit le même : un socket mort doit
+        /// dernier envoi **réussi**. Rend `Err` comme un envoi d'état, pour que
+        /// le contrôle d'erreur de la boucle soit le même : un socket mort doit
         /// faire sortir, quel que soit le genre de trame qui l'a découvert.
         ///
         /// Une pochette introuvable, illisible ou trop grosse n'est **pas** une
-        /// erreur d'envoi : rien ne part, et `derniere` est quand même mise à
-        /// jour — sans quoi chaque trame d'état de la piste retenterait la
-        /// lecture d'un fichier qui vient d'échouer, une fois par seconde.
+        /// erreur d'envoi : rien ne part, la boucle continue, et l'échec est
+        /// compté à part du succès (voir `SuiviPochette` et `ESSAIS_POCHETTE`).
+        /// Un échec transitoire est donc réessayé à la trame d'état suivante,
+        /// jusqu'à épuisement du budget — un échec définitif ne coûte que trois
+        /// lectures par piste, pas une par seconde.
         ///
-        /// **N'encode rien elle-même** : `covers.ligne` construit la trame une
-        /// fois par publication et la partage par `Arc` ; ce relais, comme
-        /// tous les autres qui la redemandent, ne fait qu'écrire le même
-        /// buffer (`DisplayClient::send_cover_line`).
+        /// **N'encode rien elle-même** : `covers.ligne` construit la trame et la
+        /// rend derrière un `Arc` ; ce relais ne fait qu'écrire ce buffer
+        /// (`DisplayClient::send_cover_line`), sans recopie ni réencodage.
         async fn pousse(
             client: &DisplayClient,
             covers: &cover::CoverCache,
-            derniere: &mut Option<String>,
+            suivi: &mut SuiviPochette,
             href: Option<&str>,
         ) -> anyhow::Result<()> {
-            if derniere.as_deref() == href {
-                return Ok(());
-            }
-            *derniere = href.map(str::to_owned);
             // `None` (plus rien ne joue, ou pochette retirée) n'émet aucune
             // trame : l'afficheur l'apprend par le `cover_href` absent de
             // l'état, qu'il vient de recevoir. Inventer une trame de pochette
             // vide ferait exister une image de zéro octet dans le protocole.
-            let Some(href) = href else { return Ok(()) };
+            // Les deux mémoires sont vidées : la prochaine pochette, même
+            // identique à la précédente, décrit un nouveau morceau.
+            let Some(href) = href else {
+                suivi.poussee = None;
+                suivi.echecs = None;
+                return Ok(());
+            };
+            if suivi.poussee.as_deref() == Some(href) {
+                return Ok(());
+            }
+            // Budget consommé pour *ce* href : ne plus rien tenter. Un href
+            // différent efface l'ardoise, ce que fait le `match` ci-dessous.
+            let essais = match &suivi.echecs {
+                Some((h, n)) if h == href => {
+                    if *n >= ESSAIS_POCHETTE {
+                        return Ok(());
+                    }
+                    *n
+                }
+                _ => 0,
+            };
             let Some(cle) = href.strip_prefix(cover::PREFIXE_HREF) else {
+                // Un href sans notre préfixe ne deviendra jamais valide :
+                // consommer tout le budget d'un coup plutôt que de réessayer
+                // trois fois une chaîne qui ne peut pas changer.
                 tracing::debug!("cover href {href} has no key, nothing pushed");
+                suivi.echecs = Some((href.to_owned(), ESSAIS_POCHETTE));
                 return Ok(());
             };
             let Some(ligne) = covers.ligne(cle, href).await else {
-                // Déjà journalisé par `octets` avec sa raison.
+                // Déjà journalisé par `octets` avec sa raison. Compté comme un
+                // échec, donc réessayé à la trame suivante : c'est ici que se
+                // joue le partage endormi.
+                suivi.echecs = Some((href.to_owned(), essais + 1));
                 return Ok(());
             };
-            client.send_cover_line(&ligne).await
+            client.send_cover_line(&ligne).await?;
+            suivi.poussee = Some(href.to_owned());
+            suivi.echecs = None;
+            Ok(())
         }
 
         let etat = etat_rx.borrow_and_update().clone();
@@ -158,12 +219,12 @@ fn relais_afficheur(
         // La pochette courante part d'emblée, comme l'état et le catalogue et
         // pour la même raison : un afficheur câblé à chaud doit montrer ce qui
         // joue sans attendre le prochain changement de piste.
-        let mut derniere_pochette: Option<String> = None;
+        let mut suivi_pochette = SuiviPochette::default();
         if veut_pochettes {
             if let Err(e) = pousse(
                 &client,
                 &covers,
-                &mut derniere_pochette,
+                &mut suivi_pochette,
                 etat.morceau.cover_href.as_deref(),
             )
             .await
@@ -186,7 +247,7 @@ fn relais_afficheur(
                                 pousse(
                                     &client,
                                     &covers,
-                                    &mut derniere_pochette,
+                                    &mut suivi_pochette,
                                     e.morceau.cover_href.as_deref(),
                                 )
                                 .await
@@ -1455,33 +1516,47 @@ async fn main() -> Result<()> {
                         tracing::info!("plugin {name} stopped: disabled from the admin UI");
                     } else {
                         tracing::warn!("plugin {name} exited: {status:?}");
-                        // Décâblage de la source, **comme sur le chemin de
-                        // l'extinction volontaire**. Un greffon qui meurt de
-                        // lui-même — panique, `SIGSEGV`, tué à la main — laissait
-                        // sinon son nom dans `source_order` et ses présélections
-                        // dans `presets_par_source` : un client MPD gardait donc
-                        // une liste enregistrée pour une source qui n'existe plus,
-                        // et un `load` dessus **passait** le garde de
-                        // `Command::SelectSource` (qui ne consulte que
-                        // `source_order`). La bascule partait alors vers un socket
-                        // mort et payait jusqu'à deux délais de 5 s du protocole
-                        // des sources — `Deactivate` puis `Activate` — **dans la
-                        // boucle principale**, donc sans répondre à la
-                        // télécommande pendant ce temps.
+                        // Décâblage de la source, mais **pas** avec la fonction
+                        // du chemin volontaire, et c'est le cœur de la décision.
                         //
-                        // C'est le même danger que celui qu'on a écarté pour la
-                        // désactivation depuis l'IHM, sur le chemin qui avait été
-                        // oublié : la seule différence entre les deux est de
-                        // savoir qui a décidé de la mort, ce qui ne change rien à
-                        // ce que le cœur doit oublier. `remove_source` bascule
-                        // vers la source suivante s'il s'agissait de l'active,
-                        // évince les présélections et republie le catalogue.
-                        if let Err(e) = core.remove_source(&name).await {
-                            tracing::warn!("unwiring source {name} after it exited: {e:#}");
+                        // Ce qu'il faut oublier est le même dans les deux cas :
+                        // sans éviction, un greffon mort laissait son nom dans
+                        // `source_order` et ses présélections dans
+                        // `presets_par_source`, si bien qu'un client MPD gardait
+                        // une liste enregistrée pour une source qui n'existe plus
+                        // et qu'un `load` dessus **passait** le garde de
+                        // `Command::SelectSource` (qui ne consulte que
+                        // `source_order`).
+                        //
+                        // Ce qui diffère est la conséquence sur ce qui joue.
+                        // `remove_source` bascule vers la source suivante quand
+                        // c'était l'active : c'est juste quand **l'opérateur** a
+                        // demandé l'extinction, la bascule étant la suite de son
+                        // geste. Ici personne n'a rien demandé. Un greffon de
+                        // Source est un *contrôleur* — le flux est tenu par mpv,
+                        // enfant du cœur, que sa mort ne touche pas —, donc
+                        // basculer transformait la panne d'un contrôleur en
+                        // silence, puis affichait « cd » sur un appareil dont
+                        // l'utilisateur avait choisi la radio. La musique
+                        // continue, `active_source` garde son nom, et la page de
+                        // statut porte le diagnostic complet : source active,
+                        // greffon non joint. Voir la doc d'`oublie_source_morte`,
+                        // qui écrit la comparaison des deux chemins.
+                        if !core.oublie_source_morte(&name) {
+                            tracing::debug!("plugin {name} was not a wired source, nothing to unwire");
                         }
                         // Un seul verrou pour les deux écritures, comme
                         // `eteindre_a_chaud` : la ligne « déconnecté » et le nom
                         // de la source active décrivent le même instant.
+                        //
+                        // Réaffirmé même si ce chemin ne change plus
+                        // `active_source` : c'est la page de statut qui doit
+                        // montrer les deux faits **ensemble** — la source active
+                        // est « radio » et le greffon « radio » n'est plus joint.
+                        // C'est cette conjonction qui est le diagnostic, et la
+                        // relire du cœur plutôt que de supposer qu'elle n'a pas
+                        // bougé garde la ligne juste si la décision de basculer
+                        // était un jour reprise.
                         let mut statuts = status_state.write().await;
                         crate::status::mark_plugin_disconnected(&mut statuts, &name);
                         statuts.active_source = core.active_source().to_string();
@@ -1772,5 +1847,126 @@ mod relais_tests {
         let mut b = banc(true, covers, etat_avec_pochette("evincee")).await;
         let recus = temoin(&mut b).await;
         assert!(pochettes(&recus).is_empty(), "{recus:?}");
+    }
+
+    #[tokio::test]
+    async fn un_echec_transitoire_est_reessaye_et_la_pochette_finit_par_partir() {
+        // **La propriété que le défaut cassait, et rien d'autre.** `pousse`
+        // marquait la tentative comme faite *avant* de la faire : un seul délai
+        // dépassé sur un partage SMB endormi sacrifiait la pochette pour **toute
+        // la piste**, parce que la garde de déduplication considérait ensuite
+        // l'affaire classée. Or c'est exactement le cas où un second essai
+        // réussit — un partage réveillé répond au deuxième accès.
+        //
+        // L'échec est provoqué par la disparition du fichier, ce que
+        // `lit_fichier_borne` traite comme toute IO qui n'aboutit pas. La
+        // séquence est celle de la production : l'entrée est insérée alors que le
+        // fichier existe (`recupere` en a lu l'en-tête avant d'insérer), le
+        // partage s'absente, puis il revient.
+        let dir = tempfile::tempdir().unwrap();
+        let chemin = dir.path().join("folder.jpg");
+        let image = jpeg(500);
+        std::fs::write(&chemin, &image).unwrap();
+        let covers = Arc::new(CoverCache::new());
+        covers.insere("abcd".into(), Pochette::Fichier(chemin.clone())).await;
+        // Le partage s'endort : le fichier n'est plus lisible.
+        std::fs::remove_file(&chemin).unwrap();
+
+        let mut b = banc(true, covers, etat_avec_pochette("abcd")).await;
+        let recus = temoin(&mut b).await;
+        assert!(
+            pochettes(&recus).is_empty(),
+            "premiere tentative : le fichier est illisible, rien ne doit partir : {recus:?}"
+        );
+
+        // Le partage revient. Le `cover_href` n'a **pas** changé — c'est tout
+        // l'enjeu : avec l'ancien code, la garde le tenait pour deja traite et
+        // aucune relecture n'avait plus lieu jusqu'au morceau suivant.
+        std::fs::write(&chemin, &image).unwrap();
+        let mut encore = etat_avec_pochette("abcd");
+        encore.volume = 42;
+        let recus = provoque(&mut b, encore).await;
+        let vues = pochettes(&recus);
+        assert_eq!(vues.len(), 1, "le second essai doit pousser la pochette : {recus:?}");
+        assert_eq!(vues[0].bytes, image);
+    }
+
+    #[tokio::test]
+    async fn un_echec_definitif_nest_pas_reessaye_sans_fin() {
+        // L'autre moitié du compromis, et elle compte autant : une trame d'état
+        // sort jusqu'à une fois par seconde en lecture, donc retenter sans borne
+        // relirait un fichier absent une fois par seconde pour le reste de la
+        // piste. Le budget est de `ESSAIS_POCHETTE` essais, et il s'épuise.
+        //
+        // Preuve sans marge de temps : le fichier est remis en place **après**
+        // épuisement du budget, et la pochette ne doit alors plus partir. Si le
+        // budget n'existait pas, elle partirait.
+        let dir = tempfile::tempdir().unwrap();
+        let chemin = dir.path().join("folder.jpg");
+        let image = jpeg(500);
+        std::fs::write(&chemin, &image).unwrap();
+        let covers = Arc::new(CoverCache::new());
+        covers.insere("abcd".into(), Pochette::Fichier(chemin.clone())).await;
+        std::fs::remove_file(&chemin).unwrap();
+
+        // Une tentative part avec l'état initial, une par témoin ci-dessous :
+        // trois essais au total, soit tout le budget.
+        let mut b = banc(true, covers, etat_avec_pochette("abcd")).await;
+        for _ in 0..3 {
+            let recus = temoin(&mut b).await;
+            assert!(pochettes(&recus).is_empty(), "rien ne doit partir tant que le fichier manque");
+        }
+
+        std::fs::write(&chemin, &image).unwrap();
+        let recus = temoin(&mut b).await;
+        assert!(
+            pochettes(&recus).is_empty(),
+            "le budget de cette pochette est epuise : plus aucune relecture ne doit avoir lieu \
+             pour ce href, {recus:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn un_afficheur_recable_recoit_limage_actuelle_et_non_celle_davant() {
+        // **Le scénario du constat le plus grave, de bout en bout.** Trois clics
+        // de l'utilisateur : désactiver l'afficheur depuis la page d'admin,
+        // remplacer la pochette sur le partage, le réactiver. Le second relais
+        // repart avec sa garde de déduplication à zéro et redemande la pochette
+        // courante — même clé, puisque la clé hache le *chemin*.
+        //
+        // Une ligne encodée gardée d'un appel sur l'autre servait alors l'image
+        // d'avant, et rien ne pouvait l'invalider : remplacer un fichier sur un
+        // partage ne passe par aucun code à nous, et aucun `insere` n'a lieu ici.
+        // Deux bancs successifs sur le **même** `CoverCache` reproduisent
+        // exactement le décâblage puis le recâblage.
+        let dir = tempfile::tempdir().unwrap();
+        let chemin = dir.path().join("folder.jpg");
+        let avant = jpeg(500);
+        let apres = jpeg(1500);
+        std::fs::write(&chemin, &avant).unwrap();
+        let covers = Arc::new(CoverCache::new());
+        covers.insere("abcd".into(), Pochette::Fichier(chemin.clone())).await;
+
+        let mut premier = banc(true, covers.clone(), etat_avec_pochette("abcd")).await;
+        let recus = temoin(&mut premier).await;
+        let vues = pochettes(&recus);
+        assert_eq!(vues.len(), 1, "la pochette initiale : {recus:?}");
+        assert_eq!(vues[0].bytes, avant);
+        // L'afficheur est desactive : son relais s'en va avec son banc.
+        drop(premier);
+
+        // L'utilisateur remplace la pochette qui ne lui plaisait pas.
+        std::fs::write(&chemin, &apres).unwrap();
+
+        // Puis il reactive l'afficheur : nouveau relais, meme cache, meme cle.
+        let mut second = banc(true, covers, etat_avec_pochette("abcd")).await;
+        let recus = temoin(&mut second).await;
+        let vues = pochettes(&recus);
+        assert_eq!(vues.len(), 1, "l'afficheur recable doit recevoir la pochette courante : {recus:?}");
+        assert_eq!(
+            vues[0].bytes, apres,
+            "et ce doit etre l'image actuelle du partage, pas celle que le cache avait encodee \
+             avant le remplacement"
+        );
     }
 }

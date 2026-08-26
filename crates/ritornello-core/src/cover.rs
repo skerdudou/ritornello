@@ -134,10 +134,6 @@ pub fn cle(r: &CoverRef) -> String {
 #[derive(Default)]
 pub struct CoverCache {
     entrees: RwLock<VecDeque<(String, Pochette)>>,
-    /// La dernière ligne de protocole (`DisplayFrame::Cover`, encodée) déjà
-    /// construite, gardée derrière un `Arc` et partagée telle quelle : voir
-    /// `ligne`.
-    derniere_ligne: RwLock<Option<(String, Arc<str>)>>,
 }
 
 impl CoverCache {
@@ -210,41 +206,51 @@ impl CoverCache {
         lit_fichier_borne(&chemin).await
     }
 
-    /// Construit — ou réutilise — la ligne de protocole `DisplayFrame::Cover`
-    /// déjà encodée pour `cle`/`href` : le JSON complet, base64 compris,
-    /// terminé par un saut de ligne, prêt à être écrit tel quel sur un socket.
+    /// Construit la ligne de protocole `DisplayFrame::Cover` pour `cle`/`href` :
+    /// le JSON complet, base64 compris, terminé par un saut de ligne, prêt à
+    /// être écrit tel quel sur un socket.
     ///
-    /// **Construite une fois, partagée par `Arc`.** Le coût d'une pochette —
-    /// matérialiser ses octets puis les encoder en base64, jusqu'à
-    /// `COVER_MAX_BYTES` — ne doit être payé qu'une fois par publication, pas
-    /// une fois par relais qui la redemande : un second appelant pour la même
-    /// clé, qu'il s'agisse d'un second afficheur abonné ou du même relais qui
-    /// revient sur un morceau déjà vu, reçoit le **même** `Arc`, sans recopier
-    /// les octets ni réencoder. C'est délibérément un cache à une seule entrée
-    /// (la dernière ligne construite) et non une table par clé : à un instant
-    /// donné, tous les relais s'intéressent à la pochette du morceau courant,
-    /// la même clé.
+    /// **Construite à chaque appel, jamais mémorisée, et c'est la propriété qui
+    /// compte.** Une ligne encodée retenue d'un appel sur l'autre a été essayée
+    /// ici, puis retirée : la clé du cache hache le *chemin*, pas le contenu, si
+    /// bien qu'une ligne gardée devenait fausse dès que l'utilisateur remplaçait
+    /// l'image sous ce chemin. Et le geste qui y menait tient en trois clics —
+    /// désactiver l'afficheur depuis la page d'admin, remplacer le `folder.jpg`,
+    /// le réactiver : le relais rebranché repart avec sa garde de déduplication
+    /// à zéro (`main::relais_afficheur`, `SuiviPochette`), redemande la
+    /// pochette courante, et recevait la ligne d'avant. Rien ne l'invalidait
+    /// parce que rien ne *pouvait* l'invalider : remplacer un fichier sur un
+    /// partage ne passe par aucun code à nous. Une image visiblement fausse est
+    /// le pire des défauts de cet appareil, très au-dessus d'un pic mémoire.
     ///
-    /// **Jamais d'`Arc` dans un type sérialisé** : ce qui est partagé ici est
-    /// la ligne de texte déjà produite par `serde_json`, pas une valeur
+    /// **Le partage reste souhaitable, mais structurel plutôt que mémorisé.**
+    /// L'économie visée — payer une fois par *publication* la matérialisation
+    /// des octets et leur base64, jusqu'à `COVER_MAX_BYTES`, plutôt qu'une fois
+    /// par relais abonné — s'obtient en construisant la ligne **au moment de la
+    /// publication** et en donnant le même `Arc` à chaque relais. C'est une
+    /// refonte à part entière : la construction lit un fichier, elle ne peut
+    /// donc pas s'installer sur la boucle principale du cœur. Et il n'y avait
+    /// rien à gagner à l'anticiper par un memo, parce qu'en service il n'avait
+    /// **aucun** appelant second à servir : `wants_covers` est faux par défaut,
+    /// un seul greffon le redéfinit, et `relais_afficheur` n'appelle cette
+    /// fonction qu'une fois par changement de `cover_href`. Le greffon MPD ne
+    /// repasse pas non plus par ici pour servir ses tranches de 8 Kio — il garde
+    /// sa propre copie de la trame reçue.
+    ///
+    /// **Jamais d'`Arc` dans un type sérialisé** : ce qui voyage derrière l'`Arc`
+    /// rendu est la ligne de texte déjà produite par `serde_json`, pas une valeur
     /// `ritornello_proto::Cover` — ce type-là reste un type de fil ordinaire,
-    /// sans partage à exprimer.
+    /// sans partage à exprimer. L'`Arc` sert à `DisplayClient::send_cover_line`,
+    /// qui écrit ces octets tels quels plutôt que de recopier et réencoder.
     ///
     /// `None` couvre les mêmes cas que `octets` : rien à pousser.
     pub async fn ligne(&self, cle: &str, href: &str) -> Option<Arc<str>> {
-        if let Some((k, l)) = self.derniere_ligne.read().await.as_ref() {
-            if k == cle {
-                return Some(l.clone());
-            }
-        }
         let (mime, octets) = self.octets(cle).await?;
         let cover =
             ritornello_proto::Cover { href: href.to_string(), mime: mime.to_string(), bytes: octets };
         let mut ligne = serde_json::to_string(&ritornello_proto::DisplayFrame::Cover(cover)).ok()?;
         ligne.push('\n');
-        let ligne: Arc<str> = Arc::from(ligne);
-        *self.derniere_ligne.write().await = Some((cle.to_string(), ligne.clone()));
-        Some(ligne)
+        Some(Arc::from(ligne))
     }
 }
 
@@ -923,34 +929,50 @@ mod tests {
         );
     }
 
-    // -- `ligne` : la trame de pochette construite une fois, partagee -------
+    // -- `ligne` : la trame de pochette, relue a chaque appel ---------------
 
     #[tokio::test]
-    async fn ligne_construit_une_seule_fois_et_partage_larc_entre_deux_appelants() {
-        // La propriete du changement 3 : deux appelants pour la meme cle —
-        // deux relais abonnes, ou le meme relais qui redemande la pochette du
-        // morceau courant — ne doivent pas reconstruire la ligne chacun de
-        // leur cote. `Arc::ptr_eq` est la seule facon de le prouver : une
-        // simple egalite de contenu passerait tout aussi bien si `ligne`
-        // clonait les octets et reencodait a chaque appel.
+    async fn ligne_relit_le_fichier_donc_une_image_remplacee_sous_le_meme_chemin_est_servie_neuve() {
+        // **Le defaut le plus grave de la passe, a la maille du cache.** La cle
+        // hache le chemin, pas le contenu : rien dans le cache ne peut voir
+        // qu'un `folder.jpg` a ete remplace sur le partage. Tant que `ligne`
+        // relit le fichier a chaque appel, ce n'est pas un probleme ; une ligne
+        // encodee mise en memoire, elle, servait pour toujours l'image d'avant.
+        //
+        // Le scenario reel est en trois clics : desactiver l'afficheur depuis la
+        // page d'admin, remplacer l'image, le reactiver. Le relais rebranche
+        // redemande la pochette courante — donc `ligne` avec la **meme cle** —
+        // et personne n'a insere quoi que ce soit entre-temps. C'est pourquoi ce
+        // test n'appelle pas `insere` une seconde fois : une invalidation posee
+        // dans `insere` ne couvrirait pas ce chemin-la.
         let dir = tempfile::tempdir().unwrap();
         let chemin = dir.path().join("folder.jpg");
         std::fs::write(&chemin, jpeg(1000)).unwrap();
         let cache = CoverCache::new();
-        cache.insere("k".into(), Pochette::Fichier(chemin)).await;
+        cache.insere("k".into(), Pochette::Fichier(chemin.clone())).await;
 
-        let premiere = cache.ligne("k", "/api/cover/k").await.expect("une image locale doit produire une ligne");
-        let seconde = cache.ligne("k", "/api/cover/k").await.expect("le second appel doit reussir aussi");
-        assert!(
-            Arc::ptr_eq(&premiere, &seconde),
-            "le second appel pour la meme cle doit rendre le meme Arc, pas une ligne reconstruite"
+        let avant = cache.ligne("k", "/api/cover/k").await.expect("une image locale doit produire une ligne");
+        // L'utilisateur remplace la pochette sur le partage. Taille differente,
+        // pour que l'inegalite ne tienne pas au seul remplissage.
+        std::fs::write(&chemin, jpeg(2000)).unwrap();
+        let apres = cache.ligne("k", "/api/cover/k").await.expect("le second appel doit reussir aussi");
+
+        assert_ne!(
+            &*avant, &*apres,
+            "apres remplacement du fichier sous la meme cle, la ligne servie doit etre la nouvelle"
         );
+        match serde_json::from_str::<ritornello_proto::DisplayFrame>(&apres).unwrap() {
+            ritornello_proto::DisplayFrame::Cover(c) => {
+                assert_eq!(c.bytes, jpeg(2000), "les octets servis doivent etre ceux du fichier actuel");
+            }
+            autre => panic!("une trame de pochette etait attendue : {autre:?}"),
+        }
     }
 
     #[tokio::test]
     async fn ligne_change_quand_la_cle_change_et_reste_une_trame_de_pochette_valide() {
-        // Le pendant du test ci-dessus : le cache a une seule entree ne doit
-        // pas continuer de rendre une ancienne ligne pour une cle differente.
+        // Le pendant du test ci-dessus : deux cles distinctes designent deux
+        // images distinctes, et chacune doit rendre la sienne.
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("a.jpg");
         let b = dir.path().join("b.jpg");

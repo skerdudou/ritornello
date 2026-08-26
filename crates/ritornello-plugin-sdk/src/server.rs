@@ -488,13 +488,24 @@ pub fn bind_display(socket_path: &Path) -> Result<UnixListener> {
 ///
 /// Une trame d'un genre que ce SDK ne connaît pas est traitée comme une ligne
 /// illisible : `warn` puis `continue`, la connexion survit. C'est la politique
-/// qui rend l'ajout d'un genre de trame non cassant dans les deux sens.
+/// qui rend l'ajout d'un genre de trame non cassant dans les deux sens — et une
+/// ligne au-delà de `LIGNE_MAX` est traitée exactement pareil (voir
+/// `lit_ligne_bornee`), pour que la politique reste unique.
 pub async fn serve_display(listener: UnixListener, mut plugin: impl DisplayPlugin) -> Result<()> {
     let (stream, _) = listener.accept().await?;
     let (read, _write) = stream.into_split();
-    let mut lines = BufReader::new(read).lines();
-    while let Some(line) = lines.next_line().await? {
-        let frame: DisplayFrame = match serde_json::from_str(&line) {
+    let mut lecteur = BufReader::new(read);
+    let mut tampon = Vec::new();
+    loop {
+        match lit_ligne_bornee(&mut lecteur, &mut tampon, LIGNE_MAX).await? {
+            LigneLue::Fin => return Ok(()),
+            LigneLue::TropLongue(vus) => {
+                tracing::warn!("display frame ignored: line over {LIGNE_MAX} bytes ({vus} seen)");
+                continue;
+            }
+            LigneLue::Ligne => {}
+        }
+        let frame: DisplayFrame = match serde_json::from_slice(&tampon) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("invalid display frame ignored: {e}");
@@ -507,7 +518,135 @@ pub async fn serve_display(listener: UnixListener, mut plugin: impl DisplayPlugi
             DisplayFrame::Cover(c) => plugin.cover(c).await?,
         }
     }
-    Ok(())
+}
+
+/// Plafond d'une ligne de ce protocole, en octets.
+///
+/// **Une acceptation rouverte, pas un oubli.** Quand ce transport a été écrit,
+/// lire une ligne sans borne avait été accepté sur ce raisonnement : le cœur est
+/// le seul écrivain de ce socket, et borner le lecteur changerait la politique de
+/// ligne illisible que la conception a figée. Le plafond de pochette était alors
+/// de 2 Mio. Il est passé à 20 Mio sans que cette acceptation soit relue, et à
+/// cette valeur-là les deux moitiés du raisonnement ne tiennent plus :
+///
+/// * Le plafond de `COVER_MAX_BYTES` est contrôlé **au décodage**, c'est-à-dire
+///   après que la ligne entière est résidente. Sa doc dit que « le producteur ne
+///   matérialise jamais au-delà » — vrai côté cœur, faux côté lecteur, qui n'avait
+///   aucune borne du tout. Pas 27 Mio : *ce que l'écrivain veut bien envoyer*. Une
+///   ligne sans saut de ligne faisait croître le `Vec` jusqu'à l'OOM, sur un
+///   appareil à 1 Gio, dans un processus de greffon qui pèse normalement quelques
+///   mégaoctets. « Le cœur est le seul écrivain » parle de *confiance* ; ça ne
+///   borne pas un `Vec`, et un cœur qui déraille reste un cœur.
+/// * La politique de ligne illisible, elle, ne change pas : une ligne trop longue
+///   est drainée jusqu'à son saut de ligne puis traitée comme une ligne
+///   illisible — `warn`, `continue`, la connexion survit —, exactement comme une
+///   trame mal formée ou d'un genre inconnu. C'est ce qui rend le refus sans
+///   conséquence : une trame de pochette est **autonome**, en sauter une ne perd
+///   qu'une image.
+///
+/// La valeur est celle de la plus grande ligne **légitime** : les 4/3 de
+/// `COVER_MAX_BYTES` en base64, plus une marge d'enveloppe JSON (les clés, le
+/// `href`, le type MIME). Le contrôle de `COVER_MAX_BYTES` au décodage reste donc
+/// le seul juge des lignes de taille plausible — une image tout juste au-dessus du
+/// plafond est refusée par lui, avec son message, comme avant. Cette borne-ci ne
+/// voit que la démesure.
+const LIGNE_MAX: usize = ritornello_proto::COVER_MAX_BYTES / 3 * 4 + 4 + 4096;
+
+/// Issue d'une lecture de ligne bornée.
+enum LigneLue {
+    /// Une ligne complète est dans le tampon.
+    Ligne,
+    /// La ligne dépassait `LIGNE_MAX` : rien n'est dans le tampon, et le reste
+    /// de la ligne a été **consommé** jusqu'à son saut de ligne — sans quoi le
+    /// tour de boucle suivant relirait son milieu comme si c'était une trame.
+    /// Porte le nombre d'octets vus, pour que le journal dise l'ampleur.
+    TropLongue(usize),
+    /// Fin de flux : le pair a fermé.
+    Fin,
+}
+
+/// Lit une ligne dans `tampon`, sans jamais y accumuler plus de `plafond`
+/// octets.
+///
+/// Écrite à la main plutôt qu'avec `BufReader::lines()` ou `read_until` : les
+/// deux accumulent sans borne. `fill_buf`/`consume` permet de recopier ce qui
+/// est utile et de **jeter au fil de l'eau** ce qui dépasse, si bien que le pic
+/// résident est `plafond` plus le tampon interne du `BufReader`, quelle que
+/// soit la longueur de ce que l'écrivain envoie.
+///
+/// Le saut de ligne n'est pas recopié, comme `lines()` ne le recopiait pas. Une
+/// dernière ligne sans saut de ligne final est rendue quand même (`Ligne`), puis
+/// la fermeture est vue au tour suivant : même comportement que `lines()`.
+///
+/// `plafond` est un **paramètre** et non `LIGNE_MAX` lu directement, pour que les
+/// tests éprouvent le drainage et la resynchronisation sur quelques dizaines
+/// d'octets. Les fabriquer à la vraie valeur coûterait 28 Mio par test, et le
+/// seul effet de cette dépense serait de charger la machine — la logique testée
+/// est la même à 16 octets qu'à 28 Mio, et c'est elle qui peut casser, pas la
+/// constante.
+async fn lit_ligne_bornee<R: tokio::io::AsyncBufRead + Unpin>(
+    lecteur: &mut R,
+    tampon: &mut Vec<u8>,
+    plafond: usize,
+) -> std::io::Result<LigneLue> {
+    use tokio::io::AsyncBufReadExt as _;
+    tampon.clear();
+    let mut vus = 0usize;
+    let mut trop_longue = false;
+    loop {
+        // Le contenu disponible est recopié **puis** consommé dans le même tour :
+        // l'emprunt sur `lecteur` doit finir avant l'appel à `consume`, d'où le
+        // bloc.
+        let (fini, consomme) = {
+            let dispo = lecteur.fill_buf().await?;
+            if dispo.is_empty() {
+                // Fin de flux. Une ligne non terminée déjà commencée est rendue,
+                // une ligne trop longue reste un refus.
+                if trop_longue {
+                    return Ok(LigneLue::TropLongue(vus));
+                }
+                return Ok(if vus == 0 { LigneLue::Fin } else { LigneLue::Ligne });
+            }
+            match dispo.iter().position(|b| *b == b'\n') {
+                Some(i) => {
+                    if !trop_longue {
+                        tampon.extend_from_slice(&dispo[..i]);
+                        // Contrôlé sur cette branche aussi. Le tampon interne du
+                        // `BufReader` (8 Kio) ne peut pas rendre d'un coup une
+                        // ligne de plus de `plafond`, mais faire dépendre la
+                        // borne de cette taille-là serait la faire dépendre d'un
+                        // détail d'implémentation.
+                        if tampon.len() > plafond {
+                            trop_longue = true;
+                            tampon.clear();
+                            tampon.shrink_to_fit();
+                        }
+                    }
+                    vus += i;
+                    (true, i + 1)
+                }
+                None => {
+                    vus += dispo.len();
+                    if !trop_longue {
+                        tampon.extend_from_slice(dispo);
+                        if tampon.len() > plafond {
+                            // Bascule irréversible pour cette ligne : le tampon
+                            // est rendu tout de suite plutôt que gardé jusqu'au
+                            // saut de ligne, et la suite est lue pour être jetée.
+                            trop_longue = true;
+                            tampon.clear();
+                            tampon.shrink_to_fit();
+                        }
+                    }
+                    (false, dispo.len())
+                }
+            }
+        };
+        lecteur.consume(consomme);
+        if fini {
+            return Ok(if trop_longue { LigneLue::TropLongue(vus) } else { LigneLue::Ligne });
+        }
+    }
 }
 
 /// Enveloppe historique : lie puis sert. Conservée pour les appels directs et
@@ -891,12 +1030,126 @@ mod tests {
             msg.identity,
             Some(IdentityUpdate::Playing(serde_json::json!({"kind": "stream", "url": "http://fip"})))
         );
+        // L'estampille de capacité d'éjection, **dérivée** du plugin et non
+        // déclarée par lui : `EchoSource` ne surcharge pas `can_eject`, donc la
+        // valeur doit être `Some(false)` — présente, et fausse. C'est
+        // `Some(_)` qui porte la propriété (voir le test dédié aux deux chemins
+        // de trame) ; `false` prouve en plus qu'elle n'est pas câblée en dur.
+        assert_eq!(
+            msg.can_eject,
+            Some(false),
+            "la reponse correlee doit porter la capacite lue sur le plugin : {line}"
+        );
 
         write.write_all(b"{\"id\":2,\"req\":\"Select\",\"arg\":3}\n").await.unwrap();
         let line = lines.next_line().await.unwrap().unwrap();
         let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(msg.id, Some(2));
         assert_eq!(msg.action, Some(SourceAction::play("http://station-3")));
+    }
+
+    #[tokio::test]
+    async fn can_eject_est_estampille_sur_les_deux_chemins_de_trame() {
+        // **La ligne porteuse que rien n'épinglait.** `serve_source` écrit deux
+        // sortes de trames — la réponse corrélée à une requête, et la
+        // notification spontanée — et estampille `can_eject: Some(…)` sur
+        // chacune. C'est l'un des deux mécanismes qui tiennent fermée une classe
+        // de défaut apparue **trois fois** dans ce chantier : une trame relayée
+        // qui ne déclare ni identité ni statut *efface* le statut mémorisé de la
+        // source côté cœur, et c'est l'estampille qui garantit que le prédicat de
+        // trame intéressante voit toujours quelque chose. Un chemin oublié, et
+        // « PAS DE DISQUE » disparaîtrait de l'écran.
+        //
+        // Les **deux** chemins dans un seul test, parce que c'est la double
+        // estampille qui est la propriété : la prouver sur un seul chemin
+        // laisserait l'autre libre de régresser.
+        //
+        // La notification ne porte qu'une **pochette**, sans identité ni statut :
+        // c'est la forme réelle d'une notification spontanée de production, celle
+        // qui a justement besoin de l'estampille pour être relayée.
+        struct SourceEjectable {
+            annoncee: bool,
+        }
+        #[async_trait::async_trait]
+        impl SourcePlugin for SourceEjectable {
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            fn can_eject(&self) -> bool {
+                true
+            }
+            async fn poll_notification(&mut self) -> Option<Notification> {
+                if self.annoncee {
+                    // Une seule notification, puis plus jamais : `pending` et non
+                    // `None`, qui serait terminal et désarmerait le bras.
+                    std::future::pending().await
+                } else {
+                    self.annoncee = true;
+                    Some(Notification::new().cover(ritornello_proto::CoverRef::Path {
+                        path: "/mnt/nas/A/folder.jpg".into(),
+                    }))
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(SourceEjectable { annoncee: false }, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = client.expect("connexion au plugin").into_split();
+        let mut lines = BufReader::new(read).lines();
+        write.write_all(b"{\"id\":1,\"req\":\"Activate\"}\n").await.unwrap();
+
+        // Les deux trames arrivent dans un ordre que l'ordre des bras du
+        // `select!` ne garantit pas : on lit les deux et on les trie sur `id`,
+        // plutôt que de supposer laquelle vient d'abord. Aucune marge de temps —
+        // les deux doivent arriver, donc les deux sont attendues.
+        let mut correlee = None;
+        let mut spontanee = None;
+        for _ in 0..2 {
+            let line = lines.next_line().await.unwrap().expect("le plugin doit ecrire deux trames");
+            let msg: SourceMessage = serde_json::from_str(&line).unwrap();
+            if msg.id.is_some() {
+                correlee = Some((msg, line));
+            } else {
+                spontanee = Some((msg, line));
+            }
+        }
+
+        let (correlee, ligne_c) = correlee.expect("la reponse correlee a Activate");
+        assert_eq!(correlee.id, Some(1));
+        assert_eq!(
+            correlee.can_eject,
+            Some(true),
+            "chemin 1 : la reponse correlee doit estampiller la capacite : {ligne_c}"
+        );
+
+        let (spontanee, ligne_s) = spontanee.expect("la notification spontanee");
+        assert_eq!(
+            spontanee.cover,
+            Some(ritornello_proto::CoverRef::Path { path: "/mnt/nas/A/folder.jpg".into() }),
+            "la notification testee doit bien etre celle qui ne porte qu'une pochette : {ligne_s}"
+        );
+        assert!(
+            spontanee.identity.is_none() && spontanee.status.is_none(),
+            "sans quoi la trame se qualifierait d'elle-meme et l'estampille ne serait plus \
+             porteuse : {ligne_s}"
+        );
+        assert_eq!(
+            spontanee.can_eject,
+            Some(true),
+            "chemin 2 : la notification spontanee doit estampiller la capacite aussi : {ligne_s}"
+        );
     }
 
     /// Source dont le flux de notifications se tarit : premier appel `None`,
@@ -1624,6 +1877,12 @@ mod display_tests {
         // La ligne est fabriquée à la main : le producteur, lui, ne peut pas
         // émettre cela (il ne matérialise jamais au-delà du plafond), donc
         // seule une ligne écrite ici met le refus sur le chemin.
+        //
+        // Ce test tient aussi, depuis que le lecteur est borné, la moitié
+        // « la borne du lecteur ne préempte pas celle du décodage » : cette ligne
+        // dépasse `COVER_MAX_BYTES` mais reste **sous** `LIGNE_MAX`, elle traverse
+        // donc le lecteur et c'est bien le désérialiseur qui la refuse — la
+        // politique de refus qu'attend le brief est intacte.
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("display.sock");
         let listener = bind_display(&socket).unwrap();
@@ -1659,6 +1918,77 @@ mod display_tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert_eq!(etats.lock().unwrap().as_slice(), &[e]);
+    }
+
+    #[tokio::test]
+    async fn une_ligne_au_dela_du_plafond_est_drainee_sans_desynchroniser_le_flux() {
+        // **La borne du lecteur lui-meme**, distincte du plafond de pochette.
+        // Celui-la est controle au decodage, donc *apres* que la ligne entiere est
+        // residente ; `lines()` n'avait, lui, aucune borne du tout — une ligne
+        // sans saut de ligne faisait croitre le tampon jusqu'ou l'ecrivain voulait
+        // bien aller, sur un appareil a 1 Gio.
+        //
+        // Ce qu'un test peut prouver ici n'est pas la residence mais ce qui
+        // casserait si le drainage etait mal ecrit : la ligne au-dela du plafond
+        // est **consommee jusqu'a son saut de ligne**, et celle d'apres est lue
+        // comme une ligne entiere, pas comme le milieu de la precedente. Un
+        // `consume` mal compte desynchroniserait le flux pour toujours.
+        //
+        // Le plafond est passe en parametre : l'eprouver a la vraie valeur
+        // couterait 28 Mio par test pour exactement la meme logique, et cette
+        // depense-la n'aurait d'autre effet que de charger la machine.
+        let entree: &[u8] = b"avant\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\napres\n";
+        let mut lecteur = BufReader::new(entree);
+        let mut tampon = Vec::new();
+
+        assert!(matches!(
+            lit_ligne_bornee(&mut lecteur, &mut tampon, 16).await.unwrap(),
+            LigneLue::Ligne
+        ));
+        assert_eq!(tampon, b"avant", "une ligne sous le plafond passe intacte, sans son saut de ligne");
+
+        match lit_ligne_bornee(&mut lecteur, &mut tampon, 16).await.unwrap() {
+            LigneLue::TropLongue(vus) => {
+                assert_eq!(vus, 40, "le journal doit pouvoir dire l'ampleur reellement vue");
+                assert!(tampon.is_empty(), "et rien de la ligne refusee ne doit rester en memoire");
+            }
+            LigneLue::Ligne => panic!("la ligne de 40 octets devait etre refusee, pas rendue"),
+            LigneLue::Fin => panic!("le flux ne devait pas etre epuise"),
+        }
+
+        assert!(matches!(
+            lit_ligne_bornee(&mut lecteur, &mut tampon, 16).await.unwrap(),
+            LigneLue::Ligne
+        ));
+        assert_eq!(
+            tampon, b"apres",
+            "la ligne suivante doit etre lue entiere : la resynchronisation est la propriete \
+             que ce test tient"
+        );
+
+        assert!(matches!(
+            lit_ligne_bornee(&mut lecteur, &mut tampon, 16).await.unwrap(),
+            LigneLue::Fin
+        ));
+    }
+
+    #[test]
+    fn le_plafond_de_ligne_laisse_passer_la_plus_grande_pochette_legitime() {
+        // La moitie de la propriete que le test ci-dessus ne couvre pas : cette
+        // borne ne doit **jamais** prendre la place du refus de `COVER_MAX_BYTES`,
+        // qui est celui qui porte le message et la politique figee par le brief.
+        // Une image de exactement `COVER_MAX_BYTES` a le droit d'etre emise, donc
+        // sa ligne doit passer le lecteur et n'etre jugee qu'au decodage.
+        //
+        // Verifie par l'arithmetique plutot qu'en fabriquant la ligne : la
+        // fabriquer couterait 28 Mio pour prouver une inegalite entre deux
+        // constantes.
+        let base64 = ritornello_proto::COVER_MAX_BYTES.div_ceil(3) * 4;
+        assert!(
+            LIGNE_MAX >= base64 + 512,
+            "LIGNE_MAX ({LIGNE_MAX}) doit depasser le base64 de la plus grande pochette \
+             ({base64}) d'une marge couvrant l'enveloppe JSON"
+        );
     }
 }
 
