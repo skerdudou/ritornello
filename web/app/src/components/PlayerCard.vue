@@ -117,9 +117,23 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
       <div v-if="!riendAfficher(etat)" class="mt-3 flex gap-3 border-t border-border pt-3" data-now-playing>
         <!-- Le carre est le meme quand l'image manque : elle arrive apres le
              texte, parfois plusieurs secondes apres, et un carre qui apparait
-             decalerait toute la carte. -->
+             decalerait toute la carte.
+
+             Trois paliers, parce que la meme carte se lit sur un telephone et
+             sur un ecran : 112 px, 160 px au-dela de `sm`, 224 px au-dela de
+             `lg`. Le contenu de la page est borne a `max-w-5xl` (voir le
+             `<main>` d'`App.vue`), soit ~990 px utiles : a 224 px la pochette y
+             tient un peu moins du quart, et la colonne de texte garde de quoi
+             poser un titre sur une ligne. Le palier du telephone est choisi par
+             l'autre bout — sur 360 px de large il reste ~155 px au texte, ce qui
+             est le partage habituel d'une fiche de lecture.
+
+             Des paliers et non un `clamp()` en `vw` : la largeur qui compte est
+             celle de la **carte**, pas celle de la fenetre, et elle est bornee.
+             Une taille en `vw` continuerait de grandir sur un ecran large alors
+             que la carte, elle, ne bouge plus. -->
         <div
-          class="size-28 shrink-0 overflow-hidden rounded-md border border-border bg-muted sm:size-40"
+          class="size-28 shrink-0 overflow-hidden rounded-md border border-border bg-muted sm:size-40 lg:size-56"
           data-pochette
         >
           <!-- `@error` : toute voie par laquelle « la pochette a disparu »
