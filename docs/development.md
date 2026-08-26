@@ -4,33 +4,148 @@
 
 On any Linux machine (or WSL under Windows, the environment this project
 is developed in — WSL is only an environment detail, not a requirement: a
-native Linux works identically). After `cargo build --workspace` (see
-[installation.md](installation.md)), launch a local instance without any
-Pi hardware:
+native Linux works identically). After `npm run build --workspaces` then
+`cargo build --workspace` (see [installation.md](installation.md)), the
+whole device runs from the checkout — core **and every plugin** — without
+a Pi and without installing anything under `/etc`.
 
-    mkdir -p /tmp/rp
+### 1. Configuration files, once
+
+    mkdir -p /tmp/rp/playlists /tmp/rp/credentials
+
+    # The plugin list. Only `name` and `exec` are ever needed: each binary
+    # announces its own kinds (source, metadata, input, display) and whether
+    # it serves an admin page, when it registers with the core. A third key,
+    # `enabled = false`, appears when a plugin is switched off from the
+    # configuration page; its absence means active, and the core rewrites
+    # this file — comments included — when the toggle is used.
     cat > /tmp/rp/plugins.toml <<'PLUGINS'
     [[plugin]]
     name = "radio"
     exec = "target/debug/ritornello-plugin-radio"
 
     [[plugin]]
+    name = "cd"
+    exec = "target/debug/ritornello-plugin-cd"
+
+    [[plugin]]
+    name = "files"
+    exec = "target/debug/ritornello-plugin-files"
+
+    # DECLARATION ORDER MATTERS between `metadata` plugins: for a given
+    # track, the first one declared here that answers wins. Same order as
+    # deploy/plugins.example.toml, so development shows what the device shows.
+    [[plugin]]
+    name = "ouifm-metas"
+    exec = "target/debug/ritornello-plugin-ouifm-metas"
+
+    [[plugin]]
+    name = "radiofrance-metas"
+    exec = "target/debug/ritornello-plugin-radiofrance-metas"
+
+    [[plugin]]
+    name = "musicbrainz"
+    exec = "target/debug/ritornello-plugin-musicbrainz"
+
+    [[plugin]]
+    name = "generic-input"
+    exec = "target/debug/ritornello-plugin-generic-input"
+
+    [[plugin]]
     name = "console"
     exec = "target/debug/ritornello-plugin-console"
     PLUGINS
+
+    # A station, to have something to play. The radio page writes this file
+    # afterwards; two lines are enough to start.
     cat > /tmp/rp/stations.toml <<'STATIONS'
     [[stations]]
     name = "FIP"
     url = "http://icecast.radiofrance.fr/fip-midfi.mp3"
     preset = 1
     STATIONS
+
+Nothing else has to exist. The `files` roots (`/tmp/rp/media-roots.toml`),
+the remote-control bindings (`/tmp/rp/input-bindings.toml`) and the two
+optional metadata override tables are all written by their own page; a
+missing file is the normal case — at most a `WARN` naming the page to use,
+never a failure to start. To start from a local folder without going
+through the page:
+
+    cat > /tmp/rp/media-roots.toml <<'ROOTS'
+    [[root]]
+    name = "usb"
+    kind = "local"
+    path = "/home/me/Music"
+    ROOTS
+
+### 2. The launch line, every plugin included
+
+Plugins inherit the core's environment: everything below is set once, on
+the single `cargo run` line, whichever binary ends up reading it.
+
     RITORNELLO_PLUGINS=/tmp/rp/plugins.toml RITORNELLO_STATE=/tmp/rp/state.json \
     RITORNELLO_MPV_SOCKET=/tmp/rp/mpv.sock RITORNELLO_RUNTIME_DIR=/tmp/rp \
     RITORNELLO_HTTP=127.0.0.1:8080 \
+    RITORNELLO_LOCALES=deploy/locales \
     RITORNELLO_CONSOLE_TTY=/dev/stdout \
     RITORNELLO_RADIO_STATIONS=/tmp/rp/stations.toml RITORNELLO_RADIO_STATE=/tmp/rp/plugin-radio.json \
-    RITORNELLO_LOCALES=deploy/locales \
+    RITORNELLO_FILES_ROOTS=/tmp/rp/media-roots.toml \
+    RITORNELLO_FILES_CREDENTIALS=/tmp/rp/credentials \
+    RITORNELLO_FILES_STATE=/tmp/rp/plugin-files.json \
+    RITORNELLO_FILES_MPV_PLAYLIST=/tmp/rp/plugin-files.m3u \
+    RITORNELLO_FILES_PLAYLISTS=/tmp/rp/playlists \
+    RITORNELLO_INPUT_BINDINGS=/tmp/rp/input-bindings.toml RITORNELLO_INPUT_PRESETS=deploy/input-presets \
+    RITORNELLO_OUIFM_METAS=/tmp/rp/ouifm-metas.toml \
+    RITORNELLO_RADIOFRANCE_METAS=/tmp/rp/radiofrance-metas.toml \
     cargo run -p ritornello-core
+
+Then <http://127.0.0.1:8080>. The `musicbrainz` plugin needs no variable at
+all, and the two `*_METAS` lines are optional: those tables are embedded in
+their binaries, the file only ever overrides an entry gone stale. Every
+other line has the same job — pointing a default that lives under `/etc` or
+`/var/lib` at `/tmp/rp`, so that a checkout writes nowhere it has no right
+to write. `RITORNELLO_INPUT_PRESETS` is the exception that is not a path
+override but a real one: the shipped presets are in the repository, not in
+`/tmp`.
+
+Every variable, and who reads it — each default is a production path, which
+is exactly why they have to be overridden in a checkout:
+
+| Variable | Read by | Default |
+|---|---|---|
+| `RITORNELLO_PLUGINS` | core | `/etc/ritornello/plugins.toml` |
+| `RITORNELLO_STATE` | core | `/var/lib/ritornello/state.json` |
+| `RITORNELLO_HTTP` | core | `0.0.0.0:8080` |
+| `RITORNELLO_MPV_SOCKET` | core | `/run/ritornello/mpv.sock` |
+| `RITORNELLO_MPV_BIN` | core | `mpv` |
+| `RITORNELLO_RUNTIME_DIR` | core, `files` | `/run/ritornello` |
+| `RITORNELLO_LOCALES` | core and every plugin | `/etc/ritornello/locales` |
+| `RITORNELLO_LOCALE` | plugins | set by the core when it launches them |
+| `RITORNELLO_AUDIO_BUFFER`, `RITORNELLO_NETWORK_READAHEAD` | core (mpv tuning) | built-in durations |
+| `RITORNELLO_CD_DEV` | core (mpv) **and** `cd` | `/dev/sr0` |
+| `RITORNELLO_CONSOLE_TTY` | `console` | `/dev/tty1` |
+| `RITORNELLO_RADIO_STATIONS`, `RITORNELLO_RADIO_STATE` | `radio` | `/etc/…/stations.toml`, `/var/lib/…/plugin-radio.json` |
+| `RITORNELLO_RADIO_DIRECTORY` | `radio` | the radio-browser mirrors, tried in order |
+| `RITORNELLO_FILES_ROOTS`, `_CREDENTIALS`, `_STATE`, `_MPV_PLAYLIST`, `_PLAYLISTS` | `files` | `/etc/ritornello/…`, `/var/lib/ritornello/…` |
+| `RITORNELLO_FILES_PROC_MOUNTS` | `files` | `/proc/mounts` (overridden by its tests only) |
+| `RITORNELLO_USER` | `files` (owner of the mounts) | `ritornello` |
+| `RITORNELLO_OUIFM_METAS`, `RITORNELLO_RADIOFRANCE_METAS` | the two metadata plugins | `/etc/ritornello/…` — optional file, the tables are embedded |
+
+### 3. What a machine without the hardware will not do
+
+All the plugins start; three of them simply have nothing to talk to, and
+say so rather than failing:
+
+- **`cd`** finds no drive and stays on "no disc" (a real drive also needs
+  the `cd-discid` binary to read a TOC);
+- **`generic-input`** logs `bindings … unreadable … use the admin page`
+  then `0 input device(s) opened` where there is no `/dev/input` — the
+  usual case under WSL. Both are `WARN`, and its page still works, so
+  bindings can be edited without a remote;
+- **`files`** mounts nothing: mounting is done by a root helper through
+  `ritornello-media-mount.service`, which a checkout does not have. Local
+  roots work, SMB shares do not.
 
 `RITORNELLO_LOCALES` matters more than it looks: English is embedded in the
 binary, every other language is read from disk at startup. Its default
@@ -39,23 +154,6 @@ development checkout does not have, so without the line above the language
 dropdown offers **English only** — the French pack sits unread in
 `deploy/locales/`. One setting is enough: plugins inherit the core's
 environment and read the same variable.
-
-The `generic-input` plugin can be added to the `plugins.toml` in
-`/tmp/rp`:
-
-    [[plugin]]
-    name = "generic-input"
-    exec = "target/debug/ritornello-plugin-generic-input"
-
-with the following variables added to the environment line:
-
-    RITORNELLO_INPUT_BINDINGS=/tmp/rp/input-bindings.toml RITORNELLO_INPUT_PRESETS=deploy/input-presets
-
-The `metadata` plugins are added the same way (`plugins.toml` only ever
-needs `name` and `exec`; the binary announces its own kind — `metadata`
-here — to the core when it starts), executables
-`ritornello-plugin-musicbrainz`, `ritornello-plugin-ouifm-metas` and
-`ritornello-plugin-radiofrance-metas`.
 
 ## Language
 
