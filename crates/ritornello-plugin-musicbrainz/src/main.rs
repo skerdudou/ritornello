@@ -178,6 +178,22 @@ struct MusicBrainzPlugin {
 #[derive(Debug)]
 struct IssueIcy {
     url: String,
+    /// L'identité **reçue** du cœur, transportée avec le travail pour être
+    /// renvoyée en écho.
+    ///
+    /// Dans le message et non dans un champ du greffon, et les deux raisons
+    /// comptent :
+    ///
+    /// * **Reçue, pas reconstruite.** Cet écho est le garde-fou de péremption
+    ///   du cœur, qui compare la valeur *entière*. La rebâtir depuis l'URL est
+    ///   juste aujourd'hui et faux dès qu'une source enrichit son identité — un
+    ///   numéro de présélection, ce serait naturel — et le mode de panne serait
+    ///   un rejet **silencieux** de chaque enrichissement.
+    /// * **Attachée au travail, pas au greffon.** Un champ de `self` serait
+    ///   écrasé par une trame plus récente pendant qu'un traitement vole
+    ///   encore, et l'issue d'un ancien morceau repartirait avec l'identité du
+    ///   nouveau. La faire voyager lie l'écho à ce qu'il décrit.
+    identite: Value,
     /// La chaîne traitée. Sert de garde de péremption : une issue qui ne
     /// décrit pas la chaîne courante est jetée, comme les deux autres chemins
     /// jettent une réponse qui ne décrit plus ce qui joue.
@@ -360,6 +376,10 @@ impl MetadataPlugin for MusicBrainzPlugin {
                 // déplace `np.identity` : le chemin ICY en a besoin après.
                 let url_flux = np.identity.as_ref().and_then(url_de_flux);
                 let stream_title = np.known.stream_title.clone();
+                // Clonée ici, avec ses voisines, parce que le `match` ci-dessous
+                // déplace `np.identity` : c'est cette valeur-là qui repartira en
+                // écho, jamais une reconstruction. Voir `IssueIcy::identite`.
+                let identite_flux = np.identity.clone();
                 match np.identity {
                     Some(identite) if doit_chercher(&np.known) => {
                         let cle = (
@@ -399,9 +419,13 @@ impl MetadataPlugin for MusicBrainzPlugin {
                                 let magasin = self.magasin.clone();
                                 let tx = self.icy_tx.clone();
                                 let url_tache = url.clone();
+                                // `url_de_flux` a déjà reconnu l'identité, donc
+                                // elle est là : l'`unwrap_or` n'est qu'une
+                                // totalité de type, pas un cas d'usage.
+                                let identite = identite_flux.clone().unwrap_or(Value::Null);
                                 tokio::spawn(async move {
                                     let connu = magasin.read().await.entree(&url_tache).map(|e| e.motif.clone());
-                                    let issue = traite_icy(url_tache, brut, connu, resonde).await;
+                                    let issue = traite_icy(url_tache, brut, identite, connu, resonde).await;
                                     let _ = tx.send(issue).await;
                                 });
                             }
@@ -490,12 +514,10 @@ impl MetadataPlugin for MusicBrainzPlugin {
                                 }
                                 self.echecs.remove(&issue.url);
                                 self.pret = Some(Enrichment {
-                                    // L'identité d'un flux est entièrement
-                                    // reconstruite depuis son URL : c'est sa
-                                    // forme figée par le protocole (voir
-                                    // `url_de_flux`), rien de plus n'est à
-                                    // reporter en écho.
-                                    identity: serde_json::json!({"kind": "stream", "url": issue.url}),
+                                    // L'identité **reçue**, reportée telle
+                                    // quelle. Voir `IssueIcy::identite`, qui dit
+                                    // pourquoi elle voyage avec le travail.
+                                    identity: issue.identite,
                                     artist: Some(artist),
                                     title: Some(title),
                                     cover: release_id.map(|id| CoverRef::Url { url: musicbrainz::url_caa(&id) }),
@@ -604,7 +626,13 @@ async fn valide_par_recherche(artiste: &str, titre: &str) -> Option<(String, Str
 /// Détachée dans une tâche, comme les deux autres chemins : une station peut
 /// coûter quatre requêtes espacées d'une seconde, et la boucle du greffon ne
 /// doit pas attendre.
-async fn traite_icy(url: String, brut: String, connu: Option<motifs::Motif>, resonde: bool) -> IssueIcy {
+async fn traite_icy(
+    url: String,
+    brut: String,
+    identite: Value,
+    connu: Option<motifs::Motif>,
+    resonde: bool,
+) -> IssueIcy {
     signale_encodage_douteux(&brut);
     let nettoye = icy::nettoie(&brut);
 
@@ -612,7 +640,7 @@ async fn traite_icy(url: String, brut: String, connu: Option<motifs::Motif>, res
         match &connu {
             Some(motifs::Motif::NePasDecouper) => {
                 // La station parlée : coût nul, aucune requête.
-                return IssueIcy { url, brut, motif: None, valide: None };
+                return IssueIcy { url, brut, identite, motif: None, valide: None };
             }
             Some(m @ motifs::Motif::Separe { .. }) => {
                 // Régime établi : découpage local, une seule requête qui vaut
@@ -621,7 +649,7 @@ async fn traite_icy(url: String, brut: String, connu: Option<motifs::Motif>, res
                     Some((artiste, titre)) => valide_par_recherche(&artiste, &titre).await,
                     None => None,
                 };
-                return IssueIcy { url, brut, motif: None, valide };
+                return IssueIcy { url, brut, identite, motif: None, valide };
             }
             None => {} // Station jamais sondée : tombe dans le sondage ci-dessous.
         }
@@ -661,13 +689,14 @@ async fn traite_icy(url: String, brut: String, connu: Option<motifs::Motif>, res
             IssueIcy {
                 url,
                 brut,
+                identite,
                 motif: Some(motifs::Motif::depuis_candidat(&gagnant)),
                 valide: Some((gagnant.artiste.clone(), gagnant.titre.clone(), release_id)),
             }
         }
         None => {
             tracing::info!("ICY probe for {url}: tried {nb_essayes} candidate(s), none accepted");
-            IssueIcy { url, brut, motif: Some(motifs::Motif::NePasDecouper), valide: None }
+            IssueIcy { url, brut, identite, motif: Some(motifs::Motif::NePasDecouper), valide: None }
         }
     }
 }
@@ -1033,6 +1062,7 @@ mod tests {
             traite_icy(
                 "http://f".to_string(),
                 "Miles Davis - So What".to_string(),
+                json!({"kind": "stream", "url": "http://f"}),
                 Some(motifs::Motif::NePasDecouper),
                 false,
             ),
@@ -1047,7 +1077,16 @@ mod tests {
     /// consomme le tour de boucle qui en résulte : aucun enrichissement ne
     /// doit en sortir.
     async fn envoie_echec(p: &mut MusicBrainzPlugin, url: &str, brut: &str) {
-        p.icy_tx.send(IssueIcy { url: url.to_string(), brut: brut.to_string(), motif: None, valide: None }).await.unwrap();
+        p.icy_tx
+            .send(IssueIcy {
+                url: url.to_string(),
+                brut: brut.to_string(),
+                identite: json!({"kind": "stream", "url": url}),
+                motif: None,
+                valide: None,
+            })
+            .await
+            .unwrap();
         let r = tokio::time::timeout(std::time::Duration::from_millis(200), p.next_enrichment()).await;
         assert!(r.is_err(), "un echec ne doit produire aucun enrichissement");
     }
@@ -1093,6 +1132,9 @@ mod tests {
             .send(IssueIcy {
                 url: url.to_string(),
                 brut: "brut".to_string(),
+                // L'identité que le cœur aurait envoyée : c'est elle qui doit
+                // repartir en écho, à l'identique.
+                identite: json!({"kind": "stream", "url": url}),
                 motif: None,
                 valide: Some(("Artiste".to_string(), "Titre".to_string(), None)),
             })
