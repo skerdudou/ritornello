@@ -59,6 +59,73 @@ pub struct Settings {
     /// dépend de ce qu'on écoute : dix secondes pour rattraper une phrase,
     /// une minute pour traverser un mouvement.
     pub seek_step_s: u32,
+
+    // ---- Pochettes : ce qui entre, puis ce qui sort ----------------------
+    //
+    // Deux étages qu'il ne faut pas confondre, et c'est pourquoi le premier
+    // réglage vit **hors** de l'interrupteur dans l'IHM.
+    //
+    // `cover_source_max_mio` borne ce que le cœur accepte de lire, quoi qu'il
+    // arrive ensuite : c'est la seule protection quand le réencodage est
+    // désactivé, et la plus économique de toutes, puisqu'elle se juge sur la
+    // taille du fichier sans lire un octet de son contenu.
+    //
+    // Les cinq autres ne décrivent que le **rendu** — ce que le cœur fabrique
+    // pour le pousser sur un socket. Interrupteur décoché, aucun n'a de sens :
+    // la source part telle quelle.
+    /// Plafond de la pochette **source**, en mébioctets.
+    ///
+    /// Toujours actif, réencodage ou pas. Borné à
+    /// `ritornello_proto::COVER_MAX_BYTES` (20 Mio) par la validation, et c'est
+    /// structurel : cette constante est une promesse de **protocole** — elle dit
+    /// aux greffons le maximum qu'ils peuvent recevoir, et le greffon MPD
+    /// dimensionne ses propres bornes dessus sans pouvoir consulter les
+    /// réglages du cœur. Ce champ ne peut donc que l'abaisser.
+    pub cover_source_max_mio: u32,
+
+    /// Réencoder les pochettes avant de les pousser, ou pousser la source
+    /// telle quelle ?
+    ///
+    /// Décoché, le cœur ne décode plus rien : il pousse les octets d'origine, et
+    /// le pic mémoire d'une publication redevient celui de l'image source (près
+    /// de 72 Mio pour une pochette de 20 Mio, entre les octets, leur base64 et
+    /// la ligne JSON) au lieu de ~1,8 Mio pour une vignette. C'est un choix
+    /// défendable — un afficheur qui veut la pleine résolution, une machine qui
+    /// a la RAM — mais il faut le faire en le sachant.
+    pub cover_rendition: bool,
+
+    /// Côté le plus long de la vignette, en pixels. Le rapport est conservé.
+    pub cover_max_edge_px: u32,
+
+    /// Qualité JPEG de la vignette, de 1 à 100.
+    ///
+    /// Ne s'applique qu'au JPEG : une pochette à canal alpha est réencodée en
+    /// PNG, sans perte, parce qu'aplatir sa transparence sur un fond deviné
+    /// serait un choix visuel que l'appareil n'a pas à faire.
+    pub cover_jpeg_quality: u8,
+
+    /// Plafond de la vignette **produite**, en kibioctets.
+    ///
+    /// Un filet, pas une cible : le côté maximal borne déjà le nombre de pixels,
+    /// donc une vignette dépasse ce plafond seulement sur une image
+    /// pathologiquement bruitée. Dépassement = rien n'est poussé, et le journal
+    /// nomme ce réglage — plutôt qu'une boucle de réencodages dégressifs dont le
+    /// coût serait invisible.
+    pub cover_max_bytes_ko: u32,
+
+    /// Plafond de **pixels** à décoder, en mégapixels.
+    ///
+    /// La garde anti-bombe de décompression, et la seule qui compte vraiment :
+    /// les dimensions sont lues dans l'en-tête **avant toute allocation**, et un
+    /// fichier qui les dépasse est refusé sans être décodé. Un PNG de 200 Kio
+    /// peut annoncer 30000 × 30000 pixels, soit 3,6 Gio de tampon décodé — la
+    /// taille du fichier ne dit rien du coût du décodage, et c'est exactement ce
+    /// que ce réglage borne là où `cover_source_max_mio` ne peut rien.
+    ///
+    /// Son libellé dans l'IHM porte le calcul `l × h × 4`, parce que la valeur
+    /// utile n'est pas le nombre de mégapixels mais les mébioctets qu'ils
+    /// coûtent : 16 Mpx, c'est 64 Mio de tampon.
+    pub cover_max_pixels_mpx: u32,
 }
 
 impl Default for Settings {
@@ -70,6 +137,27 @@ impl Default for Settings {
             overlay_ms: 5000,
             tens_window_ms: 5000,
             seek_step_s: 10,
+            // Le plafond du protocole lui-même : par défaut le cœur n'ajoute
+            // aucune restriction à ce que les greffons savent déjà encaisser.
+            cover_source_max_mio: ritornello_proto::COVER_MAX_BYTES as u32 / (1024 * 1024),
+            // Activé par défaut : sur un Pi 2 à 1 Gio partagé entre mpv, le
+            // cœur, l'IHM et dix greffons, pousser 20 Mio d'image brute est le
+            // mauvais défaut même si l'appareil y survit.
+            cover_rendition: true,
+            // 640 px : au-delà de ce que le plus grand afficheur du parc sait
+            // montrer, et l'IHM web n'affiche la pochette qu'à 224 px sur son
+            // plus grand palier.
+            cover_max_edge_px: 640,
+            // 85 : le seuil au-delà duquel un JPEG grossit sans que l'œil y
+            // gagne, sur une image de cette taille.
+            cover_jpeg_quality: 85,
+            // 512 Kio, soit largement au-dessus d'une vignette 640 px typique
+            // (60 à 120 Kio) : le filet ne doit pas se déclencher en usage
+            // normal, sinon ce n'est plus un filet mais une limite.
+            cover_max_bytes_ko: 512,
+            // 16 Mpx = 64 Mio de tampon décodé. Couvre une pochette scannée en
+            // 4000 × 4000 avec de la marge, et refuse la bombe.
+            cover_max_pixels_mpx: 16,
         }
     }
 }
@@ -264,6 +352,18 @@ mod tests {
                 overlay_ms: 6000,
                 tens_window_ms: 7000,
                 seek_step_s: 45,
+                // Six valeurs non-défaut de plus, pour la raison écrite
+                // au-dessus : une fixture qui reprendrait les défauts ne
+                // distinguerait pas « la valeur écrite a survécu » de « le
+                // défaut s'est appliqué ». `cover_rendition` à `false` est le
+                // cas qui compte le plus ici — c'est le seul booléen du lot, et
+                // son défaut est `true`.
+                cover_source_max_mio: 12,
+                cover_rendition: false,
+                cover_max_edge_px: 800,
+                cover_jpeg_quality: 70,
+                cover_max_bytes_ko: 256,
+                cover_max_pixels_mpx: 24,
             },
             ..Default::default()
         };

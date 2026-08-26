@@ -40,6 +40,17 @@ tokio-util = { version = "0.7", features = ["io"] }
 # Même version que le greffon `files`, pour ne pas dupliquer une branche dans
 # Cargo.lock. Sert à extraire la pochette embarquée dans le fichier joué.
 lofty = "0.25.1"
+# Réencodage des pochettes avant de les pousser sur un socket : un `folder.jpg`
+# de 20 Mio devient une vignette de quelques dizaines de kilooctets, ce qui
+# divise d'autant le pic mémoire d'une publication (voir `cover::rendu`).
+#
+# `default-features = false` et trois formats seulement, choisis sur ce qu'on
+# rencontre vraiment dans une pochette d'album. Le défaut de cette crate active
+# une douzaine de décodeurs (TIFF, TGA, DDS, EXR, farbfeld…) dont aucun
+# n'apparaît sur un NAS de musique, et chacun est du code qui compile et qui
+# analyse une entrée venue du réseau — la surface d'attaque autant que le temps
+# de compilation.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 
 [dev-dependencies]
 tempfile = "3"

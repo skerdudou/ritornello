@@ -346,6 +346,12 @@ impl<P: Player> Core<P> {
         // afficheur relayé avant la première présélection croirait que
         // l'appareil n'a aucune source. `add_source` couvre la suite.
         coeur.publie_catalogue();
+        // Les réglages persistés atteignent le cache de pochettes ici, et pas
+        // seulement au premier `set_settings` : sans cette ligne, un appareil
+        // dont `state.json` décoche le réencodage l'appliquerait à partir de la
+        // première visite de la page de configuration, et pousserait des images
+        // pleine taille jusque-là. Le démarrage doit obéir au fichier.
+        coeur.covers.set_reglages(crate::cover::Reglages::from(&coeur.settings));
         coeur
     }
 
@@ -1362,6 +1368,14 @@ impl<P: Player> Core<P> {
     /// No bounds check here: the HTTP layer validates, and tests rely on tiny
     /// timings.
     pub fn set_settings(&mut self, s: crate::state::Settings) {
+        // Poussé dans le cache de pochettes, qui est le seul autre porteur de
+        // ces réglages. Ici et non dans un bras du `select!` : `set_settings`
+        // est le point de passage **unique** de tout changement de réglages —
+        // la route HTTP comme le chargement au démarrage —, donc le seul
+        // endroit où la propagation ne peut pas être oubliée par un futur
+        // appelant. Synchrone parce que `CoverCache` garde ces réglages sous un
+        // verrou `std::sync` exprès pour ça.
+        self.covers.set_reglages(crate::cover::Reglages::from(&s));
         self.settings = s;
         self.persist();
     }

@@ -23,6 +23,22 @@ export interface SettingsPayload {
   overlay_ms: number
   /** Fenêtre de saisie du cumul `+10` de la télécommande (temps laissé pour la seconde pression). */
   tens_window_ms: number
+  /**
+   * Plafond de la pochette **source**, en mébioctets. Toujours appliqué, que le
+   * réencodage soit actif ou non — c'est la seule garde qui subsiste quand il
+   * est décoché, et la raison pour laquelle l'IHM le sort de l'encart grisé.
+   */
+  cover_source_max_mio: number
+  /** Réencoder les pochettes en vignette, ou pousser la source telle quelle. */
+  cover_rendition: boolean
+  /** Côté le plus long de la vignette, en pixels. Rendu seulement. */
+  cover_max_edge_px: number
+  /** Qualité JPEG de la vignette. Rendu seulement, et ignorée si l'image a un canal alpha. */
+  cover_jpeg_quality: number
+  /** Plafond de la vignette produite, en kibioctets. Rendu seulement. */
+  cover_max_bytes_ko: number
+  /** Plafond de pixels à décoder, en mégapixels. Rendu seulement. */
+  cover_max_pixels_mpx: number
   /** Pas des touches « avancer » / « reculer », en secondes. */
   seek_step_s: number
 }

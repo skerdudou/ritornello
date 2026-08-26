@@ -281,7 +281,7 @@ async fn audio_output_put(State(state): State<AppState>, Json(req): Json<AudioOu
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// Bornes des quatre réglages, définies une seule fois et prises à la
+/// Bornes des réglages, définies une seule fois et prises à la
 /// comparaison elle-même : `SettingsError` les reporte telles quelles dans
 /// ses paramètres, pour qu'un changement de borne ne puisse plus laisser un
 /// message qui mente sur ses propres limites.
@@ -298,6 +298,35 @@ const TENS_WINDOW_MS: std::ops::RangeInclusive<u32> = 1000..=15000;
 /// ne sert plus à se déplacer dans une piste mais à en changer.
 const SEEK_STEP_S: std::ops::RangeInclusive<u32> = 1..=120;
 
+/// Plafond de la pochette source, en mébioctets.
+///
+/// La borne haute n'est **pas** un choix de confort : c'est
+/// `ritornello_proto::COVER_MAX_BYTES`, exprimée dans l'unité du réglage.
+/// Cette constante est la promesse faite aux greffons sur ce qu'ils peuvent
+/// recevoir, et le greffon MPD dimensionne ses propres bornes dessus sans
+/// pouvoir lire les réglages du cœur. La calculer ici plutôt que d'écrire
+/// « 20 » interdit qu'un jour les deux divergent en silence.
+const COVER_SOURCE_MAX_MIO: std::ops::RangeInclusive<u32> =
+    1..=(ritornello_proto::COVER_MAX_BYTES as u32 / (1024 * 1024));
+/// Côté maximal de la vignette. 64 px en bas parce qu'en dessous ce n'est plus
+/// une pochette mais une pastille ; 2048 px en haut parce qu'au-delà le rendu
+/// coûte plus que ce qu'il économise — c'est déjà le double de ce que le plus
+/// grand afficheur du parc sait montrer.
+const COVER_MAX_EDGE_PX: std::ops::RangeInclusive<u32> = 64..=2048;
+/// Qualité JPEG. 40 en bas : en dessous, les artefacts sont visibles sur les
+/// dégradés d'une pochette. 100 en haut, la borne du format.
+const COVER_JPEG_QUALITY: std::ops::RangeInclusive<u32> = 40..=100;
+/// Plafond de la vignette produite, en kibioctets. 32 Kio en bas, sous quoi une
+/// vignette 640 px ne tient pas et le filet se déclencherait toujours ; 8 Mio en
+/// haut, ce qui le rend inopérant pour qui veut le neutraliser sans décocher le
+/// réencodage.
+const COVER_MAX_BYTES_KO: std::ops::RangeInclusive<u32> = 32..=8192;
+/// Plafond de pixels à décoder, en mégapixels — donc quatre fois autant de
+/// mébioctets de tampon. 1 Mpx en bas (déjà 4 Mio) ; 64 Mpx en haut, soit
+/// 256 Mio, ce qu'un Pi 2 à 1 Gio ne peut pas dépasser sans se mettre en
+/// danger.
+const COVER_MAX_PIXELS_MPX: std::ops::RangeInclusive<u32> = 1..=64;
+
 /// Erreur de validation des réglages, une variante par borne violée. Même
 /// modèle que `AudioOutputError` : les paramètres `min`/`max` viennent de la
 /// borne effectivement comparée, jamais recopiés à la main.
@@ -308,6 +337,11 @@ pub enum SettingsError {
     Overlay { min: u32, max: u32 },
     TensWindow { min: u32, max: u32 },
     SeekStep { min: u32, max: u32 },
+    CoverSourceMax { min: u32, max: u32 },
+    CoverMaxEdge { min: u32, max: u32 },
+    CoverJpegQuality { min: u32, max: u32 },
+    CoverMaxBytes { min: u32, max: u32 },
+    CoverMaxPixels { min: u32, max: u32 },
 }
 
 impl SettingsError {
@@ -333,6 +367,26 @@ impl SettingsError {
                 .get("settings_seek_step_out_of_range")
                 .replace("{min}", &min.to_string())
                 .replace("{max}", &max.to_string()),
+            SettingsError::CoverSourceMax { min, max } => catalog
+                .get("settings_cover_source_max_out_of_range")
+                .replace("{min}", &min.to_string())
+                .replace("{max}", &max.to_string()),
+            SettingsError::CoverMaxEdge { min, max } => catalog
+                .get("settings_cover_max_edge_out_of_range")
+                .replace("{min}", &min.to_string())
+                .replace("{max}", &max.to_string()),
+            SettingsError::CoverJpegQuality { min, max } => catalog
+                .get("settings_cover_jpeg_quality_out_of_range")
+                .replace("{min}", &min.to_string())
+                .replace("{max}", &max.to_string()),
+            SettingsError::CoverMaxBytes { min, max } => catalog
+                .get("settings_cover_max_bytes_out_of_range")
+                .replace("{min}", &min.to_string())
+                .replace("{max}", &max.to_string()),
+            SettingsError::CoverMaxPixels { min, max } => catalog
+                .get("settings_cover_max_pixels_out_of_range")
+                .replace("{min}", &min.to_string())
+                .replace("{max}", &max.to_string()),
         }
     }
 }
@@ -354,6 +408,21 @@ impl std::fmt::Display for SettingsError {
             }
             SettingsError::SeekStep { min, max } => {
                 write!(f, "seek step out of range ({min}-{max} s)")
+            }
+            SettingsError::CoverSourceMax { min, max } => {
+                write!(f, "source cover ceiling out of range ({min}-{max} MiB)")
+            }
+            SettingsError::CoverMaxEdge { min, max } => {
+                write!(f, "cover thumbnail edge out of range ({min}-{max} px)")
+            }
+            SettingsError::CoverJpegQuality { min, max } => {
+                write!(f, "cover JPEG quality out of range ({min}-{max})")
+            }
+            SettingsError::CoverMaxBytes { min, max } => {
+                write!(f, "rendered cover ceiling out of range ({min}-{max} KiB)")
+            }
+            SettingsError::CoverMaxPixels { min, max } => {
+                write!(f, "cover decode ceiling out of range ({min}-{max} Mpx)")
             }
         }
     }
@@ -390,6 +459,42 @@ pub fn validate_settings(s: &crate::state::Settings) -> Result<(), SettingsError
         return Err(SettingsError::SeekStep {
             min: *SEEK_STEP_S.start(),
             max: *SEEK_STEP_S.end(),
+        });
+    }
+    if !COVER_SOURCE_MAX_MIO.contains(&s.cover_source_max_mio) {
+        return Err(SettingsError::CoverSourceMax {
+            min: *COVER_SOURCE_MAX_MIO.start(),
+            max: *COVER_SOURCE_MAX_MIO.end(),
+        });
+    }
+    // Les quatre suivants ne décrivent que le rendu. Ils sont validés **même
+    // quand `cover_rendition` est faux**, et c'est voulu : l'IHM grise ces
+    // champs sans les vider, donc leurs valeurs continuent de voyager dans le
+    // PUT. Les laisser passer sans contrôle sous prétexte qu'ils dorment
+    // ferait accepter une valeur absurde qui ne se révélerait qu'au moment de
+    // recocher l'interrupteur, très loin du geste qui l'a introduite.
+    if !COVER_MAX_EDGE_PX.contains(&s.cover_max_edge_px) {
+        return Err(SettingsError::CoverMaxEdge {
+            min: *COVER_MAX_EDGE_PX.start(),
+            max: *COVER_MAX_EDGE_PX.end(),
+        });
+    }
+    if !COVER_JPEG_QUALITY.contains(&u32::from(s.cover_jpeg_quality)) {
+        return Err(SettingsError::CoverJpegQuality {
+            min: *COVER_JPEG_QUALITY.start(),
+            max: *COVER_JPEG_QUALITY.end(),
+        });
+    }
+    if !COVER_MAX_BYTES_KO.contains(&s.cover_max_bytes_ko) {
+        return Err(SettingsError::CoverMaxBytes {
+            min: *COVER_MAX_BYTES_KO.start(),
+            max: *COVER_MAX_BYTES_KO.end(),
+        });
+    }
+    if !COVER_MAX_PIXELS_MPX.contains(&s.cover_max_pixels_mpx) {
+        return Err(SettingsError::CoverMaxPixels {
+            min: *COVER_MAX_PIXELS_MPX.start(),
+            max: *COVER_MAX_PIXELS_MPX.end(),
         });
     }
     Ok(())

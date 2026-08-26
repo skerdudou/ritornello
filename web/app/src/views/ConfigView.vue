@@ -27,6 +27,12 @@ const reglages = ref<SettingsPayload>({
   overlay_ms: 5000,
   tens_window_ms: 5000,
   seek_step_s: 10,
+  cover_source_max_mio: 20,
+  cover_rendition: true,
+  cover_max_edge_px: 640,
+  cover_jpeg_quality: 85,
+  cover_max_bytes_ko: 512,
+  cover_max_pixels_mpx: 16,
 })
 
 /**
@@ -180,6 +186,17 @@ async function enregistrerReglages() {
     overlay_ms: Number(reglages.value.overlay_ms),
     tens_window_ms: Number(reglages.value.tens_window_ms),
     seek_step_s: Number(reglages.value.seek_step_s),
+    // Les quatre réglages du rendu sont envoyés **même quand l'interrupteur est
+    // décoché**, et c'est délibéré : l'IHM les grise sans les vider, donc
+    // recocher l'interrupteur retrouve les valeurs qu'on y avait posées. Les
+    // omettre les ferait retomber sur les défauts du cœur (la structure est
+    // `serde(default)`), c'est-à-dire perdre en silence un réglage visible à
+    // l'écran.
+    cover_source_max_mio: Number(reglages.value.cover_source_max_mio),
+    cover_max_edge_px: Number(reglages.value.cover_max_edge_px),
+    cover_jpeg_quality: Number(reglages.value.cover_jpeg_quality),
+    cover_max_bytes_ko: Number(reglages.value.cover_max_bytes_ko),
+    cover_max_pixels_mpx: Number(reglages.value.cover_max_pixels_mpx),
   })
   toast[err ? 'error' : 'success'](err ?? t.value('ok'))
 }
@@ -208,6 +225,7 @@ const SECTIONS = [
   { id: 'volume-hold', key: 'volume_hold_title' },
   { id: 'overlays', key: 'overlays_title' },
   { id: 'seek', key: 'seek_card_title' },
+  { id: 'covers', key: 'cover_card_title' },
 ] as const
 
 const active = ref<string>(SECTIONS[0].id)
@@ -409,6 +427,83 @@ function aller(id: string) {
                 v-model="reglages.seek_step_s" />
             </label>
             <Button data-seek-change @click="enregistrerReglages">{{ t('change') }}</Button>
+          </CardContent>
+        </Card>
+      </section>
+
+      <!-- Pochettes. Une seule carte, deux étages qu'il ne faut pas confondre,
+           et la mise en page porte cette distinction : le plafond de la source
+           vient **en premier** et n'est jamais grisé, parce qu'il s'applique
+           quoi que dise l'interrupteur — c'est la seule garde qui subsiste
+           quand le réencodage est décoché. L'interrupteur vient ensuite, et
+           grise les quatre réglages qui ne décrivent que la vignette.
+
+           Grisés, pas vidés : les valeurs restent lisibles et repartent dans le
+           PUT (voir `enregistrerReglages`), donc recocher l'interrupteur
+           retrouve ce qu'on avait posé. -->
+      <section id="covers" class="scroll-mt-6">
+        <Card>
+          <CardHeader><CardTitle>{{ t('cover_card_title') }}</CardTitle></CardHeader>
+          <CardContent class="space-y-4">
+            <label class="grid gap-1 text-sm">
+              {{ t('cover_source_max_label') }}
+              <Input type="number" min="1" max="20" class="w-28" data-cover-source-max
+                v-model="reglages.cover_source_max_mio" />
+              <span class="text-xs text-muted-foreground">{{ t('cover_source_max_help') }}</span>
+            </label>
+
+            <div class="border-t border-border pt-4">
+              <label class="flex items-start gap-3 text-sm">
+                <Switch
+                  data-cover-rendition
+                  :model-value="reglages.cover_rendition"
+                  @update:model-value="(v: boolean) => (reglages.cover_rendition = v)"
+                />
+                <span class="grid gap-1">
+                  {{ t('cover_rendition_label') }}
+                  <span class="text-xs text-muted-foreground">{{ t('cover_rendition_help') }}</span>
+                </span>
+              </label>
+            </div>
+
+            <!-- `aria-disabled` en plus du `disabled` de chaque champ : le
+                 groupe entier est inactif, et un lecteur d'écran doit pouvoir
+                 l'annoncer une fois plutôt que champ par champ. -->
+            <div
+              data-cover-rendition-group
+              :aria-disabled="!reglages.cover_rendition"
+              :class="['flex flex-wrap items-start gap-4', reglages.cover_rendition ? '' : 'opacity-50']"
+            >
+              <label class="grid gap-1 text-sm">
+                {{ t('cover_max_edge_label') }}
+                <Input type="number" min="64" max="2048" class="w-28" data-cover-max-edge
+                  :disabled="!reglages.cover_rendition"
+                  v-model="reglages.cover_max_edge_px" />
+              </label>
+              <label class="grid gap-1 text-sm">
+                {{ t('cover_jpeg_quality_label') }}
+                <Input type="number" min="40" max="100" class="w-28" data-cover-jpeg-quality
+                  :disabled="!reglages.cover_rendition"
+                  v-model="reglages.cover_jpeg_quality" />
+                <span class="text-xs text-muted-foreground">{{ t('cover_jpeg_quality_help') }}</span>
+              </label>
+              <label class="grid gap-1 text-sm">
+                {{ t('cover_max_bytes_label') }}
+                <Input type="number" min="32" max="8192" class="w-28" data-cover-max-bytes
+                  :disabled="!reglages.cover_rendition"
+                  v-model="reglages.cover_max_bytes_ko" />
+                <span class="text-xs text-muted-foreground">{{ t('cover_max_bytes_help') }}</span>
+              </label>
+              <label class="grid gap-1 text-sm">
+                {{ t('cover_max_pixels_label') }}
+                <Input type="number" min="1" max="64" class="w-28" data-cover-max-pixels
+                  :disabled="!reglages.cover_rendition"
+                  v-model="reglages.cover_max_pixels_mpx" />
+                <span class="text-xs text-muted-foreground">{{ t('cover_max_pixels_help') }}</span>
+              </label>
+            </div>
+
+            <Button data-cover-change @click="enregistrerReglages">{{ t('change') }}</Button>
           </CardContent>
         </Card>
       </section>

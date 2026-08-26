@@ -1973,7 +1973,7 @@ mod relais_tests {
     //! été traité — ou n'a jamais été envoyé.
 
     use super::*;
-    use crate::cover::{CoverCache, Pochette};
+    use crate::cover::{fixtures, CoverCache, Pochette};
     use ritornello_plugin_sdk::{bind_display, serve_display, DisplayPlugin};
     use ritornello_proto::Cover;
 
@@ -2011,6 +2011,10 @@ mod relais_tests {
     }
 
     /// En-tête JPEG minimal puis du remplissage.
+    /// **Indecodable expres** : ne convient qu'aux tests de taille et de
+    /// plafond, ou l'image n'est jamais decodee. Tout ce qui traverse
+    /// `CoverCache::ligne` doit passer par `fixtures::jpeg_decodable`, le rendu
+    /// etant actif par defaut.
     fn jpeg(remplissage: usize) -> Vec<u8> {
         let mut v = vec![0xFFu8, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
         v.resize(6 + remplissage, 0x42);
@@ -2147,7 +2151,9 @@ mod relais_tests {
         // **La propriété qui protège la console.** Le bouchon sait recevoir une
         // pochette ; c'est le cœur qui ne doit pas la lui envoyer.
         let covers = Arc::new(CoverCache::new());
-        covers.insere("abcd".into(), Pochette::Octets(jpeg(10), "image/jpeg")).await;
+        covers
+            .insere("abcd".into(), Pochette::Octets(fixtures::jpeg_decodable(48, 48), "image/jpeg"))
+            .await;
         let mut b = banc(false, covers, etat_avec_pochette("abcd")).await;
 
         let recus = temoin(&mut b).await;
@@ -2159,7 +2165,7 @@ mod relais_tests {
 
     #[tokio::test]
     async fn un_afficheur_qui_a_demande_recoit_les_octets_et_le_href_de_letat() {
-        let image = jpeg(1000);
+        let image = fixtures::jpeg_decodable(48, 48);
         let covers = Arc::new(CoverCache::new());
         covers.insere("abcd".into(), Pochette::Octets(image.clone(), "image/png")).await;
         let mut b = banc(true, covers, etat_avec_pochette("abcd")).await;
@@ -2183,8 +2189,12 @@ mod relais_tests {
         // cette garde, chaque seconde de lecture pousserait l'image entière —
         // et referait la lecture du fichier local qui la produit.
         let covers = Arc::new(CoverCache::new());
-        covers.insere("abcd".into(), Pochette::Octets(jpeg(10), "image/jpeg")).await;
-        covers.insere("efgh".into(), Pochette::Octets(jpeg(20), "image/jpeg")).await;
+        covers
+            .insere("abcd".into(), Pochette::Octets(fixtures::jpeg_decodable(48, 48), "image/jpeg"))
+            .await;
+        covers
+            .insere("efgh".into(), Pochette::Octets(fixtures::jpeg_decodable(64, 64), "image/jpeg"))
+            .await;
         let mut b = banc(true, covers, etat_avec_pochette("abcd")).await;
 
         // La pochette initiale, qui part avec le premier état.
@@ -2253,7 +2263,7 @@ mod relais_tests {
         // partage s'absente, puis il revient.
         let dir = tempfile::tempdir().unwrap();
         let chemin = dir.path().join("folder.jpg");
-        let image = jpeg(500);
+        let image = fixtures::jpeg_decodable(48, 48);
         std::fs::write(&chemin, &image).unwrap();
         let covers = Arc::new(CoverCache::new());
         covers.insere("abcd".into(), Pochette::Fichier(chemin.clone())).await;
@@ -2291,7 +2301,7 @@ mod relais_tests {
         // budget n'existait pas, elle partirait.
         let dir = tempfile::tempdir().unwrap();
         let chemin = dir.path().join("folder.jpg");
-        let image = jpeg(500);
+        let image = fixtures::jpeg_decodable(48, 48);
         std::fs::write(&chemin, &image).unwrap();
         let covers = Arc::new(CoverCache::new());
         covers.insere("abcd".into(), Pochette::Fichier(chemin.clone())).await;
@@ -2329,8 +2339,8 @@ mod relais_tests {
         // exactement le décâblage puis le recâblage.
         let dir = tempfile::tempdir().unwrap();
         let chemin = dir.path().join("folder.jpg");
-        let avant = jpeg(500);
-        let apres = jpeg(1500);
+        let avant = fixtures::jpeg_decodable(48, 48);
+        let apres = fixtures::jpeg_decodable(64, 64);
         std::fs::write(&chemin, &avant).unwrap();
         let covers = Arc::new(CoverCache::new());
         covers.insere("abcd".into(), Pochette::Fichier(chemin.clone())).await;

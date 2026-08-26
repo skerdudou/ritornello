@@ -36,6 +36,18 @@ const CATALOGUE = {
   tens_window_ms_label: 'Fenêtre de saisie du cumul +10 (ms)',
   seek_card_title: 'Déplacement',
   seek_step_label: 'Pas de déplacement (s)',
+  cover_card_title: "Pochettes d'album",
+  cover_source_max_label: 'Plafond de la source (Mio)',
+  cover_source_max_help: 'Toujours appliqué.',
+  cover_rendition_label: 'Réencoder les pochettes',
+  cover_rendition_help: 'Décoché, la source part telle quelle.',
+  cover_max_edge_label: 'Côté le plus long (px)',
+  cover_jpeg_quality_label: 'Qualité JPEG',
+  cover_jpeg_quality_help: 'JPEG seulement.',
+  cover_max_bytes_label: 'Plafond de la vignette (Kio)',
+  cover_max_bytes_help: 'Un filet.',
+  cover_max_pixels_label: 'Plafond de décodage (Mpx)',
+  cover_max_pixels_help: 'Lu dans l’en-tête.',
   toc_label: 'sections',
 }
 
@@ -61,6 +73,8 @@ function charges() {
     '/api/settings': {
       volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'on',
       overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
+      cover_source_max_mio: 20, cover_rendition: true, cover_max_edge_px: 640,
+      cover_jpeg_quality: 85, cover_max_bytes_ko: 512, cover_max_pixels_mpx: 16,
     } as unknown,
     '/api/i18n': CATALOGUE as unknown,
   }
@@ -513,6 +527,8 @@ describe('ConfigView — réglages', () => {
         corps: {
           volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'previous',
           overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
+          cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
+          cover_max_bytes_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
         },
       },
     ])
@@ -530,6 +546,8 @@ describe('ConfigView — réglages', () => {
         corps: {
           volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'standby',
           overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
+          cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
+          cover_max_bytes_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
         },
       },
     ])
@@ -548,6 +566,8 @@ describe('ConfigView — réglages', () => {
         corps: {
           volume_repeat_initial_ms: 1500, volume_repeat_interval_ms: 300, startup_power: 'on',
           overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
+          cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
+          cover_max_bytes_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
         },
       },
     ])
@@ -595,6 +615,8 @@ describe('ConfigView — incrustations', () => {
         corps: {
           volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'on',
           overlay_ms: 2000, tens_window_ms: 7000, seek_step_s: 10,
+          cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
+          cover_max_bytes_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
         },
       },
     ])
@@ -622,6 +644,83 @@ describe('ConfigView — deplacement', () => {
   })
 })
 
+describe('ConfigView — pochettes', () => {
+  beforeEach(reinitialiser)
+
+  it('le plafond de la source n’est jamais grisé, l’interrupteur ne le touche pas', async () => {
+    // La disposition porte une distinction réelle : ce plafond s'applique que le
+    // réencodage soit actif ou non, et c'est la seule garde qui subsiste quand
+    // il est décoché. Le griser avec les autres serait le mensonge le plus
+    // coûteux de cette carte.
+    const { w } = await monter()
+    expect(w.find('[data-cover-source-max]').attributes('disabled')).toBeUndefined()
+
+    await w.find('[data-cover-rendition]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-cover-source-max]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('décocher l’interrupteur grise les quatre réglages du rendu', async () => {
+    const { w } = await monter()
+    const champs = [
+      '[data-cover-max-edge]',
+      '[data-cover-jpeg-quality]',
+      '[data-cover-max-bytes]',
+      '[data-cover-max-pixels]',
+    ]
+    for (const c of champs) expect(w.find(c).attributes('disabled')).toBeUndefined()
+
+    await w.find('[data-cover-rendition]').trigger('click')
+    await flushPromises()
+    for (const c of champs) {
+      expect(w.find(c).attributes('disabled')).toBeDefined()
+    }
+    // Le groupe entier est annoncé inactif, une fois, plutôt que champ par
+    // champ : c'est ce qu'un lecteur d'écran doit entendre.
+    expect(w.find('[data-cover-rendition-group]').attributes('aria-disabled')).toBe('true')
+  })
+
+  it('un réglage grisé garde sa valeur et repart dans le PUT', async () => {
+    // **Grisés, pas vidés.** Sans cette propriété, décocher puis enregistrer
+    // ferait retomber les quatre champs sur les défauts du cœur (la structure
+    // est `serde(default)`), c'est-à-dire perdre en silence un réglage encore
+    // affiché à l'écran — et recocher l'interrupteur ne retrouverait pas ce
+    // qu'on y avait posé.
+    const { w, puts } = await monter()
+    await w.find('[data-cover-max-edge]').setValue('800')
+    await w.find('[data-cover-rendition]').trigger('click')
+    await flushPromises()
+
+    await w.find('[data-cover-change]').trigger('click')
+    await flushPromises()
+    const corps = puts[0]!.corps as { cover_rendition: boolean; cover_max_edge_px: number }
+    expect(corps.cover_rendition).toBe(false)
+    expect(corps.cover_max_edge_px).toBe(800)
+  })
+
+  it('envoie les six réglages en nombres, jamais en chaînes', async () => {
+    // Le champ `<input type="number">` de Vue rend des **chaînes** : sans les
+    // `Number(...)` d'`enregistrerReglages`, le cœur recevrait `"800"` et
+    // refuserait le bloc entier avec un message parlant d'un champ que
+    // l'utilisateur n'a pas touché.
+    const { w, puts } = await monter()
+    await w.find('[data-cover-source-max]').setValue('12')
+    await w.find('[data-cover-max-edge]').setValue('800')
+    await w.find('[data-cover-jpeg-quality]').setValue('70')
+    await w.find('[data-cover-max-bytes]').setValue('256')
+    await w.find('[data-cover-max-pixels]').setValue('24')
+    await w.find('[data-cover-change]').trigger('click')
+    await flushPromises()
+    expect(puts[0]!.corps).toMatchObject({
+      cover_source_max_mio: 12,
+      cover_max_edge_px: 800,
+      cover_jpeg_quality: 70,
+      cover_max_bytes_ko: 256,
+      cover_max_pixels_mpx: 24,
+    })
+  })
+})
+
 describe('ConfigView — sommaire', () => {
   beforeEach(reinitialiser)
 
@@ -632,6 +731,7 @@ describe('ConfigView — sommaire', () => {
     // et le sommaire ne doit pas garder une entrée qui pointe dans le vide.
     expect(liens.map((l) => l.text())).toEqual([
       'Plugins', 'Sortie audio', 'Langue', 'Démarrage', 'Volume maintenu', 'Incrustations', 'Déplacement',
+      "Pochettes d'album",
     ])
     // Masqué sur petit écran : la colonne suit la largeur du shell, il n'y a
     // pas la place en mobile.

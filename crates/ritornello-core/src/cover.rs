@@ -131,14 +131,110 @@ pub fn cle(r: &CoverRef) -> String {
     format!("{:016x}", h.finish())
 }
 
+/// Ce que le cœur fabrique d'une pochette avant de la pousser sur un socket.
+///
+/// Absent (`Reglages::rendu` à `None`) quand l'utilisateur a décoché le
+/// réencodage : les octets d'origine partent tels quels. Un `Option` plutôt
+/// qu'un booléen à l'intérieur, et ce n'est pas cosmétique — les quatre
+/// réglages n'existent que là où ils veulent dire quelque chose, si bien qu'un
+/// code qui lit `cote_max_px` ne peut pas oublier de vérifier d'abord que le
+/// rendu est actif.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rendu {
+    /// Côté le plus long de la vignette, en pixels. Le rapport est conservé.
+    pub cote_max_px: u32,
+    /// Qualité JPEG, 1 à 100. Ignorée pour une image à canal alpha, réencodée
+    /// en PNG sans perte.
+    pub qualite_jpeg: u8,
+    /// Plafond de la vignette produite, en octets. Un filet : au-delà, rien
+    /// n'est poussé.
+    pub plafond_sortie: usize,
+    /// Plafond de pixels à décoder. Comparé aux dimensions lues dans l'en-tête
+    /// **avant toute allocation**, et reporté dans `image::Limits` pour le cas
+    /// d'un en-tête qui mentirait sur ses propres dimensions.
+    pub plafond_pixels: u64,
+}
+
+/// Les deux étages du traitement d'une pochette, qu'il ne faut pas confondre.
+///
+/// `source_max` borne ce que le cœur accepte de **lire**, quoi qu'il arrive
+/// ensuite : c'est la seule garde qui subsiste quand le rendu est désactivé, et
+/// la plus économique de toutes, puisqu'elle se juge sur la taille du fichier
+/// sans lire un octet de son contenu.
+///
+/// `rendu` ne décrit que ce que le cœur **fabrique**.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reglages {
+    /// Plafond de la pochette source, en octets.
+    pub source_max: usize,
+    /// `None` = pousser la source telle quelle.
+    pub rendu: Option<Rendu>,
+}
+
+impl Default for Reglages {
+    /// Les défauts du produit, pas des défauts neutres : un `CoverCache::new()`
+    /// se comporte comme un appareil sorti d'usine, y compris dans les tests
+    /// qui ne parlent pas de réglages. Dérivés de `state::Settings::default()`
+    /// pour qu'il n'existe qu'un seul endroit où ces valeurs sont écrites.
+    fn default() -> Self {
+        Self::from(&crate::state::Settings::default())
+    }
+}
+
+impl From<&crate::state::Settings> for Reglages {
+    fn from(s: &crate::state::Settings) -> Self {
+        Self {
+            source_max: (s.cover_source_max_mio as usize) * 1024 * 1024,
+            rendu: s.cover_rendition.then(|| Rendu {
+                cote_max_px: s.cover_max_edge_px,
+                qualite_jpeg: s.cover_jpeg_quality,
+                plafond_sortie: (s.cover_max_bytes_ko as usize) * 1024,
+                plafond_pixels: (s.cover_max_pixels_mpx as u64) * 1_000_000,
+            }),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct CoverCache {
     entrees: RwLock<VecDeque<(String, Pochette)>>,
+    /// Réglages vivants, relus à chaque publication.
+    ///
+    /// Un verrou `std::sync` et non celui de `tokio`, à la différence de
+    /// `entrees` juste au-dessus : la section critique est la copie d'une
+    /// structure `Copy` de trente octets, jamais une IO. Cela garde
+    /// `Core::set_settings` synchrone — le rendre `async` pour ce champ aurait
+    /// contaminé sa signature et tous ses appelants de test. La valeur est
+    /// **copiée hors du verrou** avant tout `await` : aucun garde ne traverse
+    /// un point de suspension.
+    reglages: std::sync::RwLock<Reglages>,
 }
 
 impl CoverCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Publie de nouveaux réglages. Prise en compte à la publication suivante :
+    /// rien n'est mémorisé, donc il n'y a rien à invalider.
+    pub fn set_reglages(&self, r: Reglages) {
+        // Un verrou empoisonné voudrait dire qu'un porteur a paniqué en tenant
+        // trente octets `Copy` — impossible sans un défaut ailleurs. Écraser
+        // plutôt que propager : des réglages perdus dégraderaient la publication
+        // suivante en silence, là où l'empoisonnement, lui, se voit au journal
+        // de la panique d'origine.
+        match self.reglages.write() {
+            Ok(mut g) => *g = r,
+            Err(e) => *e.into_inner() = r,
+        }
+    }
+
+    /// Copie des réglages courants, verrou rendu immédiatement.
+    fn reglages(&self) -> Reglages {
+        match self.reglages.read() {
+            Ok(g) => *g,
+            Err(e) => *e.into_inner(),
+        }
     }
 
     pub async fn insere(&self, cle: String, p: Pochette) {
@@ -183,7 +279,11 @@ impl CoverCache {
     /// et **taille au-delà du plafond**. L'appelant n'a rien à en distinguer :
     /// dans tous les cas l'afficheur n'a pas d'image, comme il n'en a pas quand
     /// la récupération échoue.
-    pub async fn octets(&self, cle: &str) -> Option<(&'static str, Vec<u8>)> {
+    /// Le plafond est **passé par l'appelant** plutôt que relu ici, pour que
+    /// `ligne` ne lise les réglages qu'une seule fois : deux lectures pourraient
+    /// encadrer un changement, et produire une vignette selon des règles qui
+    /// n'ont jamais coexisté.
+    async fn octets(&self, cle: &str, plafond: usize) -> Option<(&'static str, Vec<u8>)> {
         // Le verrou est rendu **avant** toute IO. Une pochette locale vit
         // couramment sur un partage endormi : tenir le verrou de lecture
         // pendant `DELAI_FICHIER` bloquerait les insertions du cache, donc la
@@ -199,11 +299,27 @@ impl CoverCache {
                 // Déjà en mémoire, et déjà borné par construction : ces
                 // octets viennent d'un corps HTTP que `telecharge` a coupé à
                 // `PLAFOND_RESEAU`.
-                Some(Pochette::Octets(v, mime)) => return Some((*mime, v.clone())),
+                //
+                // Le plafond réglable est vérifié quand même : il peut être
+                // descendu **sous** `PLAFOND_RESEAU`, et alors la borne de
+                // construction ne dit plus rien. Sans ce contrôle, le réglage
+                // ne vaudrait que pour les fichiers locaux — vrai aujourd'hui
+                // par la seule coïncidence des deux valeurs, et faux dès qu'on
+                // y touche.
+                Some(Pochette::Octets(v, mime)) => {
+                    if v.len() > plafond {
+                        tracing::warn!(
+                            "network cover not pushed: {} bytes over the {plafond}-byte limit",
+                            v.len()
+                        );
+                        return None;
+                    }
+                    return Some((*mime, v.clone()));
+                }
                 Some(Pochette::Fichier(c)) => c.clone(),
             }
         };
-        lit_fichier_borne(&chemin).await
+        lit_fichier_borne(&chemin, plafond).await
     }
 
     /// Construit la ligne de protocole `DisplayFrame::Cover` pour `cle`/`href` :
@@ -245,13 +361,184 @@ impl CoverCache {
     ///
     /// `None` couvre les mêmes cas que `octets` : rien à pousser.
     pub async fn ligne(&self, cle: &str, href: &str) -> Option<Arc<str>> {
-        let (mime, octets) = self.octets(cle).await?;
+        // Une seule lecture des réglages pour les deux étages : voir
+        // `octets_bornes`. Deux lectures pourraient encadrer un changement, et
+        // produire une vignette selon des règles qui n'ont jamais coexisté.
+        let reglages = self.reglages();
+        let (mime, octets) = self.octets(cle, reglages.source_max).await?;
+        // Le rendu s'applique **ici et pas dans `octets`**, donc sur le seul
+        // chemin de poussée. La route HTTP `cover_get`, elle, diffuse le
+        // fichier local en flux sans jamais le tenir en entier : lui imposer un
+        // réencodage lui ferait perdre exactement la propriété qui la rend
+        // économique, pour une image que le navigateur redimensionne et met en
+        // cache de son côté.
+        let (mime, octets) = match reglages.rendu {
+            None => (mime, octets),
+            Some(r) => rendu(mime, octets, r).await?,
+        };
         let cover =
             ritornello_proto::Cover { href: href.to_string(), mime: mime.to_string(), bytes: octets };
         let mut ligne = serde_json::to_string(&ritornello_proto::DisplayFrame::Cover(cover)).ok()?;
         ligne.push('\n');
         Some(Arc::from(ligne))
     }
+}
+
+/// Réencode une pochette en vignette, ou rend les octets d'origine quand il n'y
+/// a rien à gagner.
+///
+/// Quatre étapes, dans cet ordre, et l'ordre **est** la protection :
+///
+/// 1. **Les dimensions sont lues dans l'en-tête**, sans décoder. Quelques
+///    dizaines d'octets suffisent, et rien n'est alloué à la taille de l'image.
+/// 2. **La garde anti-bombe** compare le nombre de pixels au plafond. C'est la
+///    seule borne qui protège vraiment : la taille du fichier ne dit *rien* du
+///    coût du décodage — un PNG de 200 Kio peut annoncer 30000 × 30000 pixels,
+///    soit 3,6 Gio de tampon, et `source_max` le laisse passer sans broncher.
+/// 3. **Le passe-droit** : une image déjà petite en pixels *et* en octets part
+///    telle quelle, sans décodage ni réencodage. Une pochette de 300 × 300 tirée
+///    d'un fichier n'a rien à gagner d'un aller-retour qui la dégraderait.
+/// 4. **Le décodage et l'encodage**, sur un fil bloquant.
+///
+/// Inverser 2 et 1 serait absurde ; inverser 3 et 2 serait dangereux — une
+/// image de 30000 × 30000 pesant 200 Kio passerait le passe-droit sur son poids
+/// alors qu'elle est précisément la bombe qu'on cherche à refuser. Le
+/// passe-droit teste donc les **deux** critères, et vient après la garde.
+///
+/// **Rien n'est mémorisé**, et c'est cohérent avec `ligne` : la clé du cache
+/// hache le chemin, pas le contenu, donc une vignette gardée deviendrait fausse
+/// dès que l'utilisateur remplace l'image sous ce chemin. Le prix est un
+/// décodage par publication, et `ligne` n'est appelée qu'une fois par changement
+/// de pochette et par relais abonné.
+///
+/// `None` = rien à pousser, comme partout dans ce module : image illisible,
+/// dimensions au-delà du plafond, ou vignette produite au-delà du filet.
+async fn rendu(
+    mime: &'static str,
+    octets: Vec<u8>,
+    r: Rendu,
+) -> Option<(&'static str, Vec<u8>)> {
+    let (largeur, hauteur) = dimensions(&octets)?;
+    let pixels = u64::from(largeur) * u64::from(hauteur);
+    if pixels > r.plafond_pixels {
+        tracing::warn!(
+            "cover not pushed: {largeur}x{hauteur} is {pixels} pixels, over the {} allowed \
+             (decoding it would need about {} MiB)",
+            r.plafond_pixels,
+            pixels * 4 / (1024 * 1024)
+        );
+        return None;
+    }
+    if largeur.max(hauteur) <= r.cote_max_px && octets.len() <= r.plafond_sortie {
+        tracing::debug!("cover already small ({largeur}x{hauteur}, {} bytes), pushed as it is", octets.len());
+        return Some((mime, octets));
+    }
+
+    // `spawn_blocking` : décoder puis réencoder une image de plusieurs
+    // mégapixels occupe un cœur pendant des centaines de millisecondes sur un
+    // Pi 2. Le faire sur un fil de l'ordonnanceur figerait la boucle du cœur —
+    // donc l'horloge de position, les commandes de la télécommande et les
+    // requêtes HTTP — le temps d'une pochette.
+    //
+    // Cette tâche n'est **pas annulable** : abandonner la future ici ne
+    // l'arrête pas, elle ira jusqu'au bout et son résultat sera jeté. C'est
+    // acceptable précisément grâce à la garde de l'étape 2, qui borne ce
+    // qu'elle peut coûter avant de la lancer.
+    let plafond_alloc = (r.plafond_pixels as usize).saturating_mul(4);
+    let travail = tokio::task::spawn_blocking(move || encode(octets, r, plafond_alloc)).await;
+    let (mime, sortie) = match travail {
+        Ok(Some(v)) => v,
+        Ok(None) => return None,
+        Err(e) => {
+            // Une panique du décodeur sur une entrée venue du réseau : refusée
+            // comme le reste, mais journalisée en `warn` — c'est un défaut de la
+            // bibliothèque ou une entrée qui l'a mise en défaut, pas un cas
+            // d'usage.
+            tracing::warn!("cover rendition panicked: {e}");
+            return None;
+        }
+    };
+    if sortie.len() > r.plafond_sortie {
+        tracing::warn!(
+            "cover not pushed: rendered to {} bytes, over the {}-byte net",
+            sortie.len(),
+            r.plafond_sortie
+        );
+        return None;
+    }
+    tracing::debug!(
+        "cover rendered: {} bytes in, {} bytes out ({mime})",
+        pixels * 4,
+        sortie.len()
+    );
+    Some((mime, sortie))
+}
+
+/// Dimensions annoncées par l'en-tête, sans décoder l'image.
+///
+/// Séparée pour être testable seule : c'est la valeur dont dépend la garde
+/// anti-bombe, et une garde qui lit mal ses dimensions ne garde rien.
+fn dimensions(octets: &[u8]) -> Option<(u32, u32)> {
+    let lecteur = image::ImageReader::new(std::io::Cursor::new(octets))
+        .with_guessed_format()
+        .ok()?;
+    match lecteur.into_dimensions() {
+        Ok(d) => Some(d),
+        Err(e) => {
+            tracing::debug!("cover header unreadable: {e}");
+            None
+        }
+    }
+}
+
+/// Le décodage et l'encodage eux-mêmes. **Bloquant** : appelé sous
+/// `spawn_blocking`.
+fn encode(octets: Vec<u8>, r: Rendu, plafond_alloc: usize) -> Option<(&'static str, Vec<u8>)> {
+    let mut lecteur = image::ImageReader::new(std::io::Cursor::new(&octets))
+        .with_guessed_format()
+        .ok()?;
+    // La ceinture après les bretelles : la garde de `rendu` a déjà refusé les
+    // dimensions trop grandes, mais elle croit l'en-tête. `Limits` borne
+    // l'allocation réelle du décodeur, donc couvre le cas d'un en-tête qui
+    // mentirait sur ses propres dimensions — le fichier fabriqué exprès, pas le
+    // fichier maladroit.
+    let mut limites = image::Limits::default();
+    limites.max_alloc = Some(plafond_alloc as u64);
+    lecteur.limits(limites);
+    let image = match lecteur.decode() {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::debug!("cover undecodable: {e}");
+            return None;
+        }
+    };
+
+    // `thumbnail` et non `resize` : à qualité d'échantillonnage comparable pour
+    // une réduction forte (chaque pixel source contribue à un pixel cible), il
+    // est nettement moins coûteux — et sur un Pi 2 c'est le facteur qui décide.
+    // Le rapport est conservé, l'image tient dans le carré demandé.
+    let vignette = image.thumbnail(r.cote_max_px, r.cote_max_px);
+
+    let mut sortie = Vec::new();
+    // PNG dès qu'il y a un canal alpha, sans perte. Aplatir la transparence
+    // demanderait de choisir une couleur de fond — un parti pris visuel que
+    // l'appareil n'a pas à prendre sur la pochette de quelqu'un d'autre.
+    if vignette.color().has_alpha() {
+        if let Err(e) = vignette.write_to(&mut std::io::Cursor::new(&mut sortie), image::ImageFormat::Png) {
+            tracing::warn!("cover PNG encoding failed: {e}");
+            return None;
+        }
+        return Some(("image/png", sortie));
+    }
+    let mut encodeur =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut sortie, r.qualite_jpeg);
+    // `to_rgb8` : l'encodeur JPEG refuse un tampon à canal alpha, et une image
+    // en niveaux de gris ou en palette doit de toute façon être convertie.
+    if let Err(e) = encodeur.encode_image(&vignette.to_rgb8()) {
+        tracing::warn!("cover JPEG encoding failed: {e}");
+        return None;
+    }
+    Some(("image/jpeg", sortie))
 }
 
 /// Ce que la lecture bornée d'un fichier de pochette rend, avant validation
@@ -293,11 +580,14 @@ enum LectureBornee {
 /// * `DELAI_FICHIER`, comme partout où ce module touche un fichier : le
 ///   partage peut être endormi, et l'attente doit être bornée par nous plutôt
 ///   que par le noyau.
-async fn lit_fichier_borne(chemin: &std::path::Path) -> Option<(&'static str, Vec<u8>)> {
+async fn lit_fichier_borne(
+    chemin: &std::path::Path,
+    plafond: usize,
+) -> Option<(&'static str, Vec<u8>)> {
     let lecture = tokio::time::timeout(DELAI_FICHIER, async {
         let fichier = tokio::fs::File::open(chemin).await?;
         let taille = fichier.metadata().await?.len();
-        if taille > ritornello_proto::COVER_MAX_BYTES as u64 {
+        if taille > plafond as u64 {
             return Ok::<_, std::io::Error>(LectureBornee::TropGros(taille));
         }
         let mut octets = Vec::new();
@@ -306,10 +596,7 @@ async fn lit_fichier_borne(chemin: &std::path::Path) -> Option<(&'static str, Ve
         // l'allocation qu'il est censé éviter. N'agit ici que sur la fenêtre
         // TOCTOU (voir la doc au-dessus) : le cas courant a déjà été tranché
         // par `metadata`.
-        fichier
-            .take(ritornello_proto::COVER_MAX_BYTES as u64 + 1)
-            .read_to_end(&mut octets)
-            .await?;
+        fichier.take(plafond as u64 + 1).read_to_end(&mut octets).await?;
         Ok(LectureBornee::Octets(octets))
     })
     .await;
@@ -319,11 +606,10 @@ async fn lit_fichier_borne(chemin: &std::path::Path) -> Option<(&'static str, Ve
             // La taille exacte de l'offense, connue sans avoir rien lu de son
             // contenu — c'est ce que la lecture bornée à `+ 1` octet ne
             // pourrait jamais journaliser : elle ne verrait jamais que
-            // `COVER_MAX_BYTES + 1`, quelle que soit la taille réelle.
+            // `plafond + 1`, quelle que soit la taille réelle.
             tracing::warn!(
-                "cover file {} not read: {taille} bytes over the {}-byte limit",
-                chemin.display(),
-                ritornello_proto::COVER_MAX_BYTES
+                "cover file {} not read: {taille} bytes over the {plafond}-byte limit",
+                chemin.display()
             );
             return None;
         }
@@ -336,11 +622,10 @@ async fn lit_fichier_borne(chemin: &std::path::Path) -> Option<(&'static str, Ve
             return None;
         }
     };
-    if octets.len() > ritornello_proto::COVER_MAX_BYTES {
+    if octets.len() > plafond {
         tracing::warn!(
-            "cover file {} not pushed: grew past {} bytes while being read",
-            chemin.display(),
-            ritornello_proto::COVER_MAX_BYTES
+            "cover file {} not pushed: grew past {plafond} bytes while being read",
+            chemin.display()
         );
         return None;
     }
@@ -670,6 +955,49 @@ pub async fn cover_get(
     }
 }
 
+/// Fixtures d'image partagées par les tests de ce module et ceux de `main`.
+///
+/// Ici et non dans chaque `mod tests` : deux copies d'un générateur d'image
+/// dériveraient, et un test qui croit produire une image décodable alors qu'il
+/// n'en produit plus est un faux positif silencieux.
+#[cfg(test)]
+pub(crate) mod fixtures {
+    /// Un JPEG **réellement décodable** de `largeur × hauteur`.
+    ///
+    /// Nécessaire dès qu'un test traverse `CoverCache::ligne` : le rendu, actif
+    /// par défaut, décode l'image, et un en-tête suivi de remplissage est refusé
+    /// — à juste titre, c'est un fichier tronqué.
+    ///
+    /// Un dégradé et non un aplat : un aplat se comprime à quelques centaines
+    /// d'octets quelle que soit sa taille, ce qui rendrait indistinguables « la
+    /// vignette a été produite » et « le plafond de sortie n'a jamais été
+    /// approché ».
+    pub fn jpeg_decodable(largeur: u32, hauteur: u32) -> Vec<u8> {
+        let mut img = image::RgbImage::new(largeur, hauteur);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8]);
+        }
+        let mut sortie = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut sortie, 90)
+            .encode_image(&img)
+            .expect("encodage de la fixture");
+        sortie
+    }
+
+    /// Un PNG décodable **à canal alpha**, pour le chemin sans perte.
+    pub fn png_alpha(largeur: u32, hauteur: u32) -> Vec<u8> {
+        let mut img = image::RgbaImage::new(largeur, hauteur);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = image::Rgba([(x % 256) as u8, (y % 256) as u8, 0, ((x + y) % 256) as u8]);
+        }
+        let mut sortie = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut sortie), image::ImageFormat::Png)
+            .expect("encodage de la fixture");
+        sortie
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -778,7 +1106,24 @@ mod tests {
 
     // -- `octets` : la matérialisation pour le protocole d'affichage ---------
 
+    /// Le plafond de source des réglages par défaut.
+    ///
+    /// Les tests d'`octets` ci-dessous portent sur le plafond, pas sur le rendu :
+    /// le passer explicitement rend visible dans le test la borne qu'il éprouve,
+    /// là où elle était cachée dans une constante de module. Le prendre des
+    /// réglages **par défaut** plutôt que de `COVER_MAX_BYTES` en direct est
+    /// délibéré : c'est la valeur qu'un appareil sorti d'usine applique
+    /// réellement.
+    fn plafond() -> usize {
+        Reglages::default().source_max
+    }
+
     /// En-tête JPEG minimal, suivi de `remplissage` octets quelconques.
+    ///
+    /// **Indécodable exprès** : ces octets valident l'en-tête que `type_image`
+    /// inspecte, et rien de plus. Cela convient à tout ce qui porte sur les
+    /// tailles et les plafonds, et cela ne convient **pas** à ce qui porte sur
+    /// le rendu — voir `image_reelle`, plus bas.
     fn jpeg(remplissage: usize) -> Vec<u8> {
         let mut v = vec![0xFFu8, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
         v.resize(6 + remplissage, 0x42);
@@ -790,8 +1135,8 @@ mod tests {
         let cache = CoverCache::new();
         let image = jpeg(10);
         cache.insere("k".into(), Pochette::Octets(image.clone(), "image/png")).await;
-        assert_eq!(cache.octets("k").await, Some(("image/png", image)));
-        assert_eq!(cache.octets("inconnue").await, None);
+        assert_eq!(cache.octets("k", plafond()).await, Some(("image/png", image)));
+        assert_eq!(cache.octets("inconnue", plafond()).await, None);
     }
 
     #[tokio::test]
@@ -804,7 +1149,7 @@ mod tests {
         std::fs::write(&chemin, &image).unwrap();
         let cache = CoverCache::new();
         cache.insere("k".into(), Pochette::Fichier(chemin)).await;
-        assert_eq!(cache.octets("k").await, Some(("image/jpeg", image)));
+        assert_eq!(cache.octets("k", plafond()).await, Some(("image/jpeg", image)));
     }
 
     #[tokio::test]
@@ -826,7 +1171,7 @@ mod tests {
         // Quelqu'un remplace le contenu du partage après la découverte.
         std::fs::write(&chemin, b"ceci n'est plus une image").unwrap();
         assert_eq!(
-            cache.octets("k").await,
+            cache.octets("k", plafond()).await,
             None,
             "les octets rendus doivent etre ceux qui ont ete valides, jamais un contenu suppose"
         );
@@ -839,14 +1184,14 @@ mod tests {
         // ici, et nulle part ailleurs, que la borne existe. Un refus, pas une
         // allocation de la taille du fichier — la lecture s'arrête à
         // `COVER_MAX_BYTES + 1` octets, quelle que soit la taille réelle.
-        let plafond = ritornello_proto::COVER_MAX_BYTES;
+        let plafond = plafond();
         let dir = tempfile::tempdir().unwrap();
 
         let pile = dir.path().join("pile.jpg");
         std::fs::write(&pile, jpeg(plafond - 6)).unwrap();
         let cache = CoverCache::new();
         cache.insere("pile".into(), Pochette::Fichier(pile)).await;
-        match cache.octets("pile").await {
+        match cache.octets("pile", plafond).await {
             Some((mime, o)) => {
                 assert_eq!(mime, "image/jpeg");
                 assert_eq!(o.len(), plafond, "le plafond pile doit passer, pas etre refuse");
@@ -858,7 +1203,7 @@ mod tests {
         std::fs::write(&trop, jpeg(plafond - 5)).unwrap();
         cache.insere("trop".into(), Pochette::Fichier(trop)).await;
         assert_eq!(
-            cache.octets("trop").await,
+            cache.octets("trop", plafond).await,
             None,
             "un seul octet au-dela du plafond doit suffire a refuser"
         );
@@ -869,7 +1214,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = CoverCache::new();
         cache.insere("k".into(), Pochette::Fichier(dir.path().join("absent.jpg"))).await;
-        assert_eq!(cache.octets("k").await, None);
+        assert_eq!(cache.octets("k", plafond()).await, None);
     }
 
     /// Prouve que le refus vient de `metadata`, appelé **avant** toute lecture
@@ -918,7 +1263,7 @@ mod tests {
         // par thread reste donc valide a travers le `.await` qui suit.
         let subscriber = tracing_subscriber::fmt().with_writer(tampon.clone()).with_ansi(false).finish();
         let garde = tracing::subscriber::set_default(subscriber);
-        let resultat = lit_fichier_borne(&chemin).await;
+        let resultat = lit_fichier_borne(&chemin, plafond()).await;
         drop(garde);
 
         assert!(resultat.is_none(), "un fichier bien au-dela du plafond doit etre refuse");
@@ -945,16 +1290,22 @@ mod tests {
         // et personne n'a insere quoi que ce soit entre-temps. C'est pourquoi ce
         // test n'appelle pas `insere` une seconde fois : une invalidation posee
         // dans `insere` ne couvrirait pas ce chemin-la.
+        //
+        // Deux images **decodables**, et petites : sous 640 px et sous le
+        // plafond de sortie, le rendu par defaut les laisse passer telles
+        // quelles (voir `rendu`, etape 3). Les octets servis sont donc ceux du
+        // fichier, ce qui garde a ce test l'assertion la plus tranchante
+        // possible sur la fraicheur — et documente le passe-droit au passage.
         let dir = tempfile::tempdir().unwrap();
         let chemin = dir.path().join("folder.jpg");
-        std::fs::write(&chemin, jpeg(1000)).unwrap();
+        std::fs::write(&chemin, fixtures::jpeg_decodable(48, 48)).unwrap();
         let cache = CoverCache::new();
         cache.insere("k".into(), Pochette::Fichier(chemin.clone())).await;
 
         let avant = cache.ligne("k", "/api/cover/k").await.expect("une image locale doit produire une ligne");
-        // L'utilisateur remplace la pochette sur le partage. Taille differente,
-        // pour que l'inegalite ne tienne pas au seul remplissage.
-        std::fs::write(&chemin, jpeg(2000)).unwrap();
+        // L'utilisateur remplace la pochette sur le partage. Dimensions
+        // differentes, pour que l'inegalite ne tienne pas au seul remplissage.
+        std::fs::write(&chemin, fixtures::jpeg_decodable(64, 64)).unwrap();
         let apres = cache.ligne("k", "/api/cover/k").await.expect("le second appel doit reussir aussi");
 
         assert_ne!(
@@ -963,7 +1314,11 @@ mod tests {
         );
         match serde_json::from_str::<ritornello_proto::DisplayFrame>(&apres).unwrap() {
             ritornello_proto::DisplayFrame::Cover(c) => {
-                assert_eq!(c.bytes, jpeg(2000), "les octets servis doivent etre ceux du fichier actuel");
+                assert_eq!(
+                    c.bytes,
+                    fixtures::jpeg_decodable(64, 64),
+                    "les octets servis doivent etre ceux du fichier actuel"
+                );
             }
             autre => panic!("une trame de pochette etait attendue : {autre:?}"),
         }
@@ -976,8 +1331,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("a.jpg");
         let b = dir.path().join("b.jpg");
-        std::fs::write(&a, jpeg(10)).unwrap();
-        std::fs::write(&b, jpeg(20)).unwrap();
+        std::fs::write(&a, fixtures::jpeg_decodable(48, 48)).unwrap();
+        std::fs::write(&b, fixtures::jpeg_decodable(64, 64)).unwrap();
         let cache = CoverCache::new();
         cache.insere("a".into(), Pochette::Fichier(a)).await;
         cache.insere("b".into(), Pochette::Fichier(b)).await;
@@ -1176,6 +1531,184 @@ mod tests {
         assert!(
             telecharge(&url).await.is_none(),
             "le contenu declare `image/png` mais les octets recus ne le sont pas : doit etre refuse"
+        );
+    }
+    // -- Le rendu : ce que le cœur fabrique avant de pousser ----------------
+
+    /// Un `Rendu` dont chaque champ est nommé par le test qui s'en sert : les
+    /// défauts du produit (640 px, 512 Kio, 16 Mpx) rendraient la plupart des
+    /// cas inatteignables sans fabriquer des images énormes.
+    fn rendu_de_test(cote_max_px: u32, plafond_sortie: usize, plafond_pixels: u64) -> Rendu {
+        Rendu { cote_max_px, qualite_jpeg: 85, plafond_sortie, plafond_pixels }
+    }
+
+    #[tokio::test]
+    async fn une_image_deja_petite_part_telle_quelle_sans_etre_reencodee() {
+        // Le passe-droit. L'identité **binaire** est l'assertion qui compte :
+        // un aller-retour décodage/encodage produirait des octets différents
+        // même à dimensions égales, donc l'égalité prouve qu'aucun n'a eu lieu.
+        let source = fixtures::jpeg_decodable(64, 64);
+        let sortie = rendu("image/jpeg", source.clone(), rendu_de_test(640, 512 * 1024, 16_000_000))
+            .await
+            .expect("une petite image doit passer");
+        assert_eq!(sortie, ("image/jpeg", source));
+    }
+
+    #[tokio::test]
+    async fn une_image_trop_grande_est_reduite_en_gardant_son_rapport() {
+        // 300 × 150, réduite à un côté de 100 : le rapport 2:1 doit survivre.
+        // Vérifié en **décodant la sortie**, pas en croyant le code sur parole.
+        let source = fixtures::jpeg_decodable(300, 150);
+        let (mime, sortie) = rendu("image/jpeg", source.clone(), rendu_de_test(100, 512 * 1024, 16_000_000))
+            .await
+            .expect("une grande image doit etre reduite, pas refusee");
+        assert_eq!(mime, "image/jpeg");
+        assert_eq!(dimensions(&sortie), Some((100, 50)), "le rapport 2:1 doit etre conserve");
+        assert!(
+            sortie.len() < source.len(),
+            "une vignette de 100x50 doit peser moins que son original de 300x150 : {} contre {}",
+            sortie.len(),
+            source.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn une_image_a_canal_alpha_est_reencodee_en_png_sans_perte() {
+        // Aplatir la transparence demanderait de choisir une couleur de fond,
+        // parti pris visuel que l'appareil n'a pas à prendre. Le mime change,
+        // donc la trame poussée le déclare — un afficheur qui reçoit
+        // `image/jpeg` avec des octets PNG afficherait un carré cassé.
+        let source = fixtures::png_alpha(300, 300);
+        let (mime, sortie) = rendu("image/png", source, rendu_de_test(100, 512 * 1024, 16_000_000))
+            .await
+            .expect("un png alpha doit etre rendu");
+        assert_eq!(mime, "image/png", "le mime doit suivre le format reellement produit");
+        assert_eq!(dimensions(&sortie), Some((100, 100)));
+    }
+
+    /// **La garde anti-bombe, et son ordre.**
+    ///
+    /// L'image de ce test franchirait le passe-droit sans difficulté : 100 px de
+    /// côté sous les 640 autorisés, deux kilooctets sous le plafond de sortie.
+    /// Seule la garde de pixels la refuse. Le test échoue donc si la garde
+    /// disparaît **et** si elle est déplacée après le passe-droit — c'est ce
+    /// second cas qui compte, parce qu'une bombe est précisément une image
+    /// minuscule en octets et démesurée en pixels.
+    #[tokio::test]
+    async fn le_plafond_de_pixels_refuse_avant_tout_decodage_et_avant_le_passe_droit() {
+        let source = fixtures::jpeg_decodable(100, 100);
+        assert!(
+            source.len() < 512 * 1024,
+            "la fixture doit tenir sous le plafond de sortie, sinon le test ne prouve pas l'ordre"
+        );
+        assert_eq!(
+            rendu("image/jpeg", source, rendu_de_test(640, 512 * 1024, 1_000)).await,
+            None,
+            "10000 pixels au-dela d'un plafond de 1000 doivent etre refuses"
+        );
+    }
+
+    #[tokio::test]
+    async fn une_vignette_au_dela_du_filet_de_sortie_nest_pas_poussee() {
+        // Le filet, éprouvé sur un plafond volontairement minuscule : une
+        // vignette 200 × 200 d'un dégradé ne tient pas dans 200 octets.
+        let source = fixtures::jpeg_decodable(400, 400);
+        assert_eq!(
+            rendu("image/jpeg", source, rendu_de_test(200, 200, 16_000_000)).await,
+            None,
+            "une vignette au-dela du filet ne doit pas etre poussee"
+        );
+    }
+
+    #[tokio::test]
+    async fn linterrupteur_decoche_pousse_la_source_sans_la_decoder() {
+        // Deux propriétés en une, et la fixture est l'astuce : ces octets ont un
+        // en-tête JPEG valide mais un contenu **indécodable**. S'ils arrivent
+        // intacts au bout de `ligne`, c'est que le décodeur n'a pas été appelé
+        // du tout — pas seulement que son résultat a été ignoré.
+        let dir = tempfile::tempdir().unwrap();
+        let chemin = dir.path().join("folder.jpg");
+        let source = jpeg(1000);
+        std::fs::write(&chemin, &source).unwrap();
+        let cache = CoverCache::new();
+        cache.set_reglages(Reglages { source_max: plafond(), rendu: None });
+        cache.insere("k".into(), Pochette::Fichier(chemin)).await;
+
+        let ligne = cache.ligne("k", "/api/cover/k").await.expect("la source doit partir telle quelle");
+        match serde_json::from_str::<ritornello_proto::DisplayFrame>(&ligne).unwrap() {
+            ritornello_proto::DisplayFrame::Cover(c) => {
+                assert_eq!(c.bytes, source, "les octets pousses doivent etre ceux de la source");
+                assert_eq!(c.mime, "image/jpeg");
+            }
+            autre => panic!("une trame de pochette etait attendue : {autre:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn linterrupteur_coche_ecarte_une_image_dont_les_octets_ne_se_decodent_pas() {
+        // Le pendant du test ci-dessus, et un **changement de comportement**
+        // assumé : `type_image` ne lit que les octets magiques, donc un fichier
+        // tronqué passait cette validation et partait vers les afficheurs, qui
+        // montraient chacun un carré cassé à leur façon. Le rendu le tranche une
+        // fois pour tous, au centre.
+        let dir = tempfile::tempdir().unwrap();
+        let chemin = dir.path().join("folder.jpg");
+        std::fs::write(&chemin, jpeg(1000)).unwrap();
+        let cache = CoverCache::new();
+        cache.insere("k".into(), Pochette::Fichier(chemin)).await;
+        assert!(
+            cache.ligne("k", "/api/cover/k").await.is_none(),
+            "un fichier dont l'en-tete ment sur son contenu ne doit pas etre pousse"
+        );
+    }
+
+    #[tokio::test]
+    async fn les_reglages_du_produit_reencodent_une_grande_pochette() {
+        // Le chemin de production complet, avec les défauts et sans les
+        // paramétrer : une pochette 1000 × 1000 doit arriver en 640 px.
+        // Sans ce test, tous les autres pourraient passer avec des réglages
+        // qu'aucun appareil n'applique.
+        let dir = tempfile::tempdir().unwrap();
+        let chemin = dir.path().join("folder.jpg");
+        let source = fixtures::jpeg_decodable(1000, 1000);
+        std::fs::write(&chemin, &source).unwrap();
+        let cache = CoverCache::new();
+        cache.insere("k".into(), Pochette::Fichier(chemin)).await;
+
+        let ligne = cache.ligne("k", "/api/cover/k").await.expect("une pochette doit etre poussee");
+        match serde_json::from_str::<ritornello_proto::DisplayFrame>(&ligne).unwrap() {
+            ritornello_proto::DisplayFrame::Cover(c) => {
+                assert_eq!(
+                    dimensions(&c.bytes),
+                    Some((640, 640)),
+                    "les reglages par defaut doivent ramener le cote long a 640 px"
+                );
+                assert!(
+                    c.bytes.len() < source.len(),
+                    "la vignette doit peser moins que la source : {} contre {}",
+                    c.bytes.len(),
+                    source.len()
+                );
+            }
+            autre => panic!("une trame de pochette etait attendue : {autre:?}"),
+        }
+    }
+
+    #[test]
+    fn les_reglages_traduisent_linterrupteur_en_absence_de_rendu() {
+        // La conversion `Settings -> Reglages`, qui est le seul endroit où
+        // l'interrupteur devient une structure. `None` plutôt qu'un booléen
+        // porté à côté : c'est ce qui rend impossible de lire `cote_max_px`
+        // sans avoir vérifié d'abord que le rendu est actif.
+        let mut s = crate::state::Settings::default();
+        assert!(Reglages::from(&s).rendu.is_some(), "le defaut du produit reencode");
+
+        s.cover_rendition = false;
+        assert!(Reglages::from(&s).rendu.is_none());
+        assert_eq!(
+            Reglages::from(&s).source_max,
+            20 * 1024 * 1024,
+            "le plafond de source survit a l'interrupteur : c'est sa raison d'etre"
         );
     }
 }
