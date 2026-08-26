@@ -279,6 +279,127 @@ pub async fn cherche_release(artist: &str, album: &str) -> Result<Option<String>
     Ok(premier_release_id(&body))
 }
 
+/// Score minimal d'une recherche d'enregistrement pour être crue.
+///
+/// Plus haut que `SEUIL_RELEASE` : ici les deux champs contraints viennent de
+/// la **même** chaîne écrite d'une seule main par la station, donc un vrai
+/// couple obtient un score franc. Et la validation sert à *choisir* entre deux
+/// découpages : plus le seuil est haut, moins l'ordre inverse a de chances de
+/// se glisser au-dessus.
+pub const SEUIL_RECORDING: u64 = 90;
+
+/// Ce qu'un enregistrement rendu par la recherche apprend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Enregistrement {
+    pub score: u64,
+    /// Le titre **tel que MusicBrainz l'écrit**. C'est lui qu'on compare au
+    /// candidat après normalisation, et cette comparaison porte la validation :
+    /// le score seul est trop généreux.
+    pub titre: String,
+    /// Première release, s'il en a une. La pochette en vient.
+    ///
+    /// Pas de choix « intelligent » entre original, compilation et remaster :
+    /// MusicBrainz ne les classe pas par pertinence, et ce serait une
+    /// heuristique de plus pour un carré de 500 pixels.
+    pub release_id: Option<String>,
+}
+
+/// Requête de recherche d'un enregistrement par artiste et titre.
+///
+/// Les deux valeurs viennent d'une **station**, donc d'une entrée qu'on ne
+/// choisit pas : échappées pour les deux langages superposés qu'elles
+/// traversent, Lucene puis l'URL. Voir la doc de `requete_release`, qui écrit
+/// ce qu'une version antérieure y avait manqué.
+pub fn requete_recording(artist: &str, title: &str) -> String {
+    let echappe = |s: &str| pourcent_encode(&echappe_lucene(s));
+    format!(
+        "https://musicbrainz.org/ws/2/recording/?query=artist:%22{}%22%20AND%20recording:%22{}%22&fmt=json&limit=1",
+        echappe(artist),
+        echappe(title)
+    )
+}
+
+/// Premier enregistrement de la réponse. `None` = rien, illisible, ou sans
+/// score — voir `premier_release_id` pour le raisonnement sur le score absent.
+pub fn premier_enregistrement(json: &str) -> Option<Enregistrement> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let premier = v.get("recordings")?.as_array()?.first()?;
+    let Some(score) = premier.get("score").and_then(Value::as_u64) else {
+        tracing::warn!("recording search: no score field, refusing rather than guessing");
+        return None;
+    };
+    Some(Enregistrement {
+        score,
+        titre: premier.get("title")?.as_str()?.to_string(),
+        release_id: premier
+            .get("releases")
+            .and_then(Value::as_array)
+            .and_then(|r| r.first())
+            .and_then(|r| r.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+/// Forme comparable d'un titre : minuscules, diacritiques retirés, et tout ce
+/// qui n'est ni lettre ni chiffre ramené à un espace unique.
+///
+/// **Pas** une normalisation Unicode complète, et c'est assumé : une crate de
+/// décomposition pour une soixantaine de caractères latins ne se justifie pas
+/// dans ce dépôt, et un titre en écriture non latine n'a pas de diacritique à
+/// retirer — il traverse cette fonction inchangé, ce qui est exactement le
+/// comportement voulu.
+pub fn normalise(s: &str) -> String {
+    let mut mots: Vec<String> = Vec::new();
+    let mut courant = String::new();
+    for c in s.chars() {
+        let c = sans_diacritique(c).to_lowercase().next().unwrap_or(c);
+        if c.is_alphanumeric() {
+            courant.push(c);
+        } else if !courant.is_empty() {
+            mots.push(std::mem::take(&mut courant));
+        }
+    }
+    if !courant.is_empty() {
+        mots.push(courant);
+    }
+    mots.join(" ")
+}
+
+/// Le caractère latin de base d'un caractère accentué, sinon lui-même.
+///
+/// Table plutôt qu'algorithme : elle couvre le français, l'espagnol,
+/// l'allemand et le portugais, ce qui est le parc réel d'un appareil de salon
+/// européen. Ce qui n'y figure pas passe inchangé.
+fn sans_diacritique(c: char) -> char {
+    match c {
+        'à' | 'â' | 'ä' | 'á' | 'ã' | 'å' => 'a',
+        'é' | 'è' | 'ê' | 'ë' => 'e',
+        'î' | 'ï' | 'í' | 'ì' => 'i',
+        'ô' | 'ö' | 'ó' | 'õ' | 'ò' => 'o',
+        'ù' | 'û' | 'ü' | 'ú' => 'u',
+        'ç' => 'c',
+        'ñ' => 'n',
+        'ÿ' | 'ý' => 'y',
+        'À' | 'Â' | 'Ä' | 'Á' | 'Ã' | 'Å' => 'A',
+        'É' | 'È' | 'Ê' | 'Ë' => 'E',
+        'Î' | 'Ï' | 'Í' | 'Ì' => 'I',
+        'Ô' | 'Ö' | 'Ó' | 'Õ' | 'Ò' => 'O',
+        'Ù' | 'Û' | 'Ü' | 'Ú' => 'U',
+        'Ç' => 'C',
+        'Ñ' => 'N',
+        autre => autre,
+    }
+}
+
+/// Cherche un enregistrement, et rend ce qu'on en sait. `Ok(None)` = rien
+/// trouvé ou hors ligne, comme partout dans ce module.
+pub async fn cherche_enregistrement(artist: &str, title: &str) -> Result<Option<Enregistrement>> {
+    let url = requete_recording(artist, title);
+    let Some(body) = requete_texte(&url).await? else { return Ok(None) };
+    Ok(premier_enregistrement(&body))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,5 +583,80 @@ mod tests {
             "la seconde doit etre espacee de {INTERVALLE_MIN:?}, mesure {:?}",
             depart.elapsed()
         );
+    }
+
+    /// Réponse de recherche d'enregistrement **telle que MusicBrainz l'émet** :
+    /// `score`, `title`, et les releases dont sortira la pochette.
+    fn reponse_recording(score: u64, titre: &str, avec_release: bool) -> String {
+        let releases = if avec_release {
+            r#","releases":[{"id":"11111111-2222-3333-4444-555555555555","title":"Kind of Blue"}]"#
+        } else {
+            ""
+        };
+        format!(
+            r#"{{"created":"2026-08-26T12:00:00.000Z","count":1,"offset":0,
+            "recordings":[{{"id":"99999999-8888-7777-6666-555555555555","score":{score},
+            "title":"{titre}","length":545000{releases}}}]}}"#
+        )
+    }
+
+    #[test]
+    fn la_requete_dun_enregistrement_echappe_les_deux_langages() {
+        // Lucene à l'intérieur des guillemets, puis l'URL par-dessus : la même
+        // exigence que `requete_release`, pour la même raison — ces valeurs
+        // viennent d'une station, donc d'une entrée qu'on ne choisit pas.
+        let url = requete_recording(r#"AC"DC"#, "Back in Black & Co");
+        assert!(url.starts_with("https://musicbrainz.org/ws/2/recording/?query="), "{url}");
+        // Deux esperluettes structurelles seulement (avant fmt, avant limit) :
+        // le brief attendait `== 1`, mais l'URL porte toujours `&fmt=json&limit=1`
+        // en plus de `?query=`, donc deux '&' littéraux au minimum, jamais un
+        // seul — voir le rapport de tâche pour le détail. Celle du titre est
+        // percent-encodée (%26) et ne s'ajoute donc pas au compte.
+        assert_eq!(
+            url.matches('&').count(),
+            2,
+            "seuls fmt et limit doivent introduire un & ; rien depuis le titre : {url}"
+        );
+        assert!(url.contains("%5C%22"), "le guillemet doit etre echappe deux fois : {url}");
+    }
+
+    #[test]
+    fn un_enregistrement_est_lu_avec_son_score_et_sa_release() {
+        let e = premier_enregistrement(&reponse_recording(100, "So What", true)).unwrap();
+        assert_eq!(e.score, 100);
+        assert_eq!(e.titre, "So What");
+        assert_eq!(e.release_id.as_deref(), Some("11111111-2222-3333-4444-555555555555"));
+    }
+
+    #[test]
+    fn un_enregistrement_sans_release_reste_exploitable() {
+        // Le découpage est acquis même sans image : le couple artiste/titre vaut
+        // par lui-même, et le cœur traite déjà une pochette absente en silence.
+        let e = premier_enregistrement(&reponse_recording(100, "So What", false)).unwrap();
+        assert_eq!(e.release_id, None);
+        assert_eq!(e.titre, "So What");
+    }
+
+    #[test]
+    fn une_reponse_illisible_ou_vide_rend_none() {
+        assert!(premier_enregistrement(r#"{"recordings":[]}"#).is_none());
+        assert!(premier_enregistrement("pas du json").is_none());
+        // Score absent : refus, comme pour la release.
+        assert!(premier_enregistrement(r#"{"recordings":[{"id":"x","title":"y"}]}"#).is_none());
+    }
+
+    #[test]
+    fn la_normalisation_rend_comparables_deux_ecritures_du_meme_titre() {
+        assert_eq!(normalise("So What"), normalise("so  what"));
+        assert_eq!(normalise("Où es-tu ?"), normalise("ou es tu"));
+        assert_eq!(normalise("Café/Crème"), normalise("cafe creme"));
+    }
+
+    #[test]
+    fn la_normalisation_ne_confond_pas_deux_titres_differents() {
+        // Le contrôle : une normalisation trop agressive accepterait n'importe
+        // quoi, et la validation ne validerait plus rien.
+        assert_ne!(normalise("So What"), normalise("So What Else"));
+        assert_ne!(normalise("Naima"), normalise("Nauma"));
     }
 }
