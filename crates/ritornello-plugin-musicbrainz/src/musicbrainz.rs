@@ -11,6 +11,17 @@ pub struct DiscInfo {
     /// MBID de la release reconnue. C'est la clé de la pochette (voir
     /// [`url_caa`]) : le lookup par TOC la porte déjà, inutile de la
     /// redemander par une recherche texte.
+    ///
+    /// `None` veut dire **« ne demande pas d'image »**, pas « disque inconnu » :
+    /// la réponse peut affirmer qu'aucune face avant n'existe pour cette
+    /// release, et il ne faut alors pas promettre au cœur une URL qui rendra
+    /// un 404 (voir [`parse_lookup`]).
+    ///
+    /// Reste à faire (mesuré le 2026-08-26, non implémenté) : une release peut
+    /// porter des images sans qu'aucune soit typée « face avant », et l'une
+    /// d'elles est parfois la vraie pochette — `/front` ne la servira jamais.
+    /// La récupérer demande une requête de plus à l'archive et un tri par
+    /// type, donc un état intermédiaire que ce champ ne sait pas dire.
     pub release_id: Option<String>,
 }
 
@@ -43,39 +54,127 @@ pub fn mb_toc_param(raw: &str) -> Result<String> {
     Ok(format!("1+{}+{}+{}", ntracks, leadout, offsets.join("+")))
 }
 
+/// Ce que le bloc `cover-art-archive` d'une release dit de sa face avant.
+///
+/// Trois états et non un booléen : l'absence du bloc (« cette réponse ne dit
+/// rien ») ne doit pas être confondue avec `Absente` (« l'archive affirme
+/// qu'il n'y en a pas »). Confondre les deux ferait taire la pochette sur
+/// toute réponse qui ne porterait pas ce bloc, ce qui serait une régression
+/// silencieuse pour un gain nul.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FaceAvant {
+    /// L'archive annonce une face avant typée : `/front-500` la sert.
+    Presente,
+    /// Aucune face avant typée. `images` dit si la release en porte malgré
+    /// tout d'autres — mesuré le 2026-08-26 sur
+    /// `82ebb36b-0a0f-3608-9c7d-743d9003fbf8` : quatre images (un dos, un
+    /// livret, une rondelle, et **une sans aucun type**) pour un `front:
+    /// false`, et `/front-500` y rend bien 404. L'image sans type est
+    /// vraisemblablement la face avant, mais l'endpoint `/front` ne la
+    /// servira jamais.
+    Absente { images: bool },
+    /// Le bloc n'est pas dans la réponse : on ne sait pas.
+    Inconnue,
+}
+
+/// Lit le bloc `cover-art-archive` d'une release.
+///
+/// `darkened` vaut `Absente` : l'archive masque alors les images pour raison
+/// légale, et les demander ne rend rien.
+fn face_avant(release: &Value) -> FaceAvant {
+    let Some(caa) = release.get("cover-art-archive").and_then(Value::as_object) else {
+        return FaceAvant::Inconnue;
+    };
+    let Some(front) = caa.get("front").and_then(Value::as_bool) else {
+        return FaceAvant::Inconnue;
+    };
+    let assombrie = caa.get("darkened").and_then(Value::as_bool).unwrap_or(false);
+    if front && !assombrie {
+        return FaceAvant::Presente;
+    }
+    let images = !assombrie && caa.get("count").and_then(Value::as_u64).unwrap_or(0) > 0;
+    FaceAvant::Absente { images }
+}
+
+/// Préférence entre deux candidates, du meilleur au pire. Plus petit = mieux.
+fn rang(face: FaceAvant) -> u8 {
+    match face {
+        FaceAvant::Presente => 0,
+        // Avant `Absente` : sans le bloc, on ne sait pas, et l'optimisme est
+        // le comportement historique — au pire un 404 que le cœur avale.
+        FaceAvant::Inconnue => 1,
+        FaceAvant::Absente { images: true } => 2,
+        FaceAvant::Absente { images: false } => 3,
+    }
+}
+
+/// Extrait artiste / album / titres d'une release **dont le nombre de pistes
+/// correspond**. `None` si elle ne correspond pas.
+fn depouille(release: &Value, ntracks: usize) -> Option<DiscInfo> {
+    let media = release.get("media").and_then(Value::as_array)?;
+    for m in media {
+        let Some(tracks) = m.get("tracks").and_then(Value::as_array) else { continue };
+        if tracks.len() != ntracks {
+            continue;
+        }
+        let titles: Vec<String> = tracks
+            .iter()
+            .filter_map(|t| t.get("title").and_then(Value::as_str).map(String::from))
+            .collect();
+        if titles.len() != ntracks {
+            continue;
+        }
+        return Some(DiscInfo {
+            artist: release
+                .pointer("/artist-credit/0/name")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string(),
+            album: release.get("title").and_then(Value::as_str).unwrap_or("?").to_string(),
+            tracks: titles,
+            release_id: release.get("id").and_then(Value::as_str).map(String::from),
+        });
+    }
+    None
+}
+
 /// Cherche dans les releases un media dont le nombre de pistes correspond au
 /// disque inséré, et en extrait artiste / album / titres.
+///
+/// **Le nombre de pistes reste le seul filtre** ; entre les candidates qui le
+/// passent, la présence d'une face avant départage. Mesuré le 2026-08-26 sur
+/// le lookup que ce module construit : 25 releases rendues, 10 avec une face
+/// avant, et la **première** — celle que retenait la version précédente — n'en
+/// avait aucune. Le disque partait donc sans image alors qu'une candidate
+/// recevable en portait une.
+///
+/// Le texte et l'image viennent volontairement de la **même** release : les
+/// prendre sur deux pressages différents afficherait une pochette qui ne
+/// correspond pas aux titres. Le risque assumé de ce choix est de préférer un
+/// pressage un peu moins bien classé par MusicBrainz ; toutes les candidates
+/// ayant déjà passé le filtre du nombre de pistes, il est jugé mineur devant
+/// une absence d'image.
 pub fn parse_lookup(json: &str, ntracks: usize) -> Option<DiscInfo> {
     let v: Value = serde_json::from_str(json).ok()?;
     let releases = v.get("releases")?.as_array()?;
+    let mut meilleure: Option<(u8, DiscInfo)> = None;
     for release in releases {
-        let Some(media) = release.get("media").and_then(Value::as_array) else { continue };
-        for m in media {
-            let tracks = m.get("tracks").and_then(Value::as_array);
-            let Some(tracks) = tracks else { continue };
-            if tracks.len() != ntracks {
-                continue;
-            }
-            let titles: Vec<String> = tracks
-                .iter()
-                .filter_map(|t| t.get("title").and_then(Value::as_str).map(String::from))
-                .collect();
-            if titles.len() != ntracks {
-                continue;
-            }
-            return Some(DiscInfo {
-                artist: release
-                    .pointer("/artist-credit/0/name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("?")
-                    .to_string(),
-                album: release.get("title").and_then(Value::as_str).unwrap_or("?").to_string(),
-                tracks: titles,
-                release_id: release.get("id").and_then(Value::as_str).map(String::from),
-            });
+        let Some(mut info) = depouille(release, ntracks) else { continue };
+        let face = face_avant(release);
+        if matches!(face, FaceAvant::Absente { .. }) {
+            // Ne pas promettre au cœur une URL dont la réponse dit déjà
+            // qu'elle rendra 404.
+            info.release_id = None;
+        }
+        let r = rang(face);
+        if r == 0 {
+            return Some(info);
+        }
+        if meilleure.as_ref().is_none_or(|(vu, _)| r < *vu) {
+            meilleure = Some((r, info));
         }
     }
-    None
+    meilleure.map(|(_, info)| info)
 }
 
 /// Requête GET commune aux deux endpoints MusicBrainz utilisés ici (lookup par
@@ -272,6 +371,76 @@ mod tests {
             url_caa("e32a3f0b-1c19-3170-bb1c-650893774744"),
             "https://coverartarchive.org/release/e32a3f0b-1c19-3170-bb1c-650893774744/front-500"
         );
+    }
+
+    /// Reduction d'une capture reelle du lookup que ce module construit
+    /// (2026-08-26, 25 releases rendues). Trois candidates conservees, dans un
+    /// ordre qui reproduit exactement le piege : d'abord une a 3 pistes **sans**
+    /// face avant — celle que retenait la version precedente — puis un leurre
+    /// qui a une face avant mais 11 pistes, puis la bonne. Chaque release est
+    /// reduite aux champs que l'analyse lit, plus son bloc `cover-art-archive`
+    /// recopie tel quel.
+    const FIXTURE_POCHETTES: &str = include_str!("../tests/fixtures/mb_discid_pochettes.json");
+
+    #[test]
+    fn la_face_avant_departage_les_candidates_recevables() {
+        let info = parse_lookup(FIXTURE_POCHETTES, 3).unwrap();
+        // Pas la premiere qui colle (Hellfire, `front: false`) : celle qui a
+        // une image. Sans ce tri, le disque partait sans pochette alors qu'une
+        // candidate recevable en portait une.
+        assert_eq!(info.album, "Kiss You Off");
+        assert_eq!(info.artist, "Scissor Sisters");
+        assert_eq!(info.release_id.as_deref(), Some("2de62a1b-0401-4569-bfe4-7bac2a61dea2"));
+        // Le texte suit l'image : les deux viennent de la meme release, sans
+        // quoi la pochette affichee ne correspondrait pas aux titres.
+        assert_eq!(info.tracks[0], "Kiss You Off");
+    }
+
+    #[test]
+    fn le_nombre_de_pistes_reste_le_filtre_et_une_image_ne_le_contourne_pas() {
+        // Le leurre de la fixture (« Connectivity! ») a bien une face avant,
+        // mais 11 pistes. La preferer serait annoncer un autre disque.
+        let info = parse_lookup(FIXTURE_POCHETTES, 11).unwrap();
+        assert_eq!(info.album, "Connectivity!");
+        // Et pour 3 pistes, il ne doit jamais sortir.
+        assert_eq!(parse_lookup(FIXTURE_POCHETTES, 3).unwrap().album, "Kiss You Off");
+        // Un nombre de pistes qu'aucune candidate ne porte : rien.
+        assert!(parse_lookup(FIXTURE_POCHETTES, 7).is_none());
+    }
+
+    #[test]
+    fn sans_aucune_face_avant_le_texte_sort_mais_aucune_image_nest_promise() {
+        // Mesure du 2026-08-26 : `/front-500` sur une release dont la reponse
+        // dit `front: false` rend 404. Annoncer l'URL quand meme fait faire au
+        // coeur une requete dont on sait deja qu'elle ne rendra rien.
+        let sans = r#"{"releases":[
+            {"id":"11111111-1111-1111-1111-111111111111","title":"Sans image","artist-credit":[{"name":"A"}],
+             "cover-art-archive":{"front":false,"count":0,"darkened":false},
+             "media":[{"tracks":[{"title":"un"}]}]}]}"#;
+        let info = parse_lookup(sans, 1).unwrap();
+        assert_eq!(info.album, "Sans image", "le texte reste utile");
+        assert_eq!(info.release_id, None, "rien a demander a l'archive");
+    }
+
+    #[test]
+    fn une_release_assombrie_ne_promet_rien_malgre_son_drapeau() {
+        // `darkened` : l'archive masque les images pour raison legale. Le
+        // `front: true` qui l'accompagne ne veut alors plus rien dire.
+        let sombre = r#"{"releases":[
+            {"id":"22222222-2222-2222-2222-222222222222","title":"Masquee","artist-credit":[{"name":"A"}],
+             "cover-art-archive":{"front":true,"count":4,"darkened":true},
+             "media":[{"tracks":[{"title":"un"}]}]}]}"#;
+        assert_eq!(parse_lookup(sombre, 1).unwrap().release_id, None);
+    }
+
+    #[test]
+    fn un_bloc_absent_ne_vaut_pas_absence_de_pochette() {
+        // Garde-fou contre une regression silencieuse : traiter « la reponse
+        // ne dit rien » comme « pas d'image » ferait taire la pochette sur
+        // toute reponse ne portant pas ce bloc, pour un gain nul. La fixture
+        // historique n'en a pas, et son MBID doit continuer de sortir.
+        assert!(!FIXTURE.contains("cover-art-archive"), "prealable du test");
+        assert!(parse_lookup(FIXTURE, 3).unwrap().release_id.is_some());
     }
 
     #[test]
