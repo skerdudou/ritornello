@@ -35,6 +35,22 @@ pub struct PluginStatus {
     pub admin: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stalled: bool,
+    /// Lancé à l'instant, pas encore annoncé, et **dans le délai normal**.
+    ///
+    /// Exclusif avec `stalled`, et les deux disent la même chose du greffon —
+    /// il n'a pas parlé. Ils ne diffèrent que par le temps écoulé, et cette
+    /// différence est tout : « figé » accuse un greffon fautif, alors qu'un
+    /// binaire qui met deux secondes à lier ses sockets sur une carte SD est
+    /// parfaitement sain. Afficher « figé » pendant un démarrage normal était
+    /// donc une accusation à tort, signalée à l'usage.
+    ///
+    /// La bascule vers `stalled` est faite par la boucle du cœur au bout de
+    /// `DELAI_DEMARRAGE` (voir `main.rs`), et seulement si la ligne dit encore
+    /// « démarrage » à cet instant.
+    ///
+    /// Additif comme les deux autres : absent du JSON quand il est faux.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub starting: bool,
     /// Greffon éteint depuis l'IHM : aucun processus, aucun câblage, et le
     /// manifeste porte `enabled = false`. La ligne reste affichée — sans elle,
     /// on ne pourrait plus le rallumer.
@@ -58,6 +74,7 @@ impl PluginStatus {
             connected,
             admin,
             stalled: false,
+            starting: false,
             disabled: false,
         }
     }
@@ -74,6 +91,24 @@ impl PluginStatus {
             connected: false,
             admin: false,
             stalled,
+            starting: false,
+            disabled: false,
+        }
+    }
+
+    /// Ligne d'un greffon qu'on vient de lancer : il n'a pas parlé, et c'est
+    /// normal.
+    ///
+    /// Distincte de `genre_inconnu(name, true)`, qui accuse. Voir la doc du
+    /// champ `starting`.
+    pub fn demarrage(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            kind: "unknown".into(),
+            connected: false,
+            admin: false,
+            stalled: false,
+            starting: true,
             disabled: false,
         }
     }
@@ -87,6 +122,7 @@ impl PluginStatus {
             connected: false,
             admin: false,
             stalled: false,
+            starting: false,
             disabled: true,
         }
     }

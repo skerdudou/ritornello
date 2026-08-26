@@ -332,6 +332,37 @@ fn supervise(
 /// Les fils que le câblage à chaud doit tenir pour rejouer, après le
 /// démarrage, ce que la boucle de câblage initiale fait avec ses variables
 /// locales.
+/// Combien de temps un greffon qu'on vient de lancer garde le bénéfice du
+/// doute avant d'être rapporté « figé ».
+///
+/// Strictement plus long que `register::DELAI_LECTURE` (5 s), et ce n'est pas
+/// une marge de confort : une connexion déjà acceptée qui est **en train**
+/// d'écrire sa ligne d'annonce dispose de ces cinq secondes, et la rapporter
+/// figée pendant ce temps serait se contredire soi-même. Dix secondes couvrent
+/// donc le chargement du binaire depuis une carte SD, la liaison de ses sockets
+/// et l'écriture de son annonce, avec de la marge.
+///
+/// Au-delà, « figé » redevient le mot juste : le greffon est lancé, vivant, et
+/// muet — un diagnostic, pas une attente.
+const DELAI_DEMARRAGE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// L'échéance de démarrage est passée : faut-il rétrograder ce greffon en
+/// « figé » ?
+///
+/// **Seulement si sa ligne dit encore « démarrage ».** Entre le lancement et
+/// l'échéance, le greffon a pu s'annoncer (sa ligne décrit alors ses genres),
+/// mourir (elle dit « déconnecté »), ou être éteint depuis l'IHM (elle dit
+/// « désactivé »). Dans les trois cas, écraser remplacerait une information
+/// vraie par une fausse — et la fausse serait la plus trompeuse des quatre,
+/// puisqu'elle accuse un greffon qui va bien.
+///
+/// Relire l'état plutôt que tenir un registre à purger à chaque transition :
+/// c'est la leçon de `kill_triggers`, dont trois sites de purge étaient déjà un
+/// de trop.
+fn a_retrograder(statuts: &StatusState, nom: &str) -> bool {
+    statuts.plugins.iter().any(|l| l.name == nom && l.starting)
+}
+
 struct FilsChaud {
     sockets_dir: PathBuf,
     /// Noms du manifeste dans l'ordre du fichier : autorité sur les noms
@@ -775,12 +806,11 @@ async fn rallume(
             let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
             kill_triggers.insert(nom.to_string(), kill_tx);
             let mut statuts = fils.status_state.write().await;
-            status::replace_plugin_lines(
-                &mut statuts,
-                nom,
-                vec![PluginStatus::genre_inconnu(nom, true)],
-                false,
-            );
+            // « Démarrage » et non « figé » : le binaire vient d'être lancé,
+            // il n'a pas encore eu le temps de lier ses sockets. C'est la
+            // boucle du cœur qui rétrograde en « figé » au bout de
+            // `DELAI_DEMARRAGE`, si rien n'est venu.
+            status::replace_plugin_lines(&mut statuts, nom, vec![PluginStatus::demarrage(nom)], false);
             Some(supervise(nom.to_string(), generation, child, kill_rx))
         }
         Err(e) => {
@@ -923,6 +953,16 @@ async fn main() -> Result<()> {
     // (« suite documentée » du chantier greffons actifs/inactifs), ce qui
     // redessine leur table et appartient à la session qui possède ce code.
     let mut non_supervises: HashSet<String> = HashSet::new();
+    // Quand chaque greffon lancé cesse d'avoir le bénéfice du doute.
+    //
+    // Une entrée y est posée au lancement et retirée **uniquement** par le
+    // balayage d'échéance, qui décide alors en relisant la ligne de statut
+    // plutôt qu'en se fiant à la table. C'est délibéré, et c'est la leçon de
+    // `kill_triggers` : un registre dont la justesse dépend de trois sites de
+    // purge finit par mentir sur l'un d'eux. Ici, qu'un greffon se soit
+    // annoncé, soit mort ou ait été éteint entre-temps n'a pas besoin d'être
+    // signalé à la table — sa ligne le dit déjà.
+    let mut demarrages: HashMap<String, tokio::time::Instant> = HashMap::new();
     // Génération de lancement, par nom. Éteindre puis rallumer aussitôt fait
     // arriver la mort de l'**ancien** processus après le câblage du nouveau :
     // sans ce compteur, cette mort effacerait des lignes de statut qui
@@ -1394,6 +1434,17 @@ async fn main() -> Result<()> {
                 None => std::future::pending().await,
             }
         };
+        // Échéance du plus proche « fin de bénéfice du doute ». Le minimum, et
+        // recalculé à chaque tour comme les trois autres : plusieurs greffons
+        // démarrent ensemble au lancement du service, et c'est le premier
+        // arrivé à échéance qui doit réveiller la boucle.
+        let demarrage_at = demarrages.values().copied().min();
+        let demarrage_sleep = async {
+            match demarrage_at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
         // Echeance de l'overlay volume/muet, lue dans une variable locale
         // avant le `select!` (comme `retry_at`) pour ne pas garder d'emprunt
         // sur `core` pendant l'attente.
@@ -1558,6 +1609,17 @@ async fn main() -> Result<()> {
                                     {
                                         Some(fut) => {
                                             plugin_waits.push(fut);
+                                            // Le bénéfice du doute part d'ici,
+                                            // et non du lancement du service :
+                                            // c'est le rallumage depuis l'IHM
+                                            // que ce délai couvre. Le
+                                            // rendez-vous de démarrage a sa
+                                            // propre échéance et son propre
+                                            // rapport (`figes`).
+                                            demarrages.insert(
+                                                ordre.nom.clone(),
+                                                tokio::time::Instant::now() + DELAI_DEMARRAGE,
+                                            );
                                             true
                                         }
                                         None => false,
@@ -1583,6 +1645,41 @@ async fn main() -> Result<()> {
                 // Le demandeur attend : un accusé perdu laisserait sa requête
                 // HTTP pendre jusqu'au bout de son propre délai.
                 let _ = ordre.ack.send(ok);
+            }
+            _ = demarrage_sleep => {
+                let maintenant = tokio::time::Instant::now();
+                let echus: Vec<String> = demarrages
+                    .iter()
+                    .filter(|(_, at)| **at <= maintenant)
+                    .map(|(nom, _)| nom.clone())
+                    .collect();
+                let mut statuts = fils_chaud.status_state.write().await;
+                for nom in echus {
+                    // Retirée dans tous les cas : l'entrée a fait son office,
+                    // et la laisser ferait croître la table pour la vie du
+                    // processus.
+                    demarrages.remove(&nom);
+                    // Mais la rétrogradation n'a lieu que si la ligne dit
+                    // **encore** « démarrage ». Le greffon a pu s'annoncer
+                    // entre-temps (sa ligne décrit alors ses genres), mourir
+                    // (elle dit « déconnecté »), ou être éteint depuis l'IHM
+                    // (elle dit « désactivé ») : dans les trois cas, écraser
+                    // serait remplacer une information vraie par une fausse.
+                    // Relire l'état plutôt que tenir un registre à purger en
+                    // trois endroits — voir le commentaire de `demarrages`.
+                    if a_retrograder(&statuts, &nom) {
+                        tracing::warn!(
+                            "plugin {nom} still silent {}s after launch, reporting it as stalled",
+                            DELAI_DEMARRAGE.as_secs()
+                        );
+                        status::replace_plugin_lines(
+                            &mut statuts,
+                            &nom,
+                            vec![PluginStatus::genre_inconnu(&nom, true)],
+                            false,
+                        );
+                    }
+                }
             }
             _ = retry_sleep => {
                 retry_at = None;
@@ -1824,14 +1921,10 @@ mod bascule_tests {
             catalogue_rx,
             covers,
             status_state: Arc::new(RwLock::new(StatusState {
-                plugins: vec![PluginStatus {
-                    name: "mpd".into(),
-                    kind: "display".into(),
-                    connected: true,
-                    admin: true,
-                    stalled: false,
-                    disabled: false,
-                }],
+                // Le constructeur et non un littéral : un champ ajouté à
+                // `PluginStatus` ne doit pas casser ce banc, dont le sujet
+                // n'est pas la forme de la ligne de statut.
+                plugins: vec![PluginStatus::genre("mpd", "display", true, true)],
                 active_source: String::new(),
             })),
             admin_backends: Arc::new(RwLock::new(HashMap::new())),
@@ -1873,6 +1966,56 @@ mod bascule_tests {
             &b.non_supervises,
         )
         .await
+    }
+
+    fn statuts_de(lignes: Vec<PluginStatus>) -> StatusState {
+        StatusState { plugins: lignes, active_source: String::new() }
+    }
+
+    /// Le mot juste au bon moment : « démarrage » constate, « figé » accuse.
+    /// Les deux disent que le greffon n'a pas parlé, et les échanger ferait
+    /// accuser un binaire parfaitement sain — le défaut signalé à l'usage.
+    #[test]
+    fn la_ligne_de_demarrage_nest_pas_la_ligne_de_fige() {
+        let d = PluginStatus::demarrage("mpd");
+        assert!(d.starting, "elle doit dire « démarrage »");
+        assert!(!d.stalled, "et surtout pas « figé » en même temps");
+        assert!(!d.connected);
+        assert!(!d.disabled);
+
+        let f = PluginStatus::genre_inconnu("mpd", true);
+        assert!(f.stalled);
+        assert!(!f.starting, "les deux etats sont exclusifs");
+    }
+
+    /// La propriété qui compte de l'échéance de démarrage : elle ne remplace
+    /// **jamais** une information vraie par une accusation.
+    #[test]
+    fn lecheance_ne_retrograde_que_ce_qui_demarre_encore() {
+        assert!(
+            a_retrograder(&statuts_de(vec![PluginStatus::demarrage("mpd")]), "mpd"),
+            "un greffon toujours muet a l'echeance doit passer en « fige »"
+        );
+        assert!(
+            !a_retrograder(&statuts_de(vec![PluginStatus::genre("mpd", "display", true, true)]), "mpd"),
+            "il s'est annonce entre-temps : sa ligne decrit ses genres, ne pas l'ecraser"
+        );
+        assert!(
+            !a_retrograder(&statuts_de(vec![PluginStatus::genre("mpd", "display", false, true)]), "mpd"),
+            "annonce puis mort : la ligne dit « deconnecte », plus vrai que « fige »"
+        );
+        assert!(
+            !a_retrograder(&statuts_de(vec![PluginStatus::desactive("mpd")]), "mpd"),
+            "eteint depuis l'IHM pendant son demarrage : « desactive » doit tenir"
+        );
+        assert!(
+            !a_retrograder(&statuts_de(vec![PluginStatus::genre_inconnu("mpd", true)]), "mpd"),
+            "deja fige : rien a faire, et surtout pas une seconde ligne de journal"
+        );
+        assert!(
+            !a_retrograder(&statuts_de(vec![]), "mpd"),
+            "plus aucune ligne pour ce nom : rien a retrograder"
+        );
     }
 
     #[test]

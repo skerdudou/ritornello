@@ -22,6 +22,7 @@ const CATALOGUE = {
   plugins_title: 'Plugins',
   col_plugin: 'Plugin', col_kind: 'Genre', col_state: 'État', col_admin: 'Admin', col_enabled: 'Actif',
   connected: 'connecté', unavailable: 'indisponible', stalled: 'figé', disabled: 'désactivé',
+  starting: 'démarrage',
   admin_link: 'admin', toggle_plugin: 'Activer ou désactiver {name}',
   plugin_enabled: '{name} activé.', plugin_disabled: '{name} désactivé.',
   audio_output: 'Sortie audio', audio_default_device: 'Par défaut (système)',
@@ -641,6 +642,33 @@ describe('ConfigView — deplacement', () => {
     await flushPromises()
     const corpsEnvoye = puts[0]!.corps as { seek_step_s: number }
     expect(corpsEnvoye.seek_step_s).toBe(30)
+  })
+})
+
+describe('ConfigView — etat d un greffon qui demarre', () => {
+  beforeEach(reinitialiser)
+
+  it('dit « demarrage » et non « fige » pour un greffon qu on vient de rallumer', async () => {
+    // Le defaut signale a l usage : « fige » veut dire fautif, et l afficher
+    // pendant un demarrage normal accuse un binaire parfaitement sain.
+    const { w } = await monter({
+      '/api/status': {
+        plugins: [{ name: 'mpd', kind: 'unknown', connected: false, admin: false, starting: true }],
+        active_source: 'radio',
+      } as unknown,
+    })
+    expect(w.find('[data-plugin-state]').text()).toBe('démarrage')
+  })
+
+  it('dit « fige » quand le delai est passe', async () => {
+    // Le controle : sans lui, « toujours demarrage » passerait aussi.
+    const { w } = await monter({
+      '/api/status': {
+        plugins: [{ name: 'mpd', kind: 'unknown', connected: false, admin: false, stalled: true }],
+        active_source: 'radio',
+      } as unknown,
+    })
+    expect(w.find('[data-plugin-state]').text()).toBe('figé')
   })
 })
 

@@ -78,8 +78,15 @@ const admins = computed(() => [
   ...new Set(etat.value.plugins.filter((p) => p.admin).map((p) => p.name)),
 ])
 
-/** Y a-t-il un greffon lancé qui n'a pas encore parlé ? */
-const enAttente = () => etat.value.plugins.some((p) => p.stalled)
+/** Y a-t-il un greffon lancé qui n'a pas encore parlé ?
+ *
+ * **Les deux états**, et c'est le piège de cette relecture : depuis qu'un
+ * greffon fraîchement rallumé est rapporté « démarrage » et non plus « figé »,
+ * ne surveiller que `stalled` aurait désarmé le sondage pendant exactement la
+ * fenêtre pour laquelle il existe — celle où la ligne va être remplacée par
+ * l'annonce. Le rallumage serait redevenu invisible sans F5, le défaut d'avant.
+ */
+const enAttente = () => etat.value.plugins.some((p) => p.stalled || p.starting)
 
 /**
  * Relit `/api/status`. Sur échec, l'état précédent est **conservé** : une
