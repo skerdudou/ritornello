@@ -105,9 +105,9 @@ all, and the two `*_METAS` lines are optional: those tables are embedded in
 their binaries, the file only ever overrides an entry gone stale. Every
 other line has the same job — pointing a default that lives under `/etc` or
 `/var/lib` at `/tmp/rp`, so that a checkout writes nowhere it has no right
-to write. `RITORNELLO_INPUT_PRESETS` is the exception that is not a path
-override but a real one: the shipped presets are in the repository, not in
-`/tmp`.
+to write. Two of them are the exception, pointing into the checkout rather
+than at `/tmp`: `RITORNELLO_INPUT_PRESETS` and `RITORNELLO_LOCALES` name
+data the repository ships and `deploy.sh` installs.
 
 Every variable, and who reads it — each default is a production path, which
 is exactly why they have to be overridden in a checkout:
