@@ -17,11 +17,14 @@ pub enum Ack {
     /// Commande inconnue **ou** volontairement non gérée. MPD ne distingue pas
     /// les deux, et c'est tant mieux : `commands` dit déjà ce qui existe.
     Unknown = 5,
-    /// Liste enregistrée nommée qui n'existe pas.
+    /// Ce qui est nommé n'existe pas : une liste enregistrée, ou l'image d'une
+    /// URI.
     ///
-    /// Construite par le bras `load` de `commandes.rs` (Task 7) : faute de
-    /// catalogue de sources, tout nom y est provisoirement « inexistant »
-    /// (voir Ruling 3 de la spec, et le commentaire sur place).
+    /// Quatre producteurs dans `commandes.rs`, et le nom qu'ils refusent est
+    /// toujours bien formé — c'est ce qui distingue ce code d'un `Arg` : `load`
+    /// et `listplaylistinfo` pour un nom de source absent du catalogue,
+    /// `albumart` et `readpicture` pour une URI dont ce qui joue n'a pas
+    /// d'image à cet instant.
     NoExist = 50,
 }
 

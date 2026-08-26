@@ -8,9 +8,16 @@
 //! pendant que la session lit encore ses versions et compose sa requête, donc
 //! avant qu'elle ne s'inscrive, et elle resterait muette jusqu'au changement
 //! d'après. D'où la conception retenue : un compteur monotone par
-//! sous-système, que la session mémorise avant de s'endormir, et une
-//! comparaison **préalable** dans `attendre`. C'est cette comparaison qui
-//! interdit le réveil manqué ; le `Notify` ne sert qu'à ne pas sonder.
+//! sous-système, que la session mémorise **à la connexion** et fait vivre de
+//! commande en commande, et une comparaison **préalable** dans `attendre`.
+//! C'est cette comparaison qui interdit le réveil manqué ; le `Notify` ne sert
+//! qu'à ne pas sonder.
+//!
+//! La référence est portée par la connexion et non relue à chaque `idle`, et
+//! c'est la moitié du dispositif qui manquait : la relire ferait avaler tout ce
+//! qui a bougé entre la réponse précédente d'un client et sa ligne `idle` —
+//! c'est-à-dire pendant la seule fenêtre où il n'écoute pas. Voir `versions` et
+//! `attendre`.
 
 use ritornello_proto::{Catalogue, Command, Cover, Playback, PlayerState, Preset, SourceCatalogue};
 use std::sync::Arc;
@@ -55,14 +62,26 @@ pub enum Sujet {
 ///
 /// **Les octets sont derrière un `Arc`, et c'est structurel** : `Instantane`
 /// est cloné à *chaque* commande de *chaque* session (voir `lire`), et une
-/// pochette pèse jusqu'à `ritornello_proto::COVER_MAX_BYTES` — 2 Mio. Un
-/// `Vec<u8>` nu ferait donc recopier deux mébioctets pour répondre `ping`.
-/// L'`Arc` rend le clone à un incrément de compteur, et l'image n'existe
-/// **qu'une fois** dans le processus quel que soit le nombre de sessions.
+/// pochette pèse jusqu'à `ritornello_proto::COVER_MAX_BYTES` — **20 Mio**. Un
+/// `Vec<u8>` nu ferait donc recopier vingt mébioctets pour répondre `ping`.
+/// L'`Arc` rend le clone à un incrément de compteur.
+///
+/// **Ce que l'`Arc` ne garantit pas**, et il faut l'écrire ici parce que ce
+/// paragraphe l'a promis à tort : l'image n'existe une seule fois dans le
+/// processus que **par génération**. Une session qui répond `albumart` tient
+/// son propre clone de l'`Arc` — dans son `Instantane` *et* dans la réponse
+/// binaire — pendant tout son `write_all`, donc un client qui demande une
+/// tranche puis cesse de lire **épingle cette génération**. Une pochette
+/// poussée pendant ce temps est une génération de plus, qu'une autre session
+/// peut épingler à son tour. Le produit s'écrit donc en clair :
+/// `MAX_SESSIONS × COVER_MAX_BYTES` = 16 × 20 Mio = **320 Mio**, auxquels
+/// s'ajoute la génération que l'état tient lui-même, soit **340 Mio** sur un
+/// appareil d'un gibioctet partagé. Voir `commandes::MAX_TRANCHE` pour ce qui
+/// borne le reste, et pour ce qui n'est délibérément **pas** mitigé.
 ///
 /// `Arc<Vec<u8>>` et non `Arc<[u8]>` : la conversion depuis le `Vec<u8>` de la
 /// trame est alors un déplacement, là où `Arc<[u8]>::from` réallouerait et
-/// recopierait les 2 Mio une fois de plus par piste.
+/// recopierait les 20 Mio une fois de plus par piste.
 #[derive(Clone, PartialEq)]
 pub struct Pochette {
     /// Exactement le `cover_href` que la trame d'état publie pour la même
@@ -79,7 +98,7 @@ pub struct Pochette {
     pub octets: Arc<Vec<u8>>,
 }
 
-/// `Debug` écrit à la main : le dérivé imprimerait les deux mébioctets de
+/// `Debug` écrit à la main : le dérivé imprimerait les vingt mébioctets de
 /// l'image, et `Instantane` est `Debug` — donc le moindre `assert_eq!` d'un
 /// test raté vomirait l'image entière dans la sortie.
 impl std::fmt::Debug for Pochette {
@@ -186,6 +205,12 @@ pub struct Instantane {
     /// mémoriser les précédentes ferait tenir plusieurs mébioctets pour servir
     /// des URI que plus rien ne joue — exactement ce que le bras `albumart`
     /// refuse de faire.
+    ///
+    /// **Et elle est relâchée, pas seulement remplacée** : `appliquer_etat`
+    /// la remet à `None` dès qu'une trame d'état annonce `cover_href: None`.
+    /// Sans cela le greffon retenait jusqu'à `COVER_MAX_BYTES` **pour la vie
+    /// du processus**, longtemps après l'arrêt de la lecture, pour des octets
+    /// que plus aucune commande ne pouvait servir. Voir la garde sur place.
     pub pochette: Option<Pochette>,
 }
 
@@ -247,6 +272,24 @@ fn marquer(bouges: &mut Vec<Sujet>, sujet: Sujet) {
     }
 }
 
+/// Ce qu'un `idle` a appris : les sujets à annoncer, et les compteurs de
+/// l'instant où ils ont été constatés.
+///
+/// Une structure et non un `(Vec, [u64; 4])` nu : les deux champs se
+/// confondraient à l'usage, et c'est le second qui porte la subtilité — il
+/// n'est pas « les compteurs courants » mais « ceux qui ont décidé ce réveil ».
+#[derive(Debug, PartialEq)]
+pub struct Reveil {
+    /// Les sujets qui ont bougé, dans l'ordre où le client les a demandés.
+    pub bouges: Vec<Sujet>,
+    /// Tous les compteurs, lus dans la même prise de verrou que `bouges`.
+    ///
+    /// L'appelant n'en retient que les entrées des sujets qu'il **annonce** :
+    /// c'est l'équivalent exact du « n'effacer que les drapeaux rapportés » de
+    /// MPD.
+    pub versions: [u64; NB_SUJETS],
+}
+
 impl EtatPartage {
     /// Copie de l'instantané courant. Une copie et non une garde : aucune
     /// session ne doit retenir le verrou au-delà de l'instant de la lecture,
@@ -260,29 +303,31 @@ impl EtatPartage {
         self.inner.read().await.clone()
     }
 
-    /// Copie du tableau de compteurs, à mémoriser **avant** de traiter un
-    /// `idle` et à repasser à `attendre`.
+    /// Copie du tableau de compteurs, à mémoriser **une fois par connexion** et
+    /// à faire vivre de commande en commande jusqu'à `attendre`.
     ///
-    /// C'est la moitié utile du dispositif anti-réveil-manqué : la session lit
-    /// ces valeurs au même moment qu'elle lit l'état qu'elle publie, si bien
-    /// que tout ce qui bouge après cette lecture est nécessairement un
-    /// changement qu'elle n'a pas encore vu.
+    /// C'est la moitié utile du dispositif anti-réveil-manqué, et son appelant
+    /// de production est `session::servir`, **au moment de la bannière** : les
+    /// compteurs qu'un `idle` compare sont ceux de la dernière fois que ce
+    /// client a été *informé* d'un changement, jamais ceux de l'instant où il
+    /// a écrit sa ligne `idle`.
     ///
-    /// **Sans appelant en production, et la session ne doit pas en devenir
-    /// un.** C'est le point à retenir de ce commentaire, parce qu'une méthode
-    /// publique inutilisée donne envie de la câbler : la session lit
-    /// `Instantane::versions` de la copie que `lire` lui rend déjà, dans la
-    /// **même** prise de verrou que l'état qu'elle va publier. Appeler
-    /// `versions` à côté prendrait le verrou une seconde fois et pourrait lire
-    /// les compteurs d'un autre instant que l'état — c'est-à-dire rouvrir
-    /// exactement la course que ce module a été bâti pour fermer, et de la
-    /// façon la plus sournoise : un `idle` mémoriserait des compteurs plus
-    /// récents que le `status` qu'il vient de rendre, et dormirait sur un
-    /// changement que son client n'a jamais vu.
+    /// **Ce qu'il ne faut surtout pas refaire** — c'était l'état de ce code, et
+    /// c'était un défaut : lire les compteurs dans l'`Instantane` de la
+    /// commande `idle` elle-même. Cette lecture-là est bien cohérente avec
+    /// l'état publié dans la même réponse, mais elle **avale** tout ce qui a
+    /// bougé entre la réponse précédente et la ligne `idle`, c'est-à-dire
+    /// exactement la fenêtre pendant laquelle un client MPD n'écoute pas. Le
+    /// vrai MPD accumule ses drapeaux **par connexion** depuis la connexion, et
+    /// un événement survenu entre deux commandes y est rapporté à l'`idle`
+    /// suivant. Pour `stored_playlist`, l'avaler n'est pas transitoire : rien
+    /// ne le rejouera avant le prochain changement de catalogue, donc
+    /// `listplaylists` reste périmé, potentiellement pour toujours.
     ///
-    /// Gardée malgré tout : ses propres tests l'emploient, et un appelant qui
-    /// n'aurait besoin que des compteurs (sans rien publier) serait légitime.
-    #[allow(dead_code)]
+    /// Le sens de l'erreur acceptable est l'autre : un réveil superflu coûte au
+    /// client une interrogation redondante, un réveil manquant lui coûte la
+    /// justesse de son écran (le même arbitrage que `acter_optimiste` et
+    /// `appliquer_pochette` énoncent chacun de leur côté).
     pub async fn versions(&self) -> [u64; NB_SUJETS] {
         self.inner.read().await.versions
     }
@@ -343,6 +388,38 @@ impl EtatPartage {
             // `status` indéfiniment si le cœur avait refusé la bascule.
             inst.playback_optimiste = etat.playback;
             inst.etat = etat;
+
+            // **La pochette est relâchée ici, et c'est le seul endroit qui
+            // puisse le faire.** `cover_href: None` est le signal du cœur que
+            // plus rien de ce qui joue n'a d'illustration ; or `pochette`
+            // n'était jamais remis à `None`, donc le greffon gardait jusqu'à
+            // `COVER_MAX_BYTES` — 20 Mio — pour la vie du processus, y compris
+            // longtemps après l'arrêt de la lecture, sur un appareil d'un
+            // gibioctet partagé avec mpv.
+            //
+            // Ces octets-là n'étaient d'ailleurs plus servables : le bras
+            // `albumart` exige que le `href` tenu soit celui que la trame
+            // annonce (voir `commandes::pochette`), donc `cover_href: None`
+            // les avait déjà rendus inatteignables. Les libérer ne retire
+            // aucune réponse à personne.
+            //
+            // **Pourquoi ce critère et pas « le `href` tenu diffère de celui
+            // qu'annonce la trame »**, qui libérerait un peu plus tôt : le cœur
+            // envoie l'état *avant* les octets, donc il existe une fenêtre
+            // normale où la trame annonce déjà la clé suivante alors que la
+            // pochette tenue est encore la précédente. Le critère strict y
+            // détruirait une image que la trame d'après aurait légitimée, si
+            // l'ordre des deux canaux s'inversait un jour. `None` est le seul
+            // signal qui ne dépende pas de cet ordre.
+            if inst.etat.morceau.cover_href.is_none() {
+                // Sans réveil propre : la trame qui fait passer `cover_href` à
+                // `None` change `morceau`, donc elle a déjà marqué `Player`
+                // ci-dessus. Et dans le cas dégénéré où `morceau` serait
+                // identique (une trame répétée après que la pochette a cessé
+                // d'être servable), il n'y a rien à annoncer — `albumart`
+                // refusait déjà.
+                inst.pochette = None;
+            }
 
             for sujet in &bouges {
                 inst.versions[*sujet as usize] += 1;
@@ -471,12 +548,22 @@ impl EtatPartage {
     /// Acte ce que le greffon vient d'émettre, avant que le cœur ne le
     /// confirme.
     ///
-    /// **Deux commandes seulement**, et c'est délibéré : `PlayPause` (bascule
-    /// `Playing`↔`Paused`) et `SetVolume` (pose le volume). Tout le reste est
-    /// ignoré, parce que deviner l'effet d'un `Select` sur la position, le
-    /// morceau ou la présélection serait faux plus souvent que juste — c'est
-    /// la source active qui décide, et elle seule. Un `status` légèrement en
-    /// retard est bénin ; un `status` qui invente un morceau ne l'est pas.
+    /// **Trois commandes seulement**, et c'est délibéré : `PlayPause` (bascule
+    /// `Playing`↔`Paused`), `SetVolume` (pose le volume) et `Mute` (bascule la
+    /// sourdine). Tout le reste est ignoré, parce que deviner l'effet d'un
+    /// `Select` sur la position, le morceau ou la présélection serait faux plus
+    /// souvent que juste — c'est la source active qui décide, et elle seule. Un
+    /// `status` légèrement en retard est bénin ; un `status` qui invente un
+    /// morceau ne l'est pas.
+    ///
+    /// **`Mute` a rejoint la liste avec le `setvol` qui démute** (voir
+    /// `commandes::setvol`), et sans elle ce démutage aurait été invisible :
+    /// `status` publie `volume: 0` dès que `etat.muted` est vrai, donc acter le
+    /// seul `SetVolume(40)` aurait laissé un client lire `volume: 0` juste
+    /// après avoir remonté son curseur — son curseur retombant à zéro,
+    /// c'est-à-dire le défaut exact que le calque optimiste existe pour
+    /// éviter. Le cœur, lui, honore `Mute` sans condition (`self.muted =
+    /// !self.muted`), donc la bascule actée ici n'invente rien.
     ///
     /// Le volume, lui, est posé dans `etat` faute d'un champ optimiste à part.
     /// C'est voulu et sans risque : la trame suivante l'écrase de toute façon,
@@ -535,6 +622,15 @@ impl EtatPartage {
                             marquer(&mut bouges, Sujet::Mixer);
                         }
                     }
+                    // Bascule et non affectation, parce que la commande est une
+                    // bascule : le cœur fait `muted = !muted` sans condition
+                    // (voir `Command::Mute` dans le cœur), donc l'actée ici est
+                    // exacte et non devinée. Pas de comparaison à faire — une
+                    // bascule change toujours quelque chose.
+                    Command::Mute => {
+                        inst.etat.muted = !inst.etat.muted;
+                        marquer(&mut bouges, Sujet::Mixer);
+                    }
                     _ => {}
                 }
             }
@@ -551,13 +647,22 @@ impl EtatPartage {
     }
 
     /// Attend qu'un des `sujets` demandés bouge par rapport aux compteurs
-    /// `vues`, et rend la liste de ceux qui ont bougé — dans l'ordre où ils
-    /// ont été demandés.
+    /// `vues`, et rend ceux qui ont bougé — dans l'ordre où ils ont été
+    /// demandés — **avec les compteurs de l'instant qui a décidé**.
     ///
     /// **Compare d'abord, attend ensuite.** Si quelque chose a bougé depuis
     /// que l'appelant a lu `vues`, la fonction rend la main sans jamais
     /// toucher au `Notify` : c'est là et nulle part ailleurs que le réveil
-    /// manqué est interdit.
+    /// manqué est interdit. Et `vues` n'est **pas** un instantané pris au
+    /// moment de la commande `idle` : c'est la référence que la connexion
+    /// porte depuis sa bannière (voir `versions`), donc un changement survenu
+    /// entre deux commandes de ce client est encore devant elle et sort ici.
+    ///
+    /// `Reveil::versions` est ce qui permet à l'appelant d'avancer sa référence
+    /// **sujet par sujet** : le vrai MPD n'efface que les drapeaux qu'il vient
+    /// de rapporter, et tout avancer d'un coup perdrait le changement d'un
+    /// sujet non demandé — la même erreur que celle-ci répare, d'un cran plus
+    /// loin.
     ///
     /// L'inscription au réveil est faite *sous le verrou de lecture*, avant la
     /// comparaison. Sans cela le trou se rouvrirait d'un cran plus loin : un
@@ -573,23 +678,28 @@ impl EtatPartage {
     ///
     /// Appelée par la session pour tenir un `idle`. Une liste de sujets vide
     /// n'en sort jamais, et c'est le contrat : voir `Issue::Attendre`.
-    pub async fn attendre(&self, sujets: &[Sujet], vues: [u64; NB_SUJETS]) -> Vec<Sujet> {
+    pub async fn attendre(&self, sujets: &[Sujet], vues: [u64; NB_SUJETS]) -> Reveil {
         loop {
             let notifie = self.reveil.notified();
             tokio::pin!(notifie);
-            let bouges = {
+            let (bouges, versions) = {
                 let inst = self.inner.read().await;
                 // `enable` inscrit le futur maintenant plutôt qu'au premier
                 // sondage : voir le raisonnement sur le verrou ci-dessus.
                 let _ = notifie.as_mut().enable();
-                sujets
+                let bouges = sujets
                     .iter()
                     .copied()
                     .filter(|sujet| inst.versions[*sujet as usize] != vues[*sujet as usize])
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                // Les compteurs de **cette** lecture, et non d'une seconde
+                // prise de verrou après coup : entre les deux, un sujet
+                // rapporté pourrait rebouger, et l'appelant avancerait sa
+                // référence au-delà d'un changement jamais annoncé.
+                (bouges, inst.versions)
             };
             if !bouges.is_empty() {
-                return bouges;
+                return Reveil { bouges, versions };
             }
             notifie.await;
         }
@@ -1004,7 +1114,7 @@ mod tests {
 
         e.appliquer_catalogue(catalogue_a_une_source()).await;
 
-        assert_eq!(dormeur.await.unwrap(), vec![Sujet::StoredPlaylist]);
+        assert_eq!(dormeur.await.unwrap().bouges, vec![Sujet::StoredPlaylist]);
     }
 
     #[tokio::test]
@@ -1050,7 +1160,10 @@ mod tests {
         // Pas de `timeout` ici : si l'attente bloque, le test pend et l'echec
         // est franc. Une marge d'horloge serait un flake en puissance.
         let changes = e.attendre(&[Sujet::Mixer], vues).await;
-        assert_eq!(changes, vec![Sujet::Mixer]);
+        assert_eq!(changes.bouges, vec![Sujet::Mixer]);
+        // Et le réveil rend les compteurs qui l'ont décidé : c'est ce que la
+        // session retiendra comme nouvelle référence de sa connexion.
+        assert_eq!(changes.versions, e.versions().await);
     }
 
     #[tokio::test]
@@ -1059,7 +1172,7 @@ mod tests {
         let vues = e.versions().await;
         e.appliquer_etat(PlayerState { volume: 40, source: "cd".into(), ..Default::default() }).await;
         let changes = e.attendre(&[Sujet::Mixer], vues).await;
-        assert_eq!(changes, vec![Sujet::Mixer], "playlist a change mais n'etait pas demande");
+        assert_eq!(changes.bouges, vec![Sujet::Mixer], "playlist a change mais n'etait pas demande");
     }
 
     #[tokio::test]
@@ -1073,7 +1186,7 @@ mod tests {
 
         let changes = e.attendre(&[Sujet::Playlist, Sujet::Mixer, Sujet::Player], vues).await;
 
-        assert_eq!(changes, vec![Sujet::Playlist, Sujet::Mixer, Sujet::Player]);
+        assert_eq!(changes.bouges, vec![Sujet::Playlist, Sujet::Mixer, Sujet::Player]);
     }
 
     #[tokio::test]
@@ -1100,7 +1213,7 @@ mod tests {
 
         e.appliquer_etat(PlayerState { playback: Playback::Playing, ..Default::default() }).await;
 
-        assert_eq!(dormeur.await.unwrap(), vec![Sujet::Player]);
+        assert_eq!(dormeur.await.unwrap().bouges, vec![Sujet::Player]);
     }
 
     #[tokio::test]
@@ -1129,7 +1242,7 @@ mod tests {
 
         // Puis ce qu'il attendait vraiment.
         e.appliquer_etat(PlayerState { playback: Playback::Playing, volume: 22, ..Default::default() }).await;
-        assert_eq!(dormeur.await.unwrap(), vec![Sujet::Mixer]);
+        assert_eq!(dormeur.await.unwrap().bouges, vec![Sujet::Mixer]);
     }
 
     #[tokio::test]
@@ -1206,13 +1319,16 @@ mod tests {
         e.appliquer_etat(PlayerState { playback: Playback::Playing, volume: 30, ..Default::default() }).await;
         let avant_instantane = e.lire().await;
 
+        // `Mute` n'est **plus** de la liste : elle s'acte depuis que `setvol`
+        // démute (voir `commandes::setvol`), et son test propre est juste en
+        // dessous. `VolumeUp`/`VolumeDown` y restent : elles ne portent pas de
+        // valeur et c'est le cœur qui décide du pas.
         e.acter_optimiste(&[
             Command::Select(4),
             Command::Next,
             Command::Prev,
             Command::Stop,
             Command::SeekTo(30),
-            Command::Mute,
             Command::VolumeUp,
             Command::SourceCycle,
         ])
@@ -1239,6 +1355,37 @@ mod tests {
             "un seul incrément pour une seule prise de verrou"
         );
         assert_eq!(e.lire().await.playback(), Playback::Playing);
+    }
+
+    #[tokio::test]
+    async fn acter_mute_bascule_la_sourdine_et_reveille_mixer() {
+        // Sans cet actage, le `setvol` qui démute serait invisible : `status`
+        // publie `volume: 0` tant que `etat.muted` est vrai, donc un client qui
+        // remonte son curseur le verrait retomber à zéro jusqu'à la trame
+        // suivante — le défaut exact que le calque optimiste existe pour
+        // éviter.
+        let e = EtatPartage::default();
+        e.appliquer_etat(PlayerState { volume: 40, muted: true, ..Default::default() }).await;
+        let avant = e.versions().await;
+
+        e.acter_optimiste(&[Command::SetVolume(40), Command::Mute]).await;
+
+        let inst = e.lire().await;
+        assert!(!inst.etat.muted, "la sourdine doit etre levee");
+        assert_eq!(inst.etat.volume, 40);
+        assert_ne!(avant[Sujet::Mixer as usize], e.versions().await[Sujet::Mixer as usize]);
+    }
+
+    #[tokio::test]
+    async fn acter_mute_est_bien_une_bascule_dans_les_deux_sens() {
+        // Une bascule et non une pose : l'acter comme « muet = vrai » ferait
+        // qu'un `Mute` émis depuis un appareil déjà muet publierait une
+        // sourdine que le cœur vient au contraire de lever.
+        let e = EtatPartage::default();
+        e.acter_optimiste(&[Command::Mute]).await;
+        assert!(e.lire().await.etat.muted, "faux -> vrai");
+        e.acter_optimiste(&[Command::Mute]).await;
+        assert!(!e.lire().await.etat.muted, "vrai -> faux");
     }
 
     #[test]
@@ -1318,7 +1465,7 @@ mod tests {
         // Le cœur pousse la pochette courante **au câblage**, donc une
         // reconnexion de la moitié `display` repasse ici avec la même image.
         // Sans la comparaison, chaque redémarrage du greffon réveillerait tous
-        // les clients — et leur ferait retélécharger deux mébioctets.
+        // les clients — et leur ferait retélécharger jusqu'à vingt mébioctets.
         let e = EtatPartage::default();
         e.appliquer_pochette(cover_de_test(HREF, 4096)).await;
         let avant = e.versions().await;
@@ -1344,8 +1491,31 @@ mod tests {
         assert_eq!(e.lire().await.pochette.unwrap().octets.len(), 8192);
     }
 
+    /// Une trame d'état **telle que le cœur l'émet quand une pochette existe** :
+    /// elle annonce le `href` de l'image tenue.
+    ///
+    /// Le réalisme n'est pas une politesse. Ce test employait une trame
+    /// `Default` — donc sans `cover_href` — pour prouver qu'une trame d'état ne
+    /// jette pas la pochette : une trame que le producteur n'émet **jamais** en
+    /// même temps qu'une pochette, et qui prouvait donc une causalité
+    /// impossible. Elle masquait au passage que rien ne relâchait jamais
+    /// l'image.
+    fn trame_qui_annonce(href: &str) -> PlayerState {
+        PlayerState {
+            source: "radio".into(),
+            preset: Some(2),
+            morceau: ritornello_proto::Morceau {
+                title: Some("So What".into()),
+                cover_href: Some(href.to_string()),
+                cover_origin: Some("files".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
     #[tokio::test]
-    async fn une_trame_detat_ne_jette_pas_la_pochette_tenue() {
+    async fn une_trame_detat_ne_jette_pas_la_pochette_quelle_annonce() {
         // Les deux canaux écrivent dans le même instantané et chacun ne doit
         // toucher que le sien — la même propriété que pour le catalogue. Une
         // trame d'état arrive **chaque seconde** de lecture : si elle remettait
@@ -1354,11 +1524,52 @@ mod tests {
         let e = EtatPartage::default();
         e.appliquer_pochette(cover_de_test(HREF, 4096)).await;
 
-        e.appliquer_etat(PlayerState { volume: 17, ..Default::default() }).await;
+        e.appliquer_etat(PlayerState { volume: 17, ..trame_qui_annonce(HREF) }).await;
 
         let inst = e.lire().await;
         assert_eq!(inst.pochette.map(|p| p.octets.len()), Some(4096));
         assert_eq!(inst.etat.volume, 17);
+    }
+
+    #[tokio::test]
+    async fn une_trame_sans_pochette_relache_les_octets_tenus() {
+        // Le pendant, et il manquait entièrement : `pochette` n'était jamais
+        // remis à `None`, donc le greffon retenait jusqu'à 20 Mio pour la vie du
+        // processus — y compris longtemps après l'arrêt de la lecture. Le
+        // signal est le `cover_href` de la trame d'état : `None` veut dire que
+        // plus rien de ce qui joue n'a d'image, et c'est exactement la condition
+        // sous laquelle `albumart` refusait déjà de servir ces octets.
+        let e = EtatPartage::default();
+        e.appliquer_etat(trame_qui_annonce(HREF)).await;
+        e.appliquer_pochette(cover_de_test(HREF, 4096)).await;
+        assert!(e.lire().await.pochette.is_some(), "la pochette doit d'abord etre tenue");
+
+        // La piste suivante n'a pas d'illustration : le cœur l'annonce ainsi, et
+        // n'enverra aucune trame de pochette pour elle.
+        e.appliquer_etat(PlayerState {
+            morceau: ritornello_proto::Morceau { title: Some("Blue in Green".into()), ..Default::default() },
+            ..trame_qui_annonce(HREF)
+        })
+        .await;
+
+        assert!(e.lire().await.pochette.is_none(), "les octets doivent etre relaches");
+    }
+
+    #[tokio::test]
+    async fn une_trame_qui_annonce_une_autre_cle_garde_la_pochette_tenue() {
+        // La fenêtre normale du cœur : il envoie l'état **avant** les octets,
+        // donc la trame annonce déjà la clé suivante quand la pochette tenue est
+        // encore la précédente. Le relâchement ne doit pas s'y déclencher —
+        // sinon une inversion d'ordre des deux canaux détruirait une image que
+        // la trame d'après aurait légitimée. `albumart` refuse pendant cette
+        // fenêtre (le `href` ne correspond pas), et c'est tout ce qu'il faut.
+        let e = EtatPartage::default();
+        e.appliquer_etat(trame_qui_annonce(HREF)).await;
+        e.appliquer_pochette(cover_de_test(HREF, 4096)).await;
+
+        e.appliquer_etat(trame_qui_annonce("/api/cover/999999")).await;
+
+        assert!(e.lire().await.pochette.is_some(), "la fenetre etat/pochette n'est pas un relachement");
     }
 
     #[tokio::test]
@@ -1375,6 +1586,6 @@ mod tests {
         // la pochette arrive avant ou après l'inscription du dormeur, il
         // repart. Aucune synchronisation n'est donc nécessaire ici.
         e.appliquer_pochette(cover_de_test(HREF, 4096)).await;
-        assert_eq!(attente.await.unwrap(), vec![Sujet::Player]);
+        assert_eq!(attente.await.unwrap().bouges, vec![Sujet::Player]);
     }
 }

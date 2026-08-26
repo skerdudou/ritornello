@@ -58,8 +58,10 @@ pub enum Issue {
 /// pur (aucune E/S, aucune allocation d'image), la session n'a plus qu'à
 /// écrire. Le clone de l'`Arc` est un incrément de compteur, donc composer
 /// cette issue ne recopie **jamais** les octets, même pour une image de
-/// 2 Mio ; ce que la session écrira est borné par `MAX_TRANCHE` et par lui
-/// seul.
+/// 20 Mio (`COVER_MAX_BYTES`) ; ce que la session écrira est borné par
+/// `MAX_TRANCHE` et par lui seul. En revanche ce clone **retient** cette
+/// génération d'image jusqu'à la fin de l'écriture : voir le produit calculé
+/// sur `MAX_TRANCHE`.
 #[derive(Clone, PartialEq)]
 pub struct Binaire {
     /// `size: <total>`, et pour `readpicture` `type: <mime>` — dans cet ordre,
@@ -74,7 +76,7 @@ pub struct Binaire {
 }
 
 /// `Debug` écrit à la main, pour la même raison que celui de `Pochette` : le
-/// dérivé imprimerait deux mébioctets d'image dans le message d'un test raté.
+/// dérivé imprimerait vingt mébioctets d'image dans le message d'un test raté.
 impl std::fmt::Debug for Binaire {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Binaire")
@@ -288,7 +290,7 @@ pub fn traiter(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
         // active qui l'interprète (voir la doc de `Command::Next`).
         "next" => Issue::agir(Command::Next),
         "previous" => Issue::agir(Command::Prev),
-        "setvol" => setvol(indice, reste),
+        "setvol" => setvol(inst, indice, reste),
         // Dépréciée par MPD mais encore émise par de vieux clients : relative
         // au volume courant, et bornée ici (voir `volume`) plutôt que de
         // laisser déborder `Command::SetVolume`, qui lui est absolu.
@@ -385,17 +387,72 @@ fn uri(source: &str, index: u8) -> String {
 /// * `MAX_TRANCHE` borne une réponse dont **nous** choisissons la taille : le
 ///   client ne demande pas « toute l'image », il demande « à partir d'ici », et
 ///   c'est le serveur qui décide combien il en donne. Rien n'oblige donc à
-///   laisser une seule requête écrire un mébioctet, et une image de 2 Mio se
-///   sert en 256 allers-retours dont chacun coûte 8 Kio de tampon transitoire
-///   au lieu d'un seul aller-retour qui en coûterait 2048.
+///   laisser une seule requête écrire un mébioctet, et une image de 2 Mio — un
+///   dixième du plafond, voir juste en dessous — se sert en 256 allers-retours
+///   dont chacun coûte 8 Kio de tampon transitoire au lieu d'un seul
+///   aller-retour qui en coûterait 2048.
+///
+/// **Le compte d'allers-retours, et pourquoi 8 Kio reste le bon choix malgré
+/// lui.** `COVER_MAX_BYTES` vaut 20 Mio, donc le plafond de pochette se sert en
+/// ~2560 allers-retours, chacun payant un aller-retour réseau complet (le
+/// client ne peut pas les grouper : l'offset de chaque requête dépend du `size:`
+/// que la précédente a rendu, et une liste de commandes est envoyée entière
+/// avant d'être lue). Sur un Wi-Fi domestique à 20 ms d'aller-retour, cela fait
+/// une minute pour une image. Le chiffre est vrai et il est mauvais ; il ne
+/// justifie pourtant pas de lever ce plafond :
+///
+/// 1. **Il décrit le plafond, pas le trafic.** Une pochette réelle pèse 75 Kio
+///    (mesure du Cover Art Archive) à quelques centaines de kibioctets pour une
+///    étiquette embarquée : 10 à 50 allers-retours, une fraction de seconde.
+///    Les 20 Mio sont la borne de refus du protocole d'affichage, pas une
+///    taille que le cœur produit.
+/// 2. **8 Kio n'est pas un choix, c'est le contrat.** C'est la valeur par
+///    défaut de `binarylimit` chez MPD, donc ce qu'un client qui ne l'a pas
+///    relevée s'attend à ne jamais voir dépassé — et ce greffon ne gère pas
+///    `binarylimit`, donc **aucun** de ses clients ne peut l'avoir relevée.
+///    Servir 64 Kio à un client dimensionné pour 8 est un dépassement de
+///    tampon chez lui, provoqué par nous, en échange de quelques dizaines de
+///    millisecondes.
+/// 3. **Le levier existe et il est du bon côté** : implémenter `binarylimit`
+///    laisserait le client demander des tranches plus grandes, ce qui est
+///    exactement la façon dont MPD résout ce compromis. C'est un ajout de
+///    fonction, pas une correction ; ce qu'il ne faut pas faire, c'est relever
+///    `MAX_TRANCHE` unilatéralement.
 ///
 /// Conséquence, et c'est le point : le chemin binaire **ne passe pas** par
 /// l'accumulateur de texte et n'a donc aucun facteur d'amplification à lui.
-/// Le pire cas d'une connexion qui ne fait que des `albumart` est
+/// Le pire cas *transitoire* d'une connexion qui ne fait que des `albumart` est
 /// `MAX_TRANCHE` + l'en-tête ≈ 8,3 Kio de tampon, contre les ≈ 2,3 Mio que le
-/// chemin texte autorise (voir `MAX_REPONSE`) — soit trois millièmes. Et
-/// l'image elle-même n'est pas comptée par connexion : elle vit **une fois**
-/// dans l'état partagé, derrière l'`Arc` de `Pochette`.
+/// chemin texte autorise (voir `MAX_REPONSE`) — soit trois millièmes.
+///
+/// **Ce qui n'est pas borné par connexion, et il faut l'écrire en produit** —
+/// c'est la troisième fois qu'une borne de ce fichier est documentée trop
+/// favorablement, donc voici le chiffre et non une nuance. L'image vit une
+/// seule fois dans le processus **par génération**, pas une seule fois tout
+/// court : `executer` tient son clone d'`Instantane` et la réponse binaire tient
+/// son propre clone de l'`Arc`, tous deux pendant le `write_all`. Un client qui
+/// demande une tranche puis cesse de lire épingle donc sa génération pour aussi
+/// longtemps qu'il le veut, et une pochette poussée entre-temps en crée une
+/// autre qu'une deuxième session peut épingler à son tour. Le pire cas est
+/// `MAX_SESSIONS × COVER_MAX_BYTES` = 16 × 20 Mio = **320 Mio**, plus la
+/// génération que l'état tient lui-même, soit **340 Mio** sur un appareil d'un
+/// gibioctet partagé avec mpv.
+///
+/// Il demande une immobilisation délibérée *et* des pochettes proches du
+/// plafond : ce n'est pas un accident, c'est un client hostile — mais le modèle
+/// de menace de ce port (ouvert à tout le réseau local, sans mot de passe)
+/// accepte déjà cette figure, et c'est pour elle que `MAX_SESSIONS` et
+/// `MAX_REPONSE` existent.
+///
+/// **Aucune mitigation n'est ajoutée ici, et c'est un choix argumenté.** Les
+/// deux leviers réels sont hors de portée ou pires que le mal : abaisser
+/// `COVER_MAX_BYTES` vit dans `ritornello-proto` et concerne tout l'appareil ;
+/// mettre une échéance sur le `write_all` binaire introduirait la première
+/// horloge du chemin de session, pour ne protéger que d'un client qui a déjà
+/// choisi de nuire. Sérialiser les réponses binaires derrière un sémaphore
+/// serait franchement nuisible : un seul client immobile priverait alors tous
+/// les autres de pochette. La borne est donc **connue et écrite**, ce qui est ce
+/// qui manquait.
 pub const MAX_TRANCHE: usize = 8 * 1024;
 
 /// `albumart <uri> <offset>` et `readpicture <uri> <offset>` : une tranche de
@@ -877,13 +934,21 @@ fn index_existe(file: &[Entree], index: u8) -> bool {
     file.iter().any(|e| e.index == index)
 }
 
-/// Un temps MPD absolu, en secondes tronquées. `None` si non numérique ou
-/// négatif — jamais un temps négatif ramené à zéro en silence pour cette forme
-/// (contrairement à la résolution du relatif de `seekcur`, où zéro est la
-/// bonne réponse à un recul trop grand).
+/// Un temps MPD absolu, en secondes tronquées. `None` si non numérique, non
+/// fini ou négatif — jamais un temps négatif ramené à zéro en silence pour
+/// cette forme (contrairement à la résolution du relatif de `seekcur`, où zéro
+/// est la bonne réponse à un recul trop grand).
+///
+/// **`inf` et `nan` sont non numériques pour ce protocole**, même si
+/// `f64::from_str` les accepte : `seek 0 inf` rendait `SeekTo(u32::MAX)` et
+/// `seek 0 nan` rendait `SeekTo(0)`, tous deux **en silence**, contre la règle
+/// que ce module énonce douze lignes plus haut — un argument absent ou non
+/// numérique est un `Ack::Arg`, jamais un défaut muet. C'est la même classe que
+/// le débordement d'`i16` de `volume`, sur le même port sans authentification,
+/// à deux mètres de là.
 fn temps_absolu(s: &str) -> Option<u32> {
     let v: f64 = s.parse().ok()?;
-    if v < 0.0 {
+    if !v.is_finite() || v < 0.0 {
         None
     } else {
         Some(v as u32)
@@ -945,15 +1010,79 @@ fn pause(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
     }
 }
 
-fn setvol(indice: usize, args: &[String]) -> Issue {
+/// `setvol <0-100>` : pose le volume, et **lève la sourdine s'il est au-dessus
+/// de zéro**.
+///
+/// Le premier point est le protocole ; le second est la seule issue qu'un client
+/// MPD ait pour rallumer le son de cet appareil.
+///
+/// **Pourquoi il fallait le faire.** MPD n'a pas de sourdine, donc `status`
+/// publie `volume: 0` dès que l'appareil est muet (voir `status`) — c'est juste,
+/// les clients coupent le son en posant `setvol 0` et s'attendent à relire 0.
+/// Mais *aucune* commande MPD ne pouvait lever cette sourdine : un client
+/// remontait son curseur, `SetVolume(40)` partait, le volume changeait
+/// réellement, et le son restait coupé. L'utilisateur n'avait plus de sortie
+/// depuis son téléphone — seule la télécommande de la pièce pouvait le
+/// dépanner. Un utilisateur qui remonte un curseur demande sans ambiguïté à
+/// entendre quelque chose ; c'est la lecture qu'on retient.
+///
+/// **Émise conditionnellement, parce que `Command::Mute` est une bascule** et
+/// non une pose : l'émettre alors que rien n'est coupé *couperait* le son. La
+/// garde sur `etat.muted` est donc la même forme conditionnelle que `pause
+/// 0`/`pause 1` emploie contre `playback`, et pour la même raison.
+///
+/// **L'ordre des deux commandes ne change pas le résultat**, et il faut l'écrire
+/// parce que ce paragraphe a d'abord prétendu le contraire : il affirmait que le
+/// cœur, en levant la sourdine, reposait le volume mémorisé, donc qu'il fallait
+/// poser le volume après. C'est faux, et une raison fausse est pire qu'une
+/// raison absente — elle fait croire à un mécanisme de restauration dont un
+/// lecteur déduira des choses. Le bras `Command::Mute` du cœur fait
+/// `muted = !muted` puis `set_mute(muted)`, et rien d'autre : le niveau et la
+/// sourdine sont deux propriétés indépendantes, deux appels distincts à mpv.
+/// `SetVolume(40)` puis `Mute`, ou `Mute` puis `SetVolume(40)`, laissent donc
+/// tous deux un appareil non muet à 40.
+///
+/// L'ordre retenu — `SetVolume` d'abord — ne se joue que sur l'**intervalle**
+/// entre les deux, qui existe bel et bien : elles traversent le canal d'entrée
+/// l'une après l'autre, et chacune attend mpv.
+///
+/// * **Ce qu'on entend, et c'est la raison qui pèse.** Poser le niveau pendant
+///   que la sortie est encore muette est inaudible, donc le son revient *déjà*
+///   à 40. L'ordre inverse le ferait revenir au niveau mémorisé — jusqu'à 100 —
+///   le temps d'un aller-retour avant de retomber. Sur un appareil dont le
+///   volume mémorisé peut être bien au-dessus de ce que le client demande, c'est
+///   la seule des deux différences qui se remarque.
+/// * **Ce qu'on voit.** Les deux commandes appellent `show_overlay`, qui lit le
+///   `muted` et le `volume` de l'instant. L'incrustation *finale* dit « 40 % »
+///   dans les deux ordres ; seule l'intermédiaire diffère, et l'ordre retenu y
+///   affiche « muet » — un mot encore juste à cet instant — au lieu de
+///   l'ancien niveau, un nombre qui ne l'est plus.
+///
+/// **`setvol 0` ne coupe pas pour autant**, et c'est la règle inverse
+/// inchangée : voir la spec, § « La sourdine, un cas à ne pas rater ».
+/// `SetVolume(0)` pose zéro, `Mute` bascule ; les confondre ferait qu'un client
+/// remontant le volume après un `setvol 0` trouverait le son toujours coupé —
+/// exactement le défaut qu'on répare ici, réintroduit par l'autre bout.
+fn setvol(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
     match args.first().and_then(|a| a.parse::<u8>().ok()) {
-        // `0` n'est **pas** traduit en `Mute` : voir la spec, § « La sourdine,
-        // un cas à ne pas rater ». `Mute` bascule, `SetVolume` pose ; les
-        // confondre ferait qu'un client remontant le volume après ce `setvol
-        // 0` trouverait le son toujours coupé.
-        Some(v) if v <= 100 => Issue::agir(Command::SetVolume(v)),
+        Some(v) if v <= 100 => Issue::Repondre { lignes: Vec::new(), cmds: demuter(inst, v) },
         _ => Issue::Refuser(ack(Ack::Arg, indice, "setvol", "invalid volume")),
     }
+}
+
+/// Les commandes d'une pose de volume : `SetVolume`, plus `Mute` si l'appareil
+/// est muet et que le volume demandé n'est pas zéro.
+///
+/// Un seul endroit pour `setvol` et `volume` : les deux sont le même geste
+/// (« monte le son »), et laisser l'une démuter sans l'autre ferait dépendre le
+/// retour du son de l'âge du client — `volume` est dépréciée par MPD, donc
+/// c'est la vieille moitié du parc qui resterait coincée.
+fn demuter(inst: &Instantane, niveau: u8) -> Vec<Command> {
+    let mut cmds = vec![Command::SetVolume(niveau)];
+    if niveau > 0 && inst.etat.muted {
+        cmds.push(Command::Mute);
+    }
+    cmds
 }
 
 /// `volume <±n>` : dépréciée par MPD mais encore émise par de vieux clients.
@@ -970,7 +1099,12 @@ fn volume(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
             // (volume ≤ 100, delta ≤ 32767) sans aucun risque de dépassement,
             // donc le clamp reste le seul endroit qui borne.
             let nouveau = (i32::from(inst.etat.volume) + i32::from(delta)).clamp(0, 100) as u8;
-            Issue::agir(Command::SetVolume(nouveau))
+            // Même levée de sourdine que `setvol`, et par le même chemin : voir
+            // `demuter`. Le calcul part du volume **mémorisé** et non du zéro
+            // que `status` publie quand c'est coupé — c'est le seul point de
+            // départ qui ait un sens, et il rend `volume +5` sur un appareil
+            // muet équivalent à ce que la télécommande ferait.
+            Issue::Repondre { lignes: Vec::new(), cmds: demuter(inst, nouveau) }
         }
         None => Issue::Refuser(ack(Ack::Arg, indice, "volume", "invalid volume")),
     }
@@ -1000,6 +1134,14 @@ fn seekcur(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
         let Ok(delta) = arg.parse::<f64>() else {
             return refuser("float expected");
         };
+        // La même règle que `temps_absolu`, sur l'autre forme : `+inf` et `-nan`
+        // se parsent, et sans cette garde `seekcur +inf` rendait
+        // `SeekTo(u32::MAX)` en silence. Le relatif tolère le négatif (un recul
+        // trop grand vaut zéro), jamais le non fini — il n'y a pas de position
+        // à laquelle « l'infini » se ramène.
+        if !delta.is_finite() {
+            return refuser("float expected");
+        }
         let Some(base) = inst.etat.position_s else {
             // Rien à résoudre depuis : un relatif sans point de départ connu
             // inventerait un temps, ce qu'aucun défaut silencieux ne doit
@@ -1983,7 +2125,7 @@ mod tests {
         // dormir. Si `mixer` avait ete ecarte avec `database`, la liste serait
         // vide et ce test **pendrait** — l'echec est franc, a l'idiome des tests
         // d'`etat.rs`.
-        assert_eq!(partage.attendre(&sujets, vues).await, vec![Sujet::Mixer]);
+        assert_eq!(partage.attendre(&sujets, vues).await.bouges, vec![Sujet::Mixer]);
     }
 
     #[test]
@@ -2134,6 +2276,54 @@ mod tests {
     }
 
     #[test]
+    fn setvol_au_dessus_de_zero_leve_la_sourdine() {
+        // **Le seul chemin dont un client MPD dispose pour rallumer le son.**
+        // `status` publie `volume: 0` dès que l'appareil est muet, donc le
+        // client remonte son curseur, `SetVolume(40)` part, le volume change —
+        // et le son restait coupé, sans aucune issue depuis le téléphone.
+        // L'ordre est épinglé ici parce que le test compare un `Vec`, pas parce
+        // qu'il changerait le résultat : les deux ordres laissent l'appareil non
+        // muet à 40 (le cœur ne repose aucun volume en démutant, voir `setvol`).
+        // Ce qu'il préserve est l'intervalle — le son revient déjà à 40 au lieu
+        // de repasser par le niveau mémorisé.
+        assert_eq!(
+            cmds(&instantane_muet(65), &["setvol", "40"]),
+            vec![Command::SetVolume(40), Command::Mute]
+        );
+    }
+
+    #[test]
+    fn setvol_nemet_pas_de_sourdine_quand_le_son_nest_pas_coupe() {
+        // L'autre sens, et il est essentiel : `Command::Mute` est une
+        // **bascule**, donc l'émettre inconditionnellement couperait le son du
+        // client qui vient de monter le sien. Même forme conditionnelle que
+        // `pause 0`/`pause 1` contre `playback`.
+        assert_eq!(cmds(&instantane_au_volume(65), &["setvol", "40"]), vec![Command::SetVolume(40)]);
+    }
+
+    #[test]
+    fn setvol_zero_sur_un_appareil_muet_ne_leve_rien() {
+        // Le cas limite des deux règles réunies : poser zéro n'est pas
+        // « demander à entendre », donc rien à lever — et lever ici rallumerait
+        // le son d'un client qui demande le silence.
+        assert_eq!(cmds(&instantane_muet(65), &["setvol", "0"]), vec![Command::SetVolume(0)]);
+    }
+
+    #[test]
+    fn volume_relatif_leve_aussi_la_sourdine() {
+        // Même geste, même règle : `volume` est dépréciée mais c'est la vieille
+        // moitié du parc de clients, et la laisser sans issue ferait dépendre le
+        // retour du son de l'âge du client. Le calcul part du volume
+        // **mémorisé** (65) et non du zéro que `status` publie.
+        assert_eq!(
+            cmds(&instantane_muet(65), &["volume", "+10"]),
+            vec![Command::SetVolume(75), Command::Mute]
+        );
+        // Et un recul qui atteint zéro ne lève rien, comme `setvol 0`.
+        assert_eq!(cmds(&instantane_muet(5), &["volume", "-10"]), vec![Command::SetVolume(0)]);
+    }
+
+    #[test]
     fn volume_est_relatif_et_borne_sur_le_volume_courant() {
         // Commande dépréciée mais encore émise. Bornée ici, pas laissée
         // déborder.
@@ -2218,6 +2408,39 @@ mod tests {
         // exactement la même commande.
         let inst = instantane_a_la_position(0);
         assert_eq!(cmds(&inst, &["seek", "0", "+5"]), cmds(&inst, &["seek", "0", "5"]));
+    }
+
+    #[test]
+    fn les_temps_non_finis_sont_refuses_et_non_avales() {
+        // `inf` et `nan` se parsent en `f64`, et sans garde `seek 0 inf` rendait
+        // `SeekTo(u32::MAX)` tandis que `seek 0 nan` rendait `SeekTo(0)` — tous
+        // deux **en silence**, contre la règle que ce module énonce : un
+        // argument non numérique est un `ACK 2`, jamais un défaut muet. Même
+        // classe que le débordement d'`i16` de `volume`, à deux mètres de là.
+        //
+        // Les trois formes du protocole sont couvertes, parce que le relatif de
+        // `seekcur` a sa propre analyse et donc son propre trou.
+        let inst = instantane_a_la_position(30);
+        for mots in [
+            vec!["seek", "0", "inf"],
+            vec!["seek", "0", "-inf"],
+            vec!["seek", "0", "nan"],
+            vec!["seek", "0", "NaN"],
+            vec!["seekid", "1", "inf"],
+            vec!["seekcur", "inf"],
+            vec!["seekcur", "nan"],
+            vec!["seekcur", "+inf"],
+            vec!["seekcur", "-inf"],
+            vec!["seekcur", "+nan"],
+        ] {
+            assert!(
+                matches!(traiter_mots(&inst, 0, &mots), Issue::Refuser(_)),
+                "{mots:?} doit etre refuse, pas avale"
+            );
+        }
+        // Et la forme légitime la plus proche reste acceptée : `infini` n'est
+        // pas un nombre, mais `1e9` en est un.
+        assert_eq!(cmds(&inst, &["seek", "0", "1000000"]), vec![Command::SeekTo(1_000_000)]);
     }
 
     #[test]

@@ -64,6 +64,15 @@ const VERSION_ANNONCEE: &str = "0.23.5";
 /// client croire qu'il est servi. Refuser aussitôt lui dit la vérité, et c'est
 /// une réponse qu'un client sait interpréter — un serveur MPD injoignable est
 /// un état que tous savent afficher.
+///
+/// **Les 200 Mio ci-dessus ne comptent que le chemin texte, et il faut le dire
+/// ici** : depuis les pochettes, ce plafond multiplie aussi
+/// `COVER_MAX_BYTES`. Une session qui répond `albumart` retient la génération
+/// d'image qu'elle sert pendant tout son `write_all`, donc seize clients
+/// immobiles épinglent seize générations — 16 × 20 Mio = **320 Mio**, plus celle
+/// que l'état tient lui-même, soit **340 Mio**. Le calcul complet et ce qui
+/// n'est pas mitigé sont sur `commandes::MAX_TRANCHE` ; ce qu'il faut retenir
+/// ici est que ce plafond-ci est le seul facteur qui borne ce produit.
 const MAX_SESSIONS: usize = 16;
 
 /// Plafond de commandes accumulées dans une liste, avant `command_list_end`.
@@ -180,6 +189,19 @@ const MAX_LIGNE: usize = 8 * 1024;
 /// borne**. Voir `MAX_LIGNE`.
 struct LecteurBorne {
     lecture: BufReader<OwnedReadHalf>,
+    /// La ligne lue pendant une attente `idle` et **remise en file** pour la
+    /// boucle de `servir`.
+    ///
+    /// C'est le mécanisme du « `noidle` implicite » : une commande reçue
+    /// pendant un `idle` annule l'attente (`OK` nu) *puis* doit être exécutée
+    /// comme n'importe quelle autre ligne — donc repassée à l'aiguillage
+    /// complet de `servir`, listes de commandes et lignes illisibles comprises,
+    /// plutôt que réinterprétée à moitié dans `attendre_idle`.
+    ///
+    /// Une seule ligne suffit, et un seul emplacement le dit : elle est remise
+    /// juste après avoir été lue, et consommée au tour de boucle suivant, donc
+    /// deux ne peuvent pas coexister.
+    remise: Option<String>,
     /// Les octets de la ligne en cours, entre deux `\n`.
     ///
     /// Il vit dans la structure et non dans la pile de `ligne_suivante`, et ce
@@ -194,7 +216,13 @@ struct LecteurBorne {
 
 impl LecteurBorne {
     fn new(lecture: OwnedReadHalf) -> Self {
-        Self { lecture: BufReader::new(lecture), tampon: Vec::new() }
+        Self { lecture: BufReader::new(lecture), remise: None, tampon: Vec::new() }
+    }
+
+    /// Remet une ligne déjà lue devant le flux. Voir `remise`.
+    fn remettre(&mut self, ligne: String) {
+        debug_assert!(self.remise.is_none(), "deux lignes remises en file a la fois");
+        self.remise = Some(ligne);
     }
 
     /// La ligne suivante sans son `\n`, ou `None` à la fin du flux.
@@ -206,6 +234,13 @@ impl LecteurBorne {
     /// prochain `\n`, c'est-à-dire de garder une connexion qui a déjà quitté le
     /// protocole. Fermer est immédiat, défini, et journalisé par `accepter`.
     async fn ligne_suivante(&mut self) -> Result<Option<String>> {
+        // La ligne remise passe avant la chaussette, et **sans point
+        // d'attente** : ce `take` et ce `return` sont dans le même sondage, si
+        // bien qu'une annulation ne peut pas se glisser entre les deux et
+        // perdre la ligne.
+        if let Some(ligne) = self.remise.take() {
+            return Ok(Some(ligne));
+        }
         loop {
             let dispo = self.lecture.fill_buf().await?;
             if dispo.is_empty() {
@@ -368,6 +403,26 @@ pub async fn servir(flux: TcpStream, etat: Arc<EtatPartage>, cmd_tx: mpsc::Sende
     // client attend cette ligne avant d'écrire quoi que ce soit.
     ecriture.write_all(format!("OK MPD {VERSION_ANNONCEE}\n").as_bytes()).await?;
 
+    // **Les compteurs que cette connexion a déjà vus, lus une fois pour
+    // toutes.** C'est la référence de tous ses `idle`, et elle vit ici parce
+    // que c'est un fait sur la **connexion** — comme l'état de liste juste en
+    // dessous, et pour la même raison.
+    //
+    // Les lire à la bannière et les porter, plutôt que de les relire dans
+    // l'`Instantane` de chaque commande `idle`, est la correction d'un défaut
+    // réel : la lecture par commande avalait tout ce qui avait bougé entre la
+    // réponse précédente et la ligne `idle`, c'est-à-dire pendant la seule
+    // fenêtre où un client MPD n'écoute pas. Le vrai MPD accumule ses drapeaux
+    // par connexion depuis la connexion ; pour `stored_playlist`, avaler un
+    // événement laisse `listplaylists` périmé jusqu'au prochain changement de
+    // catalogue — donc potentiellement pour toujours. Voir `etat::versions`.
+    //
+    // Un `idle` immédiatement réveillé sur un changement que ce client avait
+    // peut-être déjà lu par un `status` est le sens d'erreur acceptable : un
+    // réveil superflu lui coûte une interrogation redondante, un réveil
+    // manquant lui coûte la justesse de son écran.
+    let mut vues = etat.versions().await;
+
     // Les commandes accumulées d'une liste en cours, `None` hors liste.
     // Un `Option<Vec<_>>` plutôt qu'un `Vec` plus un booléen : « pas dans une
     // liste » et « dans une liste encore vide » sont deux états différents, et
@@ -405,7 +460,9 @@ pub async fn servir(flux: TcpStream, etat: Arc<EtatPartage>, cmd_tx: mpsc::Sende
             match mot {
                 "command_list_end" => {
                     let lot = liste.take().unwrap_or_default();
-                    match executer(&mut lignes, &mut ecriture, &etat, &cmd_tx, &lot, avec_ok).await? {
+                    match executer(&mut lignes, &mut ecriture, &etat, &cmd_tx, &lot, avec_ok, &mut vues)
+                        .await?
+                    {
                         Suite::Continuer => {}
                         Suite::Fermer => break,
                     }
@@ -499,7 +556,9 @@ pub async fn servir(flux: TcpStream, etat: Arc<EtatPartage>, cmd_tx: mpsc::Sende
             }
             _ => {
                 let lot = std::slice::from_ref(&args);
-                match executer(&mut lignes, &mut ecriture, &etat, &cmd_tx, lot, false).await? {
+                match executer(&mut lignes, &mut ecriture, &etat, &cmd_tx, lot, false, &mut vues)
+                    .await?
+                {
                     Suite::Continuer => {}
                     Suite::Fermer => break,
                 }
@@ -517,7 +576,12 @@ pub async fn servir(flux: TcpStream, etat: Arc<EtatPartage>, cmd_tx: mpsc::Sende
 /// exactement comme la suite des commandes qu'elle contient, à `list_OK` près.
 ///
 /// `lignes` n'est là que pour `idle` : c'est la seule issue qui a besoin de
-/// continuer à lire (le `noidle` qui l'annule) avant d'avoir répondu.
+/// continuer à lire (le `noidle` qui l'annule, ou la commande qui la remplace)
+/// avant d'avoir répondu.
+///
+/// `vues` est la référence de compteurs de la **connexion** (voir `servir`) :
+/// lue ici, jamais réécrite ici — seul un réveil annoncé l'avance, dans
+/// `attendre_idle`.
 async fn executer(
     lignes: &mut LecteurBorne,
     ecriture: &mut OwnedWriteHalf,
@@ -525,19 +589,23 @@ async fn executer(
     cmd_tx: &mpsc::Sender<InputMessage>,
     lot: &[Vec<String>],
     avec_ok: bool,
+    vues: &mut [u64; 4],
 ) -> Result<Suite> {
     let mut sortie = Reponse::default();
     for (indice, args) in lot.iter().enumerate() {
-        // **Un seul instantané, lu avant `traiter`.** Les compteurs qu'il
-        // porte sont ceux qu'un `idle` mémorise, et les lire dans la même
-        // prise de verrou que l'état publié est ce qui rend le réveil manqué
-        // impossible : tout ce qui bouge après cette lecture est
-        // nécessairement un changement que ce client n'a pas encore vu. Les
-        // lire *après* `traiter` (ou dans une seconde prise de verrou)
-        // rouvrirait exactement la course que l'état partagé a été bâti pour
-        // fermer.
+        // **Un seul instantané, lu avant `traiter`.** Une seule prise de
+        // verrou pour tout ce que la réponse publie : la lire en deux fois
+        // laisserait `status` se contredire au milieu de lui-même.
+        //
+        // **Ses compteurs ne servent pas de référence à un `idle`, et c'est le
+        // point.** Ils décrivent l'instant de *cette* commande ; la référence
+        // d'un `idle` est celle que la connexion porte depuis sa bannière. Les
+        // confondre — ce que ce code faisait — avale tout changement survenu
+        // entre la réponse précédente et la ligne `idle`, et le commentaire qui
+        // vivait ici affirmait le contraire : rien dans cette lecture ne rend
+        // « le réveil manqué impossible ». C'est la comparaison d'`attendre`
+        // contre la référence de la connexion qui l'interdit.
         let instantane = etat.lire().await;
-        let vues = instantane.versions;
         match traiter(&instantane, indice, args) {
             Issue::Repondre { lignes: rendues, cmds } => {
                 for cmd in &cmds {
@@ -674,58 +742,91 @@ async fn executer(
 /// rendort à chaque notification — et lui passer la liste telle quelle est tout
 /// ce qu'il y a à faire. Répondre `OK` ferait boucler le client à pleine
 /// vitesse, ce qui est exactement le contraire de ce qu'`idle` sert à éviter.
+///
+/// **`vues` est la référence de la connexion, et cette fonction est la seule à
+/// l'avancer** : sur un réveil annoncé, et pour les seuls sujets annoncés. Le
+/// vrai MPD n'efface que les drapeaux qu'il vient de rapporter, et tout avancer
+/// d'un coup perdrait le changement d'un sujet qu'un `idle` suivant demandera
+/// (`idle player` puis `idle mixer` en est le cas le plus court). Un `noidle`,
+/// lui, n'annonce rien : il n'avance donc rien, et le changement en attente
+/// ressortira à l'`idle` d'après.
 async fn attendre_idle(
     lignes: &mut LecteurBorne,
     ecriture: &mut OwnedWriteHalf,
     etat: &EtatPartage,
     sujets: &[Sujet],
-    vues: [u64; 4],
+    vues: &mut [u64; 4],
 ) -> Result<Suite> {
-    // Deux issues, et il faut écouter les deux : le réveil, et la seule
-    // commande que MPD autorise pendant une attente.
+    // Deux issues, et il faut écouter les deux : le réveil, et ce que le client
+    // dit pendant l'attente — `noidle`, la seule commande que MPD y autorise,
+    // ou n'importe quelle autre ligne, qui vaut alors `noidle` implicite.
     // `LecteurBorne::ligne_suivante` est sûre à l'annulation (son tampon vit
     // dans la structure, voir là-bas), donc la branche perdante ne perd aucun
     // octet ; et abandonner `attendre` ne perd aucun réveil, puisque `vues`
     // reste la référence et que les compteurs sont monotones.
-    let bouges = tokio::select! {
-        bouges = etat.attendre(sujets, vues) => bouges,
+    let reveil = tokio::select! {
+        reveil = etat.attendre(sujets, *vues) => reveil,
         lue = lignes.ligne_suivante() => {
             let Some(brute) = lue? else {
                 // Le client est parti pendant son attente : rien à écrire.
                 return Ok(Suite::Fermer);
             };
-            let mot = match decouper(&brute) {
-                Ok(args) => args.first().cloned().unwrap_or_default(),
-                Err(code) => {
-                    // La ligne illisible tient lieu de réponse à l'`idle` :
-                    // une requête, un terminateur, la comptabilité du client
-                    // reste juste.
-                    let refus = ack(code, 0, premier_mot(&brute), "invalid argument");
-                    ecrire(ecriture, &[refus]).await?;
-                    return Ok(Suite::Continuer);
-                }
-            };
-            if mot == "noidle" {
-                // L'attente est annulée et c'est tout : `OK` sec, aucun
-                // `changed:`. Un client qui vient de faire autre chose de son
-                // côté relira l'état lui-même.
-                ecrire(ecriture, &["OK".to_string()]).await?;
-            } else {
-                // Toute autre commande pendant une attente : MPD **ferme** la
-                // connexion. Nous refusons sans fermer, par cohérence avec le
-                // reste de cette session (une ligne fautive n'est jamais une
-                // rupture) : l'`ACK` répond à l'`idle` resté en suspens, donc
-                // le client garde une requête pour une réponse et peut
-                // continuer à parler. Fermer lui coûterait une reconnexion
-                // pour un défaut de son côté que le journal ne lui montre pas.
-                let refus = ack(Ack::Unknown, 0, &mot, "not allowed during idle");
-                ecrire(ecriture, &[refus]).await?;
+            // **Une ligne reçue pendant l'attente clôt l'`idle` par un `OK`
+            // nu.** C'est la comptabilité du protocole : un client MPD compte
+            // un terminateur par requête, et il en a écrit deux — son `idle`,
+            // puis cette ligne.
+            //
+            // Ce code refusait cette ligne par un seul `ACK` et n'écrivait rien
+            // pour l'`idle` : deux requêtes se partageaient un terminateur, et
+            // le client repartait **décalé de un, définitivement** — chaque
+            // réponse suivante lue comme celle de sa requête précédente. Un
+            // décalage silencieux et permanent, là où le choix de MPD (fermer)
+            // est bruyant et auto-réparateur. Nous gardons le choix de ne pas
+            // fermer — « une ligne fautive n'est jamais une rupture », et une
+            // reconnexion coûterait au client un défaut qu'aucun journal ne lui
+            // montre — mais en réparant ce qu'il avait cassé : l'invariant que
+            // cette fonction énonce sur `Issue::Fermer` redevient vrai, toute
+            // commande acceptée reçoit exactement un terminateur.
+            //
+            // **Et l'`OK` nu n'est pas une forme inventée pour l'occasion** :
+            // c'est déjà ce que le bras `noidle` écrivait, et c'est donc la
+            // même réponse au même endroit. La correction n'étend qu'un
+            // comportement existant à un second déclencheur — elle ne peut pas
+            // mettre sur le fil une forme qu'un client n'aurait jamais vue.
+            ecrire(ecriture, &["OK".to_string()]).await?;
+            // `noidle` est la seule ligne qui ne mérite pas de réponse propre :
+            // ce n'est pas une requête mais **l'annulation de celle en cours**,
+            // et l'`OK` qu'on vient d'écrire est le sien autant que celui de
+            // l'`idle` — un seul terminateur pour `idle` + `noidle`, exactement
+            // comme MPD. Tout le reste est un `noidle` implicite **suivi de
+            // cette commande**, vraisemblablement ce que le client voulait
+            // dire : la ligne repart donc dans l'aiguillage complet de
+            // `servir` — listes de commandes, lignes illisibles et `close`
+            // comprises — sans qu'un seul cas soit réinterprété ici.
+            //
+            // Une ligne illisible n'est pas `noidle` (elle ne se découpe pas),
+            // et c'est la conduite voulue : elle recevra son `ACK` au tour
+            // suivant, comme n'importe où ailleurs.
+            let est_noidle = decouper(&brute)
+                .map(|args| args.first().is_some_and(|mot| mot == "noidle"))
+                .unwrap_or(false);
+            if !est_noidle {
+                lignes.remettre(brute);
             }
+            // La référence de la connexion n'avance pas : rien n'a été annoncé,
+            // donc un changement survenu pendant cette attente ressortira à
+            // l'`idle` suivant.
             return Ok(Suite::Continuer);
         }
     };
+    // **Les compteurs rapportés, et eux seuls, sont consommés.** Avancer tout
+    // le tableau perdrait le changement d'un sujet que cet `idle` n'a pas
+    // demandé.
+    for sujet in &reveil.bouges {
+        vues[*sujet as usize] = reveil.versions[*sujet as usize];
+    }
     let mut reponse: Vec<String> =
-        bouges.iter().map(|sujet| ligne("changed", nom_sujet(*sujet))).collect();
+        reveil.bouges.iter().map(|sujet| ligne("changed", nom_sujet(*sujet))).collect();
     reponse.push("OK".to_string());
     ecrire(ecriture, &reponse).await?;
     Ok(Suite::Continuer)
@@ -991,12 +1092,19 @@ mod tests {
     /// dormeur répond, et une implémentation qui ne réveille jamais fait
     /// *pendre* le test — un blocage franc, pas un passage douteux.
     ///
-    /// La répétition n'est pas de la superstition : rien n'ordonne
-    /// l'inscription du dormeur avec la première trame. Une trame appliquée
-    /// avant que la session n'ait lu sa ligne `idle` est comprise dans les
-    /// compteurs qu'elle mémorise, donc invisible pour elle — c'est le contrat
-    /// d'`attendre`, et un test qui n'en pousserait qu'une se bloquerait sur
-    /// cette course au lieu de la mesurer.
+    /// **Deux trames alternées, et non une répétée** : chaque poussée doit être
+    /// un changement réel, sinon la déduplication d'`appliquer_etat` l'avale et
+    /// la boucle tourne à vide.
+    ///
+    /// La boucle, elle, n'arbitre plus aucune course. Elle en arbitrait une :
+    /// une trame appliquée avant que la session n'ait lu sa ligne `idle` était
+    /// comprise dans les compteurs qu'elle mémorisait, donc invisible pour
+    /// elle. **C'était un défaut de la session et non un contrat d'`attendre`**
+    /// — la référence d'un `idle` est désormais celle que la connexion porte
+    /// depuis sa bannière (voir `servir`), donc une seule trame suffirait ici.
+    /// La boucle est gardée parce qu'elle ne dépend d'aucune horloge et qu'elle
+    /// reste juste dans les deux cas ; ce qu'il ne faut plus faire, c'est
+    /// justifier par elle une course qui a été corrigée.
     async fn reponse_sous_trames(
         client: &mut Client,
         etat: &EtatPartage,
@@ -1167,17 +1275,186 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn une_commande_pendant_une_attente_est_refusee_sans_fermer() {
+    async fn une_commande_pendant_une_attente_annule_lattente_puis_est_executee() {
+        // **Un test de comptabilité, pas de contenu.** Le client écrit deux
+        // lignes (`idle`, `status`) et doit recevoir **deux** terminateurs. Ce
+        // code n'en écrivait qu'un — l'`ACK` refusant le `status` — et l'`idle`
+        // n'en recevait aucun : le client repartait décalé de un, de façon
+        // permanente, chaque réponse suivante lue comme celle de sa requête
+        // précédente. Silencieux et définitif, là où le choix de MPD (fermer)
+        // est bruyant et auto-réparateur.
+        //
+        // Le `noidle` implicite est ce qui répare : un `OK` nu clôt l'`idle`,
+        // puis la commande est exécutée comme n'importe où ailleurs.
         let (s, _rx) = serveur().await;
         let mut c = s.client_pret().await;
         c.envoyer("idle").await;
         c.envoyer("status").await;
-        // MPD fermerait ; ici l'`ACK` répond à l'`idle` en suspens et la
-        // connexion continue. Le choix est écrit sur place dans
-        // `attendre_idle`.
-        assert_eq!(c.reponse().await, vec!["ACK [5@0] {status} not allowed during idle".to_string()]);
+
+        // Premier terminateur : celui de l'`idle` annulé. `OK` nu, aucun
+        // `changed:` — rien n'a bougé, et de toute façon `noidle` n'annonce
+        // rien.
+        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        // Second terminateur : la réponse du `status`, avec ses lignes.
+        let deuxieme = c.reponse().await;
+        assert!(deuxieme.iter().any(|l| l.starts_with("volume: ")), "{deuxieme:?}");
+        assert_eq!(*deuxieme.last().unwrap(), "OK");
+        // Et la troisième requête reçoit **sa** réponse : c'est ce qui prouve
+        // l'absence de décalage. Un `ping` répond `OK` sec, donc une réponse de
+        // `status` qui traînerait dans le flux ressortirait ici.
         c.envoyer("ping").await;
         assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+
+        // ------------------------------------------------------------------
+        // **Et le cas voisin qui doit rester à UN seul terminateur.** Gardé
+        // dans le même test exprès : séparés, un remaniement futur croirait
+        // l'un redondant. `noidle` n'est pas une requête mais l'annulation de
+        // celle en cours, donc `idle` + `noidle` = un `OK`, comme chez MPD.
+        // Si la correction ci-dessus le faisait passer à deux, elle aurait
+        // cassé le cas correct.
+        // ------------------------------------------------------------------
+        c.envoyer("idle").await;
+        c.envoyer("noidle").await;
+        c.envoyer("status").await;
+        assert_eq!(c.reponse().await, vec!["OK".to_string()], "un seul OK pour idle + noidle");
+        let apres = c.reponse().await;
+        assert!(
+            apres.iter().any(|l| l.starts_with("volume: ")),
+            "un terminateur de trop apres noidle: {apres:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn une_ligne_illisible_pendant_une_attente_compte_aussi_deux_terminateurs() {
+        // La même comptabilité sur l'autre entrée de cette branche : une ligne
+        // mal citée n'est pas `noidle` (elle ne se découpe pas), donc elle est
+        // un `noidle` implicite suivi d'une ligne qui recevra son `ACK` par le
+        // chemin ordinaire. Deux lignes écrites, deux terminateurs.
+        let (s, _rx) = serveur().await;
+        let mut c = s.client_pret().await;
+        c.envoyer("idle").await;
+        c.envoyer(r#"load "France"#).await;
+
+        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        assert_eq!(c.reponse().await, vec!["ACK [2@0] {load} invalid argument".to_string()]);
+        c.envoyer("ping").await;
+        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn une_liste_de_commandes_ouverte_pendant_une_attente_est_traitee_comme_une_liste() {
+        // La ligne remise repasse par l'aiguillage **complet** de `servir`, et
+        // non par une réinterprétation locale : un `command_list_begin` reçu
+        // pendant une attente ouvre donc une vraie liste, dont le `OK` unique
+        // arrive après celui de l'`idle` annulé. C'est ce qui garantit qu'aucun
+        // cas n'a besoin d'être dupliqué dans `attendre_idle`.
+        let (s, _rx) = serveur().await;
+        let mut c = s.client_pret().await;
+        c.envoyer("idle").await;
+        c.envoyer("command_list_begin").await;
+        c.envoyer("status").await;
+        c.envoyer("status").await;
+        c.envoyer("command_list_end").await;
+
+        assert_eq!(c.reponse().await, vec!["OK".to_string()], "l'idle annule a son terminateur");
+        let liste = c.reponse().await;
+        assert_eq!(liste.iter().filter(|l| *l == "OK").count(), 1, "{liste:?}");
+        assert_eq!(liste.iter().filter(|l| l.starts_with("volume: ")).count(), 2, "{liste:?}");
+    }
+
+    #[tokio::test]
+    async fn un_changement_survenu_entre_deux_commandes_est_rapporte_par_lidle_suivant() {
+        // **LE test de ce correctif.** La session mémorisait les compteurs dans
+        // l'`Instantane` de la commande `idle` elle-même, donc tout ce qui avait
+        // bougé entre la réponse précédente du client et sa ligne `idle` était
+        // avalé — c'est-à-dire pendant la seule fenêtre où un client MPD
+        // n'écoute pas. Pour `stored_playlist`, rien ne rejoue l'événement avant
+        // le prochain changement de catalogue : `listplaylists` reste périmé,
+        // potentiellement pour toujours. C'est exactement le premier essai
+        // prévu sur l'appareil (« désactiver une source, sa liste doit
+        // rétrécir »), qui pouvait donc échouer en silence.
+        //
+        // Sans horloge, et **une seule trame poussée** : c'est ce qui rend la
+        // preuve concluante. Aucun changement ne suivra, donc une session qui
+        // relit ses compteurs à la ligne `idle` dort pour toujours et ce test
+        // **pend** — le mode d'échec voulu. Vérifié contre l'ancien code.
+        let (s, _rx) = serveur().await;
+        let mut c = s.client_pret().await;
+        // Une commande, sa réponse lue jusqu'au terminateur : le client est
+        // désormais « entre deux commandes », précisément comme un client qui
+        // vient de rafraîchir son écran.
+        c.envoyer("ping").await;
+        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+
+        // Le changement arrive maintenant : personne n'attend.
+        s.etat.appliquer_catalogue(ritornello_proto::Catalogue {
+            sources: vec![ritornello_proto::SourceCatalogue {
+                name: "radio".into(),
+                presets: vec![ritornello_proto::Preset { index: 1, name: "FIP".into() }],
+            }],
+        })
+        .await;
+
+        c.envoyer("idle stored_playlist").await;
+        assert_eq!(
+            c.reponse().await,
+            vec!["changed: stored_playlist".to_string(), "OK".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn un_reveil_ne_consomme_que_les_sujets_quil_annonce() {
+        // La moitié fine du même dispositif. Le réveil avance la référence de la
+        // connexion **sujet par sujet**, comme MPD n'efface que les drapeaux
+        // qu'il vient de rapporter : tout avancer d'un coup perdrait le
+        // changement d'un sujet que cet `idle`-là n'avait pas demandé, et le
+        // défaut réparé au-dessus se rouvrirait d'un cran plus loin.
+        //
+        // Déterministe et sans horloge : la trame est appliquée **avant** les
+        // deux `idle`, donc chacun repart par la comparaison préalable, sans
+        // jamais dormir. Une implémentation qui remettrait tout le tableau à
+        // niveau au premier réveil ferait *pendre* le second `idle`.
+        let (s, _rx) = serveur().await;
+        let mut c = s.client_pret().await;
+        // Une seule trame, qui bouge `player` **et** `mixer`.
+        s.etat.appliquer_etat(trame_player_et_mixer(17)).await;
+
+        c.envoyer("idle player").await;
+        assert_eq!(c.reponse().await, vec!["changed: player".to_string(), "OK".to_string()]);
+
+        c.envoyer("idle mixer").await;
+        assert_eq!(c.reponse().await, vec!["changed: mixer".to_string(), "OK".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn un_reveil_annonce_consomme_bien_son_compteur() {
+        // Le pendant indispensable : la référence doit *avancer*. Sans cela un
+        // `idle` rapporterait éternellement le même changement, et un client
+        // qui boucle sur `idle` — c'est-à-dire tous — tournerait à pleine
+        // vitesse sur la commande faite pour l'en dispenser.
+        //
+        // Prouvé sans horloge : le second `idle` doit **attendre**, donc la
+        // commande d'après est un `noidle` dont le `OK` unique est suivi de la
+        // réponse du `status`. Si le second `idle` avait répondu tout seul, il
+        // y aurait un terminateur de plus et on lirait ici le `OK` du `noidle`
+        // au lieu des lignes du `status` — le même compte que
+        // `noidle_rend_la_main_immediatement`.
+        let (s, _rx) = serveur().await;
+        let mut c = s.client_pret().await;
+        s.etat.appliquer_etat(trame_mixer(17)).await;
+
+        c.envoyer("idle mixer").await;
+        assert_eq!(c.reponse().await, vec!["changed: mixer".to_string(), "OK".to_string()]);
+
+        c.envoyer("idle mixer").await;
+        c.envoyer("noidle").await;
+        c.envoyer("status").await;
+        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        let apres = c.reponse().await;
+        assert!(
+            apres.iter().any(|l| l.starts_with("volume: ")),
+            "le second idle a repondu tout seul: {apres:?}"
+        );
     }
 
     #[tokio::test]
@@ -1589,10 +1866,16 @@ mod tests {
         // `OK` immédiat. Un `OK` ferait boucler le client à pleine vitesse
         // sur la seule commande faite pour l'en dispenser.
         //
-        // Prouvé sans horloge, par ce que la ligne suivante devient : tant que
-        // l'attente tient, une commande autre que `noidle` est refusée. Une
-        // session qui aurait rendu `OK` tout de suite ne serait plus en
-        // attente, et ce `status` répondrait `volume: …` puis `OK`.
+        // Prouvé sans horloge, **en comptant les terminateurs** : `idle` +
+        // `noidle` n'en valent qu'un, donc la deuxième réponse lue est celle du
+        // `status`. Une session qui aurait rendu `OK` tout de suite en aurait
+        // écrit un de plus (le sien, puis celui du `noidle` reçu hors attente),
+        // et on lirait ici un `OK` sec au lieu des lignes du `status`.
+        //
+        // Le discriminant a changé avec le `noidle` implicite : envoyer
+        // `status` ne distingue plus rien, puisqu'une attente annulée écrit
+        // désormais `OK` puis la réponse du `status` — exactement ce qu'un
+        // `idle` répondant tout de suite produirait aussi.
         let (s, _rx) = serveur().await;
         let mut c = s.client_pret().await;
         c.envoyer("idle database").await;
@@ -1600,14 +1883,14 @@ mod tests {
         // sujets demandés (il n'y en a aucun), donc aucune ne doit réveiller.
         s.etat.appliquer_etat(trame_player_et_mixer(17)).await;
         s.etat.appliquer_etat(trame_player_et_mixer(18)).await;
-        c.envoyer("status").await;
-        assert_eq!(
-            c.reponse().await,
-            vec!["ACK [5@0] {status} not allowed during idle".to_string()]
-        );
-        // L'attente est retombée avec ce refus : la connexion reste utilisable.
         c.envoyer("noidle").await;
+        c.envoyer("status").await;
         assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        let apres = c.reponse().await;
+        assert!(
+            apres.iter().any(|l| l.starts_with("volume: ")),
+            "idle database a repondu tout seul: {apres:?}"
+        );
     }
 
     // ------------------------------------------------------------------
