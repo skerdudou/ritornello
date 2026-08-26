@@ -56,10 +56,14 @@ that the core opens before launching a single plugin:
    describing exactly what it just bound, e.g.:
 
    ```json
-   {"name":"mpd","kinds":["input","display"],"admin":true}
+   {"name":"mpd","kinds":["input","display"],"admin":true,"covers":true}
    ```
 
-   before closing the connection.
+   before closing the connection. That last flag is a display's opt-in for
+   the bytes of album covers, described with the display protocol
+   below — like `admin`, it is **derived** from what the binary actually
+   implements rather than asked of its author, which is the invariant of
+   this handshake: an announcement cannot lie.
 
 This "bind first, announce second" order is not merely a convention:
 the SDK's `Runtime` enforces it structurally (see [Writing a `metadata`
@@ -226,6 +230,46 @@ show. `preset_name` is absent (not cleared) on the "empty preset" branch:
 nothing new is playing there, the previous station carries on, so its name —
 if any — must stay exactly as it was.
 
+**It is also the only source that enumerates its presets by name.** The
+source protocol carries a request for it, `SourceReq::ListPresets`, served
+by `SourcePlugin::list_presets`; the radio answers its station table sorted
+by number, and that answer is what fills the catalogue frame the displays
+receive. The default body of that method returns the **empty list**, which
+does not mean "not implemented yet" but "I only have numbers" — the truth
+for the cd, where a track has no name without a database, and for `files`,
+whose list *is* the queue rather than a set of presets. The list may be
+**sparse** (stations 1, 5 and 99): `Preset::index` is the index `Select`
+expects, never a rank, so nothing may derive one from the other by
+subtraction.
+
+The list travels **outside the correlation**, exactly like `preset_count`,
+and the reason is worth writing down because the shape looks like an
+oversight. Nothing in the source pipe can carry a list: a `SourceReq`
+resolves to exactly one `SourceAction`, and `SourceClient` requires
+`(Some(id), Some(action))` to untie its `oneshot`. So the correlated answer
+to `ListPresets` is a plain `Noop` — which satisfies the correlation and
+teaches the core nothing — and the list rides beside it, in
+`SourceMessage::presets`, through the "is this frame worth forwarding"
+predicate that already relays `preset_count`. Nothing had to be widened:
+neither `pending`, nor `Source::request`, nor the core's pending-request
+bookkeeping. A source that does not enumerate stays inert on this path too,
+since the SDK converts an empty list into an *absent* field (both forms
+remain readable, so a hand-written plugin may send `[]`).
+
+Because the answer teaches the core nothing, the core asks in a **detached
+task** and joins none of them: once at startup, one per wired source, and
+again on every hot-wiring of a source (a late announcement, a plugin
+switched back on, a plugin restarted by hand). Waiting for those answers
+would put the source protocol's 5 s timeout on the startup path, once per
+unreachable source — precisely the class of delay the previous chantier
+existed to remove. The same detachment covers a genuine defect: without a
+fresh `ListPresets` on every wiring, a source announced late would have
+entered the catalogue with a **permanently** empty list, nobody ever asking
+again, and a plugin whose configuration changed while it was switched off
+would have kept the core on the old list. Saving the station table also
+republishes the list on the radio's own spontaneous notification, which is
+what propagates a station **rename** without any client asking for it.
+
 The search **country** is picked from a keyboard-filterable list,
 populated by the directory itself (241 countries at the last count, with
 each one's station count). Names are rendered by the browser from the ISO
@@ -275,7 +319,12 @@ in for stations.
 
 It never fills `preset_name`: a track number is not a name, and what is
 interesting about a disc (album, title, artist) already arrives through the
-`metadata` path (see below), not through the preset name.
+`metadata` path (see below), not through the preset name. For the same reason
+it keeps `SourcePlugin::list_presets`' default empty answer: a track has no
+name without a database, so "no named presets" is the truth about a disc, not
+a gap left to fill. What a consumer wanting to list a disc's tracks falls
+back on is `preset_count` — see the MPD server's section for the one place
+that difference is visible.
 
 It is also the only source that overrides `SourcePlugin::can_eject` to return
 true — the capability that greys the web remote's Eject key everywhere else.
@@ -559,31 +608,83 @@ A display plugin receives the appliance's full state — `PlayerState`, the
 same structured payload that feeds the SPA's Player card (see
 [interface.md](interface.md)) — through a one-way call,
 `DisplayPlugin::show(state)`, no answer expected. It is not the only call:
-the protocol carries a second kind of frame, described just below, which a
-plugin may ignore. **The core imposes no
+the protocol carries **three** kinds of frame today, and a plugin may ignore
+two of them. **The core imposes no
 layout**: it hands over data, never composed lines, so a future display (an
 SSD1306 OLED over SPI/I2C, a wall panel with a scrolling ticker) is free to
 lay its own screen out, at whatever size, with no fallback rule to
 reimplement and no core change to request one.
 
-Each line on that socket is a **frame**: `{"frame":"state","data":{…}}`
-carries the `PlayerState` (the `data` is byte-for-byte the payload that used
-to travel bare), and `{"frame":"catalogue","data":{…}}` carries the declared
-sources and, for each one that can enumerate them, its named presets —
-the protocol and the SDK carry catalogue frames as of this writing, but
-nothing produces one yet; the core starts sending them once it keeps a
-catalogue of its own, and no shipped source enumerates its presets before
-the radio does. The
-tagging is adjacent rather than internal because `PlayerState` flattens
-`Morceau`, and flatten crossed with an internally-tagged enum is a known
-serde blind spot. The catalogue is a separate frame rather than a wider
-`PlayerState` on purpose: the state is a snapshot the core deduplicates by
-equality and rebuilds on every publication, so fifty station names would
-ride every frame of playback. `DisplayPlugin::catalogue` has a **default
-body that ignores it** — a twenty-column screen has no use for it — which is
-what makes each new kind of frame a non-breaking addition; a frame of a kind
-the SDK does not know is treated like an unreadable line (warn, then
-continue) and the connection survives.
+Each line on that socket is a **frame**, tagged by a `frame` key with the
+payload beside it in `data`. The tagging is adjacent rather than internal
+because `PlayerState` flattens `Morceau`, and flatten crossed with an
+internally-tagged enum is a known serde blind spot; the state frame's `data`
+is therefore byte-for-byte the payload that used to travel bare, which is
+what made that migration verifiable.
+
+- `{"frame":"state","data":{…}}` — the `PlayerState`, up to once a second
+  while something plays.
+- `{"frame":"catalogue","data":{…}}` — the declared sources, in
+  `SourceCycle` order, and for each one that can enumerate them its named
+  presets (see [`ListPresets`](#ritornello-plugin-radio--internet-radio) in
+  the radio section). A source that does not enumerate is still listed, with
+  an empty list: it exists, and the consumer falls back on `preset_count`,
+  which stays the truth about the number.
+- `{"frame":"cover","data":{…}}` — the bytes of the cover of what is
+  playing, base64 on the wire, pushed **only** to the displays that asked
+  for them.
+
+**Why the catalogue has a channel of its own** rather than a field in
+`PlayerState`, since that is the decision a future reader is most likely to
+want to undo. A field present only when it changed would be an *event*, not
+a snapshot, and `PlayerState` is a snapshot: the core rebuilds it on every
+publication and deduplicates it by equality. A field always present would
+therefore send the 51 station names on every per-second frame of playback,
+and deduplication would catch nothing, since both values change together by
+construction. So there are two `watch` channels, `publie_etat` never calls
+`publie_catalogue` and `publie_catalogue` never calls `publie_etat`. The
+catalogue is republished only where it can actually change: at core
+construction (the sources wired at startup), when a source's presets
+arrive, on `add_source` and on `remove_source` — a plugin switched off must
+leave the list, otherwise an MPD client would keep a stored playlist to act
+on. It is deduplicated the same way the state is, for the same reason: the
+radio republishes the same list on every save of its admin page, and that
+must not wake the displays.
+
+Both new frames have a **default body that ignores them** —
+`DisplayPlugin::catalogue` returns `Ok(())`, `DisplayPlugin::cover` too —
+which is what makes each new kind of frame a non-breaking addition, and is
+also why **no behaviour of this console plugin changed** when the two were
+added: a twenty-column screen has no use for either. A frame of a kind the
+SDK does not know is treated like an unreadable line (warn, then continue)
+and the connection survives.
+
+Covers are **opt-in, and the opt-in cannot lie**: a display that wants the
+bytes overrides `DisplayPlugin::wants_covers`, and the SDK *derives* the
+`covers` flag of the register announcement from that method rather than
+asking the plugin author to declare it (same shape as the `kinds` and
+`admin` flags — see [Declaring the
+plugins](#declaring-the-plugins)). The core pushes bytes only to the
+displays whose announcement carried the flag, and only when the cover
+actually changes — change being detected on the state frame's `cover_href`,
+which is the identity of the image (the cache key), not a timestamp, so a
+cover that stays on screen is never re-sent. The materialization of the
+bytes, the only moment the whole image exists in the core's memory, sits
+**behind** that filter: a display that does not want covers does not make
+anyone pay the file read either. The flag is read once, at registration, and
+never re-read; a display that changed its mind has nothing to expect from
+it, and needs nothing — `cover` can simply ignore.
+
+A cover frame is **self-contained**: one line carries one whole image, never
+a slice. That is what makes it compatible with the SDK's unreadable-line
+policy — skipping a self-contained line loses one image, whereas skipping a
+slice would produce a truncated image that no check would catch. It carries
+the same `cover_href` the state frame publishes for that image, because
+frames do arrive in order on a single socket but nothing *inside* an image
+says which one it is, and a plugin that must answer "the cover of that
+track" (the MPD server does) has no other correlation available. Its ceiling
+is `COVER_MAX_BYTES`, **20 MiB** — see the MPD server's section below for
+what that number costs and what it excludes.
 
 Every piece of information the core knows travels both raw and already
 resolved into words: `volume` is a number a display can turn into a gauge,
@@ -605,7 +706,12 @@ deliberately not built ahead of need: the day a display wants its own words
 `SetLocale` to the display protocol is a new message a plugin can ignore
 until it cares about it — non-breaking, unlike the rest of this protocol
 change, which was only safe to make because it happened before the project
-was published.
+was published. That prediction has since been tested twice, by the catalogue
+frame and by the cover frame: both were added, both have default bodies, and
+**not one line of this plugin's behaviour changed** for either — its only
+edit was a test pinning that it does *not* ask for covers, written on the
+side that must stay silent, since that is where the regression would happen
+if someone added an override by mimicry.
 
 This bundled plugin (`RITORNELLO_CONSOLE_TTY` variable, default
 `/dev/tty1`) targets a text screen of about twenty columns. Its layout is
@@ -704,6 +810,354 @@ is delete the old entry — it never removes anything (see [Declaring the
 plugins](#declaring-the-plugins)) — and that entry now names a binary
 that no longer exists, which the core reports at every startup. Delete
 the `name = "mce"` block by hand, once.
+
+## `ritornello-plugin-mpd` — the appliance seen as an MPD server
+
+It speaks the MPD protocol over TCP so that a phone's MPD client — M.A.L.P.
+is the one this was built against — can act as a remote control, with a
+screen, without an app to write. One binary serving **two kinds**: the
+`display` half receives the core's frames and drops them in a shared state,
+the `input` half pushes protocol `Command`s the client's actions translate
+into. There is no third path: everything it can show is something a display
+already receives, and everything it can do goes down the very channel the
+infrared remote feeds — including the two commands added for it,
+`Command::SetVolume` (`setvol`) and `Command::SelectSource` (`load`), which
+are absolute where the remote's keys are relative and are therefore now
+available to any input plugin (see [interface.md](interface.md)). Nothing
+here reaches into the core sideways.
+
+**What a client sees.** Each audio **source** declared in `plugins.toml` is
+a **stored playlist** (`listplaylists`), named exactly as the manifest names
+it, and listed **in the order the catalogue frame carries** — the plugin does
+not sort, deliberately: that order is the core's source-cycle order (today,
+the names sorted alphabetically, re-sorted when a source is wired late so
+that the cycle does not depend on boot chronology), which is the order the
+remote's source key walks. Re-sorting on this side would just be a second
+opinion about it. Its entries are that source's named presets
+(`listplaylistinfo`), and the **active** source's presets are the **queue**
+(`playlistinfo`, `plchanges`, `currentsong`, `status`). That correspondence
+is what makes the appliance readable from a client at all: "load the radio
+playlist" means "listen to the radio". So `load` does not concatenate as it
+does in MPD — the queue *is* the active source's list, hence loading one is
+choosing one, and it emits `Command::SelectSource`. Playing an entry emits
+`Command::Select`. `listplaylistinfo` answers for a source that is not
+playing too, since what a source contains is a fact about the source, not
+about what plays.
+
+Two details of that listing are decisions rather than accidents. Each entry
+carries a `Last-Modified` of `1970-01-01T00:00:00Z`, a **constant**: no date
+exists on this side — a source is not a file — and deriving one from the
+clock would make a client believe a list had just changed every time it
+re-read it. The field is nonetheless emitted rather than omitted, optional
+though the protocol makes it, because clients read it without keeping it
+(libmpdclient sorts its lists on it) and its absence trips them; a value that
+will never move can never lie. And a client that asks **before the first
+catalogue frame** gets nothing at all, which is the truth of that instant —
+the plugin then knows of no source — and it will re-read after its
+`stored_playlist` wake-up.
+
+**What a client does not get**, and this is a list, not an apology: no
+browsable database (nothing to index, so `update`, `lsinfo`, `find` and
+`search` are all refused), no queue editing (`add`, `delete`, `move` — the
+queue is not ours to rearrange, it is what the active source offers), and no
+writing playlists (`save`, `rm`, `playlistadd` — a source's presets are
+edited on that source's own admin page). `repeat`, `random`, `single` and
+`consume` are reported as `0` and cannot be set: reported rather than
+omitted, because clients read them unconditionally and misbehave without
+them, but writing them is refused. There is one audio output, always
+enabled, and `enableoutput`/`disableoutput` are refused — a client that sees
+no output at all displays "muted" and stops trying.
+
+**`commands` is what makes this honest rather than merely incomplete.** A
+well-behaved client reads that list and greys out the rest itself; the
+difference between "empty tabs" and "tabs that crash" is exactly that
+answer, so the list must never promise more than the dispatch really
+handles, and a test walks it to check that each name it carries is. Its
+counterpart `notcommands` answers empty, which is the honest answer and not
+a stub: `notcommands` lists what the current password *forbids*, and there
+is no password here, so nothing is forbidden by permission — what does not
+exist is simply absent from `commands`. The banner, on the other hand,
+announces version `0.23.5`, which the plugin does not implement in full.
+That overstatement is deliberate: clients derive their capabilities from the
+version number and not from `commands` alone (libmpdclient and M.A.L.P.
+compare it before emitting `plchanges`, `seekcur` or `tagtypes`), so
+announcing a low version would make them give up commands that do work. The
+opposite risk is bounded by `commands`, which tells the truth, and by the
+`ACK 5` everything else gets.
+
+### Dense positions, sparse indices
+
+**This is the one thing worth reading before touching this plugin.** Preset
+indices are **1-based and may be sparse**: `Stations::preset_count` returns
+the *maximum* number in use and not a count, so stations numbered 1, 5 and
+99 are perfectly legal (see the radio section, and
+[interface.md](interface.md) for the general rule). MPD positions, on the
+other hand, are **dense**. The mapping is therefore:
+
+| MPD | this appliance |
+|---|---|
+| `Id`, `songid` | the preset index as-is — sparse, ≥ 1 |
+| `Pos`, `song` | the **rank** in the list returned — dense, 0-based |
+| `play <POS>` | the index found at that rank, never `POS + 1` |
+| `playid <ID>` | `Select(ID)`, but only after checking the id is really *in* the list |
+| `playlistlength` | the **length** of the list, never the maximum index |
+
+Three stations numbered 1, 5 and 99 therefore answer `playlistlength: 3`,
+never 99 — publishing the maximum would make a client ask for ninety-six
+entries that do not exist. And `playid` checks membership rather than
+comparing against a bound, because an id below the maximum yet absent from a
+sparse list must be refused, where a bound check would let it through. The
+distinction is invisible on a dense list, which is exactly why it has to be
+written down: the bug it prevents only appears on a hand-edited, sparse
+station file.
+
+The queue itself is built on two branches. When the catalogue holds a
+**non-empty** list for the active source, that list is the queue, sparse
+indices included. Otherwise the plugin **synthesizes** `1..=preset_count`,
+which is dense by construction (`Pos = Id - 1`); that fallback is what shows
+the twelve tracks of a disc, since the cd names nothing and its catalogue
+entry carries an empty list — meaning "I only have numbers", not "I have
+nothing". An absent `preset_count` becomes **zero** entries, not the nine of
+the web UI's historical grid: that grid is a keypad, and announcing nine
+entries would make a client ask for nine things of which none exists. Note
+what the synthesis cannot do: `preset_count` describes the *active* source
+only, so `listplaylistinfo` on an idle source that does not enumerate
+answers a well-formed **empty** list rather than a guessed number.
+
+### Network posture
+
+`0.0.0.0:6600` by default — the same surface the appliance's web server
+already exposes — and **no password**. The consequence, stated plainly:
+**anyone on the local network can change the station, switch source, move
+the volume and cut the sound**, exactly like anyone holding the remote in
+the room. That is the deliberate trade (`password` is even accepted without
+being checked, so that a client configured with one is not rejected for it;
+it grants nothing, because nothing is restricted), and it is worth knowing
+before exposing port 6600 on a network you do not trust. One capability is
+withheld rather than granted by that logic: `kill` is **refused**, not
+ignored, because shutting the appliance down from the network without
+authentication is something no remote in the room can do.
+
+Settings live in `/etc/ritornello/mpd.toml` (`RITORNELLO_MPD_CONFIG` moves
+the path), two keys, `listen` and `port`. No file has to be provisioned: the
+defaults are exactly what `deploy/mpd.example.toml` contains, and a file
+that is missing, unreadable or refused by validation falls back to those
+defaults **with a log line** rather than refusing to start — a plugin that
+refuses to start disappears from the status page instead of explaining
+itself on it, which is the same policy the radio's station table follows.
+The admin page is at `http://<host>:8080/plugins/mpd/`; it writes the file
+through a temporary and a rename, so no power cut leaves a truncated toml,
+and it says on the page that a change **takes effect when the plugin
+restarts** — the TCP socket was bound at startup and nothing rebinds it.
+
+**The port is bound before the plugin announces itself.** That is the same
+doctrine the SDK holds for its Unix sockets (bind first, announce second —
+see [Declaring the plugins](#declaring-the-plugins)), and here it buys
+something concrete: a port 6600 already taken makes `main` fail *before* a
+`Runtime` even exists, so the plugin dies **unannounced**, the core reports
+it as dead-before-announcing, and the **status page shows it**. Without that
+ordering, an occupied port would be something an operator had to guess from
+the logs.
+
+### Four limits, and why each exists
+
+This is a port open to the whole local network on a device with a single
+gigabyte of RAM shared between mpv, the core, the web UI and the nine
+plugins the reference manifest declares.
+None of these four needs malice to be reached — a port scanner or a buggy
+client gets there by accident, and taking down the plugin here takes down
+the music with it.
+
+- **Per line: 8 KiB** (`MAX_LIGNE`). Without it, a client that connects and
+  sends bytes while never sending a newline makes the plugin allocate until
+  the allocator gives up. The line reader is written by hand
+  (`fill_buf`/`consume`) for exactly this reason: `BufReader::lines()`
+  accumulates to the `\n` without any bound. 8 KiB is twice MPD's own input
+  buffer and an order of magnitude above the longest legitimate line (a
+  quoted playlist name, a few hundred bytes). Over the limit the connection
+  is **closed**, not `ACK`ed: the command name is unknowable by then, so
+  there would be nothing to name in the ACK, and keeping a connection that
+  has already left the protocol buys nothing.
+- **Command-list bytes: 256 KiB** (`MAX_OCTETS_LISTE`), alongside a count of
+  **2048 commands** (`MAX_COMMANDES_LISTE`). Between `command_list_begin`
+  and its `end` nothing executes and every line is *kept*, so a client that
+  never sends the `end` grows a `Vec` without bound. The count alone was not
+  enough: 2048 legitimate lines of 8 KiB is 16 MiB, the very order of
+  magnitude the line limit exists to forbid — which is also why MPD
+  expresses its own limit in bytes. One caveat, because the unit invites a
+  wrong reading: these count **bytes of text, not bytes of heap**. Tokenizing
+  allocates a `String` per token, so a legal line of `"a a a a …"` becomes
+  thousands of one-character strings, and 256 KiB counted can weigh several
+  real mebibytes.
+- **Composed response: 1 MiB** (`MAX_REPONSE`) — the most instructive of the
+  four, because it is the one a command-list limit does *not* cover: that
+  one bounds commands, not what they **produce**. A list of 2048
+  `playlistinfo` — **26 KiB of input**, a loop, no malice whatsoever —
+  returns four lines per queue entry, up to 1020 lines per command at the
+  maximum `preset_count` of 255: two million `String`s, and above all **a
+  single contiguous allocation of tens of mebibytes** at the moment of
+  flattening it all for the `write_all`. On a Pi 2 B a contiguous request
+  that size fails against fragmented memory long before the total is
+  reached. 1 MiB still admits some sixty complete `playlistinfo` in one
+  list, the longest legitimate response being about fifteen kibibytes.
+- **Simultaneous sessions: 16** (`MAX_SESSIONS`). The multiplier of the
+  other three: each of them bounds one connection, and nothing bounded the
+  number of connections, so a hundred sessions reached the device's gigabyte
+  by the one path the other ceilings left open. 16 is three times any
+  legitimate population (two phones, `mpc` on the device, a tablet, a
+  desktop client — and MPD clients open one connection each, sometimes a
+  second to hold an `idle` apart). Over it a connection is **refused at
+  once** rather than queued — making it wait would hold a descriptor open
+  and let the client believe it is being served, whereas an unreachable MPD
+  server is a state every client knows how to display — and the log names
+  the ceiling so the cause reads without guessing.
+
+### `idle`, and the wake-up that must not be missed
+
+The delicate part of this plugin is not in the protocol. A client that sends
+`idle` just after something changed must return **immediately**, not wait
+for the next change; a bare `Notify` loses that, because the notification
+fires while the session is still reading its versions and composing its
+request, before it has subscribed. So the shared state keeps a **monotonic
+counter per subsystem**, the session remembers them before going to sleep,
+and the wait begins with a **comparison**. It is that comparison that
+forbids the missed wake-up; the `Notify` only spares a polling loop. Four
+subsystems are named: `player` (playback, pause, stop, preset change,
+position), `mixer` (volume or mute), `playlist` (the queue changed — since
+the queue *is* the active source's presets, that means a source change) and
+`stored_playlist` (the catalogue of sources or of their presets changed). An
+`idle` naming only subsystems this server never emits waits **for ever**,
+which is the correct MPD behaviour and not an oversight; a *misspelled*
+subsystem is refused, because a client left silent for ever diagnoses far
+worse than one that got an `ACK`.
+
+### Album art
+
+`albumart` and `readpicture` answer **exactly the same bytes**, and that is
+not a shortcut. For MPD they are two different origins — a file *beside* the
+track, versus a picture *embedded* in its tags — whereas this appliance has
+exactly **one** cover per track whatever its origin, the core having already
+arbitrated between the neighbouring file, the embedded tag and the network
+(see [the cover chain](#the-cover-chain)). Distinguishing them here would
+need information the display protocol does not carry, and M.A.L.P. tries one
+then the other: answering only one of the two would make the cover depend on
+which the client happens to try first. The single difference is MPD's own —
+`readpicture` publishes a `type:` line.
+
+The image is served **in chunks of 8 KiB**, which is MPD's own `binarylimit`
+default and therefore the ceiling a client that never sends `binarylimit`
+(all of them here, since the command is not handled) expects never to be
+exceeded; serving 64 KiB to a client sized for 8 would be a buffer overrun
+in its process caused by ours. `size:` is the size of the **whole** image
+and not of the chunk, since that is what tells the client how many
+round-trips remain. The bytes never travel through the session's text
+accumulator — the amplification factor described under `MAX_REPONSE` has no
+purchase on them — and the image itself is not counted per connection: it
+lives **once** in the process, behind an `Arc`, however many sessions read
+it.
+
+Those bytes come from the cover frame the core pushes (see the console
+section above). The plugin cannot fetch them itself: the `cover_href` a
+state frame carries is a URL of the *core's* HTTP server, which the plugin
+has neither the right nor the means to read. It is the only plugin in the
+repository that overrides `wants_covers`, and that single line is what turns
+cover pushing on for the whole appliance.
+
+**The ceiling is 20 MiB, and its consequence is user-visible.** A cover above
+that is not pushed, so it appears **in the SPA and not in MPD**: the web
+route streams the file and never has to materialize it, while pushing on a
+socket **forces** materialization — the bytes, their base64, the rendered
+line. The value was raised from an initial 2 MiB because the owner keeps
+album scans on his NAS that exceed 2 MiB, and the cost was measured before
+accepting it: pushing a 20 MiB cover took the producing process's resident
+high-water to about **97 MiB**, some 4.8 times the image, once per track
+change, under a tenth of the device's 1024 MiB. (That measurement was taken
+on a dev build under WSL, not on the Pi.) The encoded line is built **once
+per publication** and shared between relays by `Arc`, so a second asker for
+the same cover — a second subscribed display, or the same one returning to a
+cover it has already seen — costs nothing measurable: the peak drops by about
+22 % from the second ask onward, and stays flat however many follow. Beyond
+the ceiling it is not a cover but an accident: the 150 MB PNG on a share that
+the core's HTTP route names as a real case would cost half the machine.
+
+The limit is checked on the **file's size, before a single byte of content
+is read** (on `metadata`), and the reason is worth keeping: a file size
+requires **no knowledge of the format** — no header to interpret, no
+decoder — so it is indifferent to JPEG, PNG, WebP or whatever comes next. A
+`take` before the read stays in place as a net, in case the file grows
+between the stat and the read. Exceeding the limit is a **refusal, not an
+allocation error**: no frame is emitted, the display simply has no image,
+the same silent-failure policy as cover fetching itself. Re-encoding or
+generating thumbnails was considered and **rejected**: only JPEG has a cheap
+reduced decode, the input is not necessarily JPEG, and the feature would
+become a multi-decoder project. It stays possible later, and its place would
+be the core's `cover.rs`, where the SPA would benefit too. A dedicated
+range-request socket was considered and rejected the same way: the ceiling
+covers the real cases, and the pattern keeps its own value for the day a
+*second* display wants covers.
+
+One rigour that is easy to mistake for a bug: **the requested URI is checked
+strictly against what is playing at that instant**. `currentsong` publishes
+`file: ritornello://<source>/<index>`, so `albumart ritornello://radio/17`
+means "the cover of whatever preset 17 is playing *now*" — a URI whose
+content changes underneath it, which never happens in an ordinary MPD where
+a URI is a file. Serving anyway would hand the client the **wrong** image as
+soon as its request is one track late, and the damage would be durable,
+since clients cache the cover **under the URI they asked for** (M.A.L.P.
+does): the poisoned entry would never be invalidated. So a mismatch is
+refused, and so is a mismatch of the `href` between the current state frame
+and the cover held — the core sends state first and cover second, so that
+window really exists. The refusal is transient and repairs itself: a cover
+change wakes `player`, and the client asks again.
+
+### `pause 0` / `pause 1`, and why there is no `SetPause`
+
+The protocol's pause is `Command::PlayPause`, a **toggle**, while MPD's
+`pause 1` is absolute. The plugin bridges the two with an **optimistic local
+state**: right after pushing a command it records the only two effects it can
+predict — `PlayPause` flips playing↔paused, `SetVolume` sets the volume —
+and `status` reports *that*, so a client that sends `pause` then `status` in
+the same breath does not read the state from before its own command and see
+its button fail to move. The next frame from the core is the authority and
+overwrites it. `pause 1` therefore emits **only if the state differs from
+the target**, which closes the remaining race: a client that repeats `pause
+1` having missed the confirmation must not resume playback. Stopped, `pause`
+emits nothing at all whatever its argument, since `PlayPause` would start a
+playback neither the plugin nor the source knows the what or the where of —
+though a malformed `pause 2` is still an `ACK` even when stopped, argument
+validation coming before that guard.
+
+Nothing else is guessed. Predicting what a `Select` does to the position,
+the track or the preset would be wrong more often than right — the active
+source decides that, and it alone. A slightly late `status` is benign; a
+`status` that invents a track is not.
+
+**No `Command::SetPause` was added**, and that is a decision rather than an
+omission. It would weigh down a protocol shared by every input plugin with a
+variant only a network client would ever emit, and it would ask the core and
+every source for a guarantee they do not have — pausing a live stream is not
+something a source necessarily honours. The optimistic layer buys the same
+client-visible behaviour exactly where it was needed, in the client's own
+`status`, without asking anyone to promise anything.
+
+### Not yet verified on hardware
+
+Like the rest of this chantier, **none of this has ever run on the
+device**: the test suite covers it, hardware does not. Two behaviours in
+particular are open rather than settled, and are the first things to try on
+the Pi:
+
+- **disabling a source while an MPD client is connected.** Turning a plugin
+  off removes it from the catalogue, which is republished, so the client's
+  `listplaylists` should **shrink** and its `stored_playlist` wake up should
+  fire. The path is there and tested in Rust; nobody has watched a phone do
+  it.
+- **a cover arriving while a permanent status is on screen.** Nothing read in
+  the code says the two interfere — a cover landing republishes the state,
+  and that frame carries the remembered status unchanged — but the
+  combination has never been watched on the device, and it is on the list
+  precisely because a status that vanished the moment a cover arrived is the
+  kind of defect only a screen shows.
 
 ## Now-playing metadata (the `metadata` kind)
 
@@ -1157,7 +1611,7 @@ which are the entirety of the data-side contract:
   slash) it designates `/plugins/api/data`, which the core interprets as
   a plugin named "api", hence a 404. The shell's router now canonicalizes
   the URL, but a module must not depend on that form: `base` is the
-  guarantee, the displayed URL is not one. Both bundled modules declare
+  guarantee, the displayed URL is not one. The bundled modules all declare
   `base` **required**, with no default value: the name a plugin is served
   under comes from `plugins.toml`, hence from the deployment, and a
   module that rebuilt `/plugins/<its-name>/` would be wrong — silently —
@@ -1169,7 +1623,8 @@ and a single set of components serve everyone. An incompatible contract
 is reported in the interface rather than breaking the page.
 
 Native ESM requires no build step: a simple plugin can ship a
-**hand-written** `ui.js`. The two bundled plugins use a Vite build (see
+**hand-written** `ui.js`. The four bundled plugin pages (radio, files,
+generic-input, mpd) use a Vite build (see
 `crates/ritornello-plugin-radio/ui/`) to benefit from `.vue` files and
 TypeScript — a comfort choice, not a requirement.
 

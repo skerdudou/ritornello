@@ -2,11 +2,20 @@
 
 ## Web remote and command API
 
-The home page (`http://<host>:8080/`) embeds a remote control: 14 of the
-protocol's 15 commands (presets 1-9 plus `+10`, next/previous, volume, mute,
-play/pause, stop, eject, source switch, standby, seek forward/backward). The
-15th, absolute seek, has no button of its own — it's the progress bar that
-sends it (see below).
+The home page (`http://<host>:8080/`) embeds a remote control: buttons for
+13 of the protocol's 17 commands (presets 1-9, next/previous, volume, mute,
+play/pause, stop, eject, source switch, standby, seek forward/backward). A
+14th, absolute seek, has no button of its own — it's the progress bar that
+sends it (see below). The remaining three are emitted by something other
+than this page: `Plus10` belongs to the physical remote, which has a single
+key and no other way past preset 9 (the web grid reaches the same numbers
+through its own page arrows, described below), while `SetVolume` (an
+absolute volume) and `SelectSource` (a source named rather than cycled to)
+exist for the MPD server plugin, whose clients send `setvol` and
+`load` — see [plugins.md](plugins.md). Both are absolute where the remote's
+keys are relative, which is exactly why they could not be expressed by
+stacking existing ones: the volume step is an adjustable setting, and each
+step writes an overlay on screen.
 
 `Next`/`Prev` are interpreted by the active source: preset for the radio,
 track for the CD player — these are not two distinct command pairs, only a
@@ -163,11 +172,14 @@ Three rules, and only the three the payload lets us establish:
   the cd player answers true with an empty tray too, since that is exactly
   when one opens it.
 
-Everything else stays live for lack of knowing: nothing in the payload says
-whether anything is playing, so `PlayPause` and `Stop` stay offered. A greyed
-button *asserts* the action does not exist, so greying on a guess would be
-worse than a button without effect. A state not yet received (the fraction of
-a second before the first frame) greys nothing.
+Everything else stays live: `PlayPause` and `Stop` are still offered
+unconditionally. That used to be for lack of knowing — nothing in the payload
+said whether anything was playing — and it no longer is: the payload now
+carries `playback` (below). The rule has not been revisited on the strength
+of it, and deliberately so, since the two questions are different. A greyed
+button *asserts* the action does not exist, and `Stop` on a stopped device is
+a no-op rather than a non-existent action. A state not yet received (the
+fraction of a second before the first frame) greys nothing.
 
 Two more fields ride the same payload for a different purpose: `position_s`,
 where in what's playing sits, in seconds, at the instant the frame is
@@ -182,6 +194,27 @@ precisely the case where mpv knows the position best. `position_s` is
 absent when neither of the two position sources — mpv on a finite content,
 a `metadata` plugin on a stream — has an answer right now: a stopped
 device, standby, or a stream nobody follows.
+
+A third field of the same payload says **what the player is doing**, in one
+word: `playback`, one of `playing`, `paused` or `stopped`. It is additive in
+the idiom this protocol already uses twice (`InputMessage.held`,
+`PluginStatus.stalled`): absent from the JSON when it is `stopped`, so no
+existing frame changed shape and an older frame still reads. It is
+deliberately *not* a deduction from `position_s` being known, because the two
+diverge exactly where it matters — a paused playback keeps its position, and
+a stream that is playing may have none at all. The core computes it at
+publication from `lecture`, `standby` and a single `paused` flag, rather than
+maintaining it along the five paths that stop playback: one point cannot be
+forgotten, five sprinkled assignments would be forgotten at the sixth path
+added.
+
+Two consumers wanted it. The MPD server plugin needs `state: play|pause|stop`
+in every `status` answer it composes (see [plugins.md](plugins.md)), which
+was the reason it was added. And the SPA's play/pause button, a fixed icon
+today for lack of knowing which way it points, **can** now know: the field
+reaches the browser on the same stream as everything else. That second use is
+still an opportunity rather than a change — the web UI does not read the
+field yet.
 
 `can_eject` rides along the same way, and is remembered by the core on the
 same schedule as `preset_count`: forgotten on a source change and on standby
