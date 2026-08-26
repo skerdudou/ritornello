@@ -1,5 +1,9 @@
-# Adresse et port du serveur MPD. Tout client MPD du reseau local peut
-# commander l'appareil : pas de mot de passe, comme n'importe quelle
-# telecommande de la piece.
+# Listen address and port of the MPD server. Any MPD client on the local
+# network can drive the appliance: there is no password, exactly like any
+# other remote control in the room.
+#
+# A change takes effect when the plugin restarts. Both settings are also
+# editable from the plugin's page at http://<host>:8080/plugins/mpd/.
 listen = "0.0.0.0"
 port = 6600
+</content>
