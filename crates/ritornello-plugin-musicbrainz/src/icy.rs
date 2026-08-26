@@ -187,9 +187,20 @@ mod tests {
 
     #[test]
     fn une_moitie_vide_ne_produit_pas_de_candidat() {
-        // « - So What » ou « Miles Davis - » : une requête avec un champ vide
-        // est une requête pour rien.
-        assert!(candidats("- So What").is_empty());
-        assert!(candidats("Miles Davis -").is_empty());
+        // Une requête avec un champ vide est une requête pour rien.
+        //
+        // **Les espaces de bord sont l'essentiel de ces deux fixtures**, et une
+        // première version les avait oubliés (`"- So What"`, `"Miles Davis -"`) :
+        // le séparateur étant `" - "`, ces chaînes n'en contenaient aucun, la
+        // garde n'était jamais atteinte, et le test passait pour une mauvaise
+        // raison — retirer la garde ne le faisait pas tomber. Trouvé par la
+        // preuve par mutation, qui est faite pour ça.
+        //
+        // Ces deux formes ne sortent **pas** de `nettoie`, qui coupe les bords :
+        // ce test éprouve donc le contrat de `candidats`, qui est une fonction
+        // publique et ne doit pas dépendre de qui l'appelle, et non un chemin de
+        // production. La distinction vaut d'être sue avant d'y toucher.
+        assert!(candidats(" - So What").is_empty(), "artiste vide");
+        assert!(candidats("Miles Davis - ").is_empty(), "titre vide");
     }
 }
