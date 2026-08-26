@@ -953,7 +953,17 @@ async function attendreRetour(avant: number | null, maxMs: number, cleSucces: st
          Le compteur tient dans la `DialogDescription` : il décrit bien le
          dialogue, et l'y mettre lui donne au passage son texte d'accessibilité. -->
     <Dialog v-model:open="erreursOuvertes">
-      <DialogContent>
+      <!-- Bien plus large que les autres popins, et c'est le seul cas qui le
+           justifie : celles-ci portent une phrase, celle-ci porte des lignes de
+           journal. Le `DialogContent` du kit se cale a `sm:max-w-lg` (512 px),
+           ou une ligne de log se replie trois ou quatre fois et devient
+           illisible. Ici on prend l'ecran : 95 % de la fenetre, borne a 1920 px
+           pour qu'un ecran tres large n'etale pas une ligne sur deux metres.
+
+           Plus large que le `max-w-5xl` de la page elle-meme, donc, et
+           volontairement : la page est un document qui se lit, ce dialogue est
+           un outil de diagnostic qui se scrute. -->
+      <DialogContent class="sm:max-w-[min(95vw,120rem)]">
         <DialogHeader>
           <DialogTitle>{{ t('system_errors_title') }}</DialogTitle>
           <DialogDescription data-logs-count>
@@ -965,7 +975,18 @@ async function attendreRetour(avant: number | null, maxMs: number, cleSucces: st
           data-logs-filter
           :placeholder="t('system_errors_filter')"
         />
-        <ul class="max-h-[60vh] space-y-1 overflow-y-auto font-mono text-xs text-muted-foreground">
+        <!-- `whitespace-pre-wrap` : une ligne de journal aligne ses champs avec
+             des espaces, que le rendu HTML par defaut reduit a un seul — la
+             colonne du niveau et celle de la cible se retrouvaient decalees
+             d'une ligne a l'autre. Le repli reste autorise (`pre-wrap` et non
+             `pre`) : une ligne longue doit rester lisible sans defilement
+             horizontal.
+
+             70vh plutot que 60 : le dialogue est le seul endroit qui montre plus
+             que les dernieres lignes, autant qu'il en montre. -->
+        <ul
+          class="max-h-[70vh] space-y-1 overflow-y-auto font-mono text-xs whitespace-pre-wrap text-muted-foreground"
+        >
           <li v-for="(l, i) in logsFiltres" :key="i" data-logs-dialog-line>{{ l }}</li>
         </ul>
         <p v-if="!logsFiltres.length" data-logs-empty class="text-sm text-muted-foreground">
