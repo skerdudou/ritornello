@@ -143,8 +143,30 @@ impl Magasin {
     }
 
     /// Aucune station sondée.
-    pub fn vide(&self) -> bool {
+    ///
+    /// `est_vide` et non `vide` : c'est la convention de ce dépôt pour un
+    /// prédicat (`Known::est_vide`, `Morceau::est_vide`), et surtout « vide »
+    /// seul est ambigu en français — adjectif ou verbe. Mon brief l'avait écrit
+    /// ainsi et l'implémenteur a compris le prédicat là où j'entendais
+    /// l'action ; les deux existent maintenant, sous deux noms qui ne peuvent
+    /// plus se confondre.
+    pub fn est_vide(&self) -> bool {
         self.stations.is_empty()
+    }
+
+    /// Oublie **toutes** les stations : c'est le « tout vider » de la page
+    /// d'admin.
+    ///
+    /// Un geste à part de `supprime`, et pas seulement une boucle dessus : il
+    /// répond à « je ne fais plus confiance à ce que l'appareil a appris »,
+    /// alors que `supprime` répond à « resonde celle-ci ». La page les présente
+    /// distinctement pour cette raison, et l'appelant reste chargé
+    /// d'`enregistre` — comme pour les autres mutations, pour qu'une écriture
+    /// disque ne se cache pas derrière un nom qui n'en parle pas.
+    pub fn vide_tout(&mut self) {
+        let combien = self.stations.len();
+        self.stations.clear();
+        tracing::info!("forgot the split patterns of {combien} stations");
     }
 
     /// Pose le motif appris d'un sondage.
@@ -321,6 +343,24 @@ mod tests {
         let relu = Magasin::charge(&p);
         assert_eq!(relu.entree("http://a"), m.entree("http://a"));
         assert_eq!(relu.entree("http://b").unwrap().motif, Motif::NePasDecouper);
+    }
+
+    #[test]
+    fn tout_vider_emporte_meme_les_motifs_manuels() {
+        // Le point non évident, et il fallait le trancher : la protection d'un
+        // motif `Manuel` vise le **réapprentissage automatique**, jamais un
+        // geste explicite de l'utilisateur. Il a cliqué « tout vider » ; lui
+        // laisser silencieusement ses corrections passées serait lui répondre à
+        // côté, et il ne pourrait plus s'en débarrasser du tout.
+        let mut m = Magasin::default();
+        m.pose_manuel("http://a", separe(" / ", false));
+        m.apprend("http://b", separe(" - ", true));
+        assert!(!m.est_vide());
+
+        m.vide_tout();
+        assert!(m.est_vide(), "plus aucune station");
+        assert!(m.entree("http://a").is_none(), "le manuel part aussi");
+        assert!(m.entree("http://b").is_none());
     }
 
     #[test]
