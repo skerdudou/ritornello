@@ -367,6 +367,70 @@ Living in the core rather than on the key means the same reasoning as the
 5% volume step: a remote never has to be reprogrammed just because the step
 it sends should now be bigger or smaller.
 
+### Album covers card
+
+Six settings on the same `GET`/`PUT /api/settings` and the same
+`422`-on-write contract, and the card's layout carries a distinction that
+matters more than any of the values.
+
+**`cover_source_max_mio`** comes first and is never greyed out: it bounds
+what the core agrees to *read*, whatever happens next, and it is the only
+guard left when re-encoding is off. 20 MiB by default, bounded **1-20** —
+the upper bound is `COVER_MAX_BYTES` expressed in the setting's unit, not a
+comfort choice. That constant is the promise made to display plugins about
+what they may receive, and the MPD plugin sizes its own bounds on it without
+being able to read the core's settings, so this setting can only lower it.
+It is also the cheapest guard of the lot: judged on the file's size, before a
+single byte of its content is read.
+
+**`cover_rendition`** is the switch. On (the default), the core renders a
+thumbnail before pushing a cover on a socket; off, the original bytes are
+pushed as they are, and the memory peak of one publication goes from about
+1.8 MiB back to about 72 MiB for a 20 MiB cover — the bytes, their base64,
+and the JSON line. A defensible choice on a machine with the RAM, but one to
+make knowingly. The switch greys the four settings below, which describe
+nothing but the thumbnail; it does not clear them, so their values still
+travel in the `PUT` and re-checking the switch finds what was set.
+
+**`cover_max_edge_px`** (640, bounded 64-2048) is the thumbnail's longest
+edge, aspect ratio preserved. **`cover_jpeg_quality`** (85, bounded 40-100)
+applies to JPEG only: a cover with an alpha channel is re-encoded to PNG,
+losslessly, because flattening its transparency would mean picking a
+background colour — a visual decision the device has no business making on
+someone else's artwork. The pushed frame's mime always states the format
+actually produced. **`cover_max_bytes_ko`** (512, bounded 32-8192) is a net
+rather than a target: the edge already bounds the pixel count, so a thumbnail
+only passes it on a pathologically noisy image, and past it nothing is pushed
+and the log names the setting.
+
+**`cover_max_pixels_mpx`** (16, bounded 1-64) is the decompression-bomb
+guard, and the only one that really protects: a file's size says *nothing*
+about what decoding it costs. A 200 KiB PNG can declare 30000 × 30000
+pixels, which is 3.6 GiB of buffer. Dimensions are read from the header
+before any allocation, and the value is also handed to the decoder's own
+allocation limit, covering a header that lies about itself. The useful figure
+is not the megapixel count but the memory it costs — `w × h × 4`, so 16 Mpx
+is 64 MiB — which is why the label carries the arithmetic.
+
+The order of those steps is the protection, not an implementation detail:
+header dimensions, then the pixel guard, then the pass-through for an image
+already small in *both* pixels and bytes, then decode and encode on a
+blocking thread. Swapping the last two would let a bomb through on its
+weight, since a bomb is precisely a file that is tiny in bytes and immense in
+pixels.
+
+Two consequences worth knowing. Nothing is memoised: the cache key hashes the
+*path*, not the content, so a kept thumbnail would go stale the moment
+someone replaces the image under that path — and replacing it is exactly the
+triggering gesture. And with re-encoding on, a cover whose bytes do not
+decode is dropped: the header check only reads magic bytes, so a truncated
+file used to pass it and reach every display, each showing a broken square
+its own way. The device now settles it once, centrally.
+
+The rendition applies to the push path only. `GET /api/cover/{key}` still
+streams a local file without ever holding it whole, the browser resizing and
+caching on its side.
+
 ## System page
 
 `GET /api/system` reports OS metrics. **Every metric is optional and is
