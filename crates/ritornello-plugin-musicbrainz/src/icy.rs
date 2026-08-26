@@ -105,9 +105,36 @@ pub fn candidats(nettoye: &str) -> Vec<Candidat> {
     out
 }
 
+/// Rejoue un motif appris sur une chaîne nettoyée.
+///
+/// **Aucun réseau** : c'est là tout l'intérêt du souvenir. Une fois le motif
+/// d'une station connu, séparer artiste et titre est une opération locale, et
+/// seule la pochette demande encore une requête.
+///
+/// `None` quand le motif ne s'applique pas : la chaîne ne porte pas ce
+/// séparateur, une moitié est vide, ou le motif est `NePasDecouper`. Ce `None`
+/// **est** l'échec de validation dont parle la règle des trois échecs
+/// consécutifs — pas une erreur, un morceau qui ne rentre pas dans la forme.
+pub fn applique(motif: &crate::motifs::Motif, nettoye: &str) -> Option<(String, String)> {
+    let crate::motifs::Motif::Separe { separateur, artiste_en_premier } = motif else {
+        return None;
+    };
+    let (tete, reste) = nettoye.split_once(separateur.as_str())?;
+    let (tete, reste) = (tete.trim(), reste.trim());
+    if tete.is_empty() || reste.is_empty() {
+        return None;
+    }
+    Some(if *artiste_en_premier {
+        (tete.to_string(), reste.to_string())
+    } else {
+        (reste.to_string(), tete.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::motifs::Motif;
 
     #[test]
     fn le_nettoyage_retire_la_reclame_apres_une_barre() {
@@ -202,5 +229,28 @@ mod tests {
         // production. La distinction vaut d'être sue avant d'y toucher.
         assert!(candidats(" - So What").is_empty(), "artiste vide");
         assert!(candidats("Miles Davis - ").is_empty(), "titre vide");
+    }
+
+    #[test]
+    fn appliquer_un_motif_redonne_le_couple() {
+        let m = Motif::Separe { separateur: " - ".into(), artiste_en_premier: false };
+        assert_eq!(
+            applique(&m, "So What - Miles Davis"),
+            Some(("Miles Davis".to_string(), "So What".to_string())),
+            "ordre inverse : l'artiste est en second"
+        );
+    }
+
+    #[test]
+    fn appliquer_un_motif_absent_de_la_chaine_rend_none() {
+        // Le morceau où la station change de forme : pas un couple bancal,
+        // rien du tout. C'est ce `None` qui compte comme échec de validation.
+        let m = Motif::Separe { separateur: " - ".into(), artiste_en_premier: true };
+        assert_eq!(applique(&m, "Vous ecoutez Radio X"), None);
+    }
+
+    #[test]
+    fn ne_pas_decouper_ne_produit_jamais_de_couple() {
+        assert_eq!(applique(&Motif::NePasDecouper, "Miles Davis - So What"), None);
     }
 }

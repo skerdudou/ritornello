@@ -17,6 +17,7 @@
 //! échec ou sa lenteur ne concernent que les métadonnées.
 
 mod icy;
+mod motifs;
 mod musicbrainz;
 
 use anyhow::Result;
