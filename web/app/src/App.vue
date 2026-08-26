@@ -1,14 +1,17 @@
 <script setup lang="ts">
-import { api, Toaster } from '@ritornello/ui'
-import { onMounted, ref } from 'vue'
+import { Toaster } from '@ritornello/ui'
+import { onMounted } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
 import ThemeToggle from './components/ThemeToggle.vue'
 import { useCatalog } from './composables/useCatalog'
+import { useGreffons } from './composables/useGreffons'
 import { useMetriques } from './composables/useMetriques'
-import type { StatusPayload } from './types'
 
 const { t, reload } = useCatalog()
-const admins = ref<string[]>([])
+// Partagé avec `ConfigView` au niveau module : c'est ce qui fait qu'une bascule
+// faite sur la page de configuration retire ou remet l'entrée de menu ici, sans
+// rechargement de la page. Voir `useGreffons`, qui écrit le défaut d'avant.
+const { admins, rafraichir: rafraichirGreffons } = useGreffons()
 
 /**
  * Classes communes des liens de la nav. Le soulignement est un pseudo-élément
@@ -50,19 +53,7 @@ onMounted(async () => {
   // départ (deux se disputeraient le même minuteur).
   useMetriques().demarrer()
   await reload()
-  // Un `/api/status` injoignable prive silencieusement la navigation de tous
-  // les plugins admin — le symptome le plus difficile a attribuer sans
-  // diagnostic, la page ayant l'air normale par ailleurs.
-  const s = await api.get<StatusPayload>('/api/status').catch((e) => {
-    console.warn('GET /api/status indisponible : navigation sans les plugins admin', e)
-    return null
-  })
-  // Une ligne de statut par (nom, genre) : un greffon multi-genres avec page
-  // d'admin (ex. `mpd` en `input` + `display`) pousse plusieurs lignes
-  // portant le même `admin: true`. Sans le `Set`, la nav afficherait autant
-  // de liens identiques que de genres — voir la même clé `${name}-${kind}`
-  // dans ConfigView.vue pour le tableau, qui lui doit garder les doublons.
-  admins.value = [...new Set((s?.plugins ?? []).filter((p) => p.admin).map((p) => p.name))]
+  await rafraichirGreffons()
 })
 </script>
 

@@ -244,6 +244,35 @@ describe('PlayerCard', () => {
     expect(w.find('[data-cover-origin]').text()).toContain('files')
   })
 
+  it('ne repete pas le meme contributeur sur la pochette', () => {
+    // Le cas courant sur une radio : un seul greffon fournit le texte et
+    // l'image, et les deux badges affichaient alors le meme mot cote a cote.
+    // Le badge de gauche dit deja qui c'est.
+    const w = monteAvec({
+      title: 'So What',
+      origin: 'radiofrance-metas',
+      cover_href: '/api/cover/1a2b',
+      cover_origin: 'radiofrance-metas',
+    })
+    expect(w.get('[data-origin]').text()).toBe('radiofrance-metas')
+    expect(w.find('[data-cover-origin]').exists()).toBe(false)
+  })
+
+  it('montre l origine de la pochette quand elle differe de celle du texte', () => {
+    // Le controle de la regle ci-dessus, et ce pour quoi le badge existe :
+    // `icy` donne le titre du flux, `musicbrainz` la pochette. Sans ce test,
+    // masquer le doublon pourrait degenerer en ne jamais rien montrer, et la
+    // suite resterait verte.
+    const w = monteAvec({
+      title: 'So What',
+      origin: 'icy',
+      cover_href: '/api/cover/1a2b',
+      cover_origin: 'musicbrainz',
+    })
+    expect(w.get('[data-origin]').text()).toBe('icy')
+    expect(w.get('[data-cover-origin]').text()).toBe('musicbrainz')
+  })
+
   it('garde le carre en place quand il n y a pas de pochette', () => {
     const w = monteAvec({ title: 'So What' })
     // Le carre existe toujours : la pochette arrive apres le texte, parfois

@@ -119,7 +119,7 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
              texte, parfois plusieurs secondes apres, et un carre qui apparait
              decalerait toute la carte. -->
         <div
-          class="size-20 shrink-0 overflow-hidden rounded-md border border-border bg-muted"
+          class="size-28 shrink-0 overflow-hidden rounded-md border border-border bg-muted sm:size-40"
           data-pochette
         >
           <!-- `@error` : toute voie par laquelle « la pochette a disparu »
@@ -152,8 +152,18 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
               {{ etat.origin }}
             </Badge>
             <!-- Meme question, posee cette fois sur la pochette : le texte et
-                 l'image peuvent venir de deux contributeurs differents. -->
-            <Badge v-if="etat?.cover_origin" variant="secondary" class="text-[10px]" data-cover-origin>
+                 l'image peuvent venir de deux contributeurs differents.
+                 Affiche seulement quand ils **le sont**, sinon le meme mot
+                 apparaissait deux fois de suite — le cas courant sur une radio,
+                 ou un seul greffon fournit le texte et l'image. Le badge
+                 d'origine juste a gauche dit deja qui c'est ; celui-ci n'existe
+                 que pour signaler une divergence. -->
+            <Badge
+              v-if="etat?.cover_origin && etat.cover_origin !== etat.origin"
+              variant="secondary"
+              class="text-[10px]"
+              data-cover-origin
+            >
               {{ etat.cover_origin }}
             </Badge>
             <!-- Seulement quand la position n'est pas connue : sinon la barre

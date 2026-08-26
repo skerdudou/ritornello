@@ -2,7 +2,13 @@ import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 import type { PlayerPayload } from '../types'
-import { indisponible, REMOTE_COMMANDS, REMOTE_POWER, REMOTE_ROWS } from './remoteCommands'
+import {
+  indisponible,
+  REMOTE_COMMANDS,
+  REMOTE_POWER,
+  REMOTE_ROWS,
+  REMOTE_SOURCE,
+} from './remoteCommands'
 
 /** Faux `EventSource` : jsdom n'en fournit pas. */
 class FauxEventSource {
@@ -52,20 +58,27 @@ describe('REMOTE_COMMANDS', () => {
 
   it('groupe les commandes par rangée, dans l’ordre voulu', () => {
     // L'ordre est une demande explicite du propriétaire : transport, contenu,
-    // son, appareil — et dans chaque rangée le sens du geste, « précédent »
+    // son, tiroir — et dans chaque rangée le sens du geste, « précédent »
     // avant « suivant » et « moins » avant « plus ». Le figer ici evite qu'un
     // remaniement du gabarit le change sans qu'on s'en apercoive.
     expect(REMOTE_ROWS.map((r) => r.map((c) => c.cmd.cmd))).toEqual([
       ['PlayPause', 'Stop', 'SeekBackward', 'SeekForward'],
       ['Prev', 'Next'],
       ['VolumeDown', 'VolumeUp', 'Mute'],
-      ['SourceCycle', 'Eject'],
+      ['Eject'],
     ])
   })
 
-  it('la veille est à part, et n’apparaît pas dans les rangées', () => {
+  it('la veille et la source sont à part, et n’apparaissent pas dans les rangées', () => {
+    // Les deux commandes qui portent sur l'appareil entier vivent dans le coin
+    // de la carte. Le figer des deux cotes — le nom de la commande **et** son
+    // absence des rangees — est ce qui empeche un bouton en double, defaut le
+    // plus probable d'un deplacement comme celui-la.
     expect(REMOTE_POWER.cmd.cmd).toBe('Power')
-    expect(REMOTE_ROWS.flat().map((c) => c.cmd.cmd)).not.toContain('Power')
+    expect(REMOTE_SOURCE.cmd.cmd).toBe('SourceCycle')
+    const rangees = REMOTE_ROWS.flat().map((c) => c.cmd.cmd)
+    expect(rangees).not.toContain('Power')
+    expect(rangees).not.toContain('SourceCycle')
   })
 
   it('chaque commande porte une clé de traduction', () => {
@@ -544,9 +557,9 @@ describe('HomeView — boutons indisponibles', () => {
     // `'cd'`, ce nom venant de plugins.toml.
     const radio = await monterAvec({ source: 'radio', can_eject: false })
     expect(radio.get('[data-remote-command="Eject"]').attributes('disabled')).toBeDefined()
-    // Et la voisine de rangée reste intacte : le grisage vise une touche, pas
-    // le groupe « appareil ».
-    expect(radio.get('[data-remote-command="SourceCycle"]').attributes('disabled')).toBeUndefined()
+    // Et la source, desormais dans le coin de la carte, reste intacte : le
+    // grisage vise une touche, jamais un groupe.
+    expect(radio.get('[data-remote-source]').attributes('disabled')).toBeUndefined()
     vi.unstubAllGlobals()
     const cd = await monterAvec({ source: 'cd', can_eject: true })
     expect(cd.get('[data-remote-command="Eject"]').attributes('disabled')).toBeUndefined()

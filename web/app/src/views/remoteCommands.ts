@@ -22,8 +22,25 @@ export interface RemoteCommand {
 export const REMOTE_POWER: RemoteCommand = { key: 'remote_power', cmd: { cmd: 'Power' } }
 
 /**
+ * Le changement de source, a part elle aussi, et voisine de la veille dans le
+ * coin de la carte.
+ *
+ * Meme raison qu'elle : ce n'est pas une commande de lecture mais un choix
+ * portant sur l'appareil entier — ce qui joue change de nature, pas de piste.
+ * Elle etait en fond de grille, dans la rangee « appareil », ou elle se lisait
+ * comme un cran de plus apres le volume. La sortir la met au niveau de la
+ * decision qu'elle represente, et laisse la grille aux seules commandes de la
+ * lecture en cours.
+ *
+ * Elle garde son grisage, a la difference de la veille : en veille, le coeur
+ * retourne sans rien faire sur tout ce qui n'est pas `Power` (voir
+ * `indisponible`). Le bouton mentirait autrement.
+ */
+export const REMOTE_SOURCE: RemoteCommand = { key: 'remote_source', cmd: { cmd: 'SourceCycle' } }
+
+/**
  * Les autres commandes, **groupees par ligne** dans l'ordre voulu par le
- * proprietaire : transport, changement de contenu, son, puis appareil.
+ * proprietaire : transport, changement de contenu, son, puis tiroir.
  *
  * Dans chaque rangee, l'ordre suit le sens du geste et non celui du protocole :
  * « precedent » avant « suivant », « moins » avant « plus », comme sur la
@@ -52,18 +69,21 @@ export const REMOTE_ROWS: RemoteCommand[][] = [
     { key: 'remote_vol_up', cmd: { cmd: 'VolumeUp' } },
     { key: 'remote_mute', cmd: { cmd: 'Mute' } },
   ],
-  [
-    { key: 'remote_source', cmd: { cmd: 'SourceCycle' } },
-    { key: 'remote_eject', cmd: { cmd: 'Eject' } },
-  ],
+  [{ key: 'remote_eject', cmd: { cmd: 'Eject' } }],
 ]
 
 /**
- * Toutes les commandes, veille comprise : sert au garde-fou qui verifie que
- * chaque cle de traduction employee existe bien dans le catalogue, et a
- * verrouiller le compte de douze.
+ * Toutes les commandes, veille et source comprises : sert au garde-fou qui
+ * verifie que chaque cle de traduction employee existe bien dans le catalogue,
+ * et a verrouiller le compte de douze. Les deux commandes hors grille y sont
+ * nommees explicitement — c'est ce qui fait que les sortir de `REMOTE_ROWS` ne
+ * les fait pas disparaitre du garde-fou.
  */
-export const REMOTE_COMMANDS: RemoteCommand[] = [REMOTE_POWER, ...REMOTE_ROWS.flat()]
+export const REMOTE_COMMANDS: RemoteCommand[] = [
+  REMOTE_POWER,
+  REMOTE_SOURCE,
+  ...REMOTE_ROWS.flat(),
+]
 
 /**
  * Une commande que l'appareil ignorerait dans l'état courant : son bouton doit

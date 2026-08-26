@@ -7,10 +7,14 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { nomLangue } from '../composables/langues'
 import { useCatalog } from '../composables/useCatalog'
-import type { AudioPayload, LocalePayload, SettingsPayload, StatusPayload } from '../types'
+import { useGreffons } from '../composables/useGreffons'
+import type { AudioPayload, LocalePayload, SettingsPayload } from '../types'
 
 const { t, reload } = useCatalog()
-const status = ref<StatusPayload>({ plugins: [], active_source: '' })
+// L'état des greffons vient du module, pas d'un `ref` local : la navigation du
+// haut lit le **même** objet, donc une bascule faite ici met son menu à jour
+// sans rechargement. Voir `useGreffons`.
+const { etat: status, rafraichir: rafraichirGreffons } = useGreffons()
 const audio = ref<AudioPayload>({ devices: [], current: null })
 const locale = ref<LocalePayload>({ locales: [], current: null })
 const device = ref('')
@@ -49,7 +53,11 @@ async function chargerTout() {
   // un changement de langue reussi (voir `changerLangue` plus bas), a la
   // place de l'ancien `location.reload()`.
   await reload()
-  status.value = await api.get<StatusPayload>('/api/status').catch(() => status.value)
+  // Relit l'état des greffons **et** arme la surveillance de la fenêtre « figé »
+  // qu'un rallumage vient d'ouvrir : le cœur remplace la ligne dès que le
+  // greffon s'annonce, quelques secondes plus tard, et sans cette relecture la
+  // ligne restait sur « figé » jusqu'au prochain F5.
+  await rafraichirGreffons()
   audioIndisponible.value = false
   audio.value = await api.get<AudioPayload>('/api/audio-output').catch(() => {
     audioIndisponible.value = true

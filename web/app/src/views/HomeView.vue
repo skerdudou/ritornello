@@ -7,7 +7,7 @@ import PlayerCard from '../components/PlayerCard.vue'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlayer } from '../composables/usePlayer'
 import type { Command, SettingsPayload } from '../types'
-import { indisponible, REMOTE_POWER, REMOTE_ROWS } from './remoteCommands'
+import { indisponible, REMOTE_POWER, REMOTE_ROWS, REMOTE_SOURCE } from './remoteCommands'
 import type { RemoteCommand } from './remoteCommands'
 
 const { t } = useCatalog()
@@ -172,18 +172,34 @@ function toucheVolume(e: KeyboardEvent, cmd: Command) {
       @deplacer="(s: number) => send({ cmd: 'SeekTo', arg: s })"
     />
     <Card>
-      <!-- La veille au coin de la carte : c'est la seule commande qui agisse sur
-           l'appareil entier plutot que sur la lecture, et la plus consequente —
-           la tenir a l'ecart de la grille evite de l'actionner par megarde.
-           `CardAction` est ce qui la place a droite **sur la ligne du titre** :
+      <!-- Les deux commandes qui portent sur l'appareil entier plutot que sur la
+           lecture, au coin de la carte : le choix de la source et la veille.
+           Les tenir a l'ecart de la grille evite de les actionner par megarde,
+           et laisse celle-ci aux seules commandes de ce qui joue.
+           `CardAction` est ce qui les place a droite **sur la ligne du titre** :
            l'en-tete est une grille qui ne passe en deux colonnes qu'en presence
-           de ce slot. Sans lui, le bouton tombait sous le titre. -->
+           de ce slot. Sans lui, les boutons tombaient sous le titre.
+
+           La veille reste au coin extreme, la source a sa gauche : c'est la
+           plus consequente des deux, et sa position la met le plus loin
+           possible du reste. -->
       <CardHeader>
         <CardTitle>{{ t('remote_title') }}</CardTitle>
         <CardAction>
-          <Button variant="outline" size="sm" data-remote-power @click="send(REMOTE_POWER.cmd)">
-            {{ t(REMOTE_POWER.key) }}
-          </Button>
+          <div class="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              data-remote-source
+              :disabled="indisponible(REMOTE_SOURCE.cmd.cmd, etat)"
+              @click="send(REMOTE_SOURCE.cmd)"
+            >
+              {{ t(REMOTE_SOURCE.key) }}
+            </Button>
+            <Button variant="outline" size="sm" data-remote-power @click="send(REMOTE_POWER.cmd)">
+              {{ t(REMOTE_POWER.key) }}
+            </Button>
+          </div>
         </CardAction>
       </CardHeader>
       <CardContent class="space-y-3">
