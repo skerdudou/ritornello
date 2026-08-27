@@ -52,9 +52,41 @@ pub type AdminBackends =
 /// Actifs d'IHM déjà récupérés, par `(plugin, chemin)` → `(mime, corps, etag)`.
 /// Un bundle est immuable pour la durée de vie du processus du plugin : on ne
 /// le relit pas par IPC à chaque rechargement de page.
+///
+/// **« Pour la durée de vie du processus du plugin » est un invariant, pas une
+/// remarque**, et il n'était tenu par personne : rien ne purgeait ce cache quand
+/// ce processus s'arrêtait. Un greffon relancé à la main avec son `ui.js`
+/// reconstruit servait donc l'ancien jusqu'au redémarrage du cœur — ce qui pique
+/// surtout en développement, là où c'est justement le geste courant.
+/// `oublie_page` est ce qui le tient désormais.
 pub type AssetCache = tokio::sync::RwLock<
     std::collections::HashMap<(String, String), (String, String, String)>,
 >;
+
+/// Oublie tout ce que le cœur garde de la page d'admin de `nom` : son dorsal et
+/// ses actifs mis en cache.
+///
+/// **Un seul point de purge, appelé partout où le processus du greffon
+/// s'arrête** — mort observée par la supervision, mort déduite de la fermeture
+/// des sockets, extinction demandée, et ré-annonce (qui est la fin d'un
+/// processus suivie du début d'un autre). C'est délibérément une fonction et non
+/// deux lignes recopiées : les deux registres doivent tomber *ensemble*, et un
+/// invariant dont la justesse dépend de quatre sites de purge finit par mentir
+/// sur l'un d'eux.
+///
+/// Ce que le retrait du dorsal achète : `/api/admin/<nom>` répond un 404 franc
+/// — « plugin inconnu » — au lieu d'un aller-retour IPC sur un socket fermé.
+/// L'échec y était rapide (écrire sur un socket dont le pair a fermé rend
+/// `EPIPE` tout de suite), donc le gain n'est pas de la latence sauf dans une
+/// course étroite : si l'écriture entre dans le tampon avant que la fermeture
+/// soit traitée, la réponse n'arrive jamais et le budget de la requête s'écoule
+/// en entier. Le vrai gain est de dire la vérité.
+pub async fn oublie_page(backends: &AdminBackends, actifs: &AssetCache, nom: &str) {
+    backends.write().await.remove(nom);
+    // `retain` et non `remove` : la clé porte le chemin de l'actif, donc un
+    // greffon en a autant d'entrées qu'il a servi de fichiers.
+    actifs.write().await.retain(|(greffon, _), _| greffon != nom);
+}
 
 fn etag_of(body: &str) -> String {
     use std::hash::{Hash, Hasher};
@@ -302,6 +334,56 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::OK);
         }
         assert_eq!(appels.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn oublie_page_rend_le_404_franc_et_fait_relire_lui_apres_une_re_annonce() {
+        // Trois propriétés d'un coup, et toutes par le **comportement observé**
+        // plutôt que par le contenu d'une table : ce qui compte n'est pas qu'une
+        // clé ait disparu, c'est ce que la route répond ensuite.
+        let fake = Fake::default();
+        let appels = fake.appels_asset.clone();
+        let state = state_with(fake);
+        let app = router(state.clone());
+
+        let get = |app: axum::Router| async move {
+            app.oneshot(Request::get("/plugins/radio/ui.js").body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+        };
+
+        assert_eq!(get(app.clone()).await.status(), StatusCode::OK);
+        assert_eq!(get(app.clone()).await.status(), StatusCode::OK);
+        assert_eq!(appels.load(std::sync::atomic::Ordering::SeqCst), 1, "mis en cache");
+
+        // 1. Purger un **autre** greffon n'emporte rien ici. La clé du cache
+        //    porte `(greffon, chemin)`, donc la purge passe par un `retain` : se
+        //    tromper de moitié de clé aurait vidé le cache entier.
+        oublie_page(&state.admin_backends, &state.admin_assets, "autre").await;
+        assert_eq!(get(app.clone()).await.status(), StatusCode::OK);
+        assert_eq!(appels.load(std::sync::atomic::Ordering::SeqCst), 1, "toujours en cache");
+
+        // 2. Une fois le greffon oublié, la route dit franchement qu'il n'y a
+        //    rien là — c'est la moitié du correctif qui retire la page morte du
+        //    menu au lieu de rendre une erreur d'IPC.
+        oublie_page(&state.admin_backends, &state.admin_assets, "radio").await;
+        assert_eq!(get(app.clone()).await.status(), StatusCode::NOT_FOUND);
+
+        // 3. Et une ré-annonce relit vraiment : c'est la séquence de
+        //    `cabler_a_chaud` — oublier, puis recâbler. Sans la purge des
+        //    actifs, le greffon relancé avec un `ui.js` reconstruit servait
+        //    encore l'ancien jusqu'au redémarrage du cœur.
+        state
+            .admin_backends
+            .write()
+            .await
+            .insert("radio".into(), Arc::new(Fake { appels_asset: appels.clone(), ..Default::default() }));
+        assert_eq!(get(app.clone()).await.status(), StatusCode::OK);
+        assert_eq!(
+            appels.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "le nouveau processus doit etre relu, pas servi depuis le cache de l'ancien"
+        );
     }
 
     #[tokio::test]

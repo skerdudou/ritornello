@@ -755,6 +755,12 @@ mod tests {
         ok.then_some(sortie)
     }
 
+    /// L'image de ce module. **Doit rester distincte de celle de
+    /// `core::tests::mp3_avec_pochette_de_test`** : le temporaire étant nommé
+    /// d'après son contenu, deux fixtures identiques viseraient le même chemin
+    /// dans le `temp_dir()` partagé, et les tests de `core` y font travailler
+    /// `CoverCache`, dont l'éviction supprime ces fichiers. C'est exactement ce
+    /// qui a produit un échec intermittent ici.
     fn mp3_avec_pochette(dir: &Path) -> Option<std::path::PathBuf> {
         mp3_avec_pochette_de(dir, "color=c=red:s=16x16:d=1")
     }

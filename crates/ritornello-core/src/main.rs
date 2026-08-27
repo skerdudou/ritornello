@@ -420,6 +420,10 @@ struct FilsChaud {
     covers: Arc<cover::CoverCache>,
     status_state: Arc<RwLock<StatusState>>,
     admin_backends: admin::AdminBackends,
+    /// **Le même** `Arc` que celui de l'`AppState` HTTP, pour la même raison que
+    /// `covers` : purger un cache neuf et vide n'invaliderait rien de ce que les
+    /// routes servent réellement.
+    admin_assets: Arc<admin::AssetCache>,
     /// Par où un socket qui se ferme le fait savoir à la boucle principale.
     ///
     /// **C'est le seul chemin par lequel la mort d'un greffon non supervisé
@@ -679,7 +683,10 @@ async fn cabler_a_chaud<P: player::Player>(
     // vers un socket disparu : `/api/admin/<nom>` rendrait une erreur au bout
     // du budget de la requête, là où un 404 franc dit tout de suite qu'il n'y a
     // rien à cette adresse.
-    fils.admin_backends.write().await.remove(&nom);
+    // Les actifs partent avec le dorsal : une ré-annonce est la fin d'un
+    // processus suivie du début d'un autre, et le nouveau peut porter un `ui.js`
+    // reconstruit. Les garder servait l'ancien jusqu'au redémarrage du cœur.
+    admin::oublie_page(&fils.admin_backends, &fils.admin_assets, &nom).await;
     let mut admin_joint = false;
     if annonce.admin {
         let chemin = ritornello_plugin_sdk::admin_socket(&prefix);
@@ -868,7 +875,7 @@ async fn eteindre_a_chaud<P: player::Player>(
     // Retiré, sinon `/plugins/<nom>/` attendrait le budget de la requête pour
     // finir en erreur, là où un 404 franc dit tout de suite qu'il n'y a rien à
     // cette adresse.
-    fils.admin_backends.write().await.remove(nom);
+    admin::oublie_page(&fils.admin_backends, &fils.admin_assets, nom).await;
     let mut statuts = fils.status_state.write().await;
     status::replace_plugin_lines(&mut statuts, nom, vec![PluginStatus::desactive(nom)], false);
     statuts.active_source = core.active_source().to_string();
@@ -1342,6 +1349,10 @@ async fn main() -> Result<()> {
     // table n'est plus figée pour autant — un greffon qui s'annonce en retard
     // doit voir sa page d'admin apparaître sans redémarrage du cœur.
     let admin_backends: admin::AdminBackends = Arc::new(RwLock::new(admin_backends));
+    // Nommé plutôt que construit dans le littéral de l'`AppState` : la boucle
+    // principale et `cabler_a_chaud` doivent purger **ce** cache-là, celui que
+    // les routes lisent, et non une copie neuve.
+    let admin_assets: Arc<admin::AssetCache> = Arc::new(Default::default());
 
     // Démarrer **sans aucune source** est légitime depuis l'enregistrement à
     // chaud, et c'était la dernière échéance qui condamnait : refuser de
@@ -1446,7 +1457,7 @@ async fn main() -> Result<()> {
             locale_tx: locale_tx.clone(),
             locales_root: locales_root.clone(),
             admin_backends: admin_backends.clone(),
-            admin_assets: Arc::new(Default::default()),
+            admin_assets: admin_assets.clone(),
             cmd_tx: cmd_tx.clone(),
             theme_current: theme_current.clone(),
             theme_tx: theme_tx.clone(),
@@ -1580,6 +1591,7 @@ async fn main() -> Result<()> {
         covers: app_covers.clone(),
         status_state: status_state.clone(),
         admin_backends: admin_backends.clone(),
+        admin_assets: admin_assets.clone(),
         injoignable_tx: injoignable_tx.clone(),
     };
 
@@ -1756,6 +1768,11 @@ async fn main() -> Result<()> {
                     // absente est un non-événement — vérifié, pas supposé.
                     crate::status::mark_plugin_disconnected(&mut statuts, &nom);
                     statuts.active_source = core.active_source().to_string();
+                    // Après le verrou des statuts, et non avant : `oublie_page`
+                    // prend deux autres verrous, et les imbriquer ferait dépendre
+                    // la sûreté d'un ordre à ne jamais inverser ailleurs.
+                    drop(statuts);
+                    admin::oublie_page(&admin_backends, &admin_assets, &nom).await;
                 }
             }
             Some((name, update)) = source_update_rx.recv() => {
@@ -2009,6 +2026,11 @@ async fn main() -> Result<()> {
                         let mut statuts = status_state.write().await;
                         crate::status::mark_plugin_disconnected(&mut statuts, &name);
                         statuts.active_source = core.active_source().to_string();
+                        // Même geste que sur le chemin voisin : les deux morts
+                        // doivent laisser le même état, sous peine que le
+                        // comportement dépende de qui a lancé le processus.
+                        drop(statuts);
+                        admin::oublie_page(&admin_backends, &admin_assets, &name).await;
                     }
                 }
             }
@@ -2272,6 +2294,7 @@ mod bascule_tests {
                 active_source: String::new(),
             })),
             admin_backends: Arc::new(RwLock::new(HashMap::new())),
+            admin_assets: Arc::new(Default::default()),
         };
 
         let mut rassemble = register::Gathered::default();
@@ -2618,21 +2641,38 @@ mod relais_tests {
     /// l'arrivée de *cet* état : un `watch` ne conserve que la dernière valeur,
     /// donc envoyer le témoin avant d'avoir vu celui-ci pourrait l'effacer sans
     /// qu'il ait jamais existé pour le relais. La seconde est le témoin, qui
-    /// clôt la collecte. Comme le relais écrit l'état **puis** la pochette avant
-    /// de retourner attendre, ce qui arrive entre les deux ne peut venir que de
-    /// cet état-là.
+    /// clôt la collecte.
+    ///
+    /// **Une trame de pochette peut arriver en retard, et il a fallu un échec
+    /// intermittent pour l'admettre.** Le raisonnement d'origine disait « la
+    /// fenêtre précédente a été close par son propre témoin, donc rien ne reste
+    /// en vol » et faisait paniquer sur toute autre trame. C'est faux : `temoin`
+    /// rend la main dès qu'il voit **sa** trame d'état, or le relais enchaîne
+    /// ensuite sur son étape pochette pour ce témoin-là. Un témoin dont la
+    /// pochette est en attente de réessai déclenche donc une lecture qui vit
+    /// encore après son retour — et si le test a entre-temps remis le fichier en
+    /// place, ce réessai **réussit** et sa trame se présente juste avant l'état
+    /// suivant. Cadrage faux, pas anomalie.
+    ///
+    /// D'où l'asymétrie assumée ci-dessous : une **pochette** en avance est
+    /// versée dans la fenêtre (elle est la conséquence retardée du changement
+    /// précédent, et la compter ici est ce que les assertions veulent — le
+    /// relais dédoublonne ensuite, donc elle ne peut pas compter deux fois),
+    /// tandis qu'un **état** inattendu reste une anomalie et fait paniquer :
+    /// l'ordre des états, lui, n'a aucune raison de flotter.
     async fn provoque(banc: &mut Banc, etat: PlayerState) -> Vec<Recu> {
         banc.dernier = etat.clone();
         banc.etat_tx.send(etat.clone()).unwrap();
-        // La trame **suivante** est nécessairement cet état : la fenêtre
-        // précédente a été close par son propre témoin, donc rien ne reste en
-        // vol. Une autre trame ici serait une anomalie, pas une attente à
-        // prolonger.
-        match banc.recus.recv().await.expect("le relais doit rester vivant") {
-            Recu::Etat(e) if *e == etat => {}
-            autre => panic!("trame inattendue avant letat envoye : {autre:?}"),
+        let mut avant = Vec::new();
+        loop {
+            match banc.recus.recv().await.expect("le relais doit rester vivant") {
+                Recu::Etat(e) if *e == etat => break,
+                pochette @ Recu::Pochette(_) => avant.push(pochette),
+                autre => panic!("trame inattendue avant letat envoye : {autre:?}"),
+            }
         }
-        temoin(banc).await
+        avant.extend(temoin(banc).await);
+        avant
     }
 
     fn pochettes(recus: &[Recu]) -> Vec<&Cover> {

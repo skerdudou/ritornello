@@ -660,6 +660,15 @@ pub fn parse_available_locales(filenames: &[String]) -> Vec<String> {
 /// processus dont on vient de voir la sortie n'est plus vivant, et laisser l'un
 /// ou l'autre raconterait un état qui n'existe pas.
 ///
+/// **`admin` tombe aussi**, et c'est ce qui retire l'entrée du menu du haut.
+/// L'IHM construit ce menu par `plugins.filter(p => p.admin)` **sans regarder
+/// `connected`** : une ligne restée à `admin: true` continuait donc d'offrir la
+/// page d'un greffon mort, et le clic rendait une erreur au lieu de rien. C'est
+/// le même symptôme que pour un greffon éteint, réglé de son côté parce que
+/// `desactive` pose le drapeau à faux par construction. Corollaire utile : le
+/// sondage `Ping` de `/api/status` ne filtre que sur `admin`, donc il cesse du
+/// même coup d'interroger un dorsal mort à chaque rafraîchissement.
+///
 /// `starting` en particulier avait une conséquence visible : `main::a_retrograder`
 /// ne consulte que ce drapeau, si bien qu'un greffon mort **pendant** ses dix
 /// secondes de grâce gardait sa ligne « démarrage » jusqu'à l'échéance, puis se
@@ -671,6 +680,7 @@ pub fn mark_plugin_disconnected(state: &mut StatusState, name: &str) {
             p.connected = false;
             p.stalled = false;
             p.starting = false;
+            p.admin = false;
         }
     }
 }
@@ -1807,6 +1817,31 @@ mod tests {
         assert!(!ligne.connected);
         assert!(!ligne.starting, "un processus dont on a vu la sortie ne demarre plus");
         assert!(!ligne.stalled, "et il n'est pas fige non plus");
+    }
+
+    #[test]
+    fn mark_plugin_disconnected_retire_la_page_dadmin_du_menu() {
+        // Le menu du haut de l'IHM est `plugins.filter(p => p.admin)`, sans
+        // regard sur `connected` : sans cet effacement, l'entrée d'un greffon
+        // mort restait offerte et le clic rendait une erreur au lieu de rien.
+        // Exactement la plainte déjà traitée pour le cas « éteint ».
+        let mut st = StatusState {
+            plugins: vec![
+                PluginStatus::genre("files", "input", true, true),
+                PluginStatus::genre("files", "display", true, true),
+                PluginStatus::genre("radio", "source", true, true),
+            ],
+            active_source: "radio".into(),
+        };
+        mark_plugin_disconnected(&mut st, "files");
+        assert!(
+            st.plugins.iter().filter(|p| p.name == "files").all(|p| !p.admin),
+            "toutes les lignes du greffon mort doivent cesser d'annoncer une page"
+        );
+        assert!(
+            st.plugins.iter().find(|p| p.name == "radio").unwrap().admin,
+            "la page d'un autre greffon ne doit pas etre touchee"
+        );
     }
 
     #[test]

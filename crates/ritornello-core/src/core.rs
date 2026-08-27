@@ -6052,11 +6052,23 @@ mod tests {
     /// faute d'un moyen simple de partager un utilitaire de test entre
     /// modules. Rend `None` si ffmpeg est absent : le test se saute plutôt
     /// que d'échouer, ce n'est pas une dépendance du cœur.
+    ///
+    /// **L'image doit rester différente de celle de `player::mpv::tests`, et ce
+    /// n'est pas cosmétique.** Depuis que le fichier temporaire est nommé
+    /// d'après le *contenu* de l'image, deux fixtures portant la même image
+    /// visent le même chemin dans le `temp_dir()` **partagé** par tous les tests
+    /// de ce binaire — qui tournent en parallèle. Les tests d'ici traversent en
+    /// plus `CoverCache`, dont l'éviction **supprime** ces fichiers : la
+    /// collision s'est manifestée comme un échec intermittent chez le voisin,
+    /// qui lisait un fichier effacé ou réécrit sous lui. Les deux fixtures
+    /// partageaient `color=c=red:s=16x16`.
     fn mp3_avec_pochette_de_test(dir: &std::path::Path) -> Option<std::path::PathBuf> {
         let image = dir.join("cover.jpg");
         let sortie = dir.join("avec_pochette.mp3");
         let ok = std::process::Command::new("ffmpeg")
-            .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=16x16:d=1"])
+            // Verte et 32×32 : voir la doc ci-dessus, elle **ne doit pas**
+            // coïncider avec celle de `player::mpv::tests`.
+            .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=green:s=32x32:d=1"])
             .args(["-frames:v", "1"])
             .arg(&image)
             .status()
