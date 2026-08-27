@@ -373,7 +373,7 @@ impl AdminClient {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
-        let msg = AdminRequest { id, req };
+        let msg = AdminRequest { id, deadline_ms: None, req };
         {
             let mut w = self.writer.lock().await;
             if let Err(e) = w.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await {

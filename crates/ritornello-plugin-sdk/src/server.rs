@@ -801,6 +801,7 @@ pub async fn serve_admin(listener: UnixListener, mut plugin: impl AdminPlugin) -
                 Some((mime, body)) => AdminResult::Asset { mime, body: Some(body) },
                 None => AdminResult::Asset { mime: "text/plain".to_string(), body: None },
             },
+            AdminReq::Ping => AdminResult::Pong,
             AdminReq::GetCatalog => AdminResult::Catalog(plugin.catalog()),
             AdminReq::GetData => AdminResult::Data(plugin.get_data().await),
             AdminReq::SetData(data) => match plugin.set_data(data).await {
