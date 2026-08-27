@@ -2,6 +2,7 @@
 name = "ritornello-plugin-musicbrainz"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [[bin]]
 name = "ritornello-plugin-musicbrainz"
@@ -9,6 +10,10 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+# `derive` : le magasin de motifs appris est sérialisé en JSON sur disque. Même
+# déclaration que les autres greffons, pour ne pas dupliquer une branche dans
+# Cargo.lock.
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
@@ -20,3 +25,16 @@ async-trait = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 ritornello-proto = { path = "../ritornello-proto" }
 ritornello-plugin-sdk = { path = "../ritornello-plugin-sdk" }
+ritornello-i18n = { path = "../ritornello-i18n" }
+
+[dev-dependencies]
+# Horloge simulée, comme dans `ritornello-core` et le greffon mpd. Nécessaire
+# et non confortable : l'étranglement des requêtes vers MusicBrainz s'éprouve
+# sur un intervalle de 1,1 s, et l'attendre pour de vrai ferait d'un test juste
+# un test lent — puis un flake dès que la suite tourne sous charge.
+#
+# À ne pas croire acquise par `features = ["full"]` côté `[dependencies]` :
+# `full` **n'inclut pas** `test-util`, et sans elle
+# `#[tokio::test(start_paused = true)]` échoue à la compilation, pas au test.
+tokio = { version = "1", features = ["test-util"] }
+tempfile = "3"

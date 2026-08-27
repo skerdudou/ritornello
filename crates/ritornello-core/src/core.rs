@@ -2767,6 +2767,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn une_reponse_de_preselections_en_retard_ne_ressuscite_pas_une_source_retiree() {
+        // La course : `ListPresets` est détaché, donc sa réponse peut arriver
+        // après l'extinction du greffon. Sans protection, elle réinsérait
+        // l'entrée que `remove_source` venait d'évincer — et le catalogue
+        // recommençait à annoncer à un client MPD une liste enregistrée sur
+        // laquelle il pouvait agir. C'est exactement le défaut que l'éviction
+        // existe pour empêcher.
+        //
+        // **Ce qui protège est le retour anticipé en tête de
+        // `handle_source_update`** (`!self.sources.contains_key(name)`), et non
+        // une garde posée près de l'insertion. Ce test existe parce que rien ne
+        // l'épinglait : le retour anticipé est arrivé pour la trame *entière*,
+        // et sa doc décrit bien ce cas, mais aucune assertion ne l'aurait
+        // empêché de disparaître. Vérifié par mutation : le retirer fait tomber
+        // ce test.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.handle_source_update("radio", avec_presets(vec![pres(1, "FIP")]));
+        assert!(core.remove_source("radio").await.unwrap());
+        assert_eq!(noms(&core.catalogue()), vec!["cd".to_string()]);
+
+        // La réponse en retard arrive maintenant, sur un nom que le cœur ne
+        // câble plus.
+        core.handle_source_update("radio", avec_presets(vec![pres(1, "FIP"), pres(5, "OUI FM")]));
+
+        assert!(
+            !core.presets_par_source.contains_key("radio"),
+            "une source retirée ne doit pas revenir par une réponse en vol"
+        );
+        assert_eq!(
+            noms(&core.catalogue()),
+            vec!["cd".to_string()],
+            "et le catalogue ne doit pas la réannoncer"
+        );
+    }
+
+    #[tokio::test]
     async fn retirer_une_source_la_sort_du_catalogue_avec_ses_preselections() {
         // Fusion des deux chantiers : `remove_source` (extinction à chaud d'un
         // greffon) est arrivé par un côté, `presets_par_source` et le canal de

@@ -57,6 +57,17 @@ exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-ouifm-metas"
 name = "radiofrance-metas"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-radiofrance-metas"
 
+# `musicbrainz` comes AFTER the two station-specific plugins above, and that
+# position is a requirement rather than an accident. `metadata` plugins are
+# arbitrated by declaration order, and the winner's block is taken WHOLE — the
+# core never merges field by field. So a `musicbrainz` declared before
+# `ouifm-metas` would win on the very stations that plugin knows better, and its
+# answer would replace theirs entirely rather than filling the gaps.
+#
+# It matters more since this plugin learned to split a radio's single metadata
+# string into artist and title: on that path it overwrites (it has validated its
+# guess against MusicBrainz), where its cover-only path merely fills in. Keep it
+# last of the three.
 [[plugin]]
 name = "musicbrainz"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-musicbrainz"

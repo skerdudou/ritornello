@@ -389,6 +389,9 @@ impl Metadonnees {
             album: m.album,
             duration_s: m.duration_s,
             cover: self.cover_retenue().is_some(),
+            // Verbatim, et depuis `self.icy` et non depuis `m` : `m` est le
+            // texte **composé**, où l'ICY n'apparaît qu'en dernier recours.
+            stream_title: self.icy.clone(),
         }
     }
 
@@ -1295,6 +1298,47 @@ mod tests {
     fn sans_enrichissement_il_n_y_a_pas_de_position() {
         let m = Metadonnees::new(vec!["radiofrance".into()]);
         assert_eq!(m.position_s(), None);
+    }
+
+    #[test]
+    fn la_chaine_brute_survit_a_lenrichissement_qui_lecrase() {
+        // La propriété dont dépend toute la fonctionnalité. L'identité d'une
+        // radio est l'URL du flux : elle ne change pas entre deux morceaux, et
+        // `set_icy` n'efface délibérément pas les enrichissements. Donc sans
+        // ce champ, un greffon qui a une fois écrit un artiste ne reverrait
+        // plus jamais la chaîne ICY, et ne pourrait plus rien découper — « ça
+        // marche une fois ».
+        let mut m = Metadonnees::new(vec!["musicbrainz".to_string()]);
+        let identite = serde_json::json!({ "kind": "stream", "url": "http://exemple/flux.mp3" });
+        m.set_identity(Some(identite.clone()));
+        assert!(m.set_icy("Miles Davis - So What".into()));
+
+        // Le greffon corrige, en écrasant : le titre composé devient le sien.
+        assert!(m.ajoute(
+            "musicbrainz",
+            ritornello_proto::Enrichment {
+                identity: identite.clone(),
+                artist: Some("Miles Davis".into()),
+                title: Some("So What".into()),
+                ..Default::default()
+            }
+        ));
+        assert_eq!(m.known().title.as_deref(), Some("So What"));
+
+        // Morceau suivant, même station : l'enrichissement précédent est toujours
+        // là (identité inchangée), mais la chaîne brute doit être la neuve.
+        assert!(m.set_icy("John Coltrane - Naima".into()));
+        assert_eq!(
+            m.known().stream_title.as_deref(),
+            Some("John Coltrane - Naima"),
+            "le brut doit suivre le flux, pas la composition"
+        );
+    }
+
+    #[test]
+    fn sans_icy_le_champ_reste_vide() {
+        let m = Metadonnees::new(vec![]);
+        assert_eq!(m.known().stream_title, None);
     }
 
     #[test]

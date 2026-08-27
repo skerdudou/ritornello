@@ -61,6 +61,22 @@ pub struct Known {
     /// transmettre alourdirait chaque trame pour rien.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cover: bool,
+    /// Ce que le **flux lui-même** a annoncé, brut : ni découpé, ni composé,
+    /// ni arbitré.
+    ///
+    /// Pas une redite de `title`. `title` est le résultat d'un arbitrage entre
+    /// plusieurs contributeurs et peut donc venir d'un greffon ; ce champ est
+    /// un fait d'un seul émetteur, la station.
+    ///
+    /// Il existe parce que seule la forme brute peut être **redécoupée**, et
+    /// qu'un greffon a besoin de la revoir même après avoir lui-même écrasé le
+    /// titre composé. L'identité d'une radio est l'URL de son flux, donc elle
+    /// ne change pas d'un morceau à l'autre : le garde-fou de péremption de
+    /// `Metadonnees::ajoute` ne périme rien, et `set_icy` n'efface pas les
+    /// enrichissements. Sans ce champ, un greffon qui corrige une fois ne
+    /// reverrait plus jamais ce que la station annonce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_title: Option<String>,
 }
 
 impl Known {
@@ -752,6 +768,10 @@ mod tests {
                 album: None,
                 duration_s: Some(218),
                 cover: true,
+                // Valeur non-défaut, comme les champs voisins : ce test verifie
+                // un aller-retour complet, et un `None` par defaut n'aurait rien
+                // distingue d'un champ oublie dans l'implementation.
+                stream_title: Some("Lou Reed - Oooh Baby".into()),
             },
         };
         let back: NowPlaying = serde_json::from_str(&serde_json::to_string(&np).unwrap()).unwrap();
@@ -886,6 +906,29 @@ mod tests {
         // Muet quand faux : la trame d'un greffon qui ecrase ne grossit pas.
         let defaut = Enrichment { identity: json!(1), ..Default::default() };
         assert!(!serde_json::to_string(&defaut).unwrap().contains("fill_only"));
+    }
+
+    #[test]
+    fn stream_title_absent_ne_grossit_pas_la_trame() {
+        // Même contrat que `covers` et `known` : un champ neuf ne doit rien
+        // changer à la trame la plus courante, sinon chaque trame par seconde de
+        // lecture paie l'ajout.
+        let json = serde_json::to_string(&Known::default()).unwrap();
+        assert!(!json.contains("stream_title"), "{json}");
+    }
+
+    #[test]
+    fn stream_title_voyage_quand_il_est_la() {
+        let k = Known { stream_title: Some("Miles Davis - So What".into()), ..Default::default() };
+        let json = serde_json::to_string(&k).unwrap();
+        assert!(json.contains(r#""stream_title":"Miles Davis - So What""#), "{json}");
+        assert_eq!(serde_json::from_str::<Known>(&json).unwrap(), k);
+    }
+
+    #[test]
+    fn une_trame_dun_binaire_anterieur_se_relit() {
+        let k: Known = serde_json::from_str(r#"{"title":"X"}"#).unwrap();
+        assert_eq!(k.stream_title, None);
     }
 
     #[test]

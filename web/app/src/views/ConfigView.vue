@@ -85,6 +85,7 @@ interface LigneGreffon {
   kinds: string
   connected: boolean
   stalled: boolean
+  starting: boolean
   disabled: boolean
   admin: boolean
 }
@@ -97,6 +98,7 @@ interface AccGreffon {
   kindsRecus: string[]
   connected: boolean
   stalled: boolean
+  starting: boolean
   disabled: boolean
   admin: boolean
 }
@@ -119,6 +121,7 @@ const greffons = computed<LigneGreffon[]>(() => {
         kindsRecus: [p.kind],
         connected: p.connected,
         stalled: !!p.stalled,
+        starting: !!p.starting,
         disabled: !!p.disabled,
         admin: p.admin,
       })
@@ -127,6 +130,7 @@ const greffons = computed<LigneGreffon[]>(() => {
     acc.kindsRecus.push(p.kind)
     acc.connected = acc.connected && p.connected
     acc.stalled = acc.stalled || !!p.stalled
+    acc.starting = acc.starting || !!p.starting
     acc.disabled = acc.disabled || !!p.disabled
     acc.admin = acc.admin || p.admin
   }
@@ -138,7 +142,15 @@ const greffons = computed<LigneGreffon[]>(() => {
     // ce qui dépendrait de l'ordre d'arrivée des lignes.
     const reels = acc.kindsRecus.filter((k) => k !== 'unknown')
     const kinds = (reels.length > 0 ? reels : acc.kindsRecus).join(', ')
-    return { name: acc.name, kinds, connected: acc.connected, stalled: acc.stalled, disabled: acc.disabled, admin: acc.admin }
+    return {
+      name: acc.name,
+      kinds,
+      connected: acc.connected,
+      stalled: acc.stalled,
+      starting: acc.starting,
+      disabled: acc.disabled,
+      admin: acc.admin,
+    }
   })
 })
 
@@ -285,9 +297,34 @@ function aller(id: string) {
                   <td data-plugin-kind>{{ p.kinds }}</td>
                   <td data-plugin-state>
                     <Badge
-                      :variant="p.disabled ? 'outline' : p.connected ? 'secondary' : p.stalled ? 'outline' : 'destructive'"
+                      :variant="
+                        p.disabled
+                          ? 'outline'
+                          : p.connected
+                            ? 'secondary'
+                            : p.starting
+                              ? 'secondary'
+                              : p.stalled
+                                ? 'outline'
+                                : 'destructive'
+                      "
                     >
-                      {{ p.disabled ? t('disabled') : p.connected ? t('connected') : p.stalled ? t('stalled') : t('unavailable') }}
+                      <!-- « Démarrage » passe **avant** « figé » : les deux
+                           disent que le greffon n'a pas parlé, et seul le temps
+                           écoulé les distingue. Afficher « figé » pendant un
+                           démarrage normal accusait à tort un binaire
+                           parfaitement sain. -->
+                      {{
+                        p.disabled
+                          ? t('disabled')
+                          : p.connected
+                            ? t('connected')
+                            : p.starting
+                              ? t('starting')
+                              : p.stalled
+                                ? t('stalled')
+                                : t('unavailable')
+                      }}
                     </Badge>
                   </td>
                   <td>

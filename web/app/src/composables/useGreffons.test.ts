@@ -109,6 +109,32 @@ describe('useGreffons', () => {
     expect(spy).toHaveBeenCalledTimes(2)
   })
 
+  it('surveille aussi un greffon en « démarrage », pas seulement un « figé »', async () => {
+    // Le piège de cette relecture, et la raison d’être de ce test : depuis
+    // qu’un greffon fraîchement rallumé est rapporté « démarrage » et non plus
+    // « figé », ne surveiller que `stalled` aurait désarmé le sondage pendant
+    // exactement la fenêtre pour laquelle il existe. Le rallumage serait
+    // redevenu invisible sans F5 — le défaut d’origine, réintroduit par une
+    // amélioration d’à côté.
+    const spy = vi
+      .fn()
+      .mockResolvedValueOnce(
+        reponse([ligne({ kind: 'unknown', connected: false, admin: false, starting: true })]),
+      )
+      .mockResolvedValue(reponse([ligne()]))
+    vi.stubGlobal('fetch', spy)
+    const { useGreffons } = await import('./useGreffons')
+    const { admins, rafraichir } = useGreffons()
+
+    await rafraichir()
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(admins.value).toEqual([])
+
+    await vi.advanceTimersByTimeAsync(1500)
+    expect(spy).toHaveBeenCalledTimes(2)
+    expect(admins.value).toEqual(['mpd'])
+  })
+
   it('un greffon qui n’annonce jamais cesse d’être sondé au bout de 30 s', async () => {
     // `Gathered::figes` du cœur : lancé, vivant, muet. C'est un greffon fautif,
     // pas un greffon lent, et la ligne « figé » devient alors un diagnostic à

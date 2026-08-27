@@ -1,6 +1,18 @@
 import type { Mode } from '@ritornello/ui'
 
-export interface PluginStatus { name: string; kind: string; connected: boolean; admin: boolean; stalled?: boolean; disabled?: boolean }
+export interface PluginStatus {
+  name: string
+  kind: string
+  connected: boolean
+  admin: boolean
+  /** Lancé, pas encore annoncé, et **passé** le délai normal : un diagnostic. */
+  stalled?: boolean
+  /** Lancé à l'instant, pas encore annoncé, et c'est normal. Exclusif avec
+   * `stalled`, dont il ne diffère que par le temps écoulé — mais la différence
+   * est tout : « figé » accuse, « démarrage » constate. */
+  starting?: boolean
+  disabled?: boolean
+}
 export interface StatusPayload { plugins: PluginStatus[]; active_source: string }
 export interface AudioDevice { name: string; description: string }
 export interface AudioPayload { devices: AudioDevice[]; current: string | null }
