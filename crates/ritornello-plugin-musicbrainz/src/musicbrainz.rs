@@ -380,9 +380,32 @@ pub fn requete_release(artist: &str, album: &str) -> String {
 /// d'enregistrement, que la station écrit d'une seule main.
 pub const SEUIL_RELEASE: u64 = 85;
 
-/// MBID du premier résultat, **s'il est assez sûr**. `None` = rien trouvé,
+/// URL de pochette pour une release issue d'une **recherche**.
+///
+/// Le niveau album, pas le pressage — et c'est un choix, pas un raccourci. Une
+/// réponse de recherche ne porte **jamais** de bloc `cover-art-archive`
+/// (mesuré le 2026-08-26 sur les deux recherches : release et enregistrement),
+/// donc l'arbitrage de [`parse_lookup`] est impossible ici. Il est aussi
+/// inutile : ces chemins cherchent par texte, ils n'ont jamais visé une
+/// édition précise. Or l'endpoint du release-group répond dès qu'**un**
+/// pressage du groupe a une face avant, et le pressage tiré par la recherche
+/// est lui-même dans ce groupe : le niveau album est donc strictement plus
+/// disponible, jamais moins.
+///
+/// Le repli sur le pressage ne sert qu'à une réponse sans release-group.
+/// Mesuré, elles n'existent pas (5/5 et 2/2), mais compter là-dessus serait
+/// supposer un schéma plutôt que le lire.
+fn pochette_de_release(release: &Value) -> Option<String> {
+    release
+        .pointer("/release-group/id")
+        .and_then(Value::as_str)
+        .map(url_caa_groupe)
+        .or_else(|| release.get("id").and_then(Value::as_str).map(url_caa))
+}
+
+/// Pochette du premier résultat, **s'il est assez sûr**. `None` = rien trouvé,
 /// réponse illisible, ou meilleur résultat trop incertain.
-pub fn premier_release_id(json: &str) -> Option<String> {
+pub fn premiere_pochette(json: &str) -> Option<String> {
     let v: Value = serde_json::from_str(json).ok()?;
     let premiere = v.get("releases")?.as_array()?.first()?;
     // Score absent = refus, et un `warn` plutôt qu'un `debug` : c'est un champ
@@ -398,10 +421,10 @@ pub fn premier_release_id(json: &str) -> Option<String> {
         tracing::debug!("release search: best match scored {score}, under the {SEUIL_RELEASE} needed");
         return None;
     }
-    premiere.get("id")?.as_str().map(str::to_string)
+    pochette_de_release(premiere)
 }
 
-/// Recherche une release par artiste et album, et rend son identifiant.
+/// Recherche une release par artiste et album, et rend l'URL de sa pochette.
 ///
 /// C'est le chemin générique (fichier sans pochette, flux radio dont les
 /// métadonnées textuelles suffisent) : contrairement au chemin disque, il ne
@@ -411,7 +434,7 @@ pub fn premier_release_id(json: &str) -> Option<String> {
 pub async fn cherche_release(artist: &str, album: &str) -> Result<Option<String>> {
     let url = requete_release(artist, album);
     let Some(body) = requete_texte(&url).await? else { return Ok(None) };
-    Ok(premier_release_id(&body))
+    Ok(premiere_pochette(&body))
 }
 
 /// Score minimal d'une recherche d'enregistrement pour être crue.
@@ -431,12 +454,18 @@ pub struct Enregistrement {
     /// candidat après normalisation, et cette comparaison porte la validation :
     /// le score seul est trop généreux.
     pub titre: String,
-    /// Première release, s'il en a une. La pochette en vient.
+    /// URL de la pochette, tirée de la première release s'il y en a une.
     ///
     /// Pas de choix « intelligent » entre original, compilation et remaster :
     /// MusicBrainz ne les classe pas par pertinence, et ce serait une
     /// heuristique de plus pour un carré de 500 pixels.
-    pub release_id: Option<String>,
+    ///
+    /// Une URL et non un MBID, pour la même raison que `DiscInfo::cover_url` :
+    /// le niveau à viser (album ou pressage) se décide ici, où l'on voit la
+    /// réponse, et jamais chez l'appelant. C'est ce qui empêche un troisième
+    /// chemin de refabriquer une URL en aveugle — le défaut que ce module a
+    /// porté sur ses trois chemins à la fois.
+    pub cover_url: Option<String>,
 }
 
 /// Requête de recherche d'un enregistrement par artiste et titre.
@@ -466,13 +495,11 @@ pub fn premier_enregistrement(json: &str) -> Option<Enregistrement> {
     Some(Enregistrement {
         score,
         titre: premier.get("title")?.as_str()?.to_string(),
-        release_id: premier
+        cover_url: premier
             .get("releases")
             .and_then(Value::as_array)
             .and_then(|r| r.first())
-            .and_then(|r| r.get("id"))
-            .and_then(Value::as_str)
-            .map(str::to_string),
+            .and_then(pochette_de_release),
     })
 }
 
@@ -792,22 +819,54 @@ mod tests {
     }
 
     #[test]
-    fn premier_release_id_lit_le_premier_resultat() {
-        let json = r#"{"count":135,"releases":[{"id":"e32a3f0b-1c19-3170-bb1c-650893774744","score":100},{"id":"autre"}]}"#;
+    fn la_pochette_vient_du_premier_resultat() {
+        let json = r#"{"count":135,"releases":[
+            {"id":"e32a3f0b-1c19-3170-bb1c-650893774744","score":100,
+             "release-group":{"id":"8e8a594f-2175-38c7-a871-abb68ec363e7"}},
+            {"id":"autre"}]}"#;
         assert_eq!(
-            premier_release_id(json).as_deref(),
-            Some("e32a3f0b-1c19-3170-bb1c-650893774744")
+            premiere_pochette(json).as_deref(),
+            Some("https://coverartarchive.org/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7/front-500")
         );
-        assert_eq!(premier_release_id(r#"{"releases":[]}"#), None);
-        assert_eq!(premier_release_id("pas du json"), None);
+        assert_eq!(premiere_pochette(r#"{"releases":[]}"#), None);
+        assert_eq!(premiere_pochette("pas du json"), None);
+    }
+
+    #[test]
+    fn une_recherche_vise_lalbum_et_non_le_pressage() {
+        // Mesure du 2026-08-26 : une reponse de recherche ne porte JAMAIS de
+        // bloc `cover-art-archive` (verifie sur les deux recherches), donc
+        // l'arbitrage de `parse_lookup` est impossible ici. Il est aussi
+        // inutile : on a cherche par texte, aucun pressage precis n'etait vise,
+        // et l'endpoint du groupe repond des qu'un seul de ses pressages a une
+        // face avant.
+        let json = r#"{"releases":[{"id":"11111111-1111-1111-1111-111111111111","score":100,
+            "release-group":{"id":"22222222-2222-2222-2222-222222222222"}}]}"#;
+        let url = premiere_pochette(json).unwrap();
+        assert!(url.contains("/release-group/22222222"), "{url}");
+        assert!(!url.contains("/release/11111111"), "le pressage ne doit pas etre vise — {url}");
+    }
+
+    #[test]
+    fn sans_release_group_la_recherche_se_rabat_sur_le_pressage() {
+        // Mesure : 5/5 et 2/2 des reponses en portent un. Mais s'en remettre a
+        // ca serait supposer un schema plutot que le lire.
+        let json = r#"{"releases":[{"id":"11111111-1111-1111-1111-111111111111","score":100}]}"#;
+        assert_eq!(
+            premiere_pochette(json).as_deref(),
+            Some("https://coverartarchive.org/release/11111111-1111-1111-1111-111111111111/front-500")
+        );
     }
 
     /// Réponse de recherche de release **telle que MusicBrainz l'émet** : le
-    /// champ `score` est toujours présent, et c'est lui qu'on ignorait.
+    /// champ `score` est toujours présent, et c'est lui qu'on ignorait. Le
+    /// `release-group` y est aussi — mesuré présent sur 5 résultats sur 5,
+    /// sans aucun `inc`.
     fn reponse_release(score: u64) -> String {
         format!(
             r#"{{"created":"2026-08-26T12:00:00.000Z","count":1,"offset":0,
             "releases":[{{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","score":{score},
+            "release-group":{{"id":"ffffffff-eeee-dddd-cccc-bbbbbbbbbbbb"}},
             "title":"Kind of Blue","status":"Official"}}]}}"#
         )
     }
@@ -815,8 +874,8 @@ mod tests {
     #[test]
     fn une_release_assez_sure_est_retenue() {
         assert_eq!(
-            premier_release_id(&reponse_release(SEUIL_RELEASE)).as_deref(),
-            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+            premiere_pochette(&reponse_release(SEUIL_RELEASE)).as_deref(),
+            Some("https://coverartarchive.org/release-group/ffffffff-eeee-dddd-cccc-bbbbbbbbbbbb/front-500"),
             "le seuil pile doit passer"
         );
     }
@@ -826,7 +885,7 @@ mod tests {
         // Le defaut latent : aujourd'hui un album mal orthographie recoit une
         // pochette fausse avec aplomb, parce que la recherche rend toujours
         // quelque chose de plausible.
-        assert_eq!(premier_release_id(&reponse_release(SEUIL_RELEASE - 1)), None);
+        assert_eq!(premiere_pochette(&reponse_release(SEUIL_RELEASE - 1)), None);
     }
 
     #[test]
@@ -835,13 +894,13 @@ mod tests {
         // reviendrait au defaut d'avant, en silence ; le supposer mauvais coupe
         // la fonctionnalite, mais visiblement (voir le `warn`).
         let sans = r#"{"releases":[{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","title":"X"}]}"#;
-        assert_eq!(premier_release_id(sans), None);
+        assert_eq!(premiere_pochette(sans), None);
     }
 
     #[test]
     fn une_reponse_sans_release_reste_none() {
-        assert_eq!(premier_release_id(r#"{"releases":[]}"#), None);
-        assert_eq!(premier_release_id("pas du json"), None);
+        assert_eq!(premiere_pochette(r#"{"releases":[]}"#), None);
+        assert_eq!(premiere_pochette("pas du json"), None);
     }
 
     #[tokio::test(start_paused = true)]
@@ -866,7 +925,10 @@ mod tests {
     /// `score`, `title`, et les releases dont sortira la pochette.
     fn reponse_recording(score: u64, titre: &str, avec_release: bool) -> String {
         let releases = if avec_release {
-            r#","releases":[{"id":"11111111-2222-3333-4444-555555555555","title":"Kind of Blue"}]"#
+            // Le `release-group` imbrique est mesure present sur 2 releases
+            // sur 2 dans une reponse reelle, sans aucun `inc`.
+            r#","releases":[{"id":"11111111-2222-3333-4444-555555555555","title":"Kind of Blue",
+              "release-group":{"id":"66666666-7777-8888-9999-aaaaaaaaaaaa"}}]"#
         } else {
             ""
         };
@@ -902,7 +964,13 @@ mod tests {
         let e = premier_enregistrement(&reponse_recording(100, "So What", true)).unwrap();
         assert_eq!(e.score, 100);
         assert_eq!(e.titre, "So What");
-        assert_eq!(e.release_id.as_deref(), Some("11111111-2222-3333-4444-555555555555"));
+        // L'album, pas le pressage : une recherche ne porte pas de bloc
+        // `cover-art-archive`, et le niveau groupe est strictement plus
+        // disponible (voir `pochette_de_release`).
+        assert_eq!(
+            e.cover_url.as_deref(),
+            Some("https://coverartarchive.org/release-group/66666666-7777-8888-9999-aaaaaaaaaaaa/front-500")
+        );
     }
 
     #[test]
@@ -910,7 +978,7 @@ mod tests {
         // Le découpage est acquis même sans image : le couple artiste/titre vaut
         // par lui-même, et le cœur traite déjà une pochette absente en silence.
         let e = premier_enregistrement(&reponse_recording(100, "So What", false)).unwrap();
-        assert_eq!(e.release_id, None);
+        assert_eq!(e.cover_url, None);
         assert_eq!(e.titre, "So What");
     }
 
