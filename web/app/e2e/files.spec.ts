@@ -288,10 +288,12 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   const premiere = await position.textContent()
   await expect(position).not.toHaveText(premiere ?? '', { timeout: 10_000 })
   // Un fichier local se parcourt : la barre est un curseur, nomme et
-  // atteignable au clavier.
-  const barre = page.locator('[data-barre]')
-  await expect(barre).toHaveAttribute('role', 'slider')
-  await expect(barre).toHaveAttribute('aria-label', /.+/)
+  // atteignable au clavier. Le role et l'aria-label vivent sur la poignee, pas
+  // sur l'enveloppe (voir Slider.vue du kit : l'aria-label descend sur
+  // `SliderThumb`, seul element que le lecteur d'ecran annonce).
+  const poignee = page.locator('[data-barre] [role="slider"]')
+  await expect(poignee).toHaveCount(1)
+  await expect(poignee).toHaveAttribute('aria-label', /.+/)
 
   // Remettre le harnais dans l'etat ou on l'a trouve : les parcours partagent
   // un unique coeur et `files.spec.ts` s'execute **avant** `parcours.spec.ts`,

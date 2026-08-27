@@ -209,7 +209,10 @@ test('onglet Système : métriques et boutons présents', async ({ page }) => {
   await expect(page.locator('[data-logs-card]')).toBeVisible()
   await page.goto('/config')
   await expect(page.locator('[data-logs-card]')).toHaveCount(0)
-  // Le lien de navigation existe depuis la page d'accueil.
+  // Le lien de navigation existe depuis la page d'accueil. Scope a la nav du
+  // haut (visible sur ce viewport bureau) : depuis la tache 11, une seconde
+  // nav — la barre basse du telephone — porte le meme lien, cachee mais
+  // toujours dans le DOM, ce qui rendrait le selecteur nu ambigu.
   await page.goto('/')
-  await expect(page.locator('a[href="/system"]')).toBeVisible()
+  await expect(page.locator('[data-nav-haut] a[href="/system"]')).toBeVisible()
 })
