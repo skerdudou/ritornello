@@ -154,9 +154,9 @@ struct MusicBrainzPlugin {
     /// (ICY), ou changer sans que l'album change (piste suivante du même
     /// disque de fichiers).
     cle_generique: Option<CleGenerique>,
-    /// Dernier couple recherché, et le release_id trouvé (`None` = recherche
-    /// faite, rien trouvé). Mémoriser aussi les échecs évite de réinterroger
-    /// MusicBrainz à chaque trame tant que l'album ne change pas.
+    /// Dernier couple recherché, et l'URL de pochette trouvée (`None` =
+    /// recherche faite, rien trouvé). Mémoriser aussi les échecs évite de
+    /// réinterroger MusicBrainz à chaque trame tant que l'album ne change pas.
     pochette_connue: Option<TrouvePochette>,
     /// Couple dont la recherche est en vol, pour ne pas la lancer deux fois.
     pochette_en_vol: Option<CleGenerique>,
@@ -284,9 +284,10 @@ impl MusicBrainzPlugin {
             // Ce plugin ne sait pas où en est la lecture : il répond
             // sur l'identité d'un morceau, pas sur son déroulement.
             position_s: None,
-            // Le lookup par TOC portait déjà le MBID de la release : aucune
-            // requête de plus pour la pochette, juste construire l'URL fixe.
-            cover: info.release_id.as_deref().map(|id| CoverRef::Url { url: musicbrainz::url_caa(id) }),
+            // Le lookup par TOC portait déjà de quoi construire l'URL, et le
+            // choix du niveau (ce pressage, ou l'album à défaut de face avant)
+            // a été fait à l'analyse. Aucune requête de plus ici.
+            cover: info.cover_url.clone().map(|url| CoverRef::Url { url }),
             // Chemin disque : la TOC dit ce qui joue, donc il écrase (défaut).
             ..Default::default()
         });
@@ -298,13 +299,16 @@ impl MusicBrainzPlugin {
         let (Some(identite), Some(cle)) = (&self.identite_generique, &self.cle_generique) else {
             return;
         };
-        let Some((connu, Some(release_id))) = &self.pochette_connue else { return };
+        let Some((connu, Some(cover_url))) = &self.pochette_connue else { return };
         if connu != cle {
             return;
         }
         self.pret = Some(Enrichment {
             identity: identite.clone(),
-            cover: Some(CoverRef::Url { url: musicbrainz::url_caa(release_id) }),
+            // URL déjà résolue par `cherche_release` : ce chemin ne rebâtit
+            // rien. Une recherche ne porte pas de bloc `cover-art-archive`,
+            // donc c'est la pochette de l'album qui en sort.
+            cover: Some(CoverRef::Url { url: cover_url.clone() }),
             // Ce chemin ne sait rien de plus que ce qu'on lui a donné : il ne
             // fait que compléter, jamais écraser un champ déjà renseigné.
             fill_only: true,
@@ -325,14 +329,14 @@ impl MusicBrainzPlugin {
         let (artist, album) = cle.clone();
         let tx = self.pochette_tx.clone();
         tokio::spawn(async move {
-            let release_id = match musicbrainz::cherche_release(&artist, &album).await {
+            let cover_url = match musicbrainz::cherche_release(&artist, &album).await {
                 Ok(id) => id,
                 Err(e) => {
                     tracing::info!("MusicBrainz release search: {e}");
                     None
                 }
             };
-            let _ = tx.send((cle, release_id)).await;
+            let _ = tx.send((cle, cover_url)).await;
         });
     }
 
@@ -526,7 +530,7 @@ impl MetadataPlugin for MusicBrainzPlugin {
                     None => std::future::pending().await,
                 },
                 r = self.pochette_rx.recv() => match r {
-                    Some((cle, release_id)) => {
+                    Some((cle, cover_url)) => {
                         if self.pochette_en_vol.as_ref() == Some(&cle) {
                             self.pochette_en_vol = None;
                         }
@@ -535,7 +539,7 @@ impl MetadataPlugin for MusicBrainzPlugin {
                         // visé — un changement de piste peut avoir rendu la
                         // recherche en vol obsolète pendant qu'elle volait.
                         if self.cle_generique.as_ref() == Some(&cle) {
-                            self.pochette_connue = Some((cle, release_id));
+                            self.pochette_connue = Some((cle, cover_url));
                             self.prepare_generique();
                         }
                     }
@@ -573,7 +577,7 @@ impl MetadataPlugin for MusicBrainzPlugin {
                             continue;
                         }
                         match issue.valide {
-                            Some((artist, title, release_id)) => {
+                            Some((artist, title, cover_url)) => {
                                 {
                                     let mut magasin = self.magasin.write().await;
                                     magasin.succes(&issue.url);
@@ -589,7 +593,8 @@ impl MetadataPlugin for MusicBrainzPlugin {
                                     identity: issue.identite,
                                     artist: Some(artist),
                                     title: Some(title),
-                                    cover: release_id.map(|id| CoverRef::Url { url: musicbrainz::url_caa(&id) }),
+                                    // URL déjà résolue par `premier_enregistrement`.
+                                    cover: cover_url.map(|url| CoverRef::Url { url }),
                                     // Ce chemin **remplace** la chaîne ICY
                                     // brute, qui est précisément ce qu'on
                                     // corrige — à la différence du relai
@@ -718,7 +723,7 @@ async fn valide_par_recherche(artiste: &str, titre: &str) -> Option<(String, Str
             None
         })?;
     if valide(titre, &reponse) {
-        Some((artiste.to_string(), titre.to_string(), reponse.release_id))
+        Some((artiste.to_string(), titre.to_string(), reponse.cover_url))
     } else {
         None
     }
@@ -787,8 +792,8 @@ async fn traite_icy(
     match meilleur_accepte(&essais).cloned() {
         Some(gagnant) => {
             let score = essais.iter().find(|(c, _)| *c == gagnant).and_then(|(_, r)| r.as_ref()).map(|e| e.score);
-            let release_id =
-                essais.iter().find(|(c, _)| *c == gagnant).and_then(|(_, r)| r.as_ref()).and_then(|e| e.release_id.clone());
+            let cover_url =
+                essais.iter().find(|(c, _)| *c == gagnant).and_then(|(_, r)| r.as_ref()).and_then(|e| e.cover_url.clone());
             tracing::info!(
                 "ICY probe for {url}: tried {nb_essayes} candidate(s), kept \"{}\" / \"{}\" (score {:?})",
                 gagnant.artiste,
@@ -800,7 +805,7 @@ async fn traite_icy(
                 brut,
                 identite,
                 motif: Some(motifs::Motif::depuis_candidat(&gagnant)),
-                valide: Some((gagnant.artiste.clone(), gagnant.titre.clone(), release_id)),
+                valide: Some((gagnant.artiste.clone(), gagnant.titre.clone(), cover_url)),
                 couple: Some((gagnant.artiste, gagnant.titre)),
             }
         }
@@ -1054,7 +1059,11 @@ mod tests {
         // comme `plugin_avec_disque_connu` le fait côté disque.
         let mut p = plugin_test();
         let cle = ("Miles Davis".to_string(), "Kind of Blue".to_string());
-        p.pochette_connue = Some((cle, Some("e32a3f0b-1c19-3170-bb1c-650893774744".to_string())));
+        // Une URL deja resolue, comme ce que `cherche_release` memorise : c'est
+        // le module qui decide du niveau (album ou pressage), jamais ce
+        // chemin-ci. Ici celle d'un groupe, le cas courant d'une recherche.
+        let pochette = musicbrainz::url_caa_groupe("8e8a594f-2175-38c7-a871-abb68ec363e7");
+        p.pochette_connue = Some((cle, Some(pochette.clone())));
         p.now_playing(NowPlaying {
             source: "files".into(),
             identity: Some(identite_fichier("/musique/a.flac")),
@@ -1068,10 +1077,7 @@ mod tests {
         .await;
         let e = p.next_enrichment().await;
         assert_eq!(e.identity, identite_fichier("/musique/a.flac"), "l'identite doit etre reemise en echo");
-        assert_eq!(
-            e.cover,
-            Some(CoverRef::Url { url: musicbrainz::url_caa("e32a3f0b-1c19-3170-bb1c-650893774744") })
-        );
+        assert_eq!(e.cover, Some(CoverRef::Url { url: pochette }));
         assert!(e.fill_only, "ce chemin ne sait rien de plus que ce qu'on lui a donne, il complete");
         assert!(
             e.artist.is_none() && e.title.is_none() && e.album.is_none(),
@@ -1157,7 +1163,7 @@ mod tests {
     }
 
     fn enregistrement(score: u64, titre: &str) -> musicbrainz::Enregistrement {
-        musicbrainz::Enregistrement { score, titre: titre.to_string(), release_id: None }
+        musicbrainz::Enregistrement { score, titre: titre.to_string(), cover_url: None }
     }
 
     #[test]
