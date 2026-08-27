@@ -584,8 +584,8 @@ async fn cabler_a_chaud<P: player::Player>(
     // L'ancien dorsal est retiré **avant** la tentative de connexion, et quoi
     // qu'annonce le greffon. Un dorsal survivant à une ré-annonce pointerait
     // vers un socket disparu : `/api/admin/<nom>` rendrait une erreur au bout
-    // des 5 s du protocole d'admin — sériel, donc en retenant la page — là où un
-    // 404 franc dit tout de suite qu'il n'y a rien à cette adresse.
+    // du budget de la requête, là où un 404 franc dit tout de suite qu'il n'y a
+    // rien à cette adresse.
     fils.admin_backends.write().await.remove(&nom);
     let mut admin_joint = false;
     if annonce.admin {
@@ -758,9 +758,9 @@ async fn eteindre_a_chaud<P: player::Player>(
     rassemble.figes.retain(|n| n != nom);
     rassemble.morts.retain(|n| n != nom);
     core.set_metadata_order(register::metadata_order(&fils.ordre_manifeste, rassemble));
-    // Retiré, sinon `/plugins/<nom>/` attendrait les 5 s du protocole d'admin
-    // — sériel, donc en retenant la page — pour finir en erreur, là où un 404
-    // franc dit tout de suite qu'il n'y a rien à cette adresse.
+    // Retiré, sinon `/plugins/<nom>/` attendrait le budget de la requête pour
+    // finir en erreur, là où un 404 franc dit tout de suite qu'il n'y a rien à
+    // cette adresse.
     fils.admin_backends.write().await.remove(nom);
     let mut statuts = fils.status_state.write().await;
     status::replace_plugin_lines(&mut statuts, nom, vec![PluginStatus::desactive(nom)], false);
