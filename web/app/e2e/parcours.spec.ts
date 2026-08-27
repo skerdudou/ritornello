@@ -21,8 +21,10 @@ test('navigation entre l’accueil, la config et les pages de plugin', async ({ 
   await page.goto('/config')
   // `getByText('radio')` seul est ambigu : l'en-tete liste aussi les
   // plugins admin par leur nom (voir App.vue), donc « radio » y apparait en
-  // plus de la cellule du tableau de statut — d'ou ce ciblage par role.
-  await expect(page.getByRole('cell', { name: 'radio' })).toBeVisible()
+  // plus de la cellule du tableau de statut — d'ou ce ciblage par role. Et
+  // `exact` : la cellule de l'interrupteur s'appelle « Enable or disable
+  // radio », que le nom partiel attrapait aussi.
+  await expect(page.getByRole('cell', { name: 'radio', exact: true })).toBeVisible()
 
   // Une sauvegarde annonce son issue par une notification. Signale a l'usage :
   // la feuille de style de vue-sonner n'etait importee nulle part, si bien que
