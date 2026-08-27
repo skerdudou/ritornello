@@ -209,6 +209,12 @@ pub struct AppState {
     /// Bascule actif/inactif des greffons : le manifeste à réécrire, les noms
     /// acceptés, et l'oreille du cœur.
     pub greffons: Arc<GreffonsControle>,
+    /// Catalogue des sources et de leurs présélections nommées, tel que le cœur
+    /// le diffuse aux afficheurs (`Core::catalogue`). Le même `watch` que celui
+    /// des greffons Display : la route lit la dernière valeur, rien n'est
+    /// sondé côté cœur, et la liste ne change qu'à l'annonce ou au départ
+    /// d'une source.
+    pub catalogue: tokio::sync::watch::Receiver<ritornello_proto::Catalogue>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -219,6 +225,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/i18n", get(i18n_json))
         .route("/api/logs", get(logs_json))
         .route("/api/player", get(player_sse))
+        .route("/api/presets", get(presets_json))
         .route("/api/theme", get(crate::theme::theme_json).put(crate::theme::theme_put))
         .route("/api/settings", get(settings_json).put(settings_put))
         .route("/api/system", get(crate::system::system_json))
@@ -263,6 +270,14 @@ async fn status_json(State(state): State<AppState>) -> Json<StatusState> {
         p.busy = verdicts.get(&p.name).copied().unwrap_or(false);
     }
     Json(etat)
+}
+
+/// Les présélections nommées de chaque source, pour les tuiles de la
+/// télécommande web. Une lecture de la valeur courante, pas un flux : la page
+/// la recharge au changement de source (la trame SSE le lui dit), et c'est
+/// assez — voir la spec, décision 6.
+async fn presets_json(State(state): State<AppState>) -> Json<ritornello_proto::Catalogue> {
+    Json(state.catalogue.borrow().clone())
 }
 
 #[derive(Serialize)]
@@ -977,6 +992,7 @@ pub(crate) mod tests_support {
             settings_current: Arc::new(tokio::sync::RwLock::new(crate::state::Settings::default())),
             settings_tx: tokio::sync::mpsc::channel(4).0,
             player: player_inerte(),
+            catalogue: tokio::sync::watch::channel(ritornello_proto::Catalogue::default()).1,
             system: Default::default(),
             covers: Arc::new(crate::cover::CoverCache::new()),
             greffons: Arc::new(GreffonsControle {
@@ -1013,6 +1029,7 @@ pub(crate) mod tests_support {
             settings_current: Arc::new(tokio::sync::RwLock::new(crate::state::Settings::default())),
             settings_tx: tokio::sync::mpsc::channel(4).0,
             player: player_inerte(),
+            catalogue: tokio::sync::watch::channel(ritornello_proto::Catalogue::default()).1,
             system: Default::default(),
             covers: Arc::new(crate::cover::CoverCache::new()),
             greffons: Arc::new(GreffonsControle {
@@ -1051,6 +1068,7 @@ pub(crate) mod tests_support {
             settings_current: Arc::new(tokio::sync::RwLock::new(crate::state::Settings::default())),
             settings_tx: tokio::sync::mpsc::channel(4).0,
             player: player_inerte(),
+            catalogue: tokio::sync::watch::channel(ritornello_proto::Catalogue::default()).1,
             system: Default::default(),
             covers: Arc::new(crate::cover::CoverCache::new()),
             greffons: Arc::new(GreffonsControle {
@@ -1097,6 +1115,7 @@ pub(crate) mod tests_support {
             settings_current: Arc::new(tokio::sync::RwLock::new(crate::state::Settings::default())),
             settings_tx: tokio::sync::mpsc::channel(4).0,
             player: player_inerte(),
+            catalogue: tokio::sync::watch::channel(ritornello_proto::Catalogue::default()).1,
             system: Default::default(),
             covers: Arc::new(crate::cover::CoverCache::new()),
             greffons: Arc::new(GreffonsControle {
@@ -1567,6 +1586,35 @@ mod tests {
         let s: StatusState = serde_json::from_slice(&body).unwrap();
         assert_eq!(s.plugins.len(), 2);
         assert_eq!(s.active_source, "radio");
+    }
+
+    /// Les tuiles de la télécommande web lisent ici le nom des présélections :
+    /// le cœur tient déjà ce catalogue pour les afficheurs, la route ne fait
+    /// que le rendre lisible en HTTP. Une source qui n'énumère pas n'a pas de
+    /// champ `presets` — la page retombe alors sur les numéros seuls.
+    #[tokio::test]
+    async fn api_presets_sert_le_catalogue_courant() {
+        use ritornello_proto::{Catalogue, Preset, SourceCatalogue};
+        let (tx, rx) = tokio::sync::watch::channel(Catalogue::default());
+        let app = router(AppState { catalogue: rx, ..app_state() });
+        tx.send(Catalogue {
+            sources: vec![
+                SourceCatalogue {
+                    name: "radio".into(),
+                    presets: vec![Preset { index: 1, name: "FIP".into() }],
+                },
+                SourceCatalogue { name: "cd".into(), presets: vec![] },
+            ],
+        })
+        .unwrap();
+        let resp = app.oneshot(Request::get("/api/presets").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["sources"][0]["name"], "radio");
+        assert_eq!(v["sources"][0]["presets"][0], serde_json::json!({ "index": 1, "name": "FIP" }));
+        assert_eq!(v["sources"][1]["name"], "cd");
+        assert_eq!(v["sources"][1].get("presets"), None, "une source qui n'énumère pas n'a pas de champ presets");
     }
 
     #[tokio::test]

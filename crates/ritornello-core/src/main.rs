@@ -1464,6 +1464,7 @@ async fn main() -> Result<()> {
             settings_current: settings_current.clone(),
             settings_tx: settings_tx.clone(),
             player: etat_rx.clone(),
+            catalogue: catalogue_rx.clone(),
             system: Arc::new(system::SystemInfo {
                 can_power_off: sonde.can_power_off,
                 can_reboot: sonde.can_reboot,

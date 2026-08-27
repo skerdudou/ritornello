@@ -292,6 +292,7 @@ mod tests {
             admin_assets: Arc::new(Default::default()),
             cmd_tx,
             player: crate::status::tests_support::player_inerte(),
+            catalogue: tokio::sync::watch::channel(ritornello_proto::Catalogue::default()).1,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
             theme_tx: tokio::sync::mpsc::channel(4).0,
             settings_current: Arc::new(tokio::sync::RwLock::new(crate::state::Settings::default())),
