@@ -828,6 +828,33 @@ mod tests {
     }
 
     #[test]
+    fn un_known_qui_ne_porte_que_licy_brut_est_impossible() {
+        // `Known::est_vide` ne compte pas `stream_title`, et j'ai d'abord cru a
+        // un oubli : ce predicat est le `skip_serializing_if` de
+        // `NowPlaying::known`, donc un `Known` juge vide **disparait de la
+        // trame**, et un greffon ne reverrait jamais la chaine ICY brute.
+        //
+        // Ce n'est pas un defaut : l'etat est inatteignable. Des que `icy` est
+        // renseigne, `bloc_de_texte` garantit un titre — celui d'un gagnant, des
+        // tags, ou l'ICY lui-meme en dernier recours — donc `est_vide` est faux
+        // par un autre champ. Et `set_icy` ne recoit jamais de chaine blanche,
+        // `player::mpv::icy_title` la filtrant en amont.
+        //
+        // Mais cette surete tient a un invariant tenu **ailleurs**, pas au
+        // predicat. Ce test le verrouille : si `bloc_de_texte` cessait un jour
+        // de reporter l'ICY dans le titre, l'omission deviendrait une perte
+        // silencieuse, et c'est ici qu'on l'apprendrait.
+        let id = json!({"kind": "stream"});
+        let mut m = Metadonnees::new(vec!["greffon".into()]);
+        m.set_identity(Some(id));
+        assert!(m.set_icy("Mandrillus Sphynx - Bikwix".into()));
+        let k = m.known();
+        assert_eq!(k.stream_title.as_deref(), Some("Mandrillus Sphynx - Bikwix"));
+        assert!(!k.est_vide(), "l'ICY seul remplit deja le titre, donc la trame le porte");
+        assert_eq!(k.title.as_deref(), Some("Mandrillus Sphynx - Bikwix"), "l'invariant en question");
+    }
+
+    #[test]
     fn lannee_et_les_liens_suivent_la_regle_du_gagnant() {
         // Regle tranchee avec le proprietaire : le gagnant l'emporte, un
         // `fill_only` ne fait que combler un vide. Pas de fusion par
