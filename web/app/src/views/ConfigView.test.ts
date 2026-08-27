@@ -273,7 +273,7 @@ describe('ConfigView — table des plugins', () => {
     })
     const lignes = wrapper.findAll('[data-plugin-row]')
     expect(lignes).toHaveLength(2)
-    expect(lignes[0].find('[data-plugin-kind]').text()).toBe('source, metadata')
+    expect(lignes[0]!.find('[data-plugin-kind]').text()).toBe('source, metadata')
   })
 
   it('bascule un greffon et recharge', async () => {
