@@ -2,6 +2,7 @@
 import { Toaster } from '@ritornello/ui'
 import { onMounted } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
+import NavBasse from './components/NavBasse.vue'
 import ThemeToggle from './components/ThemeToggle.vue'
 import { useCatalog } from './composables/useCatalog'
 import { useGreffons } from './composables/useGreffons'
@@ -67,40 +68,45 @@ onMounted(async () => {
         <RouterLink to="/" :class="[LIEN, 'font-semibold']" :exact-active-class="LIEN_ACTIF">
           Ritornello
         </RouterLink>
-        <RouterLink
-          to="/config"
-          :class="[LIEN, 'text-sm text-muted-foreground']"
-          :exact-active-class="LIEN_ACTIF"
-        >
-          {{ t('config_title') }}
-        </RouterLink>
-        <RouterLink
-          to="/system"
-          :class="[LIEN, 'text-sm text-muted-foreground']"
-          :exact-active-class="LIEN_ACTIF"
-        >
-          {{ t('system_title') }}
-        </RouterLink>
-        <!-- `first-letter:uppercase` en CSS, pas en i18n : ces noms viennent
-             de plugins.toml (y compris des plugins tiers), aucun catalogue
-             ne pourrait les couvrir, et ajouter un champ de libellé au
-             protocole des plugins serait disproportionné pour une seule
-             capitale. -->
-        <RouterLink
-          v-for="name in admins"
-          :key="name"
-          :to="`/plugins/${name}/`"
-          :class="[LIEN, 'text-sm text-muted-foreground first-letter:uppercase']"
-          :exact-active-class="LIEN_ACTIF"
-        >
-          {{ name }}
-        </RouterLink>
+        <!-- Masquée sous `md` : la barre basse fixe (`NavBasse`) prend le
+             relais sur téléphone, avec ses quatre onglets fixes. -->
+        <div class="hidden items-center gap-4 md:flex" data-nav-haut>
+          <RouterLink
+            to="/config"
+            :class="[LIEN, 'text-sm text-muted-foreground']"
+            :exact-active-class="LIEN_ACTIF"
+          >
+            {{ t('config_title') }}
+          </RouterLink>
+          <RouterLink
+            to="/system"
+            :class="[LIEN, 'text-sm text-muted-foreground']"
+            :exact-active-class="LIEN_ACTIF"
+          >
+            {{ t('system_title') }}
+          </RouterLink>
+          <!-- `first-letter:uppercase` en CSS, pas en i18n : ces noms viennent
+               de plugins.toml (y compris des plugins tiers), aucun catalogue
+               ne pourrait les couvrir, et ajouter un champ de libellé au
+               protocole des plugins serait disproportionné pour une seule
+               capitale. -->
+          <RouterLink
+            v-for="name in admins"
+            :key="name"
+            :to="`/plugins/${name}/`"
+            :class="[LIEN, 'text-sm text-muted-foreground first-letter:uppercase']"
+            :exact-active-class="LIEN_ACTIF"
+          >
+            {{ name }}
+          </RouterLink>
+        </div>
         <ThemeToggle class="ml-auto" />
       </nav>
     </header>
-    <main class="mx-auto max-w-5xl px-4 py-6">
+    <main class="mx-auto max-w-5xl px-4 py-6 pb-24 md:pb-6">
       <RouterView />
     </main>
+    <NavBasse />
     <!-- Centrees en bas et colorees par type : sur un ecran de salon, une
          notification discrete dans un coin passe inapercue, et « enregistre »
          doit se distinguer d'un refus sans avoir a lire. `rich-colors` est ce

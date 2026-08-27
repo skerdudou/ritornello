@@ -16,6 +16,10 @@ export const router = createRouter({
     // route canonique et la redirection ci-dessous ne se declencherait jamais
     // — tandis que `/plugins/<nom>/` pourrait matcher la redirection et
     // boucler. Chaque forme d'URL matche ainsi exactement une route.
+    // La liste des pages de greffons : la cible de l'onglet « Greffons » de la
+    // barre basse, qui a besoin d'une destination fixe quel que soit le nombre
+    // de greffons. `strict` pour ne pas matcher `/plugins` nu.
+    { path: '/plugins/', name: 'plugins', strict: true, component: () => import('./views/PluginsView.vue') },
     {
       path: '/plugins/:name/',
       name: 'plugin',

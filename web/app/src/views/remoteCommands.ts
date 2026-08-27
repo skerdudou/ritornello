@@ -9,10 +9,8 @@ export interface RemoteCommand {
 // canal que celui alimente par les plugins Input, donc aucune logique metier
 // n'est dupliquee ici.
 //
-// Douze commandes simples en tout — les deux entrees « preselection +/- » de
-// l'ancienne page ont ete fusionnees sur `Next`/`Prev` : meme commande de
-// protocole, interpretee par la source active (preselection pour la radio,
-// piste pour le cd).
+// Huit commandes sur la page, sur les douze du protocole : les ±10 s et le
+// volume pas a pas n'ont plus de touche web (voir `REMOTE_TRANSPORT`).
 
 /**
  * La veille, a part : elle occupe le coin de la carte et non la grille des
@@ -39,84 +37,83 @@ export const REMOTE_POWER: RemoteCommand = { key: 'remote_power', cmd: { cmd: 'P
 export const REMOTE_SOURCE: RemoteCommand = { key: 'remote_source', cmd: { cmd: 'SourceCycle' } }
 
 /**
- * Les autres commandes, **groupees par ligne** dans l'ordre voulu par le
- * proprietaire : transport, changement de contenu, son, puis tiroir.
- *
- * Dans chaque rangee, l'ordre suit le sens du geste et non celui du protocole :
- * « precedent » avant « suivant », « moins » avant « plus », comme sur la
- * facade d'un ampli ou la reglette d'un lecteur. L'inverse — l'ordre dans
- * lequel ces commandes se sont trouvees ecrites d'abord — obligeait a lire les
- * libelles pour viser, alors que la position suffit quand elle va dans le sens
- * attendu. `remote_mute` reste en bout de sa rangee : ce n'est pas un cran de
- * plus sur l'echelle du volume, c'est une bascule.
- *
- * Le groupement est ici et non dans le gabarit : c'est une donnee, et la vue se
- * contente de la parcourir.
+ * Le muet, a part lui aussi : c'est une bascule, pas un cran sur l'echelle du
+ * volume, et il vit sur l'icone du haut-parleur au bout du curseur — la ou on
+ * cherche le son.
  */
-export const REMOTE_ROWS: RemoteCommand[][] = [
-  [
-    { key: 'remote_play_pause', cmd: { cmd: 'PlayPause' } },
-    { key: 'remote_stop', cmd: { cmd: 'Stop' } },
-    { key: 'remote_seek_back', cmd: { cmd: 'SeekBackward' } },
-    { key: 'remote_seek_forward', cmd: { cmd: 'SeekForward' } },
-  ],
-  [
-    { key: 'remote_prev', cmd: { cmd: 'Prev' } },
-    { key: 'remote_next', cmd: { cmd: 'Next' } },
-  ],
-  [
-    { key: 'remote_vol_down', cmd: { cmd: 'VolumeDown' } },
-    { key: 'remote_vol_up', cmd: { cmd: 'VolumeUp' } },
-    { key: 'remote_mute', cmd: { cmd: 'Mute' } },
-  ],
-  [{ key: 'remote_eject', cmd: { cmd: 'Eject' } }],
+export const REMOTE_MUTE: RemoteCommand = { key: 'remote_mute', cmd: { cmd: 'Mute' } }
+
+/**
+ * Le transport : |◀ ▶ ▶| — precedent et suivant **adjacents** a la lecture,
+ * qui est le seul bouton plein. C'est l'ordre des telecommandes hi-fi, de VLC
+ * et des lecteurs de bureau : changer de piste est le geste frequent.
+ *
+ * Plus de « reculer / avancer de 10 s » : decide au chantier refonte, au vu de
+ * VLC, Deezer et WMP qui n'en ont pas — c'est la barre d'avancement qui fait
+ * ce travail (voir `BarreProgression`). `SeekBackward`/`SeekForward` restent
+ * dans le protocole et sur la telecommande physique.
+ *
+ * Plus de « volume − / + » non plus : le volume est un curseur (`Volume.vue`),
+ * pilote au clavier par fleches et Page ↑/↓, ce qui couvre l'accessibilite
+ * que les deux touches auraient apportee. Elles restent le geste de la
+ * telecommande physique, avec son appui maintenu.
+ */
+export const REMOTE_TRANSPORT: RemoteCommand[] = [
+  { key: 'remote_prev', cmd: { cmd: 'Prev' } },
+  { key: 'remote_play_pause', cmd: { cmd: 'PlayPause' } },
+  { key: 'remote_next', cmd: { cmd: 'Next' } },
 ]
 
 /**
- * Toutes les commandes, veille et source comprises : sert au garde-fou qui
- * verifie que chaque cle de traduction employee existe bien dans le catalogue,
- * et a verrouiller le compte de douze. Les deux commandes hors grille y sont
- * nommees explicitement — c'est ce qui fait que les sortir de `REMOTE_ROWS` ne
- * les fait pas disparaitre du garde-fou.
+ * En retrait du transport : l'arret, et l'ejection quand la source a un tiroir.
+ */
+export const REMOTE_TRANSPORT_SECONDAIRE: RemoteCommand[] = [
+  { key: 'remote_stop', cmd: { cmd: 'Stop' } },
+  { key: 'remote_eject', cmd: { cmd: 'Eject' } },
+]
+
+/**
+ * Toutes les commandes de la page : sert au garde-fou i18n
+ * (`i18nKeysUsed.test.ts`) et a verrouiller le compte de huit.
  */
 export const REMOTE_COMMANDS: RemoteCommand[] = [
   REMOTE_POWER,
   REMOTE_SOURCE,
-  ...REMOTE_ROWS.flat(),
+  REMOTE_MUTE,
+  ...REMOTE_TRANSPORT,
+  ...REMOTE_TRANSPORT_SECONDAIRE,
 ]
 
 /**
- * Une commande que l'appareil ignorerait dans l'état courant : son bouton doit
- * être grisé plutôt qu'offert.
+ * Une commande que l'appareil ignorerait dans l'état courant : son bouton est
+ * grisé plutôt qu'offert.
  *
- * Trois règles, et seulement celles que la charge utile de `/api/player`
- * permet d'établir :
+ * Une seule règle désormais : en **veille**, le cœur retourne sans rien faire
+ * sur tout ce qui n'est pas `Power` (première ligne de `handle_command`),
+ * grille des présélections comprise. Le déplacement n'a plus de touche (c'est
+ * la barre qui se rend inerte, sur `seekable`), et l'éjection se **masque**
+ * plutôt que de se griser — voir `masquee`.
  *
- * - en **veille**, le cœur retourne sans rien faire sur tout ce qui n'est pas
- *   `Power` (c'est la première ligne de `handle_command`), grille des
- *   présélections comprise. Ces boutons mentaient : la requête partait, le
- *   serveur répondait 204, et rien ne se passait.
- * - un contenu **non déplaçable** ignore les deux touches de déplacement. C'est
- *   le même `seekable` qui rend la barre de progression cliquable : les deux
- *   endroits de la page doivent dire la même chose d'un direct qu'on ne
- *   rembobine pas.
- * - une source **sans tiroir** ignore `Eject`. La source le déclare
- *   elle-même (`can_eject`, voir `SourcePlugin::can_eject` du sdk) : la page
- *   ne compare pas `source` à `'cd'`, un nom de plugin venant de
- *   `plugins.toml` et pouvant changer sans que rien ici ne s'en aperçoive.
- *
- * Le reste reste actif, faute de savoir : rien dans la charge utile ne dit si
- * quelque chose joue, donc `PlayPause` et `Stop` restent offerts. Un bouton
- * grisé **affirme** que l'action n'existe pas ; le griser sur une supposition
- * serait pire qu'un bouton sans effet.
- *
- * Un état pas encore reçu (`null` — la fraction de seconde avant la première
- * trame) ne grise rien : la télécommande s'ouvre utilisable, et la trame
- * corrige aussitôt.
+ * Un état pas encore reçu (`null`) ne grise rien : la télécommande s'ouvre
+ * utilisable, et la trame corrige aussitôt.
  */
 export function indisponible(nom: string, etat: PlayerPayload | null): boolean {
   if (!etat) return false
-  if (etat.standby) return nom !== 'Power'
-  if (nom === 'Eject') return !etat.can_eject
-  return (nom === 'SeekForward' || nom === 'SeekBackward') && !etat.seekable
+  return etat.standby && nom !== 'Power'
+}
+
+/**
+ * Une commande qui n'a pas lieu d'être sur cette source : son bouton n'est pas
+ * rendu du tout.
+ *
+ * Seul `Eject` est concerné. `can_eject` est une capacité que le greffon source
+ * déclare **pour lui-même** (`SourcePlugin::can_eject` du sdk) : le lecteur de
+ * cd la déclare qu'il y ait un disque ou non, la radio ne la déclare pas.
+ * Masquer sur cette base ne cache donc jamais un lecteur qui existe — au
+ * contraire d'un grisage, qui affirmait une touche là où il n'y a pas de
+ * tiroir. Avant la première trame on ne sait pas : rien n'est rendu, et la
+ * trame corrige.
+ */
+export function masquee(nom: string, etat: PlayerPayload | null): boolean {
+  return nom === 'Eject' && !(etat?.can_eject ?? false)
 }

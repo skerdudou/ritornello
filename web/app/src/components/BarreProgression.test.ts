@@ -1,5 +1,6 @@
-import { mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
+import { Slider } from '@ritornello/ui'
+import { flushPromises, mount } from '@vue/test-utils'
+import { beforeAll, describe, expect, it } from 'vitest'
 import BarreProgression from './BarreProgression.vue'
 
 const monte = (props: Record<string, unknown>) =>
@@ -35,40 +36,110 @@ describe('BarreProgression', () => {
     await w.get('[data-barre]').trigger('click')
     expect(w.emitted('deplacer')).toBeUndefined()
     expect(w.get('[data-barre]').attributes('role')).toBeUndefined()
+    expect(w.find('[role="slider"]').exists()).toBe(false)
   })
 
-  it('emet la seconde visee au clic', async () => {
+  // reka-ui capture le pointeur pendant le glisser ; jsdom n'implemente pas
+  // cette API. Trois cales, le temps du fichier.
+  beforeAll(() => {
+    Element.prototype.setPointerCapture ??= () => {}
+    Element.prototype.releasePointerCapture ??= () => {}
+    Element.prototype.hasPointerCapture ??= () => true
+    // jsdom ne fournit pas ResizeObserver ; reka-ui l'utilise pour mesurer la
+    // piste du curseur au montage (voir web/kit/src/index.test.ts).
+    globalThis.ResizeObserver ??= class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  })
+
+  function rectangle(w: ReturnType<typeof monte>) {
+    const piste = w.get('[data-slot="slider"]')
+    piste.element.getBoundingClientRect = () =>
+      ({ left: 0, width: 200, top: 0, height: 44, right: 200, bottom: 44, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect
+    return piste
+  }
+
+  it('un contenu deplacable rend une poignee accessible', async () => {
+    // `await flushPromises()` : reka-ui resout l'index de la poignee depuis
+    // la collection des thumbs montes (`SliderThumb`), remplie a l'accroche
+    // de la ref DOM. Au premier rendu, l'index vaut -1 (poignee pas encore
+    // dans la collection) et `aria-valuenow` reste absent ; un tick plus tard
+    // il vaut 0 et l'attribut apparait. Constate ici, meme cause que le stub
+    // ResizeObserver ci-dessus (mesure/collecte differee sous jsdom).
     const w = monte({ deplacable: true })
-    const barre = w.get('[data-barre]')
-    barre.element.getBoundingClientRect = () =>
-      ({ left: 0, width: 200, top: 0, height: 4, right: 200, bottom: 4, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect
-    await barre.trigger('click', { clientX: 100 })
-    expect(w.emitted('deplacer')?.[0]).toEqual([127])
+    await flushPromises()
+    const poignee = w.get('[role="slider"]')
+    expect(poignee.attributes('aria-valuenow')).toBe('87')
+    expect(poignee.attributes('aria-valuemax')).toBe('254')
+  })
+
+  it('le glisser suit le doigt localement et ne valide qu au relachement', async () => {
+    // Un seul `SeekTo` par geste : pendant le glisser, seul l'affichage bouge.
+    //
+    // Repli sur les evenements du composant plutot que de vrais
+    // pointerdown/move/up : sous jsdom, `thumb.clientWidth` vaut toujours 0
+    // (pas de mise en page reelle), donc reka calcule le geste sur la largeur
+    // pleine de la piste (200 px). 150/200 x 254 tombe exactement sur 190,5 s,
+    // que `Math.round` de reka arrondit a 191 et non 190 — un desaccord de
+    // mesure propre a jsdom, pas un defaut du composant (verifie en inspectant
+    // `SliderHorizontal.getValueFromPointerEvent`). Dans un navigateur reel, la
+    // poignee a une largeur non nulle et ne tombe pas sur cette frontiere ; le
+    // geste reel est couvert par l'e2e (Tache 12).
+    const w = monte({ deplacable: true })
+    const slider = w.getComponent(Slider)
+    await slider.vm.$emit('update:modelValue', [190])
+    expect(w.emitted('deplacer')).toBeUndefined()
+    expect(w.get('[data-position]').text()).toBe('3:10') // 150/200 × 254 = 190 s, affiché pendant le geste
+    await slider.vm.$emit('valueCommit', [190])
+    expect(w.emitted('deplacer')).toEqual([[190]])
+  })
+
+  it('la valeur visee tient jusqu a la trame qui la rejoint', async () => {
+    // Sans cela, la trame suivante (position d'avant le saut) ramenait la
+    // poignée en arrière un instant — le défaut visible des lecteurs naïfs.
+    const w = monte({ deplacable: true })
+    const piste = rectangle(w)
+    await piste.trigger('pointerdown', { clientX: 100, pointerId: 1, button: 0 })
+    await piste.trigger('pointerup', { clientX: 100, pointerId: 1 })
+    expect(w.emitted('deplacer')).toEqual([[127]])
+    await w.setProps({ position: 88 }) // la trame d'avant le saut
+    expect(w.get('[data-position]').text()).toBe('2:07')
+    await w.setProps({ position: 129 }) // à un pas près : on la rejoint
+    expect(w.get('[data-position]').text()).toBe('2:09')
+  })
+
+  it('une trame sans position relache la valeur visee au lieu de la figer', async () => {
+    // Fin de piste, Stop, veille, changement de source : aucune de ces trames
+    // ne porte de position, et aucune ne viendra jamais confirmer le saut —
+    // sans quoi la barre resterait bloquee sur l'ancienne cible pour toujours.
+    const w = monte({ deplacable: true, position: 87 })
+    const piste = rectangle(w)
+    await piste.trigger('pointerdown', { clientX: 100, pointerId: 1, button: 0 })
+    await piste.trigger('pointerup', { clientX: 100, pointerId: 1 })
+    expect(w.emitted('deplacer')).toEqual([[127]])
+    await w.setProps({ position: null })
+    // Plus de position : rien n'est rendu (voir le test « affiche la position
+    // et la duree »), la valeur visee ne doit donc laisser aucune trace.
+    expect(w.find('[data-progression]').exists()).toBe(false)
+    // Une piste suivante qui repart a 0:01 le prouve : sans le relachement,
+    // la visee (127) aurait encore masque cette valeur toute neuve.
+    await w.setProps({ position: 1 })
+    expect(w.get('[data-position]').text()).toBe('0:01')
   })
 
   // Sans le clavier, la barre serait la seule commande de la page hors
-  // d'atteinte sans souris, sur une page dont toutes les autres sont des
-  // boutons.
-  it('se pilote au clavier', async () => {
-    const w = monte({ deplacable: true })
-    const barre = w.get('[data-barre]')
-    expect(barre.attributes('role')).toBe('slider')
-    expect(barre.attributes('tabindex')).toBe('0')
-    await barre.trigger('keydown', { key: 'ArrowRight' })
-    expect(w.emitted('deplacer')?.[0]).toEqual([97])
-    await barre.trigger('keydown', { key: 'ArrowLeft' })
-    expect(w.emitted('deplacer')?.[1]).toEqual([77])
-    await barre.trigger('keydown', { key: 'Home' })
-    expect(w.emitted('deplacer')?.[2]).toEqual([0])
-    await barre.trigger('keydown', { key: 'End' })
-    expect(w.emitted('deplacer')?.[3]).toEqual([254])
-  })
-
-  // Un `role="slider"` sans nom est annonce « curseur » par un lecteur
-  // d'ecran, sans dire ce qu'il controle. Le libelle vient du catalogue, pas
-  // d'une chaine en dur.
-  it('porte un nom accessible quand il est deplacable', () => {
-    const w = monte({ deplacable: true })
-    expect(w.get('[data-barre]').attributes('aria-label')).toBeTruthy()
+  // d'atteinte sans souris. Le pas est celui des touches physiques
+  // (`seek_step_s`), pas la seconde du curseur.
+  it('le clavier deplace du pas configure, borne aux deux bouts', async () => {
+    const w = monte({ deplacable: true, position: 250 })
+    const poignee = w.get('[role="slider"]')
+    await poignee.trigger('keydown', { key: 'ArrowRight' })
+    expect(w.emitted('deplacer')?.[0]).toEqual([254])
+    await poignee.trigger('keydown', { key: 'Home' })
+    expect(w.emitted('deplacer')?.[1]).toEqual([0])
+    await poignee.trigger('keydown', { key: 'ArrowLeft' })
+    expect(w.emitted('deplacer')?.[2]).toEqual([240])
   })
 })

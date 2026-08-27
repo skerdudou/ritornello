@@ -1,7 +1,18 @@
 import { mount } from '@vue/test-utils'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 import PlayerCard from './PlayerCard.vue'
 import type { PlayerPayload } from '../types'
+
+// jsdom ne fournit pas ResizeObserver ; reka-ui l'utilise pour mesurer la
+// piste du curseur de BarreProgression, monte ici des que `seekable` est vrai
+// (voir web/kit/src/index.test.ts et BarreProgression.test.ts).
+beforeAll(() => {
+  globalThis.ResizeObserver ??= class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+})
 
 /**
  * Etat complet a partir d'un fragment : le composant recoit l'etat en prop —
@@ -39,10 +50,9 @@ function monteAvec(etat: Partial<PlayerPayload> | null) {
 }
 
 describe('PlayerCard', () => {
-  it('affiche source et volume des la premiere trame', () => {
+  it('affiche la source dès la première trame', () => {
     const w = monteAvec({ source: 'cd', volume: 45 })
-    expect(w.find('[data-source]').text()).toBe('cd')
-    expect(w.find('[data-volume]').text()).toBe('45 %')
+    expect(w.get('[data-source]').text()).toBe('cd')
   })
 
   it('nomme l absence de source au lieu d afficher un vide', () => {
@@ -65,7 +75,7 @@ describe('PlayerCard', () => {
 
   it('affiche la présélection en cours quand la Source en déclare une', () => {
     const w = monteAvec({ preset: 4 })
-    expect(w.find('[data-player-preset]').text()).toBe('4')
+    expect(w.get('[data-player-preset]').text()).toBe('4')
   })
 
   it('n affiche pas de ligne de présélection quand la Source n en déclare aucune', () => {
@@ -117,42 +127,14 @@ describe('PlayerCard', () => {
     expect(w.find('[data-standby]').exists()).toBe(true)
   })
 
-  it('signale le muet et la veille', () => {
-    const w = monteAvec({ muted: true, standby: true })
-    expect(w.find('[data-muted]').exists()).toBe(true)
+  it('signale la veille', () => {
+    const w = monteAvec({ standby: true })
     expect(w.find('[data-standby]').exists()).toBe(true)
   })
 
-  it('n affiche ni muet ni veille quand ils sont inactifs', () => {
-    const w = monteAvec({ muted: false, standby: false })
-    expect(w.find('[data-muted]').exists()).toBe(false)
+  it('n affiche pas de veille quand elle est inactive', () => {
+    const w = monteAvec({ standby: false })
     expect(w.find('[data-standby]').exists()).toBe(false)
-  })
-
-  it('dit la sourdine sur la ligne du volume, et barre la valeur', () => {
-    // Signalé à l'usage : le son coupé ne se voyait pas. La mention vivait dans
-    // le titre de l'encart, à deux lignes de la valeur qu'elle contredit — on
-    // lisait « Volume : 60 % » sans jamais remarquer le badge. Elle se lit
-    // desormais là où on regarde le volume, et la valeur est barrée : elle
-    // reste vraie (elle reviendra au rétablissement) mais n'a pas cours.
-    const muet = monteAvec({ volume: 60, muted: true })
-    const ligne = muet.find('[data-volume-ligne]')
-    expect(ligne.text()).toContain('60 %')
-    expect(ligne.find('[data-muted]').exists()).toBe(true)
-    expect(muet.find('[data-volume]').classes()).toContain('line-through')
-
-    const audible = monteAvec({ volume: 60, muted: false })
-    expect(audible.find('[data-volume-ligne]').find('[data-muted]').exists()).toBe(false)
-    expect(audible.find('[data-volume]').classes()).not.toContain('line-through')
-  })
-
-  it('suit les changements de volume sans rechargement', async () => {
-    // Le volume peut changer depuis la telecommande infrarouge ou un autre
-    // onglet : c'est tout l'objet du flux pousse, relaye ici par la prop.
-    const w = monteAvec({ volume: 60 })
-    expect(w.find('[data-volume]').text()).toBe('60 %')
-    await w.setProps({ etat: complet({ volume: 65 }) })
-    expect(w.find('[data-volume]').text()).toBe('65 %')
   })
 
   it('n affiche pas de bloc morceau tant que rien n est connu', () => {
@@ -325,5 +307,37 @@ describe('PlayerCard', () => {
     expect(w.find('[data-now-playing]').exists()).toBe(false)
     expect(w.get('[data-position]').text()).toBe('1:27')
     expect(w.find('[data-barre]').exists()).toBe(true)
+  })
+
+  it('la pochette et le morceau sont au centre, la source en pastille', () => {
+    const w = monteAvec({ title: 'Blue in Green', artist: 'Miles Davis', album: 'Kind of Blue', preset: 1, preset_name: 'FIP' })
+    expect(w.get('[data-source]').text()).toBe('radio')
+    expect(w.get('[data-player-preset]').text()).toBe('1')
+    expect(w.get('[data-player-preset-name]').text()).toBe('FIP')
+    expect(w.get('[data-titre]').classes()).toContain('text-xl')
+    expect(w.find('[data-pochette]').exists()).toBe(true)
+  })
+
+  it('le carre de pochette reste la meme sans morceau : c est lui qui tient la mise en page', () => {
+    const w = monteAvec({ status: 'NO DISC', preset_count: 0 })
+    expect(w.find('[data-pochette]').exists()).toBe(true)
+    expect(w.find('[data-pochette-repli]').exists()).toBe(true)
+    expect(w.get('[data-player-status]').text()).toBe('NO DISC')
+  })
+
+  it('en veille la pochette s eteint', () => {
+    const w = monteAvec({ standby: true })
+    expect(w.get('[data-pochette]').classes()).toContain('opacity-50')
+    expect(w.find('[data-standby]').exists()).toBe(true)
+  })
+
+  it('rend les slots actions et commandes', () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
+    const w = mount(PlayerCard, {
+      props: { etat: complet({}), pasDeplacement: 10 },
+      slots: { actions: '<button data-test-action>a</button>', commandes: '<div data-test-commandes>c</div>' },
+    })
+    expect(w.find('[data-slot="card-action"] [data-test-action]').exists()).toBe(true)
+    expect(w.find('[data-test-commandes]').exists()).toBe(true)
   })
 })

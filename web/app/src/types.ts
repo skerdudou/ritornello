@@ -137,8 +137,22 @@ export interface PlayerPayload {
    * `seekable`) : ne pas savoir, c'est n'offrir rien.
    */
   can_eject: boolean
+  /**
+   * Ce que fait le lecteur : `playing`, `paused`, ou absent quand rien ne joue.
+   * C'est ce qui choisit l'icône du bouton de lecture (▶ ou ❚❚). Le champ
+   * voyageait déjà sans être lu.
+   */
+  playback?: Playback
 }
 export type Command = { cmd: string; arg?: number }
+/** Ce que fait le lecteur. Absent de la trame quand il est arrêté (idiome de `seekable`). */
+export type Playback = 'playing' | 'paused'
+/** Une présélection nommée telle que `GET /api/presets` la sert. */
+export interface PresetNomme { index: number; name: string }
+/** Une source et sa liste ; `presets` est absent quand elle n'énumère pas. */
+export interface SourcePresets { name: string; presets?: PresetNomme[] }
+/** Le catalogue des sources, tel que le cœur le diffuse aux afficheurs. */
+export interface PresetsPayload { sources: SourcePresets[] }
 export interface SystemUsage { total_kb: number; available_kb: number }
 /**
  * Metriques de l'OS, telles que les sert `GET /api/system`.

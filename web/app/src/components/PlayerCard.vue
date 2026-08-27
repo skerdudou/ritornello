@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { Badge, Card, CardContent, CardHeader, CardTitle } from '@ritornello/ui'
+import { Badge, Card, CardAction, CardContent, CardHeader, CardTitle } from '@ritornello/ui'
 import BarreProgression from './BarreProgression.vue'
 import { useCatalog } from '../composables/useCatalog'
 import { formateDuree, riendAfficher } from '../composables/usePlayer'
@@ -34,144 +34,81 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
 
 <template>
   <!--
-    L'encart est toujours la : l'etat du lecteur (source, volume) est toujours
-    connu. Le morceau, lui, s'y ajoute quand on le connait — la plupart des
-    stations francaises n'annoncent rien, et un bloc « En ecoute » vide ferait
-    croire a une panne.
+    La pochette et le morceau sont le sujet : c'est la seule chose qu'on
+    regarde depuis le canape. L'etat (source, veille) tient dans l'en-tete ;
+    le volume est le curseur du slot `commandes`. Sur telephone tout est
+    centre en colonne ; a partir de `md` la pochette passe a gauche du texte.
   -->
   <Card data-player>
     <CardHeader class="pb-2">
       <CardTitle class="flex items-center gap-2 text-base">
         {{ t('player_title') }}
-        <Badge v-if="etat?.standby" variant="secondary" data-standby>{{ t('standby') }}</Badge>
-        <!-- Le muet n'est plus annoncé ici mais sur la ligne du volume, seule
-             place où on le cherche. Deux mentions du même état seraient du
-             bruit, et c'est celle du titre qui passait inaperçue. -->
-      </CardTitle>
-    </CardHeader>
-    <CardContent class="space-y-1 pb-4">
-      <!-- Depuis l'enregistrement a chaud, le coeur demarre sans source : un
-           greffon lent peut s'annoncer bien apres, et la page doit etre la pour
-           le montrer. La chaine vide **est** cette absence — le protocole ne
-           change pas, c'est au rendu de la nommer, sinon on lit « Source
-           active : » suivi de rien et on croit a une panne d'affichage.
-
-           Le ternaire distingue les deux vides : `etat` a `null`, c'est
-           « l'etat n'est pas encore arrive » (avant la premiere trame SSE), et
-           annoncer « Aucune source » a ce moment-la serait faux. Meme idiome
-           que la ligne du volume juste en dessous. -->
-      <p class="text-sm text-muted-foreground">
-        {{ t('active_source_label') }} :
-        <span class="text-foreground" data-source>{{
-          etat ? etat.source || t('no_source') : ''
-        }}</span>
-      </p>
-      <!-- La touche numérotée de ce qui joue, quand la Source en déclare une.
-           Absente plutôt qu'affichée vide : `null` signifie « rien ne joue, ou
-           la Source ne numérote pas » (un cd sans disque, une entrée auxiliaire),
-           et une ligne « Présélection : — » laisserait croire à une panne là où
-           il n'y a simplement rien à numéroter. Même règle que le bloc « En
-           écoute » juste en dessous.
-
-           Le nom se colle au numéro dans la même ligne (data-player-preset
-           reste sur le seul numéro, data-player-preset-name porte le nom) :
-           aucune clé i18n dédiée, pour ne pas dire « station » là où ce n'en
-           est pas toujours une — le cd, par exemple, ne déclare aucun nom. -->
-      <p v-if="etat?.preset != null" class="text-sm text-muted-foreground">
-        {{ t('player_preset') }} :
-        <span class="text-foreground" data-player-preset>{{ etat.preset }}</span>
-        <template v-if="etat.preset_name">
-          — <span class="text-foreground" data-player-preset-name>{{ etat.preset_name }}</span>
-        </template>
-      </p>
-      <!-- Le statut de la source, déjà traduit par elle. Invisible sur le web
-           jusqu'ici pour la même raison que le nom de station l'était : il
-           n'existait que dans une ligne d'afficheur.
-
-           Masqué en veille : le badge "VEILLE" juste au-dessus porte déjà ce
-           mot, et le statut publié en veille est exactement le même mot du
-           même catalogue — l'afficher aussi ici doublerait "VEILLE" sur la
-           carte, sans libellé la seconde fois. -->
-      <p v-if="etat?.status && !etat.standby" class="text-sm text-muted-foreground">
-        <span class="text-foreground" data-player-status>{{ etat.status }}</span>
-      </p>
-      <!-- La sourdine se dit **ici**, sur la ligne du volume, et non dans le
-           titre de l'encart : signalé à l'usage, on lisait « Volume : 60 % »
-           sans remarquer le badge deux lignes plus haut, donc sans comprendre
-           pourquoi rien ne sortait. La valeur est barrée plutôt que masquée —
-           elle reste vraie, et c'est celle qui revient au rétablissement. -->
-      <p class="flex items-center gap-2 text-sm text-muted-foreground" data-volume-ligne>
-        <span>
-          {{ t('volume') }} :
+        <!-- La source en pastille : un badge du kit, `data-source` conserve
+             pour les parcours. Le point vert dit « ca joue » (playback), la
+             ou l'ancienne ligne de texte ne disait rien. -->
+        <Badge variant="secondary" class="gap-1.5 font-normal">
           <span
-            class="text-foreground"
-            :class="{ 'line-through opacity-60': etat?.muted }"
-            data-volume
-            >{{ etat ? etat.volume + ' %' : '' }}</span
-          >
-        </span>
-        <Badge v-if="etat?.muted" variant="secondary" data-muted>{{ t('muted') }}</Badge>
-      </p>
-
-      <!-- Le morceau, quand il est connu. -->
-      <div v-if="!riendAfficher(etat)" class="mt-3 flex gap-3 border-t border-border pt-3" data-now-playing>
-        <!-- Le carre est le meme quand l'image manque : elle arrive apres le
-             texte, parfois plusieurs secondes apres, et un carre qui apparait
-             decalerait toute la carte.
-
-             Trois paliers, parce que la meme carte se lit sur un telephone et
-             sur un ecran : 112 px, 160 px au-dela de `sm`, 224 px au-dela de
-             `lg`. Le contenu de la page est borne a `max-w-5xl` (voir le
-             `<main>` d'`App.vue`), soit ~990 px utiles : a 224 px la pochette y
-             tient un peu moins du quart, et la colonne de texte garde de quoi
-             poser un titre sur une ligne. Le palier du telephone est choisi par
-             l'autre bout — sur 360 px de large il reste ~155 px au texte, ce qui
-             est le partage habituel d'une fiche de lecture.
-
-             Des paliers et non un `clamp()` en `vw` : la largeur qui compte est
-             celle de la **carte**, pas celle de la fenetre, et elle est bornee.
-             Une taille en `vw` continuerait de grandir sur un ecran large alors
-             que la carte, elle, ne bouge plus. -->
-        <div
-          class="size-28 shrink-0 overflow-hidden rounded-md border border-border bg-muted sm:size-40 lg:size-56"
-          data-pochette
-        >
-          <!-- `@error` : toute voie par laquelle « la pochette a disparu »
-               (cle evincee du cache, fichier retire du partage) doit degrader
-               vers le repli ♫ ci-dessous, et non vers le glyphe d'image
-               cassee du navigateur, dans un carre qui est justement la pour
-               que rien ne bouge. -->
-          <img
-            v-if="etat?.cover_href && !imageCassee"
-            :src="etat.cover_href"
-            :alt="t('cover_alt')"
-            class="size-full object-cover"
-            @error="imageCassee = true"
-          />
-          <div
-            v-else
-            class="flex size-full items-center justify-center text-muted-foreground"
-            data-pochette-repli
+            v-if="etat?.playback === 'playing'"
+            class="size-1.5 rounded-full bg-primary"
             aria-hidden="true"
-          >
-            ♫
-          </div>
+            data-lecture-en-cours
+          />
+          <span data-source>{{ etat ? etat.source || t('no_source') : '' }}</span>
+        </Badge>
+        <Badge v-if="etat?.standby" variant="secondary" data-standby>{{ t('standby') }}</Badge>
+      </CardTitle>
+      <CardAction v-if="$slots.actions">
+        <slot name="actions" />
+      </CardAction>
+    </CardHeader>
+    <CardContent class="flex flex-col items-center gap-4 md:flex-row md:items-start md:gap-5">
+      <!-- Le carre est toujours la, image ou repli : c'est lui qui tient la
+           mise en page, et une image qui arrive apres le texte ne doit rien
+           decaler. 224 px sur telephone (le sujet), 176 px a cote du texte
+           sur PC. -->
+      <div
+        class="size-56 shrink-0 overflow-hidden rounded-lg border border-border bg-muted shadow-md md:size-44"
+        :class="{ 'opacity-50': etat?.standby }"
+        data-pochette
+      >
+        <img
+          v-if="etat?.cover_href && !imageCassee"
+          :src="etat.cover_href"
+          :alt="t('cover_alt')"
+          class="size-full object-cover"
+          @error="imageCassee = true"
+        />
+        <div
+          v-else
+          class="flex size-full items-center justify-center text-muted-foreground"
+          data-pochette-repli
+          aria-hidden="true"
+        >
+          <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" />
+          </svg>
         </div>
-        <div class="min-w-0 flex-1">
-          <div class="flex items-baseline gap-2">
-            <p class="text-xs uppercase tracking-wide text-muted-foreground">{{ t('now_playing') }}</p>
-            <!-- Qui a fourni l'information : c'est la premiere question qu'on se
-                 pose devant un titre faux. -->
-            <Badge v-if="etat?.origin" variant="secondary" class="text-[10px]" data-origin>
-              {{ etat.origin }}
-            </Badge>
-            <!-- Meme question, posee cette fois sur la pochette : le texte et
-                 l'image peuvent venir de deux contributeurs differents.
-                 Affiche seulement quand ils **le sont**, sinon le meme mot
-                 apparaissait deux fois de suite — le cas courant sur une radio,
-                 ou un seul greffon fournit le texte et l'image. Le badge
-                 d'origine juste a gauche dit deja qui c'est ; celui-ci n'existe
-                 que pour signaler une divergence. -->
+      </div>
+      <div class="flex min-w-0 flex-1 flex-col items-center gap-1 text-center md:items-start md:text-left">
+        <!-- La presélection en surligne : `P1 · FIP`. Absente quand la source
+             n'en declare pas (cd sans disque, entree aux). -->
+        <p v-if="etat?.preset != null" class="text-[11px] font-semibold uppercase tracking-wider text-primary">
+          P<span data-player-preset>{{ etat.preset }}</span>
+          <template v-if="etat.preset_name"> · <span data-player-preset-name>{{ etat.preset_name }}</span></template>
+        </p>
+        <!-- Le statut de la source (« PAS DE DISQUE »), masque en veille : le
+             badge VEILLE porte deja le mot. -->
+        <p v-if="etat?.status && !etat.standby" class="text-sm text-muted-foreground" data-player-status>
+          {{ etat.status }}
+        </p>
+        <div v-if="!riendAfficher(etat)" class="flex min-w-0 flex-col items-center gap-0.5 md:items-start" data-now-playing>
+          <p v-if="etat?.title" class="text-xl font-semibold leading-tight text-foreground" data-titre>{{ etat.title }}</p>
+          <p v-if="etat?.artist" class="text-sm text-foreground" data-artiste>{{ etat.artist }}</p>
+          <p v-if="etat?.album" class="text-sm text-muted-foreground" data-album>{{ etat.album }}</p>
+          <!-- Qui a fourni le texte, et la pochette quand ce n'est pas le meme :
+               la premiere question devant un titre faux. -->
+          <div class="mt-1 flex items-center gap-1.5">
+            <Badge v-if="etat?.origin" variant="secondary" class="text-[10px]" data-origin>{{ etat.origin }}</Badge>
             <Badge
               v-if="etat?.cover_origin && etat.cover_origin !== etat.origin"
               variant="secondary"
@@ -180,10 +117,6 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
             >
               {{ etat.cover_origin }}
             </Badge>
-            <!-- Seulement quand la position n'est pas connue : sinon la barre
-                 juste en dessous affiche deja "ecoule ... duree", et repeter la
-                 duree seule ici serait la meme information deux fois (defaut
-                 corrige : "4:14" dans l'en-tete, "1:27 ... 4:14" dans la barre). -->
             <span
               v-if="etat?.position_s == null && formateDuree(etat?.duration_s)"
               class="text-xs text-muted-foreground"
@@ -193,17 +126,10 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
               {{ formateDuree(etat?.duration_s) }}
             </span>
           </div>
-          <p v-if="etat?.title" class="text-lg font-medium leading-tight" data-titre>{{ etat.title }}</p>
-          <p v-if="etat?.artist" class="text-sm text-foreground" data-artiste>{{ etat.artist }}</p>
-          <p v-if="etat?.album" class="text-sm text-muted-foreground" data-album>{{ etat.album }}</p>
         </div>
       </div>
-
-      <!-- Hors du bloc « en ecoute » ci-dessus, et c'est un defaut corrige :
-           ce bloc est garde par la presence de metadonnees, si bien que la
-           barre disparaissait sur un fichier sans etiquettes ou un disque non
-           reconnu — precisement les cas ou mpv connait le mieux la position.
-           Savoir ou l'on en est ne depend pas d'avoir un titre. -->
+    </CardContent>
+    <CardContent class="space-y-3 pt-0">
       <BarreProgression
         :position="etat?.position_s ?? null"
         :duree="etat?.duration_s ?? null"
@@ -211,6 +137,7 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
         :pas="pasDeplacement"
         @deplacer="(s) => emit('deplacer', s)"
       />
+      <slot name="commandes" />
     </CardContent>
   </Card>
 </template>

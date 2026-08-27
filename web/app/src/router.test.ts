@@ -37,4 +37,11 @@ describe('router', () => {
     expect(router.currentRoute.value.name).toBe('plugin')
     expect(router.currentRoute.value.params.name).toBe('generic-input')
   })
+
+  it('/plugins/ est la liste des greffons, distincte de /plugins/<nom>/', async () => {
+    await router.push('/plugins/')
+    expect(router.currentRoute.value.name).toBe('plugins')
+    await router.push('/plugins/radio/')
+    expect(router.currentRoute.value.name).toBe('plugin')
+  })
 })

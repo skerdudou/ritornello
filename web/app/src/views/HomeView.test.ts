@@ -1,13 +1,12 @@
-import { mount } from '@vue/test-utils'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
+import {
+  afterEach, beforeAll, describe, expect, it, vi,
+} from 'vitest'
 import { nextTick } from 'vue'
 import type { PlayerPayload } from '../types'
 import {
-  indisponible,
-  REMOTE_COMMANDS,
-  REMOTE_POWER,
-  REMOTE_ROWS,
-  REMOTE_SOURCE,
+  indisponible, masquee, REMOTE_COMMANDS, REMOTE_MUTE, REMOTE_POWER, REMOTE_SOURCE,
+  REMOTE_TRANSPORT, REMOTE_TRANSPORT_SECONDAIRE,
 } from './remoteCommands'
 
 /** Faux `EventSource` : jsdom n'en fournit pas. */
@@ -45,53 +44,50 @@ class FauxEventSource {
   }
 }
 
+// HomeView monte toujours le curseur de volume (reka-ui `Slider`) : jsdom ne
+// fournit ni ResizeObserver (mesure de la piste au montage) ni les méthodes
+// de capture de pointeur qu'il appelle. Une fois pour tout le fichier.
+beforeAll(() => {
+  Element.prototype.setPointerCapture ??= () => {}
+  Element.prototype.releasePointerCapture ??= () => {}
+  Element.prototype.hasPointerCapture ??= () => true
+  globalThis.ResizeObserver ??= class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+})
+
 describe('REMOTE_COMMANDS', () => {
-  it('couvre les 12 commandes simples du protocole, veille comprise', () => {
-    expect(REMOTE_COMMANDS).toHaveLength(12)
+  it('couvre les 8 commandes de la page : les ±10 s et le volume pas à pas ont quitté le web', () => {
+    // Décidé au chantier refonte : le déplacement passe par la barre, le
+    // volume par le curseur. Les quatre commandes retirées restent dans le
+    // protocole et sur la télécommande physique.
+    expect(REMOTE_COMMANDS).toHaveLength(8)
     expect(REMOTE_COMMANDS.map((c) => c.cmd.cmd).sort()).toEqual(
-      [
-        'Eject', 'Mute', 'Next', 'PlayPause', 'Power',
-        'Prev', 'SeekBackward', 'SeekForward', 'SourceCycle', 'Stop', 'VolumeDown', 'VolumeUp',
-      ].sort(),
+      ['Eject', 'Mute', 'Next', 'PlayPause', 'Power', 'Prev', 'SourceCycle', 'Stop'].sort(),
     )
   })
 
-  it('groupe les commandes par rangée, dans l’ordre voulu', () => {
-    // L'ordre est une demande explicite du propriétaire : transport, contenu,
-    // son, tiroir — et dans chaque rangée le sens du geste, « précédent »
-    // avant « suivant » et « moins » avant « plus ». Le figer ici evite qu'un
-    // remaniement du gabarit le change sans qu'on s'en apercoive.
-    expect(REMOTE_ROWS.map((r) => r.map((c) => c.cmd.cmd))).toEqual([
-      ['PlayPause', 'Stop', 'SeekBackward', 'SeekForward'],
-      ['Prev', 'Next'],
-      ['VolumeDown', 'VolumeUp', 'Mute'],
-      ['Eject'],
-    ])
+  it('le transport va dans le sens du geste, la lecture au centre', () => {
+    // |◀ ▶ ▶| : précédent/suivant adjacents à lecture, c'est l'ordre des
+    // télécommandes hi-fi ; Stop et Éjecter en retrait.
+    expect(REMOTE_TRANSPORT.map((c) => c.cmd.cmd)).toEqual(['Prev', 'PlayPause', 'Next'])
+    expect(REMOTE_TRANSPORT_SECONDAIRE.map((c) => c.cmd.cmd)).toEqual(['Stop', 'Eject'])
   })
 
-  it('la veille et la source sont à part, et n’apparaissent pas dans les rangées', () => {
-    // Les deux commandes qui portent sur l'appareil entier vivent dans le coin
-    // de la carte. Le figer des deux cotes — le nom de la commande **et** son
-    // absence des rangees — est ce qui empeche un bouton en double, defaut le
-    // plus probable d'un deplacement comme celui-la.
+  it('la veille, la source et le muet sont à part', () => {
     expect(REMOTE_POWER.cmd.cmd).toBe('Power')
     expect(REMOTE_SOURCE.cmd.cmd).toBe('SourceCycle')
-    const rangees = REMOTE_ROWS.flat().map((c) => c.cmd.cmd)
-    expect(rangees).not.toContain('Power')
-    expect(rangees).not.toContain('SourceCycle')
+    expect(REMOTE_MUTE.cmd.cmd).toBe('Mute')
+    const transport = [...REMOTE_TRANSPORT, ...REMOTE_TRANSPORT_SECONDAIRE].map((c) => c.cmd.cmd)
+    expect(transport).not.toContain('Power')
+    expect(transport).not.toContain('SourceCycle')
+    expect(transport).not.toContain('Mute')
   })
 
   it('chaque commande porte une clé de traduction', () => {
     for (const c of REMOTE_COMMANDS) expect(c.key).toMatch(/^remote_/)
-  })
-
-  // Dans la rangee, l'ordre suit le sens du geste : reculer avant avancer,
-  // comme « precedent » avant « suivant » et « moins » avant « plus ».
-  it('offre les deux touches de deplacement, dans le sens du geste', () => {
-    const cles = REMOTE_ROWS.flat().map((c) => c.key)
-    expect(cles).toContain('remote_seek_back')
-    expect(cles).toContain('remote_seek_forward')
-    expect(cles.indexOf('remote_seek_back')).toBeLessThan(cles.indexOf('remote_seek_forward'))
   })
 })
 
@@ -118,14 +114,6 @@ describe('HomeView', () => {
     expect(w.findAll('[data-preset-button]')).toHaveLength(9)
     expect(w.find('[data-preset-prev]').exists()).toBe(false)
     expect(w.find('[data-preset-next]').exists()).toBe(false)
-  })
-
-  it('rend une rangée par groupe et la veille dans l’en-tête', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
-    const HomeView = (await import('./HomeView.vue')).default
-    const w = mount(HomeView)
-    expect(w.findAll('[data-remote-row]')).toHaveLength(REMOTE_ROWS.length)
-    expect(w.find('[data-remote-power]').exists()).toBe(true)
   })
 
   it('la veille est dans le slot d’action de l’en-tête, donc sur la ligne du titre', async () => {
@@ -214,83 +202,6 @@ describe('HomeView', () => {
       '/api/command',
       expect.objectContaining({ method: 'POST', body: JSON.stringify({ cmd: 'Power' }) }),
     )
-  })
-})
-
-describe('HomeView — volume maintenu', () => {
-  /** Monte la vue avec des timings servis par /api/settings et des faux minuteurs. */
-  async function monterAvecTimings(reglages = { volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'on', seek_step_s: 10 }) {
-    vi.useFakeTimers()
-    const posts: string[] = []
-    const spy = vi.fn(async (url: string, init?: RequestInit) => {
-      if (init?.method === 'POST') {
-        posts.push(String(init.body))
-        return new Response(null, { status: 204 })
-      }
-      if (url === '/api/settings') return new Response(JSON.stringify(reglages), { status: 200 })
-      return new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })
-    })
-    vi.stubGlobal('fetch', spy)
-    const HomeView = (await import('./HomeView.vue')).default
-    const w = mount(HomeView)
-    // Laisse le GET /api/settings du montage se résoudre sous faux minuteurs.
-    await vi.runOnlyPendingTimersAsync()
-    return { w, posts }
-  }
-
-  afterEach(() => {
-    vi.useRealTimers()
-    vi.unstubAllGlobals()
-  })
-
-  it('un appui simple envoie une seule commande', async () => {
-    const { w, posts } = await monterAvecTimings()
-    await w.find('[data-remote-hold="VolumeUp"]').trigger('pointerdown')
-    await w.find('[data-remote-hold="VolumeUp"]').trigger('pointerup')
-    await vi.advanceTimersByTimeAsync(5000)
-    expect(posts).toEqual([JSON.stringify({ cmd: 'VolumeUp' })])
-  })
-
-  it('un appui maintenu répète après le délai initial puis à l’intervalle', async () => {
-    const { w, posts } = await monterAvecTimings()
-    await w.find('[data-remote-hold="VolumeDown"]').trigger('pointerdown')
-    expect(posts).toHaveLength(1) // le pas immédiat
-    await vi.advanceTimersByTimeAsync(999)
-    expect(posts).toHaveLength(1)
-    await vi.advanceTimersByTimeAsync(1)
-    expect(posts).toHaveLength(2) // premier pas répété à 1000 ms
-    await vi.advanceTimersByTimeAsync(500)
-    expect(posts).toHaveLength(3)
-    await vi.advanceTimersByTimeAsync(500)
-    expect(posts).toHaveLength(4)
-    await w.find('[data-remote-hold="VolumeDown"]').trigger('pointerup')
-    await vi.advanceTimersByTimeAsync(5000)
-    expect(posts).toHaveLength(4) // plus rien après le relâchement
-  })
-
-  it('les timings viennent de /api/settings', async () => {
-    const { w, posts } = await monterAvecTimings({ volume_repeat_initial_ms: 200, volume_repeat_interval_ms: 100, startup_power: 'on', seek_step_s: 10 })
-    await w.find('[data-remote-hold="VolumeUp"]').trigger('pointerdown')
-    await vi.advanceTimersByTimeAsync(200)
-    expect(posts).toHaveLength(2)
-    await vi.advanceTimersByTimeAsync(100)
-    expect(posts).toHaveLength(3)
-    await w.find('[data-remote-hold="VolumeUp"]').trigger('pointerup')
-  })
-
-  it('quitter le bouton pendant le maintien arrête la répétition', async () => {
-    const { w, posts } = await monterAvecTimings()
-    await w.find('[data-remote-hold="VolumeUp"]').trigger('pointerdown')
-    await w.find('[data-remote-hold="VolumeUp"]').trigger('pointerleave')
-    await vi.advanceTimersByTimeAsync(5000)
-    expect(posts).toHaveLength(1)
-  })
-
-  it('l’auto-répétition du clavier ne mitraille pas : un seul pas par appui', async () => {
-    const { w, posts } = await monterAvecTimings()
-    await w.find('[data-remote-hold="VolumeUp"]').trigger('keydown.enter', { repeat: false })
-    await w.find('[data-remote-hold="VolumeUp"]').trigger('keydown.enter', { repeat: true })
-    expect(posts).toEqual([JSON.stringify({ cmd: 'VolumeUp' })])
   })
 })
 
@@ -515,9 +426,10 @@ describe('HomeView — boutons indisponibles', () => {
     for (const b of w.findAll('[data-remote-command]')) {
       expect(b.attributes('disabled'), b.attributes('data-remote-command')).toBeDefined()
     }
-    expect(w.get('[data-remote-hold="VolumeUp"]').attributes('disabled')).toBeDefined()
-    expect(w.get('[data-remote-hold="VolumeDown"]').attributes('disabled')).toBeDefined()
-    expect(w.get('[data-preset-button="1"]').attributes('disabled')).toBeDefined()
+    for (const b of w.findAll('[data-preset-button]')) {
+      expect(b.attributes('disabled')).toBeDefined()
+    }
+    expect(w.get('[data-remote-source]').attributes('disabled')).toBeDefined()
     expect(w.get('[data-remote-power]').attributes('disabled')).toBeUndefined()
   })
 
@@ -536,40 +448,15 @@ describe('HomeView — boutons indisponibles', () => {
     expect(rendue.attributes('aria-pressed')).toBe('false')
   })
 
-  it('hors veille, seul le déplacement dépend du contenu', async () => {
-    const w = await monterAvec({ standby: false, seekable: false, preset_count: 24 })
-    expect(w.get('[data-remote-command="SeekForward"]').attributes('disabled')).toBeDefined()
-    expect(w.get('[data-remote-command="SeekBackward"]').attributes('disabled')).toBeDefined()
-    // Le reste de la rangée transport n'a rien à voir avec `seekable`.
-    expect(w.get('[data-remote-command="PlayPause"]').attributes('disabled')).toBeUndefined()
-    expect(w.get('[data-remote-command="Stop"]').attributes('disabled')).toBeUndefined()
-    expect(w.get('[data-preset-button="1"]').attributes('disabled')).toBeUndefined()
-  })
-
-  it('un contenu déplaçable rend les deux touches de déplacement', async () => {
-    const w = await monterAvec({ standby: false, seekable: true })
-    expect(w.get('[data-remote-command="SeekForward"]').attributes('disabled')).toBeUndefined()
-    expect(w.get('[data-remote-command="SeekBackward"]').attributes('disabled')).toBeUndefined()
-  })
-
-  it('Eject suit la source : grisé sur la radio, actif sur le lecteur de cd', async () => {
+  it('Eject est masqué sur la radio et présent sur le lecteur de cd, disque ou pas', async () => {
     // La source le déclare elle-même — la page ne compare jamais `source` à
-    // `'cd'`, ce nom venant de plugins.toml.
-    const radio = await monterAvec({ source: 'radio', can_eject: false })
-    expect(radio.get('[data-remote-command="Eject"]').attributes('disabled')).toBeDefined()
-    // Et la source, desormais dans le coin de la carte, reste intacte : le
-    // grisage vise une touche, jamais un groupe.
-    expect(radio.get('[data-remote-source]').attributes('disabled')).toBeUndefined()
-    vi.unstubAllGlobals()
-    const cd = await monterAvec({ source: 'cd', can_eject: true })
-    expect(cd.get('[data-remote-command="Eject"]').attributes('disabled')).toBeUndefined()
-  })
-
-  it('un tiroir s’ouvre sans disque : Eject ne dépend pas de ce qui joue', async () => {
-    // Cd sans disque : rien ne joue, aucune piste à numéroter, et c'est
-    // précisément le moment où l'on ouvre le tiroir.
-    const w = await monterAvec({ source: 'cd', can_eject: true, preset: null, preset_count: 0, seekable: false })
-    expect(w.get('[data-remote-command="Eject"]').attributes('disabled')).toBeUndefined()
+    // `'cd'`, ce nom venant de plugins.toml. Masqué plutôt que grisé (voir
+    // `masquee`) : la radio n'a pas de tiroir, un cd sans disque en a un.
+    const w = await monterAvec({ source: 'radio', can_eject: false })
+    expect(w.find('[data-remote-command="Eject"]').exists()).toBe(false)
+    FauxEventSource.derniere!.pousse({ can_eject: true, preset_count: 0, status: 'NO DISC' })
+    await nextTick()
+    expect(w.find('[data-remote-command="Eject"]').exists()).toBe(true)
   })
 
   it('avant la première trame, rien n’est grisé', async () => {
@@ -586,49 +473,107 @@ describe('HomeView — boutons indisponibles', () => {
   })
 })
 
-describe('indisponible', () => {
-  /** Charge utile complète, dont on ne surcharge que ce qui compte. */
-  function etat(champs: Partial<PlayerPayload>): PlayerPayload {
-    return {
-      source: 'radio', volume: 60, muted: false, standby: false, preset: null,
-      preset_count: null, preset_name: null, status: null, overlay: null,
-      artist: null, title: null, album: null, duration_s: null, origin: null,
-      cover_href: null, cover_origin: null,
-      position_s: null, seekable: false, can_eject: false, ...champs,
-    }
-  }
+describe('HomeView — curseurs et noms', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('le curseur de volume poste SetVolume, absolu', async () => {
+    const posts: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') { posts.push(String(init.body)); return new Response(null, { status: 204 }) }
+      if (url === '/api/presets') return new Response(JSON.stringify({ sources: [] }), { status: 200 })
+      return new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })
+    }))
+    vi.stubGlobal('EventSource', FauxEventSource)
+    const HomeView = (await import('./HomeView.vue')).default
+    const w = mount(HomeView)
+    FauxEventSource.derniere!.pousse({ volume: 60 })
+    await nextTick()
+    const poignee = w.get('[data-volume-curseur] [role="slider"]')
+    ;(poignee.element as HTMLElement).focus()
+    await poignee.trigger('keydown', { key: 'ArrowRight' })
+    expect(posts).toContain(JSON.stringify({ cmd: 'SetVolume', arg: 61 }))
+  })
+
+  it('la barre poste SeekTo, du pas configure par /api/settings', async () => {
+    const posts: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') { posts.push(String(init.body)); return new Response(null, { status: 204 }) }
+      if (url === '/api/presets') return new Response(JSON.stringify({ sources: [] }), { status: 200 })
+      return new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })
+    }))
+    vi.stubGlobal('EventSource', FauxEventSource)
+    const HomeView = (await import('./HomeView.vue')).default
+    const w = mount(HomeView)
+    FauxEventSource.derniere!.pousse({ seekable: true, duration_s: 254, position_s: 87 })
+    await flushPromises()
+    const poignee = w.get('[data-barre] [role="slider"]')
+    ;(poignee.element as HTMLElement).focus()
+    await poignee.trigger('keydown', { key: 'ArrowRight' })
+    // Le pas vient de /api/settings (`seek_step_s: 10`, stubbe ci-dessus) :
+    // 87 + 10 = 97.
+    expect(posts).toContain(JSON.stringify({ cmd: 'SeekTo', arg: 97 }))
+  })
+
+  it('nomme les tuiles depuis /api/presets et recharge au changement de source', async () => {
+    const gets: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') return new Response(null, { status: 204 })
+      gets.push(url)
+      if (url === '/api/presets') {
+        return new Response(JSON.stringify({ sources: [
+          { name: 'radio', presets: [{ index: 1, name: 'FIP' }] },
+          { name: 'files', presets: [{ index: 1, name: 'tout.m3u' }] },
+        ] }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })
+    }))
+    vi.stubGlobal('EventSource', FauxEventSource)
+    const HomeView = (await import('./HomeView.vue')).default
+    const w = mount(HomeView)
+    await flushPromises()
+    FauxEventSource.derniere!.pousse({ source: 'radio', preset_count: 3 })
+    await nextTick()
+    expect(w.get('[data-preset-button="1"] [data-preset-name]').text()).toBe('FIP')
+    const avant = gets.filter((u) => u === '/api/presets').length
+    FauxEventSource.derniere!.pousse({ source: 'files', preset_count: 3 })
+    await flushPromises()
+    expect(gets.filter((u) => u === '/api/presets').length).toBe(avant + 1)
+    expect(w.get('[data-preset-button="1"] [data-preset-name]').text()).toBe('tout.m3u')
+  })
+})
+
+describe('indisponible / masquee', () => {
+  const etat = (e: Partial<PlayerPayload>): PlayerPayload => ({
+    source: 'radio', volume: 60, muted: false, standby: false, preset: null, preset_count: null,
+    preset_name: null, status: null, overlay: null, artist: null, title: null, album: null,
+    duration_s: null, origin: null, cover_href: null, cover_origin: null, position_s: null,
+    seekable: false, can_eject: false, ...e,
+  })
 
   it('la veille ne laisse passer que Power', () => {
-    const veille = etat({ standby: true, seekable: true })
-    for (const c of REMOTE_ROWS.flat()) expect(indisponible(c.cmd.cmd, veille)).toBe(true)
-    expect(indisponible('Select', veille)).toBe(true)
-    expect(indisponible('Power', veille)).toBe(false)
+    expect(indisponible('Power', etat({ standby: true }))).toBe(false)
+    expect(indisponible('PlayPause', etat({ standby: true }))).toBe(true)
+    expect(indisponible('Select', etat({ standby: true }))).toBe(true)
   })
 
-  it('hors veille, seuls le déplacement et l’éjection peuvent tomber', () => {
-    // Le jeu exact, figé : c'est ce qui empêche une quatrième règle d'entrer
-    // sans qu'on l'ait décidée, `PlayPause` et `Stop` restant offerts faute de
-    // savoir si quelque chose joue.
-    const direct = etat({ seekable: false, can_eject: false })
-    const indispo = REMOTE_COMMANDS.map((c) => c.cmd.cmd).filter((n) => indisponible(n, direct))
-    expect(indispo.sort()).toEqual(['Eject', 'SeekBackward', 'SeekForward'])
-    const disque = etat({ seekable: true, can_eject: true })
-    expect(REMOTE_COMMANDS.filter((c) => indisponible(c.cmd.cmd, disque))).toEqual([])
+  it('hors veille, rien n’est grisé : le déplacement n’a plus de touche, l’éjection se masque', () => {
+    expect(indisponible('PlayPause', etat({}))).toBe(false)
+    expect(indisponible('Eject', etat({ can_eject: false }))).toBe(false)
   })
 
-  it('les deux capacités sont indépendantes', () => {
-    // Un cd sans disque n'est pas déplaçable et s'éjecte quand même ; un direct
-    // radio n'est ni l'un ni l'autre.
-    const tiroir_vide = etat({ seekable: false, can_eject: true })
-    expect(indisponible('Eject', tiroir_vide)).toBe(false)
-    expect(indisponible('SeekForward', tiroir_vide)).toBe(true)
-    const fichier = etat({ seekable: true, can_eject: false })
-    expect(indisponible('Eject', fichier)).toBe(true)
-    expect(indisponible('SeekForward', fichier)).toBe(false)
+  it('Eject est masqué tant que la source ne déclare pas de tiroir, y compris avant la première trame', () => {
+    // `can_eject` est une capacité que le greffon déclare pour lui-même (le cd
+    // la déclare disque ou pas) : la masquer ne cache jamais un lecteur qui
+    // existe. Avant la première trame, on ne sait pas — donc rien.
+    expect(masquee('Eject', null)).toBe(true)
+    expect(masquee('Eject', etat({ can_eject: false }))).toBe(true)
+    expect(masquee('Eject', etat({ can_eject: true }))).toBe(false)
+    expect(masquee('Stop', etat({ can_eject: false }))).toBe(false)
   })
 
   it('un état inconnu ne grise rien', () => {
-    for (const c of REMOTE_COMMANDS) expect(indisponible(c.cmd.cmd, null)).toBe(false)
-    expect(indisponible('Select', null)).toBe(false)
+    expect(indisponible('PlayPause', null)).toBe(false)
   })
 })

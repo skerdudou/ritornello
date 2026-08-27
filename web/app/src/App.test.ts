@@ -98,7 +98,11 @@ describe('navigation du shell', () => {
     await router.isReady()
     const w = mount(App, { global: { plugins: [router], stubs: { RouterView: true } } })
     await flushPromises()
-    expect(w.findAll('a[href="/plugins/mpd/"]')).toHaveLength(1)
+    // Scopé à la nav du haut : la barre basse pointe elle aussi sur
+    // `/plugins/mpd/` quand il n'y a qu'un seul greffon admin (voir
+    // `NavBasse.test.ts`), ce qui est un second lien légitime et non un
+    // doublon du même `v-for`.
+    expect(w.get('[data-nav-haut]').findAll('a[href="/plugins/mpd/"]')).toHaveLength(1)
     w.unmount()
   })
 
@@ -112,6 +116,14 @@ describe('navigation du shell', () => {
     const w = mount(App, { global: { plugins: [router], stubs: { RouterView: true } } })
     await flushPromises()
     expect(f.mock.calls.some((c) => String(c[0]).includes('/api/system'))).toBe(true)
+    w.unmount()
+  })
+
+  it('la nav du haut est masquée sous md, la barre basse rendue', async () => {
+    const w = await monter('/') // l'aide de montage existante du fichier
+    expect(w.get('[data-nav-haut]').classes()).toContain('hidden')
+    expect(w.get('[data-nav-haut]').classes()).toContain('md:flex')
+    expect(w.find('[data-nav-basse]').exists()).toBe(true)
     w.unmount()
   })
 })
