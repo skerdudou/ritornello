@@ -191,6 +191,7 @@ mod tests {
         assert!(serves_shell("/status"));
         assert!(serves_shell("/config"));
         assert!(serves_shell("/plugins/radio/"));
+        assert!(serves_shell("/plugins/"));
         // Les espaces de donnees : jamais de shell, sinon une faute de frappe
         // sur une route d'API repondrait 200 avec du HTML — piege a debogage.
         assert!(!serves_shell("/api/statuss"));

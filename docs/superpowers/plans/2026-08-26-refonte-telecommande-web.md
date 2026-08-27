@@ -2268,3 +2268,7 @@ Ne pas fusionner depuis le worktree (mémoire : `ExitWorktree(keep)` puis `git m
 2. **Mot derrière le compte** (« 12 stations » / « 12 pistes ») : le `Catalogue` ne porte pas le genre des présélections ; la carte dit « Présélections : 12 » avec la clé existante `presets_label`. Pas de nouvelles clés `presets_count_*`.
 3. **Icône de la pastille source** : pas d'icône par source (aucun moyen de la choisir pour un greffon tiers) ; un point `bg-primary` quand `playback === 'playing'` en tient lieu.
 4. **e2e du glisser** : sur le curseur de **volume** (toujours présent) plutôt que sur la progression (la radio du harnais n'est pas `seekable`) ; la progression déplaçable est couverte par les tests unitaires et par la vérification à l'écran de la Tâche 14.
+5. **Compte de présélections à zéro** : `preset_count === 0` affiche le compte « 0 » dans la carte Présélections plutôt que le statut de la source (« NO DISC », etc.) — ce statut a sa propre ligne, dans la carte Lecteur.
+6. **Mise en forme du muet** : seule la valeur numérique est barrée et assombrie (`line-through opacity-60`) quand `muted` ; la piste du curseur de volume elle-même n'est pas touchée.
+7. **Tailles retenues** : bouton Play/Pause 64 px (48 px à partir de `md`) ; pochette 224 px sur téléphone, 176 px à côté du texte à partir de `md`.
+8. **Clés i18n des curseurs** : pas de nouvelles clés `*_slider_label` — l'`aria-label` de la barre réutilise `position_label`, celui du volume réutilise `volume`.

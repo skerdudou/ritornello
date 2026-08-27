@@ -295,6 +295,56 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   await expect(poignee).toHaveCount(1)
   await expect(poignee).toHaveAttribute('aria-label', /.+/)
 
+  // Le glisser de la barre, de bout en bout : un vrai geste souris pose un
+  // `SeekTo`, que mpv applique reellement. Aucun test unitaire ne peut
+  // l'attraper (voir `BarreProgression.test.ts`, glisser simule sur le
+  // composant) ni le pupitre telephone (source non `seekable`).
+  // `data-barre` est pose sur la racine du Slider elle-meme (voir Slider.vue
+  // du kit : attrs non-`aria-*` transmis a `SliderRoot`, qui porte deja
+  // `data-slot="slider"`) — meme motif que `data-volume-curseur` dans
+  // telephone.spec.ts, pas un descendant.
+  const pisteBarre = page.locator('[data-barre]')
+  const boiteBarre = await pisteBarre.boundingBox()
+  if (!boiteBarre) throw new Error('piste de progression invisible')
+  const yBarre = boiteBarre.y + boiteBarre.height / 2
+  const reponseSeek = page.waitForResponse(
+    (r) => r.url().endsWith('/api/command') && r.request().method() === 'POST',
+  )
+  // Meme motif que le curseur de volume (voir telephone.spec.ts) : partir
+  // d'un point de la piste, pas forcement de la poignee elle-meme.
+  await page.mouse.move(boiteBarre.x + boiteBarre.width * 0.2, yBarre)
+  await page.mouse.down()
+  await page.mouse.move(boiteBarre.x + boiteBarre.width * 0.5, yBarre, { steps: 5 })
+  await page.mouse.up()
+  expect((await reponseSeek).status()).toBe(204)
+  // Le 204 ne prouve que la mise en file (voir le meme commentaire dans
+  // telephone.spec.ts) : on sonde une connexion SSE fraiche jusqu'a une trame
+  // qui montre le saut vraiment applique par mpv, plutot que de supposer un
+  // delai fixe.
+  const lireProgressionSse = () =>
+    page.evaluate(
+      () =>
+        new Promise<{ position: number | null; duree: number | null }>((resolve, reject) => {
+          const flux = new EventSource('/api/player')
+          const minuteur = setTimeout(() => { flux.close(); reject(new Error('aucune trame en 2 s')) }, 2000)
+          flux.onmessage = (e) => {
+            clearTimeout(minuteur)
+            flux.close()
+            const trame = JSON.parse(e.data as string) as { position_s: number | null; duration_s: number | null }
+            resolve({ position: trame.position_s, duree: trame.duration_s })
+          }
+        }),
+    )
+  let derniereProgression: { position: number | null; duree: number | null } = { position: null, duree: null }
+  await expect
+    .poll(async () => {
+      derniereProgression = await lireProgressionSse()
+      const { position, duree } = derniereProgression
+      if (position == null || duree == null || duree <= 0) return false
+      return position >= duree * 0.4
+    }, { timeout: 10_000 })
+    .toBe(true)
+
   // Remettre le harnais dans l'etat ou on l'a trouve : les parcours partagent
   // un unique coeur et `files.spec.ts` s'execute **avant** `parcours.spec.ts`,
   // qui exige la radio active. La remise est verifiee, pas esperee.

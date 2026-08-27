@@ -77,7 +77,9 @@ const grisees = computed(() => indisponible('Select', props.etat))
 <template>
   <div class="space-y-3" data-grille-presets>
     <div v-if="compte !== null" class="flex items-center gap-2">
-      <p data-preset-count class="text-xs text-muted-foreground">{{ t('presets_label') }} : {{ compte }}</p>
+      <!-- Le libelle "Présélections" est deja le titre de la carte (HomeView) :
+           ici, seul le compte. -->
+      <p data-preset-count class="text-xs text-muted-foreground">{{ compte }}</p>
       <span class="flex-1" />
       <template v-if="paginationVisible">
         <Button data-preset-prev variant="outline" size="icon-sm" :disabled="page === 0" :aria-label="t('presets_prev_page')" @click="pagePrecedente">

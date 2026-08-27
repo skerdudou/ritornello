@@ -93,7 +93,7 @@ describe('REMOTE_COMMANDS', () => {
 
 describe('HomeView', () => {
   it('poste la commande Select avec le numéro de présélection', async () => {
-    const spy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    const spy = vi.fn().mockImplementation(async () => new Response(null, { status: 204 }))
     vi.stubGlobal('fetch', spy)
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
@@ -108,7 +108,7 @@ describe('HomeView', () => {
     // `preset_count: null` (defaut de FauxEventSource, jamais poussee ici) :
     // la source ne declare rien, on garde la grille nue historique et pas de
     // +10 (rien a decaler vers).
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     expect(w.findAll('[data-preset-button]')).toHaveLength(9)
@@ -122,7 +122,7 @@ describe('HomeView', () => {
     // bouton tombe sur la deuxieme ligne, sous le titre — c'est exactement ce
     // qui s'etait produit, et aucune classe utilitaire ajoutee a la main ne le
     // corrigeait.
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     const action = w.find('[data-slot="card-action"]')
@@ -135,7 +135,7 @@ describe('HomeView', () => {
     // qui joue (déclarée par la source active via le flux poussé) porte
     // aria-current et la variante pleine ; les autres restent neutres.
     vi.stubGlobal('EventSource', FauxEventSource)
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     FauxEventSource.derniere!.pousse({ preset: 3 })
@@ -152,7 +152,7 @@ describe('HomeView', () => {
 
   it('annonce le nombre de présélections déclaré par la source', async () => {
     vi.stubGlobal('EventSource', FauxEventSource)
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     FauxEventSource.derniere!.pousse({ preset_count: 24 })
@@ -172,7 +172,7 @@ describe('HomeView', () => {
     // Grille nue 1-9 : c'est un repli, pas un inventaire — annoncer « 9 »
     // serait une affirmation que personne n'a faite.
     vi.stubGlobal('EventSource', FauxEventSource)
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     FauxEventSource.derniere!.pousse({ preset_count: null })
@@ -184,7 +184,7 @@ describe('HomeView', () => {
     // L'unique connexion SSE de la page vit dans HomeView : l'encart doit
     // recevoir le même état en prop (c'était son propre flux auparavant).
     vi.stubGlobal('EventSource', FauxEventSource)
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     FauxEventSource.derniere!.pousse({ volume: 45 })
@@ -193,7 +193,7 @@ describe('HomeView', () => {
   })
 
   it('le bouton de veille poste la commande Power', async () => {
-    const spy = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    const spy = vi.fn().mockImplementation(async () => new Response(null, { status: 204 }))
     vi.stubGlobal('fetch', spy)
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
@@ -330,7 +330,7 @@ describe('HomeView — pagination des présélections', () => {
 describe('HomeView — la page suit ce qui joue', () => {
   /** Monte la vue, pousse un premier état, et rend de quoi en pousser d'autres. */
   async function monterAvec(etat: Partial<PlayerPayload>) {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     vi.stubGlobal('EventSource', FauxEventSource)
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
@@ -404,7 +404,7 @@ describe('HomeView — la page suit ce qui joue', () => {
 
 describe('HomeView — boutons indisponibles', () => {
   async function monterAvec(etat: Partial<PlayerPayload>) {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     vi.stubGlobal('EventSource', FauxEventSource)
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
@@ -462,7 +462,7 @@ describe('HomeView — boutons indisponibles', () => {
   it('avant la première trame, rien n’est grisé', async () => {
     // La télécommande s'ouvre utilisable : griser à l'aveugle, puis dégriser,
     // ferait clignoter la carte entière à chaque ouverture d'onglet.
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     vi.stubGlobal('EventSource', FauxEventSource)
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)

@@ -9,7 +9,7 @@ export interface RemoteCommand {
 // canal que celui alimente par les plugins Input, donc aucune logique metier
 // n'est dupliquee ici.
 //
-// Huit commandes sur la page, sur les douze du protocole : les ±10 s et le
+// Huit commandes sur la page, sur les dix-sept du protocole : les ±10 s et le
 // volume pas a pas n'ont plus de touche web (voir `REMOTE_TRANSPORT`).
 
 /**

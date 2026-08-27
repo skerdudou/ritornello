@@ -51,7 +51,7 @@ function monteAvec(etat: Partial<PlayerPayload> | null) {
 
 describe('PlayerCard', () => {
   it('affiche la source dès la première trame', () => {
-    const w = monteAvec({ source: 'cd', volume: 45 })
+    const w = monteAvec({ source: 'cd' })
     expect(w.get('[data-source]').text()).toBe('cd')
   })
 
@@ -185,7 +185,8 @@ describe('PlayerCard', () => {
   it('retire le bloc morceau quand la lecture s arrete', async () => {
     // Changement d'identite ou arret : le coeur diffuse un etat sans morceau,
     // et l'ancien titre ne doit pas rester a l'ecran — mais l'encart du lecteur
-    // reste, lui, avec la source et le volume.
+    // reste, lui, avec la source (le volume vit desormais dans le slot
+    // `commandes`, hors de cette carte).
     const w = monteAvec({ title: 'premier' })
     await w.setProps({ etat: complet({}) })
     expect(w.find('[data-now-playing]').exists()).toBe(false)

@@ -33,7 +33,7 @@ watch(() => etat.value?.source, (apres, avant) => {
   if (apres !== undefined && apres !== avant) recharger()
 })
 
-// Pas de deplacement au clavier de la barre : celui des touches physiques,
+// Le pas de deplacement au clavier de la barre : celui des touches physiques,
 // servi par /api/settings. Le defaut couvre le temps du GET et son echec.
 const reglages = ref<SettingsPayload>({
   volume_repeat_initial_ms: 800,
