@@ -217,6 +217,18 @@ struct IssueIcy {
     motif: Option<motifs::Motif>,
     /// Le couple validé et sa pochette. `None` = validation échouée.
     valide: Option<(String, String, Option<String>)>,
+    /// Le couple issu du découpage **local**, que la validation ait abouti ou
+    /// non.
+    ///
+    /// Distinct de `valide`, et la distinction porte une correction de
+    /// relecture : un morceau que MusicBrainz ne connaît pas est un échec de
+    /// **validation**, pas une raison de jeter un découpage dont le motif a
+    /// déjà fait ses preuves sur cette station. Sans ce champ, le greffon
+    /// n'émettait rien dans ce cas — et comme l'identité d'une radio ne change
+    /// pas d'un morceau à l'autre, l'enrichissement du morceau **précédent**
+    /// restait gagnant : l'écran annonçait l'artiste, le titre et la pochette
+    /// d'avant pendant toute la durée du suivant.
+    couple: Option<(String, String)>,
 }
 
 impl MusicBrainzPlugin {
@@ -430,6 +442,19 @@ impl MetadataPlugin for MusicBrainzPlugin {
                             if self.icy_en_vol.as_deref() != Some(url.as_str()) {
                                 self.icy_en_vol = Some(url.clone());
                                 let resonde = doit_resonder(&self.echecs, &url);
+                                if resonde {
+                                    // **Le resondage consomme le compteur.**
+                                    // Sans ça il restait au-dessus du seuil
+                                    // pour la vie du processus : une station
+                                    // qui ne valide jamais — un flux en
+                                    // mojibake, par exemple — repartait en
+                                    // sondage complet à *chaque* titre, ce qui
+                                    // démentait la documentation et faisait de
+                                    // cette limite une tempête de requêtes
+                                    // garantie. Un resondage rachète trois
+                                    // titres, il ne s'arme pas en permanence.
+                                    self.echecs.remove(&url);
+                                }
                                 let magasin = self.magasin.clone();
                                 let tx = self.icy_tx.clone();
                                 let url_tache = url.clone();
@@ -503,19 +528,31 @@ impl MetadataPlugin for MusicBrainzPlugin {
                         if self.icy_en_vol.as_deref() == Some(issue.url.as_str()) {
                             self.icy_en_vol = None;
                         }
-                        // Garde de péremption, comme les deux autres chemins :
-                        // la station a pu changer de morceau pendant le vol,
-                        // et une issue qui ne décrit plus la chaîne courante
-                        // doit être jetée plutôt qu'appliquée à tort.
-                        if self.icy_vu.as_deref() != Some(issue.brut.as_str()) {
-                            continue;
-                        }
+                        // **Le motif est retenu avant la garde de
+                        // péremption**, et l'ordre est le correctif : un motif
+                        // décrit la **station**, pas le morceau. Une issue de
+                        // sondage devenue périmée pendant son vol — la station a
+                        // changé de titre, ce qui prend quelques secondes et le
+                        // sondage en prend quatre — porte quand même un
+                        // apprentissage valable, vérifié contre MusicBrainz.
+                        //
+                        // Jeter l'issue entière avant cette ligne, comme le
+                        // faisait la version d'avant, pouvait faire qu'une
+                        // station n'apprenne **jamais rien** : chaque sondage
+                        // était invalidé par le changement de titre qui l'avait
+                        // en partie provoqué.
                         if let Some(m) = issue.motif {
                             let mut magasin = self.magasin.write().await;
                             magasin.apprend(&issue.url, m);
                             if let Err(e) = magasin.enregistre(&self.chemin_etat) {
                                 tracing::warn!("could not save ICY patterns: {e}");
                             }
+                        }
+                        // Garde de péremption, comme les deux autres chemins,
+                        // mais elle ne protège plus que ce qui décrit **le
+                        // morceau** : le couple et la pochette.
+                        if self.icy_vu.as_deref() != Some(issue.brut.as_str()) {
+                            continue;
                         }
                         match issue.valide {
                             Some((artist, title, release_id)) => {
@@ -548,7 +585,41 @@ impl MetadataPlugin for MusicBrainzPlugin {
                                 });
                             }
                             None => {
-                                *self.echecs.entry(issue.url).or_default() += 1;
+                                *self.echecs.entry(issue.url.clone()).or_default() += 1;
+                                // **Émettre quand même.** Ne rien envoyer
+                                // laissait l'enrichissement du morceau
+                                // *précédent* gagner l'arbitrage, l'identité
+                                // d'une radio ne changeant pas d'un morceau à
+                                // l'autre : l'écran annonçait l'artiste, le
+                                // titre et la pochette d'avant pendant toute la
+                                // durée du suivant. Le pire des trois états, et
+                                // celui que ma spec décrivait sans le voir en
+                                // écrivant « ne rien émettre pour ce morceau ».
+                                //
+                                // Ce qu'on émet dépend de ce qu'on sait :
+                                //
+                                // * le couple local, quand le motif s'applique.
+                                //   MusicBrainz ne connaît pas ce morceau, ce
+                                //   qui ne dit rien contre un découpage déjà
+                                //   confirmé sur cette station. Sans pochette,
+                                //   faute de release à citer.
+                                // * sinon la chaîne nettoyée en guise de titre :
+                                //   le motif ne s'applique plus (la station a
+                                //   changé de forme) ou il n'y en a pas. On
+                                //   n'affirme alors aucun découpage — juste ce
+                                //   que le flux annonce, débarrassé de sa
+                                //   réclame.
+                                let (artist, title) = match issue.couple {
+                                    Some((a, t)) => (Some(a), Some(t)),
+                                    None => (None, Some(icy::nettoie(&issue.brut))),
+                                };
+                                self.pret = Some(Enrichment {
+                                    identity: issue.identite,
+                                    artist,
+                                    title,
+                                    fill_only: false,
+                                    ..Default::default()
+                                });
                             }
                         }
                     }
@@ -654,16 +725,22 @@ async fn traite_icy(
         match &connu {
             Some(motifs::Motif::NePasDecouper) => {
                 // La station parlée : coût nul, aucune requête.
-                return IssueIcy { url, brut, identite, motif: None, valide: None };
+                return IssueIcy { url, brut, identite, motif: None, valide: None, couple: None };
             }
             Some(m @ motifs::Motif::Separe { .. }) => {
                 // Régime établi : découpage local, une seule requête qui vaut
                 // à la fois validation continue et recherche de pochette.
-                let valide = match icy::applique(m, &nettoye) {
-                    Some((artiste, titre)) => valide_par_recherche(&artiste, &titre).await,
+                //
+                // Le couple local est rapporté **même si la validation
+                // échoue** : c'est notre meilleure connaissance du morceau, et
+                // le motif qui l'a produit a déjà été confirmé sur cette
+                // station. Voir `IssueIcy::couple`.
+                let couple = icy::applique(m, &nettoye);
+                let valide = match &couple {
+                    Some((artiste, titre)) => valide_par_recherche(artiste, titre).await,
                     None => None,
                 };
-                return IssueIcy { url, brut, identite, motif: None, valide };
+                return IssueIcy { url, brut, identite, motif: None, valide, couple };
             }
             None => {} // Station jamais sondée : tombe dans le sondage ci-dessous.
         }
@@ -706,11 +783,19 @@ async fn traite_icy(
                 identite,
                 motif: Some(motifs::Motif::depuis_candidat(&gagnant)),
                 valide: Some((gagnant.artiste.clone(), gagnant.titre.clone(), release_id)),
+                couple: Some((gagnant.artiste, gagnant.titre)),
             }
         }
         None => {
             tracing::info!("ICY probe for {url}: tried {nb_essayes} candidate(s), none accepted");
-            IssueIcy { url, brut, identite, motif: Some(motifs::Motif::NePasDecouper), valide: None }
+            IssueIcy {
+                url,
+                brut,
+                identite,
+                motif: Some(motifs::Motif::NePasDecouper),
+                valide: None,
+                couple: None,
+            }
         }
     }
 }
@@ -1120,8 +1205,18 @@ mod tests {
     }
 
     /// Envoie une issue d'échec (validation ratée) pour `url`/`brut`, et
-    /// consomme le tour de boucle qui en résulte : aucun enrichissement ne
-    /// doit en sortir.
+    /// consomme le tour de boucle qui en résulte.
+    ///
+    /// **Un échec produit désormais un enrichissement**, et c'est une
+    /// correction de relecture : ne rien émettre laissait celui du morceau
+    /// *précédent* gagner l'arbitrage, l'identité d'une radio ne changeant pas
+    /// d'un morceau à l'autre. L'assertion d'avant — « aucun enrichissement » —
+    /// épinglait donc le défaut au lieu de la propriété.
+    ///
+    /// Avec `couple: None`, ce qui part est la chaîne nettoyée en guise de
+    /// titre, sans artiste : on n'affirme aucun découpage, on montre ce que le
+    /// flux annonce. Et l'attente est **exacte** (on attend ce qui doit venir)
+    /// au lieu de reposer sur une marge de temps.
     async fn envoie_echec(p: &mut MusicBrainzPlugin, url: &str, brut: &str) {
         p.icy_tx
             .send(IssueIcy {
@@ -1130,11 +1225,18 @@ mod tests {
                 identite: json!({"kind": "stream", "url": url}),
                 motif: None,
                 valide: None,
+                couple: None,
             })
             .await
             .unwrap();
-        let r = tokio::time::timeout(std::time::Duration::from_millis(200), p.next_enrichment()).await;
-        assert!(r.is_err(), "un echec ne doit produire aucun enrichissement");
+        let e = p.next_enrichment().await;
+        assert_eq!(e.artist, None, "un echec n'affirme aucun artiste");
+        assert_eq!(
+            e.title.as_deref(),
+            Some(icy::nettoie(brut).as_str()),
+            "il montre ce que le flux annonce, nettoye"
+        );
+        assert!(e.cover.is_none(), "et aucune pochette, faute de release a citer");
     }
 
     #[tokio::test]
@@ -1161,6 +1263,48 @@ mod tests {
         assert!(doit_resonder(&p.echecs, url), "trois echecs d'affilee doivent resonder");
     }
 
+    /// Le resondage **consomme** le compteur d'echecs.
+    ///
+    /// Sans ca il restait au-dessus du seuil pour la vie du processus, et une
+    /// station qui ne valide jamais — un flux en mojibake, par exemple —
+    /// repartait en sondage complet a *chaque* titre. La documentation promet
+    /// l'inverse, et la limite qu'elle decrit devenait une tempete de requetes
+    /// garantie. Constat de la relecture croisee finale.
+    ///
+    /// Eprouve sur `now_playing` et non sur `doit_resonder` seul : la remise a
+    /// zero vit au site de lancement, et c'est le lien entre les deux que ce
+    /// test doit tenir. La tache detachee qui suit ne peut pas joindre le
+    /// reseau, ce qui ne gene pas — la remise a zero est synchrone et precede
+    /// le `spawn`.
+    #[tokio::test]
+    async fn un_resondage_consomme_le_compteur() {
+        let mut p = plugin_test();
+        let url = "http://exemple/flux.mp3";
+        let identite = json!({"kind": "stream", "url": url});
+        p.echecs.insert(url.to_string(), ECHECS_AVANT_RESONDAGE);
+        assert!(doit_resonder(&p.echecs, url), "trois echecs arment bien le resondage");
+
+        p.now_playing(NowPlaying {
+            source: "radio".into(),
+            identity: Some(identite),
+            known: ritornello_proto::Known {
+                stream_title: Some("Miles Davis - So What".into()),
+                ..Default::default()
+            },
+        })
+        .await;
+
+        assert_eq!(
+            p.echecs.get(url),
+            None,
+            "le lancement du resondage doit avoir consomme le compteur"
+        );
+        assert!(
+            !doit_resonder(&p.echecs, url),
+            "et le titre suivant ne doit pas resonder a son tour"
+        );
+    }
+
     #[tokio::test]
     async fn un_succes_remet_le_compteur_a_zero() {
         // Deux échecs, un succès, deux échecs : pas de resondage. C'est la
@@ -1183,6 +1327,7 @@ mod tests {
                 identite: json!({"kind": "stream", "url": url}),
                 motif: None,
                 valide: Some(("Artiste".to_string(), "Titre".to_string(), None)),
+                couple: Some(("Artiste".to_string(), "Titre".to_string())),
             })
             .await
             .unwrap();

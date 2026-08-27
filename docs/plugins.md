@@ -1448,6 +1448,23 @@ is never re-probed automatically — deleting its entry from the admin page is t
 intended remedy, and that is what the delete button is for. A manual pattern is
 never overwritten by re-learning.
 
+Launching a re-probe **consumes** the counter, so a re-probe buys three more
+tracks rather than arming itself permanently. Without that, a station that never
+validates — a stream in mojibake, say — would re-probe on *every* title for the
+life of the process, and the limit described just above would become a
+guaranteed request storm.
+
+**And a failed validation still says something.** The plugin does not go silent:
+going silent would leave the *previous* track's answer winning the arbitration,
+since a radio's identity does not change from one track to the next, and the
+screen would announce the artist, title and cover of the track before for the
+whole duration of the next one. So on a failure it emits what it still knows:
+the locally split pair when the pattern applies — MusicBrainz not knowing a
+track says nothing against a split already confirmed on that station — without a
+cover, for want of a release to cite; or, when the pattern no longer applies, the
+cleaned announced string as the title and no artist at all, which claims no split
+and shows only what the stream says, stripped of its own advertising.
+
 **Where it must be declared.** After the station-specific `metadata` plugins.
 `metadata` plugins are arbitrated by declaration order and the winner's block is
 taken whole, so a `musicbrainz` declared before `ouifm-metas` would win on the
