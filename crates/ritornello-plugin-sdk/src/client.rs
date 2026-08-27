@@ -95,6 +95,33 @@ impl SourceClient {
         name: String,
         update_tx: mpsc::Sender<(String, SourceUpdate)>,
     ) -> Result<Arc<Self>> {
+        Self::connect_avec_fermeture(socket_path, name, update_tx, None).await
+    }
+
+    /// Comme `connect`, mais avertit `ferme_tx` quand le socket se ferme.
+    ///
+    /// **Une variante plutôt qu'un paramètre de plus à `connect`** : la
+    /// fermeture n'intéresse que le cœur, et neuf sites d'appel dans les tests
+    /// de ce fichier n'ont rien à en dire. Un champ ajouté à une signature
+    /// publique se paie en littéraux à recopier partout ailleurs.
+    ///
+    /// Un `oneshot` et non un `mpsc` : la fermeture n'arrive qu'une fois par
+    /// client, et le type le dit. Ce qu'il signifie exactement est *le pair a
+    /// fermé* — soit son processus est mort, soit il a fermé son socket. Dans
+    /// les deux cas il n'est plus joignable, ce qui est tout ce dont l'appelant
+    /// a besoin ; ce n'est en revanche pas une preuve stricte de décès, et
+    /// personne ne devrait en déduire un code de sortie.
+    ///
+    /// Le SDK ne sait **rien** de la comptabilité du cœur (nom, génération de
+    /// câblage) : il signale un fait, l'appelant l'habille. C'est ce qui permet
+    /// à cette fonction de rester indifférente à la façon dont le cœur
+    /// distingue deux incarnations d'un même greffon.
+    pub async fn connect_avec_fermeture(
+        socket_path: &Path,
+        name: String,
+        update_tx: mpsc::Sender<(String, SourceUpdate)>,
+        ferme_tx: Option<oneshot::Sender<()>>,
+    ) -> Result<Arc<Self>> {
         let stream = UnixStream::connect(socket_path)
             .await
             .with_context(|| format!("connecting to {}", socket_path.display()))?;
@@ -195,7 +222,16 @@ impl SourceClient {
             // Déconnexion : drainer les requêtes en vol. Dropper chaque Sender
             // fait résoudre le rx.await de request() en Err immédiatement.
             pending.lock().await.clear();
-            tracing::warn!("source plugin connection closed");
+            // Le nom, alors qu'il manquait : « source plugin connection closed »
+            // sans dire lequel n'était pas exploitable sur un appareil qui en
+            // porte plusieurs.
+            tracing::warn!("source plugin {name} connection closed");
+            // Et l'avis à qui l'a demandé. Après le drainage, pour que le cœur
+            // ne puisse pas observer « déconnecté » avant que les requêtes en
+            // vol aient été libérées.
+            if let Some(tx) = ferme_tx {
+                let _ = tx.send(());
+            }
         });
         Ok(client)
     }

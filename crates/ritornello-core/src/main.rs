@@ -103,6 +103,8 @@ fn relais_afficheur(
     covers: Arc<cover::CoverCache>,
     mut etat_rx: watch::Receiver<PlayerState>,
     mut catalogue_rx: watch::Receiver<Catalogue>,
+    cablage: u64,
+    injoignable: mpsc::Sender<(String, u64)>,
 ) {
     tokio::spawn(async move {
         /// Nombre de tentatives accordées à un même `cover_href` avant de
@@ -206,69 +208,91 @@ fn relais_afficheur(
             Ok(())
         }
 
-        let etat = etat_rx.borrow_and_update().clone();
-        let cat = catalogue_rx.borrow_and_update().clone();
-        if let Err(e) = client.send(&etat).await {
-            tracing::warn!("display plugin {nom} relay stopped: {e}");
-            return;
-        }
-        if let Err(e) = client.send_catalogue(&cat).await {
-            tracing::warn!("display plugin {nom} relay stopped: {e}");
-            return;
-        }
-        // La pochette courante part d'emblée, comme l'état et le catalogue et
-        // pour la même raison : un afficheur câblé à chaud doit montrer ce qui
-        // joue sans attendre le prochain changement de piste.
-        let mut suivi_pochette = SuiviPochette::default();
-        if veut_pochettes {
-            if let Err(e) = pousse(
-                &client,
-                &covers,
-                &mut suivi_pochette,
-                etat.morceau.cover_href.as_deref(),
-            )
-            .await
-            {
+        // **Deux sorties de boucle qu'il ne faut surtout pas confondre.** Un
+        // envoi en échec veut dire que l'afficheur n'est plus joignable, et
+        // c'est ce qui doit devenir visible sur la page de statut. Un
+        // `watch::Receiver` fermé veut dire que *le cœur* s'arrête — ses
+        // émetteurs sont tombés —, ce qui ne dit rien du greffon et ne doit donc
+        // rien signaler : marquer déconnectés tous les afficheurs pendant
+        // l'extinction du cœur peindrait une panne sur un arrêt normal.
+        //
+        // D'où le bloc étiqueté : les quatre chemins « pair injoignable »
+        // rendent `true`, la fin naturelle de la boucle rend `false`, et l'avis
+        // part d'un seul endroit — sous le bloc — au lieu d'être recopié quatre
+        // fois.
+        let injoignable_constate = 'vie: {
+            let etat = etat_rx.borrow_and_update().clone();
+            let cat = catalogue_rx.borrow_and_update().clone();
+            if let Err(e) = client.send(&etat).await {
                 tracing::warn!("display plugin {nom} relay stopped: {e}");
-                return;
+                break 'vie true;
             }
-        }
-        loop {
-            let envoi = tokio::select! {
-                r = etat_rx.changed() => match r {
-                    Ok(()) => {
-                        let e = etat_rx.borrow_and_update().clone();
-                        let envoi = client.send(&e).await;
-                        // L'état d'abord, la pochette ensuite : l'afficheur
-                        // connaît ainsi le `cover_href` avant de recevoir les
-                        // octets qui s'en réclament.
-                        match (envoi, veut_pochettes) {
-                            (Ok(()), true) => {
-                                pousse(
-                                    &client,
-                                    &covers,
-                                    &mut suivi_pochette,
-                                    e.morceau.cover_href.as_deref(),
-                                )
-                                .await
+            if let Err(e) = client.send_catalogue(&cat).await {
+                tracing::warn!("display plugin {nom} relay stopped: {e}");
+                break 'vie true;
+            }
+            // La pochette courante part d'emblée, comme l'état et le catalogue
+            // et pour la même raison : un afficheur câblé à chaud doit montrer
+            // ce qui joue sans attendre le prochain changement de piste.
+            let mut suivi_pochette = SuiviPochette::default();
+            if veut_pochettes {
+                if let Err(e) = pousse(
+                    &client,
+                    &covers,
+                    &mut suivi_pochette,
+                    etat.morceau.cover_href.as_deref(),
+                )
+                .await
+                {
+                    tracing::warn!("display plugin {nom} relay stopped: {e}");
+                    break 'vie true;
+                }
+            }
+            loop {
+                let envoi = tokio::select! {
+                    r = etat_rx.changed() => match r {
+                        Ok(()) => {
+                            let e = etat_rx.borrow_and_update().clone();
+                            let envoi = client.send(&e).await;
+                            // L'état d'abord, la pochette ensuite : l'afficheur
+                            // connaît ainsi le `cover_href` avant de recevoir
+                            // les octets qui s'en réclament.
+                            match (envoi, veut_pochettes) {
+                                (Ok(()), true) => {
+                                    pousse(
+                                        &client,
+                                        &covers,
+                                        &mut suivi_pochette,
+                                        e.morceau.cover_href.as_deref(),
+                                    )
+                                    .await
+                                }
+                                (autre, _) => autre,
                             }
-                            (autre, _) => autre,
                         }
-                    }
-                    Err(_) => break,
-                },
-                r = catalogue_rx.changed() => match r {
-                    Ok(()) => {
-                        let c = catalogue_rx.borrow_and_update().clone();
-                        client.send_catalogue(&c).await
-                    }
-                    Err(_) => break,
-                },
-            };
-            if let Err(e) = envoi {
-                tracing::warn!("display plugin {nom} relay stopped: {e}");
-                break;
+                        // Le cœur s'arrête, pas le greffon : sortir sans rien
+                        // signaler.
+                        Err(_) => break,
+                    },
+                    r = catalogue_rx.changed() => match r {
+                        Ok(()) => {
+                            let c = catalogue_rx.borrow_and_update().clone();
+                            client.send_catalogue(&c).await
+                        }
+                        Err(_) => break,
+                    },
+                };
+                if let Err(e) = envoi {
+                    tracing::warn!("display plugin {nom} relay stopped: {e}");
+                    break 'vie true;
+                }
             }
+            false
+        };
+        if injoignable_constate {
+            // `let _` : la boucle du cœur a pu disparaître entre-temps, et son
+            // départ n'est pas un incident à journaliser ici.
+            let _ = injoignable.send((nom, cablage)).await;
         }
     });
 }
@@ -382,6 +406,19 @@ struct FilsChaud {
     covers: Arc<cover::CoverCache>,
     status_state: Arc<RwLock<StatusState>>,
     admin_backends: admin::AdminBackends,
+    /// Par où un socket qui se ferme le fait savoir à la boucle principale.
+    ///
+    /// **C'est le seul chemin par lequel la mort d'un greffon non supervisé
+    /// devient visible.** Un greffon relancé à la main échappe à
+    /// `plugin_waits` — le cœur n'est pas son parent, il ne verra jamais son
+    /// code de sortie —, mais ses sockets, eux, sont bien les nôtres : leur
+    /// fermeture est un fait que le cœur observe déjà, et qu'il se contentait de
+    /// journaliser. La page continuait donc de l'afficher connecté,
+    /// indéfiniment.
+    ///
+    /// Porte `(nom, génération de câblage)` : voir `cablages` dans la boucle,
+    /// qui dit pourquoi le numéro est indispensable.
+    injoignable_tx: mpsc::Sender<(String, u64)>,
 }
 
 /// Câble un greffon qui s'annonce **après** le rendez-vous de démarrage.
@@ -403,6 +440,11 @@ async fn cabler_a_chaud<P: player::Player>(
     rassemble: &mut register::Gathered,
     kill_triggers: &HashMap<String, tokio::sync::oneshot::Sender<()>>,
     non_supervises: &mut HashSet<String>,
+    // Numéro de ce câblage-ci, attribué par la boucle. Recopié dans chaque
+    // tâche de socket lancée ici, pour que la fermeture d'un socket d'une
+    // incarnation précédente soit reconnue comme telle et ignorée. Un `///` est
+    // refusé sur un paramètre, d'où le commentaire ordinaire.
+    cablage: u64,
 ) {
     let nom = annonce.name.clone();
     // Le nom fait autorité côté manifeste, à chaud comme au rendez-vous : une
@@ -473,7 +515,27 @@ async fn cabler_a_chaud<P: player::Player>(
         let socket = ritornello_plugin_sdk::genre_socket(&prefix, *kind);
         match kind {
             PluginKind::Source => {
-                match SourceClient::connect(&socket, nom.clone(), fils.source_update_tx.clone())
+                // `connect_avec_fermeture` et non `connect` : la tâche de
+                // lecture du SDK se terminait sur EOF en journalisant, sans
+                // prévenir personne. Un `oneshot` relayé vers la boucle, parce
+                // que le SDK ne doit rien savoir de la comptabilité du cœur.
+                let (ferme_tx, ferme_rx) = tokio::sync::oneshot::channel();
+                let injoignable = fils.injoignable_tx.clone();
+                let nom_ferme = nom.clone();
+                tokio::spawn(async move {
+                    // `Err` = le client a été détruit sans que le socket ferme,
+                    // ce qui n'arrive qu'au remplacement du client : rien à
+                    // signaler alors, le remplaçant parle pour lui.
+                    if ferme_rx.await.is_ok() {
+                        let _ = injoignable.send((nom_ferme, cablage)).await;
+                    }
+                });
+                match SourceClient::connect_avec_fermeture(
+                    &socket,
+                    nom.clone(),
+                    fils.source_update_tx.clone(),
+                    Some(ferme_tx),
+                )
                     .await
                 {
                     Ok(client) => {
@@ -545,6 +607,8 @@ async fn cabler_a_chaud<P: player::Player>(
                         fils.covers.clone(),
                         fils.etat_rx.clone(),
                         fils.catalogue_rx.clone(),
+                        cablage,
+                        fils.injoignable_tx.clone(),
                     );
                     lignes.push(PluginStatus::genre(&nom, "display", true, annonce.admin));
                 }
@@ -557,10 +621,16 @@ async fn cabler_a_chaud<P: player::Player>(
                 let tx = fils.cmd_tx.clone();
                 let socket_for_task = socket.clone();
                 let name = nom.clone();
+                let injoignable = fils.injoignable_tx.clone();
                 tokio::spawn(async move {
                     if let Err(e) = run_input_client(&socket_for_task, tx).await {
                         tracing::warn!("input plugin {name} disconnected: {e}");
                     }
+                    // `run_input_client` ne rend **jamais** `Ok` : il sort en
+                    // erreur sur EOF comme sur canal du cœur fermé. Le second
+                    // cas signale dans le vide — la boucle est partie, son
+                    // récepteur avec — donc il n'a pas besoin d'être distingué.
+                    let _ = injoignable.send((name, cablage)).await;
                 });
                 lignes.push(PluginStatus::genre(&nom, "input", true, annonce.admin));
             }
@@ -569,12 +639,14 @@ async fn cabler_a_chaud<P: player::Player>(
                 let np_rx = fils.now_playing_rx.clone();
                 let socket_for_task = socket.clone();
                 let name = nom.clone();
+                let injoignable = fils.injoignable_tx.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
                         run_metadata_client(&socket_for_task, name.clone(), tx, np_rx).await
                     {
                         tracing::warn!("metadata plugin {name} disconnected: {e}");
                     }
+                    let _ = injoignable.send((name, cablage)).await;
                 });
                 lignes.push(PluginStatus::genre(&nom, "metadata", true, annonce.admin));
             }
@@ -968,6 +1040,33 @@ async fn main() -> Result<()> {
     // sans ce compteur, cette mort effacerait des lignes de statut qui
     // décrivent déjà le nouveau. Voir le bras `plugin_waits.next()`.
     let mut generations: HashMap<String, u64> = HashMap::new();
+    // Génération de **câblage**, par nom, et distincte de `generations` juste
+    // au-dessus — les confondre casserait l'une ou l'autre.
+    //
+    // `generations` compte les **lancements de processus** : le bras
+    // `plugin_waits` compare la génération que lui rend la supervision à celle
+    // de la table, et la bosseler ailleurs qu'au lancement ferait ignorer une
+    // mort réelle. `cablages` compte les **câblages de sockets**, qui arrivent
+    // en plus : un greffon relancé à la main se recâble sans que le cœur l'ait
+    // lancé.
+    //
+    // Pourquoi ce numéro est indispensable. Un relais d'afficheur n'apprend la
+    // mort de son pair qu'au **prochain envoi**, qui peut n'arriver que des
+    // minutes plus tard, faute de changement d'état. Soit : le greffon meurt,
+    // l'utilisateur le relance à la main trente secondes après, il se
+    // réannonce, ses lignes repassent à connecté — puis un morceau change, le
+    // *vieux* relais se réveille enfin, échoue et signale. Sans le numéro, ce
+    // signal marquerait déconnecté un greffon qui vient de se rebrancher, et
+    // seul un nouveau changement de piste l'aurait réparé.
+    let mut cablages: HashMap<String, u64> = HashMap::new();
+    // Les sockets qui se ferment. Voir `FilsChaud::injoignable_tx`.
+    //
+    // Borné à 16 : un envoi est une fin de tâche, jamais une cadence. Si le
+    // canal se remplissait — huit greffons mourant tous en même temps, deux
+    // fois — les émetteurs attendraient leur tour au lieu de perdre l'avis, ce
+    // qui est le bon compromis pour un message dont l'oubli laisserait une
+    // ligne mentir indéfiniment.
+    let (injoignable_tx, mut injoignable_rx) = mpsc::channel::<(String, u64)>(16);
 
     for p in &manifest.plugins {
         generations.insert(p.name.clone(), 0);
@@ -1103,7 +1202,23 @@ async fn main() -> Result<()> {
             // les autres genres du même greffon continuant d'être câblés.
             match kind {
                 PluginKind::Source => {
-                    match SourceClient::connect(&socket, nom.clone(), source_update_tx.clone()).await
+                    // Voir le même geste dans `cabler_a_chaud`, qui dit
+                    // pourquoi le SDK ne connaît pas la comptabilité du cœur.
+                    let (ferme_tx, ferme_rx) = tokio::sync::oneshot::channel();
+                    let injoignable = injoignable_tx.clone();
+                    let nom_ferme = nom.clone();
+                    tokio::spawn(async move {
+                        if ferme_rx.await.is_ok() {
+                            let _ = injoignable.send((nom_ferme, 0)).await;
+                        }
+                    });
+                    match SourceClient::connect_avec_fermeture(
+                        &socket,
+                        nom.clone(),
+                        source_update_tx.clone(),
+                        Some(ferme_tx),
+                    )
+                    .await
                     {
                         Ok(client) => {
                             sources.insert(nom.clone(), client);
@@ -1129,10 +1244,17 @@ async fn main() -> Result<()> {
                     let tx = cmd_tx.clone();
                     let socket_for_task = socket.clone();
                     let name = nom.clone();
+                    let injoignable = injoignable_tx.clone();
                     tokio::spawn(async move {
                         if let Err(e) = run_input_client(&socket_for_task, tx).await {
                             tracing::warn!("input plugin {name} disconnected: {e}");
                         }
+                        // `0` : c'est le câblage du rendez-vous de démarrage, et
+                        // `cablages` ne porte encore aucune entrée — sa valeur
+                        // par défaut est donc lue comme `0` du côté de la
+                        // boucle, ce qui fait de ce socket l'incarnation
+                        // courante tant que personne n'a recâblé ce nom.
+                        let _ = injoignable.send((name, 0)).await;
                     });
                     plugin_statuses.push(PluginStatus::genre(nom, "input", true, annonce.admin));
                 }
@@ -1144,12 +1266,14 @@ async fn main() -> Result<()> {
                     let np_rx = now_playing_rx.clone();
                     let socket_for_task = socket.clone();
                     let name = nom.clone();
+                    let injoignable = injoignable_tx.clone();
                     tokio::spawn(async move {
                         if let Err(e) =
                             run_metadata_client(&socket_for_task, name.clone(), tx, np_rx).await
                         {
                             tracing::warn!("metadata plugin {name} disconnected: {e}");
                         }
+                        let _ = injoignable.send((name, 0)).await;
                     });
                     plugin_statuses.push(PluginStatus::genre(nom, "metadata", true, annonce.admin));
                 }
@@ -1403,6 +1527,8 @@ async fn main() -> Result<()> {
             app_covers.clone(),
             etat_rx.clone(),
             catalogue_rx.clone(),
+            0,
+            injoignable_tx.clone(),
         );
     }
 
@@ -1420,6 +1546,7 @@ async fn main() -> Result<()> {
         covers: app_covers.clone(),
         status_state: status_state.clone(),
         admin_backends: admin_backends.clone(),
+        injoignable_tx: injoignable_tx.clone(),
     };
 
     let mut retry_at: Option<tokio::time::Instant> = None;
@@ -1514,6 +1641,12 @@ async fn main() -> Result<()> {
             // par genre, et une ré-annonce est traitée comme une annonce
             // tardive — on recâble.
             Some(annonce) = tardives_rx.recv() => {
+                // Un numéro neuf **avant** de câbler : les sockets de
+                // l'incarnation précédente, s'il en reste, deviennent périmés
+                // à cet instant précis, et leur fermeture sera ignorée.
+                let cablage = cablages.entry(annonce.name.clone()).or_insert(0);
+                *cablage += 1;
+                let cablage = *cablage;
                 cabler_a_chaud(
                     annonce,
                     &fils_chaud,
@@ -1521,9 +1654,51 @@ async fn main() -> Result<()> {
                     &mut rassemble,
                     &kill_triggers,
                     &mut non_supervises,
+                    cablage,
                 )
                 .await;
                 status_state.write().await.active_source = core.active_source().to_string();
+            }
+            // Un socket de greffon s'est fermé. **C'est ce qui rend visible la
+            // mort d'un greffon non supervisé**, laquelle ne produisait jusqu'ici
+            // qu'une ligne de journal : la page continuait de l'afficher
+            // connecté, indéfiniment.
+            //
+            // Ce que la fermeture prouve exactement : le pair a fermé. Soit son
+            // processus est mort, soit il a fermé son socket. Dans les deux cas
+            // il n'est plus joignable, donc « déconnecté » est honnête — mais ce
+            // n'est pas une preuve stricte de décès, et rien ici n'en déduit un
+            // code de sortie.
+            Some((nom, cablage)) = injoignable_rx.recv() => {
+                if cablages.get(&nom).copied().unwrap_or(0) != cablage {
+                    // Le socket d'une incarnation précédente, arrivé après le
+                    // recâblage de la suivante. Voir `cablages`.
+                    tracing::debug!(
+                        "plugin {nom} socket from wiring {cablage} closed after it was rewired"
+                    );
+                } else {
+                    tracing::info!("plugin {nom} is no longer reachable, reporting it disconnected");
+                    // **Le nom sort de `non_supervises`, et c'est la moitié
+                    // utile.** Il n'y était que parce qu'un processus vivant
+                    // échappait à la supervision du cœur ; ce processus n'est
+                    // plus joignable, donc le greffon redevient gérable — un
+                    // allumage depuis l'IHM en lancera un vrai, supervisé, au
+                    // lieu d'être refusé par `eteindre_a_chaud`.
+                    //
+                    // C'est aussi pourquoi ce registre-ci se purge alors que
+                    // `demarrages` ne se purge pas : `non_supervises` décrit une
+                    // **capacité** du cœur sur un processus, et cette capacité
+                    // vient de changer. Aucune ligne de statut ne porte cette
+                    // information, donc rien ne pourrait la relire.
+                    non_supervises.remove(&nom);
+                    let mut statuts = status_state.write().await;
+                    // Idempotent, et il faut qu'il le soit : pour un greffon
+                    // *supervisé*, le bras `plugin_waits` marquera aussi, dans
+                    // un ordre que rien ne fixe. `mark_plugin_disconnected` ne
+                    // fait que poser des booléens, et `remove` sur une clé
+                    // absente est un non-événement — vérifié, pas supposé.
+                    crate::status::mark_plugin_disconnected(&mut statuts, &nom);
+                }
             }
             Some((name, update)) = source_update_rx.recv() => {
                 core.handle_source_update(&name, update);
@@ -1787,6 +1962,118 @@ async fn main() -> Result<()> {
 }
 
 #[cfg(test)]
+mod injoignable_tests {
+    //! Ce que le cœur signale quand un socket d'afficheur se ferme — et ce
+    //! qu'il ne signale pas.
+    //!
+    //! **Aucune marge de temps ici non plus, et pas même un plafond.** Les deux
+    //! sens se prouvent par la fermeture des émetteurs : le relais détient le
+    //! *seul* émetteur du canal, donc `recv()` rend `Some` s'il signale et
+    //! `None` dès qu'il se termine sans le faire. L'attente est exacte dans les
+    //! deux cas, et un relais qui se tromperait de sens ne ferait pas expirer le
+    //! test — il le ferait échouer sur la valeur.
+
+    use super::*;
+    use ritornello_plugin_sdk::{bind_display, serve_display, DisplayPlugin};
+
+    /// Un afficheur qui lit et jette : ce module n'éprouve pas ce qui est reçu,
+    /// seulement qui est averti de la fermeture.
+    struct Muet;
+
+    #[async_trait::async_trait]
+    impl DisplayPlugin for Muet {
+        async fn show(&mut self, _etat: PlayerState) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn un_afficheur_qui_ne_repond_plus_est_signale_avec_sa_generation_de_cablage() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("display.sock");
+        let listener = bind_display(&socket).unwrap();
+        let client = DisplayClient::connect(&socket).await.unwrap();
+        // Le pair accepte puis **disparaît**. C'est la mort qu'un greffon
+        // relancé à la main produit, et que le cœur ne voyait que passer dans
+        // son journal.
+        let (flux, _) = listener.accept().await.unwrap();
+        drop(flux);
+        drop(listener);
+
+        let (_etat_tx, etat_rx) = watch::channel(PlayerState::default());
+        let (_cat_tx, catalogue_rx) = watch::channel(Catalogue::default());
+        let (tx, mut rx) = mpsc::channel(4);
+        // Les deux `watch` restent vivants : sans cela le relais pourrait sortir
+        // par le chemin « le cœur s'arrête », et le test confondrait les deux
+        // sens qu'il existe précisément pour séparer.
+        relais_afficheur(
+            "mort".into(),
+            client,
+            false,
+            Arc::new(cover::CoverCache::default()),
+            etat_rx,
+            catalogue_rx,
+            7,
+            tx,
+        );
+
+        // Le relais écrit l'état d'emblée, avant sa boucle : cette écriture-là
+        // suffit, le pair ayant fermé. `None` ici voudrait dire qu'il s'est
+        // terminé sans rien dire — le défaut même que ce chemin corrige.
+        assert_eq!(
+            rx.recv().await,
+            Some(("mort".to_string(), 7)),
+            "la fermeture du socket doit etre signalee, avec le numero de cablage recu"
+        );
+    }
+
+    #[tokio::test]
+    async fn larret_du_coeur_ne_signale_aucun_greffon_injoignable() {
+        // Le constat que ce test existe pour empêcher : marquer déconnectés tous
+        // les afficheurs pendant l'extinction du cœur, c'est-à-dire peindre une
+        // panne sur un arrêt normal. Les deux sorties de boucle du relais se
+        // ressemblent — l'une est un envoi en échec, l'autre un `watch` fermé —
+        // et rien d'autre ne les distingue.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("display.sock");
+        let listener = bind_display(&socket).unwrap();
+        tokio::spawn(async move {
+            let _ = serve_display(listener, Muet).await;
+        });
+        let client = DisplayClient::connect(&socket).await.unwrap();
+
+        let (etat_tx, etat_rx) = watch::channel(PlayerState::default());
+        let (cat_tx, catalogue_rx) = watch::channel(Catalogue::default());
+        let (tx, mut rx) = mpsc::channel(4);
+        relais_afficheur(
+            "vivant".into(),
+            client,
+            false,
+            Arc::new(cover::CoverCache::default()),
+            etat_rx,
+            catalogue_rx,
+            3,
+            tx,
+        );
+
+        // Le cœur s'arrête : ses émetteurs tombent. Le pair, lui, est toujours
+        // là et lit.
+        drop(etat_tx);
+        drop(cat_tx);
+
+        // Le relais détient le seul émetteur restant du canal. `None` prouve
+        // donc qu'il s'est terminé **sans** signaler, et l'attente est exacte :
+        // elle se résout à la seconde où sa tâche se termine, sans qu'aucune
+        // durée soit supposée nulle part.
+        assert_eq!(
+            rx.recv().await,
+            None,
+            "l'arret du coeur n'est pas la mort d'un greffon : rien ne doit etre signale"
+        );
+    }
+}
+
+#[cfg(test)]
 mod bascule_tests {
     //! La bascule allumer/éteindre, et ce que le cœur sait de la vie d'un
     //! greffon.
@@ -1916,6 +2203,7 @@ mod bascule_tests {
             source_update_tx: mpsc::channel(4).0,
             cmd_tx: mpsc::channel(4).0,
             enrich_tx: mpsc::channel(4).0,
+            injoignable_tx: mpsc::channel(4).0,
             now_playing_rx,
             etat_rx,
             catalogue_rx,
@@ -2206,7 +2494,20 @@ mod relais_tests {
         let client = DisplayClient::connect(&socket).await.unwrap();
         let (etat_tx, etat_rx) = watch::channel(etat_initial.clone());
         let (catalogue_tx, catalogue_rx) = watch::channel(Catalogue::default());
-        relais_afficheur("banc".into(), client, veut_pochettes, covers, etat_rx, catalogue_rx);
+        // Le banc ne dit rien de l'avis d'injoignabilité : récepteur abandonné
+        // aussitôt, donc l'envoi de fin de relais échoue et est ignoré, comme
+        // il l'est en service quand la boucle du cœur est déjà partie. Même
+        // idiome que les canaux du banc de `cabler_a_chaud`.
+        relais_afficheur(
+            "banc".into(),
+            client,
+            veut_pochettes,
+            covers,
+            etat_rx,
+            catalogue_rx,
+            0,
+            mpsc::channel(4).0,
+        );
         let mut b = Banc {
             etat_tx,
             recus,
