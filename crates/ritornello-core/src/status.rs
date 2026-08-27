@@ -59,6 +59,12 @@ pub struct PluginStatus {
     /// trame existante ne change.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
+    /// Greffon joint dont la page d'admin ne répond pas au `Ping` : un
+    /// `set_data` long tient son verrou (le plus souvent un partage réseau).
+    /// Calculé au moment de `/api/status`, jamais stocké : c'est un état qui
+    /// change à la seconde. Additif comme `stalled` et `disabled`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub busy: bool,
 }
 
 impl PluginStatus {
@@ -76,6 +82,7 @@ impl PluginStatus {
             stalled: false,
             starting: false,
             disabled: false,
+            busy: false,
         }
     }
 
@@ -93,6 +100,7 @@ impl PluginStatus {
             stalled,
             starting: false,
             disabled: false,
+            busy: false,
         }
     }
 
@@ -110,6 +118,7 @@ impl PluginStatus {
             stalled: false,
             starting: true,
             disabled: false,
+            busy: false,
         }
     }
 
@@ -124,6 +133,7 @@ impl PluginStatus {
             stalled: false,
             starting: false,
             disabled: true,
+            busy: false,
         }
     }
 }
@@ -228,7 +238,31 @@ pub fn router(state: AppState) -> Router {
 }
 
 async fn status_json(State(state): State<AppState>) -> Json<StatusState> {
-    Json(state.status.read().await.clone())
+    let mut etat = state.status.read().await.clone();
+    // Toutes les sondes en parallèle : un greffon occupé ne retarde pas la
+    // réponse au-delà de son propre budget (500 ms + grâce). Le verrou des
+    // dorsaux est relâché avant les allers-retours IPC, comme dans `admin.rs`.
+    let dorsaux = state.admin_backends.read().await.clone();
+    let sondes = etat.plugins.iter().filter(|p| p.admin).map(|p| {
+        let dorsal = dorsaux.get(&p.name).cloned();
+        let nom = p.name.clone();
+        async move {
+            let occupe = match dorsal {
+                Some(d) => matches!(
+                    d.ping().await.map_err(|e| e.downcast::<ritornello_plugin_sdk::AdminIpcError>()),
+                    Err(Ok(ritornello_plugin_sdk::AdminIpcError::Timeout))
+                ),
+                None => false,
+            };
+            (nom, occupe)
+        }
+    });
+    let verdicts: std::collections::HashMap<String, bool> =
+        futures::future::join_all(sondes).await.into_iter().collect();
+    for p in etat.plugins.iter_mut() {
+        p.busy = verdicts.get(&p.name).copied().unwrap_or(false);
+    }
+    Json(etat)
 }
 
 #[derive(Serialize)]
@@ -1478,6 +1512,40 @@ mod tests {
             assert!(premier["name"].is_string());
             assert!(premier["description"].is_string());
         }
+    }
+
+    struct FakeOccupe;
+    #[async_trait::async_trait]
+    impl crate::admin::AdminBackend for FakeOccupe {
+        async fn asset(&self, _: &str) -> anyhow::Result<Option<(String, String)>> { Ok(None) }
+        async fn catalog(&self) -> anyhow::Result<serde_json::Value> { Ok(serde_json::json!({})) }
+        async fn get_data(&self) -> anyhow::Result<serde_json::Value> { Ok(serde_json::json!({})) }
+        async fn set_data(&self, _: serde_json::Value) -> anyhow::Result<Result<(), String>> { Ok(Ok(())) }
+        async fn ping(&self) -> anyhow::Result<()> { Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
+    }
+
+    #[tokio::test]
+    async fn un_greffon_qui_ne_repond_pas_au_ping_est_occupe_dans_le_statut() {
+        let st = app_state();
+        st.status.write().await.plugins = vec![
+            PluginStatus::genre("files", "source", true, true),
+            PluginStatus::genre("radio", "source", true, false),
+        ];
+        st.admin_backends.write().await.insert("files".into(), Arc::new(FakeOccupe));
+        let app = router(st);
+        let resp = app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap()).await.unwrap();
+        let v: serde_json::Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(v["plugins"][0]["busy"], serde_json::json!(true));
+        // Sans page d'admin, rien à sonder : le champ reste absent, comme `stalled`.
+        assert!(v["plugins"][1].get("busy").is_none());
+    }
+
+    #[test]
+    fn busy_est_additif_absent_quand_faux() {
+        let l = PluginStatus::genre("radio", "source", true, true);
+        let json = serde_json::to_string(&l).unwrap();
+        assert!(!json.contains("busy"), "{json}");
     }
 
     #[tokio::test]

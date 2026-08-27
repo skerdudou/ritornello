@@ -306,7 +306,7 @@ until one answers: `all.api.radio-browser.info` is a rotating record, and
 the mirror fleet drifts over time — a vanished host fails fast, the next
 one is tried, and every failure is logged. The whole thing fits in a
 **4 s budget** (at most 2 s per server): the admin page goes through the
-core's admin protocol, which abandons any request after 5 s, so a search
+core's admin protocol, which gives a `GetData` 5 s, so a search
 that drags on is stopped on its own with an error message rather than
 ending in a timeout.
 
@@ -451,11 +451,13 @@ show a dialog to. `mount.cifs` is given `echo_interval=10`, `retrans=1` and
 `actimeo=30` to shorten that window, but none of them bring the worst case
 under a second.
 
-That matters because the admin protocol is **serial** and the core abandons a
-request after 5 s. One blocking `stat` is enough to wedge the plugin, page
-included. When it does, the core's `502` names the cause and distinguishes a
-request that ran past the 5 s ceiling from a plugin that is not answering at
-all — the two used to look identical on the page. So every filesystem access
+That matters because the admin protocol bounds the *wait*, not the syscall:
+`set_data` is exclusive, and a blocking `stat` inside it runs to completion
+whatever the budget says. One is enough to hold the plugin's data for as long
+as the kernel takes, even if `ui.js` and the catalog now answer on their own.
+When it happens, the core's `504` names the cause and distinguishes a
+request that ran past its budget from a plugin that is not answering at
+all (`502`) — the two used to look identical on the page. So every filesystem access
 a request triggers goes through a circuit
 breaker (`sante.rs`): it runs off the async thread under a 1.5 s deadline, and a
 mount point whose probe never returned is remembered, so later requests are
@@ -515,7 +517,7 @@ a minute and a half, and it spares a Raspberry Pi two thousand process spawns
 while music is playing. No system package is involved.
 
 The work runs **in the background** and is polled by the page, like the
-recursive scan: the admin protocol has a 5 s ceiling and a playlist coming off
+recursive scan: a `GetData` has a 5 s budget and a playlist coming off
 a share needs longer. Results are applied by **path**, never by position — the
 page may reorder or remove tracks while measuring, and applying by index would
 write one file's length onto another. Each batch is persisted, so an
@@ -1718,7 +1720,7 @@ async fn main() -> anyhow::Result<()> {
 every other kind-specific method, which is what lets the resulting
 announcement (`{"name":"...","kinds":[...],"admin":true}`) truthfully
 say whether a page exists — no single line of the core changes to
-support it. The admin half then answers three requests of the admin
+support it. The admin half then answers the requests of the admin
 protocol:
 
 - `GetAsset("ui.js")` → an **ESM module** exporting `contract` (the
@@ -1727,7 +1729,38 @@ protocol:
 - `GetAsset("ui.css")` → the module's stylesheet (its own Tailwind pass,
   important: the core's CSS only contains the classes the core sees);
 - `GetCatalog` → its flat i18n catalog, which the view consumes through
-  `t()`.
+  `t()`;
+- `GetData` / `SetData` → the page's data, opaque JSON both ways;
+- `Ping` → `Pong`, without touching the plugin's state or taking any lock.
+
+**The protocol is concurrent.** `serve_admin` spawns one task per request
+and a single writer for the socket: responses leave in the order they
+*complete*, correlated by `id`, not by arrival order. Historically it was
+serial (read, await, write, read again), so a `set_data` mounting a
+sleeping network share held back `ui.js` — a plain `include_str!` — until
+the core gave up, and the admin page simply vanished. The plugin now sits
+behind an `RwLock`: `asset`, `catalog` and `get_data` read in parallel,
+`set_data` is exclusive (legitimately: it is a write). Assets are cached
+by the SDK the first time they are seen, and `ui.js`/`ui.css` are read
+before the socket accepts, so they never wait behind a write.
+
+**Each request carries a budget** (`deadline_ms`), decided by the core
+from the request's nature — an in-memory asset does not get the budget of
+a network mount: `Ping` 500 ms, `GetAsset`/`GetCatalog` 1 s, `GetData`
+5 s, `SetData` 30 s. The SDK enforces it server-side, **lock wait
+included**, and answers `Expired` at the deadline instead of going silent;
+the core maps `Expired` and silence alike to `AdminIpcError::Timeout`,
+rendered as a `504` with a catalog message, while a closed socket is a
+`502`. `/api/status` pings every admin page and reports `busy: true` for a
+plugin whose ping expires — alive and wired, but held up.
+
+**What the budget does not absorb.** `tokio::time::timeout` drops the
+future at its next `await`, so an interrupted `set_data` releases the
+lock — but a blocking syscall inside `spawn_blocking` runs to completion.
+A plugin that touches a network path therefore still has to run it off
+the async thread and behind a circuit breaker
+(`crates/ritornello-plugin-files/src/sante.rs`); the protocol bounds the
+*wait*, not the syscall.
 
 The shell mounts the module's default component passing it **two props**,
 which are the entirety of the data-side contract:

@@ -12,6 +12,10 @@ export interface PluginStatus {
    * est tout : « figé » accuse, « démarrage » constate. */
   starting?: boolean
   disabled?: boolean
+  /** Joint, mais sa page d'admin ne répond pas au ping : un `set_data` long
+   * tient son verrou (le plus souvent un partage réseau). Calculé au moment
+   * du `/api/status`, donc peut changer d'un rafraîchissement à l'autre. */
+  busy?: boolean
 }
 export interface StatusPayload { plugins: PluginStatus[]; active_source: string }
 export interface AudioDevice { name: string; description: string }
