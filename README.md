@@ -2,6 +2,9 @@
 
 <p align="center"><em>A standalone internet radio and CD player, in Rust, for Raspberry Pi — and any Linux box.</em></p>
 
+<!-- <owner> à remplacer par le compte GitHub à la publication. -->
+<p align="center"><img src="https://github.com/<owner>/ritornello/actions/workflows/ci.yml/badge.svg" alt="CI"></p>
+
 <p align="center">
   <img src="docs/captures/accueil-clair.png" width="85%" alt="The web UI home page: a Player card with the current track and where the information came from, a full remote control below">
 </p>

@@ -1,0 +1,124 @@
+name: CI
+
+# Les cinq commandes de docs/development.md, sur Ubuntu : les tests du SDK
+# ouvrent des sockets Unix, donc aucun runner Windows n'est possible.
+# scripts/ci-local.sh reprend les mêmes commandes dans le même ordre — si l'un
+# des deux change, l'autre doit suivre.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: IHM (build, typecheck, vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build --workspaces --if-present
+      - run: npm run typecheck
+      - run: npm test --workspaces --if-present
+      - name: Publier les dist pour les jobs Rust
+        # dist/ est ignoré par git : ce job est le seul producteur, les autres
+        # téléchargent. Sans dist, build.rs embarque un bouchon et se contente
+        # d'un warning — voir « Refuser un bouchon » plus bas.
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-web
+          if-no-files-found: error
+          path: |
+            web/app/dist
+            crates/*/ui/dist
+
+  rust:
+    name: Rust (build, clippy, tests)
+    needs: web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-web
+      - name: Refuser un bouchon embarqué
+        # build.rs remplace un dist absent par un bouchon et n'émet qu'un
+        # warning : ici c'est une erreur, sinon la CI validerait un binaire
+        # sans IHM.
+        run: test -f web/app/dist/index.html && ls crates/*/ui/dist/ui.js
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Outils des tests
+        # ffmpeg : sinon quatre tests se sautent eux-mêmes en silence.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: cargo build --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  e2e:
+    name: Parcours e2e (Playwright)
+    needs: web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-web
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Lecteur audio des parcours
+        # docs/development.md : les e2e jouent vraiment via le greffon radio.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mpv ffmpeg
+      - run: cargo build --workspace
+      - run: npx playwright install --with-deps chromium
+        working-directory: web/app
+      - run: npm run e2e
+        working-directory: web/app
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            web/app/playwright-report
+            web/app/test-results
+
+  release:
+    name: Binaires armv7 (cross)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [rust, e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-web
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cross --locked
+      - run: cross build --release --workspace --target armv7-unknown-linux-gnueabihf
+      - name: Rassembler ce que deploy.sh attend
+        run: |
+          mkdir -p livraison
+          cp target/armv7-unknown-linux-gnueabihf/release/ritornello-core livraison/
+          cp target/armv7-unknown-linux-gnueabihf/release/ritornello-plugin-* livraison/
+          ls -l livraison
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ritornello-armv7-${{ github.ref_name }}
+          path: livraison
