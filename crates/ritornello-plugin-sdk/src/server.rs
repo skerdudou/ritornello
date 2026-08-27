@@ -757,9 +757,10 @@ pub async fn run_metadata_plugin(plugin: impl MetadataPlugin, socket_path: &Path
 }
 
 use ritornello_proto::{AdminReq, AdminRequest, AdminResponse, AdminResult};
+use std::collections::HashMap;
 
 #[async_trait::async_trait]
-pub trait AdminPlugin: Send + 'static {
+pub trait AdminPlugin: Send + Sync + 'static {
     /// Actif d'IHM : `(mime, corps)`, ou `None` si le chemin est inconnu.
     /// Typiquement `ui.js` et `ui.css`, embarqués par `include_str!`.
     fn asset(&self, path: &str) -> Option<(String, String)>;
@@ -782,11 +783,65 @@ pub fn bind_admin(socket_path: &Path) -> Result<UnixListener> {
     UnixListener::bind(socket_path).with_context(|| format!("binding {}", socket_path.display()))
 }
 
-/// Accepte la connexion du cœur, puis traite les requêtes admin
-/// (requête/réponse corrélée par `id`) jusqu'à fermeture.
-pub async fn serve_admin(listener: UnixListener, mut plugin: impl AdminPlugin) -> Result<()> {
+/// Accepte la connexion du cœur, puis traite les requêtes admin **en
+/// parallèle** : une tâche par requête, un seul écrivain sur la socket.
+///
+/// Historiquement sériel (lire, attendre, écrire, relire), ce qui faisait
+/// qu'un `set_data` qui montait un partage réseau endormi retenait `ui.js`,
+/// un simple `include_str!`, jusqu'au plafond du cœur — la page d'admin
+/// « disparaissait ». Les réponses partent maintenant dans l'ordre où elles
+/// aboutissent ; c'est l'`id` qui les corrèle, pas l'ordre.
+///
+/// Le greffon est derrière un `RwLock` : `asset`, `catalog`, `get_data`
+/// lisent en parallèle, `set_data` est exclusif — il l'est légitimement, c'est
+/// une écriture. Le budget (`deadline_ms`) couvre l'**attente du verrou** aussi
+/// bien que le traitement : un `GetCatalog` coincé derrière un `set_data` de
+/// 60 s répond `Expired` à son échéance au lieu de se taire.
+///
+/// `Ping` ne prend aucun verrou : c'est ce qui permet au cœur de distinguer
+/// « occupé » de « mort ». Les **actifs** n'en prennent pas non plus une fois
+/// vus : un bundle est immuable pour la durée de vie du processus, donc il est
+/// mis en cache ici, et les deux noms conventionnels (`ui.js`, `ui.css`) sont
+/// chargés avant la première requête. Sans cela, le `RwLock` étant équitable
+/// (FIFO), un `GetAsset` arrivé après un `set_data` en file attendrait derrière
+/// lui — exactement l'incident que ce découplage veut clore.
+///
+/// Ce que le budget **n'absorbe pas** : `tokio::time::timeout` abandonne le
+/// futur au prochain point d'`await`, donc un `set_data` interrompu relâche le
+/// verrou — mais une IO bloquante dans un `spawn_blocking` court jusqu'au bout.
+/// Les greffons qui touchent un chemin réseau gardent donc l'obligation
+/// d'exécuter hors fil et sous disjoncteur (voir `plugin-files/src/sante.rs`).
+pub async fn serve_admin(listener: UnixListener, plugin: impl AdminPlugin) -> Result<()> {
+    // Les actifs conventionnels sont lus **avant** d'accepter : le verrou est
+    // forcément libre, et le cœur les demandera dès la première page.
+    let actifs: std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>> = Default::default();
+    for nom in ["ui.js", "ui.css"] {
+        if let Some(a) = plugin.asset(nom) {
+            actifs.lock().unwrap().insert(nom.to_string(), a);
+        }
+    }
     let (stream, _) = listener.accept().await?;
     let (read, mut write) = stream.into_split();
+    let plugin = std::sync::Arc::new(tokio::sync::RwLock::new(plugin));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AdminResponse>(64);
+
+    // L'unique écrivain : sérialise les trames sortantes sans sérialiser les
+    // traitements.
+    let ecrivain = tokio::spawn(async move {
+        while let Some(resp) = rx.recv().await {
+            let ligne = match serde_json::to_string(&resp) {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!("admin response not serializable: {e}");
+                    continue;
+                }
+            };
+            if write.write_all(format!("{ligne}\n").as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
+
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
         let req: AdminRequest = match serde_json::from_str(&line) {
@@ -796,23 +851,63 @@ pub async fn serve_admin(listener: UnixListener, mut plugin: impl AdminPlugin) -
                 continue;
             }
         };
-        let result = match req.req {
-            AdminReq::GetAsset(path) => match plugin.asset(&path) {
+        let plugin = plugin.clone();
+        let actifs = actifs.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let id = req.id;
+            let budget = req.deadline_ms.map(std::time::Duration::from_millis);
+            let travail = traite_admin(plugin, actifs, req.req);
+            let result = match budget {
+                Some(d) => match tokio::time::timeout(d, travail).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        tracing::warn!("admin request {id} exceeded its {} ms budget", d.as_millis());
+                        AdminResult::Expired
+                    }
+                },
+                None => travail.await,
+            };
+            // Le destinataire a pu partir (cœur déconnecté) : rien à faire.
+            let _ = tx.send(AdminResponse { id, result }).await;
+        });
+    }
+    drop(tx);
+    let _ = ecrivain.await;
+    Ok(())
+}
+
+async fn traite_admin<P: AdminPlugin>(
+    plugin: std::sync::Arc<tokio::sync::RwLock<P>>,
+    actifs: std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,
+    req: AdminReq,
+) -> AdminResult {
+    match req {
+        AdminReq::Ping => AdminResult::Pong,
+        AdminReq::GetAsset(path) => {
+            let connu = actifs.lock().unwrap().get(&path).cloned();
+            let trouve = match connu {
+                Some(a) => Some(a),
+                None => {
+                    let lu = plugin.read().await.asset(&path);
+                    if let Some(a) = &lu {
+                        actifs.lock().unwrap().insert(path.clone(), a.clone());
+                    }
+                    lu
+                }
+            };
+            match trouve {
                 Some((mime, body)) => AdminResult::Asset { mime, body: Some(body) },
                 None => AdminResult::Asset { mime: "text/plain".to_string(), body: None },
-            },
-            AdminReq::Ping => AdminResult::Pong,
-            AdminReq::GetCatalog => AdminResult::Catalog(plugin.catalog()),
-            AdminReq::GetData => AdminResult::Data(plugin.get_data().await),
-            AdminReq::SetData(data) => match plugin.set_data(data).await {
-                Ok(()) => AdminResult::Set { ok: true, error: None },
-                Err(msg) => AdminResult::Set { ok: false, error: Some(msg) },
-            },
-        };
-        let resp = AdminResponse { id: req.id, result };
-        write.write_all(format!("{}\n", serde_json::to_string(&resp)?).as_bytes()).await?;
+            }
+        }
+        AdminReq::GetCatalog => AdminResult::Catalog(plugin.read().await.catalog()),
+        AdminReq::GetData => AdminResult::Data(plugin.read().await.get_data().await),
+        AdminReq::SetData(data) => match plugin.write().await.set_data(data).await {
+            Ok(()) => AdminResult::Set { ok: true, error: None },
+            Err(msg) => AdminResult::Set { ok: false, error: Some(msg) },
+        },
     }
-    Ok(())
 }
 
 /// Enveloppe historique : lie puis sert. Conservée pour les appels directs et
@@ -830,6 +925,8 @@ mod admin_server_tests {
 
     struct FakeAdmin {
         data: serde_json::Value,
+        /// Durée d'un `set_data` : simule le montage réseau qui n'aboutit pas.
+        lenteur_set: std::time::Duration,
     }
 
     #[async_trait::async_trait]
@@ -847,6 +944,7 @@ mod admin_server_tests {
             self.data.clone()
         }
         async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String> {
+            tokio::time::sleep(self.lenteur_set).await;
             if data.get("bad").is_some() {
                 return Err("refus".into());
             }
@@ -855,13 +953,91 @@ mod admin_server_tests {
         }
     }
 
+    fn fake_lent(secs: u64) -> FakeAdmin {
+        FakeAdmin { data: serde_json::json!({}), lenteur_set: std::time::Duration::from_secs(secs) }
+    }
+
+    async fn client_connecte(
+        plugin: FakeAdmin,
+    ) -> (BufReader<tokio::net::unix::OwnedReadHalf>, tokio::net::unix::OwnedWriteHalf) {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("admin.sock");
+        // Le socket doit survivre au test : le répertoire est abandonné.
+        std::mem::forget(dir);
+        let listener = bind_admin(&socket).unwrap();
+        tokio::spawn(async move { serve_admin(listener, plugin).await.unwrap() });
+        let stream = UnixStream::connect(&socket).await.unwrap();
+        let (r, w) = stream.into_split();
+        (BufReader::new(r), w)
+    }
+
+    async fn ligne(r: &mut BufReader<tokio::net::unix::OwnedReadHalf>) -> AdminResponse {
+        let mut s = String::new();
+        r.read_line(&mut s).await.unwrap();
+        serde_json::from_str(&s).unwrap()
+    }
+
+    #[tokio::test]
+    async fn un_set_data_lent_ne_retient_pas_ui_js() {
+        // L'incident du partage muet : la boucle admin était sérielle, donc un
+        // seul appel système qui n'aboutit pas retenait `ui.js`, un simple
+        // `include_str!`. Ici `set_data` dort 3 s ; l'actif doit revenir bien
+        // avant, et **avant** la réponse du set.
+        let (mut r, mut w) = client_connecte(fake_lent(3)).await;
+        w.write_all(b"{\"id\":1,\"req\":\"SetData\",\"arg\":{}}\n").await.unwrap();
+        w.write_all(b"{\"id\":2,\"req\":\"GetAsset\",\"arg\":\"ui.js\"}\n").await.unwrap();
+        let debut = std::time::Instant::now();
+        let premiere = ligne(&mut r).await;
+        assert_eq!(premiere.id, 2, "l'actif doit repondre avant le set lent");
+        assert!(debut.elapsed() < std::time::Duration::from_secs(1), "{:?}", debut.elapsed());
+        let seconde = ligne(&mut r).await;
+        assert_eq!(seconde.id, 1);
+        assert_eq!(seconde.result, AdminResult::Set { ok: true, error: None });
+    }
+
+    #[tokio::test]
+    async fn le_budget_est_tenu_par_le_serveur() {
+        // Le cœur accorde 200 ms ; le set en prend 3 s : le greffon le dit
+        // lui-même (`Expired`) au lieu de laisser le client deviner.
+        let (mut r, mut w) = client_connecte(fake_lent(3)).await;
+        w.write_all(b"{\"id\":1,\"deadline_ms\":200,\"req\":\"SetData\",\"arg\":{}}\n").await.unwrap();
+        let debut = std::time::Instant::now();
+        let rep = ligne(&mut r).await;
+        assert_eq!(rep.result, AdminResult::Expired);
+        assert!(debut.elapsed() < std::time::Duration::from_secs(2), "{:?}", debut.elapsed());
+    }
+
+    #[tokio::test]
+    async fn ping_repond_pong_meme_pendant_un_set_data() {
+        let (mut r, mut w) = client_connecte(fake_lent(3)).await;
+        w.write_all(b"{\"id\":1,\"req\":\"SetData\",\"arg\":{}}\n").await.unwrap();
+        w.write_all(b"{\"id\":2,\"deadline_ms\":500,\"req\":\"Ping\"}\n").await.unwrap();
+        let rep = ligne(&mut r).await;
+        assert_eq!((rep.id, rep.result), (2, AdminResult::Pong));
+    }
+
+    #[tokio::test]
+    async fn get_catalog_attend_le_verrou_dans_son_budget_puis_expire() {
+        // Le catalogue lit l'état du greffon, donc attend la fin d'un
+        // `set_data` en cours ; si le budget est plus court que ce set, c'est
+        // `Expired`, pas un silence.
+        let (mut r, mut w) = client_connecte(fake_lent(3)).await;
+        w.write_all(b"{\"id\":1,\"req\":\"SetData\",\"arg\":{}}\n").await.unwrap();
+        w.write_all(b"{\"id\":2,\"deadline_ms\":300,\"req\":\"GetCatalog\"}\n").await.unwrap();
+        let rep = ligne(&mut r).await;
+        assert_eq!((rep.id, rep.result), (2, AdminResult::Expired));
+    }
+
     #[tokio::test]
     async fn getasset_getdata_setdata_getcatalog_dialogue() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("admin.sock");
         let socket_srv = socket.clone();
         tokio::spawn(async move {
-            run_admin_plugin(FakeAdmin { data: serde_json::json!({"n": 1}) }, &socket_srv)
+            run_admin_plugin(
+                FakeAdmin { data: serde_json::json!({"n": 1}), lenteur_set: std::time::Duration::ZERO },
+                &socket_srv,
+            )
                 .await
                 .unwrap();
         });
