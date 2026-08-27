@@ -227,19 +227,28 @@ pub fn file_tags(data: &Value) -> Option<Morceau> {
 /// Tenté uniquement sur un chemin **sans schéma** : un flux n'a pas de tag, et
 /// `lofty` n'a rien à ouvrir sur une URL.
 ///
-/// Nommé d'après le chemin de la **piste**, pas de l'album ni du contenu de
-/// l'image : deux pistes distinctes écrivent donc chacune leur propre
-/// fichier, même si leur pochette embarquée est identique — seule la même
-/// piste rejouée retombe sur le même nom. Ce nom ne dépend donc pas du
-/// contenu, et un fichier resté d'une exécution précédente pourrait en
-/// théorie décrire une image qui ne correspond plus aux tags actuels (l'usager
-/// a réédité ses tags entre deux démarrages). Cela n'expose pourtant jamais
-/// une image périmée : cette fonction **réécrit systématiquement** le fichier
-/// avant d'en renvoyer la référence, donc rien n'est jamais servi sans être
-/// passé par une extraction fraîche de cette exécution-ci. `main` purge
-/// malgré tout ces fichiers au démarrage (`cover::purge_temporaires`) — pas
-/// pour cette raison, déjà couverte, mais parce que rien d'autre ne les
-/// efface jamais entre deux lancements (voir sa doc).
+/// Nommé d'après le **contenu de l'image**, pas d'après la piste (voir
+/// `cover::cle_contenu`) : les pistes d'un même album à pochette unique
+/// écrivent donc un seul fichier et publient un seul `href`, que
+/// `relais_afficheur` reconnaît alors comme déjà poussé — plus de décodage,
+/// plus de trame, plus de retéléchargement navigateur après la première.
+/// Reste une lecture `lofty` par piste, incontournable : il faut les octets
+/// pour les hacher.
+///
+/// **N'écrit que si le fichier est absent**, et c'est le nommage par contenu
+/// qui rend ce raccourci sûr : un fichier déjà là sous ce nom porte, par
+/// construction, l'image qu'on s'apprêtait à y mettre. Ce n'est pas qu'une
+/// économie — réécrire aurait tronqué, le temps de l'écriture, le fichier
+/// que la route HTTP est peut-être en train de servir pour la piste
+/// précédente, qui porte désormais le même nom.
+///
+/// La fraîcheur ne repose donc plus sur une réécriture systématique mais sur
+/// l'adressage par contenu. Ce que ce nommage ne couvre pas, en revanche,
+/// c'est un fichier **tronqué** laissé par une exécution tuée en pleine
+/// écriture : son nom annoncerait une image que son contenu ne porte pas, et
+/// l'écriture conditionnelle l'adopterait. C'est `cover::purge_temporaires`,
+/// au démarrage, qui ferme ce cas — la purge n'est plus seulement une borne
+/// à l'accumulation, elle est devenue nécessaire à la correction.
 pub fn pochette_embarquee(chemin: &str) -> Option<ritornello_proto::CoverRef> {
     if chemin.contains("://") {
         return None;
@@ -259,9 +268,11 @@ pub fn pochette_embarquee(chemin: &str) -> Option<ritornello_proto::CoverRef> {
     cible.push(format!(
         "{}{}.{extension}",
         crate::cover::PREFIXE_TEMPORAIRE,
-        crate::cover::cle(&ritornello_proto::CoverRef::Path { path: chemin.to_string() })
+        crate::cover::cle_contenu(image.data())
     ));
-    std::fs::write(&cible, image.data()).ok()?;
+    if !cible.exists() {
+        std::fs::write(&cible, image.data()).ok()?;
+    }
     Some(ritornello_proto::CoverRef::Path { path: cible.to_string_lossy().into_owned() })
 }
 
@@ -713,11 +724,17 @@ mod tests {
     /// Comme dans `ritornello-plugin-files::duree` : pas de binaire versionné
     /// dans le dépôt, et le test se saute plutôt que d'échouer là où ffmpeg
     /// manque — c'est un outil de développement, pas une dépendance du cœur.
-    fn mp3_avec_pochette(dir: &Path) -> Option<std::path::PathBuf> {
+    ///
+    /// `source_image` est un filtre `lavfi`, donc l'image embarquée, donc —
+    /// depuis que le temporaire est nommé d'après son contenu — **le nom du
+    /// fichier temporaire lui-même**. Deux tests parallèles qui embarquent la
+    /// même image viseraient le même chemin dans le `temp_dir()` partagé :
+    /// chacun doit donc demander une image à lui.
+    fn mp3_avec_pochette_de(dir: &Path, source_image: &str) -> Option<std::path::PathBuf> {
         let image = dir.join("cover.jpg");
         let sortie = dir.join("avec_pochette.mp3");
         let ok = std::process::Command::new("ffmpeg")
-            .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=16x16:d=1"])
+            .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", source_image])
             .args(["-frames:v", "1"])
             .arg(&image)
             .status()
@@ -736,6 +753,10 @@ mod tests {
                 .map(|s| s.success())
                 .unwrap_or(false);
         ok.then_some(sortie)
+    }
+
+    fn mp3_avec_pochette(dir: &Path) -> Option<std::path::PathBuf> {
+        mp3_avec_pochette_de(dir, "color=c=red:s=16x16:d=1")
     }
 
     #[test]
@@ -760,6 +781,42 @@ mod tests {
         // c'est ce qui évite d'écrire deux fois la même image.
         let r2 = pochette_embarquee(f.to_str().unwrap()).unwrap();
         assert_eq!(r2, ritornello_proto::CoverRef::Path { path });
+    }
+
+    #[test]
+    fn deux_pistes_du_meme_album_partagent_un_seul_fichier_temporaire() {
+        let dir = tempfile::tempdir().unwrap();
+        // Une image propre à ce test : voir `mp3_avec_pochette_de`.
+        let Some(piste1) = mp3_avec_pochette_de(dir.path(), "color=c=blue:s=24x24:d=1") else {
+            eprintln!("ffmpeg absent : test saute");
+            return;
+        };
+        // Deux fichiers de piste distincts portant la même pochette : le cas
+        // courant d'un album, et celui que le nommage par chemin de piste
+        // faisait payer quinze fois pour une seule image.
+        let piste2 = dir.path().join("piste_2.mp3");
+        std::fs::copy(&piste1, &piste2).unwrap();
+
+        let r1 = pochette_embarquee(piste1.to_str().unwrap()).expect("une pochette attendue");
+        let r2 = pochette_embarquee(piste2.to_str().unwrap()).expect("une pochette attendue");
+        assert_eq!(r1, r2, "deux pistes a pochette identique doivent rendre le meme fichier");
+        let ritornello_proto::CoverRef::Path { path } = r1 else {
+            panic!("une pochette locale doit rendre un CoverRef::Path");
+        };
+
+        // Rien n'est reecrit quand le nom est deja pris : la sentinelle
+        // survit. Sans le `if !cible.exists()`, la route HTTP pourrait servir
+        // ce fichier tronque pendant sa reecriture pour la piste suivante.
+        std::fs::write(&path, b"sentinelle").unwrap();
+        let r3 = pochette_embarquee(piste2.to_str().unwrap()).unwrap();
+        assert_eq!(r3, ritornello_proto::CoverRef::Path { path: path.clone() });
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"sentinelle".to_vec(),
+            "un fichier deja present ne doit pas etre reecrit"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

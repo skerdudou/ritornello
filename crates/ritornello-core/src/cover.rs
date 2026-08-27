@@ -59,18 +59,26 @@ fn est_temporaire_de_pochette(chemin: &std::path::Path) -> bool {
 /// fois au démarrage, avant que quoi que ce soit ne puisse en créer de
 /// nouveaux.
 ///
-/// **Ce n'est pas une garde de fraîcheur** : `pochette_embarquee` réécrit de
-/// toute façon entièrement le fichier avant d'en renvoyer la référence, donc
-/// rien n'est jamais servi sans être passé par une extraction fraîche de
-/// **cette** exécution — un fichier resté d'une exécution précédente ne
-/// pourrait de toute façon jamais être adopté tel quel (voir sa doc). Le
-/// seul problème que cette purge résout est l'accumulation : rien d'autre
-/// n'efface ces fichiers entre deux démarrages, et sur un Pi `std::env::
-/// temp_dir()` est souvent une `tmpfs` — ce qui s'accumule y grignote de la
-/// RAM, pas seulement de l'espace disque. Sans risque ici : le cache ne
-/// survit jamais à un redémarrage (`CoverCache` est reconstruit à chaque
-/// lancement), donc rien de ce qui traîne encore ici ne peut être référencé
-/// par quoi que ce soit.
+/// **Deux raisons, dont une de correction.** Depuis que `pochette_embarquee`
+/// nomme ses fichiers d'après leur contenu et n'écrit que si le nom est libre,
+/// un fichier laissé par une exécution **tuée en pleine écriture** serait
+/// tronqué tout en portant le nom d'une image complète : l'écriture
+/// conditionnelle l'adopterait, et un afficheur recevrait une image coupée.
+/// Ce balayage est ce qui rend ce cas impossible, et c'est pourquoi il doit
+/// tourner **avant** que quoi que ce soit ne puisse créer un temporaire.
+///
+/// La seconde raison est l'accumulation, et elle vaut d'être dite parce
+/// qu'on pourrait croire le système s'en charger : rien d'autre n'efface ces
+/// fichiers entre deux démarrages, et un `systemctl restart` ne vide **pas**
+/// `std::env::temp_dir()` — sur un Pi c'est souvent une `tmpfs`, que seul un
+/// vrai redémarrage remet à zéro, et ce qui s'y entasse grignote de la RAM,
+/// pas seulement du disque. Compter sur `/tmp` aurait donc laissé fuir
+/// exactement le cas le plus fréquent, le redémarrage de service.
+///
+/// Sans risque de purger quelque chose d'utile : le cache ne survit jamais à
+/// un redémarrage (`CoverCache` est reconstruit à chaque lancement), donc
+/// rien de ce qui traîne encore ici ne peut être référencé par quoi que ce
+/// soit.
 pub fn purge_temporaires() {
     purge_temporaires_dans(&std::env::temp_dir());
 }
@@ -137,6 +145,22 @@ pub fn cle(r: &CoverRef) -> String {
             path.hash(&mut h);
         }
     }
+    format!("{:016x}", h.finish())
+}
+
+/// Empreinte du **contenu** d'une image, pour nommer un fichier temporaire.
+///
+/// Même hacheur que `cle`, et le même arbitrage : une collision afficherait la
+/// mauvaise pochette et rien d'autre. Ce qui change est ce qu'on hache — les
+/// octets de l'image, pas le chemin d'où ils sortent. Deux pistes d'un même
+/// album portant la même pochette embarquée retombent donc sur un seul
+/// fichier, donc un seul `href`, donc rien à repousser ni à redécoder : le cas
+/// embarqué rejoint ainsi le `folder.jpg` local, déjà gratuit. Sans cela, un
+/// album de quinze pistes faisait tourner à vide un cache qui n'en tient
+/// que quatre (`ENTREES`), extraction, écriture et éviction comprises.
+pub fn cle_contenu(octets: &[u8]) -> String {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    octets.hash(&mut h);
     format!("{:016x}", h.finish())
 }
 
