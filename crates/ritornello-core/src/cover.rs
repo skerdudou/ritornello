@@ -11,7 +11,7 @@ use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use ritornello_proto::CoverRef;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -208,11 +208,51 @@ pub struct CoverCache {
     /// **copiée hors du verrou** avant tout `await` : aucun garde ne traverse
     /// un point de suspension.
     reglages: std::sync::RwLock<Reglages>,
+    /// Les constructions de trame en cours, une entrée par clé.
+    ///
+    /// **Un rendez-vous, pas un cache — la distinction est tout.** Mémoriser une
+    /// trame serait faux pour la raison que dit la doc de `rendu` : la clé hache
+    /// le *chemin*, pas le contenu, donc une vignette gardée deviendrait fausse
+    /// dès que l'utilisateur remplace l'image sous ce chemin. Une entrée d'ici ne
+    /// survit pas à sa construction : le dernier appelant à en sortir la retire,
+    /// et l'appelant suivant repart d'une lecture neuve du fichier.
+    ///
+    /// Ce que cela économise : deux afficheurs abonnés qui reçoivent la même
+    /// trame d'état demandent la même pochette dans le même instant, et
+    /// décodaient puis réencodaient deux fois la même image. Sur un Pi 2, c'est
+    /// un cœur occupé plusieurs centaines de millisecondes en double.
+    ///
+    /// `tokio::sync::OnceCell::get_or_init` **est** le rendez-vous : le premier
+    /// arrivé exécute, les suivants attendent son résultat. La cellule est
+    /// derrière un `Arc` pour que les suiveurs la tiennent après avoir rendu le
+    /// verrou de la table — le verrou ne couvre jamais le travail, seulement
+    /// l'inscription.
+    en_vol: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::OnceCell<Option<Arc<str>>>>>>,
+    /// Combien de constructions de trame ont **réellement** été exécutées.
+    ///
+    /// Sous `cfg(test)`, et c'est le bon compromis. Le rendez-vous ne peut se
+    /// prouver que par un décompte d'exécutions : `Arc::ptr_eq` sur les trames
+    /// rendues montrerait qu'un `Arc` est partagé, ce qui est déjà vrai sans
+    /// aucun rendez-vous — chaque appelant reçoit son propre `Arc` sur sa propre
+    /// chaîne, et rien dans l'égalité des contenus ne dit combien de fois
+    /// l'image a été décodée. Or c'est *cela* qu'on économise.
+    ///
+    /// Rien en service n'a besoin de ce nombre, donc il n'entre pas dans le
+    /// binaire livré : sur un Pi 2, un compteur atomique de plus n'est pas un
+    /// coût, mais un champ que personne ne lit est une dette.
+    #[cfg(test)]
+    constructions: std::sync::atomic::AtomicUsize,
 }
 
 impl CoverCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Combien de fois une trame a été construite depuis la création du cache.
+    #[cfg(test)]
+    pub(crate) fn constructions(&self) -> usize {
+        self.constructions.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Publie de nouveaux réglages. Prise en compte à la publication suivante :
@@ -361,26 +401,74 @@ impl CoverCache {
     ///
     /// `None` couvre les mêmes cas que `octets` : rien à pousser.
     pub async fn ligne(&self, cle: &str, href: &str) -> Option<Arc<str>> {
-        // Une seule lecture des réglages pour les deux étages : voir
-        // `octets_bornes`. Deux lectures pourraient encadrer un changement, et
-        // produire une vignette selon des règles qui n'ont jamais coexisté.
-        let reglages = self.reglages();
-        let (mime, octets) = self.octets(cle, reglages.source_max).await?;
-        // Le rendu s'applique **ici et pas dans `octets`**, donc sur le seul
-        // chemin de poussée. La route HTTP `cover_get`, elle, diffuse le
-        // fichier local en flux sans jamais le tenir en entier : lui imposer un
-        // réencodage lui ferait perdre exactement la propriété qui la rend
-        // économique, pour une image que le navigateur redimensionne et met en
-        // cache de son côté.
-        let (mime, octets) = match reglages.rendu {
-            None => (mime, octets),
-            Some(r) => rendu(mime, octets, r).await?,
+        // Inscription au rendez-vous. Le verrou de la table ne couvre que
+        // l'inscription elle-même — jamais la construction, qui lit un fichier
+        // et occupe un cœur. Le tenir pendant le travail sérialiserait des clés
+        // *différentes*, ce qui est le contraire du but.
+        let cellule = {
+            let mut en_vol = self.en_vol.lock().await;
+            en_vol.entry(cle.to_string()).or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())).clone()
         };
-        let cover =
-            ritornello_proto::Cover { href: href.to_string(), mime: mime.to_string(), bytes: octets };
-        let mut ligne = serde_json::to_string(&ritornello_proto::DisplayFrame::Cover(cover)).ok()?;
-        ligne.push('\n');
-        Some(Arc::from(ligne))
+
+        // `href` n'a pas besoin d'être comparé entre appelants : `cle` en est
+        // dérivée (`relais_afficheur` la tire de `href` par
+        // `strip_prefix(PREFIXE_HREF)`), donc deux appelants de même clé
+        // portent la même chaîne. Un suiveur reçoit bien la trame du premier
+        // arrivé, et elle décrit la même image sous le même nom.
+        let resultat = cellule
+            .get_or_init(|| async {
+                #[cfg(test)]
+                self.constructions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Une seule lecture des réglages pour les deux étages : voir
+                // `octets_bornes`. Deux lectures pourraient encadrer un
+                // changement, et produire une vignette selon des règles qui
+                // n'ont jamais coexisté.
+                let reglages = self.reglages();
+                let (mime, octets) = self.octets(cle, reglages.source_max).await?;
+                // Le rendu s'applique **ici et pas dans `octets`**, donc sur le
+                // seul chemin de poussée. La route HTTP `cover_get`, elle,
+                // diffuse le fichier local en flux sans jamais le tenir en
+                // entier : lui imposer un réencodage lui ferait perdre
+                // exactement la propriété qui la rend économique, pour une image
+                // que le navigateur redimensionne et met en cache de son côté.
+                let (mime, octets) = match reglages.rendu {
+                    None => (mime, octets),
+                    Some(r) => rendu(mime, octets, r).await?,
+                };
+                let cover = ritornello_proto::Cover {
+                    href: href.to_string(),
+                    mime: mime.to_string(),
+                    bytes: octets,
+                };
+                let mut ligne =
+                    serde_json::to_string(&ritornello_proto::DisplayFrame::Cover(cover)).ok()?;
+                ligne.push('\n');
+                Some(Arc::from(ligne))
+            })
+            .await
+            .clone();
+
+        // **Le retrait est ce qui empêche le rendez-vous de devenir un cache.**
+        // Une `OnceCell` garde sa valeur pour toujours ; laissée dans la table,
+        // elle servirait la même vignette à un appelant survenu une heure plus
+        // tard, alors que le fichier a pu changer sous son chemin.
+        //
+        // Tous les appelants tentent le retrait, pas seulement le premier
+        // arrivé : si celui-là est abandonné en cours (sa tâche annulée), un
+        // suiveur reprend l'initialisation, et personne d'autre ne serait là
+        // pour nettoyer.
+        //
+        // L'identité est vérifiée avant de retirer : entre la fin du travail et
+        // ce verrou, un appelant plus récent a pu inscrire une cellule **neuve**
+        // sous la même clé. La retirer lui ferait perdre son rendez-vous — pas
+        // un défaut de justesse, mais exactement l'économie qu'on installe ici.
+        {
+            let mut en_vol = self.en_vol.lock().await;
+            if en_vol.get(cle).is_some_and(|c| Arc::ptr_eq(c, &cellule)) {
+                en_vol.remove(cle);
+            }
+        }
+        resultat
     }
 }
 
@@ -1540,6 +1628,87 @@ mod tests {
     /// cas inatteignables sans fabriquer des images énormes.
     fn rendu_de_test(cote_max_px: u32, plafond_sortie: usize, plafond_pixels: u64) -> Rendu {
         Rendu { cote_max_px, qualite_jpeg: 85, plafond_sortie, plafond_pixels }
+    }
+
+    #[tokio::test]
+    async fn huit_afficheurs_qui_demandent_la_meme_pochette_ne_la_construisent_quune_fois() {
+        // Le rendez-vous. Deux afficheurs abonnés reçoivent la **même** trame
+        // d'état, donc demandent la même pochette dans le même instant, et
+        // décodaient puis réencodaient deux fois la même image — plusieurs
+        // centaines de millisecondes de cœur en double sur un Pi 2.
+        //
+        // La preuve est un **décompte d'exécutions**, et il n'y en a pas
+        // d'autre : comparer les trames rendues ne dirait rien, deux
+        // constructions successives de la même image produisant des octets
+        // identiques.
+        let cache = Arc::new(CoverCache::new());
+        // Un rendu qui a vraiment du travail : 600 × 400 dépasse le côté
+        // maximal, donc l'image est décodée et réencodée pour de bon. Sans
+        // cela, le passe-droit rendrait la source telle quelle et le premier
+        // arrivé finirait sans jamais suspendre — aucun suiveur n'aurait le
+        // temps d'arriver, et le test passerait sans rien prouver.
+        cache.set_reglages(Reglages {
+            source_max: 8 * 1024 * 1024,
+            rendu: Some(rendu_de_test(64, 512 * 1024, 16_000_000)),
+        });
+        cache
+            .insere("k".into(), Pochette::Octets(fixtures::jpeg_decodable(600, 400), "image/jpeg"))
+            .await;
+
+        let taches: Vec<_> = (0..8)
+            .map(|_| {
+                let c = cache.clone();
+                tokio::spawn(async move { c.ligne("k", "/api/cover/k").await })
+            })
+            .collect();
+        let mut trames = Vec::new();
+        for t in taches {
+            trames.push(t.await.expect("aucune tache ne doit paniquer"));
+        }
+
+        assert!(trames.iter().all(|t| t.is_some()), "les huit doivent recevoir une trame");
+        let premiere = trames[0].as_deref().unwrap();
+        assert!(
+            trames.iter().all(|t| t.as_deref() == Some(premiere)),
+            "les huit doivent recevoir la meme trame"
+        );
+        assert_eq!(
+            cache.constructions(),
+            1,
+            "une seule construction pour huit demandes concurrentes de la meme cle"
+        );
+    }
+
+    #[tokio::test]
+    async fn le_rendez_vous_ne_retient_rien_une_fois_la_trame_construite() {
+        // Le rendez-vous n'est **pas** un cache, et c'est ce qui le rend
+        // acceptable : la clé hache le *chemin*, pas le contenu, donc une trame
+        // retenue deviendrait fausse dès que l'utilisateur remplace l'image sous
+        // ce chemin. Une `OnceCell` gardant sa valeur pour toujours, tout tient
+        // au retrait de l'entrée.
+        let cache = Arc::new(CoverCache::new());
+        cache.set_reglages(Reglages {
+            source_max: 8 * 1024 * 1024,
+            rendu: Some(rendu_de_test(64, 512 * 1024, 16_000_000)),
+        });
+        cache
+            .insere("k".into(), Pochette::Octets(fixtures::jpeg_decodable(600, 400), "image/jpeg"))
+            .await;
+
+        assert!(cache.ligne("k", "/api/cover/k").await.is_some());
+        assert!(
+            cache.en_vol.lock().await.is_empty(),
+            "la table des constructions en cours doit etre vide apres coup"
+        );
+
+        // Et la seconde demande **reconstruit**, au lieu d'être servie par une
+        // cellule restée en place.
+        assert!(cache.ligne("k", "/api/cover/k").await.is_some());
+        assert_eq!(
+            cache.constructions(),
+            2,
+            "deux demandes separees dans le temps doivent produire deux constructions"
+        );
     }
 
     #[tokio::test]
