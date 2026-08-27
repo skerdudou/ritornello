@@ -123,6 +123,27 @@ function surveille(): void {
   boucle()
 }
 
+/**
+ * Desarme le sondage en cours, s'il y en a un.
+ *
+ * L'etat de ce module est **partage** (au niveau module, pour que deux
+ * composants voient la meme surveillance), et un sondage arme survit donc a
+ * qui l'a declenche. En service c'est voulu. En test, c'est une fuite : un
+ * `recharger()` encore en vol a la fin d'un test consomme un
+ * `mockResolvedValueOnce` du test suivant — le `fetch` bouchonne etant global —
+ * et decale toute sa sequence de reponses. D'ou cette sortie explicite, a
+ * appeler dans un `afterEach`.
+ *
+ * Utile aussi le jour ou l'IHM voudra cesser de sonder sans etre demontee.
+ */
+export function arrete(): void {
+  if (minuteur !== null) {
+    clearTimeout(minuteur)
+    minuteur = null
+  }
+  restantes = 0
+}
+
 function boucle(): void {
   if (!enAttente() || restantes <= 0) {
     minuteur = null

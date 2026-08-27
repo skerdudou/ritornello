@@ -48,6 +48,16 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     restoreMocks: true,
+    // 20 s au lieu des 5 s par defaut, et ce n'est pas masquer une lenteur du
+    // produit : quatre tests preexistants tiennent 2 a 4,6 s a eux seuls, non
+    // pas en *attendant* quoi que ce soit mais en faisant **transformer** les
+    // vues importees paresseusement (`router.push('/config')` compile la vue a
+    // la volee). Mesure : `router.test.ts` seul prend 2,2 s ; dans la suite
+    // complete, ou plusieurs workers transforment en parallele, il franchissait
+    // les 5 s environ une passe sur deux. Le plafond mesurait donc la charge de
+    // la machine, pas le code teste — exactement ce qu'un plafond ne doit pas
+    // faire.
+    testTimeout: 20000,
     exclude: [...configDefaults.exclude, 'e2e/**'],
   },
 })

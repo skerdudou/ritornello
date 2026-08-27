@@ -35,8 +35,16 @@ describe('useGreffons', () => {
     vi.useFakeTimers()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
+    // Desarmer **avant** de rendre les vrais minuteurs, puis laisser retomber
+    // ce qui est en vol : sans cela un `recharger()` non resolu franchissait la
+    // frontiere du test et consommait un `mockResolvedValueOnce` du suivant,
+    // qui echouait alors sur une sequence de reponses decalee d'un cran. Le
+    // `fetch` bouchonne est global, c'est par la que la fuite passait.
+    const { arrete } = await import('./useGreffons')
+    arrete()
     vi.useRealTimers()
+    await new Promise((r) => setTimeout(r, 0))
   })
 
   it('dédoublonne les pages d’admin d’un greffon multi-genres', async () => {
