@@ -1,6 +1,16 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
-import { Button, cn, Tabs, TabsContent, TabsList, TabsTrigger, UI_CONTRACT } from './index'
+import { describe, expect, it, vi } from 'vitest'
+import { Button, cn, Slider, Tabs, TabsContent, TabsList, TabsTrigger, UI_CONTRACT } from './index'
+
+// jsdom ne fournit pas ResizeObserver ; reka-ui l'utilise (`useSize`) pour
+// mesurer la piste du curseur au montage. Un stub minimal suffit : le test
+// ne verifie aucune position au pixel pres.
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+vi.stubGlobal('ResizeObserver', ResizeObserverStub)
 
 describe('surface publique du kit', () => {
   it('expose la version de contrat', () => {
@@ -50,6 +60,33 @@ describe('surface publique du kit', () => {
     await flushPromises()
     expect(w.text()).toContain('panneau B')
     expect(w.text()).not.toContain('panneau A')
+    w.unmount()
+  })
+
+  it('le curseur rend une poignée accessible et valide un pas de clavier', async () => {
+    // Un seul composant pour la progression et le volume : ce qui est vérifié
+    // ici — la poignée est un `role=slider`, un pas de clavier émet la valeur
+    // **et** la valide — est ce que les deux usages supposent.
+    const w = mount(Slider, {
+      props: { modelValue: [60], min: 0, max: 100, step: 1, 'aria-label': 'Volume' },
+      attachTo: document.body,
+    })
+    await flushPromises()
+    const poignee = w.get('[role="slider"]')
+    expect(poignee.attributes('aria-valuenow')).toBe('60')
+    expect(poignee.attributes('aria-valuemin')).toBe('0')
+    expect(poignee.attributes('aria-valuemax')).toBe('100')
+    // Sans le tri des attrs dans Slider.vue, `aria-label` file vers le
+    // `<span>` englobant de `SliderRoot` et la poignée reste sans nom
+    // accessible : c'est elle, pas le root, que verifie ce test.
+    expect(poignee.attributes('aria-label')).toBe('Volume')
+    ;(poignee.element as HTMLElement).focus()
+    await poignee.trigger('keydown', { key: 'ArrowRight' })
+    expect(w.emitted('update:modelValue')?.[0]).toEqual([[61]])
+    expect(w.emitted('valueCommit')?.[0]).toEqual([[61]])
+    // « part une fois » : un seul pas clavier ne doit pas produire plusieurs
+    // validations.
+    expect(w.emitted('valueCommit')).toHaveLength(1)
     w.unmount()
   })
 })
