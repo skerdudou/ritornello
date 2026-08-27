@@ -10,22 +10,17 @@ OUT="target/$TARGET/release"
 # script must be launchable from anywhere.
 cd "$(dirname "$0")/.."
 
-# The plugin list drives the scp then the remote mv, from this single place:
-# a list duplicated between the two would end up diverging.
-PLUGINS=(radio cd files generic-input console musicbrainz ouifm-metas radiofrance-metas mpd)
-
-# deploy/plugins.example.toml names the same set, from the core's side — and
-# its entries are now installed one by one on a device already in service
-# (see further down). The two lists must therefore hold the same names: one
-# declared there without its binary here gives the core an exec that does not
-# exist, and one built here but absent there ships a plugin nothing launches.
-# Both are the mistake of a plugin added in a hurry, and both are silent, so
-# they are turned into a refusal to deploy.
-DECLARES=$(sed -n 's|^exec *= *".*/ritornello-plugin-\([^"]*\)".*|\1|p' \
+# The plugin list drives the scp then the remote mv. It is derived from
+# deploy/plugins.example.toml — the core's side of the same set — so the two
+# cannot diverge: a plugin declared there without a binary built here gives the
+# core an exec that does not exist, and one built here but absent there ships a
+# plugin nothing launches. Both were the mistake of a plugin added in a hurry,
+# and both were silent; deriving the list removes the second, and the scp below
+# fails loudly on the first (no such file in target/).
+mapfile -t PLUGINS < <(sed -n 's|^exec *= *".*/ritornello-plugin-\([^"]*\)".*|\1|p' \
   deploy/plugins.example.toml | sort)
-if [ "$DECLARES" != "$(printf '%s\n' "${PLUGINS[@]}" | sort)" ]; then
-  echo "deploy.sh: PLUGINS and deploy/plugins.example.toml disagree" >&2
-  diff <(printf '%s\n' "${PLUGINS[@]}" | sort) <(echo "$DECLARES") >&2 || true
+if [ "${#PLUGINS[@]}" -eq 0 ]; then
+  echo "deploy.sh: no plugin found in deploy/plugins.example.toml" >&2
   exit 1
 fi
 
