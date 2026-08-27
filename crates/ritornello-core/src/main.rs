@@ -489,8 +489,16 @@ async fn cabler_a_chaud<P: player::Player>(
     // disparaissait à l'instant du recâblage. Un défaut dont le programme avait
     // conscience et dont il détruisait la preuve.
     if vivacite(&nom, kill_triggers, non_supervises) != Vivacite::Supervise {
+        // Cet avertissement disait « sa prochaine sortie passera inaperçue, et
+        // il ne pourra plus être allumé ni éteint depuis l'IHM avant un
+        // redémarrage du cœur ». **Les deux moitiés sont devenues fausses** :
+        // la fermeture de ses sockets est désormais observée, ce qui rend sa
+        // mort visible sur la page *et* le fait sortir de `non_supervises`,
+        // donc redevenir gérable. Ce qui reste vrai — et ce que ce
+        // `warn!` dit maintenant — est plus étroit : tant qu'il vit, le cœur ne
+        // peut pas l'arrêter, faute de tenir son `child`.
         tracing::warn!(
-            "wiring {nom}, which is alive but not supervised by the core: its next exit will go unnoticed, and it cannot be started or stopped from the admin UI until the core restarts"
+            "wiring {nom}, which is alive but not supervised by the core: it cannot be stopped from the admin UI while it lives, though the core will notice when its sockets close"
         );
         non_supervises.insert(nom.clone());
     }
@@ -773,18 +781,32 @@ enum Vivacite {
     /// Vivant et **hors d'atteinte** : il a parlé, le cœur ne tient pas son
     /// `child`. Relance à la main, superviseur système, ou `child.wait()` déjà
     /// consommée par le rendez-vous de démarrage.
+    ///
+    /// **Cet état n'est plus définitif.** Le cœur ne verra jamais le code de
+    /// sortie d'un tel processus, mais il voit ses sockets se fermer, et il en
+    /// déduit qu'il n'est plus joignable : le nom quitte alors `non_supervises`
+    /// et redevient `Eteint`, donc allumable. Voir le bras `injoignable_rx` de
+    /// la boucle principale.
     HorsAtteinte,
 }
 
 /// Croise les deux registres pour un nom.
 ///
 /// `Supervise` l'emporte quand les deux répondent : ce que le cœur peut
-/// arrêter primerait sur ce qu'il ne peut que constater. La conjonction est en
-/// fait **inatteignable** — un nom n'entre dans `non_supervises` que s'il est
-/// absent de `kill_triggers`, et la garde d'allumage refuse de lancer un
-/// processus pour un nom déjà classé `HorsAtteinte`, donc il ne peut pas y
-/// revenir. L'ordre est écrit quand même : il rend la fonction totale sans
-/// dépendre de cet argument.
+/// arrêter primerait sur ce qu'il ne peut que constater. La conjonction est
+/// **inatteignable**, mais plus pour la raison qui était écrite ici.
+///
+/// L'ancien argument était qu'un nom classé `HorsAtteinte` ne peut pas revenir
+/// dans `kill_triggers`, la garde d'allumage refusant de lancer un processus
+/// pour lui — donc jamais dans les deux tables. Ce n'est plus vrai : depuis que
+/// la fermeture des sockets est observée, un nom **sort** de `non_supervises`
+/// quand son processus cesse d'être joignable, et il peut être rallumé ensuite.
+///
+/// La conclusion tient quand même, et par un chemin plus court : la sortie de
+/// `non_supervises` précède toujours l'allumage qui l'inscrirait dans
+/// `kill_triggers` — c'est ce qui rend cet allumage possible. Les deux
+/// appartenances restent donc exclusives à tout instant. L'ordre est écrit
+/// quand même : il rend la fonction totale sans dépendre de cet argument.
 fn vivacite(
     nom: &str,
     kill_triggers: &HashMap<String, tokio::sync::oneshot::Sender<()>>,

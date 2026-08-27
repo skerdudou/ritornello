@@ -91,11 +91,31 @@ later (its status lines are then **replaced**, not added to). A
 the last one: the arbitration list is recomputed in full from
 `plugins.toml` rather than appended to.
 
-The status page therefore reports three states rather than two: wired
-(`connected: true`), dead before announcing (`connected: false`), and
+The status page therefore reports four states rather than two: wired
+(`connected: true`), dead before announcing (`connected: false`),
+**starting** (`starting: true`) — launched moments ago and not yet heard
+from, which is normal and not yet worth reporting as a fault — and
 **stalled** (`connected: false`, `stalled: true`) — the process is
-alive, said nothing by the deadline, and may still speak. Only the third
-one is worth waiting on; the first two are worth acting on.
+alive, said nothing by the deadline, and may still speak. Only the last
+two are worth waiting on; the first two are worth acting on.
+
+Starting and stalled are the same silence read at two different ages, and
+they are mutually exclusive: a plugin gets ten seconds of benefit of the
+doubt, after which its line is downgraded — but only if it still says
+"starting" at that moment, re-read rather than assumed. A plugin that
+announced itself, died, or was switched off in the meantime already says
+something truer, and overwriting that would replace a fact with a guess.
+
+**The death of a plugin the core did not launch is noticed too.** A
+plugin restarted by hand escapes supervision — the core is not its
+parent, so it will never see its exit code — and its death used to
+produce nothing but a log line, leaving the page showing it as connected
+forever. What the core does own are its sockets, and their closing is
+now reported: the line flips to disconnected, and the name becomes
+manageable again, so switching it on from the admin UI launches a real,
+supervised process instead of being refused. Closing proves the peer
+closed, not that the process died — either way it is no longer
+reachable, which is what the page claims and all it claims.
 
 This register/announce handshake is exercised end to end by the Rust
 test suite (bind ordering, a plugin dying mid-registration, an unknown
