@@ -164,9 +164,10 @@ impl MusicBrainzPlugin {
             // Ce plugin ne sait pas où en est la lecture : il répond
             // sur l'identité d'un morceau, pas sur son déroulement.
             position_s: None,
-            // Le lookup par TOC portait déjà le MBID de la release : aucune
-            // requête de plus pour la pochette, juste construire l'URL fixe.
-            cover: info.release_id.as_deref().map(|id| CoverRef::Url { url: musicbrainz::url_caa(id) }),
+            // Le lookup par TOC portait déjà de quoi construire l'URL, et le
+            // choix du niveau (ce pressage, ou l'album à défaut de face avant)
+            // a été fait à l'analyse. Aucune requête de plus ici.
+            cover: info.cover_url.clone().map(|url| CoverRef::Url { url }),
             // Chemin disque : la TOC dit ce qui joue, donc il écrase (défaut).
             ..Default::default()
         });

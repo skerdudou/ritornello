@@ -3,55 +3,128 @@
   {
    "id": "22fcb6d1-af83-42be-b417-03aeb0aa313e",
    "title": "Dios de la inmoralidad",
-   "artist-credit": [{ "name": "Hellfire" }],
-   "cover-art-archive": { "artwork": false, "back": false, "front": false, "count": 0, "darkened": false },
+   "artist-credit": [
+    {
+     "name": "Hellfire"
+    }
+   ],
+   "cover-art-archive": {
+    "artwork": false,
+    "back": false,
+    "front": false,
+    "count": 0,
+    "darkened": false
+   },
    "media": [
     {
      "tracks": [
-      { "title": "Dios de la inmoralidad" },
-      { "title": "Scavenger" },
-      { "title": "Odio y repulsión" }
+      {
+       "title": "Dios de la inmoralidad"
+      },
+      {
+       "title": "Scavenger"
+      },
+      {
+       "title": "Odio y repulsión"
+      }
      ]
     }
-   ]
+   ],
+   "release-group": {
+    "id": "c0cf7818-99cb-4682-95f6-e4367b85bba7"
+   }
   },
   {
    "id": "85c8a2ef-7091-41be-9aae-8eda3bfa789d",
    "title": "Connectivity!",
-   "artist-credit": [{ "name": "Mahogany" }],
-   "cover-art-archive": { "artwork": true, "back": false, "front": true, "count": 1, "darkened": false },
+   "artist-credit": [
+    {
+     "name": "Mahogany"
+    }
+   ],
+   "cover-art-archive": {
+    "artwork": true,
+    "back": false,
+    "front": true,
+    "count": 1,
+    "darkened": false
+   },
    "media": [
     {
      "tracks": [
-      { "title": "Tesselation (Formerly Plateau One)" },
-      { "title": "The View From the People Wall" },
-      { "title": "Supervitesse (Robin Guthrie mix)" },
-      { "title": "One Plus One Equals Three or More" },
-      { "title": "Mantissa" },
-      { "title": "Neo-Plastic Boogie-Woogie" },
-      { "title": "Windmill International A" },
-      { "title": "Renovo" },
-      { "title": "Domino Ladder Beta" },
-      { "title": "My Bed Is My Castle" },
-      { "title": "Springtime, Save Our Country" }
+      {
+       "title": "Tesselation (Formerly Plateau One)"
+      },
+      {
+       "title": "The View From the People Wall"
+      },
+      {
+       "title": "Supervitesse (Robin Guthrie mix)"
+      },
+      {
+       "title": "One Plus One Equals Three or More"
+      },
+      {
+       "title": "Mantissa"
+      },
+      {
+       "title": "Neo-Plastic Boogie-Woogie"
+      },
+      {
+       "title": "Windmill International A"
+      },
+      {
+       "title": "Renovo"
+      },
+      {
+       "title": "Domino Ladder Beta"
+      },
+      {
+       "title": "My Bed Is My Castle"
+      },
+      {
+       "title": "Springtime, Save Our Country"
+      }
      ]
     }
-   ]
+   ],
+   "release-group": {
+    "id": "32f3a83c-0e3c-3aa5-b678-4ed56b0848f2"
+   }
   },
   {
    "id": "2de62a1b-0401-4569-bfe4-7bac2a61dea2",
    "title": "Kiss You Off",
-   "artist-credit": [{ "name": "Scissor Sisters" }],
-   "cover-art-archive": { "artwork": true, "back": false, "front": true, "count": 3, "darkened": false },
+   "artist-credit": [
+    {
+     "name": "Scissor Sisters"
+    }
+   ],
+   "cover-art-archive": {
+    "artwork": true,
+    "back": false,
+    "front": true,
+    "count": 3,
+    "darkened": false
+   },
    "media": [
     {
      "tracks": [
-      { "title": "Kiss You Off" },
-      { "title": "Kiss You Off (Mr Oizo remix)" },
-      { "title": "Making Ladies" }
+      {
+       "title": "Kiss You Off"
+      },
+      {
+       "title": "Kiss You Off (Mr Oizo remix)"
+      },
+      {
+       "title": "Making Ladies"
+      }
      ]
     }
-   ]
+   ],
+   "release-group": {
+    "id": "79938634-442c-4e3c-b059-b2437dfb3316"
+   }
   }
  ]
 }
