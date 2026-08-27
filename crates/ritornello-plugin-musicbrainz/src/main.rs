@@ -16,12 +16,21 @@
 //! partageait le processus qui doit répondre aux commandes de piste. Ici, son
 //! échec ou sa lenteur ne concernent que les métadonnées.
 
+mod admin;
 mod icy;
 mod motifs;
 mod musicbrainz;
+// Uniquement compilé sous `cargo test` : `ui_placeholder_js` ne sert au
+// run-time nulle part dans ce crate, seulement à `build.rs` (compilation
+// séparée, via `include!`) et à ses propres tests. Le compiler en continu
+// dans le binaire déclencherait un `dead_code` que `-D warnings` refuserait
+// (voir `ritornello-plugin-mpd/src/main.rs`, même piège).
+#[cfg(test)]
+mod placeholder;
 
 use anyhow::Result;
 use musicbrainz::DiscInfo;
+use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::{MetadataPlugin, Runtime};
 use ritornello_proto::{CoverRef, Enrichment, NowPlaying};
 use serde_json::Value;
@@ -29,6 +38,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
+
+/// Catalogue i18n embarqué de la page d'admin (`admin.rs`). Nommé comme
+/// `MPD_EN` côté greffon mpd : c'est ce nom que `Catalog::load` embarque en
+/// dernier recours si aucun pack externe n'est présent.
+pub(crate) const MUSICBRAINZ_EN: &str = include_str!("locales/en.toml");
 
 /// Échecs de validation **consécutifs** avant de resonder une station déjà
 /// connue.
@@ -709,13 +723,39 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|_| "/var/lib/ritornello/plugin-musicbrainz.json".to_string()),
     );
     let magasin = Arc::new(RwLock::new(motifs::Magasin::charge(&chemin_etat)));
-    Runtime::from_args()?.metadata(MusicBrainzPlugin::new(magasin.clone(), chemin_etat.clone()))?.run().await
+
+    // Un greffon `metadata` ne reçoit pas de trame `SetLocale` (elle
+    // n'existe que pour `SourcePlugin`) : la langue de la page d'admin vient
+    // donc de l'environnement au lancement, comme en generic-input et en
+    // mpd — un changement de langue de l'appareil ne s'y voit qu'après un
+    // redémarrage du greffon (voir la doc de `admin::MusicBrainzAdmin`).
+    let locales_root = PathBuf::from(
+        std::env::var("RITORNELLO_LOCALES").unwrap_or_else(|_| "/etc/ritornello/locales".to_string()),
+    );
+    let locale = std::env::var("RITORNELLO_LOCALE").unwrap_or_else(|_| "en".to_string());
+    let catalog = Arc::new(std::sync::RwLock::new(Catalog::load(
+        "musicbrainz",
+        &locale,
+        &locales_root,
+        MUSICBRAINZ_EN,
+    )));
+
+    Runtime::from_args()?
+        .metadata(MusicBrainzPlugin::new(magasin.clone(), chemin_etat.clone()))?
+        .admin(admin::MusicBrainzAdmin::new(magasin, chemin_etat, catalog))?
+        .run()
+        .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn en_embarque_musicbrainz_est_non_vide() {
+        assert!(!ritornello_i18n::try_parse(MUSICBRAINZ_EN).unwrap().is_empty());
+    }
 
     const FIXTURE: &str = include_str!("../tests/fixtures/mb_discid.json");
     const TOC: &str = "3 150 22767 41887 63000";
