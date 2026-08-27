@@ -620,14 +620,23 @@ pub fn parse_available_locales(filenames: &[String]) -> Vec<String> {
 /// Marque le plugin `name` comme déconnecté dans l'état de statut : un plugin
 /// dont le processus s'est terminé n'est plus joignable (supervision, page de
 /// statut vivante). No-op si le nom est inconnu.
-/// Le drapeau `stalled` est retiré au passage : « figé » veut dire vivant et
-/// muet. Un processus dont on vient de voir la sortie n'est plus vivant, et
-/// laisser les deux drapeaux ensemble raconterait un état qui n'existe pas.
+/// Les drapeaux `stalled` **et** `starting` sont retirés au passage, pour la
+/// même raison : tous deux décrivent un processus *vivant* — « figé » veut dire
+/// vivant et muet, « démarrage » veut dire vivant et pas encore annoncé. Un
+/// processus dont on vient de voir la sortie n'est plus vivant, et laisser l'un
+/// ou l'autre raconterait un état qui n'existe pas.
+///
+/// `starting` en particulier avait une conséquence visible : `main::a_retrograder`
+/// ne consulte que ce drapeau, si bien qu'un greffon mort **pendant** ses dix
+/// secondes de grâce gardait sa ligne « démarrage » jusqu'à l'échéance, puis se
+/// faisait rétrograder en « figé » — c'est-à-dire annoncer vivant mais muet un
+/// processus dont la sortie avait été moissonnée dix secondes plus tôt.
 pub fn mark_plugin_disconnected(state: &mut StatusState, name: &str) {
     for p in &mut state.plugins {
         if p.name == name {
             p.connected = false;
             p.stalled = false;
+            p.starting = false;
         }
     }
 }
@@ -1711,6 +1720,25 @@ mod tests {
         let ligne = &st.plugins[0];
         assert!(!ligne.connected);
         assert!(!ligne.stalled, "un processus dont on a vu la sortie n'est plus fige");
+    }
+
+    #[test]
+    fn mark_plugin_disconnected_efface_le_drapeau_demarrage() {
+        // Un greffon qui meurt **pendant** ses dix secondes de grâce. Sans cet
+        // effacement, sa ligne restait « démarrage » jusqu'à l'échéance, et
+        // comme `main::a_retrograder` ne consulte que ce drapeau, le balayage
+        // la rétrogradait ensuite en « figé » : vivant mais muet, pour un
+        // processus dont la sortie avait été moissonnée. Les deux drapeaux
+        // décrivent un vivant, et c'est pourquoi les deux tombent ici.
+        let mut st = StatusState {
+            plugins: vec![PluginStatus::demarrage("cd")],
+            active_source: "radio".into(),
+        };
+        mark_plugin_disconnected(&mut st, "cd");
+        let ligne = &st.plugins[0];
+        assert!(!ligne.connected);
+        assert!(!ligne.starting, "un processus dont on a vu la sortie ne demarre plus");
+        assert!(!ligne.stalled, "et il n'est pas fige non plus");
     }
 
     #[test]
