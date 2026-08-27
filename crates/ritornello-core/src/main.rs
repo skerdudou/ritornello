@@ -96,6 +96,21 @@ impl core::Source for SourceClient {
 /// La matérialisation des octets — le seul moment où l'image entière existe en
 /// mémoire dans le cœur — est **derrière** ce filtre : un afficheur qui n'en
 /// veut pas ne fait pas payer la lecture du fichier non plus.
+/// Par où un relais fait savoir que son pair ne répond plus, et sous quel
+/// numéro.
+///
+/// Les deux voyagent **toujours** ensemble — un avis sans son numéro de câblage
+/// ne serait pas interprétable par la boucle —, et les réunir garde la
+/// signature du relais lisible.
+#[derive(Clone)]
+struct AvisInjoignable {
+    /// Numéro du câblage qui a lancé ce relais. Voir `cablages` dans la boucle
+    /// principale : c'est ce qui distingue la fermeture d'un socket courant de
+    /// celle d'une incarnation déjà remplacée.
+    cablage: u64,
+    tx: mpsc::Sender<(String, u64)>,
+}
+
 fn relais_afficheur(
     nom: String,
     client: Arc<DisplayClient>,
@@ -103,8 +118,7 @@ fn relais_afficheur(
     covers: Arc<cover::CoverCache>,
     mut etat_rx: watch::Receiver<PlayerState>,
     mut catalogue_rx: watch::Receiver<Catalogue>,
-    cablage: u64,
-    injoignable: mpsc::Sender<(String, u64)>,
+    avis: AvisInjoignable,
 ) {
     tokio::spawn(async move {
         /// Nombre de tentatives accordées à un même `cover_href` avant de
@@ -292,7 +306,7 @@ fn relais_afficheur(
         if injoignable_constate {
             // `let _` : la boucle du cœur a pu disparaître entre-temps, et son
             // départ n'est pas un incident à journaliser ici.
-            let _ = injoignable.send((nom, cablage)).await;
+            let _ = avis.tx.send((nom, avis.cablage)).await;
         }
     });
 }
@@ -607,8 +621,7 @@ async fn cabler_a_chaud<P: player::Player>(
                         fils.covers.clone(),
                         fils.etat_rx.clone(),
                         fils.catalogue_rx.clone(),
-                        cablage,
-                        fils.injoignable_tx.clone(),
+                        AvisInjoignable { cablage, tx: fils.injoignable_tx.clone() },
                     );
                     lignes.push(PluginStatus::genre(&nom, "display", true, annonce.admin));
                 }
@@ -1527,8 +1540,7 @@ async fn main() -> Result<()> {
             app_covers.clone(),
             etat_rx.clone(),
             catalogue_rx.clone(),
-            0,
-            injoignable_tx.clone(),
+            AvisInjoignable { cablage: 0, tx: injoignable_tx.clone() },
         );
     }
 
@@ -2013,8 +2025,7 @@ mod injoignable_tests {
             Arc::new(cover::CoverCache::default()),
             etat_rx,
             catalogue_rx,
-            7,
-            tx,
+            AvisInjoignable { cablage: 7, tx },
         );
 
         // Le relais écrit l'état d'emblée, avant sa boucle : cette écriture-là
@@ -2052,8 +2063,7 @@ mod injoignable_tests {
             Arc::new(cover::CoverCache::default()),
             etat_rx,
             catalogue_rx,
-            3,
-            tx,
+            AvisInjoignable { cablage: 3, tx },
         );
 
         // Le cœur s'arrête : ses émetteurs tombent. Le pair, lui, est toujours
@@ -2505,8 +2515,7 @@ mod relais_tests {
             covers,
             etat_rx,
             catalogue_rx,
-            0,
-            mpsc::channel(4).0,
+            AvisInjoignable { cablage: 0, tx: mpsc::channel(4).0 },
         );
         let mut b = Banc {
             etat_tx,

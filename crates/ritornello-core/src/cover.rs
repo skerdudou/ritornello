@@ -96,6 +96,15 @@ fn purge_temporaires_dans(dir: &std::path::Path) {
     }
 }
 
+/// Une trame de pochette en cours de construction, partagée entre l'appelant
+/// qui la construit et ceux qui l'attendent.
+///
+/// L'`Option` extérieure est celle de `ligne` — « rien à pousser », pour les
+/// mêmes raisons que partout dans ce module ; l'`Arc<str>` intérieur est la
+/// ligne de texte déjà sérialisée. La cellule est derrière un `Arc` pour que les
+/// attendants la tiennent après avoir rendu le verrou de la table.
+type TrameEnVol = Arc<tokio::sync::OnceCell<Option<Arc<str>>>>;
+
 /// Ce que le cœur retient d'une pochette.
 ///
 /// Deux natures, et c'est délibéré : une pochette **locale** n'entre pas en
@@ -227,7 +236,7 @@ pub struct CoverCache {
     /// derrière un `Arc` pour que les suiveurs la tiennent après avoir rendu le
     /// verrou de la table — le verrou ne couvre jamais le travail, seulement
     /// l'inscription.
-    en_vol: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::OnceCell<Option<Arc<str>>>>>>,
+    en_vol: tokio::sync::Mutex<HashMap<String, TrameEnVol>>,
     /// Combien de constructions de trame ont **réellement** été exécutées.
     ///
     /// Sous `cfg(test)`, et c'est le bon compromis. Le rendez-vous ne peut se
@@ -407,7 +416,7 @@ impl CoverCache {
         // *différentes*, ce qui est le contraire du but.
         let cellule = {
             let mut en_vol = self.en_vol.lock().await;
-            en_vol.entry(cle.to_string()).or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())).clone()
+            en_vol.entry(cle.to_string()).or_insert_with(TrameEnVol::default).clone()
         };
 
         // `href` n'a pas besoin d'être comparé entre appelants : `cle` en est
