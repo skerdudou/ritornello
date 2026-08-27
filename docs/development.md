@@ -226,9 +226,13 @@ happened, and say which one in a comment.
 
 ## E2e journeys (Playwright)
 
-`npm run e2e -w app` needs a compiled core (`cargo build --workspace`)
-and `mpv` on the machine running the journeys (real playback by the radio
-plugin). Under Windows — the environment where npm/node/Playwright run in
+`npm run e2e -w app` needs a compiled core, built in the order
+`npm run build --workspaces` **then** `cargo build --workspace`: the core
+embeds the SPA's `dist/` at compile time (see "Build guardrails" below),
+so a stale `dist` produces a core that serves a stale UI to the e2e
+journeys even though the source changed. It also needs `mpv` on the
+machine running the journeys (real playback by the radio plugin). Under
+Windows — the environment where npm/node/Playwright run in
 this project —, the core binary is a Linux ELF compiled under WSL: the
 harness (`web/app/e2e/serve.mjs`) therefore launches it through
 `wsl.exe`, not directly, and the teardown (`web/app/e2e/teardown.mjs`)
@@ -251,6 +255,11 @@ documented at the top of `serve.mjs`.
   (re-reads the Open API documentation and the site's webradio cards, and
   re-checks every mount not covered by the documentation; `--verifier`
   reports a drift without writing anything).
+- **Screenshots** (`docs/captures/*.png`): with a core running (`node
+  e2e/serve.mjs` from `web/app`), `node scripts/captures.mjs` from `web/app`;
+  then stop the core with the e2e teardown. As with the e2e journeys
+  above, run `npm run build --workspaces` then `cargo build --workspace`
+  first — the core the script screenshots is the one just built.
 
 ## Build guardrails
 

@@ -2,20 +2,30 @@
 
 ## Web remote and command API
 
-The home page (`http://<host>:8080/`) embeds a remote control: buttons for
-13 of the protocol's 17 commands (presets 1-9, next/previous, volume, mute,
-play/pause, stop, eject, source switch, standby, seek forward/backward). A
-14th, absolute seek, has no button of its own — it's the progress bar that
-sends it (see below). The remaining three are emitted by something other
-than this page: `Plus10` belongs to the physical remote, which has a single
-key and no other way past preset 9 (the web grid reaches the same numbers
-through its own page arrows, described below), while `SetVolume` (an
-absolute volume) and `SelectSource` (a source named rather than cycled to)
-exist for the MPD server plugin, whose clients send `setvol` and
-`load` — see [plugins.md](plugins.md). Both are absolute where the remote's
-keys are relative, which is exactly why they could not be expressed by
-stacking existing ones: the volume step is an adjustable setting, and each
-step writes an overlay on screen.
+The home page (`http://<host>:8080/`) is a remote control built around the
+Player card and the preset tiles, not a settings form: the cover and the
+current track are the subject, one primary Play/Pause button dominates the
+transport, and volume is a slider rather than two step buttons. It is a
+single `HomeView`, a single `GET /api/player` connection (SSE, see below)
+and a single set of components; the difference between the phone and the
+desktop arrangement is Tailwind breakpoints, not two separate views (see
+"Layout" below).
+
+The page embeds buttons for 8 of the protocol's 17 commands: standby,
+source switch, mute, previous/next, play/pause, stop, eject. Three more
+commands are sent by controls that are not buttons — the preset tiles send
+`Select`, the progress bar sends `SeekTo`, the volume slider sends
+`SetVolume`. The remaining six belong elsewhere: `VolumeUp`/`VolumeDown`
+and `SeekForward`/`SeekBackward` are the physical remote's hold-to-repeat
+and step keys (see "Physical remote" below) — the web page dropped its own
+±5%-volume and ±`seek_step_s`-seek buttons in this refonte, in favour of
+the slider and the progress bar respectively, so these four commands no
+longer have a web control at all; `Plus10` belongs to the physical remote,
+which has a single key and no other way past preset 9 (the web tiles reach
+the same numbers through their own page arrows, described under
+"Presets"); and `SelectSource` (a source named rather than cycled to)
+exists for the MPD server plugin, whose clients send `load` — see
+[plugins.md](plugins.md).
 
 `Next`/`Prev` are interpreted by the active source: preset for the radio,
 track for the CD player — these are not two distinct command pairs, only a
@@ -33,238 +43,385 @@ logic is duplicated:
       -H 'content-type: application/json' -d '{"cmd":"Select","arg":3}'
 
 Handy for driving the device without a remote (from a phone on the local
-network, or over SSH while debugging).
+network, or over SSH while debugging). Its `204` means only that the
+command was **enqueued** on the same channel the Input plugins feed — not
+that it was applied. The applied state (the new volume, the new preset,
+whatever changed) arrives separately, on the `GET /api/player` stream
+described next; a client that wants to know the outcome watches that
+stream, it does not infer it from the response to its own `POST`.
 
-The **Player** card above the remote (active source, volume, mute,
-standby, and the current track with where the information came from) is
-fed by a pushed stream from `GET /api/player` (SSE) — nothing is polled,
-and the state follows the infrared remote as well as other browser tabs.
+The **Player** card (active source, volume, mute, standby, and the current
+track with where the information came from) is fed by a pushed stream from
+`GET /api/player` (SSE) — nothing is polled, and the state follows the
+infrared remote as well as other browser tabs and, per the paragraph
+above, the web remote's own commands.
+
+### Layout: one page, two arrangements
+
+A single `HomeView` renders both arrangements; the breakpoint is Tailwind's
+`md`, not a separate mobile view or a fork in the code.
+
+- **Below `md` (phone).** One column: the cover, the track block, the
+  progress bar, the transport, the volume slider and the preset tiles
+  stack in that order, then a fixed bottom tab bar (see "Navigation") sits
+  under everything, clear of the phone's own gesture bar.
+- **From `md` (desktop/tablet).** Two cards side by side, inside a
+  `max-w-5xl` column: the Player card on the left (cover, track block,
+  progress bar, transport, volume), the Presets card on the right. The
+  navigation stays at the top of the page, as before this refonte.
+
+![The home page in light mode, at desktop width: the Player card on the left, the preset tiles on the right](captures/accueil-clair.png)
+
+![The same home page in dark mode](captures/accueil-sombre.png)
+
+![The home page at phone width: one column, the four-tab bar fixed at the bottom](captures/accueil-telephone.png)
+
+### The Player card
+
+The cover and the current track are the subject: nothing above them
+competes for attention any more. A pastille badge in the card's header
+names the active source (`etat.source`, or "No source" before the first
+frame), with a small dot lit next to it while something is actually
+playing (`playback === 'playing'`); a second badge reads "STANDBY" in
+standby. The corner of the card carries the two commands that act on the
+whole appliance rather than on what's playing — source switch and
+standby — deliberately apart from the transport below it, which only ever
+acts on the current source.
+
+The cover is a fixed square — 224 px on the phone, 176 px on desktop, next
+to the text rather than above it — so the layout never jumps when an
+image arrives after the text. It never disappears: a muted square with a
+music-note glyph stands in for it, both while no `cover_href` is present
+and when the browser failed to load the one that was (without this flag
+the browser's own broken-image icon would show instead of the intended
+fallback; it resets on the next `cover_href`, so one failure doesn't
+condemn the square for the rest of the session). In standby only the cover
+itself dims, to half opacity (`PlayerCard.vue`'s own `opacity-50`) — not
+the rest of the card: the transport, mute and source-cycle buttons look
+dimmed too, but that's the kit's standard `disabled:opacity-50`, a
+side-effect of being disabled (see "Buttons the appliance would ignore"
+below), not a deliberate standby style, and it is why the STANDBY badge,
+the header text and the Standby button itself — never disabled, standby
+being the one command that still works — stay at full opacity throughout.
+
+Above the title, a small highlighted line reads `P1 · FIP` — the preset
+number in `primary` and, when the source declares one, its name after the
+separator (`preset_name` in its frames — the configured station name for
+the radio; the CD plugin never declares one, since a track number is not
+a name). It lives and dies with `preset` below it: both clear together as
+soon as nothing is playing anymore, and neither survives a source change.
+Under it, the source's own `status` sentence shows when there is one and
+the device isn't in standby (the "STANDBY" badge already says it): "NO
+DISC", "AUDIO CD", or whatever the active source or the core itself
+produced (see [plugins.md](plugins.md)). Title, artist and album follow
+when at least one of the three is known; when none is, nothing is drawn
+there — an "0:34" alone would inform nobody, so the block simply doesn't
+appear — but the cover square stays exactly where it was, still the thing
+that carries the layout. When it does appear, a pair of small badges under
+the album name says who supplied the text (`origin`) and, when it differs,
+who supplied the cover (`cover_origin`) — the first question to ask in
+front of a wrong title; alongside them, when no position is known but a
+duration is, a small duration figure shows too — the one piece of timing
+information left when the progress bar (below) has nothing to draw at
+all.
 
 That stream and the display plugins' socket carry the very same
 payload — `PlayerState`, one structure serialized once per transport —
-rather than two views kept separately in sync. Two of its
-fields exist only for this: `status`, the appliance's current state as a
-sentence already translated by whoever produced it (the active source, e.g.
-"NO DISC", "AUDIO CD" — or the core itself in standby), which the Player
-card shows plainly when present, for the same reason `preset_name` below
-was added — a word that used to exist only on a display, invisible on the
-web exactly as a station name once was. And `overlay`, the transient
-overlay a display plugin is showing right now (the volume/mute readout, the
+rather than two views kept separately in sync. One of its fields is
+carried for the displays alone: `overlay`, the transient overlay a
+display plugin is showing right now (the volume/mute readout, the
 remote's pending `+NN`, or a source's ephemeral message — see
-[plugins.md](plugins.md) for its shape): the payload carries it because the
-same structure feeds the displays, but the SPA **ignores** it. The web UI
-already shows the volume in plain sight (see above), and a browser page has
-none of a twenty-column physical display's real-estate constraints, so
-there is no cramped "now playing" line for a transient message to interrupt
-in the first place. One practical consequence: selecting an empty preset
-from the web remote produces no on-screen feedback today — the "empty
-preset" message reaches only the physical display, through this same
-field. The home page's one toast (see `HomeView.vue`) is unrelated: it
-reports HTTP failures of `POST /api/command`, not source-declared
-overlays.
+[plugins.md](plugins.md) for its shape). The payload carries it because
+the same structure feeds the displays, but the SPA **ignores** it: the
+web UI already shows the volume in plain sight (the slider, below), and a
+browser page has none of a twenty-column physical display's real-estate
+constraints, so there is no cramped "now playing" line for a transient
+message to interrupt in the first place. One practical consequence:
+selecting an empty preset from the web remote produces no on-screen
+feedback today — the "empty preset" message reaches only the physical
+display, through this same field. The one toast the home page can show
+(see `HomeView.vue`) is unrelated: it reports HTTP failures of
+`POST /api/command`, not source-declared overlays.
 
 Two more fields of the pushed `Morceau` carry the album cover, when there
 is one: `cover_href`, **always** a local URL of the appliance, of the
 form `/api/cover/{key}` — never the address the cover was actually found
 at, since it is the appliance that fetches an image, not the browser
 (see [plugins.md](plugins.md) for the chain that produces it) — and
-`cover_origin`, naming who supplied it (a Source, `"tags"` for one the
-core extracted itself, or a `metadata` plugin's name), shown next to the
-picture the same way `origin` is shown next to the text. Both are absent
-when no cover is held.
+`cover_origin`, described above. Both are absent when no cover is held.
 
-On the preset grid, the key matching **what is playing** is highlighted:
-the preset for the radio, the track for the CD. The active source is what
-declares it (the `preset` field of its frames, see the protocol) — the
-core never interprets what `Select(n)` was supposed to mean — and it goes
-out as soon as nothing is playing anymore.
+### Progress bar
 
-The Player card also shows the readable name the source gives that preset
-(`preset_name` in its frames), next to the number, when it declares one —
-the configured station name for the radio. It lives and dies with `preset`:
-both clear together as soon as nothing is playing anymore, and neither
-survives a source change. The field exists because that name used to live
-only in a display line the core composed for itself, one a `metadata`
-plugin was free to overwrite (see [plugins.md](plugins.md)), so the SPA had
-nothing stable to show; the CD plugin never declares one, since a track
-number is not a name.
+Under the track block, a thin bar shows the elapsed time next to the
+total duration, both drawn from the pushed `position_s`/`duration_s`.
+Four states, and the payload distinguishes all of them:
 
-The grid is not hardcoded to nine keys: the active source also declares, in
-`preset_count`, the **highest preset number it is currently using** —
-stations for the radio, tracks for the CD — not a literal count of how many
-exist, and the web UI shows only the numbers up to that ceiling. The
-distinction is usually invisible: through the admin pages presets are
-numbered contiguously (1..N), so the ceiling and the count coincide. A
-hand-edited, sparse configuration breaks that equivalence — two stations at
-presets 1 and 40 declare `preset_count: 40`, and the console display then
-reads "RADIO  1/40" — which is the field doing exactly what it promises,
-not a bug. Absent means the source says nothing on the subject,
-so the grid falls back to the historical 1-9 layout rather than being
-disarmed by a source that has not been updated; `Some(0)` is a distinct,
-meaningful answer ("nothing to number", an empty CD tray). The remembered
-count is forgotten on a source change and on standby (the newly active
-source re-declares it on activate/wake) but **not** on stop — a stopped
-radio still has its stations.
+- **position unknown** (`position_s` absent — a stopped device, standby, a
+  stream nobody follows): nothing at all is drawn, not even the elapsed
+  figure;
+- **position known, no duration**: the elapsed figure alone, no bar —
+  a bar with no end to reach would teach nothing, so none is drawn rather
+  than one that never fills;
+- **duration known too, not `seekable`**: a plain filled bar with no
+  handle and no keyboard focus, elapsed time and total duration both
+  shown — exactly the Radio France case, where knowing you're 1:27 into a
+  4:14 track has value even without being able to jump inside it;
+- **duration known and `seekable`**: a real slider (the kit's `Slider`),
+  draggable at the pointer over a 44 px tall contact zone around a 6 px
+  visual track, and operable by keyboard (arrow keys move by one
+  `seek_step_s`, Home/End jump to the ends — captured ahead of the
+  slider's own handler, so the step always matches the physical remote's).
+
+`seekable` is a field of its own rather than a deduction from `duration_s`
+being known, because the two diverge exactly where it matters: a Radio
+France station declares the duration of the song it names on a direct
+nobody can rewind, while a plain file carrying no duration tag can still
+be sought end to end — mpv knows the position best precisely there. The
+bar itself, though, needs both: a file reported `seekable` with no known
+duration still falls back to the elapsed-figure-alone state above (no
+handle to place without an end to place it against), until a duration
+arrives or the position is lost.
+
+**Exactly one `SeekTo` leaves per gesture, at release.** While a finger or
+the pointer is down, the fill and the elapsed figure follow it locally —
+no command is sent yet; releasing (or a plain click) commits the value
+with a single `SeekTo`. After release, the bar holds the value it aimed
+for rather than the payload's, until an SSE frame arrives whose
+`position_s` lands within one `seek_step_s` of it — without that, the
+frame already in flight from *before* the seek would land first and drag
+the handle back for an instant, on a page whose whole point is to trust
+what it shows. `SeekForward` and `SeekBackward` still exist in the
+protocol and drive the physical remote's stepping (see "Physical
+remote"); the web page itself sends only `SeekTo`, and — like every seek
+command — it is silently ignored on content that isn't seekable: no
+error, no overlay. The step, `seek_step_s`, lives in the core rather than
+in a key or a button, the same reasoning that already keeps the volume's
+step off the volume control itself (below): a remote never has to be
+reprogrammed just because the step it sends should now be bigger or
+smaller. It is adjustable on its own card of the config page, 10 s by
+default and bounded 1-120 s under the same `422`-on-write contract as the
+timings described there.
+
+### Transport
+
+Three keys and a dominant Play/Pause: `|◀`, then the large `▶`/`❚❚`
+button, then `▶|` — the order of a hi-fi remote and of VLC, previous/next
+either side of the frequent gesture. `Stop` and `Eject` sit apart, in
+retreat (to the right on desktop, at the end of the row on the phone).
+Play/Pause is the one filled, round, primary-colored button on the page —
+64 px on the phone, 48 px on desktop, larger than the other three keys at
+every width — and its icon now actually
+follows `playback` (▶ at rest or paused, ❚❚ while playing) instead of a
+fixed glyph: the field existed in the payload before this refonte and
+simply wasn't read yet.
+
+`playback`, one of `playing`, `paused` or `stopped`, is additive in the
+idiom this protocol already uses twice (`InputMessage.held`,
+`PluginStatus.stalled`): absent from the JSON when it is `stopped`, so no
+existing frame changed shape and an older frame still reads. It is
+deliberately *not* a deduction from `position_s` being known, because the
+two diverge exactly where it matters — a paused playback keeps its
+position, and a stream that is playing may have none at all. The core
+computes it at publication from `lecture`, `standby` and a single
+`paused` flag, rather than maintaining it along the five paths that stop
+playback: one point cannot be forgotten, five sprinkled assignments would
+be forgotten at the sixth path added. The MPD server plugin needs the
+same field for its `state: play|pause|stop` (see [plugins.md](plugins.md)),
+which was the original reason it was added.
+
+**The two seek keys and both volume keys are gone from the web page.**
+Decided in this refonte, on the strength of VLC, Deezer and Windows Media
+Player having none either: the progress bar (above) and the volume
+slider (below) do that work now. `SeekForward`/`SeekBackward` and
+`VolumeUp`/`VolumeDown` remain in the protocol and drive the physical
+remote (see "Physical remote") — the web page just no longer offers a
+button for any of the four. Eight commands remain on the page (standby,
+source switch, mute, previous, play/pause, next, stop, eject); a binding
+that still expects the web UI to grey `SeekForward`/`SeekBackward` or
+expose a ±volume control is stale.
+
+**Buttons the appliance would ignore are disabled or hidden**, never
+offered as if they worked:
+
+- in **standby** the core returns without doing anything for everything
+  but `Power` (the first line of `handle_command`), preset tiles
+  included — those buttons used to lie: the request left, the server
+  answered `204`, and nothing happened;
+- `Eject` is **hidden outright** rather than merely disabled when the
+  active source declares `can_eject: false` (`SourcePlugin::can_eject` —
+  see [plugins.md](plugins.md)); the page never compares `source` to
+  `"cd"`, a plugin name coming from `plugins.toml` and free to change
+  without anything here noticing. It is a capability of the **source**,
+  not of what is loaded: the CD player answers `true` with an empty tray
+  too, since that is exactly when one opens it. `can_eject` is
+  remembered on the same schedule as `preset_count` below: forgotten on
+  a source change and on standby, kept on a stop.
+
+`PlayPause` and `Stop` are still offered unconditionally outside standby.
+That used to be for lack of knowing whether anything was playing — the
+payload said nothing on the subject before `playback` existed — and it no
+longer is, yet the rule hasn't been revisited on the strength of it,
+deliberately: hiding *asserts* the action doesn't exist, and `Stop` on a
+stopped device is a legitimate no-op rather than a non-existent one. A
+state not yet received (the fraction of a second before the first frame)
+disables nothing: the remote opens usable, and the first frame corrects
+it.
+
+While something plays, one frame goes out every second carrying a fresh
+`position_s`, on top of whatever else changed; nothing goes out for this
+reason alone at rest, since deduplication already discards a frame
+identical to the last one and a stopped or standby device has no position
+left to advance. A transient `overlay` in flight (ignored by the SPA, see
+above, but relevant to the physical display and to the timings on the
+config page) rides along untouched by this ticking.
+
+### Volume
+
+A horizontal slider, 0-100, the speaker icon on its left and the value in
+percent on its right — no more `−`/`+` buttons, on either width. The icon
+**is** the mute toggle (`aria-pressed`, a barred-speaker glyph when
+muted): that's where the ear looks for the volume control in the first
+place. Muting dims and strikes through the percentage figure and shows a
+"MUTED" badge, but keeps the number itself legible — it's the value that
+comes back once mute is lifted, same as before.
+
+The slider sends exactly one `SetVolume` per gesture, at release
+(the same commit-on-release mechanic as the progress bar above, both
+built on the kit's shared `Slider`): the figure follows the pointer
+locally while dragging, and the slider holds the released value until a
+frame confirms it, for the same reason the progress bar does. Keyboard:
+arrow keys move by 1%, Page ↑/↓ by 10%, Home/End jump to the ends — this
+is what makes the slider's own `role="slider"` sufficient for
+accessibility, without a pair of ± buttons alongside it.
+`VolumeUp`/`VolumeDown`, with their hold-to-repeat cadence from
+`GET /api/settings`, remain the physical remote's gesture (see "Physical
+remote" and the config page's volume-hold card); the `SetVolume` the
+slider sends is the same absolute command the MPD server plugin's
+`setvol` already used (`ritornello-proto::Command::SetVolume`) — no
+change on the core's side.
+
+### Presets
+
+A tile is a number and, when known, a name — a 56 px row on the phone,
+48 px on desktop, the one matching what's playing filled in `primary`
+with a trailing dot. On the tiles, the one matching **what is playing**
+is highlighted: the preset for the radio, the track for the CD. The
+active source is what declares it (the `preset` field of its frames, see
+the protocol) — the core never interprets what `Select(n)` was supposed
+to mean — and it goes out as soon as nothing is playing anymore.
+
+The name comes from `GET /api/presets`, a read-only route added in this
+refonte: it serves, as-is, the `Catalogue` the core already keeps for the
+physical displays (`presets_par_source`, built from the `Preset` entries
+each source declares in its `presets` frames) — no new protocol payload,
+just an HTTP window onto one the core already held.
+
+    curl http://<host>:8080/api/presets
+    {"sources":[
+      {"name":"radio","presets":[{"index":1,"name":"FIP"}]},
+      {"name":"cd"}
+    ]}
+
+A source that doesn't enumerate its presets (the CD player, an aux input)
+has no `presets` field at all, rather than an empty list — the page falls
+back to bare numbers for it, same as `preset_count` below already does.
+The SPA loads the catalogue once on mount and reloads it whenever the
+active source changes (the SSE stream says so, nothing is polled for
+this); a failed load keeps the previous names rather than blanking the
+tiles, since a passing outage shouldn't un-name a station.
+
+The tiles are not hardcoded to nine keys: the active source also
+declares, in `preset_count`, the **highest preset number it is currently
+using** — stations for the radio, tracks for the CD — not a literal count
+of how many exist, and the page shows only the numbers up to that
+ceiling. The distinction is usually invisible: through the admin pages
+presets are numbered contiguously (1..N), so the ceiling and the count
+coincide. A hand-edited, sparse configuration breaks that
+equivalence — two stations at presets 1 and 40 declare
+`preset_count: 40`, and the console display then reads "RADIO  1/40" —
+which is the field doing exactly what it promises, not a bug. Absent
+means the source says nothing on the subject, so the page falls back to
+the historical 1-9 layout rather than being disarmed by a source that has
+not been updated; `Some(0)` is a distinct, meaningful answer ("nothing to
+number", an empty CD tray — the header still reads "Presets : 0", with no
+tile below it). The remembered count is forgotten on a source change and
+on standby (the newly active source re-declares it on activate/wake) but
+**not** on stop — a stopped radio still has its stations.
 
 Past the ninth preset, bare digits cannot reach further: the physical
 remote's **`+10`** key, once bound, accumulates a tens offset held by the
 **core**, cumulatively (each press adds 10), wrapping back to 0 once it
 passes the last useful decade (`(count / 10) * 10`, so a count of 20
 still lets `+10 +10` then `0` reach preset 20; with no known count, the
-offset saturates instead of wrapping) — the web grid has no `+10` button
+offset saturates instead of wrapping) — the web page has no `+10` button
 of its own, it reaches the same numbers through its own `<`/`>` page
-arrows, described below. It is shown as `+NN` through the same
-overlay slot as the volume/mute overlay, but its own deadline: the
-config page's `tens_window_ms` setting, 5 s by default and independent
-from the volume/mute overlay's own `overlay_ms` (see the config page
-section below). The `+NN` overlay lasts exactly as long as the offset
-stays armed — not an arbitrary display duration, since that equality is
-what guarantees a digit is never composed blind. A further `+10` within
-that window extends it rather than starting a new one. The next digit
+arrows, described next. It is shown as `+NN` through the same overlay
+slot as the volume/mute overlay, but its own deadline: the config page's
+`tens_window_ms` setting, 5 s by default and independent from the
+volume/mute overlay's own `overlay_ms` (see the config page section
+below). The `+NN` overlay lasts exactly as long as the offset stays armed
+— not an arbitrary display duration, since that equality is what
+guarantees a digit is never composed blind. A further `+10` within that
+window extends it rather than starting a new one. The next digit
 (`Select`) consumes the pending offset — effective number = offset +
-digit — and clears the overlay; any other command
-abandons a pending offset outright, since pressing, say, a volume key
-mid-sequence is a change of mind, not a step of it. Key **`0`** is legal
-input for exactly this: alone, with no offset pending, `Select(0)`
-selects nothing (there is no preset 0).
+digit — and clears the overlay; any other command abandons a pending
+offset outright, since pressing, say, a volume key mid-sequence is a
+change of mind, not a step of it. Key **`0`** is legal input for exactly
+this: alone, with no offset pending, `Select(0)` selects nothing (there
+is no preset 0).
 
-The web grid mirrors the same decade window **locally**, through two `<`/`>`
-arrows next to the count (shown once it exceeds nine) instead of a `+10`
-button: page 0 is 1-9, page k is 10k to 10k+9 — the same boundaries as the
-core's offset, so both interfaces agree on what "the same page" means.
-Unlike the core, the web grid does **not** wrap: `<` is disabled on the
-first page and `>` on the last, and there is no auto-return to page 0. The
-physical remote wraps because it has a single key and no way back, so
-wrapping is its only way to reach everything; a pair of arrows has a way
-back, so wrapping would just be gratuitous and confusing. Picking a preset
-does not change page either — trying several presets from the same group
-should not require paging back each time. The browser always sends the
-absolute number to `Select`.
+The web page mirrors the same decade window **locally**, through two
+`<`/`>` arrows next to the "Presets : N" count (shown once it exceeds
+nine) instead of a `+10` button: page 0 is 1-9, page k is 10k to 10k+9 —
+the same boundaries as the core's offset, so both interfaces agree on
+what "the same page" means. Unlike the core, the page does **not** wrap:
+`<` is disabled on the first page and `>` on the last, and there is no
+auto-return to page 0. The physical remote wraps because it has a single
+key and no way back, so wrapping is its only way to reach everything; a
+pair of arrows has a way back, so wrapping would just be gratuitous and
+confusing. Picking a preset does not change page either — trying several
+presets from the same group should not require paging back each time.
+The browser always sends the absolute number to `Select`.
 
-**The page follows what is playing.** On arrival and whenever the highlighted
-preset moves to another decade — the infrared remote's `+10`, another browser
-tab, a CD stepping from track 9 to 10 — the grid places itself on the page
-containing that number. Without it the grid asserted 1-9 while station 24
-played, and the highlight that answers "which preset are we on" was only
-visible after paging to it by hand. The number is clamped to the last
-non-empty page, so a source declaring a preset beyond its own count cannot
-open an empty page. With no preset declared, a **count** change (another
-source, an ejected disc) resets to page 0 — that is what carries the "changing
-source returns to the first page" guarantee. A plain stop does not move the
-page: the count survives a stop, and so does the page. Paging by hand
-survives every frame that changes neither the preset nor the count.
+**The page follows what is playing.** On arrival and whenever the
+highlighted preset moves to another decade — the infrared remote's
+`+10`, another browser tab, a CD stepping from track 9 to 10 — the tiles
+place themselves on the page containing that number. Without it the page
+asserted 1-9 while station 24 played, and the highlight that answers
+"which preset are we on" was only visible after paging to it by hand. The
+number is clamped to the last non-empty page, so a source declaring a
+preset beyond its own count cannot open an empty page. With no preset
+declared, a **count** change (another source, an ejected disc) resets to
+page 0 — that is what carries the "changing source returns to the first
+page" guarantee. A plain stop does not move the page: the count survives
+a stop, and so does the page. Paging by hand survives every frame that
+changes neither the preset nor the count.
 
-**Buttons the appliance would ignore are greyed out** rather than offered.
-Three rules, and only the three the payload lets us establish:
+### Navigation
 
-- in **standby** the core returns without doing anything for everything but
-  `Power` (the first line of `handle_command`), preset grid included — those
-  buttons used to lie: the request left, the server answered 204, and nothing
-  happened;
-- a **non-seekable** content greys the two seek keys, the same `seekable` that
-  makes the progress bar clickable, so both places on the page say the same
-  thing about a direct nobody can rewind;
-- a source **with no tray** greys `Eject`. The source declares that itself
-  (`can_eject`, from `SourcePlugin::can_eject` — see
-  [plugins.md](plugins.md)); the page never compares `source` to `"cd"`, a
-  plugin name coming from `plugins.toml` and free to change without anything
-  here noticing. It is a capability of the **source**, not of what is loaded:
-  the cd player answers true with an empty tray too, since that is exactly
-  when one opens it.
+**From `md` up**, the top bar carries the brand, a link to the config
+page ("Configuration"), one to the system page, and one per plugin with
+an admin backend, in the order `/api/status` reports them (so, of
+`plugins.toml`) — unchanged from before this refonte.
 
-Everything else stays live: `PlayPause` and `Stop` are still offered
-unconditionally. That used to be for lack of knowing — nothing in the payload
-said whether anything was playing — and it no longer is: the payload now
-carries `playback` (below). The rule has not been revisited on the strength
-of it, and deliberately so, since the two questions are different. A greyed
-button *asserts* the action does not exist, and `Stop` on a stopped device is
-a no-op rather than a non-existent action. A state not yet received (the
-fraction of a second before the first frame) greys nothing.
+**Below `md`**, the top bar is replaced by a fixed bottom tab bar, four
+entries whatever the number of plugins: **Listen** (this page),
+**Plugins**, **System**, **Settings** (the config page, under its short
+label). Tapping "Plugins" opens `/plugins/`, a list of every plugin with
+an admin page — same order and the same connected/unavailable badges as
+the config page's own table — **or**, when exactly one plugin has an
+admin page, that page directly: a one-entry list would teach nothing a
+direct link doesn't. The route exists either way; nothing on desktop
+links to the list itself, the top bar already shows each plugin.
 
-Two more fields ride the same payload for a different purpose: `position_s`,
-where in what's playing sits, in seconds, at the instant the frame is
-published, and `seekable`, whether what's playing accepts being moved
-through. `seekable` is a field of its own rather than a deduction from
-`duration_s` being known, because the two diverge exactly where it matters:
-a Radio France station declares the duration of the song it names on a
-direct nobody can rewind, while a plain file carrying no duration tag can
-still be sought end to end. Deducing one from the other would make the bar
-below clickable on a station, or refuse to draw it on an untagged file —
-precisely the case where mpv knows the position best. `position_s` is
-absent when neither of the two position sources — mpv on a finite content,
-a `metadata` plugin on a stream — has an answer right now: a stopped
-device, standby, or a stream nobody follows.
+![The radio plugin's administration page, reached from the "Plugins" tab: reorderable stations and directory search](captures/admin-radio.png)
 
-A third field of the same payload says **what the player is doing**, in one
-word: `playback`, one of `playing`, `paused` or `stopped`. It is additive in
-the idiom this protocol already uses twice (`InputMessage.held`,
-`PluginStatus.stalled`): absent from the JSON when it is `stopped`, so no
-existing frame changed shape and an older frame still reads. It is
-deliberately *not* a deduction from `position_s` being known, because the two
-diverge exactly where it matters — a paused playback keeps its position, and
-a stream that is playing may have none at all. The core computes it at
-publication from `lecture`, `standby` and a single `paused` flag, rather than
-maintaining it along the five paths that stop playback: one point cannot be
-forgotten, five sprinkled assignments would be forgotten at the sixth path
-added.
-
-Two consumers wanted it. The MPD server plugin needs `state: play|pause|stop`
-in every `status` answer it composes (see [plugins.md](plugins.md)), which
-was the reason it was added. And the SPA's play/pause button, a fixed icon
-today for lack of knowing which way it points, **can** now know: the field
-reaches the browser on the same stream as everything else. That second use is
-still an opportunity rather than a change — the web UI does not read the
-field yet.
-
-`can_eject` rides along the same way, and is remembered by the core on the
-same schedule as `preset_count`: forgotten on a source change and on standby
-(the next source re-declares it), kept on a stop — a stop does not remove the
-tray. It is a plain boolean rather than an `Option`, because "the source said
-nothing" and "the source cannot eject" call for the same greyed key, and a
-third state would have no rendering of its own.
-
-While something plays, one frame goes out every second carrying a fresh
-`position_s`, on top of whatever else changed; nothing goes out for this
-reason alone at rest, since deduplication already discards a frame
-identical to the last one and a stopped or standby device has no position
-left to advance. A transient `overlay` in flight rides along untouched by
-this ticking: the core refreshes its `remaining_ms` as it always does, but
-the tick neither shortens nor extends the deadline behind it, so a volume
-readout or a pending `+NN` lasts exactly as long as it always did, whether
-zero or fifty position frames cross it in the meantime.
-
-Under the Player card, a thin bar shows the elapsed time next to the total
-duration, both drawn from this same pushed payload. No known duration means
-no bar, the elapsed figure standing alone — a bar with no end to reach
-would teach nothing. When `seekable` is false the numbers still show, but
-the bar takes no click and no key: this is exactly the Radio France case,
-where knowing you are 1:27 into a 4:14 track has value even without being
-able to jump inside it. When it is true, clicking the bar seeks to that
-point — a drag lands there too, since releasing the mouse still fires a
-click, but nothing tracks the pointer or shows feedback while dragging — and
-the keyboard does the same (arrow keys move by one
-step, Home/End jump to the ends) — without that, the bar would be the only
-control on the page out of reach without a mouse, on a page where every
-other control is a button. It is named for a screen reader either way.
-
-Two commands drive the bar and a remote alike: `SeekForward` and
-`SeekBackward`, which move by a step rather than carrying one — the step
-lives in the core, not in the key, the same reasoning that already keeps
-the volume's 5% off the button itself — and `SeekTo`, an absolute second
-that only the bar's click and drag ever send, no physical key producing
-one. All three are silently ignored on content that isn't seekable: no
-error, no overlay, the key behaves exactly like one bound to nothing. The
-step is `seek_step_s`, adjustable on its own card of the config page,
-10 s by default and bounded 1-120 s under the same `422`-on-write contract
-as the timings described below.
-
-**Volume +/- respond to holding**, not just clicking: pointer-down sends
-one step immediately, then — after the initial delay set on the config
-page's volume-hold card — repeats at that card's interval until
-pointer-up (`pointercancel`/`pointerleave` also stop it). Keyboard
-activation (Enter/Space) still sends a single step per press. The timings
-come from `GET /api/settings`, so the web remote's autorepeat always
-matches the infrared remote's.
+Icons throughout the remote, the volume, the transport and the
+navigation come from `@radix-icons/vue` (already a dependency, for the
+theme toggle); the handful Radix doesn't have — eject, standby — are
+small hand-drawn stroke SVGs in the same 15 px grid, kept next to the
+components that use them (`components/icones/`). The admin pages of
+individual plugins are untouched and keep their own glyphs.
 
 ## Physical remote
 
@@ -339,9 +496,11 @@ followed a deliberate standby.
 
 ### Volume-hold card
 
-The two timings that pace a **held** volume key, on the physical remote
-and on the web remote's own buttons alike: the delay before the first
-repeat, and the interval between the following ones. Backed by
+The two timings that pace a **held** volume key on the physical remote
+(`VolumeUp`/`VolumeDown`; the web remote's volume is a slider and has no
+hold gesture of its own — see "Web remote and command API" above): the
+delay before the first repeat, and the interval between the following
+ones. Backed by
 `GET`/`PUT /api/settings`, with bounds enforced on write (a `PUT` outside
 them answers `422`): initial delay **200-5000 ms**, interval **100-2000
 ms**.
