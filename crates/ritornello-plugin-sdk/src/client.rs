@@ -309,7 +309,9 @@ impl DisplayClient {
 /// cœur.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdminIpcError {
-    /// Le plafond de 5 s a été atteint : le plugin vit, mais répond trop tard.
+    /// Le budget de la requête est dépassé — par silence, ou parce que le
+    /// greffon a répondu `Expired` lui-même. Le plafond n'est plus 5 s pour
+    /// tous : voir [`budget`].
     Timeout,
     /// Le socket est tombé, ou la requête a été drainée par une déconnexion.
     Closed,
@@ -328,6 +330,23 @@ impl std::fmt::Display for AdminIpcError {
 }
 
 impl std::error::Error for AdminIpcError {}
+
+/// Budget accordé à une requête admin, **par nature** : c'est le cœur qui
+/// sait qu'un actif est un `include_str!` et qu'un `SetData` peut monter un
+/// partage réseau. Un plafond unique de 5 s donnait le même délai aux deux.
+pub fn budget(req: &AdminReq) -> std::time::Duration {
+    use std::time::Duration;
+    match req {
+        AdminReq::Ping => Duration::from_millis(500),
+        AdminReq::GetAsset(_) | AdminReq::GetCatalog => Duration::from_secs(1),
+        AdminReq::GetData => Duration::from_secs(5),
+        AdminReq::SetData(_) => Duration::from_secs(30),
+    }
+}
+
+/// Marge accordée au transport au-delà du budget : le serveur répond
+/// `Expired` à l'échéance, il faut lui laisser le temps de le dire.
+const GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 pub struct AdminClient {
     writer: Mutex<OwnedWriteHalf>,
@@ -371,9 +390,10 @@ impl AdminClient {
 
     async fn request(&self, req: AdminReq) -> Result<AdminResult> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let budget = budget(&req);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
-        let msg = AdminRequest { id, req };
+        let msg = AdminRequest { id, deadline_ms: Some(budget.as_millis() as u64), req };
         {
             let mut w = self.writer.lock().await;
             if let Err(e) = w.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await {
@@ -381,7 +401,9 @@ impl AdminClient {
                 return Err(e.into());
             }
         }
-        match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+        match tokio::time::timeout(budget + GRACE, rx).await {
+            // Le greffon vit et le dit lui-même : même verdict que le silence.
+            Ok(Ok(AdminResult::Expired)) => Err(AdminIpcError::Timeout.into()),
             Ok(Ok(result)) => Ok(result),
             Ok(Err(_)) => Err(AdminIpcError::Closed.into()),
             Err(_) => {
@@ -417,6 +439,15 @@ impl AdminClient {
             AdminResult::Set { ok: true, .. } => Ok(Ok(())),
             AdminResult::Set { ok: false, error } => Ok(Err(error.unwrap_or_default())),
             other => bail!("unexpected admin response for SetData: {other:?}"),
+        }
+    }
+
+    /// Sonde à 500 ms, sans verrou côté greffon : `Err(Timeout)` = occupé,
+    /// `Err(Closed)` = mort.
+    pub async fn ping(&self) -> Result<()> {
+        match self.request(AdminReq::Ping).await? {
+            AdminResult::Pong => Ok(()),
+            other => bail!("unexpected admin response for Ping: {other:?}"),
         }
     }
 }
@@ -1268,6 +1299,54 @@ mod tests {
         assert_eq!(client.get_catalog().await.unwrap(), serde_json::json!({"btn_save": "Enregistrer"}));
         let verdict = client.set_data(serde_json::json!({})).await.unwrap();
         assert_eq!(verdict, Err("nope".to_string()));
+    }
+
+    #[test]
+    fn le_budget_depend_de_la_nature_de_la_requete() {
+        use std::time::Duration;
+        assert_eq!(budget(&AdminReq::Ping), Duration::from_millis(500));
+        assert_eq!(budget(&AdminReq::GetAsset("ui.js".into())), Duration::from_secs(1));
+        assert_eq!(budget(&AdminReq::GetCatalog), Duration::from_secs(1));
+        assert_eq!(budget(&AdminReq::GetData), Duration::from_secs(5));
+        assert_eq!(budget(&AdminReq::SetData(serde_json::json!({}))), Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn la_deadline_part_dans_la_trame_et_expired_devient_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("admin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let l = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::AdminRequest = serde_json::from_str(&l).unwrap();
+            assert_eq!(req.deadline_ms, Some(30_000), "SetData porte son budget");
+            write.write_all(b"{\"id\":1,\"result\":{\"kind\":\"Expired\"}}\n").await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let client = AdminClient::connect(&socket).await.unwrap();
+        let err = client.set_data(serde_json::json!({})).await.unwrap_err();
+        assert_eq!(err.downcast_ref::<AdminIpcError>(), Some(&AdminIpcError::Timeout));
+    }
+
+    #[tokio::test]
+    async fn ping_sans_reponse_echoue_en_moins_de_deux_secondes() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("admin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _garde = stream; // connecté, muet
+            std::future::pending::<()>().await;
+        });
+        let client = AdminClient::connect(&socket).await.unwrap();
+        let debut = std::time::Instant::now();
+        let err = client.ping().await.unwrap_err();
+        assert_eq!(err.downcast_ref::<AdminIpcError>(), Some(&AdminIpcError::Timeout));
+        // 500 ms de budget + 500 ms de grâce : bien sous les 5 s d'avant.
+        assert!(debut.elapsed() < std::time::Duration::from_secs(2), "{:?}", debut.elapsed());
     }
 
     #[tokio::test]

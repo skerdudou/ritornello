@@ -22,7 +22,7 @@ const CATALOGUE = {
   plugins_title: 'Plugins',
   col_plugin: 'Plugin', col_kind: 'Genre', col_state: 'État', col_admin: 'Admin', col_enabled: 'Actif',
   connected: 'connecté', unavailable: 'indisponible', stalled: 'figé', disabled: 'désactivé',
-  starting: 'démarrage',
+  starting: 'démarrage', busy: 'occupé',
   admin_link: 'admin', toggle_plugin: 'Activer ou désactiver {name}',
   plugin_enabled: '{name} activé.', plugin_disabled: '{name} désactivé.',
   audio_output: 'Sortie audio', audio_default_device: 'Par défaut (système)',
@@ -215,6 +215,28 @@ describe('ConfigView — table des plugins', () => {
       (l) => l.find('[data-plugin-state] [data-slot="badge"]').classes().join(' '),
     )
     expect(new Set(classes).size).toBe(3)
+  })
+
+  it('un greffon occupé (joint, mais sa page ne répond pas) se lit occupé, pas connecté', async () => {
+    // `busy` vient d'un ping de la page d'admin qui expire : le greffon vit,
+    // il est cablé, mais un `set_data` long (partage réseau) tient son verrou.
+    // « connecté » serait vrai et inutile : c'est justement ce qui ne dit rien.
+    const { w } = await monter({
+      '/api/status': {
+        plugins: [
+          { name: 'files', kind: 'source', connected: true, admin: true, busy: true },
+          { name: 'radio', kind: 'source', connected: true, admin: true },
+        ],
+        active_source: 'radio',
+      },
+    })
+    const lignes = w.findAll('[data-plugin-row]')
+    const textes = lignes.map((l) => l.find('[data-plugin-state]').text())
+    expect(textes).toEqual(['occupé', 'connecté'])
+    const classes = lignes.map(
+      (l) => l.find('[data-plugin-state] [data-slot="badge"]').classes().join(' '),
+    )
+    expect(classes[0]!).not.toBe(classes[1]!)
   })
 
   it('ne rend le lien d’admin que pour les plugins admin, sur /plugins/<nom>/', async () => {

@@ -13,10 +13,16 @@ pub trait AdminBackend: Send + Sync {
     async fn catalog(&self) -> Result<serde_json::Value>;
     async fn get_data(&self) -> Result<serde_json::Value>;
     async fn set_data(&self, data: serde_json::Value) -> Result<Result<(), String>>;
+    /// Sonde à 500 ms, sans verrou côté greffon : `Err(Timeout)` = occupé,
+    /// `Err(Closed)` = mort.
+    async fn ping(&self) -> Result<()>;
 }
 
 #[async_trait::async_trait]
 impl AdminBackend for ritornello_plugin_sdk::AdminClient {
+    async fn ping(&self) -> Result<()> {
+        ritornello_plugin_sdk::AdminClient::ping(self).await
+    }
     async fn asset(&self, path: &str) -> Result<Option<(String, String)>> {
         self.get_asset(path).await
     }
@@ -70,14 +76,16 @@ async fn refus_plugin(st: &AppState, name: &str, contexte: &str, e: &anyhow::Err
     // au diagnostic à distance, et elle est souvent plus précise que la phrase
     // affichée.
     tracing::warn!("plugin {name} admin unreachable ({contexte}): {e}");
-    let cle = match e.downcast_ref::<ritornello_plugin_sdk::AdminIpcError>() {
+    // Le code HTTP suit la cause, comme le message : 504 quand c'est le temps
+    // qui a manqué, 502 quand c'est le greffon.
+    let (code, cle) = match e.downcast_ref::<ritornello_plugin_sdk::AdminIpcError>() {
         // Vivant mais trop lent : dire « injoignable » enverrait redémarrer un
         // processus qui tourne, au lieu de regarder le réseau.
-        Some(ritornello_plugin_sdk::AdminIpcError::Timeout) => "plugin_timeout",
-        _ => "plugin_unreachable",
+        Some(ritornello_plugin_sdk::AdminIpcError::Timeout) => (StatusCode::GATEWAY_TIMEOUT, "plugin_timeout"),
+        _ => (StatusCode::BAD_GATEWAY, "plugin_unreachable"),
     };
     let msg = st.catalog.read().await.get(cle).to_string();
-    (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": msg }))).into_response()
+    (code, Json(serde_json::json!({ "error": msg }))).into_response()
 }
 
 /// `ui.js` ou `ui.css` d'un plugin. Le nom du fichier vient du chemin de la
@@ -220,6 +228,11 @@ mod tests {
             if self.lent { return Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
             if self.down { anyhow::bail!("down") }
             Ok(if self.reject { Err("présélection en double".into()) } else { Ok(()) })
+        }
+        async fn ping(&self) -> Result<()> {
+            if self.lent { return Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
+            if self.down { anyhow::bail!("down") }
+            Ok(())
         }
     }
 
@@ -450,7 +463,7 @@ mod tests {
             .oneshot(Request::get("/plugins/radio/api/data").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(r1.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(r1.status(), StatusCode::GATEWAY_TIMEOUT);
         let c1 = r1.into_body().collect().await.unwrap().to_bytes();
         let m1 = serde_json::from_slice::<serde_json::Value>(&c1).unwrap()["error"]
             .as_str()
@@ -470,5 +483,15 @@ mod tests {
 
         assert_ne!(m1, m2, "le delai depasse et la panne rendent le meme message");
         assert!(m1.contains(' ') && m2.contains(' '), "cle brute : {m1} / {m2}");
+    }
+
+    #[tokio::test]
+    async fn un_plugin_trop_lent_rend_504_et_un_plugin_mort_502() {
+        let lent = router(state_with(Fake { lent: true, ..Default::default() }));
+        let r1 = lent.oneshot(Request::get("/plugins/radio/api/data").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(r1.status(), StatusCode::GATEWAY_TIMEOUT);
+        let mort = router(state_with(Fake { down: true, ..Default::default() }));
+        let r2 = mort.oneshot(Request::get("/plugins/radio/api/data").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(r2.status(), StatusCode::BAD_GATEWAY);
     }
 }
