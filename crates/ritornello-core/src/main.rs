@@ -1725,6 +1725,29 @@ async fn main() -> Result<()> {
                     // vient de changer. Aucune ligne de statut ne porte cette
                     // information, donc rien ne pourrait la relire.
                     non_supervises.remove(&nom);
+                    // **Décâblée si c'était une Source**, exactement comme le
+                    // fait la branche de décès supervisée. Sans cette ligne, ce
+                    // chemin serait une demi-action, et une demi-action est pire
+                    // que rien ici : la page dirait « non joint » pendant que le
+                    // cœur garderait la source câblée sur un socket fermé, donc
+                    // toujours offerte au catalogue et à la télécommande. Les
+                    // deux chemins de décès doivent produire le **même** état,
+                    // sous peine que le comportement dépende de qui a lancé le
+                    // processus.
+                    //
+                    // `oublie_source_morte` et non `remove_source` : la
+                    // distinction est écrite dans sa doc, et elle vaut ici pour
+                    // la même raison — personne n'a demandé cette extinction,
+                    // donc rien ne bascule vers une autre source. La musique
+                    // continue, `active_source` garde son nom, et c'est la
+                    // conjonction « source active X, greffon X non joint » qui
+                    // porte le diagnostic.
+                    if !core.oublie_source_morte(&nom) {
+                        tracing::debug!("plugin {nom} was not a wired source, nothing to unwire");
+                    }
+                    // Un seul verrou pour les deux écritures, comme
+                    // `eteindre_a_chaud` : la ligne « déconnecté » et le nom de
+                    // la source active décrivent le même instant.
                     let mut statuts = status_state.write().await;
                     // Idempotent, et il faut qu'il le soit : pour un greffon
                     // *supervisé*, le bras `plugin_waits` marquera aussi, dans
@@ -1732,6 +1755,7 @@ async fn main() -> Result<()> {
                     // fait que poser des booléens, et `remove` sur une clé
                     // absente est un non-événement — vérifié, pas supposé.
                     crate::status::mark_plugin_disconnected(&mut statuts, &nom);
+                    statuts.active_source = core.active_source().to_string();
                 }
             }
             Some((name, update)) = source_update_rx.recv() => {

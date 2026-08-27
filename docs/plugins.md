@@ -99,6 +99,13 @@ from, which is normal and not yet worth reporting as a fault — and
 alive, said nothing by the deadline, and may still speak. Only the last
 two are worth waiting on; the first two are worth acting on.
 
+Four, and `busy` is not a fifth: it sits on a different axis. These four
+describe whether a *process* is alive and has spoken, and they are stored
+state. `busy` describes whether an already-wired plugin's *admin page*
+answers right now, is computed on every `/api/status` rather than stored,
+and says nothing about liveness — see [A plugin's UI](#a-plugins-ui),
+which describes the admin protocol's budgets and its `Ping`.
+
 Starting and stalled are the same silence read at two different ages, and
 they are mutually exclusive: a plugin gets ten seconds of benefit of the
 doubt, after which its line is downgraded — but only if it still says
@@ -116,6 +123,14 @@ manageable again, so switching it on from the admin UI launches a real,
 supervised process instead of being refused. Closing proves the peer
 closed, not that the process died — either way it is no longer
 reachable, which is what the page claims and all it claims.
+
+A dead `source` is also **unwired** from the core, exactly as it is when
+the core watched the process exit itself: the two death paths must leave
+the same state, or behaviour would depend on who launched the process.
+Nothing switches to another source, though — nobody asked for this
+shutdown. The music keeps playing, the active source keeps its name, and
+it is the conjunction "active source X, plugin X not connected" that
+carries the diagnosis.
 
 This register/announce handshake is exercised end to end by the Rust
 test suite (bind ordering, a plugin dying mid-registration, an unknown
