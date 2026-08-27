@@ -134,6 +134,10 @@ const ligneEnEdition = ref<string | null>(null)
 const edSeparateur = ref('')
 const edOrdre = ref<'artist_first' | 'title_first'>('artist_first')
 const edNePasDecouper = ref(false)
+/** La forme `Artiste - Titre - Album`, **conservee et non offerte** : aucun
+ * champ du formulaire ne la pose, mais l'edition d'une entree qui la porte doit
+ * la rejouer a l'identique. Voir `ouvrirEdition`. */
+const edTitreAuMilieu = ref(false)
 
 function ouvrirEdition(s: Station): void {
   ligneEnEdition.value = s.url
@@ -145,6 +149,12 @@ function ouvrirEdition(s: Station): void {
     edNePasDecouper.value = false
     edSeparateur.value = s.motif.separe.separateur
     edOrdre.value = s.motif.separe.artiste_en_premier ? 'artist_first' : 'title_first'
+    // Conserve, et non offert : le formulaire ne propose pas cette forme — elle
+    // ne s'obtient que par un sondage — mais il doit la **rejouer** telle
+    // quelle. Sans cette ligne, ouvrir l'edition d'une station en
+    // « Artiste - Titre - Album » puis enregistrer sans rien changer degradait
+    // son motif, et l'entree devenant manuelle, plus rien ne la reparait.
+    edTitreAuMilieu.value = s.motif.separe.titre_au_milieu === true
   }
 }
 
@@ -162,7 +172,11 @@ function annulerEdition(): void {
  */
 const erreurSeparateur = computed(() => {
   if (edNePasDecouper.value) return null
-  if (!edSeparateur.value) return t.value('separator_empty')
+  // `trim()` et non la seule vacuite : un separateur qui n'est que des espaces
+  // passait les deux controles (`' '` commence *et* finit par une espace, la
+  // meme) et aurait decoupe sur chaque espace du titre annonce. Meme predicat
+  // que le dorsal, qui reste l'autorite.
+  if (!edSeparateur.value.trim()) return t.value('separator_empty')
   if (!(edSeparateur.value.startsWith(' ') && edSeparateur.value.endsWith(' '))) {
     return t.value('separator_no_space')
   }
@@ -171,7 +185,13 @@ const erreurSeparateur = computed(() => {
 
 function construireMotif(): Motif {
   if (edNePasDecouper.value) return 'ne_pas_decouper'
-  return { separe: { separateur: edSeparateur.value, artiste_en_premier: edOrdre.value === 'artist_first' } }
+  return {
+    separe: {
+      separateur: edSeparateur.value,
+      artiste_en_premier: edOrdre.value === 'artist_first',
+      titre_au_milieu: edTitreAuMilieu.value,
+    },
+  }
 }
 
 /**

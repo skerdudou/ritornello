@@ -26,6 +26,7 @@ const CATALOGUE = {
   pattern_no_split: 'do not split',
   pattern_artist_first: 'artist first',
   pattern_title_first: 'title first',
+  pattern_title_middle: 'title in the middle field',
   filter_exceptions_only: 'Exceptions only',
   empty: 'No station probed yet.',
   empty_filtered: 'No exception: every probed station follows the standard format.',
@@ -178,7 +179,45 @@ describe('MusicBrainzAdmin', () => {
     expect(puts[0]!.corps).toEqual({
       action: 'pose',
       url: 'http://exemple/parlotte.mp3',
-      motif: { separe: { separateur: ' :: ', artiste_en_premier: false } },
+      motif: { separe: { separateur: ' :: ', artiste_en_premier: false, titre_au_milieu: false } },
+    })
+  })
+
+  it('enregistrer sans rien changer preserve la forme a trois champs', async () => {
+    // La regression que ce test existe pour empecher, trouvee en relecture : le
+    // formulaire n'**offre** pas la forme « Artiste - Titre - Album » — elle ne
+    // s'obtient que par un sondage — mais il doit la **rejouer** quand il a ete
+    // ouvert sur une entree qui la porte.
+    //
+    // Sans ca, l'operateur qui clique « Modifier » pour regarder puis
+    // « Enregistrer » sans toucher a rien degradait le motif : l'album se
+    // recollait au titre des le morceau suivant, et comme l'entree devenait
+    // manuelle, plus rien ne pouvait la reparer. Le geste destructeur n'etait
+    // pas de poser cette forme, c'etait d'enregistrer sans modification.
+    const { w, puts } = await monter({
+      stations: [
+        {
+          url: 'http://exemple/trois-champs.mp3',
+          motif: { separe: { separateur: ' - ', artiste_en_premier: true, titre_au_milieu: true } },
+          origine: 'deviation_apprise',
+          dernier_usage: '2026-08-26T12:00:00Z',
+          titres_decoupes: 7,
+        },
+      ],
+    })
+
+    // La colonne le nomme, au lieu de l'afficher comme le standard.
+    expect(w.get('[data-station-ligne]').text()).toContain('title in the middle field')
+
+    await w.get('[data-editer]').trigger('click')
+    await w.get('[data-enregistrer-edition]').trigger('click')
+    await flushPromises()
+
+    expect(puts).toHaveLength(1)
+    expect(puts[0]!.corps).toEqual({
+      action: 'pose',
+      url: 'http://exemple/trois-champs.mp3',
+      motif: { separe: { separateur: ' - ', artiste_en_premier: true, titre_au_milieu: true } },
     })
   })
 

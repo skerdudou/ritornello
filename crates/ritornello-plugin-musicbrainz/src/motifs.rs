@@ -36,6 +36,14 @@ pub enum Motif {
         /// `serde(default)` : un fichier d'état écrit avant ce champ se relit,
         /// et l'absence vaut « non », qui est la forme courante.
         ///
+        /// **Quand il est vrai, `artiste_en_premier` n'a plus d'effet** : la
+        /// forme à trois champs est toujours « artiste, puis titre, puis le
+        /// reste », et c'est la seule que `icy::candidats` produise. La
+        /// combinaison inverse est donc représentable sans être signifiante —
+        /// elle n'est pas rendue impossible par le type, parce qu'un troisième
+        /// variant d'énumération ferait payer au contrat JSON de la page une
+        /// forme qu'elle n'offre pas.
+        ///
         /// Ce champ existe parce que `icy::candidats` produit un candidat du
         /// milieu que le motif devait pouvoir **rejouer**. Sans lui, ce candidat
         /// validait puis était réenregistré sous une forme qui recollait l'album

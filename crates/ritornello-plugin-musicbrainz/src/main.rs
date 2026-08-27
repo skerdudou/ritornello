@@ -441,7 +441,25 @@ impl MetadataPlugin for MusicBrainzPlugin {
                             // devenue hors sujet le temps du vol.
                             if self.icy_en_vol.as_deref() != Some(url.as_str()) {
                                 self.icy_en_vol = Some(url.clone());
-                                let resonde = doit_resonder(&self.echecs, &url);
+                                // **Une station au motif manuel n'est jamais
+                                // resondee.** Le magasin refusait bien de
+                                // reecrire l'entree (`Magasin::apprend`), mais
+                                // rien n'empechait le sondage de partir — et
+                                // alors c'etait *son* decoupage qui s'affichait,
+                                // pas celui de l'operateur. La documentation
+                                // etait donc vraie du fichier et fausse de
+                                // l'ecran. Consulter l'origine ici ferme l'ecart
+                                // a la source : si l'operateur a tranche, on
+                                // applique ce qu'il a pose, meme quand
+                                // MusicBrainz n'en veut pas.
+                                let manuel = self
+                                    .magasin
+                                    .read()
+                                    .await
+                                    .entree(&url)
+                                    .map(|e| e.origine == motifs::Origine::Manuel)
+                                    .unwrap_or(false);
+                                let resonde = !manuel && doit_resonder(&self.echecs, &url);
                                 if resonde {
                                     // **Le resondage consomme le compteur.**
                                     // Sans ça il restait au-dessus du seuil

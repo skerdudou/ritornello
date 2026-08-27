@@ -41,20 +41,34 @@ enum Ecriture {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum MotifEcrit {
-    Separe { separateur: String, artiste_en_premier: bool },
+    Separe {
+        separateur: String,
+        artiste_en_premier: bool,
+        /// `serde(default)` alors que les autres champs sont obligatoires, et
+        /// c'est délibéré : une page qui ne connaît pas cette forme continue
+        /// d'écrire, et l'absence vaut « non » — la forme courante.
+        #[serde(default)]
+        titre_au_milieu: bool,
+    },
     NePasDecouper,
 }
 
 impl From<MotifEcrit> for Motif {
     fn from(m: MotifEcrit) -> Self {
         match m {
-            MotifEcrit::Separe { separateur, artiste_en_premier } => {
-                // `titre_au_milieu: false` : la page ne propose **pas** la forme
-                // `Artiste - Titre - Album` dans son jeu fermé, et c'est
-                // assumé — ce motif ne s'obtient que par un sondage, jamais à la
-                // main. Un utilisateur qui voudrait le forcer supprime l'entrée
-                // et laisse resonder.
-                Motif::Separe { separateur, artiste_en_premier, titre_au_milieu: false }
+            MotifEcrit::Separe { separateur, artiste_en_premier, titre_au_milieu } => {
+                // `titre_au_milieu` est **reporté** et non remis à faux.
+                //
+                // La page ne l'*offre* pas dans son jeu fermé — cette forme ne
+                // s'obtient que par un sondage — mais elle le **rejoue** quand
+                // le formulaire a été ouvert sur une entrée qui la porte. Le
+                // reposer à faux ici faisait qu'« Enregistrer » sans rien
+                // changer dégradait le motif : l'album se recollait au titre dès
+                // le morceau suivant, et comme l'entrée devenait `Manuel`, plus
+                // rien ne pouvait la réparer. Le geste destructeur n'était pas
+                // « poser cette forme », c'était « enregistrer sans
+                // modification ».
+                Motif::Separe { separateur, artiste_en_premier, titre_au_milieu }
             }
             MotifEcrit::NePasDecouper => Motif::NePasDecouper,
         }
@@ -130,7 +144,12 @@ impl AdminPlugin for MusicBrainzAdmin {
                 // deux (« Jean-Michel Jarre »). La page valide déjà pour un
                 // retour immédiat, mais le dorsal reste l'autorité.
                 if let MotifEcrit::Separe { separateur, .. } = &motif {
-                    if separateur.is_empty() {
+                    // `trim()` et non `is_empty()` : un séparateur qui n'est
+                    // que des espaces passait les deux contrôles — `" "`
+                    // commence *et* finit par une espace, la même — et aurait
+                    // découpé sur **chaque** espace de la chaîne annoncée.
+                    // « Vide » est le bon mot pour lui : il ne porte rien.
+                    if separateur.trim().is_empty() {
                         return Err(self.traduit("separator_empty"));
                     }
                     if !(separateur.starts_with(' ') && separateur.ends_with(' ')) {
@@ -269,6 +288,26 @@ mod tests {
         // appelé après la mutation, comme le contrat l'exige.
         let relu = Magasin::charge(&f.chemin_etat);
         assert_eq!(relu.entree("http://exemple/flux.mp3").unwrap().origine, Origine::Manuel);
+    }
+
+    /// Un séparateur qui n'est **que** des espaces est refusé comme vide.
+    ///
+    /// `" "` passait les deux contrôles d'origine — il commence et finit par une
+    /// espace, la même — et aurait découpé sur chaque espace de la chaîne
+    /// annoncée : « Miles Davis - So What » devenait artiste « Miles ». Constat
+    /// de la relecture croisée.
+    #[tokio::test]
+    async fn un_separateur_qui_nest_que_des_espaces_est_refuse() {
+        let mut f = fixture();
+        for sep in [" ", "  ", "\t"] {
+            let op = serde_json::json!({
+                "action": "pose",
+                "url": "http://exemple/flux.mp3",
+                "motif": { "separe": { "separateur": sep, "artiste_en_premier": true } }
+            });
+            let err = f.admin.set_data(op).await.expect_err("un separateur vide doit etre refuse");
+            assert!(!err.contains("separator_"), "jamais la cle brute : {err}");
+        }
     }
 
     #[tokio::test]
