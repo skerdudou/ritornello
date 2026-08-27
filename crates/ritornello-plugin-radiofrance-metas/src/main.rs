@@ -152,6 +152,8 @@ impl MetadataPlugin for RadioFranceMetas {
                     // lit dans la grille, qui a fréquemment un morceau de
                     // retard (voir `live::album_dans_grille`).
                     album: meta.album,
+                    year: meta.year,
+                    links: meta.links,
                     duration_s: meta.duration_s,
                     cover: meta.cover.as_deref().map(|u| CoverRef::Url { url: live::url_pochette(u) }),
                     // Ce greffon lit le flux officiel de la station : il sait mieux que
@@ -237,6 +239,13 @@ mod tests {
                     artist: Some("Etta James".into()),
                     title: Some("Fire".into()),
                     album: Some("At Last!".into()),
+                    // Valeurs non-defaut : ce test verifie que le relais porte
+                    // bien tout le supplement de la grille jusqu'a
+                    // l'enrichissement, pas seulement l'album.
+                    year: Some(1960),
+                    links: vec![ritornello_proto::Link::Youtube {
+                        url: "https://www.youtube.com/watch?v=zIqlKJj9IlY".into(),
+                    }],
                     duration_s: Some(197),
                     start_time: None,
                     cover: None,

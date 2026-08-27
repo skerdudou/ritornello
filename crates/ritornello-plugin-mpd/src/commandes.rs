@@ -611,6 +611,12 @@ fn currentsong(inst: &Instantane) -> Vec<String> {
     if let Some(album) = &morceau.album {
         lignes.push(ligne("Album", album));
     }
+    // `Date` est le nom du tag dans le protocole MPD, et il y est libre :
+    // beaucoup de bibliothèques y mettent une année seule. On y met donc
+    // l'année telle quelle, sans la maquiller en date complète qu'on n'a pas.
+    if let Some(annee) = morceau.year {
+        lignes.push(ligne("Date", annee));
+    }
     if let Some(duree) = morceau.duration_s {
         // `Time` en entier (déprécié), `duration` en décimal : les deux, parce
         // que les clients se partagent entre les deux selon leur âge.
@@ -1215,6 +1221,10 @@ mod tests {
                 title: Some("So What".into()),
                 album: Some("Kind of Blue".into()),
                 duration_s: Some(545),
+                year: Some(1959),
+                // Le protocole MPD n'a pas de champ de lien : le greffon n'en
+                // lit aucun, meme raison que `cover_href` plus bas.
+                links: Vec::new(),
                 origin: Some("musicbrainz".into()),
                 // Le protocole MPD n'a pas de champ de pochette : le greffon
                 // n'en lit aucun, mais le litteral doit rester complet — c'est
@@ -1702,6 +1712,10 @@ mod tests {
                 "Title: So What",
                 "Artist: Miles Davis",
                 "Album: Kind of Blue",
+                // `Date` s'insere entre l'album et la duree : l'ordre des
+                // lignes est celui que ce test fige, et un client qui les lit
+                // par prefixe s'en moque, mais le figer documente le choix.
+                "Date: 1959",
                 "Time: 545",
                 "duration: 545.000",
                 "Pos: 1",

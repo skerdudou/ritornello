@@ -2,9 +2,26 @@
 import { ref, watch } from 'vue'
 import { Badge, Card, CardAction, CardContent, CardHeader, CardTitle } from '@ritornello/ui'
 import BarreProgression from './BarreProgression.vue'
+import IconeAppleMusic from './icones/IconeAppleMusic.vue'
+import IconeDeezer from './icones/IconeDeezer.vue'
+import IconeYoutube from './icones/IconeYoutube.vue'
 import { useCatalog } from '../composables/useCatalog'
 import { formateDuree, riendAfficher } from '../composables/usePlayer'
 import type { PlayerPayload } from '../types'
+
+// La cle de catalogue par plateforme. Une table, et non une cle fabriquee par
+// concatenation a la volee : `i18nKeysUsed.test.ts` releve les cles citees
+// litteralement dans le source, et une cle composee lui echapperait — elle
+// pourrait disparaitre du catalogue sans qu'aucun test ne s'en apercoive.
+//
+// Ce commentaire a d'ailleurs fait tomber ce test en le citant : le prefixe
+// ecrit entre guillemets etait lu comme une cle a part entiere. D'ou la
+// paraphrase plutot qu'un exemple.
+const LIBELLE_LIEN = {
+  youtube: 'listen_on_youtube',
+  deezer: 'listen_on_deezer',
+  apple_music: 'listen_on_apple_music',
+} as const
 
 // L'etat vient du parent (HomeView), qui tient l'**unique** connexion SSE de
 // la page : la telecommande en a besoin elle aussi (touche active), et ouvrir
@@ -104,7 +121,35 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
         <div v-if="!riendAfficher(etat)" class="flex min-w-0 flex-col items-center gap-0.5 md:items-start" data-now-playing>
           <p v-if="etat?.title" class="text-xl font-semibold leading-tight text-foreground" data-titre>{{ etat.title }}</p>
           <p v-if="etat?.artist" class="text-sm text-foreground" data-artiste>{{ etat.artist }}</p>
-          <p v-if="etat?.album" class="text-sm text-muted-foreground" data-album>{{ etat.album }}</p>
+          <!-- L'annee s'accole a l'album, la ou une annee se lit. Elle sort
+               aussi seule : un flux peut la connaitre sans connaitre l'album. -->
+          <p v-if="etat?.album || etat?.year" class="text-sm text-muted-foreground">
+            <span v-if="etat?.album" data-album>{{ etat.album }}</span>
+            <span v-if="etat?.album && etat?.year"> · </span>
+            <span v-if="etat?.year" :title="t('release_year')" data-annee>{{ etat.year }}</span>
+          </p>
+          <!-- Les plateformes d'ecoute. `platform` est un ensemble ferme cote
+               protocole et l'URL a deja ete validee contre l'hote de cette
+               plateforme : rien a revalider ici. `noopener` parce que la cible
+               est un tiers, `noreferrer` parce qu'il n'a pas a savoir d'ou on
+               vient. -->
+          <div v-if="etat?.links?.length" class="mt-1 flex items-center gap-2" data-liens>
+            <a
+              v-for="lien in etat.links"
+              :key="lien.platform"
+              :href="lien.url"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="rounded text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              :aria-label="t(LIBELLE_LIEN[lien.platform])"
+              :title="t(LIBELLE_LIEN[lien.platform])"
+              :data-lien="lien.platform"
+            >
+              <IconeYoutube v-if="lien.platform === 'youtube'" />
+              <IconeDeezer v-else-if="lien.platform === 'deezer'" />
+              <IconeAppleMusic v-else />
+            </a>
+          </div>
           <!-- Qui a fourni le texte, et la pochette quand ce n'est pas le meme :
                la premiere question devant un titre faux. -->
           <div class="mt-1 flex items-center gap-1.5">

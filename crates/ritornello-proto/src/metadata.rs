@@ -56,11 +56,17 @@ pub struct Known {
     pub album: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_s: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub year: Option<u16>,
     /// Une pochette est **déjà tenue**. Un booléen, jamais l'image : un greffon
     /// n'a pas besoin de la voir pour décider s'il doit en chercher une, et la
     /// transmettre alourdirait chaque trame pour rien.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cover: bool,
+    // Pas de `links` ici, et ce n'est pas un oubli : `Known` existe pour qu'un
+    // greffon ne travaille que sur ce qui manque, or aucun des nôtres ne
+    // *cherche* des liens — il recopie ceux de la réponse qu'il lit déjà. Le
+    // champ ne changerait la décision d'aucun d'eux.
     /// Ce que le **flux lui-même** a annoncé, brut : ni découpé, ni composé,
     /// ni arbitré.
     ///
@@ -85,8 +91,17 @@ impl Known {
     /// Sert de `skip_serializing_if` : une trame qui ne dit rien de ce qui est
     /// connu doit rester identique à l'octet près à ce qu'elle était avant ce
     /// chantier, et le protocole se veut lisible à l'œil dans un journalctl.
+    /// `year` en fait partie, et l'oublier serait une perte silencieuse : ce
+    /// prédicat est le `skip_serializing_if` de `NowPlaying::known`, donc un
+    /// `Known` jugé vide **disparaît de la trame**. Une année seule connue
+    /// n'atteindrait jamais les greffons.
     pub fn est_vide(&self) -> bool {
-        self.artist.is_none() && self.title.is_none() && self.album.is_none() && self.duration_s.is_none() && !self.cover
+        self.artist.is_none()
+            && self.title.is_none()
+            && self.album.is_none()
+            && self.duration_s.is_none()
+            && self.year.is_none()
+            && !self.cover
     }
 }
 
@@ -160,6 +175,112 @@ impl CoverRef {
     }
 }
 
+/// Un lien vers la plateforme d'écoute où ce morceau se trouve.
+///
+/// Un enum fermé, et non un couple `(nom, url)` : c'est **la** décision de
+/// sécurité de ce type. La variante nomme la plateforme, et [`Self::validee`]
+/// impose alors l'hôte qui lui correspond. Une source tierce ne peut donc pas
+/// faire afficher à l'IHM un lien cliquable vers un domaine de son choix — au
+/// pire elle ment sur son propre domaine, ce qui est le risque qu'on accepte
+/// déjà en la croyant sur le titre.
+///
+/// Avec un champ `plateforme: String` libre, un `{"plateforme":"deezer",
+/// "url":"https://ailleurs.example/x"}` serait rendu tel quel : le contrôle
+/// n'aurait plus rien à quoi se raccrocher.
+///
+/// Ajouter une plateforme est une modification de ce fichier, volontairement :
+/// elle oblige à écrire son hôte ici, à côté des autres.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "platform", rename_all = "snake_case")]
+pub enum Link {
+    Youtube { url: String },
+    Deezer { url: String },
+    AppleMusic { url: String },
+}
+
+impl Link {
+    /// Les hôtes admis pour cette plateforme, et **rien d'autre**.
+    ///
+    /// Une liste et non un hôte unique, parce qu'une même plateforme se publie
+    /// sous plusieurs noms et que ce sont bien ses liens : `youtu.be` est la
+    /// forme raccourcie que YouTube émet lui-même, `music.youtube.com` sa
+    /// déclinaison musicale. Ils doivent donc marcher, et **avec la même
+    /// icône** — ce qui vient gratuitement, puisque c'est la variante et non
+    /// l'hôte qui choisit l'icône côté IHM.
+    ///
+    /// Radio France n'émet aujourd'hui que du `www.youtube.com` (mesuré le
+    /// 2026-08-27) ; les autres formes sont admises d'avance plutôt qu'après
+    /// une panne silencieuse le jour où le tiers change d'avis.
+    ///
+    /// **Cette liste est la frontière de sécurité du type.** Y ajouter un nom
+    /// est une décision, pas une formalité : tout ce qui y figure devient un
+    /// lien que l'appareil rendra cliquable sur la foi d'un tiers.
+    fn hotes_admis(&self) -> &'static [&'static str] {
+        match self {
+            Self::Youtube { .. } => {
+                &["www.youtube.com", "youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"]
+            }
+            Self::Deezer { .. } => &["www.deezer.com", "deezer.com"],
+            Self::AppleMusic { .. } => &["music.apple.com"],
+        }
+    }
+
+    fn url(&self) -> &str {
+        match self {
+            Self::Youtube { url } | Self::Deezer { url } | Self::AppleMusic { url } => url,
+        }
+    }
+
+    /// Normalise et **valide**. `None` = à jeter.
+    ///
+    /// La comparaison porte sur l'**autorité** et non sur un préfixe de chaîne :
+    /// `https://www.deezer.com.evil.example/x` a bien le vrai domaine en
+    /// préfixe sans en être un. C'est la même erreur que le greffon OUI FM a
+    /// documentée pour son hôte d'images, et elle se referme ici pour tout le
+    /// monde d'un coup.
+    ///
+    /// Le port est refusé, et l'info utilisateur (`@`) aussi : `https://
+    /// www.deezer.com@evil.example/` a pour hôte réel `evil.example`.
+    pub fn validee(self) -> Option<Self> {
+        let admis = self.hotes_admis();
+        let url = self.url().trim().to_string();
+        let reste = url.strip_prefix("https://")?;
+        let autorite = reste.split(['/', '?', '#']).next().unwrap_or("");
+        // Égalité stricte contre chaque nom admis, jamais un suffixe :
+        // `evil-youtube.com` et `youtube.com.evil.example` échouent tous deux,
+        // là où un `ends_with` laisserait passer le premier et un `starts_with`
+        // le second.
+        if !admis.contains(&autorite) {
+            return None;
+        }
+        Some(match self {
+            Self::Youtube { .. } => Self::Youtube { url },
+            Self::Deezer { .. } => Self::Deezer { url },
+            Self::AppleMusic { .. } => Self::AppleMusic { url },
+        })
+    }
+}
+
+/// Borne de vraisemblance d'une année, des deux côtés.
+///
+/// Ces valeurs viennent d'un tiers ou d'une étiquette de fichier arbitraire.
+/// Une année à 0 ou à 90210 n'apprend rien et enlaidit l'écran ; la refuser ne
+/// coûte que ce qu'elle valait.
+const ANNEE_MIN: u16 = 1000;
+const ANNEE_MAX: u16 = 2999;
+
+/// Lit une année dans les formes que rendent nos sources. `None` = à jeter.
+///
+/// Trois formes mesurées, d'où l'existence de cette fonction plutôt qu'un
+/// `parse()` chez chaque appelant : MusicBrainz rend `"1987"` ou
+/// `"2017-06-23"`, la grille Radio France rend le **nombre** 1952, et les
+/// étiquettes de fichiers rendent un peu tout, `"1972-00-00"` compris.
+pub fn annee_valide(brut: &str) -> Option<u16> {
+    let tete: String = brut.trim().chars().take_while(char::is_ascii_digit).collect();
+    let annee = tete.parse::<u16>().ok()?;
+    (ANNEE_MIN..=ANNEE_MAX).contains(&annee).then_some(annee)
+}
+
 /// Cœur → plugin. Émis à chaque changement de ce qui joue, et à l'arrêt
 /// (`identity: None`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -195,6 +316,18 @@ pub struct Enrichment {
     pub album: Option<String>,
     #[serde(default)]
     pub duration_s: Option<u32>,
+    /// Année de sortie. Validée par [`annee_valide`] chez le contributeur, et
+    /// rebornée ici par [`Self::cleaned`] : la valeur arrive d'un autre
+    /// processus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub year: Option<u16>,
+    /// Les plateformes d'écoute où ce morceau se trouve.
+    ///
+    /// Une liste et non une `Option` : un contributeur peut en connaître
+    /// plusieurs d'un coup (OUI FM rend Deezer **et** Apple Music dans la même
+    /// trame), et la liste vide dit déjà « aucune ».
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
     /// Écoulé dans le morceau **au moment de l'émission**, en secondes.
     ///
     /// Un écoulé relatif plutôt qu'un horodatage absolu : rien à synchroniser
@@ -236,6 +369,14 @@ impl Enrichment {
         vide(&mut self.title);
         vide(&mut self.album);
         self.cover = self.cover.take().and_then(CoverRef::validee);
+        // Rebornée ici même si le contributeur est censé l'avoir fait : cette
+        // valeur traverse un socket, et cette couche est celle qui est
+        // documentée comme propriétaire de la validation de forme.
+        self.year = self.year.filter(|a| (ANNEE_MIN..=ANNEE_MAX).contains(a));
+        // Chaque lien passe par sa propre validation d'hôte ; ceux qui la
+        // ratent sont **jetés un à un**, pas la liste entière : un `deezerId`
+        // douteux ne doit pas faire perdre le lien YouTube qui l'accompagne.
+        self.links = self.links.drain(..).filter_map(Link::validee).collect();
         self
     }
 
@@ -260,6 +401,17 @@ pub struct Morceau {
     pub title: Option<String>,
     pub album: Option<String>,
     pub duration_s: Option<u32>,
+    /// Année de sortie, quand un contributeur la connaît.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub year: Option<u16>,
+    /// Les plateformes d'écoute, déjà validées (voir [`Link::validee`]).
+    ///
+    /// Voyage dans la charge utile commune plutôt que par un canal réservé à
+    /// l'IHM : c'est la convention du projet, chaque afficheur compose ce
+    /// qu'il sait montrer. Un afficheur texte l'ignore, l'IHM web en fait des
+    /// boutons.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
     pub origin: Option<String>,
     /// URL **locale** de la pochette, à mettre telle quelle dans un `src`.
     /// Toujours de la forme `/api/cover/{clé}` : l'IHM ne contacte jamais
@@ -493,6 +645,14 @@ mod tests {
             title: Some("So What".into()),
             album: Some("Kind of Blue".into()),
             duration_s: Some(545),
+            // Valeurs non-defaut : ce test verifie un aller-retour complet, et
+            // un champ laisse a sa valeur par defaut ne prouverait rien de son
+            // encodage. Les deux liens couvrent les deux formes du `Vec`.
+            year: Some(1959),
+            links: vec![
+                Link::Youtube { url: "https://www.youtube.com/watch?v=zqNTltOGh5c".into() },
+                Link::Deezer { url: "https://www.deezer.com/track/9956167".into() },
+            ],
             position_s: None,
             cover: None,
             fill_only: false,
@@ -526,6 +686,96 @@ mod tests {
     }
 
     #[test]
+    fn un_lien_ne_peut_viser_que_sa_propre_plateforme() {
+        // LA propriete de securite de ce type. Ces URL viennent d'un tiers, et
+        // l'IHM en fait un lien cliquable : sans ce controle, une trame
+        // hostile place un lien vers la cible de son choix sous une icone de
+        // confiance.
+        for mauvaise in [
+            // L'hote d'une autre plateforme, ou un hote quelconque.
+            "https://www.deezer.com/track/1",
+            "https://evil.example/x",
+            // Le vrai domaine en simple prefixe de chaine, et en simple
+            // suffixe : les deux erreurs classiques d'un controle par
+            // `starts_with` ou `ends_with`.
+            "https://www.youtube.com.evil.example/x",
+            "https://evil-youtube.com/x",
+            // Confusion userinfo : l'hote reel est evil.example.
+            "https://www.youtube.com@evil.example/x",
+            // Schema.
+            "http://www.youtube.com/watch?v=a",
+            "javascript:alert(1)",
+            "",
+        ] {
+            assert!(
+                Link::Youtube { url: mauvaise.into() }.validee().is_none(),
+                "accepte a tort : {mauvaise:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn les_formes_courtes_de_youtube_sont_admises_et_gardent_la_meme_icone() {
+        // Decision du proprietaire : `youtu.be` doit marcher comme
+        // `youtube.com`, avec la meme icone. C'est gratuit — c'est la variante
+        // et non l'hote qui choisit l'icone cote IHM — a condition que la
+        // validation admette la forme courte, ce que ce test verrouille.
+        for bonne in [
+            "https://www.youtube.com/watch?v=zIqlKJj9IlY",
+            "https://youtube.com/watch?v=a",
+            "https://m.youtube.com/watch?v=a",
+            "https://music.youtube.com/watch?v=a",
+            "https://youtu.be/zIqlKJj9IlY",
+        ] {
+            let l = Link::Youtube { url: bonne.into() }.validee();
+            assert!(matches!(l, Some(Link::Youtube { .. })), "refuse a tort : {bonne:?}");
+        }
+        // Et les deux autres plateformes gardent leurs propres hotes.
+        assert!(Link::Deezer { url: "https://www.deezer.com/track/1".into() }.validee().is_some());
+        assert!(Link::Deezer { url: "https://deezer.com/track/1".into() }.validee().is_some());
+        assert!(Link::AppleMusic { url: "https://music.apple.com/us/song/1".into() }.validee().is_some());
+        // `youtu.be` n'ouvre pas la porte aux autres variantes.
+        assert!(Link::Deezer { url: "https://youtu.be/a".into() }.validee().is_none());
+    }
+
+    #[test]
+    fn un_lien_invalide_ne_fait_pas_perdre_les_autres() {
+        // Un identifiant douteux chez un fournisseur ne doit pas couter le lien
+        // valide qui l'accompagne dans la meme trame.
+        let e = Enrichment {
+            identity: json!(1),
+            links: vec![
+                Link::Deezer { url: "https://evil.example/x".into() },
+                Link::AppleMusic { url: "https://music.apple.com/us/song/1443171670".into() },
+            ],
+            ..Default::default()
+        }
+        .cleaned();
+        assert_eq!(
+            e.links,
+            vec![Link::AppleMusic { url: "https://music.apple.com/us/song/1443171670".into() }]
+        );
+    }
+
+    #[test]
+    fn une_annee_hors_bornes_est_refusee() {
+        // Ces valeurs viennent d'etiquettes de fichiers arbitraires et de
+        // tiers. Une annee a 0 ou a 90210 n'apprend rien et enlaidit l'ecran.
+        for brut in ["0", "999", "3000", "90210", "", "abc", "-1959"] {
+            assert_eq!(annee_valide(brut), None, "accepte a tort : {brut:?}");
+        }
+        // Les trois formes mesurees chez nos sources.
+        assert_eq!(annee_valide("1987"), Some(1987), "MusicBrainz, annee seule");
+        assert_eq!(annee_valide("2017-06-23"), Some(2017), "MusicBrainz, date complete");
+        assert_eq!(annee_valide("1972-00-00"), Some(1972), "etiquette de fichier bancale");
+        assert_eq!(annee_valide("  1959  "), Some(1959), "elague");
+        // Le rebornage passe aussi par `cleaned`, la couche proprietaire de la
+        // validation de forme.
+        let e = Enrichment { identity: json!(1), year: Some(90), ..Default::default() }.cleaned();
+        assert_eq!(e.year, None);
+    }
+
+    #[test]
     fn cleaned_ramene_le_blanc_a_none_et_elague() {
         let e = Enrichment {
             identity: json!(1),
@@ -533,6 +783,8 @@ mod tests {
             title: Some("  So What  ".into()),
             album: Some(String::new()),
             duration_s: None,
+            year: None,
+            links: Vec::new(),
             position_s: None,
             cover: None,
             fill_only: false,
@@ -767,6 +1019,7 @@ mod tests {
                 title: Some("Oooh Baby".into()),
                 album: None,
                 duration_s: Some(218),
+                year: Some(1972),
                 cover: true,
                 // Valeur non-défaut, comme les champs voisins : ce test verifie
                 // un aller-retour complet, et un `None` par defaut n'aurait rien

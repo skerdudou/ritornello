@@ -8,6 +8,11 @@ pub struct DiscInfo {
     pub artist: String,
     pub album: String,
     pub tracks: Vec<String>,
+    /// Année de sortie du pressage reconnu, lue dans son champ `date`.
+    ///
+    /// Mesuré : ce champ vaut tantôt `"1987"`, tantôt `"2017-06-23"`, d'où le
+    /// passage par `annee_valide` qui ne retient que la tête numérique.
+    pub year: Option<u16>,
     /// URL de la pochette, **déjà résolue** : celle du pressage reconnu quand
     /// il annonce une face avant, celle de l'album (`release-group`) sinon.
     ///
@@ -140,6 +145,7 @@ fn depouille(release: &Value, ntracks: usize) -> Option<DiscInfo> {
                 .to_string(),
             album: release.get("title").and_then(Value::as_str).unwrap_or("?").to_string(),
             tracks: titles,
+            year: release.get("date").and_then(Value::as_str).and_then(ritornello_proto::annee_valide),
             cover_url,
         });
     }

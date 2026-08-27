@@ -9,8 +9,8 @@ pub use admin::{AdminReq, AdminRequest, AdminResponse, AdminResult};
 pub use command::{Command, InputMessage};
 pub use display::{Catalogue, Cover, DisplayFrame, SourceCatalogue, COVER_MAX_BYTES};
 pub use metadata::{
-    CoverRef, Enrichment, IdentityUpdate, Known, Morceau, NowPlaying, Overlay, Playback,
-    PlayerState,
+    annee_valide, CoverRef, Enrichment, IdentityUpdate, Known, Link, Morceau, NowPlaying, Overlay,
+    Playback, PlayerState,
 };
 pub use register::{Announcement, PluginKind};
 pub use source::{Preset, SourceAction, SourceMessage, SourceReq, SourceRequest};

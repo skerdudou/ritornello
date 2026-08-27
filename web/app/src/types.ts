@@ -109,6 +109,24 @@ export interface PlayerPayload {
   artist: string | null
   title: string | null
   album: string | null
+  /**
+   * Année de sortie, quand un contributeur la connaît.
+   *
+   * Optionnelle, comme `links` : le cœur **omet** le champ plutôt que d'émettre
+   * un `null`, pour qu'une trame sans année reste identique à l'octet près à
+   * ce qu'elle était avant ce chantier.
+   */
+  year?: number | null
+  /**
+   * Les plateformes d'écoute où trouver ce morceau.
+   *
+   * Absent de la trame quand la liste est vide, d'où l'optionnel : le cœur
+   * omet le champ plutôt que d'émettre un tableau vide. `platform` est un
+   * ensemble fermé côté protocole, et l'URL a déjà été validée contre l'hôte
+   * de cette plateforme — l'IHM n'a donc rien à revérifier avant d'en faire
+   * un lien.
+   */
+  links?: { platform: 'youtube' | 'deezer' | 'apple_music'; url: string }[]
   duration_s: number | null
   origin: string | null
   /** URL locale de la pochette, servie par l'appareil. Jamais une URL externe. */

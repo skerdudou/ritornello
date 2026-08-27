@@ -5,6 +5,7 @@
 
 use anyhow::{bail, Result};
 use futures::StreamExt;
+use ritornello_proto::Link;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -28,6 +29,9 @@ pub struct Meta {
     /// vient de l'hôte connu, sinon `coverId` recomposé selon le motif du
     /// lecteur d'OUI FM lui-même.
     pub cover: Option<String>,
+    /// Les plateformes d'écoute, composées depuis les identifiants de la
+    /// trame. Voir [`liens`].
+    pub links: Vec<Link>,
 }
 
 /// Attente initiale avant reconnexion, puis doublée à chaque échec.
@@ -75,6 +79,39 @@ pub fn decoupe_lignes(tampon: &mut Vec<u8>) -> Vec<String> {
     lignes
 }
 
+/// Compose les liens de plateformes à partir des identifiants de la trame.
+///
+/// Le flux ne donne pas d'URL mais des **identifiants** (`deezerId`,
+/// `appleMusicId`), qu'il faut donc savoir mettre en forme. Les deux motifs
+/// sont mesurés le 2026-08-27 sur les identifiants d'une trame réellement
+/// capturée : Deezer rend 200 puis redirige vers `/fr/track/…`, et Apple Music
+/// rend 200 en redirigeant vers `…/song/shes-a-rainbow/1443171670` — le
+/// *slug* confirme au passage que l'identifiant désigne bien le morceau que la
+/// trame annonçait.
+///
+/// Un identifiant qui n'est pas fait que de chiffres est refusé : il entre
+/// dans une URL que l'IHM rendra cliquable, et rien n'oblige un tiers à écrire
+/// ce qu'on attend. `Link::validee` reverrouille l'hôte côté cœur, mais mieux
+/// vaut ne pas fabriquer une URL douteuse ici pour la faire refuser là-bas.
+pub fn liens(v: &serde_json::Value) -> Vec<Link> {
+    let identifiant = |cle: &str| -> Option<String> {
+        let brut = match v.get(cle)? {
+            serde_json::Value::String(s) => s.trim().to_string(),
+            serde_json::Value::Number(n) => n.to_string(),
+            _ => return None,
+        };
+        (!brut.is_empty() && brut.chars().all(|c| c.is_ascii_digit())).then_some(brut)
+    };
+    let mut out = Vec::new();
+    if let Some(id) = identifiant("deezerId") {
+        out.push(Link::Deezer { url: format!("https://www.deezer.com/track/{id}") });
+    }
+    if let Some(id) = identifiant("appleMusicId") {
+        out.push(Link::AppleMusic { url: format!("https://music.apple.com/us/song/{id}") });
+    }
+    out
+}
+
 /// Analyse une ligne du flux. `None` pour tout ce qui n'est pas une trame de
 /// métadonnées exploitable : lignes de commentaire (`:`), champs `event:`/`id:`,
 /// JSON illisible, ou trame sans artiste **ni** titre.
@@ -120,6 +157,7 @@ pub fn parse_data_line(ligne: &str) -> Option<Meta> {
         // Une durée absurde vaut mieux ignorée qu'affichée : elle vient d'un tiers.
         duration_s: duree.filter(|d| *d > 0 && *d <= 24 * 3600).map(|d| d as u32),
         cover,
+        links: liens(&v),
     };
     // Une durée seule n'est pas affichable : ce n'est pas une réponse.
     (meta.artist.is_some() || meta.title.is_some()).then_some(meta)
@@ -274,6 +312,44 @@ mod tests {
         let compose = parse_data_line(usurpe).unwrap().cover.unwrap();
         assert!(compose.starts_with("https://www.lesindesradios.fr/"), "{compose}");
         assert!(compose.contains("iid=abc"), "{compose}");
+    }
+
+    #[test]
+    fn les_deux_plateformes_sont_composees_depuis_la_trame_reelle() {
+        // Motifs mesures le 2026-08-27 sur ces identifiants precis : Deezer
+        // rend 200 (redirige vers /fr/track/…) et Apple Music rend 200 en
+        // redirigeant vers …/song/shes-a-rainbow/1443171670 — le slug confirme
+        // que l'identifiant designe bien « SHE'S A RAINBOW », ce que la trame
+        // annonce par ailleurs.
+        let m = parse_data_line(TRAME).unwrap();
+        assert_eq!(
+            m.links,
+            vec![
+                Link::Deezer { url: "https://www.deezer.com/track/9956167".into() },
+                Link::AppleMusic { url: "https://music.apple.com/us/song/1443171670".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn un_identifiant_qui_nest_pas_numerique_est_refuse() {
+        // Il entre dans une URL que l'IHM rendra cliquable. Rien n'oblige un
+        // tiers a ecrire ce qu'on attend, et un `../` ou un `@` y changerait
+        // la cible.
+        for mauvais in ["\"../evil\"", "\"9956167@evil.example\"", "\"\"", "null", "[]", "\"12 34\""] {
+            let ligne = format!(r#"data: {{"title":"t","deezerId":{mauvais}}}"#);
+            let m = parse_data_line(&ligne).unwrap();
+            assert!(m.links.is_empty(), "accepte a tort : {mauvais}");
+        }
+        // Un nombre JSON nu passe : le flux peut changer d'avis sur la forme,
+        // comme il l'a fait pour `durationInSeconds`.
+        let m = parse_data_line(r#"data: {"title":"t","deezerId":9956167}"#).unwrap();
+        assert_eq!(m.links, vec![Link::Deezer { url: "https://www.deezer.com/track/9956167".into() }]);
+    }
+
+    #[test]
+    fn une_trame_sans_identifiant_ne_donne_aucun_lien() {
+        assert!(parse_data_line(r#"data: {"title":"t"}"#).unwrap().links.is_empty());
     }
 
     #[test]

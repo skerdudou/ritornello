@@ -11,6 +11,7 @@
 //! laisser une tranche d'antenne d'une heure tranquille.
 
 use anyhow::{bail, Result};
+use ritornello_proto::Link;
 use serde_json::Value;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -21,6 +22,10 @@ pub struct Meta {
     pub artist: Option<String>,
     pub title: Option<String>,
     pub album: Option<String>,
+    /// Année et liens viennent de la **grille**, comme l'album, et sont donc
+    /// remplis au même moment (voir `suit`). Le direct ne les porte pas.
+    pub year: Option<u16>,
+    pub links: Vec<Link>,
     pub duration_s: Option<u32>,
     /// Début du morceau, en secondes depuis l'époque Unix, tel que le direct
     /// l'annonce. Brut : c'est l'émission de l'enrichissement qui en déduit
@@ -41,9 +46,8 @@ pub struct Direct {
     /// basculement d'antenne. Le délai, lui, reste exploitable.
     pub meta: Option<Meta>,
     /// Identifiant du morceau en cours, quand il y en a un. Il n'est jamais
-    /// affiché : il sert à retrouver l'album dans la grille (voir
-    /// `album_dans_grille`), qui est la seule façon de l'obtenir — le direct
-    /// ne porte pas d'album.
+    /// affiché : il sert à retrouver dans la grille ce que le direct ne porte
+    /// pas — album, année, lien (voir `supplement_dans_grille`).
     pub song_uuid: Option<String>,
     /// UUID de la pochette, **seulement quand un vrai morceau joue**.
     ///
@@ -78,15 +82,21 @@ const RAPPEL_MAX: Duration = Duration::from_secs(600);
 /// Délai retenu quand le serveur n'en annonce aucun.
 const RAPPEL_DEFAUT: Duration = Duration::from_secs(60);
 
-/// Nombre de morceaux consécutifs sans album au-delà duquel on cesse
-/// d'interroger la grille de cette station.
+/// Nombre de morceaux consécutifs pour lesquels la grille n'apprend **rien**
+/// au-delà duquel on cesse de l'interroger pour cette station.
 ///
 /// La grille publie souvent le morceau **en retard d'un** : mesuré, elle
 /// s'arrête pile au début de ce qui passe. Sur certaines stations elle
-/// rattrape en quelques secondes et l'album est là ; sur d'autres — les 45
-/// locales, notamment — elle ne l'a jamais eu sur toute la durée d'un morceau.
-/// Continuer à demander doublerait le nombre de requêtes chez un tiers pour
-/// une réponse qui ne vient pas, ce que le plafond évite.
+/// rattrape en quelques secondes ; sur d'autres — les 45 locales, notamment —
+/// elle n'a jamais rien sur toute la durée d'un morceau. Continuer à demander
+/// doublerait le nombre de requêtes chez un tiers pour une réponse qui ne
+/// vient pas, ce que le plafond évite.
+///
+/// Le critère porte sur le **supplément entier** (album, année, liens) et non
+/// sur le seul album depuis le 2026-08-27 : la grille rend l'année bien plus
+/// souvent que l'album — 9 éléments sur 9 mesurés, contre 3 sur 9 pour le lien
+/// YouTube — et une requête qui rapporte l'année n'est pas une requête pour
+/// rien.
 const MANQUES_MAX: u32 = 5;
 
 /// Durée maximale plausible pour un élément d'antenne. Au-delà, la durée vient
@@ -174,8 +184,11 @@ pub fn parse_direct(charge: &str) -> Option<Direct> {
     let meta = Meta {
         title,
         artist,
-        // Le direct ne porte pas d'album : il se lit dans la grille, à part.
+        // Le direct ne porte ni album, ni année, ni lien : tout cela se lit
+        // dans la grille, à part.
         album: None,
+        year: None,
+        links: Vec::new(),
         duration_s: duree.filter(|_| morceau_plausible).map(|d| d as u32),
         start_time: now.get("startTime").and_then(Value::as_u64).filter(|_| morceau_plausible),
         // Rempli plus tard, dans `suit`, depuis `Direct.cover` : à ce stade,
@@ -192,6 +205,27 @@ pub fn parse_direct(charge: &str) -> Option<Direct> {
     Some(Direct { meta, song_uuid, cover, recontacter })
 }
 
+/// Ce que l'élément de grille apprend en plus de l'album.
+///
+/// Regroupés parce qu'ils se lisent dans le **même** élément que
+/// `titreAlbum` : les chercher séparément relirait la grille trois fois pour
+/// une seule réponse déjà en main.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Supplement {
+    pub album: Option<String>,
+    /// `anneeEditionMusique`, un **nombre** JSON dans les réponses mesurées.
+    pub year: Option<u16>,
+    /// `lienYoutube`. Validé par `Link::validee` côté cœur, mais déjà filtré
+    /// ici sur son hôte : autant ne pas transmettre ce qui sera refusé.
+    pub links: Vec<Link>,
+}
+
+impl Supplement {
+    pub fn est_vide(&self) -> bool {
+        self.album.is_none() && self.year.is_none() && self.links.is_empty()
+    }
+}
+
 /// Album du morceau `song_uuid` dans une réponse de la grille, s'il y figure.
 ///
 /// La correspondance se fait sur `songId`, **pas** sur `uuid` : `uuid`
@@ -201,23 +235,49 @@ pub fn parse_direct(charge: &str) -> Option<Direct> {
 ///
 /// `None` est le cas courant, pas une anomalie : la grille publie souvent le
 /// morceau en retard d'un, et l'album n'est alors simplement pas encore là.
-pub fn album_dans_grille(charge: &str, song_uuid: &str) -> Option<String> {
-    let v: Value = serde_json::from_str(charge).ok()?;
-    let steps = v.get("steps")?.as_object()?;
-    let step = steps.values().find(|s| s.get("songId").and_then(Value::as_str) == Some(song_uuid))?;
-    texte(step, "titreAlbum")
+/// Tout ce que l'élément de grille du morceau apprend : album, année, liens.
+///
+/// Un seul parcours pour les trois. `Supplement::default()` quand la grille
+/// ignore le morceau — le cas courant, elle a souvent un morceau de retard, et
+/// ce n'est pas une anomalie.
+pub fn supplement_dans_grille(charge: &str, song_uuid: &str) -> Supplement {
+    let Ok(v) = serde_json::from_str::<Value>(charge) else { return Supplement::default() };
+    let Some(steps) = v.get("steps").and_then(Value::as_object) else {
+        return Supplement::default();
+    };
+    let Some(step) = steps.values().find(|s| s.get("songId").and_then(Value::as_str) == Some(song_uuid))
+    else {
+        return Supplement::default();
+    };
+    // `anneeEditionMusique` est un nombre dans les réponses mesurées, mais le
+    // texte est accepté aussi : le champ vient d'un tiers qui peut changer de
+    // forme sans préavis, exactement comme `durationInSeconds` chez OUI FM.
+    let year = match step.get("anneeEditionMusique") {
+        Some(Value::Number(n)) => Some(n.to_string()),
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+    .as_deref()
+    .and_then(ritornello_proto::annee_valide);
+    let links = texte(step, "lienYoutube")
+        .map(|url| Link::Youtube { url })
+        .and_then(Link::validee)
+        .into_iter()
+        .collect();
+    Supplement { album: texte(step, "titreAlbum"), year, links }
 }
 
-/// Interroge la grille pour l'album du morceau en cours. Toute erreur vaut
-/// « pas d'album » : c'est un supplément, il ne doit jamais empêcher le titre
-/// de partir.
-async fn cherche_album(client: &reqwest::Client, id: u32, song_uuid: &str) -> Option<String> {
-    let resp = client.get(url_grille(id)).send().await.ok()?;
+/// Interroge la grille pour ce que le morceau en cours y gagne : album, année,
+/// liens. Toute erreur vaut « rien trouvé » : ce sont des suppléments, ils ne
+/// doivent jamais empêcher le titre de partir.
+async fn cherche_supplement(client: &reqwest::Client, id: u32, song_uuid: &str) -> Supplement {
+    let Ok(resp) = client.get(url_grille(id)).send().await else { return Supplement::default() };
     if !resp.status().is_success() {
         tracing::debug!("schedule query for station {id}: HTTP {}", resp.status());
-        return None;
+        return Supplement::default();
     }
-    album_dans_grille(&resp.text().await.ok()?, song_uuid)
+    let Ok(corps) = resp.text().await else { return Supplement::default() };
+    supplement_dans_grille(&corps, song_uuid)
 }
 
 /// Interroge une fois le direct d'une station.
@@ -289,16 +349,30 @@ pub async fn suit(id: u32, profil: String, tx: mpsc::Sender<(u32, Meta)>) {
                         let mut a_envoyer = meta;
                         if let Some(uuid) = direct.song_uuid.as_deref() {
                             if manques < MANQUES_MAX {
-                                a_envoyer.album = cherche_album(&client, id, uuid).await;
-                                if a_envoyer.album.is_some() {
-                                    manques = 0;
-                                } else {
+                                let s = cherche_supplement(&client, id, uuid).await;
+                                // Le compteur porte désormais sur le
+                                // supplément **entier** et non sur le seul
+                                // album, et ce changement de critère est
+                                // volontaire : la grille rend l'année bien plus
+                                // souvent que l'album (mesuré le 2026-08-27,
+                                // 9 éléments sur 9 contre 3 sur 9 pour le lien
+                                // YouTube). Continuer à l'interroger quand elle
+                                // ne donne pas l'album mais donne l'année n'est
+                                // plus une requête pour rien — ce que ce
+                                // compteur existe pour éviter.
+                                let vide = s.est_vide();
+                                a_envoyer.album = s.album;
+                                a_envoyer.year = s.year;
+                                a_envoyer.links = s.links;
+                                if vide {
                                     manques += 1;
                                     if manques == MANQUES_MAX {
                                         tracing::debug!(
-                                            "station {id}: no album in the schedule after {MANQUES_MAX} tracks, no longer asking"
+                                            "station {id}: schedule gave nothing for {MANQUES_MAX} tracks, no longer asking"
                                         );
                                     }
+                                } else {
+                                    manques = 0;
                                 }
                             }
                         }
@@ -430,15 +504,64 @@ mod tests {
     #[test]
     fn lalbum_se_lit_dans_la_grille_par_lidentifiant_de_morceau() {
         assert_eq!(
-            album_dans_grille(GRILLE, "2edd8576-0344-4cfc-87ea-b7aaca8e3bb2").as_deref(),
+            supplement_dans_grille(GRILLE, "2edd8576-0344-4cfc-87ea-b7aaca8e3bb2").album.as_deref(),
             Some("African tribute to Art Blakey")
         );
         // L'autre élément de la même grille, pour prouver que la sélection
         // porte bien sur l'identifiant et non sur le premier venu.
         assert_eq!(
-            album_dans_grille(GRILLE, "9648da4b-ec2c-4c1d-a75c-ba88b6e2a5fb").as_deref(),
+            supplement_dans_grille(GRILLE, "9648da4b-ec2c-4c1d-a75c-ba88b6e2a5fb").album.as_deref(),
             Some("Lucky Chops")
         );
+    }
+
+    #[test]
+    fn la_grille_rend_aussi_lannee_et_le_lien_youtube() {
+        // La fixture est une capture reelle : `anneeEditionMusique` y est un
+        // **nombre** (2008), et c'est la forme mesuree le 2026-08-27 sur les
+        // stations 7 et 65. Ces deux champs etaient lus et jetes.
+        let s = supplement_dans_grille(GRILLE, "2edd8576-0344-4cfc-87ea-b7aaca8e3bb2");
+        assert_eq!(s.album.as_deref(), Some("African tribute to Art Blakey"));
+        assert_eq!(s.year, Some(2008));
+        // Cet element-la n'a pas de lien : la grille en donne moins souvent que
+        // d'annees (mesure : 3 sur 9 contre 9 sur 9).
+        assert!(s.links.is_empty());
+        assert!(!s.est_vide(), "album et annee suffisent a ne pas etre vide");
+    }
+
+    #[test]
+    fn le_lien_youtube_est_retenu_et_valide_sur_son_hote() {
+        // Motif mesure le 2026-08-27 sur les stations 7 et 65 :
+        // `https://www.youtube.com/watch?v=...`.
+        let avec = r#"{"steps":{"a":{"songId":"u","titreAlbum":"X",
+            "lienYoutube":"https://www.youtube.com/watch?v=zIqlKJj9IlY"}}}"#;
+        assert_eq!(
+            supplement_dans_grille(avec, "u").links,
+            vec![Link::Youtube { url: "https://www.youtube.com/watch?v=zIqlKJj9IlY".into() }]
+        );
+        // Un lien vers un autre hote est jete ici deja : inutile de faire
+        // traverser au coeur ce qu'il refusera.
+        let ailleurs = r#"{"steps":{"a":{"songId":"u","lienYoutube":"https://evil.example/x"}}}"#;
+        assert!(supplement_dans_grille(ailleurs, "u").links.is_empty());
+    }
+
+    #[test]
+    fn une_annee_aberrante_de_la_grille_est_ignoree_sans_perdre_lalbum() {
+        let brut = r#"{"steps":{"a":{"songId":"u","titreAlbum":"X","anneeEditionMusique":0}}}"#;
+        let s = supplement_dans_grille(brut, "u");
+        assert_eq!(s.year, None);
+        assert_eq!(s.album.as_deref(), Some("X"), "l'album survit");
+        // La forme texte est acceptee aussi : le champ vient d'un tiers qui
+        // peut changer d'avis, comme `durationInSeconds` chez OUI FM.
+        let texte = r#"{"steps":{"a":{"songId":"u","anneeEditionMusique":"1952"}}}"#;
+        assert_eq!(supplement_dans_grille(texte, "u").year, Some(1952));
+    }
+
+    #[test]
+    fn un_supplement_introuvable_est_vide_et_ne_panique_pas() {
+        assert!(supplement_dans_grille(GRILLE, "00000000-0000-0000-0000-000000000000").est_vide());
+        assert!(supplement_dans_grille("pas du json", "u").est_vide());
+        assert!(supplement_dans_grille("", "u").est_vide());
     }
 
     #[test]
@@ -446,19 +569,19 @@ mod tests {
         // `uuid` identifie l'élément de grille, `songId` le morceau — et c'est
         // `songId` que le direct renvoie. Les confondre ne trouverait jamais
         // rien, silencieusement.
-        assert!(album_dans_grille(GRILLE, "8c391d63-ff9d-4f2c-9ca9-4290e6ed88e1").is_none());
+        assert!(supplement_dans_grille(GRILLE, "8c391d63-ff9d-4f2c-9ca9-4290e6ed88e1").album.is_none());
     }
 
     #[test]
     fn une_grille_qui_ignore_le_morceau_ne_donne_pas_dalbum() {
         // Le cas le plus courant : la grille a un morceau de retard.
-        assert!(album_dans_grille(GRILLE, "00000000-0000-0000-0000-000000000000").is_none());
-        assert!(album_dans_grille("", "peu-importe").is_none());
-        assert!(album_dans_grille("pas du json", "peu-importe").is_none());
-        assert!(album_dans_grille(r#"{"stationId":65}"#, "peu-importe").is_none());
+        assert!(supplement_dans_grille(GRILLE, "00000000-0000-0000-0000-000000000000").album.is_none());
+        assert!(supplement_dans_grille("", "peu-importe").album.is_none());
+        assert!(supplement_dans_grille("pas du json", "peu-importe").album.is_none());
+        assert!(supplement_dans_grille(r#"{"stationId":65}"#, "peu-importe").album.is_none());
         // Élément trouvé mais sans album : rien à dire non plus.
         let sans = r#"{"steps":{"x":{"songId":"u","titreAlbum":"  "}}}"#;
-        assert!(album_dans_grille(sans, "u").is_none());
+        assert!(supplement_dans_grille(sans, "u").album.is_none());
     }
 
     #[test]

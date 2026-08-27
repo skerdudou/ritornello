@@ -33,6 +33,7 @@ function complet(etat: Partial<PlayerPayload>): PlayerPayload {
     artist: null,
     title: null,
     album: null,
+    year: null,
     duration_s: null,
     origin: null,
     cover_href: null,
@@ -340,5 +341,78 @@ describe('PlayerCard', () => {
     })
     expect(w.find('[data-slot="card-action"] [data-test-action]').exists()).toBe(true)
     expect(w.find('[data-test-commandes]').exists()).toBe(true)
+  })
+
+  describe('année', () => {
+    it("s'accole à l'album, séparée par un point médian", () => {
+      const w = monteAvec({ title: 'So What', album: 'Kind of Blue', year: 1959 })
+      expect(w.find('[data-album]').text()).toBe('Kind of Blue')
+      expect(w.find('[data-annee]').text()).toBe('1959')
+      // Les deux dans la meme ligne, avec le separateur entre eux.
+      expect(w.find('[data-album]').element.parentElement?.textContent).toContain('Kind of Blue · 1959')
+    })
+
+    it('sort seule quand aucun album n’est connu', () => {
+      // Reel : un flux peut donner l'annee sans l'album, la grille Radio France
+      // rend l'une bien plus souvent que l'autre.
+      const w = monteAvec({ title: 'Fire', album: null, year: 1960 })
+      expect(w.find('[data-annee]').text()).toBe('1960')
+      expect(w.find('[data-album]').exists()).toBe(false)
+    })
+
+    it('ne laisse aucune trace quand elle est inconnue', () => {
+      const w = monteAvec({ title: 'So What', album: 'Kind of Blue' })
+      expect(w.find('[data-annee]').exists()).toBe(false)
+    })
+  })
+
+  describe('liens de plateformes', () => {
+    it('rend une icône par plateforme, en lien externe sûr', () => {
+      const w = monteAvec({
+        title: 'Get Lucky',
+        links: [
+          { platform: 'youtube', url: 'https://www.youtube.com/watch?v=5NV6Rdv1a3I' },
+          { platform: 'deezer', url: 'https://www.deezer.com/track/9956167' },
+        ],
+      })
+      expect(w.findAll('[data-lien]')).toHaveLength(2)
+      const yt = w.get('[data-lien="youtube"]')
+      expect(yt.attributes('href')).toBe('https://www.youtube.com/watch?v=5NV6Rdv1a3I')
+      expect(yt.attributes('target')).toBe('_blank')
+      // `noopener` : la cible est un tiers. `noreferrer` : il n'a pas a savoir
+      // d'ou on vient.
+      expect(yt.attributes('rel')).toBe('noopener noreferrer')
+      // Un nom accessible traduit, pas une icone muette.
+      expect(yt.attributes('aria-label')).toBeTruthy()
+      expect(yt.find('svg').exists()).toBe(true)
+      expect(w.find('[data-lien="deezer"]').exists()).toBe(true)
+    })
+
+    it('distingue les trois plateformes par leur icône', () => {
+      const w = monteAvec({
+        title: 'Get Lucky',
+        links: [
+          { platform: 'youtube', url: 'https://www.youtube.com/watch?v=a' },
+          { platform: 'deezer', url: 'https://www.deezer.com/track/1' },
+          { platform: 'apple_music', url: 'https://music.apple.com/us/song/1' },
+        ],
+      })
+      const svg = w.findAll('[data-lien] svg').map((s) => s.html())
+      expect(new Set(svg).size).toBe(3)
+    })
+
+    it("n'affiche pas la rangée quand il n'y a aucun lien", () => {
+      expect(monteAvec({ title: 'So What' }).find('[data-liens]').exists()).toBe(false)
+      expect(monteAvec({ title: 'So What', links: [] }).find('[data-liens]').exists()).toBe(false)
+    })
+
+    it('reste muet quand on ne sait rien du morceau par ailleurs', () => {
+      // Toute la zone est derriere `riendAfficher` : des icones de plateformes
+      // seules, sans titre ni artiste, seraient des boutons sans sujet. Regle
+      // heritee du composant, verifiee ici parce que les liens sont la
+      // premiere donnee qui pourrait arriver seule.
+      const w = monteAvec({ links: [{ platform: 'youtube', url: 'https://www.youtube.com/watch?v=a' }] })
+      expect(w.find('[data-liens]').exists()).toBe(false)
+    })
   })
 })

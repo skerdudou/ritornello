@@ -210,7 +210,16 @@ impl Metadonnees {
             tracing::debug!("enrichment from {plugin} stale, ignored");
             return false;
         }
-        if e.is_empty() && e.cover.is_none() {
+        // `is_empty()` ne parle que du **texte**. La pochette avait déjà dû
+        // être exemptée ici ; l'année et les liens sont dans le même cas, et
+        // les oublier les perdrait en silence — un contributeur qui n'apporte
+        // qu'une année serait compté comme n'ayant rien répondu, et sa valeur
+        // jetée avant même d'atteindre l'arbitrage.
+        //
+        // Aucun de nos greffons n'est dans ce cas aujourd'hui : tous portent
+        // du texte quand ils portent une année. C'est précisément pour ça que
+        // l'oubli aurait été invisible.
+        if e.is_empty() && e.cover.is_none() && e.year.is_none() && e.links.is_empty() {
             tracing::debug!("empty enrichment from {plugin}, counted as no response");
             return false;
         }
@@ -388,6 +397,7 @@ impl Metadonnees {
             title: m.title,
             album: m.album,
             duration_s: m.duration_s,
+            year: m.year,
             cover: self.cover_retenue().is_some(),
             // Verbatim, et depuis `self.icy` et non depuis `m` : `m` est le
             // texte **composé**, où l'ICY n'apparaît qu'en dernier recours.
@@ -442,6 +452,17 @@ impl Metadonnees {
             if m.duration_s.is_none() {
                 m.duration_s = e.duration_s;
             }
+            if m.year.is_none() {
+                m.year = e.year;
+            }
+            // Même règle que les autres champs, décidée avec le propriétaire :
+            // le gagnant l'emporte, un `fill_only` ne fait que combler un vide.
+            // Pas de fusion par plateforme — ce serait une politique inventée
+            // pour un cas que nos sources ne produisent pas, aucune ne donnant
+            // à la fois du YouTube et du Deezer.
+            if m.links.is_empty() {
+                m.links = e.links.clone();
+            }
         }
         m
     }
@@ -488,6 +509,8 @@ impl Metadonnees {
                     title: e.title.clone(),
                     album: e.album.clone(),
                     duration_s: e.duration_s,
+                    year: e.year,
+                    links: e.links.clone(),
                     origin: Some(plugin.clone()),
                     ..Default::default()
                 };
@@ -802,6 +825,73 @@ mod tests {
         let (r, origine) = m.cover_retenue().expect("le greffon specialise fournit une pochette");
         assert_eq!(origine, "specialise", "declare plus bas, il ne doit pourtant pas ceder au fill_only");
         assert_eq!(r, CoverRef::Url { url: "https://coverartarchive.org/b/front-500".into() });
+    }
+
+    #[test]
+    fn lannee_et_les_liens_suivent_la_regle_du_gagnant() {
+        // Regle tranchee avec le proprietaire : le gagnant l'emporte, un
+        // `fill_only` ne fait que combler un vide. Pas de fusion par
+        // plateforme — ce serait une politique inventee pour un cas que nos
+        // sources ne produisent pas.
+        use ritornello_proto::Link;
+        let id = json!({"kind": "stream"});
+        let mut m = Metadonnees::new(vec!["gagnant".into(), "filler".into()]);
+        m.set_identity(Some(id.clone()));
+        m.ajoute(
+            "gagnant",
+            Enrichment {
+                identity: id.clone(),
+                title: Some("T".into()),
+                year: Some(1959),
+                links: vec![Link::Youtube { url: "https://www.youtube.com/watch?v=a".into() }],
+                ..Default::default()
+            },
+        );
+        m.ajoute(
+            "filler",
+            Enrichment {
+                identity: id.clone(),
+                year: Some(1999),
+                links: vec![Link::Deezer { url: "https://www.deezer.com/track/1".into() }],
+                fill_only: true,
+                ..Default::default()
+            },
+        );
+        let etat = m.etat();
+        assert_eq!(etat.year, Some(1959), "le fill_only n'ecrase pas");
+        assert_eq!(
+            etat.links,
+            vec![Link::Youtube { url: "https://www.youtube.com/watch?v=a".into() }],
+            "pas de fusion : les liens du gagnant, et eux seuls"
+        );
+    }
+
+    #[test]
+    fn un_fill_only_comble_lannee_et_les_liens_que_le_gagnant_ignore() {
+        use ritornello_proto::Link;
+        let id = json!({"kind": "stream"});
+        let mut m = Metadonnees::new(vec!["gagnant".into(), "filler".into()]);
+        m.set_identity(Some(id.clone()));
+        m.ajoute(
+            "gagnant",
+            Enrichment { identity: id.clone(), title: Some("T".into()), ..Default::default() },
+        );
+        m.ajoute(
+            "filler",
+            Enrichment {
+                identity: id.clone(),
+                year: Some(1999),
+                links: vec![Link::Deezer { url: "https://www.deezer.com/track/1".into() }],
+                fill_only: true,
+                ..Default::default()
+            },
+        );
+        let etat = m.etat();
+        assert_eq!(etat.year, Some(1999));
+        assert_eq!(etat.links.len(), 1);
+        // Et `known()` republie l'annee composee, pour qu'un greffon sache
+        // qu'elle est deja tenue.
+        assert_eq!(m.known().year, Some(1999));
     }
 
     #[test]

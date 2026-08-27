@@ -146,8 +146,11 @@ impl MetadataPlugin for OuiFmMetas {
                     identity: identite.clone(),
                     artist: meta.artist,
                     title: meta.title,
-                    // Le flux ne donne pas d'album (ce sont des webradios).
+                    // Le flux ne donne pas d'album (ce sont des webradios), ni
+                    // d'année : mesuré, la trame ne porte aucun champ de date.
                     album: None,
+                    year: None,
+                    links: meta.links.clone(),
                     duration_s: meta.duration_s,
                     // Ce plugin ne sait pas où en est la lecture : il répond
                     // sur l'identité d'un morceau, pas sur son déroulement.
@@ -226,6 +229,12 @@ mod tests {
                     title: Some("Wanna Get Free".into()),
                     duration_s: Some(214),
                     cover: None,
+                    // Valeur non-defaut : ce test verifie que les liens
+                    // composes depuis la trame traversent jusqu'a
+                    // l'enrichissement.
+                    links: vec![ritornello_proto::Link::Deezer {
+                        url: "https://www.deezer.com/track/9956167".into(),
+                    }],
                 },
             ))
             .await

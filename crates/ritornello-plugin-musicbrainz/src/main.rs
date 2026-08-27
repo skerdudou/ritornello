@@ -278,6 +278,9 @@ impl MusicBrainzPlugin {
             artist: Some(info.artist.clone()),
             title: Some(titre.clone()),
             album: Some(info.album.clone()),
+            // Le lookup par TOC porte la date du pressage : l'annee est donc
+            // gratuite sur le chemin disque, sans requete de plus.
+            year: info.year,
             // MusicBrainz donnerait les durées avec `inc=recordings`, mais la
             // durée n'est pas affichée : rien ne justifie d'alourdir la requête.
             duration_s: None,

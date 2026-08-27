@@ -207,6 +207,14 @@ pub fn file_tags(data: &Value) -> Option<Morceau> {
         title: champ("title"),
         album: champ("album"),
         duration_s: None,
+        // FFmpeg normalise l'année sous `date`, quel que soit le format du
+        // fichier — comme il le fait déjà pour les trois champs ci-dessus. Sa
+        // valeur va de `"1959"` à `"1959-08-17"` selon ce que l'étiquette
+        // porte, d'où le passage par `annee_valide`.
+        year: champ("date").as_deref().and_then(ritornello_proto::annee_valide),
+        // Un fichier local ne porte pas de lien de plateforme : ce sont les
+        // flux qui en annoncent.
+        links: Vec::new(),
         origin: Some(crate::metadata::ORIGINE_TAGS.to_string()),
         cover_href: None,
         cover_origin: None,
