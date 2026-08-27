@@ -125,6 +125,14 @@ const reglages = ref<SettingsPayload>({
   overlay_ms: 5000,
   tens_window_ms: 5000,
   seek_step_s: 10,
+  // Mêmes défauts que la page config : ce repli doit rester un SettingsPayload
+  // complet, sinon `vue-tsc` refuse — c'est ce qui a signalé l'oubli.
+  cover_source_max_mio: 20,
+  cover_rendition: true,
+  cover_max_edge_px: 640,
+  cover_jpeg_quality: 85,
+  cover_max_bytes_ko: 512,
+  cover_max_pixels_mpx: 16,
 })
 onMounted(async () => {
   reglages.value = await api.get<SettingsPayload>('/api/settings').catch(() => reglages.value)

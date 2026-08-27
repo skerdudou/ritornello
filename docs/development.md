@@ -192,6 +192,32 @@ Three audiences, three rules — the boundary is the audience, not the file:
     npm run typecheck                                   # vue-tsc
     npm run e2e -w app                                  # Playwright journeys
 
+### Continuous integration
+
+`.github/workflows/ci.yml` runs those five commands on every push and pull
+request, on Ubuntu, in four jobs:
+
+- `web` — `npm ci`, build of the six workspaces, `vue-tsc`, vitest; it
+  publishes the `dist/` directories as an artifact, because they are
+  git-ignored and the Rust jobs need them;
+- `rust` — downloads the dist, **refuses to go on if one is missing**
+  (`build.rs` would otherwise embed a placeholder UI and only warn), then
+  `cargo build`, `clippy -D warnings`, `cargo test`; `ffmpeg` is installed
+  so the duration tests do not skip themselves;
+- `e2e` — same dist, debug build of the core, `mpv` installed (the
+  journeys really play), Playwright on chromium; the report is uploaded on
+  failure;
+- `release` — on a `v*` tag only: `cross build --release` for
+  `armv7-unknown-linux-gnueabihf`, and the binaries `deploy.sh` expects as
+  an artifact.
+
+Ubuntu and not Windows because the SDK tests open Unix sockets.
+`scripts/ci-local.sh [web|rust|e2e]` runs the same commands in the same
+order from WSL — if one of the two changes, the other must follow. A known
+flaky class (a test that assumes fast execution; the plan
+`docs/superpowers/plans/2026-08-26-ci-github-actions.md` lists the known
+cases) is fixed at the source when it shows up, never retried blindly.
+
 The project's testing style: pure functions tested against **real
 captures** (mpv frames, radio-browser responses, OUI FM feeds, Radio
 France live answers), and

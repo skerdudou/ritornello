@@ -216,6 +216,10 @@ pub fn search(
 
 /// Marche filtrante. Rend la cause d'un arrêt anticipé, `None` si la marche a
 /// couvert tout le dossier.
+// Neuf paramètres : les trois derniers sont l'état de la récursion, les six
+// premiers ses bornes. Les regrouper dans une struct n'apporterait qu'un nom
+// de plus à lire — accepté tel quel.
+#[allow(clippy::too_many_arguments)]
 fn marche_cherchant(
     dir: &Path,
     motif: &str,
@@ -249,7 +253,7 @@ fn marche_cherchant(
         }
         // Mesurée toutes les `PAS_ECHEANCE` entrées, pas à chaque entrée :
         // `Instant::elapsed` n'est pas gratuit.
-        if *visites % PAS_ECHEANCE == 0 && debut.elapsed() >= delai {
+        if visites.is_multiple_of(PAS_ECHEANCE) && debut.elapsed() >= delai {
             return Ok(Some(FinDeRecherche::Interrompue));
         }
         // `metadata` et non `symlink_metadata`, comme dans `marche` : un lien
@@ -565,13 +569,12 @@ mod tests {
         assert!(trouves.is_empty(), "aucun fichier non-audio ne doit etre rapporte");
     }
 
-    #[test]
-    fn le_plafond_de_visite_de_la_recherche_depasse_celui_de_la_liste() {
-        // Les deux plafonds ne mesurent pas la même chose : `MAX_TRACKS` borne ce
-        // qu'on peut AJOUTER, `MAX_VISITES` ce qu'on peut PARCOURIR en cherchant.
-        // Les confondre est exactement le défaut corrigé ici.
-        assert!(MAX_VISITES > MAX_TRACKS);
-    }
+    // Les deux plafonds ne mesurent pas la même chose : `MAX_TRACKS` borne ce
+    // qu'on peut AJOUTER, `MAX_VISITES` ce qu'on peut PARCOURIR en cherchant.
+    // Les confondre est exactement le défaut corrigé ici. Vérifié à la
+    // compilation : un test sur deux constantes ne peut pas échouer à
+    // l'exécution, clippy le refuse à raison.
+    const _: () = assert!(MAX_VISITES > MAX_TRACKS);
 
     #[test]
     fn une_recherche_rend_les_correspondances_et_seulement_elles() {

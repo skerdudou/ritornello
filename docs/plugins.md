@@ -198,9 +198,9 @@ purpose.
   `name` is not a declaration, so the block is simply appended again
   below. Keeping a plugin off a device is therefore decided in the
   repository, not on the device: remove it from
-  `deploy/plugins.example.toml` **and** from the `PLUGINS` list in
-  `deploy/deploy.sh`, which the script requires to name the same set and
-  refuses to run otherwise. `enabled = false` (see [Turning a plugin
+  `deploy/plugins.example.toml` — `deploy/deploy.sh` derives the list of
+  binaries it ships from that file, so there is nothing else to keep in
+  step. `enabled = false` (see [Turning a plugin
   off](#turning-a-plugin-off)) is a different, reversible thing — it
   stops a *declared* plugin from launching without touching the
   declaration itself, so the entry stays exactly where it is and a
