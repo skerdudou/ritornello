@@ -124,6 +124,16 @@ supervised process instead of being refused. Closing proves the peer
 closed, not that the process died — either way it is no longer
 reachable, which is what the page claims and all it claims.
 
+Its **admin page goes with it**: the status lines stop advertising one, so
+the entry leaves the top menu, and the core forgets the plugin's admin
+backend along with any UI assets it had cached — `/plugins/<name>/`
+answers a plain 404 instead of reaching for a closed socket. That last
+part also fixes a development annoyance that had nothing to do with
+death: the asset cache promised to last only "for the lifetime of the
+plugin's process" but was never cleared, so a plugin restarted by hand
+with a rebuilt `ui.js` kept serving the old one until the core itself
+restarted. Re-announcing now clears it, which is the same act.
+
 A dead `source` is also **unwired** from the core, exactly as it is when
 the core watched the process exit itself: the two death paths must leave
 the same state, or behaviour would depend on who launched the process.
