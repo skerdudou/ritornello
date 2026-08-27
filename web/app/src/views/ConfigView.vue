@@ -87,6 +87,7 @@ interface LigneGreffon {
   stalled: boolean
   starting: boolean
   disabled: boolean
+  busy: boolean
   admin: boolean
 }
 
@@ -100,6 +101,7 @@ interface AccGreffon {
   stalled: boolean
   starting: boolean
   disabled: boolean
+  busy: boolean
   admin: boolean
 }
 
@@ -123,6 +125,7 @@ const greffons = computed<LigneGreffon[]>(() => {
         stalled: !!p.stalled,
         starting: !!p.starting,
         disabled: !!p.disabled,
+        busy: !!p.busy,
         admin: p.admin,
       })
       continue
@@ -132,6 +135,7 @@ const greffons = computed<LigneGreffon[]>(() => {
     acc.stalled = acc.stalled || !!p.stalled
     acc.starting = acc.starting || !!p.starting
     acc.disabled = acc.disabled || !!p.disabled
+    acc.busy = acc.busy || !!p.busy
     acc.admin = acc.admin || p.admin
   }
   return [...parNom.values()].map((acc) => {
@@ -149,6 +153,7 @@ const greffons = computed<LigneGreffon[]>(() => {
       stalled: acc.stalled,
       starting: acc.starting,
       disabled: acc.disabled,
+      busy: acc.busy,
       admin: acc.admin,
     }
   })
@@ -300,25 +305,31 @@ function aller(id: string) {
                       :variant="
                         p.disabled
                           ? 'outline'
-                          : p.connected
-                            ? 'secondary'
-                            : p.starting
+                          : p.busy
+                            ? 'outline'
+                            : p.connected
                               ? 'secondary'
-                              : p.stalled
-                                ? 'outline'
-                                : 'destructive'
+                              : p.starting
+                                ? 'secondary'
+                                : p.stalled
+                                  ? 'outline'
+                                  : 'destructive'
                       "
                     >
-                      <!-- « Démarrage » passe **avant** « figé » : les deux
-                           disent que le greffon n'a pas parlé, et seul le temps
-                           écoulé les distingue. Afficher « figé » pendant un
-                           démarrage normal accusait à tort un binaire
-                           parfaitement sain. -->
+                      <!-- « Occupé » passe **avant** « connecté » : un greffon
+                           occupé est joint, et c'est justement pour ça que
+                           « connecté » ne dit rien d'utile. « Démarrage » passe
+                           **avant** « figé » : les deux disent que le greffon
+                           n'a pas parlé, et seul le temps écoulé les distingue.
+                           Afficher « figé » pendant un démarrage normal accusait
+                           à tort un binaire parfaitement sain. -->
                       {{
                         p.disabled
                           ? t('disabled')
-                          : p.connected
-                            ? t('connected')
+                          : p.busy
+                            ? t('busy')
+                            : p.connected
+                              ? t('connected')
                             : p.starting
                               ? t('starting')
                               : p.stalled
