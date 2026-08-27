@@ -26,6 +26,16 @@ pub struct Candidat {
     pub titre: String,
     pub separateur: &'static str,
     pub artiste_en_premier: bool,
+    /// Le titre est le champ du **milieu** — la forme `Artiste - Titre - Album`.
+    ///
+    /// Ce drapeau existe parce que `Motif` doit pouvoir **rejouer** ce candidat.
+    /// Une première version ne le portait pas, et le défaut était une boucle
+    /// infinie plutôt qu'un simple titre faux : le candidat du milieu validait,
+    /// le motif enregistré ne retenait que le séparateur et l'ordre, donc
+    /// `applique` recollait l'album au titre au morceau suivant, la validation
+    /// échouait, trois échecs déclenchaient un resondage, le même candidat
+    /// validait de nouveau — et ainsi de suite pour toujours.
+    pub titre_au_milieu: bool,
 }
 
 /// Retire le bruit qu'une station accole à ce qu'elle annonce.
@@ -85,21 +95,23 @@ pub fn candidats(nettoye: &str) -> Vec<Candidat> {
         }
         let tete = parts[0];
         let reste = parts[1..].join(separateur);
-        let mut pousse = |artiste: &str, titre: &str, artiste_en_premier: bool| {
-            if artiste.is_empty() || titre.is_empty() || out.len() >= MAX_CANDIDATS {
-                return;
-            }
-            out.push(Candidat {
-                artiste: artiste.to_string(),
-                titre: titre.to_string(),
-                separateur,
-                artiste_en_premier,
-            });
-        };
-        pousse(tete, &reste, true);
-        pousse(&reste, tete, false);
+        let mut pousse =
+            |artiste: &str, titre: &str, artiste_en_premier: bool, titre_au_milieu: bool| {
+                if artiste.is_empty() || titre.is_empty() || out.len() >= MAX_CANDIDATS {
+                    return;
+                }
+                out.push(Candidat {
+                    artiste: artiste.to_string(),
+                    titre: titre.to_string(),
+                    separateur,
+                    artiste_en_premier,
+                    titre_au_milieu,
+                });
+            };
+        pousse(tete, &reste, true, false);
+        pousse(&reste, tete, false, false);
         if parts.len() >= 3 {
-            pousse(tete, parts[1], true);
+            pousse(tete, parts[1], true, true);
         }
     }
     out
@@ -116,9 +128,23 @@ pub fn candidats(nettoye: &str) -> Vec<Candidat> {
 /// **est** l'échec de validation dont parle la règle des trois échecs
 /// consécutifs — pas une erreur, un morceau qui ne rentre pas dans la forme.
 pub fn applique(motif: &crate::motifs::Motif, nettoye: &str) -> Option<(String, String)> {
-    let crate::motifs::Motif::Separe { separateur, artiste_en_premier } = motif else {
+    let crate::motifs::Motif::Separe { separateur, artiste_en_premier, titre_au_milieu } = motif
+    else {
         return None;
     };
+    // `titre_au_milieu` : la forme `Artiste - Titre - Album`, où le titre est le
+    // **deuxième** champ et le reste est ignoré. Sans cette branche, le motif
+    // appris d'un candidat du milieu recollait l'album au titre — et comme la
+    // validation échouait alors à chaque morceau, la station se faisait
+    // resonder sans fin. Voir `Candidat::titre_au_milieu`.
+    if *titre_au_milieu {
+        let parts: Vec<&str> = nettoye.split(separateur.as_str()).map(str::trim).collect();
+        let (artiste, titre) = (parts.first()?, parts.get(1)?);
+        if artiste.is_empty() || titre.is_empty() {
+            return None;
+        }
+        return Some((artiste.to_string(), titre.to_string()));
+    }
     let (tete, reste) = nettoye.split_once(separateur.as_str())?;
     let (tete, reste) = (tete.trim(), reste.trim());
     if tete.is_empty() || reste.is_empty() {
@@ -233,7 +259,8 @@ mod tests {
 
     #[test]
     fn appliquer_un_motif_redonne_le_couple() {
-        let m = Motif::Separe { separateur: " - ".into(), artiste_en_premier: false };
+        let m =
+            Motif::Separe { separateur: " - ".into(), artiste_en_premier: false, titre_au_milieu: false };
         assert_eq!(
             applique(&m, "So What - Miles Davis"),
             Some(("Miles Davis".to_string(), "So What".to_string())),
@@ -241,11 +268,55 @@ mod tests {
         );
     }
 
+    /// **La propriété qui relie les deux moitiés du chantier**, et que rien ne
+    /// prouvait : rejouer le motif d'un candidat sur la chaîne dont il est issu
+    /// doit redonner ce candidat, à l'identique.
+    ///
+    /// Son intérêt n'est pas théorique. Le sondage retient le candidat que
+    /// MusicBrainz a validé, puis tous les morceaux suivants sont découpés par
+    /// `applique` sans plus aucune requête. Si les deux fonctions divergeaient
+    /// sur une forme quelconque, l'appareil afficherait un artiste et un titre
+    /// **faux après un sondage réussi** — la pire des combinaisons, puisque la
+    /// validation a bien eu lieu et que rien au journal ne le signalerait.
+    ///
+    /// Éprouvée sur toutes les formes que les autres tests traitent une à une,
+    /// **plus** celles qui les combinent : plusieurs séparateurs dans la même
+    /// chaîne, trois champs, séparateurs rares, et un nom composé.
+    #[test]
+    fn appliquer_le_motif_dun_candidat_redonne_ce_candidat() {
+        let formes = [
+            "Miles Davis - So What",
+            "So What - Miles Davis",
+            "Miles Davis – So What",
+            "Miles Davis — So What",
+            "Miles Davis / So What",
+            "Miles Davis : So What",
+            "Miles Davis - So What - Kind of Blue",
+            "A - B / C : D – E",
+            "Daft Punk - Around the World (Radio Edit)",
+            "Jean-Michel Jarre - Oxygene Pt. 4",
+        ];
+        for forme in formes {
+            let nettoye = nettoie(forme);
+            let cands = candidats(&nettoye);
+            assert!(!cands.is_empty(), "« {forme} » doit produire au moins un candidat");
+            for c in cands {
+                let motif = crate::motifs::Motif::depuis_candidat(&c);
+                assert_eq!(
+                    applique(&motif, &nettoye),
+                    Some((c.artiste.clone(), c.titre.clone())),
+                    "motif {motif:?} rejoue sur « {nettoye} » doit redonner {c:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn appliquer_un_motif_absent_de_la_chaine_rend_none() {
         // Le morceau où la station change de forme : pas un couple bancal,
         // rien du tout. C'est ce `None` qui compte comme échec de validation.
-        let m = Motif::Separe { separateur: " - ".into(), artiste_en_premier: true };
+        let m =
+            Motif::Separe { separateur: " - ".into(), artiste_en_premier: true, titre_au_milieu: false };
         assert_eq!(applique(&m, "Vous ecoutez Radio X"), None);
     }
 

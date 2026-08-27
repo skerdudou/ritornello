@@ -1044,7 +1044,13 @@ mod tests {
     // --- Chemin ICY (radio) ---------------------------------------------
 
     fn candidat(artiste: &str, titre: &str, artiste_en_premier: bool) -> icy::Candidat {
-        icy::Candidat { artiste: artiste.to_string(), titre: titre.to_string(), separateur: " - ", artiste_en_premier }
+        icy::Candidat {
+            artiste: artiste.to_string(),
+            titre: titre.to_string(),
+            separateur: " - ",
+            artiste_en_premier,
+            titre_au_milieu: false,
+        }
     }
 
     fn enregistrement(score: u64, titre: &str) -> musicbrainz::Enregistrement {

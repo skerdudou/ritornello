@@ -27,7 +27,24 @@ use std::path::Path;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Motif {
-    Separe { separateur: String, artiste_en_premier: bool },
+    Separe {
+        separateur: String,
+        artiste_en_premier: bool,
+        /// Le titre est le champ du **milieu** (`Artiste - Titre - Album`), le
+        /// reste étant ignoré.
+        ///
+        /// `serde(default)` : un fichier d'état écrit avant ce champ se relit,
+        /// et l'absence vaut « non », qui est la forme courante.
+        ///
+        /// Ce champ existe parce que `icy::candidats` produit un candidat du
+        /// milieu que le motif devait pouvoir **rejouer**. Sans lui, ce candidat
+        /// validait puis était réenregistré sous une forme qui recollait l'album
+        /// au titre : la validation échouait à chaque morceau, trois échecs
+        /// déclenchaient un resondage, le même candidat regagnait — une boucle
+        /// sans fin, trouvée par le test qui compare `applique` à `candidats`.
+        #[serde(default)]
+        titre_au_milieu: bool,
+    },
     NePasDecouper,
 }
 
@@ -38,7 +55,11 @@ impl Motif {
     /// découpages plausibles depuis une chaîne, `depuis_candidat` retient
     /// lequel a validé, pour le rejouer sans réseau la prochaine fois.
     pub fn depuis_candidat(c: &Candidat) -> Motif {
-        Motif::Separe { separateur: c.separateur.to_string(), artiste_en_premier: c.artiste_en_premier }
+        Motif::Separe {
+            separateur: c.separateur.to_string(),
+            artiste_en_premier: c.artiste_en_premier,
+            titre_au_milieu: c.titre_au_milieu,
+        }
     }
 }
 
@@ -69,7 +90,12 @@ impl Origine {
     /// confiance à l'origine déjà posée pour savoir si elle peut réécrire.
     pub fn depuis_motif(motif: &Motif) -> Origine {
         match motif {
-            Motif::Separe { separateur, artiste_en_premier: true } if separateur == " - " => {
+            // `titre_au_milieu: false` fait partie de la définition du
+            // standard : `Artiste - Titre - Album` est une déviation, même si
+            // son séparateur et son ordre sont ceux du standard.
+            Motif::Separe { separateur, artiste_en_premier: true, titre_au_milieu: false }
+                if separateur == " - " =>
+            {
                 Origine::StandardConfirme
             }
             _ => Origine::DeviationApprise,
@@ -264,7 +290,21 @@ mod tests {
     use super::*;
 
     fn separe(sep: &str, premier: bool) -> Motif {
-        Motif::Separe { separateur: sep.to_string(), artiste_en_premier: premier }
+        Motif::Separe {
+            separateur: sep.to_string(),
+            artiste_en_premier: premier,
+            titre_au_milieu: false,
+        }
+    }
+
+    /// La forme `Artiste - Titre - Album`, dont le motif doit se distinguer du
+    /// standard : voir `Origine::depuis_motif`.
+    fn separe_milieu(sep: &str) -> Motif {
+        Motif::Separe {
+            separateur: sep.to_string(),
+            artiste_en_premier: true,
+            titre_au_milieu: true,
+        }
     }
 
     #[test]
@@ -276,6 +316,11 @@ mod tests {
         assert_eq!(Origine::depuis_motif(&separe(" - ", false)), Origine::DeviationApprise);
         assert_eq!(Origine::depuis_motif(&separe(" / ", true)), Origine::DeviationApprise);
         assert_eq!(Origine::depuis_motif(&Motif::NePasDecouper), Origine::DeviationApprise);
+        assert_eq!(
+            Origine::depuis_motif(&separe_milieu(" - ")),
+            Origine::DeviationApprise,
+            "« Artiste - Titre - Album » n'est pas le standard, meme avec son separateur et son ordre"
+        );
     }
 
     #[test]

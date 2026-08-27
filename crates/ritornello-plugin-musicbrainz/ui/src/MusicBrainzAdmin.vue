@@ -24,7 +24,17 @@ function url(chemin: string): string {
 // un objet avec un champ `type` — le typer comme une union de ces deux formes
 // exactes evite de reconstituer une forme qui n'existe pas cote serveur.
 interface MotifSepare {
-  separe: { separateur: string; artiste_en_premier: boolean }
+  separe: {
+    separateur: string
+    artiste_en_premier: boolean
+    /** La forme `Artiste - Titre - Album` : le titre est le champ du milieu.
+     *
+     * Optionnel parce que le champ est additif cote dorsal (`serde(default)`),
+     * donc un fichier d'etat ecrit avant lui se relit sans l'avoir. Et la page
+     * ne le **produit** jamais : ce motif ne s'obtient que par un sondage,
+     * jamais a la main — le jeu ferme de l'edition ne le propose pas. */
+    titre_au_milieu?: boolean
+  }
 }
 type Motif = MotifSepare | 'ne_pas_decouper'
 type Origine = 'standard_confirme' | 'deviation_apprise' | 'manuel'
@@ -98,7 +108,14 @@ function texteOrigine(o: Origine): string {
 
 function texteMotif(m: Motif): string {
   if (m === 'ne_pas_decouper') return t.value('pattern_no_split')
-  const ordre = m.separe.artiste_en_premier ? t.value('pattern_artist_first') : t.value('pattern_title_first')
+  // La forme `Artiste - Titre - Album` porte le meme separateur et le meme
+  // ordre que le standard : sans mention propre, elle s'afficherait comme lui
+  // et la page mentirait par omission sur la seule colonne qu'on vient y lire.
+  const ordre = m.separe.titre_au_milieu
+    ? t.value('pattern_title_middle')
+    : m.separe.artiste_en_premier
+      ? t.value('pattern_artist_first')
+      : t.value('pattern_title_first')
   return `"${m.separe.separateur}" (${ordre})`
 }
 

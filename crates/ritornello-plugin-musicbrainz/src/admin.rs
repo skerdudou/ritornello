@@ -49,7 +49,12 @@ impl From<MotifEcrit> for Motif {
     fn from(m: MotifEcrit) -> Self {
         match m {
             MotifEcrit::Separe { separateur, artiste_en_premier } => {
-                Motif::Separe { separateur, artiste_en_premier }
+                // `titre_au_milieu: false` : la page ne propose **pas** la forme
+                // `Artiste - Titre - Album` dans son jeu fermé, et c'est
+                // assumé — ce motif ne s'obtient que par un sondage, jamais à la
+                // main. Un utilisateur qui voudrait le forcer supprime l'entrée
+                // et laisse resonder.
+                Motif::Separe { separateur, artiste_en_premier, titre_au_milieu: false }
             }
             MotifEcrit::NePasDecouper => Motif::NePasDecouper,
         }
@@ -107,7 +112,15 @@ impl AdminPlugin for MusicBrainzAdmin {
         // sur le type. Un champ manquant ou une action inconnue doit refuser
         // la requête, pas se faire compléter par un défaut de *chargement*.
         let ecriture: Ecriture =
-            serde_json::from_value(data).map_err(|e| format!("Unexpected request: {e}"))?;
+            serde_json::from_value(data).map_err(|e| {
+                // Par le catalogue, comme tous les autres refus de cette
+                // méthode : une chaîne anglaise en dur n'est pas « une phrase
+                // traduite », elle est juste une clé déguisée — un utilisateur
+                // en français verrait de l'anglais. Le catalogue du greffon
+                // n'avait pas cette clé (oubli de mon brief), elle a été ajoutée
+                // sur le modèle exact de celle du greffon mpd.
+                self.catalog.read().unwrap().get("bad_request").replace("{detail}", &e.to_string())
+            })?;
 
         let mut magasin = self.magasin.write().await;
         match ecriture {
@@ -237,9 +250,19 @@ mod tests {
         let data = f.admin.get_data().await;
         assert_eq!(data["stations"][0]["url"], "http://exemple/flux.mp3");
         assert_eq!(data["stations"][0]["origine"], "manuel");
+        // `titre_au_milieu` figure dans la forme sérialisée : le champ est
+        // additif (`serde(default)`), donc la page qui l'ignore continue de
+        // lire, et celle qui n'envoie que les deux autres continue d'écrire.
+        // Figé ici parce que c'est le contrat que la page consomme.
         assert_eq!(
             data["stations"][0]["motif"],
-            serde_json::json!({ "separe": { "separateur": " - ", "artiste_en_premier": true } })
+            serde_json::json!({
+                "separe": {
+                    "separateur": " - ",
+                    "artiste_en_premier": true,
+                    "titre_au_milieu": false
+                }
+            })
         );
 
         // Persisté sur disque, pas seulement en mémoire : `enregistre` a été
