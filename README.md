@@ -90,6 +90,7 @@ station directory, *their* screen or *their* remote without asking anyone.
 </p>
 <p align="center">
   <img src="docs/captures/accueil-telephone.png" width="30%" alt="The home page on a phone: the remote control fits the screen">
+  <img src="docs/captures/systeme.png" width="66%" alt="The system page: CPU, memory, a history graph, load average, storage — and shutdown/reboot further down">
 </p>
 
 ## Architecture

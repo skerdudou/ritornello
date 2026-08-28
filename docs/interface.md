@@ -733,6 +733,8 @@ recognisable is left exactly as it is.
 
 ## System page
 
+![The system page, captured on a development machine (hence the missing temperature and frequency): CPU, memory, history graph, load average, storage](captures/systeme.png)
+
 `GET /api/system` reports OS metrics. **Every metric is optional and is
 `null` when the machine does not expose it** — no thermal zone under WSL, no
 cpufreq in most VMs, no `rpi_volt` sensor outside a Raspberry Pi — while the

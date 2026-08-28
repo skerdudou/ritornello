@@ -18,7 +18,11 @@ if (!cwd.endsWith('/web/app')) {
 const OUT = resolve(process.cwd(), '../../docs/captures')
 mkdirSync(OUT, { recursive: true })
 
-async function capture(navigateur, nom, { largeur, hauteur, mode, chemin = '/' }) {
+// `attente` : delai avant la prise, en ms. 800 suffit partout sauf sur /system,
+// dont l'usage CPU est un delta calcule dans la page et l'historique une
+// fenetre glissante : ouverts depuis moins d'un cycle de rafraichissement,
+// ils affichent « — » et une courbe vide.
+async function capture(navigateur, nom, { largeur, hauteur, mode, chemin = '/', attente = 800 }) {
   const page = await navigateur.newPage({ viewport: { width: largeur, height: hauteur }, deviceScaleFactor: 2 })
   try {
     await page.goto(`${BASE}/`)
@@ -28,7 +32,7 @@ async function capture(navigateur, nom, { largeur, hauteur, mode, chemin = '/' }
     try {
       await page.evaluate((m) => fetch('/api/theme', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(m) }), { ...theme, mode })
       await page.goto(`${BASE}${chemin}`)
-      await page.waitForTimeout(800)
+      await page.waitForTimeout(attente)
       await page.screenshot({ path: resolve(OUT, `${nom}.png`), fullPage: false })
     } finally {
       // Remis dans l'etat trouve meme si la capture plante en chemin : sans
@@ -47,6 +51,7 @@ try {
   await capture(navigateur, 'accueil-sombre', { largeur: 1280, hauteur: 800, mode: 'dark' })
   await capture(navigateur, 'accueil-telephone', { largeur: 390, hauteur: 844, mode: 'light' })
   await capture(navigateur, 'admin-radio', { largeur: 1280, hauteur: 800, mode: 'light', chemin: '/plugins/radio/' })
+  await capture(navigateur, 'systeme', { largeur: 1280, hauteur: 800, mode: 'light', chemin: '/system', attente: 25_000 })
 } finally {
   // Sinon un navigateur Chromium reste ouvert (et le process ne se termine
   // jamais) des qu'une des quatre captures echoue.
