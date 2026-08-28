@@ -21,13 +21,23 @@ struct EcritureConfig {
 
 pub struct MpdAdmin {
     pub config_path: PathBuf,
-    /// Copie en mémoire, distincte de celle qui a servi à ouvrir le socket
-    /// TCP au démarrage : un changement n'y prend effet qu'au redémarrage du
-    /// greffon (`restart_notice`), donc rien ici ne pilote la moitié réseau.
-    /// Elle sert seulement à ce que `get_data` reflète le dernier
-    /// enregistrement réussi sans relire le disque à chaque requête.
+    /// Copie en mémoire du dernier enregistrement réussi : `get_data` la rend
+    /// sans relire le disque à chaque requête.
     pub config: RwLock<Config>,
     pub catalog: Arc<RwLock<Catalog>>,
+    /// Par où la nouvelle configuration atteint la moitié réseau, qui se relie
+    /// alors sans redémarrage (voir `session::ecouter`).
+    ///
+    /// **Envoyée après l'écriture disque et jamais avant** : ce qui est servi
+    /// doit être ce qui est enregistré, et une reliaison sur une configuration
+    /// que le fichier ne porte pas encore serait perdue au premier vrai
+    /// redémarrage — l'appareil écouterait alors ailleurs qu'à l'endroit qu'il
+    /// annonce.
+    ///
+    /// `Option` pour les tests, qui éprouvent la validation et l'écriture sans
+    /// monter de socket. Un `None` ne fait rien, silencieusement : c'est
+    /// exactement l'ancien comportement.
+    pub rebind_tx: Option<tokio::sync::watch::Sender<Config>>,
 }
 
 #[async_trait::async_trait]
@@ -70,7 +80,14 @@ impl AdminPlugin for MpdAdmin {
         config
             .enregistrer(&self.config_path)
             .map_err(|cle| self.catalog.read().unwrap().get(&cle).to_string())?;
-        *self.config.write().unwrap() = config;
+        *self.config.write().unwrap() = config.clone();
+        // La moitié réseau se relie toute seule. `send` échoue seulement si
+        // plus personne n'écoute — le greffon s'arrête — et il n'y a alors rien
+        // à relier ni rien à signaler à l'utilisateur : le fichier est écrit,
+        // ce qu'il demandait est fait.
+        if let Some(tx) = &self.rebind_tx {
+            let _ = tx.send(config);
+        }
         Ok(())
     }
 }
@@ -84,6 +101,15 @@ mod tests {
         _dir: tempfile::TempDir,
     }
 
+    /// Un admin câblé à un canal de reliaison, pour les tests qui veulent voir
+    /// ce que la moitié réseau reçoit.
+    fn fixture_avec_rebind() -> (Fixture, tokio::sync::watch::Receiver<Config>) {
+        let mut f = fixture();
+        let (tx, rx) = tokio::sync::watch::channel(Config::default());
+        f.admin.rebind_tx = Some(tx);
+        (f, rx)
+    }
+
     fn fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("mpd.toml");
@@ -94,7 +120,12 @@ mod tests {
             crate::MPD_EN,
         )));
         Fixture {
-            admin: MpdAdmin { config_path, config: RwLock::new(Config::default()), catalog },
+            admin: MpdAdmin {
+                config_path,
+                config: RwLock::new(Config::default()),
+                catalog,
+                rebind_tx: None,
+            },
             _dir: dir,
         }
     }
@@ -150,6 +181,32 @@ mod tests {
         assert!(f.admin.set_data(op).await.is_ok());
         assert_eq!(f.admin.get_data().await, serde_json::json!({ "listen": "192.168.1.10", "port": 6601 }));
         assert_eq!(Config::charger(&f.admin.config_path).port, 6601);
+    }
+
+    #[tokio::test]
+    async fn un_enregistrement_reussi_fait_relier_la_moitie_reseau() {
+        // La demande du propriétaire : ne plus avoir à relancer le greffon à la
+        // main. La page écrit le fichier **puis** pousse la configuration ; la
+        // moitié réseau lie le nouveau couple adresse/port (voir
+        // `session::ecouter`).
+        let (mut f, mut rx) = fixture_avec_rebind();
+        assert!(f.admin.set_data(serde_json::json!({ "listen": "127.0.0.1", "port": 6612 })).await.is_ok());
+        assert!(rx.has_changed().unwrap(), "la moitie reseau doit etre prevenue");
+        let c = rx.borrow_and_update().clone();
+        assert_eq!((c.listen.as_str(), c.port), ("127.0.0.1", 6612));
+        // Et ce qui est poussé est bien ce qui est sur disque : servir une
+        // adresse que le fichier ne porte pas la ferait disparaître au premier
+        // vrai redémarrage.
+        assert_eq!(Config::charger(&f.admin.config_path), c);
+    }
+
+    #[tokio::test]
+    async fn un_enregistrement_refuse_ne_fait_rien_relier() {
+        // Le pendant : un port invalide ne doit surtout pas faire lâcher le
+        // socket qui sert.
+        let (mut f, rx) = fixture_avec_rebind();
+        assert!(f.admin.set_data(serde_json::json!({ "listen": "0.0.0.0", "port": 0 })).await.is_err());
+        assert!(!rx.has_changed().unwrap(), "rien ne doit etre pousse sur un refus");
     }
 
     #[tokio::test]

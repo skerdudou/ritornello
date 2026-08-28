@@ -61,9 +61,12 @@ async function recharger(): Promise<void> {
 onMounted(recharger)
 
 /**
- * Enregistre l'ecoute. Le port ne change pas a chaud (`restart_notice`,
- * toujours visible au-dessus du formulaire) : rien ici ne tente de le
- * signaler apres coup, la page ne fait que persister le reglage.
+ * Enregistre l'ecoute. Le greffon se relie de lui-meme au nouveau couple
+ * adresse/port des que l'enregistrement aboutit (voir `session::ecouter`) ;
+ * `restart_notice`, toujours visible au-dessus du formulaire, dit ce qui reste
+ * vrai — les clients deja connectes gardent leur session sur l'ancien port.
+ * Rien ici ne pilote la reliaison : la page ne fait que persister le reglage,
+ * et c'est `admin.rs` qui previent la moitie reseau.
  *
  * `api.put` ne rejette jamais (reseau coupe compris) : le resultat est la
  * seule source de verite, jamais une exception a rattraper. Un refus (422)

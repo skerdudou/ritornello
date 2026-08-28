@@ -216,3 +216,35 @@ test('onglet Système : métriques et boutons présents', async ({ page }) => {
   await page.goto('/')
   await expect(page.locator('[data-nav-haut] a[href="/system"]')).toBeVisible()
 })
+/**
+ * **Le CSS d'un plugin ne doit pas defaire celui du shell.**
+ *
+ * Regression reelle : les deux passes Tailwind ecrivaient dans la meme couche
+ * `utilities`, et la feuille du plugin — injectee apres, et laissee en place a
+ * dessein — gagnait a specificite egale. Le `class="hidden"` du champ de
+ * fichier d'`InputAdmin` ecrasait ainsi le `md:flex` de la barre de navigation,
+ * qui disparaissait pour le reste de la session.
+ *
+ * Un parcours et pas un test unitaire : le defaut ne vit ni dans le balisage ni
+ * dans les composants mais dans la cascade CSS de deux feuilles reellement
+ * servies, ce que jsdom ne calcule pas.
+ */
+test('le menu du haut survit a une visite de generic-input', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.locator('[data-nav-haut]')).toBeVisible()
+
+  // Navigation SPA (un clic), et non un `goto` : c'est le cas reel. Un
+  // rechargement complet jetterait la feuille de style injectee, donc
+  // masquerait justement le defaut.
+  await page.locator('[data-nav-haut] a', { hasText: 'generic-input' }).click()
+  await expect(page.locator('[data-device-select]')).toBeVisible()
+  await expect(page.locator('[data-nav-haut]')).toBeVisible()
+
+  // Et le champ de fichier du plugin — celui dont le `.hidden` ecrasait le
+  // shell — reste bien masque : la couche `greffon` ne doit pas avoir desarme
+  // le CSS du plugin sur son propre balisage.
+  await expect(page.locator('[data-import]')).toBeHidden()
+
+  await page.locator('[data-nav-haut] a', { hasText: 'Configuration' }).click()
+  await expect(page.locator('[data-nav-haut]')).toBeVisible()
+})

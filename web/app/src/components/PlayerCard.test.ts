@@ -1,4 +1,5 @@
 import { mount } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import PlayerCard from './PlayerCard.vue'
 import type { PlayerPayload } from '../types'
@@ -234,7 +235,9 @@ describe('PlayerCard', () => {
     const img = w.find('[data-pochette] img')
     expect(img.exists()).toBe(true)
     // L'IHM ne doit jamais pointer vers l'exterieur : le coeur sert l'image.
-    expect(img.attributes('src')).toBe('/api/cover/1a2b')
+    // Et elle demande la **vignette** : le carre fait 224 px, le `folder.jpg`
+    // d'un NAS en fait couramment trois mebioctets.
+    expect(img.attributes('src')).toBe('/api/cover/1a2b?taille=vignette')
     expect(w.find('[data-cover-origin]').text()).toContain('files')
   })
 
@@ -292,7 +295,51 @@ describe('PlayerCard', () => {
     // Et une **autre** image redonne sa chance a l'element : sans cela, un
     // seul echec condamnerait le carre pour le reste de la session.
     await w.setProps({ etat: complet({ title: 'So What', cover_href: '/api/cover/3c4d' }) })
-    expect(w.get('[data-pochette] img').attributes('src')).toBe('/api/cover/3c4d')
+    expect(w.get('[data-pochette] img').attributes('src')).toBe(
+      '/api/cover/3c4d?taille=vignette',
+    )
+  })
+
+  it('agrandit la pochette au clic, et la referme au clic suivant', async () => {
+    const w = monteAvec({ title: 'So What', cover_href: '/api/cover/1a2b' })
+    // Rien d'ouvert au depart.
+    expect(document.body.querySelector('[data-pochette-agrandie]')).toBeNull()
+
+    await w.get('[data-pochette-agrandir]').trigger('click')
+    const surcouche = document.body.querySelector('[data-pochette-agrandie]')
+    expect(surcouche).not.toBeNull()
+    // La vue agrandie charge l'image **pleine**, pas la vignette : c'est tout
+    // l'interet d'agrandir.
+    expect(surcouche?.querySelector('img')?.getAttribute('src')).toBe('/api/cover/1a2b')
+
+    // La surcouche est **teleportee vers le body** : elle n'appartient pas au
+    // sous-arbre du wrapper, donc `w.get` ne la voit pas. On la pilote par le
+    // DOM, comme le ferait un vrai clic.
+    const fermer = document.body.querySelector<HTMLElement>('[data-pochette-fermer]')
+    expect(fermer).not.toBeNull()
+    fermer!.click()
+    await nextTick()
+    expect(document.body.querySelector('[data-pochette-agrandie]')).toBeNull()
+    w.unmount()
+  })
+
+  it('referme la pochette agrandie quand la piste change', async () => {
+    // Sinon l'image de la piste suivante s'affiche en plein ecran sans que
+    // personne l'ait demande.
+    const w = monteAvec({ title: 'So What', cover_href: '/api/cover/1a2b' })
+    await w.get('[data-pochette-agrandir]').trigger('click')
+    expect(document.body.querySelector('[data-pochette-agrandie]')).not.toBeNull()
+
+    await w.setProps({ etat: complet({ title: 'Blue in Green', cover_href: '/api/cover/9f9f' }) })
+    expect(document.body.querySelector('[data-pochette-agrandie]')).toBeNull()
+    w.unmount()
+  })
+
+  it("n'offre pas d'agrandissement quand il n'y a pas de pochette", () => {
+    // Un bouton qui n'ouvre rien est pire qu'aucun bouton : le repli ♫ n'est
+    // pas une image.
+    const w = monteAvec({ title: 'So What' })
+    expect(w.find('[data-pochette-agrandir]').exists()).toBe(false)
   })
 
   it('ne montre rien de la progression quand aucune position n est connue', () => {

@@ -56,9 +56,9 @@ function remonter(): void {
 </script>
 
 <template>
+  <!-- Sans titre, comme les deux autres volets : l'onglet le porte deja, et
+       `TabsContent` en fait le nom accessible de cette section. -->
   <section class="space-y-4" data-volet-sources>
-    <h2 class="font-medium">{{ t('sources_title') }}</h2>
-
     <p v-if="!donnees.roots.length" class="text-sm text-muted-foreground" data-no-sources>
       {{ t('no_sources') }}
     </p>

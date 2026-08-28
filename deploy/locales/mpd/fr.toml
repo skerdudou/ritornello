@@ -1,7 +1,7 @@
 title = "Serveur MPD"
 listen_label = "Adresse d'écoute"
 port_label = "Port"
-restart_notice = "Le changement ne prend effet qu'au redémarrage du greffon."
+restart_notice = "Le changement prend effet immédiatement. Les clients déjà connectés gardent leur session sur l'ancien port."
 btn_save = "Enregistrer"
 saved = "Enregistré ✓"
 listen_empty = "L'adresse d'écoute ne peut pas être vide."

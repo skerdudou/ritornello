@@ -164,9 +164,11 @@ function charger(): void {
 </script>
 
 <template>
+  <!-- Aucun titre ici : l'onglet qui ouvre ce volet porte deja le meme mot, et
+       le repeter juste en dessous ne disait rien de plus. Le volet n'y perd
+       pas son nom accessible — `TabsContent` porte un `aria-labelledby` vers
+       son declencheur, c'est-a-dire vers ce libelle-la. -->
   <section class="space-y-3" data-volet-liste>
-    <h2 class="font-medium">{{ t('playlist_title') }}</h2>
-
     <p v-if="!pistes.length" class="text-sm text-muted-foreground" data-empty-playlist>
       {{ t('empty_playlist') }}
     </p>

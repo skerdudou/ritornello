@@ -45,16 +45,40 @@ export function pluginBase(name: string): string {
   return `/plugins/${name}/`
 }
 
+/**
+ * Couche en cascade dans laquelle toute feuille de plugin est rangee.
+ *
+ * Declaree **sous** `utilities` par `app.css`, qui fixe l'ordre des couches.
+ * C'est ce qui empeche l'IHM d'un plugin de defaire la mise en page du shell :
+ * les deux sont des passes Tailwind separees qui emettaient dans la meme
+ * couche, et celle du plugin, injectee plus tard, gagnait a specificite egale.
+ * Le `.hidden` du champ de fichier de `generic-input` faisait ainsi disparaitre
+ * le menu du haut (`hidden ... md:flex`) pour le reste de la session.
+ */
+const COUCHE_GREFFON = 'greffon'
+
 // Le CSS d'un plugin est sa propre passe Tailwind : on l'injecte une fois et
 // on le laisse en place (revenir sur la page ne doit pas rejouer un
 // telechargement).
+//
+// Un `<style>@import url(...) layer(greffon)</style>` et non un
+// `<link rel="stylesheet">` : c'est la seule facon de ranger une feuille
+// **externe** dans une couche nommee, et elle vaut pour un plugin tiers dont on
+// ne construit pas le CSS. Les couches internes de la feuille importee
+// (`theme`, `utilities`) deviennent des sous-couches de `greffon`, donc leur
+// ordre relatif — celui que Tailwind a calcule pour ce plugin — est conserve.
 function ensureStylesheet(name: string): void {
   if (feuillesInjectees.has(name)) return
   feuillesInjectees.add(name)
-  const link = document.createElement('link')
-  link.rel = 'stylesheet'
-  link.href = `${pluginBase(name)}ui.css`
-  document.head.appendChild(link)
+  const style = document.createElement('style')
+  // Le nom du plugin vient de `/api/status`, donc de `plugins.toml`. Les
+  // guillemets et parentheses sont les seuls caracteres qui pourraient sortir
+  // de l'`url(...)` : les retirer plutot que de les echapper, un nom de plugin
+  // n'en contient jamais et un `@import` malforme serait ignore en silence.
+  const href = `${pluginBase(name)}ui.css`.replace(/["'()\\\s]/g, '')
+  style.setAttribute('data-feuille-greffon', name)
+  style.textContent = `@import url("${href}") layer(${COUCHE_GREFFON});`
+  document.head.appendChild(style)
 }
 
 // Charge le module d'IHM d'un plugin et le monte. Le nom du plugin vient de

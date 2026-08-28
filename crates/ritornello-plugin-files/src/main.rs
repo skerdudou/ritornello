@@ -20,7 +20,7 @@ use ritornello_plugin_files::playlist::Playlist;
 use ritornello_plugin_files::roots::Roots;
 use ritornello_plugin_files::FILES_EN;
 use ritornello_plugin_sdk::{Notification, Runtime, SourceOutcome, SourcePlugin};
-use ritornello_proto::SourceAction;
+use ritornello_proto::{Preset, SourceAction};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::RwLock as AsyncRwLock;
@@ -463,6 +463,18 @@ impl SourcePlugin for FilesSource {
             Catalog::load("files", &locale, &self.locales_root, FILES_EN);
     }
 
+    /// Les présélections nommées, pour la grille de la page d'accueil et pour
+    /// le catalogue que le cœur tient à l'usage des afficheurs.
+    ///
+    /// Sans cette surcharge, le corps par défaut du trait rendait une liste
+    /// vide : la source ne déclarait qu'un `preset_count`, et les tuiles de la
+    /// grille ne portaient qu'un numéro là où la radio affiche « 1 · FIP ».
+    /// C'est la même voie que la radio emprunte, et le catalogue distingue déjà
+    /// « je n'ai que des numéros » (liste vide) de « voici mes noms ».
+    async fn list_presets(&mut self) -> Vec<Preset> {
+        self.playlist.read().await.presets()
+    }
+
     async fn poll_notification(&mut self) -> Option<Notification> {
         // Une sonde est en vol : attendre son résultat, sans jamais la
         // relancer depuis ce futur (voir la doc du champ — c'est `jouer()`
@@ -531,6 +543,21 @@ impl SourcePlugin for FilesSource {
                 // jusqu'à la commande suivante.
                 let liste = self.playlist.read().await;
                 let mut avis = Notification::new().preset_count(n);
+                // Les **noms**, republiés avec le compte. Le canal se réveille à
+                // chaque modification de la liste (`watch::send` signale même à
+                // valeur égale), donc un simple réordonnancement — qui ne change
+                // pas le compte — renomme quand même les tuiles. Sans cela, la
+                // grille aurait gardé les titres d'avant sous les nouveaux
+                // numéros, ce qui est pire qu'aucun titre.
+                //
+                // Rien n'est publié pour une liste vide : c'est l'absence qui
+                // dit « je n'ai que des numéros » (voir `SourceOutcome::presets`),
+                // et une liste vide y serait indistinguable d'un effacement
+                // volontaire du catalogue.
+                let presets = liste.presets();
+                if !presets.is_empty() {
+                    avis = avis.presets(presets);
+                }
                 if let Some(entry) = liste.current() {
                     avis = avis.preset_name(entry.display_name());
                 }
@@ -851,6 +878,27 @@ mod tests {
         assert!(n.preset_name.is_some(), "et le nom avec");
         assert!(n.identity.is_none(), "ce qui joue ne doit pas etre redeclare");
         assert!(n.status.is_none(), "ni le statut touche");
+        // Les noms voyagent avec le compte : sans eux, la grille garderait les
+        // titres d'avant sous les nouveaux numeros — pire qu'aucun titre.
+        assert_eq!(
+            n.presets.as_deref().map(|p| p.len()),
+            Some(3),
+            "les preselections nommees doivent accompagner le compte"
+        );
+    }
+
+    #[tokio::test]
+    async fn la_source_enumere_ses_preselections_nommees() {
+        // Sans cette surcharge, le corps par defaut de `list_presets` rend une
+        // liste vide et les tuiles de la grille n'ont qu'un numero — le defaut
+        // signale par le proprietaire. Le catalogue distingue « je n'ai que des
+        // numeros » (liste vide) de « voici mes noms », et cette source sait
+        // nommer.
+        let mut s = source_de_test(liste_de(2));
+        let presets = s.list_presets().await;
+        assert_eq!(presets.len(), 2);
+        assert_eq!(presets[0].index, 1);
+        assert!(!presets[0].name.is_empty(), "chaque tuile doit porter un titre");
     }
 
     #[tokio::test]

@@ -237,6 +237,12 @@ test('parcours du plugin files : racine locale, balayage, liste enregistrée, pr
   // Pas de pagination sous dix preselections.
   await expect(page.locator('[data-preset-prev]')).toHaveCount(0)
   await expect(page.locator('[data-preset-next]')).toHaveCount(0)
+  // **Et chaque tuile porte un titre**, comme celles de la radio. La source ne
+  // declarait qu'un compte, donc le corps par defaut de `list_presets` rendait
+  // une liste vide et la grille n'affichait que des numeros nus. Le chemin
+  // complet ne se voit qu'ici : la source enumere, le coeur tient le
+  // catalogue, `/api/presets` le sert, la grille le lit.
+  await expect(page.locator('[data-preset-name]')).toHaveText(['01', '02', '03'])
 
   // Choisir une piste par son numero doit reellement y aller.
   //

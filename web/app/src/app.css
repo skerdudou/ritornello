@@ -1,3 +1,29 @@
+/* **L'ordre des couches, declare avant tout le reste** — et c'est une
+   correction, pas un rangement.
+
+   Le shell et chaque IHM de plugin sont deux passes Tailwind separees, qui
+   emettent chacune les seules classes qu'elle voit. Les deux ecrivaient dans la
+   meme couche `utilities`, et la feuille du plugin est injectee **apres** celle
+   du shell (voir `PluginView.ts`) : a specificite egale, ses regles gagnaient
+   donc sur celles du shell. Consequence mesuree : `InputAdmin.vue` porte un
+   `class="hidden"` sur son champ de fichier, donc `generic-input/ui.css`
+   contient `.hidden{display:none}` ; cette regle ecrasait le `md:flex` de la
+   barre de navigation du shell (`<div data-nav-haut class="hidden ... md:flex">`),
+   et le menu du haut disparaissait — pour toute la session, la feuille du
+   plugin restant en place a dessein.
+
+   Le remede est une couche a part, **sous** `utilities` : tout ce qu'une IHM de
+   plugin apporte perd donc systematiquement contre le shell. Les classes que
+   les deux passes emettent portent les memes declarations (meme theme), donc
+   ceder ne change rien de visible ; ce qui change, c'est qu'un plugin ne peut
+   plus defaire la mise en page du shell.
+
+   `@layer` en instruction est l'une des rares regles autorisees avant `@import`
+   par la specification CSS ; elle doit rester en tete de fichier. `properties`
+   est la couche que Tailwind v4 emet pour ses `@property` de repli : la nommer
+   ici la garde a sa place, faute de quoi elle serait ajoutee en fin de liste. */
+@layer properties, theme, base, components, greffon, utilities;
+
 @import "tailwindcss";
 @import "@ritornello/ui/theme.css";
 

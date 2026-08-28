@@ -260,6 +260,50 @@ pub struct EtatPartage {
     reveil: Notify,
 }
 
+/// Avance normale de l'horloge de position entre deux trames, en secondes,
+/// au-delà de laquelle un changement est un **déplacement** et non le temps qui
+/// passe.
+///
+/// Cinq et non une, alors que le cœur émet une trame par seconde : les trames
+/// voyagent par un `watch`, qui **coalesce**. Un relais momentanément en retard
+/// — un Pi occupé, une pochette en cours de lecture sur un partage — ne reçoit
+/// que la dernière valeur, et voit donc l'horloge sauter de deux, trois ou
+/// quatre secondes sans que personne n'ait rien déplacé. La marge couvre ce
+/// retard. Le prix est un déplacement de moins de cinq secondes qui ne réveille
+/// pas les dormeurs ; ils le liront à leur prochain `status`, où `elapsed` est
+/// toujours juste.
+const AVANCE_NORMALE_S: u32 = 5;
+
+/// Ce changement de position est-il un événement, ou seulement le temps qui
+/// passe ?
+///
+/// **C'est le correctif du défaut le plus coûteux de ce greffon.** Le cœur
+/// pousse une trame d'état **par seconde** en lecture, et son seul champ qui
+/// bouge est alors `position_s`. Le comparer comme les autres marquait donc
+/// `Player` une fois par seconde, et `idle player` — sur lequel tout client MPD
+/// se met en attente — se réveillait au même rythme. M.A.L.P. redemandait alors
+/// `status`, `currentsong` **et la pochette** chaque seconde, ce qui explique
+/// l'instabilité observée et l'image qui disparaît : un `albumart` relancé sans
+/// cesse au milieu de son propre transfert par tranches. Le vrai MPD n'émet
+/// jamais `player` pour l'écoulement du temps ; `elapsed` se lit dans `status`,
+/// que le client interroge quand il veut.
+///
+/// Ce qui reste un événement :
+/// - l'apparition ou la disparition de la position (une piste qui commence, un
+///   flux sans position) ;
+/// - un recul, toujours — c'est un retour en arrière demandé, ou une nouvelle
+///   piste qui repart de zéro ;
+/// - une avance supérieure à `AVANCE_NORMALE_S`, c'est-à-dire un déplacement et
+///   non l'horloge.
+fn saut_de_position(avant: Option<u32>, apres: Option<u32>) -> bool {
+    match (avant, apres) {
+        (Some(a), Some(b)) => b < a || b - a > AVANCE_NORMALE_S,
+        // L'un des deux est absent : présence et absence sont deux états
+        // différents de la lecture, et leur bascule est un événement.
+        (a, b) => a != b,
+    }
+}
+
 /// Marque un sujet comme ayant bougé, sans doublon.
 ///
 /// Le dédoublonnage n'est pas cosmétique : une liste de commandes MPD peut
@@ -334,6 +378,9 @@ impl EtatPartage {
 
     /// Applique une trame du cœur : elle fait autorité sur tout.
     ///
+    /// (voir aussi `saut_de_position`, qui décide ce que l'horloge de position
+    /// vaut comme événement)
+    ///
     /// Les sujets qui bougent sont décidés **par comparaison champ par champ**
     /// avec l'état précédent, et pas par le seul fait qu'une trame soit
     /// arrivée : le cœur déduplique déjà, mais une reconnexion de la moitié
@@ -376,7 +423,7 @@ impl EtatPartage {
             }
             if etat.playback != avant.playback
                 || etat.preset != avant.preset
-                || etat.position_s != avant.position_s
+                || saut_de_position(avant.position_s, etat.position_s)
                 || etat.morceau != avant.morceau
             {
                 marquer(&mut bouges, Sujet::Player);
@@ -712,8 +759,7 @@ mod tests {
 
     /// Un catalogue tel que le cœur en émet : chaque source déclarée est
     /// nommée, et ses présélections sont celles qu'elle sait énumérer (vides
-    /// pour le cd et les fichiers, qui restent au corps par défaut de
-    /// `list_presets`).
+    /// pour le cd, qui reste au corps par défaut de `list_presets`).
     fn catalogue_de(sources: &[(&str, &[(u8, &str)])]) -> Catalogue {
         Catalogue {
             sources: sources
@@ -915,6 +961,88 @@ mod tests {
             assert_ne!(avant[Sujet::Player as usize], apres[Sujet::Player as usize], "{nom} devrait bouger player");
             assert_eq!(avant[Sujet::Playlist as usize], apres[Sujet::Playlist as usize], "{nom} ne touche pas la file");
             assert_eq!(avant[Sujet::Mixer as usize], apres[Sujet::Mixer as usize], "{nom} ne touche pas le mixer");
+        }
+    }
+
+    #[tokio::test]
+    async fn lhorloge_de_position_ne_reveille_personne() {
+        // **La régression la plus coûteuse de ce greffon.** Le cœur pousse une
+        // trame par seconde en lecture, et son seul champ qui bouge est alors
+        // `position_s` : marquer `Player` pour cela réveillait tous les
+        // clients endormis sur `idle player` une fois par seconde. M.A.L.P.
+        // redemandait `status`, `currentsong` et la **pochette** au même
+        // rythme, ce qui hachait le transfert par tranches de l'image — d'où
+        // l'instabilité et la pochette qui disparaît.
+        let base = PlayerState {
+            source: "files".into(),
+            playback: Playback::Playing,
+            position_s: Some(30),
+            ..Default::default()
+        };
+        let e = EtatPartage::default();
+        e.appliquer_etat(base.clone()).await;
+        let avant = e.versions().await;
+
+        // Quatre secondes d'horloge, une par trame : rien ne doit bouger.
+        for s in 31..=34 {
+            e.appliquer_etat(PlayerState { position_s: Some(s), ..base.clone() }).await;
+        }
+
+        assert_eq!(
+            avant[Sujet::Player as usize],
+            e.versions().await[Sujet::Player as usize],
+            "le temps qui passe n'est pas un evenement MPD"
+        );
+    }
+
+    #[tokio::test]
+    async fn un_deplacement_reveille_player() {
+        // Le pendant du test ci-dessus : la tolérance ne doit pas avaler un
+        // vrai déplacement, sinon la barre de progression du client resterait
+        // à l'ancienne position jusqu'à ce qu'il redemande `status` de
+        // lui-même. Les deux sens comptent — un recul est toujours un
+        // événement, une avance seulement au-delà de la tolérance.
+        let base = PlayerState {
+            source: "files".into(),
+            playback: Playback::Playing,
+            position_s: Some(30),
+            ..Default::default()
+        };
+        for (nom, position) in [("avance", 90u32), ("recul", 5)] {
+            let e = EtatPartage::default();
+            e.appliquer_etat(base.clone()).await;
+            let avant = e.versions().await;
+
+            e.appliquer_etat(PlayerState { position_s: Some(position), ..base.clone() }).await;
+
+            assert_ne!(
+                avant[Sujet::Player as usize],
+                e.versions().await[Sujet::Player as usize],
+                "{nom} : un deplacement doit reveiller player"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn lapparition_et_la_disparition_de_la_position_reveillent_player() {
+        // Une piste qui commence, un flux qui n'a plus de position : deux états
+        // différents de la lecture, pas l'horloge qui avance.
+        let sans = PlayerState { source: "radio".into(), ..Default::default() };
+        let avec = PlayerState { position_s: Some(1), ..sans.clone() };
+        for (nom, depart, arrivee) in
+            [("apparition", sans.clone(), avec.clone()), ("disparition", avec, sans)]
+        {
+            let e = EtatPartage::default();
+            e.appliquer_etat(depart).await;
+            let avant = e.versions().await;
+
+            e.appliquer_etat(arrivee).await;
+
+            assert_ne!(
+                avant[Sujet::Player as usize],
+                e.versions().await[Sujet::Player as usize],
+                "{nom} : doit reveiller player"
+            );
         }
     }
 

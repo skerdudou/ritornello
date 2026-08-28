@@ -275,17 +275,113 @@ pub struct CoverCache {
     /// coût, mais un champ que personne ne lit est une dette.
     #[cfg(test)]
     constructions: std::sync::atomic::AtomicUsize,
+    /// Les vignettes déjà fabriquées pour la route HTTP, **clé du cache et
+    /// ETag réunis**.
+    ///
+    /// Un cache, cette fois, et non un rendez-vous comme `en_vol` — la
+    /// différence tient entièrement à ce qui sert de clé. `ligne` ne pouvait
+    /// rien mémoriser parce que sa clé hache le *chemin* : l'utilisateur
+    /// remplace le `folder.jpg` sous ce chemin et rien n'invalide l'entrée. Ici
+    /// la clé porte en plus l'ETag, c'est-à-dire la date de modification et la
+    /// taille du fichier (voir `etag_fichier`) — remplacer le fichier change
+    /// donc la clé, et l'ancienne vignette n'est plus jamais servie. Elle
+    /// s'évince ensuite d'elle-même, comme le reste.
+    ///
+    /// Sans cela, chaque chargement de la page d'accueil redécoderait et
+    /// réencoderait l'image sur un Pi 2, alors que la vignette est justement ce
+    /// qu'on fabrique pour que le navigateur *n'ait pas* à télécharger trois
+    /// mégaoctets. Le navigateur revalide (`no-cache`), donc le cas courant est
+    /// un 304 sans rien fabriquer ; ce cache couvre le premier chargement de
+    /// chaque nouveau navigateur, et les onglets multiples d'un même appareil.
+    vignettes: RwLock<VecDeque<Vignette>>,
+    /// Combien de vignettes ont **réellement** été décodées et réencodées.
+    ///
+    /// Sous `cfg(test)`, le même arbitrage que `constructions` juste au-dessus
+    /// et pour la même raison : la seule preuve qu'un cache économise du
+    /// travail est un décompte d'exécutions. Comparer deux réponses ne dit
+    /// rien — deux fabrications successives rendent les mêmes octets.
+    #[cfg(test)]
+    vignettes_fabriquees: std::sync::atomic::AtomicUsize,
 }
+
+/// Une vignette retenue : son identité (clé du cache **plus** ETag de la
+/// source), son type MIME, et ses octets.
+///
+/// Un type nommé plutôt qu'un triplet : le premier champ est le seul qui puisse
+/// se confondre avec un autre `String`, et il porte justement la propriété qui
+/// rend ce cache sûr — voir le champ `vignettes`.
+struct Vignette {
+    identite: String,
+    mime: &'static str,
+    octets: Arc<Vec<u8>>,
+}
+
+/// Nombre de vignettes HTTP retenues. Le même compte que `ENTREES` : au-delà de
+/// la pochette courante et de quelques précédentes, personne ne redemande.
+const VIGNETTES: usize = 4;
 
 impl CoverCache {
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// La vignette déjà fabriquée pour cette identité, s'il y en a une.
+    async fn vignette_memorisee(&self, identite: &str) -> Option<(&'static str, Arc<Vec<u8>>)> {
+        self.vignettes
+            .read()
+            .await
+            .iter()
+            .find(|v| v.identite == identite)
+            .map(|v| (v.mime, v.octets.clone()))
+    }
+
+    /// Retient une vignette sous son identité (clé + ETag), en évinçant la plus
+    /// ancienne au-delà de `VIGNETTES`.
+    async fn memorise_vignette(&self, identite: String, mime: &'static str, octets: Arc<Vec<u8>>) {
+        let mut v = self.vignettes.write().await;
+        v.retain(|e| e.identite != identite);
+        v.push_back(Vignette { identite, mime, octets });
+        while v.len() > VIGNETTES {
+            v.pop_front();
+        }
+    }
+
+    /// Fabrique — ou retrouve — la vignette de `cle`, sous l'identité
+    /// `identite` (la clé du cache **plus** l'ETag de la source, voir le champ
+    /// `vignettes`).
+    ///
+    /// `None` veut dire « pas de vignette à servir » sans distinguer les cas :
+    /// réencodage désactivé par l'utilisateur, image illisible, dimensions
+    /// au-delà du plafond. L'appelant retombe alors sur l'original, qui est la
+    /// réponse qu'il aurait donnée sans cette route.
+    async fn vignette(&self, cle: &str, identite: &str) -> Option<(&'static str, Arc<Vec<u8>>)> {
+        if let Some(trouvee) = self.vignette_memorisee(identite).await {
+            return Some(trouvee);
+        }
+        // Une seule lecture des réglages pour les deux étages, comme `ligne` :
+        // deux lectures pourraient encadrer un changement et produire une
+        // vignette selon des règles qui n'ont jamais coexisté.
+        let reglages = self.reglages();
+        let rendu_voulu = reglages.rendu?;
+        let (mime, octets) = self.octets(cle, reglages.source_max).await?;
+        #[cfg(test)]
+        self.vignettes_fabriquees.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (mime, octets) = rendu(mime, octets, rendu_voulu).await?;
+        let octets = Arc::new(octets);
+        self.memorise_vignette(identite.to_string(), mime, octets.clone()).await;
+        Some((mime, octets))
+    }
+
     /// Combien de fois une trame a été construite depuis la création du cache.
     #[cfg(test)]
     pub(crate) fn constructions(&self) -> usize {
         self.constructions.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Combien de vignettes ont été fabriquées depuis la création du cache.
+    #[cfg(test)]
+    pub(crate) fn vignettes_fabriquees(&self) -> usize {
+        self.vignettes_fabriquees.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Publie de nouveaux réglages. Prise en compte à la publication suivante :
@@ -968,28 +1064,93 @@ fn etag_fichier(modifie: Option<std::time::SystemTime>, taille: u64) -> String {
     format!("\"{nanos:x}-{taille:x}\"")
 }
 
-/// `GET /api/cover/{clé}`. La clé est une empreinte de la **source**, donc son
-/// immuabilité ne dit rien du contenu : une pochette réseau est bien figée
-/// sous sa clé (elle vient d'un corps déjà entièrement vérifié), mais un
-/// fichier local reste modifiable sur son partage après coup.
+/// Ce que la route sait servir.
+///
+/// **Deux tailles et non une, parce que la page en a deux usages.** Le carré de
+/// la carte fait 224 px sur téléphone : y charger le `folder.jpg` de trois
+/// mégaoctets d'un NAS est du gaspillage pur, surtout en Wi-Fi. Mais la même
+/// image agrandie au clic (voir `PlayerCard.vue`) mérite, elle, tous ses
+/// pixels. La taille est donc **demandée par l'appelant** plutôt que devinée
+/// ici.
+///
+/// Pleine taille par défaut, et c'est délibéré : le `cover_href` publié dans
+/// l'état désigne l'image telle qu'elle est, sans transformation, pour tout
+/// consommateur présent ou futur du protocole. La vignette est un service rendu
+/// à qui la demande, pas un changement de ce que l'URL nue veut dire.
+/// La chaîne de requête de `cover_get`.
+///
+/// **Une chaîne libre et non une énumération sérialisée**, et c'est une
+/// correction : un `enum` faisait refuser la requête entière par l'extracteur
+/// `Query` — un `?taille=nawak` rendait un 400, donc le repli ♫ sur la page,
+/// pour une simple faute de frappe dans une URL. Une valeur inconnue doit
+/// valoir le défaut, comme une valeur absente : la taille est un service rendu
+/// à qui la demande, jamais une condition de service.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ParametresCover {
+    #[serde(default)]
+    taille: Option<String>,
+}
+
+/// Le mot qui demande la réduction, tel que la page l'écrit dans son URL.
+const TAILLE_VIGNETTE: &str = "vignette";
+
+/// `GET /api/cover/{clé}[?taille=vignette]`. La clé est une empreinte de la
+/// **source**, donc son immuabilité ne dit rien du contenu : une pochette
+/// réseau est bien figée sous sa clé (elle vient d'un corps déjà entièrement
+/// vérifié), mais un fichier local reste modifiable sur son partage après coup.
 pub async fn cover_get(
     State(state): State<crate::status::AppState>,
     Path(cle): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<ParametresCover>,
     headers: HeaderMap,
 ) -> Response {
+    let vignette_demandee = params.taille.as_deref() == Some(TAILLE_VIGNETTE);
     let Some(p) = state.covers.lit(&cle).await else {
         return (StatusCode::NOT_FOUND, "inconnue").into_response();
     };
     match p {
-        Pochette::Octets(octets, mime) => (
-            [
-                (header::CONTENT_TYPE, mime.to_string()),
-                (header::CACHE_CONTROL, "public, max-age=31536000, immutable".to_string()),
-                (header::ETAG, format!("\"{cle}\"")),
-            ],
-            octets,
-        )
-            .into_response(),
+        Pochette::Octets(octets, mime) => {
+            // Une pochette réseau est figée sous sa clé : son ETag n'a rien à
+            // porter de plus que la clé et la taille demandée, et sa vignette
+            // est aussi immuable qu'elle.
+            if vignette_demandee {
+                let etag = format!("\"{cle}-v\"");
+                if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok())
+                    == Some(etag.as_str())
+                {
+                    return StatusCode::NOT_MODIFIED.into_response();
+                }
+                if let Some((mime, petite)) =
+                    state.covers.vignette(&cle, &format!("{cle}:v")).await
+                {
+                    return (
+                        [
+                            (header::CONTENT_TYPE, mime.to_string()),
+                            (
+                                header::CACHE_CONTROL,
+                                "public, max-age=31536000, immutable".to_string(),
+                            ),
+                            (header::ETAG, etag),
+                        ],
+                        petite.as_slice().to_vec(),
+                    )
+                        .into_response();
+                }
+                // Pas de vignette (réencodage désactivé, image illisible,
+                // dimensions au-delà du plafond) : l'original, qui est la
+                // réponse qu'on aurait donnée sans ce paramètre. Mieux vaut une
+                // image trop grande que pas d'image.
+            }
+            (
+                [
+                    (header::CONTENT_TYPE, mime.to_string()),
+                    (header::CACHE_CONTROL, "public, max-age=31536000, immutable".to_string()),
+                    (header::ETAG, format!("\"{cle}\"")),
+                ],
+                octets,
+            )
+                .into_response()
+        }
         Pochette::Fichier(chemin) => {
             // Ouverture et `metadata` sous une borne de temps : ce fichier
             // vit couramment sur un partage réseau, et cette route est
@@ -1019,10 +1180,42 @@ pub async fn cover_get(
                     return (StatusCode::NOT_FOUND, "illisible").into_response();
                 }
             };
-            let etag = etag_fichier(meta.modified().ok(), meta.len());
+            // L'ETag de la vignette n'est pas celui de l'original : c'est le
+            // même contenu source mais pas les mêmes octets servis, et deux
+            // réponses différentes sous un même validateur feraient servir au
+            // navigateur l'une pour l'autre.
+            let etag_source = etag_fichier(meta.modified().ok(), meta.len());
+            let etag = if vignette_demandee {
+                format!("\"v-{}\"", etag_source.trim_matches('"'))
+            } else {
+                etag_source.clone()
+            };
             if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) == Some(etag.as_str())
             {
                 return StatusCode::NOT_MODIFIED.into_response();
+            }
+            // **Après le 304 et pas avant** : une requête conditionnelle ne doit
+            // rien fabriquer, et c'est ce qui rend la vignette bon marché en
+            // régime établi. L'identité mémorisée porte l'ETag de la source,
+            // donc un `folder.jpg` remplacé sur le partage change de clé et son
+            // ancienne vignette n'est plus jamais servie.
+            if vignette_demandee {
+                let identite = format!("{cle}:{etag_source}");
+                if let Some((mime, petite)) = state.covers.vignette(&cle, &identite).await {
+                    return (
+                        [
+                            (header::CONTENT_TYPE, mime.to_string()),
+                            (header::CACHE_CONTROL, "no-cache".to_string()),
+                            (header::ETAG, etag),
+                        ],
+                        petite.as_slice().to_vec(),
+                    )
+                        .into_response();
+                }
+                // Rien à réduire : on retombe sur la diffusion en flux de
+                // l'original, ci-dessous, avec l'ETag de la vignette — le
+                // contenu servi sous cette URL reste cohérent avec son
+                // validateur, ce qui est tout ce que le cache exige.
             }
             // Revalidation des octets d'en-tête au moment de servir, et non
             // seulement au moment de la découverte (`recupere`) : entre les
@@ -1134,6 +1327,94 @@ mod tests {
         assert_ne!(cle(&a), cle(&CoverRef::Path { path: "/https://x.org/a.jpg".into() }));
         // Hexadecimal, donc sans surprise dans un chemin d'URL.
         assert!(cle(&a).chars().all(|c| c.is_ascii_hexdigit()), "{}", cle(&a));
+    }
+
+    /// Le corps servi par la vraie route HTTP pour cette clé et cette taille.
+    ///
+    /// Par `status::router` et une vraie requête, comme
+    /// `la_route_http_sert_ce_que_le_coeur_vient_de_deposer` : la chaîne
+    /// d'extracteurs (dont le `Query` qui lit `taille`) fait partie de ce qu'on
+    /// éprouve, et l'appeler en fonction la court-circuiterait.
+    async fn corps_servi(cache: &Arc<CoverCache>, cle: &str, requete: &str) -> (u16, Vec<u8>) {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let app = crate::status::router(crate::status::AppState {
+            covers: cache.clone(),
+            ..crate::status::tests_support::app_state()
+        });
+        let resp = app
+            .oneshot(Request::get(format!("/api/cover/{cle}{requete}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let statut = resp.status().as_u16();
+        let octets = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        (statut, octets.to_vec())
+    }
+
+    #[tokio::test]
+    async fn la_route_sert_une_vignette_a_qui_la_demande_et_loriginal_sinon() {
+        // **La demande du propriétaire** : le carré de 224 px de la page
+        // d'accueil ne doit plus télécharger le `folder.jpg` entier d'un NAS.
+        // L'URL nue, elle, ne change pas de sens — c'est elle que la vue
+        // agrandie charge, et elle doit rendre tous les pixels.
+        let dir = tempfile::tempdir().unwrap();
+        let chemin = dir.path().join("folder.jpg");
+        let grande = fixtures::jpeg_decodable(1500, 1500);
+        std::fs::write(&chemin, &grande).unwrap();
+        let cache = Arc::new(CoverCache::new());
+        cache.insere("k".to_string(), Pochette::Fichier(chemin)).await;
+
+        let (statut, pleine) = corps_servi(&cache, "k", "").await;
+        assert_eq!(statut, 200);
+        assert_eq!(pleine.len(), grande.len(), "l'URL nue sert le fichier tel quel");
+
+        let (statut, vignette) = corps_servi(&cache, "k", "?taille=vignette").await;
+        assert_eq!(statut, 200);
+        assert!(
+            vignette.len() < pleine.len(),
+            "la vignette doit peser moins ({} contre {})",
+            vignette.len(),
+            pleine.len()
+        );
+        let (l, h) = dimensions(&vignette).expect("la vignette doit rester une image lisible");
+        let cote = crate::state::Settings::default().cover_max_edge_px;
+        assert!(l <= cote && h <= cote, "vignette {l}x{h}, plafond {cote}");
+    }
+
+    #[tokio::test]
+    async fn une_taille_inconnue_retombe_sur_loriginal_plutot_que_sur_une_erreur() {
+        // Une URL mal formée ne doit pas rendre la pochette introuvable : le
+        // carré de la page afficherait le repli ♫ pour une faute de frappe.
+        let cache = Arc::new(CoverCache::new());
+        let octets = fixtures::jpeg_decodable(40, 40);
+        cache.insere("k".to_string(), Pochette::Octets(octets.clone(), "image/jpeg")).await;
+        let (statut, corps) = corps_servi(&cache, "k", "?taille=nawak").await;
+        assert_eq!(statut, 200);
+        assert_eq!(corps, octets);
+    }
+
+    #[tokio::test]
+    async fn la_vignette_dun_fichier_nest_fabriquee_quune_fois() {
+        // Décoder puis réencoder coûte des centaines de millisecondes sur un
+        // Pi 2 : deux navigateurs qui ouvrent la page ne doivent pas le payer
+        // deux fois. L'identité mémorisée porte l'ETag de la source, donc rien
+        // de périmé ne peut être servi (voir le champ `vignettes`).
+        let dir = tempfile::tempdir().unwrap();
+        let chemin = dir.path().join("folder.jpg");
+        std::fs::write(&chemin, fixtures::jpeg_decodable(1200, 1200)).unwrap();
+        let cache = Arc::new(CoverCache::new());
+        cache.insere("k".to_string(), Pochette::Fichier(chemin.clone())).await;
+
+        let (_, une) = corps_servi(&cache, "k", "?taille=vignette").await;
+        let (statut, deux) = corps_servi(&cache, "k", "?taille=vignette").await;
+        assert_eq!(statut, 200);
+        assert_eq!(une, deux);
+        // **Le décompte est la seule preuve** : comparer les deux réponses ne
+        // dit rien, deux fabrications successives rendent les mêmes octets.
+        // Même raison que le compteur `constructions` du rendez-vous.
+        assert_eq!(cache.vignettes_fabriquees(), 1, "la seconde demande doit etre gratuite");
     }
 
     #[tokio::test]

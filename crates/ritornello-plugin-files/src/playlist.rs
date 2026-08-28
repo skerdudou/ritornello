@@ -2,6 +2,7 @@
 //! mpv.
 
 use crate::m3u::{render, Entry};
+use ritornello_proto::Preset;
 use std::path::Path;
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -18,6 +19,29 @@ impl Playlist {
     /// chiffre ne les désigne. Ce n'est pas contourné — c'est déclaré.
     pub fn preset_count(&self) -> u8 {
         self.entries.len().min(99) as u8
+    }
+
+    /// Les présélections **nommées** : un numéro et le titre de la piste.
+    ///
+    /// La source n'a longtemps annoncé qu'un `preset_count`, si bien que la
+    /// grille de la page d'accueil ne montrait que des numéros nus là où la
+    /// radio affiche « 1 · FIP ». Le nom existait pourtant déjà — c'est celui
+    /// que `preset_name` publie pour la piste courante, et celui que le m3u
+    /// écrit en `#EXTINF`.
+    ///
+    /// **Dense et bornée à 99, exactement comme `preset_count`** : les deux
+    /// décrivent la même chose et doivent rester d'accord. Une liste de fichiers
+    /// n'a pas de trous — les numéros suivent les positions — donc l'indice est
+    /// bien « la position plus un », ce qui n'est *pas* vrai d'une table de
+    /// stations creuse (voir la doc du greffon MPD, § Dense positions, sparse
+    /// indices).
+    pub fn presets(&self) -> Vec<Preset> {
+        self.entries
+            .iter()
+            .take(usize::from(self.preset_count()))
+            .enumerate()
+            .map(|(i, e)| Preset { index: (i + 1) as u8, name: e.display_name() })
+            .collect()
     }
 
     pub fn current(&self) -> Option<&Entry> {
@@ -89,6 +113,29 @@ mod tests {
         assert_eq!(liste_de(150).preset_count(), 99);
         assert_eq!(liste_de(12).preset_count(), 12);
         assert_eq!(Playlist::default().preset_count(), 0);
+    }
+
+    #[test]
+    fn les_preselections_nommees_suivent_les_positions_et_le_meme_plafond() {
+        // Le nom est celui que `preset_name` publie déjà pour la piste
+        // courante : les tuiles de la grille et le lecteur doivent dire la même
+        // chose de la même piste.
+        let p = liste_de(3);
+        assert_eq!(
+            p.presets(),
+            vec![
+                Preset { index: 1, name: "01".into() },
+                Preset { index: 2, name: "02".into() },
+                Preset { index: 3, name: "03".into() },
+            ]
+        );
+        // Le même plafond que `preset_count`, et il doit le rester : une
+        // présélection annoncée que `Command::Select` ne peut pas atteindre
+        // ferait une tuile qui ne joue rien.
+        let longue = liste_de(150);
+        assert_eq!(longue.presets().len(), usize::from(longue.preset_count()));
+        assert_eq!(longue.presets().last().unwrap().index, 99);
+        assert!(Playlist::default().presets().is_empty());
     }
 
     #[test]
