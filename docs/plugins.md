@@ -1214,8 +1214,8 @@ what it knows about it.
 
 **The current track is a partial state, completed by layers rather than
 overwritten by them.** `NowPlaying` carries `known` — what is already
-known of the track (artist, title, album, duration, plus a boolean saying
-whether a cover is already held) — so a contributor can see what is
+known of the track (artist, title, album, duration, release year, plus a
+boolean saying whether a cover is already held) — so a contributor can see what is
 missing and either fill it in or abstain, instead of blindly declaring
 everything it knows and letting the freshest answer win. Three layers
 feed it, from least informed to most:
@@ -1228,13 +1228,14 @@ feed it, from least informed to most:
    without the Source having to declare anything.
 2. **What the file itself carries.** From that very same `metadata`
    property, the core also reads a played file's tags — `title`, `artist`,
-   `album`. FFmpeg normalises the keys, so ID3 (mp3), Vorbis comments
-   (flac, ogg, opus), iTunes atoms (m4a) and RIFF INFO (wav) all surface
-   under those three names. Shown with origin `tags`. Like ICY, this layer
+   `album`, `date`. FFmpeg normalises the keys, so ID3 (mp3), Vorbis
+   comments (flac, ogg, opus), iTunes atoms (m4a) and RIFF INFO (wav) all
+   surface under those four names; `date` yields the release year (its
+   leading four digits, whatever the rest of the string). Shown with origin `tags`. Like ICY, this layer
    works **without any plugin** and serves *any* Source that plays a
    tagged file — nothing has to be declared for it.
 
-   Two rules are worth knowing. The core picks **three named keys** rather
+   Two rules are worth knowing. The core picks **four named keys** rather
    than absorbing the object: an m4a also carries container keys
    (`major_brand`, `handler_name`) that have no place on a screen. And the
    layer stays silent as soon as **any `icy-*` key is present**: some
@@ -1694,6 +1695,23 @@ actually chained in. Two points of contract for `MetadataPlugin` itself:
   those that overwrite; a `fill_only` plugin never competes on priority
   in the first place (see [Now-playing
   metadata](#now-playing-metadata-the-metadata-kind)).
+
+Two optional fields carry what a listener would look up next: `year`, the
+release year (a plain number; the core re-checks its range on arrival),
+and `links`, a list of listening-platform links. `links` is **not a free
+URL field**: each entry is `{"platform": "youtube" | "deezer" |
+"apple_music", "url": …}` and the core accepts an entry only if its URL is
+`https`, carries neither port nor user info, and names exactly one of the
+hosts registered for that platform in `ritornello-proto` (equality, never
+a prefix or suffix — `evil-youtube.com` and `youtube.com.evil.example` are
+both refused). A link that fails the check is **dropped silently, entry by
+entry**, the rest of the enrichment surviving; a plugin that wants its
+links shown therefore emits the platform's canonical hosts, and adding a
+platform is a change to the protocol crate, on purpose — the host list is
+the security boundary that keeps a third party from making the appliance
+render a clickable link to a domain of its choosing. Winner-takes-all
+applies to them as to the text: a `fill_only` contributor only fills a
+year or a link list that is still empty.
 
 One more field of `Enrichment` needs attention from a plugin only if it can
 answer it: `position_s`, an elapsed number of seconds **in the track, at the

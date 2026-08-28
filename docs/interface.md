@@ -117,13 +117,23 @@ produced (see [plugins.md](plugins.md)). Title, artist and album follow
 when at least one of the three is known; when none is, nothing is drawn
 there — an "0:34" alone would inform nobody, so the block simply doesn't
 appear — but the cover square stays exactly where it was, still the thing
-that carries the layout. When it does appear, a pair of small badges under
-the album name says who supplied the text (`origin`) and, when it differs,
-who supplied the cover (`cover_origin`) — the first question to ask in
-front of a wrong title; alongside them, when no position is known but a
-duration is, a small duration figure shows too — the one piece of timing
-information left when the progress bar (below) has nothing to draw at
-all.
+that carries the layout. The release year, when a contributor knows it
+(`year`), sits on the album line after a middle dot — "Kind of Blue ·
+1959" — where a year is read; it also shows alone, since a stream may know
+the year without the album. Under that line, when the payload carries
+`links`, one small icon per listening platform (YouTube, Deezer, Apple
+Music — inline SVG in `currentColor`, so they follow the theme rather than
+carrying brand colours) opens the track there in a new tab
+(`rel="noopener noreferrer"`); each icon has a translated accessible name
+("Listen on YouTube"…), and the platform set is closed on the protocol
+side, the URL having already been checked against that platform's hosts
+before it ever reaches the page — see [plugins.md](plugins.md). When the
+block appears, a pair of small badges under it says who supplied the text
+(`origin`) and, when it differs, who supplied the cover (`cover_origin`) —
+the first question to ask in front of a wrong title; alongside them, when
+no position is known but a duration is, a small duration figure shows too
+— the one piece of timing information left when the progress bar (below)
+has nothing to draw at all.
 
 That stream and the display plugins' socket carry the very same
 payload — `PlayerState`, one structure serialized once per transport —
@@ -149,6 +159,13 @@ form `/api/cover/{key}` — never the address the cover was actually found
 at, since it is the appliance that fetches an image, not the browser
 (see [plugins.md](plugins.md) for the chain that produces it) — and
 `cover_origin`, described above. Both are absent when no cover is held.
+
+Two further optional fields of the same `Morceau` feed the track block:
+`year`, the release year as a number, and `links`, a list of
+`{"platform":"youtube"|"deezer"|"apple_music","url":…}`. Both are
+**omitted** from the frame rather than sent as `null` or `[]`, so a frame
+without them is byte-for-byte what it was before they existed; the SPA
+types them optional for the same reason.
 
 ### Progress bar
 
