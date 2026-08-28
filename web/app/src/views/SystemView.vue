@@ -7,8 +7,8 @@ import {
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
 import { PERIODES_S, useMetriques } from '../composables/useMetriques'
-import type { LogsPayload, SystemPayload, SystemUsage } from '../types'
-import { filtreLignes } from './journal'
+import type { DateFormat, LogsPayload, SettingsPayload, SystemPayload, SystemUsage } from '../types'
+import { dateeLigne, filtreLignes } from './journal'
 import { abscisses, cheminSparkline, reperesMinute } from './sparkline'
 
 const { t } = useCatalog()
@@ -39,8 +39,28 @@ const logs = ref<string[]>([])
 const LOGS_CARTE = 8
 const erreursOuvertes = ref(false)
 const requeteErreurs = ref('')
-const logsCarte = computed(() => logs.value.slice(0, LOGS_CARTE))
-const logsFiltres = computed(() => filtreLignes(logs.value, requeteErreurs.value))
+/**
+ * Les réglages d'écriture du temps, relevés une fois au montage.
+ *
+ * Une requête de plus sur cette page, et c'est le prix juste : les valeurs par
+ * défaut suffisent tant qu'elle n'a pas répondu, et un échec laisse le journal
+ * daté par défaut plutôt que de le priver de dates.
+ */
+const horloge = ref<{ date_format: DateFormat; clock_24h: boolean }>({
+  date_format: 'day_month_year',
+  clock_24h: true,
+})
+
+/**
+ * Les lignes réécrites dans le format réglé, **avant** le filtre : ce qu'on
+ * cherche est ce qu'on voit, donc une recherche sur « 14:03 » doit porter sur
+ * l'heure affichée et non sur l'UTC que le cœur a écrit.
+ */
+const logsDates = computed(() =>
+  logs.value.map((l) => dateeLigne(l, horloge.value.date_format, horloge.value.clock_24h)),
+)
+const logsCarte = computed(() => logsDates.value.slice(0, LOGS_CARTE))
+const logsFiltres = computed(() => filtreLignes(logsDates.value, requeteErreurs.value))
 
 /**
  * Relève le journal : au montage, et à chaque ouverture de la popin.
@@ -103,6 +123,14 @@ const etiquettePeriode = computed(
 // l'ouverture de la popin le relève à nouveau (voir `releverJournal`).
 onMounted(() => {
   void releverJournal()
+  // Son propre `.catch` : des réglages injoignables ne doivent pas priver la
+  // page de ses métriques ni de son journal.
+  void api
+    .get<SettingsPayload>('/api/settings')
+    .then((r) => {
+      horloge.value = { date_format: r.date_format, clock_24h: r.clock_24h }
+    })
+    .catch(() => {})
 })
 onUnmounted(() => {
   monte = false

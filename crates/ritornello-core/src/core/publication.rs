@@ -139,6 +139,18 @@ impl<P: Player> Core<P> {
             // état qui l'annule, parce qu'elle n'y laisse passer aucune
             // commande.
             can_eject: self.can_eject && !self.standby,
+            // Une préférence de rendu, poussée avec le reste : un afficheur ne
+            // va jamais rien chercher de côté, et l'horloge qu'il dessine en
+            // veille est quelque chose qu'il montre. Elle ne bouge qu'au geste
+            // de l'utilisateur, donc elle ne provoque aucune trame en trop.
+            clock: ritornello_proto::Horloge {
+                date: match self.settings.date_format {
+                    crate::state::DateFormat::DayMonthYear => ritornello_proto::FormatDate::DayMonthYear,
+                    crate::state::DateFormat::YearMonthDay => ritornello_proto::FormatDate::YearMonthDay,
+                    crate::state::DateFormat::MonthDayYear => ritornello_proto::FormatDate::MonthDayYear,
+                },
+                douze_heures: !self.settings.clock_24h,
+            },
             morceau: {
                 let mut m = self.metadonnees.etat();
                 // Précédence : la durée mesurée par mpv l'emporte sur celle

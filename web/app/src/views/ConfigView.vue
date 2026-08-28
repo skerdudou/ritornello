@@ -24,6 +24,8 @@ const reglages = ref<SettingsPayload>({
   volume_repeat_initial_ms: 800,
   volume_repeat_interval_ms: 200,
   startup_power: 'on',
+  date_format: 'day_month_year',
+  clock_24h: true,
   overlay_ms: 5000,
   tens_window_ms: 5000,
   seek_step_s: 10,
@@ -239,6 +241,7 @@ const SECTIONS = [
   { id: 'audio', key: 'audio_output' },
   { id: 'language', key: 'language' },
   { id: 'startup', key: 'startup_title' },
+  { id: 'clock', key: 'clock_title' },
   { id: 'volume-hold', key: 'volume_hold_title' },
   { id: 'overlays', key: 'overlays_title' },
   { id: 'seek', key: 'seek_card_title' },
@@ -423,6 +426,46 @@ function aller(id: string) {
               </SelectContent>
             </Select>
             <Button data-startup-change @click="enregistrerReglages">{{ t('change') }}</Button>
+          </CardContent>
+        </Card>
+      </section>
+
+      <!-- Date et heure. Deux reglages separes, a la demande du proprietaire :
+           l'ordre d'une date et le format 12/24 h ne varient pas ensemble d'un
+           pays a l'autre. Aucun reglage de fuseau — l'afficheur tourne sur
+           l'appareil, la page formate dans le fuseau du navigateur, et un
+           troisieme reglage ne pourrait que contredire l'un des deux. -->
+      <section id="clock" class="scroll-mt-6">
+        <Card>
+          <CardHeader><CardTitle>{{ t('clock_title') }}</CardTitle></CardHeader>
+          <CardContent class="flex flex-wrap items-end gap-4">
+            <label class="grid gap-1 text-sm">
+              {{ t('clock_date_label') }}
+              <Select v-model="reglages.date_format">
+                <SelectTrigger class="min-w-36" data-date-format-select :aria-label="t('clock_date_label')"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="day_month_year">{{ t('clock_date_dmy') }}</SelectItem>
+                  <SelectItem value="year_month_day">{{ t('clock_date_ymd') }}</SelectItem>
+                  <SelectItem value="month_day_year">{{ t('clock_date_mdy') }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </label>
+            <label class="grid gap-1 text-sm">
+              {{ t('clock_hours_label') }}
+              <!-- Un booleen rendu par deux choix nommes plutot qu'une case a
+                   cocher : « 24 h » n'est pas l'absence de « 12 h », et une
+                   case intitulee « 24 h » se lirait mal decochee. -->
+              <Select :model-value="reglages.clock_24h ? '24' : '12'"
+                      @update:model-value="(v) => (reglages.clock_24h = v === '24')">
+                <SelectTrigger class="min-w-36" data-clock-hours-select :aria-label="t('clock_hours_label')"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="24">{{ t('clock_24h') }}</SelectItem>
+                  <SelectItem value="12">{{ t('clock_12h') }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </label>
+            <Button data-clock-change @click="enregistrerReglages">{{ t('change') }}</Button>
+            <p class="w-full text-sm text-muted-foreground">{{ t('clock_hint') }}</p>
           </CardContent>
         </Card>
       </section>

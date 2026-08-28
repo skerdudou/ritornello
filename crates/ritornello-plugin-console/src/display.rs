@@ -6,12 +6,92 @@ use std::path::Path;
 /// Ce qui s'écrit en place du nom de source quand le cœur n'en a aucune.
 const AUCUNE_SOURCE: &str = "—";
 
+/// L'heure locale de l'appareil, en heures (0-23) et minutes.
+///
+/// `None` quand l'horloge du système n'est pas convertible — avant que le
+/// réseau n'ait remis un Raspberry Pi à l'heure, par exemple, un Pi n'ayant
+/// pas de pile. L'afficheur écrit alors la veille sans horloge, plutôt qu'une
+/// heure fausse.
+///
+/// **`libc::localtime_r` et non un nouveau crate de dates.** L'appel est déjà
+/// l'idiome de ce dépôt pour ce que la bibliothèque C sait faire seule (voir
+/// `system.rs` et le greffon cd), et `libc` y est déjà. Ajouter `chrono`
+/// coûterait une dépendance et sa transitive de fuseaux, pour deux entiers.
+///
+/// **Le fuseau est celui que la glibc charge au premier appel**, et cela
+/// couvre ce qui compte : les règles de changement d'heure vivent *dans* le
+/// fichier de fuseau, donc le passage à l'heure d'été est suivi sans rien
+/// relire. Ce qui n'est pas suivi est un opérateur qui change le fuseau de la
+/// machine pendant que le service tourne — rare, et un redémarrage du greffon
+/// le règle. `tzset()` à chaque tour l'aurait couvert au prix d'un `stat` par
+/// tour d'horloge, et la fonction n'est de toute façon pas exposée par le crate
+/// `libc` sur toutes les cibles.
+///
+/// La variante réentrante, seule sûre dans un processus à plusieurs fils.
+pub fn heure_locale() -> Option<(u32, u32)> {
+    let secondes =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    let t = libc::time_t::try_from(secondes).ok()?;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // Sûreté : `localtime_r` remplit `tm` et n'en conserve aucun pointeur ; on
+    // lui passe deux références valides pour la durée de l'appel. Elle rend
+    // NULL — jamais un `tm` à moitié écrit — pour un temps qu'elle ne sait pas
+    // convertir, ce que le test ci-dessous traite comme « pas d'heure ».
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+        return None;
+    }
+    let (h, m) = (u32::try_from(tm.tm_hour).ok()?, u32::try_from(tm.tm_min).ok()?);
+    (h < 24 && m < 60).then_some((h, m))
+}
+
+/// `13:05`, ou `1:05 PM` — selon le réglage que la trame d'état porte.
+///
+/// Sur 12 h, minuit s'écrit `12:00 AM` et midi `12:00 PM` : c'est la convention
+/// anglo-saxonne, et un `0:00 AM` n'existe nulle part. Les heures ne sont pas
+/// complétées par un zéro dans cette forme (`1:05 PM`, pas `01:05 PM`), là où la
+/// forme 24 h les complète — les deux usages diffèrent, et c'est ce que
+/// l'utilisateur lit ailleurs.
+pub fn format_heure(heures: u32, minutes: u32, douze_heures: bool) -> String {
+    if !douze_heures {
+        return format!("{heures:02}:{minutes:02}");
+    }
+    let (h, suffixe) = match heures {
+        0 => (12, "AM"),
+        1..=11 => (heures, "AM"),
+        12 => (12, "PM"),
+        _ => (heures - 12, "PM"),
+    };
+    format!("{h}:{minutes:02} {suffixe}")
+}
+
+/// Comme [`compose`], mais avec l'heure à écrire en veille.
+///
+/// Séparée pour que la mise en page reste **pure** : `compose` ne lit aucune
+/// horloge, donc chaque cas se teste sur une heure choisie. `None` = pas
+/// d'heure à afficher (horloge système inutilisable, ou état hors veille).
+pub fn compose_a(etat: &PlayerState, maintenant: Option<(u32, u32)>) -> [String; 3] {
+    if etat.overlay.is_none() && etat.standby {
+        // **L'heure en veille**, demandée par le propriétaire : c'est le seul
+        // moment où l'écran n'a rien d'autre à dire, et une horloge y est plus
+        // utile qu'un tty noir. Le mot de veille reste en première ligne — il
+        // dit *pourquoi* rien ne joue — et l'heure prend la seconde.
+        let heure = maintenant
+            .map(|(h, m)| format_heure(h, m, etat.clock.douze_heures))
+            .unwrap_or_default();
+        return [etat.status.clone().unwrap_or_default(), heure, String::new()];
+    }
+    compose(etat)
+}
+
 /// Trois lignes pour un écran texte d'environ vingt colonnes, composées depuis
 /// l'état structuré.
 ///
 /// C'est **ici** que vit la mise en page, et non dans le cœur : un autre
 /// afficheur en écrira une autre à partir de la même trame, sans rien changer
 /// au cœur.
+///
+/// Ne lit **aucune** horloge : l'heure de la veille entre par `compose_a`,
+/// qui délègue à cette fonction tout le reste.
 pub fn compose(etat: &PlayerState) -> [String; 3] {
     // Une incrustation prend toute la place : elle est passagère et c'est ce
     // qu'on veut lire pendant qu'elle dure. Décision du propriétaire : le
@@ -152,8 +232,16 @@ impl ConsoleDisplay {
         Ok(Self { out, dernieres_lignes: None })
     }
 
+    /// Réécrit l'écran depuis l'état courant, en lisant l'horloge du système.
+    ///
+    /// L'horloge est lue **ici** et non dans `compose_a`, qui reste pure : le
+    /// seul appel impur du rendu vit au seul endroit qui touche déjà le tty.
     pub fn show(&mut self, etat: &PlayerState) -> Result<()> {
-        let lignes = compose(etat);
+        // Lue seulement quand elle sert : hors veille, `compose_a` ne la
+        // regarde pas, et un `tzset` par trame d'état — une par seconde en
+        // lecture — serait un `stat` par seconde pour rien.
+        let maintenant = etat.standby.then(heure_locale).flatten();
+        let lignes = compose_a(etat, maintenant);
         if self.dernieres_lignes.as_ref() == Some(&lignes) {
             return Ok(());
         }
@@ -184,6 +272,68 @@ mod tests {
         let l = compose(&etat_radio());
         assert_eq!(l[0], "RADIO  3/12");
         assert_eq!(l[1], "France Inter");
+    }
+
+    #[test]
+    fn la_veille_affiche_lheure_sous_le_mot_de_veille() {
+        // Demande du propriétaire : l'écran de veille n'a rien d'autre à dire,
+        // une horloge y est plus utile qu'un tty noir. Le mot de veille reste
+        // en tête — il dit *pourquoi* rien ne joue.
+        let etat = PlayerState { standby: true, status: Some("VEILLE".into()), ..Default::default() };
+        assert_eq!(compose_a(&etat, Some((13, 5))), ["VEILLE", "13:05", ""]);
+    }
+
+    #[test]
+    fn la_veille_suit_le_reglage_douze_heures() {
+        // Le réglage voyage dans la trame d'état : un afficheur ne va jamais
+        // rien chercher de côté.
+        let mut etat =
+            PlayerState { standby: true, status: Some("VEILLE".into()), ..Default::default() };
+        etat.clock.douze_heures = true;
+        assert_eq!(compose_a(&etat, Some((13, 5)))[1], "1:05 PM");
+    }
+
+    #[test]
+    fn une_horloge_inutilisable_laisse_la_veille_sans_heure() {
+        // Un Pi n'a pas de pile : avant que le réseau ne l'ait remis à l'heure,
+        // mieux vaut pas d'heure du tout qu'une heure fausse.
+        let etat = PlayerState { standby: true, status: Some("VEILLE".into()), ..Default::default() };
+        assert_eq!(compose_a(&etat, None), ["VEILLE", "", ""]);
+    }
+
+    #[test]
+    fn une_incrustation_passe_devant_lhorloge_de_veille() {
+        // L'incrustation est passagère et c'est ce qu'on veut lire pendant
+        // qu'elle dure — la règle qui vaut partout ailleurs dans `compose`.
+        let etat = PlayerState {
+            standby: true,
+            status: Some("VEILLE".into()),
+            overlay: Some(Overlay::Message { text: "PAS DE DISQUE".into(), remaining_ms: 2000 }),
+            ..Default::default()
+        };
+        assert_eq!(compose_a(&etat, Some((13, 5))), ["PAS DE DISQUE", "", ""]);
+    }
+
+    #[test]
+    fn les_deux_formats_dheure_couvrent_minuit_et_midi() {
+        // Les deux bornes que la convention anglo-saxonne traite à part : un
+        // `0:00 AM` n'existe nulle part, et midi est `12:00 PM`.
+        assert_eq!(format_heure(0, 0, false), "00:00");
+        assert_eq!(format_heure(0, 0, true), "12:00 AM");
+        assert_eq!(format_heure(12, 0, true), "12:00 PM");
+        assert_eq!(format_heure(23, 59, true), "11:59 PM");
+        assert_eq!(format_heure(9, 5, true), "9:05 AM");
+        assert_eq!(format_heure(9, 5, false), "09:05");
+    }
+
+    #[test]
+    fn lheure_locale_est_lisible_et_dans_les_bornes() {
+        // L'unique appel impur du module. On ne peut pas prédire l'heure, mais
+        // on peut exiger qu'elle soit une heure : c'est ce qui attraperait une
+        // `tm` mal lue (un champ pris pour un autre, un fuseau qui déborde).
+        let (h, m) = heure_locale().expect("l'horloge du systeme de test doit etre convertible");
+        assert!(h < 24, "heure hors bornes : {h}");
+        assert!(m < 60, "minutes hors bornes : {m}");
     }
 
     #[test]

@@ -101,6 +101,17 @@ function stub(
       }
       return Promise.resolve({ ok: true, json: async () => journal } as Response)
     }
+    // `/api/settings` distingue lui aussi : la page le releve une fois au
+    // montage, pour dater le journal au format regle. Sans cette branche, il
+    // tombait dans le repli ci-dessous et **consommait un echantillon de
+    // metriques**, ce qui decalait tous les deltas CPU calcules ensuite — un
+    // echec qui n'a rien a voir avec ce que ces tests verifient.
+    if (u.includes('/api/settings')) {
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({ date_format: 'day_month_year', clock_24h: true }),
+      } as Response)
+    }
     const j = u.includes('/api/i18n')
       ? catalogue
       : typeof corps === 'function'
@@ -677,8 +688,12 @@ describe('SystemView', () => {
       if (init?.method === 'POST') return Promise.resolve({ ok: true, json: async () => ({}) } as Response)
       if (String(url).includes('/api/i18n')) return Promise.resolve({ ok: true, json: async () => CATALOGUE } as Response)
       // Le journal est relevé une fois au montage et ne passe pas par le verrou
-      // de sondage : le compter ici mesurerait autre chose que ce test.
+      // de sondage : le compter ici mesurerait autre chose que ce test. Même
+      // chose pour les réglages, relevés une fois pour dater ce journal.
       if (String(url).includes('/api/logs')) return Promise.resolve({ ok: true, json: async () => ({ lines: [] }) } as Response)
+      if (String(url).includes('/api/settings')) {
+        return Promise.resolve({ ok: true, json: async () => ({ date_format: 'day_month_year', clock_24h: true }) } as Response)
+      }
       n += 1
       return new Promise((resolve) => differes.push({ resolve }))
     })
@@ -767,7 +782,11 @@ describe('SystemView', () => {
       if (String(url).includes('/api/i18n')) return Promise.resolve({ ok: true, json: async () => CATALOGUE } as Response)
       // Même raison que dans le test du verrou : le journal est relevé une seule
       // fois au montage, hors du sondage, et n'a rien à faire dans `differes`.
+      // Les réglages non plus, relevés une fois pour dater ce journal.
       if (String(url).includes('/api/logs')) return Promise.resolve({ ok: true, json: async () => ({ lines: [] }) } as Response)
+      if (String(url).includes('/api/settings')) {
+        return Promise.resolve({ ok: true, json: async () => ({ date_format: 'day_month_year', clock_24h: true }) } as Response)
+      }
       return new Promise((resolve, reject) => {
         const signal = init?.signal
         // Un `AbortSignal` réel rejette son `fetch` à l'annulation : le stub

@@ -616,8 +616,64 @@ pub struct PlayerState {
     /// troisième état n'aurait aucun rendu propre.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub can_eject: bool,
+    /// Comment cet appareil écrit une heure et une date, tel que son
+    /// propriétaire l'a réglé.
+    ///
+    /// **Une préférence de rendu dans la trame d'état, et il faut dire
+    /// pourquoi.** Un afficheur ne doit jamais aller chercher quoi que ce soit
+    /// de côté — tout ce qu'il montre arrive par ce canal — et l'horloge qu'il
+    /// dessine en veille est justement quelque chose qu'il montre. La
+    /// solution inverse (le cœur pousse l'heure **déjà écrite**) a été écartée :
+    /// elle imposerait une trame par minute, pour toujours, y compris quand
+    /// personne ne regarde. Ici la valeur ne bouge qu'au geste de l'utilisateur.
+    ///
+    /// Additif, à l'idiome du reste de la structure : absent du JSON à sa
+    /// valeur par défaut, donc aucune trame existante ne change de forme.
+    #[serde(default, skip_serializing_if = "Horloge::est_defaut")]
+    pub clock: Horloge,
     #[serde(flatten)]
     pub morceau: Morceau,
+}
+
+/// Les deux réglages d'écriture du temps, tels qu'ils voyagent aux afficheurs.
+///
+/// Deux champs séparés parce que ce sont deux choix indépendants : l'ordre des
+/// composants d'une date et le format 12/24 h ne varient pas ensemble d'un pays
+/// à l'autre.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Horloge {
+    /// L'ordre des composants d'une date.
+    #[serde(default)]
+    pub date: FormatDate,
+    /// Heure sur 24 h plutôt que sur 12 h.
+    ///
+    /// **Le défaut est 24 h**, et le champ s'écrit donc « sur 12 h » pour que
+    /// la valeur par défaut soit `false` et disparaisse du JSON — la même
+    /// mécanique additive que `playback` ou `can_eject`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub douze_heures: bool,
+}
+
+impl Horloge {
+    /// Vrai pour la valeur par défaut : sert au `skip_serializing_if` de
+    /// `PlayerState::clock`.
+    pub fn est_defaut(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// L'ordre des composants d'une date. Miroir de `state::DateFormat` côté cœur,
+/// que le protocole ne peut pas importer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FormatDate {
+    /// `31/12/2026`
+    #[default]
+    DayMonthYear,
+    /// `2026-12-31`
+    YearMonthDay,
+    /// `12/31/2026`
+    MonthDayYear,
 }
 
 impl Morceau {

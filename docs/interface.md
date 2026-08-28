@@ -664,6 +664,46 @@ and size), so replacing the image under that path changes the key and the old
 thumbnail is never served again. Without it every page load would decode and
 re-encode on a Pi 2, which is the very cost the thumbnail exists to avoid.
 
+### Date and time
+
+Two settings, not one, and not a free pattern. The owner asked for the pair
+explicitly, and the split defends itself: the order of a date's components and
+the 12/24-hour choice do not vary together from one country to the next — one
+reader may want `2026-12-31` with 24-hour time, another `12/31/2026` with
+12-hour. A `strftime`-style pattern would cover both and hand the owner a blank
+display on the first typo, on an appliance where nobody reads a log; the three
+closed date forms (`31/12/2026`, `2026-12-31`, `12/31/2026`) cover what
+countries actually write and cannot be malformed. The separator belongs to the
+form rather than being a third setting: `2026-12-31` with slashes is read
+nowhere.
+
+**No timezone setting**, deliberately. A display runs *on* the appliance, so its
+clock is already the right one; the web page formats in the browser, so in the
+timezone of whoever is looking — which stays right for a phone that travels. A
+third setting could only contradict one of the two.
+
+They serve two consumers. The **displays** draw a clock in standby: the standby
+word keeps the first line, since it says *why* nothing is playing, and the time
+takes the second. The preference travels **in the state frame**
+(`PlayerState::clock`) rather than being fetched sideways — a display never
+reaches for anything, everything it shows arrives on that channel. Pushing the
+already-formatted time was the alternative and was rejected: it would mean one
+frame a minute, forever, including when nobody is watching, where this value
+only moves when the user changes it. The console display therefore keeps its own
+ten-second heartbeat and redraws; `ConsoleDisplay` compares its render to the
+previous one, so nothing is written until the minute actually turns. The clock
+is read through `libc::localtime_r` — already this repository's idiom for what
+the C library does on its own — rather than by adding a date crate for two
+integers.
+
+The second consumer is the **recent errors** list on the System page. The core
+logs in UTC, which is right for a file and reads badly when you are looking for
+what happened five minutes ago, so the page rewrites the leading timestamp into
+the configured format and the browser's timezone. It does so **before**
+filtering: what you search is what you see, so a search for "14:03" matches the
+time on screen and not the UTC the core wrote. A line whose timestamp is not
+recognisable is left exactly as it is.
+
 ## System page
 
 `GET /api/system` reports OS metrics. **Every metric is optional and is

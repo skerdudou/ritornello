@@ -25,6 +25,12 @@ export interface ThemePayload { theme: string; mode: Mode }
 export interface LogsPayload { lines: string[] }
 /** Les trois valeurs de `settings.startup_power`, cote coeur comme cote IHM. */
 export type StartupPower = 'on' | 'standby' | 'previous'
+
+/**
+ * L'ordre des composants d'une date, tel que l'appareil l'ecrit. Un choix
+ * ferme et non un motif libre : un motif fautif donnerait un afficheur vide.
+ */
+export type DateFormat = 'day_month_year' | 'year_month_day' | 'month_day_year'
 /** Réglages de comportement, tels que les sert `GET /api/settings`. */
 export interface SettingsPayload {
   volume_repeat_initial_ms: number
@@ -35,6 +41,14 @@ export interface SettingsPayload {
    * avait au dernier arret.
    */
   startup_power: StartupPower
+  /**
+   * L'ordre des composants d'une date. Deux reglages separes et non un motif
+   * unique : l'ordre d'une date et le choix 12/24 h ne varient pas ensemble
+   * d'un pays a l'autre.
+   */
+  date_format: DateFormat
+  /** Heure sur 24 h (`13:05`) plutot que sur 12 h (`1:05 PM`). */
+  clock_24h: boolean
   /** Durée d'affichage de l'incrustation volume/muet et des messages éphémères des sources. */
   overlay_ms: number
   /** Fenêtre de saisie du cumul `+10` de la télécommande (temps laissé pour la seconde pression). */

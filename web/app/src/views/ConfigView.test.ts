@@ -29,6 +29,10 @@ const CATALOGUE = {
   language: 'Langue', change: 'Changer', ok: 'OK',
   recent_errors: 'Dernières erreurs',
   startup_title: 'Démarrage', startup_on: 'allumé', startup_standby: 'veille',
+  clock_title: 'Date et heure', clock_date_label: 'Date', clock_hours_label: 'Heures',
+  clock_24h: '24 h (13:05)', clock_12h: '12 h (1:05 PM)',
+  clock_date_dmy: '31/12/2026', clock_date_ymd: '2026-12-31', clock_date_mdy: '12/31/2026',
+  clock_hint: "Sert à l'horloge de veille des afficheurs.",
   startup_previous: 'état précédent',
   volume_hold_title: 'Volume maintenu',
   volume_hold_initial: 'Délai initial (ms)', volume_hold_interval: 'Intervalle de répétition (ms)',
@@ -780,8 +784,8 @@ describe('ConfigView — sommaire', () => {
     // Plus de « Dernières erreurs » : la carte est passée sur l'onglet Système,
     // et le sommaire ne doit pas garder une entrée qui pointe dans le vide.
     expect(liens.map((l) => l.text())).toEqual([
-      'Plugins', 'Sortie audio', 'Langue', 'Démarrage', 'Volume maintenu', 'Incrustations', 'Déplacement',
-      "Pochettes d'album",
+      'Plugins', 'Sortie audio', 'Langue', 'Démarrage', 'Date et heure', 'Volume maintenu',
+      'Incrustations', 'Déplacement', "Pochettes d'album",
     ])
     // Masqué sur petit écran : la colonne suit la largeur du shell, il n'y a
     // pas la place en mobile.

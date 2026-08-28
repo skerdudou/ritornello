@@ -39,6 +39,8 @@ const reglages = ref<SettingsPayload>({
   volume_repeat_initial_ms: 800,
   volume_repeat_interval_ms: 200,
   startup_power: 'on',
+  date_format: 'day_month_year',
+  clock_24h: true,
   overlay_ms: 5000,
   tens_window_ms: 5000,
   cover_source_max_mio: 20,

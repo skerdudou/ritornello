@@ -18,6 +18,28 @@ pub enum StartupPower {
     Previous,
 }
 
+/// Comment une date s'écrit sur cet appareil.
+///
+/// **Un choix fermé et non un motif libre.** Le propriétaire a demandé deux
+/// réglages séparés, date et heure ; un motif à la `strftime` serait plus
+/// souple et donnerait un afficheur vide au premier motif fautif, sur un
+/// appareil de salon où personne ne lit de journal. Trois formes couvrent ce
+/// que les pays écrivent réellement, et chacune est infalsifiable.
+///
+/// Le **séparateur** appartient à la forme et n'est pas un réglage de plus :
+/// `2026-12-31` avec des barres obliques ne se lit nulle part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DateFormat {
+    /// `31/12/2026` — la forme française, et le défaut.
+    #[default]
+    DayMonthYear,
+    /// `2026-12-31` — ISO 8601, celle qui se trie.
+    YearMonthDay,
+    /// `12/31/2026` — la forme nord-américaine.
+    MonthDayYear,
+}
+
 /// Behavior settings, edited on the config page (`PUT /api/settings`).
 /// Container-level `serde(default)`: a partial block in a hand-edited
 /// state.json fills in with defaults instead of failing to load.
@@ -59,6 +81,27 @@ pub struct Settings {
     /// dépend de ce qu'on écoute : dix secondes pour rattraper une phrase,
     /// une minute pour traverser un mouvement.
     pub seek_step_s: u32,
+
+    // ---- Comment l'appareil écrit une date et une heure ------------------
+    //
+    // **Deux réglages et non un**, à la demande du propriétaire, et la
+    // séparation se défend : l'ordre des composants d'une date et le choix
+    // 12/24 h ne varient pas ensemble d'un pays à l'autre. Un anglophone peut
+    // vouloir `2026-12-31` et 24 h, un autre `12/31/2026` et 12 h.
+    //
+    // Ils servent deux publics, et c'est pour cela qu'ils vivent ici plutôt
+    // que dans chaque consommateur : l'heure de l'afficheur en veille, et la
+    // date des « dernières erreurs » de la page Système.
+    //
+    // **Aucun réglage de fuseau**, et c'est délibéré : l'afficheur tourne
+    // *sur* l'appareil, donc son horloge est déjà la bonne ; la page web
+    // formate côté navigateur, donc dans le fuseau de qui regarde — ce qui est
+    // juste pour un téléphone qui voyage. Un réglage de plus ne pourrait que
+    // contredire l'un des deux.
+    /// L'ordre des composants d'une date. Voir `DateFormat`.
+    pub date_format: DateFormat,
+    /// Heure sur 24 h (`13:05`) plutôt que sur 12 h (`1:05 PM`).
+    pub clock_24h: bool,
 
     // ---- Pochettes : ce qui entre, puis ce qui sort ----------------------
     //
@@ -137,6 +180,11 @@ impl Default for Settings {
             overlay_ms: 5000,
             tens_window_ms: 5000,
             seek_step_s: 10,
+            // Les défauts du pays de l'appareil, pas des défauts neutres : il
+            // n'y a pas de forme « neutre » de date, et celle-ci est celle de
+            // son propriétaire.
+            date_format: DateFormat::DayMonthYear,
+            clock_24h: true,
             // Le plafond du protocole lui-même : par défaut le cœur n'ajoute
             // aucune restriction à ce que les greffons savent déjà encaisser.
             cover_source_max_mio: ritornello_proto::COVER_MAX_BYTES as u32 / (1024 * 1024),
@@ -352,6 +400,10 @@ mod tests {
                 overlay_ms: 6000,
                 tens_window_ms: 7000,
                 seek_step_s: 45,
+                // Non-défaut toutes les deux, même raison : le défaut est
+                // `DayMonthYear` et `true`.
+                date_format: DateFormat::YearMonthDay,
+                clock_24h: false,
                 // Six valeurs non-défaut de plus, pour la raison écrite
                 // au-dessus : une fixture qui reprendrait les défauts ne
                 // distinguerait pas « la valeur écrite a survécu » de « le
