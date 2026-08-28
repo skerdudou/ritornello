@@ -792,6 +792,21 @@ async fn executer(
             // composées partent quand même, comme le fait MPD — un `ACK` ne
             // rétracte pas les réponses des commandes qui, elles, ont abouti.
             Issue::Refuser(refus) => {
+                // **Le refus est journalisé avec la commande entière**, et ce
+                // n'est pas du confort. Un client qui bute sur une commande non
+                // gérée n'affiche qu'un message générique — « unsupported » —
+                // et l'opérateur n'a alors aucun moyen de savoir *laquelle* :
+                // c'est exactement ce qui a manqué pour diagnostiquer l'échec
+                // de M.A.L.P. sur la sélection d'une piste dans une liste
+                // enregistrée. Les arguments comptent autant que le nom : la
+                // même commande peut être refusée pour sa forme.
+                //
+                // En `info` et non en `warn` : un refus est une réponse
+                // ordinaire du protocole (un client essaie, apprend, passe à
+                // autre chose), et le cœur ne retient que les `warn` pour sa
+                // carte « dernières erreurs » — y verser chaque commande
+                // inconnue d'un client bavard la remplirait de bruit.
+                tracing::info!("mpd refused {args:?}: {refus}");
                 sortie.pousser(refus);
                 ecrire(ecriture, &sortie.lignes).await?;
                 return Ok(Suite::Continuer);

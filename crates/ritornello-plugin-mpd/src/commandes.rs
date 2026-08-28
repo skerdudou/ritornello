@@ -125,8 +125,11 @@ impl Issue {
 ///
 /// Ordre alphabétique : les clients n'en tirent rien, mais un trou se voit.
 pub const COMMANDES: &[&str] = &[
+    "add",
+    "addid",
     "albumart",
     "binarylimit",
+    "clear",
     "close",
     "commands",
     "count",
@@ -200,9 +203,9 @@ fn entrees_nommees(presets: &[Preset]) -> Vec<Entree> {
 ///    « je n'ai rien ». Retomber sur `preset_count` est alors la seule façon de
 ///    voir les douze pistes d'un disque.
 ///
-/// `None` devient **zéro entrée** et non les neuf de la grille historique de
-/// l'IHM : cette grille est un pavé numérique, pas une liste. Annoncer neuf
-/// entrées ferait demander à un client neuf choses dont aucune n'existe.
+/// `None` devient **zéro entrée** et non les dix de la grille par défaut de
+/// l'IHM : cette grille est un pavé numérique, pas une liste. Annoncer dix
+/// entrées ferait demander à un client dix choses dont aucune n'existe.
 pub fn file_attente(inst: &Instantane) -> Vec<Entree> {
     let presets = inst.presets_actifs();
     if !presets.is_empty() {
@@ -364,6 +367,29 @@ pub fn traiter(
         // la liste de la source active, donc la charger, c'est la choisir.
         // Le refus n'est plus fixe : le catalogue dit quels noms existent.
         "load" => load(inst, indice, reste),
+        // **Toucher une piste dans une liste enregistrée doit la jouer.**
+        // C'était `ACK 5` : le propriétaire l'a signalé, et c'est le geste le
+        // plus ordinaire qui soit une fois qu'un client sait lister les
+        // sources. Un client qui « joue » une entrée l'ajoute d'abord à la
+        // file (`add`/`addid`), souvent après l'avoir vidée (`clear`).
+        //
+        // Ce n'est **pas** un retour sur le refus de l'édition de file, qui
+        // reste entier : réordonner, supprimer, insérer à une position n'a
+        // aucun sens ici, la file *est* la liste de la source active et elle ne
+        // nous appartient pas. Ce que ces trois-là font, c'est traduire « joue
+        // cette entrée-ci » dans le seul vocabulaire que l'appareil ait :
+        // choisir la source, puis la présélection. L'URI le permet parce que
+        // c'est **nous** qui l'avons publiée (`currentsong`, `listplaylistinfo`,
+        // `lsinfo`) et qu'elle nomme les deux.
+        "add" | "addid" => ajouter(inst, indice, cmd, reste),
+        // Accepté sans rien faire, et il faut dire pourquoi : il n'y a pas de
+        // file à vider — la file est la liste de la source. Un `ACK` ici
+        // interromprait la liste de commandes `clear`/`add`/`play` que le
+        // client envoie pour jouer une piste, donc le refus coûterait
+        // exactement la fonction qu'on vient d'ajouter. Le client relira
+        // `status` et y trouvera la file inchangée : une surprise bénigne,
+        // contre un geste qui marche.
+        "clear" => Issue::ok(),
         // **Le navigateur de fichiers d'un client, rendu utile plutôt que
         // refusé.** `lsinfo` était dans la liste des refus assumés, au motif
         // qu'il n'y a pas de base de données à parcourir. C'est vrai des
@@ -959,6 +985,65 @@ fn lsinfo(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
         // qu'il désigne qui n'existe pas.
         None => Issue::Refuser(ack(Ack::NoExist, indice, "lsinfo", "No such directory")),
     }
+}
+
+/// L'inverse d'[`uri`] : la source et l'indice qu'une de nos URI désigne.
+///
+/// `None` pour tout ce qui n'est pas de nous — un chemin de fichier, une URL
+/// http, une URI tronquée. Coupée au **dernier** `/` : un nom de source vient
+/// de `plugins.toml` et rien ne lui interdit d'en contenir un, alors que
+/// l'indice, lui, n'en contient jamais.
+fn depuis_uri(uri: &str) -> Option<(&str, u8)> {
+    let reste = uri.strip_prefix("ritornello://")?;
+    let (source, index) = reste.rsplit_once('/')?;
+    if source.is_empty() {
+        return None;
+    }
+    Some((source, index.parse().ok()?))
+}
+
+/// `add <URI>` / `addid <URI> [POS]` : jouer l'entrée que cette URI désigne.
+///
+/// **La position d'`addid` est ignorée**, et c'est cohérent avec tout le
+/// reste : il n'y a pas de file à insérer dedans, seulement une source à
+/// choisir et une présélection à lancer. La refuser ferait échouer un client
+/// qui la fournit sans y tenir.
+///
+/// Deux commandes émises quand la source visée n'est pas l'active, une seule
+/// sinon. L'ordre compte et il est garanti : la session les pousse dans l'ordre
+/// sur le canal d'entrée, que le cœur dépile en série.
+fn ajouter(inst: &Instantane, indice: usize, cmd: &str, args: &[String]) -> Issue {
+    let Some(uri) = args.first() else {
+        return Issue::Refuser(ack(Ack::Arg, indice, cmd, "wrong number of arguments"));
+    };
+    // `ACK 50` : l'URI est bien formée en tant que chaîne, c'est ce qu'elle
+    // désigne qui n'existe pas — la distinction que MPD fait, et celle qui dit
+    // au client de relire plutôt que de corriger sa syntaxe.
+    let absente = || Issue::Refuser(ack(Ack::NoExist, indice, cmd, "No such song"));
+    let Some((source, index)) = depuis_uri(uri) else { return absente() };
+    let Some(catalogue) = inst.catalogue_source(source) else { return absente() };
+    // Vérifié dans la liste de **cette** source et pas seulement contre une
+    // borne : une table creuse a des trous, et un indice qui tombe dedans ne
+    // joue rien. Même règle que `playid`.
+    let entrees = entrees_de_source(inst, catalogue);
+    if !index_existe(&entrees, index) {
+        return absente();
+    }
+    let mut cmds = Vec::new();
+    if source != inst.etat.source {
+        // Le nom du **catalogue** et non l'argument brut, comme `load` : les
+        // deux sont égaux par construction, et émettre celui que le cœur nous a
+        // donné garde le greffon incapable d'inventer un nom de source.
+        cmds.push(Command::SelectSource(catalogue.name.clone()));
+    }
+    cmds.push(Command::Select(index));
+    let mut lignes = Vec::new();
+    if cmd == "addid" {
+        // Le seul écart entre les deux commandes, et c'est celui de MPD :
+        // `addid` rend l'identifiant de ce qu'il vient d'ajouter.
+        lignes.push(ligne("Id", index));
+    }
+    Issue::Repondre { lignes, cmds }
 }
 
 /// `find`/`search` : bien formées, et vides.
@@ -2136,7 +2221,7 @@ mod tests {
         // onglet vide vaut mieux qu'un onglet qui plante. Ce qui reste ici est
         // ce qui n'existe vraiment pas : l'ecriture de la file, l'ecriture des
         // listes, et l'extinction.
-        for absente in ["add", "delete", "move", "save", "rm", "playlistadd", "update", "kill"] {
+        for absente in ["delete", "move", "swap", "save", "rm", "playlistadd", "update", "kill"] {
             assert!(!lignes.contains(&format!("command: {absente}")), "{absente} annoncee a tort");
         }
     }
@@ -2902,14 +2987,11 @@ mod tests {
         // pas de sens sur cet appareil, et elle seule.
         for cmd in [
             "update",
-            "add",
-            "addid",
             "delete",
             "deleteid",
             "move",
             "swap",
             "shuffle",
-            "clear",
             "save",
             "rm",
             "rename",
@@ -2943,6 +3025,72 @@ mod tests {
     // ------------------------------------------------------------------
     // La bibliothèque : ce qu'un client peut parcourir
     // ------------------------------------------------------------------
+
+    #[test]
+    fn add_dune_uri_de_la_source_active_joue_cette_entree() {
+        // **Le geste que le proprietaire a signale casse** : toucher une piste
+        // dans une liste enregistree renvoyait `ACK 5`. Sur la source deja
+        // active, une seule commande suffit.
+        let inst = instantane_avec_presets("radio", &[(1, "FIP"), (5, "Nova")]);
+        assert_eq!(cmds(&inst, &["add", "ritornello://radio/5"]), vec![Command::Select(5)]);
+    }
+
+    #[test]
+    fn add_dune_autre_source_la_choisit_avant_de_jouer() {
+        // Deux commandes, dans cet ordre : la file *est* la liste de la source,
+        // donc jouer une entree d'ailleurs veut dire changer de source d'abord.
+        let inst = instantane_actif_sur("radio", &[("radio", &[(1, "FIP")]), ("cd", &[(2, "Piste 2")])]);
+        assert_eq!(
+            cmds(&inst, &["add", "ritornello://cd/2"]),
+            vec![Command::SelectSource("cd".into()), Command::Select(2)]
+        );
+    }
+
+    #[test]
+    fn addid_rend_lidentifiant_comme_le_fait_mpd() {
+        // Le seul ecart entre les deux commandes. Sa position eventuelle est
+        // ignoree : il n'y a pas de file ou inserer.
+        let inst = instantane_avec_presets("radio", &[(1, "FIP"), (5, "Nova")]);
+        assert_eq!(traiter_ok(&inst, &["addid", "ritornello://radio/5", "0"]), vec!["Id: 5"]);
+        assert_eq!(
+            cmds(&inst, &["addid", "ritornello://radio/5", "0"]),
+            vec![Command::Select(5)]
+        );
+    }
+
+    #[test]
+    fn add_dune_uri_qui_ne_designe_rien_est_refuse() {
+        // Y compris un indice **dans les bornes mais absent** d'une table
+        // creuse : meme regle que `playid`, une borne ne suffit pas.
+        let inst = instantane_avec_presets("radio", &[(1, "FIP"), (5, "Nova")]);
+        for uri in [
+            "ritornello://radio/3",     // trou de la suite creuse
+            "ritornello://inconnue/1",  // source absente du catalogue
+            "/musique/piste.flac",      // pas une de nos URI
+            "ritornello://radio",       // tronquee
+            "ritornello:///1",          // source vide
+        ] {
+            assert_eq!(
+                traiter_mots(&inst, 0, &["add", uri]),
+                Issue::Refuser("ACK [50@0] {add} No such song".to_string()),
+                "{uri} acceptee a tort"
+            );
+        }
+        assert_eq!(
+            traiter_mots(&inst, 0, &["add"]),
+            Issue::Refuser("ACK [2@0] {add} wrong number of arguments".to_string())
+        );
+    }
+
+    #[test]
+    fn clear_est_accepte_sans_rien_faire() {
+        // Il n'y a pas de file a vider. Un `ACK` interromprait la liste
+        // `clear`/`add`/`play` qu'un client envoie pour jouer une piste, donc
+        // le refus couterait exactement la fonction qu'on vient d'ajouter.
+        let inst = instantane_avec_presets("radio", &[(1, "FIP")]);
+        assert_eq!(traiter_ok(&inst, &["clear"]), Vec::<String>::new());
+        assert_eq!(cmds(&inst, &["clear"]), Vec::<Command>::new());
+    }
 
     #[test]
     fn lsinfo_a_la_racine_rend_les_sources_comme_listplaylists() {

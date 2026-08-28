@@ -946,8 +946,23 @@ nothing — and the whole point of that paragraph is the difference between
 because a truncated request must be learned rather than mistaken for a search
 that found nothing.
 
+**Playing an entry of a stored playlist.** Touching a track in a playlist has to
+play it, and it used to answer `ACK 5`. A client that "plays" an entry adds it to
+the queue first (`add` / `addid`), often after emptying it (`clear`), so those
+three are handled — by translating "play this entry" into the only vocabulary
+the appliance has: pick the source, then the preset. The URI makes that possible
+because **we** published it (`currentsong`, `listplaylistinfo`, `lsinfo`) and it
+names both. Two commands go out when the entry belongs to another source, one
+when it is the active one; `addid`'s position is ignored, there being no queue to
+insert into, and an index falling in a hole of a sparse list is refused just as
+`playid` refuses it. `clear` answers OK and does nothing: there is no queue to
+empty, and an `ACK` there would abort the `clear`/`add`/`play` list a client
+sends to play a track — the refusal would cost exactly the feature. The client
+re-reads `status` and finds the queue unchanged: a benign surprise, against a
+gesture that works.
+
 **What a client does not get**, and this is a list, not an apology: no queue
-editing (`add`, `delete`, `move` — the queue is not ours to rearrange, it is
+*rearranging* (`delete`, `move`, `swap` — the queue is not ours to reorder, it is
 what the active source offers), no writing playlists (`save`, `rm`,
 `playlistadd` — a source's presets are edited on that source's own admin page),
 and no `update` (there is no database to index). `repeat`, `random`, `single` and
@@ -1008,6 +1023,15 @@ cover stayed blank until the next track, where it happened again. The session
 now waits up to three seconds for the announced image, and refuses only when
 nothing announced one, when the URI names another track, or when the wait runs
 out. Waiting costs nothing to anyone else: a session is a task of its own.
+
+**Every refusal is logged with the whole command**, arguments included, at
+`info`. A client that hits an unhandled command shows a generic message —
+"unsupported" — and the operator then has no way of knowing *which*: that is
+precisely what was missing to diagnose M.A.L.P. failing to play a track from a
+stored playlist. `info` and not `warn`, because a refusal is an ordinary
+protocol answer (a client tries, learns, moves on) and the core only keeps
+`warn` and above for its "recent errors" card — pouring every unknown command
+from a chatty client in there would fill it with noise.
 
 ### Dense positions, sparse indices
 
