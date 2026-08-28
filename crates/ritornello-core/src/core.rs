@@ -16,9 +16,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
 
-/// Anglais embarqué du cœur (base toujours présente).
-pub const EN: &str = include_str!("locales/en.toml");
-
 const RETRY_BASE: Duration = Duration::from_secs(2);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 
@@ -2165,7 +2162,7 @@ impl<P: Player> Core<P> {
     /// `Command::Power` (voir la doc de `standby_status`).
     pub async fn set_locale(&mut self, locale: String) -> Result<()> {
         self.locale = Some(locale.clone());
-        let nouveau = Catalog::load("core", &locale, &self.locales_root, EN);
+        let nouveau = Catalog::load("core", &locale, &self.locales_root, crate::i18n::EN);
         self.standby_status = Some(resout_standby_status(&nouveau));
         *self.catalog.write().await = nouveau;
         self.persist();
@@ -2507,7 +2504,7 @@ mod tests {
         sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls.clone() }));
         let (etat_tx, etat_rx) = watch::channel(PlayerState::default());
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
         let (covers, pochette_tx) = covers_de_test();
         let core = Core::new(
             player,
@@ -2547,7 +2544,7 @@ mod tests {
         let (np_tx, np_rx) = watch::channel(NowPlaying { source: "radio".into(), identity: None, ..Default::default() });
         let (etat_tx, etat_rx) = watch::channel(PlayerState::default());
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
         let (covers, pochette_tx) = covers_de_test();
         let core = Core::new(
             FakePlayer::default(),
@@ -2600,7 +2597,7 @@ mod tests {
             watch::channel(NowPlaying { source: "radio".into(), identity: None, ..Default::default() });
         let (etat_tx, etat_rx) = watch::channel(PlayerState::default());
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
         let (covers, pochette_tx) = covers_de_test();
         let (extraction_tx, extraction_rx) = mpsc::channel(4);
         let core = Core::new(
@@ -2674,7 +2671,7 @@ mod tests {
             "core",
             "en",
             &root,
-            crate::core::EN,
+            crate::i18n::EN,
         )));
         let (etat_tx, etat_rx) = watch::channel(PlayerState::default());
         let (covers, pochette_tx) = covers_de_test();
@@ -3296,7 +3293,7 @@ mod tests {
 
     #[test]
     fn en_embarque_du_coeur_est_non_vide() {
-        assert!(!ritornello_i18n::try_parse(super::EN).unwrap().is_empty());
+        assert!(!ritornello_i18n::try_parse(crate::i18n::EN).unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -3420,7 +3417,7 @@ mod tests {
             settings: crate::state::Settings::default(),
         };
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
         let (covers, pochette_tx) = covers_de_test();
         let mut core = Core::new(player, Cablage { sources, persisted, state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata: cablage_muet(vec![]), catalogue: watch::channel(Catalogue::default()).0 }, covers, pochette_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
@@ -3502,7 +3499,7 @@ mod tests {
         sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())) }));
         let (etat_tx, mut etat_rx) = watch::channel(PlayerState::default());
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "fr", &root, crate::core::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "fr", &root, crate::i18n::EN)));
         let metadata = MetadataCablage {
             plugins: vec![],
             now_playing: watch::channel(NowPlaying { source: String::new(), identity: None, ..Default::default() }).0,
@@ -3531,7 +3528,7 @@ mod tests {
         let (etat_tx, mut etat_rx) = watch::channel(PlayerState::default());
         let root = dir.path().to_path_buf();
         // Construction en anglais : "STANDBY", la valeur embarquée de la clé.
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
         let metadata = MetadataCablage {
             plugins: vec![],
             now_playing: watch::channel(NowPlaying { source: String::new(), identity: None, ..Default::default() }).0,
@@ -3606,7 +3603,7 @@ mod tests {
         sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: Arc::new(Mutex::new(Vec::new())) }));
         let persisted = PersistedState { active_source: "cd".into(), ..PersistedState::default() };
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
         let (covers, pochette_tx) = covers_de_test();
         let mut core = Core::new(player, Cablage { sources, persisted, state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata: cablage_muet(vec![]), catalogue: watch::channel(Catalogue::default()).0 }, covers, pochette_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
@@ -3811,7 +3808,7 @@ mod tests {
         sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls.clone() }));
         let persisted = PersistedState { active_source: "cd".into(), ..PersistedState::default() };
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
         let (covers, pochette_tx) = covers_de_test();
         let mut core = Core::new(player, Cablage { sources, persisted, state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata: cablage_muet(vec![]), catalogue: watch::channel(Catalogue::default()).0 }, covers, pochette_tx, mpsc::channel(4).0);
         // Unique source : SourceCycle re-active « cd », qui répond `Play cdda://`.
@@ -3848,7 +3845,7 @@ mod tests {
         sources.insert("cd".into(), Arc::new(SourceVide));
         let (etat_tx, etat_rx) = watch::channel(PlayerState::default());
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
         let metadata = MetadataCablage {
             plugins: vec![],
             now_playing: watch::channel(NowPlaying { source: String::new(), identity: None, ..Default::default() }).0,
@@ -3893,7 +3890,7 @@ mod tests {
         sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())) }));
         sources.insert("cd".into(), Arc::new(SourceEnPanne));
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
         let (covers, pochette_tx) = covers_de_test();
         let mut core = Core::new(player, Cablage { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata: cablage_muet(vec![]), catalogue: watch::channel(Catalogue::default()).0 }, covers, pochette_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
@@ -6208,7 +6205,7 @@ mod tests {
     fn le_coeur_et_lappstate_partagent_reellement_le_meme_arc() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::core::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
         let cablage = Cablage {
             sources: HashMap::new(),
             persisted: PersistedState::default(),
@@ -6240,7 +6237,7 @@ mod tests {
 
     #[test]
     fn parite_des_cles_entre_len_embarque_et_le_pack_fr() {
-        let en = ritornello_i18n::try_parse(super::EN).unwrap();
+        let en = ritornello_i18n::try_parse(crate::i18n::EN).unwrap();
         let fr = ritornello_i18n::try_parse(&pack_fr()).unwrap();
         let mut cles_en: Vec<&String> = en.keys().collect();
         let mut cles_fr: Vec<&String> = fr.keys().collect();

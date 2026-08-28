@@ -963,7 +963,7 @@ mod tests {
         std::fs::write(dir.path().join("core/fr.toml"), cles).unwrap();
         // `Catalog::load` copie tout en mémoire, la racine temporaire peut
         // donc être jetée à la fin de la fonction.
-        ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::core::EN)
+        ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::i18n::EN)
     }
 
     #[test]

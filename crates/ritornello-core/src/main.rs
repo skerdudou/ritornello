@@ -2,6 +2,7 @@ mod audio_output;
 mod admin;
 mod core;
 mod cover;
+mod i18n;
 mod metadata;
 mod placeholder;
 mod player;
@@ -976,7 +977,7 @@ async fn main() -> Result<()> {
         "core",
         persisted.locale.as_deref().unwrap_or("en"),
         &locales_root,
-        core::EN,
+        i18n::EN,
     )));
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<InputMessage>(32);
@@ -2253,7 +2254,7 @@ mod bascule_tests {
             "core",
             "en",
             &root,
-            crate::core::EN,
+            crate::i18n::EN,
         )));
 
         let core = core::Core::new(

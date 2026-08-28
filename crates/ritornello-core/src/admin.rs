@@ -283,7 +283,7 @@ mod tests {
                 "core",
                 "en",
                 std::path::Path::new("/nonexistent"),
-                crate::core::EN,
+                crate::i18n::EN,
             ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,

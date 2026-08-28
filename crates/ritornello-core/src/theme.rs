@@ -236,7 +236,7 @@ mod tests {
             "theme_unknown_mode = \"mode {mode} inconnu\"\n",
         )
         .unwrap();
-        let cat = ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::core::EN);
+        let cat = ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::i18n::EN);
         let err = ThemeError::UnknownMode { mode: "system".to_string() };
         assert_eq!(err.message(&cat), "mode system inconnu");
     }

@@ -979,7 +979,7 @@ pub(crate) mod tests_support {
                 "core",
                 "en",
                 std::path::Path::new("/nonexistent"),
-                crate::core::EN,
+                crate::i18n::EN,
             ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
@@ -1016,7 +1016,7 @@ pub(crate) mod tests_support {
                 "core",
                 "en",
                 std::path::Path::new("/nonexistent"),
-                crate::core::EN,
+                crate::i18n::EN,
             ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
@@ -1055,7 +1055,7 @@ pub(crate) mod tests_support {
                 "core",
                 "en",
                 std::path::Path::new("/nonexistent"),
-                crate::core::EN,
+                crate::i18n::EN,
             ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
@@ -1102,7 +1102,7 @@ pub(crate) mod tests_support {
                 "core",
                 "fr",
                 dir.path(),
-                crate::core::EN,
+                crate::i18n::EN,
             ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(Some("fr".to_string()))),
             locale_tx,
@@ -1290,7 +1290,7 @@ mod tests {
     /// réellement embarqué**, et refuse un message égal à sa propre clé.
     #[test]
     fn chaque_refus_resout_contre_le_catalogue_embarque() {
-        let catalog = Catalog::load("core", "en", std::path::Path::new("/inexistant"), crate::core::EN);
+        let catalog = Catalog::load("core", "en", std::path::Path::new("/inexistant"), crate::i18n::EN);
         // Une clé absente se reconnaît à ce que le message **est** la clé : pas
         // d'espace, et le préfixe qu'on lui a donné.
         let messages = [
@@ -2224,7 +2224,7 @@ mod tests {
             "audio_output_name_empty = \"nom de sortie vide\"\n",
         )
         .unwrap();
-        let cat = ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::core::EN);
+        let cat = ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::i18n::EN);
         assert_eq!(AudioOutputError::EmptyName.message(&cat), "nom de sortie vide");
     }
 
@@ -2262,7 +2262,7 @@ mod tests {
             "settings_initial_delay_out_of_range = \"delai hors bornes ({min}-{max})\"\n",
         )
         .unwrap();
-        let cat = ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::core::EN);
+        let cat = ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::i18n::EN);
         let err = SettingsError::InitialDelay { min: 200, max: 5000 };
         assert_eq!(err.message(&cat), "delai hors bornes (200-5000)");
     }
@@ -2292,7 +2292,7 @@ mod tests {
             "core",
             "en",
             std::path::Path::new("/inexistant"),
-            crate::core::EN,
+            crate::i18n::EN,
         );
         let message = SettingsError::SeekStep { min: 1, max: 120 }.message(&catalogue);
         assert!(message.contains('1') && message.contains("120"), "{message}");
