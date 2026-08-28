@@ -93,10 +93,50 @@ function auClavier(e: KeyboardEvent): void {
 </script>
 
 <template>
-  <div v-if="texteEcoule" class="space-y-1" data-progression>
+  <!--
+    Demande du proprietaire : beaucoup trop d'air avant et apres la barre,
+    les durees pourraient etre quasiment collees a la piste. `-mt-4`
+    rapproche la barre du bloc texte au-dessus : le `gap-6` (24 px) du
+    `Card` du kit qui separe les deux `CardContent` de `PlayerCard` n'est
+    pas modifiable ici sans toucher un composant partage, donc c'est cote
+    `BarreProgression` qu'on le compense — mesure a l'ecran (Playwright,
+    390 px) apres un premier essai a `-mt-2` : il n'en rendait que 8 des
+    24 px, insuffisant pour passer sous la cible de 12 px. Le `space-y-1`
+    d'origine est retire au profit d'un `mt-0.5` porte par la seule ligne
+    des durees, plus proche de ce qu'elle doit longer.
+    `flex flex-col` sur la racine : un bloc ordinaire fusionne sa marge avec
+    celle de son premier enfant (margin collapsing CSS) — ici l'enveloppe du
+    curseur, dont le `-my-[19px]` du `Slider` remontait alors seul (le CSS ne
+    garde que la plus negative des deux, -19px, au lieu de les additionner
+    a -mt-4). Mesure a l'ecran : il restait 24 px au lieu de 8 sur le cas
+    fichier. Un conteneur flex ne fusionne pas ses marges avec ses enfants,
+    ce qui restaure l'addition attendue ; la barre statique, sans marge
+    propre, n'est pas affectee.
+  -->
+  <div v-if="texteEcoule" class="-mt-4 flex flex-col" data-progression>
     <div v-if="barreVisible && deplacable" @keydown.capture="auClavier">
+      <!--
+        `-my-[19px]` : le curseur garde sa zone de contact de 44 px (le
+        `py-[19px]` du kit, intouche) sans la faire payer a la mise en page.
+        Mesure a l'ecran : `-my-3` (12 px) ne compensait que 12 des 19 px de
+        padding, laissant encore 31 px entre le bloc texte et la piste sur
+        le cas fichier. En reprenant l'integralite du padding, la boite
+        visuelle du curseur redevient la piste de 6 px, comme la barre
+        statique — la zone de contact deborde alors entierement sur ses
+        voisins : la ligne des durees en dessous (du texte, jamais une
+        cible, elle reste inerte au sens plein) et la ligne des badges
+        au-dessus, qui elle N'EST PAS inerte quand elle porte des liens de
+        plateformes (`data-lien`, des ancres de 44 px, cf. PlayerCard.vue) —
+        le debordement de 19 px y recouvrirait leur bas et leur volerait le
+        tap. C'est PlayerCard.vue qui les fait passer devant dans l'ordre de
+        peinture (`relative z-10` sur `[data-liens]`) pour rendre le tap aux
+        liens ; cote curseur, rien d'autre a faire ici. La poignee reste
+        cliquable au bord : la marge negative deplace la boite, pas la zone
+        de contact qu'elle contient (le padding, lui, ne bouge pas).
+      -->
       <Slider
         data-barre
+        class="-my-[19px]"
         :model-value="[affichee ?? 0]"
         :min="0"
         :max="duree ?? 0"
@@ -106,12 +146,17 @@ function auClavier(e: KeyboardEvent): void {
         @value-commit="surValidation"
       />
     </div>
-    <div v-else-if="barreVisible" class="py-[19px]" data-barre>
+    <!-- `py-0`, pas `py-[19px]` : cette barre n'est pas une cible (pas de
+         `deplacable`), elle n'a donc pas a reserver une zone de contact —
+         et `py-0` plutot que `py-1` pour que radio (barre statique) et
+         fichier (curseur) partagent exactement la meme geometrie, la
+         piste de 6 px collant directement a ses voisins dans les deux cas. -->
+    <div v-else-if="barreVisible" class="py-0" data-barre>
       <div class="h-1.5 w-full overflow-hidden rounded-full bg-muted">
         <div class="h-full rounded-full bg-primary" :style="{ width: pourcent + '%' }" data-remplissage />
       </div>
     </div>
-    <div class="flex justify-between text-xs text-muted-foreground">
+    <div class="mt-0.5 flex justify-between text-xs text-muted-foreground">
       <span data-position>{{ texteEcoule }}</span>
       <span v-if="texteDuree" data-duree-totale>{{ texteDuree }}</span>
     </div>

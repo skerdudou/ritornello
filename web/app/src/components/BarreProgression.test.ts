@@ -37,6 +37,33 @@ describe('BarreProgression', () => {
     expect(w.emitted('deplacer')).toBeUndefined()
     expect(w.get('[data-barre]').attributes('role')).toBeUndefined()
     expect(w.find('[role="slider"]').exists()).toBe(false)
+    // La barre statique n'est pas une cible : elle ne doit pas payer la zone
+    // de contact de 44 px (`py-[19px]`) reservee au vrai curseur, et doit
+    // partager l'exacte meme geometrie que le curseur (`py-0` des deux
+    // cotes, mesure Playwright a l'appui : radio et fichier doivent
+    // s'aligner).
+    const classes = w.get('[data-barre]').classes()
+    expect(classes).not.toContain('py-[19px]')
+    expect(classes).toContain('py-0')
+  })
+
+  // Peu importe l'etat (barre statique ou curseur) : la ligne des durees
+  // reste sous la piste dans le DOM, jamais avant. Une regression possible
+  // avec des marges negatives (`-my-[19px]`, `-mt-4`) qui pourraient a tort
+  // faire chevaucher ou reordonner les blocs visuellement.
+  it('la ligne des durees reste sous la piste, non deplacable', () => {
+    const w = monte({ deplacable: false })
+    const piste = w.get('[data-barre]').element
+    const durees = w.get('[data-position]').element.closest('div')!
+    expect(piste.compareDocumentPosition(durees) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('la ligne des durees reste sous la piste, deplacable', async () => {
+    const w = monte({ deplacable: true })
+    await flushPromises()
+    const piste = w.get('[data-slot="slider"]').element
+    const durees = w.get('[data-position]').element.closest('div')!
+    expect(piste.compareDocumentPosition(durees) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
   // reka-ui capture le pointeur pendant le glisser ; jsdom n'implemente pas

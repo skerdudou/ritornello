@@ -2272,3 +2272,4 @@ Ne pas fusionner depuis le worktree (mémoire : `ExitWorktree(keep)` puis `git m
 6. **Mise en forme du muet** : seule la valeur numérique est barrée et assombrie (`line-through opacity-60`) quand `muted` ; la piste du curseur de volume elle-même n'est pas touchée.
 7. **Tailles retenues** : bouton Play/Pause 64 px (48 px à partir de `md`) ; pochette 224 px sur téléphone, 176 px à côté du texte à partir de `md`.
 8. **Clés i18n des curseurs** : pas de nouvelles clés `*_slider_label` — l'`aria-label` de la barre réutilise `position_label`, celui du volume réutilise `volume`.
+9. **Couleur des icônes de plateformes** : décision du propriétaire, chaque icône (YouTube, Deezer, Apple Music) garde en dur la couleur officielle de sa marque, dans les deux palettes — la seule exception assumée à « aucune couleur en dur » dans cette IHM. Voir docs/interface.md, § Player card.

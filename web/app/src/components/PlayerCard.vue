@@ -174,15 +174,31 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
                  revalider ici. `noopener` parce que la cible est un tiers,
                  `noreferrer` parce qu'il n'a pas a savoir d'ou on vient.
                  La cle est l'URL et non la plateforme : rien n'interdit deux
-                 liens d'une meme plateforme, et Vue en perdrait un. -->
-            <span v-if="liens.length" class="inline-flex items-center gap-1" data-liens>
+                 liens d'une meme plateforme, et Vue en perdrait un.
+                 L'ancre ne porte plus de couleur elle-meme (ni au repos, ni au
+                 survol) : chaque icone porte deja sa couleur de marque en dur
+                 (decision du proprietaire, exception assumee a la regle
+                 « aucune couleur en dur », voir docs/interface.md § Player
+                 card), et une teinte de texte par-dessus la brouillerait sans
+                 rien apporter. `hover:opacity-80` garde un retour perceptible
+                 au survol malgre l'absence de changement de couleur.
+                 `relative z-10` : la zone de contact de 44 px du curseur de
+                 BarreProgression deborde de 19 px au-dessus de sa piste (voir
+                 BarreProgression.vue), alors que cette ligne n'est qu'a 8 px
+                 plus haut — le debordement recouvre donc le bas de ces
+                 ancres (des cibles reelles, contrairement aux durees en
+                 dessous de la piste). Les faire passer devant dans l'ordre
+                 de peinture rend le tap aux liens : le curseur garde toute
+                 sa zone de contact basse et au moins 33 px en haut, largement
+                 assez pour rester utilisable. -->
+            <span v-if="liens.length" class="relative z-10 inline-flex items-center gap-1" data-liens>
               <a
                 v-for="lien in liens"
                 :key="lien.url"
                 :href="lien.url"
                 target="_blank"
                 rel="noopener noreferrer"
-                class="inline-flex size-11 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                class="inline-flex size-11 items-center justify-center rounded-md transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                 :aria-label="t(LIBELLE_LIEN[lien.platform])"
                 :title="t(LIBELLE_LIEN[lien.platform])"
                 :data-lien="lien.platform"
@@ -199,7 +215,10 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
         </div>
       </div>
     </CardContent>
-    <CardContent class="space-y-3 pt-0">
+    <!-- space-y-2 (au lieu de space-y-3) : la demande du proprietaire est de
+         resserrer tout l'entourage de la barre de progression, y compris
+         entre elle et les commandes du dessous. -->
+    <CardContent class="space-y-2 pt-0">
       <BarreProgression
         :position="etat?.position_s ?? null"
         :duree="etat?.duration_s ?? null"

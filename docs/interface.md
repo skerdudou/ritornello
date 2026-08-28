@@ -128,9 +128,12 @@ then, when no position is known but a duration is, a small duration figure
 — the one piece of timing information left when the progress bar (below)
 has nothing to draw at all; then, on the same line as the origin badges,
 when the payload carries `links`, one small icon per listening platform
-(YouTube, Deezer, Apple Music — inline SVG in `currentColor`, so they
-follow the theme rather than carrying brand colours) opens the track there
-in a new tab (`rel="noopener noreferrer"`). Each icon has a translated
+(YouTube, Deezer, Apple Music — inline SVG) opens the track there in a new
+tab (`rel="noopener noreferrer"`). These icons are the one deliberate
+exception to "no hard-coded colour" anywhere else in this interface: each
+one keeps its platform's own brand colour in every palette, light or
+dark, rather than following the theme through `currentColor` — a brand is
+not a colour role the theme owns. Each icon has a translated
 accessible name ("Listen on YouTube"…) and sits in a 44 px touch target,
 and the row reserves that height even with no link so that a link arriving
 late never pushes the volume slider out from under a thumb already resting

@@ -3,13 +3,14 @@ import { beforeAll, describe, expect, it, vi } from 'vitest'
 import PlayerCard from './PlayerCard.vue'
 import type { PlayerPayload } from '../types'
 
-// Un fragment de trace qui n'existe que dans une des trois icones : la note
-// dans son cadre (Apple), le triangle de lecture (YouTube), la quatrieme barre
-// d'egaliseur (Deezer). Sert a verifier que chaque ancre porte **son** icone.
-const EMPREINTE_ICONE = {
-  youtube: 'M6.3 5.75',
-  deezer: 'y="1.4"',
-  apple_music: 'M9.9 3.6',
+// La couleur de marque : l'exception assumee a la regle « aucune couleur en
+// dur » (decision du proprietaire, voir docs/interface.md § Player card).
+// Verifier qu'elle est bien la, plateforme par plateforme, documente
+// l'exception autant que ca ne la prouve.
+const COULEUR_ICONE = {
+  youtube: '#FF0000',
+  deezer: '#A238FF',
+  apple_music: '#FA243C',
 } as const
 
 // jsdom ne fournit pas ResizeObserver ; reka-ui l'utilise pour mesurer la
@@ -409,9 +410,9 @@ describe('PlayerCard', () => {
       // Assertion **par plateforme** et non « trois icones distinctes » : trois
       // icones differentes peuvent tres bien etre les trois mauvaises (deux
       // branches d'un `v-if` inversees passent l'ancienne version du test).
-      // Chaque motif ci-dessous n'appartient qu'a une des trois icones.
-      for (const [plateforme, motif] of Object.entries(EMPREINTE_ICONE)) {
-        expect(w.get(`[data-lien="${plateforme}"] svg`).html()).toContain(motif)
+      // La couleur de marque n'appartient qu'a une des trois icones.
+      for (const [plateforme, couleur] of Object.entries(COULEUR_ICONE)) {
+        expect(w.get(`[data-lien="${plateforme}"] svg`).html()).toContain(`fill="${couleur}"`)
       }
       const svg = w.findAll('[data-lien] svg').map((s) => s.html())
       expect(new Set(svg).size).toBe(3)
@@ -445,6 +446,22 @@ describe('PlayerCard', () => {
       })
       expect(w.get('[data-lien="youtube"]').classes()).toContain('size-11')
       expect(w.get('[data-lien="youtube"] svg').classes()).toContain('size-5')
+    })
+
+    it('passe devant le debordement du curseur de la barre de progression', () => {
+      // La zone de contact de 44 px du curseur deborde de 19 px au-dessus de
+      // sa piste (voir BarreProgression.vue), alors que cette ligne n'est
+      // qu'a 8 px plus haut : sans `relative z-10`, un tap au bas d'une
+      // ancre de lien tomberait sur le curseur (un SeekTo) plutot que sur le
+      // lien. jsdom ne peint rien : ce test documente l'agencement, il ne le
+      // prouve pas a l'ecran (mesure par le controleur via Playwright).
+      const w = monteAvec({
+        title: 'Get Lucky',
+        links: [{ platform: 'youtube', url: 'https://www.youtube.com/watch?v=a' }],
+      })
+      const classes = w.get('[data-liens]').classes()
+      expect(classes).toContain('relative')
+      expect(classes).toContain('z-10')
     })
 
     it('reserve la hauteur de la ligne meme sans lien', () => {
