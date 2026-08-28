@@ -21,7 +21,7 @@ and step keys (see "Physical remote" below) — the web page dropped its own
 ±5%-volume and ±`seek_step_s`-seek buttons in this refonte, in favour of
 the slider and the progress bar respectively, so these four commands no
 longer have a web control at all; `Plus10` belongs to the physical remote,
-which has a single key and no other way past preset 9 (the web tiles reach
+which has a single key and no other way past preset 10 (the web tiles reach
 the same numbers through their own page arrows, described under
 "Presets"); and `SelectSource` (a source named rather than cycled to)
 exists for the MPD server plugin, whose clients send `load` — see
@@ -404,15 +404,24 @@ window extends it rather than starting a new one. The next digit
 (`Select`) consumes the pending offset — effective number = offset +
 digit — and clears the overlay; any other command abandons a pending
 offset outright, since pressing, say, a volume key mid-sequence is a
-change of mind, not a step of it. Key **`0`** is legal input for exactly
-this: alone, with no offset pending, `Select(0)` selects nothing (there
-is no preset 0).
+change of mind, not a step of it.
+
+Key **`0` is worth ten**, so a decade covers `offset + 1 .. offset + 10`:
+1-10, then 11-20, then 21-30. `0` alone picks preset 10, `+10` `0` picks 20.
+It used to select nothing at all — a key inert until another had been pressed
+first — and a decade then ran 10-19, which put preset 10 out of reach of the
+bare digits. The owner asked for pages of ten starting at 1; since the physical
+remote and the web grid must name the same groups, the change lives here rather
+than in the page alone. The last useful offset is therefore
+`((count - 1) / 10) * 10`: with twenty stations that is 10, whose decade covers
+11-20, where the previous reading needed an offset of 20 to reach station 20.
 
 The web page mirrors the same decade window **locally**, through two
 `<`/`>` arrows next to the "Presets : N" count (shown once it exceeds
-nine) instead of a `+10` button: page 0 is 1-9, page k is 10k to 10k+9 —
-the same boundaries as the core's offset, so both interfaces agree on
-what "the same page" means. Unlike the core, the page does **not** wrap:
+ten) instead of a `+10` button: page k is `10k+1` to `10k+10` — the same
+boundaries as the core's offset, so both interfaces agree on what "the same
+page" means. Not six or twelve tiles for layout's sake, either: the keypad has
+ten digits, and that is what fixes the size of a page. Unlike the core, the page does **not** wrap:
 `<` is disabled on the first page and `>` on the last, and there is no
 auto-return to page 0. The physical remote wraps because it has a single
 key and no way back, so wrapping is its only way to reach everything; a
@@ -425,7 +434,7 @@ The browser always sends the absolute number to `Select`.
 highlighted preset moves to another decade — the infrared remote's
 `+10`, another browser tab, a CD stepping from track 9 to 10 — the tiles
 place themselves on the page containing that number. Without it the page
-asserted 1-9 while station 24 played, and the highlight that answers
+asserted 1-10 while station 24 played, and the highlight that answers
 "which preset are we on" was only visible after paging to it by hand. The
 number is clamped to the last non-empty page, so a source declaring a
 preset beyond its own count cannot open an empty page. With no preset

@@ -37,16 +37,54 @@ describe('GrillePresets', () => {
   })
 
   it('annonce le compte et la fenêtre affichée', () => {
+    // Une page couvre 10k+1..10k+10 : la présélection 11 est donc la première
+    // de la page 1, qui va de 11 à 12 sur douze stations.
     const w = monte({ preset_count: 12, preset: 11 })
     expect(w.get('[data-preset-count]').text()).toContain('12')
-    expect(w.get('[data-preset-fenetre]').text()).toBe('10–12')
+    expect(w.get('[data-preset-fenetre]').text()).toBe('11–12')
     expect(w.get('[data-preset-prev]').attributes('disabled')).toBeUndefined()
     expect(w.get('[data-preset-next]').attributes('disabled')).toBeDefined()
   })
 
-  it('sans compte déclaré, 1-9 nus et pas de flèches', () => {
+  it('la première page tient dix tuiles, la seconde commence à 11', async () => {
+    // **La demande du propriétaire** : des pages de dix qui commencent à 1, 11,
+    // 21. La grille valait auparavant 1-9 puis 10-19, parce que la touche 0 de
+    // la télécommande ne valait rien seule ; elle vaut dix depuis (voir
+    // `Command::Select` côté cœur), et les deux doivent nommer les mêmes
+    // groupes.
+    const w = monte({ preset_count: 23 })
+    expect(w.findAll('[data-preset-button]').map((b) => b.attributes('data-preset-button')))
+      .toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'])
+    expect(w.get('[data-preset-fenetre]').text()).toBe('1–10')
+
+    await w.get('[data-preset-next]').trigger('click')
+    expect(w.get('[data-preset-fenetre]').text()).toBe('11–20')
+    await w.get('[data-preset-next]').trigger('click')
+    expect(w.get('[data-preset-fenetre]').text()).toBe('21–23')
+    // Et c'est la dernière : 23 stations tiennent en trois pages.
+    expect(w.get('[data-preset-next]').attributes('disabled')).toBeDefined()
+  })
+
+  it('la page suit la présélection qui joue, dixième compris', async () => {
+    // Le piège de la nouvelle borne : 10 appartient à la page 0, pas à la 1.
+    const w = monte({ preset_count: 23, preset: 10 })
+    expect(w.get('[data-preset-fenetre]').text()).toBe('1–10')
+    await w.setProps({ etat: etat({ preset_count: 23, preset: 11 }) })
+    expect(w.get('[data-preset-fenetre]').text()).toBe('11–20')
+  })
+
+  it('un compte pile sur une dizaine ne fabrique pas de page vide', () => {
+    // Vingt stations : deux pages, pas trois. Une troisième nommerait 21-30,
+    // où il n'y a rien — c'est la meme borne que le rebouclage du `+10`.
+    const w = monte({ preset_count: 20 })
+    expect(w.get('[data-preset-fenetre]').text()).toBe('1–10')
+    expect(w.get('[data-preset-prev]').attributes('disabled')).toBeDefined()
+    expect(w.get('[data-preset-next]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('sans compte déclaré, 1-10 nus et pas de flèches', () => {
     const w = monte({}, () => null)
-    expect(w.findAll('[data-preset-button]')).toHaveLength(9)
+    expect(w.findAll('[data-preset-button]')).toHaveLength(10)
     expect(w.find('[data-preset-prev]').exists()).toBe(false)
     expect(w.find('[data-preset-count]').exists()).toBe(false)
   })

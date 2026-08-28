@@ -104,14 +104,14 @@ describe('HomeView', () => {
     )
   })
 
-  it('sans compte déclaré, la grille retombe sur 1-9', async () => {
+  it('sans compte déclaré, la grille retombe sur 1-10', async () => {
     // `preset_count: null` (defaut de FauxEventSource, jamais poussee ici) :
     // la source ne declare rien, on garde la grille nue historique et pas de
     // +10 (rien a decaler vers).
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
-    expect(w.findAll('[data-preset-button]')).toHaveLength(9)
+    expect(w.findAll('[data-preset-button]')).toHaveLength(10)
     expect(w.find('[data-preset-prev]').exists()).toBe(false)
     expect(w.find('[data-preset-next]').exists()).toBe(false)
   })
@@ -158,9 +158,9 @@ describe('HomeView', () => {
     FauxEventSource.derniere!.pousse({ preset_count: 24 })
     await w.vm.$nextTick()
     // Le compte porte au-delà de la fenêtre affichée : c'est justement ce qu'il
-    // apprend, la grille n'en montrant que neuf à la fois.
+    // apprend, la grille n'en montrant que dix à la fois.
     expect(w.get('[data-preset-count]').text()).toContain('24')
-    expect(w.findAll('[data-preset-button]')).toHaveLength(9)
+    expect(w.findAll('[data-preset-button]')).toHaveLength(10)
     // Zéro est une information, pas une absence : il explique la grille vide
     // d'un cd sans disque.
     FauxEventSource.derniere!.pousse({ preset_count: 0 })
@@ -169,7 +169,7 @@ describe('HomeView', () => {
   })
 
   it('n’annonce aucun compte quand la source ne déclare rien', async () => {
-    // Grille nue 1-9 : c'est un repli, pas un inventaire — annoncer « 9 »
+    // Grille nue 1-10 : c'est un repli, pas un inventaire — annoncer « 10 »
     // serait une affirmation que personne n'a faite.
     vi.stubGlobal('EventSource', FauxEventSource)
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
@@ -250,21 +250,21 @@ describe('HomeView — pagination des présélections', () => {
     expect(w.find('[data-preset-next]').exists()).toBe(false)
   })
 
-  it('les deux flèches sont absentes avec 9 présélections ou moins', async () => {
-    const { w } = await monterAvec({ preset_count: 9 })
+  it('les deux flèches sont absentes avec 10 présélections ou moins', async () => {
+    const { w } = await monterAvec({ preset_count: 10 })
     expect(w.find('[data-preset-prev]').exists()).toBe(false)
     expect(w.find('[data-preset-next]').exists()).toBe(false)
   })
 
   it('> avance d’une page à travers toute la plage', async () => {
     const { w } = await monterAvec({ preset_count: 24 })
-    expect(numeros(w)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9'])
+    expect(numeros(w)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'])
     await w.find('[data-preset-next]').trigger('click')
     await nextTick()
-    expect(numeros(w)).toEqual(['10', '11', '12', '13', '14', '15', '16', '17', '18', '19'])
+    expect(numeros(w)).toEqual(['11', '12', '13', '14', '15', '16', '17', '18', '19', '20'])
     await w.find('[data-preset-next]').trigger('click')
     await nextTick()
-    expect(numeros(w)).toEqual(['20', '21', '22', '23', '24'])
+    expect(numeros(w)).toEqual(['21', '22', '23', '24'])
   })
 
   it('< revient à la page précédente', async () => {
@@ -272,10 +272,10 @@ describe('HomeView — pagination des présélections', () => {
     await w.find('[data-preset-next]').trigger('click')
     await w.find('[data-preset-next]').trigger('click')
     await nextTick()
-    expect(numeros(w)).toEqual(['20', '21', '22', '23', '24'])
+    expect(numeros(w)).toEqual(['21', '22', '23', '24'])
     await w.find('[data-preset-prev]').trigger('click')
     await nextTick()
-    expect(numeros(w)).toEqual(['10', '11', '12', '13', '14', '15', '16', '17', '18', '19'])
+    expect(numeros(w)).toEqual(['11', '12', '13', '14', '15', '16', '17', '18', '19', '20'])
   })
 
   it('bornes : < inactive sur la première page, > sur la dernière', async () => {
@@ -296,14 +296,14 @@ describe('HomeView — pagination des présélections', () => {
     await nextTick()
     vi.advanceTimersByTime(60_000)
     await nextTick()
-    expect(numeros(w)).toEqual(['10', '11', '12', '13', '14', '15', '16', '17', '18', '19'])
+    expect(numeros(w)).toEqual(['11', '12', '13', '14', '15', '16', '17', '18', '19', '20'])
   })
 
   it('un changement de compte ramène à la première page', async () => {
     const { w } = await monterAvec({ preset_count: 24 })
     await w.find('[data-preset-next]').trigger('click')
     await nextTick()
-    expect(numeros(w)).toEqual(['10', '11', '12', '13', '14', '15', '16', '17', '18', '19'])
+    expect(numeros(w)).toEqual(['11', '12', '13', '14', '15', '16', '17', '18', '19', '20'])
     // Nouvelle source, nouveau compte : la fenêtre ne doit pas survivre.
     FauxEventSource.derniere!.pousse({ preset_count: 5 })
     await nextTick()
@@ -316,7 +316,7 @@ describe('HomeView — pagination des présélections', () => {
     await nextTick()
     await w.find('[data-preset-button="14"]').trigger('click')
     expect(posts).toEqual([JSON.stringify({ cmd: 'Select', arg: 14 })])
-    expect(numeros(w)).toEqual(['10', '11', '12', '13', '14', '15', '16', '17', '18', '19'])
+    expect(numeros(w)).toEqual(['11', '12', '13', '14', '15', '16', '17', '18', '19', '20'])
   })
 
   it('met en évidence la touche active au-delà de 9', async () => {
@@ -349,28 +349,30 @@ describe('HomeView — la page suit ce qui joue', () => {
 
   it('s’ouvre sur la page de la présélection qui joue', async () => {
     // Le cas qui motivait tout : arriver sur l'onglet pendant que la station 24
-    // joue montrait 1-9, sans aucune touche en évidence.
+    // joue montrait 1-10, sans aucune touche en évidence.
     const w = await monterAvec({ preset_count: 40, preset: 24 })
-    expect(numeros(w)).toEqual(['20', '21', '22', '23', '24', '25', '26', '27', '28', '29'])
+    expect(numeros(w)).toEqual(['21', '22', '23', '24', '25', '26', '27', '28', '29', '30'])
     expect(w.findAll('[data-preset-active]')).toHaveLength(1)
   })
 
   it('suit un changement de page venu d’ailleurs (télécommande infrarouge, +10)', async () => {
     const w = await monterAvec({ preset_count: 40, preset: 3 })
-    expect(numeros(w)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9'])
+    expect(numeros(w)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'])
     FauxEventSource.derniere!.pousse({ preset_count: 40, preset: 31 })
     await nextTick()
-    expect(numeros(w)).toEqual(['30', '31', '32', '33', '34', '35', '36', '37', '38', '39'])
+    expect(numeros(w)).toEqual(['31', '32', '33', '34', '35', '36', '37', '38', '39', '40'])
   })
 
-  it('9 et 10 sont de part et d’autre de la frontière', async () => {
-    // Les bornes de la grille sont celles du décalage du cœur : la page 0
-    // s'arrête à 9, la page 1 commence à 10.
-    const w = await monterAvec({ preset_count: 40, preset: 9 })
+  it('10 et 11 sont de part et d’autre de la frontière', async () => {
+    // Les bornes de la grille sont celles du décalage du cœur : une page
+    // couvre 10k+1..10k+10, donc 10 clôt la page 0 et 11 ouvre la page 1. La
+    // frontière était à 9/10 quand la touche 0 de la télécommande ne valait
+    // rien seule.
+    const w = await monterAvec({ preset_count: 40, preset: 10 })
     expect(numeros(w)[0]).toBe('1')
-    FauxEventSource.derniere!.pousse({ preset_count: 40, preset: 10 })
+    FauxEventSource.derniere!.pousse({ preset_count: 40, preset: 11 })
     await nextTick()
-    expect(numeros(w)[0]).toBe('10')
+    expect(numeros(w)[0]).toBe('11')
   })
 
   it('un arrêt laisse la page où elle est', async () => {
@@ -379,18 +381,18 @@ describe('HomeView — la page suit ce qui joue', () => {
     const w = await monterAvec({ preset_count: 40, preset: 24 })
     FauxEventSource.derniere!.pousse({ preset_count: 40, preset: null })
     await nextTick()
-    expect(numeros(w)[0]).toBe('20')
+    expect(numeros(w)[0]).toBe('21')
   })
 
   it('une pagination à la main survit aux trames qui ne changent rien', async () => {
     const w = await monterAvec({ preset_count: 40, preset: 3 })
     await w.find('[data-preset-next]').trigger('click')
     await nextTick()
-    expect(numeros(w)[0]).toBe('10')
+    expect(numeros(w)[0]).toBe('11')
     // Même présélection, même compte, seul le volume change : la page reste.
     FauxEventSource.derniere!.pousse({ preset_count: 40, preset: 3, volume: 42 })
     await nextTick()
-    expect(numeros(w)[0]).toBe('10')
+    expect(numeros(w)[0]).toBe('11')
   })
 
   it('un numéro au-delà du compte n’ouvre pas une page vide', async () => {
@@ -398,7 +400,7 @@ describe('HomeView — la page suit ce qui joue', () => {
     // suive) : on borne sur la dernière page non vide plutôt que de n'afficher
     // aucune touche.
     const w = await monterAvec({ preset_count: 12, preset: 35 })
-    expect(numeros(w)).toEqual(['10', '11', '12'])
+    expect(numeros(w)).toEqual(['11', '12'])
   })
 })
 
@@ -420,7 +422,7 @@ describe('HomeView — boutons indisponibles', () => {
   it('en veille, tout est grisé sauf la veille elle-même', async () => {
     // Le cœur ignore tout ce qui n'est pas `Power` en veille : les boutons le
     // disent au lieu d'envoyer une commande sans effet. Pas de compte poussé
-    // ici : la veille l'efface côté cœur, la grille retombe donc sur 1-9 —
+    // ici : la veille l'efface côté cœur, la grille retombe donc sur 1-10 —
     // désactivée elle aussi.
     const w = await monterAvec({ standby: true })
     for (const b of w.findAll('[data-remote-command]')) {

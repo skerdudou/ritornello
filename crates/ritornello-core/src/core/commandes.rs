@@ -158,11 +158,24 @@ impl<P: Player> Core<P> {
                     // say; the source's own status takes over.
                     self.overlay = None;
                 }
-                let n = n.saturating_add(tens);
-                if n == 0 {
-                    // Key 0 with no pending offset: nothing to select.
-                    return Ok(());
-                }
+                // **Key 0 is worth ten, so each decade covers 1..10, 11..20,
+                // 21..30 — never 1..9 then 10..19.** The owner asked for pages
+                // of ten starting at 1, and the physical remote has to name the
+                // very same groups as the web grid (see `GrillePresets.vue`),
+                // so the change belongs here and not only in the page.
+                //
+                // What it buys beyond the pages: preset 10 used to need `+10`
+                // then `0`, while `0` alone did nothing at all — a key that is
+                // inert until you have pressed another one first. Now `0` picks
+                // 10, `+10` `0` picks 20, and the last decade is no longer half
+                // empty.
+                //
+                // Selections that are **not** a remote digit — the web grid, the
+                // MPD server — carry an absolute preset number and reach this
+                // arm with `pending_tens` at zero, so they pass through
+                // untouched. Zero is not a preset number, so no caller can mean
+                // "preset 0" here.
+                let n = tens.saturating_add(if n == 0 { 10 } else { n });
                 self.retry_count = 0;
                 if let Some(action) = self.demande_active(SourceReq::Select(n)).await? {
                     self.apply(action).await?;
@@ -341,11 +354,19 @@ impl<P: Player> Core<P> {
             Command::Plus10 => {
                 let next = self.pending_tens.saturating_add(10);
                 self.pending_tens = match self.preset_count {
-                    // Wrap past the last useful decade: the largest
-                    // reachable multiple of 10 is (count / 10) * 10
-                    // (station 20 is +10 +10 then 0, so offset 20 must
-                    // stay allowed for a count of 20).
-                    Some(count) if next > (count / 10) * 10 => 0,
+                    // Wrap past the last useful decade. A decade now covers
+                    // `offset + 1 ..= offset + 10` (key 0 is worth ten, see
+                    // `Select`), so the last one that holds anything starts at
+                    // `((count - 1) / 10) * 10`: for 20 stations that is 10,
+                    // whose decade is 11..20 — offset 20 would name 21..30 and
+                    // hold nothing. Under the previous reading, where a decade
+                    // was 10..19, offset 20 *was* needed to reach station 20;
+                    // it no longer is, and allowing it would cost one dead
+                    // press per cycle.
+                    //
+                    // `saturating_sub` guards the empty source: with no preset
+                    // at all the only useful offset is zero.
+                    Some(count) if next > (count.saturating_sub(1) / 10) * 10 => 0,
                     // No known count: saturate, don't wrap — we can't know
                     // where the end is.
                     None => next.min(240),
@@ -693,18 +714,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn la_touche_zero_seule_ne_fait_rien() {
+    async fn la_touche_zero_seule_vaut_dix() {
+        // **Le changement demandé par le propriétaire** : les dizaines couvrent
+        // 1..10, 11..20, 21..30. La touche 0 nomme donc le dixième de sa
+        // dizaine, et seule elle vaut 10. Auparavant elle ne faisait *rien* —
+        // une touche inerte tant qu'on n'avait pas appuyé sur `+10` d'abord.
         let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.handle_source_update("radio", update_avec_compte(Some(23)));
         core.handle_command(Command::Select(0)).await.unwrap();
-        assert!(!source_calls.lock().unwrap().iter().any(|c| c.contains("Select(0)")));
+        assert!(source_calls.lock().unwrap().iter().any(|c| c.contains("Select(10)")));
     }
 
     #[tokio::test]
-    async fn zero_atteint_les_multiples_de_dix() {
-        // 20 stations : +10 +10 puis 0 = 20 — le décalage 20 doit rester permis.
+    async fn zero_atteint_le_haut_de_sa_dizaine() {
+        // 20 stations : `+10` puis 0 = 20, la dizaine courante étant 11..20.
+        // Un `+10` de plus rebouclerait — voir le test suivant.
         let (mut core, _pc, source_calls, _rx, _d) = setup();
         core.handle_source_update("radio", update_avec_compte(Some(20)));
-        core.handle_command(Command::Plus10).await.unwrap();
         core.handle_command(Command::Plus10).await.unwrap();
         core.handle_command(Command::Select(0)).await.unwrap();
         assert!(source_calls.lock().unwrap().iter().any(|c| c.contains("Select(20)")));
@@ -712,8 +738,9 @@ mod tests {
 
     #[tokio::test]
     async fn plus10_reboucle_apres_la_derniere_dizaine() {
-        // 23 stations : décalages utiles 10 et 20 ; le troisième appui revient
-        // à zéro et éteint l'incrustation, comme la fenêtre web.
+        // 23 stations : dizaines 1..10, 11..20, 21..23 — décalages utiles 10 et
+        // 20. Le troisième appui revient à zéro et éteint l'incrustation, comme
+        // la fenêtre web.
         let (mut core, _pc, source_calls, _rx, _d) = setup();
         core.handle_source_update("radio", update_avec_compte(Some(23)));
         for _ in 0..3 {
@@ -722,6 +749,22 @@ mod tests {
         assert!(core.overlay_deadline().is_none());
         core.handle_command(Command::Select(3)).await.unwrap();
         assert!(source_calls.lock().unwrap().iter().any(|c| c.contains("Select(3)")));
+    }
+
+    #[tokio::test]
+    async fn la_derniere_dizaine_utile_ne_depasse_pas_le_compte() {
+        // Le pendant de la borne : pour un compte pile sur une dizaine (20), le
+        // décalage 20 nommerait 21..30, où il n'y a rien. Il doit reboucler, et
+        // c'est ce que l'ancienne borne `(count / 10) * 10` laissait passer —
+        // elle avait besoin de ce décalage-là quand une dizaine valait 10..19.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.handle_source_update("radio", update_avec_compte(Some(20)));
+        core.handle_command(Command::Plus10).await.unwrap();
+        core.handle_command(Command::Plus10).await.unwrap();
+        assert!(
+            core.overlay_deadline().is_none(),
+            "le second +10 doit reboucler a zero sur 20 stations"
+        );
     }
 
     #[tokio::test]

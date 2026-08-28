@@ -250,8 +250,8 @@ equivalence: stations at 1 and 40 declare `preset_count: 40`, and the
 console display then reads "RADIO  1/40" — not a bug, the field's contract
 is the highest number in use, not a count of how many exist (see
 [interface.md](interface.md) for the general rule). It is what lets the web
-grid show only the numbers that exist and reach past nine through its own
-`<`/`>` page arrows — the remote's bare digits alone only reach 1-9. The
+grid show only the numbers that exist and reach past ten through its own
+`<`/`>` page arrows — the remote's bare digits alone only reach 1-10. The
 order is changed **by dragging a row** (or with the ▲▼ arrows, which remain
 the keyboard-and-touch-accessible path): moving a station therefore changes
 its remote digit.
@@ -1029,9 +1029,9 @@ indices included. Otherwise the plugin **synthesizes** `1..=preset_count`,
 which is dense by construction (`Pos = Id - 1`); that fallback is what shows
 the twelve tracks of a disc, since the cd names nothing and its catalogue
 entry carries an empty list — meaning "I only have numbers", not "I have
-nothing". An absent `preset_count` becomes **zero** entries, not the nine of
-the web UI's historical grid: that grid is a keypad, and announcing nine
-entries would make a client ask for nine things of which none exists. Note
+nothing". An absent `preset_count` becomes **zero** entries, not the ten of
+the web UI's default grid: that grid is a keypad, and announcing ten
+entries would make a client ask for ten things of which none exists. Note
 what the synthesis cannot do: `preset_count` describes the *active* source
 only, so `listplaylistinfo` on an idle source that does not enumerate
 answers a well-formed **empty** list rather than a guessed number.

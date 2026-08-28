@@ -13,29 +13,36 @@ const emit = defineEmits<{ choisir: [n: number] }>()
 const page = ref(0)
 
 // Compte déclaré par la source (null = source muette sur le sujet : grille
-// 1-9 historique, pour ne jamais désarmer la télécommande).
+// 1-10, pour ne jamais désarmer la télécommande).
 const compte = computed(() => props.etat?.preset_count ?? null)
 
-// Numéros de la page courante, seulement ceux qui existent. Page 0 : 1-9 (les
-// touches nues de la télécommande) ; page k : 10k à 10k+9 (le 0 de la
-// télécommande donne 10k). Mêmes bornes que le `+10` du cœur — ne pas
-// « simplifier » en fenêtres de 6 ou 10 : la page web et la touche physique
-// doivent désigner les mêmes groupes.
+// Numéros de la page courante, seulement ceux qui existent. Page k :
+// 10k+1 à 10k+10 — donc 1-10, 11-20, 21-30. **Mêmes bornes que le `+10` du
+// cœur**, et ce n'est pas une coïncidence à entretenir mais une contrainte :
+// la page web et la touche physique doivent désigner les mêmes groupes, sans
+// quoi « page 2 » ne veut pas dire la même chose selon qu'on regarde l'écran
+// ou la télécommande. Côté cœur, la touche 0 vaut dix (voir
+// `Command::Select`), ce qui est exactement ce qui fait tenir dix numéros dans
+// une dizaine.
+//
+// Ne pas « simplifier » en fenêtres de 6 ou 12 pour des raisons de mise en
+// page : le pavé numérique n'a que dix chiffres.
 const presets = computed(() => {
   const c = compte.value
-  if (c === null) return Array.from({ length: 9 }, (_, i) => i + 1)
-  const debut = page.value === 0 ? 1 : page.value * 10
-  const fin = Math.min(page.value * 10 + 9, c)
+  if (c === null) return Array.from({ length: 10 }, (_, i) => i + 1)
+  const debut = page.value * 10 + 1
+  const fin = Math.min(page.value * 10 + 10, c)
   return debut > fin ? [] : Array.from({ length: fin - debut + 1 }, (_, i) => debut + i)
 })
 
-const paginationVisible = computed(() => (compte.value ?? 0) > 9)
+const paginationVisible = computed(() => (compte.value ?? 0) > 10)
 
-// Dernière page non vide : le plus grand multiple de 10 encore atteignable
-// (même borne que le rebouclage du +10 côté cœur), 0 si tout tient sur 1-9.
+// Dernière page non vide. Une page k couvre 10k+1..10k+10, donc la dernière
+// qui contient quelque chose est `floor((compte - 1) / 10)` — même borne que
+// le rebouclage du `+10` côté cœur, qui s'écrit là-bas `((count - 1) / 10) * 10`.
 const dernierePage = computed(() => {
   const c = compte.value ?? 0
-  return c > 9 ? Math.floor(c / 10) : 0
+  return c > 0 ? Math.floor((c - 1) / 10) : 0
 })
 
 const fenetre = computed(() => {
@@ -52,8 +59,10 @@ function pageSuivante() {
 
 const presetActif = computed(() => props.etat?.preset ?? null)
 
+// La page qui contient la présélection `n` (1-based). `n - 1` parce qu'une
+// page couvre 10k+1..10k+10 : 10 appartient à la page 0, 11 à la page 1.
 function pageDe(n: number) {
-  return n < 10 ? 0 : Math.floor(n / 10)
+  return Math.floor((n - 1) / 10)
 }
 
 // La page suit ce qui joue (télécommande infrarouge, +10, piste suivante) ;
