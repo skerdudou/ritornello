@@ -1785,7 +1785,22 @@ protocol:
   contract version, see `web/kit/src/contract.ts`) and, as default, a Vue
   component;
 - `GetAsset("ui.css")` → the module's stylesheet (its own Tailwind pass,
-  important: the core's CSS only contains the classes the core sees);
+  important: the core's CSS only contains the classes the core sees). The
+  shell injects it into a **cascade layer of its own, `greffon`, declared below
+  `utilities`** by `web/app/src/app.css`, through a
+  `<style>@import url(…) layer(greffon)</style>` — the only way to put an
+  *external* sheet in a named layer, which also makes it work for a third-party
+  plugin whose CSS nobody here builds. That is a fix, not tidiness: both passes
+  used to write into the same `utilities` layer, and the plugin's sheet —
+  injected later and deliberately left in place — won on equal specificity.
+  `InputAdmin.vue` carries `class="hidden"` on its file input, so
+  `generic-input/ui.css` contains `.hidden{display:none}`, which overrode the
+  `md:flex` of the shell's own top navigation: visiting that page made the menu
+  disappear for the rest of the session. Any class both passes emit carries the
+  same declarations (same theme), so losing changes nothing visible; what
+  changes is that a plugin can no longer undo the shell's layout. A Playwright
+  journey locks it, because the defect lives in the cascade of two really
+  served sheets, which jsdom does not compute;
 - `GetCatalog` → its flat i18n catalog, which the view consumes through
   `t()`;
 - `GetData` / `SetData` → the page's data, opaque JSON both ways;

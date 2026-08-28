@@ -229,6 +229,23 @@ describe('PluginView', () => {
     monter(async () => ({ contract: 1, default: vue }), 'feuille-unique')
     monter(async () => ({ contract: 1, default: vue }), 'feuille-unique')
     await flushPromises()
-    expect(document.head.querySelectorAll('link[href="/plugins/feuille-unique/ui.css"]')).toHaveLength(1)
+    expect(document.head.querySelectorAll('style[data-feuille-greffon="feuille-unique"]')).toHaveLength(1)
+  })
+
+  it('range la feuille du plugin dans la couche `greffon`', async () => {
+    // **La regression visee est le menu du haut qui disparait.** Les deux
+    // passes Tailwind (shell et plugin) ecrivaient dans la meme couche
+    // `utilities` ; la feuille du plugin, injectee apres, gagnait a
+    // specificite egale, et son `.hidden` (le champ de fichier d'InputAdmin)
+    // ecrasait le `md:flex` de `data-nav-haut`. Sans cette assertion, revenir
+    // a un `<link rel="stylesheet">` ne casserait aucun autre test.
+    document.head.innerHTML = ''
+    const vue = defineComponent({ render: () => h('p', 'ok') })
+    monter(async () => ({ contract: 1, default: vue }), 'feuille-en-couche')
+    await flushPromises()
+    const style = document.head.querySelector('style[data-feuille-greffon="feuille-en-couche"]')
+    expect(style?.textContent).toBe(
+      '@import url("/plugins/feuille-en-couche/ui.css") layer(greffon);',
+    )
   })
 })
