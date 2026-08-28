@@ -1,3 +1,21 @@
+//! Le cœur : la struct `Core<P>`, sa construction, et `handle_source_update`,
+//! point d'entrée d'une trame Source qui écrit dans tous les domaines.
+//!
+//! Un domaine par module enfant, chacun portant son `impl<P: Player> Core<P>`
+//! partiel. Un module enfant voit les champs privés de la struct définie par
+//! son parent : c'est ce qui rend ce découpage gratuit — aucun accesseur,
+//! aucun champ `pub`. Ajouter un domaine, c'est ajouter un fichier.
+//!
+//! - `commandes` : télécommande et IHM — lecture/veille, volume, dizaines, déplacement, démarrage
+//! - `echeances` : incrustations et échéances que la boucle de `main.rs` doit réveiller
+//! - `lecteur` : événements de mpv, relance à rebours croissant, reprise au réveil
+//! - `metadonnees` : identité, ICY, tags, enrichissements, pochettes et extraction
+//! - `position` : progression rapportée par mpv, ancre posée par un plugin
+//! - `publication` : état du lecteur et catalogue poussés aux afficheurs, SPA et greffons
+//! - `reglages` : sortie audio, langue, thème, écriture de `state.json`
+//! - `sources` : ordre du cycle, bascule, arrivée à chaud et mort d'un greffon, `apply`
+//! - `test_support` : lecteur et sources factices, montages partagés par les tests
+
 use crate::metadata::{Metadonnees, PlayerState};
 use crate::player::mpv;
 use crate::player::Player;
@@ -16,14 +34,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
 
-mod echeances;
-mod publication;
-mod lecteur;
 mod commandes;
-mod reglages;
-mod sources;
+mod echeances;
+mod lecteur;
 mod metadonnees;
 mod position;
+mod publication;
+mod reglages;
+mod sources;
 pub use echeances::prochaine_echeance;
 
 #[cfg(test)]
