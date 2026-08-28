@@ -1,27 +1,14 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { Badge, Card, CardAction, CardContent, CardHeader, CardTitle } from '@ritornello/ui'
 import BarreProgression from './BarreProgression.vue'
 import IconeAppleMusic from './icones/IconeAppleMusic.vue'
 import IconeDeezer from './icones/IconeDeezer.vue'
 import IconeYoutube from './icones/IconeYoutube.vue'
+import { LIBELLE_LIEN } from './liens'
 import { useCatalog } from '../composables/useCatalog'
 import { formateDuree, riendAfficher } from '../composables/usePlayer'
 import type { PlayerPayload } from '../types'
-
-// La cle de catalogue par plateforme. Une table, et non une cle fabriquee par
-// concatenation a la volee : `i18nKeysUsed.test.ts` releve les cles citees
-// litteralement dans le source, et une cle composee lui echapperait — elle
-// pourrait disparaitre du catalogue sans qu'aucun test ne s'en apercoive.
-//
-// Ce commentaire a d'ailleurs fait tomber ce test en le citant : le prefixe
-// ecrit entre guillemets etait lu comme une cle a part entiere. D'ou la
-// paraphrase plutot qu'un exemple.
-const LIBELLE_LIEN = {
-  youtube: 'listen_on_youtube',
-  deezer: 'listen_on_deezer',
-  apple_music: 'listen_on_apple_music',
-} as const
 
 // L'etat vient du parent (HomeView), qui tient l'**unique** connexion SSE de
 // la page : la telecommande en a besoin elle aussi (touche active), et ouvrir
@@ -43,6 +30,30 @@ watch(
   () => {
     imageCassee.value = false
   },
+)
+// La duree ne s'affiche que faute de barre de progression : quand une position
+// est connue, la barre porte deja la duree totale.
+const dureeAAfficher = computed(
+  () => props.etat?.position_s == null && !!formateDuree(props.etat?.duration_s),
+)
+// Les liens que cette version sait rendre. Le protocole ferme l'ensemble des
+// plateformes, mais un greffon en avance sur l'IHM peut en nommer une nouvelle :
+// la laisser passer donnerait une ancre de 44 px sans icone et sans nom
+// accessible (`LIBELLE_LIEN` n'aurait aucune entree pour elle). Filtrer ici
+// plutot que de tenter un rendu par defaut, qui annoncerait « Ecouter sur Apple
+// Music » pour un lien qui n'y mene pas.
+const liens = computed(
+  () => props.etat?.links?.filter((lien) => lien.platform in LIBELLE_LIEN) ?? [],
+)
+// La ligne basse du bloc morceau (badges d'origine, duree, liens) n'existe que
+// s'il y a quelque chose a y mettre : sinon `min-h-11` reserverait 44 px vides
+// sous l'album, ce qui est le cas le plus courant (un titre ICY nu).
+const ligneBadges = computed(
+  () =>
+    !!props.etat?.origin
+    || !!props.etat?.cover_origin
+    || dureeAAfficher.value
+    || liens.value.length > 0,
 )
 // Remonte au parent : c'est HomeView qui poste les commandes (comme pour le
 // reste de la telecommande), la carte elle-meme n'en poste aucune.
@@ -128,31 +139,19 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
             <span v-if="etat?.album && etat?.year"> · </span>
             <span v-if="etat?.year" :title="t('release_year')" data-annee>{{ etat.year }}</span>
           </p>
-          <!-- Les plateformes d'ecoute. `platform` est un ensemble ferme cote
-               protocole et l'URL a deja ete validee contre l'hote de cette
-               plateforme : rien a revalider ici. `noopener` parce que la cible
-               est un tiers, `noreferrer` parce qu'il n'a pas a savoir d'ou on
-               vient. -->
-          <div v-if="etat?.links?.length" class="mt-1 flex items-center gap-2" data-liens>
-            <a
-              v-for="lien in etat.links"
-              :key="lien.platform"
-              :href="lien.url"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="rounded text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-              :aria-label="t(LIBELLE_LIEN[lien.platform])"
-              :title="t(LIBELLE_LIEN[lien.platform])"
-              :data-lien="lien.platform"
-            >
-              <IconeYoutube v-if="lien.platform === 'youtube'" />
-              <IconeDeezer v-else-if="lien.platform === 'deezer'" />
-              <IconeAppleMusic v-else />
-            </a>
-          </div>
           <!-- Qui a fourni le texte, et la pochette quand ce n'est pas le meme :
-               la premiere question devant un titre faux. -->
-          <div class="mt-1 flex items-center gap-1.5">
+               la premiere question devant un titre faux. Les plateformes
+               d'ecoute partagent cette ligne : une rangee a elles seules
+               poussait le curseur de volume hors de portee du pouce sur
+               telephone. `min-h-11` reserve d'emblee la hauteur de la cible
+               tactile, sinon un lien qui arrive apres le titre (MusicBrainz
+               repond plus tard) ferait grandir la carte sous le doigt.
+               La ligne n'existe que s'il y a quelque chose a y mettre. -->
+          <div
+            v-if="ligneBadges"
+            class="mt-1 flex min-h-11 items-center gap-1.5"
+            data-badges
+          >
             <Badge v-if="etat?.origin" variant="secondary" class="text-[10px]" data-origin>{{ etat.origin }}</Badge>
             <Badge
               v-if="etat?.cover_origin && etat.cover_origin !== etat.origin"
@@ -163,12 +162,38 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
               {{ etat.cover_origin }}
             </Badge>
             <span
-              v-if="etat?.position_s == null && formateDuree(etat?.duration_s)"
+              v-if="dureeAAfficher"
               class="text-xs text-muted-foreground"
               :title="t('track_length')"
               data-duree
             >
               {{ formateDuree(etat?.duration_s) }}
+            </span>
+            <!-- `platform` est un ensemble ferme cote protocole et l'URL a deja
+                 ete validee contre l'hote de cette plateforme : rien a
+                 revalider ici. `noopener` parce que la cible est un tiers,
+                 `noreferrer` parce qu'il n'a pas a savoir d'ou on vient.
+                 La cle est l'URL et non la plateforme : rien n'interdit deux
+                 liens d'une meme plateforme, et Vue en perdrait un. -->
+            <span v-if="liens.length" class="inline-flex items-center gap-1" data-liens>
+              <a
+                v-for="lien in liens"
+                :key="lien.url"
+                :href="lien.url"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="inline-flex size-11 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                :aria-label="t(LIBELLE_LIEN[lien.platform])"
+                :title="t(LIBELLE_LIEN[lien.platform])"
+                :data-lien="lien.platform"
+              >
+                <!-- Aucun `v-else` : les trois branches epuisent l'ensemble
+                     deja filtre par `liens`, et un `v-else` rendrait l'icone
+                     Apple pour tout le reste. -->
+                <IconeYoutube v-if="lien.platform === 'youtube'" class="size-5" />
+                <IconeDeezer v-else-if="lien.platform === 'deezer'" class="size-5" />
+                <IconeAppleMusic v-else-if="lien.platform === 'apple_music'" class="size-5" />
+              </a>
             </span>
           </div>
         </div>

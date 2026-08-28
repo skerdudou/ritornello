@@ -8,7 +8,13 @@ pub struct DiscInfo {
     pub artist: String,
     pub album: String,
     pub tracks: Vec<String>,
-    /// Année de sortie du pressage reconnu, lue dans son champ `date`.
+    /// Année de sortie du disque.
+    ///
+    /// Celle de la **première parution de l'album**
+    /// (`release-group.first-release-date`), et non celle du pressage reconnu
+    /// (`release.date`) qui ne sert que de repli : un repressage de 1987
+    /// affichait 1987 pour un disque de 1959, alors que c'est l'année du disque
+    /// qu'un auditeur cherche.
     ///
     /// Mesuré : ce champ vaut tantôt `"1987"`, tantôt `"2017-06-23"`, d'où le
     /// passage par `annee_valide` qui ne retient que la tête numérique.
@@ -145,7 +151,29 @@ fn depouille(release: &Value, ntracks: usize) -> Option<DiscInfo> {
                 .to_string(),
             album: release.get("title").and_then(Value::as_str).unwrap_or("?").to_string(),
             tracks: titles,
-            year: release.get("date").and_then(Value::as_str).and_then(ritornello_proto::annee_valide),
+            // La première parution de l'**album** d'abord, la date de ce
+            // pressage-ci en repli. Mesuré le 2026-08-27 sur la release
+            // e32a3f0b-1c19-3170-bb1c-650893774744 : `date` = "1987",
+            // `release-group.first-release-date` = "1959-08-17" — un
+            // repressage de 1987 affichait donc 1987 pour un disque de 1959,
+            // et c'est l'année du disque qu'un auditeur cherche. Le lookup
+            // demande déjà `inc=…+release-groups` (c'est ce même bloc qui sert
+            // à `url_caa_groupe`), le champ ne coûte donc aucune requête ; il
+            // reste optionnel côté MusicBrainz, d'où le repli.
+            //
+            // Le `and_then(as_str).filter(…)` vient **avant** le repli, et
+            // c'est tout l'intérêt : « présent mais vide » n'est pas « présent
+            // et lisible ». Un `first-release-date` à `""` (ou à `null`)
+            // passait le `or_else` puisque la clé existait, puis échouait sur
+            // `annee_valide` — et l'année du pressage était perdue alors
+            // qu'elle était là, juste à côté. Un champ illisible doit ramener
+            // au même cas que le champ absent.
+            year: release
+                .pointer("/release-group/first-release-date")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| release.get("date").and_then(Value::as_str))
+                .and_then(ritornello_proto::annee_valide),
             cover_url,
         });
     }
@@ -592,6 +620,83 @@ mod tests {
         assert_eq!(info.artist, "Miles Davis");
         assert_eq!(info.album, "Kind of Blue");
         assert_eq!(info.tracks, vec!["So What", "Freddie Freeloader", "Blue in Green"]);
+    }
+
+    /// Une release minimale, tout juste assez pour que `depouille` la retienne :
+    /// un media d'une piste titree. `date` est ajoutee par l'appelant, sous la
+    /// forme qu'on veut eprouver.
+    fn release_minimale(date: Option<&str>) -> String {
+        let champ_date = date.map(|d| format!(r#""date":"{d}","#)).unwrap_or_default();
+        format!(
+            r#"{{"releases":[{{"title":"Kind of Blue",{champ_date}"artist-credit":[{{"name":"Miles Davis"}}],"media":[{{"tracks":[{{"title":"So What"}}]}}]}}]}}"#
+        )
+    }
+
+    #[test]
+    fn lannee_vient_de_la_premiere_parution_de_lalbum_pas_du_pressage() {
+        // Mesure du 2026-08-27 sur la release e32a3f0b-1c19-3170-bb1c-650893774744
+        // (Kind of Blue) : `date` = "1987", `release-group.first-release-date`
+        // = "1959-08-17". C'est l'annee du **disque** qu'un auditeur cherche,
+        // pas celle du repressage qu'il a sous la main. Le lookup demande deja
+        // `inc=...+release-groups`, le champ est donc la sans requete de plus
+        // (mesure : present sur les 25 release-groups de la reponse au toc des
+        // fixtures).
+        let json = format!(
+            r#"{{"releases":[{{"title":"Kind of Blue","date":"1987","release-group":{{"id":"{}","first-release-date":"1959-08-17"}},"artist-credit":[{{"name":"Miles Davis"}}],"media":[{{"tracks":[{{"title":"So What"}}]}}]}}]}}"#,
+            "0b1b0b1b-0b1b-0b1b-0b1b-0b1b0b1b0b1b"
+        );
+        assert_eq!(parse_lookup(&json, 1).unwrap().year, Some(1959));
+    }
+
+    #[test]
+    fn une_premiere_parution_vide_laisse_la_date_du_pressage_prendre_le_relais() {
+        // Le champ present mais **vide**, ce qui n'est pas le champ absent : un
+        // `or_else` pose apres le seul `pointer` laissait passer la chaine
+        // vide, qui echouait ensuite sur `annee_valide`. L'annee du pressage
+        // etait donc perdue alors qu'elle etait la, juste a cote.
+        let json = r#"{"releases":[{"title":"Kind of Blue","date":"1987","release-group":{"id":"0b1b0b1b-0b1b-0b1b-0b1b-0b1b0b1b0b1b","first-release-date":""},"artist-credit":[{"name":"Miles Davis"}],"media":[{"tracks":[{"title":"So What"}]}]}]}"#;
+        assert_eq!(parse_lookup(json, 1).unwrap().year, Some(1987));
+    }
+
+    #[test]
+    fn une_premiere_parution_qui_nest_pas_une_chaine_ne_masque_pas_le_pressage() {
+        // Meme famille : `null` (ou n'importe quelle autre forme) au lieu d'une
+        // date. C'est le `and_then(as_str)` place **avant** le repli qui la
+        // ramene au meme cas que l'absence.
+        let json = r#"{"releases":[{"title":"Kind of Blue","date":"1987","release-group":{"first-release-date":null},"artist-credit":[{"name":"Miles Davis"}],"media":[{"tracks":[{"title":"So What"}]}]}]}"#;
+        assert_eq!(parse_lookup(json, 1).unwrap().year, Some(1987));
+    }
+
+    #[test]
+    fn faute_de_premiere_parution_la_date_du_pressage_prend_le_relais() {
+        // Un `release-group` present mais sans `first-release-date` (le champ
+        // est optionnel cote MusicBrainz) : mieux vaut l'annee du pressage que
+        // pas d'annee du tout.
+        let json = r#"{"releases":[{"title":"Kind of Blue","date":"1987","release-group":{"id":"0b1b0b1b-0b1b-0b1b-0b1b-0b1b0b1b0b1b"},"artist-credit":[{"name":"Miles Davis"}],"media":[{"tracks":[{"title":"So What"}]}]}]}"#;
+        assert_eq!(parse_lookup(json, 1).unwrap().year, Some(1987));
+    }
+
+    #[test]
+    fn lannee_vient_de_la_date_de_la_release() {
+        // Aucune fixture mesuree ne porte `date` : sans ce test, lire l'annee
+        // depuis la mauvaise cle (ou ne pas la lire du tout) ne reveillait
+        // rien. JSON minimal ecrit a la main, donc, plutot qu'une fixture
+        // mesuree qu'il faudrait maquiller.
+        let info = parse_lookup(&release_minimale(Some("1959-08-17")), 1).unwrap();
+        assert_eq!(info.year, Some(1959));
+        // La forme courte est tout aussi courante dans MusicBrainz.
+        let info = parse_lookup(&release_minimale(Some("1959")), 1).unwrap();
+        assert_eq!(info.year, Some(1959));
+    }
+
+    #[test]
+    fn sans_date_la_release_ne_promet_aucune_annee() {
+        // Le controle : beaucoup de releases n'ont pas de `date`, et le reste du
+        // depouillement doit aboutir quand meme — une annee inconnue n'est pas
+        // un echec de reconnaissance du disque.
+        let info = parse_lookup(&release_minimale(None), 1).unwrap();
+        assert_eq!(info.year, None);
+        assert_eq!(info.album, "Kind of Blue");
     }
 
     #[test]

@@ -11,6 +11,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { LIBELLE_LIEN } from './components/liens'
 import { REMOTE_COMMANDS } from './views/remoteCommands'
 
 // Chemins resolus via `process.cwd()` (le repertoire du paquet, cf. le
@@ -92,6 +93,11 @@ describe('cles i18n utilisees par le shell', () => {
       // point d'appel et non dans un `t(...)` — la regex ne les voit donc pas.
       'system_restarted',
       'system_device_restarted',
+      // components/liens.ts : les libelles des plateformes d'ecoute sont
+      // indexes par `platform` (`t(LIBELLE_LIEN[lien.platform])`), donc jamais
+      // ecrits en dur dans un appel `t(...)` — la regex ne les voit pas, c'est
+      // cet ajout explicite qui les couvre.
+      ...Object.values(LIBELLE_LIEN),
     ])
 
     const manquantes = [...utilisees].filter((cle) => !catalogue.has(cle)).sort()

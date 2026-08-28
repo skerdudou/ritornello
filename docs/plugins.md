@@ -1230,8 +1230,11 @@ feed it, from least informed to most:
    property, the core also reads a played file's tags — `title`, `artist`,
    `album`, `date`. FFmpeg normalises the keys, so ID3 (mp3), Vorbis
    comments (flac, ogg, opus), iTunes atoms (m4a) and RIFF INFO (wav) all
-   surface under those four names; `date` yields the release year (its
-   leading four digits, whatever the rest of the string). Shown with origin `tags`. Like ICY, this layer
+   surface under those four names; `date` yields the release year — read
+   from the string's **leading digits**, four of them being a year and
+   eight a compact `YYYYMMDD` whose first four are kept, any other length
+   being discarded (which is what keeps a five-digit number from becoming
+   a plausible-looking year). Shown with origin `tags`. Like ICY, this layer
    works **without any plugin** and serves *any* Source that plays a
    tagged file — nothing has to be declared for it.
 
@@ -1330,7 +1333,12 @@ without anything being lost: the entries already there are not touched.
 - `ritornello-plugin-musicbrainz` recognizes a disc through MusicBrainz.
   This is the code that used to live in `ritornello-plugin-cd`, where a
   multi-second network call shared the process that had to answer track
-  commands. It also splits a radio's single metadata string into artist and
+  commands. The release year it reports is the **album's first release**
+  (`release-group.first-release-date`), the recognized pressing's own
+  `date` serving only as a fallback: measured, a 1987 pressing of a 1959
+  record carries `date: "1987"`, and it is the record's year a listener is
+  after. The lookup already asks for `release-groups` — the same block that
+  resolves an album-level cover — so this costs no extra request. It also splits a radio's single metadata string into artist and
   title, learning each station's format — see [Splitting the ICY
   string](#splitting-the-icy-string) below, which is where its one variable
   (`RITORNELLO_MUSICBRAINZ_STATE`) and its admin page are described.
@@ -1710,8 +1718,15 @@ links shown therefore emits the platform's canonical hosts, and adding a
 platform is a change to the protocol crate, on purpose — the host list is
 the security boundary that keeps a third party from making the appliance
 render a clickable link to a domain of its choosing. Winner-takes-all
-applies to them as to the text: a `fill_only` contributor only fills a
-year or a link list that is still empty.
+applies to them as to the text: whoever comes first in the manifest order
+and carries one wins, and a later contributor only fills a year or a link
+list that is still empty. Unlike the text, though, these two fields are
+filled from **every** retained enrichment and not only from the `fill_only`
+ones — they describe the track, not one reading of it, and a plugin that
+overwrites but carries nothing but a year or a link would otherwise have
+its answer dropped in silence: it is exempt from the "entirely empty"
+refusal at the door, yet it cannot become the retained text block (it would
+wipe the title the tags or the ICY were showing).
 
 One more field of `Enrichment` needs attention from a plugin only if it can
 answer it: `position_s`, an elapsed number of seconds **in the track, at the

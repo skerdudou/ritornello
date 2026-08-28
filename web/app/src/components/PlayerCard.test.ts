@@ -3,6 +3,15 @@ import { beforeAll, describe, expect, it, vi } from 'vitest'
 import PlayerCard from './PlayerCard.vue'
 import type { PlayerPayload } from '../types'
 
+// Un fragment de trace qui n'existe que dans une des trois icones : la note
+// dans son cadre (Apple), le triangle de lecture (YouTube), la quatrieme barre
+// d'egaliseur (Deezer). Sert a verifier que chaque ancre porte **son** icone.
+const EMPREINTE_ICONE = {
+  youtube: 'M6.3 5.75',
+  deezer: 'y="1.4"',
+  apple_music: 'M9.9 3.6',
+} as const
+
 // jsdom ne fournit pas ResizeObserver ; reka-ui l'utilise pour mesurer la
 // piste du curseur de BarreProgression, monte ici des que `seekable` est vrai
 // (voir web/kit/src/index.test.ts et BarreProgression.test.ts).
@@ -397,8 +406,92 @@ describe('PlayerCard', () => {
           { platform: 'apple_music', url: 'https://music.apple.com/us/song/1' },
         ],
       })
+      // Assertion **par plateforme** et non « trois icones distinctes » : trois
+      // icones differentes peuvent tres bien etre les trois mauvaises (deux
+      // branches d'un `v-if` inversees passent l'ancienne version du test).
+      // Chaque motif ci-dessous n'appartient qu'a une des trois icones.
+      for (const [plateforme, motif] of Object.entries(EMPREINTE_ICONE)) {
+        expect(w.get(`[data-lien="${plateforme}"] svg`).html()).toContain(motif)
+      }
       const svg = w.findAll('[data-lien] svg').map((s) => s.html())
       expect(new Set(svg).size).toBe(3)
+    })
+
+    it('rend les icônes sur la même ligne que les badges d’origine', () => {
+      // Decision du proprietaire : une ligne a elles seules decalait trop le
+      // curseur de volume sur telephone. La ligne des badges les accueille.
+      const w = monteAvec({
+        title: 'Get Lucky',
+        origin: 'musicbrainz',
+        duration_s: 248,
+        links: [
+          { platform: 'youtube', url: 'https://www.youtube.com/watch?v=a' },
+          { platform: 'deezer', url: 'https://www.deezer.com/track/1' },
+          { platform: 'apple_music', url: 'https://music.apple.com/us/song/1' },
+        ],
+      })
+      const ligne = w.get('[data-badges]').element
+      expect(w.get('[data-liens]').element.parentElement).toBe(ligne)
+      expect(w.get('[data-origin]').element.parentElement).toBe(ligne)
+      expect(w.get('[data-duree]').element.parentElement).toBe(ligne)
+    })
+
+    it('donne aux ancres une cible tactile de 44 px', () => {
+      // 44 px, la cible minimale recommandee au doigt : l'icone seule (20 px)
+      // se rate une fois sur trois depuis le canape.
+      const w = monteAvec({
+        title: 'Get Lucky',
+        links: [{ platform: 'youtube', url: 'https://www.youtube.com/watch?v=a' }],
+      })
+      expect(w.get('[data-lien="youtube"]').classes()).toContain('size-11')
+      expect(w.get('[data-lien="youtube"] svg').classes()).toContain('size-5')
+    })
+
+    it('reserve la hauteur de la ligne meme sans lien', () => {
+      // Sans hauteur minimale, l'arrivee tardive d'un lien (MusicBrainz repond
+      // apres le titre) faisait grandir la carte et descendre le volume sous
+      // le doigt deja pose.
+      const w = monteAvec({ title: 'Get Lucky', origin: 'icy' })
+      expect(w.get('[data-badges]').classes()).toContain('min-h-11')
+    })
+
+    it('n’ouvre pas la ligne des badges quand il n’y a rien a y mettre', () => {
+      // Un titre nu (le cas ICY le plus courant) ne doit pas reserver 44 px
+      // vides sous l'album.
+      const w = monteAvec({ title: 'Made Up - TAHITI 80' })
+      expect(w.find('[data-badges]').exists()).toBe(false)
+    })
+
+    it('ouvre la ligne des badges pour un lien seul', () => {
+      const w = monteAvec({
+        title: 'Get Lucky',
+        links: [{ platform: 'youtube', url: 'https://www.youtube.com/watch?v=a' }],
+      })
+      expect(w.find('[data-badges]').exists()).toBe(true)
+    })
+
+    it('ne rend rien pour une plateforme inconnue', () => {
+      // Le protocole ferme l'ensemble, mais un `v-else` rendait l'icone Apple
+      // pour tout ce qui n'etait ni YouTube ni Deezer : un greffon en avance
+      // sur le coeur aurait affiche « Ecouter sur Apple Music » vers Spotify.
+      const w = monteAvec({
+        title: 'Get Lucky',
+        links: [{ platform: 'inconnue' as 'youtube', url: 'https://exemple.test/x' }],
+      })
+      expect(w.findAll('[data-lien]')).toHaveLength(0)
+    })
+
+    it('rend deux ancres pour deux liens d’une même plateforme', () => {
+      // Rien dans le protocole n'interdit deux liens de la meme plateforme :
+      // une cle de rendu posee sur `platform` en aurait perdu un.
+      const w = monteAvec({
+        title: 'Get Lucky',
+        links: [
+          { platform: 'youtube', url: 'https://www.youtube.com/watch?v=a' },
+          { platform: 'youtube', url: 'https://www.youtube.com/watch?v=b' },
+        ],
+      })
+      expect(w.findAll('[data-lien="youtube"]')).toHaveLength(2)
     })
 
     it("n'affiche pas la rangée quand il n'y a aucun lien", () => {

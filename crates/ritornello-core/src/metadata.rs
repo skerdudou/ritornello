@@ -433,10 +433,35 @@ impl Metadonnees {
     /// On ne compose pas champ par champ entre deux contributeurs qui
     /// écrasent : cela mélangerait deux lectures du même flux — l'artiste de
     /// l'un, l'album de l'autre — et afficherait un morceau qui n'existe pas.
+    ///
+    /// L'année et les liens font exception à cette dernière règle, et c'est
+    /// délibéré : ils sont **attachés au morceau, pas à sa lecture**. Un
+    /// contributeur qui écrase mais n'apporte aucun texte (le cas réel d'un
+    /// greffon qui ne sait qu'aller chercher un lien d'écoute) est écarté par
+    /// `bloc_de_texte` — à juste titre, il effacerait sinon le titre de l'ICY
+    /// ou des tags — mais sa réponse a bel et bien passé la porte de `ajoute`,
+    /// qui l'exempte du refus « entièrement vide ». Ne la combler que depuis
+    /// les `fill_only` la jetait en silence. L'ordre de déclaration reste
+    /// l'arbitre : le premier à en porter une l'emporte, donc le gagnant
+    /// d'abord s'il en a une.
     fn texte_compose(&self) -> Morceau {
         let mut m = self.bloc_de_texte();
         for plugin in &self.ordre {
             let Some(e) = self.enrichissements.get(plugin) else { continue };
+            // L'année et les liens se comblent depuis **tout** enrichissement
+            // retenu, `fill_only` ou non (voir la doc ci-dessus) ; le texte,
+            // lui, ne se comble que depuis un `fill_only`.
+            if m.year.is_none() {
+                m.year = e.year;
+            }
+            // Même règle que les autres champs, décidée avec le propriétaire :
+            // le gagnant l'emporte, un complément ne fait que combler un vide.
+            // Pas de fusion par plateforme — ce serait une politique inventée
+            // pour un cas que nos sources ne produisent pas, aucune ne donnant
+            // à la fois du YouTube et du Deezer.
+            if m.links.is_empty() {
+                m.links = e.links.clone();
+            }
             if !e.fill_only {
                 continue;
             }
@@ -451,17 +476,6 @@ impl Metadonnees {
             }
             if m.duration_s.is_none() {
                 m.duration_s = e.duration_s;
-            }
-            if m.year.is_none() {
-                m.year = e.year;
-            }
-            // Même règle que les autres champs, décidée avec le propriétaire :
-            // le gagnant l'emporte, un `fill_only` ne fait que combler un vide.
-            // Pas de fusion par plateforme — ce serait une politique inventée
-            // pour un cas que nos sources ne produisent pas, aucune ne donnant
-            // à la fois du YouTube et du Deezer.
-            if m.links.is_empty() {
-                m.links = e.links.clone();
             }
         }
         m
@@ -919,6 +933,82 @@ mod tests {
         // Et `known()` republie l'annee composee, pour qu'un greffon sache
         // qu'elle est deja tenue.
         assert_eq!(m.known().year, Some(1999));
+    }
+
+    #[test]
+    fn un_contributeur_sans_texte_apporte_quand_meme_son_annee_et_ses_liens() {
+        // Le symetrique du test precedent, cote **ecrasement**. Un
+        // contributeur qui n'apporte qu'une annee et/ou des liens est accepte
+        // par `ajoute` (exempte du refus « entierement vide »), puis
+        // `bloc_de_texte` l'ecarte — a juste titre : sans texte il ne peut pas
+        // etre le bloc retenu, sinon il effacerait le titre de l'ICY ou des
+        // tags. Restait qu'il etait ensuite perdu tout entier : `texte_compose`
+        // ne comblait l'annee et les liens que depuis les `fill_only`. Sa
+        // reponse etait donc jetee en silence alors qu'elle avait passe la
+        // porte.
+        use ritornello_proto::Link;
+        let id = json!({"kind": "stream"});
+        let mut m = Metadonnees::new(vec!["greffon".into()]);
+        m.set_identity(Some(id.clone()));
+        assert!(m.set_icy("Mandrillus Sphynx - Bikwix".into()));
+        assert!(m.ajoute(
+            "greffon",
+            Enrichment {
+                identity: id,
+                year: Some(1959),
+                links: vec![Link::Youtube { url: "https://www.youtube.com/watch?v=a".into() }],
+                ..Default::default()
+            }
+        ));
+        let etat = m.etat();
+        assert_eq!(etat.year, Some(1959), "l'annee du contributeur sans texte est retenue");
+        assert_eq!(
+            etat.links,
+            vec![Link::Youtube { url: "https://www.youtube.com/watch?v=a".into() }],
+            "ses liens aussi"
+        );
+        // Et le titre reste celui de l'ICY : combler ne doit pas promouvoir ce
+        // contributeur en bloc retenu.
+        assert_eq!(etat.title.as_deref(), Some("Mandrillus Sphynx - Bikwix"));
+        assert_eq!(etat.origin.as_deref(), Some(ORIGINE_ICY));
+    }
+
+    #[test]
+    fn un_second_contributeur_qui_ecrase_ne_remplace_pas_lannee_du_gagnant() {
+        // Le controle du test precedent : combler depuis **tout**
+        // enrichissement retenu ne doit pas degenerer en « le dernier
+        // l'emporte ». L'ordre de declaration reste l'arbitre.
+        use ritornello_proto::Link;
+        let id = json!({"kind": "stream"});
+        let mut m = Metadonnees::new(vec!["gagnant".into(), "suivant".into()]);
+        m.set_identity(Some(id.clone()));
+        m.ajoute(
+            "gagnant",
+            Enrichment {
+                identity: id.clone(),
+                title: Some("T".into()),
+                year: Some(1959),
+                links: vec![Link::Youtube { url: "https://www.youtube.com/watch?v=a".into() }],
+                ..Default::default()
+            },
+        );
+        m.ajoute(
+            "suivant",
+            Enrichment {
+                identity: id,
+                title: Some("T2".into()),
+                year: Some(2017),
+                links: vec![Link::Deezer { url: "https://www.deezer.com/track/1".into() }],
+                ..Default::default()
+            },
+        );
+        let etat = m.etat();
+        assert_eq!(etat.year, Some(1959), "l'annee du gagnant reste celle du gagnant");
+        assert_eq!(
+            etat.links,
+            vec![Link::Youtube { url: "https://www.youtube.com/watch?v=a".into() }],
+            "les liens du gagnant, et eux seuls"
+        );
     }
 
     #[test]

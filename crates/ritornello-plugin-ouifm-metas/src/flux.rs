@@ -85,19 +85,35 @@ pub fn decoupe_lignes(tampon: &mut Vec<u8>) -> Vec<String> {
 /// `appleMusicId`), qu'il faut donc savoir mettre en forme. Les deux motifs
 /// sont mesurés le 2026-08-27 sur les identifiants d'une trame réellement
 /// capturée : Deezer rend 200 puis redirige vers `/fr/track/…`, et Apple Music
-/// rend 200 en redirigeant vers `…/song/shes-a-rainbow/1443171670` — le
+/// rend 301 vers `…/song/shes-a-rainbow/1443171670`, soit 200 en suivant — le
 /// *slug* confirme au passage que l'identifiant désigne bien le morceau que la
 /// trame annonçait.
+///
+/// **Aucune vitrine dans l'URL Apple Music** : la forme
+/// `music.apple.com/song/{id}`, mesurée le 2026-08-27, redirige d'elle-même
+/// vers celle de l'auditeur. Écrire `/us/` figeait la vitrine américaine pour
+/// un appareil qui n'y écoute rien, alors que rien dans l'identifiant n'est
+/// américain. (La mesure depuis ici aboutit tout de même sur `/us/`, Apple ne
+/// tenant compte ni de l'IP ni d'`Accept-Language` en HTTP nu ; c'est un
+/// navigateur avec son compte qui obtient la bonne, et il ne peut le faire
+/// que si on ne la lui impose pas.)
 ///
 /// Un identifiant qui n'est pas fait que de chiffres est refusé : il entre
 /// dans une URL que l'IHM rendra cliquable, et rien n'oblige un tiers à écrire
 /// ce qu'on attend. `Link::validee` reverrouille l'hôte côté cœur, mais mieux
 /// vaut ne pas fabriquer une URL douteuse ici pour la faire refuser là-bas.
+/// Un **flottant** JSON (`9956167.0`) est dans ce lot : décider que `.0` se
+/// laisse tomber ferait de nous l'auteur d'un identifiant que le tiers n'a pas
+/// écrit, et un lien vers le mauvais morceau ne se voit pas, là où un lien
+/// manquant se voit et se corrige.
 pub fn liens(v: &serde_json::Value) -> Vec<Link> {
     let identifiant = |cle: &str| -> Option<String> {
         let brut = match v.get(cle)? {
             serde_json::Value::String(s) => s.trim().to_string(),
-            serde_json::Value::Number(n) => n.to_string(),
+            // `is_u64` plutôt que n'importe quel nombre : c'est ce qui écarte
+            // explicitement le flottant et le négatif, au lieu de compter sur
+            // le filtre de chiffres ci-dessous pour le faire par ricochet.
+            serde_json::Value::Number(n) if n.is_u64() => n.to_string(),
             _ => return None,
         };
         (!brut.is_empty() && brut.chars().all(|c| c.is_ascii_digit())).then_some(brut)
@@ -107,7 +123,7 @@ pub fn liens(v: &serde_json::Value) -> Vec<Link> {
         out.push(Link::Deezer { url: format!("https://www.deezer.com/track/{id}") });
     }
     if let Some(id) = identifiant("appleMusicId") {
-        out.push(Link::AppleMusic { url: format!("https://music.apple.com/us/song/{id}") });
+        out.push(Link::AppleMusic { url: format!("https://music.apple.com/song/{id}") });
     }
     out
 }
@@ -326,7 +342,7 @@ mod tests {
             m.links,
             vec![
                 Link::Deezer { url: "https://www.deezer.com/track/9956167".into() },
-                Link::AppleMusic { url: "https://music.apple.com/us/song/1443171670".into() },
+                Link::AppleMusic { url: "https://music.apple.com/song/1443171670".into() },
             ]
         );
     }
@@ -341,10 +357,28 @@ mod tests {
             let m = parse_data_line(&ligne).unwrap();
             assert!(m.links.is_empty(), "accepte a tort : {mauvais}");
         }
-        // Un nombre JSON nu passe : le flux peut changer d'avis sur la forme,
-        // comme il l'a fait pour `durationInSeconds`.
+    }
+
+    #[test]
+    fn les_trois_formes_dun_identifiant_numerique_sont_tranchees_une_par_une() {
+        // Un test par forme, parce que les trois passent par des chemins
+        // differents dans `serde_json` et qu'une seule d'entre elles est
+        // mesuree sur le flux reel.
+        let attendu = vec![Link::Deezer { url: "https://www.deezer.com/track/9956167".into() }];
+        // La forme mesuree : une chaine de chiffres.
+        let m = parse_data_line(r#"data: {"title":"t","deezerId":"9956167"}"#).unwrap();
+        assert_eq!(m.links, attendu, "chaine de chiffres");
+        // Un entier JSON nu : le flux peut changer d'avis sur la forme, comme
+        // il l'a fait pour `durationInSeconds`.
         let m = parse_data_line(r#"data: {"title":"t","deezerId":9956167}"#).unwrap();
-        assert_eq!(m.links, vec![Link::Deezer { url: "https://www.deezer.com/track/9956167".into() }]);
+        assert_eq!(m.links, attendu, "entier JSON");
+        // Un flottant JSON, en revanche, est refuse : `9956167.0` n'est pas un
+        // identifiant, c'est une valeur qu'un encodeur a maquillee, et devoir
+        // decider si `.0` se laisse tomber ferait de nous l'auteur d'un
+        // identifiant que le tiers n'a pas ecrit. Un lien manquant se voit et
+        // se corrige ; un lien vers le mauvais morceau, non.
+        let m = parse_data_line(r#"data: {"title":"t","deezerId":9956167.0}"#).unwrap();
+        assert!(m.links.is_empty(), "flottant JSON");
     }
 
     #[test]

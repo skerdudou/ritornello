@@ -190,6 +190,17 @@ impl CoverRef {
 ///
 /// Ajouter une plateforme est une modification de ce fichier, volontairement :
 /// elle oblige à écrire son hôte ici, à côté des autres.
+///
+/// **Conséquence de l'enum interne-taggé, acceptée :** une trame nommant une
+/// plateforme que ce fichier ne connaît pas ne perd pas ce lien-là, elle fait
+/// échouer la désérialisation de **tout** l'enrichissement — `serde` n'a pas de
+/// variante de repli à lui donner, et un `#[serde(other)]` en ajouterait une
+/// qui n'aurait ni hôte admis ni icône. C'est admis parce que cœur et greffons
+/// se déploient **ensemble**, d'un seul paquet : un greffon ne peut pas se
+/// retrouver en avance sur le cœur qui le lit. Le jour où ce ne serait plus
+/// vrai, il faudrait un `Vec<serde_json::Value>` dépouillé lien par lien, et ce
+/// jour-là seulement — l'ajouter d'avance coûterait le typage qui fait toute la
+/// valeur de ce type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "platform", rename_all = "snake_case")]
 pub enum Link {
@@ -275,8 +286,21 @@ const ANNEE_MAX: u16 = 2999;
 /// `parse()` chez chaque appelant : MusicBrainz rend `"1987"` ou
 /// `"2017-06-23"`, la grille Radio France rend le **nombre** 1952, et les
 /// étiquettes de fichiers rendent un peu tout, `"1972-00-00"` compris.
+///
+/// La règle porte sur la **longueur** de la tête numérique, et non sur sa
+/// valeur : 4 chiffres, c'est l'année ; 8 chiffres, c'est un `YYYYMMDD`
+/// compact (que les étiquettes ID3 écrivent, `TDRC` autorisant la forme
+/// resserrée) dont on garde les quatre premiers ; toute autre longueur est
+/// jetée. Sans cette règle, `"19590817"` sortait `None` (hors bornes) et
+/// surtout `"90210"` sortait 9021 — la borne haute ne rattrape pas un code
+/// postal, elle ne fait que tronquer le nombre qu'il forme.
 pub fn annee_valide(brut: &str) -> Option<u16> {
     let tete: String = brut.trim().chars().take_while(char::is_ascii_digit).collect();
+    let tete = match tete.len() {
+        4 => tete.as_str(),
+        8 => &tete[..4],
+        _ => return None,
+    };
     let annee = tete.parse::<u16>().ok()?;
     (ANNEE_MIN..=ANNEE_MAX).contains(&annee).then_some(annee)
 }
@@ -761,7 +785,7 @@ mod tests {
     fn une_annee_hors_bornes_est_refusee() {
         // Ces valeurs viennent d'etiquettes de fichiers arbitraires et de
         // tiers. Une annee a 0 ou a 90210 n'apprend rien et enlaidit l'ecran.
-        for brut in ["0", "999", "3000", "90210", "", "abc", "-1959"] {
+        for brut in ["0", "999", "3000", "90210", "195", "", "abc", "-1959"] {
             assert_eq!(annee_valide(brut), None, "accepte a tort : {brut:?}");
         }
         // Les trois formes mesurees chez nos sources.
@@ -769,6 +793,14 @@ mod tests {
         assert_eq!(annee_valide("2017-06-23"), Some(2017), "MusicBrainz, date complete");
         assert_eq!(annee_valide("1972-00-00"), Some(1972), "etiquette de fichier bancale");
         assert_eq!(annee_valide("  1959  "), Some(1959), "elague");
+        // La forme compacte des etiquettes ID3 (`TDRC` autorise `YYYYMMDD`) :
+        // la tete numerique fait alors 8 chiffres d'affilee, et sans regle sur
+        // la longueur elle sortait `None` faute de tenir dans un `u16`.
+        assert_eq!(annee_valide("19590817"), Some(1959), "etiquette ID3 compacte");
+        // Le piege de la troncature naive : garder « les quatre premiers
+        // chiffres » sans regarder la longueur ferait de ce code postal
+        // l'annee 9021, et la borne haute ne rattraperait rien.
+        assert_eq!(annee_valide("90210"), None, "un code postal n'est pas une annee");
         // Le rebornage passe aussi par `cleaned`, la couche proprietaire de la
         // validation de forme.
         let e = Enrichment { identity: json!(1), year: Some(90), ..Default::default() }.cleaned();
@@ -962,6 +994,43 @@ mod tests {
         let relue: PlayerState = serde_json::from_str(ancienne).unwrap();
         assert_eq!(relue.position_s, None);
         assert!(!relue.seekable);
+    }
+
+    #[test]
+    fn player_state_serialise_lannee_et_les_liens_quand_ils_disent_quelque_chose() {
+        let etat = PlayerState {
+            source: "cd".into(),
+            morceau: Morceau {
+                year: Some(1959),
+                links: vec![Link::Youtube { url: "https://www.youtube.com/watch?v=a".into() }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&etat).unwrap();
+        assert!(json.contains(r#""year":1959"#), "{json}");
+        // Le `Link` est interne-taggé : la plateforme est une clé de l'objet,
+        // pas un objet imbriqué de plus.
+        assert!(
+            json.contains(r#""links":[{"platform":"youtube","url":"https://www.youtube.com/watch?v=a"}]"#),
+            "{json}"
+        );
+    }
+
+    /// Additif : une trame muette sur ces deux champs reste identique à
+    /// l'octet près à ce qu'elle était avant ce chantier — ni `"year":null`
+    /// ni `"links":[]` — et une trame écrite par un binaire antérieur se
+    /// relit sans eux.
+    #[test]
+    fn player_state_tait_lannee_et_les_liens_quand_ils_ne_disent_rien() {
+        let etat = PlayerState { source: "radio".into(), ..Default::default() };
+        let json = serde_json::to_string(&etat).unwrap();
+        assert!(!json.contains("year"), "{json}");
+        assert!(!json.contains("links"), "{json}");
+        let ancienne = r#"{"source":"radio","volume":50,"muted":false,"standby":false,"preset":null,"preset_count":null,"preset_name":null,"artist":null,"title":null,"album":null,"duration_s":null,"origin":null}"#;
+        let relue: PlayerState = serde_json::from_str(ancienne).unwrap();
+        assert_eq!(relue.morceau.year, None);
+        assert!(relue.morceau.links.is_empty());
     }
 
     #[test]

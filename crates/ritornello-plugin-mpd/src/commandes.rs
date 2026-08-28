@@ -239,11 +239,15 @@ pub fn traiter(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
         // la spec, § Reseau), donc rien n'est interdit par permission. Ce qui
         // n'existe pas est simplement absent de `commands`.
         "notcommands" => Issue::ok(),
-        // Les trois seules étiquettes que `Morceau` porte. En annoncer d'autres
-        // ferait chercher au client des tris que rien n'alimente.
-        "tagtypes" => {
-            Issue::lignes(["Artist", "Album", "Title"].iter().map(|t| ligne("tagtype", t)).collect())
-        }
+        // Les quatre seules étiquettes que `Morceau` porte. En annoncer
+        // d'autres ferait chercher au client des tris que rien n'alimente ; en
+        // oublier une que `currentsong` émet est le défaut inverse, et il était
+        // là : un client a le droit de ne lire que les lignes des étiquettes
+        // annoncées ici, l'année restait donc invisible chez lui. La liste doit
+        // rester le miroir exact de ce que `currentsong` peut pousser.
+        "tagtypes" => Issue::lignes(
+            ["Artist", "Album", "Title", "Date"].iter().map(|t| ligne("tagtype", t)).collect(),
+        ),
         // Une sortie unique et toujours active : l'appareil a une sortie audio,
         // que la page d'admin choisit. `enableoutput`/`disableoutput` sont
         // refusées, donc rien ici n'est pilotable — mais un client qui ne voit
@@ -1954,10 +1958,13 @@ mod tests {
     }
 
     #[test]
-    fn tagtypes_ne_nomme_que_les_trois_etiquettes_portees() {
+    fn tagtypes_ne_nomme_que_les_quatre_etiquettes_portees() {
+        // `Date` en fait partie depuis que `currentsong` l'emet : un client qui
+        // ne voit pas une etiquette dans `tagtypes` a le droit de ne jamais en
+        // lire la ligne, et l'annee restait alors invisible chez lui.
         assert_eq!(
             traiter_ok(&instantane_arrete(), &["tagtypes"]),
-            vec!["tagtype: Artist", "tagtype: Album", "tagtype: Title"]
+            vec!["tagtype: Artist", "tagtype: Album", "tagtype: Title", "tagtype: Date"]
         );
     }
 

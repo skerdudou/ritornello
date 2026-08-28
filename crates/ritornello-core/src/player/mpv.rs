@@ -634,25 +634,29 @@ mod tests {
     }
 
     #[test]
-    fn les_tags_dun_fichier_local_donnent_les_trois_champs() {
+    fn les_tags_dun_fichier_local_donnent_les_quatre_champs() {
         // Charge relevée au banc sur un mp3 (ID3). FFmpeg normalise les clés :
         // flac, ogg, opus, m4a et wav ont été vérifiés et remontent sous les
-        // mêmes noms, donc une seule grammaire à connaître.
+        // mêmes noms, donc une seule grammaire à connaître. `date` en fait
+        // partie et porte ici la forme longue : sans cette assertion, lire
+        // `year` depuis la mauvaise clé (`year`, que FFmpeg n'émet pas) serait
+        // passé inaperçu.
         let data = serde_json::json!({
             "title": "So What", "artist": "Miles Davis",
-            "album": "Kind of Blue", "encoder": "Lavf60.16.100"
+            "album": "Kind of Blue", "date": "1959-08-17", "encoder": "Lavf60.16.100"
         });
         let m = file_tags(&data).unwrap();
         assert_eq!(m.title.as_deref(), Some("So What"));
         assert_eq!(m.artist.as_deref(), Some("Miles Davis"));
         assert_eq!(m.album.as_deref(), Some("Kind of Blue"));
+        assert_eq!(m.year, Some(1959));
         assert_eq!(m.origin.as_deref(), Some("tags"));
     }
 
     #[test]
     fn les_cles_de_conteneur_m4a_sont_ignorees() {
         // Relevé au banc : un m4a fait aussi remonter des clés de conteneur.
-        // On pioche trois clés nommées, on n'absorbe jamais l'objet.
+        // On pioche quatre clés nommées, on n'absorbe jamais l'objet.
         let data = serde_json::json!({
             "title": "So What", "major_brand": "M4A ", "handler_name": "SoundHandler",
             "vendor_id": "[0][0][0][0]", "compatible_brands": "M4A mp42isom"
@@ -661,6 +665,7 @@ mod tests {
         assert_eq!(m.title.as_deref(), Some("So What"));
         assert_eq!(m.artist, None);
         assert_eq!(m.album, None);
+        assert_eq!(m.year, None);
     }
 
     #[test]
