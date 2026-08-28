@@ -1698,6 +1698,24 @@ supplies the station's own image whenever it names a genuine track;
 lacking one, `musicbrainz` completes from the very artist and album that
 plugin just supplied.
 
+**An outage is retried later, not merely "not remembered".** `cherche_release`
+already retries three times in-process (2 s then 4 s), and a failure past that
+is deliberately not memoised — a 503 must not turn into "this album has no
+cover". But not memoising is only half an answer: the note said "the next frame
+will retry", and there is no next frame. The core republishes `NowPlaying` only
+when the identity or the `known` block changes (see `publie_etat`), and on a
+local file both settle the moment the tags are read. The owner's report has
+exactly that shape: nothing for ten seconds, then the cover appears **on the
+next track** — the only event that relaunched anything. The plugin therefore
+schedules its own deferred retries, twice, at 20 s and 60 s. Two and no more:
+past that the absence is no longer a transient outage, and hammering a free
+third-party service for one image would be abuse — a track change remains the
+last resort, as before. Only the pair still being targeted is retried, and the
+in-flight marker stays armed across the wait so a frame arriving meanwhile
+cannot start a second search for the same album. The decision (is a retry due,
+and after how long) is a separate, pure function from its execution, which is
+what makes it testable without a clock or a network.
+
 **`GET /api/cover/{key}`** serves the bytes. It is **the appliance** that
 fetches an image, never the browser — the same principle already stated
 for admin pages ("the page loads no external resource") — which also

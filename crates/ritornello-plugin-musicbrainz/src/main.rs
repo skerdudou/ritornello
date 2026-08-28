@@ -37,6 +37,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 
 /// Catalogue i18n embarqué de la page d'admin (`admin.rs`). Nommé comme
@@ -54,6 +55,16 @@ pub(crate) const MUSICBRAINZ_EN: &str = include_str!("locales/en.toml");
 /// mauvais sur un seul coup de chance. Trois échecs d'affilée décrivent une
 /// station qui a changé de forme, pas un titre que le catalogue ignore.
 const ECHECS_AVANT_RESONDAGE: u32 = 3;
+
+/// Délais des reprises différées d'une recherche de pochette, en secondes.
+///
+/// **Deux, et espacées.** `cherche_release` a déjà réessayé trois fois en
+/// interne (2 s puis 4 s) : ce qui arrive ici est une panne qui dure plus que
+/// quelques secondes, pas un hoquet. Vingt secondes, puis une minute, couvrent
+/// la charge passagère d'un service tiers gratuit sans jamais le marteler ; au
+/// delà, l'absence cesse d'être une panne et le changement de piste reste la
+/// reprise ultime. Voir `MusicBrainzPlugin::reprogramme_pochette`.
+const REPRISES_POCHETTE_S: &[u64] = &[20, 60];
 
 /// Résultat d'une interrogation : la TOC concernée, et ce qu'on a trouvé.
 /// Ce qu'une interrogation de MusicBrainz rapporte.
@@ -190,6 +201,9 @@ struct MusicBrainzPlugin {
     pochette_connue: Option<TrouvePochette>,
     /// Couple dont la recherche est en vol, pour ne pas la lancer deux fois.
     pochette_en_vol: Option<CleGenerique>,
+    /// Le couple en cours de **reprise différée** et le nombre de reprises déjà
+    /// consommées. Voir [`MusicBrainzPlugin::reprogramme_pochette`].
+    reprises_pochette: Option<(CleGenerique, usize)>,
     pochette_tx: mpsc::Sender<IssuePochette>,
     pochette_rx: mpsc::Receiver<IssuePochette>,
 
@@ -278,6 +292,7 @@ impl MusicBrainzPlugin {
             cle_generique: None,
             pochette_connue: None,
             pochette_en_vol: None,
+            reprises_pochette: None,
             pochette_tx,
             pochette_rx,
             magasin,
@@ -358,10 +373,82 @@ impl MusicBrainzPlugin {
         if self.pochette_connue.as_ref().is_some_and(|(connue, _)| connue == &cle) {
             return; // déjà recherché, résultat mémorisé (trouvé ou non)
         }
+        self.lance_recherche_pochette(cle, Duration::ZERO);
+    }
+
+    /// Reprogramme la recherche après une panne de MusicBrainz, une fois le
+    /// budget de reprises non épuisé.
+    ///
+    /// **Ce que ceci répare, et pourquoi les trois tentatives ne suffisaient
+    /// pas.** `cherche_release` réessaie déjà trois fois en interne, à 2 s puis
+    /// 4 s — une poignée de secondes en tout. Si la panne dure plus longtemps,
+    /// la réponse est `Indisponible`, rien n'est mémorisé (c'est bien : un 503
+    /// ne doit pas devenir « cet album n'a pas de pochette »)... et **plus rien
+    /// ne relance**. Le commentaire d'alors disait « la prochaine trame
+    /// réessaiera », mais il n'y a pas de prochaine trame : le cœur ne
+    /// republie `NowPlaying` que lorsque l'identité ou le `known` changent
+    /// (voir `publie_etat`), et sur un fichier local les deux se figent dès que
+    /// les étiquettes sont lues. Le symptôme rapporté par le propriétaire est
+    /// exactement celui-là : rien pendant dix secondes, puis la pochette
+    /// apparaît **au changement de piste** — c'est-à-dire à la seule occasion
+    /// qui relançait quoi que ce soit.
+    ///
+    /// Deux reprises et pas davantage : au-delà, l'absence n'est plus une
+    /// panne passagère, et marteler un service tiers gratuit pour une image
+    /// serait un abus. Le changement de piste reste la reprise ultime, comme
+    /// avant.
+    ///
+    /// Ne reprend que le couple **encore visé** : une reprise pour un album
+    /// qu'on n'écoute plus est du travail pur perdu, et sa réponse serait de
+    /// toute façon écartée par la garde de péremption.
+    fn reprogramme_pochette(&mut self, cle: CleGenerique) {
+        let Some((rang, delai)) = self.reprise_due(&cle) else {
+            tracing::info!("MusicBrainz still unavailable, giving up until the track changes");
+            return;
+        };
+        self.reprises_pochette = Some((cle.clone(), rang + 1));
+        self.lance_recherche_pochette(cle, delai);
+    }
+
+    /// Le rang de la prochaine reprise pour ce couple et son délai, ou `None`
+    /// — budget épuisé, ou couple qui n'est plus celui qu'on vise.
+    ///
+    /// Le rang sort d'ici plutôt que d'être recalculé par l'appelant : les deux
+    /// valeurs viennent de la même lecture, et les séparer laisserait un
+    /// compteur avancer sur un rang qu'un autre couple avait posé.
+    ///
+    /// **Séparée de son application**, et c'est ce qui la rend vérifiable : la
+    /// reprise elle-même dort puis interroge un service tiers, donc l'éprouver
+    /// de bout en bout demanderait un réseau et une horloge. La décision, elle,
+    /// ne lit que deux champs.
+    ///
+    /// Le compteur est porté **par le couple** : un album différent repart de
+    /// zéro sans qu'aucune remise à zéro explicite n'ait à exister, donc sans
+    /// chemin où l'oublier.
+    fn reprise_due(&self, cle: &CleGenerique) -> Option<(usize, Duration)> {
+        if self.cle_generique.as_ref() != Some(cle) {
+            return None;
+        }
+        let rang = match &self.reprises_pochette {
+            Some((precedent, rang)) if precedent == cle => *rang,
+            _ => 0,
+        };
+        REPRISES_POCHETTE_S.get(rang).map(|s| (rang, Duration::from_secs(*s)))
+    }
+
+    /// Le vol lui-même, éventuellement précédé d'une attente.
+    ///
+    /// **`pochette_en_vol` est armé avant l'attente**, pas après : sans cela une
+    /// trame arrivant pendant la pause relancerait une seconde recherche pour
+    /// le même couple, et les deux se répondraient.
+    fn lance_recherche_pochette(&mut self, cle: CleGenerique, apres: Duration) {
         self.pochette_en_vol = Some(cle.clone());
         let (artist, album) = cle.clone();
         let tx = self.pochette_tx.clone();
         tokio::spawn(async move {
+            if !apres.is_zero() {
+                tokio::time::sleep(apres).await;
+            }
             let reponse = match musicbrainz::cherche_release(&artist, &album).await {
                 Ok(url) => Reponse::Connue(url),
                 Err(e) => {
@@ -571,13 +658,18 @@ impl MetadataPlugin for MusicBrainzPlugin {
                         if self.pochette_en_vol.as_ref() == Some(&cle) {
                             self.pochette_en_vol = None;
                         }
-                        // Une panne passagère ne se mémorise pas. C'est **le**
-                        // correctif de ce chantier : sans cette ligne, un 503
-                        // de MusicBrainz devenait « cet album n'a pas de
-                        // pochette » pour toute la durée de l'album, et le seul
-                        // remède était de relancer le greffon. `pochette_en_vol`
-                        // vient d'être libéré, donc la prochaine trame relance.
-                        let Reponse::Connue(cover_url) = reponse else { continue };
+                        // Une panne passagère ne se mémorise pas : un 503 de
+                        // MusicBrainz ne doit pas devenir « cet album n'a pas de
+                        // pochette » pour toute la durée de l'album.
+                        //
+                        // **Et elle est reprogrammée**, ce qui manquait : rien
+                        // ne relançait la recherche tant que la piste ne
+                        // changeait pas, faute de nouvelle trame à attendre
+                        // (voir `reprogramme_pochette`).
+                        let Reponse::Connue(cover_url) = reponse else {
+                            self.reprogramme_pochette(cle);
+                            continue;
+                        };
                         // Même garde que côté disque : ne retenir le résultat
                         // que s'il décrit le couple (artiste, album) toujours
                         // visé — un changement de piste peut avoir rendu la
@@ -1193,13 +1285,23 @@ mod tests {
         let rien = tokio::time::timeout(std::time::Duration::from_secs(1), p.next_enrichment()).await;
         assert!(rien.is_err(), "une panne passagere ne doit produire aucun enrichissement");
 
-        assert!(p.pochette_en_vol.is_none(), "le marqueur en vol doit etre libere");
         assert!(
             p.pochette_connue.is_none(),
             "rien ne doit etre memorise : c'est ce qui figeait l'absence jusqu'au redemarrage"
         );
+        // **Une reprise est armee, et c'est elle qui tient le marqueur.** La
+        // version d'avant liberait `pochette_en_vol` en comptant sur « la
+        // prochaine trame » pour reessayer -- or il n'y en a pas sur un fichier
+        // local, ou identite et `known` se figent des que les etiquettes sont
+        // lues. Le marqueur reste donc arme pendant l'attente : c'est ce qui
+        // interdit a une trame survenant entre-temps de lancer une seconde
+        // recherche pour le meme couple.
+        assert_eq!(p.pochette_en_vol.as_ref(), Some(&cle), "la reprise tient le marqueur");
+        assert_eq!(p.reprises_pochette, Some((cle.clone(), 1)), "une reprise doit etre consommee");
 
-        // Et la trame suivante relance bien la recherche.
+        // Une trame de plus ne relance rien : la reprise deja armee s'en
+        // charge, et deux recherches concurrentes pour le meme couple se
+        // repondraient l'une l'autre.
         p.now_playing(NowPlaying {
             source: "files".into(),
             identity: Some(identite_fichier("/x")),
@@ -1207,7 +1309,35 @@ mod tests {
             ..Default::default()
         })
         .await;
-        assert_eq!(p.pochette_en_vol.as_ref(), Some(&cle), "la trame suivante doit reessayer");
+        assert_eq!(p.reprises_pochette, Some((cle, 1)), "aucune reprise de plus ne doit partir");
+    }
+
+    #[test]
+    fn le_budget_de_reprises_est_borne_et_porte_par_le_couple() {
+        // La decision seule, sans horloge ni reseau : c'est pour cela qu'elle
+        // est separee de son application (voir `reprise_due`).
+        let mut p = plugin_test();
+        let cle = ("A".to_string(), "Disque".to_string());
+        p.cle_generique = Some(cle.clone());
+
+        // Deux reprises, espacees, puis plus rien : au-dela, l'absence n'est
+        // plus une panne passagere et le changement de piste reste la reprise
+        // ultime.
+        assert_eq!(p.reprise_due(&cle), Some((0, Duration::from_secs(20))));
+        p.reprises_pochette = Some((cle.clone(), 1));
+        assert_eq!(p.reprise_due(&cle), Some((1, Duration::from_secs(60))));
+        p.reprises_pochette = Some((cle.clone(), 2));
+        assert_eq!(p.reprise_due(&cle), None, "le budget doit etre borne");
+
+        // Le compteur est porte par le couple : un autre album repart de zero
+        // sans qu'aucune remise a zero explicite n'ait a exister.
+        let autre = ("A".to_string(), "Autre".to_string());
+        p.cle_generique = Some(autre.clone());
+        assert_eq!(p.reprise_due(&autre), Some((0, Duration::from_secs(20))));
+
+        // Et rien n'est repris pour un couple qu'on ne vise plus : ce serait du
+        // travail pur perdu, sa reponse etant de toute facon ecartee.
+        assert_eq!(p.reprise_due(&cle), None, "un couple abandonne ne se reprend pas");
     }
 
     // Voir `le_relai_generique_emet_une_pochette_seule_en_completion` : le
