@@ -541,6 +541,18 @@ measured on sixty files: 0.33 ms each that way, against 42 ms with one
 a minute and a half, and it spares a Raspberry Pi two thousand process spawns
 while music is playing. No system package is involved.
 
+**`lofty` is kept out of the log below `error`**, and that is not tidiness. It
+emits a `WARN` per MP3 without a Xing header — "MPEG: Using bitrate to estimate
+duration" — which is not an incident but the normal estimation method for that
+format, calls for no action, and repeats once per track. The owner reported it
+as flooding the journal, and the cost is real: the core keeps only `warn` and
+above for its "recent errors" card, so that noise pushes actual errors out of
+the buffer. Its `error` lines still go through — a frame the library judges
+broken is information. A `filter_fn` and not an `EnvFilter`: the latter sits
+behind `tracing-subscriber`'s optional `env-filter` feature, which pulls in
+`regex` — one more dependency to compile and ship on a Pi, for a single rule
+known in advance.
+
 The work runs **in the background** and is polled by the page, like the
 recursive scan: a `GetData` has a 5 s budget and a playlist coming off
 a share needs longer. Results are applied by **path**, never by position — the

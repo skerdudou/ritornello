@@ -573,9 +573,40 @@ impl SourcePlugin for FilesSource {
     }
 }
 
+/// Vrai pour une trame que ce greffon accepte d'écrire au journal.
+///
+/// **Elle n'écarte qu'une chose : le bavardage de `lofty` sous le niveau
+/// erreur.** Le relevé des durées ouvre l'en-tête de chaque fichier de la
+/// liste, et `lofty` y émet un `WARN` par MP3 sans en-tête Xing —
+/// « MPEG: Using bitrate to estimate duration ». Ce n'est pas un incident :
+/// c'est la méthode d'estimation normale pour ce format, elle n'appelle
+/// aucune action, et elle se répète par piste. Signalée par le propriétaire
+/// comme polluant son journal, et le coût est réel : le cœur ne retient que
+/// les lignes `WARN` et au-delà pour la carte « dernières erreurs », donc ce
+/// bruit-là chasse de vraies erreurs du tampon.
+///
+/// `lofty` garde ses `ERROR` : une trame que la bibliothèque juge fautive
+/// reste une information.
+///
+/// Un `filter_fn` et non un `EnvFilter` : ce dernier vit derrière la fonction
+/// optionnelle `env-filter` de `tracing-subscriber`, qui tire `regex` — une
+/// dépendance de plus à compiler et à embarquer sur un Pi, pour une seule
+/// règle connue à l'avance.
+fn trame_a_journaliser(metadata: &tracing::Metadata<'_>) -> bool {
+    // `>` et non `<` : dans `tracing`, l'ordre des niveaux est celui de la
+    // verbosité, donc `ERROR` est le plus **petit**. « Plus verbeux qu'erreur »
+    // s'écrit bien `> Level::ERROR`.
+    !(metadata.target().starts_with("lofty") && *metadata.level() > tracing::Level::ERROR)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_target(false).init();
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(tracing_subscriber::filter::filter_fn(trame_a_journaliser))
+        .init();
 
     let state_path =
         PathBuf::from(env_or("RITORNELLO_FILES_STATE", "/var/lib/ritornello/plugin-files.json"));
@@ -705,6 +736,50 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
     use ritornello_proto::IdentityUpdate;
+
+    /// Fabrique une `Metadata` de test pour un couple (cible, niveau).
+    ///
+    /// `tracing::Metadata::new` demande des `&'static str` : les cibles
+    /// testées sont donc des littéraux, ce qui suffit — la règle ne porte que
+    /// sur un préfixe connu à l'avance.
+    fn trame(cible: &'static str, niveau: tracing::Level) -> tracing::Metadata<'static> {
+        tracing::Metadata::new(
+            "trame",
+            cible,
+            niveau,
+            None,
+            None,
+            None,
+            tracing::field::FieldSet::new(&[], tracing::callsite::Identifier(&CALLSITE)),
+            tracing::metadata::Kind::EVENT,
+        )
+    }
+
+    /// Un site d'appel factice, exigé par `FieldSet::new`. Il n'est jamais
+    /// enregistré ni consulté : seul son identité sert de clé.
+    struct Callsite;
+    impl tracing::callsite::Callsite for Callsite {
+        fn set_interest(&self, _: tracing::subscriber::Interest) {}
+        fn metadata(&self) -> &tracing::Metadata<'_> {
+            unreachable!("ce site d'appel n'est jamais consulte")
+        }
+    }
+    static CALLSITE: Callsite = Callsite;
+
+    #[test]
+    fn le_bavardage_de_lofty_est_ecarte_du_journal_mais_pas_ses_erreurs() {
+        // Le symptôme rapporté : « MPEG: Using bitrate to estimate duration »,
+        // un WARN par MP3 sans en-tête Xing, qui chasse de vraies erreurs du
+        // tampon des « dernières erreurs » du cœur.
+        assert!(!trame_a_journaliser(&trame("lofty::mpeg::properties", tracing::Level::WARN)));
+        assert!(!trame_a_journaliser(&trame("lofty", tracing::Level::INFO)));
+        // Ce que la règle ne doit surtout pas emporter :
+        assert!(trame_a_journaliser(&trame("lofty::mpeg", tracing::Level::ERROR)));
+        assert!(trame_a_journaliser(&trame("ritornello_plugin_files", tracing::Level::WARN)));
+        // Et pas de correspondance par simple sous-chaîne : une cible qui
+        // commence par le même mot sans être `lofty` reste journalisée.
+        assert!(trame_a_journaliser(&trame("mon_crate::lofty_helper", tracing::Level::WARN)));
+    }
 
     fn source_de_test(playlist: Playlist) -> FilesSource {
         let dir = tempfile::tempdir().unwrap();
