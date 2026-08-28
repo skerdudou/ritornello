@@ -1,18 +1,17 @@
 #!/bin/sh
-# Faux `smbclient` du parcours de bout en bout.
+# Fake `smbclient` for the end-to-end journey.
 #
-# Le parcours n'a pas de NAS, et ne peut pas en avoir : il tourne sur la machine
-# de n'importe qui. Il en simule donc un — mais avec les sorties **captées sur
-# un vrai NAS Synology** via le client samba 4.19.5, et non avec un format
-# reconstitué. C'est ce qui rend l'assistant réseau jouable en entier sans
-# matériel, tout en éprouvant l'analyse contre ce qu'elle rencontrera vraiment.
+# The journey has no NAS, and cannot have one: it runs on anyone's machine.
+# So it simulates one — but with outputs **captured on a real Synology NAS**
+# through samba client 4.19.5, not with a reconstructed format. That is what
+# makes the network wizard playable end to end without hardware, while still
+# testing the parser against what it will really meet.
 #
-# Les détails qui comptent, et qu'on n'aurait pas inventés :
-#   - le partage administratif porte le type « IPC| », pas « Disk| » ;
-#   - une ligne de bruit « SMB1 disabled » termine la sortie sans faire échouer
-#     la commande ;
-#   - les attributs tiennent sur une ou deux lettres (« D » comme « DA ») ;
-#   - un nom de dossier contient des espaces.
+# The details that matter, and that nobody would have invented:
+#   - the administrative share has type "IPC|", not "Disk|";
+#   - a noise line "SMB1 disabled" ends the output without failing the command;
+#   - attributes are one or two letters ("D" as well as "DA");
+#   - one folder name contains spaces.
 
 case "$*" in
   *--version*)
@@ -33,7 +32,7 @@ case "$*" in
     printf '\n\t\t102400 blocks of size 1024. 102380 blocks available\n'
     ;;
   *)
-    # Tout le reste échoue comme le vrai : code 1, message sur stderr.
+    # Everything else fails like the real one: exit code 1, message on stderr.
     echo "do_connect: Connection to inconnu failed (Error NT_STATUS_CONNECTION_REFUSED)" >&2
     exit 1
     ;;

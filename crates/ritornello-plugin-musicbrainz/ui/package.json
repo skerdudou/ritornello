@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vite build && node ../../../scripts/verifier-dist-plugin.mjs",
+    "build": "vite build && node ../../../scripts/check-plugin-dist.mjs",
     "test": "vitest run",
     "typecheck": "vue-tsc --noEmit"
   },

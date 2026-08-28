@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
-# Les mêmes commandes que .github/workflows/ci.yml, dans le même ordre : le
-# dépôt n'a pas encore de remote, donc c'est ici que la recette est validée
-# avant que le YAML ne tourne pour la première fois. Si l'un des deux change,
-# l'autre doit suivre.
+# The same commands as .github/workflows/ci.yml, in the same order: this is
+# where the recipe is validated locally before the YAML runs. If one of the
+# two changes, the other must follow.
 #
-# À lancer depuis WSL (cargo et npm y vivent). Un argument optionnel limite
-# l'exécution à une étape : web | rust | e2e.
+# Run from WSL (cargo and npm live there). An optional argument limits the
+# run to one stage: web | rust | e2e.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-etape="${1:-tout}"
+stage="${1:-all}"
 
-if [ "$etape" = tout ] || [ "$etape" = web ]; then
+if [ "$stage" = all ] || [ "$stage" = web ]; then
   echo "== web =="
   npm ci
   npm run build --workspaces --if-present
@@ -19,18 +18,18 @@ if [ "$etape" = tout ] || [ "$etape" = web ]; then
   npm test --workspaces --if-present
 fi
 
-if [ "$etape" = tout ] || [ "$etape" = rust ]; then
+if [ "$stage" = all ] || [ "$stage" = rust ]; then
   echo "== rust =="
-  # Le même refus qu'en CI : sans dist, cargo embarque un bouchon en silence.
+  # The same refusal as in CI: without dist, cargo silently embeds a stub.
   test -f web/app/dist/index.html && ls crates/*/ui/dist/ui.js >/dev/null
   cargo build --workspace
   cargo clippy --workspace --all-targets -- -D warnings
   cargo test --workspace
 fi
 
-if [ "$etape" = tout ] || [ "$etape" = e2e ]; then
+if [ "$stage" = all ] || [ "$stage" = e2e ]; then
   echo "== e2e =="
-  # Comme le job e2e : le cœur en debug doit exister, serve.mjs le lance.
+  # Like the e2e job: the debug core must exist, serve.mjs launches it.
   cargo build --workspace
   (cd web/app && npx playwright install chromium && npm run e2e)
 fi

@@ -1,9 +1,9 @@
 name: CI
 
-# Les cinq commandes de docs/development.md, sur Ubuntu : les tests du SDK
-# ouvrent des sockets Unix, donc aucun runner Windows n'est possible.
-# scripts/ci-local.sh reprend les mêmes commandes dans le même ordre — si l'un
-# des deux change, l'autre doit suivre.
+# The five commands of docs/development.md, on Ubuntu: the SDK tests open
+# Unix sockets, so no Windows runner is possible. scripts/ci-local.sh runs
+# the same commands in the same order — if one of the two changes, the
+# other must follow.
 
 on:
   push:
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   web:
-    name: IHM (build, typecheck, vitest)
+    name: Web UI (build, typecheck, vitest)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,10 +29,10 @@ jobs:
       - run: npm run build --workspaces --if-present
       - run: npm run typecheck
       - run: npm test --workspaces --if-present
-      - name: Publier les dist pour les jobs Rust
-        # dist/ est ignoré par git : ce job est le seul producteur, les autres
-        # téléchargent. Sans dist, build.rs embarque un bouchon et se contente
-        # d'un warning — voir « Refuser un bouchon » plus bas.
+      - name: Publish the dist bundles for the Rust jobs
+        # dist/ is git-ignored: this job is the only producer, the others
+        # download. Without dist, build.rs embeds a stub and settles for a
+        # warning — see "Refuse an embedded stub" below.
         uses: actions/upload-artifact@v4
         with:
           name: dist-web
@@ -50,24 +50,24 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: dist-web
-      - name: Refuser un bouchon embarqué
-        # build.rs remplace un dist absent par un bouchon et n'émet qu'un
-        # warning : ici c'est une erreur, sinon la CI validerait un binaire
-        # sans IHM.
+      - name: Refuse an embedded stub
+        # build.rs replaces a missing dist with a stub and only emits a
+        # warning: here it is an error, otherwise CI would validate a binary
+        # without a UI.
         run: test -f web/app/dist/index.html && ls crates/*/ui/dist/ui.js
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Outils des tests
-        # ffmpeg : sinon quatre tests se sautent eux-mêmes en silence.
+      - name: Test tools
+        # ffmpeg: otherwise four tests silently skip themselves.
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: cargo build --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
   e2e:
-    name: Parcours e2e (Playwright)
+    name: End-to-end journeys (Playwright)
     needs: web
     runs-on: ubuntu-latest
     steps:
@@ -82,8 +82,8 @@ jobs:
       - run: npm ci
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Lecteur audio des parcours
-        # docs/development.md : les e2e jouent vraiment via le greffon radio.
+      - name: Audio player for the journeys
+        # docs/development.md: the e2e tests really play through the radio plugin.
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mpv ffmpeg
       - run: cargo build --workspace
       - run: npx playwright install --with-deps chromium
@@ -99,7 +99,7 @@ jobs:
             web/app/test-results
 
   release:
-    name: Binaires armv7 (cross)
+    name: armv7 binaries (cross)
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [rust, e2e]
     runs-on: ubuntu-latest
@@ -112,13 +112,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cross --locked
       - run: cross build --release --workspace --target armv7-unknown-linux-gnueabihf
-      - name: Rassembler ce que deploy.sh attend
+      - name: Gather what deploy.sh expects
         run: |
-          mkdir -p livraison
-          cp target/armv7-unknown-linux-gnueabihf/release/ritornello-core livraison/
-          cp target/armv7-unknown-linux-gnueabihf/release/ritornello-plugin-* livraison/
-          ls -l livraison
+          mkdir -p release-bundle
+          cp target/armv7-unknown-linux-gnueabihf/release/ritornello-core release-bundle/
+          cp target/armv7-unknown-linux-gnueabihf/release/ritornello-plugin-* release-bundle/
+          ls -l release-bundle
       - uses: actions/upload-artifact@v4
         with:
           name: ritornello-armv7-${{ github.ref_name }}
-          path: livraison
+          path: release-bundle

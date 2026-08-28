@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/captures/accueil-clair.png" width="85%" alt="The web UI home page: a Player card with the current track and where the information came from, a full remote control below">
+  <img src="docs/captures/home-light.png" width="85%" alt="The web UI home page: a Player card with the current track and where the information came from, a full remote control below">
 </p>
 
 Ritornello turns a Raspberry Pi plugged into an amplifier into a radio and
@@ -85,12 +85,12 @@ station directory, *their* screen or *their* remote without asking anyone.
   screens on the framebuffer console, no X11 or Wayland involved.
 
 <p align="center">
-  <img src="docs/captures/accueil-sombre.png" width="49%" alt="The same home page in dark mode">
-  <img src="docs/captures/admin-radio.png" width="49%" alt="The radio plugin's administration page: reorderable stations and directory search">
+  <img src="docs/captures/home-dark.png" width="49%" alt="The same home page in dark mode">
+  <img src="docs/captures/radio-admin.png" width="49%" alt="The radio plugin's administration page: reorderable stations and directory search">
 </p>
 <p align="center">
-  <img src="docs/captures/accueil-telephone.png" width="30%" alt="The home page on a phone: the remote control fits the screen">
-  <img src="docs/captures/systeme.png" width="66%" alt="The system page: CPU, memory, a history graph, load average, storage — and shutdown/reboot further down">
+  <img src="docs/captures/home-phone.png" width="30%" alt="The home page on a phone: the remote control fits the screen">
+  <img src="docs/captures/system.png" width="66%" alt="The system page: CPU, memory, a history graph, load average, storage — and shutdown/reboot further down">
 </p>
 
 ## Architecture
@@ -198,10 +198,10 @@ network's metadata feed, another language pack.
 | [docs/interface.md](docs/interface.md) | The web UI, the command API, the physical remote, languages, themes |
 | [docs/development.md](docs/development.md) | Local instance without hardware, tests, e2e journeys, regenerating embedded data |
 
-The specifications and plans that drove each work stream are archived in
-[docs/superpowers/](docs/superpowers/) (in French) — the project is
-developed through systematic reviews and tests, and these documents are
-the record of that.
+The project is developed through written specifications, implementation
+plans and systematic reviews; the design record is kept outside this
+repository, and the durable decisions live in the code comments and in the
+documents above.
 
 ## Status and contributing
 

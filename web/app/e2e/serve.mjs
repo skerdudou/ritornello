@@ -172,7 +172,7 @@ const dirFauxBin = `${dirConfig}/bin`
 mkdirSync(join(dirConfigNative, 'bin'), { recursive: true })
 {
   const cible = join(dirConfigNative, 'bin', 'smbclient')
-  copyFileSync(join(racineNative, 'web', 'app', 'e2e', 'faux-smbclient.sh'), cible)
+  copyFileSync(join(racineNative, 'web', 'app', 'e2e', 'fake-smbclient.sh'), cible)
   chmodSync(cible, 0o755)
 }
 

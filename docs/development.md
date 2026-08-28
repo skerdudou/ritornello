@@ -159,10 +159,11 @@ environment and read the same variable.
 
 Three audiences, three rules — the boundary is the audience, not the file:
 
-- **Code comments, commit messages, and the specs and plans under
-  `docs/superpowers/` are French.** Public `///` doc comments follow the
-  file they live in: files documenting an API surface (`state.rs`,
-  `core/mod.rs`) are English throughout and keep internal `//` comments French.
+- **Code, comments, test names and commit messages are English.** The
+  identifiers, `///` doc comments and internal `//` comments all use the
+  same vocabulary as the wire contract (`cover`, `preset`, `plugin`,
+  `settings`, `state`); French appears only in test fixtures that replay
+  real French data (station names, Radio France payloads).
 - **Logs are English**, at every level, including the `anyhow!` and
   `.context(…)` strings they interpolate. They are read next to
   `journalctl` and rustc — and they are visible in the UI: the System
@@ -249,9 +250,8 @@ request, on Ubuntu, in four jobs:
 Ubuntu and not Windows because the SDK tests open Unix sockets.
 `scripts/ci-local.sh [web|rust|e2e]` runs the same commands in the same
 order from WSL — if one of the two changes, the other must follow. A known
-flaky class (a test that assumes fast execution; the plan
-`docs/superpowers/plans/2026-08-26-ci-github-actions.md` lists the known
-cases) is fixed at the source when it shows up, never retried blindly.
+flaky class (a test that assumes fast execution) is fixed at the source
+when it shows up, never retried blindly.
 
 The project's testing style: pure functions tested against **real
 captures** (mpv frames, radio-browser responses, OUI FM feeds, Radio
@@ -298,9 +298,9 @@ documented at the top of `serve.mjs`.
 
 ## Build guardrails
 
-`web/app/scripts/verifier-dist.mjs` checks after every npm build that the
+`web/app/scripts/check-dist.mjs` checks after every npm build that the
 import map is correct and that the Vue runtime is unique; the equivalent
-for plugin bundles is `verifier-dist-plugin.mjs`. The npm build must
+for plugin bundles is `check-plugin-dist.mjs`. The npm build must
 **always** precede the cargo builds: the SPA and the plugins' `ui.js` are
 embedded at compile time (`rust-embed`, `include_str!`). This is the
 order `deploy/build.sh` applies. When cargo runs through WSL against a
@@ -311,8 +311,8 @@ re-embedding the SPA.
 ## Process
 
 The project is developed through specifications, implementation plans and
-systematic reviews; these documents are archived (in French) in
-[docs/superpowers/](superpowers/). The full review of 2026-07-27 (four
+systematic reviews; those working documents are kept outside the
+repository. The full review of 2026-07-27 (four
 reviewers by area: protocol/SDK, core, plugins, web/deployment) produced
 the `fix(core)`/`fix(sdk,i18n)`/`fix(plugins)`/`fix(web)`/`fix(deploy)`
 series of fixes visible in the history. Debt identified and **accepted**

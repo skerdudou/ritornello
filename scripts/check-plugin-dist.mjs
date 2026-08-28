@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Anti-regression guardrail wired at the end of each `crates/*/ui`
 // package's `npm run build` (plugin module). Sibling of
-// `web/app/scripts/verifier-dist.mjs`: same spirit (a green `vite build`
+// `web/app/scripts/check-dist.mjs`: same spirit (a green `vite build`
 // guarantees neither the uniqueness of the Vue instance nor the shape of
 // the plugins' delivery contract), adapted to the plugin-side invariants
 // rather than the shell's:
@@ -21,7 +21,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 const distDir = `${process.cwd()}/dist`
 
 function echouer(message) {
-  console.error(`verifier-dist-plugin: ${message}`)
+  console.error(`check-plugin-dist: ${message}`)
   process.exit(1)
 }
 
@@ -57,7 +57,7 @@ const uiCss = readFileSync(`${distDir}/ui.css`, 'utf8')
 // 2. `build.lib` mode does not substitute `process.env.NODE_ENV`: a
 // surviving reference crashes at load time (no global `process` in the
 // browser). Same risk as the one documented in
-// web/app/scripts/verifier-dist.mjs for vue.js/ui-kit.js.
+// web/app/scripts/check-dist.mjs for vue.js/ui-kit.js.
 for (const [nom, contenu] of [['ui.js', uiJs], ['ui.css', uiCss]]) {
   if (contenu.includes('process.env')) {
     echouer(
@@ -93,4 +93,4 @@ for (const empreinte of ['__v_isRef', '__v_skip', '[Vue warn]']) {
   }
 }
 
-console.log('verifier-dist-plugin: contrat de livraison et externalites confirmes')
+console.log('check-plugin-dist: delivery contract and externals confirmed')

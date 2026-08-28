@@ -12,7 +12,7 @@ const distDir = fileURLToPath(new URL('../dist', import.meta.url))
 const assetsDir = fileURLToPath(new URL('../dist/assets', import.meta.url))
 
 function echouer(message) {
-  console.error(`verifier-dist: ${message}`)
+  console.error(`check-dist: ${message}`)
   process.exit(1)
 }
 
@@ -76,4 +76,4 @@ for (const fichier of fichiers) {
   }
 }
 
-console.log('verifier-dist: import map et unicite du runtime Vue confirmees')
+console.log('check-dist: import map and Vue runtime uniqueness confirmed')
