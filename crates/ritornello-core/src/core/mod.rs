@@ -16,6 +16,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
 
+#[cfg(test)]
+mod test_support;
+
 const RETRY_BASE: Duration = Duration::from_secs(2);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 
@@ -2317,321 +2320,9 @@ pub fn prochaine_echeance(arme: bool, courante: Option<Instant>, maintenant: Ins
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::*;
     use super::*;
     use std::sync::Mutex;
-
-    #[derive(Default)]
-    struct FakePlayer {
-        calls: Arc<Mutex<Vec<String>>>,
-        /// Ce que le lecteur factice prétend savoir de sa progression.
-        /// `Mutex` et non champ simple : les tests le règlent après
-        /// construction, `Player` ne prenant que `&self`.
-        progression: Arc<Mutex<crate::player::Progression>>,
-        /// Quand c'est vrai, `toggle_pause` échoue — mpv absent, socket coupé.
-        /// Partagé et posé après construction, pour la même raison que
-        /// `progression`.
-        pause_echoue: Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    #[async_trait::async_trait]
-    impl crate::player::Player for FakePlayer {
-        async fn play(&self, uri: &str) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push(format!("play {uri}"));
-            Ok(())
-        }
-        async fn load_list(&self, uri: &str) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push(format!("load_list {uri}"));
-            Ok(())
-        }
-        async fn stop(&self) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push("stop".into());
-            Ok(())
-        }
-        async fn toggle_pause(&self) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push("pause".into());
-            if self.pause_echoue.load(std::sync::atomic::Ordering::SeqCst) {
-                anyhow::bail!("mpv injoignable");
-            }
-            Ok(())
-        }
-        async fn next(&self) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push("next".into());
-            Ok(())
-        }
-        async fn prev(&self) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push("prev".into());
-            Ok(())
-        }
-        async fn set_playlist_pos(&self, n: i64) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push(format!("playlist-pos {n}"));
-            Ok(())
-        }
-        async fn set_volume(&self, v: u8) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push(format!("vol {v}"));
-            Ok(())
-        }
-        async fn set_mute(&self, m: bool) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push(format!("mute {m}"));
-            Ok(())
-        }
-        async fn set_audio_device(&self, device: &str) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push(format!("audio_device {device}"));
-            Ok(())
-        }
-        async fn progression(&self) -> anyhow::Result<crate::player::Progression> {
-            Ok(*self.progression.lock().unwrap())
-        }
-        async fn seek_relative(&self, delta_s: i64) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push(format!("seek_relative {delta_s}"));
-            Ok(())
-        }
-        async fn seek_absolute(&self, position_s: u32) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push(format!("seek_absolute {position_s}"));
-            Ok(())
-        }
-    }
-
-    struct FakeSource {
-        name: &'static str,
-        calls: Arc<Mutex<Vec<String>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl Source for FakeSource {
-        async fn request(&self, req: SourceReq) -> Result<SourceAction> {
-            self.calls.lock().unwrap().push(format!("{}:{:?}", self.name, req));
-            // Un nom réservé pour simuler un greffon qui ne répond plus :
-            // `remove_source` doit rester correct même quand la bascule vers
-            // l'entrante échoue, et c'est le seul moyen de le tester sans
-            // truquer `FakePlayer`.
-            if self.name == "casse" {
-                anyhow::bail!("plugin casse ne répond pas");
-            }
-            Ok(match (self.name, req) {
-                ("radio", SourceReq::Activate) => SourceAction::play("http://fip"),
-                ("radio", SourceReq::Select(3)) => SourceAction::play("http://inter"),
-                ("radio", SourceReq::Select(_)) => SourceAction::Noop,
-                // `.finite()` comme le vrai plugin cd : sans cette
-                // déclaration, la fin du disque passerait pour une coupure de
-                // flux et la relance rejouerait le disque en boucle.
-                ("cd", SourceReq::Activate) => SourceAction::play("cdda://").finite(),
-                (_, SourceReq::Eject) if self.name == "cd" => SourceAction::Stop,
-                ("radio", SourceReq::Wake) => SourceAction::play("http://fip"),
-                ("cd", SourceReq::Wake) => SourceAction::Noop,
-                _ => SourceAction::Noop,
-            })
-        }
-    }
-
-    /// Alias pour le montage de test (clippy::type_complexity) : cœur factice,
-    /// journaux d'appels du lecteur et des sources, récepteur d'état, répertoire temporaire.
-    type Montage = (Core<FakePlayer>, Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<String>>>, watch::Receiver<PlayerState>, tempfile::TempDir);
-
-    /// Câblage métadonnées sans observateur : les récepteurs sont lâchés
-    /// aussitôt, les `send` du cœur échouent silencieusement (c'est déjà le cas
-    /// en production quand aucun plugin `metadata` n'est déclaré). Les tests qui
-    /// observent ces canaux utilisent `setup_metadonnees`.
-    fn cablage_muet(plugins: Vec<String>) -> MetadataCablage {
-        MetadataCablage {
-            plugins,
-            now_playing: watch::channel(NowPlaying { source: String::new(), identity: None, ..Default::default() }).0,
-            etat: watch::channel(PlayerState::default()).0,
-        }
-    }
-
-    /// Câblage minimal des pochettes pour les montages qui n'en ont pas
-    /// l'usage : un cache neuf, et un émetteur dont personne ne lit la
-    /// réception (le récepteur est lâché aussitôt — un envoi ultérieur
-    /// échoue alors en silence, ce que `lance_pochette` ignore déjà).
-    fn covers_de_test() -> (Arc<crate::cover::CoverCache>, mpsc::Sender<(String, bool)>) {
-        (Arc::new(crate::cover::CoverCache::new()), mpsc::channel(4).0)
-    }
-
-    /// Mise à jour ne portant rien : tous les champs à `None`/`false`. Base
-    /// commode pour composer une trame minimale dans un test (voir les tests
-    /// de statut).
-    fn update_nu() -> SourceUpdate {
-        SourceUpdate::default()
-    }
-
-    /// Mise à jour ne portant qu'une identité.
-    fn joue(identity: serde_json::Value) -> SourceUpdate {
-        SourceUpdate {
-            identity: Some(IdentityUpdate::Playing(identity)),
-            transient: false,
-            preset: None,
-            preset_count: None,
-            preset_name: None,
-            status: None,
-            can_eject: None,
-            presets: None,
-            cover: None,
-        }
-    }
-
-    /// Une présélection nommée, forme courte pour les tests.
-    fn pres(index: u8, name: &str) -> Preset {
-        Preset { index, name: name.into() }
-    }
-
-    /// Trame ne portant **que** des présélections nommées : c'est exactement la
-    /// forme sous laquelle la réponse à `ListPresets` atteint le cœur, l'action
-    /// corrélée (`Noop`) partant par l'autre voie.
-    fn avec_presets(presets: Vec<Preset>) -> SourceUpdate {
-        let mut u = update_nu();
-        u.presets = Some(presets);
-        u
-    }
-
-    /// Les noms d'un catalogue, dans l'ordre où il les porte.
-    fn noms(cat: &Catalogue) -> Vec<String> {
-        cat.sources.iter().map(|s| s.name.clone()).collect()
-    }
-
-    fn setup() -> Montage {
-        setup_persiste(PersistedState::default())
-    }
-
-    /// `setup` with a say on what `state.json` held at launch — what
-    /// `StartupPower::Previous` reads.
-    fn setup_persiste(persisted: PersistedState) -> Montage {
-        let dir = tempfile::tempdir().unwrap();
-        let player = FakePlayer::default();
-        let player_calls = player.calls.clone();
-        let source_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
-        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: source_calls.clone() }));
-        sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls.clone() }));
-        let (etat_tx, etat_rx) = watch::channel(PlayerState::default());
-        let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
-        let (covers, pochette_tx) = covers_de_test();
-        let core = Core::new(
-            player,
-            Cablage {
-                sources,
-                persisted,
-                state_path: dir.path().join("state.json"),
-                catalog,
-                locales_root: root,
-                catalogue: watch::channel(Catalogue::default()).0,
-                metadata: MetadataCablage {
-                    plugins: vec![],
-                    now_playing: watch::channel(NowPlaying { source: String::new(), identity: None, ..Default::default() }).0,
-                    etat: etat_tx,
-                },
-            },
-            covers,
-            pochette_tx,
-            mpsc::channel(4).0,
-        );
-        (core, player_calls, source_calls, etat_rx, dir)
-    }
-
-    /// Montage observant les deux canaux de métadonnées : ce qui descend vers
-    /// les plugins, et l'état structuré qui monte vers la SPA et les afficheurs.
-    ///
-    /// `plugins` porte l'ordre de déclaration, donc la priorité d'arbitrage.
-    #[allow(clippy::type_complexity)]
-    fn setup_metadonnees(
-        plugins: Vec<String>,
-    ) -> (Core<FakePlayer>, watch::Receiver<NowPlaying>, watch::Receiver<PlayerState>, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let source_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
-        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: source_calls.clone() }));
-        sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls }));
-        let (np_tx, np_rx) = watch::channel(NowPlaying { source: "radio".into(), identity: None, ..Default::default() });
-        let (etat_tx, etat_rx) = watch::channel(PlayerState::default());
-        let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
-        let (covers, pochette_tx) = covers_de_test();
-        let core = Core::new(
-            FakePlayer::default(),
-            Cablage {
-                sources,
-                persisted: PersistedState::default(),
-                state_path: dir.path().join("state.json"),
-                catalog,
-                locales_root: root,
-                catalogue: watch::channel(Catalogue::default()).0,
-                metadata: MetadataCablage { plugins, now_playing: np_tx, etat: etat_tx },
-            },
-            covers,
-            pochette_tx,
-            mpsc::channel(4).0,
-        );
-        (core, np_rx, etat_rx, dir)
-    }
-
-    /// Alias de `setup_metadonnees(vec![])` : les tests de l'état partiel
-    /// n'ont besoin d'aucun greffon `metadata`, seulement du montage que
-    /// `setup_metadonnees` sait déjà construire.
-    fn core_de_test() -> (Core<FakePlayer>, watch::Receiver<NowPlaying>, watch::Receiver<PlayerState>, tempfile::TempDir) {
-        setup_metadonnees(vec![])
-    }
-
-    /// Comme `core_de_test`, mais **garde** le récepteur du canal
-    /// d'extraction de pochette embarquée plutôt que de le lâcher.
-    ///
-    /// Nécessaire pour tout test qui laisse réellement tourner la tâche
-    /// détachée de `handle_path` sur un vrai fichier : celle-ci est l'unique
-    /// écrivaine légitime du fichier temporaire, et un test qui relirait les
-    /// tags une seconde fois de son côté (pour reconstituer le `CoverRef`
-    /// attendu) écrirait en concurrence avec elle sur le même chemin — une
-    /// vraie course entre deux écrivains, découverte à l'usage (voir le
-    /// rapport de tâche 6, ruling 1 de la revue).
-    #[allow(clippy::type_complexity)]
-    fn core_de_test_avec_extraction() -> (
-        Core<FakePlayer>,
-        watch::Receiver<PlayerState>,
-        mpsc::Receiver<(String, Option<ritornello_proto::CoverRef>)>,
-        tempfile::TempDir,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let source_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
-        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: source_calls.clone() }));
-        sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls }));
-        let (np_tx, _np_rx) =
-            watch::channel(NowPlaying { source: "radio".into(), identity: None, ..Default::default() });
-        let (etat_tx, etat_rx) = watch::channel(PlayerState::default());
-        let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
-        let (covers, pochette_tx) = covers_de_test();
-        let (extraction_tx, extraction_rx) = mpsc::channel(4);
-        let core = Core::new(
-            FakePlayer::default(),
-            Cablage {
-                sources,
-                persisted: PersistedState::default(),
-                state_path: dir.path().join("state.json"),
-                catalog,
-                locales_root: root,
-                catalogue: watch::channel(Catalogue::default()).0,
-                metadata: MetadataCablage { plugins: vec![], now_playing: np_tx, etat: etat_tx },
-            },
-            covers,
-            pochette_tx,
-            extraction_tx,
-        );
-        (core, etat_rx, extraction_rx, dir)
-    }
-
-    impl Core<FakePlayer> {
-        /// Règle ce que le lecteur factice prétend savoir de sa progression.
-        fn regle_progression(&self, position_s: Option<f64>, duration_s: Option<f64>) {
-            *self.player.progression.lock().unwrap() =
-                crate::player::Progression { position_s, duration_s };
-        }
-
-        /// Recule l'ancre de `duree` : le test avance le temps sans dormir.
-        fn avance_ancre_pour_test(&mut self, duree: std::time::Duration) {
-            if let Some((p, pose)) = self.ancre_position {
-                self.ancre_position = Some((p, pose - duree));
-            }
-        }
-    }
 
     #[tokio::test]
     async fn resume_active_la_source_persistee() {
@@ -2655,51 +2346,6 @@ mod tests {
         let (core, _pc, _sc, _rx, _d) = setup();
         // PersistedState::default().active_source == "radio".
         assert_eq!(core.active_source(), "radio");
-    }
-
-    /// Cœur sans aucune source : le démarrage où *aucune* n'a répondu. C'est
-    /// exactement la situation dont le câblage à chaud doit pouvoir sortir, et
-    /// celle que le cœur doit désormais savoir servir — la page de statut est là
-    /// pour montrer les greffons figés.
-    ///
-    /// Le récepteur d'état est rendu (et non lâché comme dans `cablage_muet`) :
-    /// « aucune source » est un état à observer, pas seulement à survivre.
-    fn setup_sans_source() -> (Core<FakePlayer>, watch::Receiver<PlayerState>, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
-            "core",
-            "en",
-            &root,
-            crate::i18n::EN,
-        )));
-        let (etat_tx, etat_rx) = watch::channel(PlayerState::default());
-        let (covers, pochette_tx) = covers_de_test();
-        let core = Core::new(
-            FakePlayer::default(),
-            Cablage {
-                sources: HashMap::new(),
-                persisted: PersistedState::default(),
-                state_path: dir.path().join("state.json"),
-                catalog,
-                locales_root: root,
-                catalogue: watch::channel(Catalogue::default()).0,
-                metadata: MetadataCablage {
-                    plugins: vec![],
-                    now_playing: watch::channel(NowPlaying {
-                        source: String::new(),
-                        identity: None,
-                        ..Default::default()
-                    })
-                    .0,
-                    etat: etat_tx,
-                },
-            },
-            covers,
-            pochette_tx,
-            mpsc::channel(4).0,
-        );
-        (core, etat_rx, dir)
     }
 
     #[test]
@@ -3445,14 +3091,6 @@ mod tests {
         assert_eq!(st.audio_device, None);
     }
 
-    /// Extrait le délai d'un `RetryIn`, ou échoue en nommant ce qui est arrivé.
-    fn relance(outcome: EventOutcome) -> Duration {
-        match outcome {
-            EventOutcome::RetryIn(d) => d,
-            autre => panic!("attendu RetryIn, obtenu {autre:?}"),
-        }
-    }
-
     #[tokio::test]
     async fn stop_intentionnel_ne_declenche_pas_de_retry() {
         let (mut core, _pc, _sc, _rx, _d) = setup();
@@ -4121,15 +3759,6 @@ mod tests {
         assert_eq!(core.etat_lecteur().position_s, Some(30));
     }
 
-    fn enrichissement(identity: serde_json::Value, artist: &str, title: &str) -> Enrichment {
-        Enrichment {
-            identity,
-            artist: Some(artist.into()),
-            title: Some(title.into()),
-            ..Default::default()
-        }
-    }
-
     #[tokio::test]
     async fn la_selection_declaree_est_diffusee_puis_oubliee_quand_rien_ne_joue() {
         // La touche numérotée mise en évidence sur la télécommande de l'IHM désigne
@@ -4168,36 +3797,6 @@ mod tests {
         assert_eq!(etat_rx.borrow().preset_name, None);
     }
 
-    /// Mise à jour ne portant qu'un compte de présélections déclaré par la Source.
-    fn update_avec_compte(compte: Option<u8>) -> SourceUpdate {
-        SourceUpdate {
-            identity: None,
-            transient: false,
-            preset: None,
-            preset_count: compte,
-            preset_name: None,
-            status: None,
-            can_eject: None,
-            presets: None,
-            cover: None,
-        }
-    }
-
-    /// Mise à jour ne portant qu'un nom de présélection déclaré par la Source.
-    fn update_avec_nom(nom: Option<&str>) -> SourceUpdate {
-        SourceUpdate {
-            identity: None,
-            transient: false,
-            preset: None,
-            preset_count: None,
-            preset_name: nom.map(str::to_string),
-            status: None,
-            can_eject: None,
-            presets: None,
-            cover: None,
-        }
-    }
-
     #[tokio::test]
     async fn le_compte_de_preselections_est_memorise_et_publie() {
         // Une trame qui déclare un compte doit se retrouver dans PlayerState ;
@@ -4210,21 +3809,6 @@ mod tests {
         // Some(0) écrase : le cd sans disque dit « rien à numéroter ».
         core.handle_source_update("radio", update_avec_compte(Some(0)));
         assert_eq!(etat_rx.borrow().preset_count, Some(0));
-    }
-
-    /// Mise à jour ne portant que la capacité d'éjection déclarée par la Source.
-    fn update_avec_ejection(peut: Option<bool>) -> SourceUpdate {
-        SourceUpdate {
-            identity: None,
-            transient: false,
-            preset: None,
-            preset_count: None,
-            preset_name: None,
-            status: None,
-            can_eject: peut,
-            presets: None,
-            cover: None,
-        }
     }
 
     #[tokio::test]
@@ -4782,18 +4366,6 @@ mod tests {
         assert_eq!(noms(&core.catalogue()), vec!["cd".to_string(), "radio".into()]);
     }
 
-    /// Trame à la forme que `serve_source` produit vraiment : `can_eject`
-    /// estampillé, parce que le SDK l'estampille sur **chaque** trame qu'il
-    /// écrit (voir la doc de `SourceMessage::can_eject`).
-    ///
-    /// À préférer à `update_nu()` dans tout test qui prétend décrire une trame
-    /// venue d'un vrai greffon : `SourceUpdate::default()` laisse `can_eject` à
-    /// `None`, une forme que le SDK ne peut pas émettre, et un test bâti dessus
-    /// peut attester un mode de défaillance qui n'existe pas.
-    fn trame_du_sdk() -> SourceUpdate {
-        SourceUpdate { can_eject: Some(false), ..SourceUpdate::default() }
-    }
-
     #[tokio::test]
     async fn une_pochette_seule_est_retenue_et_nefface_pas_le_statut() {
         // **Le défaut que la fusion du chantier des pochettes a produit : chaque
@@ -5060,16 +4632,6 @@ mod tests {
         let etat = etat_rx.borrow().clone();
         assert_eq!(etat.morceau.title.as_deref(), Some("Mandrillus Sphynx - Bikwix"));
         assert_eq!(etat.morceau.origin.as_deref(), Some("icy"));
-    }
-
-    /// Short timings so pacing tests run in tens of milliseconds. The core does
-    /// not validate bounds (that's the HTTP layer's job), so this is legal.
-    fn reglages_rapides() -> crate::state::Settings {
-        crate::state::Settings {
-            volume_repeat_initial_ms: 30,
-            volume_repeat_interval_ms: 25,
-            ..Default::default()
-        }
     }
 
     #[tokio::test]
@@ -6044,48 +5606,6 @@ mod tests {
 
     // -- Pochette embarquée, lue par le cœur : tâche 6 ----------------------
 
-    /// Fabrique un mp3 réel avec une pochette embarquée, via ffmpeg — même
-    /// principe que `player::mpv::tests::mp3_avec_pochette`, dupliqué ici
-    /// faute d'un moyen simple de partager un utilitaire de test entre
-    /// modules. Rend `None` si ffmpeg est absent : le test se saute plutôt
-    /// que d'échouer, ce n'est pas une dépendance du cœur.
-    ///
-    /// **L'image doit rester différente de celle de `player::mpv::tests`, et ce
-    /// n'est pas cosmétique.** Depuis que le fichier temporaire est nommé
-    /// d'après le *contenu* de l'image, deux fixtures portant la même image
-    /// visent le même chemin dans le `temp_dir()` **partagé** par tous les tests
-    /// de ce binaire — qui tournent en parallèle. Les tests d'ici traversent en
-    /// plus `CoverCache`, dont l'éviction **supprime** ces fichiers : la
-    /// collision s'est manifestée comme un échec intermittent chez le voisin,
-    /// qui lisait un fichier effacé ou réécrit sous lui. Les deux fixtures
-    /// partageaient `color=c=red:s=16x16`.
-    fn mp3_avec_pochette_de_test(dir: &std::path::Path) -> Option<std::path::PathBuf> {
-        let image = dir.join("cover.jpg");
-        let sortie = dir.join("avec_pochette.mp3");
-        let ok = std::process::Command::new("ffmpeg")
-            // Verte et 32×32 : voir la doc ci-dessus, elle **ne doit pas**
-            // coïncider avec celle de `player::mpv::tests`.
-            .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=green:s=32x32:d=1"])
-            .args(["-frames:v", "1"])
-            .arg(&image)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-            && std::process::Command::new("ffmpeg")
-                .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i"])
-                .arg("sine=frequency=440:duration=1")
-                .arg("-i")
-                .arg(&image)
-                .args(["-map", "0:a", "-map", "1:v", "-c:a", "libmp3lame", "-c:v", "copy"])
-                .args(["-id3v2_version", "3"])
-                .args(["-metadata:s:v", "title=Album cover", "-metadata:s:v", "comment=Cover (front)"])
-                .arg(&sortie)
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-        ok.then_some(sortie)
-    }
-
     /// Le chemin annoncé par mpv (`Event::Path`) arme une extraction
     /// **détachée** : `handle_event` rend la main aussitôt, sans que rien ne
     /// soit encore connu — la suite (`set_cover_tags` → `true`,
@@ -6227,12 +5747,6 @@ mod tests {
             Arc::ptr_eq(core.app_covers(), &app_state.covers),
             "le coeur et l'AppState HTTP doivent partager le meme Arc<CoverCache>"
         );
-    }
-
-    /// Pack français livré dans le dépôt (invariant : mêmes clés que l'anglais embarqué).
-    fn pack_fr() -> String {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales/core/fr.toml");
-        std::fs::read_to_string(p).expect("pack fr livre")
     }
 
     #[test]
