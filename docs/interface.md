@@ -676,6 +676,19 @@ text is composed by several hands: the winner of the arbitration, the
 taken from any contributor at all, the cover which often comes from elsewhere.
 `origin` named only the first of them.
 
+**A contributor that re-reads a source does not become that source.** A radio
+announces `"Artist - Title"` as one ICY string; `musicbrainz` splits it along a
+pattern learned for that station and checks the split against its database. The
+result used to be credited to it — "Title: musicbrainz" — although it taught
+nobody anything: the information comes from the station, it only read it
+differently. The owner reported it on a radio with no metadata plugin at all,
+where ICY was the only real contributor. An enrichment therefore declares
+`derived_from`, the core credits the fields to **that** source (including
+`origin`, so both halves of a frame agree), and records who reworked them
+separately — the dialog reads "Title: icy (reworked by musicbrainz)". The two
+facts hold together instead of one erasing the other. A contributor that fetches
+elsewhere — a TOC lookup, a cover search — declares nothing and stays the source.
+
 The dialog has a second section: **searched and found nothing**. That is a
 different fact from a field's absence, which is also true of a plugin that was
 never asked — and the two used to look identical, that is, invisible. A plugin

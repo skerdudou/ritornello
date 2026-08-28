@@ -37,7 +37,7 @@ pub const ORIGINE_TAGS: &str = "tags";
 /// Ne note que ce qui est **renseigné** : la carte dit « d'où vient ce qu'on
 /// voit », pas « qui a été consulté ». Un champ absent n'y figure donc pas, et
 /// c'est `Provenance::misses` qui porte l'autre question.
-fn note_les_champs(m: &mut Morceau, contributeur: &str) {
+fn note_les_champs(m: &mut Morceau, contributeur: &str, derive_par: Option<&str>) {
     for (nom, present) in [
         ("artist", m.artist.is_some()),
         ("title", m.title.is_some()),
@@ -48,6 +48,9 @@ fn note_les_champs(m: &mut Morceau, contributeur: &str) {
     ] {
         if present {
             m.provenance.fields.insert(nom.to_string(), contributeur.to_string());
+            if let Some(par) = derive_par {
+                m.provenance.derived.insert(nom.to_string(), par.to_string());
+            }
         }
     }
 }
@@ -578,6 +581,13 @@ impl Metadonnees {
                 if e.fill_only || e.is_empty() {
                     continue;
                 }
+                // **La source d'abord, le contributeur ensuite.** Un
+                // enrichissement qui déclare `derived_from` ne fait que relire
+                // ce qu'un autre a annoncé (le découpage d'un ICY) : lui
+                // attribuer l'information effacerait celui qui la détient
+                // vraiment. `origin` suit la même règle, sans quoi les deux
+                // moitiés de la même trame se contrediraient.
+                let source = e.derived_from.as_deref().unwrap_or(plugin);
                 let mut m = Morceau {
                     artist: e.artist.clone(),
                     title: e.title.clone(),
@@ -585,10 +595,10 @@ impl Metadonnees {
                     duration_s: e.duration_s,
                     year: e.year,
                     links: e.links.clone(),
-                    origin: Some(plugin.clone()),
+                    origin: Some(source.to_string()),
                     ..Default::default()
                 };
-                note_les_champs(&mut m, plugin);
+                note_les_champs(&mut m, source, e.derived_from.as_deref().map(|_| plugin.as_str()));
                 return m;
             }
         }
@@ -596,7 +606,7 @@ impl Metadonnees {
             let mut m = tags.clone();
             // Les tags portent déjà `origin`, mais pas la provenance par champ :
             // c'est ici qu'on la pose, sur ce qu'ils renseignent réellement.
-            note_les_champs(&mut m, ORIGINE_TAGS);
+            note_les_champs(&mut m, ORIGINE_TAGS, None);
             return m;
         }
         match &self.icy {
@@ -606,7 +616,7 @@ impl Metadonnees {
                     origin: Some(ORIGINE_ICY.to_string()),
                     ..Default::default()
                 };
-                note_les_champs(&mut m, ORIGINE_ICY);
+                note_les_champs(&mut m, ORIGINE_ICY, None);
                 m
             }
             None => Morceau::default(),
@@ -1472,6 +1482,64 @@ mod tests {
         // Rien n'est nommé pour un champ absent : la carte dit d'où vient ce
         // qu'on voit, pas qui a été consulté.
         assert!(!champs.contains_key("duration"), "aucune duree n'a ete fournie");
+    }
+
+    #[test]
+    fn un_contributeur_qui_relit_une_source_nen_devient_pas_la_source() {
+        // **Le defaut signale par le proprietaire**, sur une radio sans greffon
+        // de metadonnees : l'ICY donnait l'information, `musicbrainz` la
+        // decoupait, et l'ecran affichait « Titre : musicbrainz ». Il n'avait
+        // pourtant rien appris a personne — la station reste la source, il n'a
+        // fait que la lire autrement.
+        let mut m = Metadonnees::new(vec!["musicbrainz".into()]);
+        m.set_identity(Some(json!(1)));
+        m.set_icy("Miles Davis - So What".into());
+        assert!(m.ajoute(
+            "musicbrainz",
+            Enrichment {
+                identity: json!(1),
+                artist: Some("Miles Davis".into()),
+                title: Some("So What".into()),
+                derived_from: Some(ORIGINE_ICY.to_string()),
+                ..Default::default()
+            }
+        ));
+
+        let etat = m.etat();
+        // Les valeurs sont bien celles du contributeur — il a decoupe, et c'est
+        // son decoupage qu'on affiche.
+        assert_eq!(etat.artist.as_deref(), Some("Miles Davis"));
+        // Mais la **source** est la station, dans les deux moities de la trame.
+        assert_eq!(etat.origin.as_deref(), Some(ORIGINE_ICY));
+        assert_eq!(etat.provenance.fields.get("title").map(String::as_str), Some(ORIGINE_ICY));
+        assert_eq!(etat.provenance.fields.get("artist").map(String::as_str), Some(ORIGINE_ICY));
+        // Et le retravail est note **a cote**, sans rien effacer : les deux
+        // faits tiennent ensemble.
+        assert_eq!(etat.provenance.derived.get("title").map(String::as_str), Some("musicbrainz"));
+        assert_eq!(etat.provenance.derived.get("artist").map(String::as_str), Some("musicbrainz"));
+    }
+
+    #[test]
+    fn un_contributeur_qui_va_chercher_ailleurs_reste_la_source() {
+        // Le controle de la regle ci-dessus : sans `derived_from`, rien ne
+        // change. Un lookup par TOC ou une recherche de pochette *est* la
+        // source, et le noter comme un retravail serait le defaut inverse.
+        let mut m = Metadonnees::new(vec!["musicbrainz".into()]);
+        m.set_identity(Some(json!(1)));
+        assert!(m.ajoute(
+            "musicbrainz",
+            Enrichment {
+                identity: json!(1),
+                artist: Some("Miles Davis".into()),
+                title: Some("So What".into()),
+                ..Default::default()
+            }
+        ));
+
+        let etat = m.etat();
+        assert_eq!(etat.origin.as_deref(), Some("musicbrainz"));
+        assert_eq!(etat.provenance.fields.get("title").map(String::as_str), Some("musicbrainz"));
+        assert!(etat.provenance.derived.is_empty(), "rien n'a ete retravaille");
     }
 
     #[test]

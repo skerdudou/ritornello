@@ -390,6 +390,27 @@ pub struct Enrichment {
     /// tout, et réessaie.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub searched: bool,
+    /// Ce contributeur **relit** une information déjà présente, il ne l'apporte
+    /// pas : le nom de sa source.
+    ///
+    /// **Le cas concret est le découpage d'un en-tête ICY.** Une radio annonce
+    /// `« Artiste - Titre »` en une seule chaîne ; `musicbrainz` la découpe
+    /// selon un motif appris pour cette station, et vérifie le découpage contre
+    /// sa base. Le résultat lui était attribué — « Titre : musicbrainz » —
+    /// alors qu'il n'a rien appris à personne : l'information vient de la
+    /// station, il n'a fait que la lire autrement. Le propriétaire l'a signalé
+    /// sur une radio sans greffon de métadonnées, où le seul contributeur réel
+    /// était l'ICY.
+    ///
+    /// Le cœur attribue donc les champs à **cette source-là**, et note à part
+    /// qui les a retravaillés (voir `Provenance::derived`). L'un ne remplace
+    /// plus l'autre.
+    ///
+    /// `None` — le défaut — pour un contributeur qui va chercher l'information
+    /// ailleurs : un lookup par TOC, une recherche de pochette. Là, il *est*
+    /// la source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<String>,
 }
 
 impl Enrichment {
@@ -506,6 +527,14 @@ pub struct Provenance {
     /// `Enrichment::searched`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub misses: Vec<String>,
+    /// Qui a **retravaillé** un champ sans en être la source, par nom de champ.
+    ///
+    /// Complète `fields` au lieu de la remplacer : « Titre : icy, découpé par
+    /// musicbrainz » dit les deux faits, là où nommer le seul découpeur en
+    /// perdait un — et le plus important, celui qui répond à « d'où sort cette
+    /// information ». Voir `Enrichment::derived_from`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub derived: std::collections::BTreeMap<String, String>,
 }
 
 impl Provenance {
@@ -513,7 +542,7 @@ impl Provenance {
     /// `Morceau::provenance`, pour qu'aucune trame existante ne change de
     /// forme.
     pub fn est_vide(&self) -> bool {
-        self.fields.is_empty() && self.misses.is_empty()
+        self.fields.is_empty() && self.misses.is_empty() && self.derived.is_empty()
     }
 }
 
@@ -805,6 +834,7 @@ mod tests {
             cover: None,
             fill_only: false,
             searched: false,
+            derived_from: None,
         };
         let back: Enrichment = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
         assert_eq!(back, e);
@@ -946,6 +976,7 @@ mod tests {
             cover: None,
             fill_only: false,
             searched: false,
+            derived_from: None,
         }
         .cleaned();
         assert_eq!(e.artist, None);

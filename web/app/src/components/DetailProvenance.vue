@@ -55,7 +55,15 @@ const LIBELLE: Record<string, string> = {
 
 const champs = computed(() => {
   const fournis = props.etat?.provenance?.fields ?? {}
-  return ORDRE.filter((c) => fournis[c]).map((c) => ({ champ: c, par: fournis[c]! }))
+  const retravailles = props.etat?.provenance?.derived ?? {}
+  return ORDRE.filter((c) => fournis[c]).map((c) => ({
+    champ: c,
+    par: fournis[c]!,
+    // Le greffon qui a retravaille ce champ sans en etre la source — le
+    // decoupage d'un en-tete ICY, typiquement. Affiche **a cote** de la
+    // source, jamais a sa place : c'est tout l'objet de la distinction.
+    retravaillePar: retravailles[c],
+  }))
 })
 
 const manques = computed(() => props.etat?.provenance?.misses ?? [])
@@ -103,7 +111,14 @@ const aQuelqueChoseADire = computed(() => champs.value.length > 0 || manques.val
       <dl v-if="champs.length" class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
         <template v-for="c in champs" :key="c.champ">
           <dt class="text-muted-foreground">{{ t(LIBELLE[c.champ]!) }}</dt>
-          <dd class="font-medium" :data-provenance-champ="c.champ">{{ c.par }}</dd>
+          <dd class="font-medium" :data-provenance-champ="c.champ">
+            {{ c.par }}
+            <span
+              v-if="c.retravaillePar"
+              class="font-normal text-muted-foreground"
+              :data-provenance-derive="c.champ"
+            >{{ t('provenance_derived_by', { par: c.retravaillePar }) }}</span>
+          </dd>
         </template>
       </dl>
 

@@ -263,13 +263,40 @@ describe('PlayerCard', () => {
     await w.get('[data-provenance-ouvrir]').trigger('click')
     const popin = document.body.querySelector('[data-provenance-popin]')
     expect(popin).not.toBeNull()
-    expect(popin?.querySelector('[data-provenance-champ="title"]')?.textContent).toBe('icy')
-    expect(popin?.querySelector('[data-provenance-champ="year"]')?.textContent).toBe('musicbrainz')
-    expect(popin?.querySelector('[data-provenance-champ="cover"]')?.textContent).toBe('musicbrainz')
+    const par = (champ: string) =>
+      popin?.querySelector(`[data-provenance-champ="${champ}"]`)?.textContent?.trim()
+    expect(par('title')).toBe('icy')
+    expect(par('year')).toBe('musicbrainz')
+    expect(par('cover')).toBe('musicbrainz')
     // « A cherche sans rien trouver » est une section a part : ce n'est pas la
     // meme information qu'une absence de la liste ci-dessus, qui vaut aussi
     // quand le greffon n'a jamais ete interroge.
     expect(popin?.querySelector('[data-provenance-manques]')?.textContent).toContain('ouifm-metas')
+    w.unmount()
+  })
+
+  it('nomme le retravail a cote de la source, jamais a sa place', async () => {
+    // **Le defaut signale par le proprietaire** : sur une radio sans greffon de
+    // metadonnees, l'ICY donnait l'information, `musicbrainz` la decoupait, et
+    // l'ecran affichait « Titre : musicbrainz ». La station est la source ; le
+    // decoupage se dit a cote.
+    const w = monteAvec({
+      title: 'Miles Davis - So What',
+      provenance: {
+        fields: { title: 'icy', artist: 'icy' },
+        derived: { title: 'musicbrainz', artist: 'musicbrainz' },
+      },
+    })
+    await w.get('[data-provenance-ouvrir]').trigger('click')
+    const popin = document.body.querySelector('[data-provenance-popin]')
+    const ligne = popin?.querySelector('[data-provenance-champ="title"]')
+    // La source, mot pour mot : c'est elle qui etait effacee.
+    expect(ligne?.textContent).toContain('icy')
+    // Et le retravail existe, **dans la meme ligne**. Le libelle lui-meme vient
+    // du catalogue, que ce montage ne charge pas (`t()` retombe sur la cle) :
+    // sa redaction et la parite fr/en sont couvertes par `i18nKeysUsed`, ce
+    // test-ci ne prouve que l'agencement.
+    expect(ligne?.querySelector('[data-provenance-derive="title"]')).not.toBeNull()
     w.unmount()
   })
 
