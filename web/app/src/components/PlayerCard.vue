@@ -24,12 +24,76 @@ const props = defineProps<{ etat: PlayerPayload | null; pasDeplacement: number }
 // reserve montrait le glyphe d'image cassee du navigateur au lieu du repli ♫
 // prevu pour exactement cette situation.
 const imageCassee = ref(false)
+
+/**
+ * Nombre de reprises accordees a une image annoncee, avant le repli ♫.
+ *
+ * **Un echec n'est plus definitif pour la piste**, et c'est le point. Le
+ * proprietaire rapporte des pochettes qui ne se chargent pas, dont certaines
+ * finissent par arriver « beaucoup plus tard » : la publication de l'URL et la
+ * disponibilite reelle des octets ne sont pas le meme instant, et le premier
+ * `error` de l'`<img>` condamnait le carre jusqu'au morceau suivant. Deux
+ * reprises espacees rattrapent un creux passager sans marteler l'appareil.
+ */
+const REPRISES_IMAGE = 2
+/** Delai avant chaque reprise, en millisecondes : court, puis moins court. */
+const DELAIS_REPRISE_MS = [800, 3000]
+/** Combien de reprises ont deja ete consommees pour l'URL courante. */
+const reprisesFaites = ref(0)
+/**
+ * Compteur ajoute a l'URL des reprises.
+ *
+ * Sans lui le navigateur resservirait son propre echec mis en cache : une
+ * reponse 404 est cachable, et redemander la meme URL ne repartirait pas sur le
+ * reseau. Il ne bouge qu'aux reprises, donc le cas nominal garde une URL stable
+ * et le cache du navigateur joue son role.
+ */
+const essai = ref(0)
+let minuterieReprise: ReturnType<typeof setTimeout> | null = null
+
+function annuleReprise() {
+  if (minuterieReprise !== null) {
+    clearTimeout(minuterieReprise)
+    minuterieReprise = null
+  }
+}
+
+/**
+ * L'`<img>` a echoue : reprendre si le budget le permet, sinon replier.
+ *
+ * **Le repli ♫ est pose dans les deux cas**, tout de suite. Laisser l'`<img>`
+ * en place pendant l'attente rendrait le glyphe d'image cassee du navigateur —
+ * exactement ce que `imageCassee` existe pour eviter — et une reprise le
+ * ferait clignoter. Le carre montre donc le repli, et l'image revient d'elle
+ * meme si la reprise aboutit.
+ */
+function surEchecImage() {
+  imageCassee.value = true
+  if (reprisesFaites.value >= REPRISES_IMAGE) return
+  const delai = DELAIS_REPRISE_MS[reprisesFaites.value] ?? 3000
+  reprisesFaites.value += 1
+  annuleReprise()
+  minuterieReprise = setTimeout(() => {
+    minuterieReprise = null
+    // L'ordre compte : la nouvelle URL d'abord, le remontage ensuite. En
+    // sens inverse, l'`<img>` reparaitrait un instant avec l'URL qui vient
+    // d'echouer, et le navigateur resservirait son echec en cache.
+    essai.value += 1
+    imageCassee.value = false
+  }, delai)
+}
+
 // Remis a zero des que l'appareil designe une **autre** image : sans cela, un
 // seul echec condamnerait le carre pour le reste de la session.
 watch(
   () => props.etat?.cover_href,
   () => {
     imageCassee.value = false
+    // Le budget de reprises est **par image** : une nouvelle URL repart avec
+    // le sien, et la minuterie de la precedente n'a plus d'objet.
+    reprisesFaites.value = 0
+    essai.value = 0
+    annuleReprise()
     // Une pochette agrandie qui reste ouverte pendant que la piste change
     // montrerait l'image de la piste suivante en plein ecran, sans que
     // personne l'ait demande. Fermer est la seule reponse honnete.
@@ -48,9 +112,12 @@ const aUneImage = computed(() => !!props.etat?.cover_href && !imageCassee.value)
  * aux afficheurs), il suffit de la lui demander. L'URL nue reste l'image telle
  * qu'elle est, et c'est elle que la vue agrandie charge.
  */
-const vignetteHref = computed(() =>
-  props.etat?.cover_href ? `${props.etat.cover_href}?taille=vignette` : null,
-)
+const vignetteHref = computed(() => {
+  if (!props.etat?.cover_href) return null
+  const base = `${props.etat.cover_href}?taille=vignette`
+  // `essai` n'apparait qu'a partir de la premiere reprise : voir sa doc.
+  return essai.value === 0 ? base : `${base}&essai=${essai.value}`
+})
 /** La pochette est-elle ouverte en plein ecran ? */
 const agrandie = ref(false)
 // Echap ferme, comme toute surcouche modale. L'ecouteur n'existe que pendant
@@ -64,8 +131,12 @@ watch(agrandie, (ouverte) => {
   if (ouverte) window.addEventListener('keydown', surEchap)
   else window.removeEventListener('keydown', surEchap)
 })
-// Sans cela, quitter la page pochette ouverte laisse l'ecouteur derriere lui.
-onUnmounted(() => window.removeEventListener('keydown', surEchap))
+// Sans cela, quitter la page pochette ouverte laisse l'ecouteur derriere lui —
+// et la minuterie de reprise tournerait contre un composant demonte.
+onUnmounted(() => {
+  window.removeEventListener('keydown', surEchap)
+  annuleReprise()
+})
 // La duree ne s'affiche que faute de barre de progression : quand une position
 // est connue, la barre porte deja la duree totale.
 const dureeAAfficher = computed(
@@ -164,7 +235,7 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
             :src="vignetteHref!"
             :alt="t('cover_alt')"
             class="size-full object-cover"
-            @error="imageCassee = true"
+            @error="surEchecImage"
           />
         </button>
         <div
@@ -275,10 +346,13 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
         </div>
       </div>
     </CardContent>
-    <!-- space-y-2 (au lieu de space-y-3) : la demande du proprietaire est de
-         resserrer tout l'entourage de la barre de progression, y compris
-         entre elle et les commandes du dessous. -->
-    <CardContent class="space-y-2 pt-0">
+    <!-- L'entourage de la barre de progression a ete resserre a la demande du
+         proprietaire, puis **desserre de 4 px** : a `space-y-2` la ligne des
+         durees touchait les commandes, « colle au pixel pres ». `space-y-3`
+         rend le tout petit ecart demande sans revenir a l'air d'avant. Le
+         pendant au-dessus de la piste vit dans `BarreProgression.vue`
+         (`-mt-3`), le `gap-6` du `Card` du kit n'etant pas modifiable ici. -->
+    <CardContent class="space-y-3 pt-0">
       <BarreProgression
         :position="etat?.position_s ?? null"
         :duree="etat?.duration_s ?? null"

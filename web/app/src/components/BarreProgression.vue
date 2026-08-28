@@ -95,15 +95,22 @@ function auClavier(e: KeyboardEvent): void {
 <template>
   <!--
     Demande du proprietaire : beaucoup trop d'air avant et apres la barre,
-    les durees pourraient etre quasiment collees a la piste. `-mt-4`
+    les durees pourraient etre quasiment collees a la piste. `-mt-3`
     rapproche la barre du bloc texte au-dessus : le `gap-6` (24 px) du
     `Card` du kit qui separe les deux `CardContent` de `PlayerCard` n'est
     pas modifiable ici sans toucher un composant partage, donc c'est cote
     `BarreProgression` qu'on le compense — mesure a l'ecran (Playwright,
     390 px) apres un premier essai a `-mt-2` : il n'en rendait que 8 des
-    24 px, insuffisant pour passer sous la cible de 12 px. Le `space-y-1`
-    d'origine est retire au profit d'un `mt-0.5` porte par la seule ligne
-    des durees, plus proche de ce qu'elle doit longer.
+    24 px, insuffisant. Le `space-y-1` d'origine est retire au profit d'un
+    `mt-0.5` porte par la seule ligne des durees, plus proche de ce qu'elle
+    doit longer.
+
+    **`-mt-3` et non `-mt-4`** : le resserrement etait alle trop loin. A
+    16 px de compensation il ne restait que 8 px au-dessus de la piste, et
+    le proprietaire l'a signale comme colle « au pixel pres ». Douze px
+    compenses en laissent douze, ce qui est le tout petit ecart demande —
+    la ligne des durees, elle, garde ses 2 px et reste contre la piste,
+    c'est bien ce qu'il voulait.
     `flex flex-col` sur la racine : un bloc ordinaire fusionne sa marge avec
     celle de son premier enfant (margin collapsing CSS) — ici l'enveloppe du
     curseur, dont le `-my-[19px]` du `Slider` remontait alors seul (le CSS ne
@@ -113,7 +120,7 @@ function auClavier(e: KeyboardEvent): void {
     ce qui restaure l'addition attendue ; la barre statique, sans marge
     propre, n'est pas affectee.
   -->
-  <div v-if="texteEcoule" class="-mt-4 flex flex-col" data-progression>
+  <div v-if="texteEcoule" class="-mt-3 flex flex-col" data-progression>
     <div v-if="barreVisible && deplacable" @keydown.capture="auClavier">
       <!--
         `-my-[19px]` : le curseur garde sa zone de contact de 44 px (le
