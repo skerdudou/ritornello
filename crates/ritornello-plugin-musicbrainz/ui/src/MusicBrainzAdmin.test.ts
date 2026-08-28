@@ -45,7 +45,7 @@ const CATALOGUE = {
 }
 
 // Prefixe absolu que le shell passe par la prop `base` (requise) : c'est le
-// contrat, cette vue ne connait pas le nom sous lequel elle est servie.
+// contract, cette vue ne connait pas le nom sous lequel elle est servie.
 const BASE = '/plugins/musicbrainz/'
 
 const STATION_CONFORME = {
@@ -64,11 +64,11 @@ const STATION_EXCEPTION = {
   titres_decoupes: 0,
 }
 
-/** Monte le composant avec un `fetch` espionne : `donnees` sert le GET, les PUT
+/** Monte le composant avec un `fetch` espionne : `data` sert le GET, les PUT
  *  sont journalises dans `puts` et repondent 204 sauf si `reponsePut` est
  *  fourni (pour simuler un refus). */
 async function monter(
-  donnees: { stations: unknown[] } = { stations: [STATION_CONFORME, STATION_EXCEPTION] },
+  data: { stations: unknown[] } = { stations: [STATION_CONFORME, STATION_EXCEPTION] },
   reponsePut?: (corps: { action: string }) => Response,
 ) {
   const puts: Array<{ url: string; corps: Record<string, unknown> }> = []
@@ -81,7 +81,7 @@ async function monter(
       return new Response(null, { status: 204 })
     }
     gets.push(url)
-    return new Response(JSON.stringify(donnees), { status: 200 })
+    return new Response(JSON.stringify(data), { status: 200 })
   })
   vi.stubGlobal('fetch', spy)
   const w = mount(MusicBrainzAdmin, { props: { catalog: CATALOGUE, base: BASE } })
@@ -137,13 +137,13 @@ describe('MusicBrainzAdmin', () => {
     expect(filtre.text()).toContain('No exception: every probed station follows the standard format.')
   })
 
-  it('« ne pas decouper » grise le separateur et l ordre', async () => {
+  it('« ne pas decouper » grise le separateur et l order', async () => {
     const { w } = await monter()
 
     await w.get('[data-editer]').trigger('click')
 
     const champSeparateur = w.get('[data-separateur]').element as HTMLInputElement
-    const champOrdre = w.get('[data-ordre]').element as HTMLSelectElement
+    const champOrdre = w.get('[data-order]').element as HTMLSelectElement
     // La station exception est deja `ne_pas_decouper` : les champs sont donc
     // deja grises a l'ouverture.
     expect(champSeparateur.disabled).toBe(true)
@@ -152,12 +152,12 @@ describe('MusicBrainzAdmin', () => {
     // Decocher rend les champs de nouveau modifiables.
     await w.get('[data-ne-pas-decouper]').setValue(false)
     expect((w.get('[data-separateur]').element as HTMLInputElement).disabled).toBe(false)
-    expect((w.get('[data-ordre]').element as HTMLSelectElement).disabled).toBe(false)
+    expect((w.get('[data-order]').element as HTMLSelectElement).disabled).toBe(false)
 
     // Et le recocher grise de nouveau les deux.
     await w.get('[data-ne-pas-decouper]').setValue(true)
     expect((w.get('[data-separateur]').element as HTMLInputElement).disabled).toBe(true)
-    expect((w.get('[data-ordre]').element as HTMLSelectElement).disabled).toBe(true)
+    expect((w.get('[data-order]').element as HTMLSelectElement).disabled).toBe(true)
   })
 
   it('poste une action pose avec un motif du jeu ferme', async () => {
@@ -168,14 +168,14 @@ describe('MusicBrainzAdmin', () => {
     // decocher pour atteindre le motif separe.
     await w.get('[data-ne-pas-decouper]').setValue(false)
     await w.get('[data-separateur]').setValue(' :: ')
-    await w.get('[data-ordre]').setValue('title_first')
+    await w.get('[data-order]').setValue('title_first')
     await w.get('[data-enregistrer-edition]').trigger('click')
     await flushPromises()
 
     expect(puts).toHaveLength(1)
     expect(puts[0]!.url).toBe('/plugins/musicbrainz/api/data')
     // Un motif du jeu ferme : jamais de champ d'expression rationnelle, juste
-    // un separateur et un booleen d'ordre.
+    // un separateur et un booleen d'order.
     expect(puts[0]!.corps).toEqual({
       action: 'pose',
       url: 'http://exemple/parlotte.mp3',
@@ -225,7 +225,7 @@ describe('MusicBrainzAdmin', () => {
     const { w, puts, gets } = await monter()
     const getsAvant = gets.length
 
-    await w.get('[data-supprimer]').trigger('click')
+    await w.get('[data-remove]').trigger('click')
     await flushPromises()
 
     expect(puts).toHaveLength(1)
@@ -241,7 +241,7 @@ describe('MusicBrainzAdmin', () => {
       () => new Response(JSON.stringify({ error: messageServeur }), { status: 422 }),
     )
 
-    await w.get('[data-supprimer]').trigger('click')
+    await w.get('[data-remove]').trigger('click')
     await flushPromises()
 
     // Le message affiche est exactement le texte renvoye par le serveur —
@@ -254,7 +254,7 @@ describe('MusicBrainzAdmin', () => {
     const { w, puts, gets } = await monter()
     const getsAvant = gets.length
 
-    await w.get('[data-vider]').trigger('click')
+    await w.get('[data-clear]').trigger('click')
     await flushPromises()
 
     expect(puts).toHaveLength(1)

@@ -16,16 +16,16 @@ const kitSrcPrefixe = `${kitSrc.replaceAll('\\', '/').replace(/\/$/, '')}/`
 function kitAlias(): Plugin {
   return {
     name: 'ritornello-kit-alias',
-    resolveId(source, importer) {
-      if (!source.startsWith('@/') || !importer) return null
-      const importeurNormalise = importer.replaceAll('\\', '/')
+    resolveId(source, import_) {
+      if (!source.startsWith('@/') || !import_) return null
+      const importeurNormalise = import_.replaceAll('\\', '/')
       // `node_modules` (y compris nos propres paquets, symlinkes par npm
       // workspaces) n'est jamais concerne : seuls les fichiers sources du
       // kit y ont droit. Sans ce garde, un import '@/...' venu d'ailleurs
       // (par ex. une autre dependance) se verrait revendique a tort.
       if (importeurNormalise.includes('/node_modules/')) return null
       if (!importeurNormalise.startsWith(kitSrcPrefixe)) return null
-      return this.resolve(source.replace('@/', `${kitSrc}/`), importer, { skipSelf: true })
+      return this.resolve(source.replace('@/', `${kitSrc}/`), import_, { skipSelf: true })
     },
   }
 }

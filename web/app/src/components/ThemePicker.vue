@@ -9,13 +9,13 @@ defineEmits<{ choose: [id: string] }>()
 
 const { t } = useCatalog()
 const query = ref('')
-const liste = computed(() => filterPresets(query.value))
+const list = computed(() => filterPresets(query.value))
 
 // Les quatre pastilles rendues dans le mode affiché : un preset se reconnaît
 // bien plus vite à ses couleurs qu'à son nom.
-const PASTILLES = ['background', 'primary', 'secondary', 'accent'] as const
+const SWATCHES = ['background', 'primary', 'secondary', 'accent'] as const
 
-function couleur(id: string, cle: string): string {
+function color(id: string, cle: string): string {
   const p = presets[id]
   return p ? (resolveVars(p, props.mode)[cle] ?? 'transparent') : 'transparent'
 }
@@ -26,7 +26,7 @@ function couleur(id: string, cle: string): string {
     <Input v-model="query" :placeholder="t('theme_filter')" />
     <div class="grid max-h-[60vh] grid-cols-2 gap-2 overflow-y-auto sm:grid-cols-3">
       <button
-        v-for="p in liste"
+        v-for="p in list"
         :key="p.id"
         :data-preset="p.id"
         :data-active="String(p.id === props.current)"
@@ -37,15 +37,15 @@ function couleur(id: string, cle: string): string {
         <span class="truncate">{{ p.label }}</span>
         <span class="flex gap-1">
           <span
-            v-for="cle in PASTILLES"
+            v-for="cle in SWATCHES"
             :key="cle"
             :data-swatch="cle"
             class="h-4 w-4 rounded-full border border-border"
-            :style="{ background: couleur(p.id, cle) }"
+            :style="{ background: color(p.id, cle) }"
           />
         </span>
       </button>
     </div>
-    <p v-if="!liste.length" class="text-sm text-muted-foreground">—</p>
+    <p v-if="!list.length" class="text-sm text-muted-foreground">—</p>
   </div>
 </template>

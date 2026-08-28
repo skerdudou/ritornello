@@ -7,9 +7,9 @@ pub mod source;
 
 pub use admin::{AdminReq, AdminRequest, AdminResponse, AdminResult};
 pub use command::{Command, InputMessage};
-pub use display::{Catalogue, Cover, DisplayFrame, SourceCatalogue, COVER_MAX_BYTES};
+pub use display::{SourcesCatalog, Cover, DisplayFrame, SourceCatalog, COVER_MAX_BYTES};
 pub use metadata::{
-    annee_valide, CoverRef, Enrichment, FormatDate, Horloge, IdentityUpdate, Known, Link, Morceau,
+    valid_year, CoverRef, Enrichment, DateFormat, Clock, IdentityUpdate, Known, Link, Track,
     NowPlaying, Overlay, Playback, PlayerState, Provenance,
 };
 pub use register::{Announcement, PluginKind};

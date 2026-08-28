@@ -6,17 +6,17 @@
 //! son parent : c'est ce qui rend ce découpage gratuit — aucun accesseur,
 //! aucun champ `pub`. Ajouter un domaine, c'est ajouter un fichier.
 //!
-//! - `commandes` : télécommande et IHM — lecture/veille, volume, dizaines, déplacement, démarrage
-//! - `echeances` : incrustations et échéances que la boucle de `main.rs` doit réveiller
-//! - `lecteur` : événements de mpv, relance à rebours croissant, reprise au réveil
-//! - `metadonnees` : identité, ICY, tags, enrichissements, pochettes et extraction
-//! - `position` : progression rapportée par mpv, ancre posée par un plugin
-//! - `publication` : état du lecteur et catalogue poussés aux afficheurs, SPA et greffons
-//! - `reglages` : sortie audio, langue, thème, écriture de `state.json`
-//! - `sources` : ordre du cycle, bascule, arrivée à chaud et mort d'un greffon, `apply`
-//! - `test_support` : lecteur et sources factices, montages partagés par les tests
+//! - `commands` : télécommande et IHM — playback/veille, volume, dizaines, déplacement, démarrage
+//! - `deadlines` : incrustations et échéances que la boucle de `main.rs` doit réveiller
+//! - `player` : événements de mpv, restart à rebours croissant, reprise au réveil
+//! - `metadata` : identité, ICY, tags, enrichments, pochettes et extraction
+//! - `position` : progress rapportée par mpv, ancre posée par un plugin
+//! - `publication` : état du player et sources_catalog poussés aux afficheurs, SPA et plugins
+//! - `settings` : sortie audio, langue, thème, écriture de `state.json`
+//! - `sources` : order du cycle, bascule, arrivée à chaud et mort d'un greffon, `apply`
+//! - `test_support` : player et sources factices, montages partagés par les tests
 
-use crate::metadata::{Metadonnees, PlayerState};
+use crate::metadata::{Metadata, PlayerState};
 use crate::player::mpv;
 use crate::player::Player;
 use crate::state::{self, PersistedState, StartupPower};
@@ -25,8 +25,8 @@ use anyhow::Result;
 use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::SourceUpdate;
 use ritornello_proto::{
-    Catalogue, Command, Enrichment, IdentityUpdate, InputMessage, NowPlaying, Overlay, Playback,
-    Preset, SourceAction, SourceCatalogue, SourceReq,
+    SourcesCatalog, Command, Enrichment, IdentityUpdate, InputMessage, NowPlaying, Overlay, Playback,
+    Preset, SourceAction, SourceCatalog, SourceReq,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -34,15 +34,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
 
-mod commandes;
-mod echeances;
-mod lecteur;
-mod metadonnees;
+mod commands;
+mod deadlines;
+mod playback;
+mod track_metadata;
 mod position;
-mod publication;
-mod reglages;
+mod publish;
+mod settings;
 mod sources;
-pub use echeances::prochaine_echeance;
+pub use deadlines::next_deadline;
 
 #[cfg(test)]
 mod test_support;
@@ -55,19 +55,19 @@ pub trait Source: Send + Sync + 'static {
     async fn request(&self, req: SourceReq) -> Result<SourceAction>;
 }
 
-/// Ce que la boucle principale doit faire d'un événement du lecteur.
+/// Ce que la boucle principale doit faire d'un événement du player.
 ///
-/// C'est le cœur qui décide quelles variantes attestent la vivacité du flux
-/// (`StreamAlive`) : la boucle de `main`, qui tient l'échéance de relance,
+/// C'est le cœur qui décide quelles variantes attestent la vivacité du stream
+/// (`StreamAlive`) : la boucle de `main`, qui tient l'échéance de restart,
 /// suit ce verdict au lieu de dupliquer la liste des variantes — les deux
 /// listes avaient déjà commencé à devoir être maintenues en parallèle.
 #[derive(Debug, PartialEq, Eq)]
 pub enum EventOutcome {
     /// Rien à faire côté temporisation.
     Nothing,
-    /// Le flux est vivant : annuler toute relance programmée.
+    /// Le stream est vivant : annuler toute restart programmée.
     StreamAlive,
-    /// Programmer une relance du flux dans ce délai.
+    /// Programmer une restart du stream dans ce délai.
     RetryIn(Duration),
 }
 
@@ -75,36 +75,36 @@ pub enum EventOutcome {
 /// persisté, ses canaux de sortie.
 ///
 /// Une structure nommée plutôt qu'une longue liste de paramètres positionnels :
-/// à huit éléments, l'ordre d'un appel ne se vérifie plus à l'œil, et deux
+/// à huit éléments, l'order d'un appel ne se vérifie plus à l'œil, et deux
 /// `PathBuf` voisins (`state_path`, `locales_root`) s'échangeraient sans que le
 /// compilateur y trouve à redire.
-pub struct Cablage {
+pub struct Wiring {
     pub sources: HashMap<String, Arc<dyn Source>>,
     pub persisted: PersistedState,
     pub state_path: PathBuf,
     pub catalog: Arc<RwLock<Catalog>>,
     pub locales_root: PathBuf,
-    pub metadata: MetadataCablage,
-    /// Le catalogue des sources vers les plugins Display, sur **son propre**
-    /// canal. Pas dans `MetadataCablage` : il ne descend ni à la SPA ni aux
-    /// plugins `metadata`, et surtout pas dans `etat` — un catalogue est
-    /// structurel et rarement changeant, l'élargir ferait voyager les noms de
-    /// 51 stations sur chacune des trames d'état par seconde de lecture.
-    pub catalogue: watch::Sender<Catalogue>,
+    pub metadata: MetadataWiring,
+    /// Le sources_catalog des sources vers les plugins Display, sur **son propre**
+    /// canal. Pas dans `MetadataWiring` : il ne descend ni à la SPA ni aux
+    /// plugins `metadata`, et surtout pas dans `state` — un sources_catalog est
+    /// structurel et rarement changeant, l'élargir ferait voyager les names de
+    /// 51 stations sur chacune des trames d'état par seconde de playback.
+    pub sources_catalog: watch::Sender<SourcesCatalog>,
 }
 
 /// Câblage des métadonnées.
-pub struct MetadataCablage {
-    /// Noms des plugins `metadata`, **dans l'ordre de déclaration** de
-    /// `plugins.toml` : cet ordre est la priorité d'arbitrage.
+pub struct MetadataWiring {
+    /// Noms des plugins `metadata`, **dans l'order de déclaration** de
+    /// `plugins.toml` : cet order est la priorité d'arbitrage.
     pub plugins: Vec<String>,
-    /// Ce qui joue, vers les plugins `metadata`. Un `watch` et non un appel
-    /// direct : un plugin qui ne lit plus ne doit pas pouvoir figer le cœur.
+    /// Ce qui plays, vers les plugins `metadata`. Un `watch` et non un appel
+    /// direct : un plugin qui ne read plus ne doit pas pouvoir figer le cœur.
     pub now_playing: watch::Sender<NowPlaying>,
-    /// État du lecteur, vers la SPA (route `GET /api/player`) et vers les
+    /// État du player, vers la SPA (route `GET /api/player`) et vers les
     /// plugins Display : un seul canal d'état structuré pour les deux, chacun
     /// composant ce qu'il veut de la même trame.
-    pub etat: watch::Sender<PlayerState>,
+    pub state: watch::Sender<PlayerState>,
 }
 
 pub struct Core<P: Player> {
@@ -117,27 +117,27 @@ pub struct Core<P: Player> {
     standby: bool,
     /// Standby as `state.json` had it at launch — the only thing
     /// `StartupPower::Previous` needs, and the reason it is a snapshot and
-    /// not a re-read: `demarrage` runs after `new`, and by then `persist`
+    /// not a re-read: `startup` runs after `new`, and by then `persist`
     /// may already have rewritten the file.
-    veille_persistee: bool,
+    persisted_standby: bool,
     expecting_stream: bool,
-    /// Quelque chose est en lecture, **quelle qu'en soit la nature**.
+    /// Quelque chose est en playback, **quelle qu'en soit la nature**.
     ///
-    /// Distinct d'`expecting_stream`, qui ne dit plus que « ce qui joue est un
-    /// flux live susceptible de tomber, donc à relancer ». Les deux
-    /// coïncidaient tant que seuls des flux étaient concernés ; depuis qu'une
+    /// Distinct d'`expecting_stream`, qui ne dit plus que « ce qui plays est un
+    /// stream live susceptible de tomber, donc à relancer ». Les deux
+    /// coïncidaient tant que seuls des stream étaient concernés ; depuis qu'une
     /// Source peut déclarer un contenu fini (`Play { finite: true }`),
-    /// `expecting_stream` est faux pendant la lecture d'un disque ou d'une
-    /// liste de fichiers. S'en servir comme garde « ça joue » ferait taire
+    /// `expecting_stream` est faux pendant la playback d'un disque ou d'une
+    /// liste de fichiers. S'en serve comme garde « ça plays » ferait taire
     /// toute couche de métadonnées sur exactement ces contenus-là.
-    lecture: bool,
-    /// La lecture en cours est **suspendue**. N'a de sens que quand `lecture`
-    /// est vrai ; `etat_lecteur` ne le consulte pas autrement.
+    playback: bool,
+    /// La playback en cours est **suspendue**. N'a de sens que quand `playback`
+    /// est vrai ; `player_state` ne le consulte pas autrement.
     ///
-    /// Remis à faux **au seul endroit** où `lecture` passe à vrai. C'est la
-    /// doctrine que `etat_lecteur` défend déjà pour `position_s` : un point
+    /// Remis à faux **au seul endroit** où `playback` passe à vrai. C'est la
+    /// doctrine que `player_state` défend déjà pour `position_s` : un point
     /// unique ne peut pas être oublié, là où cinq effacements le seraient au
-    /// sixième chemin ajouté.
+    /// sixième path ajouté.
     paused: bool,
     retry_count: u32,
     audio_device: Option<String>,
@@ -145,8 +145,8 @@ pub struct Core<P: Player> {
     /// échéance. Porté par `PlayerState::overlay`, que le plugin d'affichage
     /// dessine en priorité sur toute autre chose.
     overlay: Option<(Overlay, Instant)>,
-    /// Touche numérotée correspondant à ce qui joue, déclarée par la Source active
-    /// (voir `SourceMessage::preset`). Oubliée dès que plus rien ne joue —
+    /// Touche numérotée correspondant à ce qui plays, déclarée par la Source active
+    /// (voir `SourceMessage::preset`). Oubliée dès que plus rien ne plays —
     /// c'est `set_identity(None)` qui fait foi, comme pour l'ardoise des
     /// métadonnées.
     preset: Option<u8>,
@@ -161,14 +161,14 @@ pub struct Core<P: Player> {
     /// compris par son absence — voir le test de convention.
     source_status: Option<String>,
     /// Mot de veille résolu, mémorisé à la construction et à chaque
-    /// `set_locale` — jamais au moment de poser la veille : le catalogue se
-    /// lit derrière un verrou asynchrone, et `etat_lecteur` ne l'est pas. Le
+    /// `set_locale` — jamais au moment de poser la veille : le sources_catalog se
+    /// read derrière un verrou asynchrone, et `player_state` ne l'est pas. Le
     /// résoudre à la pose de la veille exigeait deux `await` faillibles avant
-    /// de l'atteindre (`Command::Power`) : une Source ou mpv injoignables au
+    /// de l'atteindre (`Command::Power`) : une Source ou mpv unreachable au
     /// premier passage en veille publiaient `standby: true` sans aucun statut,
     /// et l'écran devenait entièrement noir. Résolu en amont, le champ est
     /// toujours frais et ce piège d'ordonnancement disparaît. Gagne sur
-    /// `source_status` dans `etat_lecteur` — l'appareil dort, ce que raconte
+    /// `source_status` dans `player_state` — l'appareil dort, ce que raconte
     /// la source n'a plus cours.
     standby_status: Option<String>,
     /// How many numbered presets the active source offers (stations,
@@ -183,20 +183,20 @@ pub struct Core<P: Player> {
     /// declares: not knowing means offering nothing, so the web remote greys
     /// its Eject key rather than sending a command into the void.
     can_eject: bool,
-    /// Les présélections nommées **de chaque source**, indexées par nom de
+    /// Les présélections nommées **de chaque source**, indexées par name de
     /// source, telles que chacune les a déclarées (`SourceMessage::presets`).
     ///
     /// À part de `preset_count`, et ce n'est pas une redondance : `preset_count`
     /// décrit la source **active** et s'oublie avec elle, alors qu'une table
-    /// indexée par nom décrit *toutes* les sources en même temps. C'est ce
+    /// indexée par name décrit *toutes* les sources en même temps. C'est ce
     /// qu'exige un client MPD, qui demande `listplaylistinfo "radio"` pendant
-    /// que le cd joue. Rien ne l'oublie donc : ni la bascule de source, ni la
+    /// que le cd plays. Rien ne l'oublie donc : ni la bascule de source, ni la
     /// veille.
     presets_par_source: HashMap<String, Vec<Preset>>,
     /// Remote tens offset in flight: `Plus10` presses accumulate here until
     /// a digit key consumes them (`+10` then `4` selects 14). Cleared by the
     /// overlay's own deadline (`expire_overlay`) or by its consumption
-    /// (`Select`), and just as much by `appliquer_commande`'s abandon
+    /// (`Select`), and just as much by `apply_command`'s abandon
     /// guard — which also clears `self.overlay` in that third case, so an
     /// abandoned offset never leaves its `+NN` behind on a display that no
     /// longer means it.
@@ -207,14 +207,14 @@ pub struct Core<P: Player> {
     locales_root: PathBuf,
     theme: Option<String>,
     mode: Option<String>,
-    /// Métadonnées du morceau : identité de ce qui joue, titre ICY, et
-    /// enrichissements des plugins. Voir `metadata.rs` pour l'arbitrage.
-    metadonnees: Metadonnees,
+    /// Métadonnées du track : identité de ce qui plays, titre ICY, et
+    /// enrichments des plugins. Voir `metadata.rs` pour l'arbitrage.
+    metadata: Metadata,
     now_playing_tx: watch::Sender<NowPlaying>,
-    etat_tx: watch::Sender<PlayerState>,
-    /// Le catalogue des sources vers les afficheurs. Un canal séparé d'`etat_tx`
-    /// et jamais publié par `publie_etat` : voir `publie_catalogue`.
-    catalogue_tx: watch::Sender<Catalogue>,
+    state_tx: watch::Sender<PlayerState>,
+    /// Le sources_catalog des sources vers les afficheurs. Un canal séparé d'`state_tx`
+    /// et jamais publié par `publish_state` : voir `publish_catalog`.
+    sources_catalog_tx: watch::Sender<SourcesCatalog>,
     /// Behavior settings (hold-to-repeat timings, startup power state),
     /// persisted with the rest of the state.
     settings: crate::state::Settings,
@@ -224,76 +224,76 @@ pub struct Core<P: Player> {
     /// a held event arriving out of nowhere (core restarted mid-hold) does
     /// nothing.
     volume_deadline: Option<Instant>,
-    /// Où en est ce qui joue, en secondes entières, tel que le dernier
-    /// rafraîchissement l'a établi. Publié tel quel par `etat_lecteur`.
+    /// Où en est ce qui plays, en secondes entières, tel que le dernier
+    /// rafraîchissement l'a établi. Publié tel quel par `player_state`.
     position_s: Option<u32>,
     /// Durée **mesurée par mpv**, distincte de celle qu'un plugin `metadata`
-    /// annonce. Gardée à part parce qu'elle la supplante : les fondre en un
+    /// announcement. Gardée à part parce qu'elle la supplante : les fondre en un
     /// seul champ ferait perdre la trace de qui a parlé, et la précédence
-    /// deviendrait un ordre d'écriture — le genre d'invariant qui se casse en
+    /// deviendrait un order d'écriture — le kind d'invariant qui se casse en
     /// silence.
-    duree_mesuree_s: Option<u32>,
+    measured_duration_s: Option<u32>,
     /// Position annoncée par un plugin `metadata`, et l'instant où elle est
     /// arrivée. Le cœur l'avance lui-même entre deux annonces — Radio France
     /// n'interroge le direct que toutes les quelques dizaines de secondes, et
     /// sans cette avance la barre resterait figée entre deux réponses.
-    ancre_position: Option<(u32, Instant)>,
+    position_anchor: Option<(u32, Instant)>,
     /// Cache partagé avec le routeur : la tâche détachée y dépose, la route y
-    /// lit. **Le même `Arc`** que celui remis à l'`AppState` HTTP — voir la
+    /// read. **Le même `Arc`** que celui remis à l'`AppState` HTTP — voir la
     /// note à son lieu de construction dans `main.rs` — sans quoi une
-    /// pochette téléchargée par le cœur ne serait jamais lisible par la
+    /// cover téléchargée par le cœur ne serait jamais lisible par la
     /// route.
     covers: Arc<crate::cover::CoverCache>,
     /// Résultats des récupérations détachées, consommés par la boucle de
     /// `main` (voir son bras `pochette_rx.recv()`). Le booléen dit si la
-    /// récupération a abouti — nécessaire pour que `pochette_arrivee` libère
-    /// `pochette_en_vol` même sur un échec, au lieu de laisser cette clé
+    /// récupération a abouti — nécessaire pour que `cover_arrived` libère
+    /// `cover_in_flight` même sur un échec, au lieu de laisser cette clé
     /// bloquée pour le reste du processus.
-    pochette_tx: mpsc::Sender<(String, bool)>,
+    cover_tx: mpsc::Sender<(String, bool)>,
     /// Clé dont la récupération est en vol, pour ne pas la lancer deux fois.
-    pochette_en_vol: Option<String>,
-    /// Dernier chemin annoncé par mpv (`Event::Path`), retenu **seulement**
+    cover_in_flight: Option<String>,
+    /// Dernier path annoncé par mpv (`Event::Path`), retenu **seulement**
     /// pour comparaison à l'arrivée d'une extraction détachée — jamais
-    /// interprété, comme le veut le principe posé pour `OBSERVEES`. Une
-    /// extraction lancée pour un chemin peut revenir après que mpv soit
+    /// interprété, comme le veut le principe posé pour `OBSERVED`. Une
+    /// extraction lancée pour un path peut revenir après que mpv soit
     /// passé à un autre : sans cette trace, son résultat s'installerait
     /// après coup sur la piste suivante.
-    chemin_courant: Option<String>,
+    current_path: Option<String>,
     /// Chemin dont l'extraction embarquée est actuellement en vol, pour ne
     /// pas en relancer une deuxième pendant que la première tourne encore
     /// sur ce même fichier.
-    extraction_en_vol: Option<String>,
+    extraction_in_flight: Option<String>,
     /// Résultat d'une extraction détachée par `handle_path`, consommé par la
-    /// boucle `select!` de `main` (voir `extraction_arrivee`). Symétrique de
-    /// `pochette_tx` ci-dessus.
+    /// boucle `select!` de `main` (voir `extraction_arrived`). Symétrique de
+    /// `cover_tx` ci-dessus.
     extraction_tx: mpsc::Sender<(String, Option<ritornello_proto::CoverRef>)>,
-    /// Disjoncteur qui borne l'appel `lofty`, strictement bloquant et
-    /// potentiellement sur un partage réseau : voir `sante.rs` et le
+    /// Disjoncteur qui bounded l'appel `lofty`, strictement bloquant et
+    /// potentiellement sur un partage réseau : voir `health.rs` et le
     /// commentaire de `handle_path`.
-    sante: Arc<crate::sante::Sante>,
+    health: Arc<crate::health::Health>,
 }
 
-/// Résout le mot de veille depuis un catalogue déjà en main.
+/// Résout le mot de veille depuis un sources_catalog déjà en main.
 ///
 /// Fonction libre plutôt que méthode : elle sert à la fois à la construction
-/// (catalogue lu par `try_read`, avant que `self` n'existe) et à `set_locale`
-/// (catalogue tout juste chargé, avant qu'il ne remplace celui du cœur), donc
+/// (sources_catalog lu par `try_read`, avant que `self` n'existe) et à `set_locale`
+/// (sources_catalog tout juste chargé, avant qu'il ne remplace celui du cœur), donc
 /// aucune des deux n'a besoin de passer par le verrou asynchrone une seconde
 /// fois.
-fn resout_standby_status(catalog: &Catalog) -> String {
+fn resolve_standby_status(catalog: &Catalog) -> String {
     catalog.get("standby").to_string()
 }
 
 impl<P: Player> Core<P> {
     pub fn new(
         player: P,
-        cablage: Cablage,
+        wiring: Wiring,
         covers: Arc<crate::cover::CoverCache>,
-        pochette_tx: mpsc::Sender<(String, bool)>,
+        cover_tx: mpsc::Sender<(String, bool)>,
         extraction_tx: mpsc::Sender<(String, Option<ritornello_proto::CoverRef>)>,
     ) -> Self {
-        let Cablage { sources, persisted, state_path, catalog, locales_root, metadata, catalogue } =
-            cablage;
+        let Wiring { sources, persisted, state_path, catalog, locales_root, metadata, sources_catalog } =
+            wiring;
         let mut source_order: Vec<String> = sources.keys().cloned().collect();
         source_order.sort();
         let active_source = if sources.contains_key(&persisted.active_source) {
@@ -301,19 +301,19 @@ impl<P: Player> Core<P> {
         } else {
             source_order.first().cloned().unwrap_or_default()
         };
-        // Résolu tout de suite : le seul écrivain de ce catalogue est
+        // Résolu tout de suite : le seul écrivain de ce sources_catalog est
         // `set_locale`, joignable uniquement depuis la boucle `select!` qui ne
         // démarre qu'après le retour d'ici — aucun verrou concurrent ne peut
-        // donc exister à cet instant. Voir `resout_standby_status` pour la
+        // donc exister à cet instant. Voir `resolve_standby_status` pour la
         // raison de ce choix (plus jamais résolu au moment de poser la veille).
         //
         // L'échec est malgré tout journalisé plutôt qu'avalé : il rendrait
-        // l'écran de veille entièrement vide jusqu'au prochain changement de
+        // l'écran de veille entièrement clear jusqu'au prochain changement de
         // langue — précisément le défaut que ce pré-calcul corrige. Un
         // invariant qu'on croit tenu et que personne ne vérifie est ce qui a
         // produit ce défaut la première fois.
         let standby_status = match catalog.try_read() {
-            Ok(cat) => Some(resout_standby_status(&cat)),
+            Ok(cat) => Some(resolve_standby_status(&cat)),
             Err(_) => {
                 tracing::warn!(
                     "standby label unavailable at startup: the standby screen will stay blank until the next locale change"
@@ -326,14 +326,14 @@ impl<P: Player> Core<P> {
             sources,
             source_order,
             active_source,
-            // Reborné à la lecture : `state.json` peut avoir été édité à la
+            // Reborné à la playback : `state.json` peut avoir été édité à la
             // main, et un `volume: 255` partirait tel quel à mpv au réveil.
             volume: persisted.volume.min(100),
             muted: false,
             standby: false,
-            veille_persistee: persisted.standby,
+            persisted_standby: persisted.standby,
             expecting_stream: false,
-            lecture: false,
+            playback: false,
             paused: false,
             retry_count: 0,
             audio_device: persisted.audio_device.clone(),
@@ -352,57 +352,57 @@ impl<P: Player> Core<P> {
             locales_root,
             theme: persisted.theme.clone(),
             mode: persisted.mode.clone(),
-            metadonnees: Metadonnees::new(metadata.plugins),
+            metadata: Metadata::new(metadata.plugins),
             now_playing_tx: metadata.now_playing,
-            etat_tx: metadata.etat,
-            catalogue_tx: catalogue,
+            state_tx: metadata.state,
+            sources_catalog_tx: sources_catalog,
             settings: persisted.settings.clone(),
             volume_deadline: None,
             position_s: None,
-            duree_mesuree_s: None,
-            ancre_position: None,
+            measured_duration_s: None,
+            position_anchor: None,
             covers,
-            pochette_tx,
-            pochette_en_vol: None,
-            chemin_courant: None,
-            extraction_en_vol: None,
+            cover_tx,
+            cover_in_flight: None,
+            current_path: None,
+            extraction_in_flight: None,
             extraction_tx,
-            sante: Arc::new(crate::sante::Sante::new()),
+            health: Arc::new(crate::health::Health::new()),
         };
         // Les sources câblées au démarrage sont déjà connues : sans cette
-        // publication, le canal garderait son `Catalogue::default()` vide et un
+        // publication, le canal garderait son `SourcesCatalog::default()` clear et un
         // afficheur relayé avant la première présélection croirait que
         // l'appareil n'a aucune source. `add_source` couvre la suite.
-        coeur.publie_catalogue();
+        coeur.publish_catalog();
         // Les réglages persistés atteignent le cache de pochettes ici, et pas
-        // seulement au premier `set_settings` : sans cette ligne, un appareil
+        // seulement au premier `set_settings` : sans cette line, un appareil
         // dont `state.json` décoche le réencodage l'appliquerait à partir de la
         // première visite de la page de configuration, et pousserait des images
-        // pleine taille jusque-là. Le démarrage doit obéir au fichier.
-        coeur.covers.set_reglages(crate::cover::Reglages::from(&coeur.settings));
+        // pleine size jusque-là. Le démarrage doit obéir au fichier.
+        coeur.covers.set_cover_settings(crate::cover::CoverSettings::from(&coeur.settings));
         coeur
     }
 
     /// Applique ce qu'une Source rapporte : son statut, et/ou l'identité de ce
-    /// qu'elle joue désormais.
+    /// qu'elle plays désormais.
     ///
     /// Les deux arrivent dans la même trame et sont appliqués ensemble, sans
-    /// affichage intermédiaire : aucun instant observable ne voit la ligne
-    /// affichée décrire un morceau et l'identité annoncée aux plugins en décrire
+    /// affichage intermédiaire : aucun instant observable ne voit la line
+    /// affichée décrire un track et l'identité annoncée aux plugins en décrire
     /// un autre.
     ///
     /// Deux sortes de trames arrivent par ce canal, et elles ne prennent pas le
-    /// même chemin :
+    /// même path :
     ///
     /// - celles qui **recomposent la vue** — une réponse de Source, qui déclare
     ///   une identité ou un statut, ou un mot éphémère à incruster ;
-    /// - celles qui **annoncent un fait** sans rien dire de ce qui joue — les
+    /// - celles qui **annoncent un fait** sans rien dire de ce qui plays — les
     ///   présélections nommées, leur nombre, le tiroir, la renumérotation de la
-    ///   piste en cours, la pochette. Celles-là rendent la main avant le
+    ///   piste en cours, la cover. Celles-là rendent la main avant le
     ///   traitement du statut : voir le retour anticipé.
     ///
     /// **En pratique, presque toute trame de production emprunte le second
-    /// chemin dès qu'elle ne déclare ni identité ni statut** : le prédicat qui
+    /// path dès qu'elle ne déclare ni identité ni statut** : le prédicat qui
     /// l'ouvre est une tautologie pour le SDK (voir le corps). Tout champ doit
     /// donc être appliqué **sur les deux chemins** — ce qui n'est appliqué qu'en
     /// bas de fonction n'est jamais appliqué. La déstructuration exhaustive en
@@ -410,14 +410,14 @@ impl<P: Player> Core<P> {
     /// champ ajouté plus tard.
     pub fn handle_source_update(&mut self, name: &str, update: SourceUpdate) {
         // **Une trame d'une source que le cœur ne connaît plus est jetée, et
-        // entière.** Le fan-out des requêtes de catalogue est détaché : un
+        // entière.** Le fan-out des requêtes de sources_catalog est détaché : un
         // `ListPresets` part dans sa propre tâche, et `remove_source` peut
         // s'exécuter entre la requête et la réponse — un greffon éteint depuis
         // l'IHM, ou mort de lui-même. Sans ce garde, la réponse encore en vol
         // ré-insérait la liste dans `presets_par_source` **après** l'éviction,
         // parce que cette insertion se fait délibérément avant le garde de
-        // source active (le catalogue décrit toutes les sources, pas celle qui
-        // joue). Le catalogue republié annonçait alors une liste enregistrée
+        // source active (le sources_catalog décrit toutes les sources, pas celle qui
+        // plays). Le sources_catalog republié annonçait alors une liste enregistrée
         // pour une source qui n'existe plus, un client MPD la mettait en cache,
         // et un `load` dessus n'était refusé qu'au dernier moment par le garde
         // de `Command::SelectSource` — donc après avoir menti à l'utilisateur.
@@ -441,15 +441,15 @@ impl<P: Player> Core<P> {
         //
         // Dérivé plutôt que demandé, et c'est une leçon payée. La fusion du
         // chantier des pochettes a ajouté `cover` au prédicat sans l'appliquer
-        // sur le chemin du retour anticipé : le champ était gardé, donc la trame
+        // sur le path du retour anticipé : le champ était gardé, donc la trame
         // passait, mais son application vivait tout en bas de la fonction, après
-        // un `return` que cette trame prenait toujours. Chaque pochette de Source
+        // un `return` que cette trame prenait toujours. Chaque cover de Source
         // était perdue **en silence**. Rien ne l'a signalé : le prédicat teste
         // les champs un par un, et `SourceUpdate` dérive `Default`, si bien qu'un
         // dixième champ ne casse aucun littéral et aucun test. Un commentaire
-        // réclamant « pensez aux deux moitiés » se lit après coup ; une
+        // réclamant « pensez aux deux moitiés » se read après coup ; une
         // déstructuration exhaustive, elle, ne peut pas être oubliée. Même
-        // principe que l'annonce d'un greffon, qui ne peut pas mentir sur ses
+        // principe que l'announcement d'un greffon, qui ne peut pas mentir sur ses
         // genres parce qu'ils sont déduits et non déclarés.
         let SourceUpdate {
             identity,
@@ -462,16 +462,16 @@ impl<P: Player> Core<P> {
             presets,
             cover,
         } = update;
-        // Lu **avant** le garde ci-dessous, et c'est voulu : le catalogue décrit
-        // toutes les sources, pas celle qui joue. Un client MPD interroge
-        // `listplaylistinfo "radio"` pendant que le cd joue, et la veille ne
-        // change rien à ce qu'une source contient. Le garde, lui, protège ce qui
-        // décrit **ce qui joue** — identité, statut, message éphémère — et reste
+        // Lu **avant** le garde ci-dessous, et c'est voulu : le sources_catalog décrit
+        // toutes les sources, pas celle qui plays. Un client MPD interroge
+        // `listplaylistinfo "radio"` pendant que le cd plays, et la veille ne
+        // change rien à ce qu'une source contains. Le garde, lui, protège ce qui
+        // décrit **ce qui plays** — identité, statut, message éphémère — et reste
         // en place pour tout le reste.
         let porte_des_presets = presets.is_some();
         if let Some(presets) = presets {
             self.presets_par_source.insert(name.to_string(), presets);
-            self.publie_catalogue();
+            self.publish_catalog();
         }
         if self.standby || name != self.active_source {
             return;
@@ -480,7 +480,7 @@ impl<P: Player> Core<P> {
         // de présélections elle offre, si elle a quelque chose à éjecter — et
         // leur doc de champ les nomme déjà comme une paire, oubliée ensemble à la
         // bascule de source et à la veille. Appliqués ici, **avant** le retour
-        // anticipé, pour que celui-ci ne puisse pas les avaler ; l'ordre
+        // anticipé, pour que celui-ci ne puisse pas les avaler ; l'order
         // vis-à-vis de l'identité est sans effet, `set_identity` n'y touche pas.
         if let Some(c) = preset_count {
             self.preset_count = Some(c);
@@ -509,11 +509,11 @@ impl<P: Player> Core<P> {
         //
         // La conséquence est celle qui compte : ce n'est **pas** le prédicat qui
         // protège quoi que ce soit, c'est le fait d'appliquer chaque champ **sur
-        // les deux chemins**. Une trame qui n'annonce qu'un fait prend le retour
+        // les deux chemins**. Une trame qui n'announcement qu'un fait prend le retour
         // anticipé de toute façon ; ce qui n'est appliqué qu'en bas de fonction
         // n'est donc jamais appliqué du tout. C'est exactement le défaut que la
         // fusion du chantier des pochettes a produit — `cover` gardé mais
-        // appliqué seulement en bas, donc chaque pochette perdue en silence — et
+        // appliqué seulement en bas, donc chaque cover perdue en silence — et
         // c'est la déstructuration en tête de fonction, non ce commentaire, qui
         // empêche sa récurrence.
         //
@@ -525,7 +525,7 @@ impl<P: Player> Core<P> {
         // `recompose_la_vue` reprend l'invariant du SDK mot pour mot : seule une
         // identité ou un statut déclarés attestent une recomposition de vue, et
         // `transient` s'y joint parce qu'un mot éphémère est un propos sur ce qui
-        // joue (il doit garder son incrustation et désarmer un `+NN` en vol).
+        // plays (il doit garder son incrustation et désarmer un `+NN` en vol).
         // `preset`, `preset_name`, `preset_count`, `can_eject`, `presets` et
         // `cover` n'attestent rien : tous ont la convention « absent = garder »,
         // donc aucun ne peut prouver que la trame décrit la vue entière.
@@ -539,15 +539,15 @@ impl<P: Player> Core<P> {
         if porte_un_fait && !recompose_la_vue {
             // Un **seul** appel, et c'est le point : les champs « absent =
             // garder » qui doivent être appliqués après l'identité vivent tous
-            // dans `applique_les_faits_declares`, appelée ici et une seule autre
+            // dans `apply_declared_facts`, appelée ici et une seule autre
             // fois en bas de fonction. Un champ ajouté là-dedans atterrit donc
             // sur les deux chemins par construction, au lieu de dépendre de
             // quelqu'un qui se souvienne de le recopier — c'est exactement
-            // l'oubli qui a fait perdre chaque pochette de Source en silence.
-            self.applique_les_faits_declares(preset, preset_name, cover, name);
+            // l'oubli qui a fait perdre chaque cover de Source en silence.
+            self.apply_declared_facts(preset, preset_name, cover, name);
             // Publier quand même : compte, tiroir et sélection font partie de
             // l'état diffusé, et le canal déduplique si rien n'a bougé.
-            self.publie_etat();
+            self.publish_state();
             return;
         }
         // `status` est réaffirmé par chaque trame permanente : absent vaut
@@ -560,11 +560,11 @@ impl<P: Player> Core<P> {
             self.source_status = status.clone();
         }
         if transient {
-            // Message éphémère (« présélection vide ») : il emprunte
+            // Message éphémère (« présélection clear ») : il emprunte
             // l'emplacement et l'échéance de l'incrustation volume/muet, donc
             // `self.source_status` — le statut permanent — est conservé et
             // reparaît d'elle-même. Sans cela, le message restait à l'écran
-            // indéfiniment alors que la lecture continuait sur la station
+            // indéfiniment alors que la playback continuait sur la station
             // précédente : l'affichage décrivait durablement un état qui
             // n'existait plus. `overlay_ms`, pas `tens_window_ms` : ce message
             // n'a rien à voir avec le décalage `+NN` de la télécommande, seule
@@ -573,14 +573,14 @@ impl<P: Player> Core<P> {
             // Un décalage `+NN` en cours perd donc son emplacement d'affichage
             // ici : le désarmer avec lui est ce qui évite qu'il survive
             // derrière un écran qui ne le montre plus (même raison que le
-            // garde d'abandon d'`appliquer_commande`) — que la trame porte ou
+            // garde d'abandon d'`apply_command`) — que la trame porte ou
             // non un mot à afficher.
             self.pending_tens = 0;
             if let Some(mot) = status {
-                let echeance = Instant::now() + Duration::from_millis(self.settings.overlay_ms.into());
+                let deadline = Instant::now() + Duration::from_millis(self.settings.overlay_ms.into());
                 self.overlay = Some((
                     Overlay::Message { text: mot, remaining_ms: self.settings.overlay_ms },
-                    echeance,
+                    deadline,
                 ));
             }
         }
@@ -591,26 +591,26 @@ impl<P: Player> Core<P> {
             };
             self.set_identity(valeur);
         }
-        // Le second — et dernier — appelant de `applique_les_faits_declares`,
+        // Le second — et dernier — appelant de `apply_declared_facts`,
         // ici **après** l'identité : `set_identity(None)` efface la sélection, et
-        // `set_identity` tout court remet à zéro tout ce que `Metadonnees`
-        // retenait, pochette de la Source comprise. Une trame qui déclare
+        // `set_identity` tout court remet à zéro tout ce que `Metadata`
+        // retenait, cover de la Source comprise. Une trame qui déclare
         // explicitement l'un ou l'autre doit gagner sur ce reset, donc elle est
-        // appliquée derrière lui. C'est cet ordre-là qui interdit de remonter cet
-        // appel avec `preset_count` ; le chemin du retour anticipé, lui, ne peut
+        // appliquée derrière lui. C'est cet order-là qui interdit de remonter cet
+        // appel avec `preset_count` ; le path du retour anticipé, lui, ne peut
         // pas porter d'identité par construction, donc l'y appeler est sûr.
-        self.applique_les_faits_declares(preset, preset_name, cover, name);
+        self.apply_declared_facts(preset, preset_name, cover, name);
         // `preset_count` et `can_eject` sont appliqués **en tête** de cette
         // fonction, avant le retour anticipé, pour la même raison.
         //
         // Toujours publier : la sélection courante fait partie de l'état
         // diffusé, et cet appel couvre la trame qui ne change ni identité ni
         // métadonnées (les autres chemins publient déjà, et le canal
-        // déduplique). `etat_lecteur` porte toujours l'incrustation active
+        // déduplique). `player_state` porte toujours l'incrustation active
         // aux côtés du reste : une trame source arrivant pendant une
         // incrustation met donc à jour source_status/preset/preset_name sans
         // rien changer de ce que l'afficheur montre tant qu'elle dure.
-        self.publie_etat();
+        self.publish_state();
     }
 
     /// Tout ce qu'une trame de Source déclare et qui doit être appliqué
@@ -622,7 +622,7 @@ impl<P: Player> Core<P> {
     /// la vue — et un champ appliqué à un seul des deux endroits est perdu en
     /// silence sur l'autre. C'est arrivé deux fois : `presets`, puis `cover`, ce
     /// dernier gardé par le prédicat mais appliqué seulement en bas, donc jamais,
-    /// puisque une pochette de Source arrive toujours seule et prend toujours le
+    /// puisque une cover de Source arrive toujours seule et prend toujours le
     /// retour anticipé. La déstructuration exhaustive en tête de fonction force
     /// la *question* (« à laquelle des deux moitiés ce champ appartient-il ? »)
     /// mais pas la *réponse* : deux appels côte à côte pouvaient toujours
@@ -631,16 +631,16 @@ impl<P: Player> Core<P> {
     ///
     /// La limite, dite franchement : rien n'empêche d'écrire un jour un nouveau
     /// champ *à côté* de cet appel plutôt que dedans. Ce qui est acquis, c'est
-    /// qu'aucun champ déjà passé par ici ne peut manquer sur un chemin.
-    fn applique_les_faits_declares(
+    /// qu'aucun champ déjà passé par ici ne peut manquer sur un path.
+    fn apply_declared_facts(
         &mut self,
         preset: Option<u8>,
         preset_name: Option<String>,
         cover: Option<ritornello_proto::CoverRef>,
         name: &str,
     ) {
-        self.applique_selection(preset, preset_name);
-        self.applique_pochette_de_source(cover, name);
+        self.apply_selection(preset, preset_name);
+        self.apply_source_cover(cover, name);
     }
 
 }
@@ -652,18 +652,18 @@ mod tests {
 
     #[tokio::test]
     async fn la_veille_ignore_les_mises_a_jour_de_la_source_et_le_reveil_les_reprend() {
-        let (mut core, _pc, _sc, mut etat_rx, _d) = setup();
+        let (mut core, _pc, _sc, mut state_rx, _d) = setup();
         core.resume().await.unwrap();
         core.handle_command(Command::Power).await.unwrap();
-        assert!(etat_rx.borrow_and_update().standby);
-        let mut update = update_nu();
+        assert!(state_rx.borrow_and_update().standby);
+        let mut update = bare_update();
         update.preset_name = Some("FIP".into());
         core.handle_source_update("radio", update.clone());
-        assert_eq!(etat_rx.borrow().preset_name, None, "en veille, la trame source est ignoree");
+        assert_eq!(state_rx.borrow().preset_name, None, "en veille, la trame source est ignoree");
         core.handle_command(Command::Power).await.unwrap();
         core.handle_source_update("radio", update);
         assert_eq!(
-            etat_rx.borrow_and_update().preset_name.as_deref(),
+            state_rx.borrow_and_update().preset_name.as_deref(),
             Some("FIP"),
             "le reveil laisse la source reprendre la main"
         );
@@ -671,34 +671,34 @@ mod tests {
 
     #[tokio::test]
     async fn mise_a_jour_dune_source_inactive_est_ignoree() {
-        let (mut core, _pc, _sc, mut etat_rx, _d) = setup();
+        let (mut core, _pc, _sc, mut state_rx, _d) = setup();
         core.resume().await.unwrap();
-        let mut update_cd = update_nu();
+        let mut update_cd = bare_update();
         update_cd.preset_name = Some("CD".into());
         core.handle_source_update("cd", update_cd);
-        assert_eq!(etat_rx.borrow().preset_name, None, "la mise a jour de \"cd\" (inactive) n'a pas ete appliquee");
-        let mut update_radio = update_nu();
+        assert_eq!(state_rx.borrow().preset_name, None, "la mise a jour de \"cd\" (inactive) n'a pas ete appliquee");
+        let mut update_radio = bare_update();
         update_radio.preset_name = Some("FIP".into());
         core.handle_source_update("radio", update_radio);
-        assert_eq!(etat_rx.borrow_and_update().preset_name.as_deref(), Some("FIP"));
+        assert_eq!(state_rx.borrow_and_update().preset_name.as_deref(), Some("FIP"));
     }
 
     #[tokio::test]
     async fn le_statut_de_la_source_ne_survit_pas_a_la_mise_en_veille() {
         // Second scénario d'I2 : sans effacement explicite, `source_status`
         // restait en mémoire pendant la veille (masqué par la priorité du mot
-        // de veille dans `etat_lecteur`) et reparaissait au réveil tant que la
+        // de veille dans `player_state`) et reparaissait au réveil tant que la
         // Source n'avait pas reparlé — un mensonge prêt à resurgir.
-        let (mut core, _pc, _sc, mut etat_rx, _d) = setup();
+        let (mut core, _pc, _sc, mut state_rx, _d) = setup();
         core.resume().await.unwrap();
-        let mut update = update_nu();
+        let mut update = bare_update();
         update.status = Some("pas de disque".into());
         core.handle_source_update("radio", update);
-        assert_eq!(etat_rx.borrow_and_update().status.as_deref(), Some("pas de disque"));
+        assert_eq!(state_rx.borrow_and_update().status.as_deref(), Some("pas de disque"));
         core.handle_command(Command::Power).await.unwrap(); // veille
         core.handle_command(Command::Power).await.unwrap(); // reveil, source muette
         assert_eq!(
-            etat_rx.borrow_and_update().status,
+            state_rx.borrow_and_update().status,
             None,
             "le statut de l'ancienne trame ne doit pas reapparaitre au reveil avant que la Source n'ait reparle"
         );
@@ -708,14 +708,14 @@ mod tests {
     async fn le_compte_de_preselections_est_memorise_et_publie() {
         // Une trame qui déclare un compte doit se retrouver dans PlayerState ;
         // une trame muette sur le sujet ne doit pas l'effacer.
-        let (mut core, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
-        core.handle_source_update("radio", update_avec_compte(Some(23)));
-        assert_eq!(etat_rx.borrow().preset_count, Some(23));
-        core.handle_source_update("radio", update_avec_compte(None));
-        assert_eq!(etat_rx.borrow().preset_count, Some(23));
+        let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
+        core.handle_source_update("radio", update_with_count(Some(23)));
+        assert_eq!(state_rx.borrow().preset_count, Some(23));
+        core.handle_source_update("radio", update_with_count(None));
+        assert_eq!(state_rx.borrow().preset_count, Some(23));
         // Some(0) écrase : le cd sans disque dit « rien à numéroter ».
-        core.handle_source_update("radio", update_avec_compte(Some(0)));
-        assert_eq!(etat_rx.borrow().preset_count, Some(0));
+        core.handle_source_update("radio", update_with_count(Some(0)));
+        assert_eq!(state_rx.borrow().preset_count, Some(0));
     }
 
     #[tokio::test]
@@ -723,27 +723,27 @@ mod tests {
         // Fausse par défaut : ne pas savoir, c'est n'offrir rien — la
         // télécommande web grise sa touche Eject tant que personne ne l'a
         // réclamée. Une trame muette sur le sujet ne l'efface pas.
-        let (mut core, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
-        assert!(!etat_rx.borrow().can_eject, "rien de declare : rien d'offert");
-        core.handle_source_update("radio", update_avec_ejection(Some(true)));
-        assert!(etat_rx.borrow().can_eject);
-        core.handle_source_update("radio", update_avec_ejection(None));
-        assert!(etat_rx.borrow().can_eject, "une trame muette ne retire pas la capacite");
-        core.handle_source_update("radio", update_avec_ejection(Some(false)));
-        assert!(!etat_rx.borrow().can_eject);
+        let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
+        assert!(!state_rx.borrow().can_eject, "rien de declare : rien d'offert");
+        core.handle_source_update("radio", update_with_eject(Some(true)));
+        assert!(state_rx.borrow().can_eject);
+        core.handle_source_update("radio", update_with_eject(None));
+        assert!(state_rx.borrow().can_eject, "une trame muette ne retire pas la capacite");
+        core.handle_source_update("radio", update_with_eject(Some(false)));
+        assert!(!state_rx.borrow().can_eject);
     }
 
     #[tokio::test]
     async fn lejection_survit_a_larret_mais_ni_au_changement_de_source_ni_a_la_veille() {
         // Même calendrier d'oubli que `preset_count`, et pour la même raison :
-        // la capacité décrit la Source, pas ce qui joue. Un arrêt ne change
-        // pas le fait que le lecteur a un tiroir ; changer de source, si.
-        let (mut core, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
-        core.handle_source_update("radio", update_avec_ejection(Some(true)));
+        // la capacité décrit la Source, pas ce qui plays. Un arrêt ne change
+        // pas le fait que le player a un tiroir ; changer de source, si.
+        let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
+        core.handle_source_update("radio", update_with_eject(Some(true)));
         core.handle_command(Command::Stop).await.unwrap();
-        assert!(etat_rx.borrow().can_eject, "un tiroir ne disparait pas a l'arret");
+        assert!(state_rx.borrow().can_eject, "un tiroir ne disparait pas a l'arret");
         core.handle_command(Command::SourceCycle).await.unwrap();
-        assert!(!etat_rx.borrow().can_eject, "la capacite decrit la source qui s'en va");
+        assert!(!state_rx.borrow().can_eject, "la capacite decrit la source qui s'en va");
     }
 
     #[tokio::test]
@@ -753,109 +753,109 @@ mod tests {
         // `SourceCycle`, plus rien ne garantit que « radio » soit encore la
         // source active, donc plus rien ne garantit qu'une trame la concernant
         // franchisse le garde-fou de `handle_source_update`.
-        let (mut core, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
-        core.handle_source_update("radio", update_avec_ejection(Some(true)));
-        assert!(etat_rx.borrow().can_eject);
+        let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
+        core.handle_source_update("radio", update_with_eject(Some(true)));
+        assert!(state_rx.borrow().can_eject);
         core.handle_command(Command::Power).await.unwrap();
-        assert!(!etat_rx.borrow().can_eject);
+        assert!(!state_rx.borrow().can_eject);
     }
 
     #[tokio::test]
     async fn le_compte_survit_a_larret_mais_pas_au_changement_de_source() {
-        // Stop efface preset (plus rien ne joue) mais pas le compte : une radio
+        // Stop efface preset (plus rien ne plays) mais pas le compte : une radio
         // arrêtée a toujours ses stations.
-        let (mut core, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
-        core.handle_source_update("radio", update_avec_compte(Some(23)));
-        assert_eq!(etat_rx.borrow().preset_count, Some(23));
+        let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
+        core.handle_source_update("radio", update_with_count(Some(23)));
+        assert_eq!(state_rx.borrow().preset_count, Some(23));
         core.handle_command(Command::Stop).await.unwrap();
-        assert_eq!(etat_rx.borrow().preset_count, Some(23));
+        assert_eq!(state_rx.borrow().preset_count, Some(23));
         core.handle_command(Command::SourceCycle).await.unwrap();
-        assert_eq!(etat_rx.borrow().preset_count, None);
+        assert_eq!(state_rx.borrow().preset_count, None);
     }
 
     #[tokio::test]
     async fn une_mise_a_jour_de_seul_compte_laisse_morceau_et_identite_intacts() {
-        // Garantie de sûreté dont dépend l'annonce spontanée de `preset_count`
+        // Garantie de sûreté dont dépend l'announcement spontanée de `preset_count`
         // par la radio après un enregistrement réussi côté admin (voir
         // `RadioSource::poll_notification`) : une trame qui ne porte que le
-        // compte doit laisser le morceau en cours et l'identité intacts, et
+        // compte doit laisser le track en cours et l'identité intacts, et
         // tout de même publier l'état. Rien ne le vérifiait avant ce test.
-        let (mut core, mut np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
+        let (mut core, mut np_rx, state_rx, _d) = setup_metadata(vec![]);
         let id = serde_json::json!({"kind": "stream", "url": "http://fip"});
-        core.handle_source_update("radio", joue(id.clone()));
+        core.handle_source_update("radio", plays(id.clone()));
         // Repère pris après l'installation de l'identité : seuls les
         // changements ultérieurs doivent être détectés.
         np_rx.borrow_and_update();
-        let morceau_avant = etat_rx.borrow().morceau.clone();
+        let morceau_avant = state_rx.borrow().track.clone();
 
-        core.handle_source_update("radio", update_avec_compte(Some(5)));
+        core.handle_source_update("radio", update_with_count(Some(5)));
 
-        assert_eq!(etat_rx.borrow().preset_count, Some(5), "le compte doit etre publie");
-        assert_eq!(etat_rx.borrow().morceau, morceau_avant, "le morceau ne doit pas bouger");
-        assert!(!np_rx.has_changed().unwrap(), "l'identite ne doit pas bouger");
+        assert_eq!(state_rx.borrow().preset_count, Some(5), "le compte doit etre publie");
+        assert_eq!(state_rx.borrow().track, morceau_avant, "le track ne doit pas bouger");
+        assert!(!np_rx.has_changed().unwrap(), "l'identity ne doit pas bouger");
         assert_eq!(np_rx.borrow().identity, Some(id));
     }
 
     #[tokio::test]
     async fn une_mise_a_jour_de_seul_nom_laisse_morceau_et_identite_intacts() {
         // Même garantie que pour `preset_count` ci-dessus, cette fois pour
-        // `preset_name` : une trame qui ne porte que le nom doit se fondre
+        // `preset_name` : une trame qui ne porte que le name doit se fondre
         // dans l'état publié sans rien déranger d'autre.
-        let (mut core, mut np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
+        let (mut core, mut np_rx, state_rx, _d) = setup_metadata(vec![]);
         let id = serde_json::json!({"kind": "stream", "url": "http://fip"});
-        core.handle_source_update("radio", joue(id.clone()));
+        core.handle_source_update("radio", plays(id.clone()));
         np_rx.borrow_and_update();
-        let morceau_avant = etat_rx.borrow().morceau.clone();
+        let morceau_avant = state_rx.borrow().track.clone();
 
-        core.handle_source_update("radio", update_avec_nom(Some("FIP")));
+        core.handle_source_update("radio", update_with_name(Some("FIP")));
 
-        assert_eq!(etat_rx.borrow().preset_name.as_deref(), Some("FIP"), "le nom doit etre publie");
-        assert_eq!(etat_rx.borrow().morceau, morceau_avant, "le morceau ne doit pas bouger");
-        assert!(!np_rx.has_changed().unwrap(), "l'identite ne doit pas bouger");
+        assert_eq!(state_rx.borrow().preset_name.as_deref(), Some("FIP"), "le name doit etre publie");
+        assert_eq!(state_rx.borrow().track, morceau_avant, "le track ne doit pas bouger");
+        assert!(!np_rx.has_changed().unwrap(), "l'identity ne doit pas bouger");
         assert_eq!(np_rx.borrow().identity, Some(id));
     }
 
     #[tokio::test]
     async fn le_compte_est_oublie_en_veille() {
-        let (mut core, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
-        core.handle_source_update("radio", update_avec_compte(Some(23)));
-        assert_eq!(etat_rx.borrow().preset_count, Some(23));
+        let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
+        core.handle_source_update("radio", update_with_count(Some(23)));
+        assert_eq!(state_rx.borrow().preset_count, Some(23));
         core.handle_command(Command::Power).await.unwrap(); // entre en veille
-        assert_eq!(etat_rx.borrow().preset_count, None);
+        assert_eq!(state_rx.borrow().preset_count, None);
     }
 
     #[tokio::test]
     async fn un_message_ephemere_seffece_et_laisse_reparaitre_letat_precedent() {
-        // Cas reel : selectionner une preselection vide. Rien n'est lance, la
-        // station precedente joue toujours — le message doit donc passer, puis
-        // ceder la place, sans que le statut permanent ni les metadonnees bougent.
-        let (mut core, _np_rx, mut etat_rx, _d) = setup_metadonnees(vec!["ouifm".into()]);
+        // Cas reel : selectionner une preselection clear. Rien n'est lance, la
+        // station precedente plays toujours — le message doit donc passer, puis
+        // ceder la place, sans que le statut permanent ni les metadata bougent.
+        let (mut core, _np_rx, mut state_rx, _d) = setup_metadata(vec!["ouifm".into()]);
         core.resume().await.unwrap();
         let id = serde_json::json!({"url": "un"});
-        core.handle_source_update("radio", joue(id.clone()));
-        let mut permanent = update_nu();
+        core.handle_source_update("radio", plays(id.clone()));
+        let mut permanent = bare_update();
         permanent.status = Some("FIP".into());
         core.handle_source_update("radio", permanent);
-        core.handle_enrichment("ouifm", enrichissement(id, "Miles Davis", "So What"));
-        assert_eq!(etat_rx.borrow_and_update().status.as_deref(), Some("FIP"));
+        core.handle_enrichment("ouifm", enrichment(id, "Miles Davis", "So What"));
+        assert_eq!(state_rx.borrow_and_update().status.as_deref(), Some("FIP"));
 
-        let mut ephemere = update_nu();
+        let mut ephemere = bare_update();
         ephemere.transient = true;
         // Le mot affiché vient de `status`, jamais d'une vue composée (voir
         // Task 3) : c'est ainsi que le plugin radio le déclare réellement sur
-        // la branche « présélection vide ».
+        // la branche « présélection clear ».
         ephemere.status = Some("empty preset".into());
         core.handle_source_update("radio", ephemere);
-        let pendant = etat_rx.borrow_and_update().clone();
+        let pendant = state_rx.borrow_and_update().clone();
         assert!(matches!(pendant.overlay, Some(Overlay::Message { .. })), "le message doit s'afficher");
         assert_eq!(pendant.status.as_deref(), Some("FIP"), "le statut permanent n'a pas bouge");
-        assert!(core.overlay_deadline().is_some(), "et porter une echeance");
+        assert!(core.overlay_deadline().is_some(), "et porter une deadline");
 
         core.expire_overlay();
-        let apres = etat_rx.borrow_and_update().clone();
+        let apres = state_rx.borrow_and_update().clone();
         assert!(apres.overlay.is_none());
-        assert_eq!(apres.status.as_deref(), Some("FIP"), "la station qui joue doit reparaitre");
-        assert_eq!(apres.morceau.title.as_deref(), Some("So What"), "les metadonnees aussi");
+        assert_eq!(apres.status.as_deref(), Some("FIP"), "la station qui plays doit reparaitre");
+        assert_eq!(apres.track.title.as_deref(), Some("So What"), "les metadata aussi");
     }
 
     #[tokio::test]
@@ -867,44 +867,44 @@ mod tests {
         // d'effacer un statut : sinon « PAS DE DISQUE » resterait affiché après
         // l'insertion d'un disque, sans aucune façon de l'annuler.
         let (mut core, _pc, _sc, _rx, _d) = setup();
-        let mut update = update_nu();
+        let mut update = bare_update();
         update.status = Some("PAS DE DISQUE".into());
         core.handle_source_update("radio", update);
-        assert_eq!(core.etat_lecteur().status.as_deref(), Some("PAS DE DISQUE"));
+        assert_eq!(core.player_state().status.as_deref(), Some("PAS DE DISQUE"));
 
-        core.handle_source_update("radio", update_nu());
-        assert_eq!(core.etat_lecteur().status, None, "absent vaut effacé, pas conservé");
+        core.handle_source_update("radio", bare_update());
+        assert_eq!(core.player_state().status, None, "absent vaut effacé, pas conservé");
     }
 
     #[tokio::test]
     async fn un_statut_ephemere_ne_touche_pas_au_statut_memorise() {
-        // Le cas « présélection vide » : un mot passager, alors que la station
+        // Le cas « présélection clear » : un mot passager, alors que la station
         // précédente continue de jouer. Il alimente l'incrustation, et le statut
         // permanent doit reparaître à l'échéance.
         let (mut core, _pc, _sc, _rx, _d) = setup();
-        let mut permanent = update_nu();
+        let mut permanent = bare_update();
         permanent.status = Some("FIP".into());
         core.handle_source_update("radio", permanent);
 
-        let mut ephemere = update_nu();
+        let mut ephemere = bare_update();
         ephemere.status = Some("PRESELECTION VIDE".into());
         ephemere.transient = true;
         core.handle_source_update("radio", ephemere);
         assert_eq!(
-            core.etat_lecteur().status.as_deref(),
+            core.player_state().status.as_deref(),
             Some("FIP"),
             "le statut permanent survit à un message éphémère"
         );
-        assert!(matches!(core.etat_lecteur().overlay, Some(Overlay::Message { .. })));
+        assert!(matches!(core.player_state().overlay, Some(Overlay::Message { .. })));
 
         core.expire_overlay();
-        assert_eq!(core.etat_lecteur().status.as_deref(), Some("FIP"));
-        assert!(core.etat_lecteur().overlay.is_none());
+        assert_eq!(core.player_state().status.as_deref(), Some("FIP"));
+        assert!(core.player_state().overlay.is_none());
     }
 
     #[tokio::test]
     async fn un_compte_seul_neffece_pas_le_statut_de_la_source() {
-        // Le defaut etait **en service** : `plugin-files` annonce un compte sans
+        // Le defaut etait **en service** : `plugin-files` announcement un compte sans
         // statut quand sa page d'admin enregistre une liste, alors qu'il declare
         // un statut permanent partout ailleurs. Le statut disparaissait donc de
         // la console et de la SPA jusqu'a la commande suivante.
@@ -913,21 +913,21 @@ mod tests {
         // toujours : cette trame **arrive** au coeur, et le traitement du statut
         // l'aurait effacee faute d'en porter un.
         let (mut core, _pc, _sc, _rx, _d) = setup();
-        let mut permanent = update_nu();
+        let mut permanent = bare_update();
         permanent.status = Some("6 FICHIERS".into());
         core.handle_source_update("radio", permanent);
-        assert_eq!(core.etat_lecteur().status.as_deref(), Some("6 FICHIERS"));
+        assert_eq!(core.player_state().status.as_deref(), Some("6 FICHIERS"));
 
-        let mut compte = update_nu();
+        let mut compte = bare_update();
         compte.preset_count = Some(6);
         core.handle_source_update("radio", compte);
         assert_eq!(
-            core.etat_lecteur().status.as_deref(),
+            core.player_state().status.as_deref(),
             Some("6 FICHIERS"),
-            "une trame qui ne declare ni identite ni statut n'a rien a dire du statut"
+            "une trame qui ne declare ni identity ni statut n'a rien a dire du statut"
         );
         assert_eq!(
-            core.etat_lecteur().preset_count,
+            core.player_state().preset_count,
             Some(6),
             "et le compte doit quand meme etre pris : le retour anticipe est apres lui"
         );
@@ -936,76 +936,76 @@ mod tests {
     #[tokio::test]
     async fn un_avis_de_renumerotation_neffece_pas_le_statut() {
         // La trame exacte de `plugin-files` apres un enregistrement depuis sa
-        // page d'admin : le compte, **et** le numero et le nom de la piste
-        // courante, sans identite (la piste ne doit pas etre redeclaree) ni
+        // page d'admin : le compte, **et** le numero et le name de la piste
+        // courante, sans identity (la piste ne doit pas etre redeclaree) ni
         // statut. Trois champs de fusion, aucune recomposition de vue.
         let (mut core, _pc, _sc, _rx, _d) = setup();
-        let mut permanent = update_nu();
+        let mut permanent = bare_update();
         permanent.status = Some("6 FICHIERS".into());
         core.handle_source_update("radio", permanent);
 
-        let mut avis = update_nu();
-        avis.preset_count = Some(9);
-        avis.preset = Some(3);
-        avis.preset_name = Some("Kind of Blue".into());
-        core.handle_source_update("radio", avis);
-        let etat = core.etat_lecteur();
-        assert_eq!(etat.status.as_deref(), Some("6 FICHIERS"), "le statut permanent survit");
-        assert_eq!(etat.preset_count, Some(9));
-        assert_eq!(etat.preset, Some(3));
-        assert_eq!(etat.preset_name.as_deref(), Some("Kind of Blue"));
+        let mut notice = bare_update();
+        notice.preset_count = Some(9);
+        notice.preset = Some(3);
+        notice.preset_name = Some("Kind of Blue".into());
+        core.handle_source_update("radio", notice);
+        let state = core.player_state();
+        assert_eq!(state.status.as_deref(), Some("6 FICHIERS"), "le statut permanent survit");
+        assert_eq!(state.preset_count, Some(9));
+        assert_eq!(state.preset, Some(3));
+        assert_eq!(state.preset_name.as_deref(), Some("Kind of Blue"));
     }
 
     #[tokio::test]
     async fn des_preselections_seules_neffacent_pas_le_statut() {
         // Le second producteur du meme piege : la reponse a `ListPresets` ne
-        // porte ni identite ni statut. Sans le retour anticipe, demander son
-        // catalogue a une source blanchirait son statut.
+        // porte ni identity ni statut. Sans le retour anticipe, demander son
+        // sources_catalog a une source blanchirait son statut.
         let (mut core, _pc, _sc, _rx, _d) = setup();
-        let mut permanent = update_nu();
+        let mut permanent = bare_update();
         permanent.status = Some("PAS DE DISQUE".into());
         core.handle_source_update("radio", permanent);
 
-        core.handle_source_update("radio", avec_presets(vec![pres(1, "FIP")]));
+        core.handle_source_update("radio", with_presets(vec![preset_of(1, "FIP")]));
         assert_eq!(
-            core.etat_lecteur().status.as_deref(),
+            core.player_state().status.as_deref(),
             Some("PAS DE DISQUE"),
-            "demander le catalogue ne doit pas effacer l'ecran"
+            "demander le sources_catalog ne doit pas effacer l'ecran"
         );
-        assert_eq!(noms(&core.catalogue()), vec!["cd".to_string(), "radio".into()]);
+        assert_eq!(names(&core.sources_catalog()), vec!["cd".to_string(), "radio".into()]);
     }
 
     #[tokio::test]
     async fn les_preselections_dune_source_inactive_sont_gardees() {
         // La raison d'etre du contournement du garde : `listplaylistinfo "radio"`
-        // s'interroge pendant que le cd joue.
+        // s'interroge pendant que le cd plays.
         let (mut core, _pc, _sc, _rx, _d) =
-            setup_persiste(PersistedState { active_source: "cd".into(), ..Default::default() });
+            setup_persisted(PersistedState { active_source: "cd".into(), ..Default::default() });
         assert_eq!(core.active_source(), "cd");
-        core.handle_source_update("radio", avec_presets(vec![pres(1, "FIP"), pres(5, "OUI FM")]));
-        let cat = core.catalogue();
+        core.handle_source_update("radio", with_presets(vec![preset_of(1, "FIP"), preset_of(5, "OUI FM")]));
+        let cat = core.sources_catalog();
         let radio = cat.sources.iter().find(|s| s.name == "radio").expect("radio est declaree");
-        assert_eq!(radio.presets, vec![pres(1, "FIP"), pres(5, "OUI FM")]);
+        assert_eq!(radio.presets, vec![preset_of(1, "FIP"), preset_of(5, "OUI FM")]);
         let cd = cat.sources.iter().find(|s| s.name == "cd").expect("cd est declaree");
         assert!(cd.presets.is_empty(), "le cd n'enumere rien, il figure quand meme");
     }
 
     #[tokio::test]
     async fn les_preselections_arrivent_meme_en_veille() {
-        // Le garde arrete l'identite et le statut, pas un fait sur une source :
-        // ce qu'une source contient ne depend pas de l'appareil etant allume.
+        // Le garde arrete l'identity et le statut, pas un fait sur une source :
+        // ce qu'une source contains ne depend pas de l'appareil etant allume.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         core.handle_command(Command::Power).await.unwrap();
-        assert!(core.etat_lecteur().standby, "l'appareil dort");
-        core.handle_source_update("radio", avec_presets(vec![pres(3, "FIP")]));
-        let cat = core.catalogue();
+        assert!(core.player_state().standby, "l'appareil dort");
+        core.handle_source_update("radio", with_presets(vec![preset_of(3, "FIP")]));
+        let cat = core.sources_catalog();
         let radio = cat.sources.iter().find(|s| s.name == "radio").unwrap();
-        assert_eq!(radio.presets, vec![pres(3, "FIP")]);
+        assert_eq!(radio.presets, vec![preset_of(3, "FIP")]);
     }
 
-    // -- État partiel (`known`) et pochette : tâche 5 -----------------------
+    // -- État partiel (`known`) et cover : tâche 5 -----------------------
 
-    // -- Pochette embarquée, lue par le cœur : tâche 6 ----------------------
+    // -- CoverPayload embarquée, lue par le cœur : tâche 6 ----------------------
 
     /// C'est cette fonction, et non plus une relecture du code de `main`, qui
     /// prouve le partage exigé par la tâche 5 : le `Core` et l'`AppState` HTTP
@@ -1019,20 +1019,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
-        let cablage = Cablage {
+        let wiring = Wiring {
             sources: HashMap::new(),
             persisted: PersistedState::default(),
             state_path: dir.path().join("state.json"),
             catalog,
             locales_root: root,
-            metadata: cablage_muet(vec![]),
-            catalogue: watch::channel(Catalogue::default()).0,
+            metadata: silent_wiring(vec![]),
+            sources_catalog: watch::channel(SourcesCatalog::default()).0,
         };
-        let (pochette_tx, _pochette_rx) = mpsc::channel::<(String, bool)>(4);
-        let (app_state, core) = crate::assemble_covers_et_core(
+        let (cover_tx, _pochette_rx) = mpsc::channel::<(String, bool)>(4);
+        let (app_state, core) = crate::assemble_covers_and_core(
             FakePlayer::default(),
-            cablage,
-            pochette_tx,
+            wiring,
+            cover_tx,
             mpsc::channel(4).0,
             crate::status::tests_support::app_state(),
         );

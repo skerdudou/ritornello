@@ -43,7 +43,7 @@ export default defineConfig({
       // Les trois cles sont fixees ensemble : le prefixe `app-` marque tout
       // ce qui est hashe (entree, chunks de route paresseux, feuilles de
       // style), donc immuable par construction, par opposition a `vue.js`
-      // et `ui-kit.js` qui gardent un nom stable — les URL du contrat des
+      // et `ui-kit.js` qui gardent un nom stable — les URL du contract des
       // plugins — et doivent rester revalidables. Le coeur Rust (Task 6)
       // deduira sa politique de cache de ce seul prefixe.
       output: {

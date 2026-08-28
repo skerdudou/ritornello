@@ -48,29 +48,29 @@ export default async function globalTeardown() {
   // Same computation as in serve.mjs: `process.cwd()` is `web/app` (npm
   // puts the process there for a `-w app` script), the state file lives
   // at the repo root, under `target/` (git-ignored).
-  const racineNative = process.cwd().replace(/[\\/]web[\\/]app$/, '')
-  const etatPath = join(racineNative, 'target', 'e2e-etat.json')
-  if (!existsSync(etatPath)) return
-  const etat = JSON.parse(readFileSync(etatPath, 'utf8'))
+  const rootNative = process.cwd().replace(/[\\/]web[\\/]app$/, '')
+  const statePath = join(rootNative, 'target', 'e2e-state.json')
+  if (!existsSync(statePath)) return
+  const state = JSON.parse(readFileSync(statePath, 'utf8'))
 
-  if (etat.estWindows) {
+  if (state.isWindows) {
     // `balayer`: kills everything matching the pattern, explicitly
     // excluding `$$` (the shell executing this script — see the note
     // above on `pkill -f`/`pgrep -f` self-matching).
     const balayer = (signal) =>
-      `for pid in $(pgrep -f '${etat.dirExec}'); do [ "$pid" = "$$" ] && continue; kill -${signal} "$pid" 2>/dev/null; done`
+      `for pid in $(pgrep -f '${state.execDir}'); do [ "$pid" = "$$" ] && continue; kill -${signal} "$pid" 2>/dev/null; done`
     const script =
       `#!/usr/bin/env bash\n` +
-      `kill -TERM "$(cat '${etat.pidFile}' 2>/dev/null)" 2>/dev/null\n` +
+      `kill -TERM "$(cat '${state.pidFile}' 2>/dev/null)" 2>/dev/null\n` +
       `sleep 0.5\n` +
       `${balayer('TERM')}\n` +
       `sleep 0.3\n` +
       `${balayer('KILL')}\n` +
       // Execution directory (WSL-native, under /tmp) and PID file: out of
       // reach of `rmSync` on the Windows side, cleaned up here WSL-side.
-      `rm -rf '${etat.dirExec}' '${etat.pidFile}'\n`
-    const scriptNative = join(etat.dirConfigNative, 'arreter.sh')
-    const scriptWsl = `${versWsl(etat.dirConfigNative)}/arreter.sh`
+      `rm -rf '${state.execDir}' '${state.pidFile}'\n`
+    const scriptNative = join(state.configDirNative, 'stop.sh')
+    const scriptWsl = `${toWsl(state.configDirNative)}/stop.sh`
     writeFileSync(scriptNative, script)
     spawnSync('wsl.exe', ['--', 'bash', scriptWsl], { stdio: 'inherit' })
   }
@@ -80,13 +80,13 @@ export default async function globalTeardown() {
   // — nothing left to do here.
 
   try {
-    rmSync(etat.dirConfigNative, { recursive: true, force: true })
+    rmSync(state.configDirNative, { recursive: true, force: true })
   } catch {
     // Best effort: a locked file (a socket still held for an instant by a
     // process on its way out) must not fail the journeys.
   }
   try {
-    rmSync(etatPath, { force: true })
+    rmSync(statePath, { force: true })
   } catch {
     // same
   }
@@ -95,7 +95,7 @@ export default async function globalTeardown() {
 // Same conversion as in serve.mjs (duplicated: both files are launched as
 // independent entry points by Playwright, not modules importing each
 // other).
-function versWsl(cheminWindows) {
+function toWsl(cheminWindows) {
   const normalise = cheminWindows.replace(/\\/g, '/')
   const correspondance = /^([A-Za-z]):\/(.*)$/.exec(normalise)
   return correspondance ? `/mnt/${correspondance[1].toLowerCase()}/${correspondance[2]}` : normalise

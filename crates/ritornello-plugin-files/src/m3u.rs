@@ -1,4 +1,4 @@
-//! Lecture et écriture de listes m3u.
+//! Lecture et écriture de playlists m3u.
 //!
 //! Deux objets distincts passent par ici, et les confondre serait une erreur :
 //! la **liste utilisateur** (éditée, enregistrée, rechargeable, à chemins
@@ -15,7 +15,7 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// Nom affichable : le titre `#EXTINF` s'il existe, sinon le nom du fichier
+    /// Nom affichable : le titre `#EXTINF` s'il existe, sinon le name du fichier
     /// sans extension.
     ///
     /// C'est ce que la Source déclare en `preset_name`, de sorte que l'écran ne
@@ -39,9 +39,9 @@ pub struct Parsed {
 
 /// Résout une entrée brute.
 ///
-/// Trois règles, dans cet ordre. Un m3u écrit par le NAS porte souvent des
+/// Trois règles, in_dir cet order. Un m3u écrit par le NAS porte souvent des
 /// chemins qui n'ont de sens que chez lui (`Z:\Musique\…`, `/volume1/music/…`,
-/// un chemin UNC) : la troisième règle est là pour les rattraper plutôt que de
+/// un path UNC) : la troisième règle est là pour les rattraper plutôt que de
 /// jeter l'entrée.
 fn resolve(brut: &str, m3u_dir: &Path, root: &Path) -> Option<PathBuf> {
     let brut = brut.trim();
@@ -62,7 +62,7 @@ fn resolve(brut: &str, m3u_dir: &Path, root: &Path) -> Option<PathBuf> {
         return Some(abs.to_path_buf());
     }
 
-    // 3. chemin d'un autre système : on retire un préfixe de lecteur (`Z:`),
+    // 3. path d'un autre système : on retire un préfixe de player (`Z:`),
     //    puis on essaie les suffixes successifs sous la racine, du plus long au
     //    plus court — `Musique/Album/02.mp3`, puis `Album/02.mp3`, puis
     //    `02.mp3`. Le premier qui existe gagne.
@@ -85,12 +85,12 @@ fn resolve(brut: &str, m3u_dir: &Path, root: &Path) -> Option<PathBuf> {
 pub fn parse(text: &str, m3u_dir: &Path, root: &Path) -> Parsed {
     let mut out = Parsed::default();
     let mut en_attente: Option<(Option<u32>, Option<String>)> = None;
-    for ligne in text.lines() {
-        let ligne = ligne.trim();
-        if ligne.is_empty() {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
             continue;
         }
-        if let Some(reste) = ligne.strip_prefix("#EXTINF:") {
+        if let Some(reste) = line.strip_prefix("#EXTINF:") {
             en_attente = Some(match reste.split_once(',') {
                 Some((d, t)) => (
                     // `-1` est la convention « durée inconnue » : elle ne doit
@@ -102,13 +102,13 @@ pub fn parse(text: &str, m3u_dir: &Path, root: &Path) -> Parsed {
             });
             continue;
         }
-        if ligne.starts_with('#') {
+        if line.starts_with('#') {
             continue;
         }
-        let (duree, titre) = en_attente.take().unwrap_or((None, None));
-        match resolve(ligne, m3u_dir, root) {
-            Some(path) => out.entries.push(Entry { path, title: titre, duration_s: duree }),
-            None => out.unresolved.push(ligne.to_string()),
+        let (duration, titre) = en_attente.take().unwrap_or((None, None));
+        match resolve(line, m3u_dir, root) {
+            Some(path) => out.entries.push(Entry { path, title: titre, duration_s: duration }),
+            None => out.unresolved.push(line.to_string()),
         }
     }
     out
@@ -117,19 +117,19 @@ pub fn parse(text: &str, m3u_dir: &Path, root: &Path) -> Parsed {
 /// Rend un m3u.
 ///
 /// Avec une `base`, les chemins sont **relatifs** à elle : c'est ce qui rend la
-/// liste relisible par un autre lecteur et survivante à un changement de point
+/// liste relisible par un autre player et survivante à un changement de point
 /// de montage. Sans base, ils sont absolus — la forme de la liste destinée à
 /// mpv, qui ne doit dépendre d'aucun répertoire courant.
 pub fn render(entries: &[Entry], base: Option<&Path>) -> String {
     let mut s = String::from("#EXTM3U\n");
     for e in entries {
-        let duree = e.duration_s.map(|d| d.to_string()).unwrap_or_else(|| "-1".into());
-        s.push_str(&format!("#EXTINF:{duree},{}\n", e.display_name()));
-        let chemin = base
+        let duration = e.duration_s.map(|d| d.to_string()).unwrap_or_else(|| "-1".into());
+        s.push_str(&format!("#EXTINF:{duration},{}\n", e.display_name()));
+        let path = base
             .and_then(|b| e.path.strip_prefix(b).ok())
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .unwrap_or_else(|| e.path.to_string_lossy().into_owned());
-        s.push_str(&chemin);
+        s.push_str(&path);
         s.push('\n');
     }
     s
@@ -162,7 +162,7 @@ mod tests {
     #[test]
     fn un_chemin_windows_ecrit_par_le_nas_se_rattrape_sous_la_racine() {
         // Un m3u produit par le NAS porte des chemins qui n'ont de sens que
-        // chez lui. On retire le préfixe de lecteur et on essaie les suffixes
+        // chez lui. On retire le préfixe de player et on essaie les suffixes
         // successifs sous la racine, plutôt que de jeter l'entrée.
         let dir = tempfile::tempdir().unwrap();
         let cible = fichier(dir.path(), "Musique/Album/02.mp3");
@@ -204,9 +204,9 @@ mod tests {
         // une durée afficherait « -1 s » quelque part.
         let dir = tempfile::tempdir().unwrap();
         fichier(dir.path(), "a.mp3");
-        let p = parse("#EXTM3U\n#EXTINF:-1,Sans duree\na.mp3\n", dir.path(), dir.path());
+        let p = parse("#EXTM3U\n#EXTINF:-1,Sans duration\na.mp3\n", dir.path(), dir.path());
         assert_eq!(p.entries[0].duration_s, None);
-        assert_eq!(p.entries[0].title.as_deref(), Some("Sans duree"));
+        assert_eq!(p.entries[0].title.as_deref(), Some("Sans duration"));
     }
 
     #[test]

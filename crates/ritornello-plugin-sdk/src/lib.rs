@@ -3,7 +3,7 @@ pub mod client;
 pub mod runtime;
 pub mod server;
 
-pub use args::{admin_socket, genre_socket, plugin_name, register_socket, socket_prefix};
+pub use args::{admin_socket, socket_kind, plugin_name, register_socket, socket_prefix};
 pub use client::{
     run_input_client, run_metadata_client, AdminClient, AdminIpcError, DisplayClient, SourceClient,
     SourceUpdate,

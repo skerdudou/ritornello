@@ -1,16 +1,16 @@
-// Garantit que le répertoire embarqué par `rust-embed` existe et contient au
+// Garantit que le répertoire embarqué par `rust-embed` existe et contains au
 // moins un `index.html`. Le build npm n'est **jamais** invoqué ici : la
 // cross-compilation par `cross` tourne dans une image Docker sans Node, et le
 // livrable y est déjà présent sur le disque (voir `deploy/build.sh`).
 include!("src/placeholder.rs");
 
 const DIST: &str = "../../web/app/dist";
-const AVERTISSEMENT: &str = "IHM web non construite : bouchon embarque a la place";
+const WARNING: &str = "IHM web non construite : bouchon embarque a la place";
 
 fn main() {
     // On surveille ici le répertoire dans lequel ce script écrit parfois
     // lui-même (le bouchon, plus bas). La documentation de Cargo déconseille
-    // en général de surveiller un chemin qu'on modifie soi-même, mais c'est
+    // en général de surveiller un path qu'on modifie soi-même, mais c'est
     // volontaire et sûr ici : Cargo capture l'empreinte du répertoire APRÈS
     // l'exécution complète de ce script, donc l'écriture qui suit ne se
     // reboucle pas sur elle-même immédiatement — au pire, la prochaine
@@ -36,12 +36,12 @@ fn main() {
         // release embarquait « Web interface not built » en silence. On relit
         // donc le fichier pour ré-émettre l'avertissement à **chaque** build
         // tant que le vrai livrable n'est pas là.
-        if std::fs::read_to_string(&index).is_ok_and(|c| est_un_bouchon(&c)) {
-            println!("cargo::warning={AVERTISSEMENT}");
+        if std::fs::read_to_string(&index).is_ok_and(|c| is_placeholder(&c)) {
+            println!("cargo::warning={WARNING}");
         }
         return;
     }
-    println!("cargo::warning={AVERTISSEMENT}");
+    println!("cargo::warning={WARNING}");
     std::fs::create_dir_all(dist).expect("creation de web/app/dist");
     std::fs::write(&index, placeholder_html("npm ci && npm run build --workspaces"))
         .expect("ecriture du bouchon");

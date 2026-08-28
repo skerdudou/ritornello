@@ -1,4 +1,4 @@
-//! Interrogation de l'annuaire communautaire en ligne Radio Browser.
+//! Interrogation de l'annuaire communautaire en line Radio Browser.
 //!
 //! Découpage testable, sur le modèle de `musicbrainz.rs` du plugin cd : la
 //! partie *pure* (construction de l'URL de requête, analyse de la réponse) est
@@ -10,21 +10,21 @@
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
-/// Nombre de résultats demandés à l'annuaire (politesse : borne haute).
+/// Nombre de résultats demandés à l'annuaire (politesse : bounded haute).
 const LIMIT: u32 = 30;
 
-/// Serveurs de l'annuaire, essayés **dans cet ordre** jusqu'au premier qui
+/// Serveurs de l'annuaire, essayés **dans cet order** jusqu'au premier qui
 /// répond, et tant qu'il reste du budget (voir `SEARCH_BUDGET`).
 /// `all.api.radio-browser.info` est un enregistrement tournant (une adresse
 /// différente à chaque résolution) : on vise des serveurs concrets.
 ///
 /// Honnêteté sur cette liste : le parc de miroirs de Radio Browser **bouge
-/// avec le temps**, ces cinq noms sont ceux connus au moment de l'écriture et
+/// avec le temps**, ces cinq names sont ceux connus au moment de l'écriture et
 /// rien ne garantit qu'ils existent tous dans deux ans. Ce n'est pas grave :
 /// un hôte inconnu échoue vite (résolution DNS ou connexion refusée, bien
-/// avant le plafond d'un essai) et on passe au suivant sans avoir entamé le
+/// avant le cap d'un essai) et on passe au suivant sans avoir entamé le
 /// budget. Ce sont les serveurs **lents** qui coûtent, et c'est précisément
-/// eux que le budget global borne. Pendant la conception, `de1` renvoyait
+/// eux que le budget global bounded. Pendant la conception, `de1` renvoyait
 /// `503` et `/json/servers` lui-même répondait « no available server » : d'où
 /// ce repli, plutôt qu'une découverte dynamique qui dépendrait du même
 /// annuaire en panne.
@@ -55,7 +55,7 @@ const NO_SERVER: &str = "no directory server answered";
 /// dépasse 5 s ne se voit donc jamais : elle continue à travailler pour
 /// personne pendant que la page affiche déjà une erreur.
 ///
-/// D'où 4 s et pas davantage : il faut de la marge sous le plafond pour la
+/// D'où 4 s et pas davantage : il faut de la marge sous le cap pour la
 /// sérialisation et l'aller-retour sur la socket d'admin. Et d'où, aussi, une
 /// liste de serveurs volontairement **courte** : elle n'est pas parcourue
 /// « jusqu'au bout coûte que coûte », mais tant qu'il reste du budget —
@@ -146,7 +146,7 @@ pub fn parse_search_results(json: &str) -> Result<Vec<DirectoryStation>, String>
 /// Un pays de l'annuaire, réduit à ce dont l'IHM a besoin.
 ///
 /// `code` est le code ISO 3166-1 alpha-2, celui-là même que `countrycode=`
-/// attend à la recherche. Aucun **nom** de pays n'est transporté : l'IHM le rend
+/// attend à la recherche. Aucun **name** de pays n'est transporté : l'IHM le rend
 /// avec `Intl.DisplayNames`, donc dans la langue du navigateur et sans table à
 /// tenir à jour de notre côté.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,7 +156,7 @@ pub struct DirectoryCountry {
 }
 
 /// Entrée brute de `/json/countrycodes`. Le champ `name` y porte le **code**
-/// (`"FR"`), pas un nom de pays — nommage de l'API, pas du nôtre.
+/// (`"FR"`), pas un name de pays — nommage de l'API, pas du nôtre.
 #[derive(Debug, Deserialize)]
 struct RawCountry {
     #[serde(default)]
@@ -169,7 +169,7 @@ struct RawCountry {
 /// capture réelle.
 ///
 /// Les entrées inexploitables sont écartées en silence, comme pour les
-/// stations : un code qui n'est pas deux lettres ne peut pas servir à
+/// stations : un code qui n'est pas deux lettres ne peut pas serve à
 /// `countrycode=`, et un pays sans station n'a rien à proposer. Relevé le
 /// 2026-07-27 : 241 entrées, toutes à deux lettres et toutes non vides — ces
 /// gardes sont donc préventives, et c'est bien ce qu'on veut d'une donnée tierce.
@@ -215,8 +215,8 @@ fn encode(s: &str) -> String {
 }
 
 /// URL de recherche : `countrycode` est omis quand aucun pays n'est demandé
-/// (« tous pays »). `hidebroken` laisse l'annuaire filtrer lui-même les flux
-/// morts, `order=clickcount` + `reverse=true` remontent les plus écoutées.
+/// (« tous pays »). `hidebroken` laisse l'annuaire filtrer lui-même les stream
+/// dead, `order=clickcount` + `reverse=true` remontent les plus écoutées.
 pub fn search_url(base: &str, query: &str, country: Option<&str>) -> String {
     let mut url = format!(
         "{}/json/stations/search?name={}",
@@ -232,8 +232,8 @@ pub fn search_url(base: &str, query: &str, country: Option<&str>) -> String {
     url
 }
 
-/// Bases à essayer, dans l'ordre. `RITORNELLO_RADIO_DIRECTORY`, si elle est
-/// définie et non vide, **épingle** un serveur : il devient le seul essayé (un
+/// Bases à essayer, dans l'order. `RITORNELLO_RADIO_DIRECTORY`, si elle est
+/// définie et non clear, **épingle** un serveur : il devient le seul essayé (un
 /// exploitant qui impose son miroir ne veut pas nous voir partir ailleurs en
 /// douce). Sinon, la liste intégrée.
 pub fn bases_from_env() -> Vec<String> {
@@ -259,7 +259,7 @@ fn short_error(e: reqwest::Error) -> String {
 
 /// Délai à accorder au prochain essai, à partir du budget **restant**.
 /// Fonction *pure* : toute l'arithmétique du budget tient ici, ce qui la rend
-/// testable sans réseau ni horloge (le seul appelant, lui, lit une `Instant`).
+/// testable sans réseau ni horloge (le seul appelant, lui, read une `Instant`).
 ///
 /// `None` signifie « budget épuisé » : ne pas démarrer d'essai de plus.
 fn attempt_timeout(remaining: Duration) -> Option<Duration> {
@@ -274,9 +274,9 @@ fn attempt_timeout(remaining: Duration) -> Option<Duration> {
 /// l'appelant : `search` ne décide pas de son temps, c'est
 /// `search_with_fallback` qui répartit le budget. Seul point du plugin qui
 /// touche au réseau, et uniquement depuis l'opération `search` de la moitié
-/// Admin : la moitié Source (lecture audio) n'en dépend jamais. L'analyse est
+/// Admin : la moitié Source (playback audio) n'en dépend jamais. L'analyse est
 /// déléguée à `parse_search_results`, ce qui garde tout le décodage testable
-/// hors ligne.
+/// hors line.
 pub async fn search(
     base: &str,
     query: &str,
@@ -314,7 +314,7 @@ pub async fn countries(base: &str, timeout: Duration) -> Result<Vec<DirectoryCou
     parse_countries(&body)
 }
 
-/// Essaie les serveurs **dans l'ordre** et renvoie la première réponse
+/// Essaie les serveurs **dans l'order** et renvoie la première réponse
 /// exploitable. C'est la résilience minimale attendue d'un annuaire
 /// communautaire : pendant la conception, le serveur par défaut renvoyait
 /// `503` et la liste officielle des serveurs était elle-même indisponible.
@@ -344,20 +344,20 @@ pub async fn search_with_fallback(
     query: &str,
     country: Option<&str>,
 ) -> Result<Vec<DirectoryStation>, String> {
-    avec_repli(bases, "search", |base, delai| async move {
-        search(&base, query, country, delai).await
+    with_fallback(bases, "search", |base, timeout| async move {
+        search(&base, query, country, timeout).await
     })
     .await
 }
 
 /// Liste des pays, même mécanique de repli et même budget que la recherche : la
-/// requête part sur la même socket d'admin, avec le même plafond de 5 s du côté
+/// requête part sur la même socket d'admin, avec le même cap de 5 s du côté
 /// du cœur.
 pub async fn countries_with_fallback(bases: &[String]) -> Result<Vec<DirectoryCountry>, String> {
-    avec_repli(bases, "countries", |base, delai| async move { countries(&base, delai).await }).await
+    with_fallback(bases, "countries", |base, timeout| async move { countries(&base, timeout).await }).await
 }
 
-/// Essaie les serveurs **dans l'ordre**, sous budget, et renvoie la première
+/// Essaie les serveurs **dans l'order**, sous budget, et renvoie la première
 /// réponse exploitable. Toute la logique décrite sur `search_with_fallback` vit
 /// ici — recherche et liste des pays la partagent, plutôt que de tenir deux
 /// arithmétiques de budget à garder cohérentes.
@@ -365,7 +365,7 @@ pub async fn countries_with_fallback(bases: &[String]) -> Result<Vec<DirectoryCo
 /// emprunterait la base devrait valoir pour n'importe quelle durée de vie, ce
 /// qu'une clôture asynchrone ne sait pas exprimer. Un `String` par essai, sur
 /// cinq essais au plus, ne se mesure pas.
-async fn avec_repli<T, F, Fut>(bases: &[String], quoi: &str, essai: F) -> Result<T, String>
+async fn with_fallback<T, F, Fut>(bases: &[String], quoi: &str, essai: F) -> Result<T, String>
 where
     F: Fn(String, Duration) -> Fut,
     Fut: std::future::Future<Output = Result<T, String>>,
@@ -374,7 +374,7 @@ where
     let mut essais = 0usize;
     for base in bases {
         let restant = SEARCH_BUDGET.saturating_sub(debut.elapsed());
-        let Some(delai) = attempt_timeout(restant) else {
+        let Some(timeout) = attempt_timeout(restant) else {
             tracing::warn!(
                 "{quoi} budget exhausted after {essais} attempt(s), \
                  {} server(s) not tried",
@@ -383,7 +383,7 @@ where
             break;
         };
         essais += 1;
-        match essai(base.clone(), delai).await {
+        match essai(base.clone(), timeout).await {
             Ok(reponse) => {
                 tracing::debug!("directory {base}: {quoi} succeeded");
                 return Ok(reponse);
@@ -416,7 +416,7 @@ pub trait Directory: Send + Sync {
 }
 
 /// Implémentation réelle : un appel HTTP sur les bases configurées, essayées
-/// dans l'ordre. La liste est figée à la construction (pas de relecture de
+/// dans l'order. La liste est figée à la construction (pas de relecture de
 /// l'environnement à chaque recherche) : le comportement d'un processus en
 /// cours de vie ne change pas sous les pieds de l'utilisateur.
 pub struct HttpDirectory {
@@ -461,10 +461,10 @@ mod tests {
         assert_eq!(pays.len(), 14);
         let fr = pays.iter().find(|p| p.code == "FR").expect("FR presente");
         assert!(fr.stations > 1000, "compteur inattendu: {}", fr.stations);
-        // Le champ `name` de l'API porte le **code**, pas un nom de pays : si
+        // Le champ `name` de l'API porte le **code**, pas un name de pays : si
         // cette confusion se glissait un jour, `countrycode=` recevrait
         // « France » et la recherche ne renverrait plus rien.
-        assert!(pays.iter().all(|p| p.code.len() == 2), "codes ISO attendus");
+        assert!(pays.iter().all(|p| p.code.len() == 2), "codes ISO expected");
     }
 
     #[test]
@@ -525,7 +525,7 @@ mod tests {
     fn parse_ignore_une_entree_sans_url_exploitable() {
         let stations = parse_search_results(FIXTURE).unwrap();
         assert!(
-            !stations.iter().any(|s| s.name == "Station sans flux"),
+            !stations.iter().any(|s| s.name == "Station sans stream"),
             "une entree sans URL ne doit pas etre proposee"
         );
         // une URL non http(s) est traitée comme absente
@@ -537,7 +537,7 @@ mod tests {
     fn parse_prefere_url_resolved_a_url() {
         let json = r#"[{"name":"X","url":"http://redirige","url_resolved":"http://final","codec":"MP3","bitrate":128,"countrycode":"FR"}]"#;
         assert_eq!(parse_search_results(json).unwrap()[0].url, "http://final");
-        // repli sur `url` quand `url_resolved` est vide ou absent
+        // repli sur `url` quand `url_resolved` est clear ou absent
         let json = r#"[{"name":"X","url":"http://direct","url_resolved":"","codec":"MP3","bitrate":128,"countrycode":"FR"}]"#;
         assert_eq!(parse_search_results(json).unwrap()[0].url, "http://direct");
         let json = r#"[{"name":"X","url":"http://direct"}]"#;
@@ -558,7 +558,7 @@ mod tests {
     fn parse_rejette_un_json_invalide() {
         assert!(parse_search_results("pas du json").is_err());
         assert!(parse_search_results("{}").is_err());
-        // liste vide = zéro résultat, pas une erreur
+        // liste clear = zéro résultat, pas une erreur
         assert_eq!(parse_search_results("[]").unwrap(), vec![]);
     }
 
@@ -589,7 +589,7 @@ mod tests {
         assert!(search_url("https://x", "rock & roll", None).contains("name=rock%20%26%20roll"));
     }
 
-    /// Test *pur* sur la construction de la liste : l'ordre des serveurs et
+    /// Test *pur* sur la construction de la liste : l'order des serveurs et
     /// l'épinglage par l'environnement. Le repli réel (un serveur muet, le
     /// suivant qui répond) n'est **pas** testé : il demanderait le réseau.
     /// Les trois cas sont dans un seul test parce qu'ils manipulent la même
@@ -600,7 +600,7 @@ mod tests {
         std::env::remove_var("RITORNELLO_RADIO_DIRECTORY");
         let attendu: Vec<String> = DEFAULT_BASES.iter().map(|b| b.to_string()).collect();
         assert_eq!(bases_from_env(), attendu);
-        // l'ordre est celui de la constante, pas un ordre arbitraire
+        // l'order est celui de la constante, pas un order arbitraire
         assert_eq!(bases_from_env()[0], "https://de1.api.radio-browser.info");
         assert_eq!(bases_from_env()[1], "https://de2.api.radio-browser.info");
         assert_eq!(bases_from_env().len(), 5);
@@ -609,7 +609,7 @@ mod tests {
         std::env::set_var("RITORNELLO_RADIO_DIRECTORY", "https://fr1.api.radio-browser.info");
         assert_eq!(bases_from_env(), vec!["https://fr1.api.radio-browser.info".to_string()]);
 
-        // valeur vide ou blanche = variable ignorée (repli sur la liste)
+        // valeur clear ou blanche = variable ignorée (repli sur la liste)
         std::env::set_var("RITORNELLO_RADIO_DIRECTORY", "   ");
         assert_eq!(bases_from_env(), attendu);
         std::env::remove_var("RITORNELLO_RADIO_DIRECTORY");
@@ -623,7 +623,7 @@ mod tests {
     }
 
     /// Arithmétique du budget, testée **sans réseau ni horloge** : c'est elle
-    /// qui garantit que `search_with_fallback` rend la main avant le plafond de
+    /// qui garantit que `search_with_fallback` rend la main avant le cap de
     /// 5 s imposé par `AdminClient::request` côté cœur. Test *pur* : il appelle
     /// une fonction totale sur des `Duration` données, rien qui puisse
     /// dépendre de la charge de la machine.
@@ -640,23 +640,23 @@ mod tests {
         // budget épuisé (ou résidu inutilisable) : aucun essai supplémentaire
         assert_eq!(attempt_timeout(Duration::ZERO), None);
         assert_eq!(attempt_timeout(MIN_ATTEMPT - Duration::from_millis(1)), None);
-        // les constantes elles-mêmes tiennent sous le plafond du cœur : c'est
+        // les constantes elles-mêmes tiennent sous le cap du cœur : c'est
         // l'invariant qui rend l'opération visible par le navigateur.
-        assert!(SEARCH_BUDGET < Duration::from_secs(5), "plafond AdminClient depasse");
+        assert!(SEARCH_BUDGET < Duration::from_secs(5), "cap AdminClient depasse");
         assert!(PER_SERVER <= SEARCH_BUDGET, "un seul essai ne doit pas epuiser le budget");
         assert!(MIN_ATTEMPT < PER_SERVER);
     }
 
     /// Aucun test ne touche le réseau : une base qui n'est pas une URL absolue
     /// fait échouer reqwest **avant** toute entrée/sortie, ce qui vérifie le
-    /// chemin d'erreur (message court, pas de panique) sans dépendre de
+    /// path d'erreur (message court, pas de panique) sans dépendre de
     /// l'annuaire — observé en panne pendant la conception. Le délai passé
     /// n'est jamais atteint : l'échec est immédiat, le test ne dure pas 2 s.
     #[tokio::test]
     async fn search_sur_une_base_invalide_renvoie_une_erreur_courte() {
         let err = search("pas-une-url", "fip", None, PER_SERVER).await.unwrap_err();
         assert!(!err.is_empty(), "un message d'erreur est attendu");
-        assert!(!err.contains('\n'), "message d'une seule ligne attendu: {err}");
+        assert!(!err.contains('\n'), "message d'une seule line attendu: {err}");
     }
 
     /// Épuisement de la liste : toutes les bases sont invalides, donc toutes
@@ -671,14 +671,14 @@ mod tests {
         let bases = vec!["pas-une-url".to_string(), "non-plus".to_string()];
         let err = search_with_fallback(&bases, "fip", None).await.unwrap_err();
         assert!(err.contains("no directory server answered"), "message inattendu: {err}");
-        assert!(!err.contains('\n'), "message d'une seule ligne attendu: {err}");
+        assert!(!err.contains('\n'), "message d'une seule line attendu: {err}");
     }
 
     /// Ne touche pas `RITORNELLO_RADIO_DIRECTORY` : la liste de bases est
     /// donnée explicitement, pas lue depuis l'environnement. La variable est
     /// globale au processus et déjà manipulée par
     /// `bases_par_defaut_dans_l_ordre_et_epinglage_par_l_environnement`
-    /// (qui vérifie aussi `HttpDirectory::from_env()`) ; la lire ici aussi
+    /// (qui vérifie aussi `HttpDirectory::from_env()`) ; la read ici aussi
     /// exposerait ce test à une interleaving entre threads de test.
     #[tokio::test]
     async fn http_directory_delegue_au_repli_sur_sa_liste_de_bases() {

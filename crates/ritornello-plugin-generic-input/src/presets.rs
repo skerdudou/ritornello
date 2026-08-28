@@ -3,7 +3,7 @@ use ritornello_i18n::Catalog;
 use serde::Deserialize;
 use std::path::Path;
 
-/// Un preset est une simple liste de bindings, sans nom de périphérique.
+/// Un preset est une simple liste de bindings, sans name de périphérique.
 #[derive(Debug, Clone, Default, Deserialize)]
 struct Preset {
     #[serde(default)]
@@ -11,7 +11,7 @@ struct Preset {
 }
 
 /// Preset introuvable, illisible ou invalide — un seul cas d'erreur côté
-/// utilisateur : « ce preset n'existe pas ». Le détail part dans les journaux.
+/// utilisateur : « ce preset n'existe pas ». Le détail part dans les logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownPreset(pub String);
 
@@ -29,29 +29,29 @@ impl std::fmt::Display for UnknownPreset {
 
 impl std::error::Error for UnknownPreset {}
 
-/// Un nom de preset est un identifiant simple : il vient du navigateur et sert
-/// à construire un chemin, donc ni séparateur ni point (pas de `../`).
-fn nom_valide(name: &str) -> bool {
+/// Un name de preset est un identifiant simple : il vient du navigateur et sert
+/// à construire un path, donc ni séparateur ni point (pas de `../`).
+fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Parse pur du listing d'un répertoire : ne garde que les `*.toml` au nom
+/// Parse pur du listing d'un répertoire : ne garde que les `*.toml` au name
 /// valide, sans l'extension, triés et dédoublonnés. Séparé de l'accès disque
 /// pour être testable (comme `audio_output::parse_device_list` du cœur).
 pub fn parse_preset_names(entries: &[String]) -> Vec<String> {
-    let mut noms: Vec<String> = entries
+    let mut names: Vec<String> = entries
         .iter()
         .filter_map(|e| e.strip_suffix(".toml"))
-        .filter(|n| nom_valide(n))
+        .filter(|n| valid_name(n))
         .map(|n| n.to_string())
         .collect();
-    noms.sort();
-    noms.dedup();
-    noms
+    names.sort();
+    names.dedup();
+    names
 }
 
-/// Noms des presets disponibles. Répertoire absent ou illisible → liste vide.
+/// Noms des presets disponibles. Répertoire absent ou illisible → liste clear.
 pub fn list(root: &Path) -> Vec<String> {
     let Ok(rd) = std::fs::read_dir(root) else {
         tracing::warn!("preset directory {} unreadable: no preset", root.display());
@@ -76,7 +76,7 @@ pub fn parse_preset(content: &str) -> Result<Vec<Binding>, String> {
 /// Charge les bindings d'un preset. Nom invalide, fichier absent ou TOML
 /// illisible → `UnknownPreset` (avec un `warn` détaillant la vraie cause).
 pub fn load(root: &Path, name: &str) -> Result<Vec<Binding>, UnknownPreset> {
-    if !nom_valide(name) {
+    if !valid_name(name) {
         tracing::warn!("preset name rejected: {name}");
         return Err(UnknownPreset(name.to_string()));
     }

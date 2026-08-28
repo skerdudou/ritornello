@@ -24,7 +24,7 @@ const RACINE_PAQUET = process.cwd()
 
 // Lecteur TOML plat ecrit a la main : le format des catalogues embarques
 // est une simple suite de lignes `cle = "valeur"`, jamais de table
-// `[[...]]`. Suffisant ici, inutile d'ajouter une dependance TOML.
+// `[[...]]`. Suffisant ici, inutile d'add une dependance TOML.
 function clesToml(chemin: string): Set<string> {
   const cles = new Set<string>()
   for (const ligneBrute of readFileSync(chemin, 'utf8').split(/\r?\n/)) {

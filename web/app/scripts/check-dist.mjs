@@ -11,7 +11,7 @@ import { fileURLToPath, URL } from 'node:url'
 const distDir = fileURLToPath(new URL('../dist', import.meta.url))
 const assetsDir = fileURLToPath(new URL('../dist/assets', import.meta.url))
 
-function echouer(message) {
+function fail(message) {
   console.error(`check-dist: ${message}`)
   process.exit(1)
 }
@@ -22,28 +22,28 @@ function echouer(message) {
 // as far as the build is concerned.
 const indexHtml = readFileSync(`${distDir}/index.html`, 'utf8')
 if (!indexHtml.includes('<script type="importmap">')) {
-  echouer(
+  fail(
     'aucune balise <script type="importmap"> dans dist/index.html — ' +
-      'le plugin shellPlugin (vite.config.ts) n\'a peut-etre pas tourne, ' +
+      'le plugin shellPlugin (vite.config.ts) n\'a peut-etre step tourne, ' +
       'ou le marqueur <!--IMPORTMAP--> a ete retire de index.html',
   )
 }
 if (!indexHtml.includes('"vue":"/assets/vue.js"')) {
-  echouer(
+  fail(
     'import map presente mais sans entree vers /assets/vue.js — ' +
       'verifier la constante IMPORT_MAP dans vite.config.ts',
   )
 }
 if (!indexHtml.includes('"@ritornello/ui":"/assets/ui-kit.js"')) {
-  echouer(
+  fail(
     'import map presente mais sans entree vers /assets/ui-kit.js — ' +
       'verifier la constante IMPORT_MAP dans vite.config.ts',
   )
 }
 
-const fichiers = readdirSync(assetsDir).filter((f) => f.endsWith('.js'))
+const files = readdirSync(assetsDir).filter((f) => f.endsWith('.js'))
 
-for (const fichier of fichiers) {
+for (const fichier of files) {
   const contenu = readFileSync(`${assetsDir}/${fichier}`, 'utf8')
 
   // 2. `build.lib` mode (used for `vue.js` and, kit side, for
@@ -51,7 +51,7 @@ for (const fichier of fichiers) {
   // reference crashes the browser, which has no global `process`. This is
   // exactly fix round 1's Critical.
   if (contenu.includes('process.env')) {
-    echouer(
+    fail(
       `${fichier} contient encore "process.env" — ajouter/verifier le define ` +
         "'process.env.NODE_ENV': JSON.stringify('production') dans la config vite.lib " +
         "correspondante (vite.vue.config.ts pour vue.js, web/kit/vite.config.ts pour " +
@@ -66,10 +66,10 @@ for (const fichier of fichiers) {
   if (fichier.startsWith('app-')) {
     for (const empreinte of ['__v_isRef', '__v_skip', '[Vue warn]']) {
       if (contenu.includes(empreinte)) {
-        echouer(
+        fail(
           `${fichier} contient l'empreinte de runtime Vue "${empreinte}" — ` +
             "verifier que 'vue' figure dans rollupOptions.external de vite.config.ts " +
-            'et que ce fichier ne bundle pas Vue en double.',
+            'et que ce fichier ne bundle step Vue en double.',
         )
       }
     }

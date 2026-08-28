@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { PlayerPayload } from '../types'
-import { formateDuree, formatePosition, riendAfficher, usePlayer } from './usePlayer'
+import { formatDuration, formatPosition, nothingToShow, usePlayer } from './usePlayer'
 
 /** Etat complet, dont chaque test retire ce qu'il veut eprouver. */
-function etat(partiel: Partial<PlayerPayload> = {}): PlayerPayload {
+function state(partiel: Partial<PlayerPayload> = {}): PlayerPayload {
   return {
     source: 'radio',
     volume: 60,
@@ -44,60 +44,60 @@ class FauxEventSource {
   }
 }
 
-describe('formateDuree', () => {
+describe('formatDuration', () => {
   it('formate en minutes et secondes', () => {
-    expect(formateDuree(214)).toBe('3:34')
-    expect(formateDuree(60)).toBe('1:00')
-    expect(formateDuree(9)).toBe('0:09')
-    expect(formateDuree(3600)).toBe('60:00')
+    expect(formatDuration(214)).toBe('3:34')
+    expect(formatDuration(60)).toBe('1:00')
+    expect(formatDuration(9)).toBe('0:09')
+    expect(formatDuration(3600)).toBe('60:00')
   })
 
   it('traite comme inconnue toute valeur inexploitable', () => {
     // Ces valeurs viennent d'un tiers : mieux vaut ne rien afficher que « -1:59 ».
-    expect(formateDuree(null)).toBeNull()
-    expect(formateDuree(undefined)).toBeNull()
-    expect(formateDuree(0)).toBeNull()
-    expect(formateDuree(-5)).toBeNull()
-    expect(formateDuree(Number.NaN)).toBeNull()
-    expect(formateDuree(Number.POSITIVE_INFINITY)).toBeNull()
+    expect(formatDuration(null)).toBeNull()
+    expect(formatDuration(undefined)).toBeNull()
+    expect(formatDuration(0)).toBeNull()
+    expect(formatDuration(-5)).toBeNull()
+    expect(formatDuration(Number.NaN)).toBeNull()
+    expect(formatDuration(Number.POSITIVE_INFINITY)).toBeNull()
   })
 })
 
-describe('formatePosition', () => {
-  // `formateDuree` refuse les valeurs <= 0, ce qui est juste pour une duree
+describe('formatPosition', () => {
+  // `formatDuration` refuse les valeurs <= 0, ce qui est juste pour une duration
   // et faux pour une position : `0:00` est un instant parfaitement legitime.
   // Deux fonctions plutot qu'un assouplissement de la premiere, qui ferait
   // reapparaitre des « 0:00 » la ou le refus servait.
   it('accepte zero', () => {
-    expect(formatePosition(0)).toBe('0:00')
+    expect(formatPosition(0)).toBe('0:00')
   })
   it('formate minutes et secondes', () => {
-    expect(formatePosition(87)).toBe('1:27')
-    expect(formatePosition(3725)).toBe('62:05')
+    expect(formatPosition(87)).toBe('1:27')
+    expect(formatPosition(3725)).toBe('62:05')
   })
   it('rend null sur une absence', () => {
-    expect(formatePosition(null)).toBeNull()
-    expect(formatePosition(undefined)).toBeNull()
-    expect(formatePosition(-1)).toBeNull()
-    expect(formatePosition(Number.NaN)).toBeNull()
-    expect(formatePosition(Number.POSITIVE_INFINITY)).toBeNull()
+    expect(formatPosition(null)).toBeNull()
+    expect(formatPosition(undefined)).toBeNull()
+    expect(formatPosition(-1)).toBeNull()
+    expect(formatPosition(Number.NaN)).toBeNull()
+    expect(formatPosition(Number.POSITIVE_INFINITY)).toBeNull()
   })
 })
 
-describe('riendAfficher', () => {
+describe('nothingToShow', () => {
   it('accepte toute information partielle', () => {
-    // Decision du proprietaire : on affiche tout ce qui est disponible.
-    expect(riendAfficher(etat())).toBe(false)
-    expect(riendAfficher(etat({ artist: null }))).toBe(false)
-    expect(riendAfficher(etat({ title: null }))).toBe(false)
-    expect(riendAfficher(etat({ artist: null, title: null, album: 'Kind of Blue' }))).toBe(false)
+    // Decision du proprietaire : on displayed tout ce qui est disponible.
+    expect(nothingToShow(state())).toBe(false)
+    expect(nothingToShow(state({ artist: null }))).toBe(false)
+    expect(nothingToShow(state({ title: null }))).toBe(false)
+    expect(nothingToShow(state({ artist: null, title: null, album: 'Kind of Blue' }))).toBe(false)
   })
 
-  it('ne retient ni un etat absent, ni une duree seule', () => {
-    expect(riendAfficher(null)).toBe(true)
-    expect(riendAfficher(etat({ artist: null, title: null, album: null }))).toBe(true)
+  it('ne retient ni un state absent, ni une duration seule', () => {
+    expect(nothingToShow(null)).toBe(true)
+    expect(nothingToShow(state({ artist: null, title: null, album: null }))).toBe(true)
     // « 3:34 » sans titre ni artiste n'informe personne.
-    expect(riendAfficher(etat({ artist: null, title: null, album: null, duration_s: 214 }))).toBe(true)
+    expect(nothingToShow(state({ artist: null, title: null, album: null, duration_s: 214 }))).toBe(true)
   })
 })
 
@@ -105,15 +105,15 @@ describe('usePlayer', () => {
   it('ouvre le flux pousse et applique chaque trame', () => {
     FauxEventSource.instances = []
     vi.stubGlobal('EventSource', FauxEventSource)
-    const { etat: courant, ouvre, ferme } = usePlayer()
+    const { state: courant, ouvre, ferme } = usePlayer()
     ouvre()
     const flux = FauxEventSource.instances[0]!
     expect(flux.url).toBe('/api/player')
     expect(courant.value).toBeNull()
 
-    flux.pousse(etat({ title: 'premier' }))
+    flux.pousse(state({ title: 'premier' }))
     expect(courant.value?.title).toBe('premier')
-    flux.pousse(etat({ title: 'second' }))
+    flux.pousse(state({ title: 'second' }))
     expect(courant.value?.title).toBe('second')
 
     ferme()
@@ -125,11 +125,11 @@ describe('usePlayer', () => {
     // de laisser le morceau precedent une seconde de trop.
     FauxEventSource.instances = []
     vi.stubGlobal('EventSource', FauxEventSource)
-    const { etat: courant, ouvre } = usePlayer()
+    const { state: courant, ouvre } = usePlayer()
     ouvre()
     const flux = FauxEventSource.instances[0]!
-    flux.pousse(etat({ title: 'connu' }))
-    flux.pousse('pas du json')
+    flux.pousse(state({ title: 'connu' }))
+    flux.pousse('step du json')
     expect(courant.value?.title).toBe('connu')
   })
 
@@ -146,7 +146,7 @@ describe('usePlayer', () => {
   it('sans EventSource, previent et laisse le reste de la page vivre', () => {
     vi.stubGlobal('EventSource', undefined)
     const avertit = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const { etat: courant, ouvre } = usePlayer()
+    const { state: courant, ouvre } = usePlayer()
     expect(() => ouvre()).not.toThrow()
     expect(courant.value).toBeNull()
     expect(avertit).toHaveBeenCalled()

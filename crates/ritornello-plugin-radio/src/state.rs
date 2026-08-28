@@ -5,7 +5,7 @@ use std::path::Path;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginState {
     pub preset: u8,
-    /// Dernier pays choisi dans la page d'admin : code ISO, ou chaîne vide pour
+    /// Dernier pays choisi dans la page d'admin : code ISO, ou chaîne clear pour
     /// « tous les pays ».
     ///
     /// Persisté côté plugin et non côté navigateur : le choix suit l'appareil,
@@ -52,16 +52,16 @@ pub fn save(path: &Path, state: &PluginState) -> Result<()> {
 /// Les deux moitiés du plugin écrivent dans le même fichier : la Source pour la
 /// présélection, l'Admin pour le pays. Un `save` construit de toutes pièces par
 /// l'une effacerait donc le champ de l'autre — c'est arrivé par construction
-/// lors de l'ajout du pays, d'où cette lecture-modification-écriture.
+/// lors de l'ajout du pays, d'où cette playback-modification-écriture.
 ///
 /// Reste une fenêtre de course : deux lectures-modifications simultanées
 /// peuvent se perdre l'une l'autre. Conséquence maximale, une préférence
 /// oubliée jusqu'au prochain changement ; un verrou ne se justifierait pas
 /// pour cela.
 pub fn update(path: &Path, modifie: impl FnOnce(&mut PluginState)) -> Result<()> {
-    let mut etat = load(path);
-    modifie(&mut etat);
-    save(path, &etat)
+    let mut state = load(path);
+    modifie(&mut state);
+    save(path, &state)
 }
 
 #[cfg(test)]
@@ -71,9 +71,9 @@ mod tests {
     #[test]
     fn defauts_dun_fichier_absent() {
         let dir = tempfile::tempdir().unwrap();
-        let etat = load(&dir.path().join("absent.json"));
-        assert_eq!(etat.preset, 1);
-        assert_eq!(etat.country, "", "aucun pays impose par defaut");
+        let state = load(&dir.path().join("absent.json"));
+        assert_eq!(state.preset, 1);
+        assert_eq!(state.country, "", "aucun pays impose par defaut");
     }
 
     #[test]
@@ -81,33 +81,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         save(&path, &PluginState { preset: 5, country: "BE".into() }).unwrap();
-        let etat = load(&path);
-        assert_eq!(etat.preset, 5);
-        assert_eq!(etat.country, "BE");
+        let state = load(&path);
+        assert_eq!(state.preset, 5);
+        assert_eq!(state.country, "BE");
     }
 
     #[test]
     fn un_fichier_dune_version_anterieure_se_relit() {
         // Sans `#[serde(default)]` sur `country`, une mise a jour de l'appareil
-        // ferait echouer la lecture et repartir sur la preselection 1.
+        // ferait echouer la playback et repartir sur la preselection 1.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         std::fs::write(&path, r#"{"preset":7}"#).unwrap();
-        let etat = load(&path);
-        assert_eq!(etat.preset, 7);
-        assert_eq!(etat.country, "");
+        let state = load(&path);
+        assert_eq!(state.preset, 7);
+        assert_eq!(state.country, "");
     }
 
     #[test]
     fn update_ne_detruit_pas_le_champ_quon_ne_touche_pas() {
-        // Les deux moities du plugin ecrivent dans ce fichier : c'est
+        // Les deux halves du plugin ecrivent dans ce fichier : c'est
         // exactement le defaut que `update` existe pour eviter.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         update(&path, |s| s.country = "DE".into()).unwrap();
         update(&path, |s| s.preset = 4).unwrap();
-        let etat = load(&path);
-        assert_eq!(etat.preset, 4);
-        assert_eq!(etat.country, "DE", "le pays doit survivre a une ecriture de preselection");
+        let state = load(&path);
+        assert_eq!(state.preset, 4);
+        assert_eq!(state.country, "DE", "le pays doit survivre a une ecriture de preselection");
     }
 }

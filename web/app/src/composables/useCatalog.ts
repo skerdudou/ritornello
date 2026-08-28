@@ -11,7 +11,7 @@ export function useCatalog() {
     // Un échec transitoire garde le catalogue en place : l'écraser par `{}`
     // faisait basculer toute l'IHM (nav, cartes, télécommande) en clés brutes
     // jusqu'à un rechargement manuel — pire que de rester une langue en
-    // retard. Même convention que `chargerTout` de la page de statut.
+    // retard. Même convention que `loadAll` de la page de statut.
     catalog.value = await api.get<Catalog>('/api/i18n').catch(() => catalog.value)
   }
   return { t, reload }

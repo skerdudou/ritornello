@@ -25,7 +25,7 @@ impl Playlist {
     ///
     /// La source n'a longtemps annoncé qu'un `preset_count`, si bien que la
     /// grille de la page d'accueil ne montrait que des numéros nus là où la
-    /// radio affiche « 1 · FIP ». Le nom existait pourtant déjà — c'est celui
+    /// radio affiche « 1 · FIP ». Le name existait pourtant déjà — c'est celui
     /// que `preset_name` publie pour la piste courante, et celui que le m3u
     /// écrit en `#EXTINF`.
     ///
@@ -48,15 +48,15 @@ impl Playlist {
         self.entries.get(self.index)
     }
 
-    /// Numéro de présélection de ce qui joue (1-based), plafonné à 99 pour
-    /// tenir dans un `u8`.
+    /// Numéro de présélection de ce qui plays (1-based), plafonné à 99 pour
+    /// tenir in_dir un `u8`.
     pub fn preset(&self) -> Option<u8> {
         (self.index < self.entries.len()).then(|| (self.index + 1).min(99) as u8)
     }
 
     /// Positionne sur la présélection `n` (1-based). Rend `false` — **sans
-    /// déplacer la lecture** — quand elle n'existe pas : un échec de sélection
-    /// ne doit pas interrompre ce qui joue.
+    /// déplacer la playback** — quand elle n'existe pas : un échec de sélection
+    /// ne doit pas interrompre ce qui plays.
     pub fn select(&mut self, n: u8) -> bool {
         if n == 0 || usize::from(n) > self.entries.len() {
             return false;
@@ -65,7 +65,7 @@ impl Playlist {
         true
     }
 
-    /// Recale l'index sur une piste annoncée par le lecteur. Rend `false` pour
+    /// Recale l'index sur une piste annoncée par le player. Rend `false` pour
     /// un index hors liste — mpv dit `-1` en fin de liste, et le cœur le relaie
     /// tel quel.
     pub fn set_index(&mut self, n: i64) -> bool {
@@ -117,8 +117,8 @@ mod tests {
 
     #[test]
     fn les_preselections_nommees_suivent_les_positions_et_le_meme_plafond() {
-        // Le nom est celui que `preset_name` publie déjà pour la piste
-        // courante : les tuiles de la grille et le lecteur doivent dire la même
+        // Le name est celui que `preset_name` publie déjà pour la piste
+        // courante : les tuiles de la grille et le player doivent dire la même
         // chose de la même piste.
         let p = liste_de(3);
         assert_eq!(
@@ -129,9 +129,9 @@ mod tests {
                 Preset { index: 3, name: "03".into() },
             ]
         );
-        // Le même plafond que `preset_count`, et il doit le rester : une
+        // Le même cap que `preset_count`, et il doit le rester : une
         // présélection annoncée que `Command::Select` ne peut pas atteindre
-        // ferait une tuile qui ne joue rien.
+        // ferait une tuile qui ne plays rien.
         let longue = liste_de(150);
         assert_eq!(longue.presets().len(), usize::from(longue.preset_count()));
         assert_eq!(longue.presets().last().unwrap().index, 99);
@@ -144,7 +144,7 @@ mod tests {
         p.index = 1;
         assert!(!p.select(0), "le zero n'est pas une presentation");
         assert!(!p.select(4));
-        assert_eq!(p.index, 1, "un echec ne doit pas deplacer la lecture");
+        assert_eq!(p.index, 1, "un failure ne doit pas deplacer la playback");
         assert!(p.select(3));
         assert_eq!(p.index, 2);
     }
@@ -170,8 +170,8 @@ mod tests {
 
     #[test]
     fn le_m3u_de_mpv_porte_des_chemins_absolus() {
-        // Il est écrit dans le répertoire d'état et lu par un autre processus :
-        // un chemin relatif s'y résoudrait contre le répertoire courant de mpv.
+        // Il est écrit in_dir le répertoire d'état et lu par un autre processus :
+        // un path relatif s'y résoudrait contre le répertoire courant de mpv.
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("plugin-files.m3u");
         liste_de(2).write_for_mpv(&f).unwrap();

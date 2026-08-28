@@ -8,7 +8,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as AsyncRwLock;
 
 /// Opérations portées par `SetData`, discriminées par le champ `op` (modèle du
-/// plugin generic-input) : le protocole d'admin n'est **pas** étendu, tout
+/// plugin generic-input) : le protocol d'admin n'est **pas** étendu, tout
 /// passe par `GetAsset` / `GetCatalog` / `GetData` / `SetData`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -20,14 +20,14 @@ enum Op {
         #[serde(default)]
         stations: Vec<Station>,
     },
-    /// Interroge l'annuaire en ligne et mémorise les résultats. Aucune station
-    /// n'est persistée : l'utilisateur ajoute ensuite celles qui l'intéressent
+    /// Interroge l'annuaire en line et mémorise les résultats. Aucune station
+    /// n'est persistée : l'utilisateur add ensuite celles qui l'intéressent
     /// puis clique « Enregistrer ». Le **pays**, lui, est retenu (voir
     /// `PluginState::country`) : c'est une préférence de l'appareil, et la
     /// retrouver au rechargement évite de la resaisir à chaque fois.
     Search {
         query: String,
-        /// Code pays ISO ; chaîne vide = « tous pays ».
+        /// Code pays ISO ; chaîne clear = « tous pays ».
         #[serde(default)]
         country: String,
     },
@@ -50,7 +50,7 @@ pub struct RadioAdmin {
     /// résultats sans jamais toucher au réseau.
     pub directory: Arc<dyn Directory>,
     /// Derniers résultats de recherche, exposés par `get_data` (champ
-    /// `search`) ; liste vide tant qu'aucune recherche n'a été faite. Une
+    /// `search`) ; liste clear tant qu'aucune recherche n'a été faite. Une
     /// recherche en échec les laisse intacts.
     pub search: RwLock<Vec<DirectoryStation>>,
     /// Liste des pays, une fois récupérée. Vide tant que l'utilisateur n'a pas
@@ -117,9 +117,9 @@ impl AdminPlugin for RadioAdmin {
                     .validate()
                     .map_err(|e| e.message(&self.catalog.read().unwrap()))?;
                 stations.save(&self.stations_path).map_err(|e| {
-                    // Le détail technique (chemin, cause I/O) reste dans le
-                    // journal : un `/var/lib` en lecture seule doit rester
-                    // diagnosticable, mais pas au prix de servir ce diagnostic
+                    // Le détail technique (path, cause I/O) reste dans le
+                    // journal : un `/var/lib` en playback seule doit rester
+                    // diagnosticable, mais pas au prix de serve ce diagnostic
                     // comme texte d'interface.
                     tracing::warn!("failed to save stations: {e}");
                     self.catalog.read().unwrap().get("save_failed").to_string()
@@ -128,9 +128,9 @@ impl AdminPlugin for RadioAdmin {
                 *self.stations.write().await = stations;
                 // Annonce spontanée à la moitié Source, sur **chaque**
                 // enregistrement réussi — même si le compte ne change pas :
-                // comparer avant d'envoyer coûterait une garde pour un gain
+                // comparer avant d'send_frame coûterait une garde pour un gain
                 // nul, la fusion côté cœur (`Core::handle_source_update`) et
-                // sa diffusion (`publie_etat`) dédupliquant déjà toute trame
+                // sa diffusion (`publish_state`) dédupliquant déjà toute trame
                 // identique à la précédente. Aucun récepteur en mode dégradé
                 // (pas d'admin) : `send` renvoie alors une erreur sans
                 // conséquence, ignorée.
@@ -142,7 +142,7 @@ impl AdminPlugin for RadioAdmin {
                 let pays = if pays.is_empty() { None } else { Some(pays) };
                 // L'appel réseau est attendu ici (pas de sondage, contrairement
                 // à l'apprentissage du plugin input) ; il ne concerne que la
-                // moitié Admin, la lecture audio n'est jamais bloquée. C'est
+                // moitié Admin, la playback audio n'est jamais bloquée. C'est
                 // aussi le point qui doit rendre la main avant les 5 s
                 // qu'`AdminClient::request` accorde au cœur : le budget de
                 // `search_with_fallback` (4 s) est là pour ça.
@@ -294,7 +294,7 @@ mod tests {
         assert_eq!(mime, "text/javascript");
         assert!(!corps.is_empty());
         assert_eq!(a.asset("ui.css").unwrap().0, "text/css");
-        // Un chemin inconnu n'est pas une erreur : c'est un 404 cote coeur.
+        // Un path inconnu n'est pas une erreur : c'est un 404 cote coeur.
         assert!(a.asset("../../../etc/passwd").is_none());
         assert!(a.asset("index.html").is_none());
     }
@@ -303,7 +303,7 @@ mod tests {
     fn catalog_expose_les_cles_du_composant() {
         let dir = tempfile::tempdir().unwrap();
         let v = admin(dir.path()).catalog();
-        assert!(v["btn_save"].is_string(), "le catalogue doit porter les cles du plugin");
+        assert!(v["btn_save"].is_string(), "le sources_catalog doit porter les cles du plugin");
     }
 
     #[tokio::test]
@@ -335,8 +335,8 @@ mod tests {
         // d'E/S, sans jamais toucher au disque des stations réelles.
         // Régression visée : `Stations::save(...).map_err(|e| e.to_string())`
         // mettait cette erreur brute (chemins compris) dans le corps de la
-        // réponse — le texte destiné au lecteur doit rester une phrase de
-        // catalogue, le détail technique allant au journal.
+        // réponse — le texte destiné au player doit rester une phrase de
+        // sources_catalog, le détail technique allant au journal.
         let dir = tempfile::tempdir().unwrap();
         let obstacle = dir.path().join("obstacle");
         std::fs::write(&obstacle, b"pas un repertoire").unwrap();
@@ -420,8 +420,8 @@ mod tests {
     #[tokio::test]
     async fn save_dune_preselection_hors_bornes_est_refuse_cote_serveur() {
         // Filet serveur : `Stations::validate` reste l'autorité même pour un
-        // payload qui ne passe pas par la page d'admin — la borne est
-        // désormais 1..=99 (avant : 1..=9, d'où l'ancien nom de ce test).
+        // payload qui ne passe pas par la page d'admin — la bounded est
+        // désormais 1..=99 (avant : 1..=9, d'où l'ancien name de ce test).
         let dir = tempfile::tempdir().unwrap();
         let mut a = admin(dir.path());
         let stations = vec![serde_json::json!({ "name": "S100", "url": "http://x", "preset": 100 })];
@@ -530,15 +530,15 @@ mod tests {
 
     #[tokio::test]
     async fn memoriser_le_pays_ne_perd_pas_la_preselection() {
-        // Les deux moities du plugin ecrivent dans le meme fichier d'etat.
+        // Les deux halves du plugin ecrivent dans le meme fichier d'state.
         let dir = tempfile::tempdir().unwrap();
         let mut a = admin_avec(dir.path(), StubDirectory::ok(Vec::new()));
         crate::state::update(&a.state_path, |s| s.preset = 6).unwrap();
         let op = serde_json::json!({ "op": "search", "query": "rock", "country": "DE" });
         assert!(a.set_data(op).await.is_ok());
-        let etat = crate::state::load(&a.state_path);
-        assert_eq!(etat.country, "DE");
-        assert_eq!(etat.preset, 6, "la preselection ne doit pas etre ecrasee");
+        let state = crate::state::load(&a.state_path);
+        assert_eq!(state.country, "DE");
+        assert_eq!(state.preset, 6, "la preselection ne doit pas etre ecrasee");
     }
 
     #[tokio::test]
@@ -566,7 +566,7 @@ mod tests {
     }
 
     /// Pack français livré dans le dépôt.
-    fn pack_fr() -> String {
+    fn fr_pack() -> String {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../deploy/locales/radio/fr.toml");
         std::fs::read_to_string(p).expect("pack fr livre")
@@ -575,7 +575,7 @@ mod tests {
     #[test]
     fn parite_des_cles_entre_len_embarque_et_le_pack_fr() {
         let en = ritornello_i18n::try_parse(crate::RADIO_EN).unwrap();
-        let fr = ritornello_i18n::try_parse(&pack_fr()).unwrap();
+        let fr = ritornello_i18n::try_parse(&fr_pack()).unwrap();
         let mut cles_en: Vec<&String> = en.keys().collect();
         let mut cles_fr: Vec<&String> = fr.keys().collect();
         cles_en.sort();

@@ -23,31 +23,31 @@ const RACINE_PAQUET = process.cwd()
 
 // Lecteur TOML plat ecrit a la main : le format des catalogues embarques
 // est une simple suite de lignes `cle = "valeur"`, jamais de table
-// `[[...]]`. Suffisant ici, inutile d'ajouter une dependance TOML.
+// `[[...]]`. Suffisant ici, inutile d'add une dependance TOML.
 function clesToml(chemin: string): Set<string> {
   const cles = new Set<string>()
   for (const ligneBrute of readFileSync(chemin, 'utf8').split(/\r?\n/)) {
-    const ligne = ligneBrute.trim()
-    if (!ligne || ligne.startsWith('#')) continue
-    const i = ligne.indexOf('=')
+    const row = ligneBrute.trim()
+    if (!row || row.startsWith('#')) continue
+    const i = row.indexOf('=')
     if (i === -1) continue
-    const cle = ligne.slice(0, i).trim()
+    const cle = row.slice(0, i).trim()
     if (/^[A-Za-z0-9_]+$/.test(cle)) cles.add(cle)
   }
   return cles
 }
 
 function fichiersSource(dir: string): string[] {
-  const resultats: string[] = []
+  const results: string[] = []
   for (const entree of readdirSync(dir)) {
     const chemin = join(dir, entree)
     if (statSync(chemin).isDirectory()) {
-      resultats.push(...fichiersSource(chemin))
+      results.push(...fichiersSource(chemin))
     } else if (/\.(vue|ts)$/.test(entree) && !entree.endsWith('.test.ts')) {
-      resultats.push(chemin)
+      results.push(chemin)
     }
   }
-  return resultats
+  return results
 }
 
 // Cles appelees via `t('...')` (template) ou `t.value('...')` (script) avec

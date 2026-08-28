@@ -1,5 +1,5 @@
-//! Ligne de commande d'un plugin, telle que le cœur la construit
-//! (`plugins::spawn`) : `--register <chemin>`, `--name <nom>`, et
+//! Line de commande d'un plugin, telle que le cœur la construit
+//! (`plugins::spawn`) : `--register <path>`, `--name <name>`, et
 //! `--socket-prefix <préfixe>`, obligatoires.
 //!
 //! Un seul exemplaire ici plutôt qu'une copie par binaire : la revue de
@@ -14,7 +14,7 @@ use ritornello_proto::PluginKind;
 /// Valeur de l'option `flag` dans `args` (forme `--flag <valeur>`).
 ///
 /// Fonction pure pour être testable. `None` si l'option est absente ; panique
-/// **en nommant l'option** si elle est présente sans valeur — ces lignes de
+/// **en nommant l'option** si elle est présente sans valeur — ces lines de
 /// commande sont construites par le cœur, une valeur manquante est un bug de
 /// montage à désigner clairement.
 pub fn arg_value(args: &[String], flag: &str) -> Option<PathBuf> {
@@ -34,9 +34,9 @@ pub fn register_socket() -> PathBuf {
 
 /// Nom sous lequel le cœur connaît ce greffon (`--name`), obligatoire.
 ///
-/// Le greffon le **renvoie** dans son annonce sans jamais l'inventer : c'est
-/// le manifeste qui a autorité, sinon deux binaires pourraient réclamer le
-/// même nom et collisionner sur les chemins de sockets.
+/// Le greffon le **renvoie** dans son announcement sans jamais l'inventer : c'est
+/// le manifest qui a autorité, sinon deux binaires pourraient réclamer le
+/// même name et collisionner sur les chemins de sockets.
 pub fn plugin_name() -> String {
     let args: Vec<String> = std::env::args().collect();
     arg_value(&args, "--name")
@@ -48,21 +48,21 @@ pub fn plugin_name() -> String {
 /// Préfixe des sockets que ce greffon doit lier (`--socket-prefix`).
 ///
 /// Le cœur garde la maîtrise du répertoire et du préfixe ; le greffon n'a
-/// autorité que sur les suffixes, qui sont exactement ce qu'il annonce.
+/// autorité que sur les suffixes, qui sont exactement ce qu'il announcement.
 pub fn socket_prefix() -> PathBuf {
     let args: Vec<String> = std::env::args().collect();
     arg_value(&args, "--socket-prefix").expect("--socket-prefix <path> required")
 }
 
-/// `{prefixe}-{genre}.sock`.
-pub fn genre_socket(prefix: &std::path::Path, kind: PluginKind) -> PathBuf {
-    let genre = match kind {
+/// `{prefixe}-{kind}.sock`.
+pub fn socket_kind(prefix: &std::path::Path, kind: PluginKind) -> PathBuf {
+    let kind = match kind {
         PluginKind::Source => "source",
         PluginKind::Display => "display",
         PluginKind::Input => "input",
         PluginKind::Metadata => "metadata",
     };
-    PathBuf::from(format!("{}-{genre}.sock", prefix.display()))
+    PathBuf::from(format!("{}-{kind}.sock", prefix.display()))
 }
 
 /// `{prefixe}-admin.sock`.
@@ -119,7 +119,7 @@ mod tests {
     fn suffixe_un_prefixe_par_genre_et_par_admin() {
         let p = PathBuf::from("/run/ritornello/sockets/radio");
         assert_eq!(
-            super::genre_socket(&p, ritornello_proto::PluginKind::Source),
+            super::socket_kind(&p, ritornello_proto::PluginKind::Source),
             PathBuf::from("/run/ritornello/sockets/radio-source.sock")
         );
         assert_eq!(

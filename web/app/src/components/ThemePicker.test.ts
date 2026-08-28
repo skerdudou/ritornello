@@ -5,7 +5,7 @@ import ThemePicker from './ThemePicker.vue'
 describe('ThemePicker', () => {
   it('propage le placeholder du catalogue sur le champ de recherche rendu', () => {
     // Le placeholder vient désormais du catalogue (clé `theme_filter`, valeur
-    // anglaise embarquée « filter » — celle que le parcours Playwright cible
+    // anglaise embarquée « filter » — celle que le journey Playwright cible
     // via `getByPlaceholder('filter')`). Sans catalogue chargé, `t()` retombe
     // sur la clé : c'est elle qu'on doit voir descendre jusqu'à l'`<input>`
     // rendu par le composant `Input` du kit.
@@ -13,7 +13,7 @@ describe('ThemePicker', () => {
     expect(w.find('input').attributes('placeholder')).toBe('theme_filter')
   })
 
-  it('liste les 42 thèmes avec quatre pastilles chacun', () => {
+  it('list les 42 thèmes avec quatre pastilles chacun', () => {
     const w = mount(ThemePicker, { props: { current: 'northern-lights', mode: 'light' } })
     expect(w.findAll('[data-preset]')).toHaveLength(42)
     const carte = w.find('[data-preset="northern-lights"]')

@@ -1,8 +1,8 @@
-//! Langues : les packs disponibles sur disque, la selection courante (GET/PUT /api/locale) et le catalogue a plat servi a la SPA.
+//! Langues : les packs disponibles sur disque, la selection courante (GET/PUT /api/locale) et le sources_catalog a plat servi a la SPA.
 
 use super::*;
 
-/// Noms de langues disponibles à partir des noms de fichiers d'un répertoire
+/// Noms de langues disponibles à partir des names de fichiers d'un répertoire
 /// `core/` : `en` (toujours) + chaque `<lang>.toml`. Fonction pure, testable,
 /// séparée de l'accès disque (comme `audio_output::parse_device_list`).
 pub fn parse_available_locales(filenames: &[String]) -> Vec<String> {
@@ -44,22 +44,22 @@ pub(super) struct LocaleRequest {
     locale: String,
 }
 
-/// Forme d'un code de langue acceptable : ce que produisent les noms de
+/// Forme d'un code de langue acceptable : ce que produisent les names de
 /// fichiers `<lang>.toml` des packs (`fr`, `en`, `pt-BR`…).
 ///
 /// La valeur finit dans des chemins de fichiers (`<root>/<composant>/<lang>.toml`
 /// via `Catalog::load`), dans `state.json` et en variable d'environnement des
 /// plugins : même rigueur que pour le thème et la sortie audio, qui sont
-/// validés — une chaîne arbitraire ouvrait une traversée de chemin
+/// validés — une chaîne arbitraire ouvrait une traversée de path
 /// (`{"locale":"../../nimporte/quoi"}`) sur une API non authentifiée.
-pub(super) fn locale_valide(locale: &str) -> bool {
+pub(super) fn valid_locale(locale: &str) -> bool {
     !locale.is_empty()
         && locale.len() <= 16
         && locale.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 pub(super) async fn locale_put(State(state): State<AppState>, Json(req): Json<LocaleRequest>) -> StatusCode {
-    if !locale_valide(&req.locale) {
+    if !valid_locale(&req.locale) {
         return StatusCode::BAD_REQUEST;
     }
     *state.locale_current.write().await = Some(req.locale.clone());
@@ -69,7 +69,7 @@ pub(super) async fn locale_put(State(state): State<AppState>, Json(req): Json<Lo
     StatusCode::NO_CONTENT
 }
 
-/// Catalogue du cœur dans la langue courante, à plat, pour le `t()` de la SPA.
+/// SourcesCatalog du cœur dans la langue courante, à plat, pour le `t()` de la SPA.
 pub(super) async fn i18n_json(State(state): State<AppState>) -> Json<serde_json::Value> {
     let cat = state.catalog.read().await;
     Json(serde_json::json!(cat.entries()))
@@ -86,8 +86,8 @@ mod tests {
 
     #[test]
     fn parse_available_locales_prefixe_en_et_deduplique() {
-        let noms = vec!["fr.toml".to_string(), "en.toml".to_string(), "README.md".to_string()];
-        assert_eq!(parse_available_locales(&noms), vec!["en".to_string(), "fr".to_string()]);
+        let names = vec!["fr.toml".to_string(), "en.toml".to_string(), "README.md".to_string()];
+        assert_eq!(parse_available_locales(&names), vec!["en".to_string(), "fr".to_string()]);
     }
 
     #[tokio::test]
@@ -150,10 +150,10 @@ mod tests {
     #[test]
     fn locale_valide_accepte_les_codes_et_refuse_le_reste() {
         for ok in ["en", "fr", "pt-BR", "zh_Hant", "fr-CA"] {
-            assert!(locale_valide(ok), "{ok} devrait passer");
+            assert!(valid_locale(ok), "{ok} devrait passer");
         }
         for ko in ["", "..", "../fr", "fr/..", "fr toml", "a".repeat(17).as_str()] {
-            assert!(!locale_valide(ko), "{ko:?} devrait être refusé");
+            assert!(!valid_locale(ko), "{ko:?} devrait être refusé");
         }
     }
 

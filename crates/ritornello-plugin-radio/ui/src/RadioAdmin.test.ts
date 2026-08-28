@@ -1,7 +1,7 @@
 import { Dialog } from '@ritornello/ui'
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import PaysPicker from './PaysPicker.vue'
+import CountryPicker from './CountryPicker.vue'
 import RadioAdmin from './RadioAdmin.vue'
 
 const CATALOGUE = {
@@ -10,15 +10,15 @@ const CATALOGUE = {
   limit_reached: '99 maximum', empty_query: 'Saisir un terme',
   searching: 'Recherche…', no_results: 'Aucun résultat',
   col_num: 'N°', col_name: 'Nom', col_url: 'URL',
-  search_title: 'Annuaire', search_placeholder: 'nom', country_label: 'Pays',
-  country_all: 'Tous', country_filter_placeholder: 'Pays ou code',
-  country_none: 'Aucun pays', country_loading: 'Chargement…',
+  search_title: 'Annuaire', search_placeholder: 'nom', country_label: 'Country',
+  country_all: 'Tous', country_filter_placeholder: 'Country ou code',
+  country_none: 'Aucun country', country_loading: 'Chargement…',
   reorder_hint: 'Glisser', move_up: 'Monter', move_down: 'Descendre',
   load_error_1: 'Erreur : ', load_error_2: '',
 }
 
 // Prefixe absolu que le shell passe par la prop `base` (requise) : c'est le
-// contrat, cette vue ne connait pas le nom sous lequel elle est servie.
+// contract, cette vue ne connait pas le nom sous lequel elle est servie.
 const BASE = '/plugins/radio/'
 
 function reponses(data: unknown) {
@@ -120,17 +120,17 @@ describe('RadioAdmin', () => {
     expect(w.text()).toContain('128')
   })
 
-  it('reprend le pays mémorisé par le plugin et l’affiche traduit', async () => {
-    // Defaut corrige : le libelle venait du composant `Select`, qui capture le
+  it('reprend le country mémorisé par le plugin et l’affiche traduit', async () => {
+    // Defaut corrige : le label venait du composant `Select`, qui capture le
     // texte de l'element selectionne au premier rendu — or `PluginView` monte
     // l'IHM avec un catalogue **vide**, donc la page affichait la cle de
-    // traduction elle-meme (« country_fr »). Le libelle est desormais rendu
+    // traduction elle-meme (« country_fr »). Le label est desormais rendu
     // depuis le code, par `Intl.DisplayNames`.
     const { w } = await monter({ stations: [], search: [], country: 'DE' })
     expect(w.find('[data-country-open]').text()).toBe('Germany')
   })
 
-  it('affiche « tous les pays » quand aucun pays n’est mémorisé', async () => {
+  it('affiche « tous les country » quand aucun country n’est mémorisé', async () => {
     // Chaine vide = choix legitime, et non absence de valeur : c'est ce que le
     // plugin attend dans `country`.
     const { w, spy } = await monter({ stations: [], search: [], country: '' })
@@ -144,7 +144,7 @@ describe('RadioAdmin', () => {
     })
   })
 
-  it('ne demande la liste des pays qu’à l’ouverture du sélecteur, et une seule fois', async () => {
+  it('ne demande la liste des country qu’à l’ouverture du sélecteur, et une seule fois', async () => {
     // Simulacre fidèle au plugin : `get_data` ne rend la liste **qu'après**
     // l'opération `countries`. Un simulacre qui la rendrait dès le montage
     // masquerait la récupération ; un simulacre qui la rendrait toujours vide
@@ -171,7 +171,7 @@ describe('RadioAdmin', () => {
         .filter((c) => (c[1] as RequestInit)?.method === 'PUT')
         .map((c) => JSON.parse(String((c[1] as RequestInit).body)).op)
     // Au chargement de la page, aucun appel : rien ne le justifie tant que
-    // l'utilisateur ne cherche pas à changer de pays.
+    // l'utilisateur ne cherche pas à changer de country.
     expect(puts()).toEqual([])
 
     // `update:open` plutôt qu'un vrai clic : le contenu d'un Dialog reka n'est
@@ -188,7 +188,7 @@ describe('RadioAdmin', () => {
     expect(puts()).toEqual(['countries'])
   })
 
-  it('le pays choisi dans le sélecteur part dans la recherche', async () => {
+  it('le country choisi dans le sélecteur part dans la recherche', async () => {
     const { w, spy } = await monter({
       stations: [],
       search: [],
@@ -197,7 +197,7 @@ describe('RadioAdmin', () => {
     })
     await w.findComponent(Dialog).vm.$emit('update:open', true)
     await flushPromises()
-    await w.findComponent(PaysPicker).vm.$emit('choose', 'BE')
+    await w.findComponent(CountryPicker).vm.$emit('choose', 'BE')
     await flushPromises()
     expect(w.find('[data-country-open]').text()).toBe('Belgium')
 
@@ -320,7 +320,7 @@ describe('RadioAdmin', () => {
   it('adresse ses requêtes sous le préfixe absolu reçu par la prop `base`', async () => {
     // IMPORTANT 6 de la revue finale. Cette vue appelait `api.get('./api/data')`
     // en relatif, donc resolu contre l'URL du navigateur et non contre quoi que
-    // ce soit que le contrat garantisse : sur `/plugins/radio` (sans slash
+    // ce soit que le contract garantisse : sur `/plugins/radio` (sans slash
     // final, forme que le routeur du shell acceptait aussi), `./api/data`
     // resolvait vers `/plugins/api/data` — que le coeur interprete comme le
     // plugin « api » : 404, table vide et tous les boutons en echec.
@@ -387,7 +387,7 @@ describe('RadioAdmin', () => {
     // de lui-meme sur un element `disabled`, ce qui ferait passer ce test
     // sans qu'aucune garde ne soit exercee dans le code de la vue. On
     // dispatche donc le clic directement, ce qui appelle bien le gestionnaire
-    // `@click` : c'est le **retour anticipe** d'`enregistrer()` qui est
+    // `@click` : c'est le **retour anticipe** d'`save()` qui est
     // teste ici, pas l'etat visuel du bouton (ceinture et bretelles : la
     // protection ne doit pas reposer sur le seul attribut `disabled`).
     w.find('[data-save]').element.dispatchEvent(new Event('click'))
@@ -397,12 +397,12 @@ describe('RadioAdmin', () => {
 
   it('chargement en échec : la touche Entrée dans la recherche n’émet aucune requête et garde le message d’erreur', async () => {
     // Correction repliee (revue finale) : `:disabled` sur le bouton
-    // « Chercher » ne protege pas `@keydown.enter="chercher"`, qui
-    // atteignait encore `chercher()`. Une recherche reussie y ferait
+    // « Chercher » ne protege pas `@keydown.enter="search"`, qui
+    // atteignait encore `search()`. Une recherche reussie y ferait
     // `message.value = ''`, effacant le message d'erreur de chargement
-    // alors que `chargementEchoue` reste vrai -- la page paraitrait saine
-    // alors qu'elle est inerte. `chercher()` doit donc porter le meme
-    // retour anticipe qu'`enregistrer()`.
+    // alors que `loadFailed` reste vrai -- la page paraitrait saine
+    // alors qu'elle est inerte. `search()` doit donc porter le meme
+    // retour anticipe qu'`save()`.
     const spy = chargementEnEchec()
     const w = mount(RadioAdmin, { props: { catalog: CATALOGUE, base: BASE } })
     await flushPromises()
@@ -412,7 +412,7 @@ describe('RadioAdmin', () => {
     await flushPromises()
     expect(spy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'PUT')).toBe(false)
     // Le message d'erreur de chargement subsiste : il n'a pas ete efface
-    // par un `chercher()` qui aurait quand meme tourne.
+    // par un `search()` qui aurait quand meme tourne.
     expect(w.text()).toContain('Erreur : ')
   })
 

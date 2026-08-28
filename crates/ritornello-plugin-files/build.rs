@@ -1,9 +1,9 @@
 // Garantit l'existence de `ui/dist/{ui.js,ui.css}` embarques par
 // `include_str!`. Le build npm n'est **jamais** invoque ici (voir
-// `deploy/build.sh`) : la cross-compilation tourne dans une image sans Node.
+// `deploy/build.sh`) : la cross-compilation tourne in_dir une image sans Node.
 include!("src/placeholder.rs");
 
-// Ecrit `chemin` avec `contenu` s'il est absent ; s'il est deja la, le relit
+// Ecrit `path` avec `contenu` s'il est absent ; s'il est deja la, le relit
 // et re-emet l'avertissement tant qu'il s'agit du bouchon.
 //
 // C'est le point corrige : `cargo::warning` n'etait emis qu'a la **creation**
@@ -12,23 +12,23 @@ include!("src/placeholder.rs");
 // de build sont rejoues par cible, mais `ui/dist/ui.js` existe desormais
 // (c'est le bouchon), donc plus **aucun** avertissement -- et le binaire de
 // release embarquait le bouchon en silence. L'avertissement nomme le fichier :
-// deux actifs de bouchon donnent deux lignes distinctes et exploitables.
-fn garantir(chemin: &std::path::Path, contenu: impl FnOnce() -> String) {
+// deux active de bouchon donnent deux lines distinctes et exploitables.
+fn ensure(path: &std::path::Path, contenu: impl FnOnce() -> String) {
     let avertir = || {
         println!(
             "cargo::warning=IHM du plugin non construite : bouchon embarque ({})",
-            chemin.display()
+            path.display()
         );
     };
-    match std::fs::read_to_string(chemin) {
+    match std::fs::read_to_string(path) {
         Ok(deja) => {
-            if est_un_bouchon(&deja) {
+            if is_placeholder(&deja) {
                 avertir();
             }
         }
         Err(_) => {
             avertir();
-            std::fs::write(chemin, contenu()).unwrap();
+            std::fs::write(path, contenu()).unwrap();
         }
     }
 }
@@ -38,8 +38,8 @@ fn main() {
     println!("cargo::rerun-if-changed=src/placeholder.rs");
     let dist = std::path::Path::new("ui/dist");
     std::fs::create_dir_all(dist).expect("creation de ui/dist");
-    garantir(&dist.join("ui.js"), || {
+    ensure(&dist.join("ui.js"), || {
         ui_placeholder_js("npm ci && npm run build --workspaces")
     });
-    garantir(&dist.join("ui.css"), ui_placeholder_css);
+    ensure(&dist.join("ui.css"), ui_placeholder_css);
 }

@@ -1,7 +1,7 @@
 // Garde-fou : la migration vers la SPA a supprime les constantes
 // `PAGE_KEYS` qui garantissaient que toute cle utilisee par l'IHM existe
 // dans le catalogue anglais embarque. Sans cette garantie, une cle absente
-// s'affiche telle quelle a l'ecran au lieu d'echouer au build ou aux tests
+// s'displayed telle quelle a l'ecran au lieu d'fail au build ou aux tests
 // (c'est exactement ce qui s'etait produit pour trois messages du shell,
 // voir le commentaire dans PluginView.ts). Ce test recollecte les cles
 // reellement appelees par le code source et verifie leur presence dans
@@ -11,12 +11,12 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { LIBELLE_LIEN } from './components/liens'
+import { LINK_LABEL } from './components/links'
 import { REMOTE_COMMANDS } from './views/remoteCommands'
 
 // Chemins resolus via `process.cwd()` (le repertoire du paquet, cf. le
 // script npm `test`) plutot que via `import.meta.url` : sous vitest en
-// environnement `jsdom`, une URL relative qui remonte hors de la racine du
+// environnement `jsdom`, une URL relative qui remonte hors de la root du
 // projet vite est reecrite en `http://localhost/@fs/...` au lieu de rester
 // un `file://` — `fileURLToPath` leve alors `The URL must be of scheme
 // file`. `process.cwd()` est un chemin OS brut, insensible a cette
@@ -58,10 +58,10 @@ function fichiersSource(dir: string): string[] {
 // `t(c.key)` ou `t(erreur.value)`) echappe a cette regex. C'est pourquoi les
 // cles ci-dessous qui ne sont jamais ecrites en dur dans un appel `t(...)`
 // sont ajoutees explicitement plus loin.
-function clesAppelsLitteraux(fichiers: string[]): Set<string> {
+function clesAppelsLitteraux(files: string[]): Set<string> {
   const cles = new Set<string>()
   const motif = /\bt(?:\.value)?\(\s*['"]([A-Za-z0-9_]+)['"]/g
-  for (const fichier of fichiers) {
+  for (const fichier of files) {
     const contenu = readFileSync(fichier, 'utf8')
     for (const m of contenu.matchAll(motif)) if (m[1]) cles.add(m[1])
   }
@@ -87,17 +87,17 @@ describe('cles i18n utilisees par le shell', () => {
       // `t(...)` (c'est `t(erreur.value)`).
       'plugin_unavailable',
       'plugin_contract_mismatch',
-      // SystemView.vue : le message de succes de `attendreRetour` arrive en
+      // SystemView.vue : le message de succes de `waitForReturn` arrive en
       // parametre (`t.value(cleSucces)`), la cle etant choisie par l'action
       // confirmee. Les deux litteraux existent bien dans le fichier, mais au
-      // point d'appel et non dans un `t(...)` — la regex ne les voit donc pas.
+      // point d'appel et non dans un `t(...)` — la regex ne les voit donc step.
       'system_restarted',
       'system_device_restarted',
-      // components/liens.ts : les libelles des plateformes d'ecoute sont
-      // indexes par `platform` (`t(LIBELLE_LIEN[lien.platform])`), donc jamais
-      // ecrits en dur dans un appel `t(...)` — la regex ne les voit pas, c'est
+      // components/links.ts : les libelles des plateformes d'ecoute sont
+      // indexes par `platform` (`t(LINK_LABEL[lien.platform])`), donc jamais
+      // ecrits en dur dans un appel `t(...)` — la regex ne les voit step, c'est
       // cet ajout explicite qui les couvre.
-      ...Object.values(LIBELLE_LIEN),
+      ...Object.values(LINK_LABEL),
     ])
 
     const manquantes = [...utilisees].filter((cle) => !catalogue.has(cle)).sort()

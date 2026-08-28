@@ -25,13 +25,13 @@ pub fn mime_for(path: &str) -> &'static str {
     }
 }
 
-/// Les chunks de l'app portent un hash dans leur nom : ils sont immuables.
-/// `vue.js` et `ui-kit.js` gardent au contraire un **nom stable** — c'est le
+/// Les chunks de l'app portent un hash dans leur name : ils sont immuables.
+/// `vue.js` et `ui-kit.js` gardent au contraire un **name stable** — c'est le
 /// contrat que les modules de plugin importent — donc ils doivent être
 /// revalidés (l'`ETag` s'en charge).
 pub fn cache_control(path: &str) -> &'static str {
-    let nom = path.rsplit('/').next().unwrap_or(path);
-    if nom.starts_with("app-") {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if name.starts_with("app-") {
         "public, max-age=31536000, immutable"
     } else {
         "no-cache"
@@ -50,18 +50,18 @@ pub fn serves_shell(path: &str) -> bool {
             if apres.starts_with("api/") || apres.starts_with("ui.") {
                 return false;
             }
-            // Chemin d'actif profond (`/plugins/radio/assets/chunk.js`) : les
-            // actifs d'un plugin ne sont servis que sur **un seul** segment
-            // (`/plugins/<nom>/<fichier>`), donc un chemin à plusieurs segments
+            // Chemin d'active profond (`/plugins/radio/assets/chunk.js`) : les
+            // active d'un plugin ne sont servis que sur **un seul** segment
+            // (`/plugins/<name>/<fichier>`), donc un path à plusieurs segments
             // ne correspond à aucune route et tombait ici — le repli renvoyait
             // alors **le shell HTML en 200**, si bien qu'un `import()`
             // dynamique recevait du HTML : mode d'échec très déroutant, rien ne
             // signalant l'erreur. Il obtient maintenant un 404 propre.
             //
-            // Le test `serves_shell("/plugins/<nom>/")` reste vert : `apres`
-            // vaut alors la chaîne vide, qui ne contient pas de `/`. C'est
+            // Le test `serves_shell("/plugins/<name>/")` reste vert : `apres`
+            // vaut alors la chaîne clear, qui ne contains pas de `/`. C'est
             // aussi pourquoi cette condition est préférée à un wildcard
-            // `/plugins/:name/*fichier` dans le routeur, dont le reste vide ne
+            // `/plugins/:name/*fichier` dans le routeur, dont le reste clear ne
             // matche pas de façon fiable — et cette URL est un invariant.
             if apres.contains('/') {
                 return false;
@@ -75,7 +75,7 @@ pub fn inject_theme(html: &str, theme: &str, mode: &str) -> String {
     // Le `Display` de `serde_json::Value` n'échappe pas `/` : une valeur
     // (par ex. `theme`) contenant `</script>` fermerait prématurément la
     // balise et permettrait d'injecter du HTML arbitraire dans le shell.
-    // `theme::validate` interdit déjà ces caractères sur le chemin HTTP, mais
+    // `theme::validate` interdit déjà ces caractères sur le path HTTP, mais
     // `main.rs` relit `theme`/`mode` depuis `state.json` sans revalider — un
     // fichier d'état corrompu ou édité à la main reste donc un vecteur.
     // On échappe donc chaque signe « inférieur » de la valeur sérialisée par
@@ -106,9 +106,9 @@ fn etag_of(hash: &[u8]) -> String {
 }
 
 async fn asset(headers: HeaderMap, uri: Uri) -> Response {
-    let chemin = uri.path().trim_start_matches("/assets/");
-    let Some(f) = Dist::get(&format!("assets/{chemin}")) else {
-        return (StatusCode::NOT_FOUND, "actif inconnu").into_response();
+    let path = uri.path().trim_start_matches("/assets/");
+    let Some(f) = Dist::get(&format!("assets/{path}")) else {
+        return (StatusCode::NOT_FOUND, "active inconnu").into_response();
     };
     let etag = etag_of(&f.metadata.sha256_hash());
     if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) == Some(etag.as_str()) {
@@ -116,8 +116,8 @@ async fn asset(headers: HeaderMap, uri: Uri) -> Response {
     }
     (
         [
-            (header::CONTENT_TYPE, mime_for(chemin)),
-            (header::CACHE_CONTROL, cache_control(chemin)),
+            (header::CONTENT_TYPE, mime_for(path)),
+            (header::CACHE_CONTROL, cache_control(path)),
             (header::ETAG, etag.as_str()),
         ],
         f.data.to_vec(),
@@ -139,7 +139,7 @@ pub async fn shell(State(state): State<AppState>, uri: Uri) -> Response {
 }
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/assets/*chemin", get(asset))
+    Router::new().route("/assets/*path", get(asset))
 }
 
 #[cfg(test)]
@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn inject_theme_echappe_les_fermetures_de_script_dans_les_valeurs() {
-        // `theme::validate` empêche ce cas sur le chemin HTTP normal, mais
+        // `theme::validate` empêche ce cas sur le path HTTP normal, mais
         // `main.rs` relit `theme`/`mode` depuis `state.json` sans revalider :
         // un fichier d'état corrompu ou édité à la main reste un vecteur.
         // `inject_theme` doit rester sûre même en recevant une valeur hostile.
@@ -200,18 +200,18 @@ mod tests {
         assert!(!serves_shell("/plugins/radio/api/data"));
         assert!(!serves_shell("/plugins/radio/ui.js"));
         assert!(!serves_shell("/plugins/radio/ui.css"));
-        // Chemin d'actif profond : les actifs d'un plugin ne sont servis que
+        // Chemin d'active profond : les active d'un plugin ne sont servis que
         // sur un seul segment, donc `/plugins/radio/assets/chunk.js` ne matche
         // aucune route. Il tombait sur le repli, qui repondait 200 avec le
         // shell HTML — un `import()` dynamique recevait du HTML, mode d'echec
         // tres deroutant. Desormais un 404 propre.
         assert!(!serves_shell("/plugins/radio/assets/chunk.js"));
         assert!(!serves_shell("/plugins/radio/a/b/c.js"));
-        // ... sans toucher a l'URL historique, qui doit continuer de servir le
-        // shell : le reste apres le nom du plugin est vide, donc sans `/`.
+        // ... sans toucher a l'URL historique, qui doit continuer de serve le
+        // shell : le reste apres le name du plugin est clear, donc sans `/`.
         assert!(serves_shell("/plugins/radio/"));
         assert!(serves_shell("/plugins/generic-input/"));
-        // Un actif plat reste possible : c'est le contrat des IHM de plugin.
+        // Un active plat reste possible : c'est le contrat des IHM de plugin.
         assert!(serves_shell("/plugins/radio/quelconque"));
     }
 

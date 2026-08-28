@@ -10,18 +10,18 @@
 // Usage: node scripts/fetch-presets.mjs
 import { writeFileSync } from 'node:fs'
 
-const URL_AMONT =
+const UPSTREAM_URL =
   'https://raw.githubusercontent.com/jnsahaj/tweakcn/main/utils/theme-presets.ts'
 
-const source = await fetch(URL_AMONT).then((r) => {
+const source = await fetch(UPSTREAM_URL).then((r) => {
   if (!r.ok) throw new Error(`amont injoignable : HTTP ${r.status}`)
   return r.text()
 })
 
-const debut = source.indexOf('{', source.indexOf('defaultPresets'))
-if (debut < 0) throw new Error("`defaultPresets` introuvable dans l'amont")
-const corps = source
-  .slice(debut)
+const start = source.indexOf('{', source.indexOf('defaultPresets'))
+if (start < 0) throw new Error("`defaultPresets` introuvable dans l'amont")
+const body = source
+  .slice(start)
   .replace(/;?\s*$/, '')
   .replace(/,(\s*[}\]])/g, '$1')          // trailing commas
   .replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":')  // bare keys
@@ -30,9 +30,9 @@ const corps = source
   // escaping the inner ones.
   .replace(/'((?:[^'\\]|\\.)*)'/g, (_m, inner) => `"${inner.replace(/"/g, '\\"')}"`)
 
-const presets = JSON.parse(corps)
-const noms = Object.keys(presets)
-if (noms.length < 40) throw new Error(`trop peu de presets analysés : ${noms.length}`)
+const presets = JSON.parse(body)
+const names = Object.keys(presets)
+if (names.length < 40) throw new Error(`trop peu de presets analysés : ${names.length}`)
 if (!presets['northern-lights']) throw new Error('`northern-lights` absent')
 for (const [nom, p] of Object.entries(presets)) {
   if (!p.label || !p.styles?.light || !p.styles?.dark) {
@@ -44,4 +44,4 @@ writeFileSync(
   new URL('../src/themes/presets.json', import.meta.url),
   JSON.stringify(presets, null, 2) + '\n',
 )
-console.log(`${noms.length} presets écrits`)
+console.log(`${names.length} presets écrits`)

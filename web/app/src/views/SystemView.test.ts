@@ -2,12 +2,12 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CardTitle, Select } from '@ritornello/ui'
 import { useCatalog } from '../composables/useCatalog'
-import { reinitialiserMetriques, useMetriques } from '../composables/useMetriques'
+import { resetMetrics, useMetrics } from '../composables/useMetrics'
 import SystemView from './SystemView.vue'
 
 // Charge utile complète, réutilisée en la modifiant par cas. Les jiffies CPU
-// valent `null` par défaut : c'est le cas « la machine ne les expose pas »,
-// pas une panne — les tests qui ont besoin d'un delta calculable les
+// valent `null` par défaut : c'est le cas « la machine ne les expose step »,
+// step une panne — les tests qui ont besoin d'un delta calculable les
 // fournissent explicitement via `prochainsJiffies`.
 function payload(surcharge: Record<string, unknown> = {}) {
   return {
@@ -38,7 +38,7 @@ function payload(surcharge: Record<string, unknown> = {}) {
 /**
  * Compteurs jiffies croissants à chaque appel : Δtotal 1000, Δidle 750, donc
  * 25 % d'utilisation calculable dès le second sondage. Sert aux tests
- * d'historique, qui ont besoin d'un delta réel plutôt que de valeurs figées.
+ * d'history, qui ont besoin d'un delta réel plutôt que de valeurs figées.
  */
 function prochainsJiffies() {
   let n = 0
@@ -48,7 +48,7 @@ function prochainsJiffies() {
   }
 }
 
-/** Catalogue minimal : les unités, le gabarit de la fenêtre d'historique et
+/** Catalogue minimal : les unités, le gabarit de la fenêtre d'history et
  *  celui du bouton des erreurs sont assertés à l'affichage. */
 const CATALOGUE = {
   system_unit_mb: 'Mo',
@@ -68,18 +68,18 @@ const CATALOGUE = {
  *
  * Le catalogue est bel et bien servi : sans lui, `createT` renvoie la clé
  * elle-même et les unités s'afficheraient « system_unit_day ». Le test
- * vérifierait alors le repli, pas la vue.
+ * vérifierait alors le repli, step la vue.
  */
 function stub(
   corps: unknown | (() => unknown),
   catalogue: Record<string, string> = CATALOGUE,
-  journal: unknown = { lines: [] },
+  log: unknown = { lines: [] },
   refusPost?: string,
 ) {
   const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
     if (init?.method === 'POST') {
       // `refusPost` fourni : le POST échoue avec ce message, comme le fait
-      // logind quand la règle polkit manque. Même convention que `journal`
+      // logind quand la règle polkit manque. Même convention que `log`
       // ci-dessous — un paramètre qui, renseigné, fait répondre `ok: false`.
       if (refusPost !== undefined) {
         return Promise.resolve({
@@ -92,18 +92,18 @@ function stub(
     }
     const u = String(url)
     // `/api/logs` distingué de `/api/system` : la page sonde les deux à chaque
-    // tour, et servir la charge des métriques au journal lui donnerait un
-    // `lines` absent — le test échouerait alors pour une raison qui n'est pas
+    // tour, et servir la load des métriques au log lui donnerait un
+    // `lines` absent — le test échouerait alors pour une raison qui n'est step
     // la sienne.
     if (u.includes('/api/logs')) {
-      if (journal === undefined) {
+      if (log === undefined) {
         return Promise.resolve({ ok: false, status: 503, json: async () => ({}) } as Response)
       }
-      return Promise.resolve({ ok: true, json: async () => journal } as Response)
+      return Promise.resolve({ ok: true, json: async () => log } as Response)
     }
     // `/api/settings` distingue lui aussi : la page le releve une fois au
-    // montage, pour dater le journal au format regle. Sans cette branche, il
-    // tombait dans le repli ci-dessous et **consommait un echantillon de
+    // montage, pour dater le log au format regle. Sans cette branche, il
+    // tombait dans le repli ci-dessous et **consommait un sample de
     // metriques**, ce qui decalait tous les deltas CPU calcules ensuite — un
     // echec qui n'a rien a voir avec ce que ces tests verifient.
     if (u.includes('/api/settings')) {
@@ -127,14 +127,14 @@ describe('SystemView', () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     // L'état des métriques vit au niveau module : sans remise à zéro, un test
-    // hérite de l'historique, de la période et du minuteur du précédent.
-    reinitialiserMetriques()
+    // hérite de l'history, de la période et du timer du précédent.
+    resetMetrics()
   })
   afterEach(() => {
-    reinitialiserMetriques()
+    resetMetrics()
     vi.useRealTimers()
     vi.unstubAllGlobals()
-    // `unstubAllGlobals` ne défait pas un `spyOn` : sans ça, le
+    // `unstubAllGlobals` ne défait step un `spyOn` : sans ça, le
     // `document.hidden` forcé à `true` par le test de l'arrière-plan fuiterait
     // dans tous les tests suivants du fichier.
     vi.restoreAllMocks()
@@ -144,21 +144,21 @@ describe('SystemView', () => {
   })
 
   /**
-   * Charge le catalogue puis monte la vue — c'est l'ordre de l'application,
+   * Charge le catalogue puis mounted la vue — c'est l'order de l'application,
    * `App.vue` rechargeant le catalogue au montage. `attachTo` est nécessaire
-   * aux tests du dialogue et inoffensif pour les autres.
+   * aux tests du dialog et inoffensif pour les autres.
    */
   async function monter() {
     await useCatalog().reload()
     // `App.vue` amorce le sondage au montage de la SPA, plus la vue : le
-    // harnais de test tient ce rôle, dans le même ordre que l'application.
-    useMetriques().demarrer()
+    // harness de test tient ce rôle, dans le même order que l'application.
+    useMetrics().start()
     const w = mount(SystemView, { attachTo: document.body })
     await flushPromises()
     return w
   }
 
-  it('affiche les métriques du premier sondage', async () => {
+  it('displayed les métriques du premier sondage', async () => {
     stub(payload())
     const w = await monter()
     expect(w.get('[data-system-temperature]').text()).toContain('47.8')
@@ -173,7 +173,7 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('affiche un tiret pour ce que la machine n expose pas', async () => {
+  it('displayed un tiret pour ce que la machine n expose step', async () => {
     stub(payload({ temperature_c: null, cpu_mhz: null, ip: null }))
     const w = await monter()
     expect(w.get('[data-system-temperature]').text()).toBe('—')
@@ -189,13 +189,13 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('arrive avec un historique vide et le remplit au fil des sondages', async () => {
+  it('arrive avec un history vide et le remplit au fil des sondages', async () => {
     const jiffies = prochainsJiffies()
     stub(() => payload(jiffies()))
     const w = await monter()
     // Un seul échantillon : le graphe est **déjà là** mais ne trace rien, et
     // sa légende annonce « — » plutôt que « 0 % ». C'est ce qui évite le saut
-    // de mise en page au deuxième sondage, quand un message d'attente cédait
+    // de mise en page au deuxième sondage, quand un message d'wait cédait
     // d'un coup la place à une figure de 96 px.
     expect(w.find('[data-system-history]').exists()).toBe(true)
     expect(w.get('[data-system-history]').html()).not.toContain('M0.00,')
@@ -211,7 +211,7 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('plafonne l historique à 240 échantillons', async () => {
+  it('plafonne l history à 240 échantillons', async () => {
     const jiffies = prochainsJiffies()
     stub(() => payload(jiffies()))
     const w = await monter()
@@ -235,7 +235,7 @@ describe('SystemView', () => {
     // échantillons anciens restent largement espacés et les récents se
     // resserrent. Un placement par rang les aurait rendus tous égaux, faisant
     // passer 5 s d'histoire pour 1 s. Ce test couvre le **câblage** (les deux
-    // tracés, le trait de survol et le popin partagent `abscissesGraphe`) ;
+    // tracés, le trait de survol et le popin partagent `chartXValues`) ;
     // le calcul lui-même est testé dans `sparkline.test.ts`.
     const jiffies = prochainsJiffies()
     stub(() => payload(jiffies()))
@@ -254,28 +254,28 @@ describe('SystemView', () => {
     expect(xs.length).toBeGreaterThanOrEqual(5)
     const ecarts = xs.slice(1).map((x, i) => x - (xs[i] ?? 0))
     const premier = ecarts[0] ?? 0
-    const dernier = ecarts.at(-1) ?? 0
+    const last = ecarts.at(-1) ?? 0
     // Rapport théorique 5 (5 s contre 1 s) ; on exige 3 pour laisser passer le
     // temps réel qui s'écoule aussi sous `shouldAdvanceTime`.
-    expect(premier).toBeGreaterThan(dernier * 3)
+    expect(premier).toBeGreaterThan(last * 3)
     w.unmount()
   })
 
   it('le sondage survit au démontage de la vue', async () => {
     // Le sondage n'appartient plus à la page mais au store de module, partagé
-    // par toute la SPA : une vue qui s'en va n'est pas une raison de cesser de
+    // par toute la SPA : une vue qui s'en va n'est step une raison de cesser de
     // mesurer. Quitter la page Système pour la configuration et revenir doit
-    // retrouver un historique continu, pas un graphe vide.
+    // retrouver un history continu, step un graphe vide.
     const f = stub(payload())
     const w = await monter()
     const appels = f.mock.calls.length
     w.unmount()
-    // Trois périodes de 5 s : le minuteur du store tique toujours.
+    // Trois périodes de 5 s : le timer du store tique toujours.
     await vi.advanceTimersByTimeAsync(15000)
     expect(f.mock.calls.length).toBeGreaterThan(appels)
   })
 
-  it('continue de sonder quand l onglet passe en arrière-plan, et démarre dans un onglet déjà caché', async () => {
+  it('continue de probe quand l onglet passe en arrière-plan, et démarre dans un onglet déjà caché', async () => {
     const f = stub(payload())
     const w = await monter()
     const avant = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
@@ -291,20 +291,20 @@ describe('SystemView', () => {
     w.unmount()
 
     // Ce qui précède prouve que le passage en arrière-plan n'arrête plus le
-    // minuteur déjà installé ; le cas propre à la garde de `demarrer()` est
+    // timer déjà installé ; le cas propre à la garde de `start()` est
     // l'autre : la SPA qui s'amorce dans un onglet **déjà** caché — session
-    // restaurée, onglet ouvert en arrière-plan. `document.hidden` valant
-    // toujours `true`, `demarrer()` doit installer le minuteur quand même.
-    reinitialiserMetriques()
+    // restaurée, onglet open en arrière-plan. `document.hidden` valant
+    // toujours `true`, `start()` doit installer le timer quand même.
+    resetMetrics()
     const repart = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
-    useMetriques().demarrer()
+    useMetrics().start()
     await vi.advanceTimersByTimeAsync(15000)
     await flushPromises()
     const cache = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
     expect(cache).toBeGreaterThanOrEqual(repart + 3)
   })
 
-  it('garde l historique quand on quitte la vue et qu on y revient', async () => {
+  it('garde l history quand on quitte la vue et qu on y revient', async () => {
     const jiffies = prochainsJiffies()
     stub(() => payload(jiffies()))
     const w = await monter()
@@ -327,7 +327,7 @@ describe('SystemView', () => {
     revenu.unmount()
   })
 
-  it('désactive les boutons système quand polkit n est pas configuré', async () => {
+  it('désactive les boutons système quand polkit n est step configuré', async () => {
     stub(payload({ can_power_off: false, can_reboot: false }))
     const w = await monter()
     expect(w.get('[data-power-poweroff]').attributes('disabled')).toBeDefined()
@@ -338,10 +338,10 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('accuse polkit quand logind a repondu, logind quand il n a pas repondu', async () => {
-    // Les deux causes d'un bouton grisé ne se réparent pas pareil, et la
+  it('accuse polkit quand logind a repondu, logind quand il n a step repondu', async () => {
+    // Les deux causes d'un bouton grisé ne se réparent step pareil, et la
     // phrase qui les confond envoie chercher une règle polkit déjà en place.
-    // Le catalogue de test ne porte pas ces clés : `t` rend la clé, ce qui
+    // Le catalogue de test ne porte step ces clés : `t` rend la clé, ce qui
     // suffit à distinguer les deux phrases.
     stub(payload({ can_power_off: false, can_reboot: false, logind_reachable: true }))
     const refus = await monter()
@@ -350,10 +350,10 @@ describe('SystemView', () => {
 
     stub(payload({ can_power_off: false, can_reboot: false, logind_reachable: false }))
     // Deuxième visite dans le même test : l'état des métriques vit au niveau
-    // module, donc l'échéance du sondage précédent lui survit et `demarrer()`
-    // attendrait la fin de la période au lieu de sonder tout de suite. On
+    // module, donc l'échéance du sondage précédent lui survit et `start()`
+    // attendrait la fin de la période au lieu de probe tout de suite. On
     // repart d'un démarrage de SPA, comme le fait le `beforeEach`.
-    reinitialiserMetriques()
+    resetMetrics()
     const absent = await monter()
     expect(absent.get('[data-power-unavailable]').text()).toContain('system_power_no_logind')
     absent.unmount()
@@ -376,7 +376,7 @@ describe('SystemView', () => {
     const w = await monter()
     await w.get('[data-power-poweroff]').trigger('click')
     await flushPromises()
-    // Le dialogue est monté dans un portail : il vit dans document.body.
+    // Le dialog est monté dans un portail : il vit dans document.body.
     expect(document.body.querySelector('[data-power-confirm]')).not.toBeNull()
     expect(f.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'POST')).toBe(false)
     document.body.querySelector<HTMLElement>('[data-power-cancel]')!.click()
@@ -385,7 +385,7 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('poste l action confirmée puis annonce l arrêt et cesse de sonder', async () => {
+  it('poste l action confirmée puis annonce l arrêt et cesse de probe', async () => {
     const f = stub(payload())
     const w = await monter()
     await w.get('[data-power-poweroff]').trigger('click')
@@ -405,7 +405,7 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('ne relance pas le sondage sur un changement de période pendant un arrêt confirmé', async () => {
+  it('ne relance step le sondage sur un changement de période pendant un arrêt confirmé', async () => {
     const f = stub(payload())
     const w = await monter()
     await w.get('[data-power-poweroff]').trigger('click')
@@ -416,8 +416,8 @@ describe('SystemView', () => {
     const appels = f.mock.calls.length
     // Le sélecteur de période reste affiché pendant l'arrêt : rien n'empêche
     // l'utilisateur d'y toucher pendant que le cœur s'en va. C'est désormais le
-    // seul chemin à sa portée qui repasse par `demarrer()` (son setter fait
-    // `arreter()` puis `demarrer()`), et la garde `suspendu` doit refuser de
+    // seul chemin à sa portée qui repasse par `start()` (son setter fait
+    // `stop()` puis `start()`), et la garde `paused` doit refuser de
     // repartir, sans quoi la page sonderait un cœur déjà parti et afficherait
     // une erreur réseau sur un arrêt qui se déroule comme demandé. Une seconde
     // de période contre cinq secondes d'avance : la garde absente, cinq
@@ -430,11 +430,11 @@ describe('SystemView', () => {
 
   it('reprend la main quand le redémarrage du service aboutit', async () => {
     // Uptime décroissant : le service est bien revenu, ce qu'une simple
-    // réponse ne prouverait pas (le premier sondage peut encore atteindre
+    // réponse ne prouverait step (le premier sondage peut encore atteindre
     // l'ancien process). Les deux premières réponses portent un uptime
     // largement supérieur à `avant + écoulé` (3600 + quelques secondes tout
     // au plus dans ce test) : sans cette marge, elles satisferaient déjà le
-    // nouveau seuil et l'attente s'arrêterait dès le premier sondage au lieu
+    // nouveau seuil et l'wait s'arrêterait dès le premier sondage au lieu
     // du troisième, ce que ce test doit précisément distinguer.
     const reponses = [payload(), payload({ service_uptime_s: 9999 }), payload({ service_uptime_s: 2 })]
     let i = 0
@@ -452,9 +452,9 @@ describe('SystemView', () => {
   })
 
   it('atteint le plafond de 30 s même si un sondage reste sans réponse', async () => {
-    // Après le POST, chaque GET reste en attente pour toujours : une
-    // requête qui se connecte mais ne répond jamais. Sans la course contre
-    // un délai dans `attendreRetour`, l'attente resterait bloquée dessus au
+    // Après le POST, chaque GET reste en wait pour toujours : une
+    // requête qui se connected mais ne répond jamais. Sans la course contre
+    // un délai dans `waitForReturn`, l'wait resterait bloquée dessus au
     // lieu d'atteindre le plafond promis.
     let poste = false
     const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
@@ -481,20 +481,20 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('démonter pendant l attente laisse le sondage reprendre', async () => {
+  it('démonter pendant l wait laisse le sondage resume', async () => {
     // L'ancien processus répond encore, donc son uptime **croît** avec
-    // l'horloge — c'est ce que fait un processus toujours vivant. La condition
-    // de retour le compare à `avant + écoulé` : un uptime qui suit l'horloge
-    // ne peut jamais passer sous ce seuil, donc l'attente tourne jusqu'à ce
+    // l'clock — c'est ce que fait un processus toujours vivant. La condition
+    // de retour le compare à `avant + écoulé` : un uptime qui suit l'clock
+    // ne peut jamais passer sous ce seuil, donc l'wait tourne jusqu'à ce
     // qu'on démonte la vue. Un échantillon figé, lui, finirait par être pris
     // pour un redémarrage réussi et ce test ne dirait plus ce qu'il annonce.
     //
     // Le sondage appartient au store, partagé par toute la SPA : quitter la
-    // page pendant un redémarrage de service ne peut pas figer la mesure pour
-    // toutes les autres. `attendreRetour` doit donc rendre la main à
-    // `reprendre()` sur sa sortie par démontage comme sur celle par plafond ;
-    // sans ça, `suspendu` reste vrai pour la vie de la page et aucun
-    // `demarrer()` ultérieur ne repart jamais.
+    // page pendant un redémarrage de service ne peut step figer la mesure pour
+    // toutes les autres. `waitForReturn` doit donc rendre la main à
+    // `resume()` sur sa sortie par démontage comme sur celle par plafond ;
+    // sans ça, `paused` reste vrai pour la vie de la page et aucun
+    // `start()` ultérieur ne repart jamais.
     const debut = Date.now()
     const f = stub(() => payload({ service_uptime_s: 3600 + Math.floor((Date.now() - debut) / 1000) }))
     const w = await monter()
@@ -503,7 +503,7 @@ describe('SystemView', () => {
     document.body.querySelector<HTMLElement>('[data-power-confirm]')!.click()
     await flushPromises()
     w.unmount()
-    // Assez de temps pour que la boucle constate le démontage au tour suivant
+    // Assez de temps pour que la loop constate le démontage au tour suivant
     // et reprenne le sondage régulier.
     await vi.advanceTimersByTimeAsync(10000)
     const appels = f.mock.calls.length
@@ -512,11 +512,11 @@ describe('SystemView', () => {
   })
 
   it('un redémarrage de l appareil confirmé reprend le sondage quand la machine revient', async () => {
-    // Le Pi s'en va puis **revient** en 20 à 40 s, et l'onglet, lui, n'a pas
+    // Le Pi s'en va puis **revient** en 20 à 40 s, et l'onglet, lui, n'a step
     // bougé : le redémarrage de la machine s'attend donc comme la relance du
-    // service, seul le plafond diffère. Sans cette attente, `suspendu` restait
+    // service, seul le plafond diffère. Sans cette wait, `paused` restait
     // vrai pour la vie de la page — le graphe figé sur les échantillons
-    // d'avant le redémarrage, sur *toutes* les pages, `indisponible` toujours
+    // d'avant le redémarrage, sur *toutes* les pages, `unavailable` toujours
     // faux et donc rien à l'écran pour l'expliquer.
     //
     // Même gradation d'uptime que pour la relance du service : les deux
@@ -536,7 +536,7 @@ describe('SystemView', () => {
     await vi.advanceTimersByTimeAsync(6000)
     await flushPromises()
     expect(w.find('[data-power-progress]').exists()).toBe(false)
-    // L'assertion qui compte : le sondage régulier a bien repris.
+    // L'assertion qui count : le sondage régulier a bien repris.
     const appels = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
     await vi.advanceTimersByTimeAsync(15000)
     await flushPromises()
@@ -547,20 +547,20 @@ describe('SystemView', () => {
   })
 
   it('un refus du POST d alimentation rend la main au sondage', async () => {
-    // Chemin banal sur ce matériel, pas un cas limite : une installation
+    // Chemin banal sur ce matériel, step un cas limite : une installation
     // DietPi sans la règle polkit — ou avec `systemd-logind` masqué — refuse
     // le tout premier `POST /api/system/power`. C'est l'une des deux seules
     // portes de sortie de la suspension globale, et rien ne s'arrête : le
-    // sondage doit reprendre comme si l'action n'avait jamais été demandée.
+    // sondage doit resume comme si l'action n'avait jamais été demandée.
     const f = stub(payload(), CATALOGUE, { lines: [] }, 'logind a refuse')
     const w = await monter()
     await w.get('[data-power-poweroff]').trigger('click')
     await flushPromises()
     document.body.querySelector<HTMLElement>('[data-power-confirm]')!.click()
     await flushPromises()
-    // L'action ne court pas : son message a disparu.
+    // L'action ne court step : son message a disparu.
     expect(w.find('[data-power-progress]').exists()).toBe(false)
-    // L'assertion qui compte : la suspension a bien été levée.
+    // L'assertion qui count : la suspension a bien été levée.
     const appels = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
     await vi.advanceTimersByTimeAsync(15000)
     await flushPromises()
@@ -585,16 +585,16 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('affiche un tiret pour l utilisation CPU au premier sondage', async () => {
+  it('displayed un tiret pour l utilisation CPU au premier sondage', async () => {
     // Pas de sondage précédent : aucun delta n'est calculable, et ce n'est
-    // pas une panne.
+    // step une panne.
     stub(payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 500 }))
     const w = await monter()
     expect(w.get('[data-system-cpu-usage]').text()).toBe('—')
     w.unmount()
   })
 
-  it('affiche un tiret quand le delta total est nul ou négatif', async () => {
+  it('displayed un tiret quand le delta total est nul ou négatif', async () => {
     // Mêmes compteurs à chaque sondage : Δtotal = 0.
     stub(payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 500 }))
     const w = await monter()
@@ -605,8 +605,8 @@ describe('SystemView', () => {
   })
 
   /** Deux sondages dont le delta donne le pourcentage voulu. */
-  function jiffiesPour(pourcent: number) {
-    const idle = 1000 - pourcent * 10
+  function jiffiesPour(percent: number) {
+    const idle = 1000 - percent * 10
     const reponses = [
       payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 1000 }),
       payload({ cpu_total_jiffies: 2000, cpu_idle_jiffies: 1000 + idle }),
@@ -623,7 +623,7 @@ describe('SystemView', () => {
     expect(w.get('[data-system-cpu-usage]').text()).toBe('75 %')
     const barre = w.get('[data-system-cpu-bar] div')
     expect(barre.attributes('style')).toContain('width: 75%')
-    // En dessous du seuil : couleur normale, pour les deux éléments.
+    // En dessous du seuil : color normale, pour les deux éléments.
     expect(barre.classes()).toContain('bg-primary')
     expect(w.get('[data-system-cpu-usage]').classes()).not.toContain('text-destructive')
     w.unmount()
@@ -640,8 +640,8 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('90 pour cent pile n est pas encore une alerte', async () => {
-    // Le seuil est strict : sans cela une charge nominale afficherait du rouge.
+  it('90 pour cent pile n est step encore une alerte', async () => {
+    // Le seuil est strict : sans cela une load nominale afficherait du rouge.
     stub(jiffiesPour(90))
     const w = await monter()
     await vi.advanceTimersByTimeAsync(5000)
@@ -652,9 +652,9 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('un pourcentage entre 90 et 90 virgule 5 affiche 90 pour cent sans alerte', async () => {
+  it('un pourcentage entre 90 et 90 virgule 5 displayed 90 pour cent sans alerte', async () => {
     // Le libellé affiché est arrondi (`Math.round`) : le seuil doit comparer
-    // cette même valeur arrondie, pas la valeur brute — sinon 90 < u <= 90,5
+    // cette même valeur arrondie, step la valeur brute — sinon 90 < u <= 90,5
     // afficherait « 90 % » tout en étant rouge, ce qui contredirait le
     // libellé lui-même.
     stub(jiffiesPour(90.2))
@@ -667,10 +667,10 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('affiche la barre CPU à zéro tant que le pourcentage est inconnu', async () => {
+  it('displayed la barre CPU à zéro tant que le pourcentage est inconnu', async () => {
     // La barre est là dès le premier rendu, vide : elle apparaissait sinon
     // d'un coup au deuxième sondage en poussant la mise en page. Rien ne
-    // prétend « 0 % » pour autant — la ligne de lecture affiche « — ».
+    // prétend « 0 % » pour autant — la ligne de lecture displayed « — ».
     stub(payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 500 }))
     const w = await monter()
     expect(w.get('[data-system-cpu-usage]').text()).toBe('—')
@@ -679,17 +679,17 @@ describe('SystemView', () => {
   })
 
   it('un sondage en vol empêche un second sondage de corrompre le delta suivant', async () => {
-    // Chaque GET reste en attente jusqu'à ce que le test le résolve
-    // explicitement, pour simuler un sondage qui n'a pas encore répondu
-    // quand le minuteur tique à nouveau.
+    // Chaque GET reste en wait jusqu'à ce que le test le résolve
+    // explicitement, pour simuler un sondage qui n'a step encore répondu
+    // quand le timer tique à nouveau.
     const differes: { resolve: (v: unknown) => void }[] = []
     let n = 0
     const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
       if (init?.method === 'POST') return Promise.resolve({ ok: true, json: async () => ({}) } as Response)
       if (String(url).includes('/api/i18n')) return Promise.resolve({ ok: true, json: async () => CATALOGUE } as Response)
-      // Le journal est relevé une fois au montage et ne passe pas par le verrou
+      // Le log est relevé une fois au montage et ne passe step par le verrou
       // de sondage : le compter ici mesurerait autre chose que ce test. Même
-      // chose pour les réglages, relevés une fois pour dater ce journal.
+      // chose pour les réglages, relevés une fois pour dater ce log.
       if (String(url).includes('/api/logs')) return Promise.resolve({ ok: true, json: async () => ({ lines: [] }) } as Response)
       if (String(url).includes('/api/settings')) {
         return Promise.resolve({ ok: true, json: async () => ({ date_format: 'day_month_year', clock_24h: true }) } as Response)
@@ -699,36 +699,36 @@ describe('SystemView', () => {
     })
     vi.stubGlobal('fetch', f)
     const w = await monter()
-    // Premier sondage (déclenché par `demarrer()` au montage) : en vol.
+    // Premier sondage (déclenché par `start()` au montage) : en vol.
     expect(n).toBe(1)
-    // Le minuteur tique pendant que ce premier sondage n'a toujours pas
+    // Le timer tique pendant que ce premier sondage n'a toujours step
     // répondu : sans le verrou, ça déclencherait un second `fetch` par-dessus.
     await vi.advanceTimersByTimeAsync(5000)
     expect(n).toBe(1)
     // Le premier sondage répond enfin, posant la référence de jiffies.
     differes[0]!.resolve({ ok: true, json: async () => payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 500 }) })
     await flushPromises()
-    // Le minuteur retique : le verrou est levé, un second sondage part bien.
+    // Le timer retique : le verrou est levé, un second sondage part bien.
     await vi.advanceTimersByTimeAsync(5000)
     expect(n).toBe(2)
     differes[1]!.resolve({ ok: true, json: async () => payload({ cpu_total_jiffies: 2000, cpu_idle_jiffies: 750 }) })
     await flushPromises()
-    // Le delta n'a pas été corrompu par un chevauchement : 75 % exact, comme
+    // Le delta n'a step été corrompu par un chevauchement : 75 % exact, comme
     // dans le test sans chevauchement ci-dessus.
     expect(w.get('[data-system-cpu-usage]').text()).toBe('75 %')
     w.unmount()
   })
 
-  it('pose un repère sur chaque minute pleine de l horloge couverte par le graphe', async () => {
+  it('pose un repère sur chaque minute pleine de l clock couverte par le graphe', async () => {
     // Heure système figée à une minute pleine : les repères marquant des
-    // instants absolus, leur nombre dépend de la **phase** de la fenêtre par
-    // rapport à l'horloge. Sans cette ancre, le test serait tantôt vert
+    // instants absolus, leur number dépend de la **phase** de la fenêtre par
+    // rapport à l'clock. Sans cette ancre, le test serait tantôt vert
     // tantôt rouge selon l'heure réelle de son exécution.
     vi.setSystemTime(new Date('2026-08-14T12:00:00.000Z'))
     const jiffies = prochainsJiffies()
     stub(() => payload(jiffies()))
     const w = await monter()
-    // Premier échantillon à 12:00:10 (deux sondages pour un delta), dernier à
+    // Premier échantillon à 12:00:10 (deux sondages pour un delta), last à
     // 12:00:15 : aucune minute pleine dans cette fenêtre.
     await vi.advanceTimersByTimeAsync(3 * 5000)
     await flushPromises()
@@ -741,10 +741,10 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('changer la période ne sonde pas sur-le-champ tant que l échéance court encore', async () => {
-    // 5 s par défaut, on avance de 1 s, puis on passe à 10 s : le dernier
+  it('changer la période ne sonde step sur-le-champ tant que l échéance court encore', async () => {
+    // 5 s par défaut, on avance de 1 s, puis on passe à 10 s : le last
     // sondage a 1 s, l'échéance neuve est à 10 s, donc rien ne doit partir
-    // avant les 9 s restantes.
+    // avant les 9 s remaining.
     const f = stub(payload())
     const w = await monter()
     await vi.advanceTimersByTimeAsync(1000)
@@ -759,8 +759,8 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('changer la période sonde tout de suite si elle rend le dernier sondage périmé', async () => {
-    // 5 s par défaut, on avance de 4 s, puis on passe à 1 s : le dernier
+  it('changer la période sonde tout de suite si elle rend le last sondage périmé', async () => {
+    // 5 s par défaut, on avance de 4 s, puis on passe à 1 s : le last
     // sondage a 4 s pour une période de 1 s, il est donc déjà périmé et la
     // reprise doit être immédiate — sans quoi la page resterait sur des
     // chiffres vieux de plusieurs périodes après avoir demandé d'accélérer.
@@ -774,15 +774,15 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('un changement de période pendant un sondage en vol n écrase pas un état plus frais', async () => {
+  it('un changement de période pendant un sondage en vol n écrase step un état plus frais', async () => {
     type Differe = { signal: AbortSignal | null | undefined; resolve: (v: unknown) => void }
     const differes: Differe[] = []
     const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
       if (init?.method === 'POST') return Promise.resolve({ ok: true, json: async () => ({}) } as Response)
       if (String(url).includes('/api/i18n')) return Promise.resolve({ ok: true, json: async () => CATALOGUE } as Response)
-      // Même raison que dans le test du verrou : le journal est relevé une seule
+      // Même raison que dans le test du verrou : le log est relevé une seule
       // fois au montage, hors du sondage, et n'a rien à faire dans `differes`.
-      // Les réglages non plus, relevés une fois pour dater ce journal.
+      // Les réglages non plus, relevés une fois pour dater ce log.
       if (String(url).includes('/api/logs')) return Promise.resolve({ ok: true, json: async () => ({ lines: [] }) } as Response)
       if (String(url).includes('/api/settings')) {
         return Promise.resolve({ ok: true, json: async () => ({ date_format: 'day_month_year', clock_24h: true }) } as Response)
@@ -802,13 +802,13 @@ describe('SystemView', () => {
     // Changement de période pendant que ce premier sondage est encore en vol.
     await w.findComponent(Select).vm.$emit('update:modelValue', '1')
     await flushPromises()
-    // `arreter()` a dû annuler la requête en vol...
+    // `stop()` a dû annuler la requête en vol...
     expect(differes[0]!.signal?.aborted).toBe(true)
-    // ... sans que cette annulation compte pour une panne : une requête
-    // abandonnée par notre propre code n'est pas un échec du cœur.
+    // ... sans que cette annulation count pour une panne : une requête
+    // abandonnée par notre propre code n'est step un échec du cœur.
     expect(w.find('[data-system-unavailable]').exists()).toBe(false)
-    // ... et la reprise n'est plus immédiate : le dernier sondage venant tout
-    // juste d'être lancé, l'échéance du nouveau rythme (1 s) n'est pas
+    // ... et la reprise n'est plus immédiate : le last sondage venant tout
+    // juste d'être lancé, l'échéance du nouveau rythme (1 s) n'est step
     // atteinte. C'est elle qui relancera.
     expect(differes.length).toBe(1)
     await vi.advanceTimersByTimeAsync(1000)
@@ -816,7 +816,7 @@ describe('SystemView', () => {
     // La requête annulée finit par « répondre » avec des données pourtant
     // plus anciennes que celles déjà posées par la requête plus fraîche :
     // elle ne doit ni les écraser, ni afficher la ligne d'indisponibilité —
-    // une requête abandonnée par notre propre code n'est pas un échec du
+    // une requête abandonnée par notre propre code n'est step un échec du
     // cœur.
     differes[1]!.resolve({ ok: true, json: async () => payload({ cpu_total_jiffies: 2000, cpu_idle_jiffies: 1000 }) })
     await flushPromises()
@@ -824,14 +824,14 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('re-choisir la période déjà active ne redéclenche pas le sondage', async () => {
+  it('re-choose la période déjà active ne redéclenche step le sondage', async () => {
     const f = stub(payload())
     const w = await monter()
     await flushPromises()
     const appels = f.mock.calls.length
     // La valeur initiale du sélecteur est déjà « 5 » (période par défaut) :
-    // la re-choisir ne doit ni sonder immédiatement, ni réinitialiser le
-    // minuteur.
+    // la re-choose ne doit ni probe immédiatement, ni réinitialiser le
+    // timer.
     await w.findComponent(Select).vm.$emit('update:modelValue', '5')
     await flushPromises()
     expect(f.mock.calls.length).toBe(appels)
@@ -865,42 +865,42 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('affiche la charge moyenne dans la carte historique', async () => {
+  it('displayed la load moyenne dans la carte history', async () => {
     stub(payload())
     const w = await monter()
     expect(w.get('[data-system-load]').text()).toBe('0.50 · 0.40 · 0.30')
     w.unmount()
   })
 
-  it('affiche un tiret pour la tension quand aucune sonde n est presente', async () => {
-    // `null` : pas de capteur `rpi_volt`, à distinguer d'une alimentation
+  it('displayed un tiret pour la voltage quand aucune sonde n est presente', async () => {
+    // `null` : step de capteur `rpi_volt`, à distinguer d'une alimentation
     // saine (`false`) — l'ancien affichage confondait les deux.
     stub(payload({ under_voltage: null }))
     const w = await monter()
-    const tension = w.get('[data-system-under-voltage]')
-    expect(tension.text()).toBe('—')
-    expect(tension.classes()).not.toContain('text-destructive')
+    const voltage = w.get('[data-system-under-voltage]')
+    expect(voltage.text()).toBe('—')
+    expect(voltage.classes()).not.toContain('text-destructive')
     w.unmount()
   })
 
-  it('affiche la tension nominale quand la sonde ne detecte rien', async () => {
+  it('displayed la voltage nominale quand la sonde ne detecte rien', async () => {
     stub(payload({ under_voltage: false }))
     const w = await monter()
-    const tension = w.get('[data-system-under-voltage]')
-    expect(tension.text()).toBe('system_voltage_ok')
-    expect(tension.classes()).not.toContain('text-destructive')
+    const voltage = w.get('[data-system-under-voltage]')
+    expect(voltage.text()).toBe('system_voltage_ok')
+    expect(voltage.classes()).not.toContain('text-destructive')
     w.unmount()
   })
 
-  it('affiche l antecedent quand la sonde est saine mais un episode a eu lieu depuis le demarrage', async () => {
+  it('displayed l antecedent quand la sonde est saine mais un episode a eu lieu depuis le demarrage', async () => {
     // `under_voltage: false` (rien à l'instant) mais `under_voltage_since_boot:
     // true` (le bit collant du micrologiciel) : un troisième état, distinct
-    // de la sous-tension en cours, sans le rouge de l'alerte immédiate.
+    // de la sous-voltage en cours, sans le rouge de l'alerte immédiate.
     stub(payload({ under_voltage: false, under_voltage_since_boot: true }))
     const w = await monter()
-    const tension = w.get('[data-system-under-voltage]')
-    expect(tension.text()).toBe('system_voltage_since_boot')
-    expect(tension.classes()).not.toContain('text-destructive')
+    const voltage = w.get('[data-system-under-voltage]')
+    expect(voltage.text()).toBe('system_voltage_since_boot')
+    expect(voltage.classes()).not.toContain('text-destructive')
     // La phrase de conseil reste réservée à l'alerte instantanée.
     expect(w.find('[data-system-under-voltage-avis]').exists()).toBe(false)
     w.unmount()
@@ -913,25 +913,25 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('affiche l alerte en rouge en cas de sous-tension detectee', async () => {
+  it('displayed l alerte en rouge en cas de sous-voltage detectee', async () => {
     stub(payload({ under_voltage: true }))
     const w = await monter()
-    const tension = w.get('[data-system-under-voltage]')
-    // Le mot court dans la grille, pas la phrase entière : voir le test
+    const voltage = w.get('[data-system-under-voltage]')
+    // Le mot court dans la grille, step la phrase entière : voir le test
     // suivant pour la phrase de conseil, affichée à part.
-    expect(tension.text()).toBe('system_voltage_low')
-    expect(tension.classes()).toContain('text-destructive')
+    expect(voltage.text()).toBe('system_voltage_low')
+    expect(voltage.classes()).toContain('text-destructive')
     w.unmount()
   })
 
-  it('affiche la phrase de conseil sous la grille seulement quand l alerte est active', async () => {
+  it('displayed la phrase de conseil sous la grille seulement quand l alerte est active', async () => {
     stub(payload({ under_voltage: false }))
     const w = await monter()
     expect(w.find('[data-system-under-voltage-avis]').exists()).toBe(false)
     w.unmount()
   })
 
-  it('affiche la phrase de conseil avec role status en cas de sous-tension', async () => {
+  it('displayed la phrase de conseil avec role status en cas de sous-voltage', async () => {
     stub(payload({ under_voltage: true }))
     const w = await monter()
     const avis = w.get('[data-system-under-voltage-avis]')
@@ -940,36 +940,36 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('le bouton d aide sur la tension porte un nom accessible et ouvre la popin', async () => {
+  it('le bouton d aide sur la voltage porte un nom accessible et ouvre la popin', async () => {
     stub(payload())
     const w = await monter()
     const bouton = w.get('[data-system-voltage-help]')
     expect(bouton.attributes('aria-label')).toBe('system_voltage_help')
-    // Fermée au départ : la popin ne doit pas s'imposer à l'arrivée sur la page.
+    // Fermée au départ : la popin ne doit step s'imposer à l'arrivée sur la page.
     expect(document.body.querySelector('[role="dialog"]')).toBeNull()
     await bouton.trigger('click')
     await flushPromises()
-    // Montée dans un portail, comme le dialogue d'alimentation.
+    // Montée dans un portail, comme le dialog d'alimentation.
     expect(document.body.textContent).toContain('system_voltage_help_title')
     expect(document.body.textContent).toContain('system_voltage_help_body')
     w.unmount()
   })
 
   it('l étiquette de période se corrige quand le catalogue arrive après le montage', async () => {
-    // Reproduit l'ordre réel d'un premier chargement : `App.vue` lance le
-    // rechargement du catalogue à SON montage, donc la vue se monte avant que
+    // Reproduit l'order réel d'un premier chargement : `App.vue` lance le
+    // rechargement du catalogue à SON montage, donc la vue se mounted avant que
     // la réponse arrive. Tous les libellés se corrigent ensuite d'eux-mêmes,
     // `t` étant une computed — sauf celui du déclencheur du Select, que
-    // `SelectValue` sans contenu figeait sur le texte capturé au montage : la
-    // liste affichait « 5 system_unit_second » pour toujours.
+    // `SelectValue` sans contenu figeait sur le text capturé au montage : la
+    // list affichait « 5 system_unit_second » pour toujours.
     //
     // Ce test échouerait donc en rendant `<SelectValue />` sans contenu.
-    // `monter()` ne peut pas le voir : il charge le catalogue AVANT de monter.
+    // `monter()` ne peut step le voir : il load le catalogue AVANT de monter.
     stub(payload(), {})
     await useCatalog().reload()
     // `App.vue` amorce le sondage au montage de la SPA, plus la vue : le
-    // harnais de test tient ce rôle, dans le même ordre que l'application.
-    useMetriques().demarrer()
+    // harness de test tient ce rôle, dans le même order que l'application.
+    useMetrics().start()
     const w = mount(SystemView, { attachTo: document.body })
     await flushPromises()
     expect(w.get('[data-system-period]').text()).toContain('system_unit_second')
@@ -991,7 +991,7 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('affiche la fenêtre de repli (capacité × période) tant que l historique ne mesure rien', async () => {
+  it('displayed la fenêtre de repli (capacité × période) tant que l history ne mesure rien', async () => {
     // Page fraîche : aucun échantillon encore poussé (seul le premier sondage
     // de référence a eu lieu), donc rien à mesurer — repli sur la capacité
     // théorique à la période par défaut (5 s × 240 = 20 min).
@@ -1001,7 +1001,7 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('affiche la durée réelle de l historique plutôt que la capacité une fois mesurable', async () => {
+  it('displayed la durée réelle de l history plutôt que la capacité une fois mesurable', async () => {
     const jiffies = prochainsJiffies()
     stub(() => payload(jiffies()))
     const w = await monter()
@@ -1015,12 +1015,12 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  describe('survol de l historique', () => {
+  describe('survol de l history', () => {
     /**
      * Cinq réponses successives aux valeurs bien séparées (cpu 10/30/50/70/90 %,
      * ram 5/25/45/65/85 %) : de quoi distinguer sans ambiguïté la colonne
      * pointée. La toute première réponse ne fait que poser la référence de
-     * jiffies (voir `utilisationCpu`) et ne pousse aucun échantillon.
+     * jiffies (voir `cpuUsage`) et ne pousse aucun échantillon.
      */
     function reponsesSurvol() {
       const cibles: [cpu: number, ram: number][] = [
@@ -1048,7 +1048,7 @@ describe('SystemView', () => {
     }
 
     /**
-     * Monte la vue avec les cinq échantillons ci-dessus déjà en historique, et
+     * Monte la vue avec les cinq échantillons ci-dessus déjà en history, et
      * stube le rectangle du graphe : sous jsdom, `getBoundingClientRect`
      * renvoie des zéros, et tout x se ramènerait au même index sans ce stub.
      */
@@ -1066,7 +1066,7 @@ describe('SystemView', () => {
       return { w, svg }
     }
 
-    it('un pointeur au milieu du graphe affiche l échantillon du milieu', async () => {
+    it('un pointeur au milieu du graphe displayed l échantillon du milieu', async () => {
       const { w, svg } = await monterAvecHistorique()
       await svg.trigger('pointermove', { clientX: 100 })
       const popin = w.get('[data-system-history-popin]')
@@ -1075,7 +1075,7 @@ describe('SystemView', () => {
       w.unmount()
     })
 
-    it('un pointeur sur la première colonne affiche le premier échantillon', async () => {
+    it('un pointeur sur la première colonne displayed le premier échantillon', async () => {
       const { w, svg } = await monterAvecHistorique()
       await svg.trigger('pointermove', { clientX: 0 })
       const popin = w.get('[data-system-history-popin]')
@@ -1084,7 +1084,7 @@ describe('SystemView', () => {
       w.unmount()
     })
 
-    it('un pointeur sur la dernière colonne affiche le dernier échantillon', async () => {
+    it('un pointeur sur la dernière colonne displayed le last échantillon', async () => {
       const { w, svg } = await monterAvecHistorique()
       await svg.trigger('pointermove', { clientX: 200 })
       const popin = w.get('[data-system-history-popin]')
@@ -1103,7 +1103,7 @@ describe('SystemView', () => {
       w.unmount()
     })
 
-    it('un appui tactile affiche le popin sans attendre un mouvement', async () => {
+    it('un appui tactile displayed le popin sans attendre un mouvement', async () => {
       // `pointerdown` seul, sans `pointermove` : un tap immobile sur écran
       // tactile ne déclencherait jamais `pointermove`.
       const { w, svg } = await monterAvecHistorique()
@@ -1126,7 +1126,7 @@ describe('SystemView', () => {
     })
 
     it('le trait de survol suit la colonne pointée', async () => {
-      // `LARGEUR` du viewBox vaut 100, n = 5 : le pas entre colonnes vaut
+      // `WIDTH` du viewBox vaut 100, n = 5 : le step entre colonnes vaut
       // 25. La colonne 2 (survolée par `clientX: 100`, voir le test du
       // milieu ci-dessus) doit donc placer le trait à x = 50.
       const { w, svg } = await monterAvecHistorique()
@@ -1153,7 +1153,7 @@ describe('SystemView', () => {
       // `clientX: 125` (fraction 2,5, à cheval entre les colonnes 2 et 3) :
       // `Math.round` arrondit les demis vers le haut, donc la colonne 3
       // (x = 75), ce qu'un arrondi « au plus proche » différent (vers le
-      // pair, par exemple) ne donnerait pas forcément.
+      // pair, par exemple) ne donnerait step forcément.
       await svg.trigger('pointermove', { clientX: 125 })
       ligne = w.get('[data-system-history-line]')
       expect(ligne.attributes('x1')).toBe('75')
@@ -1162,13 +1162,13 @@ describe('SystemView', () => {
 
     it('le popin est centré par une transformation constante, bornée en pixels sur les trois régimes', async () => {
       // Graphe large de 200 px (voir le stub de `getBoundingClientRect`
-      // ci-dessus), popin large de 100 px (`LARGEUR_POPIN_PX`) : le centre
+      // ci-dessus), popin large de 100 px (`POPOVER_WIDTH_PX`) : le centre
       // idéal ne peut descendre sous 50 px ni dépasser 150 px sans faire
       // déborder le popin de la carte.
       const { w, svg } = await monterAvecHistorique()
       // Première colonne (i = 0 sur 5) : centre idéal à 0 px, borné à 50 px —
       // la transformation reste -50 % constante, c'est la position qui est
-      // bornée, pas un cas particulier de transformation comme avant cette
+      // bornée, step un cas particulier de transformation comme avant cette
       // série.
       await svg.trigger('pointermove', { clientX: 0 })
       let popin = w.get('[data-system-history-popin]').element as HTMLElement
@@ -1190,13 +1190,13 @@ describe('SystemView', () => {
       w.unmount()
     })
 
-    it('survoler un graphe encore vide n affiche ni popin ni trait', async () => {
+    it('survoler un graphe encore vide n displayed ni popin ni trait', async () => {
       // Un seul sondage : la référence de jiffies est posée, aucun échantillon
       // poussé. Le graphe est là quand même (il l'est désormais toujours, pour
-      // que la mise en page ne saute pas), donc il est **survolable** avant
+      // que la mise en page ne saute step), donc il est **survolable** avant
       // d'avoir la moindre donnée — ce que l'ancienne version rendait
-      // impossible en ne le dessinant pas. Le garde `< 2` de `survolPointeur`
-      // et celui de `xLigneSurvol` deviennent donc porteurs : ce test les
+      // impossible en ne le dessinant step. Le garde `< 2` de `hoverPointer`
+      // et celui de `hoverLineX` deviennent donc porteurs : ce test les
       // épingle.
       stub(payload({ cpu_total_jiffies: 0, cpu_idle_jiffies: 0 }))
       const w = await monter()
@@ -1229,7 +1229,7 @@ describe('SystemView', () => {
       const w = await monter()
       await vi.advanceTimersByTimeAsync(15000)
       await flushPromises()
-      // Les deux autres courbes restent : une machine sans sonde ne perd pas
+      // Les deux autres courbes restent : une machine sans sonde ne perd step
       // son graphe.
       expect(w.get('[data-system-history] path').attributes('d')).not.toBe('')
       expect(w.get('[data-system-history-temp]').attributes('d')).toBe('')
@@ -1240,7 +1240,7 @@ describe('SystemView', () => {
       // Une lecture manquante n'efface plus la courbe entière : chaque
       // température présente reste sur sa propre abscisse (son horodatage),
       // exactement comme dans les deux autres courbes, donc rien ne dérive
-      // même quand la série a un trou au milieu. `cheminSparkline` referme le
+      // même quand la série a un trou au milieu. `sparklinePath` referme le
       // sous-tracé courant sur le `null` et rouvre un `M` au prochain point
       // présent : deux sous-tracés SVG plutôt qu'un tracé absent.
       const jiffies = prochainsJiffies()
@@ -1266,7 +1266,7 @@ describe('SystemView', () => {
       w.unmount()
     })
 
-    it('n annonce pas de température dans la légende sans sonde', async () => {
+    it('n annonce step de température dans la légende sans sonde', async () => {
       stub(payload({ temperature_c: null }))
       const w = await monter()
       // Pas de série annoncée quand aucune courbe ne peut exister : l'absence
@@ -1275,7 +1275,7 @@ describe('SystemView', () => {
       w.unmount()
     })
 
-    it('affiche la température dans le popin de survol', async () => {
+    it('displayed la température dans le popin de survol', async () => {
       const jiffies = prochainsJiffies()
       stub(() => payload({ ...jiffies(), temperature_c: 47.8 }))
       const w = await monter()
@@ -1293,9 +1293,9 @@ describe('SystemView', () => {
   })
 
   describe('dernières erreurs', () => {
-    it('rend une ligne par entrée de journal, dans l’ordre reçu', async () => {
+    it('rend une ligne par entrée de log, dans l’order reçu', async () => {
       // `/api/logs` rend déjà les plus récentes en premier (le cœur inverse son
-      // tampon), la vue ne retrie pas : elle doit rendre l'ordre tel quel.
+      // tampon), la vue ne retrie step : elle doit rendre l'order tel quel.
       stub(payload(), CATALOGUE, {
         lines: ['WARN la plus recente', 'WARN la plus ancienne'],
       })
@@ -1315,10 +1315,10 @@ describe('SystemView', () => {
       w.unmount()
     })
 
-    it('un journal injoignable ne prive pas la page de ses métriques', async () => {
+    it('un log injoignable ne prive step la page de ses métriques', async () => {
       // Les deux relevés sont indépendants, chacun avec son `.catch` : un
-      // `/api/logs` en panne ne doit pas faire passer la machine pour muette —
-      // ce sont justement les métriques qu'on regarde quand le journal manque.
+      // `/api/logs` en panne ne doit step faire passer la machine pour muette —
+      // ce sont justement les métriques qu'on regarde quand le log manque.
       stub(payload(), CATALOGUE, undefined)
       const w = await monter()
       expect(w.findAll('[data-log-line]')).toHaveLength(0)
@@ -1327,8 +1327,8 @@ describe('SystemView', () => {
       w.unmount()
     })
 
-    it('le sondage périodique ne relève pas le journal', async () => {
-      // Greffer le journal sur `sonder()` allongerait la prise du verrou « en
+    it('le sondage périodique ne relève step le log', async () => {
+      // Greffer le log sur `probe()` allongerait la prise du verrou « en
       // vol » et changerait la cadence observée : mesuré, quatre tests de
       // cadence tombaient. Ce test épingle la séparation.
       const f = stub(payload(), CATALOGUE, { lines: ['WARN une erreur'] })
@@ -1368,7 +1368,7 @@ describe('SystemView', () => {
       w.unmount()
 
       // Trois erreurs : la carte les montre déjà toutes, et le bouton reste
-      // offert quand même. Signalé à l'usage — reserve au journal long, le
+      // offert quand même. Signalé à l'usage — reserve au log long, le
       // filtre ne se decouvrait qu'au pire moment, quand il y a trop a lire
       // pour explorer l'ecran.
       stub(payload(), CATALOGUE, { lines: DOUZE.slice(0, 3) })
@@ -1383,7 +1383,7 @@ describe('SystemView', () => {
       vide.unmount()
     })
 
-    it('la popin liste tout le journal', async () => {
+    it('la popin list tout le log', async () => {
       stub(payload(), CATALOGUE, { lines: DOUZE })
       const w = await monter()
       await w.get('[data-logs-all]').trigger('click')
@@ -1394,7 +1394,7 @@ describe('SystemView', () => {
       w.unmount()
     })
 
-    it('le champ filtre la liste et met à jour le compteur', async () => {
+    it('le champ filtre la list et met à jour le compteur', async () => {
       stub(payload(), CATALOGUE, { lines: DOUZE })
       const w = await monter()
       await w.get('[data-logs-all]').trigger('click')
@@ -1424,14 +1424,14 @@ describe('SystemView', () => {
       w.unmount()
     })
 
-    it('relève le journal à l ouverture', async () => {
+    it('relève le log à l ouverture', async () => {
       const f = stub(payload(), CATALOGUE, { lines: DOUZE })
       const w = await monter()
       const avant = f.mock.calls.filter((c) => String(c[0]).includes('/api/logs')).length
       await w.get('[data-logs-all]').trigger('click')
       await flushPromises()
-      // Une requête de plus, sur geste utilisateur : le journal reste hors du
-      // sondage périodique (verrou « en vol » et delta CPU de `sonder`).
+      // Une requête de plus, sur geste utilisateur : le log reste hors du
+      // sondage périodique (verrou « en vol » et delta CPU de `probe`).
       expect(f.mock.calls.filter((c) => String(c[0]).includes('/api/logs')).length).toBe(avant + 1)
       w.unmount()
     })
@@ -1447,10 +1447,10 @@ describe('SystemView', () => {
       await flushPromises()
       expect(document.body.querySelectorAll('[data-logs-dialog-line]')).toHaveLength(1)
 
-      // Fermeture par le bouton du dialogue — le vrai geste, et le seul
-      // `[data-slot="dialog-close"]` présent puisque seul le dialogue ouvert
+      // Fermeture par le bouton du dialog — le vrai geste, et le seul
+      // `[data-slot="dialog-close"]` présent puisque seul le dialog open
       // est rendu dans le portail. Puis réouverture : le champ repart vide,
-      // sinon la popin s'ouvrirait sur une liste tronquée sans que rien à
+      // sinon la popin s'ouvrirait sur une list tronquée sans que rien à
       // l'écran ne l'explique.
       document.body.querySelector<HTMLElement>('[data-slot="dialog-close"]')!.click()
       await flushPromises()

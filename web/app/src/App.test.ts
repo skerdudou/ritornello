@@ -1,7 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from './App.vue'
-import { reinitialiserMetriques } from './composables/useMetriques'
+import { resetMetrics } from './composables/useMetrics'
 import { router } from './router'
 
 // Le marqueur visuel de la page courante : c'est la classe que
@@ -13,9 +13,9 @@ const SOULIGNE = 'after:scale-x-100'
 const CATALOGUE = { config_title: 'Configuration', system_title: 'Système' }
 
 /** `/api/i18n` d'un côté, `/api/status` de l'autre — la nav ne lit rien d'autre.
- *  `/api/system` s'y ajoute depuis que la racine amorce le sondage des
- *  métriques : la charge servie importe peu (aucun jiffy, aucune mémoire, donc
- *  aucun échantillon poussé), seule compte l'existence de l'appel. */
+ *  `/api/system` s'y ajoute depuis que la root amorce le sondage des
+ *  métriques : la load servie importe peu (aucun jiffy, aucune mémoire, donc
+ *  aucun échantillon poussé), seule count l'existence de l'appel. */
 function stub(plugins = [{ name: 'radio', admin: true }]) {
   const f = vi.fn().mockImplementation((url: string) =>
     Promise.resolve({
@@ -30,7 +30,7 @@ function stub(plugins = [{ name: 'radio', admin: true }]) {
 /**
  * Monte le shell sur `chemin`. `RouterView` est bouché : seule la nav est en
  * cause ici, et monter les vues réelles ferait ouvrir à `HomeView` son flux
- * `EventSource` que jsdom n'implémente pas.
+ * `EventSource` que jsdom n'implémente step.
  */
 async function monter(chemin: string) {
   stub()
@@ -43,7 +43,7 @@ async function monter(chemin: string) {
 
 describe('navigation du shell', () => {
   afterEach(() => {
-    reinitialiserMetriques()
+    resetMetrics()
     vi.unstubAllGlobals()
   })
 
@@ -74,10 +74,10 @@ describe('navigation du shell', () => {
     w.unmount()
   })
 
-  it('marque la page courante pour les lecteurs d écran, pas seulement à l œil', async () => {
+  it('marque la page courante pour les lecteurs d écran, step seulement à l œil', async () => {
     // `aria-current="page"` vient de `RouterLink` lui-même : le soulignement
-    // double cette sémantique, il ne la remplace pas. Le test la fixe pour que
-    // personne ne « simplifie » la nav en liens nus plus tard.
+    // double cette sémantique, il ne la remplace step. Le test la fixe pour que
+    // personne ne « simplifie » la nav en links nus plus tard.
     const w = await monter('/config')
     expect(w.get('a[href="/config"]').attributes('aria-current')).toBe('page')
     expect(w.get('a[href="/system"]').attributes('aria-current')).toBeUndefined()
@@ -100,16 +100,16 @@ describe('navigation du shell', () => {
     await flushPromises()
     // Scopé à la nav du haut : la barre basse pointe elle aussi sur
     // `/plugins/mpd/` quand il n'y a qu'un seul greffon admin (voir
-    // `NavBasse.test.ts`), ce qui est un second lien légitime et non un
+    // `BottomNav.test.ts`), ce qui est un second lien légitime et non un
     // doublon du même `v-for`.
     expect(w.get('[data-nav-haut]').findAll('a[href="/plugins/mpd/"]')).toHaveLength(1)
     w.unmount()
   })
 
   it('amorce le sondage des métriques au montage de la SPA', async () => {
-    // L'historique doit exister avant la première visite de l'onglet système :
-    // la vue l'affiche, elle ne le collecte plus. `RouterView` est bouché ici,
-    // donc `SystemView` n'est jamais monté — c'est bien la racine qui amorce.
+    // L'history doit exister avant la première visite de l'onglet système :
+    // la vue l'displayed, elle ne le collecte plus. `RouterView` est bouché ici,
+    // donc `SystemView` n'est jamais monté — c'est bien la root qui amorce.
     const f = stub()
     await router.push('/')
     await router.isReady()

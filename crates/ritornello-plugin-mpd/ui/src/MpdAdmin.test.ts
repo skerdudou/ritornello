@@ -26,18 +26,18 @@ const CATALOGUE = {
 }
 
 // Prefixe absolu que le shell passe par la prop `base` (requise) : c'est le
-// contrat, cette vue ne connait pas le nom sous lequel elle est servie.
+// contract, cette vue ne connait pas le nom sous lequel elle est servie.
 const BASE = '/plugins/mpd/'
 
-/** Monte le composant avec un `fetch` espionne servant `donnees` au GET. */
-async function monter(donnees: { listen: string; port: number } = { listen: '0.0.0.0', port: 6600 }) {
+/** Monte le composant avec un `fetch` espionne servant `data` au GET. */
+async function monter(data: { listen: string; port: number } = { listen: '0.0.0.0', port: 6600 }) {
   const puts: Array<{ url: string; corps: unknown }> = []
   const spy = vi.fn(async (url: string, init?: RequestInit) => {
     if (init?.method === 'PUT') {
       puts.push({ url, corps: JSON.parse(String(init.body)) })
       return new Response(null, { status: 204 })
     }
-    return new Response(JSON.stringify(donnees), { status: 200 })
+    return new Response(JSON.stringify(data), { status: 200 })
   })
   vi.stubGlobal('fetch', spy)
   const w = mount(MpdAdmin, { props: { catalog: CATALOGUE, base: BASE } })
@@ -47,12 +47,12 @@ async function monter(donnees: { listen: string; port: number } = { listen: '0.0
 
 /** Variante ou le PUT est refuse par le serveur (422), comme un vrai refus de validation. */
 async function monterAvecRefus(erreur: string) {
-  const donnees = { listen: '0.0.0.0', port: 6600 }
+  const data = { listen: '0.0.0.0', port: 6600 }
   const spy = vi.fn(async (url: string, init?: RequestInit) => {
     if (init?.method === 'PUT') {
       return new Response(JSON.stringify({ error: erreur }), { status: 422 })
     }
-    return new Response(JSON.stringify(donnees), { status: 200 })
+    return new Response(JSON.stringify(data), { status: 200 })
   })
   vi.stubGlobal('fetch', spy)
   const w = mount(MpdAdmin, { props: { catalog: CATALOGUE, base: BASE } })
@@ -100,7 +100,7 @@ describe('MpdAdmin', () => {
     expect(toast.success).toHaveBeenCalledWith('Enregistré')
   })
 
-  // Le garde cote client (`aDesErreurs`) est calque exactement sur
+  // Le garde cote client (`hasErrors`) est calque exactement sur
   // `Config::valider` : une adresse non vide et un port dans 1..=65535 sont
   // les deux seuls refus que le serveur connait pour ces deux champs, donc
   // un couple qui passe le garde est par construction accepte cote serveur
@@ -140,7 +140,7 @@ describe('MpdAdmin', () => {
     // de lui-meme sur un element `disabled`, ce qui ferait passer ce test
     // sans qu'aucun garde ne soit exerce dans le code de la vue (voir le
     // meme choix dans `RadioAdmin.test.ts`). On dispatche donc le clic
-    // directement : c'est le retour anticipe d'`enregistrer()` qui est
+    // directement : c'est le retour anticipe d'`save()` qui est
     // teste ici, pas le seul etat visuel du bouton.
     bouton.dispatchEvent(new Event('click'))
     await flushPromises()

@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-/// État d'apprentissage tel que l'IHM le lit dans `GetData` : `captured` reste
+/// État d'apprentissage tel que l'IHM le read dans `GetData` : `captured` reste
 /// `null` tant qu'aucune touche n'a été pressée.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Learning {
@@ -82,7 +82,7 @@ mod tests {
         // deuxième appui : plus rien à capturer, l'apprentissage est terminé
         assert!(!s.capture("USB Keyboard", 42));
         assert_eq!(s.snapshot().unwrap().captured, Some(115));
-        // et le périphérique réémet ses commandes
+        // et le périphérique réémet ses commands
         assert_eq!(s.device(), None);
     }
 

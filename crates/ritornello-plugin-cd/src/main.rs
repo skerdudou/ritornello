@@ -1,10 +1,10 @@
-//! Plugin Source « cd » : présence du disque, lecture, piste courante, éjection.
+//! Plugin Source « cd » : présence du disque, playback, piste courante, éjection.
 //!
 //! Il ne connaît **aucun** fournisseur de métadonnées. Ce qu'il sait du disque,
-//! il le déclare dans l'identité du morceau (la TOC brute et l'index de piste) ;
+//! il le déclare dans l'identité du track (la TOC brute et l'index de piste) ;
 //! artiste, album et titres viennent d'un plugin `metadata` — par exemple
 //! `ritornello-plugin-musicbrainz` — que le cœur arbitre. Un appel réseau lent
-//! ne vit donc plus dans le processus qui doit répondre aux commandes de piste.
+//! ne vit donc plus dans le processus qui doit répondre aux commands de piste.
 
 mod cd;
 
@@ -18,9 +18,9 @@ use ritornello_i18n::Catalog;
 
 const CD_EN: &str = include_str!("locales/en.toml");
 
-/// Résultat d'une lecture de TOC : époque de validité, TOC brute si lisible,
+/// Résultat d'une playback de TOC : époque de validité, TOC brute si lisible,
 /// nombre de pistes.
-type TocLue = (u64, Option<String>, usize);
+type ReadToc = (u64, Option<String>, usize);
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
@@ -35,27 +35,27 @@ struct CdSource {
     /// illisible.
     toc: Option<String>,
     /// TOC du disque précédent, seul moyen de distinguer un **clignotement de
-    /// présence** du lecteur (même disque, la lecture continue) d'un **échange
+    /// présence** du player (même disque, la playback continue) d'un **échange
     /// de disque** (rien ne peut plus jouer).
-    toc_precedente: Option<String>,
+    previous_toc: Option<String>,
     total_tracks: usize,
-    /// Vrai si le plugin a demandé la lecture et ne l'a pas arrêtée depuis.
+    /// Vrai si le plugin a demandé la playback et ne l'a pas arrêtée depuis.
     ///
     /// Nécessaire pour l'identité : un disque **présent dans le tiroir** n'est
-    /// pas un morceau **en cours de lecture**, et seul le second a des
+    /// pas un track **en cours de playback**, et seul le second a des
     /// métadonnées à afficher. Sans cette distinction, insérer un disque sans
     /// rien lancer ferait interroger un service tiers pour rien.
-    lecture: bool,
+    playback: bool,
     epoch: u64,
     presence_rx: mpsc::Receiver<bool>,
-    toc_tx: mpsc::Sender<TocLue>,
-    toc_rx: mpsc::Receiver<TocLue>,
+    toc_tx: mpsc::Sender<ReadToc>,
+    toc_rx: mpsc::Receiver<ReadToc>,
     catalog: Catalog,
     locales_root: PathBuf,
 }
 
 impl CdSource {
-    /// Issue complète : action, statut, présélection et identité de ce qui joue.
+    /// Issue complète : action, statut, présélection et identité de ce qui plays.
     fn issue(&self, action: SourceAction) -> SourceOutcome {
         let sortie = SourceOutcome::new(action);
         // Le statut permanent de la Source : ce que la carte Lecteur de la SPA
@@ -73,9 +73,9 @@ impl CdSource {
             None => 0,
         };
         let sortie = sortie.preset_count(count);
-        match (self.lecture && self.present, &self.toc) {
+        match (self.playback && self.present, &self.toc) {
             // La TOC désigne le disque, l'index désigne la piste : les deux sont
-            // nécessaires, un changement de piste étant un changement de morceau.
+            // nécessaires, un changement de piste étant un changement de track.
             (true, Some(toc)) => {
                 let sortie = sortie.plays(serde_json::json!({
                     "kind": "disc",
@@ -89,8 +89,8 @@ impl CdSource {
                     Err(_) => sortie,
                 }
             }
-            // Rien ne joue, ou rien d'identifiable (TOC pas encore lue,
-            // illisible, lecteur vide). On le dit : une identité partielle
+            // Rien ne plays, ou rien d'identifiable (TOC pas encore lue,
+            // illisible, player clear). On le dit : une identité partielle
             // ferait travailler les plugins pour rien.
             _ => sortie.plays_nothing(),
         }
@@ -123,17 +123,17 @@ impl CdSource {
         });
     }
 
-    /// Remise à zéro sur changement de disque : l'époque invalide toute lecture
+    /// Remise à zéro sur changement de disque : l'époque invalide toute playback
     /// de TOC encore en vol.
-    fn oublie_le_disque(&mut self) {
+    fn forget_disc(&mut self) {
         self.track = 0;
         // La dernière TOC **connue** est retenue : c'est elle qui dira, quand la
-        // prochaine arrivera, si le disque a changé ou si le lecteur a simplement
+        // prochaine arrivera, si le disque a changé ou si le player a simplement
         // cligné. Écraser avec `None` perdrait cette mémoire — un clignotement
         // produit deux changements de présence, donc deux passages ici, et le
         // second effacerait ce que le premier venait de retenir.
         if let Some(connue) = self.toc.take() {
-            self.toc_precedente = Some(connue);
+            self.previous_toc = Some(connue);
         }
         self.total_tracks = 0;
         self.epoch = self.epoch.wrapping_add(1);
@@ -143,7 +143,7 @@ impl CdSource {
 #[async_trait::async_trait]
 impl SourcePlugin for CdSource {
     async fn activate(&mut self) -> SourceOutcome {
-        self.lecture = self.present;
+        self.playback = self.present;
         if self.present {
             self.issue(SourceAction::play("cdda://").finite())
         } else {
@@ -151,14 +151,14 @@ impl SourcePlugin for CdSource {
         }
     }
     async fn deactivate(&mut self) -> SourceOutcome {
-        self.lecture = false;
+        self.playback = false;
         SourceOutcome::new(SourceAction::Stop).plays_nothing()
     }
     async fn wake(&mut self) -> SourceOutcome {
         // Réveil : rafraîchir l'affichage (« pas de disque » / infos disque)
         // sans émettre de Play — le cd ne se lance pas tout seul, donc rien ne
-        // joue et il n'y a aucune métadonnée à chercher.
-        self.lecture = false;
+        // plays et il n'y a aucune métadonnée à chercher.
+        self.playback = false;
         self.issue(SourceAction::Noop)
     }
     async fn select(&mut self, n: u8) -> SourceOutcome {
@@ -169,19 +169,19 @@ impl SourcePlugin for CdSource {
             return self.issue(SourceAction::Noop);
         }
         self.track = (n - 1) as i64;
-        self.lecture = true;
+        self.playback = true;
         self.issue(SourceAction::play(format!("cdda://{n}")).finite())
     }
     async fn next(&mut self) -> SourceOutcome {
-        // Rien en lecture : `playlist-next` sur un mpv à l'arrêt ne charge rien,
+        // Rien en playback : `playlist-next` sur un mpv à l'arrêt ne charge rien,
         // donc sauter une piste n'a aucun sens. Surtout, il ne faut pas armer
-        // `lecture` ici : cela déclarerait un morceau en cours sur un appareil
+        // `playback` ici : cela déclarerait un track en cours sur un appareil
         // silencieux, ferait interroger un service tiers et afficherait un
         // artiste et un titre sans un son.
-        if !self.lecture {
+        if !self.playback {
             return SourceOutcome::new(SourceAction::Noop);
         }
-        // Le lecteur ne remonte pas l'index réel : on suit l'index demandé,
+        // Le player ne remonte pas l'index réel : on suit l'index demandé,
         // borné à la dernière piste connue (pas de rebouclage).
         if self.total_tracks > 0 {
             self.track = (self.track + 1).min(self.total_tracks as i64 - 1);
@@ -190,7 +190,7 @@ impl SourcePlugin for CdSource {
     }
     async fn prev(&mut self) -> SourceOutcome {
         // Voir `next` : même garde, même raison.
-        if !self.lecture {
+        if !self.playback {
             return SourceOutcome::new(SourceAction::Noop);
         }
         self.track = (self.track - 1).max(0);
@@ -202,17 +202,17 @@ impl SourcePlugin for CdSource {
         // Passe par `issue()`, comme `activate`/`wake`/`select` : une trame
         // permanente sans statut EFFACE le statut mémorisé côté cœur (voir
         // `SourceMessage::status`), elle ne le laisse pas tel quel. Avant ce
-        // correctif, l'écran se vidait ("CD" et deux lignes vides) à la fin
+        // correctif, l'écran se vidait ("CD" et deux lines vides) à la fin
         // du disque comme sur la touche Stop, le disque restant pourtant
         // inséré — voir le registre de ce chantier. `issue()` ne déclare pas
-        // de préselection ici : `self.lecture` vient d'être mis à faux, donc
+        // de préselection ici : `self.playback` vient d'être mis à faux, donc
         // sa branche `plays_nothing()` s'applique, sans `preset`, exactement
         // comme avant.
-        self.lecture = false;
+        self.playback = false;
         self.issue(SourceAction::Noop)
     }
     async fn player_track(&mut self, n: i64) -> SourceOutcome {
-        // Le disque avance seul en fin de piste : c'est le **seul** chemin par
+        // Le disque avance seul en fin de piste : c'est le **seul** path par
         // lequel le plugin l'apprend, mpv ne remontant pas l'index autrement.
         // Sans cela, l'affichage et les métadonnées restaient sur la piste
         // précédente jusqu'à ce que l'utilisateur touche une touche.
@@ -224,13 +224,13 @@ impl SourcePlugin for CdSource {
             return SourceOutcome::new(SourceAction::Noop);
         }
         self.track = n;
-        // Le lecteur annonce une avance de piste : il joue donc, quoi que le
+        // Le player announcement une avance de piste : il plays donc, quoi que le
         // plugin ait cru jusqu'ici. C'est aussi ce qui répare l'état après un
-        // clignotement de présence du lecteur.
-        self.lecture = true;
+        // clignotement de présence du player.
+        self.playback = true;
         self.issue(SourceAction::Noop)
     }
-    /// Le lecteur a un tiroir, disque ou pas : c'est même sans disque qu'on
+    /// Le player a un tiroir, disque ou pas : c'est même sans disque qu'on
     /// l'ouvre le plus souvent. Rendre `self.present` ici griserait la touche
     /// exactement quand on en a besoin.
     fn can_eject(&self) -> bool {
@@ -245,8 +245,8 @@ impl SourcePlugin for CdSource {
         // ses échecs, il n'y a rien à récolter ici.
         tokio::task::spawn_blocking(move || cd::eject(&cd_dev));
         self.present = false;
-        self.lecture = false;
-        self.oublie_le_disque();
+        self.playback = false;
+        self.forget_disc();
         self.issue(SourceAction::Stop)
     }
 
@@ -259,21 +259,21 @@ impl SourcePlugin for CdSource {
             presence = self.presence_rx.recv() => {
                 let present = presence?;
                 self.present = present;
-                // `lecture` n'est **pas** touchée ici, et c'est délibéré :
-                // `issue` exige déjà `lecture && present`, donc un disque parti
-                // n'annonce rien. Le remettre à faux briserait le cas du
-                // clignotement de présence — le lecteur rapporte
-                // transitoirement « pas de disque » alors que mpv lit toujours,
+                // `playback` n'est **pas** touchée ici, et c'est délibéré :
+                // `issue` exige déjà `playback && present`, donc un disque parti
+                // n'announcement rien. Le remettre à faux briserait le cas du
+                // clignotement de présence — le player rapporte
+                // transitoirement « pas de disque » alors que mpv read toujours,
                 // et les métadonnées du disque resteraient éteintes jusqu'à la
                 // fin, sans que rien ne se répare. Le cas de l'échange de disque
                 // est traité à l'arrivée de la nouvelle TOC : c'est le premier
                 // instant où on peut le distinguer d'un clignotement.
-                self.oublie_le_disque();
+                self.forget_disc();
                 if present {
                     self.spawn_toc_read();
                 }
-                // Un disque inséré ne joue pas encore : `plays_nothing`, via
-                // `issue`, qui tient compte de `lecture`.
+                // Un disque inséré ne plays pas encore : `plays_nothing`, via
+                // `issue`, qui tient compte de `playback`.
                 Some(self.notification())
             }
             toc = self.toc_rx.recv() => {
@@ -283,21 +283,21 @@ impl SourcePlugin for CdSource {
                 }
                 self.total_tracks = total_tracks;
                 // Disque **différent** du précédent : il a été échangé, donc rien
-                // ne peut être en lecture — mpv ne joue plus ce qu'il jouait, et
+                // ne peut être en playback — mpv ne plays plus ce qu'il jouait, et
                 // aucun `Play` n'a été émis pour ce disque-ci. Même TOC : c'était
-                // un clignotement de présence du lecteur, l'état de lecture est
+                // un clignotement de présence du player, l'état de playback est
                 // conservé et les métadonnées reviennent.
                 //
                 // La comparaison n'a lieu que si une TOC précédente est connue :
                 // au premier disque, elle vaut `None` et il ne faut surtout pas
-                // éteindre une lecture que l'utilisateur vient de lancer.
-                if let Some(precedente) = &self.toc_precedente {
+                // éteindre une playback que l'utilisateur vient de lancer.
+                if let Some(precedente) = &self.previous_toc {
                     if Some(precedente) != toc.as_ref() {
-                        self.lecture = false;
+                        self.playback = false;
                     }
                 }
                 self.toc = toc;
-                // Arrivée différée de la TOC : c'est l'instant où le morceau
+                // Arrivée différée de la TOC : c'est l'instant où le track
                 // devient identifiable, donc où les plugins `metadata` peuvent
                 // enfin travailler — d'où l'identité dans la notification.
                 Some(self.notification())
@@ -331,7 +331,7 @@ impl CdSource {
             // and a spontaneous frame has nothing to republish here.
             presets: None,
             // Le cd n'est pas dans le périmètre de ce chantier : il ne
-            // déclare pas encore de pochette (voir `SourceMessage::cover`).
+            // déclare pas encore de cover (voir `SourceMessage::cover`).
             cover: None,
         }
     }
@@ -346,7 +346,7 @@ async fn main() -> Result<()> {
     let (presence_tx, presence_rx) = mpsc::channel(8);
     tokio::spawn(cd::watch(PathBuf::from(cd_dev.clone()), presence_tx));
 
-    let (toc_tx, toc_rx) = mpsc::channel::<TocLue>(4);
+    let (toc_tx, toc_rx) = mpsc::channel::<ReadToc>(4);
 
     let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
 
@@ -355,9 +355,9 @@ async fn main() -> Result<()> {
         present: false,
         track: 0,
         toc: None,
-        toc_precedente: None,
+        previous_toc: None,
         total_tracks: 0,
-        lecture: false,
+        playback: false,
         epoch: 0,
         presence_rx,
         toc_tx,
@@ -373,7 +373,7 @@ mod tests {
     use super::*;
     use ritornello_proto::IdentityUpdate;
 
-    fn source_with_channels() -> (CdSource, mpsc::Sender<bool>, mpsc::Sender<TocLue>) {
+    fn source_with_channels() -> (CdSource, mpsc::Sender<bool>, mpsc::Sender<ReadToc>) {
         let (presence_tx, presence_rx) = mpsc::channel(8);
         let (toc_tx, toc_rx) = mpsc::channel(4);
         let source = CdSource {
@@ -381,9 +381,9 @@ mod tests {
             present: true,
             track: 0,
             toc: None,
-            toc_precedente: None,
+            previous_toc: None,
             total_tracks: 0,
-            lecture: false,
+            playback: false,
             epoch: 5,
             presence_rx,
             toc_tx: toc_tx.clone(),
@@ -394,12 +394,12 @@ mod tests {
         (source, presence_tx, toc_tx)
     }
 
-    /// Disque lu et en lecture : l'état où l'identité est complète.
+    /// Disque lu et en playback : l'état où l'identité est complète.
     fn source_en_lecture() -> CdSource {
         let (mut source, _p, _t) = source_with_channels();
         source.toc = Some("3 150 22767 41887 63000".into());
         source.total_tracks = 3;
-        source.lecture = true;
+        source.playback = true;
         source
     }
 
@@ -410,7 +410,7 @@ mod tests {
         toc_tx.send((4, Some("9 1 2 3".into()), 99)).await.unwrap();
         let n = source.poll_notification().await;
         assert!(n.is_none(), "un resultat perime ne doit produire aucune notification");
-        assert_eq!(source.total_tracks, 0, "l'etat ne doit pas etre modifie par un resultat perime");
+        assert_eq!(source.total_tracks, 0, "l'state ne doit pas etre modifie par un resultat perime");
         assert!(source.toc.is_none());
 
         // Un resultat a jour (epoch 5) est applique.
@@ -423,9 +423,9 @@ mod tests {
     #[tokio::test]
     async fn larrivee_de_la_toc_rend_le_morceau_identifiable() {
         // C'est l'instant qui débloque les plugins `metadata` : avant, le disque
-        // joue mais rien ne l'identifie.
+        // plays mais rien ne l'identifie.
         let (mut source, _p, toc_tx) = source_with_channels();
-        source.lecture = true;
+        source.playback = true;
         let avant = source.issue(SourceAction::Noop);
         assert_eq!(avant.identity, Some(IdentityUpdate::Nothing), "sans TOC, rien d'identifiable");
 
@@ -456,7 +456,7 @@ mod tests {
         assert_eq!(
             n.identity,
             Some(IdentityUpdate::Nothing),
-            "le cd ne se lance pas tout seul : rien ne joue, donc rien a enrichir"
+            "le cd ne se lance pas tout seul : rien ne plays, donc rien a enrichir"
         );
     }
 
@@ -481,9 +481,9 @@ mod tests {
         // touche exactement quand on en a besoin.
         let source = source_en_lecture();
         assert!(source.can_eject());
-        let (mut vide, _p, _t) = source_with_channels();
-        vide.present = false;
-        assert!(vide.can_eject(), "un tiroir vide s'ouvre aussi");
+        let (mut clear, _p, _t) = source_with_channels();
+        clear.present = false;
+        assert!(clear.can_eject(), "un tiroir clear s'ouvre aussi");
     }
 
     #[tokio::test]
@@ -498,16 +498,16 @@ mod tests {
     #[tokio::test]
     async fn sauter_une_piste_sans_lecture_en_cours_ne_declare_rien() {
         // Disque lu, mais rien lance : `playlist-next` sur un mpv a l'arret ne
-        // charge rien. Declarer une lecture ici ferait interroger un service
+        // charge rien. Declarer une playback ici ferait interroger un service
         // tiers et afficher un artiste et un titre sur un appareil silencieux.
         let (mut source, _p, _t) = source_with_channels();
         source.toc = Some("3 150 22767 41887 63000".into());
         source.total_tracks = 3;
-        source.lecture = false;
+        source.playback = false;
 
         let out = source.next().await;
         assert_eq!(out.action, SourceAction::Noop);
-        assert!(out.identity.is_none(), "rien ne doit etre annonce aux plugins metadata");
+        assert!(out.identity.is_none(), "rien ne doit etre announcement aux plugins metadata");
         assert_eq!(source.track, 0, "l'index ne doit pas bouger");
 
         let out = source.prev().await;
@@ -518,13 +518,13 @@ mod tests {
     #[tokio::test]
     async fn un_arret_decide_par_le_coeur_remet_letat_de_lecture_a_jour() {
         // `Command::Stop` ne traverse pas la Source : sans cette notification,
-        // `lecture` resterait vraie et le plugin annoncerait plus tard des
-        // metadonnees pour un morceau a l'arret.
+        // `playback` resterait vraie et le plugin annoncerait plus tard des
+        // metadata pour un track a l'arret.
         let mut source = source_en_lecture();
         let out = source.stop().await;
         assert_eq!(out.identity, Some(IdentityUpdate::Nothing));
-        assert!(!source.lecture);
-        // Et la consequence : plus rien n'est annonce, meme a l'arrivee d'une TOC.
+        assert!(!source.playback);
+        // Et la consequence : plus rien n'est announcement, meme a l'arrivee d'une TOC.
         assert_eq!(source.issue(SourceAction::Noop).identity, Some(IdentityUpdate::Nothing));
     }
 
@@ -534,7 +534,7 @@ mod tests {
         // `issue()` et ne déclarait donc aucun statut. Une trame permanente
         // sans statut EFFACE le statut mémorisé côté cœur (convention
         // documentée de `SourceMessage::status`) : l'écran se vidait ("CD" et
-        // deux lignes vides) à la fin du disque comme sur la touche Stop,
+        // deux lines vides) à la fin du disque comme sur la touche Stop,
         // alors que le disque restait inséré. C'est cette garantie qui rend
         // vraie la mitigation actée au registre ("le statut CD audio reste
         // affiché") : sans elle, l'arbitrage du propriétaire sur la perte du
@@ -542,7 +542,7 @@ mod tests {
         let mut source = source_en_lecture();
         let out = source.stop().await;
         assert_eq!(out.status.as_deref(), Some("audio CD"), "le disque est toujours present");
-        assert_eq!(out.preset, None, "rien ne joue : aucune touche ne doit etre mise en evidence");
+        assert_eq!(out.preset, None, "rien ne plays : aucune touche ne doit etre mise en evidence");
     }
 
     #[tokio::test]
@@ -555,7 +555,7 @@ mod tests {
 
     #[tokio::test]
     async fn lavance_automatique_de_piste_met_a_jour_preset_et_identite() {
-        // Fin de piste : le disque avance sans qu'aucune touche soit pressée.
+        // Eof de piste : le disque avance sans qu'aucune touche soit pressée.
         // Avant cette notification, l'affichage et les métadonnées restaient sur
         // la piste précédente jusqu'à la prochaine commande de l'utilisateur.
         let mut source = source_en_lecture();
@@ -582,12 +582,12 @@ mod tests {
         let mut source = source_en_lecture();
         let out = source.player_track(2).await;
         assert_eq!(out.preset, Some(3));
-        // Sans lecture, aucune touche a mettre en evidence.
-        source.lecture = false;
+        // Sans playback, aucune touche a mettre en evidence.
+        source.playback = false;
         assert_eq!(source.issue(SourceAction::Noop).preset, None);
         // Au-dela de la 9e piste, la touche correspond toujours : le +10 de
         // la telecommande et la fenetre web permettent d'y acceder.
-        source.lecture = true;
+        source.playback = true;
         source.total_tracks = 12;
         source.track = 10;
         assert_eq!(source.issue(SourceAction::Noop).preset, Some(11));
@@ -595,7 +595,7 @@ mod tests {
 
     #[test]
     fn le_compte_de_pistes_suit_la_toc() {
-        // TOC connue -> total des pistes ; pas de TOC (pas de disque, ou lecture
+        // TOC connue -> total des pistes ; pas de TOC (pas de disque, ou playback
         // en cours de la TOC) -> 0, « rien a numeroter ».
         let mut source = source_en_lecture();
         source.total_tracks = 12;
@@ -621,21 +621,21 @@ mod tests {
 
     #[tokio::test]
     async fn une_avance_de_piste_atteste_la_lecture() {
-        // Le lecteur annonce l'avance : il joue donc, quoi que le plugin ait cru.
+        // Le player announcement l'avance : il plays donc, quoi que le plugin ait cru.
         // C'est ce qui répare l'état après un clignotement de présence.
         let (mut source, _p, _t) = source_with_channels();
         source.toc = Some("3 150 22767 41887 63000".into());
         source.total_tracks = 3;
-        source.lecture = false;
+        source.playback = false;
         let out = source.player_track(1).await;
-        assert!(source.lecture);
+        assert!(source.playback);
         assert!(matches!(out.identity, Some(IdentityUpdate::Playing(_))));
     }
 
     #[tokio::test]
     async fn un_disque_echange_neteint_pas_la_lecture_par_erreur() {
         // Distinction impossible avant l'arrivée de la nouvelle TOC : même TOC,
-        // c'était un clignotement du lecteur et la lecture continue ; TOC
+        // c'était un clignotement du player et la playback continue ; TOC
         // différente, le disque a été échangé et rien ne peut jouer — aucun
         // `Play` n'a été émis pour celui-ci.
         let mut source = source_en_lecture();
@@ -654,11 +654,11 @@ mod tests {
         toc_tx.send((epoch, Some("12 150 200 300".into()), 12)).await.unwrap();
         let n = source.poll_notification().await.expect("notification");
 
-        assert!(!source.lecture, "rien ne joue : aucun Play n'a ete emis pour ce disque");
+        assert!(!source.playback, "rien ne plays : aucun Play n'a ete emis pour ce disque");
         assert_eq!(
             n.identity,
             Some(IdentityUpdate::Nothing),
-            "annoncer une identite ferait interroger un tiers pour un disque a l'arret"
+            "annoncer une identity ferait interroger un tiers pour un disque a l'arret"
         );
     }
 
@@ -680,29 +680,29 @@ mod tests {
         toc_tx.send((epoch, Some(toc_courante), 3)).await.unwrap();
         let n = source.poll_notification().await.expect("notification");
 
-        assert!(source.lecture, "le meme disque : la lecture n'a jamais cesse");
+        assert!(source.playback, "le meme disque : la playback n'a jamais cesse");
         assert!(
             matches!(n.identity, Some(IdentityUpdate::Playing(_))),
-            "les metadonnees doivent revenir apres un clignotement"
+            "les metadata doivent revenir apres un clignotement"
         );
     }
 
     #[tokio::test]
     async fn un_clignotement_de_presence_neteint_pas_les_metadonnees() {
-        // Le lecteur peut rapporter transitoirement « pas de disque » alors que
-        // mpv lit toujours. Avant correction, `lecture` etait remise a faux sur
-        // le retour de presence et ne se rearmait jamais : les metadonnees du
+        // Le player peut rapporter transitoirement « pas de disque » alors que
+        // mpv read toujours. Avant correction, `playback` etait remise a faux sur
+        // le retour de presence et ne se rearmait jamais : les metadata du
         // disque restaient eteintes jusqu'a la fin, sans rien pour les rallumer.
         let mut source = source_en_lecture();
         let (presence_tx, presence_rx) = mpsc::channel(8);
         source.presence_rx = presence_rx;
         presence_tx.send(false).await.unwrap();
         let n = source.poll_notification().await.expect("notification");
-        assert_eq!(n.identity, Some(IdentityUpdate::Nothing), "disque parti : rien ne joue");
+        assert_eq!(n.identity, Some(IdentityUpdate::Nothing), "disque parti : rien ne plays");
 
         presence_tx.send(true).await.unwrap();
         let _ = source.poll_notification().await;
-        assert!(source.lecture, "la lecture ne doit pas avoir ete eteinte par le clignotement");
+        assert!(source.playback, "la playback ne doit pas avoir ete eteinte par le clignotement");
     }
 
     #[tokio::test]

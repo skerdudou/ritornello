@@ -1,24 +1,24 @@
-//! Plugin `metadata` : reconnaît un disque auprès de MusicBrainz, et sert
-//! aussi de relai générique de pochette pour tout le reste.
+//! Plugin `metadata` : reconnaît un disc auprès de MusicBrainz, et sert
+//! aussi de relai générique de cover pour tout le reste.
 //!
 //! Deux intentions cohabitent dans ce seul binaire :
-//! - le **chemin disque** ne réagit qu'aux identités de disque
-//!   (`kind: "disc"`), interroge MusicBrainz **une fois par disque**, et émet
-//!   ensuite un enrichissement par piste depuis ce qu'il a appris. Il connaît
-//!   la TOC, donc il sait ce qui joue : il écrase (`fill_only: false`).
-//! - le **chemin générique** cherche une pochette dès que le cœur annonce un
-//!   artiste et un album connus, quelle que soit la Source. Il ne sait rien
+//! - le **path disc** ne réagit qu'aux identités de disc
+//!   (`kind: "disc"`), interroge MusicBrainz **une fois par disc**, et émet
+//!   ensuite un enrichment par track depuis ce qu'il a appris. Il connaît
+//!   la TOC, donc il sait ce qui plays : il écrase (`fill_only: false`).
+//! - le **path générique** search une cover dès que le cœur announcement un
+//!   artist et un album connus, quelle que soit la Source. Il ne sait rien
 //!   de plus que ce qu'on lui a donné, donc il ne fait que **compléter**
 //!   (`fill_only: true`) : le cœur ne perd rien à ignorer sa réponse si un
-//!   autre contributeur tient déjà une pochette.
+//!   autre contributeur tient déjà une cover.
 //!
 //! Ce code vivait dans le plugin cd, où un appel réseau de plusieurs secondes
-//! partageait le processus qui doit répondre aux commandes de piste. Ici, son
+//! partageait le processus qui doit répondre aux commands de track. Ici, son
 //! échec ou sa lenteur ne concernent que les métadonnées.
 
 mod admin;
 mod icy;
-mod motifs;
+mod patterns;
 mod musicbrainz;
 // Uniquement compilé sous `cargo test` : `ui_placeholder_js` ne sert au
 // run-time nulle part dans ce crate, seulement à `build.rs` (compilation
@@ -40,47 +40,47 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 
-/// Catalogue i18n embarqué de la page d'admin (`admin.rs`). Nommé comme
-/// `MPD_EN` côté greffon mpd : c'est ce nom que `Catalog::load` embarque en
+/// SourcesCatalog i18n embarqué de la page d'admin (`admin.rs`). Nommé comme
+/// `MPD_EN` côté greffon mpd : c'est ce name que `Catalog::load` embarque en
 /// dernier recours si aucun pack externe n'est présent.
 pub(crate) const MUSICBRAINZ_EN: &str = include_str!("locales/en.toml");
 
 /// Échecs de validation **consécutifs** avant de resonder une station déjà
 /// connue.
 ///
-/// Un morceau que MusicBrainz ne connaît pas est un échec parfaitement
-/// légitime sur un motif juste : resonder au premier échec ferait partir un
-/// sondage sur chaque titre obscur, et — puisque l'ordre inverse rend parfois
-/// lui aussi un résultat acceptable — pourrait remplacer un bon motif par un
+/// Un track que MusicBrainz ne connaît pas est un échec parfaitement
+/// légitime sur un pattern juste : resonder au premier échec ferait partir un
+/// sondage sur chaque title obscur, et — puisque l'order inverse rend parfois
+/// lui aussi un résultat acceptable — pourrait remplacer un bon pattern par un
 /// mauvais sur un seul coup de chance. Trois échecs d'affilée décrivent une
-/// station qui a changé de forme, pas un titre que le catalogue ignore.
-const ECHECS_AVANT_RESONDAGE: u32 = 3;
+/// station qui a changé de forme, pas un title que le sources_catalog ignore.
+const FAILURES_BEFORE_REPROBE: u32 = 3;
 
-/// Le nom sous lequel le cœur connaît l'en-tête d'un flux.
+/// Le name sous lequel le cœur connaît l'en-tête d'un stream.
 ///
-/// Déclaré en `derived_from` par les deux enrichissements du chemin ICY : ce
+/// Déclaré en `derived_from` par les deux enrichments du path ICY : ce
 /// greffon **découpe** cette chaîne, il ne l'apporte pas. Voir
 /// `Enrichment::derived_from`.
 const SOURCE_ICY: &str = "icy";
 
-/// Délais des reprises différées d'une recherche de pochette, en secondes.
+/// Délais des reprises différées d'une recherche de cover, en secondes.
 ///
-/// **Trois, très espacées.** `cherche_release` a déjà réessayé trois fois en
+/// **Trois, très espacées.** `search_release` a déjà réessayé trois fois en
 /// interne (2 s puis 4 s) : ce qui arrive ici est une panne qui dure plus que
 /// quelques secondes, pas un hoquet.
 ///
 /// Mesuré sur l'appareil le 2026-08-28 : six 503 sur neuf requêtes en une
-/// minute, la pochette n'arrivant qu'à la sixième — trente-six secondes après
-/// le début du morceau. La cadence, elle, était conforme (1,1 s entre requêtes,
+/// minute, la cover n'arrivant qu'à la sixième — trente-six secondes après
+/// le début du track. La cadence, elle, était conforme (1,1 s entre requêtes,
 /// étrangleur partagé), donc ces 503 viennent du serveur de recherche de
 /// MusicBrainz et rien de ce qu'on fait ne les évitera.
 ///
 /// La troisième reprise à trois minutes est donc un filet pour une mauvaise
 /// passe qui dure : elle coûte une requête toutes les trois minutes au pire,
 /// très loin de la requête par seconde que le service autorise, et elle tient
-/// dans la durée d'un morceau. Au delà, l'absence cesse d'être une panne et le
-/// changement de piste reste la reprise ultime.
-const REPRISES_POCHETTE_S: &[u64] = &[20, 60, 180];
+/// dans la durée d'un track. Au delà, l'absence cesse d'être une panne et le
+/// changement de track reste la reprise ultime.
+const COVER_RETRIES_S: &[u64] = &[20, 60, 180];
 
 /// Résultat d'une interrogation : la TOC concernée, et ce qu'on a trouvé.
 /// Ce qu'une interrogation de MusicBrainz rapporte.
@@ -90,51 +90,51 @@ const REPRISES_POCHETTE_S: &[u64] = &[20, 60, 180];
 /// demandent deux traitements opposes.
 ///
 /// Le second se **memorise** — c'est meme tout l'interet des caches de ce
-/// greffon : ne pas redemander douze fois de suite pour un disque inconnu. Le
+/// greffon : ne pas redemander douze fois de suite pour un disc inconnu. Le
 /// premier ne doit surtout pas l'etre. Une version anterieure les confondait
 /// derriere un `Option`, et un 503 passager de MusicBrainz — leurs serveurs en
-/// rendent sous leur propre charge, meme a cadence respectee — se figeait alors
-/// en « cet album n'a pas de pochette » jusqu'au redemarrage du greffon.
-/// Symptome rapporte par le proprietaire, et reproduit : redemarrer le greffon
-/// faisait apparaitre la pochette.
+/// rendent sous leur propre load, meme a cadence respectee — se figeait alors
+/// en « cet album n'a pas de cover » jusqu'au redemarrage du greffon.
+/// Symptome rapporte par le owner, et reproduit : redemarrer le greffon
+/// faisait apparaitre la cover.
 #[derive(Debug, Clone, PartialEq)]
-enum Reponse<T> {
+enum Answer<T> {
     /// MusicBrainz a repondu. `None` = il ne connait pas, et c'est definitif.
-    Connue(Option<T>),
+    Known(Option<T>),
     /// Aucune reponse exploitable apres les tentatives bornees. Rien a
     /// memoriser : le prochain passage relancera la recherche.
-    Indisponible,
+    Unavailable,
 }
 
-/// Ce qu'un disque interroge a rendu, tel qu'il est **memorise**.
-type Trouve = (String, Option<DiscInfo>);
+/// Ce qu'un disc interroge a rendition, tel qu'il est **memorise**.
+type Found = (String, Option<DiscInfo>);
 
-/// Ce que la tache d'interrogation d'un disque fait traverser au canal.
-type IssueDisque = (String, Reponse<DiscInfo>);
+/// Ce que la tache d'interrogation d'un disc fait traverser au canal.
+type DiscOutcome = (String, Answer<DiscInfo>);
 
-/// Couple qui identifie une recherche du relai générique : artiste, puis
+/// Couple qui identifie une recherche du relai générique : artist, puis
 /// album. C'est aussi la clé de mémorisation (voir `MusicBrainzPlugin`).
-type CleGenerique = (String, String);
+type GenericKey = (String, String);
 
-/// Résultat d'une recherche générique : le couple concerné, et le MBID trouvé.
-type TrouvePochette = (CleGenerique, Option<String>);
+/// Résultat d'une recherche générique : le pair concerné, et le MBID trouvé.
+type FoundCover = (GenericKey, Option<String>);
 
-/// Ce que la tache de recherche de pochette fait traverser au canal.
-type IssuePochette = (CleGenerique, Reponse<String>);
+/// Ce que la tache de recherche de cover fait traverser au canal.
+type CoverOutcome = (GenericKey, Answer<String>);
 
-/// Ce qu'une identité de disque apprend à ce plugin.
+/// Ce qu'une identité de disc learn à ce plugin.
 #[derive(Debug, Clone, PartialEq)]
-struct Disque {
+struct Disc {
     toc: String,
-    piste: usize,
+    track: usize,
 }
 
-/// Lit une identité opaque et n'en retient un disque que si elle en décrit un.
+/// Lit une identité opaque et n'en retient un disc que si elle en décrit un.
 ///
 /// Fonction pure : c'est le point d'entrée de données venues d'un autre
 /// processus, donc l'endroit où une forme inattendue doit être écartée sans
 /// bruit plutôt que de faire paniquer le plugin.
-fn disque_de(identity: &Value) -> Option<Disque> {
+fn disc_of(identity: &Value) -> Option<Disc> {
     if identity.get("kind").and_then(Value::as_str)? != "disc" {
         return None;
     }
@@ -142,17 +142,17 @@ fn disque_de(identity: &Value) -> Option<Disque> {
     if toc.is_empty() {
         return None;
     }
-    // Une identité de disque sans index de piste n'est pas exploitable : on ne
-    // saurait pas quel titre annoncer.
-    let piste = identity.get("track").and_then(Value::as_u64)? as usize;
-    Some(Disque { toc: toc.to_string(), piste })
+    // Une identité de disc sans index de track n'est pas exploitable : on ne
+    // saurait pas quel title annoncer.
+    let track = identity.get("track").and_then(Value::as_u64)? as usize;
+    Some(Disc { toc: toc.to_string(), track })
 }
 
-/// Lit une identité opaque et n'en retient l'URL que si elle décrit un flux.
+/// Lit une identité opaque et n'en retient l'URL que si elle décrit un stream.
 ///
-/// Fonction pure, même contrat que [`disque_de`] : une forme inattendue est
+/// Fonction pure, même contrat que [`disc_of`] : une forme inattendue est
 /// écartée sans bruit plutôt que de faire paniquer le plugin.
-fn url_de_flux(identity: &Value) -> Option<String> {
+fn stream_url(identity: &Value) -> Option<String> {
     if identity.get("kind").and_then(Value::as_str)? != "stream" {
         return None;
     }
@@ -163,94 +163,94 @@ fn url_de_flux(identity: &Value) -> Option<String> {
     Some(url.to_string())
 }
 
-/// Faut-il chercher une pochette pour cet état partiel ?
+/// Faut-il chercher une cover pour cet état partiel ?
 ///
-/// Un artiste **et** un album, jamais un titre ICY seul : ce dernier est un
-/// texte brut, non découpé exprès dans ce projet, et OUI FM émet
-/// `Titre - ARTISTE` dans l'ordre inverse de l'usage — le donner à MusicBrainz
+/// Un artist **et** un album, jamais un title ICY seul : ce dernier est un
+/// texte raw, non découpé exprès dans ce projet, et OUI FM émet
+/// `Titre - ARTISTE` dans l'order inverse de l'usage — le donner à MusicBrainz
 /// rendrait n'importe quoi avec assurance.
 ///
-/// Et rien à faire si une pochette est déjà tenue : ce greffon **complète**,
+/// Et rien à faire si une cover est déjà tenue : ce greffon **complète**,
 /// donc l'appel serait jeté par l'arbitrage du cœur — une requête dont
 /// l'inutilité est connue d'avance.
-fn doit_chercher(known: &ritornello_proto::Known) -> bool {
+fn should_search(known: &ritornello_proto::Known) -> bool {
     !known.cover && known.artist.is_some() && known.album.is_some()
 }
 
 struct MusicBrainzPlugin {
-    /// Identité courante, réémise en écho dans chaque enrichissement — c'est le
+    /// Identité courante, réémise en écho dans chaque enrichment — c'est le
     /// garde-fou de péremption côté cœur.
-    identite: Option<Value>,
-    disque: Option<Disque>,
-    /// Dernier disque interrogé : TOC brute → résultat (`None` = interrogé,
-    /// rien trouvé). Un seul disque suffit : il n'y a qu'un tiroir. Mémoriser
+    identity: Option<Value>,
+    disc: Option<Disc>,
+    /// Dernier disc interrogé : TOC brute → résultat (`None` = interrogé,
+    /// rien trouvé). Un seul disc suffit : il n'y a qu'un tiroir. Mémoriser
     /// aussi les échecs évite de réinterroger MusicBrainz à chaque changement
-    /// de piste d'un disque inconnu — douze pistes, douze requêtes inutiles.
-    connu: Option<Trouve>,
+    /// de track d'un disc inconnu — douze pistes, douze requêtes inutiles.
+    known: Option<Found>,
     /// TOC dont l'interrogation est en vol, pour ne pas la lancer deux fois.
-    en_vol: Option<String>,
+    in_flight: Option<String>,
     /// Enrichissement prêt à partir. Un seul suffit : les deux chemins sont
-    /// mutuellement exclusifs (une identité est un disque, ou ne l'est pas).
-    pret: Option<Enrichment>,
-    trouve_tx: mpsc::Sender<IssueDisque>,
-    trouve_rx: mpsc::Receiver<IssueDisque>,
+    /// mutuellement exclusifs (une identité est un disc, ou ne l'est pas).
+    ready: Option<Enrichment>,
+    found_tx: mpsc::Sender<DiscOutcome>,
+    found_rx: mpsc::Receiver<DiscOutcome>,
 
-    // --- Relai générique (fichier sans pochette, flux dont les métadonnées
+    // --- Relai générique (fichier sans cover, stream dont les métadonnées
     // textuelles suffisent...) ---
-    /// Identité courante pour ce chemin, réémise en écho. `None` = rien à
-    /// compléter maintenant (chemin disque actif, artiste/album pas encore
-    /// connus tous les deux, ou pochette déjà tenue).
-    identite_generique: Option<Value>,
-    /// Couple (artiste, album) actuellement visé. C'est la clé de
+    /// Identité courante pour ce path, réémise en écho. `None` = rien à
+    /// compléter maintenant (path disc active, artist/album pas encore
+    /// connus tous les deux, ou cover déjà tenue).
+    generic_identity: Option<Value>,
+    /// Couple (artist, album) actuellement visé. C'est la clé de
     /// mémorisation choisie : c'est exactement ce que porte la requête
     /// MusicBrainz, elle change dès qu'on change d'album (donc jamais de
-    /// pochette d'un autre album qui survit au changement de piste), et elle
+    /// cover d'un autre album qui survit au changement de track), et elle
     /// reste stable tant que l'album ne change pas (donc pas une requête par
     /// trame reçue). Une identité de Source ne convenait pas : elle peut
-    /// rester fixe pendant que artiste/album arrivent en plusieurs trames
-    /// (ICY), ou changer sans que l'album change (piste suivante du même
-    /// disque de fichiers).
-    cle_generique: Option<CleGenerique>,
-    /// Dernier couple recherché, et l'URL de pochette trouvée (`None` =
+    /// rester fixe pendant que artist/album arrivent en plusieurs trames
+    /// (ICY), ou changer sans que l'album change (track suivante du même
+    /// disc de fichiers).
+    generic_key: Option<GenericKey>,
+    /// Dernier pair recherché, et l'URL de cover trouvée (`None` =
     /// recherche faite, rien trouvé). Mémoriser aussi les échecs évite de
     /// réinterroger MusicBrainz à chaque trame tant que l'album ne change pas.
-    pochette_connue: Option<TrouvePochette>,
+    known_cover: Option<FoundCover>,
     /// Couple dont la recherche est en vol, pour ne pas la lancer deux fois.
-    pochette_en_vol: Option<CleGenerique>,
-    /// Le couple en cours de **reprise différée** et le nombre de reprises déjà
-    /// consommées. Voir [`MusicBrainzPlugin::reprogramme_pochette`].
-    reprises_pochette: Option<(CleGenerique, usize)>,
-    pochette_tx: mpsc::Sender<IssuePochette>,
-    pochette_rx: mpsc::Receiver<IssuePochette>,
+    cover_in_flight: Option<GenericKey>,
+    /// Le pair en cours de **reprise différée** et le nombre de reprises déjà
+    /// consommées. Voir [`MusicBrainzPlugin::reschedule_cover`].
+    cover_retries: Option<(GenericKey, usize)>,
+    cover_tx: mpsc::Sender<CoverOutcome>,
+    cover_rx: mpsc::Receiver<CoverOutcome>,
 
     // --- Chemin ICY (radio) ---
-    /// Le magasin, **partagé avec la page d'admin** : les deux moitiés du
+    /// Le store, **partagé avec la page d'admin** : les deux moitiés du
     /// processus le lisent et l'écrivent, comme les deux moitiés du greffon
     /// radio partagent son fichier d'état.
-    magasin: Arc<RwLock<motifs::Magasin>>,
-    chemin_etat: PathBuf,
+    store: Arc<RwLock<patterns::Store>>,
+    state_path: PathBuf,
     /// Dernière chaîne brute traitée. Icecast répète le même en-tête tout au
-    /// long d'un morceau : sans cette garde, chaque répétition relancerait une
+    /// long d'un track : sans cette garde, chaque répétition relancerait une
     /// requête.
-    icy_vu: Option<String>,
-    /// Échecs de validation **consécutifs**, par URL de flux. En mémoire et
+    icy_seen: Option<String>,
+    /// Échecs de validation **consécutifs**, par URL de stream. En mémoire et
     /// non persisté : c'est une suite d'événements en cours, pas un fait acquis
     /// sur la station, et un redémarrage est une remise à zéro légitime.
-    echecs: HashMap<String, u32>,
+    failures: HashMap<String, u32>,
     /// URL dont un traitement est en vol, pour ne pas le lancer deux fois.
-    icy_en_vol: Option<String>,
-    icy_tx: mpsc::Sender<IssueIcy>,
-    icy_rx: mpsc::Receiver<IssueIcy>,
+    icy_in_flight: Option<String>,
+    icy_tx: mpsc::Sender<IcyOutcome>,
+    icy_rx: mpsc::Receiver<IcyOutcome>,
 }
 
 /// Ce qu'une tâche de traitement ICY rapporte, en **un seul** message.
 ///
-/// Un message et non deux (« voici le motif », « voici le couple ») : la
-/// boucle doit pouvoir mettre à jour le magasin, le compteur d'échecs et
-/// l'enrichissement dans le même tour, sans état intermédiaire où le motif
+/// Un message et non deux (« voici le pattern », « voici le pair ») : la
+/// boucle doit pouvoir mettre à jour le store, le compteur d'échecs et
+/// l'enrichment dans le même tour, sans état intermédiaire où le pattern
 /// serait retenu mais le compteur pas encore remis à zéro.
 #[derive(Debug)]
-struct IssueIcy {
+struct IcyOutcome {
     url: String,
     /// L'identité **reçue** du cœur, transportée avec le travail pour être
     /// renvoyée en écho.
@@ -262,130 +262,130 @@ struct IssueIcy {
     ///   du cœur, qui compare la valeur *entière*. La rebâtir depuis l'URL est
     ///   juste aujourd'hui et faux dès qu'une source enrichit son identité — un
     ///   numéro de présélection, ce serait naturel — et le mode de panne serait
-    ///   un rejet **silencieux** de chaque enrichissement.
+    ///   un rejet **silencieux** de chaque enrichment.
     /// * **Attachée au travail, pas au greffon.** Un champ de `self` serait
     ///   écrasé par une trame plus récente pendant qu'un traitement vole
-    ///   encore, et l'issue d'un ancien morceau repartirait avec l'identité du
+    ///   encore, et l'issue d'un ancien track repartirait avec l'identité du
     ///   nouveau. La faire voyager lie l'écho à ce qu'il décrit.
-    identite: Value,
+    identity: Value,
     /// La chaîne traitée. Sert de garde de péremption : une issue qui ne
     /// décrit pas la chaîne courante est jetée, comme les deux autres chemins
-    /// jettent une réponse qui ne décrit plus ce qui joue.
-    brut: String,
-    /// Le motif à retenir quand un sondage a eu lieu. `None` = pas de
+    /// jettent une réponse qui ne décrit plus ce qui plays.
+    raw: String,
+    /// Le pattern à retenir quand un sondage a eu lieu. `None` = pas de
     /// sondage (régime établi), donc rien à apprendre.
-    motif: Option<motifs::Motif>,
-    /// Le couple validé et sa pochette. `None` = validation échouée.
-    valide: Option<(String, String, Option<String>)>,
-    /// Le couple issu du découpage **local**, que la validation ait abouti ou
+    pattern: Option<patterns::Pattern>,
+    /// Le pair validé et sa cover. `None` = validation échouée.
+    validated: Option<(String, String, Option<String>)>,
+    /// Le pair issu du découpage **local**, que la validation ait abouti ou
     /// non.
     ///
-    /// Distinct de `valide`, et la distinction porte une correction de
-    /// relecture : un morceau que MusicBrainz ne connaît pas est un échec de
-    /// **validation**, pas une raison de jeter un découpage dont le motif a
+    /// Distinct de `validated`, et la distinction porte une correction de
+    /// relecture : un track que MusicBrainz ne connaît pas est un échec de
+    /// **validation**, pas une reason de jeter un découpage dont le pattern a
     /// déjà fait ses preuves sur cette station. Sans ce champ, le greffon
     /// n'émettait rien dans ce cas — et comme l'identité d'une radio ne change
-    /// pas d'un morceau à l'autre, l'enrichissement du morceau **précédent**
-    /// restait gagnant : l'écran annonçait l'artiste, le titre et la pochette
+    /// pas d'un track à l'autre, l'enrichment du track **précédent**
+    /// restait winner : l'écran annonçait l'artist, le title et la cover
     /// d'avant pendant toute la durée du suivant.
-    couple: Option<(String, String)>,
+    pair: Option<(String, String)>,
 }
 
 impl MusicBrainzPlugin {
-    fn new(magasin: Arc<RwLock<motifs::Magasin>>, chemin_etat: PathBuf) -> Self {
-        let (trouve_tx, trouve_rx) = mpsc::channel(4);
-        let (pochette_tx, pochette_rx) = mpsc::channel(4);
+    fn new(store: Arc<RwLock<patterns::Store>>, state_path: PathBuf) -> Self {
+        let (found_tx, found_rx) = mpsc::channel(4);
+        let (cover_tx, cover_rx) = mpsc::channel(4);
         let (icy_tx, icy_rx) = mpsc::channel(4);
         Self {
-            identite: None,
-            disque: None,
-            connu: None,
-            en_vol: None,
-            pret: None,
-            trouve_tx,
-            trouve_rx,
-            identite_generique: None,
-            cle_generique: None,
-            pochette_connue: None,
-            pochette_en_vol: None,
-            reprises_pochette: None,
-            pochette_tx,
-            pochette_rx,
-            magasin,
-            chemin_etat,
-            icy_vu: None,
-            echecs: HashMap::new(),
-            icy_en_vol: None,
+            identity: None,
+            disc: None,
+            known: None,
+            in_flight: None,
+            ready: None,
+            found_tx,
+            found_rx,
+            generic_identity: None,
+            generic_key: None,
+            known_cover: None,
+            cover_in_flight: None,
+            cover_retries: None,
+            cover_tx,
+            cover_rx,
+            store,
+            state_path,
+            icy_seen: None,
+            failures: HashMap::new(),
+            icy_in_flight: None,
             icy_tx,
             icy_rx,
         }
     }
 
-    /// Prépare l'enrichissement de la piste courante si le disque est connu.
+    /// Prépare l'enrichment de la track courante si le disc est known.
     fn prepare(&mut self) {
-        let (Some(identite), Some(disque)) = (&self.identite, &self.disque) else { return };
-        let Some((toc, Some(info))) = &self.connu else { return };
-        if toc != &disque.toc {
+        let (Some(identity), Some(disc)) = (&self.identity, &self.disc) else { return };
+        let Some((toc, Some(info))) = &self.known else { return };
+        if toc != &disc.toc {
             return;
         }
-        let Some(titre) = info.tracks.get(disque.piste) else {
-            // Index hors bornes : le disque reconnu n'a pas ce nombre de pistes.
-            // Mieux vaut se taire que d'annoncer le titre d'une autre piste.
-            tracing::info!("track {} beyond the {} known titles", disque.piste, info.tracks.len());
+        let Some(title) = info.tracks.get(disc.track) else {
+            // Index hors bornes : le disc reconnu n'a pas ce nombre de pistes.
+            // Mieux vaut se taire que d'annoncer le title d'une autre track.
+            tracing::info!("track {} beyond the {} known titles", disc.track, info.tracks.len());
             return;
         };
-        self.pret = Some(Enrichment {
-            identity: identite.clone(),
+        self.ready = Some(Enrichment {
+            identity: identity.clone(),
             artist: Some(info.artist.clone()),
-            title: Some(titre.clone()),
+            title: Some(title.clone()),
             album: Some(info.album.clone()),
             // Le lookup par TOC porte la date du pressage : l'annee est donc
-            // gratuite sur le chemin disque, sans requete de plus.
+            // gratuite sur le path disc, sans requete de plus.
             year: info.year,
             // MusicBrainz donnerait les durées avec `inc=recordings`, mais la
             // durée n'est pas affichée : rien ne justifie d'alourdir la requête.
             duration_s: None,
-            // Ce plugin ne sait pas où en est la lecture : il répond
-            // sur l'identité d'un morceau, pas sur son déroulement.
+            // Ce plugin ne sait pas où en est la playback : il répond
+            // sur l'identité d'un track, pas sur son déroulement.
             position_s: None,
             // Le lookup par TOC portait déjà de quoi construire l'URL, et le
             // choix du niveau (ce pressage, ou l'album à défaut de face avant)
             // a été fait à l'analyse. Aucune requête de plus ici.
             cover: info.cover_url.clone().map(|url| CoverRef::Url { url }),
-            // Chemin disque : la TOC dit ce qui joue, donc il écrase (défaut).
+            // Chemin disc : la TOC dit ce qui plays, donc il écrase (défaut).
             ..Default::default()
         });
     }
 
-    /// Prépare l'enrichissement générique pour le couple (artiste, album)
-    /// actuellement visé : la pochette trouvée, ou l'aveu de n'avoir rien
+    /// Prépare l'enrichment générique pour le pair (artist, album)
+    /// actuellement visé : la cover trouvée, ou l'aveu de n'avoir rien
     /// trouvé.
     ///
     /// **Le second cas est aussi une réponse**, et c'est ce qui manquait :
-    /// « MusicBrainz n'a pas de pochette pour cet album » et « MusicBrainz n'a
+    /// « MusicBrainz n'a pas de cover pour cet album » et « MusicBrainz n'a
     /// jamais été interrogé » se voyaient pareil à l'écran — c'est-à-dire pas
-    /// du tout. Un enrichissement portant `searched` et rien d'autre est le
-    /// seul que le cœur accepte vide ; il n'entre dans aucun arbitrage et
-    /// n'ajoute qu'une ligne à la provenance.
+    /// du tout. Un enrichment portant `searched` et rien d'autre est le
+    /// seul que le cœur accepte clear ; il n'entre dans aucun arbitrage et
+    /// n'add qu'une line à la provenance.
     ///
     /// À ne pas confondre avec une **panne** : celle-là n'émet rien et se
-    /// reprogramme (voir `reprogramme_pochette`). Ce qui arrive ici est une
+    /// reprogramme (voir `reschedule_cover`). Ce qui arrive ici est une
     /// réponse effective du service.
-    fn prepare_generique(&mut self) {
-        let (Some(identite), Some(cle)) = (&self.identite_generique, &self.cle_generique) else {
+    fn prepare_generic(&mut self) {
+        let (Some(identity), Some(key)) = (&self.generic_identity, &self.generic_key) else {
             return;
         };
-        let Some((connu, trouvee)) = &self.pochette_connue else { return };
-        if connu != cle {
+        let Some((known, trouvee)) = &self.known_cover else { return };
+        if known != key {
             return;
         }
         let Some(cover_url) = trouvee else {
-            self.pret = Some(Enrichment {
-                identity: identite.clone(),
+            self.ready = Some(Enrichment {
+                identity: identity.clone(),
                 searched: true,
                 // `fill_only` par honnêteté de forme : ce contributeur-là
                 // n'apporte rien, il ne peut donc rien vouloir écraser. Sans
-                // effet pratique — un enrichissement vide est écarté de
+                // effet pratique — un enrichment clear est écarté de
                 // l'arbitrage des deux côtés — mais un défaut `false`
                 // signifierait « j'écrase », ce qui serait faux.
                 fill_only: true,
@@ -393,107 +393,107 @@ impl MusicBrainzPlugin {
             });
             return;
         };
-        self.pret = Some(Enrichment {
-            identity: identite.clone(),
-            // URL déjà résolue par `cherche_release` : ce chemin ne rebâtit
+        self.ready = Some(Enrichment {
+            identity: identity.clone(),
+            // URL déjà résolue par `search_release` : ce path ne rebâtit
             // rien. Une recherche ne porte pas de bloc `cover-art-archive`,
-            // donc c'est la pochette de l'album qui en sort.
+            // donc c'est la cover de l'album qui en sort.
             cover: Some(CoverRef::Url { url: cover_url.clone() }),
             // Il a cherché, et il a trouvé : le dire aussi, pour que la
             // provenance sache qu'il a été interrogé.
             searched: true,
-            // Ce chemin ne sait rien de plus que ce qu'on lui a donné : il ne
+            // Ce path ne sait rien de plus que ce qu'on lui a donné : il ne
             // fait que compléter, jamais écraser un champ déjà renseigné.
             fill_only: true,
             ..Default::default()
         });
     }
 
-    /// Lance la recherche d'une pochette pour ce couple (artiste, album), une
-    /// seule fois — même motif que [`Self::cherche`] pour le disque.
-    fn cherche_pochette(&mut self, cle: CleGenerique) {
-        if self.pochette_en_vol.as_ref() == Some(&cle) {
+    /// Lance la recherche d'une cover pour ce pair (artist, album), une
+    /// seule fois — même pattern que [`Self::search`] pour le disc.
+    fn search_cover(&mut self, key: GenericKey) {
+        if self.cover_in_flight.as_ref() == Some(&key) {
             return;
         }
-        if self.pochette_connue.as_ref().is_some_and(|(connue, _)| connue == &cle) {
+        if self.known_cover.as_ref().is_some_and(|(connue, _)| connue == &key) {
             return; // déjà recherché, résultat mémorisé (trouvé ou non)
         }
-        self.lance_recherche_pochette(cle, Duration::ZERO);
+        self.start_cover_search(key, Duration::ZERO);
     }
 
     /// Reprogramme la recherche après une panne de MusicBrainz, une fois le
     /// budget de reprises non épuisé.
     ///
     /// **Ce que ceci répare, et pourquoi les trois tentatives ne suffisaient
-    /// pas.** `cherche_release` réessaie déjà trois fois en interne, à 2 s puis
+    /// pas.** `search_release` réessaie déjà trois fois en interne, à 2 s puis
     /// 4 s — une poignée de secondes en tout. Si la panne dure plus longtemps,
-    /// la réponse est `Indisponible`, rien n'est mémorisé (c'est bien : un 503
-    /// ne doit pas devenir « cet album n'a pas de pochette »)... et **plus rien
-    /// ne relance**. Le commentaire d'alors disait « la prochaine trame
+    /// la réponse est `Unavailable`, rien n'est mémorisé (c'est bien : un 503
+    /// ne doit pas devenir « cet album n'a pas de cover »)... et **plus rien
+    /// ne restart**. Le commentaire d'alors disait « la prochaine trame
     /// réessaiera », mais il n'y a pas de prochaine trame : le cœur ne
     /// republie `NowPlaying` que lorsque l'identité ou le `known` changent
-    /// (voir `publie_etat`), et sur un fichier local les deux se figent dès que
+    /// (voir `publish_state`), et sur un fichier local les deux se figent dès que
     /// les étiquettes sont lues. Le symptôme rapporté par le propriétaire est
-    /// exactement celui-là : rien pendant dix secondes, puis la pochette
-    /// apparaît **au changement de piste** — c'est-à-dire à la seule occasion
+    /// exactement celui-là : rien pendant dix secondes, puis la cover
+    /// apparaît **au changement de track** — c'est-à-dire à la seule occasion
     /// qui relançait quoi que ce soit.
     ///
     /// Deux reprises et pas davantage : au-delà, l'absence n'est plus une
     /// panne passagère, et marteler un service tiers gratuit pour une image
-    /// serait un abus. Le changement de piste reste la reprise ultime, comme
+    /// serait un abus. Le changement de track reste la reprise ultime, comme
     /// avant.
     ///
-    /// Ne reprend que le couple **encore visé** : une reprise pour un album
+    /// Ne reprend que le pair **encore visé** : une reprise pour un album
     /// qu'on n'écoute plus est du travail pur perdu, et sa réponse serait de
     /// toute façon écartée par la garde de péremption.
-    fn reprogramme_pochette(&mut self, cle: CleGenerique) {
-        let Some((rang, delai)) = self.reprise_due(&cle) else {
+    fn reschedule_cover(&mut self, key: GenericKey) {
+        let Some((rank, timeout)) = self.retry_due(&key) else {
             tracing::info!("MusicBrainz still unavailable, giving up until the track changes");
             return;
         };
-        self.reprises_pochette = Some((cle.clone(), rang + 1));
-        self.lance_recherche_pochette(cle, delai);
+        self.cover_retries = Some((key.clone(), rank + 1));
+        self.start_cover_search(key, timeout);
     }
 
-    /// Le rang de la prochaine reprise pour ce couple et son délai, ou `None`
-    /// — budget épuisé, ou couple qui n'est plus celui qu'on vise.
+    /// Le rank de la prochaine reprise pour ce pair et son délai, ou `None`
+    /// — budget épuisé, ou pair qui n'est plus celui qu'on vise.
     ///
-    /// Le rang sort d'ici plutôt que d'être recalculé par l'appelant : les deux
-    /// valeurs viennent de la même lecture, et les séparer laisserait un
-    /// compteur avancer sur un rang qu'un autre couple avait posé.
+    /// Le rank sort d'ici plutôt que d'être recalculé par l'appelant : les deux
+    /// valeurs viennent de la même playback, et les séparer laisserait un
+    /// compteur avancer sur un rank qu'un autre pair avait posé.
     ///
     /// **Séparée de son application**, et c'est ce qui la rend vérifiable : la
     /// reprise elle-même dort puis interroge un service tiers, donc l'éprouver
     /// de bout en bout demanderait un réseau et une horloge. La décision, elle,
-    /// ne lit que deux champs.
+    /// ne read que deux champs.
     ///
-    /// Le compteur est porté **par le couple** : un album différent repart de
+    /// Le compteur est porté **par le pair** : un album différent repart de
     /// zéro sans qu'aucune remise à zéro explicite n'ait à exister, donc sans
-    /// chemin où l'oublier.
-    fn reprise_due(&self, cle: &CleGenerique) -> Option<(usize, Duration)> {
-        if self.cle_generique.as_ref() != Some(cle) {
+    /// path où l'oublier.
+    fn retry_due(&self, key: &GenericKey) -> Option<(usize, Duration)> {
+        if self.generic_key.as_ref() != Some(key) {
             return None;
         }
-        let rang = match &self.reprises_pochette {
-            Some((precedent, rang)) if precedent == cle => *rang,
+        let rank = match &self.cover_retries {
+            Some((precedent, rank)) if precedent == key => *rank,
             _ => 0,
         };
-        REPRISES_POCHETTE_S.get(rang).map(|s| (rang, Duration::from_secs(*s)))
+        COVER_RETRIES_S.get(rank).map(|s| (rank, Duration::from_secs(*s)))
     }
 
     /// Le vol lui-même, éventuellement précédé d'une attente.
     ///
-    /// **`pochette_en_vol` est armé avant l'attente**, pas après : sans cela une
+    /// **`cover_in_flight` est armé avant l'attente**, pas après : sans cela une
     /// trame arrivant pendant la pause relancerait une seconde recherche pour
-    /// le même couple, et les deux se répondraient.
-    fn lance_recherche_pochette(&mut self, cle: CleGenerique, apres: Duration) {
-        self.pochette_en_vol = Some(cle.clone());
-        let (artist, album) = cle.clone();
-        let tx = self.pochette_tx.clone();
-        // Le depart d'une recherche, date. Avec l'etrangleur, les trois
+    /// le même pair, et les deux se répondraient.
+    fn start_cover_search(&mut self, key: GenericKey, apres: Duration) {
+        self.cover_in_flight = Some(key.clone());
+        let (artist, album) = key.clone();
+        let tx = self.cover_tx.clone();
+        // Le depart d'une recherche, date. Avec l'throttler, les trois
         // tentatives internes et leurs delais de dix secondes, le temps entre
-        // l'annonce d'un morceau et l'arrivee de sa pochette se compte parfois
-        // en dizaines de secondes : sans cette ligne, ce delai n'etait
+        // l'announcement d'un track et l'arrivee de sa cover se compte parfois
+        // en dizaines de secondes : sans cette line, ce timeout n'etait
         // observable que sur l'ecran, et donc pas attribuable.
         if apres.is_zero() {
             tracing::info!("MusicBrainz: looking for a cover for {artist} — {album}");
@@ -506,37 +506,37 @@ impl MusicBrainzPlugin {
             }
             // Chronometre, et l'issue nommee : « trouvee », « rien trouve »
             // et « pas de reponse » se distinguent enfin, avec le temps que
-            // chacune a coute. L'etrangleur, les trois tentatives internes et
+            // chacune a coute. L'throttler, les trois tentatives internes et
             // leurs delais de dix secondes peuvent additionner des dizaines de
             // secondes — c'est l'hypothese a confirmer ou a ecarter.
             let debut = std::time::Instant::now();
-            let reponse = match musicbrainz::cherche_release(&artist, &album).await {
+            let reponse = match musicbrainz::search_release(&artist, &album).await {
                 Ok(url) => {
                     let issue = if url.is_some() { "cover found" } else { "no cover" };
                     tracing::info!(
                         "MusicBrainz: {issue} for {artist} — {album} after {:?}",
                         debut.elapsed()
                     );
-                    Reponse::Connue(url)
+                    Answer::Known(url)
                 }
                 Err(e) => {
                     tracing::info!(
                         "MusicBrainz release search unavailable after {:?}: {e}",
                         debut.elapsed()
                     );
-                    Reponse::Indisponible
+                    Answer::Unavailable
                 }
             };
-            let _ = tx.send((cle, reponse)).await;
+            let _ = tx.send((key, reponse)).await;
         });
     }
 
-    /// Lance l'interrogation d'un disque inconnu, une seule fois.
-    fn cherche(&mut self, toc: String) {
-        if self.en_vol.as_deref() == Some(toc.as_str()) {
+    /// Lance l'interrogation d'un disc inconnu, une seule fois.
+    fn search(&mut self, toc: String) {
+        if self.in_flight.as_deref() == Some(toc.as_str()) {
             return;
         }
-        if let Some((connue, _)) = &self.connu {
+        if let Some((connue, _)) = &self.known {
             if connue == &toc {
                 return; // déjà interrogé, résultat mémorisé (trouvé ou non)
             }
@@ -552,14 +552,14 @@ impl MusicBrainzPlugin {
         // Le premier champ de la TOC **est** le nombre de pistes, et
         // `mb_toc_param` vient de vérifier qu'il concorde avec les offsets.
         let ntracks = toc.split_whitespace().next().and_then(|n| n.parse::<usize>().ok()).unwrap_or(0);
-        self.en_vol = Some(toc.clone());
-        let tx = self.trouve_tx.clone();
+        self.in_flight = Some(toc.clone());
+        let tx = self.found_tx.clone();
         tokio::spawn(async move {
             let reponse = match musicbrainz::lookup(&param, ntracks).await {
-                Ok(info) => Reponse::Connue(info),
+                Ok(info) => Answer::Known(info),
                 Err(e) => {
                     tracing::info!("MusicBrainz lookup unavailable: {e}");
-                    Reponse::Indisponible
+                    Answer::Unavailable
                 }
             };
             let _ = tx.send((toc, reponse)).await;
@@ -570,51 +570,51 @@ impl MusicBrainzPlugin {
 #[async_trait::async_trait]
 impl MetadataPlugin for MusicBrainzPlugin {
     async fn now_playing(&mut self, np: NowPlaying) {
-        // Toute annonce périme l'enrichissement préparé : il portait l'identité
+        // Toute announcement périme l'enrichment préparé : il portait l'identité
         // précédente, et le cœur le jetterait de toute façon.
-        self.pret = None;
-        let disque = np.identity.as_ref().and_then(disque_de);
-        match disque {
-            Some(disque) => {
-                self.identite = np.identity;
-                // Le chemin disque est exclusif : sur un disque, rien à
+        self.ready = None;
+        let disc = np.identity.as_ref().and_then(disc_of);
+        match disc {
+            Some(disc) => {
+                self.identity = np.identity;
+                // Le path disc est exclusif : sur un disc, rien à
                 // compléter par le relai générique.
-                self.identite_generique = None;
-                self.cle_generique = None;
-                let toc = disque.toc.clone();
-                self.disque = Some(disque);
-                self.cherche(toc);
+                self.generic_identity = None;
+                self.generic_key = None;
+                let toc = disc.toc.clone();
+                self.disc = Some(disc);
+                self.search(toc);
                 self.prepare();
             }
             None => {
-                // Ni disque, ni arrêt : une identité de fichier ou de flux
-                // radio, par exemple. Le chemin disque se tait — c'est
+                // Ni disc, ni arrêt : une identité de fichier ou de stream
+                // radio, par exemple. Le path disc se tait — c'est
                 // l'affaire d'un autre plugin — mais le relai générique peut
-                // avoir de quoi chercher une pochette.
-                self.identite = None;
-                self.disque = None;
+                // avoir de quoi chercher une cover.
+                self.identity = None;
+                self.disc = None;
                 // Capturés avant que le traitement générique ci-dessous ne
-                // déplace `np.identity` : le chemin ICY en a besoin après.
-                let url_flux = np.identity.as_ref().and_then(url_de_flux);
+                // déplace `np.identity` : le path ICY en a besoin après.
+                let url_flux = np.identity.as_ref().and_then(stream_url);
                 let stream_title = np.known.stream_title.clone();
                 // Clonée ici, avec ses voisines, parce que le `match` ci-dessous
                 // déplace `np.identity` : c'est cette valeur-là qui repartira en
-                // écho, jamais une reconstruction. Voir `IssueIcy::identite`.
+                // écho, jamais une reconstruction. Voir `IcyOutcome::identity`.
                 let identite_flux = np.identity.clone();
                 match np.identity {
-                    Some(identite) if doit_chercher(&np.known) => {
-                        let cle = (
-                            np.known.artist.expect("verifie par doit_chercher"),
-                            np.known.album.expect("verifie par doit_chercher"),
+                    Some(identity) if should_search(&np.known) => {
+                        let key = (
+                            np.known.artist.expect("verifie par should_search"),
+                            np.known.album.expect("verifie par should_search"),
                         );
-                        self.identite_generique = Some(identite);
-                        self.cle_generique = Some(cle.clone());
-                        self.cherche_pochette(cle);
-                        self.prepare_generique();
+                        self.generic_identity = Some(identity);
+                        self.generic_key = Some(key.clone());
+                        self.search_cover(key);
+                        self.prepare_generic();
                     }
                     _ => {
-                        self.identite_generique = None;
-                        self.cle_generique = None;
+                        self.generic_identity = None;
+                        self.generic_key = None;
                     }
                 }
 
@@ -623,61 +623,61 @@ impl MetadataPlugin for MusicBrainzPlugin {
                 //
                 // Déclenché sur un changement de `stream_title`, pas sur
                 // chaque trame : Icecast répète le même en-tête tout au long
-                // d'un morceau, et le retraiter à chaque fois serait une
+                // d'un track, et le retraiter à chaque fois serait une
                 // requête pour rien.
                 if let Some(url) = url_flux {
-                    if stream_title != self.icy_vu {
-                        self.icy_vu = stream_title.clone();
-                        if let Some(brut) = stream_title {
-                            // `icy_en_vol` empêche de lancer un second
+                    if stream_title != self.icy_seen {
+                        self.icy_seen = stream_title.clone();
+                        if let Some(raw) = stream_title {
+                            // `icy_in_flight` empêche de lancer un second
                             // traitement pour la même URL pendant qu'un
                             // premier vole encore ; la garde de péremption
                             // dans `next_enrichment` filtre une réponse
                             // devenue hors sujet le temps du vol.
-                            if self.icy_en_vol.as_deref() != Some(url.as_str()) {
-                                self.icy_en_vol = Some(url.clone());
-                                // **Une station au motif manuel n'est jamais
-                                // resondee.** Le magasin refusait bien de
-                                // reecrire l'entree (`Magasin::apprend`), mais
+                            if self.icy_in_flight.as_deref() != Some(url.as_str()) {
+                                self.icy_in_flight = Some(url.clone());
+                                // **Une station au pattern manuel n'est jamais
+                                // resondee.** Le store refusait bien de
+                                // reecrire l'entry (`Store::learn`), mais
                                 // rien n'empechait le sondage de partir — et
                                 // alors c'etait *son* decoupage qui s'affichait,
                                 // pas celui de l'operateur. La documentation
                                 // etait donc vraie du fichier et fausse de
-                                // l'ecran. Consulter l'origine ici ferme l'ecart
+                                // l'ecran. Consulter l'origin ici ferme l'ecart
                                 // a la source : si l'operateur a tranche, on
-                                // applique ce qu'il a pose, meme quand
+                                // apply ce qu'il a pose, meme quand
                                 // MusicBrainz n'en veut pas.
                                 let manuel = self
-                                    .magasin
+                                    .store
                                     .read()
                                     .await
-                                    .entree(&url)
-                                    .map(|e| e.origine == motifs::Origine::Manuel)
+                                    .entry(&url)
+                                    .map(|e| e.origin == patterns::Origin::Manual)
                                     .unwrap_or(false);
-                                let resonde = !manuel && doit_resonder(&self.echecs, &url);
-                                if resonde {
+                                let reprobe = !manuel && should_reprobe(&self.failures, &url);
+                                if reprobe {
                                     // **Le resondage consomme le compteur.**
                                     // Sans ça il restait au-dessus du seuil
                                     // pour la vie du processus : une station
-                                    // qui ne valide jamais — un flux en
+                                    // qui ne validated jamais — un stream en
                                     // mojibake, par exemple — repartait en
-                                    // sondage complet à *chaque* titre, ce qui
+                                    // sondage complet à *chaque* title, ce qui
                                     // démentait la documentation et faisait de
                                     // cette limite une tempête de requêtes
                                     // garantie. Un resondage rachète trois
                                     // titres, il ne s'arme pas en permanence.
-                                    self.echecs.remove(&url);
+                                    self.failures.remove(&url);
                                 }
-                                let magasin = self.magasin.clone();
+                                let store = self.store.clone();
                                 let tx = self.icy_tx.clone();
                                 let url_tache = url.clone();
-                                // `url_de_flux` a déjà reconnu l'identité, donc
+                                // `stream_url` a déjà reconnu l'identité, donc
                                 // elle est là : l'`unwrap_or` n'est qu'une
                                 // totalité de type, pas un cas d'usage.
-                                let identite = identite_flux.clone().unwrap_or(Value::Null);
+                                let identity = identite_flux.clone().unwrap_or(Value::Null);
                                 tokio::spawn(async move {
-                                    let connu = magasin.read().await.entree(&url_tache).map(|e| e.motif.clone());
-                                    let issue = traite_icy(url_tache, brut, identite, connu, resonde).await;
+                                    let known = store.read().await.entry(&url_tache).map(|e| e.pattern.clone());
+                                    let issue = handle_icy(url_tache, raw, identity, known, reprobe).await;
                                     let _ = tx.send(issue).await;
                                 });
                             }
@@ -690,7 +690,7 @@ impl MetadataPlugin for MusicBrainzPlugin {
 
     async fn next_enrichment(&mut self) -> Enrichment {
         loop {
-            if let Some(e) = self.pret.take() {
+            if let Some(e) = self.ready.take() {
                 return e;
             }
             // `select!` sur deux `recv` reste annulable sans perte : si un
@@ -699,117 +699,117 @@ impl MetadataPlugin for MusicBrainzPlugin {
             // qu'une fois son message reçu, jamais avant (l'état durable vit
             // dans `self`, pas dans les variables locales de ce futur).
             tokio::select! {
-                r = self.trouve_rx.recv() => match r {
+                r = self.found_rx.recv() => match r {
                     Some((toc, reponse)) => {
-                        if self.en_vol.as_deref() == Some(toc.as_str()) {
-                            self.en_vol = None;
+                        if self.in_flight.as_deref() == Some(toc.as_str()) {
+                            self.in_flight = None;
                         }
-                        // Une panne passagère ne se mémorise pas : `en_vol`
+                        // Une panne passagère ne se mémorise pas : `in_flight`
                         // vient d'être libéré, donc le prochain changement de
-                        // piste relancera l'interrogation de ce disque.
-                        let Reponse::Connue(info) = reponse else { continue };
-                        // Un résultat n'est retenu que s'il décrit le disque
+                        // track relancera l'interrogation de ce disc.
+                        let Answer::Known(info) = reponse else { continue };
+                        // Un résultat n'est retenu que s'il décrit le disc
                         // suivi : deux lookups peuvent se croiser lors d'un
                         // échange rapide de disques (A en vol, B inséré, réponse
                         // de B puis celle de A), et retenir le retardataire
-                        // écrasait le cache du disque courant — `prepare()`
+                        // écrasait le cache du disc courant — `prepare()`
                         // protégeait l'affichage, mais le prochain changement de
-                        // piste relançait une requête MusicBrainz pour rien.
-                        if self.disque.as_ref().is_some_and(|d| d.toc == toc) {
-                            self.connu = Some((toc, info));
+                        // track relançait une requête MusicBrainz pour rien.
+                        if self.disc.as_ref().is_some_and(|d| d.toc == toc) {
+                            self.known = Some((toc, info));
                             self.prepare();
                         }
                     }
                     // Impossible en pratique (le plugin garde un Sender) : ne pas
-                    // rendre la main plutôt que de boucler à vide.
+                    // rendre la main plutôt que de boucler à clear.
                     None => std::future::pending().await,
                 },
-                r = self.pochette_rx.recv() => match r {
-                    Some((cle, reponse)) => {
-                        if self.pochette_en_vol.as_ref() == Some(&cle) {
-                            self.pochette_en_vol = None;
+                r = self.cover_rx.recv() => match r {
+                    Some((key, reponse)) => {
+                        if self.cover_in_flight.as_ref() == Some(&key) {
+                            self.cover_in_flight = None;
                         }
                         // Une panne passagère ne se mémorise pas : un 503 de
                         // MusicBrainz ne doit pas devenir « cet album n'a pas de
-                        // pochette » pour toute la durée de l'album.
+                        // cover » pour toute la durée de l'album.
                         //
                         // **Et elle est reprogrammée**, ce qui manquait : rien
-                        // ne relançait la recherche tant que la piste ne
+                        // ne relançait la recherche tant que la track ne
                         // changeait pas, faute de nouvelle trame à attendre
-                        // (voir `reprogramme_pochette`).
-                        let Reponse::Connue(cover_url) = reponse else {
-                            self.reprogramme_pochette(cle);
+                        // (voir `reschedule_cover`).
+                        let Answer::Known(cover_url) = reponse else {
+                            self.reschedule_cover(key);
                             continue;
                         };
-                        // Même garde que côté disque : ne retenir le résultat
-                        // que s'il décrit le couple (artiste, album) toujours
-                        // visé — un changement de piste peut avoir rendu la
+                        // Même garde que côté disc : ne retenir le résultat
+                        // que s'il décrit le pair (artist, album) toujours
+                        // visé — un changement de track peut avoir rendition la
                         // recherche en vol obsolète pendant qu'elle volait.
-                        if self.cle_generique.as_ref() == Some(&cle) {
-                            self.pochette_connue = Some((cle, cover_url));
-                            self.prepare_generique();
+                        if self.generic_key.as_ref() == Some(&key) {
+                            self.known_cover = Some((key, cover_url));
+                            self.prepare_generic();
                         }
                     }
                     None => std::future::pending().await,
                 },
                 r = self.icy_rx.recv() => match r {
                     Some(issue) => {
-                        if self.icy_en_vol.as_deref() == Some(issue.url.as_str()) {
-                            self.icy_en_vol = None;
+                        if self.icy_in_flight.as_deref() == Some(issue.url.as_str()) {
+                            self.icy_in_flight = None;
                         }
-                        // **Le motif est retenu avant la garde de
-                        // péremption**, et l'ordre est le correctif : un motif
-                        // décrit la **station**, pas le morceau. Une issue de
+                        // **Le pattern est retenu avant la garde de
+                        // péremption**, et l'order est le correctif : un pattern
+                        // décrit la **station**, pas le track. Une issue de
                         // sondage devenue périmée pendant son vol — la station a
-                        // changé de titre, ce qui prend quelques secondes et le
+                        // changé de title, ce qui prend quelques secondes et le
                         // sondage en prend quatre — porte quand même un
                         // apprentissage valable, vérifié contre MusicBrainz.
                         //
-                        // Jeter l'issue entière avant cette ligne, comme le
+                        // Jeter l'issue entière avant cette line, comme le
                         // faisait la version d'avant, pouvait faire qu'une
                         // station n'apprenne **jamais rien** : chaque sondage
-                        // était invalidé par le changement de titre qui l'avait
+                        // était invalidé par le changement de title qui l'avait
                         // en partie provoqué.
-                        if let Some(m) = issue.motif {
-                            let mut magasin = self.magasin.write().await;
-                            magasin.apprend(&issue.url, m);
-                            if let Err(e) = magasin.enregistre(&self.chemin_etat) {
+                        if let Some(m) = issue.pattern {
+                            let mut store = self.store.write().await;
+                            store.learn(&issue.url, m);
+                            if let Err(e) = store.save(&self.state_path) {
                                 tracing::warn!("could not save ICY patterns: {e}");
                             }
                         }
                         // Garde de péremption, comme les deux autres chemins,
                         // mais elle ne protège plus que ce qui décrit **le
-                        // morceau** : le couple et la pochette.
-                        if self.icy_vu.as_deref() != Some(issue.brut.as_str()) {
+                        // track** : le pair et la cover.
+                        if self.icy_seen.as_deref() != Some(issue.raw.as_str()) {
                             continue;
                         }
-                        match issue.valide {
+                        match issue.validated {
                             Some((artist, title, cover_url)) => {
                                 {
-                                    let mut magasin = self.magasin.write().await;
-                                    magasin.succes(&issue.url);
-                                    if let Err(e) = magasin.enregistre(&self.chemin_etat) {
+                                    let mut store = self.store.write().await;
+                                    store.record_success(&issue.url);
+                                    if let Err(e) = store.save(&self.state_path) {
                                         tracing::warn!("could not save ICY patterns: {e}");
                                     }
                                 }
-                                self.echecs.remove(&issue.url);
-                                self.pret = Some(Enrichment {
+                                self.failures.remove(&issue.url);
+                                self.ready = Some(Enrichment {
                                     // L'identité **reçue**, reportée telle
-                                    // quelle. Voir `IssueIcy::identite`, qui dit
+                                    // quelle. Voir `IcyOutcome::identity`, qui dit
                                     // pourquoi elle voyage avec le travail.
-                                    identity: issue.identite,
+                                    identity: issue.identity,
                                     // **La station reste la source.** Ce
                                     // greffon a decoupe sa chaine et verifie le
-                                    // decoupage, il n'a appris le morceau a
-                                    // personne : s'attribuer le titre effacerait
-                                    // celui qui l'annonce. Le coeur note a part
+                                    // decoupage, il n'a appris le track a
+                                    // personne : s'attribuer le title effacerait
+                                    // celui qui l'announcement. Le coeur note a part
                                     // qui a retravaille.
                                     derived_from: Some(SOURCE_ICY.to_string()),
                                     artist: Some(artist),
                                     title: Some(title),
-                                    // URL déjà résolue par `premier_enregistrement`.
+                                    // URL déjà résolue par `first_recording`.
                                     cover: cover_url.map(|url| CoverRef::Url { url }),
-                                    // Ce chemin **remplace** la chaîne ICY
+                                    // Ce path **remplace** la chaîne ICY
                                     // brute, qui est précisément ce qu'on
                                     // corrige — à la différence du relai
                                     // générique voisin (`fill_only: true`),
@@ -822,40 +822,40 @@ impl MetadataPlugin for MusicBrainzPlugin {
                                 });
                             }
                             None => {
-                                *self.echecs.entry(issue.url.clone()).or_default() += 1;
-                                // **Émettre quand même.** Ne rien envoyer
-                                // laissait l'enrichissement du morceau
+                                *self.failures.entry(issue.url.clone()).or_default() += 1;
+                                // **Émettre quand même.** Ne rien send_frame
+                                // laissait l'enrichment du track
                                 // *précédent* gagner l'arbitrage, l'identité
-                                // d'une radio ne changeant pas d'un morceau à
-                                // l'autre : l'écran annonçait l'artiste, le
-                                // titre et la pochette d'avant pendant toute la
+                                // d'une radio ne changeant pas d'un track à
+                                // l'autre : l'écran annonçait l'artist, le
+                                // title et la cover d'avant pendant toute la
                                 // durée du suivant. Le pire des trois états, et
                                 // celui que ma spec décrivait sans le voir en
-                                // écrivant « ne rien émettre pour ce morceau ».
+                                // écrivant « ne rien émettre pour ce track ».
                                 //
                                 // Ce qu'on émet dépend de ce qu'on sait :
                                 //
-                                // * le couple local, quand le motif s'applique.
-                                //   MusicBrainz ne connaît pas ce morceau, ce
+                                // * le pair local, quand le pattern s'apply.
+                                //   MusicBrainz ne connaît pas ce track, ce
                                 //   qui ne dit rien contre un découpage déjà
-                                //   confirmé sur cette station. Sans pochette,
+                                //   confirmé sur cette station. Sans cover,
                                 //   faute de release à citer.
-                                // * sinon la chaîne nettoyée en guise de titre :
-                                //   le motif ne s'applique plus (la station a
+                                // * sinon la chaîne nettoyée en guise de title :
+                                //   le pattern ne s'apply plus (la station a
                                 //   changé de forme) ou il n'y en a pas. On
                                 //   n'affirme alors aucun découpage — juste ce
-                                //   que le flux annonce, débarrassé de sa
+                                //   que le stream announcement, débarrassé de sa
                                 //   réclame.
-                                let (artist, title) = match issue.couple {
+                                let (artist, title) = match issue.pair {
                                     Some((a, t)) => (Some(a), Some(t)),
-                                    None => (None, Some(icy::nettoie(&issue.brut))),
+                                    None => (None, Some(icy::clean(&issue.raw))),
                                 };
-                                self.pret = Some(Enrichment {
-                                    identity: issue.identite,
+                                self.ready = Some(Enrichment {
+                                    identity: issue.identity,
                                     // Encore plus vrai ici qu'au-dessus : ce
-                                    // chemin ne porte **que** le decoupage
-                                    // local, MusicBrainz n'ayant rien valide du
-                                    // tout. Le titre vient de la station, mot
+                                    // path ne porte **que** le decoupage
+                                    // local, MusicBrainz n'ayant rien validated du
+                                    // tout. Le title vient de la station, mot
                                     // pour mot.
                                     derived_from: Some(SOURCE_ICY.to_string()),
                                     artist,
@@ -875,36 +875,36 @@ impl MetadataPlugin for MusicBrainzPlugin {
 
 /// La station doit-elle être resondée ?
 ///
-/// Extrait en fonction pure pour la même raison que [`meilleur_accepte`] : le
+/// Extrait en fonction pure pour la même reason que [`best_accepted`] : le
 /// réseau n'est pas joignable en test, donc c'est la **décision** qui doit
 /// être éprouvée, pas le sondage qu'elle déclenche. Le seuil est en échecs
-/// **consécutifs** : voir [`ECHECS_AVANT_RESONDAGE`].
-fn doit_resonder(echecs: &HashMap<String, u32>, url: &str) -> bool {
-    echecs.get(url).copied().unwrap_or(0) >= ECHECS_AVANT_RESONDAGE
+/// **consécutifs** : voir [`FAILURES_BEFORE_REPROBE`].
+fn should_reprobe(failures: &HashMap<String, u32>, url: &str) -> bool {
+    failures.get(url).copied().unwrap_or(0) >= FAILURES_BEFORE_REPROBE
 }
 
 /// Diagnostique un encodage douteux, sans le réparer.
 ///
-/// Un titre en mojibake ne validera **jamais** contre MusicBrainz, et
+/// Un title en mojibake ne validera **jamais** contre MusicBrainz, et
 /// ressemblerait sinon à un mauvais découpage alors que le découpage était
 /// bon : sans ce diagnostic distinct, on chercherait le défaut du mauvais
 /// côté.
-fn signale_encodage_douteux(brut: &str) {
+fn warn_dubious_encoding(raw: &str) {
     // `U+FFFD` : le caractère de remplacement qu'un décodage UTF-8 forcé sur
-    // des octets qui n'en sont pas laisse derrière lui.
-    if brut.contains('\u{FFFD}') {
-        tracing::warn!("ICY stream title looks mis-decoded (replacement character present): {brut:?}");
+    // des bytes qui n'en sont pas laisse derrière lui.
+    if raw.contains('\u{FFFD}') {
+        tracing::warn!("ICY stream title looks mis-decoded (replacement character present): {raw:?}");
         return;
     }
     // Séquence caractéristique d'un texte relu dans le mauvais jeu de
-    // caractères : les deux octets d'un caractère accentué UTF-8 (tête
+    // caractères : les deux bytes d'un caractère accentué UTF-8 (tête
     // 0xC2/0xC3, puis un octet de continuation 0x80-0xBF) se relisent
     // ailleurs comme « Â »/« Ã » suivi d'un symbole Latin-1 Supplement — « Ã©
     // » pour un « é », par exemple.
     let douteux =
-        brut.chars().zip(brut.chars().skip(1)).any(|(a, b)| matches!(a, 'Â' | 'Ã') && ('\u{80}'..='\u{BF}').contains(&b));
+        raw.chars().zip(raw.chars().skip(1)).any(|(a, b)| matches!(a, 'Â' | 'Ã') && ('\u{80}'..='\u{BF}').contains(&b));
     if douteux {
-        tracing::warn!("ICY stream title looks mis-decoded (latin-1/UTF-8 mismatch): {brut:?}");
+        tracing::warn!("ICY stream title looks mis-decoded (latin-1/UTF-8 mismatch): {raw:?}");
     }
 }
 
@@ -912,78 +912,78 @@ fn signale_encodage_douteux(brut: &str) {
 ///
 /// Les deux conditions comptent : le score seul est trop généreux, la
 /// recherche MusicBrainz rendant presque toujours quelque chose de plausible.
-/// L'égalité de titre normalisée est la garde qui porte tout.
-fn valide(titre_candidat: &str, e: &musicbrainz::Enregistrement) -> bool {
-    e.score >= musicbrainz::SEUIL_RECORDING && musicbrainz::normalise(&e.titre) == musicbrainz::normalise(titre_candidat)
+/// L'égalité de title normalisée est la garde qui porte tout.
+fn validated(titre_candidat: &str, e: &musicbrainz::Recording) -> bool {
+    e.score >= musicbrainz::RECORDING_THRESHOLD && musicbrainz::normalize(&e.title) == musicbrainz::normalize(titre_candidat)
 }
 
 /// Choisit le meilleur candidat accepté parmi des réponses déjà obtenues.
 ///
 /// Séparée du réseau exprès : c'est la décision, et c'est elle qui doit être
-/// éprouvée. Les paires sont `(candidat, réponse)`, dans l'ordre d'essai.
-fn meilleur_accepte(essais: &[(icy::Candidat, Option<musicbrainz::Enregistrement>)]) -> Option<&icy::Candidat> {
+/// éprouvée. Les paires sont `(candidat, réponse)`, dans l'order d'essai.
+fn best_accepted(essais: &[(icy::Candidate, Option<musicbrainz::Recording>)]) -> Option<&icy::Candidate> {
     essais
         .iter()
-        .filter_map(|(c, reponse)| reponse.as_ref().filter(|e| valide(&c.titre, e)).map(|e| (c, e.score)))
+        .filter_map(|(c, reponse)| reponse.as_ref().filter(|e| validated(&c.title, e)).map(|e| (c, e.score)))
         .max_by_key(|(_, score)| *score)
         .map(|(c, _)| c)
 }
 
-/// Valide un couple déjà découpé localement, par une recherche
+/// Valide un pair déjà découpé localement, par une recherche
 /// d'enregistrement.
 ///
 /// C'est la validation continue du régime établi (voir la doc du module) :
-/// elle sert aussi à trouver la pochette, qu'une radio n'annonce jamais
+/// elle sert aussi à trouver la cover, qu'une radio n'announcement jamais
 /// autrement.
-async fn valide_par_recherche(artiste: &str, titre: &str) -> Option<(String, String, Option<String>)> {
-    let reponse = musicbrainz::cherche_enregistrement(artiste, titre)
+async fn validated_by_search(artist: &str, title: &str) -> Option<(String, String, Option<String>)> {
+    let reponse = musicbrainz::search_recording(artist, title)
         .await
         .unwrap_or_else(|e| {
             tracing::info!("MusicBrainz recording search: {e}");
             None
         })?;
-    if valide(titre, &reponse) {
-        Some((artiste.to_string(), titre.to_string(), reponse.cover_url))
+    if validated(title, &reponse) {
+        Some((artist.to_string(), title.to_string(), reponse.cover_url))
     } else {
         None
     }
 }
 
-/// Traite une chaîne ICY : applique le motif connu, ou sonde la station.
+/// Traite une chaîne ICY : apply le pattern known, ou sonde la station.
 ///
 /// Détachée dans une tâche, comme les deux autres chemins : une station peut
 /// coûter quatre requêtes espacées d'une seconde, et la boucle du greffon ne
 /// doit pas attendre.
-async fn traite_icy(
+async fn handle_icy(
     url: String,
-    brut: String,
-    identite: Value,
-    connu: Option<motifs::Motif>,
-    resonde: bool,
-) -> IssueIcy {
-    signale_encodage_douteux(&brut);
-    let nettoye = icy::nettoie(&brut);
+    raw: String,
+    identity: Value,
+    known: Option<patterns::Pattern>,
+    reprobe: bool,
+) -> IcyOutcome {
+    warn_dubious_encoding(&raw);
+    let nettoye = icy::clean(&raw);
 
-    if !resonde {
-        match &connu {
-            Some(motifs::Motif::NePasDecouper) => {
+    if !reprobe {
+        match &known {
+            Some(patterns::Pattern::DoNotSplit) => {
                 // La station parlée : coût nul, aucune requête.
-                return IssueIcy { url, brut, identite, motif: None, valide: None, couple: None };
+                return IcyOutcome { url, raw, identity, pattern: None, validated: None, pair: None };
             }
-            Some(m @ motifs::Motif::Separe { .. }) => {
+            Some(m @ patterns::Pattern::Split { .. }) => {
                 // Régime établi : découpage local, une seule requête qui vaut
-                // à la fois validation continue et recherche de pochette.
+                // à la fois validation continue et recherche de cover.
                 //
-                // Le couple local est rapporté **même si la validation
-                // échoue** : c'est notre meilleure connaissance du morceau, et
-                // le motif qui l'a produit a déjà été confirmé sur cette
-                // station. Voir `IssueIcy::couple`.
-                let couple = icy::applique(m, &nettoye);
-                let valide = match &couple {
-                    Some((artiste, titre)) => valide_par_recherche(artiste, titre).await,
+                // Le pair local est rapporté **même si la validation
+                // échoue** : c'est notre meilleure connaissance du track, et
+                // le pattern qui l'a produit a déjà été confirmé sur cette
+                // station. Voir `IcyOutcome::pair`.
+                let pair = icy::apply(m, &nettoye);
+                let validated = match &pair {
+                    Some((artist, title)) => validated_by_search(artist, title).await,
                     None => None,
                 };
-                return IssueIcy { url, brut, identite, motif: None, valide, couple };
+                return IcyOutcome { url, raw, identity, pattern: None, validated, pair };
             }
             None => {} // Station jamais sondée : tombe dans le sondage ci-dessous.
         }
@@ -991,53 +991,53 @@ async fn traite_icy(
 
     // Sondage : station inconnue, ou resondage déclenché par trois échecs
     // d'affilée.
-    let candidats = icy::candidats(&nettoye);
-    let mut essais = Vec::with_capacity(candidats.len());
-    for c in candidats {
-        let reponse = musicbrainz::cherche_enregistrement(&c.artiste, &c.titre).await.unwrap_or_else(|e| {
+    let candidates = icy::candidates(&nettoye);
+    let mut essais = Vec::with_capacity(candidates.len());
+    for c in candidates {
+        let reponse = musicbrainz::search_recording(&c.artist, &c.title).await.unwrap_or_else(|e| {
             tracing::info!("MusicBrainz recording search: {e}");
             None
         });
         essais.push((c, reponse));
     }
     let nb_essayes = essais.len();
-    // Un plafond silencieux se lit comme « on a tout essayé » : le dire
-    // quand le nombre de candidats sondés touche le plafond de icy::candidats.
-    if nb_essayes >= icy::MAX_CANDIDATS {
+    // Un cap silencieux se read comme « on a tout essayé » : le dire
+    // quand le nombre de candidates sondés touche le cap de icy::candidates.
+    if nb_essayes >= icy::MAX_CANDIDATES {
         tracing::info!(
             "ICY probe for {url}: hit the {}-candidate cap, some derivable candidates may not have been tried",
-            icy::MAX_CANDIDATS
+            icy::MAX_CANDIDATES
         );
     }
-    match meilleur_accepte(&essais).cloned() {
-        Some(gagnant) => {
-            let score = essais.iter().find(|(c, _)| *c == gagnant).and_then(|(_, r)| r.as_ref()).map(|e| e.score);
+    match best_accepted(&essais).cloned() {
+        Some(winner) => {
+            let score = essais.iter().find(|(c, _)| *c == winner).and_then(|(_, r)| r.as_ref()).map(|e| e.score);
             let cover_url =
-                essais.iter().find(|(c, _)| *c == gagnant).and_then(|(_, r)| r.as_ref()).and_then(|e| e.cover_url.clone());
+                essais.iter().find(|(c, _)| *c == winner).and_then(|(_, r)| r.as_ref()).and_then(|e| e.cover_url.clone());
             tracing::info!(
                 "ICY probe for {url}: tried {nb_essayes} candidate(s), kept \"{}\" / \"{}\" (score {:?})",
-                gagnant.artiste,
-                gagnant.titre,
+                winner.artist,
+                winner.title,
                 score
             );
-            IssueIcy {
+            IcyOutcome {
                 url,
-                brut,
-                identite,
-                motif: Some(motifs::Motif::depuis_candidat(&gagnant)),
-                valide: Some((gagnant.artiste.clone(), gagnant.titre.clone(), cover_url)),
-                couple: Some((gagnant.artiste, gagnant.titre)),
+                raw,
+                identity,
+                pattern: Some(patterns::Pattern::from_candidate(&winner)),
+                validated: Some((winner.artist.clone(), winner.title.clone(), cover_url)),
+                pair: Some((winner.artist, winner.title)),
             }
         }
         None => {
             tracing::info!("ICY probe for {url}: tried {nb_essayes} candidate(s), none accepted");
-            IssueIcy {
+            IcyOutcome {
                 url,
-                brut,
-                identite,
-                motif: Some(motifs::Motif::NePasDecouper),
-                valide: None,
-                couple: None,
+                raw,
+                identity,
+                pattern: Some(patterns::Pattern::DoNotSplit),
+                validated: None,
+                pair: None,
             }
         }
     }
@@ -1046,11 +1046,11 @@ async fn traite_icy(
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
-    let chemin_etat = PathBuf::from(
+    let state_path = PathBuf::from(
         std::env::var("RITORNELLO_MUSICBRAINZ_STATE")
             .unwrap_or_else(|_| "/var/lib/ritornello/plugin-musicbrainz.json".to_string()),
     );
-    let magasin = Arc::new(RwLock::new(motifs::Magasin::charge(&chemin_etat)));
+    let store = Arc::new(RwLock::new(patterns::Store::load(&state_path)));
 
     // Un greffon `metadata` ne reçoit pas de trame `SetLocale` (elle
     // n'existe que pour `SourcePlugin`) : la langue de la page d'admin vient
@@ -1069,8 +1069,8 @@ async fn main() -> Result<()> {
     )));
 
     Runtime::from_args()?
-        .metadata(MusicBrainzPlugin::new(magasin.clone(), chemin_etat.clone()))?
-        .admin(admin::MusicBrainzAdmin::new(magasin, chemin_etat, catalog))?
+        .metadata(MusicBrainzPlugin::new(store.clone(), state_path.clone()))?
+        .admin(admin::MusicBrainzAdmin::new(store, state_path, catalog))?
         .run()
         .await
 }
@@ -1088,50 +1088,50 @@ mod tests {
     const FIXTURE: &str = include_str!("../tests/fixtures/mb_discid.json");
     const TOC: &str = "3 150 22767 41887 63000";
 
-    fn identite_disque(piste: u64) -> Value {
-        json!({ "kind": "disc", "toc": TOC, "tracks": 3, "track": piste })
+    fn identite_disque(track: u64) -> Value {
+        json!({ "kind": "disc", "toc": TOC, "tracks": 3, "track": track })
     }
 
-    fn identite_fichier(chemin: &str) -> Value {
-        json!({ "kind": "file", "path": chemin })
+    fn identite_fichier(path: &str) -> Value {
+        json!({ "kind": "file", "path": path })
     }
 
-    /// Un plugin neuf, magasin vide en mémoire et chemin d'état jetable.
+    /// Un plugin neuf, store clear en mémoire et path d'état jetable.
     ///
-    /// Le chemin est unique par appel (compteur atomique + PID) : plusieurs
+    /// Le path est unique par appel (compteur atomique + PID) : plusieurs
     /// tests tournent en parallèle, et un fichier partagé se ferait voler la
     /// vedette par un autre test qui écrit au même instant.
     fn plugin_test() -> MusicBrainzPlugin {
         static COMPTEUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COMPTEUR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let chemin = std::env::temp_dir().join(format!("ritornello-mb-test-{}-{n}.json", std::process::id()));
-        MusicBrainzPlugin::new(Arc::new(RwLock::new(motifs::Magasin::default())), chemin)
+        let path = std::env::temp_dir().join(format!("ritornello-mb-test-{}-{n}.json", std::process::id()));
+        MusicBrainzPlugin::new(Arc::new(RwLock::new(patterns::Store::default())), path)
     }
 
-    /// Plugin dont le disque est déjà connu : évite tout appel réseau dans les
+    /// Plugin dont le disc est déjà known : évite tout appel réseau dans les
     /// tests, **aucun d'entre eux ne touche le réseau**.
     fn plugin_avec_disque_connu() -> MusicBrainzPlugin {
         let mut p = plugin_test();
-        p.connu = Some((TOC.to_string(), musicbrainz::parse_lookup(FIXTURE, 3)));
+        p.known = Some((TOC.to_string(), musicbrainz::parse_lookup(FIXTURE, 3)));
         p
     }
 
     #[test]
     fn une_identite_de_disque_est_reconnue() {
-        let d = disque_de(&identite_disque(2)).unwrap();
+        let d = disc_of(&identite_disque(2)).unwrap();
         assert_eq!(d.toc, TOC);
-        assert_eq!(d.piste, 2);
+        assert_eq!(d.track, 2);
     }
 
     #[test]
     fn une_identite_qui_nest_pas_un_disque_est_ignoree() {
-        // Le plugin doit se taire sur un flux radio, sans rien inspecter de plus.
-        assert!(disque_de(&json!({"kind": "stream", "url": "http://fip"})).is_none());
-        assert!(disque_de(&json!({"kind": "disc"})).is_none(), "sans TOC");
-        assert!(disque_de(&json!({"kind": "disc", "toc": "  "})).is_none(), "TOC vide");
-        assert!(disque_de(&json!({"kind": "disc", "toc": TOC})).is_none(), "sans index de piste");
-        assert!(disque_de(&json!("pas un objet")).is_none());
-        assert!(disque_de(&Value::Null).is_none());
+        // Le plugin doit se taire sur un stream radio, sans rien inspecter de plus.
+        assert!(disc_of(&json!({"kind": "stream", "url": "http://fip"})).is_none());
+        assert!(disc_of(&json!({"kind": "disc"})).is_none(), "sans TOC");
+        assert!(disc_of(&json!({"kind": "disc", "toc": "  "})).is_none(), "TOC clear");
+        assert!(disc_of(&json!({"kind": "disc", "toc": TOC})).is_none(), "sans index de track");
+        assert!(disc_of(&json!("pas un objet")).is_none());
+        assert!(disc_of(&Value::Null).is_none());
     }
 
     #[tokio::test]
@@ -1139,17 +1139,17 @@ mod tests {
         let mut p = plugin_avec_disque_connu();
         p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(1)), ..Default::default() }).await;
         let e = p.next_enrichment().await;
-        assert_eq!(e.identity, identite_disque(1), "l'identite doit etre reemise en echo");
+        assert_eq!(e.identity, identite_disque(1), "l'identity doit etre reemise en echo");
         assert_eq!(e.artist.as_deref(), Some("Miles Davis"));
         assert_eq!(e.album.as_deref(), Some("Kind of Blue"));
         assert_eq!(e.title.as_deref(), Some("Freddie Freeloader"));
-        // Le MBID etait deja porte par le lookup TOC : la pochette part sans
-        // requete de plus, et ce chemin ecrase (il sait ce qui joue).
+        // Le MBID etait deja porte par le lookup TOC : la cover part sans
+        // requete de plus, et ce path ecrase (il sait ce qui plays).
         assert_eq!(
             e.cover,
             Some(CoverRef::Url { url: musicbrainz::url_caa("e32a3f0b-1c19-3170-bb1c-650893774744") })
         );
-        assert!(!e.fill_only, "le chemin disque connait la TOC, il ecrase");
+        assert!(!e.fill_only, "le path disc connait la TOC, il ecrase");
     }
 
     #[tokio::test]
@@ -1161,7 +1161,7 @@ mod tests {
         let e = p.next_enrichment().await;
         assert_eq!(e.title.as_deref(), Some("Blue in Green"));
         assert_eq!(e.identity, identite_disque(2));
-        assert!(p.en_vol.is_none(), "aucune nouvelle interrogation pour le meme disque");
+        assert!(p.in_flight.is_none(), "aucune nouvelle interrogation pour le meme disc");
     }
 
     #[tokio::test]
@@ -1169,8 +1169,8 @@ mod tests {
         let mut p = plugin_avec_disque_connu();
         p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(0)), ..Default::default() }).await;
         p.now_playing(NowPlaying { source: "cd".into(), identity: None, ..Default::default() }).await;
-        assert!(p.pret.is_none(), "un enrichissement perime ne doit pas partir apres l'arret");
-        assert!(p.identite.is_none());
+        assert!(p.ready.is_none(), "un enrichment perime ne doit pas partir apres l'arret");
+        assert!(p.identity.is_none());
     }
 
     #[tokio::test]
@@ -1182,30 +1182,30 @@ mod tests {
             ..Default::default()
         })
         .await;
-        assert!(p.pret.is_none());
-        assert!(p.en_vol.is_none(), "aucun appel reseau pour une identite de flux");
+        assert!(p.ready.is_none());
+        assert!(p.in_flight.is_none(), "aucun appel reseau pour une identity de stream");
     }
 
     #[tokio::test]
     async fn une_piste_hors_bornes_ne_produit_rien() {
-        // Disque reconnu à 3 pistes, mais l'identité annonce la piste 7 : se
-        // taire vaut mieux qu'annoncer le titre d'une autre piste.
+        // Disc reconnu à 3 pistes, mais l'identité announcement la track 7 : se
+        // taire vaut mieux qu'annoncer le title d'une autre track.
         let mut p = plugin_avec_disque_connu();
         p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(7)), ..Default::default() }).await;
-        assert!(p.pret.is_none());
+        assert!(p.ready.is_none());
     }
 
     #[tokio::test]
     async fn un_disque_inconnu_ne_produit_rien_et_nest_interroge_quune_fois() {
         // Résultat mémorisé comme « interrogé, rien trouvé » : les changements
-        // de piste suivants ne doivent pas relancer de requête.
+        // de track suivants ne doivent pas relancer de requête.
         let mut p = plugin_test();
-        p.connu = Some((TOC.to_string(), None));
+        p.known = Some((TOC.to_string(), None));
         p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(0)), ..Default::default() }).await;
-        assert!(p.pret.is_none());
-        assert!(p.en_vol.is_none());
+        assert!(p.ready.is_none());
+        assert!(p.in_flight.is_none());
         p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(1)), ..Default::default() }).await;
-        assert!(p.en_vol.is_none(), "un disque deja interroge ne doit pas l'etre a nouveau");
+        assert!(p.in_flight.is_none(), "un disc deja interroge ne doit pas l'etre a nouveau");
     }
 
     #[tokio::test]
@@ -1217,25 +1217,25 @@ mod tests {
             ..Default::default()
         })
         .await;
-        assert!(p.en_vol.is_none());
-        assert!(p.pret.is_none());
+        assert!(p.in_flight.is_none());
+        assert!(p.ready.is_none());
     }
 
     #[test]
     fn le_relai_generique_exige_un_artiste_et_un_album_et_se_tait_si_la_pochette_est_tenue() {
         use ritornello_proto::Known;
-        // Jamais sur un titre ICY seul : c'est un texte brut, non decoupe, et
-        // OUI FM emet « Titre - ARTISTE » dans l'ordre inverse de l'usage.
-        assert!(!doit_chercher(&Known { title: Some("X - Y".into()), ..Default::default() }));
-        assert!(!doit_chercher(&Known { artist: Some("A".into()), ..Default::default() }));
-        assert!(!doit_chercher(&Known { album: Some("B".into()), ..Default::default() }));
-        assert!(doit_chercher(&Known {
+        // Jamais sur un title ICY seul : c'est un texte raw, non decoupe, et
+        // OUI FM emet « Titre - ARTISTE » dans l'order inverse de l'usage.
+        assert!(!should_search(&Known { title: Some("X - Y".into()), ..Default::default() }));
+        assert!(!should_search(&Known { artist: Some("A".into()), ..Default::default() }));
+        assert!(!should_search(&Known { album: Some("B".into()), ..Default::default() }));
+        assert!(should_search(&Known {
             artist: Some("A".into()),
             album: Some("B".into()),
             ..Default::default()
         }));
-        // Une pochette deja tenue : l'appel serait jete.
-        assert!(!doit_chercher(&Known {
+        // Une cover deja tenue : l'appel serait jete.
+        assert!(!should_search(&Known {
             artist: Some("A".into()),
             album: Some("B".into()),
             cover: true,
@@ -1245,27 +1245,27 @@ mod tests {
 
     #[tokio::test]
     async fn un_resultat_pour_un_autre_disque_ne_produit_rien() {
-        // Le disque a été changé pendant que la requête volait : le résultat
+        // Le disc a été changé pendant que la requête volait : le résultat
         // arrive pour une TOC qui n'est plus celle du tiroir.
         let mut p = plugin_test();
-        // Interrogation déclarée « en vol » : `cherche` ne lancera donc aucune
+        // Interrogation déclarée « en vol » : `search` ne lancera donc aucune
         // requête réseau, et le résultat est injecté à la main ci-dessous.
-        p.en_vol = Some(TOC.to_string());
+        p.in_flight = Some(TOC.to_string());
         p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(0)), ..Default::default() }).await;
-        p.trouve_tx
-            .send(("42 1 2 3".to_string(), Reponse::Connue(musicbrainz::parse_lookup(FIXTURE, 3))))
+        p.found_tx
+            .send(("42 1 2 3".to_string(), Answer::Known(musicbrainz::parse_lookup(FIXTURE, 3))))
             .await
             .unwrap();
         // `next_enrichment` consomme le résultat périmé puis se remet en attente :
         // on vérifie qu'il ne rend rien dans un délai borné.
         let r = tokio::time::timeout(std::time::Duration::from_millis(200), p.next_enrichment()).await;
-        assert!(r.is_err(), "aucun enrichissement ne doit sortir d'un resultat hors sujet");
+        assert!(r.is_err(), "aucun enrichment ne doit sortir d'un resultat hors sujet");
     }
 
     // `..Default::default()` derrière un littéral pourtant complet : clippy le
-    // dit sans effet (`needless_update`), et il a raison **aujourd'hui**. Ce
+    // dit sans effet (`needless_update`), et il a reason **aujourd'hui**. Ce
     // n'est pas de la redondance mais de la compatibilité ascendante — un
-    // littéral qui se termine ainsi survit à l'ajout d'un champ dans la
+    // littéral qui se terminate ainsi survit à l'ajout d'un champ dans la
     // structure, celui qui les énumère tous casse. Le dépôt a payé cette
     // leçon : un champ ajouté à une structure publique a cassé 44 littéraux
     // ailleurs, qu'un `cargo test -p` ne compile jamais. Quand clippy et la
@@ -1275,15 +1275,15 @@ mod tests {
     #[tokio::test]
     async fn le_relai_generique_emet_une_pochette_seule_en_completion() {
         // La recherche est pré-mémorisée pour n'exercer aucun appel réseau :
-        // c'est `cherche_pochette` qui décide de ne pas relancer, exactement
-        // comme `plugin_avec_disque_connu` le fait côté disque.
+        // c'est `search_cover` qui décide de ne pas relancer, exactement
+        // comme `plugin_avec_disque_connu` le fait côté disc.
         let mut p = plugin_test();
-        let cle = ("Miles Davis".to_string(), "Kind of Blue".to_string());
-        // Une URL deja resolue, comme ce que `cherche_release` memorise : c'est
+        let key = ("Miles Davis".to_string(), "Kind of Blue".to_string());
+        // Une URL deja resolue, comme ce que `search_release` memorise : c'est
         // le module qui decide du niveau (album ou pressage), jamais ce
-        // chemin-ci. Ici celle d'un groupe, le cas courant d'une recherche.
-        let pochette = musicbrainz::url_caa_groupe("8e8a594f-2175-38c7-a871-abb68ec363e7");
-        p.pochette_connue = Some((cle, Some(pochette.clone())));
+        // path-ci. Ici celle d'un groupe, le cas courant d'une recherche.
+        let cover = musicbrainz::caa_group_url("8e8a594f-2175-38c7-a871-abb68ec363e7");
+        p.known_cover = Some((key, Some(cover.clone())));
         p.now_playing(NowPlaying {
             source: "files".into(),
             identity: Some(identite_fichier("/musique/a.flac")),
@@ -1296,9 +1296,9 @@ mod tests {
         })
         .await;
         let e = p.next_enrichment().await;
-        assert_eq!(e.identity, identite_fichier("/musique/a.flac"), "l'identite doit etre reemise en echo");
-        assert_eq!(e.cover, Some(CoverRef::Url { url: pochette }));
-        assert!(e.fill_only, "ce chemin ne sait rien de plus que ce qu'on lui a donne, il complete");
+        assert_eq!(e.identity, identite_fichier("/musique/a.flac"), "l'identity doit etre reemise en echo");
+        assert_eq!(e.cover, Some(CoverRef::Url { url: cover }));
+        assert!(e.fill_only, "ce path ne sait rien de plus que ce qu'on lui a donne, il complete");
         assert!(
             e.artist.is_none() && e.title.is_none() && e.album.is_none(),
             "aucun champ de texte : il ne connait rien de plus que ce qu'on lui a donne"
@@ -1314,8 +1314,8 @@ mod tests {
         // Mémorisé comme « recherché, rien trouvé » : ne doit pas relancer de
         // requête pour la même trame ni pour une trame suivante du même album.
         let mut p = plugin_test();
-        let cle = ("A".to_string(), "B".to_string());
-        p.pochette_connue = Some((cle, None));
+        let key = ("A".to_string(), "B".to_string());
+        p.known_cover = Some((key, None));
         let known = ritornello_proto::Known { artist: Some("A".into()), album: Some("B".into()), ..Default::default() };
         p.now_playing(NowPlaying {
             source: "files".into(),
@@ -1324,19 +1324,19 @@ mod tests {
             ..Default::default()
         })
         .await;
-        // **Il prepare un aveu, pas une pochette** : « cherche, rien trouve »
+        // **Il prepare un aveu, pas une cover** : « search, rien trouve »
         // est une reponse, et c'est elle qui permet a l'ecran de distinguer
-        // MusicBrainz interroge sans succes de MusicBrainz jamais interroge.
+        // MusicBrainz interroge sans record_success de MusicBrainz jamais interroge.
         // Elle n'apporte rien d'autre — aucun champ, aucune image — donc elle
         // n'entre dans aucun arbitrage.
-        let aveu = p.pret.as_ref().expect("une recherche infructueuse doit se declarer");
+        let aveu = p.ready.as_ref().expect("une recherche infructueuse doit se declarer");
         assert!(aveu.searched);
         assert!(aveu.artist.is_none() && aveu.title.is_none() && aveu.album.is_none());
         assert!(aveu.cover.is_none() && aveu.year.is_none() && aveu.links.is_empty());
-        assert!(p.pochette_en_vol.is_none());
+        assert!(p.cover_in_flight.is_none());
         p.now_playing(NowPlaying { source: "files".into(), identity: Some(identite_fichier("/x")), known, ..Default::default() })
             .await;
-        assert!(p.pochette_en_vol.is_none(), "un couple deja recherche ne doit pas l'etre a nouveau");
+        assert!(p.cover_in_flight.is_none(), "un pair deja recherche ne doit pas l'etre a nouveau");
     }
 
     // Voir `le_relai_generique_emet_une_pochette_seule_en_completion` : le
@@ -1345,13 +1345,13 @@ mod tests {
     #[allow(clippy::needless_update)]
     #[tokio::test(start_paused = true)]
     async fn une_panne_passagere_de_musicbrainz_ne_se_memorise_pas() {
-        // Le defaut rapporte par le proprietaire, en test. Un 503 de
-        // MusicBrainz se figeait en « cet album n'a pas de pochette » pour
-        // toute la duree de l'album : seul un redemarrage du greffon le
-        // debloquait. Ici on force la reponse `Indisponible` et on verifie que
-        // rien n'est memorise et que la trame suivante relance bien.
+        // Le defaut rapporte par le owner, en test. Un 503 de
+        // MusicBrainz se figeait en « cet album n'a pas de cover » pour
+        // toute la duration de l'album : seul un redemarrage du greffon le
+        // debloquait. Ici on force la reponse `Unavailable` et on verifie que
+        // rien n'est memorise et que la trame suivante restart bien.
         let mut p = plugin_test();
-        let cle = ("Rhapsody Of Fire".to_string(), "Triumph Or Agony".to_string());
+        let key = ("Rhapsody Of Fire".to_string(), "Triumph Or Agony".to_string());
         let known = ritornello_proto::Known {
             artist: Some("Rhapsody Of Fire".into()),
             album: Some("Triumph Or Agony".into()),
@@ -1364,35 +1364,35 @@ mod tests {
             ..Default::default()
         })
         .await;
-        assert_eq!(p.pochette_en_vol.as_ref(), Some(&cle), "prealable : une recherche est partie");
+        assert_eq!(p.cover_in_flight.as_ref(), Some(&key), "prealable : une recherche est partie");
 
         // La tache repond « pas de reponse ».
-        p.pochette_tx.send((cle.clone(), Reponse::Indisponible)).await.unwrap();
-        // Horloge virtuelle (`start_paused`) : ce `timeout` n'attend aucune
-        // duree reelle. Il laisse la boucle depiler le message — pret des
-        // qu'il est en file — puis rend la main faute d'enrichissement a
-        // produire. Le delai n'est donc pas une hypothese sur la vitesse
+        p.cover_tx.send((key.clone(), Answer::Unavailable)).await.unwrap();
+        // Clock virtuelle (`start_paused`) : ce `timeout` n'wait aucune
+        // duration reelle. Il laisse la boucle depiler le message — ready des
+        // qu'il est en file — puis rend la main faute d'enrichment a
+        // produire. Le timeout n'est donc pas une hypothese sur la vitesse
         // d'execution, c'est le temps virtuel qui avance seul quand plus rien
-        // n'est pret.
+        // n'est ready.
         let rien = tokio::time::timeout(std::time::Duration::from_secs(1), p.next_enrichment()).await;
-        assert!(rien.is_err(), "une panne passagere ne doit produire aucun enrichissement");
+        assert!(rien.is_err(), "une panne passagere ne doit produire aucun enrichment");
 
         assert!(
-            p.pochette_connue.is_none(),
+            p.known_cover.is_none(),
             "rien ne doit etre memorise : c'est ce qui figeait l'absence jusqu'au redemarrage"
         );
         // **Une reprise est armee, et c'est elle qui tient le marqueur.** La
-        // version d'avant liberait `pochette_en_vol` en comptant sur « la
+        // version d'avant liberait `cover_in_flight` en comptant sur « la
         // prochaine trame » pour reessayer -- or il n'y en a pas sur un fichier
-        // local, ou identite et `known` se figent des que les etiquettes sont
+        // local, ou identity et `known` se figent des que les etiquettes sont
         // lues. Le marqueur reste donc arme pendant l'attente : c'est ce qui
         // interdit a une trame survenant entre-temps de lancer une seconde
-        // recherche pour le meme couple.
-        assert_eq!(p.pochette_en_vol.as_ref(), Some(&cle), "la reprise tient le marqueur");
-        assert_eq!(p.reprises_pochette, Some((cle.clone(), 1)), "une reprise doit etre consommee");
+        // recherche pour le meme pair.
+        assert_eq!(p.cover_in_flight.as_ref(), Some(&key), "la reprise tient le marqueur");
+        assert_eq!(p.cover_retries, Some((key.clone(), 1)), "une reprise doit etre consommee");
 
-        // Une trame de plus ne relance rien : la reprise deja armee s'en
-        // charge, et deux recherches concurrentes pour le meme couple se
+        // Une trame de plus ne restart rien : la reprise deja armee s'en
+        // load, et deux recherches concurrentes pour le meme pair se
         // repondraient l'une l'autre.
         p.now_playing(NowPlaying {
             source: "files".into(),
@@ -1401,38 +1401,38 @@ mod tests {
             ..Default::default()
         })
         .await;
-        assert_eq!(p.reprises_pochette, Some((cle, 1)), "aucune reprise de plus ne doit partir");
+        assert_eq!(p.cover_retries, Some((key, 1)), "aucune reprise de plus ne doit partir");
     }
 
     #[test]
     fn le_budget_de_reprises_est_borne_et_porte_par_le_couple() {
         // La decision seule, sans horloge ni reseau : c'est pour cela qu'elle
-        // est separee de son application (voir `reprise_due`).
+        // est separee de son application (voir `retry_due`).
         let mut p = plugin_test();
-        let cle = ("A".to_string(), "Disque".to_string());
-        p.cle_generique = Some(cle.clone());
+        let key = ("A".to_string(), "Disc".to_string());
+        p.generic_key = Some(key.clone());
 
         // Trois reprises, de plus en plus espacees, puis plus rien : au-dela,
-        // l'absence n'est plus une panne passagere et le changement de piste
+        // l'absence n'est plus une panne passagere et le changement de track
         // reste la reprise ultime. La troisieme a ete ajoutee sur mesure — six
         // 503 sur neuf requetes en une minute, constates sur l'appareil.
-        assert_eq!(p.reprise_due(&cle), Some((0, Duration::from_secs(20))));
-        p.reprises_pochette = Some((cle.clone(), 1));
-        assert_eq!(p.reprise_due(&cle), Some((1, Duration::from_secs(60))));
-        p.reprises_pochette = Some((cle.clone(), 2));
-        assert_eq!(p.reprise_due(&cle), Some((2, Duration::from_secs(180))));
-        p.reprises_pochette = Some((cle.clone(), 3));
-        assert_eq!(p.reprise_due(&cle), None, "le budget doit etre borne");
+        assert_eq!(p.retry_due(&key), Some((0, Duration::from_secs(20))));
+        p.cover_retries = Some((key.clone(), 1));
+        assert_eq!(p.retry_due(&key), Some((1, Duration::from_secs(60))));
+        p.cover_retries = Some((key.clone(), 2));
+        assert_eq!(p.retry_due(&key), Some((2, Duration::from_secs(180))));
+        p.cover_retries = Some((key.clone(), 3));
+        assert_eq!(p.retry_due(&key), None, "le budget doit etre bounded");
 
-        // Le compteur est porte par le couple : un autre album repart de zero
+        // Le compteur est porte par le pair : un autre album repart de zero
         // sans qu'aucune remise a zero explicite n'ait a exister.
         let autre = ("A".to_string(), "Autre".to_string());
-        p.cle_generique = Some(autre.clone());
-        assert_eq!(p.reprise_due(&autre), Some((0, Duration::from_secs(20))));
+        p.generic_key = Some(autre.clone());
+        assert_eq!(p.retry_due(&autre), Some((0, Duration::from_secs(20))));
 
-        // Et rien n'est repris pour un couple qu'on ne vise plus : ce serait du
+        // Et rien n'est repris pour un pair qu'on ne vise plus : ce serait du
         // travail pur perdu, sa reponse etant de toute facon ecartee.
-        assert_eq!(p.reprise_due(&cle), None, "un couple abandonne ne se reprend pas");
+        assert_eq!(p.retry_due(&key), None, "un pair abandonne ne se reprend pas");
     }
 
     // Voir `le_relai_generique_emet_une_pochette_seule_en_completion` : le
@@ -1441,15 +1441,15 @@ mod tests {
     #[allow(clippy::needless_update)]
     #[tokio::test]
     async fn un_changement_dalbum_ne_reutilise_pas_lancienne_pochette() {
-        // La mémorisation est clée par (artiste, album) : un nouvel album doit
-        // changer la clé et ne jamais réafficher la pochette de l'ancien.
+        // La mémorisation est clée par (artist, album) : un nouvel album doit
+        // changer la clé et ne jamais réafficher la cover de l'ancien.
         let mut p = plugin_test();
-        p.pochette_connue =
+        p.known_cover =
             Some((("A".to_string(), "Vieux".to_string()), Some("11111111-1111-1111-1111-111111111111".into())));
         // Recherche du nouvel album déclarée « en vol » : évite tout appel
-        // réseau dans ce test, sans changer ce qui est observé (`en_vol`
-        // arrête `cherche_pochette` avant le `tokio::spawn`).
-        p.pochette_en_vol = Some(("A".to_string(), "Nouveau".to_string()));
+        // réseau dans ce test, sans changer ce qui est observé (`in_flight`
+        // arrête `search_cover` avant le `tokio::spawn`).
+        p.cover_in_flight = Some(("A".to_string(), "Nouveau".to_string()));
         p.now_playing(NowPlaying {
             source: "files".into(),
             identity: Some(identite_fichier("/x")),
@@ -1457,53 +1457,53 @@ mod tests {
             ..Default::default()
         })
         .await;
-        assert!(p.pret.is_none(), "la pochette de l'ancien album ne doit pas s'appliquer au nouveau");
-        assert_eq!(p.cle_generique, Some(("A".to_string(), "Nouveau".to_string())), "la cle suit le nouvel album");
+        assert!(p.ready.is_none(), "la cover de l'ancien album ne doit pas s'appliquer au nouveau");
+        assert_eq!(p.generic_key, Some(("A".to_string(), "Nouveau".to_string())), "la key suit le nouvel album");
     }
 
     #[tokio::test]
     async fn une_identite_de_disque_efface_letat_generique() {
-        // Les deux chemins sont exclusifs : un disque inséré ne doit rien
+        // Les deux chemins sont exclusifs : un disc inséré ne doit rien
         // laisser du relai générique en place.
         let mut p = plugin_test();
-        p.en_vol = Some(TOC.to_string()); // évite tout appel réseau dans ce test
-        p.identite_generique = Some(identite_fichier("/x"));
-        p.cle_generique = Some(("A".to_string(), "B".to_string()));
+        p.in_flight = Some(TOC.to_string()); // évite tout appel réseau dans ce test
+        p.generic_identity = Some(identite_fichier("/x"));
+        p.generic_key = Some(("A".to_string(), "B".to_string()));
         p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(0)), ..Default::default() }).await;
-        assert!(p.identite_generique.is_none());
-        assert!(p.cle_generique.is_none());
+        assert!(p.generic_identity.is_none());
+        assert!(p.generic_key.is_none());
     }
 
     // --- Chemin ICY (radio) ---------------------------------------------
 
-    fn candidat(artiste: &str, titre: &str, artiste_en_premier: bool) -> icy::Candidat {
-        icy::Candidat {
-            artiste: artiste.to_string(),
-            titre: titre.to_string(),
-            separateur: " - ",
-            artiste_en_premier,
-            titre_au_milieu: false,
+    fn candidat(artist: &str, title: &str, artist_first: bool) -> icy::Candidate {
+        icy::Candidate {
+            artist: artist.to_string(),
+            title: title.to_string(),
+            separator: " - ",
+            artist_first,
+            title_in_middle: false,
         }
     }
 
-    fn enregistrement(score: u64, titre: &str) -> musicbrainz::Enregistrement {
-        musicbrainz::Enregistrement { score, titre: titre.to_string(), cover_url: None }
+    fn enregistrement(score: u64, title: &str) -> musicbrainz::Recording {
+        musicbrainz::Recording { score, title: title.to_string(), cover_url: None }
     }
 
     #[test]
     fn le_meilleur_score_gagne_et_non_le_premier_accepte() {
-        // Le gagnant est **second** dans l'ordre d'essai : sans cela, le test
+        // Le winner est **second** dans l'order d'essai : sans cela, le test
         // passerait aussi avec « prendre le premier accepté ».
         let essais = vec![
-            // L'ordre inversé valide quand même (score au-dessus du seuil,
+            // L'order inversé validated quand même (score au-dessus du seuil,
             // mais plus faible) : c'est le cas réel qui rend « prendre le
             // premier accepté » dangereux.
             (candidat("So What", "Miles Davis", false), Some(enregistrement(91, "Miles Davis"))),
             (candidat("Miles Davis", "So What", true), Some(enregistrement(99, "So What"))),
         ];
-        let gagnant = meilleur_accepte(&essais).expect("un candidat doit etre retenu");
-        assert_eq!((gagnant.artiste.as_str(), gagnant.titre.as_str()), ("Miles Davis", "So What"));
-        assert!(gagnant.artiste_en_premier);
+        let winner = best_accepted(&essais).expect("un candidat doit etre retenu");
+        assert_eq!((winner.artist.as_str(), winner.title.as_str()), ("Miles Davis", "So What"));
+        assert!(winner.artist_first);
     }
 
     #[test]
@@ -1511,80 +1511,80 @@ mod tests {
         // La garde qui porte tout : le score seul est trop généreux, la
         // recherche rendant presque toujours quelque chose de plausible.
         let essais =
-            vec![(candidat("So What", "Miles Davis", false), Some(enregistrement(95, "Un Tout Autre Enregistrement")))];
-        assert!(meilleur_accepte(&essais).is_none(), "score haut mais titre discordant : doit etre ecarte");
+            vec![(candidat("So What", "Miles Davis", false), Some(enregistrement(95, "Un Tout Autre Recording")))];
+        assert!(best_accepted(&essais).is_none(), "score haut mais title discordant : doit etre ecarte");
     }
 
     #[test]
     fn aucun_candidat_accepte_donne_ne_pas_decouper() {
-        // Aucun essai (chaîne sans séparateur, cf. `icy::candidats`) ou aucun
-        // accepté : le sondage n'a rien retenu, ce que `traite_icy` traduit en
-        // `Motif::NePasDecouper` (non rejoué ici, le réseau n'étant pas
-        // joignable en test — `meilleur_accepte` porte la décision).
-        assert!(meilleur_accepte(&[]).is_none(), "aucun essai, donc aucun accepte");
+        // Aucun essai (chaîne sans séparateur, cf. `icy::candidates`) ou aucun
+        // accepté : le sondage n'a rien retenu, ce que `handle_icy` translate en
+        // `Pattern::DoNotSplit` (non rejoué ici, le réseau n'étant pas
+        // joignable en test — `best_accepted` porte la décision).
+        assert!(best_accepted(&[]).is_none(), "aucun essai, donc aucun accepte");
         let essais = vec![
-            (candidat("A", "B", true), None), // hors ligne / rien trouve
+            (candidat("A", "B", true), None), // hors line / rien trouve
             (candidat("B", "A", false), Some(enregistrement(50, "A"))), // sous le seuil
         ];
-        assert!(meilleur_accepte(&essais).is_none());
+        assert!(best_accepted(&essais).is_none());
     }
 
     #[tokio::test]
     async fn une_station_classee_ne_pas_decouper_ne_declenche_aucune_requete() {
-        // `traite_icy` avec `connu = NePasDecouper` et `resonde = false` doit
+        // `handle_icy` avec `known = DoNotSplit` et `reprobe = false` doit
         // rendre son issue **sans** toucher au réseau. Prouvé par le fait que
         // le test passe alors qu'aucun réseau n'est joignable ici : une
         // requête tentée échouerait ou traînerait, et le délai ci-dessous la
         // ferait échouer.
         let r = tokio::time::timeout(
             std::time::Duration::from_millis(500),
-            traite_icy(
+            handle_icy(
                 "http://f".to_string(),
                 "Miles Davis - So What".to_string(),
                 json!({"kind": "stream", "url": "http://f"}),
-                Some(motifs::Motif::NePasDecouper),
+                Some(patterns::Pattern::DoNotSplit),
                 false,
             ),
         )
         .await;
-        let issue = r.expect("aucune requete reseau ne doit etre tentee, donc pas de delai");
-        assert_eq!(issue.motif, None);
-        assert_eq!(issue.valide, None);
+        let issue = r.expect("aucune requete reseau ne doit etre tentee, donc pas de timeout");
+        assert_eq!(issue.pattern, None);
+        assert_eq!(issue.validated, None);
     }
 
-    /// Envoie une issue d'échec (validation ratée) pour `url`/`brut`, et
+    /// Envoie une issue d'échec (validation ratée) pour `url`/`raw`, et
     /// consomme le tour de boucle qui en résulte.
     ///
-    /// **Un échec produit désormais un enrichissement**, et c'est une
-    /// correction de relecture : ne rien émettre laissait celui du morceau
+    /// **Un échec produit désormais un enrichment**, et c'est une
+    /// correction de relecture : ne rien émettre laissait celui du track
     /// *précédent* gagner l'arbitrage, l'identité d'une radio ne changeant pas
-    /// d'un morceau à l'autre. L'assertion d'avant — « aucun enrichissement » —
+    /// d'un track à l'autre. L'assertion d'avant — « aucun enrichment » —
     /// épinglait donc le défaut au lieu de la propriété.
     ///
-    /// Avec `couple: None`, ce qui part est la chaîne nettoyée en guise de
-    /// titre, sans artiste : on n'affirme aucun découpage, on montre ce que le
-    /// flux annonce. Et l'attente est **exacte** (on attend ce qui doit venir)
+    /// Avec `pair: None`, ce qui part est la chaîne nettoyée en guise de
+    /// title, sans artist : on n'affirme aucun découpage, on montre ce que le
+    /// stream announcement. Et l'attente est **exacte** (on wait ce qui doit venir)
     /// au lieu de reposer sur une marge de temps.
-    async fn envoie_echec(p: &mut MusicBrainzPlugin, url: &str, brut: &str) {
+    async fn envoie_echec(p: &mut MusicBrainzPlugin, url: &str, raw: &str) {
         p.icy_tx
-            .send(IssueIcy {
+            .send(IcyOutcome {
                 url: url.to_string(),
-                brut: brut.to_string(),
-                identite: json!({"kind": "stream", "url": url}),
-                motif: None,
-                valide: None,
-                couple: None,
+                raw: raw.to_string(),
+                identity: json!({"kind": "stream", "url": url}),
+                pattern: None,
+                validated: None,
+                pair: None,
             })
             .await
             .unwrap();
         let e = p.next_enrichment().await;
-        assert_eq!(e.artist, None, "un echec n'affirme aucun artiste");
+        assert_eq!(e.artist, None, "un echec n'affirme aucun artist");
         assert_eq!(
             e.title.as_deref(),
-            Some(icy::nettoie(brut).as_str()),
-            "il montre ce que le flux annonce, nettoye"
+            Some(icy::clean(raw).as_str()),
+            "il montre ce que le stream announcement, nettoye"
         );
-        assert!(e.cover.is_none(), "et aucune pochette, faute de release a citer");
+        assert!(e.cover.is_none(), "et aucune cover, faute de release a citer");
     }
 
     #[tokio::test]
@@ -1592,34 +1592,34 @@ mod tests {
         // Les deux moitiés. Sans la première, « resonder toujours » passerait ;
         // sans la seconde, « ne resonder jamais » passerait.
         //
-        // Le compteur et la décision sont exercés par le vrai chemin de code
+        // Le compteur et la décision sont exercés par le vrai path de code
         // (l'issue traverse `icy_tx`/`next_enrichment`, comme
         // `un_resultat_pour_un_autre_disque_ne_produit_rien` le fait déjà côté
-        // disque) : ce n'est pas une resimulation en dur de l'arithmétique.
+        // disc) : ce n'est pas une resimulation en dur de l'arithmétique.
         let mut p = plugin_test();
         let url = "http://f";
-        p.icy_vu = Some("brut".to_string());
+        p.icy_seen = Some("raw".to_string());
 
         for n in 1..=2u32 {
-            envoie_echec(&mut p, url, "brut").await;
-            assert_eq!(p.echecs.get(url), Some(&n));
-            assert!(!doit_resonder(&p.echecs, url), "echec numero {n} : ne doit pas encore resonder");
+            envoie_echec(&mut p, url, "raw").await;
+            assert_eq!(p.failures.get(url), Some(&n));
+            assert!(!should_reprobe(&p.failures, url), "echec numero {n} : ne doit pas encore resonder");
         }
 
-        envoie_echec(&mut p, url, "brut").await;
-        assert_eq!(p.echecs.get(url), Some(&3));
-        assert!(doit_resonder(&p.echecs, url), "trois echecs d'affilee doivent resonder");
+        envoie_echec(&mut p, url, "raw").await;
+        assert_eq!(p.failures.get(url), Some(&3));
+        assert!(should_reprobe(&p.failures, url), "trois failures d'affilee doivent resonder");
     }
 
-    /// Le resondage **consomme** le compteur d'echecs.
+    /// Le resondage **consomme** le compteur d'failures.
     ///
     /// Sans ca il restait au-dessus du seuil pour la vie du processus, et une
-    /// station qui ne valide jamais — un flux en mojibake, par exemple —
-    /// repartait en sondage complet a *chaque* titre. La documentation promet
+    /// station qui ne validated jamais — un stream en mojibake, par exemple —
+    /// repartait en sondage complet a *chaque* title. La documentation promet
     /// l'inverse, et la limite qu'elle decrit devenait une tempete de requetes
     /// garantie. Constat de la relecture croisee finale.
     ///
-    /// Eprouve sur `now_playing` et non sur `doit_resonder` seul : la remise a
+    /// Eprouve sur `now_playing` et non sur `should_reprobe` seul : la remise a
     /// zero vit au site de lancement, et c'est le lien entre les deux que ce
     /// test doit tenir. La tache detachee qui suit ne peut pas joindre le
     /// reseau, ce qui ne gene pas — la remise a zero est synchrone et precede
@@ -1627,14 +1627,14 @@ mod tests {
     #[tokio::test]
     async fn un_resondage_consomme_le_compteur() {
         let mut p = plugin_test();
-        let url = "http://exemple/flux.mp3";
-        let identite = json!({"kind": "stream", "url": url});
-        p.echecs.insert(url.to_string(), ECHECS_AVANT_RESONDAGE);
-        assert!(doit_resonder(&p.echecs, url), "trois echecs arment bien le resondage");
+        let url = "http://exemple/stream.mp3";
+        let identity = json!({"kind": "stream", "url": url});
+        p.failures.insert(url.to_string(), FAILURES_BEFORE_REPROBE);
+        assert!(should_reprobe(&p.failures, url), "trois failures arment bien le resondage");
 
         p.now_playing(NowPlaying {
             source: "radio".into(),
-            identity: Some(identite),
+            identity: Some(identity),
             known: ritornello_proto::Known {
                 stream_title: Some("Miles Davis - So What".into()),
                 ..Default::default()
@@ -1643,13 +1643,13 @@ mod tests {
         .await;
 
         assert_eq!(
-            p.echecs.get(url),
+            p.failures.get(url),
             None,
             "le lancement du resondage doit avoir consomme le compteur"
         );
         assert!(
-            !doit_resonder(&p.echecs, url),
-            "et le titre suivant ne doit pas resonder a son tour"
+            !should_reprobe(&p.failures, url),
+            "et le title suivant ne doit pas resonder a son tour"
         );
     }
 
@@ -1660,39 +1660,39 @@ mod tests {
         // cumulatif — et le cumulatif est le défaut naturel.
         let mut p = plugin_test();
         let url = "http://f";
-        p.icy_vu = Some("brut".to_string());
+        p.icy_seen = Some("raw".to_string());
 
-        envoie_echec(&mut p, url, "brut").await;
-        envoie_echec(&mut p, url, "brut").await;
-        assert_eq!(p.echecs.get(url), Some(&2));
+        envoie_echec(&mut p, url, "raw").await;
+        envoie_echec(&mut p, url, "raw").await;
+        assert_eq!(p.failures.get(url), Some(&2));
 
         p.icy_tx
-            .send(IssueIcy {
+            .send(IcyOutcome {
                 url: url.to_string(),
-                brut: "brut".to_string(),
+                raw: "raw".to_string(),
                 // L'identité que le cœur aurait envoyée : c'est elle qui doit
                 // repartir en écho, à l'identique.
-                identite: json!({"kind": "stream", "url": url}),
-                motif: None,
-                valide: Some(("Artiste".to_string(), "Titre".to_string(), None)),
-                couple: Some(("Artiste".to_string(), "Titre".to_string())),
+                identity: json!({"kind": "stream", "url": url}),
+                pattern: None,
+                validated: Some(("Artiste".to_string(), "Titre".to_string(), None)),
+                pair: Some(("Artiste".to_string(), "Titre".to_string())),
             })
             .await
             .unwrap();
         let e = p.next_enrichment().await;
         assert_eq!(e.artist.as_deref(), Some("Artiste"));
-        assert!(!p.echecs.contains_key(url), "le succes doit remettre le compteur a zero");
+        assert!(!p.failures.contains_key(url), "le record_success doit remettre le compteur a zero");
 
-        envoie_echec(&mut p, url, "brut").await;
-        envoie_echec(&mut p, url, "brut").await;
-        assert!(!doit_resonder(&p.echecs, url), "compteur consecutif (2), pas cumulatif (4) : ne doit pas resonder");
+        envoie_echec(&mut p, url, "raw").await;
+        envoie_echec(&mut p, url, "raw").await;
+        assert!(!should_reprobe(&p.failures, url), "compteur consecutif (2), pas cumulatif (4) : ne doit pas resonder");
     }
 
     #[test]
     fn une_identite_qui_nest_pas_un_flux_nest_pas_traitee() {
-        assert!(url_de_flux(&json!({"kind":"disc","toc":"1 2 3"})).is_none());
-        assert!(url_de_flux(&json!({"kind":"stream"})).is_none());
-        assert!(url_de_flux(&json!({"kind":"stream","url":""})).is_none());
-        assert_eq!(url_de_flux(&json!({"kind":"stream","url":"http://f"})).as_deref(), Some("http://f"));
+        assert!(stream_url(&json!({"kind":"disc","toc":"1 2 3"})).is_none());
+        assert!(stream_url(&json!({"kind":"stream"})).is_none());
+        assert!(stream_url(&json!({"kind":"stream","url":""})).is_none());
+        assert_eq!(stream_url(&json!({"kind":"stream","url":"http://f"})).as_deref(), Some("http://f"));
     }
 }

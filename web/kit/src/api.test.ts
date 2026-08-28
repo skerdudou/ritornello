@@ -20,8 +20,8 @@ describe('api', () => {
     await expect(api.get('/x')).rejects.toThrow('HTTP 502')
   })
 
-  it('get remonte la cause portée par le corps, pas le code nu', async () => {
-    // Mesuré : le cœur fait porter sa cause au corps d'un 502, mais seul `send`
+  it('get remonte la cause portée par le body, pas le code nu', async () => {
+    // Mesuré : le cœur fait porter sa cause au body d'un 502, mais seul `send`
     // la lisait. Le chargement d'une page de plugin passe par `get`, et
     // affichait « HTTP 502 » là où le même échec sur un PUT disait pourquoi.
     mockFetch(
@@ -47,7 +47,7 @@ describe('api', () => {
     await expect(api.put('/x', {})).resolves.toBe('preset en double')
   })
 
-  it('put retombe sur HTTP <code> quand le corps n’est pas du JSON', async () => {
+  it('put retombe sur HTTP <code> quand le body n’est pas du JSON', async () => {
     mockFetch(new Response('plugin injoignable', { status: 502 }))
     await expect(api.put('/x', {})).resolves.toBe('HTTP 502')
   })

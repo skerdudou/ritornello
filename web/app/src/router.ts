@@ -6,7 +6,7 @@ export const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', name: 'home', component: () => import('./views/HomeView.vue') },
-    // `/status` est l'URL historique de cette page (servie depuis les débuts
+    // `/status` est l'URL history de cette page (servie depuis les débuts
     // par le cœur) : elle reste valide et redirige vers son nouveau nom.
     { path: '/config', name: 'config', component: () => import('./views/ConfigView.vue') },
     { path: '/system', name: 'system', component: () => import('./views/SystemView.vue') },
@@ -16,9 +16,9 @@ export const router = createRouter({
     // route canonique et la redirection ci-dessous ne se declencherait jamais
     // — tandis que `/plugins/<nom>/` pourrait matcher la redirection et
     // boucler. Chaque forme d'URL matche ainsi exactement une route.
-    // La liste des pages de greffons : la cible de l'onglet « Greffons » de la
-    // barre basse, qui a besoin d'une destination fixe quel que soit le nombre
-    // de greffons. `strict` pour ne pas matcher `/plugins` nu.
+    // La list des pages de plugins : la cible de l'onglet « Greffons » de la
+    // barre basse, qui a besoin d'une destination fixe quel que soit le number
+    // de plugins. `strict` pour ne step matcher `/plugins` nu.
     { path: '/plugins/', name: 'plugins', strict: true, component: () => import('./views/PluginsView.vue') },
     {
       path: '/plugins/:name/',
@@ -27,7 +27,7 @@ export const router = createRouter({
       component: () => import('./views/PluginRoute.vue'),
     },
     // `/plugins/<nom>` (sans slash final) matchait la route canonique et
-    // montait la page, mais l'URL affichee restait sans slash — et les modules
+    // montait la page, mais l'URL displayed restait sans slash — et les modules
     // de plugin resolvaient alors `./api/data` vers `/plugins/api/data`, que le
     // coeur interprete comme le plugin « api » (404). Ils recoivent desormais
     // un prefixe absolu par la prop `base` (voir `PluginView.ts`), donc leurs

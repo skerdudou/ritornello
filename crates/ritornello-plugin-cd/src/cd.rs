@@ -15,7 +15,7 @@ pub enum DriveStatus {
     Unknown(i32),
 }
 
-/// Interroge le lecteur via l'ioctl CDROM_DRIVE_STATUS.
+/// Interroge le player via l'ioctl CDROM_DRIVE_STATUS.
 /// O_NONBLOCK est indispensable : sans lui, open() échoue quand il n'y a pas de disque.
 pub fn drive_status(dev: &Path) -> Result<DriveStatus> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -24,7 +24,7 @@ pub fn drive_status(dev: &Path) -> Result<DriveStatus> {
         .custom_flags(libc::O_NONBLOCK)
         .open(dev)
         .with_context(|| format!("opening {}", dev.display()))?;
-    // SAFETY: ioctl en lecture seule sur un fd valide ; l'argument est un int passé
+    // SAFETY: ioctl en playback seule sur un fd valide ; l'argument est un int passé
     // par valeur comme le définit linux/cdrom.h pour CDROM_DRIVE_STATUS.
     let r = unsafe { libc::ioctl(f.as_raw_fd(), CDROM_DRIVE_STATUS, CDSL_CURRENT) };
     Ok(match r {
@@ -40,11 +40,11 @@ pub fn drive_status(dev: &Path) -> Result<DriveStatus> {
 pub async fn watch(dev: PathBuf, tx: tokio::sync::mpsc::Sender<bool>) {
     let mut present = false;
     // Une erreur de sonde équivaut à « pas de disque » pour la présence — un
-    // lecteur débranché ne doit pas faire paniquer le plugin — mais elle est
+    // player débranché ne doit pas faire paniquer le plugin — mais elle est
     // journalisée **au premier échec** (puis tue jusqu'au retour au normal) :
     // un binaire hors du groupe `cdrom` ou un mauvais RITORNELLO_CD_DEV
-    // affichait « no disc » pour toujours sans une seule ligne de log, alors
-    // que les journaux sont le seul outil de diagnostic sur l'appareil.
+    // affichait « no disc » pour toujours sans une seule line de log, alors
+    // que les logs sont le seul outil de diagnostic sur l'appareil.
     let mut derniere_erreur_signalee = false;
     loop {
         let now = match drive_status(&dev) {
@@ -71,7 +71,7 @@ pub async fn watch(dev: PathBuf, tx: tokio::sync::mpsc::Sender<bool>) {
 /// TOC du disque via l'utilitaire cd-discid (paquet Debian).
 ///
 /// La sortie brute (`NTRACKS OFF1 … OFFN LEADOUT`) est ce qui part dans
-/// l'identité du morceau, telle quelle : c'est une description standard de
+/// l'identité du track, telle quelle : c'est une description standard de
 /// disque, et c'est au plugin `metadata` de la mettre au format qu'attend son
 /// fournisseur. Ce plugin-ci ne connaît aucun fournisseur de métadonnées.
 pub fn read_toc(dev: &str) -> Result<String> {

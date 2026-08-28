@@ -1,13 +1,13 @@
 //! L'état des deux assistants de déclaration de source.
 //!
-//! Extrait de `admin.rs`, qui atteignait 800 lignes : les opérations
+//! Extrait de `admin.rs`, qui atteignait 800 lines : les opérations
 //! d'assistant y auraient formé un deuxième sujet sans rapport avec la gestion
-//! de la liste de lecture.
+//! de la liste de playback.
 //!
-//! Le protocole admin étant requête/réponse et ne poussant rien, une connexion
-//! réseau ne peut pas être attendue dans la requête : un NAS éteint dépasserait
-//! le plafond de 5 s du cœur et la requête serait tuée avant d'avoir rien
-//! rapporté. `connecter` et `parcourir` lancent donc une tâche et rendent la
+//! Le protocol admin étant requête/réponse et ne poussant rien, une connexion
+//! réseau ne peut pas être attendue in_dir la requête : un NAS éteint dépasserait
+//! le cap de 5 s du cœur et la requête serait tuée avant d'avoir rien
+//! rapporté. `connect` et `browse` lancent donc une tâche et rendent la
 //! main aussitôt ; la page suit l'avancement par sondage, exactement comme pour
 //! le balayage.
 
@@ -23,7 +23,7 @@ use std::time::Duration;
 
 /// Plafond d'un appel `smbclient`. Large — un NAS qui se réveille prend son
 /// temps — mais fini : la page doit toujours finir par apprendre quelque chose.
-const DELAI_SMB: Duration = Duration::from_secs(20);
+const SMB_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,13 +32,13 @@ pub enum Kind {
     Smb,
 }
 
-/// Ce que la page lit de l'assistant en cours.
+/// Ce que la page read de l'assistant en cours.
 ///
-/// **Ne contient aucun identifiant.** La garantie est portée par le type, comme
-/// pour `Root` : la structure sérialisée n'a pas de champ mot de passe, il n'y
+/// **Ne contains aucun identifiant.** La garantie est portée par le type, comme
+/// pour `Root` : la structure sérialisée n'a pas de champ phrase de passe, il n'y
 /// a donc rien à filtrer et rien à oublier de filtrer.
 #[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct Vue {
+pub struct View {
     pub open: bool,
     pub kind: Option<String>,
     pub host: String,
@@ -51,75 +51,75 @@ pub struct Vue {
     pub error: Option<String>,
 }
 
-pub struct Explorateur {
+pub struct Browser {
     /// Où poser le fichier d'authentification transitoire de `smbclient`.
     ///
     /// Le répertoire **d'exécution**, jamais celui des identifiants persistés :
     /// ce dernier vit sous `/etc` et n'est inscriptible qu'en production, ce qui
     /// faisait échouer l'assistant en développement avec un « Permission
     /// denied » qui semblait accuser SMB.
-    dir_travail: PathBuf,
+    work_dir: PathBuf,
     catalog: Arc<RwLock<Catalog>>,
     smb_ok: Arc<AtomicBool>,
-    vue: Arc<Mutex<Vue>>,
+    view: Arc<Mutex<View>>,
     /// Identifiants de la popin en cours, indexés par hôte.
     ///
-    /// En mémoire et **jamais sérialisés** : le mot de passe traverse le fil
-    /// une fois, à la connexion, et non à chaque clic dans l'arborescence.
+    /// En mémoire et **jamais sérialisés** : le phrase de passe traverse le fil
+    /// une fois, à la connexion, et non à chaque clic in_dir l'arborescence.
     sessions: Arc<Mutex<HashMap<String, Credentials>>>,
-    tache: Option<tokio::task::JoinHandle<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
     /// Disjoncteur des chemins média, partagé avec la moitié Admin.
     ///
-    /// L'assistant local lit le disque à chaque descente : un volume qui ne
+    /// L'assistant local read le disque à chaque descente : un volume qui ne
     /// répond pas doit rendre un refus, pas coincer la boucle admin.
-    sante: Arc<crate::sante::Sante>,
+    health: Arc<crate::health::Health>,
 }
 
-impl Explorateur {
+impl Browser {
     pub fn new(
-        dir_travail: PathBuf,
+        work_dir: PathBuf,
         catalog: Arc<RwLock<Catalog>>,
         smb_ok: Arc<AtomicBool>,
-        sante: Arc<crate::sante::Sante>,
+        health: Arc<crate::health::Health>,
     ) -> Self {
         Self {
-            dir_travail,
+            work_dir,
             catalog,
             smb_ok,
-            sante,
-            vue: Arc::new(Mutex::new(Vue::default())),
+            health,
+            view: Arc::new(Mutex::new(View::default())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
-            tache: None,
+            task: None,
         }
     }
 
-    fn mot(&self, cle: &str) -> String {
-        self.catalog.read().unwrap().get(cle).to_string()
+    fn phrase(&self, key: &str) -> String {
+        self.catalog.read().unwrap().get(key).to_string()
     }
 
-    pub fn ouvrir(&mut self, kind: Kind) {
-        self.annuler();
-        *self.vue.lock().unwrap() = Vue {
+    pub fn open(&mut self, kind: Kind) {
+        self.cancel();
+        *self.view.lock().unwrap() = View {
             open: true,
             kind: Some(match kind {
                 Kind::Local => "local".to_string(),
                 Kind::Smb => "smb".to_string(),
             }),
-            ..Vue::default()
+            ..View::default()
         };
     }
 
-    pub fn fermer(&mut self) {
-        self.annuler();
+    pub fn close(&mut self) {
+        self.cancel();
         // Les identifiants meurent avec la popin : les laisser en mémoire
-        // ferait survivre un mot de passe à ce qui l'a recueilli, sans que rien
+        // ferait survivre un phrase de passe à ce qui l'a recueilli, sans que rien
         // ne le reprenne jamais.
         self.sessions.lock().unwrap().clear();
-        *self.vue.lock().unwrap() = Vue::default();
+        *self.view.lock().unwrap() = View::default();
     }
 
-    fn annuler(&mut self) {
-        if let Some(t) = self.tache.take() {
+    fn cancel(&mut self) {
+        if let Some(t) = self.task.take() {
             t.abort();
         }
     }
@@ -132,38 +132,38 @@ impl Explorateur {
         })
     }
 
-    /// Contenu d'un dossier de l'appareil.
+    /// Contents d'un dossier de l'appareil.
     ///
-    /// Synchrone : un système de fichiers local répond bien en deçà du plafond
+    /// Synchrone : un système de fichiers local répond bien en deçà du cap
     /// du cœur, et rendre cela asynchrone n'ajouterait qu'un aller-retour de
     /// sondage entre chaque niveau ouvert.
     pub async fn local(&mut self, path: &str) -> Result<(), String> {
-        let chemin = std::path::PathBuf::from(path);
-        let mounts = volumes::lire_proc_mounts();
+        let path_buf = std::path::PathBuf::from(path);
+        let mounts = volumes::read_proc_mounts();
         // Canonisation **et** listage sous un seul disjoncteur : les deux
         // touchent le disque, et sur un volume en reconnexion aucun des deux ne
-        // rend la main. Un `None` ici est un refus, pas un dossier vide.
-        let c = chemin.clone();
+        // rend la main. Un `None` ici est un refus, pas un dossier clear.
+        let c = path_buf.clone();
         let Some(lu) = self
-            .sante
-            .borne(&chemin, move || {
+            .health
+            .bounded(&path_buf, move || {
                 let canon = c.canonicalize().ok()?;
                 Some((canon.clone(), scan::list_dir(&canon)))
             })
             .await
         else {
-            return Err(self.mot("root_unresponsive").replace("{path}", path));
+            return Err(self.phrase("root_unresponsive").replace("{path}", path));
         };
         let Some((canon, contenu)) = lu else {
-            return Err(self.mot("bad_local_path").replace("{path}", path));
+            return Err(self.phrase("bad_local_path").replace("{path}", path));
         };
-        if !volumes::parcourable(&mounts, &canon) {
-            return Err(self.mot("bad_local_path").replace("{path}", path));
+        if !volumes::browsable(&mounts, &canon) {
+            return Err(self.phrase("bad_local_path").replace("{path}", path));
         }
         let contenu = contenu.map_err(|e| e.message(&self.catalog.read().unwrap()))?;
-        let mut v = self.vue.lock().unwrap();
+        let mut v = self.view.lock().unwrap();
         v.path = canon.display().to_string();
-        v.dirs = contenu.dossiers;
+        v.dirs = contenu.dirs;
         v.audio_count = contenu.audio.len();
         v.error = None;
         v.busy = false;
@@ -171,8 +171,8 @@ impl Explorateur {
     }
 
     /// Se connecte à un hôte et énumère ses partages.
-    pub fn connecter(&mut self, host: String, user: String, password: String, domain: String) {
-        self.annuler();
+    pub fn connect(&mut self, host: String, user: String, password: String, domain: String) {
+        self.cancel();
         if !user.is_empty() {
             self.sessions
                 .lock()
@@ -180,11 +180,11 @@ impl Explorateur {
                 .insert(host.clone(), Credentials { user, password, domain });
         }
         if !self.smb_ok.load(Ordering::Relaxed) {
-            self.echec(smb::SmbError::NotInstalled, &host);
+            self.failure(smb::SmbError::NotInstalled, &host);
             return;
         }
         {
-            let mut v = self.vue.lock().unwrap();
+            let mut v = self.view.lock().unwrap();
             v.host = host.clone();
             v.share = String::new();
             v.path = String::new();
@@ -194,12 +194,12 @@ impl Explorateur {
             v.error = None;
         }
         let creds = self.credentials(&host);
-        let dir = self.dir_travail.clone();
-        let vue = self.vue.clone();
+        let dir = self.work_dir.clone();
+        let view = self.view.clone();
         let catalog = self.catalog.clone();
-        self.tache = Some(tokio::spawn(async move {
-            let r = smb::list_shares(&host, creds.as_ref(), &dir, DELAI_SMB).await;
-            let mut v = vue.lock().unwrap();
+        self.task = Some(tokio::spawn(async move {
+            let r = smb::list_shares(&host, creds.as_ref(), &dir, SMB_TIMEOUT).await;
+            let mut v = view.lock().unwrap();
             v.busy = false;
             match r {
                 Ok(partages) => {
@@ -216,15 +216,15 @@ impl Explorateur {
 
     /// Revient à la liste des partages déjà obtenue, **sans se reconnecter**.
     ///
-    /// Distincte de `connecter` à dessein : les partages sont déjà connus, et
+    /// Distincte de `connect` à dessein : les partages sont déjà connus, et
     /// relancer un appel réseau pour revenir en arrière ferait attendre — voire
     /// échouer — un geste de navigation qui n'a besoin de rien.
     ///
     /// Sans cette opération, une fois un partage choisi il n'existait aucun
     /// moyen d'en essayer un autre sans refermer la popin.
-    pub fn aux_partages(&mut self) {
-        self.annuler();
-        let mut v = self.vue.lock().unwrap();
+    pub fn to_shares(&mut self) {
+        self.cancel();
+        let mut v = self.view.lock().unwrap();
         v.share = String::new();
         v.path = String::new();
         v.dirs.clear();
@@ -234,15 +234,15 @@ impl Explorateur {
     }
 
     /// Liste un dossier d'un partage.
-    pub fn parcourir(&mut self, share: String, path: String) {
-        self.annuler();
-        let host = self.vue.lock().unwrap().host.clone();
+    pub fn browse(&mut self, share: String, path: String) {
+        self.cancel();
+        let host = self.view.lock().unwrap().host.clone();
         if !self.smb_ok.load(Ordering::Relaxed) {
-            self.echec(smb::SmbError::NotInstalled, &host);
+            self.failure(smb::SmbError::NotInstalled, &host);
             return;
         }
         {
-            let mut v = self.vue.lock().unwrap();
+            let mut v = self.view.lock().unwrap();
             v.share = share.clone();
             v.path = path.clone();
             v.dirs.clear();
@@ -251,17 +251,17 @@ impl Explorateur {
             v.error = None;
         }
         let creds = self.credentials(&host);
-        let dir = self.dir_travail.clone();
-        let vue = self.vue.clone();
+        let dir = self.work_dir.clone();
+        let view = self.view.clone();
         let catalog = self.catalog.clone();
-        self.tache = Some(tokio::spawn(async move {
-            let r = smb::list_dir(&host, &share, &path, creds.as_ref(), &dir, DELAI_SMB).await;
-            let mut v = vue.lock().unwrap();
+        self.task = Some(tokio::spawn(async move {
+            let r = smb::list_dir(&host, &share, &path, creds.as_ref(), &dir, SMB_TIMEOUT).await;
+            let mut v = view.lock().unwrap();
             v.busy = false;
             match r {
-                Ok(entrees) => {
-                    v.dirs = entrees.iter().filter(|e| e.dir).map(|e| e.name.clone()).collect();
-                    v.audio_count = entrees
+                Ok(entries) => {
+                    v.dirs = entries.iter().filter(|e| e.dir).map(|e| e.name.clone()).collect();
+                    v.audio_count = entries
                         .iter()
                         .filter(|e| !e.dir && scan::is_audio(std::path::Path::new(&e.name)))
                         .count();
@@ -275,14 +275,14 @@ impl Explorateur {
         }));
     }
 
-    fn echec(&self, e: smb::SmbError, host: &str) {
-        let mut v = self.vue.lock().unwrap();
+    fn failure(&self, e: smb::SmbError, host: &str) {
+        let mut v = self.view.lock().unwrap();
         v.busy = false;
         v.error = Some(e.message(&self.catalog.read().unwrap(), host));
     }
 
-    pub fn vue(&self) -> serde_json::Value {
-        serde_json::to_value(&*self.vue.lock().unwrap()).unwrap_or_default()
+    pub fn view(&self) -> serde_json::Value {
+        serde_json::to_value(&*self.view.lock().unwrap()).unwrap_or_default()
     }
 }
 
@@ -291,8 +291,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
 
-    fn explorateur(dir: &std::path::Path) -> Explorateur {
-        Explorateur::new(
+    fn explorateur(dir: &std::path::Path) -> Browser {
+        Browser::new(
             dir.join("creds"),
             Arc::new(std::sync::RwLock::new(Catalog::load(
                 "files",
@@ -301,7 +301,7 @@ mod tests {
                 crate::FILES_EN,
             ))),
             Arc::new(AtomicBool::new(true)),
-            Arc::new(crate::sante::Sante::new()),
+            Arc::new(crate::health::Health::new()),
         )
     }
 
@@ -309,41 +309,41 @@ mod tests {
     async fn le_mot_de_passe_n_apparait_dans_aucune_vue() {
         // Il n'a aucune raison de retraverser vers le navigateur : la page l'a
         // envoyé une fois, elle n'a pas besoin de le relire pour afficher un
-        // arbre de dossiers.
+        // arbre de dirs.
         let dir = tempfile::tempdir().unwrap();
         let mut e = explorateur(dir.path());
-        e.ouvrir(Kind::Smb);
-        e.connecter("nas".into(), "steven".into(), "secret-du-nas".into(), String::new());
-        let texte = serde_json::to_string(&e.vue()).unwrap();
+        e.open(Kind::Smb);
+        e.connect("nas".into(), "steven".into(), "secret-du-nas".into(), String::new());
+        let texte = serde_json::to_string(&e.view()).unwrap();
         assert!(!texte.contains("secret-du-nas"), "{texte}");
         assert!(!texte.contains("password"), "{texte}");
     }
 
     #[tokio::test]
     async fn fermer_efface_la_session() {
-        // Sinon un mot de passe survivrait en mémoire à la popin qui l'a
+        // Sinon un phrase de passe survivrait en mémoire à la popin qui l'a
         // recueilli, sans que rien ne le reprenne jamais.
         let dir = tempfile::tempdir().unwrap();
         let mut e = explorateur(dir.path());
-        e.ouvrir(Kind::Smb);
-        e.connecter("nas".into(), "steven".into(), "secret".into(), String::new());
+        e.open(Kind::Smb);
+        e.connect("nas".into(), "steven".into(), "secret".into(), String::new());
         assert!(e.credentials("nas").is_some());
-        e.fermer();
+        e.close();
         assert!(e.credentials("nas").is_none());
     }
 
     #[tokio::test]
     async fn un_chemin_local_hors_volume_est_refuse() {
         // La garde de parcours. Sans elle, la page adresserait /proc/self et
-        // l'arbre partirait dans les liens récursifs.
+        // l'arbre partirait in_dir les liens récursifs.
         let dir = tempfile::tempdir().unwrap();
         let faux = dir.path().join("mounts");
         std::fs::write(&faux, "proc /proc proc rw 0 0\n/dev/sda1 / ext4 rw 0 0\n").unwrap();
         std::env::set_var("RITORNELLO_FILES_PROC_MOUNTS", &faux);
         let mut e = explorateur(dir.path());
-        e.ouvrir(Kind::Local);
+        e.open(Kind::Local);
         let err = e.local("/proc/self").await.unwrap_err();
-        assert!(err.contains(' '), "cle brute : {err}");
+        assert!(err.contains(' '), "key brute : {err}");
         std::env::remove_var("RITORNELLO_FILES_PROC_MOUNTS");
     }
 
@@ -361,9 +361,9 @@ mod tests {
         std::fs::write(&faux, format!("/dev/sda1 {} ext4 rw 0 0\n", dir.path().display())).unwrap();
         std::env::set_var("RITORNELLO_FILES_PROC_MOUNTS", &faux);
         let mut e = explorateur(dir.path());
-        e.ouvrir(Kind::Local);
+        e.open(Kind::Local);
         e.local(&media.display().to_string()).await.unwrap();
-        let v = e.vue();
+        let v = e.view();
         assert_eq!(v["dirs"], serde_json::json!(["Album"]));
         assert_eq!(v["audio_count"], 2, "notes.txt n'est pas un fichier audio");
         std::env::remove_var("RITORNELLO_FILES_PROC_MOUNTS");

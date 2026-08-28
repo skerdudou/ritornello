@@ -19,7 +19,7 @@ pub struct Stations {
 
 /// Erreur de validation typée : le texte utilisateur est produit à la
 /// frontière via `message(&Catalog)`. `Display` fournit une version anglaise
-/// pour les journaux internes (dev), hors périmètre i18n.
+/// pour les logs internes (dev), hors périmètre i18n.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValidationError {
     PresetOutOfRange { preset: u8, name: String },
@@ -106,11 +106,11 @@ impl Stations {
 
     /// La station dont l'URL est `url`, si elle est encore dans la table.
     ///
-    /// Sert à retrouver **où est passé** ce qui joue après un remaniement de la
+    /// Sert à retrouver **où est passé** ce qui plays après un remaniement de la
     /// table : la présélection est une *position*, donc réordonner les stations
     /// fait pointer le numéro mémorisé sur une autre station. L'URL, elle, est ce
-    /// qui identifie durablement un flux — le nom dépend de la configuration de
-    /// l'appareil, et le numéro de son ordre.
+    /// qui identifie durablement un stream — le name dépend de la configuration de
+    /// l'appareil, et le numéro de son order.
     pub fn by_url(&self, url: &str) -> Option<&Station> {
         self.stations.iter().find(|s| s.url == url)
     }
@@ -138,9 +138,9 @@ impl Stations {
     /// Les présélections nommées de la table, **triées par numéro**.
     ///
     /// La liste peut être creuse (stations 1, 5, 99 : `preset_count` en est le
-    /// maximum, pas la longueur, et les deux divergent légitimement). L'ordre
+    /// maximum, pas la longueur, et les deux divergent légitimement). L'order
     /// des positions MPD suit cette liste : un `stations.toml` édité à la main,
-    /// dont l'ordre de fichier ne coïncide pas avec les numéros, ne doit donc
+    /// dont l'order de fichier ne coïncide pas avec les numéros, ne doit donc
     /// pas produire une liste en désordre chez le client.
     pub fn presets(&self) -> Vec<Preset> {
         let mut v: Vec<Preset> =
@@ -227,7 +227,7 @@ mod tests {
             Err(ValidationError::PresetOutOfRange { preset: 100, .. })
         ));
 
-        // Et 0 reste toujours refusé (la borne basse ne bouge pas).
+        // Et 0 reste toujours refusé (la bounded basse ne bouge pas).
         let mut zero = sample();
         zero.stations[0].preset = 0;
         assert!(matches!(
@@ -277,10 +277,10 @@ mod tests {
 
     #[test]
     fn lenumeration_est_triee_par_numero_pas_par_ordre_de_fichier() {
-        // Les positions MPD suivront cet ordre : un stations.toml édité à la
+        // Les positions MPD suivront cet order : un stations.toml édité à la
         // main ne doit pas donner une liste en désordre chez le client. Le
         // fichier ci-dessous déclare Nova (5) avant FIP (1) : si `presets()`
-        // se contentait de l'ordre de la table, la liste rendue commencerait
+        // se contentait de l'order de la table, la liste rendue commencerait
         // par Nova.
         let s: Stations = toml::from_str(
             r#"

@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "req", content = "arg")]
 pub enum AdminReq {
-    /// Actif d'IHM du plugin (`"ui.js"`, `"ui.css"`). Le chemin est **opaque**
+    /// Actif d'IHM du plugin (`"ui.js"`, `"ui.css"`). Le path est **opaque**
     /// pour le cœur : c'est le plugin qui décide ce qu'il expose.
     GetAsset(String),
-    /// Catalogue i18n du plugin dans la langue courante, à plat.
+    /// SourcesCatalog i18n du plugin dans la langue courante, à plat.
     GetCatalog,
     GetData,
     SetData(serde_json::Value),
@@ -20,9 +20,9 @@ pub enum AdminReq {
 pub struct AdminRequest {
     pub id: u64,
     /// Budget accordé par le cœur, en millisecondes, **décidé par la nature de
-    /// la requête** : un actif en mémoire n'a pas le budget d'un montage
+    /// la requête** : un active en mémoire n'a pas le budget d'un montage
     /// réseau. Le serveur l'applique lui-même et répond `Expired` à
-    /// l'échéance ; absent = pas de plafond côté serveur, le client garde le
+    /// l'échéance ; absent = pas de cap côté serveur, le client garde le
     /// sien.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_ms: Option<u64>,
@@ -33,7 +33,7 @@ pub struct AdminRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum AdminResult {
-    /// `body: None` = chemin inconnu du plugin (le cœur répond 404). Le `mime`
+    /// `body: None` = path inconnu du plugin (le cœur répond 404). Le `mime`
     /// est fourni par le plugin : le cœur ne déduit rien d'une extension.
     Asset { mime: String, body: Option<String> },
     Catalog(serde_json::Value),
@@ -77,8 +77,8 @@ mod tests {
     fn resultat_asset_roundtrip_present_et_absent() {
         for r in [
             AdminResult::Asset { mime: "text/javascript".into(), body: Some("export default 1".into()) },
-            // `None` est la reponse normale a un chemin inconnu : le coeur la
-            // traduit en 404 sans avoir a interpreter le chemin.
+            // `None` est la reponse normale a un path inconnu : le coeur la
+            // traduit en 404 sans avoir a interpreter le path.
             AdminResult::Asset { mime: "text/plain".into(), body: None },
         ] {
             let json = serde_json::to_string(&AdminResponse { id: 3, result: r.clone() }).unwrap();

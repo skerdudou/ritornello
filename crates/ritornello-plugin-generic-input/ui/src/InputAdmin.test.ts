@@ -15,7 +15,7 @@ const CATALOGUE = {
   saved: 'Enregistré', save_error: 'Échec : ', load_error: 'Erreur : ', no_device: 'Aucun périphérique',
   conflict_code: 'le code {code} est déjà affecté à {action}',
   conflict_dup: 'le code {code} est saisi deux fois',
-  save_conflicts: 'Corrigez les codes en double avant d’enregistrer',
+  save_conflicts: 'Corrigez les codes en double avant d’save',
   act_mute: 'Muet', act_power: 'Veille',
 }
 
@@ -27,10 +27,10 @@ const DATA = {
 }
 
 // Prefixe absolu que le shell passe par la prop `base` (requise) : c'est le
-// contrat, cette vue ne connait pas le nom sous lequel elle est servie.
+// contract, cette vue ne connait pas le nom sous lequel elle est servie.
 const BASE = '/plugins/generic-input/'
 
-const SONDAGE_MS = 300
+const PROBE_MS = 300
 
 function stub(data: () => unknown) {
   const spy = vi.fn(async (_u: string, init?: RequestInit) =>
@@ -54,7 +54,7 @@ function monterVue(base = BASE) {
 const dansPopin = (selecteur: string) => document.body.querySelector(selecteur)
 const popin = () => dansPopin('[data-dlg-learn]')
 
-/** Les `op` des PUT emis, dans l'ordre. */
+/** Les `op` des PUT emis, dans l'order. */
 const ops = (spy: ReturnType<typeof stub>) =>
   spy.mock.calls
     .filter((c) => (c[1] as RequestInit)?.method === 'PUT')
@@ -81,9 +81,9 @@ const ligneAction = (w: ReturnType<typeof monterVue>, libelle: string) =>
   w.findAll('[data-action-row]').find((r) => r.findAll('td')[0]!.text() === libelle)!
 
 // Scenario complet d'apprentissage sous faux timers : ouverture de la popin
-// sur la ligne portant `libelle`, case « ajouter » cochee ou non, puis code
+// sur la ligne portant `libelle`, case « add » cochee ou non, puis code
 // capte par le serveur au sondage suivant.
-async function apprendreEtCapter(libelle: string, code: number, ajouter = false) {
+async function apprendreEtCapter(libelle: string, code: number, add = false) {
   vi.useFakeTimers()
   let captured: number | null = null
   const spy = stub(() => ({ ...DATA, learning: { captured } }))
@@ -95,9 +95,9 @@ async function apprendreEtCapter(libelle: string, code: number, ajouter = false)
   const ligne = () => ligneAction(w, libelle)
   await ligne().find('[data-learn]').trigger('click')
   await vi.advanceTimersByTimeAsync(0)
-  if (ajouter) await cocherAjouter()
+  if (add) await cocherAjouter()
   captured = code
-  await vi.advanceTimersByTimeAsync(SONDAGE_MS)
+  await vi.advanceTimersByTimeAsync(PROBE_MS)
   return { w, spy, ligne, valeur: () => (ligne().find('input').element as HTMLInputElement).value }
 }
 
@@ -166,14 +166,14 @@ describe('InputAdmin', () => {
       JSON.parse(String((spy.mock.calls.find((c) => (c[1] as RequestInit)?.method === 'PUT')![1] as RequestInit).body)),
     ).toEqual({ op: 'learn', device: 'mce' })
     captured = 42
-    await vi.advanceTimersByTimeAsync(SONDAGE_MS)
+    await vi.advanceTimersByTimeAsync(PROBE_MS)
     expect((muet.find('input').element as HTMLInputElement).value).toBe('42')
     // Le sondage s'arrete, `cancel_learn` est emis, et la popin se referme.
     expect(ops(spy)).toContain('cancel_learn')
     expect(popin()).toBeNull()
   })
 
-  it('apprentissage : la popin s’ouvre et son titre nomme l’action apprise', async () => {
+  it('apprentissage : la popin s’ouvre et son title nomme l’action apprise', async () => {
     vi.useFakeTimers()
     stub(() => ({ ...DATA, learning: { captured: null } }))
     const w = monterVue()
@@ -206,13 +206,13 @@ describe('InputAdmin', () => {
     // Dix tours entiers, et non « 3 000 ms » : le chiffre ne se rafraichit
     // qu'au rythme du sondage, donc une avance qui tombe entre deux tours
     // laisserait la valeur du tour precedent.
-    await vi.advanceTimersByTimeAsync(SONDAGE_MS * 10)
+    await vi.advanceTimersByTimeAsync(PROBE_MS * 10)
     expect(popin()!.querySelector('[data-learn-countdown]')!.textContent).toContain('27')
   })
 
   it('apprentissage : case décochée, le code capturé remplace le champ', async () => {
     // « Muet » porte deja le code 9 : sans la case cochee, le code capture
-    // prend sa place au lieu de s'y ajouter.
+    // prend sa place au lieu de s'y add.
     const { valeur } = await apprendreEtCapter('Muet', 42)
     expect(valeur()).toBe('42')
     expect(popin()).toBeNull()
@@ -233,14 +233,14 @@ describe('InputAdmin', () => {
 
   it('apprentissage : case cochée sur une ligne sans code, le champ vaut le code seul', async () => {
     // « Veille » ne porte aucun code : l'ajout doit donner « 42 » et non
-    // « , 42 ». Cas specifie par `appliquerCode` (`!champ.trim()`) mais que les
+    // « , 42 ». Cas specifie par `applyCode` (`!champ.trim()`) mais que les
     // autres tests, tous sur « Muet » (deja pourvu du code 9), ne couvraient
     // pas.
     const { valeur } = await apprendreEtCapter('Veille', 42, true)
     expect(valeur()).toBe('42')
   })
 
-  it('apprentissage : la case « ajouter » revient décochée à chaque ouverture', async () => {
+  it('apprentissage : la case « add » revient décochée à chaque ouverture', async () => {
     const { ligne } = await apprendreEtCapter('Muet', 42, true)
     expect(popin()).toBeNull()
     await ligne().find('[data-learn]').trigger('click')
@@ -266,7 +266,7 @@ describe('InputAdmin', () => {
   it('apprentissage : une annulation en échec réseau referme quand même la popin', async () => {
     // L'annulation est desormais le geste courant (bouton, croix, Échap,
     // voile) et son PUT `cancel_learn` peut echouer. La popin doit se refermer
-    // et le sondage mourir malgre tout : `arreterApprentissage` fait les deux
+    // et le sondage mourir malgre tout : `stopLearn` fait les deux
     // avant tout `await`.
     vi.useFakeTimers()
     const spy = vi.fn(async (_u: string, init?: RequestInit) => {
@@ -349,7 +349,7 @@ describe('InputAdmin', () => {
   it('adresse ses requêtes sous le préfixe absolu reçu par la prop `base`', async () => {
     // IMPORTANT 6 de la revue finale. Cette vue appelait `api.get('./api/data')`
     // en relatif, donc resolu contre l'URL du navigateur et non contre quoi que
-    // ce soit que le contrat garantisse : sur `/plugins/generic-input` (sans
+    // ce soit que le contract garantisse : sur `/plugins/generic-input` (sans
     // slash final, forme que le routeur du shell acceptait aussi),
     // `./api/data` resolvait vers `/plugins/api/data` — que le coeur interprete
     // comme le plugin « api » : 404, table vide et tous les boutons en echec.
@@ -372,11 +372,11 @@ describe('InputAdmin', () => {
     // IMPORTANT 2 de la revue finale. L'ancien gestionnaire annulait
     // l'apprentissage au changement de peripherique
     // (`$('dev').onchange = async () => { if (timer) await stopLearn(''); … }`) ;
-    // le `watch(device, remplirCodes)` avait perdu cette annulation.
+    // le `watch(device, fillCodes)` avait perdu cette annulation.
     //
     // Sans elle, l'intervalle continue de sonder alors que la session
     // d'apprentissage du serveur est encore armee sur le peripherique
-    // **precedent**, `remplirCodes()` a entre-temps repeuple la table depuis
+    // **precedent**, `fillCodes()` a entre-temps repeuple la table depuis
     // les bindings du **nouveau** peripherique, et la fermeture ecrit le code
     // capture dans la ligne du nouveau peripherique -- que « Enregistrer »
     // persiste ensuite. Meme classe de defaut que la course corrigee en
@@ -418,8 +418,8 @@ describe('InputAdmin', () => {
 
   it('apprentissage : la table est repeuplée même si l’annulation réseau échoue', async () => {
     // Correction repliee (revue finale) : `watch(device, …)` faisait
-    // `await arreterApprentissage('')` sans filet. Si `fetch` rejette
-    // (reseau coupe), la rejection non rattrapee sautait `remplirCodes()`,
+    // `await stopLearn('')` sans filet. Si `fetch` rejette
+    // (reseau coupe), la rejection non rattrapee sautait `fillCodes()`,
     // et les codes du peripherique **precedent** restaient affiches sous le
     // nouveau -- exactement la classe de defaut que ce watcher venait
     // corriger, dans la branche d'echec reseau.
@@ -599,11 +599,11 @@ describe('InputAdmin', () => {
 
   it('validation : tant qu’un conflit existe, « Enregistrer » est désactivé et n’émet rien', async () => {
     const { w, spy } = await conflitEntreDeuxLignes()
-    const enregistrer = w.find('[data-save]')
-    expect(enregistrer.attributes('disabled')).toBeDefined()
+    const save = w.find('[data-save]')
+    expect(save.attributes('disabled')).toBeDefined()
     // Un bouton grise sans phrase n'explique rien.
     expect(w.find('[data-save-blocked]').text()).toBe(CATALOGUE.save_conflicts)
-    await enregistrer.trigger('click')
+    await save.trigger('click')
     await flushPromises()
     expect(ops(spy)).toEqual([])
   })
@@ -620,7 +620,7 @@ describe('InputAdmin', () => {
   })
 
   it('validation : un code arrivé par apprentissage allume la validation comme une frappe', async () => {
-    // La couture entre la popin et la validation a chaud : `appliquerCode`
+    // La couture entre la popin et la validation a chaud : `applyCode`
     // ecrit dans le meme `codes`, donc le `computed` doit recalculer. Rien ne
     // le tenait -- tous les tests de conflit passaient par `setValue`, tous
     // ceux d'apprentissage par un code libre. « Muet » porte deja 9 : le

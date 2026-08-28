@@ -1,48 +1,48 @@
-//! Protocole du genre `metadata` : le cœur annonce ce qui joue, un plugin
+//! Protocole du kind `metadata` : le cœur announcement ce qui plays, un plugin
 //! renvoie ce qu'il en sait.
 //!
 //! Contrairement à `source` (requête/réponse corrélée par `id`) et à `display`
-//! ou `input` (sens unique), ce protocole est **bidirectionnel non corrélé** :
+//! ou `input` (sens unique), ce protocol est **bidirectionnel non corrélé** :
 //! chaque côté émet quand il a quelque chose à dire. Le cœur ne demande rien,
 //! parce qu'il n'a aucun moyen de savoir si un plugin saura répondre ni au bout
 //! de combien de temps ; le plugin n'attend pas de réponse, parce qu'un
-//! enrichissement n'est ni accepté ni refusé, il est simplement retenu ou
+//! enrichment n'est ni accepté ni refusé, il est simplement retenu ou
 //! périmé.
 //!
 //! Le garde-fou contre la péremption est l'**écho de l'identité** : un
-//! enrichissement porte l'identité auquel il se rapporte, et le cœur jette
-//! celui qui ne correspond plus à ce qui joue. Sans cet écho, la réponse lente
-//! d'un plugin sur le morceau précédent viendrait écraser le morceau courant.
+//! enrichment porte l'identité auquel il se rapporte, et le cœur jette
+//! celui qui ne correspond plus à ce qui plays. Sans cet écho, la réponse lente
+//! d'un plugin sur le track précédent viendrait écraser le track courant.
 
 use serde::{Deserialize, Serialize};
 
-/// Ce que la Source dit de ce qu'elle joue, transporté à côté de la vue.
+/// Ce que la Source dit de ce qu'elle plays, transporté à côté de la vue.
 ///
 /// Trois états sont nécessaires, et c'est pourquoi ce type est un enum plutôt
 /// qu'un `Option` : l'absence du champ dans une trame (« cette réponse ne dit
 /// rien de l'identité ») ne doit pas être confondue avec `Nothing` (« plus rien
-/// ne joue »), et serde ramène `null` et l'absence à la même valeur pour un
+/// ne plays »), et serde ramène `null` et l'absence à la même valeur pour un
 /// `Option`. Les trois cas sont donc : champ absent, `Playing`, `Nothing`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 // `value` et non `identity` : imbriqué dans `SourceMessage.identity`, ce dernier
-// donnerait `"identity":{"state":"Playing","identity":{…}}` — le protocole se
+// donnerait `"identity":{"state":"Playing","identity":{…}}` — le protocol se
 // veut lisible à l'œil dans un `journalctl`.
 #[serde(tag = "state", content = "value")]
 pub enum IdentityUpdate {
     /// Identité **opaque**, produite par la Source, jamais interprétée par le
-    /// cœur — même principe que le JSON opaque du protocole `admin`. Le cœur
+    /// cœur — même principe que le JSON opaque du protocol `admin`. Le cœur
     /// se contente de comparer deux identités par égalité.
     Playing(serde_json::Value),
-    /// Plus rien ne joue : le cœur oublie l'identité courante et prévient les
+    /// Plus rien ne plays : le cœur oublie l'identité courante et prévient les
     /// plugins `metadata` pour qu'ils cessent leur travail.
     Nothing,
 }
 
-/// L'état partiel du morceau, tel qu'un greffon a besoin de le voir.
+/// L'état partiel du track, tel qu'un greffon a besoin de le voir.
 ///
-/// Un type dédié plutôt que `Morceau` : ce dernier porte `cover_href` et
+/// Un type dédié plutôt que `Track` : ce dernier porte `cover_href` et
 /// `cover_origin`, qui sont des URL **locales de l'appareil** — elles n'ont
-/// aucun sens pour un greffon et l'inviteraient à croire qu'il peut les lire.
+/// aucun sens pour un greffon et l'inviteraient à croire qu'il peut les read.
 ///
 /// Un champ à `None` est un champ que personne n'a encore rempli. C'est ce qui
 /// permet à un greffon de ne travailler que sur ce qui manque.
@@ -58,16 +58,16 @@ pub struct Known {
     pub duration_s: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<u16>,
-    /// Une pochette est **déjà tenue**. Un booléen, jamais l'image : un greffon
+    /// Une cover est **déjà tenue**. Un booléen, jamais l'image : un greffon
     /// n'a pas besoin de la voir pour décider s'il doit en chercher une, et la
     /// transmettre alourdirait chaque trame pour rien.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cover: bool,
     // Pas de `links` ici, et ce n'est pas un oubli : `Known` existe pour qu'un
     // greffon ne travaille que sur ce qui manque, or aucun des nôtres ne
-    // *cherche* des liens — il recopie ceux de la réponse qu'il lit déjà. Le
+    // *cherche* des liens — il recopie ceux de la réponse qu'il read déjà. Le
     // champ ne changerait la décision d'aucun d'eux.
-    /// Ce que le **flux lui-même** a annoncé, brut : ni découpé, ni composé,
+    /// Ce que le **stream lui-même** a annoncé, brut : ni découpé, ni composé,
     /// ni arbitré.
     ///
     /// Pas une redite de `title`. `title` est le résultat d'un arbitrage entre
@@ -76,11 +76,11 @@ pub struct Known {
     ///
     /// Il existe parce que seule la forme brute peut être **redécoupée**, et
     /// qu'un greffon a besoin de la revoir même après avoir lui-même écrasé le
-    /// titre composé. L'identité d'une radio est l'URL de son flux, donc elle
-    /// ne change pas d'un morceau à l'autre : le garde-fou de péremption de
-    /// `Metadonnees::ajoute` ne périme rien, et `set_icy` n'efface pas les
-    /// enrichissements. Sans ce champ, un greffon qui corrige une fois ne
-    /// reverrait plus jamais ce que la station annonce.
+    /// titre composé. L'identité d'une radio est l'URL de son stream, donc elle
+    /// ne change pas d'un track à l'autre : le garde-fou de péremption de
+    /// `Metadata::add` ne périme rien, et `set_icy` n'efface pas les
+    /// enrichments. Sans ce champ, un greffon qui corrige une fois ne
+    /// reverrait plus jamais ce que la station announcement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_title: Option<String>,
 }
@@ -90,12 +90,12 @@ impl Known {
     ///
     /// Sert de `skip_serializing_if` : une trame qui ne dit rien de ce qui est
     /// connu doit rester identique à l'octet près à ce qu'elle était avant ce
-    /// chantier, et le protocole se veut lisible à l'œil dans un journalctl.
+    /// chantier, et le protocol se veut lisible à l'œil dans un journalctl.
     /// `year` en fait partie, et l'oublier serait une perte silencieuse : ce
     /// prédicat est le `skip_serializing_if` de `NowPlaying::known`, donc un
-    /// `Known` jugé vide **disparaît de la trame**. Une année seule connue
-    /// n'atteindrait jamais les greffons.
-    pub fn est_vide(&self) -> bool {
+    /// `Known` jugé clear **disparaît de la trame**. Une année seule connue
+    /// n'atteindrait jamais les plugins.
+    pub fn is_empty(&self) -> bool {
         self.artist.is_none()
             && self.title.is_none()
             && self.album.is_none()
@@ -105,26 +105,26 @@ impl Known {
     }
 }
 
-/// Ce qu'un contributeur a trouvé comme pochette, à charge pour le cœur
+/// Ce qu'un contributeur a trouvé comme cover, à charge pour le cœur
 /// d'aller la chercher.
 ///
 /// Deux formes **explicitement distinctes** plutôt qu'une chaîne que le cœur
-/// devinerait : le chemin sert au `folder.jpg` posé sur un partage, qui existe
+/// devinerait : le path sert au `folder.jpg` posé sur un partage, qui existe
 /// déjà sur le disque — rien à extraire, aucun fichier temporaire.
 ///
-/// Jamais des octets : le canal des greffons reste textuel, donc lisible à
+/// Jamais des bytes : le canal des plugins reste textuel, donc lisible à
 /// l'œil dans un `journalctl`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CoverRef {
-    /// URL externe, à télécharger. `https` uniquement, vers un nom d'hôte.
+    /// URL externe, à télécharger. `https` uniquement, vers un name d'hôte.
     Url { url: String },
     /// Chemin absolu d'un fichier image déjà présent sur le disque.
     Path { path: String },
 }
 
 /// Extensions acceptées pour un `CoverRef::Path`.
-const EXTENSIONS_IMAGE: [&str; 4] = ["jpg", "jpeg", "png", "webp"];
+const IMAGE_EXTENSIONS: [&str; 4] = ["jpg", "jpeg", "png", "webp"];
 
 impl CoverRef {
     /// Normalise et **valide**. `None` = à jeter.
@@ -132,14 +132,14 @@ impl CoverRef {
     /// Ces valeurs arrivent d'un autre processus et le cœur va agir dessus : il
     /// faut les traiter comme des entrées, pas comme des données de confiance.
     ///
-    /// Publique, parce qu'une pochette entre dans le cœur par **deux** canaux :
-    /// l'enrichissement d'un greffon (`Enrichment::cleaned`, juste en dessous)
+    /// Publique, parce qu'une cover entre dans le cœur par **deux** canaux :
+    /// l'enrichment d'un greffon (`Enrichment::cleaned`, juste en dessous)
     /// et la trame d'une Source (`SourceMessage::cover`). Privée, cette
     /// méthode ne couvrait que le premier — la couche documentée comme
     /// propriétaire de la validation de forme ne l'était donc que sur la
     /// moitié de ses entrées, et le second canal reposait entièrement sur les
     /// contrôles propres du cœur.
-    pub fn validee(self) -> Option<Self> {
+    pub fn validated(self) -> Option<Self> {
         match self {
             Self::Url { url } => {
                 let url = url.trim();
@@ -148,7 +148,7 @@ impl CoverRef {
                 if hote.is_empty() || hote.contains('@') {
                     return None;
                 }
-                // Une adresse IP littérale est refusée : un nom d'hôte, et rien
+                // Une adresse IP littérale est refusée : un name d'hôte, et rien
                 // d'autre. `[::1]` est écarté par le crochet, `192.168.1.1` par
                 // le fait que tous ses libellés sont numériques.
                 let sans_port = hote.split(':').next().unwrap_or("");
@@ -169,23 +169,23 @@ impl CoverRef {
                     return None;
                 }
                 let ext = path.rsplit_once('.')?.1.to_ascii_lowercase();
-                EXTENSIONS_IMAGE.contains(&ext.as_str()).then(|| Self::Path { path: path.to_string() })
+                IMAGE_EXTENSIONS.contains(&ext.as_str()).then(|| Self::Path { path: path.to_string() })
             }
         }
     }
 }
 
-/// Un lien vers la plateforme d'écoute où ce morceau se trouve.
+/// Un lien vers la plateforme d'écoute où ce track se trouve.
 ///
-/// Un enum fermé, et non un couple `(nom, url)` : c'est **la** décision de
-/// sécurité de ce type. La variante nomme la plateforme, et [`Self::validee`]
+/// Un enum fermé, et non un couple `(name, url)` : c'est **la** décision de
+/// sécurité de ce type. La variante nomme la plateforme, et [`Self::validated`]
 /// impose alors l'hôte qui lui correspond. Une source tierce ne peut donc pas
 /// faire afficher à l'IHM un lien cliquable vers un domaine de son choix — au
 /// pire elle ment sur son propre domaine, ce qui est le risque qu'on accepte
 /// déjà en la croyant sur le titre.
 ///
 /// Avec un champ `plateforme: String` libre, un `{"plateforme":"deezer",
-/// "url":"https://ailleurs.example/x"}` serait rendu tel quel : le contrôle
+/// "url":"https://ailleurs.example/x"}` serait rendition tel quel : le contrôle
 /// n'aurait plus rien à quoi se raccrocher.
 ///
 /// Ajouter une plateforme est une modification de ce fichier, volontairement :
@@ -193,11 +193,11 @@ impl CoverRef {
 ///
 /// **Conséquence de l'enum interne-taggé, acceptée :** une trame nommant une
 /// plateforme que ce fichier ne connaît pas ne perd pas ce lien-là, elle fait
-/// échouer la désérialisation de **tout** l'enrichissement — `serde` n'a pas de
+/// échouer la désérialisation de **tout** l'enrichment — `serde` n'a pas de
 /// variante de repli à lui donner, et un `#[serde(other)]` en ajouterait une
-/// qui n'aurait ni hôte admis ni icône. C'est admis parce que cœur et greffons
+/// qui n'aurait ni hôte admis ni icône. C'est admis parce que cœur et plugins
 /// se déploient **ensemble**, d'un seul paquet : un greffon ne peut pas se
-/// retrouver en avance sur le cœur qui le lit. Le jour où ce ne serait plus
+/// retrouver en avance sur le cœur qui le read. Le jour où ce ne serait plus
 /// vrai, il faudrait un `Vec<serde_json::Value>` dépouillé lien par lien, et ce
 /// jour-là seulement — l'ajouter d'avance coûterait le typage qui fait toute la
 /// valeur de ce type.
@@ -213,7 +213,7 @@ impl Link {
     /// Les hôtes admis pour cette plateforme, et **rien d'autre**.
     ///
     /// Une liste et non un hôte unique, parce qu'une même plateforme se publie
-    /// sous plusieurs noms et que ce sont bien ses liens : `youtu.be` est la
+    /// sous plusieurs names et que ce sont bien ses liens : `youtu.be` est la
     /// forme raccourcie que YouTube émet lui-même, `music.youtube.com` sa
     /// déclinaison musicale. Ils doivent donc marcher, et **avec la même
     /// icône** — ce qui vient gratuitement, puisque c'est la variante et non
@@ -221,12 +221,12 @@ impl Link {
     ///
     /// Radio France n'émet aujourd'hui que du `www.youtube.com` (mesuré le
     /// 2026-08-27) ; les autres formes sont admises d'avance plutôt qu'après
-    /// une panne silencieuse le jour où le tiers change d'avis.
+    /// une panne silencieuse le jour où le tiers change d'notice.
     ///
-    /// **Cette liste est la frontière de sécurité du type.** Y ajouter un nom
+    /// **Cette liste est la frontière de sécurité du type.** Y ajouter un name
     /// est une décision, pas une formalité : tout ce qui y figure devient un
     /// lien que l'appareil rendra cliquable sur la foi d'un tiers.
-    fn hotes_admis(&self) -> &'static [&'static str] {
+    fn allowed_hosts(&self) -> &'static [&'static str] {
         match self {
             Self::Youtube { .. } => {
                 &["www.youtube.com", "youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"]
@@ -252,12 +252,12 @@ impl Link {
     ///
     /// Le port est refusé, et l'info utilisateur (`@`) aussi : `https://
     /// www.deezer.com@evil.example/` a pour hôte réel `evil.example`.
-    pub fn validee(self) -> Option<Self> {
-        let admis = self.hotes_admis();
+    pub fn validated(self) -> Option<Self> {
+        let admis = self.allowed_hosts();
         let url = self.url().trim().to_string();
         let reste = url.strip_prefix("https://")?;
         let autorite = reste.split(['/', '?', '#']).next().unwrap_or("");
-        // Égalité stricte contre chaque nom admis, jamais un suffixe :
+        // Égalité stricte contre chaque name admis, jamais un suffixe :
         // `evil-youtube.com` et `youtube.com.evil.example` échouent tous deux,
         // là où un `ends_with` laisserait passer le premier et un `starts_with`
         // le second.
@@ -277,8 +277,8 @@ impl Link {
 /// Ces valeurs viennent d'un tiers ou d'une étiquette de fichier arbitraire.
 /// Une année à 0 ou à 90210 n'apprend rien et enlaidit l'écran ; la refuser ne
 /// coûte que ce qu'elle valait.
-const ANNEE_MIN: u16 = 1000;
-const ANNEE_MAX: u16 = 2999;
+const YEAR_MIN: u16 = 1000;
+const YEAR_MAX: u16 = 2999;
 
 /// Lit une année dans les formes que rendent nos sources. `None` = à jeter.
 ///
@@ -292,9 +292,9 @@ const ANNEE_MAX: u16 = 2999;
 /// compact (que les étiquettes ID3 écrivent, `TDRC` autorisant la forme
 /// resserrée) dont on garde les quatre premiers ; toute autre longueur est
 /// jetée. Sans cette règle, `"19590817"` sortait `None` (hors bornes) et
-/// surtout `"90210"` sortait 9021 — la borne haute ne rattrape pas un code
+/// surtout `"90210"` sortait 9021 — la bounded haute ne rattrape pas un code
 /// postal, elle ne fait que tronquer le nombre qu'il forme.
-pub fn annee_valide(brut: &str) -> Option<u16> {
+pub fn valid_year(brut: &str) -> Option<u16> {
     let tete: String = brut.trim().chars().take_while(char::is_ascii_digit).collect();
     let tete = match tete.len() {
         4 => tete.as_str(),
@@ -302,10 +302,10 @@ pub fn annee_valide(brut: &str) -> Option<u16> {
         _ => return None,
     };
     let annee = tete.parse::<u16>().ok()?;
-    (ANNEE_MIN..=ANNEE_MAX).contains(&annee).then_some(annee)
+    (YEAR_MIN..=YEAR_MAX).contains(&annee).then_some(annee)
 }
 
-/// Cœur → plugin. Émis à chaque changement de ce qui joue, et à l'arrêt
+/// Cœur → plugin. Émis à chaque changement de ce qui plays, et à l'arrêt
 /// (`identity: None`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct NowPlaying {
@@ -313,17 +313,17 @@ pub struct NowPlaying {
     /// se taire d'emblée sur une source qu'il ne traite pas, sans avoir à
     /// inspecter la forme de l'identité.
     pub source: String,
-    /// `None` = plus rien ne joue.
+    /// `None` = plus rien ne plays.
     #[serde(default)]
     pub identity: Option<serde_json::Value>,
-    /// Ce qui est **déjà connu** du morceau, tous étages confondus.
+    /// Ce qui est **déjà connu** du track, tous étages confondus.
     ///
     /// `#[serde(default)]` : une trame écrite par un binaire antérieur se
     /// relit, et un greffon qui ignore le champ fonctionne exactement comme
     /// avant — c'est ce qui rend la refonte déployable greffon par greffon.
     /// `skip_serializing_if` : tant que rien n'est connu, la trame reste
     /// identique à l'octet près à ce qu'elle était avant ce champ.
-    #[serde(default, skip_serializing_if = "Known::est_vide")]
+    #[serde(default, skip_serializing_if = "Known::is_empty")]
     pub known: Known,
 }
 
@@ -340,27 +340,27 @@ pub struct Enrichment {
     pub album: Option<String>,
     #[serde(default)]
     pub duration_s: Option<u32>,
-    /// Année de sortie. Validée par [`annee_valide`] chez le contributeur, et
+    /// Année de sortie. Validée par [`valid_year`] chez le contributeur, et
     /// rebornée ici par [`Self::cleaned`] : la valeur arrive d'un autre
     /// processus.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<u16>,
-    /// Les plateformes d'écoute où ce morceau se trouve.
+    /// Les plateformes d'écoute où ce track se trouve.
     ///
     /// Une liste et non une `Option` : un contributeur peut en connaître
     /// plusieurs d'un coup (OUI FM rend Deezer **et** Apple Music dans la même
-    /// trame), et la liste vide dit déjà « aucune ».
+    /// trame), et la liste clear dit déjà « aucune ».
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
-    /// Écoulé dans le morceau **au moment de l'émission**, en secondes.
+    /// Écoulé dans le track **au moment de l'émission**, en secondes.
     ///
     /// Un écoulé relatif plutôt qu'un horodatage absolu : rien à synchroniser
     /// entre deux horloges, et c'est la convention de `duration_s` juste
     /// au-dessus. Le cœur l'ancre à la réception et l'avance lui-même ensuite
-    /// (voir `Core::rafraichit_position`).
+    /// (voir `Core::refresh_position`).
     #[serde(default)]
     pub position_s: Option<u32>,
-    /// La pochette que ce contributeur a trouvée.
+    /// La cover que ce contributeur a trouvée.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover: Option<CoverRef>,
     /// Ce contributeur ne fait que **compléter** : il ne remplace aucun champ
@@ -368,21 +368,21 @@ pub struct Enrichment {
     ///
     /// Défaut `false` = il écrase, ce qui est la règle actuelle du projet (« a
     /// plugin takes precedence over ICY and over file tags under all
-    /// circumstances ») et ce qui évite de toucher aux greffons livrés.
+    /// circumstances ») et ce qui évite de toucher aux plugins livrés.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fill_only: bool,
-    /// Ce contributeur a **cherché** pour ce morceau.
+    /// Ce contributeur a **cherché** pour ce track.
     ///
     /// Renseigné avec les champs qu'il a trouvés, ou seul quand il n'a rien
-    /// trouvé — et c'est le seul cas où un enrichissement entièrement vide est
+    /// trouvé — et c'est le seul cas où un enrichment entièrement clear est
     /// accepté par le cœur, qui refuse les autres. C'est ce qui permet à
-    /// l'écran de distinguer « MusicBrainz n'a pas d'album pour ce morceau » de
+    /// l'écran de distinguer « MusicBrainz n'a pas d'album pour ce track » de
     /// « MusicBrainz n'a jamais été interrogé », deux situations que l'absence
     /// seule confondait.
     ///
-    /// Un enrichissement ainsi vide **ne participe à rien** : il ne peut pas
+    /// Un enrichment ainsi clear **ne participe à rien** : il ne peut pas
     /// gagner l'arbitrage (il ne dit rien du texte) ni combler quoi que ce soit
-    /// (tous ses champs sont absents). Il n'ajoute qu'une ligne à
+    /// (tous ses champs sont absents). Il n'add qu'une line à
     /// `Provenance::misses`.
     ///
     /// À ne pas confondre avec « je n'ai pas pu chercher » : une panne du
@@ -391,14 +391,14 @@ pub struct Enrichment {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub searched: bool,
     /// Ce contributeur **relit** une information déjà présente, il ne l'apporte
-    /// pas : le nom de sa source.
+    /// pas : le name de sa source.
     ///
-    /// **Le cas concret est le découpage d'un en-tête ICY.** Une radio annonce
+    /// **Le cas concret est le découpage d'un en-tête ICY.** Une radio announcement
     /// `« Artiste - Titre »` en une seule chaîne ; `musicbrainz` la découpe
     /// selon un motif appris pour cette station, et vérifie le découpage contre
     /// sa base. Le résultat lui était attribué — « Titre : musicbrainz » —
     /// alors qu'il n'a rien appris à personne : l'information vient de la
-    /// station, il n'a fait que la lire autrement. Le propriétaire l'a signalé
+    /// station, il n'a fait que la read autrement. Le propriétaire l'a signalé
     /// sur une radio sans greffon de métadonnées, où le seul contributeur réel
     /// était l'ICY.
     ///
@@ -407,46 +407,46 @@ pub struct Enrichment {
     /// plus l'autre.
     ///
     /// `None` — le défaut — pour un contributeur qui va chercher l'information
-    /// ailleurs : un lookup par TOC, une recherche de pochette. Là, il *est*
+    /// ailleurs : un lookup par TOC, une recherche de cover. Là, il *est*
     /// la source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub derived_from: Option<String>,
 }
 
 impl Enrichment {
-    /// Ramène à `None` toute chaîne vide ou blanche.
+    /// Ramène à `None` toute chaîne clear ou blanche.
     ///
-    /// Un plugin qui ne connaît pas l'artiste peut aussi bien envoyer `null`
-    /// qu'une chaîne vide — les deux disent la même chose. Normaliser ici évite
+    /// Un plugin qui ne connaît pas l'artiste peut aussi bien send_frame `null`
+    /// qu'une chaîne clear — les deux disent la même chose. Normaliser ici évite
     /// que le reste du cœur ait à traiter deux cas, et surtout évite qu'un
     /// `title: ""` compte comme une réponse et bloque un plugin moins
     /// prioritaire qui, lui, connaît le titre (voir `is_empty`).
     pub fn cleaned(mut self) -> Self {
-        fn vide(champ: &mut Option<String>) {
+        fn clear(champ: &mut Option<String>) {
             if champ.as_deref().is_some_and(|s| s.trim().is_empty()) {
                 *champ = None;
             } else if let Some(s) = champ {
                 *s = s.trim().to_string();
             }
         }
-        vide(&mut self.artist);
-        vide(&mut self.title);
-        vide(&mut self.album);
-        self.cover = self.cover.take().and_then(CoverRef::validee);
+        clear(&mut self.artist);
+        clear(&mut self.title);
+        clear(&mut self.album);
+        self.cover = self.cover.take().and_then(CoverRef::validated);
         // Rebornée ici même si le contributeur est censé l'avoir fait : cette
         // valeur traverse un socket, et cette couche est celle qui est
         // documentée comme propriétaire de la validation de forme.
-        self.year = self.year.filter(|a| (ANNEE_MIN..=ANNEE_MAX).contains(a));
+        self.year = self.year.filter(|a| (YEAR_MIN..=YEAR_MAX).contains(a));
         // Chaque lien passe par sa propre validation d'hôte ; ceux qui la
         // ratent sont **jetés un à un**, pas la liste entière : un `deezerId`
         // douteux ne doit pas faire perdre le lien YouTube qui l'accompagne.
-        self.links = self.links.drain(..).filter_map(Link::validee).collect();
+        self.links = self.links.drain(..).filter_map(Link::validated).collect();
         self
     }
 
-    /// Vrai si l'enrichissement n'apporte aucune information.
+    /// Vrai si l'enrichment n'apporte aucune information.
     ///
-    /// À appeler **après** `cleaned`. Un tel enrichissement compte comme une
+    /// À appeler **après** `cleaned`. Un tel enrichment compte comme une
     /// non-réponse dans l'arbitrage : un plugin qui reconnaît l'identité mais
     /// n'a encore rien appris ne doit pas bloquer un plugin moins prioritaire.
     pub fn is_empty(&self) -> bool {
@@ -454,13 +454,13 @@ impl Enrichment {
     }
 }
 
-/// Ce qui est affichable du morceau en cours.
+/// Ce qui est affichable du track en cours.
 ///
-/// `origin` dit **qui** a fourni l'information (`"icy"` ou le nom du plugin
-/// gagnant) : sans elle, un affichage douteux ne serait attribuable à personne,
+/// `origin` dit **qui** a fourni l'information (`"icy"` ou le name du plugin
+/// winner) : sans elle, un affichage douteux ne serait attribuable à personne,
 /// et c'est exactement la question qu'on se pose devant un titre faux.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Morceau {
+pub struct Track {
     pub artist: Option<String>,
     pub title: Option<String>,
     pub album: Option<String>,
@@ -468,7 +468,7 @@ pub struct Morceau {
     /// Année de sortie, quand un contributeur la connaît.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<u16>,
-    /// Les plateformes d'écoute, déjà validées (voir [`Link::validee`]).
+    /// Les plateformes d'écoute, déjà validées (voir [`Link::validated`]).
     ///
     /// Voyage dans la charge utile commune plutôt que par un canal réservé à
     /// l'IHM : c'est la convention du projet, chaque afficheur compose ce
@@ -477,12 +477,12 @@ pub struct Morceau {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
     pub origin: Option<String>,
-    /// URL **locale** de la pochette, à mettre telle quelle dans un `src`.
+    /// URL **locale** de la cover, à mettre telle quelle dans un `src`.
     /// Toujours de la forme `/api/cover/{clé}` : l'IHM ne contacte jamais
     /// l'extérieur.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_href: Option<String>,
-    /// Qui a fourni cette pochette : le nom de la Source, `"tags"`, ou le nom
+    /// Qui a fourni cette cover : le name de la Source, `"tags"`, ou le name
     /// du greffon. Une seconde origine, parce que le texte et l'image peuvent
     /// venir de deux contributeurs différents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -490,35 +490,35 @@ pub struct Morceau {
     /// Qui a fourni quoi, **champ par champ**, et qui a cherché sans trouver.
     ///
     /// `origin` et `cover_origin` restent : ils disent le contributeur du
-    /// **texte** et celui de l'**image**, ce qu'un afficheur à trois lignes
+    /// **texte** et celui de l'**image**, ce qu'un afficheur à trois lines
     /// peut montrer et ce dont l'IHM fait ses deux badges. Ce champ-ci va plus
     /// loin, parce que le texte lui-même est composé de plusieurs mains — le
-    /// gagnant, puis les `fill_only` qui comblent, puis l'année et les liens
+    /// winner, puis les `fill_only` qui comblent, puis l'année et les liens
     /// qui se prennent partout — et `origin` ne nomme que le premier.
-    #[serde(default, skip_serializing_if = "Provenance::est_vide")]
+    #[serde(default, skip_serializing_if = "Provenance::is_empty")]
     pub provenance: Provenance,
 }
 
-/// D'où vient chaque morceau de ce qui s'affiche.
+/// D'où vient chaque track de ce qui s'affiche.
 ///
 /// **Ce que ça répond, et que rien d'autre ne répondait** : « pourquoi ce titre
 /// est-il faux ? ». `origin` nomme le contributeur du bloc de texte, mais
-/// l'année peut venir d'un autre, la pochette d'un troisième, et un quatrième
+/// l'année peut venir d'un autre, la cover d'un troisième, et un quatrième
 /// avoir cherché en vain — trois faits que l'écran ne portait nulle part.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provenance {
-    /// Le contributeur retenu pour chaque champ **renseigné**, par nom de
+    /// Le contributeur retenu pour chaque champ **renseigné**, par name de
     /// champ : `artist`, `title`, `album`, `year`, `duration`, `links`,
     /// `cover`.
     ///
     /// Une carte plutôt qu'une structure à sept champs : les consommateurs la
     /// parcourent pour l'afficher, aucun ne teste un champ en particulier, et
-    /// une carte ne casse pas quand un champ s'ajoute au morceau. `BTreeMap`
-    /// et non `HashMap` : l'ordre de parcours est alors stable, donc la trame
+    /// une carte ne casse pas quand un champ s'add au track. `BTreeMap`
+    /// et non `HashMap` : l'order de parcours est alors stable, donc la trame
     /// sérialisée aussi — et le cœur déduplique ses trames par égalité.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub fields: std::collections::BTreeMap<String, String>,
-    /// Les greffons qui ont **cherché et n'ont rien trouvé** pour ce morceau.
+    /// Les plugins qui ont **cherché et n'ont rien trouvé** pour ce track.
     ///
     /// Distinct d'une absence de la carte ci-dessus : « musicbrainz n'a pas
     /// fourni l'album » est vrai aussi quand il n'a jamais été interrogé, et
@@ -527,7 +527,7 @@ pub struct Provenance {
     /// `Enrichment::searched`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub misses: Vec<String>,
-    /// Qui a **retravaillé** un champ sans en être la source, par nom de champ.
+    /// Qui a **retravaillé** un champ sans en être la source, par name de champ.
     ///
     /// Complète `fields` au lieu de la remplacer : « Titre : icy, découpé par
     /// musicbrainz » dit les deux faits, là où nommer le seul découpeur en
@@ -539,16 +539,16 @@ pub struct Provenance {
 
 impl Provenance {
     /// Vrai quand il n'y a rien à dire : sert au `skip_serializing_if` de
-    /// `Morceau::provenance`, pour qu'aucune trame existante ne change de
+    /// `Track::provenance`, pour qu'aucune trame existante ne change de
     /// forme.
-    pub fn est_vide(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.fields.is_empty() && self.misses.is_empty() && self.derived.is_empty()
     }
 }
 
 /// A transient overlay the appliance is showing right now, carrying **both**
 /// the raw value and the resolved words: a display can draw a volume gauge
-/// from `level`, or simply print `text`, without needing a catalogue of its
+/// from `level`, or simply print `text`, without needing a sources_catalog of its
 /// own.
 ///
 /// `remaining_ms` is informative. The core alone owns the deadline — it
@@ -568,7 +568,7 @@ pub enum Overlay {
 /// Égalité **volontairement écrite à la main** : elle ignore `remaining_ms`.
 ///
 /// Deux incrustations qui ne diffèrent que par le temps restant décrivent le
-/// même écran, et `Core::publie_etat` déduplique les trames par égalité. Une
+/// même écran, et `Core::publish_state` déduplique les trames par égalité. Une
 /// dérive automatique ferait passer chaque rafraîchissement redondant pour un
 /// changement — plusieurs chemins du cœur rafraîchissent pour un même
 /// événement — et chaque afficheur réimprimerait la même chose.
@@ -599,7 +599,7 @@ impl Overlay {
     /// read — and since equality ignores it, refreshing it does not defeat the
     /// frame deduplication.
     #[must_use]
-    pub fn avec_restant(self, restant_ms: u32) -> Self {
+    pub fn with_remaining(self, restant_ms: u32) -> Self {
         match self {
             Self::Volume { level, muted, text, .. } => {
                 Self::Volume { level, muted, text, remaining_ms: restant_ms }
@@ -610,7 +610,7 @@ impl Overlay {
     }
 }
 
-/// Ce que fait le lecteur, en un mot. `Stopped` par défaut : ne rien savoir,
+/// Ce que fait le player, en un mot. `Stopped` par défaut : ne rien savoir,
 /// c'est ne rien jouer — la même convention que `can_eject`, où l'absence
 /// d'information vaut l'absence de capacité.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -626,22 +626,22 @@ impl Playback {
     /// Sert le `skip_serializing_if` du champ : la valeur par défaut ne
     /// voyage pas, donc les trames existantes restent identiques à l'octet.
     /// Une méthode et non une fermeture : `skip_serializing_if` exige un
-    /// chemin de fonction.
+    /// path de fonction.
     pub fn is_stopped(&self) -> bool {
         matches!(self, Playback::Stopped)
     }
 }
 
-/// État du lecteur diffusé à la SPA : ce qui est volatil, et qui a donc besoin
+/// État du player diffusé à la SPA : ce qui est volatil, et qui a donc besoin
 /// d'être **poussé**.
 ///
 /// Un seul état et un seul canal pour tout ce qui bouge — source active, volume,
-/// muet, veille, et le morceau quand on le connaît. La route `/api/status`, elle,
+/// muet, veille, et le track quand on le connaît. La route `/api/status`, elle,
 /// porte le contrat de navigation (quels plugins existent, lesquels ont une page
 /// d'admin) : structurellement stable, lue une fois au montage. Y mêler du
 /// volatil obligerait la SPA à la resonder en boucle pour afficher un volume.
 ///
-/// Le morceau est **aplati** dans le JSON (`serde(flatten)`) : l'IHM reçoit un
+/// Le track est **aplati** dans le JSON (`serde(flatten)`) : l'IHM reçoit un
 /// objet plat, sans avoir à distinguer deux niveaux pour un même encart.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlayerState {
@@ -650,9 +650,9 @@ pub struct PlayerState {
     pub volume: u8,
     pub muted: bool,
     pub standby: bool,
-    /// Touche numérotée correspondant à ce qui joue, telle que la Source active l'a
+    /// Touche numérotée correspondant à ce qui plays, telle que la Source active l'a
     /// déclarée (présélection radio, piste cd) : c'est ce que la télécommande
-    /// de l'IHM met en évidence. `None` = rien ne joue, ou la Source n'a rien
+    /// de l'IHM met en évidence. `None` = rien ne plays, ou la Source n'a rien
     /// déclaré.
     pub preset: Option<u8>,
     /// Nombre de présélections numérotées offertes par la Source active
@@ -661,10 +661,10 @@ pub struct PlayerState {
     /// `Some(0)` = rien à numéroter (cd sans disque) : aucune touche.
     pub preset_count: Option<u8>,
     /// Nom lisible de la présélection donnée par `preset`, tel que la Source
-    /// active l'a déclaré (le nom configuré de la station pour la radio).
+    /// active l'a déclaré (le name configuré de la station pour la radio).
     /// `None` : la Source ne nomme rien à cet emplacement (le cd, dont
     /// « audio CD » n'a rien à voir avec une présélection nommée), ou rien ne
-    /// joue. Vit et meurt avec `preset` — voir `Core::set_identity`.
+    /// plays. Vit et meurt avec `preset` — voir `Core::set_identity`.
     pub preset_name: Option<String>,
     /// The appliance's current state as a **resolved sentence**: the status a
     /// source declared ("NO DISC", "AUDIO CD") or the core's standby word.
@@ -676,29 +676,29 @@ pub struct PlayerState {
     /// and has its own toasts).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlay: Option<Overlay>,
-    /// Où en est ce qui joue, en secondes, **à l'instant de la publication**.
+    /// Où en est ce qui plays, en secondes, **à l'instant de la publication**.
     ///
-    /// `None` = personne n'a de quoi répondre : rien ne joue, ou c'est un flux
+    /// `None` = personne n'a de quoi répondre : rien ne plays, ou c'est un stream
     /// que nul plugin `metadata` ne suit. Deux fournisseurs alimentent ce
     /// champ sans jamais se disputer — mpv pour un contenu fini, un plugin
-    /// `metadata` pour un flux — parce que le contexte décide lequel des deux
-    /// a le droit de parler (voir `Core::rafraichit_position`).
+    /// `metadata` pour un stream — parce que le contexte décide lequel des deux
+    /// a le droit de parler (voir `Core::refresh_position`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position_s: Option<u32>,
-    /// Ce que fait le lecteur. Additif, à l'idiome de `InputMessage.held` et
+    /// Ce que fait le player. Additif, à l'idiome de `InputMessage.held` et
     /// de `PluginStatus.stalled` : absent du JSON quand il vaut `Stopped`,
     /// donc aucune trame existante ne change et une trame ancienne se relit.
     ///
-    /// Distinct de `position_s.is_some()` : une lecture en pause garde sa
-    /// position, et un flux qui joue peut n'en avoir aucune.
+    /// Distinct de `position_s.is_some()` : une playback en pause garde sa
+    /// position, et un stream qui plays peut n'en avoir aucune.
     #[serde(default, skip_serializing_if = "Playback::is_stopped")]
     pub playback: Playback,
-    /// Ce qui joue accepte un déplacement : c'est le `finite` que la Source a
-    /// déclaré à son `Play`, rendu visible aux consommateurs.
+    /// Ce qui plays accepte un déplacement : c'est le `finite` que la Source a
+    /// déclaré à son `Play`, rendition visible aux consommateurs.
     ///
     /// Un champ à part entière plutôt qu'une déduction de `duration_s` : les
     /// deux notions divergent exactement là où ça compte — Radio France
-    /// annonce la durée d'un morceau sur un direct qu'on ne peut pas
+    /// announcement la durée d'un track sur un direct qu'on ne peut pas
     /// rembobiner, un fichier sans étiquette de durée reste parcourable.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub seekable: bool,
@@ -710,60 +710,60 @@ pub struct PlayerState {
     /// convention que les capacités d'extinction de `system.rs`. Un booléen et
     /// non un `Option` : côté consommateur, « la Source n'a rien déclaré » et
     /// « la Source ne peut pas éjecter » appellent le même bouton grisé, et un
-    /// troisième état n'aurait aucun rendu propre.
+    /// troisième état n'aurait aucun rendition propre.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub can_eject: bool,
     /// Comment cet appareil écrit une heure et une date, tel que son
     /// propriétaire l'a réglé.
     ///
-    /// **Une préférence de rendu dans la trame d'état, et il faut dire
+    /// **Une préférence de rendition dans la trame d'état, et il faut dire
     /// pourquoi.** Un afficheur ne doit jamais aller chercher quoi que ce soit
     /// de côté — tout ce qu'il montre arrive par ce canal — et l'horloge qu'il
     /// dessine en veille est justement quelque chose qu'il montre. La
-    /// solution inverse (le cœur pousse l'heure **déjà écrite**) a été écartée :
+    /// solution inverse (le cœur push_cover l'heure **déjà écrite**) a été écartée :
     /// elle imposerait une trame par minute, pour toujours, y compris quand
     /// personne ne regarde. Ici la valeur ne bouge qu'au geste de l'utilisateur.
     ///
     /// Additif, à l'idiome du reste de la structure : absent du JSON à sa
     /// valeur par défaut, donc aucune trame existante ne change de forme.
-    #[serde(default, skip_serializing_if = "Horloge::est_defaut")]
-    pub clock: Horloge,
+    #[serde(default, skip_serializing_if = "Clock::is_default")]
+    pub clock: Clock,
     #[serde(flatten)]
-    pub morceau: Morceau,
+    pub track: Track,
 }
 
 /// Les deux réglages d'écriture du temps, tels qu'ils voyagent aux afficheurs.
 ///
-/// Deux champs séparés parce que ce sont deux choix indépendants : l'ordre des
+/// Deux champs séparés parce que ce sont deux choix indépendants : l'order des
 /// composants d'une date et le format 12/24 h ne varient pas ensemble d'un pays
 /// à l'autre.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct Horloge {
-    /// L'ordre des composants d'une date.
+pub struct Clock {
+    /// L'order des composants d'une date.
     #[serde(default)]
-    pub date: FormatDate,
+    pub date: DateFormat,
     /// Heure sur 24 h plutôt que sur 12 h.
     ///
     /// **Le défaut est 24 h**, et le champ s'écrit donc « sur 12 h » pour que
     /// la valeur par défaut soit `false` et disparaisse du JSON — la même
     /// mécanique additive que `playback` ou `can_eject`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub douze_heures: bool,
+    pub twelve_hour: bool,
 }
 
-impl Horloge {
+impl Clock {
     /// Vrai pour la valeur par défaut : sert au `skip_serializing_if` de
     /// `PlayerState::clock`.
-    pub fn est_defaut(&self) -> bool {
+    pub fn is_default(&self) -> bool {
         *self == Self::default()
     }
 }
 
-/// L'ordre des composants d'une date. Miroir de `state::DateFormat` côté cœur,
-/// que le protocole ne peut pas importer.
+/// L'order des composants d'une date. Miroir de `state::DateFormat` côté cœur,
+/// que le protocol ne peut pas importer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum FormatDate {
+pub enum DateFormat {
     /// `31/12/2026`
     #[default]
     DayMonthYear,
@@ -773,8 +773,8 @@ pub enum FormatDate {
     MonthDayYear,
 }
 
-impl Morceau {
-    /// Vrai si rien n'est connu du morceau.
+impl Track {
+    /// Vrai si rien n'est connu du track.
     ///
     /// N'a d'appelant que dans les tests, et c'est voulu : côté IHM, c'est la
     /// SPA qui décide quoi montrer d'un état partiel, et le cœur n'a aucune
@@ -785,7 +785,7 @@ impl Morceau {
     /// tests ; un tel attribut ne survit pas au passage dans un crate séparé,
     /// où il ne s'applique qu'à la compilation de ce crate-là et ferait
     /// disparaître la méthode pour tous les autres.
-    pub fn est_vide(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.artist.is_none() && self.title.is_none() && self.album.is_none()
     }
 }
@@ -843,7 +843,7 @@ mod tests {
     #[test]
     fn enrichment_accepte_les_champs_absents() {
         // Un plugin minimal n'envoie que ce qu'il connaît : les champs manquants
-        // ne doivent pas faire échouer la lecture de la trame.
+        // ne doivent pas faire échouer la playback de la trame.
         let e: Enrichment = serde_json::from_str(r#"{"identity":{"k":1},"title":"Bikwix"}"#).unwrap();
         assert_eq!(e.title.as_deref(), Some("Bikwix"));
         assert_eq!(e.artist, None);
@@ -854,9 +854,9 @@ mod tests {
     fn identity_update_distingue_les_trois_etats() {
         // Playing et Nothing doivent se distinguer sur le fil, et l'absence du
         // champ (testée dans source.rs) est un troisième cas.
-        let joue = IdentityUpdate::Playing(json!({"kind": "stream"}));
+        let plays = IdentityUpdate::Playing(json!({"kind": "stream"}));
         assert_eq!(
-            serde_json::to_string(&joue).unwrap(),
+            serde_json::to_string(&plays).unwrap(),
             r#"{"state":"Playing","value":{"kind":"stream"}}"#
         );
         assert_eq!(serde_json::to_string(&IdentityUpdate::Nothing).unwrap(), r#"{"state":"Nothing"}"#);
@@ -887,7 +887,7 @@ mod tests {
             "",
         ] {
             assert!(
-                Link::Youtube { url: mauvaise.into() }.validee().is_none(),
+                Link::Youtube { url: mauvaise.into() }.validated().is_none(),
                 "accepte a tort : {mauvaise:?}"
             );
         }
@@ -895,7 +895,7 @@ mod tests {
 
     #[test]
     fn les_formes_courtes_de_youtube_sont_admises_et_gardent_la_meme_icone() {
-        // Decision du proprietaire : `youtu.be` doit marcher comme
+        // Decision du owner : `youtu.be` doit marcher comme
         // `youtube.com`, avec la meme icone. C'est gratuit — c'est la variante
         // et non l'hote qui choisit l'icone cote IHM — a condition que la
         // validation admette la forme courte, ce que ce test verrouille.
@@ -906,15 +906,15 @@ mod tests {
             "https://music.youtube.com/watch?v=a",
             "https://youtu.be/zIqlKJj9IlY",
         ] {
-            let l = Link::Youtube { url: bonne.into() }.validee();
+            let l = Link::Youtube { url: bonne.into() }.validated();
             assert!(matches!(l, Some(Link::Youtube { .. })), "refuse a tort : {bonne:?}");
         }
         // Et les deux autres plateformes gardent leurs propres hotes.
-        assert!(Link::Deezer { url: "https://www.deezer.com/track/1".into() }.validee().is_some());
-        assert!(Link::Deezer { url: "https://deezer.com/track/1".into() }.validee().is_some());
-        assert!(Link::AppleMusic { url: "https://music.apple.com/us/song/1".into() }.validee().is_some());
+        assert!(Link::Deezer { url: "https://www.deezer.com/track/1".into() }.validated().is_some());
+        assert!(Link::Deezer { url: "https://deezer.com/track/1".into() }.validated().is_some());
+        assert!(Link::AppleMusic { url: "https://music.apple.com/us/song/1".into() }.validated().is_some());
         // `youtu.be` n'ouvre pas la porte aux autres variantes.
-        assert!(Link::Deezer { url: "https://youtu.be/a".into() }.validee().is_none());
+        assert!(Link::Deezer { url: "https://youtu.be/a".into() }.validated().is_none());
     }
 
     #[test]
@@ -941,22 +941,22 @@ mod tests {
         // Ces valeurs viennent d'etiquettes de fichiers arbitraires et de
         // tiers. Une annee a 0 ou a 90210 n'apprend rien et enlaidit l'ecran.
         for brut in ["0", "999", "3000", "90210", "195", "", "abc", "-1959"] {
-            assert_eq!(annee_valide(brut), None, "accepte a tort : {brut:?}");
+            assert_eq!(valid_year(brut), None, "accepte a tort : {brut:?}");
         }
         // Les trois formes mesurees chez nos sources.
-        assert_eq!(annee_valide("1987"), Some(1987), "MusicBrainz, annee seule");
-        assert_eq!(annee_valide("2017-06-23"), Some(2017), "MusicBrainz, date complete");
-        assert_eq!(annee_valide("1972-00-00"), Some(1972), "etiquette de fichier bancale");
-        assert_eq!(annee_valide("  1959  "), Some(1959), "elague");
+        assert_eq!(valid_year("1987"), Some(1987), "MusicBrainz, annee seule");
+        assert_eq!(valid_year("2017-06-23"), Some(2017), "MusicBrainz, date complete");
+        assert_eq!(valid_year("1972-00-00"), Some(1972), "etiquette de fichier bancale");
+        assert_eq!(valid_year("  1959  "), Some(1959), "elague");
         // La forme compacte des etiquettes ID3 (`TDRC` autorise `YYYYMMDD`) :
         // la tete numerique fait alors 8 chiffres d'affilee, et sans regle sur
         // la longueur elle sortait `None` faute de tenir dans un `u16`.
-        assert_eq!(annee_valide("19590817"), Some(1959), "etiquette ID3 compacte");
+        assert_eq!(valid_year("19590817"), Some(1959), "etiquette ID3 compacte");
         // Le piege de la troncature naive : garder « les quatre premiers
         // chiffres » sans regarder la longueur ferait de ce code postal
-        // l'annee 9021, et la borne haute ne rattraperait rien.
-        assert_eq!(annee_valide("90210"), None, "un code postal n'est pas une annee");
-        // Le rebornage passe aussi par `cleaned`, la couche proprietaire de la
+        // l'annee 9021, et la bounded haute ne rattraperait rien.
+        assert_eq!(valid_year("90210"), None, "un code postal n'est pas une annee");
+        // Le rebornage passe aussi par `cleaned`, la couche owner de la
         // validation de forme.
         let e = Enrichment { identity: json!(1), year: Some(90), ..Default::default() }.cleaned();
         assert_eq!(e.year, None);
@@ -987,7 +987,7 @@ mod tests {
     #[test]
     fn is_empty_ne_compte_que_les_champs_de_texte() {
         assert!(Enrichment { identity: json!(1), ..Default::default() }.is_empty());
-        // Une durée seule ne fait pas un enrichissement affichable : elle ne
+        // Une durée seule ne fait pas un enrichment affichable : elle ne
         // suffit pas à gagner l'arbitrage contre un plugin qui connaît le titre.
         let duree_seule = Enrichment { identity: json!(1), duration_s: Some(210), ..Default::default() };
         assert!(duree_seule.is_empty());
@@ -1000,7 +1000,7 @@ mod tests {
     fn overlay_volume_fait_un_aller_retour_json() {
         let o = Overlay::Volume { level: 65, muted: false, text: "VOLUME 65 %".into(), remaining_ms: 4200 };
         let json = serde_json::to_string(&o).unwrap();
-        // Étiquetage interne : un objet plat, plus simple à lire côté web qu'un
+        // Étiquetage interne : un objet plat, plus simple à read côté web qu'un
         // couple {"kind":…,"data":{…}}.
         assert!(json.contains("\"kind\":\"volume\""));
         assert!(json.contains("\"level\":65"));
@@ -1023,7 +1023,7 @@ mod tests {
 
     #[test]
     fn deux_incrustations_ne_differant_que_par_le_temps_restant_sont_egales() {
-        // La garantie qui protège la déduplication de `publie_etat` : deux trames
+        // La garantie qui protège la déduplication de `publish_state` : deux trames
         // qui ne diffèrent que par le temps restant décrivent le même écran. Sans
         // cette égalité, chaque rafraîchissement redondant serait poussé, et
         // chaque afficheur réimprimerait la même chose.
@@ -1050,23 +1050,23 @@ mod tests {
         // publiera un temps restant frais. Sans ce test, une permutation de
         // champs entre variantes — reconstruire un `offset` depuis un `level` —
         // compilerait et ne se verrait qu'à l'intégration. L'égalité d'`Overlay`
-        // ignorant `remaining_ms`, elle ne peut pas servir ici : on déstructure.
+        // ignorant `remaining_ms`, elle ne peut pas serve ici : on déstructure.
         let v = Overlay::Volume { level: 65, muted: true, text: "VOLUME MUET".into(), remaining_ms: 4000 };
-        match v.avec_restant(7) {
+        match v.with_remaining(7) {
             Overlay::Volume { level, muted, text, remaining_ms } => {
                 assert_eq!((level, muted, text.as_str(), remaining_ms), (65, true, "VOLUME MUET", 7));
             }
             autre => panic!("la variante doit être préservée, obtenu {autre:?}"),
         }
         let t = Overlay::Tens { offset: 20, text: "+20".into(), remaining_ms: 4000 };
-        match t.avec_restant(8) {
+        match t.with_remaining(8) {
             Overlay::Tens { offset, text, remaining_ms } => {
                 assert_eq!((offset, text.as_str(), remaining_ms), (20, "+20", 8));
             }
             autre => panic!("la variante doit être préservée, obtenu {autre:?}"),
         }
         let m = Overlay::Message { text: "PRESELECTION VIDE".into(), remaining_ms: 4000 };
-        match m.avec_restant(9) {
+        match m.with_remaining(9) {
             Overlay::Message { text, remaining_ms } => {
                 assert_eq!((text.as_str(), remaining_ms), ("PRESELECTION VIDE", 9));
             }
@@ -1084,11 +1084,11 @@ mod tests {
 
     #[test]
     fn playerstate_desyrialise_le_morceau_aplati_et_une_incrustation() {
-        // C'est le chemin réel des afficheurs : `run_display_plugin` lit une
+        // C'est le path réel des afficheurs : `run_display_plugin` read une
         // `DisplayFrame`, dont le `data` d'une trame d'état est **exactement**
         // cette forme (étiquetage adjacent, voir `display.rs`) — ce test reste
         // donc bien celui du contenu qui traverse le socket. `#[serde(flatten)]`
-        // sur le morceau combiné à un enum étiqueté en interne (`Overlay`,
+        // sur le track combiné à un enum étiqueté en interne (`Overlay`,
         // `kind`) est la conjonction la plus susceptible de surprendre avec
         // serde. Les autres tests de ce fichier ne couvrent que l'un ou l'autre
         // séparément ; en cas de régression ici, le symptôme serait muet côté
@@ -1109,31 +1109,31 @@ mod tests {
             "duration_s": 545,
             "origin": "icy"
         }"#;
-        let etat: PlayerState = serde_json::from_str(json).unwrap();
-        assert_eq!(etat.source, "radio");
-        assert_eq!(etat.preset_name.as_deref(), Some("France Inter"));
+        let state: PlayerState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.source, "radio");
+        assert_eq!(state.preset_name.as_deref(), Some("France Inter"));
         assert_eq!(
-            etat.overlay,
+            state.overlay,
             Some(Overlay::Volume { level: 65, muted: false, text: "VOLUME 65 %".into(), remaining_ms: 4000 })
         );
-        // Le morceau aplati : ces champs viennent du même niveau JSON que
+        // Le track aplati : ces champs viennent du même niveau JSON que
         // `source`/`preset`/`overlay`, pas d'un objet imbriqué.
-        assert_eq!(etat.morceau.artist.as_deref(), Some("Miles Davis"));
-        assert_eq!(etat.morceau.title.as_deref(), Some("So What"));
-        assert_eq!(etat.morceau.album.as_deref(), Some("Kind of Blue"));
-        assert_eq!(etat.morceau.duration_s, Some(545));
-        assert_eq!(etat.morceau.origin.as_deref(), Some("icy"));
+        assert_eq!(state.track.artist.as_deref(), Some("Miles Davis"));
+        assert_eq!(state.track.title.as_deref(), Some("So What"));
+        assert_eq!(state.track.album.as_deref(), Some("Kind of Blue"));
+        assert_eq!(state.track.duration_s, Some(545));
+        assert_eq!(state.track.origin.as_deref(), Some("icy"));
     }
 
     #[test]
     fn player_state_serialise_position_et_seekable_quand_ils_disent_quelque_chose() {
-        let etat = PlayerState {
+        let state = PlayerState {
             source: "cd".into(),
             position_s: Some(87),
             seekable: true,
             ..Default::default()
         };
-        let json = serde_json::to_string(&etat).unwrap();
+        let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains(r#""position_s":87"#), "{json}");
         assert!(json.contains(r#""seekable":true"#), "{json}");
     }
@@ -1143,8 +1143,8 @@ mod tests {
     /// écrite par un binaire antérieur se relit sans eux.
     #[test]
     fn player_state_tait_position_et_seekable_quand_ils_ne_disent_rien() {
-        let etat = PlayerState { source: "radio".into(), ..Default::default() };
-        let json = serde_json::to_string(&etat).unwrap();
+        let state = PlayerState { source: "radio".into(), ..Default::default() };
+        let json = serde_json::to_string(&state).unwrap();
         assert!(!json.contains("position_s"), "{json}");
         assert!(!json.contains("seekable"), "{json}");
         let ancienne = r#"{"source":"radio","volume":50,"muted":false,"standby":false,"preset":null,"preset_count":null,"preset_name":null}"#;
@@ -1155,16 +1155,16 @@ mod tests {
 
     #[test]
     fn player_state_serialise_lannee_et_les_liens_quand_ils_disent_quelque_chose() {
-        let etat = PlayerState {
+        let state = PlayerState {
             source: "cd".into(),
-            morceau: Morceau {
+            track: Track {
                 year: Some(1959),
                 links: vec![Link::Youtube { url: "https://www.youtube.com/watch?v=a".into() }],
                 ..Default::default()
             },
             ..Default::default()
         };
-        let json = serde_json::to_string(&etat).unwrap();
+        let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains(r#""year":1959"#), "{json}");
         // Le `Link` est interne-taggé : la plateforme est une clé de l'objet,
         // pas un objet imbriqué de plus.
@@ -1180,22 +1180,22 @@ mod tests {
     /// relit sans eux.
     #[test]
     fn player_state_tait_lannee_et_les_liens_quand_ils_ne_disent_rien() {
-        let etat = PlayerState { source: "radio".into(), ..Default::default() };
-        let json = serde_json::to_string(&etat).unwrap();
+        let state = PlayerState { source: "radio".into(), ..Default::default() };
+        let json = serde_json::to_string(&state).unwrap();
         assert!(!json.contains("year"), "{json}");
         assert!(!json.contains("links"), "{json}");
         let ancienne = r#"{"source":"radio","volume":50,"muted":false,"standby":false,"preset":null,"preset_count":null,"preset_name":null,"artist":null,"title":null,"album":null,"duration_s":null,"origin":null}"#;
         let relue: PlayerState = serde_json::from_str(ancienne).unwrap();
-        assert_eq!(relue.morceau.year, None);
-        assert!(relue.morceau.links.is_empty());
+        assert_eq!(relue.track.year, None);
+        assert!(relue.track.links.is_empty());
     }
 
     #[test]
     fn playback_ne_voyage_pas_quand_il_est_arrete() {
         // L'idiome additif : la valeur par défaut est absente du JSON, donc les
         // trames d'avant ce champ sont inchangées à l'octet.
-        let etat = PlayerState::default();
-        let json = serde_json::to_string(&etat).unwrap();
+        let state = PlayerState::default();
+        let json = serde_json::to_string(&state).unwrap();
         assert!(!json.contains("playback"), "playback ne devrait pas etre serialise: {json}");
     }
 
@@ -1204,8 +1204,8 @@ mod tests {
         for (p, attendu) in
             [(Playback::Playing, "\"playback\":\"playing\""), (Playback::Paused, "\"playback\":\"paused\"")]
         {
-            let etat = PlayerState { playback: p, ..Default::default() };
-            let json = serde_json::to_string(&etat).unwrap();
+            let state = PlayerState { playback: p, ..Default::default() };
+            let json = serde_json::to_string(&state).unwrap();
             assert!(json.contains(attendu), "{attendu} absent de {json}");
             let retour: PlayerState = serde_json::from_str(&json).unwrap();
             assert_eq!(retour.playback, p);
@@ -1215,11 +1215,11 @@ mod tests {
     #[test]
     fn une_trame_sans_playback_se_relit_en_arret() {
         // Compatibilité descendante : une trame ecrite avant ce champ.
-        let etat: PlayerState = serde_json::from_str(
+        let state: PlayerState = serde_json::from_str(
             r#"{"source":"radio","volume":40,"muted":false,"standby":false,"preset":null,"preset_count":null,"preset_name":null}"#,
         )
         .unwrap();
-        assert_eq!(etat.playback, Playback::Stopped);
+        assert_eq!(state.playback, Playback::Stopped);
     }
 
     #[test]
@@ -1268,7 +1268,7 @@ mod tests {
     #[test]
     fn known_vide_reste_muet_a_la_serialisation() {
         // Contrainte dure du chantier : une trame qui ne dit rien de connu doit
-        // rester identique a l'octet pres a ce qu'elle etait avant l'ajout de
+        // rester identique a l'octet preset_of a ce qu'elle etait avant l'ajout de
         // ce champ, sans quoi chaque trame grossirait pour rien.
         let muette = NowPlaying { source: "radio".into(), identity: None, known: Known::default() };
         let json = serde_json::to_string(&muette).unwrap();
@@ -1292,10 +1292,10 @@ mod tests {
         assert!(json.contains(r#""kind":"url""#), "{json}");
         assert_eq!(serde_json::from_str::<CoverRef>(&json).unwrap(), url);
 
-        let chemin = CoverRef::Path { path: "/mnt/nas/Album/folder.jpg".into() };
-        let json = serde_json::to_string(&chemin).unwrap();
+        let path = CoverRef::Path { path: "/mnt/nas/Album/folder.jpg".into() };
+        let json = serde_json::to_string(&path).unwrap();
         assert!(json.contains(r#""kind":"path""#), "{json}");
-        assert_eq!(serde_json::from_str::<CoverRef>(&json).unwrap(), chemin);
+        assert_eq!(serde_json::from_str::<CoverRef>(&json).unwrap(), path);
     }
 
     #[test]
@@ -1312,7 +1312,7 @@ mod tests {
             "ftp://example.org/a.jpg",
             "pas une url",
             "",
-            // Confusion userinfo : tout avant le `@` est un nom d'utilisateur,
+            // Confusion userinfo : tout avant le `@` est un name d'utilisateur,
             // pas l'hote — un navigateur irait bien sur evil.example.
             "https://user@evil.example/a.jpg",
             "https://",
@@ -1362,7 +1362,7 @@ mod tests {
 
     #[test]
     fn une_pochette_seule_reste_une_non_reponse_pour_le_texte() {
-        // Meme convention que `duration_s` : une pochette seule ne doit pas
+        // Meme convention que `duration_s` : une cover seule ne doit pas
         // gagner l'arbitrage du texte.
         let e = Enrichment {
             identity: json!(1),
@@ -1375,7 +1375,7 @@ mod tests {
     #[test]
     fn fill_only_fait_le_tour_et_vaut_faux_par_defaut() {
         // Le defaut est « ecrase » : c'est la regle actuelle du projet, et
-        // c'est ce qui evite de toucher aux trois greffons livres.
+        // c'est ce qui evite de toucher aux trois plugins livres.
         let sans: Enrichment = serde_json::from_str(r#"{"identity":{"k":1}}"#).unwrap();
         assert!(!sans.fill_only);
         let e = Enrichment { identity: json!(1), fill_only: true, ..Default::default() };
@@ -1391,7 +1391,7 @@ mod tests {
     fn stream_title_absent_ne_grossit_pas_la_trame() {
         // Même contrat que `covers` et `known` : un champ neuf ne doit rien
         // changer à la trame la plus courante, sinon chaque trame par seconde de
-        // lecture paie l'ajout.
+        // playback paie l'ajout.
         let json = serde_json::to_string(&Known::default()).unwrap();
         assert!(!json.contains("stream_title"), "{json}");
     }
@@ -1416,16 +1416,16 @@ mod tests {
         assert!(!json.contains("cover_href"), "{json}");
         assert!(!json.contains("cover_origin"), "{json}");
 
-        let etat = PlayerState {
+        let state = PlayerState {
             source: "files".into(),
-            morceau: Morceau {
+            track: Track {
                 cover_href: Some("/api/cover/1a2b3c".into()),
                 cover_origin: Some("files".into()),
                 ..Default::default()
             },
             ..Default::default()
         };
-        let json = serde_json::to_string(&etat).unwrap();
+        let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains(r#""cover_href":"/api/cover/1a2b3c""#), "{json}");
         assert!(json.contains(r#""cover_origin":"files""#), "{json}");
     }

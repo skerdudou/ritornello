@@ -74,7 +74,7 @@ A single `HomeView` renders both arrangements; the breakpoint is Tailwind's
 
 ![The same home page in dark mode](captures/accueil-sombre.png)
 
-![The home page at phone width: one column, the four-tab bar fixed at the bottom](captures/accueil-telephone.png)
+![The home page at phone width: one column, the four-tab bar fixed at the bottom](captures/accueil-phone.png)
 
 ### The Player card
 
@@ -479,7 +479,7 @@ Icons throughout the remote, the volume, the transport and the
 navigation come from `@radix-icons/vue` (already a dependency, for the
 theme toggle); the handful Radix doesn't have — eject, standby — are
 small hand-drawn stroke SVGs in the same 15 px grid, kept next to the
-components that use them (`components/icones/`). The admin pages of
+components that use them (`components/icons/`). The admin pages of
 individual plugins are untouched and keep their own glyphs.
 
 ## Physical remote

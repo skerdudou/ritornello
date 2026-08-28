@@ -1,4 +1,4 @@
-//! Catalogue i18n partagé de ritornello.
+//! SourcesCatalog i18n partagé de ritornello.
 //!
 //! Deux couches indépendantes par composant :
 //! - `own` : anglais embarqué du composant (`en.toml`), surchargé par le pack
@@ -22,12 +22,12 @@ pub fn try_parse(s: &str) -> Result<HashMap<String, String>, toml::de::Error> {
     toml::from_str(s)
 }
 
-/// Surcharge `base` avec le pack TOML lu sur disque en `path`. Fichier
+/// Surcharge `base` avec le pack TOML lu sur disque en `path`. File
 /// **absent** : silencieux (cas normal — la plupart des composants n'ont pas de
 /// pack pour la plupart des langues). Toute autre erreur — droits refusés,
 /// UTF-8 invalide, TOML invalide — laisse `base` inchangée mais est **tracée** :
 /// un pack présent que l'opérateur a voulu installer ne doit pas disparaître
-/// sans une ligne de journal.
+/// sans une line de journal.
 fn overlay_from_disk(base: &mut HashMap<String, String>, path: &Path) {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -49,7 +49,7 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// Construit le catalogue d'un composant pour une langue donnée.
+    /// Construit le sources_catalog d'un composant pour une langue donnée.
     /// Part de l'anglais embarqué (`own_en` pour `own`, `COMMON_EN` pour
     /// `common`), puis superpose les packs externes présents et valides.
     /// Jamais de panique : un pack absent ou invalide laisse l'anglais.
@@ -83,9 +83,9 @@ impl Catalog {
     }
 
     /// Carte plate de **toutes** les clés connues, `own` surchargeant
-    /// `common` — même ordre de priorité que `get`, mais exposé d'un bloc.
+    /// `common` — même order de priorité que `get`, mais exposé d'un bloc.
     ///
-    /// Sert à livrer le catalogue au navigateur (`GET /api/i18n`) : la SPA
+    /// Sert à livrer le sources_catalog au navigateur (`GET /api/i18n`) : la SPA
     /// résout ses clés côté client, ce qui remplace la substitution `{{clé}}`
     /// d'autrefois. Les valeurs restent des **données** de bout en bout :
     /// aucun caractère n'est dangereux, contrairement à la substitution brute
@@ -206,27 +206,27 @@ mod tests {
         // Ces trois clés sont affichées par le shell de la SPA
         // (`web/app/src/views/PluginView.ts`). Elles doivent vivre dans
         // `common` — héritée par TOUS les catalogues — et non dans celui du
-        // cœur : le shell les résout d'abord dans le catalogue **du plugin**,
-        // qui est vide précisément quand le plugin est injoignable, le cas même
+        // cœur : le shell les résout d'abord dans le sources_catalog **du plugin**,
+        // qui est clear précisément quand le plugin est injoignable, le cas même
         // qui produit `plugin_unavailable`.
         let dir = tempfile::tempdir().unwrap();
-        // Catalogue d'un plugin dont le `own` ne définit rien : les clés
+        // SourcesCatalog d'un plugin dont le `own` ne définit rien : les clés
         // doivent quand même se résoudre, et jamais renvoyer la clé elle-même.
         //
         // `plugin_unavailable_cause` a rejoint la liste : c'est la variante qui
         // nomme la cause du refus, et elle s'affiche exactement dans le même cas
-        // — un plugin injoignable, donc un catalogue de plugin vide.
+        // — un plugin injoignable, donc un sources_catalog de plugin clear.
         let cat = Catalog::load("radio", "en", dir.path(), "");
-        for cle in [
+        for key in [
             "loading",
             "plugin_unavailable",
             "plugin_unavailable_cause",
             "plugin_contract_mismatch",
         ] {
-            assert_ne!(cat.get(cle), cle, "cle {cle} absente du vocabulaire commun");
+            assert_ne!(cat.get(key), key, "key {key} absente du vocabulaire commun");
             // `entries()` est ce qui part vers le navigateur : la clé doit y
             // être, sinon le `t()` de la SPA retombe sur la clé brute.
-            assert!(cat.entries().contains_key(cle), "cle {cle} absente de entries()");
+            assert!(cat.entries().contains_key(key), "key {key} absente de entries()");
         }
     }
 

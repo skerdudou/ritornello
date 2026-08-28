@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use ritornello_proto::{
-    Catalogue, Cover, DisplayFrame, Enrichment, IdentityUpdate, NowPlaying, PlayerState, Preset,
+    SourcesCatalog, Cover, DisplayFrame, Enrichment, IdentityUpdate, NowPlaying, PlayerState, Preset,
     SourceAction, SourceMessage, SourceReq, SourceRequest,
 };
 use std::path::Path;
@@ -8,18 +8,18 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
 /// Issue d'une requête adressée à une Source : l'action que le cœur doit
-/// appliquer au lecteur, éventuellement une correction de l'identité de ce qui
-/// joue.
+/// appliquer au player, éventuellement une correction de l'identité de ce qui
+/// plays.
 pub struct SourceOutcome {
     pub action: SourceAction,
     /// Laissé à `None`, l'identité courante du cœur est conservée. Une Source
-    /// qui sait ce qu'elle vient de mettre en lecture doit la renseigner :
+    /// qui sait ce qu'elle vient de mettre en playback doit la renseigner :
     /// sans elle, aucun plugin `metadata` n'apprend le changement, et un
-    /// enrichissement en vol sur le morceau précédent resterait affiché.
+    /// enrichment en vol sur le track précédent resterait affiché.
     pub identity: Option<IdentityUpdate>,
     /// Le statut est un message éphémère (voir `SourceMessage::transient`).
     pub transient: bool,
-    /// Touche numérotée correspondant à ce qui joue (voir `SourceMessage::preset`).
+    /// Touche numérotée correspondant à ce qui plays (voir `SourceMessage::preset`).
     pub preset: Option<u8>,
     /// See `SourceMessage::preset_count`.
     pub preset_count: Option<u8>,
@@ -49,16 +49,16 @@ impl SourceOutcome {
     /// Déclare le statut comme un message **éphémère** : le cœur l'affiche
     /// quelques secondes, puis fait reparaître le statut permanent précédent.
     /// À employer pour signaler un incident sans détruire l'affichage de ce
-    /// qui joue.
+    /// qui plays.
     pub fn transient(mut self) -> Self {
         self.transient = true;
         self
     }
 
     /// Déclare la touche numérotée de la télécommande à laquelle correspond ce qui
-    /// joue : la présélection pour une radio, la piste pour un cd. C'est ce
+    /// plays : la présélection pour une radio, la piste pour un cd. C'est ce
     /// qui permet à l'IHM de mettre la touche active en évidence. Le cœur
-    /// l'oublie de lui-même quand plus rien ne joue.
+    /// l'oublie de lui-même quand plus rien ne plays.
     pub fn preset(mut self, n: u8) -> Self {
         self.preset = Some(n);
         self
@@ -71,11 +71,11 @@ impl SourceOutcome {
         self
     }
 
-    /// Déclare le nom lisible de la présélection portée par `preset` (voir
-    /// `SourceMessage::preset_name`). Le plugin radio s'en sert avec le nom
+    /// Déclare le name lisible de la présélection portée par `preset` (voir
+    /// `SourceMessage::preset_name`). Le plugin radio s'en sert avec le name
     /// configuré de la station.
-    pub fn preset_name(mut self, nom: impl Into<String>) -> Self {
-        self.preset_name = Some(nom.into());
+    pub fn preset_name(mut self, name: impl Into<String>) -> Self {
+        self.preset_name = Some(name.into());
         self
     }
 
@@ -100,13 +100,13 @@ impl SourceOutcome {
         self
     }
 
-    /// Déclare l'identité **opaque** de ce qui joue désormais.
+    /// Déclare l'identité **opaque** de ce qui plays désormais.
     pub fn plays(mut self, identity: serde_json::Value) -> Self {
         self.identity = Some(IdentityUpdate::Playing(identity));
         self
     }
 
-    /// Déclare que plus rien ne joue.
+    /// Déclare que plus rien ne plays.
     pub fn plays_nothing(mut self) -> Self {
         self.identity = Some(IdentityUpdate::Nothing);
         self
@@ -117,8 +117,8 @@ impl SourceOutcome {
 /// d'une TOC, insertion d'un disque.
 ///
 /// Volontairement sans action : le cœur décide seul de ce qui se met en
-/// lecture. Une Source qui pourrait déclencher un `Play` de sa propre
-/// initiative rendrait la lecture imprévisible depuis la télécommande.
+/// playback. Une Source qui pourrait déclencher un `Play` de sa propre
+/// initiative rendrait la playback imprévisible depuis la télécommande.
 #[derive(Default)]
 pub struct Notification {
     pub identity: Option<IdentityUpdate>,
@@ -156,8 +156,8 @@ impl Notification {
     }
 
     /// Voir `SourceOutcome::preset_name`.
-    pub fn preset_name(mut self, nom: impl Into<String>) -> Self {
-        self.preset_name = Some(nom.into());
+    pub fn preset_name(mut self, name: impl Into<String>) -> Self {
+        self.preset_name = Some(name.into());
         self
     }
 
@@ -168,13 +168,13 @@ impl Notification {
     }
 
     /// See `SourceOutcome::presets`. C'est ce qui permet à une Source de
-    /// **republier** son catalogue sans qu'on le lui redemande — renommer une
+    /// **republier** son sources_catalog sans qu'on le lui redemande — renommer une
     /// station depuis sa page d'admin se propage ainsi.
     ///
-    /// Une liste vide y devient une absence, exactement comme sur
+    /// Une liste clear y devient une absence, exactement comme sur
     /// `SourceOutcome` : ce constructeur-ci n'avait ni garde ni mise en garde,
     /// et c'était le trou — une Source suivant la documentation à la lettre
-    /// relayait une liste vide par le chemin spontané.
+    /// relayait une liste clear par le path spontané.
     pub fn presets(mut self, presets: Vec<Preset>) -> Self {
         self.presets = if presets.is_empty() { None } else { Some(presets) };
         self
@@ -209,7 +209,7 @@ pub trait SourcePlugin: Send + 'static {
     /// Cette Source a-t-elle quelque chose à éjecter ?
     ///
     /// Une **capacité de la Source**, pas de ce qu'elle a chargé : un tiroir
-    /// vide s'ouvre quand même, donc le cd répond vrai sans disque. Le sdk
+    /// clear s'ouvre quand même, donc le cd répond vrai sans disque. Le sdk
     /// l'estampille sur chaque trame, le cœur la relaie dans `PlayerState`, et
     /// la télécommande web grise sa touche Eject là où elle ne mène nulle
     /// part — au lieu d'émettre une commande que `eject()` jette en silence.
@@ -229,22 +229,22 @@ pub trait SourcePlugin: Send + 'static {
         self.activate().await
     }
 
-    /// Le cœur a arrêté la lecture sans consulter la Source (touche Stop).
+    /// Le cœur a arrêté la playback sans consulter la Source (touche Stop).
     ///
-    /// Implémentation par défaut : déclarer que plus rien ne joue, ce qui est
+    /// Implémentation par défaut : déclarer que plus rien ne plays, ce qui est
     /// vrai pour toute Source. Sans statut, cette trame **efface** le statut
     /// mémorisé côté cœur (une trame permanente sans statut vaut effacement,
     /// voir `SourceMessage::status`) — ce qui est correct ici, une Source sans
     /// statut permanent n'ayant rien à perdre. Une Source qui en déclare un à
     /// chaque trame (le cd) doit surcharger et repasser par sa propre logique
     /// de statut, sous peine de le voir disparaître à l'arrêt ; une Source qui
-    /// tient par ailleurs un état de lecture propre (toujours le cd) surcharge
+    /// tient par ailleurs un état de playback propre (toujours le cd) surcharge
     /// aussi pour le remettre à jour. Les autres compilent inchangées.
     async fn stop(&mut self) -> SourceOutcome {
         SourceOutcome::new(SourceAction::Noop).plays_nothing()
     }
 
-    /// Le lecteur est passé de lui-même à la piste d'index `n`.
+    /// Le player est passé de lui-même à la piste d'index `n`.
     ///
     /// Implémentation par défaut : rien — une radio n'a pas de pistes. Une Source
     /// qui suit un index (le cd) surcharge pour se recaler et rendre une identité
@@ -259,8 +259,8 @@ pub trait SourcePlugin: Send + 'static {
     async fn set_locale(&mut self, _locale: String) {}
 
     /// Les présélections nommées, si cette source sait les énumérer. Défaut : la
-    /// liste vide, qui veut dire « je n'ai que des numéros ». Le cd est dans ce
-    /// cas par nature — une piste n'a pas de nom sans base de données — et les
+    /// liste clear, qui veut dire « je n'ai que des numéros ». Le cd est dans ce
+    /// cas par nature — une piste n'a pas de name sans base de données — et les
     /// fichiers y restent pour l'instant : leur liste **est** la file d'attente,
     /// pas un jeu de présélections.
     ///
@@ -271,7 +271,7 @@ pub trait SourcePlugin: Send + 'static {
     }
 
     /// Notification spontanée (ex. changement de piste, arrivée différée d'une
-    /// TOC). Par défaut ne se termine jamais : un plugin sans notification
+    /// TOC). Par défaut ne se terminate jamais : un plugin sans notification
     /// spontanée (Radio) n'a rien à écrire de plus.
     ///
     /// Deux points de contrat, dictés par le `select!` du harnais :
@@ -291,10 +291,10 @@ pub trait SourcePlugin: Send + 'static {
     }
 }
 
-/// Lie le socket d'une Source, sans servir encore.
+/// Lie le socket d'une Source, sans serve encore.
 ///
 /// Séparé de `serve_source` pour que le `Runtime` puisse lier **tous** ses
-/// sockets avant de s'annoncer : c'est cet ordre qui fait de l'annonce une
+/// sockets avant de s'annoncer : c'est cet order qui fait de l'announcement une
 /// barrière de disponibilité.
 pub fn bind_source(socket_path: &Path) -> Result<UnixListener> {
     if let Some(parent) = socket_path.parent() {
@@ -311,7 +311,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
 
-    // Vrai tant que `poll_notification` n'a pas rendu `None` — qui est
+    // Vrai tant que `poll_notification` n'a pas rendition `None` — qui est
     // terminal (voir le trait) et désarme le bras correspondant du `select!`.
     let mut notifications_ouvertes = true;
 
@@ -348,11 +348,11 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     // liste est déjà là, à côté.
                     SourceReq::ListPresets => {
                         // Plus de garde ici : `SourceOutcome::presets` normalise
-                        // lui-même une liste vide en absence, pour tous ses
+                        // lui-même une liste clear en absence, pour tous ses
                         // appelants et non seulement pour ce bras (voir sa doc).
                         // Le corps par défaut de `list_presets` rend `Vec::new()`,
                         // donc une source qui n'énumère pas produit bien une trame
-                        // inerte — sans que ce chemin ait à y penser.
+                        // inerte — sans que ce path ait à y penser.
                         SourceOutcome::new(SourceAction::Noop)
                             .presets(plugin.list_presets().await)
                     }
@@ -369,12 +369,12 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     // Estampillé ici, une seule fois, plutôt que par un appel
                     // de constructeur sur chacun des dix chemins de
                     // déclaration d'un plugin : une capacité oubliée sur un
-                    // seul chemin donnerait un bouton qui clignote entre
-                    // actif et grisé au fil des trames.
+                    // seul path donnerait un bouton qui clignote entre
+                    // active et grisé au fil des trames.
                     can_eject: Some(plugin.can_eject()),
                     presets: outcome.presets,
                     // Une réponse à une requête (Activate, Select…) ne porte
-                    // jamais de pochette : `SourceOutcome` ne le déclare pas,
+                    // jamais de cover : `SourceOutcome` ne le déclare pas,
                     // seule la notification spontanée le fait (voir plus bas).
                     cover: None,
                 };
@@ -400,10 +400,10 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     }
                     // `None` est terminal (voir le trait) : désarmer le bras,
                     // sans quoi il serait re-pollé immédiatement et la boucle
-                    // tournerait à vide — 100 % CPU pendant que les requêtes
+                    // tournerait à clear — 100 % CPU pendant que les requêtes
                     // continuent d'être servies, la panne la plus discrète qui
                     // soit. Le cas est réel : le plugin cd rend `None` si sa
-                    // tâche de veille du lecteur meurt.
+                    // tâche de veille du player meurt.
                     None => {
                         tracing::warn!("no more spontaneous notifications (internal task ended)");
                         notifications_ouvertes = false;
@@ -415,7 +415,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
 }
 
 /// Enveloppe historique : lie puis sert. Conservée pour les appels directs et
-/// pour les tests de protocole, qui ne doivent pas bouger.
+/// pour les tests de protocol, qui ne doivent pas bouger.
 pub async fn run_source_plugin(plugin: impl SourcePlugin, socket_path: &Path) -> Result<()> {
     serve_source(bind_source(socket_path)?, plugin).await
 }
@@ -424,24 +424,24 @@ pub async fn run_source_plugin(plugin: impl SourcePlugin, socket_path: &Path) ->
 pub trait DisplayPlugin: Send + 'static {
     async fn show(&mut self, state: PlayerState) -> Result<()>;
 
-    /// Le catalogue des sources et de leurs présélections nommées.
+    /// Le sources_catalog des sources et de leurs présélections nommées.
     ///
     /// Défaut : **ignoré** — un afficheur de vingt colonnes n'en a que faire, et
-    /// c'est ce corps par défaut qui fait de chaque nouveau genre de trame une
+    /// c'est ce corps par défaut qui fait de chaque nouveau kind de trame une
     /// addition non cassante (voir `DisplayFrame`, fait pour grandir).
-    async fn catalogue(&mut self, _c: Catalogue) -> Result<()> {
+    async fn sources_catalog(&mut self, _c: SourcesCatalog) -> Result<()> {
         Ok(())
     }
 
-    /// Cet afficheur veut-il recevoir les octets des pochettes ?
+    /// Cet afficheur veut-il recevoir les bytes des pochettes ?
     ///
-    /// **Défaut : non.** Une pochette pèse jusqu'à
+    /// **Défaut : non.** Une cover pèse jusqu'à
     /// `ritornello_proto::COVER_MAX_BYTES`, et un afficheur de vingt colonnes
     /// n'en a que faire : le cœur ne doit pas lui pousser des mégaoctets qu'il
     /// jetterait. Un afficheur qui en veut redéfinit cette méthode, et c'est
-    /// **cette valeur-là** qui devient le drapeau de l'annonce — voir
-    /// `Runtime::display`. L'annonce est dérivée, jamais demandée : elle ne
-    /// peut donc pas mentir sur ce que le greffon fera des octets reçus.
+    /// **cette valeur-là** qui devient le drapeau de l'announcement — voir
+    /// `Runtime::display`. L'announcement est dérivée, jamais demandée : elle ne
+    /// peut donc pas mentir sur ce que le greffon fera des bytes reçus.
     ///
     /// Lue une seule fois, au moment de l'enregistrement : le drapeau part sur
     /// le socket d'enregistrement, et le cœur ne le relit jamais. Un afficheur
@@ -451,9 +451,9 @@ pub trait DisplayPlugin: Send + 'static {
         false
     }
 
-    /// Les octets de la pochette de ce qui joue.
+    /// Les bytes de la cover de ce qui plays.
     ///
-    /// Défaut : **ignoré** — comme `catalogue` ci-dessus, et pour la même
+    /// Défaut : **ignoré** — comme `sources_catalog` ci-dessus, et pour la même
     /// raison. Reçue seulement si `wants_covers` rend vrai ; le corps par
     /// défaut couvre un afficheur qui aurait demandé sans traiter, ce que le
     /// cœur n'a aucun moyen de distinguer.
@@ -462,10 +462,10 @@ pub trait DisplayPlugin: Send + 'static {
     }
 }
 
-/// Lie le socket d'un afficheur, sans servir encore.
+/// Lie le socket d'un afficheur, sans serve encore.
 ///
 /// Séparé de `serve_display` pour que le `Runtime` puisse lier **tous** ses
-/// sockets avant de s'annoncer : c'est cet ordre qui fait de l'annonce une
+/// sockets avant de s'annoncer : c'est cet order qui fait de l'announcement une
 /// barrière de disponibilité.
 pub fn bind_display(socket_path: &Path) -> Result<UnixListener> {
     if let Some(parent) = socket_path.parent() {
@@ -478,34 +478,34 @@ pub fn bind_display(socket_path: &Path) -> Result<UnixListener> {
 /// Accepte la connexion du cœur, puis affiche chaque état reçu jusqu'à
 /// fermeture. Protocole à sens unique : aucune réponse n'est attendue.
 ///
-/// Chaque ligne est une `DisplayFrame` : un `PlayerState` complet — pas une
+/// Chaque line est une `DisplayFrame` : un `PlayerState` complet — pas une
 /// vue déjà composée, la mise en page appartient au plugin (voir
-/// `ritornello-plugin-console::display`) —, un catalogue de sources, ou les
-/// octets d'une pochette. Cette dernière n'arrive **que** si le plugin a
+/// `ritornello-plugin-console::display`) —, un sources_catalog de sources, ou les
+/// bytes d'une cover. Cette dernière n'arrive **que** si le plugin a
 /// redéfini `wants_covers` : c'est le cœur qui ne l'envoie pas, pas ce SDK qui
 /// la filtre — un afficheur de vingt colonnes ne doit pas recevoir des
 /// mégaoctets sur son socket pour les jeter à l'arrivée.
 ///
-/// Une trame d'un genre que ce SDK ne connaît pas est traitée comme une ligne
+/// Une trame d'un kind que ce SDK ne connaît pas est traitée comme une line
 /// illisible : `warn` puis `continue`, la connexion survit. C'est la politique
-/// qui rend l'ajout d'un genre de trame non cassant dans les deux sens — et une
-/// ligne au-delà de `LIGNE_MAX` est traitée exactement pareil (voir
-/// `lit_ligne_bornee`), pour que la politique reste unique.
+/// qui rend l'ajout d'un kind de trame non cassant dans les deux sens — et une
+/// line au-delà de `MAX_LINE` est traitée exactement pareil (voir
+/// `read_line_bounded`), pour que la politique reste unique.
 pub async fn serve_display(listener: UnixListener, mut plugin: impl DisplayPlugin) -> Result<()> {
     let (stream, _) = listener.accept().await?;
     let (read, _write) = stream.into_split();
-    let mut lecteur = BufReader::new(read);
-    let mut tampon = Vec::new();
+    let mut player = BufReader::new(read);
+    let mut buffer = Vec::new();
     loop {
-        match lit_ligne_bornee(&mut lecteur, &mut tampon, LIGNE_MAX).await? {
-            LigneLue::Fin => return Ok(()),
-            LigneLue::TropLongue(vus) => {
-                tracing::warn!("display frame ignored: line over {LIGNE_MAX} bytes ({vus} seen)");
+        match read_line_bounded(&mut player, &mut buffer, MAX_LINE).await? {
+            LineRead::Eof => return Ok(()),
+            LineRead::TooLong(vus) => {
+                tracing::warn!("display frame ignored: line over {MAX_LINE} bytes ({vus} seen)");
                 continue;
             }
-            LigneLue::Ligne => {}
+            LineRead::Line => {}
         }
-        let frame: DisplayFrame = match serde_json::from_slice(&tampon) {
+        let frame: DisplayFrame = match serde_json::from_slice(&buffer) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("invalid display frame ignored: {e}");
@@ -514,112 +514,112 @@ pub async fn serve_display(listener: UnixListener, mut plugin: impl DisplayPlugi
         };
         match frame {
             DisplayFrame::State(state) => plugin.show(state).await?,
-            DisplayFrame::Catalogue(c) => plugin.catalogue(c).await?,
+            DisplayFrame::Catalog(c) => plugin.sources_catalog(c).await?,
             DisplayFrame::Cover(c) => plugin.cover(c).await?,
         }
     }
 }
 
-/// Plafond d'une ligne de ce protocole, en octets.
+/// Plafond d'une line de ce protocol, en bytes.
 ///
 /// **Une acceptation rouverte, pas un oubli.** Quand ce transport a été écrit,
-/// lire une ligne sans borne avait été accepté sur ce raisonnement : le cœur est
-/// le seul écrivain de ce socket, et borner le lecteur changerait la politique de
-/// ligne illisible que la conception a figée. Le plafond de pochette était alors
+/// read une line sans bounded avait été accepté sur ce raisonnement : le cœur est
+/// le seul écrivain de ce socket, et borner le player changerait la politique de
+/// line illisible que la conception a figée. Le cap de cover était alors
 /// de 2 Mio. Il est passé à 20 Mio sans que cette acceptation soit relue, et à
 /// cette valeur-là les deux moitiés du raisonnement ne tiennent plus :
 ///
-/// * Le plafond de `COVER_MAX_BYTES` est contrôlé **au décodage**, c'est-à-dire
-///   après que la ligne entière est résidente. Sa doc dit que « le producteur ne
-///   matérialise jamais au-delà » — vrai côté cœur, faux côté lecteur, qui n'avait
-///   aucune borne du tout. Pas 27 Mio : *ce que l'écrivain veut bien envoyer*. Une
-///   ligne sans saut de ligne faisait croître le `Vec` jusqu'à l'OOM, sur un
+/// * Le cap de `COVER_MAX_BYTES` est contrôlé **au décodage**, c'est-à-dire
+///   après que la line entière est résidente. Sa doc dit que « le producteur ne
+///   matérialise jamais au-delà » — vrai côté cœur, faux côté player, qui n'avait
+///   aucune bounded du tout. Pas 27 Mio : *ce que l'écrivain veut bien send_frame*. Une
+///   line sans saut de line faisait croître le `Vec` jusqu'à l'OOM, sur un
 ///   appareil à 1 Gio, dans un processus de greffon qui pèse normalement quelques
 ///   mégaoctets. « Le cœur est le seul écrivain » parle de *confiance* ; ça ne
-///   borne pas un `Vec`, et un cœur qui déraille reste un cœur.
-/// * La politique de ligne illisible, elle, ne change pas : une ligne trop longue
-///   est drainée jusqu'à son saut de ligne puis traitée comme une ligne
+///   bounded pas un `Vec`, et un cœur qui déraille reste un cœur.
+/// * La politique de line illisible, elle, ne change pas : une line trop longue
+///   est drainée jusqu'à son saut de line puis traitée comme une line
 ///   illisible — `warn`, `continue`, la connexion survit —, exactement comme une
-///   trame mal formée ou d'un genre inconnu. C'est ce qui rend le refus sans
-///   conséquence : une trame de pochette est **autonome**, en sauter une ne perd
+///   trame mal formée ou d'un kind inconnu. C'est ce qui rend le refus sans
+///   conséquence : une trame de cover est **autonome**, en sauter une ne perd
 ///   qu'une image.
 ///
-/// La valeur est celle de la plus grande ligne **légitime** : les 4/3 de
+/// La valeur est celle de la plus grande line **légitime** : les 4/3 de
 /// `COVER_MAX_BYTES` en base64, plus une marge d'enveloppe JSON (les clés, le
 /// `href`, le type MIME). Le contrôle de `COVER_MAX_BYTES` au décodage reste donc
-/// le seul juge des lignes de taille plausible — une image tout juste au-dessus du
-/// plafond est refusée par lui, avec son message, comme avant. Cette borne-ci ne
+/// le seul juge des lines de size plausible — une image tout juste au-dessus du
+/// cap est refusée par lui, avec son message, comme avant. Cette bounded-ci ne
 /// voit que la démesure.
-const LIGNE_MAX: usize = ritornello_proto::COVER_MAX_BYTES / 3 * 4 + 4 + 4096;
+const MAX_LINE: usize = ritornello_proto::COVER_MAX_BYTES / 3 * 4 + 4 + 4096;
 
-/// Issue d'une lecture de ligne bornée.
-enum LigneLue {
-    /// Une ligne complète est dans le tampon.
-    Ligne,
-    /// La ligne dépassait `LIGNE_MAX` : rien n'est dans le tampon, et le reste
-    /// de la ligne a été **consommé** jusqu'à son saut de ligne — sans quoi le
+/// Issue d'une playback de line bornée.
+enum LineRead {
+    /// Une line complète est dans le buffer.
+    Line,
+    /// La line dépassait `MAX_LINE` : rien n'est dans le buffer, et le reste
+    /// de la line a été **consommé** jusqu'à son saut de line — sans quoi le
     /// tour de boucle suivant relirait son milieu comme si c'était une trame.
-    /// Porte le nombre d'octets vus, pour que le journal dise l'ampleur.
-    TropLongue(usize),
-    /// Fin de flux : le pair a fermé.
-    Fin,
+    /// Porte le nombre d'bytes vus, pour que le journal dise l'ampleur.
+    TooLong(usize),
+    /// Eof de stream : le pair a fermé.
+    Eof,
 }
 
-/// Lit une ligne dans `tampon`, sans jamais y accumuler plus de `plafond`
-/// octets.
+/// Lit une line dans `buffer`, sans jamais y accumuler plus de `cap`
+/// bytes.
 ///
 /// Écrite à la main plutôt qu'avec `BufReader::lines()` ou `read_until` : les
-/// deux accumulent sans borne. `fill_buf`/`consume` permet de recopier ce qui
+/// deux accumulent sans bounded. `fill_buf`/`consume` permet de recopier ce qui
 /// est utile et de **jeter au fil de l'eau** ce qui dépasse, si bien que le pic
-/// résident est `plafond` plus le tampon interne du `BufReader`, quelle que
+/// résident est `cap` plus le buffer interne du `BufReader`, quelle que
 /// soit la longueur de ce que l'écrivain envoie.
 ///
-/// Le saut de ligne n'est pas recopié, comme `lines()` ne le recopiait pas. Une
-/// dernière ligne sans saut de ligne final est rendue quand même (`Ligne`), puis
+/// Le saut de line n'est pas recopié, comme `lines()` ne le recopiait pas. Une
+/// dernière line sans saut de line final est rendue quand même (`Line`), puis
 /// la fermeture est vue au tour suivant : même comportement que `lines()`.
 ///
-/// `plafond` est un **paramètre** et non `LIGNE_MAX` lu directement, pour que les
+/// `cap` est un **paramètre** et non `MAX_LINE` lu directement, pour que les
 /// tests éprouvent le drainage et la resynchronisation sur quelques dizaines
-/// d'octets. Les fabriquer à la vraie valeur coûterait 28 Mio par test, et le
+/// d'bytes. Les fabriquer à la vraie valeur coûterait 28 Mio par test, et le
 /// seul effet de cette dépense serait de charger la machine — la logique testée
-/// est la même à 16 octets qu'à 28 Mio, et c'est elle qui peut casser, pas la
+/// est la même à 16 bytes qu'à 28 Mio, et c'est elle qui peut casser, pas la
 /// constante.
-async fn lit_ligne_bornee<R: tokio::io::AsyncBufRead + Unpin>(
-    lecteur: &mut R,
-    tampon: &mut Vec<u8>,
-    plafond: usize,
-) -> std::io::Result<LigneLue> {
+async fn read_line_bounded<R: tokio::io::AsyncBufRead + Unpin>(
+    player: &mut R,
+    buffer: &mut Vec<u8>,
+    cap: usize,
+) -> std::io::Result<LineRead> {
     use tokio::io::AsyncBufReadExt as _;
-    tampon.clear();
+    buffer.clear();
     let mut vus = 0usize;
     let mut trop_longue = false;
     loop {
         // Le contenu disponible est recopié **puis** consommé dans le même tour :
-        // l'emprunt sur `lecteur` doit finir avant l'appel à `consume`, d'où le
+        // l'emprunt sur `player` doit finir avant l'appel à `consume`, d'où le
         // bloc.
         let (fini, consomme) = {
-            let dispo = lecteur.fill_buf().await?;
+            let dispo = player.fill_buf().await?;
             if dispo.is_empty() {
-                // Fin de flux. Une ligne non terminée déjà commencée est rendue,
-                // une ligne trop longue reste un refus.
+                // Eof de stream. Une line non terminée déjà commencée est rendue,
+                // une line trop longue reste un refus.
                 if trop_longue {
-                    return Ok(LigneLue::TropLongue(vus));
+                    return Ok(LineRead::TooLong(vus));
                 }
-                return Ok(if vus == 0 { LigneLue::Fin } else { LigneLue::Ligne });
+                return Ok(if vus == 0 { LineRead::Eof } else { LineRead::Line });
             }
             match dispo.iter().position(|b| *b == b'\n') {
                 Some(i) => {
                     if !trop_longue {
-                        tampon.extend_from_slice(&dispo[..i]);
-                        // Contrôlé sur cette branche aussi. Le tampon interne du
+                        buffer.extend_from_slice(&dispo[..i]);
+                        // Contrôlé sur cette branche aussi. Le buffer interne du
                         // `BufReader` (8 Kio) ne peut pas rendre d'un coup une
-                        // ligne de plus de `plafond`, mais faire dépendre la
-                        // borne de cette taille-là serait la faire dépendre d'un
+                        // line de plus de `cap`, mais faire dépendre la
+                        // bounded de cette size-là serait la faire dépendre d'un
                         // détail d'implémentation.
-                        if tampon.len() > plafond {
+                        if buffer.len() > cap {
                             trop_longue = true;
-                            tampon.clear();
-                            tampon.shrink_to_fit();
+                            buffer.clear();
+                            buffer.shrink_to_fit();
                         }
                     }
                     vus += i;
@@ -628,29 +628,29 @@ async fn lit_ligne_bornee<R: tokio::io::AsyncBufRead + Unpin>(
                 None => {
                     vus += dispo.len();
                     if !trop_longue {
-                        tampon.extend_from_slice(dispo);
-                        if tampon.len() > plafond {
-                            // Bascule irréversible pour cette ligne : le tampon
-                            // est rendu tout de suite plutôt que gardé jusqu'au
-                            // saut de ligne, et la suite est lue pour être jetée.
+                        buffer.extend_from_slice(dispo);
+                        if buffer.len() > cap {
+                            // Bascule irréversible pour cette line : le buffer
+                            // est rendition tout de suite plutôt que gardé jusqu'au
+                            // saut de line, et la suite est lue pour être jetée.
                             trop_longue = true;
-                            tampon.clear();
-                            tampon.shrink_to_fit();
+                            buffer.clear();
+                            buffer.shrink_to_fit();
                         }
                     }
                     (false, dispo.len())
                 }
             }
         };
-        lecteur.consume(consomme);
+        player.consume(consomme);
         if fini {
-            return Ok(if trop_longue { LigneLue::TropLongue(vus) } else { LigneLue::Ligne });
+            return Ok(if trop_longue { LineRead::TooLong(vus) } else { LineRead::Line });
         }
     }
 }
 
 /// Enveloppe historique : lie puis sert. Conservée pour les appels directs et
-/// pour les tests de protocole, qui ne doivent pas bouger.
+/// pour les tests de protocol, qui ne doivent pas bouger.
 pub async fn run_display_plugin(plugin: impl DisplayPlugin, socket_path: &Path) -> Result<()> {
     serve_display(bind_display(socket_path)?, plugin).await
 }
@@ -662,10 +662,10 @@ pub trait InputPlugin: Send + 'static {
     async fn next_command(&mut self) -> Result<InputMessage>;
 }
 
-/// Lie le socket d'une entrée, sans servir encore.
+/// Lie le socket d'une entrée, sans serve encore.
 ///
 /// Séparé de `serve_input` pour que le `Runtime` puisse lier **tous** ses
-/// sockets avant de s'annoncer : c'est cet ordre qui fait de l'annonce une
+/// sockets avant de s'annoncer : c'est cet order qui fait de l'announcement une
 /// barrière de disponibilité.
 pub fn bind_input(socket_path: &Path) -> Result<UnixListener> {
     if let Some(parent) = socket_path.parent() {
@@ -677,7 +677,7 @@ pub fn bind_input(socket_path: &Path) -> Result<UnixListener> {
 
 /// Accepte la connexion du cœur, puis relaie chaque `InputMessage` produit par
 /// le plugin. `held: false` n'est pas sérialisé (voir `InputMessage`), donc
-/// les octets sur le fil restent inchangés pour les commandes non maintenues
+/// les bytes sur le fil restent inchangés pour les commands non maintenues
 /// — un cœur d'avant Tâche 1 déserialiserait la trame sans rien y voir de
 /// nouveau.
 pub async fn serve_input(listener: UnixListener, mut plugin: impl InputPlugin) -> Result<()> {
@@ -690,18 +690,18 @@ pub async fn serve_input(listener: UnixListener, mut plugin: impl InputPlugin) -
 }
 
 /// Enveloppe historique : lie puis sert. Conservée pour les appels directs et
-/// pour les tests de protocole, qui ne doivent pas bouger.
+/// pour les tests de protocol, qui ne doivent pas bouger.
 pub async fn run_input_plugin(plugin: impl InputPlugin, socket_path: &Path) -> Result<()> {
     serve_input(bind_input(socket_path)?, plugin).await
 }
 
 #[async_trait::async_trait]
 pub trait MetadataPlugin: Send + 'static {
-    /// Ce qui joue a changé. Le plugin décide seul s'il sait faire quelque
+    /// Ce qui plays a changé. Le plugin décide seul s'il sait faire quelque
     /// chose de cette identité ; s'il ne la reconnaît pas, il se tait.
     async fn now_playing(&mut self, np: NowPlaying);
 
-    /// Prochain enrichissement disponible. Ne se termine jamais s'il n'y a
+    /// Prochain enrichment disponible. Ne se terminate jamais s'il n'y a
     /// rien à dire (même convention que `poll_notification`).
     ///
     /// **Doit être annulable sans perte** : ce futur est abandonné dès qu'un
@@ -711,10 +711,10 @@ pub trait MetadataPlugin: Send + 'static {
     async fn next_enrichment(&mut self) -> Enrichment;
 }
 
-/// Lie le socket d'un plugin de métadonnées, sans servir encore.
+/// Lie le socket d'un plugin de métadonnées, sans serve encore.
 ///
 /// Séparé de `serve_metadata` pour que le `Runtime` puisse lier **tous** ses
-/// sockets avant de s'annoncer : c'est cet ordre qui fait de l'annonce une
+/// sockets avant de s'annoncer : c'est cet order qui fait de l'announcement une
 /// barrière de disponibilité.
 pub fn bind_metadata(socket_path: &Path) -> Result<UnixListener> {
     if let Some(parent) = socket_path.parent() {
@@ -725,7 +725,7 @@ pub fn bind_metadata(socket_path: &Path) -> Result<UnixListener> {
 }
 
 /// Accepte la connexion du cœur, puis relaie dans les deux sens jusqu'à
-/// fermeture : chaque ligne reçue est un `NowPlaying`, chaque enrichissement
+/// fermeture : chaque line reçue est un `NowPlaying`, chaque enrichment
 /// produit part sur le fil. Aucune corrélation par `id` : les deux sens sont
 /// indépendants.
 pub async fn serve_metadata(listener: UnixListener, mut plugin: impl MetadataPlugin) -> Result<()> {
@@ -743,15 +743,15 @@ pub async fn serve_metadata(listener: UnixListener, mut plugin: impl MetadataPlu
                 }
             }
             enrichment = plugin.next_enrichment() => {
-                let ligne = format!("{}\n", serde_json::to_string(&enrichment)?);
-                write.write_all(ligne.as_bytes()).await?;
+                let line = format!("{}\n", serde_json::to_string(&enrichment)?);
+                write.write_all(line.as_bytes()).await?;
             }
         }
     }
 }
 
 /// Enveloppe historique : lie puis sert. Conservée pour les appels directs et
-/// pour les tests de protocole, qui ne doivent pas bouger.
+/// pour les tests de protocol, qui ne doivent pas bouger.
 pub async fn run_metadata_plugin(plugin: impl MetadataPlugin, socket_path: &Path) -> Result<()> {
     serve_metadata(bind_metadata(socket_path)?, plugin).await
 }
@@ -761,19 +761,19 @@ use std::collections::HashMap;
 
 #[async_trait::async_trait]
 pub trait AdminPlugin: Send + Sync + 'static {
-    /// Actif d'IHM : `(mime, corps)`, ou `None` si le chemin est inconnu.
+    /// Actif d'IHM : `(mime, corps)`, ou `None` si le path est inconnu.
     /// Typiquement `ui.js` et `ui.css`, embarqués par `include_str!`.
     fn asset(&self, path: &str) -> Option<(String, String)>;
-    /// Catalogue i18n du plugin dans la langue courante, à plat.
+    /// SourcesCatalog i18n du plugin dans la langue courante, à plat.
     fn catalog(&self) -> serde_json::Value;
     async fn get_data(&self) -> serde_json::Value;
     async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String>;
 }
 
-/// Lie le socket d'un plugin admin, sans servir encore.
+/// Lie le socket d'un plugin admin, sans serve encore.
 ///
 /// Séparé de `serve_admin` pour que le `Runtime` puisse lier **tous** ses
-/// sockets avant de s'annoncer : c'est cet ordre qui fait de l'annonce une
+/// sockets avant de s'annoncer : c'est cet order qui fait de l'announcement une
 /// barrière de disponibilité.
 pub fn bind_admin(socket_path: &Path) -> Result<UnixListener> {
     if let Some(parent) = socket_path.parent() {
@@ -786,11 +786,11 @@ pub fn bind_admin(socket_path: &Path) -> Result<UnixListener> {
 /// Accepte la connexion du cœur, puis traite les requêtes admin **en
 /// parallèle** : une tâche par requête, un seul écrivain sur la socket.
 ///
-/// Historiquement sériel (lire, attendre, écrire, relire), ce qui faisait
+/// Historiquement sériel (read, attendre, écrire, relire), ce qui faisait
 /// qu'un `set_data` qui montait un partage réseau endormi retenait `ui.js`,
-/// un simple `include_str!`, jusqu'au plafond du cœur — la page d'admin
-/// « disparaissait ». Les réponses partent maintenant dans l'ordre où elles
-/// aboutissent ; c'est l'`id` qui les corrèle, pas l'ordre.
+/// un simple `include_str!`, jusqu'au cap du cœur — la page d'admin
+/// « disparaissait ». Les réponses partent maintenant dans l'order où elles
+/// aboutissent ; c'est l'`id` qui les corrèle, pas l'order.
 ///
 /// Le greffon est derrière un `RwLock` : `asset`, `catalog`, `get_data`
 /// lisent en parallèle, `set_data` est exclusif — il l'est légitimement, c'est
@@ -799,9 +799,9 @@ pub fn bind_admin(socket_path: &Path) -> Result<UnixListener> {
 /// 60 s répond `Expired` à son échéance au lieu de se taire.
 ///
 /// `Ping` ne prend aucun verrou : c'est ce qui permet au cœur de distinguer
-/// « occupé » de « mort ». Les **actifs** n'en prennent pas non plus une fois
+/// « occupé » de « mort ». Les **active** n'en prennent pas non plus une fois
 /// vus : un bundle est immuable pour la durée de vie du processus, donc il est
-/// mis en cache ici, et les deux noms conventionnels (`ui.js`, `ui.css`) sont
+/// mis en cache ici, et les deux names conventionnels (`ui.js`, `ui.css`) sont
 /// chargés avant la première requête. Sans cela, le `RwLock` étant équitable
 /// (FIFO), un `GetAsset` arrivé après un `set_data` en file attendrait derrière
 /// lui — exactement l'incident que ce découplage veut clore.
@@ -809,15 +809,15 @@ pub fn bind_admin(socket_path: &Path) -> Result<UnixListener> {
 /// Ce que le budget **n'absorbe pas** : `tokio::time::timeout` abandonne le
 /// futur au prochain point d'`await`, donc un `set_data` interrompu relâche le
 /// verrou — mais une IO bloquante dans un `spawn_blocking` court jusqu'au bout.
-/// Les greffons qui touchent un chemin réseau gardent donc l'obligation
-/// d'exécuter hors fil et sous disjoncteur (voir `plugin-files/src/sante.rs`).
+/// Les plugins qui touchent un path réseau gardent donc l'obligation
+/// d'exécuter hors fil et sous disjoncteur (voir `plugin-files/src/health.rs`).
 pub async fn serve_admin(listener: UnixListener, plugin: impl AdminPlugin) -> Result<()> {
-    // Les actifs conventionnels sont lus **avant** d'accepter : le verrou est
+    // Les active conventionnels sont lus **avant** d'accepter : le verrou est
     // forcément libre, et le cœur les demandera dès la première page.
-    let actifs: std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>> = Default::default();
-    for nom in ["ui.js", "ui.css"] {
-        if let Some(a) = plugin.asset(nom) {
-            actifs.lock().unwrap().insert(nom.to_string(), a);
+    let active: std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>> = Default::default();
+    for name in ["ui.js", "ui.css"] {
+        if let Some(a) = plugin.asset(name) {
+            active.lock().unwrap().insert(name.to_string(), a);
         }
     }
     let (stream, _) = listener.accept().await?;
@@ -829,14 +829,14 @@ pub async fn serve_admin(listener: UnixListener, plugin: impl AdminPlugin) -> Re
     // traitements.
     let ecrivain = tokio::spawn(async move {
         while let Some(resp) = rx.recv().await {
-            let ligne = match serde_json::to_string(&resp) {
+            let line = match serde_json::to_string(&resp) {
                 Ok(l) => l,
                 Err(e) => {
                     tracing::warn!("admin response not serializable: {e}");
                     continue;
                 }
             };
-            if write.write_all(format!("{ligne}\n").as_bytes()).await.is_err() {
+            if write.write_all(format!("{line}\n").as_bytes()).await.is_err() {
                 break;
             }
         }
@@ -852,12 +852,12 @@ pub async fn serve_admin(listener: UnixListener, plugin: impl AdminPlugin) -> Re
             }
         };
         let plugin = plugin.clone();
-        let actifs = actifs.clone();
+        let active = active.clone();
         let tx = tx.clone();
         tokio::spawn(async move {
             let id = req.id;
             let budget = req.deadline_ms.map(std::time::Duration::from_millis);
-            let travail = traite_admin(plugin, actifs, req.req);
+            let travail = handle_admin(plugin, active, req.req);
             let result = match budget {
                 Some(d) => match tokio::time::timeout(d, travail).await {
                     Ok(r) => r,
@@ -877,21 +877,21 @@ pub async fn serve_admin(listener: UnixListener, plugin: impl AdminPlugin) -> Re
     Ok(())
 }
 
-async fn traite_admin<P: AdminPlugin>(
+async fn handle_admin<P: AdminPlugin>(
     plugin: std::sync::Arc<tokio::sync::RwLock<P>>,
-    actifs: std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,
+    active: std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,
     req: AdminReq,
 ) -> AdminResult {
     match req {
         AdminReq::Ping => AdminResult::Pong,
         AdminReq::GetAsset(path) => {
-            let connu = actifs.lock().unwrap().get(&path).cloned();
+            let connu = active.lock().unwrap().get(&path).cloned();
             let trouve = match connu {
                 Some(a) => Some(a),
                 None => {
                     let lu = plugin.read().await.asset(&path);
                     if let Some(a) = &lu {
-                        actifs.lock().unwrap().insert(path.clone(), a.clone());
+                        active.lock().unwrap().insert(path.clone(), a.clone());
                     }
                     lu
                 }
@@ -911,7 +911,7 @@ async fn traite_admin<P: AdminPlugin>(
 }
 
 /// Enveloppe historique : lie puis sert. Conservée pour les appels directs et
-/// pour les tests de protocole, qui ne doivent pas bouger.
+/// pour les tests de protocol, qui ne doivent pas bouger.
 pub async fn run_admin_plugin(plugin: impl AdminPlugin, socket_path: &Path) -> Result<()> {
     serve_admin(bind_admin(socket_path)?, plugin).await
 }
@@ -971,7 +971,7 @@ mod admin_server_tests {
         (BufReader::new(r), w)
     }
 
-    async fn ligne(r: &mut BufReader<tokio::net::unix::OwnedReadHalf>) -> AdminResponse {
+    async fn line(r: &mut BufReader<tokio::net::unix::OwnedReadHalf>) -> AdminResponse {
         let mut s = String::new();
         r.read_line(&mut s).await.unwrap();
         serde_json::from_str(&s).unwrap()
@@ -981,16 +981,16 @@ mod admin_server_tests {
     async fn un_set_data_lent_ne_retient_pas_ui_js() {
         // L'incident du partage muet : la boucle admin était sérielle, donc un
         // seul appel système qui n'aboutit pas retenait `ui.js`, un simple
-        // `include_str!`. Ici `set_data` dort 3 s ; l'actif doit revenir bien
+        // `include_str!`. Ici `set_data` dort 3 s ; l'active doit revenir bien
         // avant, et **avant** la réponse du set.
         let (mut r, mut w) = client_connecte(fake_lent(3)).await;
         w.write_all(b"{\"id\":1,\"req\":\"SetData\",\"arg\":{}}\n").await.unwrap();
         w.write_all(b"{\"id\":2,\"req\":\"GetAsset\",\"arg\":\"ui.js\"}\n").await.unwrap();
         let debut = std::time::Instant::now();
-        let premiere = ligne(&mut r).await;
-        assert_eq!(premiere.id, 2, "l'actif doit repondre avant le set lent");
+        let premiere = line(&mut r).await;
+        assert_eq!(premiere.id, 2, "l'active doit repondre avant le set lent");
         assert!(debut.elapsed() < std::time::Duration::from_secs(1), "{:?}", debut.elapsed());
-        let seconde = ligne(&mut r).await;
+        let seconde = line(&mut r).await;
         assert_eq!(seconde.id, 1);
         assert_eq!(seconde.result, AdminResult::Set { ok: true, error: None });
     }
@@ -1002,7 +1002,7 @@ mod admin_server_tests {
         let (mut r, mut w) = client_connecte(fake_lent(3)).await;
         w.write_all(b"{\"id\":1,\"deadline_ms\":200,\"req\":\"SetData\",\"arg\":{}}\n").await.unwrap();
         let debut = std::time::Instant::now();
-        let rep = ligne(&mut r).await;
+        let rep = line(&mut r).await;
         assert_eq!(rep.result, AdminResult::Expired);
         assert!(debut.elapsed() < std::time::Duration::from_secs(2), "{:?}", debut.elapsed());
     }
@@ -1012,19 +1012,19 @@ mod admin_server_tests {
         let (mut r, mut w) = client_connecte(fake_lent(3)).await;
         w.write_all(b"{\"id\":1,\"req\":\"SetData\",\"arg\":{}}\n").await.unwrap();
         w.write_all(b"{\"id\":2,\"deadline_ms\":500,\"req\":\"Ping\"}\n").await.unwrap();
-        let rep = ligne(&mut r).await;
+        let rep = line(&mut r).await;
         assert_eq!((rep.id, rep.result), (2, AdminResult::Pong));
     }
 
     #[tokio::test]
     async fn get_catalog_attend_le_verrou_dans_son_budget_puis_expire() {
-        // Le catalogue lit l'état du greffon, donc attend la fin d'un
+        // Le sources_catalog read l'état du greffon, donc attend la fin d'un
         // `set_data` en cours ; si le budget est plus court que ce set, c'est
         // `Expired`, pas un silence.
         let (mut r, mut w) = client_connecte(fake_lent(3)).await;
         w.write_all(b"{\"id\":1,\"req\":\"SetData\",\"arg\":{}}\n").await.unwrap();
         w.write_all(b"{\"id\":2,\"deadline_ms\":300,\"req\":\"GetCatalog\"}\n").await.unwrap();
-        let rep = ligne(&mut r).await;
+        let rep = line(&mut r).await;
         assert_eq!((rep.id, rep.result), (2, AdminResult::Expired));
     }
 
@@ -1091,15 +1091,15 @@ mod tests {
     fn une_liste_vide_devient_une_absence_sur_les_deux_constructeurs() {
         // Les **deux**, dans le même test, parce que c'est leur divergence qui
         // était le défaut : `SourceOutcome::presets` se contentait de demander
-        // « appelez-moi avec une liste non vide » et `Notification::presets` ne
+        // « appelez-moi avec une liste non clear » et `Notification::presets` ne
         // disait rien du tout. Une Source suivant la documentation à la lettre
-        // relayait donc une liste vide par le chemin spontané — une trame qui ne
+        // relayait donc une liste clear par le path spontané — une trame qui ne
         // déclare rien. La propriété est maintenant dérivée des deux côtés, et
         // c'est ce que ce test épingle.
         assert_eq!(
             SourceOutcome::new(SourceAction::Noop).presets(Vec::new()).presets,
             None,
-            "SourceOutcome doit normaliser la liste vide en absence"
+            "SourceOutcome doit normaliser la liste clear en absence"
         );
         assert_eq!(
             Notification::new().presets(Vec::new()).presets,
@@ -1227,21 +1227,21 @@ mod tests {
 
     #[tokio::test]
     async fn can_eject_est_estampille_sur_les_deux_chemins_de_trame() {
-        // **La ligne porteuse que rien n'épinglait.** `serve_source` écrit deux
+        // **La line porteuse que rien n'épinglait.** `serve_source` écrit deux
         // sortes de trames — la réponse corrélée à une requête, et la
         // notification spontanée — et estampille `can_eject: Some(…)` sur
         // chacune. C'est l'un des deux mécanismes qui tiennent fermée une classe
         // de défaut apparue **trois fois** dans ce chantier : une trame relayée
         // qui ne déclare ni identité ni statut *efface* le statut mémorisé de la
         // source côté cœur, et c'est l'estampille qui garantit que le prédicat de
-        // trame intéressante voit toujours quelque chose. Un chemin oublié, et
+        // trame intéressante voit toujours quelque chose. Un path oublié, et
         // « PAS DE DISQUE » disparaîtrait de l'écran.
         //
         // Les **deux** chemins dans un seul test, parce que c'est la double
-        // estampille qui est la propriété : la prouver sur un seul chemin
+        // estampille qui est la propriété : la prouver sur un seul path
         // laisserait l'autre libre de régresser.
         //
-        // La notification ne porte qu'une **pochette**, sans identité ni statut :
+        // La notification ne porte qu'une **cover**, sans identité ni statut :
         // c'est la forme réelle d'une notification spontanée de production, celle
         // qui a justement besoin de l'estampille pour être relayée.
         struct SourceEjectable {
@@ -1287,8 +1287,8 @@ mod tests {
         let mut lines = BufReader::new(read).lines();
         write.write_all(b"{\"id\":1,\"req\":\"Activate\"}\n").await.unwrap();
 
-        // Les deux trames arrivent dans un ordre que l'ordre des bras du
-        // `select!` ne garantit pas : on lit les deux et on les trie sur `id`,
+        // Les deux trames arrivent dans un order que l'order des bras du
+        // `select!` ne garantit pas : on read les deux et on les trie sur `id`,
         // plutôt que de supposer laquelle vient d'abord. Aucune marge de temps —
         // les deux doivent arriver, donc les deux sont attendues.
         let mut correlee = None;
@@ -1308,14 +1308,14 @@ mod tests {
         assert_eq!(
             correlee.can_eject,
             Some(true),
-            "chemin 1 : la reponse correlee doit estampiller la capacite : {ligne_c}"
+            "path 1 : la reponse correlee doit estampiller la capacite : {ligne_c}"
         );
 
         let (spontanee, ligne_s) = spontanee.expect("la notification spontanee");
         assert_eq!(
             spontanee.cover,
             Some(ritornello_proto::CoverRef::Path { path: "/mnt/nas/A/folder.jpg".into() }),
-            "la notification testee doit bien etre celle qui ne porte qu'une pochette : {ligne_s}"
+            "la notification testee doit bien etre celle qui ne porte qu'une cover : {ligne_s}"
         );
         assert!(
             spontanee.identity.is_none() && spontanee.status.is_none(),
@@ -1325,11 +1325,11 @@ mod tests {
         assert_eq!(
             spontanee.can_eject,
             Some(true),
-            "chemin 2 : la notification spontanee doit estampiller la capacite aussi : {ligne_s}"
+            "path 2 : la notification spontanee doit estampiller la capacite aussi : {ligne_s}"
         );
     }
 
-    /// Source dont le flux de notifications se tarit : premier appel `None`,
+    /// Source dont le stream de notifications se tarit : premier appel `None`,
     /// puis compte les re-polls — il ne doit pas y en avoir.
     struct SourceTarie {
         polls: std::sync::Arc<std::sync::atomic::AtomicU32>,
@@ -1362,7 +1362,7 @@ mod tests {
         // Régression (revue 2026-07-27) : `None` était ignoré et le bras
         // re-pollé immédiatement — boucle chaude à 100 % CPU pendant que les
         // requêtes continuaient d'être servies. Le cas est réel : le plugin cd
-        // rend `None` si sa tâche de veille du lecteur meurt.
+        // rend `None` si sa tâche de veille du player meurt.
         let polls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("plugin.sock");
@@ -1384,7 +1384,7 @@ mod tests {
         let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(msg.id, Some(1));
         // …et le `None` n'a été lu qu'une fois : pas de re-poll. La pause
-        // laisse à la boucle le temps de consommer le `None` (l'ordre des bras
+        // laisse à la boucle le temps de consommer le `None` (l'order des bras
         // d'un `select!` est aléatoire) — avec l'ancien code, le compteur
         // serait à 2 ici, le bras ayant été re-pollé aussitôt.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1551,7 +1551,7 @@ mod tests {
     #[tokio::test]
     async fn une_source_qui_nenumere_pas_ne_declare_aucune_liste() {
         // `EchoSource` ne surcharge PAS `list_presets` : le corps par défaut
-        // rend `Vec::new()`, et le bras doit le taire — « pas de noms » et
+        // rend `Vec::new()`, et le bras doit le taire — « pas de names » et
         // « rien dit » étant le même propos, une seule des deux écritures
         // voyage.
         //
@@ -1586,8 +1586,8 @@ mod tests {
 
     #[tokio::test]
     async fn une_notification_spontanee_peut_republier_les_preselections() {
-        // Le chemin du renommage : la radio réenregistre sa configuration et
-        // repousse son catalogue sans qu'on le lui redemande. La trame est
+        // Le path du renommage : la radio réenregistre sa configuration et
+        // repousse son sources_catalog sans qu'on le lui redemande. La trame est
         // spontanée (aucun `id`) et ne porte aucune action.
         struct Renommante {
             emis: bool,
@@ -1637,7 +1637,7 @@ mod tests {
 
     #[tokio::test]
     async fn une_notification_spontanee_porte_lidentite() {
-        // C'est le chemin du changement de piste d'un disque et de l'arrivée
+        // C'est le path du changement de piste d'un disque et de l'arrivée
         // différée d'une TOC : aucune requête du cœur, mais l'identité change.
         struct Spontanee {
             emis: bool,
@@ -1697,7 +1697,7 @@ mod tests {
         }
         let (read, mut write) = client.expect("connexion au plugin").into_split();
         let mut lines = BufReader::new(read).lines();
-        // Ligne malformée : doit être ignorée (warn + continue), sans fermer la connexion.
+        // Line malformée : doit être ignorée (warn + continue), sans fermer la connexion.
         write.write_all(b"ceci n'est pas du json\n").await.unwrap();
         // Requête valide ensuite : réponse normale attendue.
         write.write_all(b"{\"id\":7,\"req\":\"Activate\"}\n").await.unwrap();
@@ -1724,7 +1724,7 @@ mod tests {
         // La scission ne doit rien changer au comportement observable : un
         // socket lié par `bind_display` accepte une connexion AVANT que
         // `serve_display` ne tourne (c'est le backlog du noyau, et c'est ce
-        // qui rend l'annonce du Runtime fiable).
+        // qui rend l'announcement du Runtime fiable).
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("d.sock");
         let listener = bind_display(&socket).unwrap();
@@ -1750,7 +1750,7 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        panic!("l'etat n'a pas atteint le plugin");
+        panic!("l'state n'a pas atteint le plugin");
     }
 }
 
@@ -1810,8 +1810,8 @@ mod display_tests {
     #[tokio::test]
     async fn un_afficheur_qui_ignore_le_catalogue_recoit_quand_meme_les_etats() {
         // La propriété du corps par défaut : `RecordingDisplay` ne surcharge pas
-        // `catalogue` — comme `console` et les trois autres bouchons, qui n'ont
-        // pas été touchés — et une trame de catalogue ne doit ni le casser, ni
+        // `sources_catalog` — comme `console` et les trois autres bouchons, qui n'ont
+        // pas été touchés — et une trame de sources_catalog ne doit ni le casser, ni
         // lui faire perdre la trame suivante.
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("display.sock");
@@ -1825,9 +1825,9 @@ mod display_tests {
         let (_r, mut w) = stream.into_split();
         use tokio::io::AsyncWriteExt;
 
-        // D'abord le catalogue, que ce plugin ignore…
-        let cat = DisplayFrame::Catalogue(Catalogue {
-            sources: vec![ritornello_proto::SourceCatalogue {
+        // D'abord le sources_catalog, que ce plugin ignore…
+        let cat = DisplayFrame::Catalog(SourcesCatalog {
+            sources: vec![ritornello_proto::SourceCatalog {
                 name: "radio".into(),
                 presets: vec![Preset { index: 1, name: "FIP".into() }],
             }],
@@ -1837,8 +1837,8 @@ mod display_tests {
             .unwrap();
         // …puis l'état, qui doit arriver.
         let e = PlayerState { source: "radio".into(), preset: Some(1), ..Default::default() };
-        let etat = DisplayFrame::State(e.clone());
-        w.write_all(format!("{}\n", serde_json::to_string(&etat).unwrap()).as_bytes())
+        let state = DisplayFrame::State(e.clone());
+        w.write_all(format!("{}\n", serde_json::to_string(&state).unwrap()).as_bytes())
             .await
             .unwrap();
 
@@ -1848,30 +1848,30 @@ mod display_tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        // Un seul reçu, et c'est bien l'état : le catalogue n'a pas été pris
-        // pour un état vide, et n'a pas fait tomber la connexion.
+        // Un seul reçu, et c'est bien l'état : le sources_catalog n'a pas été pris
+        // pour un état clear, et n'a pas fait tomber la connexion.
         assert_eq!(
             etats.lock().unwrap().as_slice(),
             &[e],
-            "l'etat doit passer malgre le catalogue, et le catalogue ne doit pas passer pour un etat"
+            "l'state doit passer malgre le sources_catalog, et le sources_catalog ne doit pas passer pour un state"
         );
     }
 
     #[tokio::test]
     async fn un_afficheur_interesse_recoit_le_catalogue() {
-        // Le pendant : le corps par défaut ne doit pas *avaler* le catalogue.
+        // Le pendant : le corps par défaut ne doit pas *avaler* le sources_catalog.
         // Sans le bras d'aiguillage de `serve_display`, ce plugin ne verrait
         // jamais rien.
         #[derive(Clone, Default)]
         struct Interesse {
-            catalogues: Arc<Mutex<Vec<Catalogue>>>,
+            catalogues: Arc<Mutex<Vec<SourcesCatalog>>>,
         }
         #[async_trait::async_trait]
         impl DisplayPlugin for Interesse {
             async fn show(&mut self, _state: PlayerState) -> Result<()> {
                 Ok(())
             }
-            async fn catalogue(&mut self, c: Catalogue) -> Result<()> {
+            async fn sources_catalog(&mut self, c: SourcesCatalog) -> Result<()> {
                 self.catalogues.lock().unwrap().push(c);
                 Ok(())
             }
@@ -1888,13 +1888,13 @@ mod display_tests {
         let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
         let (_r, mut w) = stream.into_split();
         use tokio::io::AsyncWriteExt;
-        let attendu = Catalogue {
-            sources: vec![ritornello_proto::SourceCatalogue {
+        let attendu = SourcesCatalog {
+            sources: vec![ritornello_proto::SourceCatalog {
                 name: "radio".into(),
                 presets: vec![Preset { index: 99, name: "Nova".into() }],
             }],
         };
-        let trame = DisplayFrame::Catalogue(attendu.clone());
+        let trame = DisplayFrame::Catalog(attendu.clone());
         w.write_all(format!("{}\n", serde_json::to_string(&trame).unwrap()).as_bytes())
             .await
             .unwrap();
@@ -1909,12 +1909,12 @@ mod display_tests {
 
     #[tokio::test]
     async fn une_trame_illisible_ne_ferme_pas_la_connexion() {
-        // La politique de ligne illisible ne change pas avec l'enveloppe :
-        // `warn` puis `continue`. Une trame d'un genre que ce SDK ne connaît pas
-        // tombe dans le même cas — c'est ce qui rend l'ajout d'un genre non
-        // cassant dans les deux sens. Une trame d'un genre **connu** dont la
+        // La politique de line illisible ne change pas avec l'enveloppe :
+        // `warn` puis `continue`. Une trame d'un kind que ce SDK ne connaît pas
+        // tombe dans le même cas — c'est ce qui rend l'ajout d'un kind non
+        // cassant dans les deux sens. Une trame d'un kind **connu** dont la
         // charge utile est mal formée (le `cover` sans ses champs ci-dessous)
-        // aussi : c'est le même chemin d'erreur de serde.
+        // aussi : c'est le même path d'erreur de serde.
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("display.sock");
         let listener = bind_display(&socket).unwrap();
@@ -1928,10 +1928,10 @@ mod display_tests {
         use tokio::io::AsyncWriteExt;
         w.write_all(b"ceci n'est pas du json\n").await.unwrap();
         w.write_all(b"{\"frame\":\"cover\",\"data\":{\"url\":\"x\"}}\n").await.unwrap();
-        w.write_all(b"{\"frame\":\"genre-inexistant\",\"data\":{}}\n").await.unwrap();
+        w.write_all(b"{\"frame\":\"kind-inexistant\",\"data\":{}}\n").await.unwrap();
         let e = PlayerState { source: "cd".into(), ..Default::default() };
-        let etat = DisplayFrame::State(e.clone());
-        w.write_all(format!("{}\n", serde_json::to_string(&etat).unwrap()).as_bytes())
+        let state = DisplayFrame::State(e.clone());
+        w.write_all(format!("{}\n", serde_json::to_string(&state).unwrap()).as_bytes())
             .await
             .unwrap();
         for _ in 0..100 {
@@ -1943,7 +1943,7 @@ mod display_tests {
         assert_eq!(etats.lock().unwrap().as_slice(), &[e]);
     }
 
-    // -- la trame de pochette ------------------------------------------------
+    // -- la trame de cover ------------------------------------------------
 
     /// Un afficheur qui n'a rien redéfini : ni `wants_covers`, ni `cover`.
     /// C'est la console, et les trois autres bouchons de ce fichier.
@@ -1953,7 +1953,7 @@ mod display_tests {
         let socket = dir.path().join("display.sock");
         let listener = bind_display(&socket).unwrap();
         let plugin = RecordingDisplay::default();
-        assert!(!plugin.wants_covers(), "le corps par defaut doit refuser les octets");
+        assert!(!plugin.wants_covers(), "le corps par defaut doit refuser les bytes");
         let etats = plugin.etats.clone();
         tokio::spawn(async move {
             serve_display(listener, plugin).await.unwrap();
@@ -1961,13 +1961,13 @@ mod display_tests {
         let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
         let (_r, mut w) = stream.into_split();
         use tokio::io::AsyncWriteExt;
-        // Une pochette valide, que le corps par défaut doit avaler sans bruit…
-        let pochette = DisplayFrame::Cover(Cover {
+        // Une cover valide, que le corps par défaut doit avaler sans bruit…
+        let cover = DisplayFrame::Cover(Cover {
             href: "/api/cover/1a2b".into(),
             mime: "image/jpeg".into(),
             bytes: vec![0xFF, 0xD8, 0xFF, 0xE0],
         });
-        w.write_all(format!("{}\n", serde_json::to_string(&pochette).unwrap()).as_bytes())
+        w.write_all(format!("{}\n", serde_json::to_string(&cover).unwrap()).as_bytes())
             .await
             .unwrap();
         // …puis l'état, qui doit arriver : la connexion a survécu.
@@ -2019,15 +2019,15 @@ mod display_tests {
         let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
         let (_r, mut w) = stream.into_split();
         use tokio::io::AsyncWriteExt;
-        // Des octets qui ne sont pas du texte, `0x0A` compris : c'est ce que le
-        // codage du fil doit rendre intact, et le saut de ligne est justement
-        // le séparateur du protocole.
-        let mut octets = vec![0xFFu8, 0xD8, 0xFF, 0xE0];
-        octets.extend((0u16..=255).map(|b| b as u8));
+        // Des bytes qui ne sont pas du texte, `0x0A` compris : c'est ce que le
+        // codage du fil doit rendre intact, et le saut de line est justement
+        // le séparateur du protocol.
+        let mut bytes = vec![0xFFu8, 0xD8, 0xFF, 0xE0];
+        bytes.extend((0u16..=255).map(|b| b as u8));
         let attendue = Cover {
             href: "/api/cover/1a2b3c4d".into(),
             mime: "image/jpeg".into(),
-            bytes: octets,
+            bytes,
         };
         w.write_all(
             format!("{}\n", serde_json::to_string(&DisplayFrame::Cover(attendue.clone())).unwrap())
@@ -2046,19 +2046,19 @@ mod display_tests {
 
     #[tokio::test]
     async fn une_pochette_au_dela_du_plafond_est_une_ligne_illisible_et_la_connexion_survit() {
-        // Le plafond du transport vu du côté qui reçoit : un refus, traité par
-        // la politique de ligne illisible — `warn` puis `continue` — et non une
-        // allocation de la taille annoncée. La trame d'état qui suit prouve que
+        // Le cap du transport vu du côté qui reçoit : un refus, traité par
+        // la politique de line illisible — `warn` puis `continue` — et non une
+        // allocation de la size annoncée. La trame d'état qui suit prouve que
         // la connexion a survécu.
         //
-        // La ligne est fabriquée à la main : le producteur, lui, ne peut pas
-        // émettre cela (il ne matérialise jamais au-delà du plafond), donc
-        // seule une ligne écrite ici met le refus sur le chemin.
+        // La line est fabriquée à la main : le producteur, lui, ne peut pas
+        // émettre cela (il ne matérialise jamais au-delà du cap), donc
+        // seule une line écrite ici met le refus sur le path.
         //
-        // Ce test tient aussi, depuis que le lecteur est borné, la moitié
-        // « la borne du lecteur ne préempte pas celle du décodage » : cette ligne
-        // dépasse `COVER_MAX_BYTES` mais reste **sous** `LIGNE_MAX`, elle traverse
-        // donc le lecteur et c'est bien le désérialiseur qui la refuse — la
+        // Ce test tient aussi, depuis que le player est borné, la moitié
+        // « la bounded du player ne préempte pas celle du décodage » : cette line
+        // dépasse `COVER_MAX_BYTES` mais reste **sous** `MAX_LINE`, elle traverse
+        // donc le player et c'est bien le désérialiseur qui la refuse — la
         // politique de refus qu'attend le brief est intacte.
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("display.sock");
@@ -2099,71 +2099,71 @@ mod display_tests {
 
     #[tokio::test]
     async fn une_ligne_au_dela_du_plafond_est_drainee_sans_desynchroniser_le_flux() {
-        // **La borne du lecteur lui-meme**, distincte du plafond de pochette.
-        // Celui-la est controle au decodage, donc *apres* que la ligne entiere est
-        // residente ; `lines()` n'avait, lui, aucune borne du tout — une ligne
-        // sans saut de ligne faisait croitre le tampon jusqu'ou l'ecrivain voulait
+        // **La bounded du player lui-meme**, distincte du cap de cover.
+        // Celui-la est controle au decodage, donc *apres* que la line entiere est
+        // residente ; `lines()` n'avait, lui, aucune bounded du tout — une line
+        // sans saut de line faisait croitre le buffer jusqu'ou l'ecrivain voulait
         // bien aller, sur un appareil a 1 Gio.
         //
         // Ce qu'un test peut prouver ici n'est pas la residence mais ce qui
-        // casserait si le drainage etait mal ecrit : la ligne au-dela du plafond
-        // est **consommee jusqu'a son saut de ligne**, et celle d'apres est lue
-        // comme une ligne entiere, pas comme le milieu de la precedente. Un
-        // `consume` mal compte desynchroniserait le flux pour toujours.
+        // casserait si le drainage etait mal ecrit : la line au-dela du cap
+        // est **consommee jusqu'a son saut de line**, et celle d'apres est lue
+        // comme une line entiere, pas comme le milieu de la precedente. Un
+        // `consume` mal compte desynchroniserait le stream pour toujours.
         //
-        // Le plafond est passe en parametre : l'eprouver a la vraie valeur
+        // Le cap est passe en parametre : l'eprouver a la vraie valeur
         // couterait 28 Mio par test pour exactement la meme logique, et cette
         // depense-la n'aurait d'autre effet que de charger la machine.
         let entree: &[u8] = b"avant\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\napres\n";
-        let mut lecteur = BufReader::new(entree);
-        let mut tampon = Vec::new();
+        let mut player = BufReader::new(entree);
+        let mut buffer = Vec::new();
 
         assert!(matches!(
-            lit_ligne_bornee(&mut lecteur, &mut tampon, 16).await.unwrap(),
-            LigneLue::Ligne
+            read_line_bounded(&mut player, &mut buffer, 16).await.unwrap(),
+            LineRead::Line
         ));
-        assert_eq!(tampon, b"avant", "une ligne sous le plafond passe intacte, sans son saut de ligne");
+        assert_eq!(buffer, b"avant", "une line sous le cap passe intacte, sans son saut de line");
 
-        match lit_ligne_bornee(&mut lecteur, &mut tampon, 16).await.unwrap() {
-            LigneLue::TropLongue(vus) => {
+        match read_line_bounded(&mut player, &mut buffer, 16).await.unwrap() {
+            LineRead::TooLong(vus) => {
                 assert_eq!(vus, 40, "le journal doit pouvoir dire l'ampleur reellement vue");
-                assert!(tampon.is_empty(), "et rien de la ligne refusee ne doit rester en memoire");
+                assert!(buffer.is_empty(), "et rien de la line refusee ne doit rester en memoire");
             }
-            LigneLue::Ligne => panic!("la ligne de 40 octets devait etre refusee, pas rendue"),
-            LigneLue::Fin => panic!("le flux ne devait pas etre epuise"),
+            LineRead::Line => panic!("la line de 40 bytes devait etre refusee, pas rendue"),
+            LineRead::Eof => panic!("le stream ne devait pas etre epuise"),
         }
 
         assert!(matches!(
-            lit_ligne_bornee(&mut lecteur, &mut tampon, 16).await.unwrap(),
-            LigneLue::Ligne
+            read_line_bounded(&mut player, &mut buffer, 16).await.unwrap(),
+            LineRead::Line
         ));
         assert_eq!(
-            tampon, b"apres",
-            "la ligne suivante doit etre lue entiere : la resynchronisation est la propriete \
+            buffer, b"apres",
+            "la line suivante doit etre lue entiere : la resynchronisation est la propriete \
              que ce test tient"
         );
 
         assert!(matches!(
-            lit_ligne_bornee(&mut lecteur, &mut tampon, 16).await.unwrap(),
-            LigneLue::Fin
+            read_line_bounded(&mut player, &mut buffer, 16).await.unwrap(),
+            LineRead::Eof
         ));
     }
 
     #[test]
     fn le_plafond_de_ligne_laisse_passer_la_plus_grande_pochette_legitime() {
         // La moitie de la propriete que le test ci-dessus ne couvre pas : cette
-        // borne ne doit **jamais** prendre la place du refus de `COVER_MAX_BYTES`,
+        // bounded ne doit **jamais** prendre la place du refus de `COVER_MAX_BYTES`,
         // qui est celui qui porte le message et la politique figee par le brief.
         // Une image de exactement `COVER_MAX_BYTES` a le droit d'etre emise, donc
-        // sa ligne doit passer le lecteur et n'etre jugee qu'au decodage.
+        // sa line doit passer le player et n'etre jugee qu'au decodage.
         //
-        // Verifie par l'arithmetique plutot qu'en fabriquant la ligne : la
+        // Verifie par l'arithmetique plutot qu'en fabriquant la line : la
         // fabriquer couterait 28 Mio pour prouver une inegalite entre deux
         // constantes.
         let base64 = ritornello_proto::COVER_MAX_BYTES.div_ceil(3) * 4;
         assert!(
-            LIGNE_MAX >= base64 + 512,
-            "LIGNE_MAX ({LIGNE_MAX}) doit depasser le base64 de la plus grande pochette \
+            MAX_LINE >= base64 + 512,
+            "MAX_LINE ({MAX_LINE}) doit depasser le base64 de la plus grande cover \
              ({base64}) d'une marge couvrant l'enveloppe JSON"
         );
     }
@@ -2176,8 +2176,8 @@ mod metadata_tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
 
-    /// Plugin d'essai : mémorise ce qu'on lui annonce et renvoie un
-    /// enrichissement en écho de la dernière identité reçue.
+    /// Plugin d'essai : mémorise ce qu'on lui announcement et renvoie un
+    /// enrichment en écho de la dernière identité reçue.
     struct EnEcho {
         recus: Arc<Mutex<Vec<NowPlaying>>>,
         a_dire: Option<Enrichment>,
@@ -2197,7 +2197,7 @@ mod metadata_tests {
         async fn next_enrichment(&mut self) -> Enrichment {
             match self.a_dire.take() {
                 Some(e) => e,
-                // Rien à dire : ne se termine jamais (le futur sera abandonné
+                // Rien à dire : ne se terminate jamais (le futur sera abandonné
                 // par le `select!` du runner dès qu'un NowPlaying arrivera).
                 None => std::future::pending().await,
             }
@@ -2235,7 +2235,7 @@ mod metadata_tests {
         };
         write.write_all(format!("{}\n", serde_json::to_string(&np).unwrap()).as_bytes()).await.unwrap();
 
-        // L'enrichissement arrive sans qu'on l'ait demandé, et sans `id`.
+        // L'enrichment arrive sans qu'on l'ait demandé, et sans `id`.
         let line = lines.next_line().await.unwrap().unwrap();
         let e: Enrichment = serde_json::from_str(&line).unwrap();
         assert_eq!(e.identity, serde_json::json!({"kind": "disc", "track": 0}));

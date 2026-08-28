@@ -95,7 +95,7 @@ impl AdminPlugin for GenericInputAdmin {
                 // Même validation sur copie qu'`ImportPreset` : le répertoire
                 // des presets est configurable et ouvert à l'opérateur, donc
                 // « fichiers livrés, réputés valides » ne tient pas. Sans
-                // cela, un preset invalide devenait actif en mémoire et
+                // cela, un preset invalide devenait active en mémoire et
                 // c'est le « Enregistrer » suivant qui échouait — sur une
                 // table que l'IHM elle-même avait produite.
                 let bindings = presets::load(&self.presets_root, &preset)
@@ -193,7 +193,7 @@ mod tests {
         assert_eq!(mime, "text/javascript");
         assert!(!corps.is_empty());
         assert_eq!(f.admin.asset("ui.css").unwrap().0, "text/css");
-        // Un chemin inconnu n'est pas une erreur : c'est un 404 cote coeur.
+        // Un path inconnu n'est pas une erreur : c'est un 404 cote coeur.
         assert!(f.admin.asset("../../../etc/passwd").is_none());
         assert!(f.admin.asset("index.html").is_none());
     }
@@ -202,11 +202,11 @@ mod tests {
     fn catalog_expose_les_cles_du_composant() {
         let f = fixture();
         let v = f.admin.catalog();
-        assert!(v["btn_save"].is_string(), "le catalogue doit porter les cles du plugin");
+        assert!(v["btn_save"].is_string(), "le sources_catalog doit porter les cles du plugin");
     }
 
     /// Pack français livré dans le dépôt.
-    fn pack_fr() -> String {
+    fn fr_pack() -> String {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../deploy/locales/generic-input/fr.toml");
         std::fs::read_to_string(p).expect("pack fr livre")
@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn parite_des_cles_entre_len_embarque_et_le_pack_fr() {
         let en = ritornello_i18n::try_parse(crate::GENERIC_INPUT_EN).unwrap();
-        let fr = ritornello_i18n::try_parse(&pack_fr()).unwrap();
+        let fr = ritornello_i18n::try_parse(&fr_pack()).unwrap();
         let mut cles_en: Vec<&String> = en.keys().collect();
         let mut cles_fr: Vec<&String> = fr.keys().collect();
         cles_en.sort();

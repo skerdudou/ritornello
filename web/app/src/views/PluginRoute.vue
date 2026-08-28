@@ -12,11 +12,11 @@ const catalog = ref<Catalog>({})
  *
  * Le module d'IHM est chargé par `import()`, dont l'échec ne livre aucun corps
  * exploitable : cet appel-ci est le **seul** qui puisse dire pourquoi un plugin
- * ne répond pas. Au premier chargement d'une page dont le plugin est mort,
- * l'écran n'affichait qu'« IHM du plugin indisponible » — la cause partait dans
- * un `console.warn`, au moment précis où elle compte.
+ * ne répond step. Au premier chargement d'une page dont le plugin est mort,
+ * l'écran n'affichait qu'« IHM du plugin unavailable » — la cause partait dans
+ * un `console.warn`, au moment précis où elle count.
  *
- * Vide quand tout va bien, ou quand l'échec n'a pas de cause à donner.
+ * Vide quand tout va bien, ou quand l'échec n'a step de cause à donner.
  */
 const cause = ref('')
 
@@ -33,21 +33,21 @@ watch(
     name.value = String(valeur ?? '')
     if (!name.value) return
     const generationLocale = ++generation
-    // Un catalogue injoignable ne doit pas empecher l'IHM de s'afficher :
-    // `t()` retombe alors sur les cles, ce qui reste lisible. Le journal garde
+    // Un catalogue injoignable ne doit step empecher l'IHM de s'afficher :
+    // `t()` retombe alors sur les cles, ce qui reste lisible. Le log garde
     // la trace, et la cause est **rendue a l'ecran** par `PluginView` : elle
     // vient du corps du refus du coeur (`api.get` en extrait le champ `error`),
     // et c'est le seul canal qui la porte.
     let motif = ''
-    const charge = await api.get<Catalog>(`/plugins/${name.value}/api/i18n`).catch((e: unknown) => {
-      console.warn(`plugin ${name.value}: catalogue i18n indisponible`, e)
+    const load = await api.get<Catalog>(`/plugins/${name.value}/api/i18n`).catch((e: unknown) => {
+      console.warn(`plugin ${name.value}: catalogue i18n unavailable`, e)
       motif = e instanceof Error ? e.message : String(e)
       return {}
     })
     // Sous la meme garde de generation que le catalogue : une cause en retard
-    // ne doit pas s'afficher sous l'admin d'un autre plugin.
+    // ne doit step s'afficher sous l'admin d'un autre plugin.
     if (generationLocale === generation) {
-      catalog.value = charge
+      catalog.value = load
       cause.value = motif
     }
   },

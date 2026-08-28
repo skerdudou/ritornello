@@ -5,7 +5,7 @@ import {
 } from '@ritornello/ui'
 import { computed, onMounted, ref } from 'vue'
 
-// `base` fait partie du contrat des IHM de plugin, au meme titre que
+// `base` fait partie du contract des IHM de plugin, au meme titre que
 // `catalog` : le prefixe **absolu** sous lequel le coeur sert les routes de ce
 // plugin (`/plugins/mpd/`), fourni par le shell.
 //
@@ -15,7 +15,7 @@ import { computed, onMounted, ref } from 'vue'
 // sous un autre nom, et le serait *silencieusement* — toutes les requetes de
 // cette page partiraient alors vers un plugin inexistant (404, page qui
 // semble morte). Mieux vaut que le shell soit tenu de fournir le prefixe — ce
-// qu'un test de `PluginView` verifie, et que `contrat.test.ts` verifie ici
+// qu'un test de `PluginView` verifie, et que `contract.test.ts` verifie ici
 // cote module.
 const props = defineProps<{ catalog: Catalog; base: string }>()
 const t = computed(() => createT(props.catalog))
@@ -35,16 +35,16 @@ const port = ref(6600)
 // vide une fois retiree des espaces, port dans 1..=65535) : les deux seuls
 // refus que le serveur connait pour ces deux champs. Comme la regle est la
 // meme des deux cotes, un couple qui passe ce garde est par construction
-// accepte par le serveur — voir le commentaire d'`enregistrer` plus bas sur
+// accepte par le serveur — voir le commentaire d'`save` plus bas sur
 // ce que cela implique pour le test du refus 422.
-const listenInvalide = computed(() => !listen.value.trim())
-const portInvalide = computed(() => {
+const listenInvalid = computed(() => !listen.value.trim())
+const portInvalid = computed(() => {
   const p = Number(port.value)
   return !Number.isInteger(p) || p < 1 || p > 65535
 })
-const aDesErreurs = computed(() => listenInvalide.value || portInvalide.value)
+const hasErrors = computed(() => listenInvalid.value || portInvalid.value)
 
-async function recharger(): Promise<void> {
+async function reload(): Promise<void> {
   try {
     const data = await api.get<{ listen: string; port: number }>(url('api/data'))
     listen.value = data.listen
@@ -58,7 +58,7 @@ async function recharger(): Promise<void> {
   }
 }
 
-onMounted(recharger)
+onMounted(reload)
 
 /**
  * Enregistre l'ecoute. Le greffon se relie de lui-meme au nouveau couple
@@ -71,19 +71,19 @@ onMounted(recharger)
  * `api.put` ne rejette jamais (reseau coupe compris) : le resultat est la
  * seule source de verite, jamais une exception a rattraper. Un refus (422)
  * porte deja le texte traduit du cote serveur (meme convention que les
- * autres greffons : `Config::valider`/`enregistrer` renvoient une cle de
+ * autres greffons : `Config::valider`/`save` renvoient une cle de
  * catalogue, que `admin.rs` resout via son propre catalogue avant de
  * repondre) — cette page l'affiche donc tel quel, sans le retraduire. Le
- * serveur reste seul juge : une valeur qui passe `aDesErreurs` ci-dessous
+ * serveur reste seul juge : une valeur qui passe `hasErrors` ci-dessous
  * peut encore etre refusee pour une autre raison (E/S, requete malformee),
  * et ce chemin-la reste exactement celui-ci.
  */
-async function enregistrer(): Promise<void> {
-  // Ceinture et bretelles, comme `RadioAdmin.enregistrer` : `:disabled` sur
+async function save(): Promise<void> {
+  // Ceinture et bretelles, comme `RadioAdmin.save` : `:disabled` sur
   // le bouton est la voie normale, mais ne protege pas un clic synthetique
   // qui contournerait l'etat visuel du bouton (outils de developpement,
   // extension, futur refactor du gabarit qui oublierait la liaison).
-  if (aDesErreurs.value) return
+  if (hasErrors.value) return
   const err = await api.put(url('api/data'), { listen: listen.value, port: Number(port.value) })
   toast[err ? 'error' : 'success'](err ?? t.value('saved'))
 }
@@ -98,8 +98,8 @@ async function enregistrer(): Promise<void> {
       <p data-restart-notice class="text-sm text-muted-foreground">{{ t('restart_notice') }}</p>
       <div class="space-y-1">
         <Label for="mpd-listen">{{ t('listen_label') }}</Label>
-        <Input id="mpd-listen" v-model="listen" data-listen :aria-invalid="listenInvalide" />
-        <p v-if="listenInvalide" data-listen-error class="text-xs text-destructive">
+        <Input id="mpd-listen" v-model="listen" data-listen :aria-invalid="listenInvalid" />
+        <p v-if="listenInvalid" data-listen-error class="text-xs text-destructive">
           {{ t('listen_empty') }}
         </p>
       </div>
@@ -107,13 +107,13 @@ async function enregistrer(): Promise<void> {
         <Label for="mpd-port">{{ t('port_label') }}</Label>
         <Input
           id="mpd-port" v-model="port" type="number" min="1" max="65535" data-port
-          :aria-invalid="portInvalide"
+          :aria-invalid="portInvalid"
         />
-        <p v-if="portInvalide" data-port-error class="text-xs text-destructive">
+        <p v-if="portInvalid" data-port-error class="text-xs text-destructive">
           {{ t('port_zero') }}
         </p>
       </div>
-      <Button data-save :disabled="aDesErreurs" @click="enregistrer">{{ t('btn_save') }}</Button>
+      <Button data-save :disabled="hasErrors" @click="save">{{ t('btn_save') }}</Button>
     </CardContent>
   </Card>
 </template>

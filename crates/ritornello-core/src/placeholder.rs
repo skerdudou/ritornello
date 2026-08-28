@@ -10,11 +10,11 @@
 // ordinaire (`//`) et non une doc interne (`//!`). Une doc interne provoque
 // `E0753 : expected outer doc comment` une fois ce fichier inclus tel quel
 // par `build.rs` via `include!` — la restriction du compilateur porte sur la
-// position dans le flux de tokens du fichier hôte, pas sur le fichier source
-// tel qu'on le lit ici.
+// position dans le stream de tokens du fichier hôte, pas sur le fichier source
+// tel qu'on le read ici.
 
 /// Marqueur reconnaissable dans la page de bouchon.
-pub const MARQUEUR: &str = "ritornello-ihm-non-construite";
+pub const MARKER: &str = "ritornello-ihm-non-construite";
 
 /// HTML minimal, sans dépendance, qui explique quoi lancer. Mieux qu'une
 /// erreur de macro `include_str!` sur un clone frais : `cargo build` et
@@ -22,7 +22,7 @@ pub const MARQUEUR: &str = "ritornello-ihm-non-construite";
 pub fn placeholder_html(commande: &str) -> String {
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
-         <title>ritornello</title></head><body id=\"{MARQUEUR}\">\
+         <title>ritornello</title></head><body id=\"{MARKER}\">\
          <h1>ritornello</h1>\
          <p>Web interface not built. Run:</p><pre>{commande}</pre>\
          </body></html>"
@@ -42,8 +42,8 @@ pub fn placeholder_html(commande: &str) -> String {
 /// retournait tôt et **aucun avertissement** n'était émis : le binaire de
 /// release embarquait une page « Web interface not built » en silence.
 #[allow(dead_code)] // consommee par build.rs (via `include!`) et par les tests
-pub fn est_un_bouchon(contenu: &str) -> bool {
-    contenu.contains(MARQUEUR)
+pub fn is_placeholder(contenu: &str) -> bool {
+    contenu.contains(MARKER)
 }
 
 #[cfg(test)]
@@ -56,18 +56,18 @@ mod tests {
         assert!(html.starts_with("<!doctype html>"));
         assert!(html.contains("npm run build --workspaces"));
         // Pas de faux positif : le bouchon doit se reconnaitre a coup sur.
-        assert!(html.contains(MARQUEUR));
+        assert!(html.contains(MARKER));
     }
 
     #[test]
     fn est_un_bouchon_reconnait_le_bouchon_et_pas_un_vrai_livrable() {
-        assert!(est_un_bouchon(&placeholder_html("npm ci && npm run build --workspaces")));
+        assert!(is_placeholder(&placeholder_html("npm ci && npm run build --workspaces")));
         // Forme d'un `index.html` reellement produit par Vite (import map,
         // point de montage) : aucun marqueur, donc aucun avertissement.
         let vrai = "<!doctype html><html><head><script type=\"importmap\">\
                     {\"imports\":{\"vue\":\"/assets/vue.js\"}}</script></head>\
                     <body><div id=\"app\"></div></body></html>";
-        assert!(!est_un_bouchon(vrai));
-        assert!(!est_un_bouchon(""));
+        assert!(!is_placeholder(vrai));
+        assert!(!is_placeholder(""));
     }
 }

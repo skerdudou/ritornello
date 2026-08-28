@@ -545,7 +545,7 @@ while music is playing. No system package is involved.
 emits a `WARN` per MP3 without a Xing header — "MPEG: Using bitrate to estimate
 duration" — which is not an incident but the normal estimation method for that
 format, calls for no action, and repeats once per track. The owner reported it
-as flooding the journal, and the cost is real: the core keeps only `warn` and
+as flooding the log, and the cost is real: the core keeps only `warn` and
 above for its "recent errors" card, so that noise pushes actual errors out of
 the buffer. Its `error` lines still go through — a frame the library judges
 broken is information. A `filter_fn` and not an `EnvFilter`: the latter sits

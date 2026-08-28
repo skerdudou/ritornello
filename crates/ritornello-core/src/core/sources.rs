@@ -1,4 +1,4 @@
-//! Superviseur de sources : l'ordre du cycle, la bascule, l'arrivee a chaud et la mort d'un greffon, et l'application d'une SourceAction.
+//! Superviseur de sources : l'order du cycle, la bascule, l'arrivee a chaud et la mort d'un greffon, et l'application d'une SourceAction.
 
 use super::*;
 
@@ -15,25 +15,25 @@ impl<P: Player> Core<P> {
     /// sans attendre un `SetLocale` — le piège déjà rencontré avec `cd`, qui
     /// réaffichait `NO DISC` faute de langue tant qu'aucun changement de
     /// langue ne survenait après coup.
-    pub fn locale_courante(&self) -> Option<String> {
+    pub fn current_locale(&self) -> Option<String> {
         self.locale.clone()
     }
 
     /// Ajoute une source découverte **après** le démarrage : un greffon qui a
     /// raté le rendez-vous, ou qu'on a relancé à la main. Renvoie `true` si
-    /// c'est un remplacement (ré-annonce d'un greffon déjà câblé).
+    /// c'est un remplacement (ré-announcement d'un greffon déjà câblé).
     ///
-    /// `source_order` est **retrié** : le cycle de sources suit l'ordre
+    /// `source_order` est **retrié** : le cycle de sources suit l'order
     /// alphabétique, et une source arrivée en retard doit y prendre sa place
     /// normale, pas la queue — sinon `SourceCycle` change de sens selon la
     /// chronologie du démarrage.
     ///
     /// Si aucune source n'était active — un démarrage où *aucune* n'avait
     /// répondu — la nouvelle le devient : c'est le seul cas où l'arrivée d'un
-    /// greffon change ce qui joue.
+    /// greffon change ce qui plays.
     ///
-    /// **Ne réveille rien** : cette fonction n'affecte que la table et le nom
-    /// de l'active. Le câblage à chaud passe par `cable_source_a_chaud`, qui
+    /// **Ne réveille rien** : cette fonction n'affecte que la table et le name
+    /// de l'active. Le câblage à chaud passe par `hotplug_source`, qui
     /// enchaîne le réveil — sans quoi une première source arrivée en retard
     /// serait active et muette.
     pub fn add_source(&mut self, name: String, client: Arc<dyn Source>) -> bool {
@@ -46,11 +46,11 @@ impl<P: Player> Core<P> {
         if premiere {
             self.active_source = name;
         }
-        // Le catalogue vient de changer de longueur : une source de plus y
+        // Le sources_catalog vient de changer de longueur : une source de plus y
         // figure, sans présélections tant qu'elle n'en a pas déclaré. Voir
-        // `publie_catalogue` pour la liste à jour de ses points d'appel —
+        // `publish_catalog` pour la liste à jour de ses points d'appel —
         // `remove_source` en est le symétrique.
-        self.publie_catalogue();
+        self.publish_catalog();
         remplacement
     }
 
@@ -61,41 +61,41 @@ impl<P: Player> Core<P> {
     /// greffon fait exactement la même chose, et deux versions de cette séquence
     /// divergeraient au premier oubli ajouté d'un côté.
     ///
-    /// Trois appelants, donc : `SourceCycle` (qui calcule le nom suivant dans
-    /// l'ordre), `SelectSource` (qui le reçoit déjà tout fait, du greffon MPD)
-    /// et `remove_source` (qui peut n'avoir aucun nom à donner). Séquence
-    /// commune : arrêt du lecteur, `Deactivate` en best-effort, oubli de
+    /// Trois appelants, donc : `SourceCycle` (qui calcule le name suivant dans
+    /// l'order), `SelectSource` (qui le reçoit déjà tout fait, du greffon MPD)
+    /// et `remove_source` (qui peut n'avoir aucun name à donner). Séquence
+    /// commune : arrêt du player, `Deactivate` en best-effort, oubli de
     /// l'identité, du compte de présélections, du statut et de l'éjection,
     /// `persist()` **avant** `Activate`, publication finale.
-    pub(super) async fn bascule_source(&mut self, suivante: Option<String>) -> Result<()> {
-        // Changer de source, c'est toujours changer de ce qui joue — et c'est
+    pub(super) async fn cycle_source(&mut self, suivante: Option<String>) -> Result<()> {
+        // Changer de source, c'est toujours changer de ce qui plays — et c'est
         // le cœur qui arrête, sans dépendre des réponses des plugins. Avant,
         // l'action renvoyée par `Deactivate` (le `Stop` du plugin radio) était
         // ignorée, et l'arrêt reposait sur le `Play` de l'`Activate` suivant —
-        // que le cd sans disque ne renvoie pas (`Noop`) : l'ancien flux
+        // que le cd sans disque ne renvoie pas (`Noop`) : l'ancien stream
         // continuait de jouer sous un affichage qui annonçait la nouvelle
         // source, titres ICY compris.
         self.expecting_stream = false;
-        self.lecture = false;
+        self.playback = false;
         self.player.stop().await?;
         // L'ancienne source est prévenue en best-effort : son arrêt est déjà
         // fait, elle n'a plus qu'à recaler son propre état.
-        if let Err(e) = self.demande_active(SourceReq::Deactivate).await {
+        if let Err(e) = self.active_request(SourceReq::Deactivate).await {
             tracing::debug!("deactivate: {e}");
         }
         self.active_source = suivante.unwrap_or_default();
         // On l'acte ici sans attendre que la nouvelle Source le déclare :
         // sinon une Source qui omettrait de le faire laisserait l'identité de
         // l'autre en place, et les plugins `metadata` continueraient
-        // d'enrichir le morceau précédent.
+        // d'enrichir le track précédent.
         self.set_identity(None);
         // Le compte de présélections et le statut annoncés par l'ancienne
         // Source ne veulent rien dire pour la nouvelle : les garder
         // afficherait une fenêtre de numéros qui ne correspond à aucune
-        // présélection réelle, ou un statut (« PAS DE DISQUE ») sous le nom
+        // présélection réelle, ou un statut (« PAS DE DISQUE ») sous le name
         // d'une source qui n'a encore rien dit — tant que la nouvelle Source
         // n'a pas parlé (ce qui peut ne jamais arriver : une présélection
-        // vide déclare une trame éphémère, qui ne touche pas au statut
+        // clear déclare une trame éphémère, qui ne touche pas au statut
         // mémorisé).
         self.preset_count = None;
         self.source_status = None;
@@ -108,68 +108,68 @@ impl<P: Player> Core<P> {
         // Persister **avant** `Activate` : si la nouvelle source ne répond
         // pas (timeout de 5 s du SDK), l'état mémoire, l'état sur disque et
         // l'affichage disent déjà tous la même chose — nouvelle source, rien
-        // ne joue. Sans cela, l'échec laissait la bascule à moitié faite :
+        // ne plays. Sans cela, l'échec laissait la bascule à moitié faite :
         // « cd » à l'écran, « radio » dans state.json.
         self.persist();
-        if let Some(action) = self.demande_active(SourceReq::Activate).await? {
+        if let Some(action) = self.active_request(SourceReq::Activate).await? {
             self.apply(action).await?;
         }
         // La séquence n'est complète qu'une fois le nouvel état publié : tous
         // les chemins ci-dessus (`set_identity`, `apply`) ne publient que
         // lorsqu'ils changent quelque chose, et rien ne garantit qu'au moins
         // un d'eux le fasse — désactiver l'unique source, ou la désactiver
-        // pendant qu'elle joue sans qu'une Source muette ne réponde à temps,
+        // pendant qu'elle plays sans qu'une Source muette ne réponde à temps,
         // n'en déclenche aucun. `handle_command` publie déjà après chaque
-        // commande, mais un appelant hors de ce chemin (le décâblage à chaud
+        // commande, mais un appelant hors de ce path (le décâblage à chaud
         // d'un greffon) laisserait sinon les afficheurs décrire une source qui
-        // n'existe plus. Le canal déduplique (`publie_etat`), donc cet appel
-        // ne coûte rien de plus sur le chemin `SourceCycle`.
-        self.publie_etat();
+        // n'existe plus. Le canal déduplique (`publish_state`), donc cet appel
+        // ne coûte rien de plus sur le path `SourceCycle`.
+        self.publish_state();
         Ok(())
     }
 
     /// Oublie une source dont le greffon est mort **de lui-même** — panique,
-    /// `SIGSEGV`, tué à la main. Rend `false` si ce nom n'était pas une source.
+    /// `SIGSEGV`, tué à la main. Rend `false` si ce name n'était pas une source.
     ///
     /// **La différence avec `remove_source` est délibérée, et elle tient en une
     /// phrase : celui-là bascule, celui-ci non.** Les deux évincent la même
-    /// chose du catalogue, pour la même raison (un client MPD ne doit pas voir
+    /// chose du sources_catalog, pour la même raison (un client MPD ne doit pas voir
     /// une liste enregistrée pour une source qu'il ne peut plus atteindre) ;
-    /// seule diffère la conséquence sur ce qui joue, parce que seule diffère la
+    /// seule diffère la conséquence sur ce qui plays, parce que seule diffère la
     /// question de qui a décidé.
     ///
     /// * `remove_source` : **l'opérateur a demandé** que cette source s'en aille.
     ///   Basculer vers la suivante est la suite de son geste, et arrêter le
-    ///   lecteur d'abord est ce qui empêche l'ancien flux de continuer sous le
-    ///   nom de la nouvelle source.
+    ///   player d'abord est ce qui empêche l'ancien stream de continuer sous le
+    ///   name de la nouvelle source.
     /// * ici : **personne n'a rien demandé**. Un greffon de Source est un
-    ///   *contrôleur* — il dit quoi jouer, il ne joue pas. Le flux est tenu par
+    ///   *contrôleur* — il dit quoi jouer, il ne plays pas. Le stream est tenu par
     ///   mpv, qui est un enfant du cœur et que la mort du greffon ne touche pas.
     ///   Arrêter mpv et basculer sur le cd, c'est transformer la panne d'un
     ///   contrôleur en silence, puis présenter à l'écran une source que
     ///   l'utilisateur n'a pas choisie : deux fautes, dont la seconde est du
     ///   mensonge. On ne fait donc ni l'un ni l'autre — la musique continue,
-    ///   `active_source` garde le nom de la source qui a disparu, et la page de
+    ///   `active_source` garde le name de la source qui a disparu, et la page de
     ///   statut dit la vérité entière (« radio », active, non joint).
     ///
-    /// Ce qui est quand même oublié : les présélections nommées (le catalogue ne
+    /// Ce qui est quand même oublié : les présélections nommées (le sources_catalog ne
     /// doit pas proposer d'agir sur un greffon mort) et, si c'était l'active, les
     /// deux **capacités** qu'elle avait déclarées — `preset_count` et
     /// `can_eject`. Celles-là décrivent ce qu'un greffon sait faire, et il n'est
     /// plus là pour le faire : laisser la touche Eject allumée ou la grille de
-    /// présélections ouverte donnerait des commandes qui ne peuvent plus aboutir.
-    /// `bascule_source` les efface déjà pour ce motif exact.
+    /// présélections ouverte donnerait des commands qui ne peuvent plus aboutir.
+    /// `cycle_source` les efface déjà pour ce motif exact.
     ///
     /// Ce qui est gardé, et c'est aussi voulu : `source_status` et l'identité de
-    /// ce qui joue. Elles décrivent **le morceau en cours**, qui joue encore ;
+    /// ce qui plays. Elles décrivent **le track en cours**, qui plays encore ;
     /// les effacer noircirait l'afficheur au milieu d'un titre. `persist()` n'est
     /// pas appelée : `active_source` n'a pas changé, et l'état sur disque nomme
     /// donc toujours la source que l'utilisateur a choisie — au prochain
     /// démarrage le greffon est relancé et la retrouve.
     ///
     /// Non-`async` : c'est la conséquence directe de ne pas basculer. Aucun
-    /// `Deactivate` à envoyer (le pair est mort), aucun `Activate` à attendre.
-    pub fn oublie_source_morte(&mut self, name: &str) -> bool {
+    /// `Deactivate` à send_frame (le pair est mort), aucun `Activate` à attendre.
+    pub fn forget_dead_source(&mut self, name: &str) -> bool {
         let Some(pos) = self.source_order.iter().position(|n| n == name) else {
             return false;
         };
@@ -180,25 +180,25 @@ impl<P: Player> Core<P> {
             self.preset_count = None;
             self.can_eject = false;
         }
-        self.publie_catalogue();
+        self.publish_catalog();
         // Publier l'état aussi : `can_eject` et `preset_count` en font partie, et
-        // aucun autre chemin ne le fera — ce bras-ci n'est pas une commande.
-        self.publie_etat();
+        // aucun autre path ne le fera — ce bras-ci n'est pas une commande.
+        self.publish_state();
         true
     }
 
     /// Retire une source décâblée — un greffon qu'on vient d'éteindre depuis
-    /// l'IHM. Rend `false` si ce nom n'était pas une source.
+    /// l'IHM. Rend `false` si ce name n'était pas une source.
     ///
-    /// **À ne pas confondre avec `oublie_source_morte`**, qui traite la mort
+    /// **À ne pas confondre avec `forget_dead_source`**, qui traite la mort
     /// *subie* du même greffon : celle-là ne bascule pas et n'arrête pas le
-    /// lecteur. La doc de l'autre porte la comparaison des deux chemins.
+    /// player. La doc de l'autre porte la comparaison des deux chemins.
     ///
     /// Si c'était l'active, la **suivante du cycle** prend sa place, ou aucune
-    /// s'il n'en reste pas : `demande_active` tolère déjà l'absence de source, et
+    /// s'il n'en reste pas : `active_request` tolère déjà l'absence de source, et
     /// démarrer sans source est légitime depuis l'enregistrement à chaud.
     ///
-    /// L'ordre est délicat : la bascule doit avoir lieu **avant** le retrait de la
+    /// L'order est délicat : la bascule doit avoir lieu **avant** le retrait de la
     /// table, parce que c'est elle qui envoie `Deactivate` à la source sortante —
     /// retirée d'abord, elle ne recevrait rien et le greffon garderait son état
     /// interne pour sa prochaine vie.
@@ -219,9 +219,9 @@ impl<P: Player> Core<P> {
             // pourrait encore retomber sur un processus qui n'existe plus —
             // c'est tout le principe d'un accusé qui ne décrit qu'un état déjà
             // vrai.
-            if let Err(e) = self.bascule_source(suivante.clone()).await {
+            if let Err(e) = self.cycle_source(suivante.clone()).await {
                 tracing::warn!("switching away from {name} while removing it: {e:#}");
-                // `bascule_source` pose `active_source` **avant** son étage qui
+                // `cycle_source` pose `active_source` **avant** son étage qui
                 // peut échouer (`Activate`) mais **après** un `stop()` qui peut
                 // lui aussi échouer : selon l'étage en cause, `active_source`
                 // peut encore nommer la source qu'on est en train de retirer de
@@ -232,46 +232,46 @@ impl<P: Player> Core<P> {
         self.sources.remove(name);
         self.source_order.remove(pos);
         // Les présélections nommées de la source partent avec elle, et le
-        // catalogue est republié dans la foulée.
+        // sources_catalog est republié dans la foulée.
         //
-        // Ce n'est pas du ménage : le catalogue est le seul canal par lequel un
+        // Ce n'est pas du ménage : le sources_catalog est le seul canal par lequel un
         // client MPD apprend qu'une liste enregistrée existe. Laissée en place,
         // l'entrée ferait figurer dans `listplaylists` une source qui n'existe
         // plus, et un client pourrait **agir** dessus — un `load "radio"` sur un
         // greffon éteint. Le garde de `Command::SelectSource` le refuserait
-        // (`source_order` ne porte plus le nom), mais l'utilisateur, lui, verrait
+        // (`source_order` ne porte plus le name), mais l'utilisateur, lui, verrait
         // une liste qui ment jusqu'au redémarrage : les clients MPD mettent
         // volontiers `listplaylists` en cache.
         //
-        // `source_order` est vidé juste au-dessus, donc `catalogue()` ne cite
+        // `source_order` est vidé juste au-dessus, donc `sources_catalog()` ne cite
         // déjà plus cette source ; retirer aussi la table évite qu'un greffon
-        // rallumé sous le même nom hérite silencieusement de la liste de sa vie
+        // rallumé sous le même name hérite silencieusement de la liste de sa vie
         // précédente au lieu d'attendre son propre `ListPresets` (voir
-        // `cable_source_a_chaud`).
+        // `hotplug_source`).
         self.presets_par_source.remove(name);
-        self.publie_catalogue();
+        self.publish_catalog();
         Ok(true)
     }
 
-    /// Câble une source qui s'annonce **après** le démarrage. Renvoie `true`
-    /// s'il s'agit d'un remplacement (ré-annonce d'un greffon déjà câblé).
+    /// Câble une source qui s'announcement **après** le démarrage. Renvoie `true`
+    /// s'il s'agit d'un remplacement (ré-announcement d'un greffon déjà câblé).
     ///
     /// Deux chemins, et c'est tout l'intérêt de les tenir ensemble ici :
     ///
-    /// - **Première source du cœur** (la table était vide) : le démarrage est
-    ///   rejoué par `resume`, donc `SetLocale` puis `Wake`, dans cet ordre.
+    /// - **Première source du cœur** (la table était clear) : le démarrage est
+    ///   rejoué par `resume`, donc `SetLocale` puis `Wake`, dans cet order.
     ///   `add_source` ne fait que désigner l'active ; sans ce réveil, une source
     ///   arrivée à t+30 s serait active et **muette** jusqu'à ce que
     ///   l'utilisateur touche quelque chose — l'appareil aurait l'air en panne
     ///   alors que tout est câblé.
     /// - **Source supplémentaire, ou cœur en veille** : seule la langue est due.
     ///   Réveiller ici rallumerait un appareil qu'on a volontairement éteint, et
-    ///   changerait ce qui joue parce qu'un greffon a fini de démarrer.
+    ///   changerait ce qui plays parce qu'un greffon a fini de démarrer.
     ///
-    /// L'état est publié dans les deux cas : le nom de la source vient
+    /// L'état est publié dans les deux cas : le name de la source vient
     /// d'apparaître dans la trame, et la SPA comme les afficheurs annonçaient
     /// jusque-là « aucune source ». (`resume` publie déjà pour le premier.)
-    pub async fn cable_source_a_chaud(
+    pub async fn hotplug_source(
         &mut self,
         name: String,
         client: Arc<dyn Source>,
@@ -281,8 +281,8 @@ impl<P: Player> Core<P> {
         if premiere && !self.standby {
             self.resume().await?;
         } else {
-            self.envoie_locale_a(&name).await;
-            self.publie_etat();
+            self.send_locale_to(&name).await;
+            self.publish_state();
         }
         Ok(remplacement)
     }
@@ -294,14 +294,14 @@ impl<P: Player> Core<P> {
     /// table au moment de leur appel. Une source arrivée après — greffon qui a
     /// raté le rendez-vous, ou relancé à la main sans son argument de langue —
     /// n'aurait jamais reçu `SetLocale` : sur un appareil en français, un `cd`
-    /// relancé revenait en affichant `NO DISC` dans sa ligne de statut, et le
+    /// relancé revenait en affichant `NO DISC` dans sa line de statut, et le
     /// serait resté jusqu'au prochain changement de langue.
     ///
     /// Sans effet si le cœur n'a pas de langue réglée : le greffon garde alors
     /// son défaut, qui est le même que celui du cœur. Best-effort comme les
     /// deux autres chemins — une source qui ne répond pas à `SetLocale` ne doit
     /// pas empêcher son câblage.
-    pub async fn envoie_locale_a(&self, name: &str) {
+    pub async fn send_locale_to(&self, name: &str) {
         let Some(locale) = self.locale.clone() else {
             return;
         };
@@ -312,57 +312,57 @@ impl<P: Player> Core<P> {
         }
     }
 
-    /// Remplace l'ordre d'arbitrage des plugins `metadata`.
+    /// Remplace l'order d'arbitrage des plugins `metadata`.
     ///
-    /// Appelé après chaque annonce tardive avec la liste **complète**
-    /// recalculée depuis le manifeste : la priorité est celle de
+    /// Appelé après chaque announcement tardive avec la liste **complète**
+    /// recalculée depuis le manifest : la priorité est celle de
     /// `plugins.toml`, jamais celle d'arrivée des annonces.
-    pub fn set_metadata_order(&mut self, ordre: Vec<String>) {
-        self.metadonnees.set_ordre(ordre);
+    pub fn set_metadata_order(&mut self, order: Vec<String>) {
+        self.metadata.set_order(order);
     }
 
     pub(super) async fn apply(&mut self, action: SourceAction) -> Result<()> {
         match action {
             SourceAction::Noop => {}
             SourceAction::Play { uri, start, finite, playlist } => {
-                // La machinerie de relance (`expecting_stream` puis
-                // `PlaybackIdle` → retry) n'existe que pour les flux réseau :
-                // un contenu qui se termine est une fin normale, pas une
+                // La machinerie de restart (`expecting_stream` puis
+                // `PlaybackIdle` → retry) n'existe que pour les stream réseau :
+                // un contenu qui se terminate est une fin normale, pas une
                 // panne. Le confondre avec une coupure faisait redémarrer le
-                // disque en boucle : fin du disque → mpv idle → relance ~2 s
+                // disque en boucle : fin du disque → mpv idle → restart ~2 s
                 // → `Activate` → `Play cdda://` → piste 1.
                 //
                 // C'est la Source qui le déclare, et non le cœur qui le
-                // devine : celui-ci reniflait `cdda://`, si bien qu'un chemin
+                // devine : celui-ci reniflait `cdda://`, si bien qu'un path
                 // de fichier — mesuré au banc, mpv passant `idle` en fin de
                 // liste exactement comme lors d'une coupure — tombait du
                 // mauvais côté.
                 self.expecting_stream = !finite;
-                self.lecture = true;
-                // Seul endroit où `lecture` passe à vrai : c'est ici, et
+                self.playback = true;
+                // Seul endroit où `playback` passe à vrai : c'est ici, et
                 // nulle part ailleurs, que `paused` doit retomber, sans quoi
-                // une pause d'hier rendrait une lecture neuve « en pause ».
+                // une pause d'hier rendrait une playback neuve « en pause ».
                 self.paused = false;
                 // `loadlist` pour une liste, `loadfile` pour un média : c'est la
                 // Source qui le déclare, et le cœur ne le devine pas. Un `.m3u8`
-                // est une liste pour un lecteur de fichiers et un flux HLS pour
+                // est une liste pour un player de fichiers et un stream HLS pour
                 // une radio ; renifler l'URI casserait l'un ou l'autre.
                 if playlist {
                     self.player.load_list(&uri).await?;
                 } else {
                     self.player.play(&uri).await?;
                 }
-                // Positionnement après le chargement, et cet ordre n'est sûr que
+                // Positionnement après le chargement, et cet order n'est sûr que
                 // grâce à `loadlist` : avec `loadfile`, mpv ne déplie la liste
                 // qu'après coup — mesuré — et cet index tombait hors bornes
-                // avant que la lecture ne reparte de la première piste.
+                // avant que la playback ne reparte de la première piste.
                 if let Some(n) = start {
                     self.player.set_playlist_pos(n).await?;
                 }
             }
             SourceAction::Stop => {
                 self.expecting_stream = false;
-                self.lecture = false;
+                self.playback = false;
                 self.player.stop().await?;
             }
             SourceAction::PlayerNext => self.player.next().await?,
@@ -378,7 +378,7 @@ mod tests {
     use crate::core::test_support::*;
     use std::sync::Mutex;
 
-    /// Source qui n'a jamais rien à jouer : un lecteur cd sans disque.
+    /// Source qui n'a jamais rien à jouer : un player cd sans disque.
     struct SourceVide;
 
     #[async_trait::async_trait]
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn add_source_retrie_lordre_du_cycle_au_lieu_dajouter_en_queue() {
-        // `SourceCycle` suit l'ordre alphabétique. Une source arrivée en retard
+        // `SourceCycle` suit l'order alphabétique. Une source arrivée en retard
         // qui resterait en queue ferait changer le sens du cycle selon la
         // chronologie du démarrage — l'utilisateur presserait la même touche et
         // n'obtiendrait pas la même source d'un jour à l'autre.
@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn add_source_signale_un_remplacement_sans_dupliquer_lordre() {
-        // Ré-annonce d'un greffon déjà câblé : le client est remplacé, le cycle
+        // Ré-announcement d'un greffon déjà câblé : le client est remplacé, le cycle
         // ne gagne pas une entrée en double.
         let (mut core, _pc, source_calls, _rx, _d) = setup();
         let remplacant = Arc::new(FakeSource { name: "radio", calls: source_calls });
@@ -439,14 +439,14 @@ mod tests {
 
     #[test]
     fn add_source_active_la_premiere_source_et_seulement_la_premiere() {
-        // Le seul cas où l'arrivée d'un greffon change ce qui joue : aucune
-        // source n'avait répondu au démarrage, donc rien n'était actif.
-        let (mut core, _rx, dir) = setup_sans_source();
+        // Le seul cas où l'arrivée d'un greffon change ce qui plays : aucune
+        // source n'avait répondu au démarrage, donc rien n'était active.
+        let (mut core, _rx, dir) = setup_without_source();
         assert_eq!(core.active_source(), "");
         let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         core.add_source("radio".into(), Arc::new(FakeSource { name: "radio", calls: calls.clone() }));
         assert_eq!(core.active_source(), "radio");
-        // La deuxième n'y touche pas, même si son nom passe avant dans l'ordre.
+        // La deuxième n'y touche pas, même si son name passe avant dans l'order.
         core.add_source("cd".into(), Arc::new(FakeSource { name: "cd", calls }));
         assert_eq!(core.active_source(), "radio");
         assert_eq!(core.source_order, vec!["cd".to_string(), "radio".into()]);
@@ -474,7 +474,7 @@ mod tests {
     async fn une_reponse_de_preselections_en_retard_ne_ressuscite_pas_une_source_retiree() {
         // La course : `ListPresets` est détaché, donc sa réponse peut arriver
         // après l'extinction du greffon. Sans protection, elle réinsérait
-        // l'entrée que `remove_source` venait d'évincer — et le catalogue
+        // l'entrée que `remove_source` venait d'évincer — et le sources_catalog
         // recommençait à annoncer à un client MPD une liste enregistrée sur
         // laquelle il pouvait agir. C'est exactement le défaut que l'éviction
         // existe pour empêcher.
@@ -487,22 +487,22 @@ mod tests {
         // empêché de disparaître. Vérifié par mutation : le retirer fait tomber
         // ce test.
         let (mut core, _pc, _sc, _rx, _d) = setup();
-        core.handle_source_update("radio", avec_presets(vec![pres(1, "FIP")]));
+        core.handle_source_update("radio", with_presets(vec![preset_of(1, "FIP")]));
         assert!(core.remove_source("radio").await.unwrap());
-        assert_eq!(noms(&core.catalogue()), vec!["cd".to_string()]);
+        assert_eq!(names(&core.sources_catalog()), vec!["cd".to_string()]);
 
-        // La réponse en retard arrive maintenant, sur un nom que le cœur ne
+        // La réponse en retard arrive maintenant, sur un name que le cœur ne
         // câble plus.
-        core.handle_source_update("radio", avec_presets(vec![pres(1, "FIP"), pres(5, "OUI FM")]));
+        core.handle_source_update("radio", with_presets(vec![preset_of(1, "FIP"), preset_of(5, "OUI FM")]));
 
         assert!(
             !core.presets_par_source.contains_key("radio"),
             "une source retirée ne doit pas revenir par une réponse en vol"
         );
         assert_eq!(
-            noms(&core.catalogue()),
+            names(&core.sources_catalog()),
             vec!["cd".to_string()],
-            "et le catalogue ne doit pas la réannoncer"
+            "et le sources_catalog ne doit pas la réannoncer"
         );
     }
 
@@ -510,22 +510,22 @@ mod tests {
     async fn retirer_une_source_la_sort_du_catalogue_avec_ses_preselections() {
         // Fusion des deux chantiers : `remove_source` (extinction à chaud d'un
         // greffon) est arrivé par un côté, `presets_par_source` et le canal de
-        // catalogue par l'autre — et rien ne les reliait. Laissée en place,
+        // sources_catalog par l'autre — et rien ne les reliait. Laissée en place,
         // l'entrée faisait figurer dans le `listplaylists` d'un client MPD une
         // source éteinte, sur laquelle il pouvait **agir** : le `load` serait
         // refusé par le garde de `SelectSource`, mais l'utilisateur verrait une
         // liste qui mente jusqu'au redémarrage, les clients MPD mettant
-        // volontiers ce catalogue en cache.
+        // volontiers ce sources_catalog en cache.
         let (mut core, _pc, _sc, _rx, _d) = setup();
-        core.handle_source_update("radio", avec_presets(vec![pres(1, "FIP"), pres(5, "OUI FM")]));
-        assert_eq!(noms(&core.catalogue()), vec!["cd".to_string(), "radio".into()]);
+        core.handle_source_update("radio", with_presets(vec![preset_of(1, "FIP"), preset_of(5, "OUI FM")]));
+        assert_eq!(names(&core.sources_catalog()), vec!["cd".to_string(), "radio".into()]);
 
         assert!(core.remove_source("radio").await.unwrap());
 
-        assert_eq!(noms(&core.catalogue()), vec!["cd".to_string()], "la source sort du catalogue");
+        assert_eq!(names(&core.sources_catalog()), vec!["cd".to_string()], "la source sort du sources_catalog");
         assert!(
             !core.presets_par_source.contains_key("radio"),
-            "ses présélections partent avec elle : un greffon rallumé sous le même nom \
+            "ses présélections partent avec elle : un greffon rallumé sous le même name \
              doit attendre son propre ListPresets, pas hériter de sa vie précédente"
         );
     }
@@ -533,22 +533,22 @@ mod tests {
     #[tokio::test]
     async fn une_source_disparue_ne_recoit_plus_de_bascule_et_sort_du_catalogue() {
         // **Le danger commun aux deux chemins de disparition d'un greffon.** Un
-        // greffon disparu qui laissait son nom dans `source_order` et ses
+        // greffon disparu qui laissait son name dans `source_order` et ses
         // présélections dans `presets_par_source` faisait garder à un client MPD
         // sa liste enregistrée en cache, et un `load` dessus **passait** le garde
         // de `SelectSource`. La bascule partait alors vers un socket mort et
-        // payait jusqu'à deux délais de 5 s du protocole des sources —
+        // payait jusqu'à deux délais de 5 s du protocol des sources —
         // `Deactivate` puis `Activate` — dans la boucle principale, muette
-        // pendant ce temps. Ce test-ci prend le chemin volontaire
+        // pendant ce temps. Ce test-ci prend le path volontaire
         // (`remove_source`) ; son jumeau juste en dessous prend celui de la mort
-        // subie (`oublie_source_morte`), et c'est leur *différence* qui est
+        // subie (`forget_dead_source`), et c'est leur *différence* qui est
         // épinglée là-bas.
         //
-        // Le test épingle les deux moitiés à la suite : la sortie du catalogue,
-        // et le fait qu'un `SelectSource` sur ce nom ne parle plus à personne.
+        // Le test épingle les deux moitiés à la suite : la sortie du sources_catalog,
+        // et le fait qu'un `SelectSource` sur ce name ne parle plus à personne.
         let (mut core, _pc, source_calls, _rx, _d) = setup();
-        core.handle_source_update("radio", avec_presets(vec![pres(1, "FIP")]));
-        assert!(noms(&core.catalogue()).contains(&"radio".to_string()));
+        core.handle_source_update("radio", with_presets(vec![preset_of(1, "FIP")]));
+        assert!(names(&core.sources_catalog()).contains(&"radio".to_string()));
 
         // Ce que fait le bras `plugin_waits` quand la mort n'était pas voulue.
         assert!(core.remove_source("radio").await.unwrap());
@@ -556,7 +556,7 @@ mod tests {
         // que ce qui suit.
         source_calls.lock().unwrap().clear();
 
-        // Ce qu'un client MPD envoie encore, son catalogue étant en cache.
+        // Ce qu'un client MPD envoie encore, son sources_catalog étant en cache.
         core.handle_command(Command::SelectSource("radio".into())).await.unwrap();
 
         let appels = source_calls.lock().unwrap().clone();
@@ -564,10 +564,10 @@ mod tests {
             appels.is_empty(),
             "aucune requete ne doit partir apres la disparition de la source, obtenu {appels:?}"
         );
-        assert_eq!(core.active_source(), "cd", "et ce qui joue n'a pas bouge");
+        assert_eq!(core.active_source(), "cd", "et ce qui plays n'a pas bouge");
         assert!(
-            !noms(&core.catalogue()).contains(&"radio".to_string()),
-            "la source disparue ne doit plus figurer au catalogue"
+            !names(&core.sources_catalog()).contains(&"radio".to_string()),
+            "la source disparue ne doit plus figurer au sources_catalog"
         );
         assert!(!core.presets_par_source.contains_key("radio"));
     }
@@ -578,35 +578,35 @@ mod tests {
         // appelait `remove_source`, qui bascule quand c'était l'active : une
         // panique du greffon radio arrêtait donc mpv et affichait « cd » sur un
         // appareil dont l'utilisateur avait choisi la radio. Or un greffon de
-        // Source est un *contrôleur* — le flux est tenu par mpv, enfant du cœur,
+        // Source est un *contrôleur* — le stream est tenu par mpv, enfant du cœur,
         // que la mort du greffon ne touche pas.
         //
         // Trois propriétés dans un seul test, parce que c'est leur conjonction
         // qui est la décision : rien ne s'arrête, rien ne bascule, et le
-        // catalogue oublie quand même.
-        let (mut core, player_calls, source_calls, etat_rx, _d) = setup();
-        core.handle_command(Command::PlayPause).await.unwrap(); // la radio joue
-        core.handle_source_update("radio", avec_presets(vec![pres(1, "FIP")]));
-        assert_eq!(etat_rx.borrow().playback, Playback::Playing);
+        // sources_catalog oublie quand même.
+        let (mut core, player_calls, source_calls, state_rx, _d) = setup();
+        core.handle_command(Command::PlayPause).await.unwrap(); // la radio plays
+        core.handle_source_update("radio", with_presets(vec![preset_of(1, "FIP")]));
+        assert_eq!(state_rx.borrow().playback, Playback::Playing);
         player_calls.lock().unwrap().clear();
         source_calls.lock().unwrap().clear();
 
-        assert!(core.oublie_source_morte("radio"));
+        assert!(core.forget_dead_source("radio"));
 
         assert_eq!(
             core.active_source(),
             "radio",
-            "personne n'a demande de changer de source : le nom affiche doit rester celui \
+            "personne n'a demande de changer de source : le name affiche doit rester celui \
              que l'utilisateur a choisi, greffon mort ou non"
         );
         assert_eq!(
-            etat_rx.borrow().playback,
+            state_rx.borrow().playback,
             Playback::Playing,
             "la panne d'un controleur ne doit pas faire taire mpv, qui n'est pas dans le greffon"
         );
         assert!(
             player_calls.lock().unwrap().is_empty(),
-            "aucun ordre au lecteur : obtenu {:?}",
+            "aucun order au player : obtenu {:?}",
             player_calls.lock().unwrap()
         );
         assert!(
@@ -617,13 +617,13 @@ mod tests {
         );
         // Et l'eviction, elle, a bien eu lieu : c'est la moitie commune aux deux
         // chemins.
-        assert_eq!(noms(&core.catalogue()), vec!["cd".to_string()]);
+        assert_eq!(names(&core.sources_catalog()), vec!["cd".to_string()]);
         assert!(!core.presets_par_source.contains_key("radio"));
         // Les capacites de la source morte sont oubliees : une touche Eject
         // allumee ou une grille de preselections ouverte proposeraient des
-        // commandes qui ne peuvent plus aboutir.
-        assert!(!etat_rx.borrow().can_eject);
-        assert_eq!(etat_rx.borrow().preset_count, None);
+        // commands qui ne peuvent plus aboutir.
+        assert!(!state_rx.borrow().can_eject);
+        assert_eq!(state_rx.borrow().preset_count, None);
     }
 
     #[tokio::test]
@@ -636,7 +636,7 @@ mod tests {
         let files = Arc::new(FakeSource { name: "files", calls: source_calls });
         core.add_source("files".into(), files);
         assert_eq!(core.source_order, vec!["cd".to_string(), "files".into(), "radio".into()]);
-        assert!(core.oublie_source_morte("radio"));
+        assert!(core.forget_dead_source("radio"));
 
         core.handle_command(Command::SourceCycle).await.unwrap();
 
@@ -649,26 +649,26 @@ mod tests {
         // propre tâche, et `remove_source` peut s'exécuter entre elle et sa
         // réponse. Cette réponse-là arrive donc pour de vrai après l'éviction, et
         // `presets_par_source.insert` se fait délibérément **avant** le garde de
-        // source active (le catalogue décrit toutes les sources, pas celle qui
-        // joue) : la liste était donc ré-insérée après coup, le catalogue
+        // source active (le sources_catalog décrit toutes les sources, pas celle qui
+        // plays) : la liste était donc ré-insérée après coup, le sources_catalog
         // republié annonçait une liste enregistrée pour une source qui n'existe
         // plus, et un client MPD pouvait `load` dessus.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         assert!(core.remove_source("radio").await.unwrap());
-        assert!(!noms(&core.catalogue()).contains(&"radio".to_string()));
+        assert!(!names(&core.sources_catalog()).contains(&"radio".to_string()));
 
         // La réponse en vol, telle que le `SourceClient` la relaie : une liste
-        // non vide, sans identité ni statut — la forme exacte qu'une trame de
+        // non clear, sans identité ni statut — la forme exacte qu'une trame de
         // `ListPresets` prend sur le fil.
-        core.handle_source_update("radio", avec_presets(vec![pres(1, "FIP"), pres(5, "OUI FM")]));
+        core.handle_source_update("radio", with_presets(vec![preset_of(1, "FIP"), preset_of(5, "OUI FM")]));
 
         assert!(
             !core.presets_par_source.contains_key("radio"),
             "une reponse pour une source que le coeur ne connait plus doit etre jetee"
         );
         assert!(
-            !noms(&core.catalogue()).contains(&"radio".to_string()),
-            "et le catalogue ne doit pas la faire reapparaitre"
+            !names(&core.sources_catalog()).contains(&"radio".to_string()),
+            "et le sources_catalog ne doit pas la faire reapparaitre"
         );
     }
 
@@ -677,45 +677,45 @@ mod tests {
         // Le pendant du test ci-dessus, et il est nécessaire : un garde trop
         // large aurait aussi jeté les listes des sources **vivantes mais non
         // actives**, ce qui est justement le cas que `presets_par_source` existe
-        // pour servir — `listplaylistinfo "radio"` pendant que le cd joue.
+        // pour serve — `listplaylistinfo "radio"` pendant que le cd plays.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         core.handle_command(Command::SourceCycle).await.unwrap();
         assert_eq!(core.active_source(), "cd");
 
-        core.handle_source_update("radio", avec_presets(vec![pres(1, "FIP")]));
+        core.handle_source_update("radio", with_presets(vec![preset_of(1, "FIP")]));
 
         assert_eq!(
             core.presets_par_source.get("radio").map(|p| p.len()),
             Some(1),
-            "la source n'est pas active, mais elle existe : sa liste doit entrer au catalogue"
+            "la source n'est pas active, mais elle existe : sa liste doit entrer au sources_catalog"
         );
     }
 
     #[tokio::test]
     async fn le_catalogue_est_republie_quand_une_source_est_retiree() {
         // Le retrait ne suffit pas : sans la publication, les afficheurs déjà
-        // connectés garderaient la version précédente du catalogue — le canal
+        // connectés garderaient la version précédente du sources_catalog — le canal
         // étant `watch`, personne ne la redemande.
         let (mut core, _pc, _sc, _rx, _d) = setup();
-        let mut cat_rx = core.catalogue_tx.subscribe();
+        let mut cat_rx = core.sources_catalog_tx.subscribe();
         cat_rx.borrow_and_update();
 
         assert!(core.remove_source("radio").await.unwrap());
 
-        assert!(cat_rx.has_changed().unwrap(), "le canal du catalogue doit avoir bougé");
-        assert_eq!(noms(&cat_rx.borrow_and_update()), vec!["cd".to_string()]);
+        assert!(cat_rx.has_changed().unwrap(), "le canal du sources_catalog doit avoir bougé");
+        assert_eq!(names(&cat_rx.borrow_and_update()), vec!["cd".to_string()]);
     }
 
     #[tokio::test]
     async fn desactiver_la_source_active_republie_letat_sans_les_reliquats_de_la_sortante() {
-        // Fix de revue finale : `bascule_source` est emprunté par
+        // Fix de revue finale : `cycle_source` est emprunté par
         // `remove_source` (donc par la désactivation à chaud d'un greffon)
         // en dehors de `handle_command`, seul endroit qui publiait jusqu'ici.
-        // Sans un `publie_etat` propre à `bascule_source`, la trame reçue par
+        // Sans un `publish_state` propre à `cycle_source`, la trame reçue par
         // la SPA et les afficheurs continuait de nommer la source sortante,
         // avec son compte de présélections, son statut et sa capacité
         // d'éjection.
-        let (mut core, _pc, _sc, etat_rx, _d) = setup();
+        let (mut core, _pc, _sc, state_rx, _d) = setup();
         core.handle_source_update(
             "radio",
             SourceUpdate {
@@ -730,17 +730,17 @@ mod tests {
                 cover: None,
             },
         );
-        assert_eq!(etat_rx.borrow().source, "radio");
-        assert_eq!(etat_rx.borrow().preset_count, Some(23));
-        assert!(etat_rx.borrow().can_eject);
+        assert_eq!(state_rx.borrow().source, "radio");
+        assert_eq!(state_rx.borrow().preset_count, Some(23));
+        assert!(state_rx.borrow().can_eject);
 
         assert!(core.remove_source("radio").await.unwrap());
 
-        let etat = etat_rx.borrow();
-        assert_eq!(etat.source, "cd", "la trame doit nommer l'entrante, pas la sortante");
-        assert_eq!(etat.preset_count, None, "le compte de preselections de la sortante ne doit pas survivre");
-        assert_eq!(etat.status, None, "le statut de la sortante ne doit pas survivre");
-        assert!(!etat.can_eject, "la capacite d'ejection decrit la sortante, pas l'entrante");
+        let state = state_rx.borrow();
+        assert_eq!(state.source, "cd", "la trame doit nommer l'entrante, pas la sortante");
+        assert_eq!(state.preset_count, None, "le compte de preselections de la sortante ne doit pas survivre");
+        assert_eq!(state.status, None, "le statut de la sortante ne doit pas survivre");
+        assert!(!state.can_eject, "la capacite d'ejection decrit la sortante, pas l'entrante");
     }
 
     #[tokio::test]
@@ -749,7 +749,7 @@ mod tests {
         assert!(core.remove_source("cd").await.unwrap());
         assert!(core.remove_source("radio").await.unwrap());
 
-        // Aucune source est un état légitime : `demande_active` le tolère, et
+        // Aucune source est un état légitime : `active_request` le tolère, et
         // démarrer sans source est accepté depuis l'enregistrement à chaud.
         assert_eq!(core.active_source(), "");
         assert!(core.source_order.is_empty());
@@ -767,7 +767,7 @@ mod tests {
         assert_eq!(core.source_order, vec!["radio".to_string()]);
         assert!(
             !player_calls.lock().unwrap().iter().any(|c| c == "stop"),
-            "retirer une source inactive n'arrête pas ce qui joue"
+            "retirer une source inactive n'arrête pas ce qui plays"
         );
     }
 
@@ -811,14 +811,14 @@ mod tests {
     #[tokio::test]
     async fn une_source_cablee_a_chaud_recoit_la_langue_courante() {
         // `resume` et `set_locale` ne servent que les sources présentes dans la
-        // table au moment de leur appel. Sans ce chemin-là, une source arrivée
+        // table au moment de leur appel. Sans ce path-là, une source arrivée
         // après n'aurait jamais reçu `SetLocale` : sur un appareil en français,
         // un `cd` relancé à la main revenait en affichant `NO DISC`.
         let (mut core, _pc, source_calls, _rx, _d) = setup();
         core.set_locale("fr".into()).await.unwrap();
 
         let tardives: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        core.cable_source_a_chaud(
+        core.hotplug_source(
             "files".into(),
             Arc::new(FakeSource { name: "files", calls: tardives.clone() }),
         )
@@ -826,7 +826,7 @@ mod tests {
         .unwrap();
 
         // La langue, et **rien d'autre** : `files` n'est pas la première source
-        // du cœur, donc elle n'est pas réveillée — ce qui joue ne change pas
+        // du cœur, donc elle n'est pas réveillée — ce qui plays ne change pas
         // parce qu'un greffon a fini de démarrer.
         assert_eq!(
             tardives.lock().unwrap().as_slice(),
@@ -847,7 +847,7 @@ mod tests {
         // force écraserait un greffon lancé avec sa propre langue.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         let tardives: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        core.cable_source_a_chaud(
+        core.hotplug_source(
             "files".into(),
             Arc::new(FakeSource { name: "files", calls: tardives.clone() }),
         )
@@ -862,41 +862,41 @@ mod tests {
         // ni `Activate`. Une source arrivée à t+30 s serait donc active et
         // **muette** jusqu'à ce que l'utilisateur touche quelque chose —
         // l'appareil aurait l'air en panne alors que tout est câblé.
-        let (mut core, mut etat_rx, dir) = setup_sans_source();
+        let (mut core, mut state_rx, dir) = setup_without_source();
         core.set_locale("fr".into()).await.unwrap();
         let vus: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         assert!(
             !core
-                .cable_source_a_chaud(
+                .hotplug_source(
                     "radio".into(),
                     Arc::new(FakeSource { name: "radio", calls: vus.clone() })
                 )
                 .await
                 .unwrap(),
-            "premier cablage, pas un remplacement"
+            "premier wiring, pas un remplacement"
         );
 
         assert_eq!(
             vus.lock().unwrap().as_slice(),
             ["radio:SetLocale(\"fr\")".to_string(), "radio:Wake".into()],
-            "la langue AVANT le reveil, exactement comme au demarrage"
+            "la langue AVANT le reveil, exactement comme au startup"
         );
-        // Le `Play` renvoyé par `Wake` a bien été appliqué : quelque chose joue.
+        // Le `Play` renvoyé par `Wake` a bien été appliqué : quelque chose plays.
         assert!(core.player.calls.lock().unwrap().contains(&"play http://fip".to_string()));
-        assert_eq!(etat_rx.borrow_and_update().source, "radio");
+        assert_eq!(state_rx.borrow_and_update().source, "radio");
         drop(dir);
     }
 
     #[tokio::test]
     async fn la_premiere_source_cablee_a_chaud_ne_reveille_pas_un_coeur_en_veille() {
-        // La veille est un état **voulu** : l'arrivée d'un greffon ne rallume pas
+        // La veille est un état **voulu** : l'arrivée d'un greffon ne relaunch pas
         // l'appareil. Seule la langue est due, pour que la source ne compose pas
         // sa première trame dans la langue de son lancement.
-        let (mut core, _rx, dir) = setup_sans_source();
+        let (mut core, _rx, dir) = setup_without_source();
         core.set_locale("fr".into()).await.unwrap();
         core.handle_command(Command::Power).await.unwrap();
         let vus: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        core.cable_source_a_chaud(
+        core.hotplug_source(
             "radio".into(),
             Arc::new(FakeSource { name: "radio", calls: vus.clone() }),
         )
@@ -956,7 +956,7 @@ mod tests {
 
     #[tokio::test]
     async fn une_source_inconnue_est_ignoree_sans_rien_couper() {
-        // La garde qui compte : sans elle, un nom errant viderait la source active.
+        // La garde qui compte : sans elle, un name errant viderait la source active.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         core.handle_command(Command::SelectSource("nexistepas".into())).await.unwrap();
         assert_eq!(core.active_source(), "radio");
@@ -965,17 +965,17 @@ mod tests {
     #[tokio::test]
     async fn selectionner_la_source_deja_active_ne_coupe_pas_ce_qui_joue() {
         // C'est exactement ce qu'un client MPD envoie en rouvrant son ecran : un
-        // `load` redondant ne doit pas arreter la lecture.
+        // `load` redondant ne doit pas arreter la playback.
         let (mut core, player_calls, _sc, _rx, _d) = setup();
         core.resume().await.unwrap();
-        assert_eq!(core.etat_lecteur().playback, Playback::Playing);
+        assert_eq!(core.player_state().playback, Playback::Playing);
         // La bascule complete (stop puis Activate) ramenerait aussi a `Playing`
         // pour cette source factice : le champ `playback` seul ne distingue pas
-        // un redondant traite en no-op d'un redondant qui a coupe puis relance.
+        // un redondant traite en no-op d'un redondant qui a coupe puis restart.
         // L'absence de tout nouvel appel `stop` est la preuve qui bite.
         player_calls.lock().unwrap().clear();
         core.handle_command(Command::SelectSource("radio".into())).await.unwrap();
-        assert_eq!(core.etat_lecteur().playback, Playback::Playing);
+        assert_eq!(core.player_state().playback, Playback::Playing);
         assert!(
             !player_calls.lock().unwrap().iter().any(|c| c == "stop"),
             "un load redondant ne doit meme pas arreter puis relancer mpv"
@@ -995,24 +995,24 @@ mod tests {
         let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
         sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())) }));
         sources.insert("cd".into(), Arc::new(SourceVide));
-        let (etat_tx, etat_rx) = watch::channel(PlayerState::default());
+        let (state_tx, state_rx) = watch::channel(PlayerState::default());
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
-        let metadata = MetadataCablage {
+        let metadata = MetadataWiring {
             plugins: vec![],
             now_playing: watch::channel(NowPlaying { source: String::new(), identity: None, ..Default::default() }).0,
-            etat: etat_tx,
+            state: state_tx,
         };
-        let (covers, pochette_tx) = covers_de_test();
-        let mut core = Core::new(player, Cablage { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata, catalogue: watch::channel(Catalogue::default()).0 }, covers, pochette_tx, mpsc::channel(4).0);
+        let (covers, cover_tx) = test_covers();
+        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata, sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         core.handle_command(Command::SourceCycle).await.unwrap();
         // C'est le cœur qui a arrêté mpv, sans dépendre des plugins.
         assert!(player_calls.lock().unwrap().contains(&"stop".to_string()));
-        // Et un titre ICY en retard de l'ancien flux n'atteint plus personne :
-        // plus aucun flux n'est attendu.
+        // Et un titre ICY en retard de l'ancien stream n'atteint plus personne :
+        // plus aucun stream n'est attendu.
         core.handle_event(Event::IcyTitle("en retard".into())).await;
-        assert_eq!(etat_rx.borrow().morceau.title, None);
+        assert_eq!(state_rx.borrow().track.title, None);
     }
 
     #[tokio::test]
@@ -1020,7 +1020,7 @@ mod tests {
         // Régression (revue 2026-07-27) : `persist()` n'était appelé qu'après
         // un `Activate` réussi. Son échec laissait la bascule à moitié faite :
         // « cd » en mémoire et à l'écran, « radio » dans state.json, et
-        // l'ancien flux toujours audible.
+        // l'ancien stream toujours audible.
         let dir = tempfile::tempdir().unwrap();
         let player = FakePlayer::default();
         let player_calls = player.calls.clone();
@@ -1029,11 +1029,11 @@ mod tests {
         sources.insert("cd".into(), Arc::new(SourceEnPanne));
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
-        let (covers, pochette_tx) = covers_de_test();
-        let mut core = Core::new(player, Cablage { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata: cablage_muet(vec![]), catalogue: watch::channel(Catalogue::default()).0 }, covers, pochette_tx, mpsc::channel(4).0);
+        let (covers, cover_tx) = test_covers();
+        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         assert!(core.handle_command(Command::SourceCycle).await.is_err());
-        // L'état est cohérent : nouvelle source partout, et rien ne joue.
+        // L'état est cohérent : nouvelle source partout, et rien ne plays.
         assert_eq!(core.active_source(), "cd");
         let st = crate::state::load(&dir.path().join("state.json"));
         assert_eq!(st.active_source, "cd");
@@ -1044,45 +1044,45 @@ mod tests {
     async fn une_source_cablee_a_chaud_entre_dans_le_catalogue() {
         // Un greffon qui a rate le rendez-vous doit apparaitre dans la liste que
         // les clients interrogent, sans redemarrage — donc `add_source` publie.
-        let (mut core, _rx, dir) = setup_sans_source();
-        let mut cat_rx = core.catalogue_tx.subscribe();
-        assert!(core.catalogue().sources.is_empty(), "aucune source au demarrage");
+        let (mut core, _rx, dir) = setup_without_source();
+        let mut cat_rx = core.sources_catalog_tx.subscribe();
+        assert!(core.sources_catalog().sources.is_empty(), "aucune source au startup");
         let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        core.cable_source_a_chaud("radio".into(), Arc::new(FakeSource { name: "radio", calls }))
+        core.hotplug_source("radio".into(), Arc::new(FakeSource { name: "radio", calls }))
             .await
             .unwrap();
         assert!(cat_rx.has_changed().unwrap(), "les afficheurs doivent l'apprendre");
-        assert_eq!(noms(&cat_rx.borrow_and_update()), vec!["radio".to_string()]);
+        assert_eq!(names(&cat_rx.borrow_and_update()), vec!["radio".to_string()]);
         drop(dir);
     }
 
     #[tokio::test]
     async fn une_source_cablee_a_chaud_finit_avec_ses_preselections() {
-        // Le chemin complet du greffon qui a rate le rendez-vous : il entre dans
-        // le catalogue avec une liste vide, puis sa reponse a `ListPresets` — que
-        // le cablage a chaud demande desormais, comme le demarrage — la remplit.
+        // Le path complet du greffon qui a rate le rendez-vous : il entre dans
+        // le sources_catalog avec une liste clear, puis sa reponse a `ListPresets` — que
+        // le wiring a chaud demande desormais, comme le startup — la remplit.
         //
         // La source cablee en second n'est **pas** l'active, ce qui est le cas
-        // reel (une `radio` tardive pendant que le `cd` joue) : la liste doit donc
+        // reel (une `radio` tardive pendant que le `cd` plays) : la liste doit donc
         // franchir le garde de source active, et la publication doit remplacer la
-        // liste vide au lieu d'etre dedoublonnee.
-        let (mut core, _rx, dir) = setup_sans_source();
+        // liste clear au lieu d'etre dedoublonnee.
+        let (mut core, _rx, dir) = setup_without_source();
         let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        core.cable_source_a_chaud("cd".into(), Arc::new(FakeSource { name: "cd", calls: calls.clone() }))
+        core.hotplug_source("cd".into(), Arc::new(FakeSource { name: "cd", calls: calls.clone() }))
             .await
             .unwrap();
-        core.cable_source_a_chaud("radio".into(), Arc::new(FakeSource { name: "radio", calls }))
+        core.hotplug_source("radio".into(), Arc::new(FakeSource { name: "radio", calls }))
             .await
             .unwrap();
         assert_eq!(core.active_source(), "cd", "la premiere cablee reste l'active");
-        let mut cat_rx = core.catalogue_tx.subscribe();
-        assert_eq!(noms(&cat_rx.borrow()), vec!["cd".to_string(), "radio".into()]);
+        let mut cat_rx = core.sources_catalog_tx.subscribe();
+        assert_eq!(names(&cat_rx.borrow()), vec!["cd".to_string(), "radio".into()]);
 
-        core.handle_source_update("radio", avec_presets(vec![pres(1, "FIP"), pres(9, "OUI FM")]));
+        core.handle_source_update("radio", with_presets(vec![preset_of(1, "FIP"), preset_of(9, "OUI FM")]));
         assert!(cat_rx.has_changed().unwrap(), "les afficheurs doivent l'apprendre");
         let cat = cat_rx.borrow_and_update().clone();
         let radio = cat.sources.iter().find(|s| s.name == "radio").expect("radio est declaree");
-        assert_eq!(radio.presets, vec![pres(1, "FIP"), pres(9, "OUI FM")]);
+        assert_eq!(radio.presets, vec![preset_of(1, "FIP"), preset_of(9, "OUI FM")]);
         drop(dir);
     }
 
@@ -1094,15 +1094,15 @@ mod tests {
         // aucune présélection configurée (une trame transitoire ne touche pas
         // au statut mémorisé) : sans ce correctif, l'écran continuait
         // d'afficher "pas de disque" sous la source "radio".
-        let (mut core, _pc, _sc, mut etat_rx, _d) = setup();
+        let (mut core, _pc, _sc, mut state_rx, _d) = setup();
         core.resume().await.unwrap();
-        let mut update = update_nu();
+        let mut update = bare_update();
         update.status = Some("pas de disque".into());
         core.handle_source_update("radio", update);
-        assert_eq!(etat_rx.borrow_and_update().status.as_deref(), Some("pas de disque"));
+        assert_eq!(state_rx.borrow_and_update().status.as_deref(), Some("pas de disque"));
         core.handle_command(Command::SourceCycle).await.unwrap();
         assert_eq!(
-            etat_rx.borrow_and_update().status,
+            state_rx.borrow_and_update().status,
             None,
             "le statut de l'ancienne source ne doit pas survivre au changement de source"
         );
@@ -1111,12 +1111,12 @@ mod tests {
     #[tokio::test]
     async fn changer_de_source_diffuse_la_nouvelle_source() {
         // Piege : `SourceCycle` appelle `set_identity(None)`, qui sort sans rien
-        // publier quand l'identite etait **deja** nulle — cas du cd sans disque.
+        // publier quand l'identity etait **deja** nulle — cas du cd sans disque.
         // La source active a pourtant change. C'est ce qui justifie de publier a
         // la sortie de la commande plutot que depuis `set_identity`.
-        let (mut core, _np_rx, etat_rx, _d) = setup_metadonnees(vec![]);
-        assert_eq!(etat_rx.borrow().source, "");
+        let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
+        assert_eq!(state_rx.borrow().source, "");
         core.handle_command(Command::SourceCycle).await.unwrap();
-        assert_eq!(etat_rx.borrow().source, "cd");
+        assert_eq!(state_rx.borrow().source, "cd");
     }
 }

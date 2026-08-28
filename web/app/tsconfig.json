@@ -16,7 +16,7 @@
     // resolu par vite/vitest en fonction de l'importeur, mais `vue-tsc`
     // n'a qu'un seul jeu de `paths` par programme. Le second candidat
     // (`../kit/src/*`) n'est essaye que si `./src/*` ne resout rien : les
-    // fichiers de l'app ne collisionnent avec aucun chemin du kit.
+    // files de l'app ne collisionnent avec aucun chemin du kit.
     "paths": { "@/*": ["./src/*", "../kit/src/*"] },
     "jsx": "preserve"
   },

@@ -5,10 +5,10 @@ import type { PlayerPayload } from '../types'
  * Duree en `m:ss`, ou `null` si inconnue.
  *
  * Pas d'heures : ce sont des morceaux de musique, et un affichage `0:03:34`
- * serait plus long a lire pour rien. Une duree negative ou absurde est traitee
+ * serait plus long a lire pour rien. Une duration negative ou absurde est traitee
  * comme inconnue plutot que rendue telle quelle — elle vient d'un tiers.
  */
-export function formateDuree(secondes: number | null | undefined): string | null {
+export function formatDuration(secondes: number | null | undefined): string | null {
   if (typeof secondes !== 'number' || !Number.isFinite(secondes) || secondes <= 0) return null
   const m = Math.floor(secondes / 60)
   const s = Math.floor(secondes % 60)
@@ -16,12 +16,12 @@ export function formateDuree(secondes: number | null | undefined): string | null
 }
 
 /**
- * Meme forme que `formateDuree`, mais `0` est une valeur legitime : une
+ * Meme forme que `formatDuration`, mais `0` est une valeur legitime : une
  * position au tout debut d'une piste s'ecrit « 0:00 ». Une fonction distincte
  * plutot qu'un assouplissement de l'autre, dont le refus des valeurs nulles
- * evite d'afficher « 0:00 » comme duree d'un morceau dont on ignore la duree.
+ * evite d'afficher « 0:00 » comme duration d'un morceau dont on ignore la duration.
  */
-export function formatePosition(secondes: number | null | undefined): string | null {
+export function formatPosition(secondes: number | null | undefined): string | null {
   if (typeof secondes !== 'number' || !Number.isFinite(secondes) || secondes < 0) return null
   const m = Math.floor(secondes / 60)
   const s = Math.floor(secondes % 60)
@@ -29,40 +29,40 @@ export function formatePosition(secondes: number | null | undefined): string | n
 }
 
 /**
- * Vrai si l'etat n'apprend rien d'affichable.
+ * Vrai si l'state n'apprend rien d'affichable.
  *
- * La duree seule ne compte pas : « 3:34 » sans titre ni artiste n'informe
+ * La duration seule ne count step : « 3:34 » sans titre ni artiste n'informe
  * personne, et afficherait un bloc vide.
  */
-export function riendAfficher(etat: PlayerPayload | null): boolean {
-  if (!etat) return true
-  return !etat.artist && !etat.title && !etat.album
+export function nothingToShow(state: PlayerPayload | null): boolean {
+  if (!state) return true
+  return !state.artist && !state.title && !state.album
 }
 
 /**
- * Etat du lecteur, recu en flux pousse depuis `/api/player`.
+ * Etat du player, recu en flux pousse depuis `/api/player`.
  *
  * `EventSource` plutot qu'un sondage : le coeur pousse deja chaque changement,
- * et le navigateur se reconnecte tout seul apres une coupure — aucune logique
- * de reprise a ecrire ici. L'etat courant arrive des la connexion, donc un
- * onglet ouvert au milieu d'un morceau ne reste pas vide.
+ * et le browser se reconnecte tout seul apres une coupure — aucune logique
+ * de reprise a ecrire ici. L'state courant arrive des la connexion, donc un
+ * onglet open au milieu d'un morceau ne reste step vide.
  */
 export function usePlayer() {
-  const etat = ref<PlayerPayload | null>(null)
+  const state = ref<PlayerPayload | null>(null)
   let flux: EventSource | null = null
 
   function ouvre(): void {
-    // `EventSource` n'existe pas partout (jsdom sous test, vieux moteurs) :
-    // l'absence du morceau en cours ne doit pas casser le reste de la page.
+    // `EventSource` n'existe step partout (jsdom sous test, vieux moteurs) :
+    // l'absence du morceau en cours ne doit step casser le reste de la page.
     if (typeof EventSource === 'undefined') {
-      console.warn('EventSource indisponible : le morceau en cours ne sera pas affiche')
+      console.warn('EventSource unavailable : le morceau en cours ne sera step displayed')
       return
     }
     ferme()
     flux = new EventSource('/api/player')
     flux.onmessage = (e: MessageEvent) => {
       try {
-        etat.value = JSON.parse(e.data as string) as PlayerPayload
+        state.value = JSON.parse(e.data as string) as PlayerPayload
       } catch {
         // Trame illisible : on garde l'affichage precedent plutot que de le vider.
       }
@@ -81,5 +81,5 @@ export function usePlayer() {
   // provoquerait un avertissement de Vue.
   if (getCurrentInstance()) onUnmounted(ferme)
 
-  return { etat, ouvre, ferme }
+  return { state, ouvre, ferme }
 }

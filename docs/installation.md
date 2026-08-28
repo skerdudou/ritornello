@@ -364,7 +364,7 @@ the plugin tries and reports. To check by hand, on the device:
     journalctl -u ritornello-media-mount -n 30
 
 Any other error — bad password, unreachable host — appears in that same
-journal, one line per share, since a share that fails does not fail the
+log, one line per share, since a share that fails does not fail the
 whole unit.
 
 **A missing `cifs-utils` is checked before mounting**, and reported as
@@ -388,7 +388,7 @@ namespace. `ritornello.service`, on the other hand, *is* hardened
 namespace of its own. systemd mounts that namespace `rslave`, which
 *should* make mounts made later by the host visible inside it — expected
 behaviour, not something measured on this hardware yet. If a share mounts
-(the unit's journal says so) while the plugin keeps seeing an empty
+(the unit's log says so) while the plugin keeps seeing an empty
 `/mnt/ritornello/<name>`, that propagation is the suspect, and the recourse
 is a `BindPaths=/mnt/ritornello` in `ritornello.service`. A second point to
 confirm against the NAS in use: no SMB dialect is forced (`vers=` is

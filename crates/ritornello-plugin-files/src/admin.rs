@@ -1,12 +1,12 @@
-//! Moitié Admin : la page de gestion des racines et de la liste de lecture.
+//! Moitié Admin : la page de gestion des racines et de la liste de playback.
 //!
 //! Elle partage avec la moitié Source la table des racines et la liste en
-//! cours, derrière des verrous asynchrones. Les deux moitiés tournent dans des
+//! cours, derrière des verrous asynchrones. Les deux moitiés tournent in_dir des
 //! tâches distinctes : une panne ici ne doit jamais couper l'audio.
 //!
-//! Le protocole admin est **requête/réponse** et ne pousse rien. C'est
+//! Le protocol admin est **requête/réponse** et ne push_cover rien. C'est
 //! pourquoi le scan est une tâche asynchrone dont la page interroge
-//! l'avancement, et non un flux d'événements.
+//! l'avancement, et non un stream d'événements.
 
 use crate::state;
 use anyhow::Result;
@@ -14,7 +14,7 @@ use ritornello_i18n::Catalog;
 use ritornello_plugin_files::m3u::Entry;
 use ritornello_plugin_files::playlist::Playlist;
 use ritornello_plugin_files::roots::{Root, RootKind, Roots};
-use ritornello_plugin_files::sante::Sante;
+use ritornello_plugin_files::health::Health;
 use ritornello_plugin_files::store::{self, Location};
 use ritornello_plugin_files::volumes;
 use ritornello_plugin_files::{mount, scan};
@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::RwLock as AsyncRwLock;
 
-/// Avancement du scan en cours, tel que la page le lit.
+/// Avancement du scan en cours, tel que la page le read.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ScanProgress {
     pub running: bool,
@@ -33,13 +33,13 @@ pub struct ScanProgress {
     pub dir: String,
     /// Refus ou incident du **dernier** scan. Conservé après la fin : c'est la
     /// seule façon pour la page d'apprendre qu'un ajout a échoué, l'appel
-    /// `add_dir` ayant rendu la main bien avant.
+    /// `add_dir` ayant rendition la main bien avant.
     pub error: Option<String>,
 }
 
-/// Avancement du sondage des durées, tel que la page le lit.
+/// Avancement du sondage des durées, tel que la page le read.
 #[derive(Debug, Clone, Default, Serialize)]
-pub struct DureesProgress {
+pub struct DurationsProgress {
     pub running: bool,
     pub done: usize,
     pub total: usize,
@@ -48,9 +48,9 @@ pub struct DureesProgress {
 /// Combien de pistes sont sondées avant de reprendre le verrou.
 ///
 /// Ni une par une — le verrou serait pris des milliers de fois, en concurrence
-/// avec la lecture — ni toutes d'un coup, qui ne montrerait aucun avancement et
+/// avec la playback — ni toutes d'un coup, qui ne montrerait aucun avancement et
 /// perdrait tout si le sondage était abandonné en route.
-const LOT_DE_SONDAGE: usize = 25;
+const PROBE_BATCH: usize = 25;
 
 pub struct FilesAdmin {
     pub roots_path: PathBuf,
@@ -61,7 +61,7 @@ pub struct FilesAdmin {
     pub playlist: Arc<AsyncRwLock<Playlist>>,
     pub catalog: Arc<RwLock<Catalog>>,
     pub scan: Arc<Mutex<ScanProgress>>,
-    /// Tâche de scan en cours. En lancer une nouvelle **avorte** la
+    /// Tâche de scan en cours. En run une nouvelle **avorte** la
     /// précédente : deux clics ne doivent pas laisser deux marches concurrentes
     /// saturer un partage lent.
     pub scan_task: Option<tokio::task::JoinHandle<()>>,
@@ -78,10 +78,10 @@ pub struct FilesAdmin {
     /// sans attendre qu'une piste soit jouée — sinon la grille de la
     /// télécommande web garderait l'ancien jeu de numéros.
     pub preset_count_tx: tokio::sync::watch::Sender<u8>,
-    /// L'assistant en cours. Vit ici plutôt que dans son propre verrou : une
-    /// seule popin est ouverte à la fois, et le protocole admin est
+    /// L'assistant en cours. Vit ici plutôt que in_dir son propre verrou : une
+    /// seule popin est ouverte à la fois, et le protocol admin est
     /// séquentiel.
-    pub explore: ritornello_plugin_files::explore::Explorateur,
+    pub explore: ritornello_plugin_files::explore::Browser,
     /// Résultat de la dernière réconciliation de montage.
     ///
     /// Le montage suit désormais la déclaration : l'utilisateur ne clique plus
@@ -95,35 +95,35 @@ pub struct FilesAdmin {
     ///
     /// Partagé avec elle : c'est le seul canal disponible, les notifications du
     /// SDK ne pouvant pas porter d'action.
-    pub liste_changee: Arc<std::sync::atomic::AtomicBool>,
-    /// La moitié Source joue-t-elle en ce moment.
+    pub playlist_changed: Arc<std::sync::atomic::AtomicBool>,
+    /// La moitié Source plays-t-elle en ce moment.
     ///
     /// Sert à la page pour décider si vider la liste doit aussi demander l'arrêt
-    /// au cœur : le faire alors qu'une autre source joue couperait celle-là.
-    pub joue: Arc<std::sync::atomic::AtomicBool>,
+    /// au cœur : le faire alors qu'une autre source plays couperait celle-là.
+    pub plays: Arc<std::sync::atomic::AtomicBool>,
     /// Disjoncteur des chemins média.
     ///
-    /// Toute lecture du système de fichiers déclenchée par une requête admin
-    /// **doit** passer par lui. Le protocole admin est sériel et le cœur
+    /// Toute playback du système de fichiers déclenchée par une requête admin
+    /// **doit** passer par lui. Le protocol admin est sériel et le cœur
     /// abandonne au bout de cinq secondes : un seul `is_file` qui n'aboutit pas
-    /// coince le plugin entier, page comprise. Voir `sante` pour la mesure.
-    pub sante: Arc<Sante>,
+    /// coince le plugin entier, page comprise. Voir `health` pour la mesure.
+    pub health: Arc<Health>,
     /// Avancement du sondage des durées.
-    pub durees: Arc<Mutex<DureesProgress>>,
-    /// Sondage en cours. En lancer un nouveau **abandonne** le précédent : après
-    /// un chargement de liste, sonder l'ancienne ne sert plus à rien.
-    pub durees_task: Option<tokio::task::JoinHandle<()>>,
+    pub durations: Arc<Mutex<DurationsProgress>>,
+    /// Sondage en cours. En run un nouveau **abandonne** le précédent : après
+    /// un chargement de liste, probe l'ancienne ne sert plus à rien.
+    pub durations_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
     /// Déclaration d'une source, d'un seul geste : l'assistant a déjà tout
-    /// recueilli, il n'y a plus de table à réécrire ni de nom à saisir.
+    /// recueilli, il n'y a plus de table à réécrire ni de name à saisir.
     ///
-    /// Le mot de passe ne voyage que dans ce sens-là : `Root` ne le porte pas,
+    /// Le phrase de passe ne voyage que in_dir ce sens-là : `Root` ne le porte pas,
     /// donc `get_data` ne peut pas le rendre par inadvertance, même si
-    /// quelqu'un ajoute un champ plus tard.
+    /// quelqu'un add un champ plus tard.
     AddSource {
         kind: RootKind,
         #[serde(default)]
@@ -141,7 +141,7 @@ pub enum Op {
         /// **Vide veut dire « prends celui de la session, à défaut celui déjà
         /// enregistré »**. La page ne peut pas renvoyer un secret qu'elle ne
         /// reçoit jamais, et l'assistant ne doit pas le faire retaper à la
-        /// confirmation alors qu'il vient de servir à se connecter.
+        /// confirmation alors qu'il vient de serve à se connect.
         #[serde(default)]
         password: String,
         #[serde(default)]
@@ -188,28 +188,28 @@ pub enum Op {
     SavePlaylist { name: String, r#where: String },
     LoadPlaylist { name: String, r#where: String },
     /// Charge un `.m3u` **trouvé en parcourant une source**, désigné par son
-    /// chemin — par opposition à `LoadPlaylist`, qui va chercher une liste
-    /// *enregistrée* par son nom dans un magasin.
+    /// path — par opposition à `LoadPlaylist`, qui va chercher une liste
+    /// *enregistrée* par son name in_dir un magasin.
     LoadM3u { root: String, path: String },
 }
 
 impl FilesAdmin {
-    fn mot(&self, cle: &str) -> String {
-        self.catalog.read().unwrap().get(cle).to_string()
+    fn phrase(&self, key: &str) -> String {
+        self.catalog.read().unwrap().get(key).to_string()
     }
 
-    /// Résout un chemin **relatif** fourni par la page contre la racine
+    /// Résout un path **relatif** fourni par la page contre la racine
     /// nommée, en refusant tout ce qui en sortirait.
     ///
     /// C'est la garde d'évasion côté page : `name` est déjà validé par
     /// `Roots`, mais `path` vient du navigateur à chaque requête. Un
-    /// `../../etc` y ferait parcourir — et ajouter à une liste de lecture — des
+    /// `../../etc` y ferait browse — et add à une liste de playback — des
     /// fichiers hors de toute racine déclarée.
-    async fn sous_racine(&self, root: &str, path: &str) -> Result<PathBuf, String> {
+    async fn under_root(&self, root: &str, path: &str) -> Result<PathBuf, String> {
         let roots = self.roots.read().await;
         let r = roots
             .by_name(root)
-            .ok_or_else(|| self.mot("unknown_root").replace("{name}", root))?;
+            .ok_or_else(|| self.phrase("unknown_root").replace("{name}", root))?;
         let base = r.base_dir();
         let cible = if path.is_empty() { base.clone() } else { base.join(path) };
         drop(roots);
@@ -219,34 +219,34 @@ impl FilesAdmin {
         //
         // Sous disjoncteur, parce que `canonicalize` touche le disque : sur un
         // partage en reconnexion il ne rend pas la main, et il est ici sur le
-        // chemin de **tout** `set_data` visant une racine. Un refus net vaut
+        // path de **tout** `set_data` visant une racine. Un refus net vaut
         // mieux qu'une boucle admin coincée, qui emporterait la page avec elle.
         let (b, c) = (base.clone(), cible.clone());
-        let Some(canon) = self.sante.borne(&cible, move || Ok((b.canonicalize()?, c.canonicalize()?))).await
+        let Some(canon) = self.health.bounded(&cible, move || Ok((b.canonicalize()?, c.canonicalize()?))).await
         else {
             return Err(self
-                .mot("root_unresponsive")
+                .phrase("root_unresponsive")
                 .replace("{path}", &cible.display().to_string()));
         };
         let Ok::<(PathBuf, PathBuf), std::io::Error>((base_c, cible_c)) = canon else {
-            return Err(self.mot("scan_io_error").replace("{path}", &cible.display().to_string()));
+            return Err(self.phrase("scan_io_error").replace("{path}", &cible.display().to_string()));
         };
         if !cible_c.starts_with(&base_c) {
-            return Err(self.mot("scan_io_error").replace("{path}", path));
+            return Err(self.phrase("scan_io_error").replace("{path}", path));
         }
         Ok(cible_c)
     }
 
-    /// Publie la liste à la moitié Source et persiste, après toute
+    /// Publie la liste à la moitié Source et persist, après toute
     /// modification. Le compte part **avant** l'écriture disque : la grille web
     /// n'a pas à attendre un `/var/lib` lent.
-    async fn liste_modifiee(&self) {
-        // mpv joue une **copie** de la liste, écrite au dernier `Play`. Toute
+    async fn playlist_changed(&self) {
+        // mpv plays une **copie** de la liste, écrite au dernier `Play`. Toute
         // modification l'en écarte, et la moitié Admin ne peut rien lui dire :
         // le SDK interdit aux notifications de porter une action. Ce drapeau est
         // donc le seul moyen de prévenir la moitié Source, qui rendra la liste à
-        // jour au prochain ordre qu'elle recevra.
-        self.liste_changee.store(true, Ordering::Relaxed);
+        // jour au prochain order qu'elle recevra.
+        self.playlist_changed.store(true, Ordering::Relaxed);
         let liste = self.playlist.read().await;
         let _ = self.preset_count_tx.send(liste.preset_count());
         let stockees: Vec<state::StoredEntry> =
@@ -261,12 +261,12 @@ impl FilesAdmin {
         }
     }
 
-    /// Ajoute des pistes à la liste, en respectant le plafond.
-    async fn ajouter(&self, chemins: Vec<PathBuf>) -> Result<(), String> {
+    /// Ajoute des pistes à la liste, en respectant le cap.
+    async fn add(&self, chemins: Vec<PathBuf>) -> Result<(), String> {
         let mut liste = self.playlist.write().await;
         if liste.entries.len() + chemins.len() > scan::MAX_TRACKS {
             return Err(self
-                .mot("too_many_tracks")
+                .phrase("too_many_tracks")
                 .replace("{cap}", &scan::MAX_TRACKS.to_string()));
         }
         liste.entries.extend(
@@ -278,9 +278,9 @@ impl FilesAdmin {
     /// Écrit le fichier d'identifiants consommé par `mount.cifs`.
     ///
     /// Les permissions sont posées **à la création**, pas après : créer puis
-    /// restreindre laisserait une fenêtre pendant laquelle le mot de passe
+    /// restreindre laisserait une fenêtre pendant laquelle le phrase de passe
     /// serait lisible par tout le monde.
-    fn ecrire_identifiants(path: &Path, user: &str, password: &str, domain: &str) -> Result<()> {
+    fn write_credentials(path: &Path, user: &str, password: &str, domain: &str) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -313,15 +313,15 @@ impl FilesAdmin {
     /// monter ou à démonter**.
     ///
     /// Sans cette garde, déclarer un simple dossier de l'appareil demandait à
-    /// systemd de lancer l'unité de montage, laquelle exige une autorisation
+    /// systemd de run l'unité de montage, laquelle exige une autorisation
     /// polkit : la page affichait alors « la dernière tentative de montage a
     /// échoué — authentification interactive requise » à quelqu'un qui venait
-    /// d'ajouter une clé USB et n'avait rien demandé de tel. Un message
+    /// d'add une clé USB et n'avait rien demandé de tel. Un message
     /// alarmant pour un travail qui n'avait pas lieu d'être.
     ///
     /// `aussi` couvre le retrait : la source qui part peut être le dernier
     /// partage de la table, et il faut encore la démonter.
-    async fn reconcilier(&self, table: &Roots, aussi: bool) {
+    async fn reconcile_roots(&self, table: &Roots, aussi: bool) {
         if !aussi && !table.root.iter().any(|r| r.kind == RootKind::Smb) {
             *self.mount_error.lock().unwrap() = None;
             return;
@@ -331,23 +331,23 @@ impl FilesAdmin {
 
     /// Lance le sondage des durées manquantes, en tâche de fond.
     ///
-    /// En tâche de fond parce qu'il n'y a pas le choix : le protocole admin a un
-    /// plafond de 5 s, et une liste de deux mille pistes venue d'un partage
+    /// En tâche de fond parce qu'il n'y a pas le choix : le protocol admin a un
+    /// cap de 5 s, et une liste de deux mille pistes venue d'un partage
     /// demande davantage. La page suit l'avancement par sondage, exactement comme
     /// pour le balayage.
     ///
     /// Ne sonde que ce qui manque : une durée venue d'un `#EXTINF` ou d'un
-    /// sondage antérieur est conservée, et `StoredEntry` la persiste — un
+    /// sondage antérieur est conservée, et `StoredEntry` la persist — un
     /// redémarrage ne resonde donc rien.
     ///
-    /// Les résultats sont appliqués **par chemin** et non par index : la page
+    /// Les résultats sont appliqués **par path** et non par index : la page
     /// peut réordonner ou retirer des pistes pendant le sondage, et appliquer par
     /// position écrirait la durée d'un fichier sur un autre.
-    fn lancer_sondage(
+    fn start_probe(
         playlist: Arc<AsyncRwLock<Playlist>>,
-        durees: Arc<Mutex<DureesProgress>>,
+        durations: Arc<Mutex<DurationsProgress>>,
         state_path: PathBuf,
-        sante: Arc<Sante>,
+        health: Arc<Health>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let a_sonder: Vec<PathBuf> = {
@@ -358,45 +358,45 @@ impl FilesAdmin {
                     .filter(|e| e.duration_s.is_none())
                     .map(|e| e.path.clone())
                     .collect();
-                // Un même fichier peut figurer deux fois : le sonder une seule
+                // Un même fichier peut figurer deux fois : le probe une seule
                 // fois suffit, la durée sera posée sur toutes ses occurrences.
                 v.sort();
                 v.dedup();
                 v
             };
             if a_sonder.is_empty() {
-                *durees.lock().unwrap() = DureesProgress::default();
+                *durations.lock().unwrap() = DurationsProgress::default();
                 return;
             }
-            *durees.lock().unwrap() =
-                DureesProgress { running: true, done: 0, total: a_sonder.len() };
+            *durations.lock().unwrap() =
+                DurationsProgress { running: true, done: 0, total: a_sonder.len() };
 
             let mut faits = 0usize;
             // Découpé en lots **par point de montage** : un lot ne mélange ainsi
             // jamais deux partages, et le disjoncteur d'un montage muet écarte
-            // aussitôt tous ses lots suivants sans rien exécuter — sans quoi
+            // aussitôt all ses lots suivants sans rien exécuter — sans quoi
             // chaque lot repartirait attendre le même partage.
-            let lots: Vec<Vec<PathBuf>> = sante
-                .grouper(&a_sonder)
+            let lots: Vec<Vec<PathBuf>> = health
+                .group(&a_sonder)
                 .into_iter()
                 .flat_map(|(_, indices)| {
                     let chemins: Vec<PathBuf> =
                         indices.iter().map(|&i| a_sonder[i].clone()).collect();
-                    chemins.chunks(LOT_DE_SONDAGE).map(<[PathBuf]>::to_vec).collect::<Vec<_>>()
+                    chemins.chunks(PROBE_BATCH).map(<[PathBuf]>::to_vec).collect::<Vec<_>>()
                 })
                 .collect();
             for lot in lots {
                 let repere = lot[0].clone();
                 // Sous disjoncteur, et pas seulement `spawn_blocking` : sortir
                 // du fil asynchrone protège la boucle admin, mais pas le pool.
-                // Sur un partage bloqué, chaque relance de `resonder` y perdait
+                // Sur un partage bloqué, chaque restart de `reprobe` y perdait
                 // un fil de plus, sans jamais en récupérer un — le disjoncteur
-                // est ce qui borne cette fuite à un fil par point de montage.
-                let mesures = sante
-                    .borne(&repere, move || {
+                // est ce qui bounded cette fuite à un fil par point de montage.
+                let mesures = health
+                    .bounded(&repere, move || {
                         lot.into_iter()
                             .map(|p| {
-                                let d = ritornello_plugin_files::duree::sonder(&p);
+                                let d = ritornello_plugin_files::duration::probe(&p);
                                 (p, d)
                             })
                             .collect::<Vec<_>>()
@@ -413,12 +413,12 @@ impl FilesAdmin {
 
                 {
                     let mut liste = playlist.write().await;
-                    for (chemin, duree) in &mesures {
-                        let Some(d) = duree else { continue };
+                    for (path, duration) in &mesures {
+                        let Some(d) = duration else { continue };
                         for e in liste.entries.iter_mut() {
                             // `is_none` à nouveau : entre le relevé et
                             // maintenant, un chargement a pu poser une durée.
-                            if e.path == *chemin && e.duration_s.is_none() {
+                            if e.path == *path && e.duration_s.is_none() {
                                 e.duration_s = Some(*d);
                             }
                         }
@@ -438,24 +438,24 @@ impl FilesAdmin {
                 }
 
                 faits += mesures.len();
-                let mut p = durees.lock().unwrap();
+                let mut p = durations.lock().unwrap();
                 p.done = faits;
             }
-            let mut p = durees.lock().unwrap();
+            let mut p = durations.lock().unwrap();
             p.running = false;
         })
     }
 
     /// Relance le sondage, en abandonnant celui qui tournait.
-    fn resonder(&mut self) {
-        if let Some(t) = self.durees_task.take() {
+    fn reprobe(&mut self) {
+        if let Some(t) = self.durations_task.take() {
             t.abort();
         }
-        self.durees_task = Some(Self::lancer_sondage(
+        self.durations_task = Some(Self::start_probe(
             self.playlist.clone(),
-            self.durees.clone(),
+            self.durations.clone(),
             self.state_path.clone(),
-            self.sante.clone(),
+            self.health.clone(),
         ));
     }
 
@@ -464,25 +464,25 @@ impl FilesAdmin {
     /// Le fichier temporaire puis le renommage : une coupure de courant au
     /// milieu d'une écriture directe laisserait une table tronquée, que le
     /// démarrage suivant refuserait — donc plus aucune source.
-    fn ecrire_table(&self, table: &Roots) -> Result<(), String> {
+    fn write_table(&self, table: &Roots) -> Result<(), String> {
         let texte = toml::to_string_pretty(table).map_err(|e| {
             tracing::warn!("serialising the roots table: {e}");
-            self.mot("store_io_error").replace("{path}", &self.roots_path.display().to_string())
+            self.phrase("store_io_error").replace("{path}", &self.roots_path.display().to_string())
         })?;
         let tmp = self.roots_path.with_extension("toml.tmp");
         std::fs::write(&tmp, texte).and_then(|_| std::fs::rename(&tmp, &self.roots_path)).map_err(
             |e| {
                 tracing::warn!("saving the roots table: {e}");
-                self.mot("store_io_error").replace("{path}", &self.roots_path.display().to_string())
+                self.phrase("store_io_error").replace("{path}", &self.roots_path.display().to_string())
             },
         )
     }
 
-    /// Relit le mot de passe déjà enregistré pour une racine.
+    /// Relit le phrase de passe déjà enregistré pour une racine.
     ///
-    /// Employé quand la page en envoie un vide : elle ne peut pas renvoyer ce
+    /// Employé quand la page en envoie un clear : elle ne peut pas renvoyer ce
     /// qu'elle n'a jamais reçu.
-    fn mot_de_passe_existant(path: &Path) -> Option<String> {
+    fn existing_password(path: &Path) -> Option<String> {
         let contenu = std::fs::read_to_string(path).ok()?;
         contenu
             .lines()
@@ -513,7 +513,7 @@ impl AdminPlugin for FilesAdmin {
     async fn get_data(&self) -> serde_json::Value {
         let roots = self.roots.read().await;
         // Chaque racine repart avec son état de montage, mais **jamais** son
-        // mot de passe : `Root` ne le porte pas, il n'y a donc rien à filtrer
+        // phrase de passe : `Root` ne le porte pas, il n'y a donc rien à filtrer
         // ici — c'est le type qui garantit l'absence, pas la vigilance.
         let racines: Vec<serde_json::Value> = roots
             .root
@@ -530,18 +530,18 @@ impl AdminPlugin for FilesAdmin {
             })
             .collect();
         // Le stockage interne est local par construction (`/var/lib`) : il se
-        // lit directement. Les racines, elles, peuvent être des partages, donc
+        // read directement. Les racines, elles, peuvent être des partages, donc
         // chacune sous son propre disjoncteur — un `read_dir` par racine et par
         // sondage de la page était l'un des deux appels qui ont coincé le
         // plugin le 2026-08-17.
-        let mut sauvegardees = store::dans(&self.internal_playlists, Location::Internal);
+        let mut sauvegardees = store::in_dir(&self.internal_playlists, Location::Internal);
         let a_ramasser: Vec<(PathBuf, String)> =
             roots.root.iter().map(|r| (r.base_dir(), r.name.clone())).collect();
         drop(roots);
-        for (dir, nom) in a_ramasser {
+        for (dir, name) in a_ramasser {
             let d = dir.clone();
             if let Some(v) =
-                self.sante.borne(&dir, move || store::dans(&d, Location::Root(nom))).await
+                self.health.bounded(&dir, move || store::in_dir(&d, Location::Root(name))).await
             {
                 sauvegardees.extend(v);
             }
@@ -558,10 +558,10 @@ impl AdminPlugin for FilesAdmin {
         drop(liste);
         // Groupé par point de montage et borné : un seul délai couvre toutes les
         // pistes d'un partage, au lieu d'un appel bloquant par piste.
-        let manquants = self.sante.manquants(&chemins).await;
+        let missing = self.health.missing(&chemins).await;
         let pistes: Vec<serde_json::Value> = decrites
             .into_iter()
-            .zip(manquants)
+            .zip(missing)
             .map(|((path, name, duration_s), manque)| {
                 serde_json::json!({
                     "path": path,
@@ -584,10 +584,10 @@ impl AdminPlugin for FilesAdmin {
         let scan = self.scan.lock().unwrap().clone();
         let unresolved = self.unresolved.lock().unwrap().clone();
         let browse = self.browse.lock().unwrap().clone();
-        let volumes = volumes::volumes(&volumes::lire_proc_mounts());
+        let volumes = volumes::volumes(&volumes::read_proc_mounts());
         let mount_error = self.mount_error.lock().unwrap().clone();
         let can_browse_smb = self.smb_ok.load(std::sync::atomic::Ordering::Relaxed);
-        let explore = self.explore.vue();
+        let explore = self.explore.view();
         serde_json::json!({
             "roots": racines,
             "volumes": volumes,
@@ -595,17 +595,17 @@ impl AdminPlugin for FilesAdmin {
             // Ce que la page en fait : décider si vider la liste doit aussi
             // demander l'arrêt. Sans cette information elle couperait la radio
             // en vidant une liste de fichiers qui ne jouait pas.
-            "playing": self.joue.load(std::sync::atomic::Ordering::Relaxed),
-            // Avancement du sondage des durées : c'est ce qui fait sonder la page
+            "playing": self.plays.load(std::sync::atomic::Ordering::Relaxed),
+            // Avancement du sondage des durées : c'est ce qui fait probe la page
             // le temps qu'elles arrivent, puis cesser.
-            "durations": self.durees.lock().unwrap().clone(),
+            "durations": self.durations.lock().unwrap().clone(),
             "explore": explore,
             "mount_error": mount_error,
             // Points de montage dont une sonde n'est jamais revenue. Dits à la
             // page pour qu'elle explique le silence : sans eux, l'utilisateur
             // voit des durées qui n'arrivent pas et des états indéterminés sans
             // aucune indication de cause.
-            "unresponsive": self.sante.muets().iter()
+            "unresponsive": self.health.silent().iter()
                 .map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "playlist": pistes,
             "index": index,
@@ -624,7 +624,7 @@ impl AdminPlugin for FilesAdmin {
 
     async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String> {
         let op: Op = serde_json::from_value(data)
-            .map_err(|e| self.mot("bad_request").replace("{detail}", &e.to_string()))?;
+            .map_err(|e| self.phrase("bad_request").replace("{detail}", &e.to_string()))?;
         match op {
             Op::AddSource {
                 kind,
@@ -638,10 +638,10 @@ impl AdminPlugin for FilesAdmin {
                 writable,
             } => {
                 let mut table = self.roots.read().await.clone();
-                // Le doublon exact seul est refusé : deux dossiers différents
+                // Le doublon exact seul est refusé : deux dirs différents
                 // du même partage sont deux sources légitimes, qui montent le
                 // partage deux fois — ce qui est légal, peu coûteux, et surtout
-                // sans surprise. Fusionner en élargissant le sous-chemin commun
+                // sans surprise. Fusionner en élargissant le sous-path commun
                 // modifierait en silence la portée d'une source déjà déclarée.
                 let deja = table.root.iter().any(|r| {
                     r.kind == kind
@@ -651,7 +651,7 @@ impl AdminPlugin for FilesAdmin {
                         && r.path == path
                 });
                 if deja {
-                    return Err(self.mot("duplicate_source"));
+                    return Err(self.phrase("duplicate_source"));
                 }
                 let pris: Vec<&str> = table.root.iter().map(|r| r.name.as_str()).collect();
                 let indice = match kind {
@@ -679,41 +679,41 @@ impl AdminPlugin for FilesAdmin {
                 table.root.push(racine);
                 // Valider **avant** d'écrire quoi que ce soit : un fichier
                 // d'identifiants posé pour une source ensuite refusée resterait
-                // orphelin sur le disque, avec un mot de passe dedans.
+                // orphelin sur le disque, avec un phrase de passe dedans.
                 table.validate().map_err(|e| e.message(&self.catalog.read().unwrap()))?;
 
                 if kind == RootKind::Smb {
                     let r = table.by_name(&name).expect("tout juste inseree");
-                    let chemin = r.credentials_path(&self.creds_dir);
+                    let path = r.credentials_path(&self.creds_dir);
                     let secret = if !password.is_empty() {
                         password
                     } else if let Some(c) = self.explore.credentials(&host) {
                         c.password
                     } else {
-                        Self::mot_de_passe_existant(&chemin).unwrap_or_default()
+                        Self::existing_password(&path).unwrap_or_default()
                     };
-                    Self::ecrire_identifiants(&chemin, &user, &secret, &domain).map_err(|e| {
+                    Self::write_credentials(&path, &user, &secret, &domain).map_err(|e| {
                         tracing::warn!("writing credentials for {name}: {e}");
-                        self.mot("store_io_error")
-                            .replace("{path}", &chemin.display().to_string())
+                        self.phrase("store_io_error")
+                            .replace("{path}", &path.display().to_string())
                     })?;
                 }
-                self.ecrire_table(&table)?;
+                self.write_table(&table)?;
                 // Le montage suit la déclaration : plus de bouton à trouver.
-                self.reconcilier(&table, false).await;
+                self.reconcile_roots(&table, false).await;
                 // Et s'il n'a pas abouti, la déclaration se défait.
                 //
                 // Le critère est l'état **observé de cette source**, pas le code
                 // de retour de la réconciliation : `systemctl start` porte sur
                 // l'unité entière, il peut échouer à cause d'un partage tiers
-                // endormi, et annuler alors l'ajout d'un partage sain serait
+                // endormi, et cancel alors l'ajout d'un partage sain serait
                 // faux. Signalé à l'usage : une source restait inscrite après un
                 // montage refusé, et il fallait la retirer à la main avant de
                 // pouvoir réessayer.
                 //
                 // La portée s'arrête à la déclaration. Une source déjà acceptée
                 // reste jusqu'à suppression manuelle : un partage momentanément
-                // injoignable ne doit pas disparaître de la table.
+                // unreachable ne doit pas disparaître de la table.
                 if kind == RootKind::Smb
                     && mount::state(table.by_name(&name).expect("tout juste inseree"))
                         != mount::MountState::Mounted
@@ -723,22 +723,22 @@ impl AdminPlugin for FilesAdmin {
                         .lock()
                         .unwrap()
                         .clone()
-                        .unwrap_or_else(|| self.mot("mount_silent_failure"));
+                        .unwrap_or_else(|| self.phrase("mount_silent_failure"));
                     let i = table
                         .root
                         .iter()
                         .position(|r| r.name == name)
                         .expect("la source vient d'etre inseree");
                     let partie = table.root.remove(i);
-                    self.ecrire_table(&table)?;
+                    self.write_table(&table)?;
                     // Le fichier d'identifiants part avec elle : le laisser
-                    // ferait survivre un mot de passe à une source qui n'a
+                    // ferait survivre un phrase de passe à une source qui n'a
                     // jamais existé.
                     let _ = std::fs::remove_file(partie.credentials_path(&self.creds_dir));
                     // Remis directement à `None`, sans repasser par
-                    // `reconcilier` : celui-ci exécuterait un vrai
+                    // `reconcile_roots` : celui-ci exécuterait un vrai
                     // `systemctl start` dès qu'il reste une AUTRE source SMB
-                    // dans la table, et son seul effet serait alors de
+                    // in_dir la table, et son seul effet serait alors de
                     // réécrire `mount_error` — la page afficherait « la
                     // dernière tentative de montage a échoué » pour une
                     // source qui n'est plus déclarée. Rien n'a de toute façon
@@ -746,7 +746,7 @@ impl AdminPlugin for FilesAdmin {
                     // justement pas monté.
                     *self.mount_error.lock().unwrap() = None;
                     *self.roots.write().await = table;
-                    return Err(self.mot("share_not_declared").replace("{detail}", &detail));
+                    return Err(self.phrase("share_not_declared").replace("{detail}", &detail));
                 }
                 *self.roots.write().await = table;
                 Ok(())
@@ -755,16 +755,16 @@ impl AdminPlugin for FilesAdmin {
             Op::RemoveSource { name } => {
                 let mut table = self.roots.read().await.clone();
                 let Some(i) = table.root.iter().position(|r| r.name == name) else {
-                    return Err(self.mot("unknown_source").replace("{name}", &name));
+                    return Err(self.phrase("unknown_source").replace("{name}", &name));
                 };
                 let partie = table.root.remove(i);
-                self.ecrire_table(&table)?;
+                self.write_table(&table)?;
                 // Le fichier d'identifiants part avec la source : le laisser
-                // ferait survivre un mot de passe à ce qui le justifiait.
+                // ferait survivre un phrase de passe à ce qui le justifiait.
                 let _ = std::fs::remove_file(partie.credentials_path(&self.creds_dir));
                 // `aussi` : la source qui part peut être le dernier partage de
                 // la table, et il reste à la démonter.
-                self.reconcilier(&table, partie.kind == RootKind::Smb).await;
+                self.reconcile_roots(&table, partie.kind == RootKind::Smb).await;
                 *self.roots.write().await = table;
                 Ok(())
             }
@@ -772,25 +772,25 @@ impl AdminPlugin for FilesAdmin {
             Op::SetWritable { name, writable } => {
                 let mut table = self.roots.read().await.clone();
                 let Some(r) = table.root.iter_mut().find(|r| r.name == name) else {
-                    return Err(self.mot("unknown_source").replace("{name}", &name));
+                    return Err(self.phrase("unknown_source").replace("{name}", &name));
                 };
                 r.writable = writable;
-                self.ecrire_table(&table)?;
+                self.write_table(&table)?;
                 // Remonter est indispensable : `ro` est une option de montage,
                 // pas un drapeau relu à chaque écriture. Sans réconciliation,
                 // autoriser l'écriture ne changerait rien jusqu'au prochain
                 // redémarrage.
-                self.reconcilier(&table, false).await;
+                self.reconcile_roots(&table, false).await;
                 *self.roots.write().await = table;
                 Ok(())
             }
 
             Op::ExploreOpen { kind } => {
-                self.explore.ouvrir(kind);
+                self.explore.open(kind);
                 Ok(())
             }
             Op::ExploreClose => {
-                self.explore.fermer();
+                self.explore.close();
                 Ok(())
             }
             Op::ExploreLocal { path } => self.explore.local(&path).await,
@@ -801,22 +801,22 @@ impl AdminPlugin for FilesAdmin {
                     ritornello_plugin_files::smb::available().await,
                     std::sync::atomic::Ordering::Relaxed,
                 );
-                self.explore.connecter(host, user, password, domain);
+                self.explore.connect(host, user, password, domain);
                 Ok(())
             }
             Op::SmbBrowse { share, path } => {
-                self.explore.parcourir(share, path);
+                self.explore.browse(share, path);
                 Ok(())
             }
             Op::SmbShares => {
-                self.explore.aux_partages();
+                self.explore.to_shares();
                 Ok(())
             }
 
             Op::Mount => mount::reconcile(mount::UNIT).await,
 
             Op::Browse { root, path } => {
-                let dir = self.sous_racine(&root, &path).await?;
+                let dir = self.under_root(&root, &path).await?;
                 let cat = self.catalog.clone();
                 let contenu = tokio::task::spawn_blocking(move || scan::list_dir(&dir))
                     .await
@@ -825,11 +825,11 @@ impl AdminPlugin for FilesAdmin {
                 *self.browse.lock().unwrap() = serde_json::json!({
                     "root": root,
                     "path": path,
-                    "dirs": contenu.dossiers,
+                    "dirs": contenu.dirs,
                     "files": contenu.audio,
-                    // Les listes de lecture voyagent à part : elles ne
+                    // Les playlists de playback voyagent à part : elles ne
                     // s'ajoutent pas à la liste en cours, elles la remplacent.
-                    "playlists": contenu.listes,
+                    "playlists": contenu.playlists,
                     "results": [],
                     // Vide, et c'est un marqueur, pas un oubli : la page s'en
                     // sert pour distinguer la réponse à un parcours de celle à
@@ -841,21 +841,21 @@ impl AdminPlugin for FilesAdmin {
 
             Op::Search { root, path, query } => {
                 // Deux résolutions, deux rôles : `dir` est le dossier où l'on
-                // cherche, `base` la racine à laquelle les résultats sont
+                // search, `base` la racine à laquelle les résultats sont
                 // rapportés. Les confondre rendrait des chemins relatifs au
                 // sous-dossier, qu'un `add_file` résoudrait ailleurs.
-                let dir = self.sous_racine(&root, &path).await?;
-                let base = self.sous_racine(&root, "").await?;
+                let dir = self.under_root(&root, &path).await?;
+                let base = self.under_root(&root, "").await?;
                 let cat = self.catalog.clone();
-                let motif = query.clone();
+                let pattern = query.clone();
                 let (trouves, fin) = tokio::task::spawn_blocking(move || {
-                    scan::search(&dir, &motif, 200, scan::MAX_VISITES, scan::DELAI_RECHERCHE)
+                    scan::search(&dir, &pattern, 200, scan::MAX_VISITS, scan::SEARCH_TIMEOUT)
                 })
                 .await
                 .map_err(|e| format!("search task: {e}"))?
                 .map_err(|e| e.message(&cat.read().unwrap()))?;
                 // Chemins **relatifs à la racine** : c'est ce que la page
-                // renvoie ensuite dans un `add_file`, et un chemin absolu y
+                // renvoie ensuite in_dir un `add_file`, et un path absolu y
                 // serait refusé par la garde d'évasion.
                 let relatifs: Vec<String> = trouves
                     .iter()
@@ -864,9 +864,9 @@ impl AdminPlugin for FilesAdmin {
                     .collect();
                 *self.browse.lock().unwrap() = serde_json::json!({
                     "root": root,
-                    // Le dossier cherché, et non la chaîne vide : la page ne
+                    // Le dossier cherché, et non la chaîne clear : la page ne
                     // retient que la réponse à la demande qu'elle vient de
-                    // faire, et ce couple (chemin, requête) est ce qui
+                    // faire, et ce couple (path, requête) est ce qui
                     // l'identifie.
                     "path": path,
                     "query": query,
@@ -876,19 +876,19 @@ impl AdminPlugin for FilesAdmin {
                     "results": relatifs,
                     // Deux champs et non un booléen : les deux causes d'arrêt
                     // n'appellent pas le même conseil. « truncated » invite à
-                    // préciser le motif, « gave_up » invite à descendre dans un
+                    // préciser le pattern, « gave_up » invite à descendre in_dir un
                     // sous-dossier. Les confondre faisait afficher « Aucun
                     // résultat » — donc « ce fichier n'existe pas » — pour une
                     // recherche qui avait simplement renoncé avant d'arriver
                     // jusqu'à lui.
-                    "truncated": fin == scan::FinDeRecherche::TropDeResultats,
-                    "gave_up": fin == scan::FinDeRecherche::Interrompue,
+                    "truncated": fin == scan::SearchEnd::TooManyResults,
+                    "gave_up": fin == scan::SearchEnd::Interrupted,
                 });
                 Ok(())
             }
 
             Op::AddDir { root, path } => {
-                let dir = self.sous_racine(&root, &path).await?;
+                let dir = self.under_root(&root, &path).await?;
                 if let Some(t) = self.scan_task.take() {
                     // Deux clics ne doivent pas laisser deux marches
                     // concurrentes saturer un partage lent.
@@ -900,21 +900,21 @@ impl AdminPlugin for FilesAdmin {
                     dir: path.clone(),
                     error: None,
                 };
-                let progres = self.scan.clone();
+                let progress = self.scan.clone();
                 let playlist = self.playlist.clone();
                 let catalog = self.catalog.clone();
-                let etat = self.scan.clone();
+                let state = self.scan.clone();
                 let compteur = Arc::new(AtomicUsize::new(0));
                 let tx = self.preset_count_tx.clone();
-                let changee = self.liste_changee.clone();
+                let changee = self.playlist_changed.clone();
                 let playlist_pour_durees = self.playlist.clone();
-                let durees = self.durees.clone();
+                let durations = self.durations.clone();
                 let state_path_pour_durees = self.state_path.clone();
-                let sante_pour_durees = self.sante.clone();
+                let sante_pour_durees = self.health.clone();
                 let state_path = self.state_path.clone();
                 self.scan_task = Some(tokio::spawn(async move {
                     let c = compteur.clone();
-                    let p = progres.clone();
+                    let p = progress.clone();
                     let trouves = tokio::task::spawn_blocking(move || {
                         scan::walk_with(&dir, scan::MAX_TRACKS, &|n, d| {
                             c.store(n, Ordering::Relaxed);
@@ -945,20 +945,20 @@ impl AdminPlugin for FilesAdmin {
                                     liste.entries.iter().map(state::StoredEntry::from).collect();
                                 let index = liste.index;
                                 drop(liste);
-                                // Même raison que dans `liste_modifiee` : mpv
-                                // joue une copie, et ce drapeau est le seul
+                                // Même raison que in_dir `playlist_changed` : mpv
+                                // plays une copie, et ce drapeau est le seul
                                 // canal vers la moitié Source.
                                 changee.store(true, Ordering::Relaxed);
                                 let _ = tx.send(compte);
                                 // Le sondage part d'ici et non du gestionnaire :
-                                // celui-ci a rendu la main bien avant que la
-                                // marche récursive n'ait ajouté quoi que ce soit.
+                                // celui-ci a rendition la main bien avant que la
+                                // walk_dir récursive n'ait ajouté quoi que ce soit.
                                 // Sa poignée n'est pas conservée — un sondage
                                 // concurrent ne fait que du travail en double, il
                                 // ne pose jamais de durée fausse.
-                                Self::lancer_sondage(
+                                Self::start_probe(
                                     playlist_pour_durees,
-                                    durees,
+                                    durations,
                                     state_path_pour_durees,
                                     sante_pour_durees,
                                 );
@@ -974,7 +974,7 @@ impl AdminPlugin for FilesAdmin {
                         Ok(Err(e)) => Err(e.message(&catalog.read().unwrap())),
                         Err(e) => Err(format!("scan task: {e}")),
                     };
-                    if let Ok(mut g) = etat.lock() {
+                    if let Ok(mut g) = state.lock() {
                         g.running = false;
                         g.error = resultat.err();
                     }
@@ -983,25 +983,25 @@ impl AdminPlugin for FilesAdmin {
             }
 
             Op::AddFile { root, path } => {
-                let fichier = self.sous_racine(&root, &path).await?;
-                self.ajouter(vec![fichier]).await?;
-                self.liste_modifiee().await;
-                self.resonder();
+                let fichier = self.under_root(&root, &path).await?;
+                self.add(vec![fichier]).await?;
+                self.playlist_changed().await;
+                self.reprobe();
                 Ok(())
             }
 
             Op::Remove { index } => {
                 let mut liste = self.playlist.write().await;
                 if index >= liste.entries.len() {
-                    return Err(self.mot("bad_request").replace("{detail}", "index"));
+                    return Err(self.phrase("bad_request").replace("{detail}", "index"));
                 }
                 let ecoutee = liste.index == index;
                 liste.entries.remove(index);
-                // L'index de lecture suit : retirer une piste avant celle qui
-                // joue décalerait sinon toute la numérotation sous les pieds de
+                // L'index de playback suit : retirer une piste avant celle qui
+                // plays décalerait sinon toute la numérotation sous les pieds de
                 // l'auditeur.
                 //
-                // Retirer **celle qu'on écoute** est le cas à part : la lecture
+                // Retirer **celle qu'on écoute** est le cas à part : la playback
                 // s'arrête (la page le demande au cœur), et on repart du début.
                 // Laisser l'index sur la position libérée gardait la surbrillance
                 // sur une piste qu'on n'avait pas choisie — celle qui a glissé à
@@ -1014,14 +1014,14 @@ impl AdminPlugin for FilesAdmin {
                     liste.index = 0;
                 }
                 drop(liste);
-                self.liste_modifiee().await;
+                self.playlist_changed().await;
                 Ok(())
             }
 
             Op::Move { from, to } => {
                 let mut liste = self.playlist.write().await;
                 if from >= liste.entries.len() || to >= liste.entries.len() {
-                    return Err(self.mot("bad_request").replace("{detail}", "index"));
+                    return Err(self.phrase("bad_request").replace("{detail}", "index"));
                 }
                 let e = liste.entries.remove(from);
                 liste.entries.insert(to, e);
@@ -1031,8 +1031,8 @@ impl AdminPlugin for FilesAdmin {
                 // piste — et la moitié Source aurait relancé la mauvaise.
                 //
                 // Trois cas, et seulement trois : la piste écoutée est celle
-                // qu'on déplace, ou bien le déplacement l'enjambe dans un sens,
-                // ou dans l'autre.
+                // qu'on déplace, ou bien le déplacement l'enjambe in_dir un sens,
+                // ou in_dir l'autre.
                 liste.index = if liste.index == from {
                     to
                 } else if from < liste.index && to >= liste.index {
@@ -1043,7 +1043,7 @@ impl AdminPlugin for FilesAdmin {
                     liste.index
                 };
                 drop(liste);
-                self.liste_modifiee().await;
+                self.playlist_changed().await;
                 Ok(())
             }
 
@@ -1053,10 +1053,10 @@ impl AdminPlugin for FilesAdmin {
                 liste.index = 0;
                 drop(liste);
                 self.unresolved.lock().unwrap().clear();
-                self.liste_modifiee().await;
+                self.playlist_changed().await;
                 // Abandonne un sondage en cours : il portait sur des pistes qui
                 // ne sont plus là, et son avancement mentirait à l'écran.
-                self.resonder();
+                self.reprobe();
                 Ok(())
             }
 
@@ -1087,28 +1087,28 @@ impl AdminPlugin for FilesAdmin {
                 liste.entries = charge.entries;
                 liste.index = 0;
                 drop(liste);
-                self.liste_modifiee().await;
-                self.resonder();
+                self.playlist_changed().await;
+                self.reprobe();
                 Ok(())
             }
 
             Op::LoadM3u { root, path } => {
                 // Un m3u trouvé en parcourant une source, par opposition aux
-                // listes **enregistrées** que `LoadPlaylist` va chercher par nom
-                // dans un magasin. Ici c'est un fichier comme un autre, désigné
-                // par son chemin, et la garde d'évasion s'applique donc.
-                let fichier = self.sous_racine(&root, &path).await?;
+                // playlists **enregistrées** que `LoadPlaylist` va chercher par name
+                // in_dir un magasin. Ici c'est un fichier comme un autre, désigné
+                // par son path, et la garde d'évasion s'applique donc.
+                let fichier = self.under_root(&root, &path).await?;
                 if !scan::is_playlist(&fichier) {
-                    return Err(self.mot("not_a_playlist").replace("{path}", &path));
+                    return Err(self.phrase("not_a_playlist").replace("{path}", &path));
                 }
                 let texte = std::fs::read_to_string(&fichier).map_err(|e| {
                     tracing::warn!("reading {}: {e}", fichier.display());
-                    self.mot("store_io_error").replace("{path}", &path)
+                    self.phrase("store_io_error").replace("{path}", &path)
                 })?;
                 // Les chemins relatifs se résolvent d'abord contre le répertoire
                 // **du m3u**, comme le veut le format ; la racine ne sert qu'aux
-                // replis (chemin absolu venu d'une autre machine, lettre de
-                // lecteur Windows).
+                // replis (path absolu venu d'une autre machine, lettre de
+                // player Windows).
                 let dossier = fichier.parent().unwrap_or(&fichier).to_path_buf();
                 let base = {
                     let roots = self.roots.read().await;
@@ -1117,7 +1117,7 @@ impl AdminPlugin for FilesAdmin {
                 let charge = ritornello_plugin_files::m3u::parse(&texte, &dossier, &base);
                 if charge.entries.len() > scan::MAX_TRACKS {
                     return Err(self
-                        .mot("too_many_tracks")
+                        .phrase("too_many_tracks")
                         .replace("{cap}", &scan::MAX_TRACKS.to_string()));
                 }
                 // Rapportées, jamais supprimées en silence : une liste plus
@@ -1128,10 +1128,10 @@ impl AdminPlugin for FilesAdmin {
                 liste.entries = charge.entries;
                 liste.index = 0;
                 drop(liste);
-                self.liste_modifiee().await;
-                // Un m3u peut porter des `#EXTINF`, mais rarement tous : le
+                self.playlist_changed().await;
+                // Un m3u peut porter des `#EXTINF`, mais rarement all : le
                 // sondage ne comble que ce qui manque.
-                self.resonder();
+                self.reprobe();
                 Ok(())
             }
         }
@@ -1151,14 +1151,14 @@ mod tests {
         std::mem::forget(dir);
         std::fs::create_dir_all(racine.join("media")).unwrap();
         let (tx, _rx) = tokio::sync::watch::channel(0u8);
-        let catalogue = Arc::new(RwLock::new(Catalog::load(
+        let sources_catalog = Arc::new(RwLock::new(Catalog::load(
             "files",
             "en",
             &racine,
             ritornello_plugin_files::FILES_EN,
         )));
         let smb_ok = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let sante = Arc::new(ritornello_plugin_files::sante::Sante::new());
+        let health = Arc::new(ritornello_plugin_files::health::Health::new());
         let admin = FilesAdmin {
             roots_path: racine.join("media-roots.toml"),
             creds_dir: racine.join("creds"),
@@ -1166,25 +1166,25 @@ mod tests {
             state_path: racine.join("plugin-files.json"),
             roots: Arc::new(AsyncRwLock::new(Roots::default())),
             playlist: Arc::new(AsyncRwLock::new(Playlist::default())),
-            catalog: catalogue.clone(),
+            catalog: sources_catalog.clone(),
             scan: Arc::new(Mutex::new(ScanProgress::default())),
             scan_task: None,
             unresolved: Arc::new(Mutex::new(Vec::new())),
             browse: Arc::new(Mutex::new(serde_json::json!({}))),
             preset_count_tx: tx,
-            liste_changee: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            joue: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            durees: Arc::new(Mutex::new(DureesProgress::default())),
-            durees_task: None,
-            explore: ritornello_plugin_files::explore::Explorateur::new(
+            playlist_changed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            plays: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            durations: Arc::new(Mutex::new(DurationsProgress::default())),
+            durations_task: None,
+            explore: ritornello_plugin_files::explore::Browser::new(
                 racine.join("creds"),
-                catalogue.clone(),
+                sources_catalog.clone(),
                 smb_ok.clone(),
-                sante.clone(),
+                health.clone(),
             ),
             mount_error: Arc::new(Mutex::new(None)),
             smb_ok,
-            sante,
+            health,
         };
         (admin, racine)
     }
@@ -1199,8 +1199,8 @@ mod tests {
 
     #[tokio::test]
     async fn une_source_ajoutee_recoit_un_nom_derive() {
-        // L'utilisateur ne saisit plus de nom : il doit être dérivé, valide, et
-        // dérivé du partage pour rester lisible dans /mnt/ritornello.
+        // L'utilisateur ne saisit plus de name : il doit être dérivé, valide, et
+        // dérivé du partage pour rester lisible in_dir /mnt/ritornello.
         let (mut admin, racine) = admin_de_test();
         let _garde = detourner_proc_mounts(
             &racine,
@@ -1269,12 +1269,12 @@ mod tests {
         );
         admin.set_data(ajout_partage("p")).await.unwrap();
         let err = admin.set_data(ajout_partage("p")).await.unwrap_err();
-        assert!(err.contains(' '), "cle brute : {err}");
+        assert!(err.contains(' '), "key brute : {err}");
     }
 
     #[tokio::test]
     async fn retirer_une_source_efface_son_fichier_d_identifiants() {
-        // Sinon un .cred contenant un mot de passe survivrait sur le disque à la
+        // Sinon un .cred contenant un phrase de passe survivrait sur le disque à la
         // source qui l'a justifié.
         let (mut admin, racine) = admin_de_test();
         let _garde = detourner_proc_mounts(
@@ -1299,14 +1299,14 @@ mod tests {
     /// est lu par un autre, avec un échec qui ne se reproduit pas seul.
     static VERROU_PROC_MOUNTS: Mutex<()> = Mutex::new(());
 
-    /// Garde rendu par `detourner_proc_mounts`.
+    /// Garde rendition par `detourner_proc_mounts`.
     ///
     /// Porte le verrou de sérialisation **et** efface la variable
-    /// d'environnement à son tour, dans un `Drop` — pas dans une ligne répétée
+    /// d'environnement à son tour, in_dir un `Drop` — pas in_dir une line répétée
     /// en fin de test. Le verrou est bien relâché par son propre `Drop` même
     /// si le test panique ; la variable d'environnement, elle, ne l'était pas
     /// avant ce garde, et `mount::state` l'honore depuis cette branche : un
-    /// test qui paniquait laissait donc lire à toute la suite restante un faux
+    /// test qui paniquait laissait donc read à toute la suite restante un faux
     /// `/proc/mounts` pointant vers un tempdir déjà supprimé — un échec unique
     /// se transformait en cascade illisible.
     struct GardeProcMounts {
@@ -1319,7 +1319,7 @@ mod tests {
         }
     }
 
-    /// Écrit un faux `/proc/mounts` et le fait lire au code sous test.
+    /// Écrit un faux `/proc/mounts` et le fait read au code sous test.
     ///
     /// Rend le garde : l'appelant doit le garder vivant jusqu'à la fin du test
     /// (`let _garde = ...`, jamais `let _ = ...`, qui le relâcherait aussitôt).
@@ -1345,7 +1345,7 @@ mod tests {
 
     #[tokio::test]
     async fn un_partage_qui_ne_se_monte_pas_n_est_pas_declare() {
-        // Signalé à l'usage : la source apparaissait dans la liste alors que le
+        // Signalé à l'usage : la source apparaissait in_dir la liste alors que le
         // montage avait échoué, et il fallait la retirer à la main avant de
         // pouvoir réessayer. La déclaration se défait donc entièrement —
         // table et fichier d'identifiants — et le refus remonte à la popin,
@@ -1353,22 +1353,22 @@ mod tests {
         let (mut admin, racine) = admin_de_test();
         let _garde = detourner_proc_mounts(&racine, "proc /proc proc rw 0 0\n");
         let err = admin.set_data(ajout_partage("p")).await.unwrap_err();
-        assert!(err.contains(' '), "cle brute renvoyee a l'ecran : {err}");
+        assert!(err.contains(' '), "key brute renvoyee a l'ecran : {err}");
         assert!(
             admin.roots.read().await.root.is_empty(),
-            "la source est restee declaree malgre l'echec du montage"
+            "la source est restee declaree malgre l'failure du montage"
         );
         assert!(
             !admin.creds_dir.join("musique.cred").exists(),
-            "un mot de passe a survecu a une source qui n'existe pas"
+            "un phrase de passe a survecu a une source qui n'existe pas"
         );
     }
 
     #[tokio::test]
     async fn un_partage_sain_ne_perd_pas_son_absence_de_bandeau_quand_un_voisin_est_refuse() {
-        // Défaut de revue : le second `reconcilier` de la branche du retour
+        // Défaut de revue : le second `reconcile_roots` de la branche du retour
         // arrière exécute un vrai `systemctl start` dès qu'il reste une AUTRE
-        // source SMB dans la table -- le cas ici -- et son seul effet est
+        // source SMB in_dir la table -- le cas ici -- et son seul effet est
         // alors de réécrire `mount_error`. La page pouvait afficher « la
         // dernière tentative de montage a échoué » pour une source qui n'est
         // plus déclarée, exactement ce que le commentaire prétendait éviter.
@@ -1384,7 +1384,7 @@ mod tests {
         second["share"] = serde_json::json!("absent");
         second["subpath"] = serde_json::json!("Rien");
         let err = admin.set_data(second).await.unwrap_err();
-        assert!(err.contains(' '), "cle brute renvoyee a l'ecran : {err}");
+        assert!(err.contains(' '), "key brute renvoyee a l'ecran : {err}");
 
         assert_eq!(
             admin.roots.read().await.root.len(),
@@ -1393,7 +1393,7 @@ mod tests {
         );
         assert!(
             admin.mount_error.lock().unwrap().is_none(),
-            "aucun bandeau d'echec de montage ne doit survivre au refus d'une source voisine"
+            "aucun bandeau d'failure de montage ne doit survivre au refus d'une source voisine"
         );
     }
 
@@ -1422,11 +1422,11 @@ mod tests {
     async fn get_data_rend_la_main_et_ne_mente_pas_quand_un_montage_est_muet() {
         // Le test de non-régression de l'incident du 2026-08-17 : `get_data`
         // faisait un `is_file` par piste et un `read_dir` par racine, sur le fil
-        // asynchrone. Le protocole admin étant sériel, un montage cifs bloqué
-        // dans le noyau y a coincé le plugin entier — jusqu'à faire expirer
+        // asynchrone. Le protocol admin étant sériel, un montage cifs bloqué
+        // in_dir le noyau y a coincé le plugin entier — jusqu'à faire expirer
         // `ui.js`, qui n'est qu'un `include_str!`.
         let (mut admin, _r) = admin_de_test();
-        admin.sante = Arc::new(ritornello_plugin_files::sante::Sante::pour_test(
+        admin.health = Arc::new(ritornello_plugin_files::health::Health::for_test(
             std::time::Duration::from_millis(50),
             MOUNTS_MUETS.to_string(),
             vec![PathBuf::from("/mnt/ritornello/nas")],
@@ -1437,16 +1437,16 @@ mod tests {
         ];
 
         // Marge délibérément large. Le disjoncteur est **déjà ouvert** ici (le
-        // montage est passé en `muets` au montage du test), donc `borne` rend
-        // la main sans rien lancer : la promptitude est acquise par
+        // montage est passé en `silent` au montage du test), donc `bounded` rend
+        // la main sans rien run : la promptitude est acquise par
         // construction, et le vrai garde de ce test est l'assertion de valeur
-        // ci-dessous. Une seconde faisait de cette ligne une hypothèse
+        // ci-dessous. Une seconde faisait de cette line une hypothèse
         // d'exécution rapide — un flake sous la charge des autres binaires de
         // test — pour ne rien prouver de plus. Elle ne sanctionne plus qu'une
         // régression catastrophique, un `get_data` qui bloquerait vraiment.
-        let debut = std::time::Instant::now();
+        let start = std::time::Instant::now();
         let d = admin.get_data().await;
-        assert!(debut.elapsed() < std::time::Duration::from_secs(10), "{:?}", debut.elapsed());
+        assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?}", start.elapsed());
 
         // `null` et non `true` : c'est tout l'objet du correctif. Dire
         // « introuvable » pour un partage endormi accuserait les fichiers d'une
@@ -1461,8 +1461,8 @@ mod tests {
 
     #[tokio::test]
     async fn basculer_l_inscriptibilite_ne_perd_pas_le_mot_de_passe() {
-        // Sans cette opération, changer d'avis imposerait de retirer puis
-        // redéclarer, donc de resaisir le mot de passe.
+        // Sans cette opération, changer d'notice imposerait de retirer puis
+        // redéclarer, donc de resaisir le phrase de passe.
         let (mut admin, racine) = admin_de_test();
         let _garde = detourner_proc_mounts(
             &racine,
@@ -1482,7 +1482,7 @@ mod tests {
     async fn get_data_ne_rend_jamais_le_mot_de_passe() {
         // Il n'a aucune raison de traverser vers le navigateur, et la page n'en
         // a pas besoin pour afficher l'état d'un partage. La garantie est
-        // portée par le type : ni `Root` ni la vue de l'assistant ne contiennent
+        // portée par le type : ni `Root` ni la view de l'assistant ne contiennent
         // le champ.
         let (mut admin, racine) = admin_de_test();
         let _garde = detourner_proc_mounts(
@@ -1497,7 +1497,7 @@ mod tests {
 
     #[tokio::test]
     async fn un_mot_de_passe_vide_reprend_celui_de_la_session() {
-        // L'assistant vient de s'en servir pour se connecter : le faire retaper
+        // L'assistant vient de s'en serve pour se connect : le faire retaper
         // à la confirmation serait une saisie de plus pour rien, et la page ne
         // peut pas renvoyer un secret qu'elle ne reçoit jamais.
         let (mut admin, racine) = admin_de_test();
@@ -1505,8 +1505,8 @@ mod tests {
             &racine,
             "//192.168.1.20/musique /mnt/ritornello/musique cifs ro,relatime 0 0\n",
         );
-        admin.explore.ouvrir(ritornello_plugin_files::explore::Kind::Smb);
-        admin.explore.connecter(
+        admin.explore.open(ritornello_plugin_files::explore::Kind::Smb);
+        admin.explore.connect(
             "192.168.1.20".into(),
             "steven".into(),
             "secret-du-nas".into(),
@@ -1520,8 +1520,8 @@ mod tests {
     #[tokio::test]
     async fn un_mot_de_passe_vide_conserve_celui_deja_enregistre() {
         // Dernier repli, quand la popin a été fermée entre-temps : redéclarer
-        // une source du même nom ne doit pas casser en silence un montage qui
-        // marchait, faute de mot de passe.
+        // une source du même name ne doit pas casser en silence un montage qui
+        // marchait, faute de phrase de passe.
         let (mut admin, racine) = admin_de_test();
         let _garde = detourner_proc_mounts(
             &racine,
@@ -1540,8 +1540,8 @@ mod tests {
 
     #[tokio::test]
     async fn un_mot_de_passe_neuf_remplace_l_ancien() {
-        // Garde-fou de la règle ci-dessus : « vide = garde » ne doit pas
-        // devenir « on ne peut plus changer de mot de passe ».
+        // Garde-fou de la règle ci-dessus : « clear = garde » ne doit pas
+        // devenir « on ne peut plus changer de phrase de passe ».
         let (mut admin, racine) = admin_de_test();
         let _garde = detourner_proc_mounts(
             &racine,
@@ -1566,7 +1566,7 @@ mod tests {
             }))
             .await
             .unwrap_err();
-        assert!(err.contains(' '), "cle brute renvoyee a l'ecran : {err}");
+        assert!(err.contains(' '), "key brute renvoyee a l'ecran : {err}");
         assert!(err.contains("nas,uid=0"), "le refus doit nommer ce qui cloche : {err}");
     }
 
@@ -1574,7 +1574,7 @@ mod tests {
     async fn une_source_refusee_ne_laisse_aucun_fichier_d_identifiants() {
         // La validation passe **avant** toute écriture : un fichier posé pour
         // une source ensuite refusée resterait orphelin sur le disque, avec un
-        // mot de passe dedans.
+        // phrase de passe dedans.
         let (mut admin, _) = admin_de_test();
         let _ = admin
             .set_data(serde_json::json!({
@@ -1591,7 +1591,7 @@ mod tests {
     #[tokio::test]
     async fn le_fichier_d_identifiants_est_ecrit_en_0600() {
         // Permissions posées à la création, pas après : créer puis restreindre
-        // laisserait une fenêtre pendant laquelle le mot de passe serait
+        // laisserait une fenêtre pendant laquelle le phrase de passe serait
         // lisible par tout le monde.
         use std::os::unix::fs::PermissionsExt;
         let (mut admin, racine) = admin_de_test();
@@ -1615,7 +1615,7 @@ mod tests {
         let relue = Roots::load(&admin.roots_path).unwrap();
         assert_eq!(relue.root.len(), 1);
         assert_eq!(relue.root[0].host, "192.168.1.20");
-        // Et le mot de passe n'y figure pas : il vit dans le fichier
+        // Et le phrase de passe n'y figure pas : il vit in_dir le fichier
         // d'identifiants, que `mount.cifs` lira seul.
         let toml = std::fs::read_to_string(&admin.roots_path).unwrap();
         assert!(!toml.contains("password"), "{toml}");
@@ -1647,26 +1647,26 @@ mod tests {
 
     /// Attend la fin du sondage des durées, ou abandonne au bout d'un délai.
     ///
-    /// Le sondage est **asynchrone** à dessein : le protocole admin a un plafond
+    /// Le sondage est **asynchrone** à dessein : le protocol admin a un cap
     /// de 5 s, et une liste venue d'un partage demande davantage. Un test doit
     /// donc l'attendre, et non supposer qu'il a fini au retour de l'opération.
     async fn attendre_les_durees(admin: &FilesAdmin) {
         for _ in 0..200 {
-            let p = admin.durees.lock().unwrap().clone();
+            let p = admin.durations.lock().unwrap().clone();
             if p.total > 0 && !p.running {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-        panic!("le sondage des durees n'a jamais abouti");
+        panic!("le sondage des durations n'a jamais abouti");
     }
 
     /// Fabrique un mp3 réel, ou rend `None` si ffmpeg manque.
-    fn mp3_de(secondes: u32, chemin: &Path) -> Option<()> {
+    fn mp3_de(secondes: u32, path: &Path) -> Option<()> {
         std::process::Command::new("ffmpeg")
             .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i"])
             .arg(format!("sine=frequency=440:duration={secondes}"))
-            .arg(chemin)
+            .arg(path)
             .status()
             .ok()
             .filter(|s| s.success())
@@ -1676,7 +1676,7 @@ mod tests {
     #[tokio::test]
     async fn ajouter_un_fichier_sonde_sa_duree_en_tache_de_fond() {
         // La demande : les durées manquantes se remplissent d'elles-mêmes, sans
-        // bloquer l'ajout — un dossier de mille pistes dépasserait le plafond de
+        // bloquer l'ajout — un dossier de mille pistes dépasserait le cap de
         // 5 s du cœur.
         let (mut admin, racine) = admin_avec_racine_locale().await;
         let media = racine.join("media");
@@ -1693,14 +1693,14 @@ mod tests {
             .unwrap();
         attendre_les_durees(&admin).await;
         let liste = admin.playlist.read().await;
-        let d = liste.entries[0].duration_s.expect("une duree attendue");
-        assert!((2..=4).contains(&d), "duree lue {d}");
+        let d = liste.entries[0].duration_s.expect("une duration attendue");
+        assert!((2..=4).contains(&d), "duration lue {d}");
     }
 
     #[tokio::test]
     async fn une_duree_deja_connue_nest_pas_ecrasee() {
         // Celles d'un `#EXTINF` sont l'autorité : le fichier peut être un extrait,
-        // et resonder par-dessus effacerait ce que la liste affirmait.
+        // et reprobe par-dessus effacerait ce que la liste affirmait.
         let (admin, _) = admin_avec_racine_locale().await;
         {
             let mut liste = admin.playlist.write().await;
@@ -1711,11 +1711,11 @@ mod tests {
             }];
         }
         let mut admin = admin;
-        admin.resonder();
-        // Rien à sonder : le sondage se termine sans rien toucher.
+        admin.reprobe();
+        // Rien à probe : le sondage se terminate sans rien toucher.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert_eq!(admin.playlist.read().await.entries[0].duration_s, Some(245));
-        assert_eq!(admin.durees.lock().unwrap().total, 0, "rien n'avait a etre sonde");
+        assert_eq!(admin.durations.lock().unwrap().total, 0, "rien n'avait a etre sonde");
     }
 
     #[tokio::test]
@@ -1734,8 +1734,8 @@ mod tests {
             .await
             .unwrap();
         attendre_les_durees(&admin).await;
-        let etat = state::load(&admin.state_path);
-        assert!(etat.playlist[0].duration_s.is_some(), "la duree doit survivre au redemarrage");
+        let state = state::load(&admin.state_path);
+        assert!(state.playlist[0].duration_s.is_some(), "la duration doit survivre au redemarrage");
     }
 
     #[tokio::test]
@@ -1759,7 +1759,7 @@ mod tests {
         let mut admin = admin;
         admin.set_data(serde_json::json!({"op": "remove", "index": 2})).await.unwrap();
         let liste = admin.playlist.read().await;
-        assert_eq!(liste.index, 0, "on repart du debut");
+        assert_eq!(liste.index, 0, "on repart du start");
         assert_eq!(liste.entries.len(), 3);
     }
 
@@ -1833,7 +1833,7 @@ mod tests {
         }
     }
 
-    /// Un admin avec une racine locale déclarée sur `media`, et son chemin.
+    /// Un admin avec une racine locale déclarée sur `media`, et son path.
     async fn admin_avec_racine_locale() -> (FilesAdmin, PathBuf) {
         let (admin, racine) = admin_de_test();
         *admin.roots.write().await = Roots {
@@ -1855,7 +1855,7 @@ mod tests {
     #[tokio::test]
     async fn un_m3u_parcouru_se_charge_et_remplace_la_liste() {
         // La demande : pouvoir charger un m3u **trouvé sur la source**, par son
-        // chemin, et non une liste enregistrée cherchée par nom dans un magasin.
+        // path, et non une liste enregistrée cherchée par name in_dir un magasin.
         let (mut admin, racine) = admin_avec_racine_locale().await;
         let media = racine.join("media");
         std::fs::create_dir_all(media.join("Album")).unwrap();
@@ -1873,7 +1873,7 @@ mod tests {
         let liste = admin.playlist.read().await;
         assert_eq!(liste.entries.len(), 2);
         assert_eq!(liste.entries[0].path, media.join("Album/01.mp3"));
-        assert_eq!(liste.index, 0, "on repart du debut de la liste chargee");
+        assert_eq!(liste.index, 0, "on repart du start de la liste chargee");
     }
 
     #[tokio::test]
@@ -1910,14 +1910,14 @@ mod tests {
             }))
             .await
             .unwrap_err();
-        assert!(err.contains(' '), "cle brute renvoyee a l'ecran : {err}");
+        assert!(err.contains(' '), "key brute renvoyee a l'ecran : {err}");
         assert!(err.contains("piste.mp3"), "le refus doit nommer le fautif : {err}");
     }
 
     #[tokio::test]
     async fn charger_un_m3u_hors_de_la_racine_est_refuse() {
-        // La garde d'évasion s'applique comme pour tout chemin venu du
-        // navigateur : `load_m3u` ne doit pas devenir une lecture de fichier
+        // La garde d'évasion s'applique comme pour tout path venu du
+        // navigateur : `load_m3u` ne doit pas devenir une playback de fichier
         // arbitraire.
         let (mut admin, racine) = admin_avec_racine_locale().await;
         std::fs::create_dir_all(racine.join("media")).unwrap();
@@ -1928,7 +1928,7 @@ mod tests {
             }))
             .await
             .unwrap_err();
-        assert!(err.contains(' '), "cle brute : {err}");
+        assert!(err.contains(' '), "key brute : {err}");
         assert!(admin.playlist.read().await.entries.is_empty());
     }
 
@@ -1945,7 +1945,7 @@ mod tests {
     #[tokio::test]
     async fn un_chemin_qui_sort_de_la_racine_est_refuse() {
         // La garde d'évasion : `path` vient du navigateur à chaque requête, et
-        // un `../..` y ferait parcourir puis ajouter des fichiers hors de toute
+        // un `../..` y ferait browse puis add des fichiers hors de toute
         // racine déclarée.
         let (mut admin, racine) = admin_de_test();
         *admin.roots.write().await = Roots {
@@ -1965,7 +1965,7 @@ mod tests {
             .set_data(serde_json::json!({"op": "browse", "root": "local", "path": "../.."}))
             .await
             .unwrap_err();
-        assert!(err.contains(' '), "cle brute : {err}");
+        assert!(err.contains(' '), "key brute : {err}");
     }
 
     #[tokio::test]
@@ -1995,12 +1995,12 @@ mod tests {
             .unwrap();
         let data = admin.get_data().await;
         assert_eq!(data["browse"]["dirs"], serde_json::json!(["Album"]));
-        // `notes.txt` n'est pas un fichier audio : il n'a rien à faire dans un
+        // `notes.txt` n'est pas un fichier audio : il n'a rien à faire in_dir un
         // arbre de navigation musicale.
         assert_eq!(data["browse"]["files"], serde_json::json!([]));
     }
 
-    /// Déclare une racine locale peuplée, et rend son chemin.
+    /// Déclare une racine locale peuplée, et rend son path.
     async fn racine_locale_peuplee(admin: &mut FilesAdmin) -> PathBuf {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().to_path_buf();
@@ -2028,9 +2028,9 @@ mod tests {
         // noyé d'homonymes venus d'ailleurs.
         let (mut admin, _) = admin_de_test();
         let base = racine_locale_peuplee(&mut admin).await;
-        let nom = admin.roots.read().await.root[0].name.clone();
+        let name = admin.roots.read().await.root[0].name.clone();
         admin
-            .set_data(serde_json::json!({"op": "search", "root": nom, "path": "A", "query": "miles"}))
+            .set_data(serde_json::json!({"op": "search", "root": name, "path": "A", "query": "miles"}))
             .await
             .unwrap();
         let d = admin.get_data().await;
@@ -2038,7 +2038,7 @@ mod tests {
         // Un seul : celui de B est hors du dossier demandé.
         assert_eq!(resultats.len(), 1, "la recherche a debordé du dossier : {resultats:?}");
         // Relatif à la RACINE et non au dossier cherché : c'est cette forme que
-        // la page renvoie ensuite dans un `add_file`, et un chemin relatif au
+        // la page renvoie ensuite in_dir un `add_file`, et un path relatif au
         // sous-dossier y désignerait un fichier inexistant.
         assert_eq!(resultats[0].as_str().unwrap(), "A/miles.mp3");
         assert_eq!(d["browse"]["path"].as_str().unwrap(), "A");
@@ -2054,9 +2054,9 @@ mod tests {
         // des résultats de recherche.
         let (mut admin, _) = admin_de_test();
         let base = racine_locale_peuplee(&mut admin).await;
-        let nom = admin.roots.read().await.root[0].name.clone();
+        let name = admin.roots.read().await.root[0].name.clone();
         admin
-            .set_data(serde_json::json!({"op": "browse", "root": nom, "path": "A"}))
+            .set_data(serde_json::json!({"op": "browse", "root": name, "path": "A"}))
             .await
             .unwrap();
         let d = admin.get_data().await;

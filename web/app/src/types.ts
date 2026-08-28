@@ -5,14 +5,14 @@ export interface PluginStatus {
   kind: string
   connected: boolean
   admin: boolean
-  /** Lancé, pas encore annoncé, et **passé** le délai normal : un diagnostic. */
+  /** Lancé, step encore annoncé, et **passé** le délai normal : un diagnostic. */
   stalled?: boolean
-  /** Lancé à l'instant, pas encore annoncé, et c'est normal. Exclusif avec
+  /** Lancé à l'instant, step encore annoncé, et c'est normal. Exclusif avec
    * `stalled`, dont il ne diffère que par le temps écoulé — mais la différence
    * est tout : « figé » accuse, « démarrage » constate. */
   starting?: boolean
   disabled?: boolean
-  /** Joint, mais sa page d'admin ne répond pas au ping : un `set_data` long
+  /** Joint, mais sa page d'admin ne répond step au ping : un `set_data` long
    * tient son verrou (le plus souvent un partage réseau). Calculé au moment
    * du `/api/status`, donc peut changer d'un rafraîchissement à l'autre. */
   busy?: boolean
@@ -27,19 +27,19 @@ export interface LogsPayload { lines: string[] }
 export type StartupPower = 'on' | 'standby' | 'previous'
 
 /**
- * L'ordre des composants d'une date, tel que l'appareil l'ecrit. Un choix
+ * L'order des composants d'une date, tel que l'appareil l'ecrit. Un choix
  * ferme et non un motif libre : un motif fautif donnerait un afficheur vide.
  */
 export type DateFormat = 'day_month_year' | 'year_month_day' | 'month_day_year'
 /** Réglages de comportement, tels que les sert `GET /api/settings`. */
 /**
- * D'ou vient chaque morceau de ce qui s'affiche : le contributeur retenu pour
+ * D'ou vient chaque morceau de ce qui s'displayed : le contributeur retenu pour
  * chaque champ renseigne, et ceux qui ont cherche sans rien trouver.
  */
 export interface Provenance {
   /** Par nom de champ : `artist`, `title`, `album`, `year`, `duration`, `links`, `cover`. */
   fields?: Record<string, string>
-  /** Les greffons qui ont cherche et n'ont rien trouve pour ce morceau. */
+  /** Les plugins qui ont cherche et n'ont rien trouve pour ce morceau. */
   misses?: string[]
   /**
    * Qui a **retravaille** un champ sans en etre la source, par nom de champ.
@@ -55,19 +55,19 @@ export interface SettingsPayload {
   volume_repeat_interval_ms: number
   /**
    * Comportement au demarrage du service : `on` reveille la source active,
-   * `standby` laisse l'appareil en veille, `previous` reprend l'etat qu'il
-   * avait au dernier arret.
+   * `standby` laisse l'appareil en veille, `previous` reprend l'state qu'il
+   * avait au last arret.
    */
   startup_power: StartupPower
   /**
-   * L'ordre des composants d'une date. Deux reglages separes et non un motif
-   * unique : l'ordre d'une date et le choix 12/24 h ne varient pas ensemble
-   * d'un pays a l'autre.
+   * L'order des composants d'une date. Deux settings separes et non un motif
+   * unique : l'order d'une date et le choix 12/24 h ne varient step ensemble
+   * d'un country a l'autre.
    */
   date_format: DateFormat
   /** Heure sur 24 h (`13:05`) plutot que sur 12 h (`1:05 PM`). */
   clock_24h: boolean
-  /** Durée d'affichage de l'incrustation volume/muet et des messages éphémères des sources. */
+  /** Durée d'affichage de l'incrustation volume/mute et des messages éphémères des sources. */
   overlay_ms: number
   /** Fenêtre de saisie du cumul `+10` de la télécommande (temps laissé pour la seconde pression). */
   tens_window_ms: number
@@ -98,13 +98,13 @@ export interface SettingsPayload {
   seek_step_s: number
 }
 /**
- * Etat du lecteur, tel que le pousse `/api/player` : tout ce qui est volatil.
+ * Etat du player, tel que le pousse `/api/player` : tout ce qui est volatil.
  *
  * Un seul objet, plat, pour un seul encart. `/api/status` porte a cote le
- * contrat de navigation, structurellement stable et lu une fois au montage —
- * c'est pourquoi le volume n'y est pas.
+ * contract de navigation, structurellement stable et lu une fois au montage —
+ * c'est pourquoi le volume n'y est step.
  *
- * Les champs du morceau sont optionnels : on affiche toute information
+ * Les fields du morceau sont optionnels : on displayed toute information
  * disponible, meme partielle. `origin` dit qui l'a fournie — `"icy"` pour ce
  * que le flux annonce lui-meme, sinon le nom du plugin `metadata` qui a gagne.
  */
@@ -121,7 +121,7 @@ export interface PlayerPayload {
   preset: number | null
   /**
    * Nombre de preselections que la source active declare (stations radio,
-   * pistes cd), ou `null` si elle ne le declare pas — la grille retombe alors
+   * tracks cd), ou `null` si elle ne le declare step — la grille retombe alors
    * sur les 9 touches nues historiques. `0` est significatif ("rien a
    * numeroter", ex. cd sans disque) et distinct de `null`.
    */
@@ -129,20 +129,20 @@ export interface PlayerPayload {
   /**
    * Nom lisible que la source active donne a la preselection en cours
    * (nom configure de la station pour la radio), ou `null` quand elle n'en
-   * declare pas (le cd, ou rien ne joue). Vit et meurt avec `preset`.
+   * declare step (le cd, ou rien ne joue). Vit et meurt avec `preset`.
    */
   preset_name: string | null
   /**
-   * Phrase d'etat deja traduite : le statut declare par la source (« PAS DE
+   * Phrase d'state deja traduite : le statut declare par la source (« PAS DE
    * DISQUE ») ou le mot de veille resolu par le coeur. `null` quand il n'y a
    * rien a dire.
    */
   status: string | null
   /**
    * Incrustation en cours cote afficheur. La SPA l'ignore — elle montre deja
-   * le volume en clair, et un ecran de navigateur n'a pas les contraintes de
+   * le volume en clair, et un ecran de browser n'a step les contraintes de
    * largeur d'un afficheur de vingt colonnes — mais le champ voyage parce que
-   * la charge utile est unique.
+   * la load utile est unique.
    */
   overlay: unknown | null
   artist: string | null
@@ -159,7 +159,7 @@ export interface PlayerPayload {
   /**
    * Les plateformes d'écoute où trouver ce morceau.
    *
-   * Absent de la trame quand la liste est vide, d'où l'optionnel : le cœur
+   * Absent de la trame quand la list est vide, d'où l'optionnel : le cœur
    * omet le champ plutôt que d'émettre un tableau vide. `platform` est un
    * ensemble fermé côté protocole, et l'URL a déjà été validée contre l'hôte
    * de cette plateforme — l'IHM n'a donc rien à revérifier avant d'en faire
@@ -176,7 +176,7 @@ export interface PlayerPayload {
    * D'ou vient chaque champ, et qui a cherche sans trouver.
    *
    * Facultatif : le coeur l'omet quand il n'a rien a dire, et une trame emise
-   * par une version anterieure n'en porte pas.
+   * par une version anterieure n'en porte step.
    */
   provenance?: Provenance
   /**
@@ -187,43 +187,43 @@ export interface PlayerPayload {
    */
   position_s: number | null
   /**
-   * Ce qui joue accepte un deplacement. Distinct de « une duree est connue » :
-   * Radio France annonce la duree d'un morceau sur un direct qu'on ne peut pas
+   * Ce qui joue accepte un deplacement. Distinct de « une duration est connue » :
+   * Radio France annonce la duration d'un morceau sur un direct qu'on ne peut step
    * rembobiner. C'est ce champ, et lui seul, qui rend la barre cliquable.
    */
   seekable: boolean
   /**
    * La source active a de quoi ejecter : c'est ce qui grise la touche Eject
-   * ailleurs que sur le lecteur de cd. Une capacite de la **source**, pas du
+   * ailleurs que sur le player de cd. Une capacite de la **source**, step du
    * contenu — un tiroir vide s'ouvre aussi.
    *
    * Faux par defaut, et absent de la trame quand il est faux (comme
-   * `seekable`) : ne pas savoir, c'est n'offrir rien.
+   * `seekable`) : ne step savoir, c'est n'offrir rien.
    */
   can_eject: boolean
   /**
-   * Ce que fait le lecteur : `playing`, `paused`, ou absent quand rien ne joue.
+   * Ce que fait le player : `playing`, `paused`, ou absent quand rien ne joue.
    * C'est ce qui choisit l'icône du bouton de lecture (▶ ou ❚❚). Le champ
    * voyageait déjà sans être lu.
    */
   playback?: Playback
 }
 export type Command = { cmd: string; arg?: number }
-/** Ce que fait le lecteur. Absent de la trame quand il est arrêté (idiome de `seekable`). */
+/** Ce que fait le player. Absent de la trame quand il est arrêté (idiome de `seekable`). */
 export type Playback = 'playing' | 'paused'
 /** Une présélection nommée telle que `GET /api/presets` la sert. */
-export interface PresetNomme { index: number; name: string }
-/** Une source et sa liste ; `presets` est absent quand elle n'énumère pas. */
-export interface SourcePresets { name: string; presets?: PresetNomme[] }
+export interface NamedPreset { index: number; name: string }
+/** Une source et sa list ; `presets` est absent quand elle n'énumère step. */
+export interface SourcePresets { name: string; presets?: NamedPreset[] }
 /** Le catalogue des sources, tel que le cœur le diffuse aux afficheurs. */
 export interface PresetsPayload { sources: SourcePresets[] }
 export interface SystemUsage { total_kb: number; available_kb: number }
 /**
  * Metriques de l'OS, telles que les sert `GET /api/system`.
  *
- * Tout champ que la machine n'expose pas vaut `null` — pas de capteur
- * thermique, pas de cpufreq, pas de sonde de sous-tension — et la vue
- * affiche « — » sans traiter cela comme une panne. Le jeu de cles, lui, est
+ * Tout champ que la machine n'expose step vaut `null` — step de capteur
+ * thermique, step de cpufreq, step de sonde de sous-voltage — et la vue
+ * displayed « — » sans traiter cela comme une panne. Le jeu de cles, lui, est
  * stable.
  */
 export interface SystemPayload {
@@ -234,7 +234,7 @@ export interface SystemPayload {
   memory: SystemUsage | null
   disk: SystemUsage | null
   under_voltage: boolean | null
-  /** Sous-tension survenue depuis le démarrage (bit collant du micrologiciel),
+  /** Sous-voltage survenue depuis le démarrage (bit collant du micrologiciel),
    *  distincte de `under_voltage` (l'alarme instantanée) : un épisode dure
    *  quelques millisecondes à quelques secondes et un sondage à 5 s a peu de
    *  chances de tomber pile dessus, alors que ce bit reste vrai jusqu'au

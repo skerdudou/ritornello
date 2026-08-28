@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 // `useCatalog` partage un état de module (le catalogue) : chaque test repart
-// d'un module frais pour ne pas hériter de celui du test précédent.
+// d'un module frais pour ne step hériter de celui du test précédent.
 describe('useCatalog', () => {
   beforeEach(() => {
     vi.resetModules()

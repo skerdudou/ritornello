@@ -1,6 +1,6 @@
-//! Construction de la ligne de montage.
+//! Construction de la line de montage.
 //!
-//! Isolée dans son propre module pour être testable **sans privilège** : c'est
+//! Isolée in_dir son propre module pour être testable **sans privilège** : c'est
 //! le code qui décide de ce que root exécutera, et il mérite d'être éprouvé
 //! sans qu'aucun montage n'ait lieu.
 
@@ -14,18 +14,18 @@ use std::path::Path;
 /// atteint l'IHM web, et exécutée par root.
 ///
 /// `soft` parce qu'un NAS endormi doit rendre une erreur d'entrée-sortie plutôt
-/// que bloquer indéfiniment le processus qui lit. Le risque de corruption qui
+/// que bloquer indéfiniment le processus qui read. Le risque de corruption qui
 /// déconseille `soft` en écriture ne s'applique pas à un montage `ro` ; il est
 /// assumé sur une racine déclarée inscriptible, qui ne sert qu'à déposer un m3u.
 ///
-/// `soft` **ne suffit pas**, et c'est une leçon payée : il borne les tentatives
+/// `soft` **ne suffit pas**, et c'est une leçon payée : il bounded les tentatives
 /// d'une opération sur une session déjà établie, pas la reconnexion. Le
 /// 2026-08-17, un NAS qui coupait ses connexions inactives a laissé le client
-/// cifs bloqué dans le noyau assez longtemps pour figer un `ls` — bien au-delà
-/// des cinq secondes du protocole admin. Les trois options qui suivent
+/// cifs bloqué in_dir le noyau assez longtemps pour figer un `ls` — bien au-delà
+/// des cinq secondes du protocol admin. Les trois options qui suivent
 /// raccourcissent ce pire cas, sans jamais l'amener sous la seconde ; la vraie
-/// borne vit côté appelant, dans `sante`. Ne pas les retirer en croyant que
-/// `soft` couvre le sujet, et ne pas croire qu'elles rendent `sante` inutile.
+/// bounded vit côté appelant, in_dir `health`. Ne pas les retirer en croyant que
+/// `soft` couvre le sujet, et ne pas croire qu'elles rendent `health` inutile.
 ///
 /// - `echo_interval=10` : le noyau s'aperçoit qu'une session est morte au bout
 ///   de dix secondes au lieu de soixante, son défaut.
@@ -58,7 +58,7 @@ pub fn mount_command(root: &Root, creds_dir: &Path, uid: u32, gid: u32) -> Vec<S
         "cifs".to_string(),
         format!("//{}/{}", root.host, root.share),
         // Le point de montage vient de `mount_point()`, donc d'une constante et
-        // du nom validé — jamais de la configuration.
+        // du name validé — jamais de la configuration.
         root.mount_point().display().to_string(),
         "-o".to_string(),
         options.join(","),
@@ -94,8 +94,8 @@ mod tests {
         assert_eq!(cmd[1], "-t");
         assert_eq!(cmd[2], "cifs");
         assert_eq!(cmd[3], "//192.168.1.20/musique");
-        // Le sous-chemin n'entre PAS dans le point de montage : c'est le
-        // partage entier qui est monté, le sous-chemin n'étant qu'un endroit où
+        // Le sous-path n'entre PAS in_dir le point de montage : c'est le
+        // partage entier qui est monté, le sous-path n'étant qu'un endroit où
         // regarder dedans.
         assert_eq!(cmd[4], "/mnt/ritornello/nas");
         assert_eq!(cmd[5], "-o");
@@ -120,7 +120,7 @@ mod tests {
         assert!(!options.contains(&"ro"), "{options:?}");
         assert!(
             options.contains(&"soft"),
-            "soft doit rester : un NAS endormi ne doit pas bloquer la lecture"
+            "soft doit rester : un NAS endormi ne doit pas bloquer la playback"
         );
         // Épinglées parce qu'elles ont l'air décoratives et ne le sont pas :
         // elles raccourcissent le blocage noyau qui a coincé le plugin entier le
@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn la_ligne_ne_contient_aucun_argument_vide() {
-        // Un argument vide décalerait tout le reste de la ligne exécutée par
+        // Un argument clear décalerait tout le reste de la line exécutée par
         // root, avec un effet difficile à prévoir.
         let cmd = mount_command(&racine_smb(), Path::new("/c"), 1, 1);
         assert!(cmd.iter().all(|a| !a.is_empty()), "{cmd:?}");

@@ -23,21 +23,21 @@ pub enum SourceReq {
     /// dans `SourceMessage::presets`, par la même voie que `preset_count` — le
     /// prédicat de trame intéressante, hors corrélation.
     ListPresets,
-    /// Le cœur a arrêté la lecture de sa propre initiative (touche Stop de la
+    /// Le cœur a arrêté la playback de sa propre initiative (touche Stop de la
     /// télécommande), **sans** que la Source ait été consultée.
     ///
     /// C'est la seule commande dans ce cas : `Play` traverse le cœur, `Eject` et
     /// `Deactivate` passent par la Source. Sans cette notification, une Source
-    /// qui tient un état de lecture (le cd, pour savoir si un morceau joue
+    /// qui tient un état de playback (le cd, pour savoir si un track plays
     /// vraiment) ne peut pas rester juste, et annoncerait des métadonnées pour
-    /// un morceau arrêté.
+    /// un track arrêté.
     Stop,
-    /// Le lecteur est passé **de lui-même** à la piste d'index `n` (fin de piste
+    /// Le player est passé **de lui-même** à la piste d'index `n` (fin de piste
     /// d'un disque), sans commande de l'utilisateur.
     ///
     /// Le cœur l'apprend de mpv, mais ne peut pas corriger l'identité : elle est
     /// opaque pour lui, et seule la Source sait ce que « piste n » veut dire pour
-    /// ce qu'elle joue. Sans cette notification, l'affichage et les métadonnées
+    /// ce qu'elle plays. Sans cette notification, l'affichage et les métadonnées
     /// restaient sur la piste précédente jusqu'à la prochaine commande.
     PlayerTrack(i64),
 }
@@ -72,27 +72,27 @@ pub enum SourceAction {
         /// payée : un `loadfile` sur un `.m3u` ne le déplie qu'**après** coup —
         /// mesuré, `playlist-count` vaut 1, puis 3 seulement après un
         /// `end-file`/`start-file`. Le `playlist-pos` envoyé dans la foulée
-        /// arrivait donc hors bornes, la lecture repartait de la première piste,
+        /// arrivait donc hors bornes, la playback repartait de la première piste,
         /// et l'affichage perdait tout. `loadlist` déplie sur-le-champ.
         ///
         /// C'est l'unique moyen pour une Source de reprendre une liste à la
         /// piste n — chiffre de la télécommande, ou reprise après redémarrage.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         start: Option<i64>,
-        /// `uri` désigne une **liste de lecture** et non un média.
+        /// `uri` désigne une **liste de playback** et non un média.
         ///
         /// Le cœur emploie alors `loadlist`, qui déplie la liste
         /// **synchroniquement**, au lieu de `loadfile` qui la traite d'abord
         /// comme une entrée unique. La distinction ne peut pas être devinée de
-        /// l'URI : un `.m3u8` est une liste pour un lecteur de fichiers et un
-        /// flux HLS pour une radio, et se tromper casse l'un ou l'autre.
+        /// l'URI : un `.m3u8` est une liste pour un player de fichiers et un
+        /// stream HLS pour une radio, et se tromper casse l'un ou l'autre.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         playlist: bool,
         /// Ce que `uri` désigne a une **fin normale** : un disque, une liste de
         /// fichiers. Quand mpv devient inactif, c'est la fin du contenu, pas
-        /// une coupure de flux à relancer.
+        /// une coupure de stream à relancer.
         ///
-        /// Absent (= `false`) veut dire « flux live », le comportement
+        /// Absent (= `false`) veut dire « stream live », le comportement
         /// historique : c'est ce qui garde les trames de la radio inchangées.
         /// Remplace le reniflage `uri.starts_with("cdda://")` du cœur, qui
         /// devinait ce que seule la Source sait.
@@ -105,7 +105,7 @@ pub enum SourceAction {
 }
 
 impl SourceAction {
-    /// Lecture d'une URI, aux défauts historiques : depuis le début, flux live.
+    /// Lecture d'une URI, aux défauts historiques : depuis le début, stream live.
     ///
     /// Passer par ce constructeur plutôt que par la variante littérale évite
     /// qu'un champ ajouté plus tard n'oblige à retoucher tous les appelants.
@@ -113,7 +113,7 @@ impl SourceAction {
         SourceAction::Play { uri: uri.into(), start: None, finite: false, playlist: false }
     }
 
-    /// Positionne la lecture sur l'élément d'index `n` de la liste. Sans effet
+    /// Positionne la playback sur l'élément d'index `n` de la liste. Sans effet
     /// sur une action qui n'est pas un `Play`.
     ///
     /// À employer avec `playlist()` : sans lui, l'URI est chargée comme un média
@@ -128,7 +128,7 @@ impl SourceAction {
         }
     }
 
-    /// Déclare que l'URI est une **liste de lecture**, à déplier comme telle.
+    /// Déclare que l'URI est une **liste de playback**, à déplier comme telle.
     #[must_use]
     pub fn playlist(self) -> Self {
         match self {
@@ -159,7 +159,7 @@ pub struct SourceMessage {
     pub id: Option<u64>,
     #[serde(default)]
     pub action: Option<SourceAction>,
-    /// Identité de ce qui joue **après** cette action, quand la Source a de
+    /// Identité de ce qui plays **après** cette action, quand la Source a de
     /// quoi la mettre à jour.
     ///
     /// Un CD change de piste sans nouveau `Play` (`PlayerNext` fait avancer
@@ -175,9 +175,9 @@ pub struct SourceMessage {
     /// Le statut ci-dessus est un message **éphémère** : le cœur l'affiche
     /// quelques secondes, puis fait reparaître le statut permanent.
     ///
-    /// Sans cela, un message d'incident (« présélection vide ») restait à l'écran
+    /// Sans cela, un message d'incident (« présélection clear ») restait à l'écran
     /// indéfiniment, jusqu'à ce que l'utilisateur touche autre chose — alors que
-    /// la lecture, elle, continuait sur la station précédente : l'affichage
+    /// la playback, elle, continuait sur la station précédente : l'affichage
     /// décrivait durablement un état qui n'existait plus.
     ///
     /// Le cœur emploie le même emplacement et la même échéance que l'incrustation
@@ -185,14 +185,14 @@ pub struct SourceMessage {
     /// de lui-même.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub transient: bool,
-    /// La touche numérotée de la télécommande à laquelle correspond ce qui joue
+    /// La touche numérotée de la télécommande à laquelle correspond ce qui plays
     /// **après** cette trame : la présélection pour la radio, la piste pour le
     /// cd. C'est ce qui permet à l'IHM de mettre en évidence la touche active —
     /// une information que la Source seule possède, le cœur n'interprétant
     /// jamais ce que `Select(n)` a voulu dire.
     ///
     /// Absent = « cette trame ne dit rien de la sélection, garde la
-    /// précédente ». Le cœur l'oublie de lui-même quand plus rien ne joue
+    /// précédente ». Le cœur l'oublie de lui-même quand plus rien ne plays
     /// (identité `Nothing`, arrêt, changement de source, veille) : il n'y a
     /// donc pas de forme « effacée » à déclarer ici.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -221,7 +221,7 @@ pub struct SourceMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_name: Option<String>,
     /// The source's own word about its state, **already translated** by its
-    /// catalogue ("NO DISC", "AUDIO CD", "EMPTY PRESET").
+    /// sources_catalog ("NO DISC", "AUDIO CD", "EMPTY PRESET").
     ///
     /// Unlike `preset`, absent means **"no status"**, not "keep the previous
     /// one": a source restates it on every frame, and this is the only
@@ -258,25 +258,25 @@ pub struct SourceMessage {
     /// Les présélections nommées de cette source, quand elle sait les énumérer.
     /// Hors corrélation, comme `preset_count` : c'est un fait sur la source, pas
     /// une réponse à une question — et c'est ce qui évite d'élargir `pending`,
-    /// `Source::request` et `demande_active` pour transporter une liste.
+    /// `Source::request` et `active_request` pour transporter une liste.
     ///
     /// Absent = « cette trame ne dit rien des présélections, garde la valeur
-    /// courante ». Une liste **vide** dit le même propos — « cette source n'a
-    /// pas de noms », le cd par nature, une piste n'ayant pas de nom sans base
+    /// courante ». Une liste **clear** dit le même propos — « cette source n'a
+    /// pas de names », le cd par nature, une piste n'ayant pas de name sans base
     /// de données — et c'est l'absence qui voyage : le sdk convertit une liste
-    /// vide en absence (voir le bras `ListPresets` de `serve_source`), pour que
+    /// clear en absence (voir le bras `ListPresets` de `serve_source`), pour que
     /// la trame d'une source qui n'énumère pas reste inerte côté cœur. Les deux
     /// formes restent **lisibles** en désérialisation, un greffon écrit à la
     /// main pouvant déclarer `[]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presets: Option<Vec<Preset>>,
-    /// Pochette que la Source a trouvée pour ce qu'elle joue.
+    /// Pochette que la Source a trouvée pour ce qu'elle plays.
     ///
     /// C'est ce qui permet à une Source de déclarer ses métadonnées **sans
     /// devenir un greffon `metadata`** : elle a l'information, elle la dit sur
     /// son canal. Envoyée en notification (`id: None`) plutôt qu'en réponse au
     /// `Play`, parce que la trouver peut demander un `readdir` sur un partage
-    /// SMB, et que la lecture ne doit pas attendre.
+    /// SMB, et que la playback ne doit pas attendre.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover: Option<crate::CoverRef>,
 }
@@ -353,7 +353,7 @@ mod tests {
         let indices: Vec<u8> = retour.presets.unwrap().iter().map(|p| p.index).collect();
         assert_eq!(indices, vec![5, 1, 99], "{json}");
         // Et la forme sur le fil, nommément : `index` et `name`, sans
-        // renommage. Un consommateur écrit à la main (le greffon MPD) lit ces
+        // renommage. Un consommateur écrit à la main (le greffon MPD) read ces
         // deux clés-là.
         assert_eq!(
             serde_json::to_string(&Preset { index: 5, name: "FIP".into() }).unwrap(),
@@ -361,15 +361,15 @@ mod tests {
         );
     }
 
-    // Il n'y a **pas** de test ici sur « liste vide contre liste absente ».
-    // Les deux disent le même propos (« cette source n'a pas de noms »), et le
+    // Il n'y a **pas** de test ici sur « liste clear contre liste absente ».
+    // Les deux disent le même propos (« cette source n'a pas de names »), et le
     // choix de n'en faire voyager qu'une seule se prend dans le sdk, où deux
     // tests le mordent (`une_source_qui_nenumere_pas_ne_declare_aucune_liste`
     // côté serveur, `une_source_qui_nenumere_pas_ne_reveille_pas_le_coeur` de
-    // bout en bout). Au niveau du protocole, il ne resterait rien à mordre :
+    // bout en bout). Au niveau du protocol, il ne resterait rien à mordre :
     // serde relit déjà un champ `Option` manquant comme `None` de lui-même,
     // `#[serde(default)]` ou non — mesuré en le retirant, aucun test ne bouge —
-    // et normaliser `[]` en `None` à la lecture serait légitime plutôt que
+    // et normaliser `[]` en `None` à la playback serait légitime plutôt que
     // fautif. Un test l'interdisant serait un obstacle, pas un garde-fou.
 
     #[test]
@@ -426,9 +426,9 @@ mod tests {
     #[test]
     fn une_trame_anterieure_se_relit_en_flux_live_depuis_le_debut() {
         // Un plugin antérieur n'émet ni `start` ni `finite` : les défauts
-        // doivent reproduire exactement le comportement historique (flux live,
+        // doivent reproduire exactement le comportement historique (stream live,
         // début de liste), sans quoi une mise à jour partielle des binaires
-        // changerait silencieusement la lecture.
+        // changerait silencieusement la playback.
         let back: SourceAction =
             serde_json::from_str(r#"{"action":"Play","data":{"uri":"http://x"}}"#).unwrap();
         assert_eq!(
@@ -496,7 +496,7 @@ mod tests {
     fn identite_absente_et_identite_nulle_ne_disent_pas_la_meme_chose() {
         // C'est la raison d'être de l'enum `IdentityUpdate` : « je ne dis rien
         // de l'identité » (champ omis, donc l'identité courante est conservée)
-        // doit rester distinct de « plus rien ne joue » (`Nothing`, donc
+        // doit rester distinct de « plus rien ne plays » (`Nothing`, donc
         // l'identité courante est oubliée). Un `Option<Option<Value>>` aurait
         // ramené les deux à la même valeur en désérialisation.
         let rien_dit: SourceMessage = serde_json::from_str(r#"{"id":1}"#).unwrap();
@@ -560,7 +560,7 @@ mod tests {
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.can_eject, Some(true));
         // Trame d'un plugin antérieur au champ : rien déclaré, et non « faux ».
-        // Le cœur ne distingue pas les deux, mais le protocole doit — c'est ce
+        // Le cœur ne distingue pas les deux, mais le protocol doit — c'est ce
         // qui permet à une trame muette de ne pas retirer la capacité.
         let ancien: SourceMessage = serde_json::from_str(r#"{"id":4}"#).unwrap();
         assert_eq!(ancien.can_eject, None);
@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn une_trame_dun_plugin_anterieur_sans_preset_name_se_relit_comme_rien_declare() {
         // Rétrocompatibilité : un plugin qui ne connaît pas encore ce champ
-        // (ou une trame qui ne dit rien du nom) doit se désérialiser sans
+        // (ou une trame qui ne dit rien du name) doit se désérialiser sans
         // erreur, le champ retombant sur `None` — « garde la valeur
         // courante », pas « efface-la ».
         let ancien: SourceMessage = serde_json::from_str(r#"{"id":3,"preset":4}"#).unwrap();
@@ -643,13 +643,13 @@ mod tests {
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.cover, msg.cover);
 
-        // Additif : une trame muette reste identique a l'octet pres a ce
+        // Additif : une trame muette reste identique a l'octet preset_of a ce
         // qu'elle etait avant ce chantier.
         let muet = SourceMessage::default();
         assert!(!serde_json::to_string(&muet).unwrap().contains("cover"));
     }
 
-    /// Fabrique locale : evite de repeter le chemin dans plusieurs tests.
+    /// Fabrique locale : evite de repeter le path dans plusieurs tests.
     fn ritornello_proto_cover_de_test() -> crate::CoverRef {
         crate::CoverRef::Path { path: "/mnt/nas/Album/folder.jpg".into() }
     }

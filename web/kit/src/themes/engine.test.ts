@@ -91,7 +91,7 @@ describe('applyTheme', () => {
   })
 
   it('purge chaque root selon ses propres clés, sans fuite entre roots', () => {
-    // Régression : `posees` était un état de module unique, partagé par tous
+    // Régression : `applied` était un état de module unique, partagé par tous
     // les roots. Un appel sur un root intercalé entre deux appels sur un
     // autre root écrasait la mémoire des clés de ce dernier : à son appel
     // suivant, il purgeait les clés de l'autre root (sans effet, elles n'y
@@ -132,11 +132,11 @@ describe('applyTheme', () => {
 
   it('injecte un unique lien de polices et le remplace au changement', () => {
     applyTheme(DEFAULT_PRESET, 'light', root)
-    const liens = () => [...document.head.querySelectorAll('link[data-ritornello-fonts]')]
-    expect(liens()).toHaveLength(1)
-    expect(liens()[0]?.getAttribute('href')).toContain('Plus+Jakarta+Sans')
+    const links = () => [...document.head.querySelectorAll('link[data-ritornello-fonts]')]
+    expect(links()).toHaveLength(1)
+    expect(links()[0]?.getAttribute('href')).toContain('Plus+Jakarta+Sans')
     applyTheme('vercel', 'light', root)
-    expect(liens()).toHaveLength(1)
+    expect(links()).toHaveLength(1)
   })
 })
 

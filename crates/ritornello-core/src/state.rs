@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// What the device does with the active source when the process starts.
-/// Read once, at launch, by `Core::demarrage`.
+/// Read once, at launch, by `Core::startup`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StartupPower {
@@ -22,12 +22,12 @@ pub enum StartupPower {
 ///
 /// **Un choix fermé et non un motif libre.** Le propriétaire a demandé deux
 /// réglages séparés, date et heure ; un motif à la `strftime` serait plus
-/// souple et donnerait un afficheur vide au premier motif fautif, sur un
-/// appareil de salon où personne ne lit de journal. Trois formes couvrent ce
+/// souple et donnerait un afficheur clear au premier motif fautif, sur un
+/// appareil de salon où personne ne read de journal. Trois formes couvrent ce
 /// que les pays écrivent réellement, et chacune est infalsifiable.
 ///
 /// Le **séparateur** appartient à la forme et n'est pas un réglage de plus :
-/// `2026-12-31` avec des barres obliques ne se lit nulle part.
+/// `2026-12-31` avec des barres obliques ne se read nulle part.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DateFormat {
@@ -70,7 +70,7 @@ pub struct Settings {
     /// the offset and its overlay disarming together **on expiry**,
     /// whatever the two values are. That alone would not be enough: the
     /// overlay slot can also be taken over before its deadline — by the
-    /// abandon guard in `appliquer_commande`, or by a source's transient
+    /// abandon guard in `apply_command`, or by a source's transient
     /// message in `handle_source_update` — and both of those explicitly
     /// clear the offset too, so it never survives behind a display that
     /// no longer shows it.
@@ -85,7 +85,7 @@ pub struct Settings {
     // ---- Comment l'appareil écrit une date et une heure ------------------
     //
     // **Deux réglages et non un**, à la demande du propriétaire, et la
-    // séparation se défend : l'ordre des composants d'une date et le choix
+    // séparation se défend : l'order des composants d'une date et le choix
     // 12/24 h ne varient pas ensemble d'un pays à l'autre. Un anglophone peut
     // vouloir `2026-12-31` et 24 h, un autre `12/31/2026` et 12 h.
     //
@@ -98,7 +98,7 @@ pub struct Settings {
     // formate côté navigateur, donc dans le fuseau de qui regarde — ce qui est
     // juste pour un téléphone qui voyage. Un réglage de plus ne pourrait que
     // contredire l'un des deux.
-    /// L'ordre des composants d'une date. Voir `DateFormat`.
+    /// L'order des composants d'une date. Voir `DateFormat`.
     pub date_format: DateFormat,
     /// Heure sur 24 h (`13:05`) plutôt que sur 12 h (`1:05 PM`).
     pub clock_24h: bool,
@@ -108,36 +108,36 @@ pub struct Settings {
     // Deux étages qu'il ne faut pas confondre, et c'est pourquoi le premier
     // réglage vit **hors** de l'interrupteur dans l'IHM.
     //
-    // `cover_source_max_mio` borne ce que le cœur accepte de lire, quoi qu'il
+    // `cover_source_max_mio` bounded ce que le cœur accepte de read, quoi qu'il
     // arrive ensuite : c'est la seule protection quand le réencodage est
     // désactivé, et la plus économique de toutes, puisqu'elle se juge sur la
-    // taille du fichier sans lire un octet de son contenu.
+    // size du fichier sans read un octet de son contenu.
     //
-    // Les cinq autres ne décrivent que le **rendu** — ce que le cœur fabrique
+    // Les cinq autres ne décrivent que le **rendition** — ce que le cœur fabrique
     // pour le pousser sur un socket. Interrupteur décoché, aucun n'a de sens :
     // la source part telle quelle.
     /// Combien de pochettes le cœur garde sous la main.
     ///
-    /// **C'est ce que le navigateur peut encore demander.** Une pochette
+    /// **C'est ce que le navigateur peut encore demander.** Une cover
     /// publiée dans `cover_href` reste servie tant que sa clé est dans ce
     /// cache ; au-delà, la page reçoit un 404 et retombe sur son ♫ — un
     /// « l'appareil avait l'image et l'a perdue » que le journal signale
     /// désormais en `warn`. Quatre entrées, la valeur d'origine, ne tenaient
     /// même pas un album parcouru dans les deux sens.
     ///
-    /// Le coût mémoire est **borné et modeste** : une pochette locale ne garde
-    /// qu'un chemin, et une pochette réseau est plafonnée à `PLAFOND_RESEAU`
+    /// Le coût mémoire est **borné et modeste** : une cover locale ne garde
+    /// qu'un path, et une cover réseau est plafonnée à `NETWORK_CAP`
     /// (2 Mio) à son téléchargement. Vingt entrées valent donc 40 Mio dans le
-    /// pire des cas absolus, et en pratique deux (une pochette de 500 px pèse
+    /// pire des cas absolus, et en pratique deux (une cover de 500 px pèse
     /// une centaine de kibioctets).
     pub cover_cache_entries: u32,
 
-    /// Plafond de la pochette **source**, en mébioctets.
+    /// Plafond de la cover **source**, en mébioctets.
     ///
-    /// Toujours actif, réencodage ou pas. Borné à
+    /// Toujours active, réencodage ou pas. Borné à
     /// `ritornello_proto::COVER_MAX_BYTES` (20 Mio) par la validation, et c'est
-    /// structurel : cette constante est une promesse de **protocole** — elle dit
-    /// aux greffons le maximum qu'ils peuvent recevoir, et le greffon MPD
+    /// structurel : cette constante est une promesse de **protocol** — elle dit
+    /// aux plugins le maximum qu'ils peuvent recevoir, et le greffon MPD
     /// dimensionne ses propres bornes dessus sans pouvoir consulter les
     /// réglages du cœur. Ce champ ne peut donc que l'abaisser.
     pub cover_source_max_mio: u32,
@@ -145,28 +145,28 @@ pub struct Settings {
     /// Réencoder les pochettes avant de les pousser, ou pousser la source
     /// telle quelle ?
     ///
-    /// Décoché, le cœur ne décode plus rien : il pousse les octets d'origine, et
+    /// Décoché, le cœur ne décode plus rien : il push_cover les bytes d'origine, et
     /// le pic mémoire d'une publication redevient celui de l'image source (près
-    /// de 72 Mio pour une pochette de 20 Mio, entre les octets, leur base64 et
-    /// la ligne JSON) au lieu de ~1,8 Mio pour une vignette. C'est un choix
+    /// de 72 Mio pour une cover de 20 Mio, entre les bytes, leur base64 et
+    /// la line JSON) au lieu de ~1,8 Mio pour une thumbnail. C'est un choix
     /// défendable — un afficheur qui veut la pleine résolution, une machine qui
     /// a la RAM — mais il faut le faire en le sachant.
     pub cover_rendition: bool,
 
-    /// Côté le plus long de la vignette, en pixels. Le rapport est conservé.
+    /// Côté le plus long de la thumbnail, en pixels. Le rapport est conservé.
     pub cover_max_edge_px: u32,
 
-    /// Qualité JPEG de la vignette, de 1 à 100.
+    /// Qualité JPEG de la thumbnail, de 1 à 100.
     ///
-    /// Ne s'applique qu'au JPEG : une pochette à canal alpha est réencodée en
+    /// Ne s'applique qu'au JPEG : une cover à canal alpha est réencodée en
     /// PNG, sans perte, parce qu'aplatir sa transparence sur un fond deviné
     /// serait un choix visuel que l'appareil n'a pas à faire.
     pub cover_jpeg_quality: u8,
 
-    /// Plafond de la vignette **produite**, en kibioctets.
+    /// Plafond de la thumbnail **produite**, en kibioctets.
     ///
-    /// Un filet, pas une cible : le côté maximal borne déjà le nombre de pixels,
-    /// donc une vignette dépasse ce plafond seulement sur une image
+    /// Un filet, pas une cible : le côté maximal bounded déjà le nombre de pixels,
+    /// donc une thumbnail dépasse ce cap seulement sur une image
     /// pathologiquement bruitée. Dépassement = rien n'est poussé, et le journal
     /// nomme ce réglage — plutôt qu'une boucle de réencodages dégressifs dont le
     /// coût serait invisible.
@@ -177,13 +177,13 @@ pub struct Settings {
     /// La garde anti-bombe de décompression, et la seule qui compte vraiment :
     /// les dimensions sont lues dans l'en-tête **avant toute allocation**, et un
     /// fichier qui les dépasse est refusé sans être décodé. Un PNG de 200 Kio
-    /// peut annoncer 30000 × 30000 pixels, soit 3,6 Gio de tampon décodé — la
-    /// taille du fichier ne dit rien du coût du décodage, et c'est exactement ce
-    /// que ce réglage borne là où `cover_source_max_mio` ne peut rien.
+    /// peut annoncer 30000 × 30000 pixels, soit 3,6 Gio de buffer décodé — la
+    /// size du fichier ne dit rien du coût du décodage, et c'est exactement ce
+    /// que ce réglage bounded là où `cover_source_max_mio` ne peut rien.
     ///
     /// Son libellé dans l'IHM porte le calcul `l × h × 4`, parce que la valeur
     /// utile n'est pas le nombre de mégapixels mais les mébioctets qu'ils
-    /// coûtent : 16 Mpx, c'est 64 Mio de tampon.
+    /// coûtent : 16 Mpx, c'est 64 Mio de buffer.
     pub cover_max_pixels_mpx: u32,
 }
 
@@ -204,25 +204,25 @@ impl Default for Settings {
             // Vingt : de quoi couvrir un album entier parcouru dans les deux
             // sens, ce que quatre ne faisait pas.
             cover_cache_entries: 20,
-            // Le plafond du protocole lui-même : par défaut le cœur n'ajoute
-            // aucune restriction à ce que les greffons savent déjà encaisser.
+            // Le cap du protocol lui-même : par défaut le cœur n'add
+            // aucune restriction à ce que les plugins savent déjà encaisser.
             cover_source_max_mio: ritornello_proto::COVER_MAX_BYTES as u32 / (1024 * 1024),
             // Activé par défaut : sur un Pi 2 à 1 Gio partagé entre mpv, le
-            // cœur, l'IHM et dix greffons, pousser 20 Mio d'image brute est le
+            // cœur, l'IHM et dix plugins, pousser 20 Mio d'image brute est le
             // mauvais défaut même si l'appareil y survit.
             cover_rendition: true,
             // 640 px : au-delà de ce que le plus grand afficheur du parc sait
-            // montrer, et l'IHM web n'affiche la pochette qu'à 224 px sur son
+            // montrer, et l'IHM web n'affiche la cover qu'à 224 px sur son
             // plus grand palier.
             cover_max_edge_px: 640,
             // 85 : le seuil au-delà duquel un JPEG grossit sans que l'œil y
-            // gagne, sur une image de cette taille.
+            // gagne, sur une image de cette size.
             cover_jpeg_quality: 85,
-            // 512 Kio, soit largement au-dessus d'une vignette 640 px typique
+            // 512 Kio, soit largement au-dessus d'une thumbnail 640 px typique
             // (60 à 120 Kio) : le filet ne doit pas se déclencher en usage
             // normal, sinon ce n'est plus un filet mais une limite.
             cover_max_bytes_ko: 512,
-            // 16 Mpx = 64 Mio de tampon décodé. Couvre une pochette scannée en
+            // 16 Mpx = 64 Mio de buffer décodé. Couvre une cover scannée en
             // 4000 × 4000 avec de la marge, et refuse la bombe.
             cover_max_pixels_mpx: 16,
         }
@@ -243,7 +243,7 @@ pub struct PersistedState {
     pub audio_device: Option<String>,
     #[serde(default)]
     pub locale: Option<String>,
-    /// Preset de thème choisi (nom opaque pour le cœur : la liste des presets
+    /// Preset de thème choisi (name opaque pour le cœur : la liste des presets
     /// vit dans la SPA). Absent = `theme::DEFAULT_THEME`.
     #[serde(default)]
     pub theme: Option<String>,
@@ -456,7 +456,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         std::fs::write(&path, r#"{"active_source":"radio","volume":42}"#).unwrap();
-        assert!(!load(&path).standby, "sans la cle, on repart eveille");
+        assert!(!load(&path).standby, "sans la key, on repart eveille");
 
         let st = PersistedState { standby: true, ..Default::default() };
         save(&path, &st).unwrap();

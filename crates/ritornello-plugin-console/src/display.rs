@@ -3,8 +3,8 @@ use ritornello_proto::{Overlay, PlayerState};
 use std::io::Write;
 use std::path::Path;
 
-/// Ce qui s'écrit en place du nom de source quand le cœur n'en a aucune.
-const AUCUNE_SOURCE: &str = "—";
+/// Ce qui s'écrit en place du name de source quand le cœur n'en a aucune.
+const NO_SOURCE: &str = "—";
 
 /// L'heure locale de l'appareil, en heures (0-23) et minutes.
 ///
@@ -27,8 +27,8 @@ const AUCUNE_SOURCE: &str = "—";
 /// tour d'horloge, et la fonction n'est de toute façon pas exposée par le crate
 /// `libc` sur toutes les cibles.
 ///
-/// La variante réentrante, seule sûre dans un processus à plusieurs fils.
-pub fn heure_locale() -> Option<(u32, u32)> {
+/// La variante réentrante, seule sûre dans un processus à plusieurs children.
+pub fn local_time() -> Option<(u32, u32)> {
     let secondes =
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
     let t = libc::time_t::try_from(secondes).ok()?;
@@ -50,9 +50,9 @@ pub fn heure_locale() -> Option<(u32, u32)> {
 /// anglo-saxonne, et un `0:00 AM` n'existe nulle part. Les heures ne sont pas
 /// complétées par un zéro dans cette forme (`1:05 PM`, pas `01:05 PM`), là où la
 /// forme 24 h les complète — les deux usages diffèrent, et c'est ce que
-/// l'utilisateur lit ailleurs.
-pub fn format_heure(heures: u32, minutes: u32, douze_heures: bool) -> String {
-    if !douze_heures {
+/// l'utilisateur read ailleurs.
+pub fn format_time(heures: u32, minutes: u32, twelve_hour: bool) -> String {
+    if !twelve_hour {
         return format!("{heures:02}:{minutes:02}");
     }
     let (h, suffixe) = match heures {
@@ -66,103 +66,103 @@ pub fn format_heure(heures: u32, minutes: u32, douze_heures: bool) -> String {
 
 /// Comme [`compose`], mais avec l'heure à écrire en veille.
 ///
-/// Séparée pour que la mise en page reste **pure** : `compose` ne lit aucune
+/// Séparée pour que la mise en page reste **pure** : `compose` ne read aucune
 /// horloge, donc chaque cas se teste sur une heure choisie. `None` = pas
 /// d'heure à afficher (horloge système inutilisable, ou état hors veille).
-pub fn compose_a(etat: &PlayerState, maintenant: Option<(u32, u32)>) -> [String; 3] {
-    if etat.overlay.is_none() && etat.standby {
+pub fn compose_at(state: &PlayerState, maintenant: Option<(u32, u32)>) -> [String; 3] {
+    if state.overlay.is_none() && state.standby {
         // **L'heure en veille**, demandée par le propriétaire : c'est le seul
         // moment où l'écran n'a rien d'autre à dire, et une horloge y est plus
-        // utile qu'un tty noir. Le mot de veille reste en première ligne — il
-        // dit *pourquoi* rien ne joue — et l'heure prend la seconde.
+        // utile qu'un tty noir. Le mot de veille reste en première line — il
+        // dit *pourquoi* rien ne plays — et l'heure prend la seconde.
         let heure = maintenant
-            .map(|(h, m)| format_heure(h, m, etat.clock.douze_heures))
+            .map(|(h, m)| format_time(h, m, state.clock.twelve_hour))
             .unwrap_or_default();
-        return [etat.status.clone().unwrap_or_default(), heure, String::new()];
+        return [state.status.clone().unwrap_or_default(), heure, String::new()];
     }
-    compose(etat)
+    compose(state)
 }
 
-/// Trois lignes pour un écran texte d'environ vingt colonnes, composées depuis
+/// Trois lines pour un écran texte d'environ vingt colonnes, composées depuis
 /// l'état structuré.
 ///
 /// C'est **ici** que vit la mise en page, et non dans le cœur : un autre
 /// afficheur en écrira une autre à partir de la même trame, sans rien changer
 /// au cœur.
 ///
-/// Ne lit **aucune** horloge : l'heure de la veille entre par `compose_a`,
+/// Ne read **aucune** horloge : l'heure de la veille entre par `compose_at`,
 /// qui délègue à cette fonction tout le reste.
-pub fn compose(etat: &PlayerState) -> [String; 3] {
+pub fn compose(state: &PlayerState) -> [String; 3] {
     // Une incrustation prend toute la place : elle est passagère et c'est ce
-    // qu'on veut lire pendant qu'elle dure. Décision du propriétaire : le
-    // texte arrive en un seul morceau depuis le cœur, et s'affiche en un seul
-    // morceau — sur une ligne, là où l'incrustation volume tenait deux lignes
+    // qu'on veut read pendant qu'elle dure. Décision du propriétaire : le
+    // texte arrive en un seul track depuis le cœur, et s'affiche en un seul
+    // track — sur une line, là où l'incrustation volume tenait deux lines
     // avant ce chantier (« VOLUME » puis « 65 % »). Le propriétaire a vu la
     // différence et l'a acceptée : ce n'est pas une régression.
-    if let Some(o) = &etat.overlay {
-        return [texte_incrustation(o).to_string(), String::new(), String::new()];
+    if let Some(o) = &state.overlay {
+        return [overlay_text(o).to_string(), String::new(), String::new()];
     }
-    if etat.standby {
-        return [etat.status.clone().unwrap_or_default(), String::new(), String::new()];
+    if state.standby {
+        return [state.status.clone().unwrap_or_default(), String::new(), String::new()];
     }
     // « SOURCE  n/total », et « SOURCE  n » quand le total est inconnu.
     //
     // Choix du propriétaire, arbitré pendant ce chantier. Chaque source avait
-    // avant son propre idiome, encodé dans son catalogue : la radio écrivait
+    // avant son propre idiome, encodé dans son sources_catalog : la radio écrivait
     // « RADIO  P3 », le cd « CD 1/3 ». Un afficheur unique ne peut pas les
-    // rejouer tous sans coder en dur des noms de plugins, ce qu'on refuse — donc
+    // rejouer tous sans coder en dur des names de plugins, ce qu'on refuse — donc
     // un idiome commun, qui rend au cd le total qu'il avait perdu et apprend à
     // la radio combien de stations sont configurées.
     //
-    // Un total à zéro (« rien à numéroter » : tiroir vide) ne s'écrit pas :
+    // Un total à zéro (« rien à numéroter » : tiroir clear) ne s'écrit pas :
     // « 1/0 » serait absurde. Le cas est atteignable, `preset_count` valant
-    // `Some(0)` de façon significative dans ce protocole.
-    // `source` vide **est** l'absence de source : depuis l'enregistrement à
+    // `Some(0)` de façon significative dans ce protocol.
+    // `source` clear **est** l'absence de source : depuis l'enregistrement à
     // chaud, le cœur démarre même si aucun greffon `source` n'a répondu, en
-    // attendant qu'un retardataire s'annonce. Sans ce repli, les trois lignes de
+    // attendant qu'un retardataire s'announcement. Sans ce repli, les trois lines de
     // l'écran étaient vides — indistinguable d'un afficheur mort, alors que
     // justement tout fonctionne.
     //
     // Un tiret, et non un mot : cet afficheur ne traduit rien. Tout ce qu'il
     // écrit lui arrive déjà traduit du cœur (le statut, le mot de veille), il n'a
-    // ni catalogue ni langue courante — un `NO SOURCE` codé en dur ici mentirait
+    // ni sources_catalog ni langue courante — un `NO SOURCE` codé en dur ici mentirait
     // sur un appareil en français. Le tiret cadratin est déjà de ses caractères
-    // (voir `ligne_titre`).
-    let nom = if etat.source.is_empty() {
-        AUCUNE_SOURCE.to_string()
+    // (voir `title_line`).
+    let name = if state.source.is_empty() {
+        NO_SOURCE.to_string()
     } else {
-        etat.source.to_uppercase()
+        state.source.to_uppercase()
     };
-    let line1 = match (etat.preset, etat.preset_count) {
-        (Some(n), Some(total)) if total > 0 => format!("{nom}  {n}/{total}"),
-        (Some(n), _) => format!("{nom}  {n}"),
-        (None, _) => nom,
+    let line1 = match (state.preset, state.preset_count) {
+        (Some(n), Some(total)) if total > 0 => format!("{name}  {n}/{total}"),
+        (Some(n), _) => format!("{name}  {n}"),
+        (None, _) => name,
     };
-    // Le nom de la présélection d'abord, puis l'album, puis le statut : du plus
+    // Le name de la présélection d'abord, puis l'album, puis le statut : du plus
     // spécifique au plus générique.
-    let line2 = etat
+    let line2 = state
         .preset_name
         .clone()
-        .or_else(|| etat.morceau.album.clone())
-        .or_else(|| etat.status.clone())
+        .or_else(|| state.track.album.clone())
+        .or_else(|| state.status.clone())
         .unwrap_or_default();
-    let line3 = ligne_titre(etat.morceau.artist.as_deref(), etat.morceau.title.as_deref())
+    let line3 = title_line(state.track.artist.as_deref(), state.track.title.as_deref())
         .unwrap_or_default();
     [line1, line2, line3]
 }
 
-fn texte_incrustation(o: &Overlay) -> &str {
+fn overlay_text(o: &Overlay) -> &str {
     match o {
         Overlay::Volume { text, .. } | Overlay::Tens { text, .. } | Overlay::Message { text, .. } => text,
     }
 }
 
-/// Ligne « artiste — titre », avec ses quatre replis. Déplacée du cœur : c'est
+/// Line « artiste — titre », avec ses quatre replis. Déplacée du cœur : c'est
 /// une décision de mise en page, donc elle appartient à l'afficheur.
 ///
 /// Une information partielle vaut mieux que rien : l'artiste seul reste
 /// affiché, parce qu'il dit déjà quelque chose de ce qu'on écoute.
-pub fn ligne_titre(artist: Option<&str>, title: Option<&str>) -> Option<String> {
+pub fn title_line(artist: Option<&str>, title: Option<&str>) -> Option<String> {
     match (artist, title) {
         (Some(a), Some(t)) => Some(format!("{a} — {t}")),
         (None, Some(t)) => Some(t.to_string()),
@@ -171,56 +171,56 @@ pub fn ligne_titre(artist: Option<&str>, title: Option<&str>) -> Option<String> 
     }
 }
 
-/// Rendu texte pour console (ANSI : efface l'écran, curseur en haut à gauche).
+/// Rendition texte pour console (ANSI : efface l'écran, curseur en haut à gauche).
 /// \r\n car sur /dev/tty1 le mode canonique n'insère pas le retour chariot.
 ///
-/// `#[cfg(test)]` : depuis que `ConsoleDisplay::show` mémorise son dernier
-/// rendu (voir plus bas), la production appelle directement `rendu_des_lignes`
-/// sur les lignes déjà composées, pour les comparer aux précédentes avant
+/// `#[cfg(test)]` : depuis que `ConsoleDisplay::show` mémorise son last
+/// rendition (voir plus bas), la production appelle directement `render_lines`
+/// sur les lines déjà composées, pour les comparer aux précédentes avant
 /// d'écrire quoi que ce soit. Cette fonction reste la commodité des tests, qui
 /// n'ont pas cette comparaison à faire et raisonnent sur un `PlayerState`
 /// complet.
 #[cfg(test)]
-fn render_console(etat: &PlayerState) -> String {
-    rendu_des_lignes(&compose(etat))
+fn render_console(state: &PlayerState) -> String {
+    render_lines(&compose(state))
 }
 
-/// Assemble le rendu ANSI à partir de lignes déjà composées : partagé par
+/// Assemble le rendition ANSI à partir de lines déjà composées : partagé par
 /// `render_console` (qui compose depuis un état complet, réservé aux tests) et
-/// `ConsoleDisplay::show` (qui a besoin des lignes à part pour les comparer
+/// `ConsoleDisplay::show` (qui a besoin des lines à part pour les comparer
 /// aux précédentes avant d'écrire quoi que ce soit).
-fn rendu_des_lignes(lignes: &[String; 3]) -> String {
+fn render_lines(lines: &[String; 3]) -> String {
     format!(
         "\x1b[2J\x1b[H\r\n  {}\r\n\r\n  {}\r\n\r\n  {}\r\n",
-        assainit(&lignes[0]),
-        assainit(&lignes[1]),
-        assainit(&lignes[2])
+        sanitize(&lines[0]),
+        sanitize(&lines[1]),
+        sanitize(&lines[2])
     )
 }
 
-/// Retire les caractères de contrôle d'une ligne avant écriture sur le tty.
+/// Retire les caractères de contrôle d'une line avant écriture sur le tty.
 ///
 /// Depuis que ce plugin compose lui-même l'affichage, **chacune** des trois
-/// lignes vient de données réseau : le nom de présélection (une configuration
-/// éditable à distance), le statut d'une source, un titre ICY. Un flux (ou une
+/// lines vient de données réseau : le name de présélection (une configuration
+/// éditable à distance), le statut d'une source, un titre ICY. Un stream (ou une
 /// configuration compromise) qui glisserait `\x1b[...` dans l'un de ces champs
-/// pourrait manipuler la console. Les seules séquences de contrôle du rendu
+/// pourrait manipuler la console. Les seules séquences de contrôle du rendition
 /// sont celles que ce module écrit lui-même ; le contenu, lui, reste des
 /// données.
-fn assainit(ligne: &str) -> String {
-    ligne.chars().filter(|c| !c.is_control()).collect()
+fn sanitize(line: &str) -> String {
+    line.chars().filter(|c| !c.is_control()).collect()
 }
 
 pub struct ConsoleDisplay {
     out: std::fs::File,
-    /// Dernières lignes effectivement écrites sur le tty. Le canal du cœur
+    /// Dernières lines effectivement écrites sur le tty. Le canal du cœur
     /// déduplique sur l'état *entier* (`PlayerState`) : une trame qui ne
     /// change que `preset_count`, `duration_s` ou `origin` — invisibles de
     /// `compose` — franchit donc cette garde et arrive jusqu'ici. Sans
-    /// mémoire de son propre rendu, ce plugin réimprimerait les trois mêmes
-    /// lignes, précédées de l'effacement d'écran : un clignotement visible
+    /// mémoire de son propre rendition, ce plugin réimprimerait les trois mêmes
+    /// lines, précédées de l'effacement d'écran : un clignotement visible
     /// sur un tty pour une trame qu'il ne montre même pas.
-    dernieres_lignes: Option<[String; 3]>,
+    last_lines: Option<[String; 3]>,
 }
 
 impl ConsoleDisplay {
@@ -229,25 +229,25 @@ impl ConsoleDisplay {
             .write(true)
             .open(path)
             .with_context(|| format!("opening {}", path.display()))?;
-        Ok(Self { out, dernieres_lignes: None })
+        Ok(Self { out, last_lines: None })
     }
 
     /// Réécrit l'écran depuis l'état courant, en lisant l'horloge du système.
     ///
-    /// L'horloge est lue **ici** et non dans `compose_a`, qui reste pure : le
-    /// seul appel impur du rendu vit au seul endroit qui touche déjà le tty.
-    pub fn show(&mut self, etat: &PlayerState) -> Result<()> {
-        // Lue seulement quand elle sert : hors veille, `compose_a` ne la
+    /// L'horloge est lue **ici** et non dans `compose_at`, qui reste pure : le
+    /// seul appel impur du rendition vit au seul endroit qui touche déjà le tty.
+    pub fn show(&mut self, state: &PlayerState) -> Result<()> {
+        // Lue seulement quand elle sert : hors veille, `compose_at` ne la
         // regarde pas, et un `tzset` par trame d'état — une par seconde en
-        // lecture — serait un `stat` par seconde pour rien.
-        let maintenant = etat.standby.then(heure_locale).flatten();
-        let lignes = compose_a(etat, maintenant);
-        if self.dernieres_lignes.as_ref() == Some(&lignes) {
+        // playback — serait un `stat` par seconde pour rien.
+        let maintenant = state.standby.then(local_time).flatten();
+        let lines = compose_at(state, maintenant);
+        if self.last_lines.as_ref() == Some(&lines) {
             return Ok(());
         }
-        self.out.write_all(rendu_des_lignes(&lignes).as_bytes())?;
+        self.out.write_all(render_lines(&lines).as_bytes())?;
         self.out.flush()?;
-        self.dernieres_lignes = Some(lignes);
+        self.last_lines = Some(lines);
         Ok(())
     }
 }
@@ -278,52 +278,52 @@ mod tests {
     fn la_veille_affiche_lheure_sous_le_mot_de_veille() {
         // Demande du propriétaire : l'écran de veille n'a rien d'autre à dire,
         // une horloge y est plus utile qu'un tty noir. Le mot de veille reste
-        // en tête — il dit *pourquoi* rien ne joue.
-        let etat = PlayerState { standby: true, status: Some("VEILLE".into()), ..Default::default() };
-        assert_eq!(compose_a(&etat, Some((13, 5))), ["VEILLE", "13:05", ""]);
+        // en tête — il dit *pourquoi* rien ne plays.
+        let state = PlayerState { standby: true, status: Some("VEILLE".into()), ..Default::default() };
+        assert_eq!(compose_at(&state, Some((13, 5))), ["VEILLE", "13:05", ""]);
     }
 
     #[test]
     fn la_veille_suit_le_reglage_douze_heures() {
         // Le réglage voyage dans la trame d'état : un afficheur ne va jamais
         // rien chercher de côté.
-        let mut etat =
+        let mut state =
             PlayerState { standby: true, status: Some("VEILLE".into()), ..Default::default() };
-        etat.clock.douze_heures = true;
-        assert_eq!(compose_a(&etat, Some((13, 5)))[1], "1:05 PM");
+        state.clock.twelve_hour = true;
+        assert_eq!(compose_at(&state, Some((13, 5)))[1], "1:05 PM");
     }
 
     #[test]
     fn une_horloge_inutilisable_laisse_la_veille_sans_heure() {
         // Un Pi n'a pas de pile : avant que le réseau ne l'ait remis à l'heure,
         // mieux vaut pas d'heure du tout qu'une heure fausse.
-        let etat = PlayerState { standby: true, status: Some("VEILLE".into()), ..Default::default() };
-        assert_eq!(compose_a(&etat, None), ["VEILLE", "", ""]);
+        let state = PlayerState { standby: true, status: Some("VEILLE".into()), ..Default::default() };
+        assert_eq!(compose_at(&state, None), ["VEILLE", "", ""]);
     }
 
     #[test]
     fn une_incrustation_passe_devant_lhorloge_de_veille() {
-        // L'incrustation est passagère et c'est ce qu'on veut lire pendant
+        // L'incrustation est passagère et c'est ce qu'on veut read pendant
         // qu'elle dure — la règle qui vaut partout ailleurs dans `compose`.
-        let etat = PlayerState {
+        let state = PlayerState {
             standby: true,
             status: Some("VEILLE".into()),
             overlay: Some(Overlay::Message { text: "PAS DE DISQUE".into(), remaining_ms: 2000 }),
             ..Default::default()
         };
-        assert_eq!(compose_a(&etat, Some((13, 5))), ["PAS DE DISQUE", "", ""]);
+        assert_eq!(compose_at(&state, Some((13, 5))), ["PAS DE DISQUE", "", ""]);
     }
 
     #[test]
     fn les_deux_formats_dheure_couvrent_minuit_et_midi() {
         // Les deux bornes que la convention anglo-saxonne traite à part : un
         // `0:00 AM` n'existe nulle part, et midi est `12:00 PM`.
-        assert_eq!(format_heure(0, 0, false), "00:00");
-        assert_eq!(format_heure(0, 0, true), "12:00 AM");
-        assert_eq!(format_heure(12, 0, true), "12:00 PM");
-        assert_eq!(format_heure(23, 59, true), "11:59 PM");
-        assert_eq!(format_heure(9, 5, true), "9:05 AM");
-        assert_eq!(format_heure(9, 5, false), "09:05");
+        assert_eq!(format_time(0, 0, false), "00:00");
+        assert_eq!(format_time(0, 0, true), "12:00 AM");
+        assert_eq!(format_time(12, 0, true), "12:00 PM");
+        assert_eq!(format_time(23, 59, true), "11:59 PM");
+        assert_eq!(format_time(9, 5, true), "9:05 AM");
+        assert_eq!(format_time(9, 5, false), "09:05");
     }
 
     #[test]
@@ -331,7 +331,7 @@ mod tests {
         // L'unique appel impur du module. On ne peut pas prédire l'heure, mais
         // on peut exiger qu'elle soit une heure : c'est ce qui attraperait une
         // `tm` mal lue (un champ pris pour un autre, un fuseau qui déborde).
-        let (h, m) = heure_locale().expect("l'horloge du systeme de test doit etre convertible");
+        let (h, m) = local_time().expect("l'horloge du systeme de test doit etre convertible");
         assert!(h < 24, "heure hors bornes : {h}");
         assert!(m < 60, "minutes hors bornes : {m}");
     }
@@ -339,8 +339,8 @@ mod tests {
     #[test]
     fn la_premiere_ligne_omet_un_total_inconnu_ou_nul() {
         // Sans total déclaré, le numéro seul. Et surtout : un total à zéro
-        // (« rien à numéroter », tiroir vide) ne s'écrit pas — « 1/0 » serait
-        // absurde, et `Some(0)` est une valeur significative de ce protocole,
+        // (« rien à numéroter », tiroir clear) ne s'écrit pas — « 1/0 » serait
+        // absurde, et `Some(0)` est une valeur significative de ce protocol,
         // pas un accident.
         let mut e = etat_radio();
         e.preset_count = None;
@@ -352,8 +352,8 @@ mod tests {
     #[test]
     fn un_coeur_sans_aucune_source_dit_labsence_au_lieu_de_ne_rien_ecrire() {
         // Le cœur démarre désormais sans source, en attendant qu'un greffon
-        // s'annonce. `source` vide, et rien d'autre à écrire : l'écran entier
-        // était vide, indistinguable d'un afficheur mort ou d'un tty perdu.
+        // s'announcement. `source` clear, et rien d'autre à écrire : l'écran entier
+        // était clear, indistinguable d'un afficheur mort ou d'un tty perdu.
         let e = PlayerState::default();
         assert_eq!(compose(&e), ["—".to_string(), String::new(), String::new()]);
     }
@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn le_cd_retrouve_sa_piste_sur_son_total() {
         // Ce que le plugin cd composait lui-même avant ce chantier (« CD 1/3 »),
-        // rendu par l'afficheur depuis les seules données de la trame.
+        // rendition par l'afficheur depuis les seules données de la trame.
         let e = PlayerState {
             source: "cd".into(),
             preset: Some(1),
@@ -374,12 +374,12 @@ mod tests {
     #[test]
     fn les_quatre_replis_de_la_ligne_de_titre() {
         // Déplacés depuis le cœur avec la fonction qu'ils testent.
-        assert_eq!(ligne_titre(Some("Miles Davis"), Some("So What")).as_deref(), Some("Miles Davis — So What"));
-        assert_eq!(ligne_titre(None, Some("So What")).as_deref(), Some("So What"));
+        assert_eq!(title_line(Some("Miles Davis"), Some("So What")).as_deref(), Some("Miles Davis — So What"));
+        assert_eq!(title_line(None, Some("So What")).as_deref(), Some("So What"));
         // Décision du propriétaire : on affiche toute information disponible,
         // même partielle.
-        assert_eq!(ligne_titre(Some("Miles Davis"), None).as_deref(), Some("Miles Davis"));
-        assert_eq!(ligne_titre(None, None), None);
+        assert_eq!(title_line(Some("Miles Davis"), None).as_deref(), Some("Miles Davis"));
+        assert_eq!(title_line(None, None), None);
     }
 
     #[test]
@@ -389,7 +389,7 @@ mod tests {
         let mut e = PlayerState { source: "cd".into(), preset: Some(1), preset_count: Some(3), ..Default::default() };
         e.status = Some("AUDIO CD".into());
         assert_eq!(compose(&e)[1], "AUDIO CD");
-        e.morceau.album = Some("Kind of Blue".into());
+        e.track.album = Some("Kind of Blue".into());
         assert_eq!(compose(&e)[1], "Kind of Blue");
     }
 
@@ -399,27 +399,27 @@ mod tests {
         // cd laisse l'album gagner parce qu'il ne nomme pas ses pistes, mais une
         // station nommée doit rester affichée même quand un plugin `metadata`
         // finit par résoudre un album. Le cœur garantissait cela par
-        // `line2_replaceable`, que la radio ne déclarait pas ; ici c'est l'ordre
+        // `line2_replaceable`, que la radio ne déclarait pas ; ici c'est l'order
         // de l'`or_else` qui le garantit, et rien ne signalerait son inversion.
         let mut e = etat_radio();
-        e.morceau.album = Some("Kind of Blue".into());
+        e.track.album = Some("Kind of Blue".into());
         assert_eq!(compose(&e)[1], "France Inter");
     }
 
     #[test]
     fn le_rendu_efface_l_ecran_et_espace_les_trois_lignes() {
-        // Format du rendu lui-même, indépendamment de ce que `compose` décide :
+        // Format du rendition lui-même, indépendamment de ce que `compose` décide :
         // en-tête ANSI d'effacement, retours chariot explicites (sur /dev/tty1
-        // le mode canonique ne les insère pas), et une ligne vide entre chaque.
+        // le mode canonique ne les insère pas), et une line clear entre chaque.
         let mut e = etat_radio();
-        e.morceau.artist = Some("Miles Davis".into());
-        e.morceau.title = Some("So What".into());
+        e.track.artist = Some("Miles Davis".into());
+        e.track.title = Some("So What".into());
         let s = render_console(&e);
         assert!(s.starts_with("\x1b[2J\x1b[H"));
         assert!(s.contains("RADIO  3/12\r\n"));
         assert!(s.contains("France Inter\r\n"));
         assert!(s.contains("Miles Davis — So What\r\n"));
-        assert_eq!(s.matches("\r\n\r\n").count(), 2, "une ligne vide entre chacune des trois");
+        assert_eq!(s.matches("\r\n\r\n").count(), 2, "une line clear entre chacune des trois");
     }
 
     #[test]
@@ -438,8 +438,8 @@ mod tests {
 
     #[test]
     fn tout_le_contenu_est_assaini_pas_seulement_la_troisieme_ligne() {
-        // Depuis que le plugin compose, **chaque** morceau vient du réseau : un
-        // nom de station configuré à distance, un statut, un titre ICY. Un flux
+        // Depuis que le plugin compose, **chaque** track vient du réseau : un
+        // name de station configuré à distance, un statut, un titre ICY. Un stream
         // qui glisserait `\x1b[2J` dans l'un d'eux pourrait manipuler la console.
         let e = PlayerState {
             source: "radio".into(),
@@ -449,16 +449,16 @@ mod tests {
         };
         let s = render_console(&e);
         assert!(!s.contains("FI\x1b[2JP"));
-        assert_eq!(s.matches('\x1b').count(), 2, "seuls les deux ESC de l'en-tête du rendu");
+        assert_eq!(s.matches('\x1b').count(), 2, "seuls les deux ESC de l'en-tête du rendition");
     }
 
     #[test]
     fn un_bel_est_aussi_retire_pas_seulement_lesc() {
         // Régression M4 (revue de branche) : l'ancien test épinglait aussi la
-        // disparition du BEL (`\x07`), en plus du compte d'ESC. Un `assainit`
+        // disparition du BEL (`\x07`), en plus du compte d'ESC. Un `sanitize`
         // réduit par erreur au seul filtrage d'ESC passerait le test
         // précédent sans être réellement sûr — `is_control` doit couvrir tous
-        // les caractères de contrôle, pas seulement celui du rendu lui-même.
+        // les caractères de contrôle, pas seulement celui du rendition lui-même.
         let e = PlayerState {
             source: "radio".into(),
             preset_name: Some("FI\x07P".into()),
@@ -471,10 +471,10 @@ mod tests {
     #[test]
     fn une_deuxieme_trame_aux_memes_lignes_ne_reecrit_pas_lecran() {
         // Régression M3 (revue de branche) : le canal du cœur déduplique sur
-        // l'état ENTIER, pas sur les lignes composées. Une trame qui ne change
+        // l'état ENTIER, pas sur les lines composées. Une trame qui ne change
         // que `duration_s` — invisible de `compose` — franchit donc la garde
-        // du cœur et arrive jusqu'ici : sans mémoire de son propre rendu, le
-        // plugin réimprimerait les trois mêmes lignes, précédées de
+        // du cœur et arrive jusqu'ici : sans mémoire de son propre rendition, le
+        // plugin réimprimerait les trois mêmes lines, précédées de
         // l'effacement d'écran (clignotement visible sur un tty).
         //
         // Le fichier n'est pas ouvert en écriture tronquante : une seconde
@@ -490,12 +490,12 @@ mod tests {
         let apres_premiere = std::fs::read(&path).unwrap();
         assert!(!apres_premiere.is_empty());
 
-        e.morceau.duration_s = Some(210);
+        e.track.duration_s = Some(210);
         display.show(&e).unwrap();
         let apres_seconde = std::fs::read(&path).unwrap();
         assert_eq!(
             apres_premiere, apres_seconde,
-            "les trois lignes composees sont identiques : la seconde ecriture n'aurait pas du avoir lieu"
+            "les trois lines composees sont identiques : la seconde ecriture n'aurait pas du avoir lieu"
         );
     }
 
@@ -518,10 +518,10 @@ mod tests {
     }
 
     /// Décision de conception : cet afficheur **ne montre pas** la position.
-    /// Trois lignes d'une vingtaine de colonnes déjà pleines, et une horloge y
+    /// Trois lines d'une vingtaine de colonnes déjà pleines, et une horloge y
     /// coûterait un effacement d'écran par seconde — or le cœur en publie une
-    /// trame par seconde pendant toute la lecture. Le champ voyage quand même
-    /// jusqu'ici : tout autre plugin d'affichage peut s'en servir.
+    /// trame par seconde pendant toute la playback. Le champ voyage quand même
+    /// jusqu'ici : tout autre plugin d'affichage peut s'en serve.
     #[test]
     fn une_trame_qui_ne_change_que_la_position_compose_les_memes_lignes() {
         let mut e = etat_radio();
@@ -533,8 +533,8 @@ mod tests {
     }
 
     /// Et le corollaire sur l'incrustation : pendant un message éphémère, les
-    /// trames par seconde composent la même ligne unique, donc la garde
-    /// `dernieres_lignes` les absorbe — aucun clignotement pendant que le
+    /// trames par seconde composent la même line unique, donc la garde
+    /// `last_lines` les absorbe — aucun clignotement pendant que le
     /// message est à l'écran.
     #[test]
     fn une_incrustation_survit_aux_trames_par_seconde() {

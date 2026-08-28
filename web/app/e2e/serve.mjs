@@ -49,13 +49,13 @@ import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, statSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const estWindows = process.platform === 'win32'
-const racineNative = process.cwd().replace(/[\\/]web[\\/]app$/, '')
+const isWindows = process.platform === 'win32'
+const rootNative = process.cwd().replace(/[\\/]web[\\/]app$/, '')
 
 // Converts a Windows path (`C:\a\b`) into its WSL equivalent
 // (`/mnt/c/a/b`): the only way for a Linux process, launched from Windows
 // through `wsl.exe`, to find the files Node wrote here.
-function versWsl(cheminWindows) {
+function toWsl(cheminWindows) {
   const normalise = cheminWindows.replace(/\\/g, '/')
   const correspondance = /^([A-Za-z]):\/(.*)$/.exec(normalise)
   return correspondance ? `/mnt/${correspondance[1].toLowerCase()}/${correspondance[2]}` : normalise
@@ -65,17 +65,17 @@ function versWsl(cheminWindows) {
 // tree (hence under a `/mnt/c/...` mount point predictable for WSL2)
 // rather than in the system `tmpdir()`, whose root (often `AppData`)
 // offers no such guarantee.
-mkdirSync(join(racineNative, 'target'), { recursive: true })
-const dirConfigNative = estWindows
-  ? mkdtempSync(join(racineNative, 'target', 'e2e-'))
+mkdirSync(join(rootNative, 'target'), { recursive: true })
+const configDirNative = isWindows
+  ? mkdtempSync(join(rootNative, 'target', 'e2e-'))
   : mkdtempSync(join(tmpdir(), 'ritornello-e2e-'))
 
-const racine = estWindows ? versWsl(racineNative) : racineNative
-const dirConfig = estWindows ? versWsl(dirConfigNative) : dirConfigNative
+const root = isWindows ? toWsl(rootNative) : rootNative
+const configDir = isWindows ? toWsl(configDirNative) : configDirNative
 // Execution directory (sockets, PID): WSL-native under Windows — see the
 // header —, same as the configuration directory under native Linux where
 // the question does not arise.
-const dirExec = estWindows ? `/tmp/ritornello-e2e-${randomBytes(6).toString('hex')}` : dirConfig
+const execDir = isWindows ? `/tmp/ritornello-e2e-${randomBytes(6).toString('hex')}` : configDir
 
 // Fixtures for the `files` journey: three short tracks in a subfolder, under
 // the *configuration* directory — the only one Node (Windows side) can write
@@ -89,11 +89,11 @@ const dirExec = estWindows ? `/tmp/ritornello-e2e-${randomBytes(6).toString('hex
 // take over — the scan filters on the extension (`scan::is_audio`) and the
 // journey declares `finite` playback, so an unreadable track costs an mpv
 // error line, never a hung or looping journey.
-const mediaNative = join(dirConfigNative, 'media')
+const mediaNative = join(configDirNative, 'media')
 const albumNative = join(mediaNative, 'Album')
-const mediaRoot = `${dirConfig}/media`
+const mediaRoot = `${configDir}/media`
 mkdirSync(albumNative, { recursive: true })
-const pistes = ['01', '02', '03']
+const tracks = ['01', '02', '03']
 {
   // Through a `.sh` file, and for the same reason as the launch below: an
   // inline command crossing Node -> wsl.exe -> bash sometimes gets corrupted
@@ -101,25 +101,25 @@ const pistes = ['01', '02', '03']
   const script =
     `#!/usr/bin/env bash\n` +
     `command -v ffmpeg >/dev/null 2>&1 || exit 1\n` +
-    pistes
+    tracks
       .map(
         (n) =>
-          // 30 s et non 1 s : avec des pistes d'une seconde, la liste
-          // s'epuisait avant que le parcours ait fini de l'observer, et l'etat
-          // « liste terminee » se confondait avec « selection en echec ». Une
-          // duree realiste est ce qui rend la lecture observable.
+          // 30 s et non 1 s : avec des tracks d'une seconde, la list
+          // s'epuisait avant que le journey ait fini de l'observe, et l'state
+          // « list terminee » se confondait avec « selection en echec ». Une
+          // duration realiste est ce qui rend la lecture observable.
           `ffmpeg -loglevel error -y -f lavfi -i 'sine=frequency=440:duration=30' ` +
           `'${mediaRoot}/Album/${n}.mp3' || exit 1`,
       )
       .join('\n') +
     `\n`
-  writeFileSync(join(dirConfigNative, 'fixtures.sh'), script)
-  if (estWindows) {
-    spawnSync('wsl.exe', ['--', 'bash', `${dirConfig}/fixtures.sh`], { stdio: 'inherit' })
+  writeFileSync(join(configDirNative, 'fixtures.sh'), script)
+  if (isWindows) {
+    spawnSync('wsl.exe', ['--', 'bash', `${configDir}/fixtures.sh`], { stdio: 'inherit' })
   } else {
-    spawnSync('bash', [`${dirConfig}/fixtures.sh`], { stdio: 'inherit' })
+    spawnSync('bash', [`${configDir}/fixtures.sh`], { stdio: 'inherit' })
   }
-  for (const n of pistes) {
+  for (const n of tracks) {
     const chemin = join(albumNative, `${n}.mp3`)
     let taille = 0
     try {
@@ -135,7 +135,7 @@ const pistes = ['01', '02', '03']
 // form the format prescribes. The journey loads it through the browse tree, so
 // this file is what proves the whole path: listed apart from the audio files,
 // carrying a different action, parsed and resolved by the plugin.
-writeFileSync(join(albumNative, 'tout.m3u'), pistes.map((n) => `${n}.mp3`).join('\n') + '\n')
+writeFileSync(join(albumNative, 'tout.m3u'), tracks.map((n) => `${n}.mp3`).join('\n') + '\n')
 
 // The device wizard opens on the mounted volumes, read from `/proc/mounts`.
 // A journey has no privilege and can mount nothing, so it *describes* a volume
@@ -146,10 +146,10 @@ writeFileSync(join(albumNative, 'tout.m3u'), pistes.map((n) => `${n}.mp3`).join(
 // declared volume is browsable; with it, it also proves that a pseudo
 // filesystem is kept out of the list — the guard that stops a recursive add
 // from walking into `/proc/self`.
-const procMounts = `${dirConfig}/proc-mounts`
+const procMounts = `${configDir}/proc-mounts`
 writeFileSync(
-  join(dirConfigNative, 'proc-mounts'),
-  `/dev/sda1 ${dirConfig} ext4 rw,relatime 0 0\nproc /proc proc rw,relatime 0 0\n`,
+  join(configDirNative, 'proc-mounts'),
+  `/dev/sda1 ${configDir} ext4 rw,relatime 0 0\nproc /proc proc rw,relatime 0 0\n`,
 )
 
 // A folder with a deliberately long name, sitting next to the fixtures inside
@@ -160,19 +160,19 @@ writeFileSync(
 // its content's — so a long name used to push the panel past its white
 // background, painting the scrollbar and the buttons outside it. jsdom has no
 // layout engine and cannot see that; Playwright measures it.
-const NOM_LONG =
+const LONG_NAME =
   'Un nom de dossier volontairement tres long pour eprouver la mise en page de la popin'
-mkdirSync(join(dirConfigNative, NOM_LONG), { recursive: true })
+mkdirSync(join(configDirNative, LONG_NAME), { recursive: true })
 
 // A fake `smbclient`, so the network wizard can be played end to end on a
 // machine with no NAS — and, more to the point, on anyone's machine. It prints
 // output *captured from a real Synology*, so the parsing is exercised against
 // what it will actually meet rather than against a reconstruction.
-const dirFauxBin = `${dirConfig}/bin`
-mkdirSync(join(dirConfigNative, 'bin'), { recursive: true })
+const fakeBinDir = `${configDir}/bin`
+mkdirSync(join(configDirNative, 'bin'), { recursive: true })
 {
-  const cible = join(dirConfigNative, 'bin', 'smbclient')
-  copyFileSync(join(racineNative, 'web', 'app', 'e2e', 'fake-smbclient.sh'), cible)
+  const cible = join(configDirNative, 'bin', 'smbclient')
+  copyFileSync(join(rootNative, 'web', 'app', 'e2e', 'fake-smbclient.sh'), cible)
   chmodSync(cible, 0o755)
 }
 
@@ -190,22 +190,22 @@ mkdirSync(join(dirConfigNative, 'bin'), { recursive: true })
 // and a second one comes back, which is what lets the journey put the harness
 // back the way it found it.
 writeFileSync(
-  join(dirConfigNative, 'plugins.toml'),
+  join(configDirNative, 'plugins.toml'),
   `[[plugin]]
 name = "radio"
-exec = "${racine}/target/debug/ritornello-plugin-radio"
+exec = "${root}/target/debug/ritornello-plugin-radio"
 
 [[plugin]]
 name = "files"
-exec = "${racine}/target/debug/ritornello-plugin-files"
+exec = "${root}/target/debug/ritornello-plugin-files"
 
 [[plugin]]
 name = "generic-input"
-exec = "${racine}/target/debug/ritornello-plugin-generic-input"
+exec = "${root}/target/debug/ritornello-plugin-generic-input"
 `,
 )
 writeFileSync(
-  join(dirConfigNative, 'stations.toml'),
+  join(configDirNative, 'stations.toml'),
   '[[stations]]\nname = "FIP"\nurl = "http://icecast.radiofrance.fr/fip-midfi.mp3"\npreset = 1\n',
 )
 
@@ -213,26 +213,26 @@ const env = {
   // See the header: 0.0.0.0 under Windows (reachable from the host on
   // 127.0.0.1 through WSL2 forwarding), 127.0.0.1 under native Linux
   // (same machine, no VM crossing).
-  RITORNELLO_HTTP: estWindows ? '0.0.0.0:8099' : '127.0.0.1:8099',
-  RITORNELLO_PLUGINS: `${dirConfig}/plugins.toml`,
-  RITORNELLO_STATE: `${dirExec}/state.json`,
-  RITORNELLO_RUNTIME_DIR: dirExec,
-  RITORNELLO_MPV_SOCKET: `${dirExec}/mpv.sock`,
-  RITORNELLO_RADIO_STATIONS: `${dirConfig}/stations.toml`,
-  RITORNELLO_RADIO_STATE: `${dirExec}/plugin-radio.json`,
-  RITORNELLO_INPUT_BINDINGS: `${dirExec}/input-bindings.toml`,
-  RITORNELLO_INPUT_PRESETS: `${racine}/deploy/input-presets`,
+  RITORNELLO_HTTP: isWindows ? '0.0.0.0:8099' : '127.0.0.1:8099',
+  RITORNELLO_PLUGINS: `${configDir}/plugins.toml`,
+  RITORNELLO_STATE: `${execDir}/state.json`,
+  RITORNELLO_RUNTIME_DIR: execDir,
+  RITORNELLO_MPV_SOCKET: `${execDir}/mpv.sock`,
+  RITORNELLO_RADIO_STATIONS: `${configDir}/stations.toml`,
+  RITORNELLO_RADIO_STATE: `${execDir}/plugin-radio.json`,
+  RITORNELLO_INPUT_BINDINGS: `${execDir}/input-bindings.toml`,
+  RITORNELLO_INPUT_PRESETS: `${root}/deploy/input-presets`,
   // Every file the `files` plugin writes goes to the throwaway execution
   // directory. Its defaults are `/etc/ritornello` and `/var/lib/ritornello`:
   // left alone, a journey run on a machine where Ritornello is installed would
   // overwrite the owner's roots table, playlist and saved lists. The directory
   // itself is created by the core before any plugin starts (the plugin sockets
   // live there), so none of these paths needs pre-creating here.
-  RITORNELLO_FILES_ROOTS: `${dirExec}/media-roots.toml`,
-  RITORNELLO_FILES_CREDENTIALS: `${dirExec}/media-credentials`,
-  RITORNELLO_FILES_STATE: `${dirExec}/plugin-files.json`,
-  RITORNELLO_FILES_MPV_PLAYLIST: `${dirExec}/plugin-files.m3u`,
-  RITORNELLO_FILES_PLAYLISTS: `${dirExec}/playlists`,
+  RITORNELLO_FILES_ROOTS: `${execDir}/media-roots.toml`,
+  RITORNELLO_FILES_CREDENTIALS: `${execDir}/media-credentials`,
+  RITORNELLO_FILES_STATE: `${execDir}/plugin-files.json`,
+  RITORNELLO_FILES_MPV_PLAYLIST: `${execDir}/plugin-files.m3u`,
+  RITORNELLO_FILES_PLAYLISTS: `${execDir}/playlists`,
   RITORNELLO_FILES_PROC_MOUNTS: procMounts,
 }
 
@@ -243,15 +243,15 @@ const env = {
 // reason: the fixtures root is drawn at random here, and the journey has to
 // type it into the page as the core sees it (a `/mnt/c/...` path under
 // Windows), not as Windows spells it.
-const etatPath = join(racineNative, 'target', 'e2e-etat.json')
+const statePath = join(rootNative, 'target', 'e2e-state.json')
 
-let enfant
+let child
 
-if (estWindows) {
+if (isWindows) {
   // PID file next to the execution directory (not inside it): the latter
   // does not exist yet at this point (the core creates it itself on the
   // first `create_dir_all`), whereas `/tmp` always exists.
-  const pidFile = `${dirExec}.pid`
+  const pidFile = `${execDir}.pid`
   const affectations = Object.entries(env)
     .map(([cle, valeur]) => `${cle}='${valeur}'`)
     .join(' ')
@@ -260,28 +260,28 @@ if (estWindows) {
   // names the core's future real PID, reachable by a later, independent
   // `wsl.exe` call (WSL2 is a single VM, shared between all `wsl.exe`
   // calls, so PIDs stay valid from one call to the next).
-  const scriptLancementNative = join(dirConfigNative, 'lancer.sh')
+  const scriptLancementNative = join(configDirNative, 'lancer.sh')
   // `PATH` is exported rather than passed through `env KEY='value'`: the
   // assignments above are single-quoted, so a `$PATH` written there would reach
   // the plugin literally instead of expanded — and the fake `smbclient` would
   // shadow nothing while the real `PATH` would be destroyed.
   writeFileSync(
     scriptLancementNative,
-    `#!/usr/bin/env bash\necho $$ > '${pidFile}'\nexport PATH='${dirFauxBin}':"$PATH"\nexec env ${affectations} '${racine}/target/debug/ritornello-core'\n`,
+    `#!/usr/bin/env bash\necho $$ > '${pidFile}'\nexport PATH='${fakeBinDir}':"$PATH"\nexec env ${affectations} '${root}/target/debug/ritornello-core'\n`,
   )
   chmodSync(scriptLancementNative, 0o755)
   writeFileSync(
-    etatPath,
-    JSON.stringify({ estWindows, dirConfigNative, dirExec, pidFile, mediaRoot }, null, 2),
+    statePath,
+    JSON.stringify({ isWindows, configDirNative, execDir, pidFile, mediaRoot }, null, 2),
   )
-  enfant = spawn('wsl.exe', ['--', 'bash', `${dirConfig}/lancer.sh`], { stdio: 'inherit' })
+  child = spawn('wsl.exe', ['--', 'bash', `${configDir}/lancer.sh`], { stdio: 'inherit' })
 } else {
-  writeFileSync(etatPath, JSON.stringify({ estWindows, dirConfigNative, mediaRoot }, null, 2))
-  enfant = spawn(`${racine}/target/debug/ritornello-core`, {
+  writeFileSync(statePath, JSON.stringify({ isWindows, configDirNative, mediaRoot }, null, 2))
+  child = spawn(`${root}/target/debug/ritornello-core`, {
     stdio: 'inherit',
     // Same reason as the `export PATH` of the Windows branch: the fake
     // `smbclient` has to come first, without losing the real `PATH`.
-    env: { ...process.env, ...env, PATH: `${dirFauxBin}:${process.env.PATH ?? ''}` },
+    env: { ...process.env, ...env, PATH: `${fakeBinDir}:${process.env.PATH ?? ''}` },
   })
 }
 
@@ -290,5 +290,5 @@ if (estWindows) {
 // under Linux, this `kill` reaches the core directly; under Windows it
 // only targets the Windows-side `wsl.exe` process — the shutdown that
 // matters remains `teardown.mjs`'s.
-process.on('SIGTERM', () => enfant.kill('SIGTERM'))
-process.on('exit', () => enfant.kill('SIGTERM'))
+process.on('SIGTERM', () => child.kill('SIGTERM'))
+process.on('exit', () => child.kill('SIGTERM'))

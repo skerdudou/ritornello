@@ -13,7 +13,7 @@ export const DEFAULT_PRESET = 'northern-lights'
 export const DEFAULT_MODE: Mode = 'light'
 
 /** Familles génériques : citées par les presets mais jamais à télécharger. */
-const GENERIQUES = new Set([
+const GENERICS = new Set([
   'sans-serif', 'serif', 'monospace', 'system-ui', 'ui-monospace', 'ui-serif',
   'ui-sans-serif', 'cursive', 'fantasy', 'inherit',
 ])
@@ -23,7 +23,7 @@ const GENERIQUES = new Set([
  * reste lisible quand le CDN de polices est injoignable (appareil hors
  * ligne) : c'est la seule ressource externe de l'interface.
  */
-const REPLIS: Record<string, string> = {
+const FALLBACKS: Record<string, string> = {
   'font-sans': 'system-ui, sans-serif',
   'font-serif': 'ui-serif, serif',
   'font-mono': 'ui-monospace, monospace',
@@ -39,21 +39,21 @@ export function resolveVars(preset: Preset, mode: Mode): Record<string, string> 
 }
 
 export function withFallback(key: string, value: string): string {
-  const repli = REPLIS[key]
+  const repli = FALLBACKS[key]
   if (!repli) return value
   const deja = value
     .split(',')
-    .some((part) => GENERIQUES.has(part.trim().toLowerCase()))
+    .some((part) => GENERICS.has(part.trim().toLowerCase()))
   return deja ? value : `${value}, ${repli}`
 }
 
 export function fontFamilies(vars: Record<string, string>): string[] {
   const out: string[] = []
-  for (const key of Object.keys(REPLIS)) {
+  for (const key of Object.keys(FALLBACKS)) {
     const value = vars[key]
     if (!value) continue
     const premiere = value.split(',')[0]?.trim().replace(/^["']|["']$/g, '')
-    if (!premiere || GENERIQUES.has(premiere.toLowerCase())) continue
+    if (!premiere || GENERICS.has(premiere.toLowerCase())) continue
     if (!out.includes(premiere)) out.push(premiere)
   }
   return out
@@ -86,7 +86,7 @@ function ensureFontLink(familles: string[], doc: Document): void {
  * une liste partagée ferait fuiter les clés d'un root vers un autre. Une
  * `WeakMap` est utilisée pour ne pas retenir en mémoire un root détruit.
  */
-const posees = new WeakMap<HTMLElement, string[]>()
+const applied = new WeakMap<HTMLElement, string[]>()
 
 /**
  * Écrit chaque entrée du preset résolu en variable CSS sur `root`, itération
@@ -107,12 +107,12 @@ export function applyTheme(
     console.warn(`thème inconnu ignoré : ${id}`)
     return
   }
-  for (const key of posees.get(root) ?? []) root.style.removeProperty(`--${key}`)
+  for (const key of applied.get(root) ?? []) root.style.removeProperty(`--${key}`)
   const vars = resolveVars(preset, mode)
   for (const [key, value] of Object.entries(vars)) {
     root.style.setProperty(`--${key}`, withFallback(key, value))
   }
-  posees.set(root, Object.keys(vars))
+  applied.set(root, Object.keys(vars))
   root.classList.toggle('dark', mode === 'dark')
   ensureFontLink(fontFamilies(vars), doc)
 }

@@ -2,20 +2,20 @@
 import { Toaster } from '@ritornello/ui'
 import { onMounted } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
-import NavBasse from './components/NavBasse.vue'
+import BottomNav from './components/BottomNav.vue'
 import ThemeToggle from './components/ThemeToggle.vue'
 import { useCatalog } from './composables/useCatalog'
-import { useGreffons } from './composables/useGreffons'
-import { useMetriques } from './composables/useMetriques'
+import { usePlugins } from './composables/usePlugins'
+import { useMetrics } from './composables/useMetrics'
 
 const { t, reload } = useCatalog()
 // Partagé avec `ConfigView` au niveau module : c'est ce qui fait qu'une bascule
 // faite sur la page de configuration retire ou remet l'entrée de menu ici, sans
-// rechargement de la page. Voir `useGreffons`, qui écrit le défaut d'avant.
-const { admins, rafraichir: rafraichirGreffons } = useGreffons()
+// rechargement de la page. Voir `usePlugins`, qui écrit le défaut d'avant.
+const { admins, refresh: rafraichirGreffons } = usePlugins()
 
 /**
- * Classes communes des liens de la nav. Le soulignement est un pseudo-élément
+ * Classes communes des links de la nav. Le soulignement est un pseudo-élément
  * `after` mis à l'échelle horizontalement, et non une barre unique qui
  * glisserait d'un onglet à l'autre : celle-là exigerait de mesurer la position
  * de l'élément actif en JS, mesure à refaire au retour à la ligne de la nav,
@@ -27,7 +27,7 @@ const { admins, rafraichir: rafraichirGreffons } = useGreffons()
  * plutôt que de s'ouvrir depuis le centre. `motion-reduce` le rend instantané
  * pour qui a demandé moins d'animations dans son système.
  */
-const LIEN = [
+const LINK = [
   'relative py-1 transition-colors hover:text-foreground',
   'after:absolute after:inset-x-0 after:-bottom-px after:h-0.5 after:rounded-full',
   'after:origin-left after:scale-x-0 after:bg-primary',
@@ -42,17 +42,17 @@ const LIEN = [
  *
  * Le soulignement double une information que `RouterLink` porte déjà en
  * `aria-current="page"` : le repère visuel s'ajoute à la sémantique, il ne la
- * remplace pas.
+ * remplace step.
  */
-const LIEN_ACTIF = 'text-foreground after:scale-x-100'
+const LINK_ACTIVE = 'text-foreground after:scale-x-100'
 
 onMounted(async () => {
-  // Avant l'`await` du catalogue, et non après : un catalogue lent ne doit pas
-  // retarder le premier échantillon. Amorcé ici — la racine de la SPA — et pas
-  // dans `SystemView`, pour que l'historique existe avant la première visite de
+  // Avant l'`await` du catalogue, et non après : un catalogue lent ne doit step
+  // retarder le premier échantillon. Amorcé ici — la root de la SPA — et step
+  // dans `SystemView`, pour que l'history existe avant la première visite de
   // l'onglet système, survive à la navigation, et n'ait qu'un seul point de
-  // départ (deux se disputeraient le même minuteur).
-  useMetriques().demarrer()
+  // départ (deux se disputeraient le même timer).
+  useMetrics().start()
   await reload()
   await rafraichirGreffons()
 })
@@ -65,27 +65,27 @@ onMounted(async () => {
         <!-- La marque est le lien de l'accueil, donc elle porte le même
              marqueur : sans elle, la page d'accueil serait la seule sans rien
              de souligné. -->
-        <RouterLink to="/" :class="[LIEN, 'font-semibold']" :exact-active-class="LIEN_ACTIF">
+        <RouterLink to="/" :class="[LINK, 'font-semibold']" :exact-active-class="LINK_ACTIVE">
           Ritornello
         </RouterLink>
-        <!-- Masquée sous `md` : la barre basse fixe (`NavBasse`) prend le
+        <!-- Masquée sous `md` : la barre basse fixe (`BottomNav`) prend le
              relais sur téléphone, avec ses quatre onglets fixes. -->
         <div class="hidden items-center gap-4 md:flex" data-nav-haut>
           <RouterLink
             to="/config"
-            :class="[LIEN, 'text-sm text-muted-foreground']"
-            :exact-active-class="LIEN_ACTIF"
+            :class="[LINK, 'text-sm text-muted-foreground']"
+            :exact-active-class="LINK_ACTIVE"
           >
             {{ t('config_title') }}
           </RouterLink>
           <RouterLink
             to="/system"
-            :class="[LIEN, 'text-sm text-muted-foreground']"
-            :exact-active-class="LIEN_ACTIF"
+            :class="[LINK, 'text-sm text-muted-foreground']"
+            :exact-active-class="LINK_ACTIVE"
           >
             {{ t('system_title') }}
           </RouterLink>
-          <!-- `first-letter:uppercase` en CSS, pas en i18n : ces noms viennent
+          <!-- `first-letter:uppercase` en CSS, step en i18n : ces noms viennent
                de plugins.toml (y compris des plugins tiers), aucun catalogue
                ne pourrait les couvrir, et ajouter un champ de libellé au
                protocole des plugins serait disproportionné pour une seule
@@ -94,8 +94,8 @@ onMounted(async () => {
             v-for="name in admins"
             :key="name"
             :to="`/plugins/${name}/`"
-            :class="[LIEN, 'text-sm text-muted-foreground first-letter:uppercase']"
-            :exact-active-class="LIEN_ACTIF"
+            :class="[LINK, 'text-sm text-muted-foreground first-letter:uppercase']"
+            :exact-active-class="LINK_ACTIVE"
           >
             {{ name }}
           </RouterLink>
@@ -106,7 +106,7 @@ onMounted(async () => {
     <main class="mx-auto max-w-5xl px-4 py-6 pb-24 md:pb-6">
       <RouterView />
     </main>
-    <NavBasse />
+    <BottomNav />
     <!-- Centrees en bas et colorees par type : sur un ecran de salon, une
          notification discrete dans un coin passe inapercue, et « enregistre »
          doit se distinguer d'un refus sans avoir a lire. `rich-colors` est ce

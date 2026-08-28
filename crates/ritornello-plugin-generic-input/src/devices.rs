@@ -27,7 +27,7 @@ pub fn event_nodes(root: &Path, entries: &[String]) -> Vec<PathBuf> {
 }
 
 /// Listing disque des nœuds evdev. Répertoire absent ou illisible → liste
-/// vide et `warn` : jamais fatal.
+/// clear et `warn` : jamais fatal.
 pub fn scan_event_nodes(root: &Path) -> Vec<PathBuf> {
     let Ok(rd) = std::fs::read_dir(root) else {
         tracing::warn!("directory {} unreadable: no input device", root.display());
@@ -74,14 +74,14 @@ pub fn key_outcome_held(
     Some(InputMessage { cmd, held })
 }
 
-/// État partagé entre la moitié Input (les tâches de lecture) et la moitié
+/// État partagé entre la moitié Input (les tâches de playback) et la moitié
 /// Admin. `std::sync::RwLock` : les gardes sont toujours relâchées avant le
-/// moindre `.await`, et `page()` (synchrone) peut lire sans runtime.
+/// moindre `.await`, et `page()` (synchrone) peut read sans runtime.
 #[derive(Clone)]
 pub struct Hub {
     pub bindings: Arc<RwLock<Bindings>>,
     pub learn: Arc<RwLock<LearnState>>,
-    /// Nœuds actuellement ouverts : chemin → nom du périphérique.
+    /// Nœuds actuellement ouverts : path → name du périphérique.
     pub open: Arc<RwLock<BTreeMap<PathBuf, String>>>,
     pub tx: mpsc::Sender<InputMessage>,
 }
@@ -97,14 +97,14 @@ impl Hub {
     }
 
     /// Noms des périphériques actuellement ouverts, triés et dédoublonnés
-    /// (plusieurs nœuds peuvent porter le même nom). Les entrées vides sont
-    /// écartées : le nom vide est un placeholder de réservation posé dans
+    /// (plusieurs nœuds peuvent porter le même name). Les entrées vides sont
+    /// écartées : le name clear est un placeholder de réservation posé dans
     /// `open` pendant que `Device::open` est en cours (voir
     /// `open_new_devices`), et la page d'admin sonde `device_names()` toutes
     /// les 300 ms pendant l'apprentissage — sans ce filtre elle afficherait
     /// transitoirement une entrée fantôme.
     pub fn device_names(&self) -> Vec<String> {
-        let mut noms: Vec<String> = self
+        let mut names: Vec<String> = self
             .open
             .read()
             .unwrap()
@@ -112,13 +112,13 @@ impl Hub {
             .filter(|n| !n.is_empty())
             .cloned()
             .collect();
-        noms.sort();
-        noms.dedup();
-        noms
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Ouvre tous les nœuds evdev lisibles pas encore ouverts et lance une
-    /// tâche de lecture par nœud. Renvoie le nombre de nouveaux nœuds. Un
+    /// tâche de playback par nœud. Renvoie le nombre de nouveaux nœuds. Un
     /// périphérique illisible (droits, disparu entre l'énumération et
     /// l'ouverture) est logué en `warn` et ignoré — jamais fatal.
     pub fn open_new_devices(&self, root: &Path) -> usize {
@@ -151,7 +151,7 @@ impl Hub {
         nouveaux
     }
 
-    /// Une tâche de lecture par nœud, toutes alimentant le même mpsc.
+    /// Une tâche de playback par nœud, toutes alimentant le même mpsc.
     fn spawn_reader(&self, path: PathBuf, dev: Device, name: String) {
         let hub = self.clone();
         tokio::spawn(async move {
@@ -168,7 +168,7 @@ impl Hub {
                 let ev = match stream.next_event().await {
                     Ok(ev) => ev,
                     Err(e) => {
-                        // Débranchement : cette tâche se termine, les autres
+                        // Débranchement : cette tâche se terminate, les autres
                         // continuent.
                         tracing::info!("read from {} ended: {e}", path.display());
                         break;
@@ -202,14 +202,14 @@ impl Hub {
         });
     }
 
-    /// Oublie un nœud dont la lecture s'est terminée. Si plus aucun nœud ne
-    /// porte ce nom, l'apprentissage éventuellement en cours dessus est
+    /// Oublie un nœud dont la playback s'est terminée. Si plus aucun nœud ne
+    /// porte ce name, l'apprentissage éventuellement en cours dessus est
     /// abandonné (le périphérique a disparu).
     fn forget(&self, path: &Path) {
-        let nom = self.open.write().unwrap().remove(path);
-        if let Some(nom) = nom {
-            if !self.device_names().contains(&nom) {
-                self.learn.write().unwrap().cancel_if(&nom);
+        let name = self.open.write().unwrap().remove(path);
+        if let Some(name) = name {
+            if !self.device_names().contains(&name) {
+                self.learn.write().unwrap().cancel_if(&name);
             }
         }
     }
@@ -317,10 +317,10 @@ mod tests {
         });
         hub.learn.write().unwrap().learn("eHome");
 
-        let sortie = |nom: &str, code: u16| {
+        let sortie = |name: &str, code: u16| {
             let learn = hub.learn.read().unwrap();
             let b = hub.bindings.read().unwrap();
-            key_outcome(&b, learn.device(), nom, code)
+            key_outcome(&b, learn.device(), name, code)
         };
         assert_eq!(sortie("eHome", 115), None);
         assert_eq!(sortie("USB Keyboard", 115), Some(Command::VolumeUp));

@@ -2,8 +2,8 @@
 import { api, Button, Card, CardContent, CardHeader, CardTitle, toast } from '@ritornello/ui'
 import { LoopIcon } from '@radix-icons/vue'
 import { onMounted, ref, watch } from 'vue'
-import GrillePresets from '../components/GrillePresets.vue'
-import IconeVeille from '../components/icones/IconeVeille.vue'
+import PresetGrid from '../components/PresetGrid.vue'
+import StandbyIcon from '../components/icons/StandbyIcon.vue'
 import PlayerCard from '../components/PlayerCard.vue'
 import Transport from '../components/Transport.vue'
 import Volume from '../components/Volume.vue'
@@ -11,13 +11,13 @@ import { useCatalog } from '../composables/useCatalog'
 import { usePlayer } from '../composables/usePlayer'
 import { usePresets } from '../composables/usePresets'
 import type { Command, SettingsPayload } from '../types'
-import { indisponible, REMOTE_MUTE, REMOTE_POWER, REMOTE_SOURCE } from './remoteCommands'
+import { unavailable, REMOTE_MUTE, REMOTE_POWER, REMOTE_SOURCE } from './remoteCommands'
 
 const { t } = useCatalog()
 
 // L'unique connexion SSE de la page vit ici : la carte Lecteur, le transport,
-// le volume et la grille consomment le meme etat, pousse par `/api/player`.
-const { etat, ouvre } = usePlayer()
+// le volume et la grille consomment le meme state, pousse par `/api/player`.
+const { state, ouvre } = usePlayer()
 onMounted(ouvre)
 
 async function send(cmd: Command) {
@@ -27,15 +27,15 @@ async function send(cmd: Command) {
 
 // Les noms des tuiles : charges au montage, recharges quand la source active
 // change — c'est la trame qui le dit, rien n'est sonde.
-const { recharger, nomDe } = usePresets()
-onMounted(recharger)
-watch(() => etat.value?.source, (apres, avant) => {
-  if (apres !== undefined && apres !== avant) recharger()
+const { reload, nameOf } = usePresets()
+onMounted(reload)
+watch(() => state.value?.source, (apres, avant) => {
+  if (apres !== undefined && apres !== avant) reload()
 })
 
-// Le pas de deplacement au clavier de la barre : celui des touches physiques,
+// Le step de deplacement au clavier de la barre : celui des touches physiques,
 // servi par /api/settings. Le defaut couvre le temps du GET et son echec.
-const reglages = ref<SettingsPayload>({
+const settings = ref<SettingsPayload>({
   volume_repeat_initial_ms: 800,
   volume_repeat_interval_ms: 200,
   startup_power: 'on',
@@ -53,17 +53,17 @@ const reglages = ref<SettingsPayload>({
   seek_step_s: 10,
 })
 onMounted(async () => {
-  reglages.value = await api.get<SettingsPayload>('/api/settings').catch(() => reglages.value)
+  settings.value = await api.get<SettingsPayload>('/api/settings').catch(() => settings.value)
 })
 </script>
 
 <template>
-  <!-- Une colonne sur telephone ; deux cartes cote a cote a partir de `md`. -->
+  <!-- Une colonne sur phone ; deux cartes cote a cote a partir de `md`. -->
   <div class="grid gap-4 md:grid-cols-2 md:items-start">
     <PlayerCard
-      :etat="etat"
-      :pas-deplacement="reglages.seek_step_s"
-      @deplacer="(s: number) => send({ cmd: 'SeekTo', arg: s })"
+      :state="state"
+      :seek-step="settings.seek_step_s"
+      @seek="(s: number) => send({ cmd: 'SeekTo', arg: s })"
     >
       <!-- Les deux commandes qui portent sur l'appareil entier, au coin de la
            carte : la source, puis la veille au coin extreme. -->
@@ -73,32 +73,32 @@ onMounted(async () => {
             variant="outline"
             size="sm"
             data-remote-source
-            :disabled="indisponible(REMOTE_SOURCE.cmd.cmd, etat)"
+            :disabled="unavailable(REMOTE_SOURCE.cmd.cmd, state)"
             @click="send(REMOTE_SOURCE.cmd)"
           >
             <LoopIcon class="size-4" />
             {{ t(REMOTE_SOURCE.key) }}
           </Button>
           <Button variant="outline" size="icon-sm" data-remote-power :aria-label="t(REMOTE_POWER.key)" :title="t(REMOTE_POWER.key)" @click="send(REMOTE_POWER.cmd)">
-            <IconeVeille class="size-4" />
+            <StandbyIcon class="size-4" />
           </Button>
         </div>
       </template>
       <template #commandes>
-        <Transport :etat="etat" @commande="send" />
+        <Transport :state="state" @command="send" />
         <Volume
-          :volume="etat?.volume ?? null"
-          :muted="etat?.muted ?? false"
-          :desactive="indisponible(REMOTE_MUTE.cmd.cmd, etat)"
-          @regler="(v: number) => send({ cmd: 'SetVolume', arg: v })"
-          @muet="send(REMOTE_MUTE.cmd)"
+          :volume="state?.volume ?? null"
+          :muted="state?.muted ?? false"
+          :disabled="unavailable(REMOTE_MUTE.cmd.cmd, state)"
+          @set="(v: number) => send({ cmd: 'SetVolume', arg: v })"
+          @mute="send(REMOTE_MUTE.cmd)"
         />
       </template>
     </PlayerCard>
     <Card>
       <CardHeader><CardTitle>{{ t('presets_label') }}</CardTitle></CardHeader>
       <CardContent>
-        <GrillePresets :etat="etat" :nom-de="(n: number) => (etat ? nomDe(etat.source, n) : null)" @choisir="(n: number) => send({ cmd: 'Select', arg: n })" />
+        <PresetGrid :state="state" :name-of="(n: number) => (state ? nameOf(state.source, n) : null)" @choose="(n: number) => send({ cmd: 'Select', arg: n })" />
       </CardContent>
     </Card>
   </div>

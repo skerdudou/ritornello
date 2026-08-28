@@ -3,7 +3,7 @@ export interface Binding extends Command { code: number }
 export interface DeviceBindings { name: string; bindings: Binding[] }
 export interface BindingTable { devices: DeviceBindings[] }
 
-// Les 23 actions, dans l'ordre de l'ancienne page (moins les deux entrees
+// Les 23 actions, dans l'order de l'ancienne page (moins les deux entrees
 // "preselection suivante/precedente", fusionnees sur `act_next`/`act_prev` :
 // meme commande de protocole, interpretee par la source active - preselection
 // pour la radio, piste pour le cd). Le libelle est traduit par le catalogue
@@ -32,23 +32,23 @@ export const ACTIONS: Array<{ key: string; cmd: Command }> = [
   { key: 'act_power', cmd: { cmd: 'Power' } },
 ]
 
-const memeCmd = (a: Command, b: Command) => a.cmd === b.cmd && (a.arg ?? null) === (b.arg ?? null)
+const sameCmd = (a: Command, b: Command) => a.cmd === b.cmd && (a.arg ?? null) === (b.arg ?? null)
 
 export function codesFor(table: BindingTable, device: string, cmd: Command): string {
   const d = table.devices.find((x) => x.name === device)
   if (!d) return ''
-  return d.bindings.filter((b) => memeCmd(b, cmd)).map((b) => b.code).join(', ')
+  return d.bindings.filter((b) => sameCmd(b, cmd)).map((b) => b.code).join(', ')
 }
 
 // Extrait les codes d'un champ : `trim`, decoupage sur la virgule, chaque
 // partie passee a `Number.parseInt`, les non-numeriques ignores. Partagee par
-// `collect` (qui en fait des `Binding`), `conflits` (qui compare les nombres
-// bruts) et l'ajout d'un code capte par apprentissage (`appliquerCode`, dans
+// `collect` (qui en fait des `Binding`), `conflicts` (qui compare les nombres
+// bruts) et l'ajout d'un code capte par apprentissage (`applyCode`, dans
 // `InputAdmin.vue`, qui verifie si le code est deja la) : ces usages doivent
 // rester en accord sur ce qui compte comme un code valide, sous peine de
 // laisser la validation a chaud dire « aucun conflit » sur une table que le
 // serveur refuserait a l'enregistrement.
-export function parseChamp(brut: string): number[] {
+export function parseField(brut: string): number[] {
   const trimmed = brut.trim()
   if (!trimmed) return []
   return trimmed
@@ -64,7 +64,7 @@ export function collect(table: BindingTable, device: string, codes: string[]): B
   const devices = table.devices.filter((d) => d.name !== device)
   const bindings: Binding[] = []
   ACTIONS.forEach((a, i) => {
-    for (const code of parseChamp(codes[i] ?? '')) bindings.push({ code, ...a.cmd })
+    for (const code of parseField(codes[i] ?? '')) bindings.push({ code, ...a.cmd })
   })
   if (device) devices.push({ name: device, bindings })
   return { devices }
@@ -85,10 +85,10 @@ export function presetToml(bindings: Binding[]): string {
     .join('\n')
 }
 
-export interface Conflit {
+export interface Conflict {
   /** Le code fautif. */
   code: number
-  /** Clés i18n des *autres* actions portant ce code, dans l'ordre d'`ACTIONS`. Vide si le doublon est interne au champ. */
+  /** Clés i18n des *autres* actions portant ce code, dans l'order d'`ACTIONS`. Vide si le doublon est interne au champ. */
   autres: string[]
 }
 
@@ -96,17 +96,17 @@ export interface Conflit {
 // soit un code deja porte par une autre action (exactement ce que le serveur
 // refuserait a l'enregistrement, `duplicate_code`, mais visible avant), soit
 // un code saisi plusieurs fois dans le meme champ. Un seul conflit par ligne,
-// choisi dans l'ordre du champ, pour qu'il n'y ait jamais qu'un message a
+// choisi dans l'order du champ, pour qu'il n'y ait jamais qu'un message a
 // afficher sous un champ donne.
-export function conflits(codes: string[]): Array<Conflit | null> {
-  // Le parcours est celui d'`ACTIONS`, pas celui de `codes` : le resultat a
+export function conflicts(codes: string[]): Array<Conflict | null> {
+  // Le journey est celui d'`ACTIONS`, pas celui de `codes` : le resultat a
   // toujours une entree par action, quelle que soit la longueur du tableau
   // recu (`codes` est indexe comme `ACTIONS`, un tableau plus court signifie
   // simplement des champs vides). Et chaque ligne porte sa propre cle i18n,
   // ce qui remplace la recherche `ACTIONS[j]` d'un indice venu du tableau
   // d'entree -- laquelle rendait `undefined`, donc levait une `TypeError`,
   // pour tout appelant passant plus de codes qu'il n'existe d'actions.
-  const lignes = ACTIONS.map((a, i) => ({ cle: a.key, codes: parseChamp(codes[i] ?? '') }))
+  const lignes = ACTIONS.map((a, i) => ({ cle: a.key, codes: parseField(codes[i] ?? '') }))
 
   // Pour chaque code, les lignes qui le portent au moins une fois — sert a
   // reperer les doublons inter-actions sans reparcourir toute la table pour

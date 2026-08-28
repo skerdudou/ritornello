@@ -7,7 +7,7 @@ use std::path::Path;
 
 /// Une touche liée à une commande. Le couple `cmd`/`arg` est exactement la
 /// représentation sérialisée de `Command` (`#[serde(tag = "cmd", content =
-/// "arg")]`) aplatie dans le binding : aucune liste de commandes n'est
+/// "arg")]`) aplatie dans le binding : aucune liste de commands n'est
 /// dupliquée, et le même objet transite tel quel en JSON vers l'IHM.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Binding {
@@ -34,8 +34,8 @@ impl Binding {
     }
 }
 
-/// Les bindings d'un périphérique, identifié par son **nom** (stable au
-/// redémarrage) : tous les nœuds evdev portant ce nom sont concernés.
+/// Les bindings d'un périphérique, identifié par son **name** (stable au
+/// redémarrage) : tous les nœuds evdev portant ce name sont concernés.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Device {
     pub name: String,
@@ -51,7 +51,7 @@ pub struct Bindings {
 
 /// Erreur de validation typée : le texte utilisateur est produit à la
 /// frontière via `message(&Catalog)` (modèle du plugin radio). `Display`
-/// fournit une version anglaise pour les journaux internes.
+/// fournit une version anglaise pour les logs internes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationError {
     DuplicateCode { device: String, code: u16 },
@@ -99,7 +99,7 @@ impl std::error::Error for ValidationError {}
 
 impl Bindings {
     /// Charge la table. Best-effort : fichier absent ou TOML invalide donnent
-    /// une table vide avec un `warn` — jamais de panique, le plugin démarre et
+    /// une table clear avec un `warn` — jamais de panique, le plugin démarre et
     /// l'utilisateur corrige depuis la page d'admin.
     pub fn load(path: &Path) -> Bindings {
         let text = match std::fs::read_to_string(path) {
@@ -167,7 +167,7 @@ impl Bindings {
         Ok(())
     }
 
-    /// Résolution au moment de l'événement : (nom du périphérique, code) →
+    /// Résolution au moment de l'événement : (name du périphérique, code) →
     /// commande. `None` = touche non liée, ignorée silencieusement.
     pub fn resolve(&self, device_name: &str, code: u16) -> Option<Command> {
         self.devices

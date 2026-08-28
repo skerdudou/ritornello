@@ -13,7 +13,7 @@ class ResizeObserverStub {
 vi.stubGlobal('ResizeObserver', ResizeObserverStub)
 
 describe('surface publique du kit', () => {
-  it('expose la version de contrat', () => {
+  it('expose la version de contract', () => {
     expect(UI_CONTRACT).toBe(1)
   })
 

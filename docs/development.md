@@ -195,7 +195,7 @@ Three audiences, three rules — the boundary is the audience, not the file:
 | `mod.rs` | the struct, `new`, and `handle_source_update` — the entry point of a Source frame, which writes into every domain and stays here on purpose |
 | `commandes.rs` | remote and UI commands: play/standby machine, volume, tens offset, seek, held keys, startup |
 | `echeances.rs` | overlays and the deadlines the `main.rs` loop wakes on (`prochaine_echeance`) |
-| `lecteur.rs` | mpv events, retry with growing backoff, resume on wake |
+| `player.rs` | mpv events, retry with growing backoff, resume on wake |
 | `metadonnees.rs` | identity, ICY titles, file tags, plugin enrichments, covers and their extraction |
 | `position.rs` | the progression mpv reports and the anchor a plugin sets |
 | `publication.rs` | player state and source catalogue pushed to displays, SPA and metadata plugins |

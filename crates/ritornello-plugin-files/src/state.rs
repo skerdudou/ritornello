@@ -1,8 +1,8 @@
 //! État persisté : la liste courante et la piste en cours.
 //!
-//! Même motif que `crates/ritornello-plugin-radio/src/state.rs`, y compris
+//! Même pattern que `crates/ritornello-plugin-radio/src/state.rs`, y compris
 //! l'`update` qui préserve les champs qu'il ne touche pas — la moitié Admin
-//! écrira dans ce même fichier, et un `save` reconstruit par la moitié Source
+//! écrira in_dir ce même fichier, et un `save` reconstruit par la moitié Source
 //! l'effacerait.
 
 use ritornello_plugin_files::m3u::Entry;
@@ -38,9 +38,9 @@ impl From<&Entry> for StoredEntry {
     }
 }
 
-/// Un fichier absent ou illisible rend l'état vide, **sans paniquer** : une
+/// Un fichier absent ou illisible rend l'état clear, **sans paniquer** : une
 /// première installation, ou un `/var/lib` effacé, doit laisser le plugin
-/// démarrer et non refuser de se lancer.
+/// démarrer et non refuser de se run.
 pub fn load(path: &Path) -> State {
     std::fs::read_to_string(path)
         .ok()
@@ -50,21 +50,21 @@ pub fn load(path: &Path) -> State {
 
 /// Écriture atomique : `.tmp` puis `rename`, pour qu'une coupure ne laisse
 /// jamais un fichier tronqué que le démarrage suivant jetterait en silence.
-pub fn save(path: &Path, etat: &State) -> anyhow::Result<()> {
+pub fn save(path: &Path, state: &State) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(etat)?)?;
+    std::fs::write(&tmp, serde_json::to_vec_pretty(state)?)?;
     std::fs::rename(tmp, path)?;
     Ok(())
 }
 
 /// Relit, modifie, réécrit — et préserve donc ce que l'appelant ne touche pas.
 pub fn update(path: &Path, f: impl FnOnce(&mut State)) -> anyhow::Result<()> {
-    let mut etat = load(path);
-    f(&mut etat);
-    save(path, &etat)
+    let mut state = load(path);
+    f(&mut state);
+    save(path, &state)
 }
 
 #[cfg(test)]
@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn update_ne_perd_pas_les_champs_qu_il_ne_touche_pas() {
-        // La moitié Admin écrit la liste dans ce même fichier ; un `save`
+        // La moitié Admin écrit la liste in_dir ce même fichier ; un `save`
         // reconstruit par la moitié Source l'effacerait.
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("plugin-files.json");

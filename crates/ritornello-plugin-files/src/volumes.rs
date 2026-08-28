@@ -1,7 +1,7 @@
 //! Les volumes montés de l'appareil : ce qu'un assistant peut proposer de
-//! parcourir, et ce qu'il doit refuser.
+//! browse, et ce qu'il doit refuser.
 //!
-//! Tout est pur et prend le texte de `/proc/mounts` plutôt que de le lire :
+//! Tout est pur et prend le texte de `/proc/mounts` plutôt que de le read :
 //! c'est ce qui permet d'éprouver la garde de parcours sans monter quoi que ce
 //! soit, ce qu'un test ne pourrait pas faire sans privilège.
 
@@ -15,23 +15,23 @@ use std::path::{Path, PathBuf};
 /// La première version énumérait au contraire les systèmes de fichiers
 /// acceptés. Le raisonnement était qu'une liste noire oublierait le prochain
 /// pseudo-système de fichiers du noyau. Il était faux, parce qu'il pesait le
-/// mauvais risque : l'asymétrie des conséquences va dans l'autre sens.
+/// mauvais risque : l'asymétrie des conséquences va in_dir l'autre sens.
 ///
 /// - Une liste blanche incomplète rend **un vrai disque inutilisable**, sans
 ///   aucun contournement offert à l'utilisateur. C'est arrivé : `/mnt/c` sous
 ///   WSL est un `9p`, et un disque USB en NTFS monté par ntfs-3g apparaît en
 ///   `fuseblk` — deux types qu'on n'avait pas prévus, deux blocages nets.
-/// - Une liste noire incomplète laisse passer **une entrée parasite** dans une
+/// - Une liste noire incomplète laisse passer **une entrée parasite** in_dir une
 ///   liste de choix. Le désagrément est visible, réversible et mineur.
 ///
-/// Ce que la liste noire doit encore garantir tient : `proc` y figure, donc la
+/// Ce que la liste noire doit encore ensure tient : `proc` y figure, donc la
 /// garde refuse toujours `/proc/self` et son arborescence récursive.
 ///
 /// `overlay` n'y est **pas** : sur un système conteneurisé, c'est la racine
 /// elle-même. L'exclure rendrait tout invisible, ce qui est exactement l'erreur
 /// qu'on vient de corriger. Ses quelques entrées parasites sous WSL sont le
 /// moindre mal.
-const FS_PSEUDO: &[&str] = &[
+const PSEUDO_FS: &[&str] = &[
     "autofs",
     "binfmt_misc",
     "bpf",
@@ -60,8 +60,8 @@ const FS_PSEUDO: &[&str] = &[
 ];
 
 /// Vrai si ce type de montage peut porter la musique de quelqu'un.
-fn fs_utile(fstype: &str) -> bool {
-    !FS_PSEUDO.contains(&fstype)
+fn useful_fs(fstype: &str) -> bool {
+    !PSEUDO_FS.contains(&fstype)
 }
 
 const PROC_MOUNTS: &str = "/proc/mounts";
@@ -74,7 +74,7 @@ pub struct Volume {
 
 /// Déséchappe un champ de `/proc/mounts` : l'espace y est écrit `\040` et la
 /// tabulation `\011`.
-fn desechappe(s: &str) -> String {
+fn unescape(s: &str) -> String {
     s.replace("\\040", " ").replace("\\011", "\t")
 }
 
@@ -82,7 +82,7 @@ fn desechappe(s: &str) -> String {
 ///
 /// La garde de parcours en a besoin entiers : c'est en connaissant le montage
 /// de `/proc` qu'on peut refuser `/proc/self`.
-fn tous(proc_mounts: &str) -> Vec<Volume> {
+fn all(proc_mounts: &str) -> Vec<Volume> {
     proc_mounts
         .lines()
         .filter_map(|l| {
@@ -90,7 +90,7 @@ fn tous(proc_mounts: &str) -> Vec<Volume> {
             let _source = c.next()?;
             let point = c.next()?;
             let fstype = c.next()?;
-            Some(Volume { path: PathBuf::from(desechappe(point)), fstype: fstype.to_string() })
+            Some(Volume { path: PathBuf::from(unescape(point)), fstype: fstype.to_string() })
         })
         .collect()
 }
@@ -98,8 +98,8 @@ fn tous(proc_mounts: &str) -> Vec<Volume> {
 /// Volumes proposables à l'utilisateur, triés.
 pub fn volumes(proc_mounts: &str) -> Vec<Volume> {
     let mut retenus: Vec<Volume> = Vec::new();
-    for v in tous(proc_mounts) {
-        if !fs_utile(&v.fstype) {
+    for v in all(proc_mounts) {
+        if !useful_fs(&v.fstype) {
             continue;
         }
         // Un même point monté deux fois n'apparaît qu'une fois, et c'est le
@@ -113,40 +113,40 @@ pub fn volumes(proc_mounts: &str) -> Vec<Volume> {
     retenus
 }
 
-/// Le montage **propriétaire** d'un chemin : le point de montage le plus long
+/// Le montage **propriétaire** d'un path : le point de montage le plus long
 /// qui le préfixe.
 ///
-/// C'est la seule formulation correcte. Un test « le chemin commence par un
+/// C'est la seule formulation correcte. Un test « le path commence par un
 /// volume » accepterait `/proc/self/root`, puisque `/proc` commence par `/`,
 /// qui est bien un volume.
 ///
 /// À égalité de longueur, `max_by_key` rend le **dernier** élément, ce qui est
 /// exactement la sémantique du surmontage : le dernier monté est celui qu'on
 /// voit.
-pub fn proprietaire(proc_mounts: &str, chemin: &Path) -> Option<Volume> {
-    tous(proc_mounts)
+pub fn owner(proc_mounts: &str, path: &Path) -> Option<Volume> {
+    all(proc_mounts)
         .into_iter()
-        .filter(|v| chemin.starts_with(&v.path))
+        .filter(|v| path.starts_with(&v.path))
         .max_by_key(|v| v.path.as_os_str().len())
 }
 
-/// Vrai si `chemin` peut être parcouru : son montage propriétaire porte un vrai
+/// Vrai si `path` peut être parcouru : son montage propriétaire porte un vrai
 /// système de fichiers.
-pub fn parcourable(proc_mounts: &str, chemin: &Path) -> bool {
-    proprietaire(proc_mounts, chemin)
-        .map(|v| fs_utile(&v.fstype))
+pub fn browsable(proc_mounts: &str, path: &Path) -> bool {
+    owner(proc_mounts, path)
+        .map(|v| useful_fs(&v.fstype))
         .unwrap_or(false)
 }
 
-/// Contenu de `/proc/mounts`.
+/// Contents de `/proc/mounts`.
 ///
-/// Le chemin est surchargeable par `RITORNELLO_FILES_PROC_MOUNTS` : c'est ce
+/// Le path est surchargeable par `RITORNELLO_FILES_PROC_MOUNTS` : c'est ce
 /// qui permet au parcours de bout en bout de décrire des volumes sans en
 /// monter, sur une machine où le test n'a aucun privilège.
-pub fn lire_proc_mounts() -> String {
-    let chemin =
+pub fn read_proc_mounts() -> String {
+    let path =
         std::env::var("RITORNELLO_FILES_PROC_MOUNTS").unwrap_or_else(|_| PROC_MOUNTS.to_string());
-    std::fs::read_to_string(chemin).unwrap_or_default()
+    std::fs::read_to_string(path).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -169,7 +169,7 @@ tmpfs /run tmpfs rw,nosuid 0 0
 
     #[test]
     fn les_pseudo_systemes_de_fichiers_ne_sont_pas_proposes() {
-        // Liste noire, et non liste blanche : voir FS_PSEUDO pour l'asymétrie
+        // Liste noire, et non liste blanche : voir PSEUDO_FS pour l'asymétrie
         // des conséquences qui a fait revoir ce choix.
         let v: Vec<String> = volumes(MOUNTS).iter().map(|v| v.path.display().to_string()).collect();
         assert_eq!(v, vec!["/", "/boot/firmware", "/media/ma cle", "/mnt/ritornello/nas"]);
@@ -192,8 +192,8 @@ partage /mnt/hote virtiofs rw 0 0
 ";
         let v: Vec<String> = volumes(m).iter().map(|v| v.path.display().to_string()).collect();
         assert_eq!(v, vec!["/media/usb", "/mnt/c", "/mnt/hote"]);
-        assert!(parcourable(m, Path::new("/mnt/c/projets/musique")));
-        assert!(parcourable(m, Path::new("/media/usb/Albums")));
+        assert!(browsable(m, Path::new("/mnt/c/projets/musique")));
+        assert!(browsable(m, Path::new("/media/usb/Albums")));
     }
 
     #[test]
@@ -202,14 +202,14 @@ partage /mnt/hote virtiofs rw 0 0
         // conteneurisé, c'est la racine elle-même, et l'exclure rendrait tout
         // invisible — exactement l'erreur que la liste blanche commettait.
         let m = "overlay / overlay rw 0 0\nproc /proc proc rw 0 0\n";
-        assert!(parcourable(m, Path::new("/srv/musique")));
-        assert!(!parcourable(m, Path::new("/proc/self")));
+        assert!(browsable(m, Path::new("/srv/musique")));
+        assert!(!browsable(m, Path::new("/proc/self")));
     }
 
     #[test]
     fn un_point_de_montage_avec_espace_echappe_est_deechappe() {
         // /proc/mounts échappe l'espace en \040. Sans ce traitement, la clé
-        // « ma cle » serait proposée sous un nom que le système de fichiers ne
+        // « ma cle » serait proposée sous un name que le système de fichiers ne
         // connaît pas, et le parcours échouerait à l'ouverture.
         assert!(volumes(MOUNTS).iter().any(|v| v.path == Path::new("/media/ma cle")));
     }
@@ -219,43 +219,43 @@ partage /mnt/hote virtiofs rw 0 0
         // LA règle qui rend la garde correcte. Un test naïf « commence par un
         // volume » accepterait /proc/self/root, puisque /proc commence par /,
         // qui est un volume.
-        let p = proprietaire(MOUNTS, Path::new("/boot/firmware/config.txt")).unwrap();
+        let p = owner(MOUNTS, Path::new("/boot/firmware/config.txt")).unwrap();
         assert_eq!(p.path, PathBuf::from("/boot/firmware"));
-        let p = proprietaire(MOUNTS, Path::new("/home/pi/musique")).unwrap();
+        let p = owner(MOUNTS, Path::new("/home/pi/musique")).unwrap();
         assert_eq!(p.path, PathBuf::from("/"));
     }
 
     #[test]
     fn les_pseudo_systemes_de_fichiers_ne_sont_pas_parcourables() {
         // Pas pour le secret — ils sont lisibles de toute façon — mais parce
-        // qu'un « tout ajouter » lancé sur /proc partirait dans les liens
+        // qu'un « tout add » lancé sur /proc partirait in_dir les liens
         // récursifs de /proc/self.
-        assert!(!parcourable(MOUNTS, Path::new("/proc/self")));
-        assert!(!parcourable(MOUNTS, Path::new("/sys/class")));
-        assert!(!parcourable(MOUNTS, Path::new("/run/user/1000")));
-        assert!(!parcourable(MOUNTS, Path::new("/dev/shm")));
+        assert!(!browsable(MOUNTS, Path::new("/proc/self")));
+        assert!(!browsable(MOUNTS, Path::new("/sys/class")));
+        assert!(!browsable(MOUNTS, Path::new("/run/user/1000")));
+        assert!(!browsable(MOUNTS, Path::new("/dev/shm")));
     }
 
     #[test]
     fn un_chemin_sous_un_vrai_volume_est_parcourable() {
-        assert!(parcourable(MOUNTS, Path::new("/media/ma cle/Albums")));
-        assert!(parcourable(MOUNTS, Path::new("/home/pi/musique")));
-        assert!(parcourable(MOUNTS, Path::new("/")));
+        assert!(browsable(MOUNTS, Path::new("/media/ma cle/Albums")));
+        assert!(browsable(MOUNTS, Path::new("/home/pi/musique")));
+        assert!(browsable(MOUNTS, Path::new("/")));
     }
 
     #[test]
     fn un_surmontage_est_celui_qui_compte() {
         // Deux montages au même endroit : c'est le dernier qui est visible,
-        // comme pour le noyau. Se tromper ici ferait déclarer parcourable un
-        // chemin que le tmpfs a recouvert.
+        // comme pour le noyau. Se tromper ici ferait déclarer browsable un
+        // path que le tmpfs a recouvert.
         let m = "/dev/sda1 /media/x ext4 rw 0 0\ntmpfs /media/x tmpfs rw 0 0\n";
-        assert_eq!(proprietaire(m, Path::new("/media/x/a")).unwrap().fstype, "tmpfs");
-        assert!(!parcourable(m, Path::new("/media/x/a")));
+        assert_eq!(owner(m, Path::new("/media/x/a")).unwrap().fstype, "tmpfs");
+        assert!(!browsable(m, Path::new("/media/x/a")));
     }
 
     #[test]
     fn une_ligne_tronquee_est_ignoree_sans_paniquer() {
-        // /proc/mounts est lu à chaud : une ligne partielle ne doit pas faire
+        // /proc/mounts est lu à chaud : une line partielle ne doit pas faire
         // tomber la page entière.
         assert!(volumes("/dev/sda1\n\n/dev/sdb1 /media/y\n").is_empty());
     }

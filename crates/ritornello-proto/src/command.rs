@@ -6,7 +6,7 @@ pub enum Command {
     Select(u8),
     /// La distinction présélection/piste n'est pas portée par la commande
     /// elle-même mais par la source active : la radio interprète
-    /// `Next`/`Prev` comme un changement de présélection, le lecteur CD
+    /// `Next`/`Prev` comme un changement de présélection, le player CD
     /// comme piste suivante/précédente.
     Next,
     Prev,
@@ -23,7 +23,7 @@ pub enum Command {
     /// The pending offset lives in the core — which also displays it and
     /// expires it; input plugins just relay the key press.
     Plus10,
-    /// Avancer d'un pas dans ce qui joue. Le pas vit dans le cœur (réglage
+    /// Avancer d'un pas dans ce qui plays. Le pas vit dans le cœur (réglage
     /// `seek_step_s`), exactement comme les 5 % du volume : la touche ne
     /// porte aucune quantité, donc changer le pas ne demande pas de
     /// reprogrammer une télécommande.
@@ -39,10 +39,10 @@ pub enum Command {
     /// un réglage et non une constante, et chaque pas écrit une incrustation à
     /// l'écran.
     SetVolume(u8),
-    /// Source désignée par son **nom**, là où `SourceCycle` ne sait qu'avancer
+    /// Source désignée par son **name**, là où `SourceCycle` ne sait qu'avancer
     /// d'un cran. Sert le `load "radio"` de MPD.
     ///
-    /// Un nom inconnu est ignoré en silence par le cœur, comme une touche non
+    /// Un name inconnu est ignoré en silence par le cœur, comme une touche non
     /// liée : c'est l'émetteur qui sait ce qu'il propose.
     SelectSource(String),
 }

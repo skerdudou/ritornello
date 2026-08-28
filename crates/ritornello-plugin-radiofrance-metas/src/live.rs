@@ -1,13 +1,13 @@
 //! Interrogation du direct d'une station Radio France.
 //!
 //! L'analyse est une fonction pure, testée sur des réponses réelles ; seule
-//! `suit` touche le réseau, et **aucun test ne l'appelle**.
+//! `follows` touche le réseau, et **aucun test ne l'appelle**.
 //!
-//! Contrairement à OUI FM, qui pousse ses métadonnées dans un
+//! Contrairement à OUI FM, qui push_cover ses métadonnées dans un
 //! `text/event-stream`, Radio France répond à une interrogation ponctuelle —
 //! mais en disant lui-même quand le rappeler (`delayToRefresh`). Le rythme
 //! d'interrogation est donc dicté par le serveur, pas par nous : c'est ce qui
-//! permet de suivre un morceau de trois minutes sans marteler un tiers, et de
+//! permet de suivre un track de trois minutes sans marteler un tiers, et de
 //! laisser une tranche d'antenne d'une heure tranquille.
 
 use anyhow::{bail, Result};
@@ -23,18 +23,18 @@ pub struct Meta {
     pub title: Option<String>,
     pub album: Option<String>,
     /// Année et liens viennent de la **grille**, comme l'album, et sont donc
-    /// remplis au même moment (voir `suit`). Le direct ne les porte pas.
+    /// remplis au même moment (voir `follows`). Le direct ne les porte pas.
     pub year: Option<u16>,
     pub links: Vec<Link>,
     pub duration_s: Option<u32>,
-    /// Début du morceau, en secondes depuis l'époque Unix, tel que le direct
-    /// l'annonce. Brut : c'est l'émission de l'enrichissement qui en déduit
+    /// Début du track, en secondes depuis l'époque Unix, tel que le direct
+    /// l'announcement. Brut : c'est l'émission de l'enrichment qui en déduit
     /// l'écoulé, pour que ce module reste sans horloge et testable sur des
     /// captures.
     pub start_time: Option<u64>,
-    /// UUID brut de la pochette, copié depuis `Direct.cover` dans `suit` — ce
+    /// UUID brut de la cover, copié depuis `Direct.cover` dans `follows` — ce
     /// champ est ce qui franchit le canal jusqu'au plugin, qui en fait une URL
-    /// (voir `url_pochette`). `None` inclut le cas où ce n'est pas un morceau,
+    /// (voir `cover_url`). `None` inclut le cas où ce n'est pas un track,
     /// la règle étant déjà tranchée en amont, dans `Direct.cover`.
     pub cover: Option<String>,
 }
@@ -45,95 +45,95 @@ pub struct Direct {
     /// `None` quand la réponse ne porte ni titre ni artiste — cas d'un
     /// basculement d'antenne. Le délai, lui, reste exploitable.
     pub meta: Option<Meta>,
-    /// Identifiant du morceau en cours, quand il y en a un. Il n'est jamais
+    /// Identifiant du track en cours, quand il y en a un. Il n'est jamais
     /// affiché : il sert à retrouver dans la grille ce que le direct ne porte
-    /// pas — album, année, lien (voir `supplement_dans_grille`).
+    /// pas — album, année, lien (voir `supplement_in_schedule`).
     pub song_uuid: Option<String>,
-    /// UUID de la pochette, **seulement quand un vrai morceau joue**.
+    /// UUID de la cover, **seulement quand un vrai track plays**.
     ///
     /// La station renseigne un `cover` même pour « Le direct » et pour ses
     /// émissions : c'est l'image générique de l'antenne. L'annoncer ferait
     /// taire le relai générique, puisqu'un champ rempli est un champ rempli et
     /// qu'aucun étage supérieur ne peut savoir qu'il l'est mal.
     pub cover: Option<String>,
-    pub recontacter: Duration,
+    pub recontact_at: Duration,
 }
 
 /// Attente initiale avant nouvelle tentative après échec, puis doublée.
-const RECUL_BASE: Duration = Duration::from_secs(2);
+const BACKOFF_BASE: Duration = Duration::from_secs(2);
 
 /// Plafond du recul. Un appareil qui tourne des mois sans surveillance ne doit
 /// pas marteler le serveur d'un tiers ; à l'inverse, plafonner évite qu'une
 /// coupure réseau d'une nuit se traduise par des heures d'attente au retour.
-const RECUL_MAX: Duration = Duration::from_secs(60);
+const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 /// Plancher du délai annoncé par le serveur. Mesuré : il descend à 10 s sur
 /// les stations qui basculent souvent. Ce plancher n'existe donc pas pour
 /// corriger le serveur mais pour borner ce qu'une réponse aberrante — ou un
 /// mandataire qui réécrirait le JSON — pourrait nous faire faire.
-const RAPPEL_MIN: Duration = Duration::from_secs(5);
+const RECHECK_MIN: Duration = Duration::from_secs(5);
 
 /// Plafond du délai annoncé. Mesuré : les locales annoncent jusqu'à 51 min,
 /// soit la fin de la tranche en cours. Les croire sur parole laisserait
 /// l'affichage figé aussi longtemps si la grille change en cours de route ;
 /// dix minutes coûtent au pire six requêtes par heure et par station.
-const RAPPEL_MAX: Duration = Duration::from_secs(600);
+const RECHECK_MAX: Duration = Duration::from_secs(600);
 
-/// Délai retenu quand le serveur n'en annonce aucun.
-const RAPPEL_DEFAUT: Duration = Duration::from_secs(60);
+/// Délai retenu quand le serveur n'en announcement aucun.
+const RECHECK_DEFAULT: Duration = Duration::from_secs(60);
 
 /// Nombre de morceaux consécutifs pour lesquels la grille n'apprend **rien**
 /// au-delà duquel on cesse de l'interroger pour cette station.
 ///
-/// La grille publie souvent le morceau **en retard d'un** : mesuré, elle
+/// La grille publie souvent le track **en retard d'un** : mesuré, elle
 /// s'arrête pile au début de ce qui passe. Sur certaines stations elle
 /// rattrape en quelques secondes ; sur d'autres — les 45 locales, notamment —
-/// elle n'a jamais rien sur toute la durée d'un morceau. Continuer à demander
+/// elle n'a jamais rien sur toute la durée d'un track. Continuer à demander
 /// doublerait le nombre de requêtes chez un tiers pour une réponse qui ne
-/// vient pas, ce que le plafond évite.
+/// vient pas, ce que le cap évite.
 ///
 /// Le critère porte sur le **supplément entier** (album, année, liens) et non
 /// sur le seul album depuis le 2026-08-27 : la grille rend l'année bien plus
 /// souvent que l'album — 9 éléments sur 9 mesurés, contre 3 sur 9 pour le lien
 /// YouTube — et une requête qui rapporte l'année n'est pas une requête pour
 /// rien.
-const MANQUES_MAX: u32 = 5;
+const MAX_MISSES: u32 = 5;
 
 /// Durée maximale plausible pour un élément d'antenne. Au-delà, la durée vient
-/// d'une borne aberrante et vaut mieux ignorée qu'affichée.
-const DUREE_MAX_S: u64 = 24 * 3600;
+/// d'une bounded aberrante et vaut mieux ignorée qu'affichée.
+const MAX_DURATION_S: u64 = 24 * 3600;
 
-/// URL du direct d'une station, pour un profil de rendu donné.
+/// URL du direct d'une station, pour un profil de rendition donné.
 ///
-/// Le dernier segment n'identifie pas la station mais le **profil de rendu**
+/// Le dernier segment n'identifie pas la station mais le **profil de rendition**
 /// que le serveur applique à sa réponse, et il change ce qu'on reçoit — au
 /// point qu'un mauvais choix rend le plugin muet. Mesuré au même instant sur
 /// Mouv' : `webrf_fip_player` répond « Le direct » / « Mouv' » (le slogan),
 /// quand `webrf_mouv_player` répond « La Playlist » / « SOOLKING - Bye Bye
 /// (feat. TAYC) », qui est bien ce qui passait à l'antenne. Chaque station
 /// porte donc son profil dans la table.
-fn url_direct(id: u32, profil: &str) -> String {
+fn live_url(id: u32, profil: &str) -> String {
     format!("https://api.radiofrance.fr/livemeta/live/{id}/{profil}")
 }
 
 /// URL de la grille d'une station : la liste des éléments diffusés, où chaque
-/// morceau porte son album. Pas de profil de rendu ici, la forme est unique.
-fn url_grille(id: u32) -> String {
+/// track porte son album. Pas de profil de rendition ici, la forme est unique.
+fn schedule_url(id: u32) -> String {
     format!("https://api.radiofrance.fr/livemeta/pull/{id}")
 }
 
-/// URL de la pochette d'un morceau.
+/// URL de la cover d'un track.
 ///
 /// `preset` n'est pas optionnel : sans lui, l'API rend un 400. Avec, elle rend
-/// un 301 vers le CDN, que le cœur suit. `400x400` est un compromis mesuré —
-/// 31 887 octets, contre un original de taille non bornée.
-pub fn url_pochette(uuid: &str) -> String {
+/// un 301 vers le CDN, que le cœur follows. `400x400` est un compromis mesuré —
+/// 31 887 bytes, contre un original de size non bornée.
+pub fn cover_url(uuid: &str) -> String {
     format!("https://api.radiofrance.fr/v1/services/embed/image/{uuid}?preset=400x400")
 }
 
-/// Texte non vide d'un champ, `None` sinon.
-fn texte(v: &Value, cle: &str) -> Option<String> {
-    let s = v.get(cle)?.as_str()?.trim();
+/// Texte non clear d'un champ, `None` sinon.
+fn text(v: &Value, key: &str) -> Option<String> {
+    let s = v.get(key)?.as_str()?.trim();
     (!s.is_empty()).then(|| s.to_string())
 }
 
@@ -141,68 +141,68 @@ fn texte(v: &Value, cle: &str) -> Option<String> {
 /// exploitable — le point d'entrée n'est pas documenté, une refonte doit se
 /// traduire par un silence et non par un affichage faux.
 ///
-/// Les noms de champs sont ceux mesurés. `now.firstLine` et `now.secondLine`
-/// portent la paire à afficher, mais **ce qu'elle contient dépend du profil**
-/// (voir `url_direct`), et la réponse le dit elle-même :
+/// Les names de champs sont ceux mesurés. `now.firstLine` et `now.secondLine`
+/// portent la paire à afficher, mais **ce qu'elle contains dépend du profil**
+/// (voir `live_url`), et la réponse le dit elle-même :
 ///
-/// - avec `firstLineSongUuid`, `firstLine` **est** le morceau et `secondLine`
+/// - avec `firstLineSongUuid`, `firstLine` **est** le track et `secondLine`
 ///   son artiste — la paire est déjà séparée, et les bornes délimitent le
-///   morceau, donc leur écart est bien sa durée ;
+///   track, donc leur écart est bien sa durée ;
 /// - sans lui, `firstLine` est l'**émission** et `secondLine` porte ce qui s'y
-///   joue, sous la forme d'une seule chaîne « ARTISTE - Titre ». Les bornes
+///   plays, sous la forme d'une seule chaîne « ARTISTE - Titre ». Les bornes
 ///   sont alors celles de l'émission : mesuré sur Mouv', elles couvraient une
-///   heure. Les prendre pour la durée d'un morceau afficherait une progression
+///   heure. Les prendre pour la durée d'un track afficherait une progress
 ///   fausse, donc la durée est écartée dans ce cas.
 pub fn parse_direct(charge: &str) -> Option<Direct> {
     let v: Value = serde_json::from_str(charge).ok()?;
-    let recontacter = v
+    let recontact_at = v
         .get("delayToRefresh")
         .and_then(Value::as_u64)
-        .map(|ms| Duration::from_millis(ms).clamp(RAPPEL_MIN, RAPPEL_MAX))
-        .unwrap_or(RAPPEL_DEFAUT);
+        .map(|ms| Duration::from_millis(ms).clamp(RECHECK_MIN, RECHECK_MAX))
+        .unwrap_or(RECHECK_DEFAULT);
     let Some(now) = v.get("now") else {
         // Réponse bien formée mais sans direct : rien à dire, on repassera.
-        return Some(Direct { meta: None, song_uuid: None, cover: None, recontacter });
+        return Some(Direct { meta: None, song_uuid: None, cover: None, recontact_at });
     };
     let est_un_morceau = now.get("firstLineSongUuid").is_some_and(|u| !u.is_null());
-    let duree = match (now.get("startTime").and_then(Value::as_u64), now.get("endTime").and_then(Value::as_u64)) {
+    let duration = match (now.get("startTime").and_then(Value::as_u64), now.get("endTime").and_then(Value::as_u64)) {
         (Some(debut), Some(fin)) if fin > debut => Some(fin - debut),
         _ => None,
     };
-    let title = texte(now, "firstLine");
-    let artist = texte(now, "secondLine");
-    // Les deux lignes identiques n'apprennent rien deux fois : c'est ce que
+    let title = text(now, "firstLine");
+    let artist = text(now, "secondLine");
+    // Les deux lines identiques n'apprennent rien deux fois : c'est ce que
     // renvoie une locale hors musique (« Le 18/19, ICI Picardie » des deux
     // côtés), et l'afficher donnerait « X — X ».
     let artist = artist.filter(|a| !title.as_ref().is_some_and(|t| t.trim().eq_ignore_ascii_case(a.trim())));
-    // « C'est un morceau ET la durée est plausible » : une seule expression,
+    // « C'est un track ET la durée est plausible » : une seule expression,
     // employée pour `duration_s` comme pour `start_time`. Écrite deux fois,
     // elle pourrait dériver ; `start_time` sortirait alors sans `duration_s`,
     // et le plafonnement de la position côté cœur — qui a besoin des deux —
-    // disparaîtrait en silence, la barre franchissant la fin du morceau.
-    let morceau_plausible = est_un_morceau && duree.is_some_and(|d| d <= DUREE_MAX_S);
+    // disparaîtrait en silence, la barre franchissant la fin du track.
+    let morceau_plausible = est_un_morceau && duration.is_some_and(|d| d <= MAX_DURATION_S);
     let meta = Meta {
         title,
         artist,
-        // Le direct ne porte ni album, ni année, ni lien : tout cela se lit
+        // Le direct ne porte ni album, ni année, ni lien : tout cela se read
         // dans la grille, à part.
         album: None,
         year: None,
         links: Vec::new(),
-        duration_s: duree.filter(|_| morceau_plausible).map(|d| d as u32),
+        duration_s: duration.filter(|_| morceau_plausible).map(|d| d as u32),
         start_time: now.get("startTime").and_then(Value::as_u64).filter(|_| morceau_plausible),
-        // Rempli plus tard, dans `suit`, depuis `Direct.cover` : à ce stade,
-        // l'analyse pure ne connaît que le morceau, pas encore le canal qui le
+        // Rempli plus tard, dans `follows`, depuis `Direct.cover` : à ce stade,
+        // l'analyse pure ne connaît que le track, pas encore le canal qui le
         // porte jusqu'au plugin.
         cover: None,
     };
     // Une durée seule n'est pas affichable : ce n'est pas une réponse.
     let meta = (meta.artist.is_some() || meta.title.is_some()).then_some(meta);
-    let song_uuid = texte(now, "songUuid");
-    // Le `songUuid` est le seul discriminant fiable entre un morceau et une
+    let song_uuid = text(now, "songUuid");
+    // Le `songUuid` est le seul discriminant fiable entre un track et une
     // émission — mesuré sur quatre stations.
-    let cover = song_uuid.as_ref().and_then(|_| texte(now, "cover"));
-    Some(Direct { meta, song_uuid, cover, recontacter })
+    let cover = song_uuid.as_ref().and_then(|_| text(now, "cover"));
+    Some(Direct { meta, song_uuid, cover, recontact_at })
 }
 
 /// Ce que l'élément de grille apprend en plus de l'album.
@@ -215,32 +215,32 @@ pub struct Supplement {
     pub album: Option<String>,
     /// `anneeEditionMusique`, un **nombre** JSON dans les réponses mesurées.
     pub year: Option<u16>,
-    /// `lienYoutube`. Validé par `Link::validee` côté cœur, mais déjà filtré
+    /// `lienYoutube`. Validé par `Link::validated` côté cœur, mais déjà filtré
     /// ici sur son hôte : autant ne pas transmettre ce qui sera refusé.
     pub links: Vec<Link>,
 }
 
 impl Supplement {
-    pub fn est_vide(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.album.is_none() && self.year.is_none() && self.links.is_empty()
     }
 }
 
-/// Album du morceau `song_uuid` dans une réponse de la grille, s'il y figure.
+/// Album du track `song_uuid` dans une réponse de la grille, s'il y figure.
 ///
 /// La correspondance se fait sur `songId`, **pas** sur `uuid` : `uuid`
-/// identifie l'élément de grille, `songId` le morceau, et c'est ce dernier que
+/// identifie l'élément de grille, `songId` le track, et c'est ce dernier que
 /// le direct renvoie dans `songUuid`. Vérifié sur quatre stations, toutes
 /// concordantes sur `songId` et aucune sur `uuid`.
 ///
 /// `None` est le cas courant, pas une anomalie : la grille publie souvent le
-/// morceau en retard d'un, et l'album n'est alors simplement pas encore là.
-/// Tout ce que l'élément de grille du morceau apprend : album, année, liens.
+/// track en retard d'un, et l'album n'est alors simplement pas encore là.
+/// Tout ce que l'élément de grille du track apprend : album, année, liens.
 ///
 /// Un seul parcours pour les trois. `Supplement::default()` quand la grille
-/// ignore le morceau — le cas courant, elle a souvent un morceau de retard, et
+/// ignore le track — le cas courant, elle a souvent un track de retard, et
 /// ce n'est pas une anomalie.
-pub fn supplement_dans_grille(charge: &str, song_uuid: &str) -> Supplement {
+pub fn supplement_in_schedule(charge: &str, song_uuid: &str) -> Supplement {
     let Ok(v) = serde_json::from_str::<Value>(charge) else { return Supplement::default() };
     let Some(steps) = v.get("steps").and_then(Value::as_object) else {
         return Supplement::default();
@@ -250,7 +250,7 @@ pub fn supplement_dans_grille(charge: &str, song_uuid: &str) -> Supplement {
         return Supplement::default();
     };
     // `anneeEditionMusique` est un nombre dans les réponses mesurées, mais le
-    // texte est accepté aussi : le champ vient d'un tiers qui peut changer de
+    // text est accepté aussi : le champ vient d'un tiers qui peut changer de
     // forme sans préavis, exactement comme `durationInSeconds` chez OUI FM.
     let year = match step.get("anneeEditionMusique") {
         Some(Value::Number(n)) => Some(n.to_string()),
@@ -258,59 +258,59 @@ pub fn supplement_dans_grille(charge: &str, song_uuid: &str) -> Supplement {
         _ => None,
     }
     .as_deref()
-    .and_then(ritornello_proto::annee_valide);
-    let links = texte(step, "lienYoutube")
+    .and_then(ritornello_proto::valid_year);
+    let links = text(step, "lienYoutube")
         .map(|url| Link::Youtube { url })
-        .and_then(Link::validee)
+        .and_then(Link::validated)
         .into_iter()
         .collect();
-    Supplement { album: texte(step, "titreAlbum"), year, links }
+    Supplement { album: text(step, "titreAlbum"), year, links }
 }
 
-/// Interroge la grille pour ce que le morceau en cours y gagne : album, année,
+/// Interroge la grille pour ce que le track en cours y gagne : album, année,
 /// liens. Toute erreur vaut « rien trouvé » : ce sont des suppléments, ils ne
 /// doivent jamais empêcher le titre de partir.
-async fn cherche_supplement(client: &reqwest::Client, id: u32, song_uuid: &str) -> Supplement {
-    let Ok(resp) = client.get(url_grille(id)).send().await else { return Supplement::default() };
+async fn fetch_supplement(client: &reqwest::Client, id: u32, song_uuid: &str) -> Supplement {
+    let Ok(resp) = client.get(schedule_url(id)).send().await else { return Supplement::default() };
     if !resp.status().is_success() {
         tracing::debug!("schedule query for station {id}: HTTP {}", resp.status());
         return Supplement::default();
     }
     let Ok(corps) = resp.text().await else { return Supplement::default() };
-    supplement_dans_grille(&corps, song_uuid)
+    supplement_in_schedule(&corps, song_uuid)
 }
 
 /// Interroge une fois le direct d'une station.
-async fn interroge(client: &reqwest::Client, id: u32, profil: &str) -> Result<Direct> {
-    let resp = client.get(url_direct(id, profil)).send().await?;
+async fn query(client: &reqwest::Client, id: u32, profil: &str) -> Result<Direct> {
+    let resp = client.get(live_url(id, profil)).send().await?;
     if !resp.status().is_success() {
         bail!("HTTP {}", resp.status());
     }
     let corps = resp.text().await?;
     let Some(direct) = parse_direct(&corps) else {
-        bail!("reponse illisible ({} octets)", corps.len());
+        bail!("reponse illisible ({} bytes)", corps.len());
     };
     Ok(direct)
 }
 
 /// Prochain recul après un échec, d'après le recul courant.
-pub fn prochain_recul(recul: Duration) -> Duration {
-    (recul * 2).min(RECUL_MAX)
+pub fn next_backoff(recul: Duration) -> Duration {
+    (recul * 2).min(BACKOFF_MAX)
 }
 
-/// Suit une station jusqu'à ce que la tâche soit abandonnée : interroge le
+/// Suit une station jusqu'à ce que la tâche soit abandonnée : query le
 /// direct, attend le délai annoncé, recommence.
 ///
 /// Ne rend jamais la main. C'est l'appelant qui arrête cette tâche (`abort`)
-/// quand ce qui joue change — d'où l'étiquetage de chaque relevé par l'`id` :
+/// quand ce qui plays change — d'où l'étiquetage de chaque relevé par l'`id` :
 /// un relevé déjà en file au moment de l'arrêt doit pouvoir être écarté.
 ///
 /// **Seuls les changements sont émis.** Le serveur redit la même chose à
-/// chaque interrogation ; réémettre ferait écrire une ligne au cœur toutes les
+/// chaque interrogation ; réémettre ferait écrire une line au cœur toutes les
 /// dix secondes pour rien. Le premier relevé, lui, part toujours : cette tâche
-/// naît avec la station, donc son « dernier vu » est vide, et l'affichage se
-/// remplit dès la première réponse plutôt qu'au changement de morceau suivant.
-pub async fn suit(id: u32, profil: String, tx: mpsc::Sender<(u32, Meta)>) {
+/// naît avec la station, donc son « dernier vu » est clear, et l'affichage se
+/// remplit dès la première réponse plutôt qu'au changement de track suivant.
+pub async fn follows(id: u32, profil: String, tx: mpsc::Sender<(u32, Meta)>) {
     let client = match reqwest::Client::builder()
         .user_agent("ritornello/0.1 (https://github.com/skerdudou/ritornello)")
         .connect_timeout(Duration::from_secs(10))
@@ -325,31 +325,31 @@ pub async fn suit(id: u32, profil: String, tx: mpsc::Sender<(u32, Meta)>) {
             return;
         }
     };
-    let mut recul = RECUL_BASE / 2;
+    let mut recul = BACKOFF_BASE / 2;
     // Dernier relevé émis, **sans son album** : c'est sur cette forme que porte
     // la comparaison, pour qu'un album trouvé (ou non) une fois ne change pas
-    // le verdict « c'est le même morceau qu'avant » au tour suivant.
+    // le verdict « c'est le même track qu'avant » au tour suivant.
     let mut dernier: Option<Meta> = None;
     let mut manques = 0u32;
     loop {
-        match interroge(&client, id, &profil).await {
+        match query(&client, id, &profil).await {
             Ok(direct) => {
-                recul = RECUL_BASE / 2;
+                recul = BACKOFF_BASE / 2;
                 if let Some(mut meta) = direct.meta {
                     // `direct.cover` n'est jamais reconstruit ici : la règle
-                    // « pas de pochette hors morceau » est déjà tranchée dans
+                    // « pas de cover hors track » est déjà tranchée dans
                     // `parse_direct`, ce champ n'est qu'un passage de témoin
                     // jusqu'au plugin.
                     meta.cover = direct.cover.clone();
                     if dernier.as_ref() != Some(&meta) {
                         dernier = Some(meta.clone());
-                        // L'album se cherche **une fois par morceau**, et
+                        // L'album se cherche **une fois par track**, et
                         // seulement ici : au fil des interrogations d'un même
-                        // morceau, la réponse ne changerait pas.
+                        // track, la réponse ne changerait pas.
                         let mut a_envoyer = meta;
                         if let Some(uuid) = direct.song_uuid.as_deref() {
-                            if manques < MANQUES_MAX {
-                                let s = cherche_supplement(&client, id, uuid).await;
+                            if manques < MAX_MISSES {
+                                let s = fetch_supplement(&client, id, uuid).await;
                                 // Le compteur porte désormais sur le
                                 // supplément **entier** et non sur le seul
                                 // album, et ce changement de critère est
@@ -360,15 +360,15 @@ pub async fn suit(id: u32, profil: String, tx: mpsc::Sender<(u32, Meta)>) {
                                 // ne donne pas l'album mais donne l'année n'est
                                 // plus une requête pour rien — ce que ce
                                 // compteur existe pour éviter.
-                                let vide = s.est_vide();
+                                let clear = s.is_empty();
                                 a_envoyer.album = s.album;
                                 a_envoyer.year = s.year;
                                 a_envoyer.links = s.links;
-                                if vide {
+                                if clear {
                                     manques += 1;
-                                    if manques == MANQUES_MAX {
+                                    if manques == MAX_MISSES {
                                         tracing::debug!(
-                                            "station {id}: schedule gave nothing for {MANQUES_MAX} tracks, no longer asking"
+                                            "station {id}: schedule gave nothing for {MAX_MISSES} tracks, no longer asking"
                                         );
                                     }
                                 } else {
@@ -382,14 +382,14 @@ pub async fn suit(id: u32, profil: String, tx: mpsc::Sender<(u32, Meta)>) {
                         }
                     }
                 }
-                tokio::time::sleep(direct.recontacter).await;
+                tokio::time::sleep(direct.recontact_at).await;
             }
             Err(e) => {
                 // Tout échec est journalisé : sans cela, une station qui ne
                 // répond plus ne laisserait aucune trace dans `/api/logs` et
                 // personne ne verrait jamais rien.
                 tracing::info!("live query failed for station {id}: {e}");
-                recul = prochain_recul(recul);
+                recul = next_backoff(recul);
                 tokio::time::sleep(recul).await;
             }
         }
@@ -405,11 +405,11 @@ mod tests {
 
     /// Réponse **capturée telle quelle** sur Mouv' (station 6, profil
     /// `webrf_mouv_player`) : `firstLine` est l'émission, `secondLine` le
-    /// morceau tout entier, et les bornes couvrent **l'émission** — une heure.
+    /// track tout entier, et les bornes couvrent **l'émission** — une heure.
     const REPONSE_MOUV: &str = r#"{"prev":[],"now":{"firstLine":"La Playlist","secondLine":"OZUNA - Mi yo de antes","secondLineSongUuid":"c6ed3f57-10a8-435f-b71e-adca48916dce","thirdLine":null,"producers":null,"songUuid":"c6ed3f57-10a8-435f-b71e-adca48916dce","cover":"2df667ba-2852-495c-89a9-9a998daa7c0d","startTime":1786723200,"endTime":1786726800},"next":[],"delayToRefresh":3090000}"#;
 
     /// Réponse **capturée telle quelle** sur une locale hors musique : les deux
-    /// lignes disent la même chose.
+    /// lines disent la même chose.
     const REPONSE_LOCALE_MUETTE: &str = r#"{"now":{"firstLine":"Le 18/19, ICI Picardie","secondLine":"Le 18/19, ici Picardie","startTime":1786723800,"endTime":1786727400},"delayToRefresh":270000}"#;
 
     #[test]
@@ -417,24 +417,24 @@ mod tests {
         let d = parse_direct(REPONSE_FIP).unwrap();
         let m = d.meta.unwrap();
         // `firstLine` est le titre, `secondLine` l'artiste : l'inverse de ce
-        // que l'ordre des champs laisse croire au premier regard.
+        // que l'order des champs laisse croire au premier regard.
         assert_eq!(m.title.as_deref(), Some("I love marijuana"));
         assert_eq!(m.artist.as_deref(), Some("Linval Thompson"));
-        // `firstLineSongUuid` est présent : les bornes sont celles du morceau.
+        // `firstLineSongUuid` est présent : les bornes sont celles du track.
         assert_eq!(m.duration_s, Some(197));
-        assert_eq!(d.recontacter, Duration::from_secs(70));
+        assert_eq!(d.recontact_at, Duration::from_secs(70));
     }
 
     #[test]
     fn une_emission_qui_porte_un_morceau_ne_prend_pas_la_duree_de_lemission() {
         // Le défaut que ce découpage évite : sans `firstLineSongUuid`, les
         // bornes sont celles de l'émission (ici une heure). Les afficher comme
-        // durée du morceau donnerait une progression fausse.
+        // durée du track donnerait une progress fausse.
         let d = parse_direct(REPONSE_MOUV).unwrap();
         let m = d.meta.unwrap();
         assert_eq!(m.title.as_deref(), Some("La Playlist"));
         assert_eq!(m.artist.as_deref(), Some("OZUNA - Mi yo de antes"));
-        assert_eq!(m.duration_s, None, "3600 s est la tranche, pas le morceau");
+        assert_eq!(m.duration_s, None, "3600 s est la tranche, pas le track");
     }
 
     #[test]
@@ -450,18 +450,18 @@ mod tests {
     #[test]
     fn le_delai_annonce_est_borne_des_deux_cotes() {
         // 3 090 000 ms = 51 min : la fin de la tranche. On repasse avant.
-        assert_eq!(parse_direct(REPONSE_MOUV).unwrap().recontacter, RAPPEL_MAX);
+        assert_eq!(parse_direct(REPONSE_MOUV).unwrap().recontact_at, RECHECK_MAX);
         let court = r#"{"now":{"firstLine":"t"},"delayToRefresh":10}"#;
-        assert_eq!(parse_direct(court).unwrap().recontacter, RAPPEL_MIN);
+        assert_eq!(parse_direct(court).unwrap().recontact_at, RECHECK_MIN);
         let absent = r#"{"now":{"firstLine":"t"}}"#;
-        assert_eq!(parse_direct(absent).unwrap().recontacter, RAPPEL_DEFAUT);
+        assert_eq!(parse_direct(absent).unwrap().recontact_at, RECHECK_DEFAULT);
     }
 
     #[test]
     fn une_reponse_sans_direct_donne_un_delai_sans_metadonnees() {
         let d = parse_direct(r#"{"prev":[],"next":[],"delayToRefresh":20000}"#).unwrap();
         assert!(d.meta.is_none(), "rien a afficher");
-        assert_eq!(d.recontacter, Duration::from_secs(20), "mais on sait quand repasser");
+        assert_eq!(d.recontact_at, Duration::from_secs(20), "mais on sait quand repasser");
     }
 
     #[test]
@@ -504,13 +504,13 @@ mod tests {
     #[test]
     fn lalbum_se_lit_dans_la_grille_par_lidentifiant_de_morceau() {
         assert_eq!(
-            supplement_dans_grille(GRILLE, "2edd8576-0344-4cfc-87ea-b7aaca8e3bb2").album.as_deref(),
+            supplement_in_schedule(GRILLE, "2edd8576-0344-4cfc-87ea-b7aaca8e3bb2").album.as_deref(),
             Some("African tribute to Art Blakey")
         );
         // L'autre élément de la même grille, pour prouver que la sélection
         // porte bien sur l'identifiant et non sur le premier venu.
         assert_eq!(
-            supplement_dans_grille(GRILLE, "9648da4b-ec2c-4c1d-a75c-ba88b6e2a5fb").album.as_deref(),
+            supplement_in_schedule(GRILLE, "9648da4b-ec2c-4c1d-a75c-ba88b6e2a5fb").album.as_deref(),
             Some("Lucky Chops")
         );
     }
@@ -520,13 +520,13 @@ mod tests {
         // La fixture est une capture reelle : `anneeEditionMusique` y est un
         // **nombre** (2008), et c'est la forme mesuree le 2026-08-27 sur les
         // stations 7 et 65. Ces deux champs etaient lus et jetes.
-        let s = supplement_dans_grille(GRILLE, "2edd8576-0344-4cfc-87ea-b7aaca8e3bb2");
+        let s = supplement_in_schedule(GRILLE, "2edd8576-0344-4cfc-87ea-b7aaca8e3bb2");
         assert_eq!(s.album.as_deref(), Some("African tribute to Art Blakey"));
         assert_eq!(s.year, Some(2008));
         // Cet element-la n'a pas de lien : la grille en donne moins souvent que
         // d'annees (mesure : 3 sur 9 contre 9 sur 9).
         assert!(s.links.is_empty());
-        assert!(!s.est_vide(), "album et annee suffisent a ne pas etre vide");
+        assert!(!s.is_empty(), "album et annee suffisent a ne pas etre clear");
     }
 
     #[test]
@@ -536,59 +536,59 @@ mod tests {
         let avec = r#"{"steps":{"a":{"songId":"u","titreAlbum":"X",
             "lienYoutube":"https://www.youtube.com/watch?v=zIqlKJj9IlY"}}}"#;
         assert_eq!(
-            supplement_dans_grille(avec, "u").links,
+            supplement_in_schedule(avec, "u").links,
             vec![Link::Youtube { url: "https://www.youtube.com/watch?v=zIqlKJj9IlY".into() }]
         );
         // Un lien vers un autre hote est jete ici deja : inutile de faire
         // traverser au coeur ce qu'il refusera.
         let ailleurs = r#"{"steps":{"a":{"songId":"u","lienYoutube":"https://evil.example/x"}}}"#;
-        assert!(supplement_dans_grille(ailleurs, "u").links.is_empty());
+        assert!(supplement_in_schedule(ailleurs, "u").links.is_empty());
     }
 
     #[test]
     fn une_annee_aberrante_de_la_grille_est_ignoree_sans_perdre_lalbum() {
         let brut = r#"{"steps":{"a":{"songId":"u","titreAlbum":"X","anneeEditionMusique":0}}}"#;
-        let s = supplement_dans_grille(brut, "u");
+        let s = supplement_in_schedule(brut, "u");
         assert_eq!(s.year, None);
         assert_eq!(s.album.as_deref(), Some("X"), "l'album survit");
-        // La forme texte est acceptee aussi : le champ vient d'un tiers qui
-        // peut changer d'avis, comme `durationInSeconds` chez OUI FM.
-        let texte = r#"{"steps":{"a":{"songId":"u","anneeEditionMusique":"1952"}}}"#;
-        assert_eq!(supplement_dans_grille(texte, "u").year, Some(1952));
+        // La forme text est acceptee aussi : le champ vient d'un tiers qui
+        // peut changer d'notice, comme `durationInSeconds` chez OUI FM.
+        let text = r#"{"steps":{"a":{"songId":"u","anneeEditionMusique":"1952"}}}"#;
+        assert_eq!(supplement_in_schedule(text, "u").year, Some(1952));
     }
 
     #[test]
     fn un_supplement_introuvable_est_vide_et_ne_panique_pas() {
-        assert!(supplement_dans_grille(GRILLE, "00000000-0000-0000-0000-000000000000").est_vide());
-        assert!(supplement_dans_grille("pas du json", "u").est_vide());
-        assert!(supplement_dans_grille("", "u").est_vide());
+        assert!(supplement_in_schedule(GRILLE, "00000000-0000-0000-0000-000000000000").is_empty());
+        assert!(supplement_in_schedule("pas du json", "u").is_empty());
+        assert!(supplement_in_schedule("", "u").is_empty());
     }
 
     #[test]
     fn la_correspondance_porte_sur_songid_et_non_sur_uuid() {
-        // `uuid` identifie l'élément de grille, `songId` le morceau — et c'est
+        // `uuid` identifie l'élément de grille, `songId` le track — et c'est
         // `songId` que le direct renvoie. Les confondre ne trouverait jamais
         // rien, silencieusement.
-        assert!(supplement_dans_grille(GRILLE, "8c391d63-ff9d-4f2c-9ca9-4290e6ed88e1").album.is_none());
+        assert!(supplement_in_schedule(GRILLE, "8c391d63-ff9d-4f2c-9ca9-4290e6ed88e1").album.is_none());
     }
 
     #[test]
     fn une_grille_qui_ignore_le_morceau_ne_donne_pas_dalbum() {
-        // Le cas le plus courant : la grille a un morceau de retard.
-        assert!(supplement_dans_grille(GRILLE, "00000000-0000-0000-0000-000000000000").album.is_none());
-        assert!(supplement_dans_grille("", "peu-importe").album.is_none());
-        assert!(supplement_dans_grille("pas du json", "peu-importe").album.is_none());
-        assert!(supplement_dans_grille(r#"{"stationId":65}"#, "peu-importe").album.is_none());
+        // Le cas le plus courant : la grille a un track de retard.
+        assert!(supplement_in_schedule(GRILLE, "00000000-0000-0000-0000-000000000000").album.is_none());
+        assert!(supplement_in_schedule("", "peu-importe").album.is_none());
+        assert!(supplement_in_schedule("pas du json", "peu-importe").album.is_none());
+        assert!(supplement_in_schedule(r#"{"stationId":65}"#, "peu-importe").album.is_none());
         // Élément trouvé mais sans album : rien à dire non plus.
         let sans = r#"{"steps":{"x":{"songId":"u","titreAlbum":"  "}}}"#;
-        assert!(supplement_dans_grille(sans, "u").album.is_none());
+        assert!(supplement_in_schedule(sans, "u").album.is_none());
     }
 
     #[test]
     fn le_direct_expose_lidentifiant_du_morceau_pour_la_recherche_dalbum() {
         let d = parse_direct(REPONSE_FIP).unwrap();
         assert_eq!(d.song_uuid.as_deref(), Some("1691b015-c8b9-48d2-a296-1f846e13af7b"));
-        // Hors morceau, il n'y a rien à chercher.
+        // Hors track, il n'y a rien à chercher.
         assert!(parse_direct(REPONSE_LOCALE_MUETTE).unwrap().song_uuid.is_none());
     }
 
@@ -601,23 +601,23 @@ mod tests {
 
     #[test]
     fn lurl_de_la_grille_porte_lidentifiant() {
-        assert_eq!(url_grille(65), "https://api.radiofrance.fr/livemeta/pull/65");
+        assert_eq!(schedule_url(65), "https://api.radiofrance.fr/livemeta/pull/65");
     }
 
     #[test]
     fn lurl_du_direct_porte_lidentifiant_et_le_profil() {
         assert_eq!(
-            url_direct(7, "webrf_fip_player"),
+            live_url(7, "webrf_fip_player"),
             "https://api.radiofrance.fr/livemeta/live/7/webrf_fip_player"
         );
         assert_eq!(
-            url_direct(6, "webrf_mouv_player"),
+            live_url(6, "webrf_mouv_player"),
             "https://api.radiofrance.fr/livemeta/live/6/webrf_mouv_player"
         );
     }
 
     /// `startTime` est retenu **brut** : c'est au moment d'émettre
-    /// l'enrichissement qu'on en déduit l'écoulé, pas au moment d'analyser la
+    /// l'enrichment qu'on en déduit l'écoulé, pas au moment d'analyser la
     /// réponse — l'analyse reste pure, sans horloge, comme tout ce module.
     #[test]
     fn le_direct_retient_le_debut_du_morceau() {
@@ -627,8 +627,8 @@ mod tests {
     }
 
     /// Même filtre que la durée : sans `firstLineSongUuid`, les bornes sont
-    /// celles d'une tranche d'antenne et non d'un morceau. En déduire une
-    /// position afficherait une progression fausse — mesuré à une heure sur
+    /// celles d'une tranche d'antenne et non d'un track. En déduire une
+    /// position afficherait une progress fausse — mesuré à une heure sur
     /// Mouv'.
     #[test]
     fn une_tranche_d_antenne_ne_donne_pas_de_debut_de_morceau() {
@@ -640,9 +640,9 @@ mod tests {
     #[test]
     fn l_url_de_pochette_suit_le_motif_mesure() {
         // Mesure du 2026-08-24 : ce motif rend un 301 vers le CDN, puis un
-        // JPEG de 31 887 octets. `preset` est obligatoire — sans lui, 400.
+        // JPEG de 31 887 bytes. `preset` est obligatoire — sans lui, 400.
         assert_eq!(
-            url_pochette("24abdb92-7220-45c6-8434-a325278efa2b"),
+            cover_url("24abdb92-7220-45c6-8434-a325278efa2b"),
             "https://api.radiofrance.fr/v1/services/embed/image/24abdb92-7220-45c6-8434-a325278efa2b?preset=400x400"
         );
     }
@@ -662,7 +662,7 @@ mod tests {
         let d = parse_direct(REPONSE_LOCALE_MUETTE).unwrap();
         assert_eq!(d.song_uuid, None, "prealable du test");
         // Precondition, pas une preuve de la regle : REPONSE_LOCALE_MUETTE ne
-        // porte aucune cle "cover", donc cette assertion passerait meme sans
+        // porte aucune key "cover", donc cette assertion passerait meme sans
         // le filtre sur songUuid. C'est l'entree « Le direct » ci-dessous,
         // avec un cover rempli a cote d'un songUuid nul, qui exerce reellement
         // la regle.
@@ -678,15 +678,15 @@ mod tests {
 
     #[test]
     fn le_recul_croit_jusquau_plafond_et_jamais_au_dela() {
-        let mut recul = RECUL_BASE;
+        let mut recul = BACKOFF_BASE;
         let mut vus = vec![recul];
         for _ in 0..10 {
-            recul = prochain_recul(recul);
+            recul = next_backoff(recul);
             vus.push(recul);
         }
         assert_eq!(vus[1], Duration::from_secs(4));
         assert_eq!(vus[2], Duration::from_secs(8));
-        assert_eq!(*vus.last().unwrap(), RECUL_MAX, "le plafond doit etre atteint");
+        assert_eq!(*vus.last().unwrap(), BACKOFF_MAX, "le cap doit etre atteint");
         assert!(vus.windows(2).all(|p| p[1] >= p[0]), "jamais decroissant");
     }
 }

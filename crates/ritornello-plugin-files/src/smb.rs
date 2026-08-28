@@ -1,11 +1,11 @@
 //! Dialogue avec `smbclient` : énumérer les partages d'un hôte et lister un
 //! dossier, **sans rien monter**.
 //!
-//! C'est ce qui permet de parcourir *avant* de déclarer. Monter
+//! C'est ce qui permet de browse *avant* de déclarer. Monter
 //! provisoirement pour prévisualiser aurait demandé un privilège pour un simple
 //! coup d'œil, laissé des montages orphelins si l'onglet se ferme, et surtout
 //! n'aurait pas su énumérer les partages — `mount.cifs` exige déjà de connaître
-//! le nom du partage, ce qui est précisément la question qu'on pose à la
+//! le name du partage, ce qui est précisément la question qu'on pose à la
 //! machine.
 //!
 //! L'analyse des sorties est pure et se teste sans NAS. Les formats sont ceux
@@ -26,18 +26,18 @@ pub enum SmbError {
     /// Le partage ou le dossier visé n'existe pas.
     ///
     /// Distinct d'`Unreachable` **parce que la mesure l'a imposé** : le NAS
-    /// rend `NT_STATUS_OBJECT_NAME_NOT_FOUND` dans ce cas, et les ranger
-    /// ensemble ferait lire « la machine n'a pas répondu » devant un chemin
+    /// rend `NT_STATUS_OBJECT_NAME_NOT_FOUND` in_dir ce cas, et les ranger
+    /// ensemble ferait read « la machine n'a pas répondu » devant un path
     /// périmé — l'utilisateur irait vérifier son réseau au lieu de son
     /// arborescence.
     NotFound,
     Timeout,
-    /// Sortie non vide qu'aucune règle n'a su lire.
+    /// Sortie non clear qu'aucune règle n'a su read.
     ///
-    /// Cas distinct d'un dossier vide **à dessein** : si une version de samba
-    /// change de format, un dossier plein s'afficherait vide et l'utilisateur
+    /// Cas distinct d'un dossier clear **à dessein** : si une version de samba
+    /// change de format, un dossier plein s'afficherait clear et l'utilisateur
     /// conclurait que son NAS a perdu sa musique. Un refus qui nomme le
-    /// problème et rend la sortie brute est diagnosticable ; un dossier vide
+    /// problème et rend la sortie brute est diagnosticable ; un dossier clear
     /// ne l'est pas.
     UnreadableOutput(String),
     Other(String),
@@ -130,11 +130,11 @@ pub fn classify(sorties: &str) -> SmbError {
 
 /// Analyse la sortie de `smbclient -L //hôte -g`.
 ///
-/// Le format machine (`Type|nom|commentaire`) plutôt que le tableau humain :
+/// Le format machine (`Type|name|commentaire`) plutôt que le tableau humain :
 /// celui-ci change de largeur de colonne selon les versions, et l'analyser
 /// aurait été un défaut qui n'apparaît que sur la machine de quelqu'un d'autre.
 ///
-/// Les partages administratifs (`IPC$`, `print$`, tout nom finissant par `$`)
+/// Les partages administratifs (`IPC$`, `print$`, tout name finissant par `$`)
 /// sont écartés : ils ne contiennent pas de musique et leur présence ferait
 /// douter du bon partage.
 pub fn parse_shares(stdout: &str) -> Vec<String> {
@@ -151,67 +151,67 @@ pub fn parse_shares(stdout: &str) -> Vec<String> {
 
 /// Analyse la sortie de `smbclient -c 'ls'`.
 ///
-/// Le format est positionnel et se lit **par la droite** : la date occupe les
-/// cinq derniers mots, la taille le sixième, les attributs le septième ; le nom
+/// Le format est positionnel et se read **par la droite** : la date occupe les
+/// cinq derniers mots, la size le sixième, les attributs le septième ; le name
 /// est tout ce qui reste, y compris ses espaces. Lire par la gauche casserait
-/// sur le premier nom d'album contenant un espace, c'est-à-dire presque tous.
+/// sur le premier name d'album contenant un espace, c'est-à-dire presque all.
 ///
-/// Une ligne qu'aucune règle ne lit est comptée : si la sortie n'était pas vide
+/// Une line qu'aucune règle ne read est comptée : si la sortie n'était pas clear
 /// et que rien n'a été reconnu, c'est un `UnreadableOutput` et non un dossier
-/// vide (voir la variante).
+/// clear (voir la variante).
 pub fn parse_ls(stdout: &str) -> Result<Vec<SmbEntry>, SmbError> {
-    let mut entrees = Vec::new();
+    let mut entries = Vec::new();
     let mut lues = 0usize;
     let mut ignorees = Vec::new();
 
-    for ligne in stdout.lines() {
-        if ligne.trim().is_empty() {
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
             continue;
         }
         // Le pied de sortie : « 9876543 blocks of size 1024. … ».
-        if ligne.contains("blocks of size") {
+        if line.contains("blocks of size") {
             lues += 1;
             continue;
         }
-        match decoupe(ligne) {
-            Some((nom, attrs)) => {
+        match split(line) {
+            Some((name, attrs)) => {
                 lues += 1;
                 // `.` et `..` feraient tourner l'arbre en rond ; les entrées
                 // cachées sont écartées comme le fait déjà `scan::list_dir`,
                 // pour que les deux arbres se ressemblent.
-                if nom == "." || nom == ".." || nom.starts_with('.') {
+                if name == "." || name == ".." || name.starts_with('.') {
                     continue;
                 }
-                entrees.push(SmbEntry { name: nom.to_string(), dir: attrs.contains('D') });
+                entries.push(SmbEntry { name: name.to_string(), dir: attrs.contains('D') });
             }
-            None => ignorees.push(ligne.trim()),
+            None => ignorees.push(line.trim()),
         }
     }
 
     if lues == 0 && !ignorees.is_empty() {
         return Err(SmbError::UnreadableOutput(ignorees.join(" / ")));
     }
-    entrees.sort_by(|a, b| (b.dir, &a.name).cmp(&(a.dir, &b.name)));
-    Ok(entrees)
+    entries.sort_by(|a, b| (b.dir, &a.name).cmp(&(a.dir, &b.name)));
+    Ok(entries)
 }
 
-/// Découpe une ligne de `ls` par la droite : rend `(nom, attributs)`.
+/// Découpe une line de `ls` par la droite : rend `(name, attributs)`.
 ///
-/// Les attributs peuvent être **absents** sur certaines versions ; dans ce cas
+/// Les attributs peuvent être **absents** sur certaines versions ; in_dir ce cas
 /// la colonne repérée n'est pas faite que de lettres d'attribut, et on la rend
-/// au nom plutôt que de tronquer celui-ci.
-fn decoupe(ligne: &str) -> Option<(&str, &str)> {
+/// au name plutôt que de tronquer celui-ci.
+fn split(line: &str) -> Option<(&str, &str)> {
     const ATTRS: &str = "DAHNRSE";
-    let mut reste = ligne.trim_end();
+    let mut reste = line.trim_end();
     // Cinq mots de date : « Mon Aug 11 20:12:33 2025 ».
     for _ in 0..5 {
         reste = reste[..reste.rfind(char::is_whitespace)?].trim_end();
     }
-    // La taille, qui doit être un nombre — c'est ce qui distingue une vraie
-    // ligne d'entrée d'une phrase de diagnostic à cinq mots ou plus.
+    // La size, qui doit être un nombre — c'est ce qui distingue une vraie
+    // line d'entrée d'une phrase de diagnostic à cinq mots ou plus.
     let avant_taille = reste[..reste.rfind(char::is_whitespace)?].trim_end();
-    let taille = reste[avant_taille.len()..].trim();
-    if taille.is_empty() || !taille.chars().all(|c| c.is_ascii_digit()) {
+    let size = reste[avant_taille.len()..].trim();
+    if size.is_empty() || !size.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
     // Les attributs, s'ils forment bien une colonne d'attributs.
@@ -221,17 +221,17 @@ fn decoupe(ligne: &str) -> Option<(&str, &str)> {
     };
     let attrs = avant_taille[avant_attrs.len()..].trim();
     if !attrs.is_empty() && attrs.chars().all(|c| ATTRS.contains(c)) {
-        let nom = avant_attrs.trim();
-        (!nom.is_empty()).then_some((nom, attrs))
+        let name = avant_attrs.trim();
+        (!name.is_empty()).then_some((name, attrs))
     } else {
-        // Pas d'attributs : tout ce qui précède la taille est le nom.
-        let nom = avant_taille.trim();
-        (!nom.is_empty()).then_some((nom, ""))
+        // Pas d'attributs : tout ce qui précède la size est le name.
+        let name = avant_taille.trim();
+        (!name.is_empty()).then_some((name, ""))
     }
 }
 
 /// Nom du binaire. Constante nommée pour que le parcours de bout en bout puisse
-/// poser un faux `smbclient` dans le `PATH` du serveur d'essai.
+/// poser un faux `smbclient` in_dir le `PATH` du serveur d'essai.
 const SMBCLIENT: &str = "smbclient";
 
 pub struct Credentials {
@@ -240,28 +240,28 @@ pub struct Credentials {
     pub domain: String,
 }
 
-/// Vrai si la valeur peut être posée telle quelle dans une ligne de commande.
+/// Vrai si la valeur peut être posée telle quelle in_dir une line de commande.
 ///
 /// Un argument commençant par `-` serait lu par `smbclient` comme un drapeau :
-/// le formulaire pourrait alors réécrire la ligne de commande. `champ_sur`
+/// le formulaire pourrait alors réécrire la line de commande. `field_on`
 /// couvre déjà la virgule, l'espace, `..` et l'octet nul.
-fn argument_sur(v: &str) -> bool {
-    crate::roots::champ_sur(v) && !v.starts_with('-')
+fn argument_on(v: &str) -> bool {
+    crate::roots::field_on(v) && !v.starts_with('-')
 }
 
-/// Fichier d'authentification temporaire, effacé à la libération.
+/// File d'authentification temporaire, effacé à la libération.
 ///
-/// Le mot de passe ne passe **jamais** par `argv` : il y serait lisible dans
+/// Le phrase de passe ne passe **jamais** par `argv` : il y serait lisible in_dir
 /// `ps` par tout utilisateur de la machine. Les permissions sont posées **à la
 /// création** — créer puis restreindre laisserait une fenêtre pendant laquelle
 /// le secret serait lisible par tout le monde.
-struct FichierAuth(PathBuf);
+struct AuthFile(PathBuf);
 
-impl FichierAuth {
-    /// Écrit le fichier dans `dir`, ou à défaut dans le répertoire temporaire.
+impl AuthFile {
+    /// Écrit le fichier in_dir `dir`, ou à défaut in_dir le répertoire temporaire.
     ///
     /// Le repli n'est pas une commodité, c'est la correction d'un défaut
-    /// rencontré : ce fichier atterrissait dans le répertoire des identifiants
+    /// rencontré : ce fichier atterrissait in_dir le répertoire des identifiants
     /// **persistés** (`/etc/ritornello/media-credentials`), qui n'existe pas en
     /// développement et qu'un utilisateur ordinaire ne peut pas créer. Le
     /// symptôme était trompeur au possible — « smbclient: Permission denied
@@ -269,23 +269,23 @@ impl FichierAuth {
     /// droits SMB là où il n'y en avait aucun.
     ///
     /// La sûreté ne vient pas du répertoire mais du **mode 0600 posé à la
-    /// création** : un fichier ainsi ouvert dans `/tmp` n'est pas plus lisible
+    /// création** : un fichier ainsi ouvert in_dir `/tmp` n'est pas plus lisible
     /// qu'ailleurs. Et il disparaît à la libération.
-    fn creer(dir: &Path, creds: &Credentials) -> std::io::Result<Self> {
-        match Self::creer_dans(dir, creds) {
+    fn create(dir: &Path, creds: &Credentials) -> std::io::Result<Self> {
+        match Self::create_in(dir, creds) {
             Ok(f) => Ok(f),
             Err(e) => {
                 tracing::debug!("{} is not writable ({e}): falling back to the temp dir", dir.display());
-                Self::creer_dans(&std::env::temp_dir(), creds)
+                Self::create_in(&std::env::temp_dir(), creds)
             }
         }
     }
 
-    fn creer_dans(dir: &Path, creds: &Credentials) -> std::io::Result<Self> {
-        static COMPTEUR: AtomicU64 = AtomicU64::new(0);
+    fn create_in(dir: &Path, creds: &Credentials) -> std::io::Result<Self> {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         std::fs::create_dir_all(dir)?;
-        let n = COMPTEUR.fetch_add(1, Ordering::Relaxed);
-        let chemin = dir.join(format!(".explore-{}-{n}.auth", std::process::id()));
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!(".explore-{}-{n}.auth", std::process::id()));
         #[cfg(unix)]
         let mut f = {
             use std::os::unix::fs::OpenOptionsExt;
@@ -293,10 +293,10 @@ impl FichierAuth {
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
-                .open(&chemin)?
+                .open(&path)?
         };
         #[cfg(not(unix))]
-        let mut f = std::fs::File::create(&chemin)?;
+        let mut f = std::fs::File::create(&path)?;
         use std::io::Write;
         writeln!(f, "username={}", creds.user)?;
         writeln!(f, "password={}", creds.password)?;
@@ -304,15 +304,15 @@ impl FichierAuth {
             writeln!(f, "domain={}", creds.domain)?;
         }
         f.sync_all()?;
-        Ok(Self(chemin))
+        Ok(Self(path))
     }
 
-    fn chemin(&self) -> &Path {
+    fn path(&self) -> &Path {
         &self.0
     }
 }
 
-impl Drop for FichierAuth {
+impl Drop for AuthFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
@@ -337,9 +337,9 @@ pub async fn available() -> bool {
 ///
 /// Le délai est tenu ici, par `tokio`, et non par le `-t` de `smbclient` : sa
 /// présence et sa sémantique varient selon les versions, là où tuer le
-/// processus est vrai partout. Sans ce plafond, un NAS éteint retiendrait la
+/// processus est vrai partout. Sans ce cap, un NAS éteint retiendrait la
 /// tâche bien au-delà de ce que la page attend.
-async fn lancer(args: &[String], delai: Duration) -> Result<(String, String, bool), SmbError> {
+async fn run(args: &[String], timeout: Duration) -> Result<(String, String, bool), SmbError> {
     let enfant = tokio::process::Command::new(SMBCLIENT)
         .args(args)
         .stdout(std::process::Stdio::piped())
@@ -353,13 +353,13 @@ async fn lancer(args: &[String], delai: Duration) -> Result<(String, String, boo
                 SmbError::Other(e.to_string())
             }
         })?;
-    let sortie = match tokio::time::timeout(delai, enfant.wait_with_output()).await {
+    let sortie = match tokio::time::timeout(timeout, enfant.wait_with_output()).await {
         Ok(r) => r.map_err(|e| SmbError::Other(e.to_string()))?,
         Err(_) => return Err(SmbError::Timeout),
     };
     let out = String::from_utf8_lossy(&sortie.stdout).to_string();
     let err = String::from_utf8_lossy(&sortie.stderr).to_string();
-    // Les deux flux réunis pour le classement : mesuré sur samba 4.19.5, le
+    // Les deux stream réunis pour le classement : mesuré sur samba 4.19.5, le
     // refus d'authentification part sur stdout et le refus de connexion sur
     // stderr.
     let reunies = format!("{out}\n{err}");
@@ -368,19 +368,19 @@ async fn lancer(args: &[String], delai: Duration) -> Result<(String, String, boo
 
 /// Arguments d'authentification : fichier, ou tentative invité.
 ///
-/// Utilisateur vide → `-N`. Beaucoup de NAS domestiques exposent un partage
+/// Utilisateur clear → `-N`. Beaucoup de NAS domestiques exposent un partage
 /// public, et exiger un compte les rendrait inaccessibles.
-fn args_auth(auth: &Option<FichierAuth>) -> Vec<String> {
+fn args_auth(auth: &Option<AuthFile>) -> Vec<String> {
     match auth {
-        Some(f) => vec!["-A".to_string(), f.chemin().display().to_string()],
+        Some(f) => vec!["-A".to_string(), f.path().display().to_string()],
         None => vec!["-N".to_string()],
     }
 }
 
-fn prepare_auth(creds: Option<&Credentials>, dir: &Path) -> Result<Option<FichierAuth>, SmbError> {
+fn prepare_auth(creds: Option<&Credentials>, dir: &Path) -> Result<Option<AuthFile>, SmbError> {
     match creds {
         Some(c) if !c.user.is_empty() => {
-            Some(FichierAuth::creer(dir, c).map_err(|e| SmbError::Other(e.to_string()))).transpose()
+            Some(AuthFile::create(dir, c).map_err(|e| SmbError::Other(e.to_string()))).transpose()
         }
         _ => Ok(None),
     }
@@ -390,16 +390,16 @@ fn prepare_auth(creds: Option<&Credentials>, dir: &Path) -> Result<Option<Fichie
 pub async fn list_shares(
     host: &str,
     creds: Option<&Credentials>,
-    dir_travail: &Path,
-    delai: Duration,
+    work_dir: &Path,
+    timeout: Duration,
 ) -> Result<Vec<String>, SmbError> {
-    if !argument_sur(host) {
+    if !argument_on(host) {
         return Err(SmbError::Other(format!("invalid host: {host}")));
     }
-    let auth = prepare_auth(creds, dir_travail)?;
+    let auth = prepare_auth(creds, work_dir)?;
     let mut args = vec!["-L".to_string(), format!("//{host}"), "-g".to_string()];
     args.extend(args_auth(&auth));
-    let (out, reunies, ok) = lancer(&args, delai).await?;
+    let (out, reunies, ok) = run(&args, timeout).await?;
     if !ok {
         return Err(classify(&reunies));
     }
@@ -409,31 +409,31 @@ pub async fn list_shares(
 /// Liste un dossier d'un partage.
 ///
 /// Le répertoire de départ passe par `-D` plutôt que par un `cd "…"` glissé
-/// dans la chaîne `-c` : un nom contenant un guillemet casserait l'analyse que
+/// in_dir la chaîne `-c` : un name contenant un guillemet casserait l'analyse que
 /// `smbclient` fait de sa propre commande.
 pub async fn list_dir(
     host: &str,
     share: &str,
     path: &str,
     creds: Option<&Credentials>,
-    dir_travail: &Path,
-    delai: Duration,
+    work_dir: &Path,
+    timeout: Duration,
 ) -> Result<Vec<SmbEntry>, SmbError> {
-    if !argument_sur(host) {
+    if !argument_on(host) {
         return Err(SmbError::Other(format!("invalid host: {host}")));
     }
-    if !argument_sur(share) {
+    if !argument_on(share) {
         return Err(SmbError::Other(format!("invalid share: {share}")));
     }
     let depart = if path.is_empty() { "/".to_string() } else { format!("/{path}") };
     if depart.starts_with('-') || depart.contains('\0') || depart.contains("..") {
         return Err(SmbError::Other(format!("invalid path: {path}")));
     }
-    let auth = prepare_auth(creds, dir_travail)?;
+    let auth = prepare_auth(creds, work_dir)?;
     let mut args =
         vec![format!("//{host}/{share}"), "-D".to_string(), depart, "-c".to_string(), "ls".to_string()];
     args.extend(args_auth(&auth));
-    let (out, reunies, ok) = lancer(&args, delai).await?;
+    let (out, reunies, ok) = run(&args, timeout).await?;
     if !ok {
         return Err(classify(&reunies));
     }
@@ -450,7 +450,7 @@ mod tests {
     /// Synology réel.
     ///
     /// Deux détails qu'on n'aurait pas inventés : le partage administratif
-    /// porte le type `IPC|` et non `Disk|`, et une ligne de bruit termine la
+    /// porte le type `IPC|` et non `Disk|`, et une line de bruit terminate la
     /// sortie sans empêcher un code de retour nul.
     const SHARES: &str = "\
 Disk|book|eBooks
@@ -464,10 +464,10 @@ SMB1 disabled -- no workgroup available
 
     /// Sortie **captée** de `smbclient //hôte/music -D / -c ls`.
     ///
-    /// Les colonnes sont alignées par des espaces : le nom peut donc en
+    /// Les colonnes sont alignées par des espaces : le name peut donc en
     /// contenir, et l'analyse doit se faire **par la droite**. Les attributs
     /// tiennent sur une ou deux lettres. La dernière entrée est le cas qui
-    /// justifie tout : espaces, apostrophe, accents et tiret dans un seul nom.
+    /// justifie tout : espaces, apostrophe, accents et tiret in_dir un seul name.
     const LS: &str = "\
   .                                  DA        0  Fri Apr 17 14:46:30 2026
   ..                                  D        0  Sun Aug 16 16:23:48 2026
@@ -482,13 +482,13 @@ SMB1 disabled -- no workgroup available
 \t\t102400 blocks of size 1024. 102380 blocks available
 ";
 
-    fn catalogue() -> Catalog {
+    fn sources_catalog() -> Catalog {
         Catalog::load("files", "en", Path::new("/inexistant"), crate::FILES_EN)
     }
 
     #[test]
     fn les_partages_administratifs_sont_ecartes() {
-        // Le NAS annonce `IPC$` avec le type `IPC|`, pas `Disk|` : le préfixe
+        // Le NAS announcement `IPC$` avec le type `IPC|`, pas `Disk|` : le préfixe
         // l'écarte donc déjà. Le filtre sur `$` reste la ceinture, pour un
         // serveur qui n'aurait pas cette délicatesse.
         assert_eq!(parse_shares(SHARES), vec!["book", "downloads", "home", "music", "photo"]);
@@ -496,7 +496,7 @@ SMB1 disabled -- no workgroup available
 
     #[test]
     fn la_ligne_de_bruit_finale_nest_pas_un_partage() {
-        // « SMB1 disabled -- no workgroup available » termine la sortie d'un
+        // « SMB1 disabled -- no workgroup available » terminate la sortie d'un
         // NAS moderne sans empêcher un code de retour nul.
         assert!(!parse_shares(SHARES).iter().any(|s| s.contains("SMB1")));
     }
@@ -510,21 +510,21 @@ SMB1 disabled -- no workgroup available
     #[test]
     fn un_nom_a_espaces_survit_a_l_analyse() {
         // LE piège du format `ls` : les colonnes sont alignées par des espaces.
-        // Lire par la gauche casserait sur presque tous les noms d'albums —
+        // Lire par la gauche casserait sur presque all les names d'albums —
         // ceux-ci sont réels.
         let e = parse_ls(LS).unwrap();
-        let noms: Vec<&str> = e.iter().map(|x| x.name.as_str()).collect();
-        assert!(noms.contains(&"Within Temptation"), "{noms:?}");
-        assert!(noms.contains(&"Eagles Of Death Metal"), "{noms:?}");
-        // Espaces, apostrophe, accents et tiret dans un seul nom : le cas qui
+        let names: Vec<&str> = e.iter().map(|x| x.name.as_str()).collect();
+        assert!(names.contains(&"Within Temptation"), "{names:?}");
+        assert!(names.contains(&"Eagles Of Death Metal"), "{names:?}");
+        // Espaces, apostrophe, accents et tiret in_dir un seul name : le cas qui
         // condamne l'analyse par la gauche autant que le `cd "…"` cité.
-        assert!(noms.contains(&"Le fabuleux Destin d'Amélie Poulain - BO"), "{noms:?}");
+        assert!(names.contains(&"Le fabuleux Destin d'Amélie Poulain - BO"), "{names:?}");
     }
 
     #[test]
     fn un_jour_du_mois_sur_un_chiffre_ne_decale_pas_le_decoupage() {
         // « Fri Feb  7 » porte deux espaces là où « Fri Feb 17 » n'en a qu'un.
-        // Compter les mots sans retrimer décalerait le nom d'une colonne.
+        // Compter les mots sans retrimer décalerait le name d'une colonne.
         let e = parse_ls(LS).unwrap();
         assert!(e.iter().any(|x| x.name == "Eagles Of Death Metal"));
     }
@@ -544,31 +544,31 @@ SMB1 disabled -- no workgroup available
         // `.` et `..` feraient tourner l'arbre en rond ; les entrées cachées
         // sont écartées comme le fait déjà `scan::list_dir`, pour que les deux
         // arbres se ressemblent.
-        let noms: Vec<String> = parse_ls(LS).unwrap().into_iter().map(|x| x.name).collect();
-        assert!(!noms.iter().any(|n| n == "." || n == ".." || n == ".cache"), "{noms:?}");
+        let names: Vec<String> = parse_ls(LS).unwrap().into_iter().map(|x| x.name).collect();
+        assert!(!names.iter().any(|n| n == "." || n == ".." || n == ".cache"), "{names:?}");
     }
 
     #[test]
     fn le_pied_de_sortie_nest_pas_une_entree() {
-        let noms: Vec<String> = parse_ls(LS).unwrap().into_iter().map(|x| x.name).collect();
-        assert!(!noms.iter().any(|n| n.contains("blocks")), "{noms:?}");
+        let names: Vec<String> = parse_ls(LS).unwrap().into_iter().map(|x| x.name).collect();
+        assert!(!names.iter().any(|n| n.contains("blocks")), "{names:?}");
     }
 
     #[test]
     fn un_dossier_vide_rend_une_liste_vide_sans_erreur() {
-        // Un vrai dossier vide ne contient que `.` et `..` : il doit se
+        // Un vrai dossier clear ne contains que `.` et `..` : il doit se
         // distinguer d'une sortie inanalysable.
-        let vide = "  .    D    0  Mon Aug 11 20:12:33 2025\n  ..   D    0  Mon Aug 11 20:12:33 2025\n";
-        assert_eq!(parse_ls(vide).unwrap(), vec![]);
+        let clear = "  .    D    0  Mon Aug 11 20:12:33 2025\n  ..   D    0  Mon Aug 11 20:12:33 2025\n";
+        assert_eq!(parse_ls(clear).unwrap(), vec![]);
         assert_eq!(parse_ls("").unwrap(), vec![]);
     }
 
     #[test]
     fn une_sortie_non_vide_mais_inanalysable_est_une_erreur_et_non_un_dossier_vide() {
         // La décision qui compte. Si une version future change de format, un
-        // dossier plein s'afficherait vide et l'utilisateur conclurait que son
+        // dossier plein s'afficherait clear et l'utilisateur conclurait que son
         // NAS a perdu sa musique. Mieux vaut un refus qui nomme le problème.
-        let err = parse_ls("quelque chose d'inattendu\nsur deux lignes\n").unwrap_err();
+        let err = parse_ls("quelque chose d'inattendu\nsur deux lines\n").unwrap_err();
         assert!(matches!(err, SmbError::UnreadableOutput(_)), "{err:?}");
     }
 
@@ -597,8 +597,8 @@ SMB1 disabled -- no workgroup available
     fn un_dossier_absent_nest_pas_un_hote_injoignable() {
         // Le piège que la mesure a démasqué. Le NAS rend
         // NT_STATUS_OBJECT_NAME_NOT_FOUND pour un dossier qui n'existe pas ;
-        // le ranger avec les échecs de connexion ferait lire « la machine n'a
-        // pas répondu » devant un simple chemin périmé — et l'utilisateur
+        // le ranger avec les échecs de connexion ferait read « la machine n'a
+        // pas répondu » devant un simple path périmé — et l'utilisateur
         // irait vérifier son réseau au lieu de son arborescence.
         assert_eq!(
             classify("cd \\NExistePas\\: NT_STATUS_OBJECT_NAME_NOT_FOUND"),
@@ -623,7 +623,7 @@ SMB1 disabled -- no workgroup available
     fn chaque_refus_resout_contre_le_catalogue_embarque() {
         // `Catalog::get` rend la clé quand il ne la trouve pas : sans ce test,
         // une faute de frappe afficherait « smb_bad_credentials » à l'écran.
-        let c = catalogue();
+        let c = sources_catalog();
         for e in [
             SmbError::NotInstalled,
             SmbError::BadCredentials,
@@ -634,7 +634,7 @@ SMB1 disabled -- no workgroup available
             SmbError::UnreadableOutput("brut".into()),
         ] {
             let m = e.message(&c, "nas");
-            assert!(m.contains(' '), "cle brute renvoyee a l'ecran : {m:?}");
+            assert!(m.contains(' '), "key brute renvoyee a l'ecran : {m:?}");
             assert!(!m.contains('{'), "jeton laisse tel quel : {m:?}");
         }
         assert!(SmbError::Unreachable.message(&c, "nas").contains("nas"));
@@ -643,19 +643,19 @@ SMB1 disabled -- no workgroup available
     #[test]
     fn un_argument_qui_ressemble_a_une_option_est_refuse() {
         // `smbclient` lirait « -L » comme un drapeau. Un hôte nommé « -L » n'a
-        // aucun sens, mais il vient du navigateur : la ligne de commande ne doit
+        // aucun sens, mais il vient du navigateur : la line de commande ne doit
         // pas pouvoir être réécrite depuis le formulaire.
-        assert!(!argument_sur("-L"));
-        assert!(!argument_sur("--user=root"));
-        assert!(!argument_sur(""));
-        assert!(argument_sur("192.168.1.20"));
-        assert!(argument_sur("nas.local"));
+        assert!(!argument_on("-L"));
+        assert!(!argument_on("--user=root"));
+        assert!(!argument_on(""));
+        assert!(argument_on("192.168.1.20"));
+        assert!(argument_on("nas.local"));
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn le_fichier_d_authentification_est_en_0600_et_disparait() {
-        // Le mot de passe ne passe jamais par argv — il y serait lisible dans `ps`
+        // Le phrase de passe ne passe jamais par argv — il y serait lisible in_dir `ps`
         // par tout utilisateur de la machine. Les permissions sont posées à la
         // création, pas après : créer puis restreindre laisse une fenêtre.
         use std::os::unix::fs::PermissionsExt;
@@ -665,23 +665,23 @@ SMB1 disabled -- no workgroup available
             password: "secret-du-nas".into(),
             domain: String::new(),
         };
-        let chemin = {
-            let f = FichierAuth::creer(dir.path(), &creds).unwrap();
-            let meta = std::fs::metadata(f.chemin()).unwrap();
+        let path = {
+            let f = AuthFile::create(dir.path(), &creds).unwrap();
+            let meta = std::fs::metadata(f.path()).unwrap();
             assert_eq!(meta.permissions().mode() & 0o777, 0o600);
-            let contenu = std::fs::read_to_string(f.chemin()).unwrap();
+            let contenu = std::fs::read_to_string(f.path()).unwrap();
             assert!(contenu.contains("password=secret-du-nas"), "{contenu}");
-            f.chemin().to_path_buf()
+            f.path().to_path_buf()
         };
-        // Le fichier s'efface à la libération : un mot de passe ne doit pas
+        // Le fichier s'efface à la libération : un phrase de passe ne doit pas
         // survivre à l'appel qui l'a demandé.
-        assert!(!chemin.exists(), "le fichier d'authentification a survecu");
+        assert!(!path.exists(), "le fichier d'authentification a survecu");
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn un_repertoire_de_travail_non_inscriptible_ne_bloque_pas_l_assistant() {
-        // Le défaut rencontré, désormais épinglé. Ce fichier atterrissait dans
+        // Le défaut rencontré, désormais épinglé. Ce fichier atterrissait in_dir
         // le répertoire des identifiants *persistés*, sous /etc : inexistant en
         // développement et impossible à créer sans privilège. L'assistant
         // échouait alors sur « smbclient: Permission denied (os error 13) », un
@@ -689,7 +689,7 @@ SMB1 disabled -- no workgroup available
         // là où il n'y en avait aucun.
         //
         // Et le repli ne brade rien : le mode 0600 est posé à la création, un
-        // fichier ainsi ouvert dans le répertoire temporaire n'est pas plus
+        // fichier ainsi ouvert in_dir le répertoire temporaire n'est pas plus
         // lisible qu'ailleurs.
         use std::os::unix::fs::PermissionsExt;
         let creds = Credentials {
@@ -697,10 +697,10 @@ SMB1 disabled -- no workgroup available
             password: "secret-du-nas".into(),
             domain: String::new(),
         };
-        let f = FichierAuth::creer(Path::new("/proc/impossible/a/creer"), &creds)
+        let f = AuthFile::create(Path::new("/proc/impossible/a/create"), &creds)
             .expect("le repli doit permettre d'ecrire malgre tout");
-        assert_eq!(std::fs::metadata(f.chemin()).unwrap().permissions().mode() & 0o777, 0o600);
-        assert!(std::fs::read_to_string(f.chemin()).unwrap().contains("password=secret-du-nas"));
+        assert_eq!(std::fs::metadata(f.path()).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(std::fs::read_to_string(f.path()).unwrap().contains("password=secret-du-nas"));
     }
 
     #[tokio::test]

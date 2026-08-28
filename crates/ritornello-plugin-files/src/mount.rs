@@ -1,19 +1,19 @@
 //! Dialogue avec systemd pour monter et démonter les partages déclarés.
 //!
 //! Le plugin ne monte rien lui-même : le service tourne en
-//! `NoNewPrivileges=true`, `sudo` et tout chemin setuid sont donc
-//! structurellement hors d'atteinte. Il demande à systemd de lancer une unité
+//! `NoNewPrivileges=true`, `sudo` et tout path setuid sont donc
+//! structurellement hors d'atteinte. Il demande à systemd de run une unité
 //! fixe, `ritornello-media-mount.service`, qu'une règle polkit l'autorise à
 //! démarrer — et elle seule (`deploy/51-ritornello-media.rules`).
 //!
-//! Ce module ne sait que deux choses : dire si une racine est montée (lecture
+//! Ce module ne sait que deux choses : dire si une racine est montée (playback
 //! de `/proc/mounts`), et demander la réconciliation. Ce qui est réellement
 //! monté, et avec quelles options, se décide du côté privilégié.
 
 use crate::roots::{Root, RootKind};
 use std::path::{Path, PathBuf};
 
-/// L'unité que le plugin démarre. Fixe : c'est aussi le nom que la règle
+/// L'unité que le plugin démarre. Fixe : c'est aussi le name que la règle
 /// polkit compare, une unité paramétrable serait une autorisation ouverte.
 pub const UNIT: &str = "ritornello-media-mount.service";
 
@@ -36,25 +36,25 @@ pub enum MountState {
 /// déclaration ratée repose désormais sur leur égalité — une divergence
 /// dé-déclarerait silencieusement un partage sain.
 ///
-/// Ce n'est pas `Root::base_dir()`, qui y ajoute le sous-chemin déclaré. Le
-/// sous-chemin est parcouru *sous* le point monté et n'apparaît jamais dans
+/// Ce n'est pas `Root::base_dir()`, qui y add le sous-path déclaré. Le
+/// sous-path est parcouru *sous* le point monté et n'apparaît jamais in_dir
 /// `/proc/mounts` : le confondre avec le point de montage ferait passer une
-/// racine à sous-chemin pour éternellement non montée.
-fn point_de_montage(root: &Root) -> PathBuf {
+/// racine à sous-path pour éternellement non montée.
+fn mount_point(root: &Root) -> PathBuf {
     root.mount_point()
 }
 
-/// Vrai si `point` figure comme point de montage dans le contenu de
+/// Vrai si `point` figure comme point de montage in_dir le contenu de
 /// `/proc/mounts`.
 ///
-/// Pure — elle prend le texte plutôt que de le lire — pour être testable sans
+/// Pure — elle prend le texte plutôt que de le read — pour être testable sans
 /// rien monter, ce qu'un test ne peut de toute façon pas faire sans privilège.
 ///
 /// La deuxième colonne échappe l'espace en `\040` (et la tabulation en
-/// `\011`) : sans ce traitement, un partage monté sous un nom contenant un
+/// `\011`) : sans ce traitement, un partage monté sous un name contenant un
 /// espace passerait pour non monté, et le plugin le remonterait en boucle.
-pub fn est_monte_dans(proc_mounts: &str, point: &Path) -> bool {
-    points_de_montage(proc_mounts).any(|p| p == point)
+pub fn is_mounted_in(proc_mounts: &str, point: &Path) -> bool {
+    mount_points(proc_mounts).any(|p| p == point)
 }
 
 /// Tous les points de montage déclarés, déséchappés.
@@ -63,10 +63,10 @@ pub fn est_monte_dans(proc_mounts: &str, point: &Path) -> bool {
 /// implémentation** : le binaire racine de montage doit lui aussi énumérer ce
 /// qui est monté, pour démonter ce qui n'est plus déclaré. Deux copies de cette
 /// règle, c'était une divergence en puissance — l'une traitant `\011` et pas
-/// l'autre, par exemple, avec un défaut visible seulement sur un nom rare.
-pub fn points_de_montage(proc_mounts: &str) -> impl Iterator<Item = PathBuf> + '_ {
-    proc_mounts.lines().filter_map(|ligne| {
-        ligne
+/// l'autre, par exemple, avec un défaut visible seulement sur un name rare.
+pub fn mount_points(proc_mounts: &str) -> impl Iterator<Item = PathBuf> + '_ {
+    proc_mounts.lines().filter_map(|line| {
+        line
             .split_whitespace()
             .nth(1)
             .map(|p| PathBuf::from(p.replace("\\040", " ").replace("\\011", "\t")))
@@ -85,13 +85,13 @@ pub fn state(root: &Root) -> MountState {
     if root.kind == RootKind::Local {
         return MountState::Mounted;
     }
-    // Par `volumes::lire_proc_mounts` et non par un `read_to_string` en dur :
-    // c'est le seul lecteur de cette table, il honore
+    // Par `volumes::read_proc_mounts` et non par un `read_to_string` en dur :
+    // c'est le seul player de cette table, il honore
     // `RITORNELLO_FILES_PROC_MOUNTS`, et c'est ce qui rend le retour arrière
     // d'une déclaration ratée vérifiable sans monter quoi que ce soit. Une
-    // table illisible rend la chaîne vide, donc `NotMounted` : ne pas savoir,
+    // table illisible rend la chaîne clear, donc `NotMounted` : ne pas savoir,
     // c'est ne pas pouvoir promettre que le partage est là.
-    if est_monte_dans(&crate::volumes::lire_proc_mounts(), &point_de_montage(root)) {
+    if is_mounted_in(&crate::volumes::read_proc_mounts(), &mount_point(root)) {
         MountState::Mounted
     } else {
         MountState::NotMounted
@@ -103,9 +103,9 @@ pub fn state(root: &Root) -> MountState {
 /// Verbatim parce qu'un refus polkit y est explicite et actionnable
 /// (« Interactive authentication required », qui désigne la règle manquante),
 /// là où une phrase maison la rendrait opaque. Le repli sur le code de sortie
-/// ne sert qu'au cas où `systemctl` échoue sans rien écrire : une erreur vide
+/// ne sert qu'au cas où `systemctl` échoue sans rien écrire : une erreur clear
 /// serait affichée comme un succès silencieux.
-fn echec(status: std::process::ExitStatus, stderr: &[u8]) -> String {
+fn failure(status: std::process::ExitStatus, stderr: &[u8]) -> String {
     let err = String::from_utf8_lossy(stderr).trim().to_string();
     if err.is_empty() {
         format!("systemctl failed ({status})")
@@ -116,7 +116,7 @@ fn echec(status: std::process::ExitStatus, stderr: &[u8]) -> String {
 
 /// Demande à systemd de réconcilier les montages.
 ///
-/// `systemctl` en processus fils, et non une crate D-Bus : c'est ainsi que
+/// `systemctl` en processus children, et non une crate D-Bus : c'est ainsi que
 /// l'onglet Système parle à systemd et à logind (`crates/ritornello-core/src/
 /// system.rs`), et cela évite de tirer une dépendance entière pour un appel.
 ///
@@ -135,14 +135,14 @@ pub async fn reconcile(unit: &str) -> Result<(), String> {
     if sortie.status.success() {
         return Ok(());
     }
-    Err(echec(sortie.status, &sortie.stderr))
+    Err(failure(sortie.status, &sortie.stderr))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Deux lignes réelles : un partage cifs monté par le binaire racine, et un
+    /// Deux lines réelles : un partage cifs monté par le binaire racine, et un
     /// montage étranger qui doit rester sans effet sur la réponse.
     const PROC_MOUNTS_EXEMPLE: &str =
         "//192.168.1.20/musique /mnt/ritornello/nas cifs ro,relatime 0 0\n\
@@ -166,8 +166,8 @@ mod tests {
     fn un_point_de_montage_absent_de_proc_mounts_est_non_monte() {
         // L'analyse de /proc/mounts est pure : le test n'a besoin de monter
         // quoi que ce soit, ce qu'il ne pourrait pas faire sans privilège.
-        assert!(est_monte_dans(PROC_MOUNTS_EXEMPLE, Path::new("/mnt/ritornello/nas")));
-        assert!(!est_monte_dans(PROC_MOUNTS_EXEMPLE, Path::new("/mnt/ritornello/autre")));
+        assert!(is_mounted_in(PROC_MOUNTS_EXEMPLE, Path::new("/mnt/ritornello/nas")));
+        assert!(!is_mounted_in(PROC_MOUNTS_EXEMPLE, Path::new("/mnt/ritornello/autre")));
     }
 
     #[test]
@@ -176,24 +176,24 @@ mod tests {
         // « ma musique » passerait pour non monté, et le plugin le remonterait
         // à chaque coup d'œil — une boucle de montage silencieuse.
         let contenu = "//nas/x /mnt/ritornello/ma\\040musique cifs ro 0 0\n";
-        assert!(est_monte_dans(contenu, Path::new("/mnt/ritornello/ma musique")));
+        assert!(is_mounted_in(contenu, Path::new("/mnt/ritornello/ma musique")));
     }
 
     #[test]
     fn une_tabulation_echappee_est_reconnue_aussi() {
         // Même mécanisme, autre échappement : \011 est la tabulation. Le
-        // traiter à moitié laisserait le même défaut sur un nom plus rare.
+        // traiter à moitié laisserait le même défaut sur un name plus rare.
         let contenu = "//nas/x /mnt/ritornello/ma\\011musique cifs ro 0 0\n";
-        assert!(est_monte_dans(contenu, Path::new("/mnt/ritornello/ma\tmusique")));
+        assert!(is_mounted_in(contenu, Path::new("/mnt/ritornello/ma\tmusique")));
     }
 
     #[test]
     fn le_peripherique_source_ne_se_confond_pas_avec_le_point_de_montage() {
         // La première colonne est la source, la deuxième le point de montage.
         // Chercher n'importe quelle colonne ferait passer pour montée une
-        // racine dont seul le nom apparaît ailleurs dans la ligne.
+        // racine dont seul le name apparaît ailleurs in_dir la line.
         let contenu = "/mnt/ritornello/nas /mnt/autre none bind 0 0\n";
-        assert!(!est_monte_dans(contenu, Path::new("/mnt/ritornello/nas")));
+        assert!(!is_mounted_in(contenu, Path::new("/mnt/ritornello/nas")));
     }
 
     #[test]
@@ -212,12 +212,12 @@ mod tests {
 
     #[test]
     fn le_sous_chemin_nentre_pas_dans_le_point_de_montage() {
-        // `base_dir()` ajoute le sous-chemin parcouru ; /proc/mounts ne connaît
+        // `base_dir()` add le sous-path parcouru ; /proc/mounts ne connaît
         // que le point monté. Les confondre ferait passer toute racine à
-        // sous-chemin pour non montée, donc remontée sans fin.
+        // sous-path pour non montée, donc remontée sans fin.
         let r = Root { subpath: Some("Albums".into()), ..racine_smb() };
-        assert_eq!(point_de_montage(&r), PathBuf::from("/mnt/ritornello/nas"));
-        assert!(est_monte_dans(PROC_MOUNTS_EXEMPLE, &point_de_montage(&r)));
+        assert_eq!(mount_point(&r), PathBuf::from("/mnt/ritornello/nas"));
+        assert!(is_mounted_in(PROC_MOUNTS_EXEMPLE, &mount_point(&r)));
     }
 
     #[test]
@@ -227,7 +227,7 @@ mod tests {
         let refus = b"Failed to start ritornello-media-mount.service: Interactive authentication required.";
         let sortie = std::process::Command::new("false").output().unwrap();
         assert_eq!(
-            echec(sortie.status, refus),
+            failure(sortie.status, refus),
             "Failed to start ritornello-media-mount.service: Interactive authentication required."
         );
     }
@@ -235,9 +235,9 @@ mod tests {
     #[test]
     fn un_echec_muet_reste_un_message_non_vide() {
         // Un `systemctl` qui échoue sans rien écrire donnerait sinon une erreur
-        // vide, que la page afficherait comme un succès silencieux.
+        // clear, que la page afficherait comme un succès silencieux.
         let sortie = std::process::Command::new("false").output().unwrap();
-        let m = echec(sortie.status, b"   \n");
+        let m = failure(sortie.status, b"   \n");
         assert!(m.contains("systemctl failed"), "{m:?}");
     }
 }

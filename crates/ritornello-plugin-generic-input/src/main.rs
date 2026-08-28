@@ -28,7 +28,7 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-/// Moitié Input : consomme le mpsc alimenté par toutes les tâches de lecture
+/// Moitié Input : consomme le mpsc alimenté par toutes les tâches de playback
 /// evdev, quel que soit le périphérique d'origine.
 struct EvdevInput {
     rx: mpsc::Receiver<InputMessage>,
@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
     let presets_root =
         PathBuf::from(env_or("RITORNELLO_INPUT_PRESETS", "/etc/ritornello/input-presets"));
     let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
-    // Un plugin Input ne reçoit pas de `SetLocale` (le protocole ne le prévoit
+    // Un plugin Input ne reçoit pas de `SetLocale` (le protocol ne le prévoit
     // que pour les sources) : la langue de la page vient de l'environnement.
     let locale = env_or("RITORNELLO_LOCALE", "en");
     let catalog = Arc::new(RwLock::new(Catalog::load(
@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
     // Les deux moitiés restent indépendantes : une panne de la page ne doit
     // pas couper la télécommande. C'est `Runtime::run` qui les tient
     // désormais, chacune dans sa tâche — la page n'est plus conditionnelle,
-    // puisque le greffon annonce lui-même qu'il en a une.
+    // puisque le greffon announcement lui-même qu'il en a une.
     let admin = GenericInputAdmin { bindings_path, presets_root, input_root, hub, catalog };
     Runtime::from_args()?.input(EvdevInput { rx })?.admin(admin)?.run().await
 }
@@ -93,7 +93,7 @@ mod tests {
         // le plugin sortait aussitôt en exit 0 — la closure du `.map(...)`
         // qui construisait la moitié admin capturait le hub même sans être
         // appelée, et le lâchait ; or le hub tient l'émetteur du canal des
-        // commandes. Le contrat que `main` doit tenir est celui-ci : tant
+        // commands. Le contrat que `main` doit tenir est celui-ci : tant
         // qu'un émetteur vit, `next_command` attend au lieu de se terminer.
         let (tx, rx) = mpsc::channel::<InputMessage>(4);
         let mut input = EvdevInput { rx };

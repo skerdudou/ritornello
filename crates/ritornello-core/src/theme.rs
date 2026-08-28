@@ -6,13 +6,13 @@ use axum::Json;
 use ritornello_i18n::Catalog;
 use serde::{Deserialize, Serialize};
 
-/// Preset par défaut de l'installation. Le cœur n'en connaît que le nom.
+/// Preset par défaut de l'installation. Le cœur n'en connaît que le name.
 pub const DEFAULT_THEME: &str = "northern-lights";
 /// Mode par défaut. Il n'existe **pas** de mode `system` : le défaut est
 /// explicite et persisté, comme la locale.
 pub const DEFAULT_MODE: &str = "light";
 
-const MAX_NOM: usize = 64;
+const MAX_NAME: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThemeState {
@@ -29,7 +29,7 @@ impl Default for ThemeState {
 /// Erreur de validation du thème. Suit le modèle de `ValidationError`
 /// (`ritornello-plugin-radio/src/config.rs`) : le texte utilisateur est
 /// produit à la frontière via `message(&Catalog)`, `Display` fournit une
-/// version anglaise pour les journaux.
+/// version anglaise pour les logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThemeError {
     UnknownMode { mode: String },
@@ -63,17 +63,17 @@ impl std::error::Error for ThemeError {}
 
 /// Valide la **forme** seulement : le cœur ne connaît pas la liste des 42
 /// presets (elle vit dans la SPA) et ne peut donc pas vérifier l'existence du
-/// preset demandé. Il vérifie en revanche que le nom est un identifiant
+/// preset demandé. Il vérifie en revanche que le name est un identifiant
 /// plausible — ce qui écarte au passage les valeurs qui n'auraient rien à
 /// faire dans un fichier d'état ou dans une page HTML.
 ///
-/// Fonction pure, sans catalogue : `theme_put` résout l'erreur rendue contre
+/// Fonction pure, sans sources_catalog : `theme_put` résout l'erreur rendue contre
 /// celui du cœur.
 pub fn validate(theme: &str, mode: &str) -> Result<(), ThemeError> {
     if mode != "light" && mode != "dark" {
         return Err(ThemeError::UnknownMode { mode: mode.to_string() });
     }
-    if theme.is_empty() || theme.len() > MAX_NOM {
+    if theme.is_empty() || theme.len() > MAX_NAME {
         return Err(ThemeError::InvalidNameLength);
     }
     if !theme.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
@@ -85,11 +85,11 @@ pub fn validate(theme: &str, mode: &str) -> Result<(), ThemeError> {
 /// État de thème au démarrage, à partir de ce que porte `state.json`, avec repli
 /// sur les défauts pour toute valeur invalide.
 ///
-/// `theme_put` validait déjà le chemin HTTP, mais `main.rs` relisait
+/// `theme_put` validait déjà le path HTTP, mais `main.rs` relisait
 /// `theme`/`mode` depuis `state.json` **sans revalider**. Un fichier d'état
 /// corrompu, édité à la main, ou écrit par une version antérieure, pouvait donc
-/// porter un nom de thème inconnu. L'échappement d'`inject_theme` rend
-/// l'injection inoffensive, mais un nom inconnu fait sortir `applyTheme`
+/// porter un name de thème inconnu. L'échappement d'`inject_theme` rend
+/// l'injection inoffensive, mais un name inconnu fait sortir `applyTheme`
 /// (`web/kit/src/themes/engine.ts`) sur son `console.warn` **sans poser une
 /// seule variable CSS** — et `theme.css` déclare `--color-background:
 /// var(--background)` sans valeur de repli, donc toutes les couleurs se
@@ -97,9 +97,9 @@ pub fn validate(theme: &str, mode: &str) -> Result<(), ThemeError> {
 ///
 /// Les deux champs sont jugés séparément : un mode invalide est inoffensif à
 /// l'affichage (le spread de `applyTheme` retombe sur `light`) et ne doit pas
-/// faire perdre un nom de thème par ailleurs valide, ni l'inverse.
+/// faire perdre un name de thème par ailleurs valide, ni l'inverse.
 pub fn from_persisted(theme: Option<&str>, mode: Option<&str>) -> ThemeState {
-    let mut etat = ThemeState {
+    let mut state = ThemeState {
         theme: theme.unwrap_or(DEFAULT_THEME).to_string(),
         mode: mode.unwrap_or(DEFAULT_MODE).to_string(),
     };
@@ -107,20 +107,20 @@ pub fn from_persisted(theme: Option<&str>, mode: Option<&str>) -> ThemeState {
     // neutralisant l'autre champ avec sa valeur par défaut, pour attribuer
     // l'erreur au bon champ.
     // Le log nomme la **valeur rejetée**, pas le message de `ThemeError` : ce
-    // message est destiné au lecteur d'un 422 et se résout contre le catalogue,
+    // message est destiné au player d'un 422 et se résout contre le sources_catalog,
     // donc dans la langue de l'appareil, alors que les logs sont en anglais.
-    // L'interpoler ici demanderait un catalogue que cette fonction pure n'a pas,
-    // et mêlerait deux langues dans une ligne de journal. La valeur fautive est
+    // L'interpoler ici demanderait un sources_catalog que cette fonction pure n'a pas,
+    // et mêlerait deux langues dans une line de journal. La valeur fautive est
     // de toute façon plus utile dans un journal que sa description.
-    if validate(&etat.theme, DEFAULT_MODE).is_err() {
-        tracing::warn!("invalid persisted theme {:?}, falling back to {DEFAULT_THEME}", etat.theme);
-        etat.theme = DEFAULT_THEME.to_string();
+    if validate(&state.theme, DEFAULT_MODE).is_err() {
+        tracing::warn!("invalid persisted theme {:?}, falling back to {DEFAULT_THEME}", state.theme);
+        state.theme = DEFAULT_THEME.to_string();
     }
-    if validate(DEFAULT_THEME, &etat.mode).is_err() {
-        tracing::warn!("invalid persisted mode {:?}, falling back to {DEFAULT_MODE}", etat.mode);
-        etat.mode = DEFAULT_MODE.to_string();
+    if validate(DEFAULT_THEME, &state.mode).is_err() {
+        tracing::warn!("invalid persisted mode {:?}, falling back to {DEFAULT_MODE}", state.mode);
+        state.mode = DEFAULT_MODE.to_string();
     }
-    etat
+    state
 }
 
 pub async fn theme_json(State(state): State<AppState>) -> Json<ThemeState> {
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn from_persisted_juge_les_deux_champs_separement() {
-        // Un mode invalide ne doit pas faire perdre un nom de theme valide...
+        // Un mode invalide ne doit pas faire perdre un name de theme valide...
         let e = from_persisted(Some("cyberpunk"), Some("system"));
         assert_eq!(e.theme, "cyberpunk");
         assert_eq!(e.mode, DEFAULT_MODE);
@@ -185,8 +185,8 @@ mod tests {
 
     #[test]
     fn un_state_json_portant_un_theme_invalide_se_charge_sur_les_defauts() {
-        // `theme_put` valide le chemin HTTP, mais `main.rs` relisait
-        // `theme`/`mode` depuis `state.json` sans revalider. Un nom de theme
+        // `theme_put` valide le path HTTP, mais `main.rs` relisait
+        // `theme`/`mode` depuis `state.json` sans revalider. Un name de theme
         // inconnu fait sortir `applyTheme` sur son `console.warn` SANS poser
         // une seule variable CSS, et `theme.css` n'a pas de valeur de repli :
         // l'IHM s'affiche entierement non themee.
@@ -200,18 +200,18 @@ mod tests {
         let persisted = crate::state::load(&path);
         // Le fichier est bien relu tel quel : c'est la validation qui corrige.
         assert_eq!(persisted.theme.as_deref(), Some("../../etc/passwd"));
-        let etat = from_persisted(persisted.theme.as_deref(), persisted.mode.as_deref());
-        assert_eq!(etat, ThemeState::default());
-        assert_eq!(etat.theme, DEFAULT_THEME);
-        assert_eq!(etat.mode, DEFAULT_MODE);
+        let state = from_persisted(persisted.theme.as_deref(), persisted.mode.as_deref());
+        assert_eq!(state, ThemeState::default());
+        assert_eq!(state.theme, DEFAULT_THEME);
+        assert_eq!(state.mode, DEFAULT_MODE);
     }
 
     #[test]
     fn le_coeur_valide_la_forme_du_nom_sans_connaitre_la_liste_des_presets() {
         // Un preset inconnu du coeur mais bien forme est accepte : la liste
         // des 42 presets vit dans la SPA, jamais ici.
-        assert!(validate("un-preset-ajoute-plus-tard", "light").is_ok());
-        // Formes refusees : vide, trop long, caracteres hors [a-z0-9-].
+        assert!(validate("un-preset-add-plus-tard", "light").is_ok());
+        // Formes refusees : clear, trop long, caracteres hors [a-z0-9-].
         assert!(validate("", "light").is_err());
         assert!(validate(&"a".repeat(65), "light").is_err());
         assert!(validate("Vercel", "light").is_err());

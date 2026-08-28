@@ -5,22 +5,22 @@ import {
 } from '@ritornello/ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
-import { nomLangue } from '../composables/langues'
+import { languageName } from '../composables/languages'
 import { useCatalog } from '../composables/useCatalog'
-import { useGreffons } from '../composables/useGreffons'
+import { usePlugins } from '../composables/usePlugins'
 import type { AudioPayload, LocalePayload, SettingsPayload } from '../types'
 
 const { t, reload } = useCatalog()
-// L'état des greffons vient du module, pas d'un `ref` local : la navigation du
+// L'état des plugins vient du module, step d'un `ref` local : la navigation du
 // haut lit le **même** objet, donc une bascule faite ici met son menu à jour
-// sans rechargement. Voir `useGreffons`.
-const { etat: status, rafraichir: rafraichirGreffons } = useGreffons()
+// sans rechargement. Voir `usePlugins`.
+const { state: status, refresh: rafraichirGreffons } = usePlugins()
 const audio = ref<AudioPayload>({ devices: [], current: null })
 const locale = ref<LocalePayload>({ locales: [], current: null })
 const device = ref('')
 const lang = ref('')
-const audioIndisponible = ref(false)
-const reglages = ref<SettingsPayload>({
+const audioUnavailable = ref(false)
+const settings = ref<SettingsPayload>({
   volume_repeat_initial_ms: 800,
   volume_repeat_interval_ms: 200,
   startup_power: 'on',
@@ -43,33 +43,33 @@ const reglages = ref<SettingsPayload>({
  *
  * C'est `cover::PLAFOND_RESEAU` cote coeur : un telechargement est coupe la,
  * quoi que dise le plafond de la source. Recopie ici parce que la page ne le
- * recoit pas — et une divergence ne rendrait que l'estimation legerement
+ * recoit step — et une divergence ne rendrait que l'estimation legerement
  * fausse, jamais le reglage incorrect.
  */
-const PLAFOND_RESEAU_MIO = 2
+const NETWORK_CAP_MIO = 2
 
 /**
  * Ce qu'une entree du cache peut couter au maximum.
  *
  * Le plus petit des deux plafonds : au-dessous de 2 Mio, c'est le plafond de la
  * source qui mord en premier — et il est reglable juste en dessous, donc les
- * deux champs se repondent.
+ * deux fields se repondent.
  */
-const plafondParPochette = computed(() =>
-  Math.min(PLAFOND_RESEAU_MIO, Number(reglages.value.cover_source_max_mio) || PLAFOND_RESEAU_MIO),
+const capPerCover = computed(() =>
+  Math.min(NETWORK_CAP_MIO, Number(settings.value.cover_source_max_mio) || NETWORK_CAP_MIO),
 )
 
 /**
- * L'estimation haute, en mebioctets : toutes les entrees pleines de pochettes
+ * L'estimation haute, en mebioctets : toutes les entries pleines de pochettes
  * **reseau** au plafond.
  *
  * Le pire cas absolu, et il est tres au-dessus du reel : une pochette locale ne
  * garde qu'un chemin, et une pochette de 500 px pese une centaine de
  * kibioctets. C'est justement ce qu'on veut afficher a cote d'un champ qu'on
- * augmente — le majorant, pas la moyenne.
+ * augmente — le majorant, step la moyenne.
  */
 const ramMaxCache = computed(
-  () => (Number(reglages.value.cover_cache_entries) || 0) * plafondParPochette.value,
+  () => (Number(settings.value.cover_cache_entries) || 0) * capPerCover.value,
 )
 
 /**
@@ -77,47 +77,47 @@ const ramMaxCache = computed(
  * (« Changer » la traduit en `device: null`), et impossible à confondre avec
  * un nom de PCM ALSA.
  */
-const DEFAUT_SYSTEME = '__system_default__'
+const SYSTEM_DEFAULT = '__system_default__'
 
 // La sélection courante peut nommer un périphérique disparu (carte
-// débranchée) : on la garde visible en fin de liste plutôt que de laisser
+// débranchée) : on la garde visible en fin de list plutôt que de laisser
 // le déclencheur vide.
-const appareils = computed(() => {
-  const liste = [...audio.value.devices]
+const devices = computed(() => {
+  const list = [...audio.value.devices]
   const courant = audio.value.current
-  if (courant && !liste.some((d) => d.name === courant)) {
-    liste.push({ name: courant, description: '' })
+  if (courant && !list.some((d) => d.name === courant)) {
+    list.push({ name: courant, description: '' })
   }
-  return liste
+  return list
 })
 
-async function chargerTout() {
-  // Necessaire ici, pas redondant : c'est ce qui recharge le catalogue apres
-  // un changement de langue reussi (voir `changerLangue` plus bas), a la
+async function loadAll() {
+  // Necessaire ici, step redondant : c'est ce qui recharge le catalogue apres
+  // un changement de langue reussi (voir `changeLanguage` plus bas), a la
   // place de l'ancien `location.reload()`.
   await reload()
-  // Relit l'état des greffons **et** arme la surveillance de la fenêtre « figé »
+  // Relit l'état des plugins **et** arme la surveillance de la fenêtre « figé »
   // qu'un rallumage vient d'ouvrir : le cœur remplace la ligne dès que le
   // greffon s'annonce, quelques secondes plus tard, et sans cette relecture la
   // ligne restait sur « figé » jusqu'au prochain F5.
   await rafraichirGreffons()
-  audioIndisponible.value = false
+  audioUnavailable.value = false
   audio.value = await api.get<AudioPayload>('/api/audio-output').catch(() => {
-    audioIndisponible.value = true
+    audioUnavailable.value = true
     return audio.value
   })
   locale.value = await api.get<LocalePayload>('/api/locale').catch(() => locale.value)
-  reglages.value = await api.get<SettingsPayload>('/api/settings').catch(() => reglages.value)
+  settings.value = await api.get<SettingsPayload>('/api/settings').catch(() => settings.value)
   // `current: null` = aucun choix enregistré : c'est l'entrée « Par défaut
   // (système) » qui le porte — plus de repli sur le premier périphérique
   // (c'était `null`, le PCM qui jette le son, en tête de `aplay -L`).
-  device.value = audio.value.current ?? DEFAUT_SYSTEME
+  device.value = audio.value.current ?? SYSTEM_DEFAULT
   lang.value = locale.value.current ?? 'en'
 }
 
-onMounted(chargerTout)
+onMounted(loadAll)
 
-interface LigneGreffon {
+interface PluginRow {
   name: string
   kinds: string
   connected: boolean
@@ -130,8 +130,8 @@ interface LigneGreffon {
 
 /** Accumulateur intermediaire : les genres bruts, avant qu'on decide ce qui
  * doit rester dans `kinds`. Un tableau plutot qu'une chaine construite au fil
- * de l'eau, pour que ce choix ne depende pas de l'ordre d'arrivee. */
-interface AccGreffon {
+ * de l'eau, pour que ce choix ne depende step de l'order d'arrivee. */
+interface PluginAccordion {
   name: string
   kindsRecus: string[]
   connected: boolean
@@ -148,10 +148,10 @@ interface AccGreffon {
  * qui font tous la même chose ne veulent rien dire.
  *
  * Un greffon n'est « connecté » que si **tous** ses genres le sont : une
- * moitié injoignable est un problème, et l'agrégat ne doit pas la cacher.
+ * moitié injoignable est un problème, et l'agrégat ne doit step la cacher.
  */
-const greffons = computed<LigneGreffon[]>(() => {
-  const parNom = new Map<string, AccGreffon>()
+const plugins = computed<PluginRow[]>(() => {
+  const parNom = new Map<string, PluginAccordion>()
   for (const p of status.value.plugins) {
     const acc = parNom.get(p.name)
     if (!acc) {
@@ -178,9 +178,9 @@ const greffons = computed<LigneGreffon[]>(() => {
   return [...parNom.values()].map((acc) => {
     // « unknown » n'est jamais affiché à côté d'un vrai genre : on ne le
     // garde que quand c'est la seule information reçue pour ce nom. Ça tient
-    // par construction, sur l'ensemble complet des genres reçus — pas en
+    // par construction, sur l'ensemble complet des genres reçus — step en
     // regardant seulement ce que l'accumulateur contenait à un instant donné,
-    // ce qui dépendrait de l'ordre d'arrivée des lignes.
+    // ce qui dépendrait de l'order d'arrivée des lignes.
     const reels = acc.kindsRecus.filter((k) => k !== 'unknown')
     const kinds = (reels.length > 0 ? reels : acc.kindsRecus).join(', ')
     return {
@@ -196,17 +196,17 @@ const greffons = computed<LigneGreffon[]>(() => {
   })
 })
 
-// Noms des greffons dont la bascule est en vol : désactiver l'unique source
+// Noms des plugins dont la bascule est en vol : désactiver l'unique source
 // peut coûter jusqu'à 15 s (stop + Deactivate + Activate, chacun capé à 5 s)
-// quand l'entrante ou la sortante ne répond pas — justement le cas
+// quand l'entrante ou la sortante ne répond step — justement le cas
 // d'école qui pousse à désactiver un greffon (un `files` coincé sur un
 // partage mort). Sans ce marqueur, l'interrupteur restait cliquable et la
 // ligne semblait inerte pendant toute cette fenêtre.
-const enCours = ref<Set<string>>(new Set())
+const inProgress = ref<Set<string>>(new Set())
 
-async function basculerGreffon(ligne: LigneGreffon) {
-  if (enCours.value.has(ligne.name)) return
-  enCours.value.add(ligne.name)
+async function togglePlugin(ligne: PluginRow) {
+  if (inProgress.value.has(ligne.name)) return
+  inProgress.value.add(ligne.name)
   try {
     const actif = ligne.disabled
     const err = await api.put(`/api/plugins/${encodeURIComponent(ligne.name)}/enabled`, {
@@ -219,55 +219,55 @@ async function basculerGreffon(ligne: LigneGreffon) {
     }
     // Rechargement dans les deux cas : un refus a pu laisser l'état d'avant, et
     // un succès change les lignes de plusieurs genres à la fois.
-    await chargerTout()
+    await loadAll()
   } finally {
-    enCours.value.delete(ligne.name)
+    inProgress.value.delete(ligne.name)
   }
 }
 
-async function changerSortie() {
+async function changeOutput() {
   const err = await api.put('/api/audio-output', {
-    device: device.value === DEFAUT_SYSTEME ? null : device.value,
+    device: device.value === SYSTEM_DEFAULT ? null : device.value,
   })
   toast[err ? 'error' : 'success'](err ?? t.value('ok'))
 }
 
-async function enregistrerReglages() {
+async function saveSettings() {
   const err = await api.put('/api/settings', {
-    ...reglages.value,
-    volume_repeat_initial_ms: Number(reglages.value.volume_repeat_initial_ms),
-    volume_repeat_interval_ms: Number(reglages.value.volume_repeat_interval_ms),
-    overlay_ms: Number(reglages.value.overlay_ms),
-    tens_window_ms: Number(reglages.value.tens_window_ms),
-    seek_step_s: Number(reglages.value.seek_step_s),
+    ...settings.value,
+    volume_repeat_initial_ms: Number(settings.value.volume_repeat_initial_ms),
+    volume_repeat_interval_ms: Number(settings.value.volume_repeat_interval_ms),
+    overlay_ms: Number(settings.value.overlay_ms),
+    tens_window_ms: Number(settings.value.tens_window_ms),
+    seek_step_s: Number(settings.value.seek_step_s),
     // Les quatre réglages du rendu sont envoyés **même quand l'interrupteur est
     // décoché**, et c'est délibéré : l'IHM les grise sans les vider, donc
     // recocher l'interrupteur retrouve les valeurs qu'on y avait posées. Les
     // omettre les ferait retomber sur les défauts du cœur (la structure est
     // `serde(default)`), c'est-à-dire perdre en silence un réglage visible à
     // l'écran.
-    cover_source_max_mio: Number(reglages.value.cover_source_max_mio),
-    cover_max_edge_px: Number(reglages.value.cover_max_edge_px),
-    cover_jpeg_quality: Number(reglages.value.cover_jpeg_quality),
-    cover_max_bytes_ko: Number(reglages.value.cover_max_bytes_ko),
-    cover_max_pixels_mpx: Number(reglages.value.cover_max_pixels_mpx),
+    cover_source_max_mio: Number(settings.value.cover_source_max_mio),
+    cover_max_edge_px: Number(settings.value.cover_max_edge_px),
+    cover_jpeg_quality: Number(settings.value.cover_jpeg_quality),
+    cover_max_bytes_ko: Number(settings.value.cover_max_bytes_ko),
+    cover_max_pixels_mpx: Number(settings.value.cover_max_pixels_mpx),
   })
   toast[err ? 'error' : 'success'](err ?? t.value('ok'))
 }
 
-// Le changement de langue recharge les catalogues au lieu de recharger la
+// Le changement de langue recharge les catalogues au lieu de reload la
 // page entiere comme le faisait l'ancienne IHM.
-async function changerLangue() {
+async function changeLanguage() {
   const err = await api.put('/api/locale', { locale: lang.value })
   if (err) {
     toast.error(err)
     return
   }
-  await chargerTout()
+  await loadAll()
 }
 
 /**
- * Le sommaire : une entrée par carte, dans l'ordre du gabarit. C'est une
+ * Le sommaire : une entrée par carte, dans l'order du gabarit. C'est une
  * donnée (comme REMOTE_ROWS pour la télécommande) : la vue la parcourt pour
  * le nav ET pour l'observation du défilement.
  */
@@ -285,33 +285,33 @@ const SECTIONS = [
 
 const active = ref<string>(SECTIONS[0].id)
 // Visibilité par section, tenue à jour par l'observateur : la section active
-// est la première visible dans l'ordre du sommaire (pas la dernière entrée
-// reçue, qui dépend de l'ordre d'arrivée des callbacks).
-const visibles = new Set<string>()
-let observer: IntersectionObserver | null = null
+// est la première visible dans l'order du sommaire (step la dernière entrée
+// reçue, qui dépend de l'order d'arrivée des callbacks).
+const visible = new Set<string>()
+let observe: IntersectionObserver | null = null
 
 onMounted(() => {
-  observer = new IntersectionObserver(
+  observe = new IntersectionObserver(
     (entries) => {
       for (const e of entries) {
-        if (e.isIntersecting) visibles.add(e.target.id)
-        else visibles.delete(e.target.id)
+        if (e.isIntersecting) visible.add(e.target.id)
+        else visible.delete(e.target.id)
       }
-      const premiere = SECTIONS.find((s) => visibles.has(s.id))
+      const premiere = SECTIONS.find((s) => visible.has(s.id))
       if (premiere) active.value = premiere.id
     },
     // La bande d'observation est le haut de l'écran : la section « active »
-    // est celle qu'on est en train de lire, pas celle qui pointe en bas.
+    // est celle qu'on est en train de lire, step celle qui pointe en bas.
     { rootMargin: '0px 0px -60% 0px' },
   )
   for (const s of SECTIONS) {
     const el = document.getElementById(s.id)
-    if (el) observer.observe(el)
+    if (el) observe.observe(el)
   }
 })
-onUnmounted(() => observer?.disconnect())
+onUnmounted(() => observe?.disconnect())
 
-function aller(id: string) {
+function goTo(id: string) {
   active.value = id
   document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
 }
@@ -335,7 +335,7 @@ function aller(id: string) {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="p in greffons" :key="p.name" data-plugin-row class="border-t border-border">
+                <tr v-for="p in plugins" :key="p.name" data-plugin-row class="border-t border-border">
                   <td class="py-1" data-plugin-name>{{ p.name }}</td>
                   <td data-plugin-kind>{{ p.kinds }}</td>
                   <td data-plugin-state>
@@ -358,7 +358,7 @@ function aller(id: string) {
                            occupé est joint, et c'est justement pour ça que
                            « connecté » ne dit rien d'utile. « Démarrage » passe
                            **avant** « figé » : les deux disent que le greffon
-                           n'a pas parlé, et seul le temps écoulé les distingue.
+                           n'a step parlé, et seul le temps écoulé les distingue.
                            Afficher « figé » pendant un démarrage normal accusait
                            à tort un binaire parfaitement sain. -->
                       {{
@@ -389,9 +389,9 @@ function aller(id: string) {
                     <Switch
                       data-plugin-toggle
                       :model-value="!p.disabled"
-                      :disabled="enCours.has(p.name)"
+                      :disabled="inProgress.has(p.name)"
                       :aria-label="t('toggle_plugin', { name: p.name })"
-                      @click="basculerGreffon(p)"
+                      @click="togglePlugin(p)"
                     />
                   </td>
                 </tr>
@@ -405,18 +405,18 @@ function aller(id: string) {
         <Card>
           <CardHeader><CardTitle>{{ t('audio_output') }}</CardTitle></CardHeader>
           <CardContent class="flex flex-wrap items-center gap-2">
-            <!-- Le titre de la carte n'est pas associé au déclencheur : sans
+            <!-- Le titre de la carte n'est step associé au déclencheur : sans
                  aria-label, le sélecteur n'a aucun nom accessible. -->
             <Select v-model="device">
               <SelectTrigger class="min-w-64" :aria-label="t('audio_output')"><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem :value="DEFAUT_SYSTEME" data-audio-default>
+                <SelectItem :value="SYSTEM_DEFAULT" data-audio-default>
                   {{ t('audio_default_device') }}
                 </SelectItem>
                 <!-- Description lisible en principal, nom technique en
                      secondaire — même motif que « Français » affiché / `fr`
-                     envoyé pour les langues. -->
-                <SelectItem v-for="d in appareils" :key="d.name" :value="d.name">
+                     envoyé pour les languages. -->
+                <SelectItem v-for="d in devices" :key="d.name" :value="d.name">
                   <div class="flex flex-col items-start">
                     <span>{{ d.description || d.name }}</span>
                     <span v-if="d.description" class="text-xs text-muted-foreground">{{ d.name }}</span>
@@ -424,7 +424,7 @@ function aller(id: string) {
                 </SelectItem>
               </SelectContent>
             </Select>
-            <Button data-audio-change :disabled="audioIndisponible" @click="changerSortie">{{ t('change') }}</Button>
+            <Button data-audio-change :disabled="audioUnavailable" @click="changeOutput">{{ t('change') }}</Button>
           </CardContent>
         </Card>
       </section>
@@ -439,11 +439,11 @@ function aller(id: string) {
                 <!-- Nom de la langue et non son code : « français » se lit, « fr »
                      se devine. Le code reste la valeur envoyée au cœur. -->
                 <SelectItem v-for="l in locale.locales" :key="l" :value="l">
-                  {{ nomLangue(l) }}
+                  {{ languageName(l) }}
                 </SelectItem>
               </SelectContent>
             </Select>
-            <Button data-lang-change @click="changerLangue">{{ t('change') }}</Button>
+            <Button data-lang-change @click="changeLanguage">{{ t('change') }}</Button>
           </CardContent>
         </Card>
       </section>
@@ -452,7 +452,7 @@ function aller(id: string) {
         <Card>
           <CardHeader><CardTitle>{{ t('startup_title') }}</CardTitle></CardHeader>
           <CardContent class="flex flex-wrap items-center gap-2">
-            <Select v-model="reglages.startup_power">
+            <Select v-model="settings.startup_power">
               <SelectTrigger class="min-w-32" data-startup-select :aria-label="t('startup_title')"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="on">{{ t('startup_on') }}</SelectItem>
@@ -460,15 +460,15 @@ function aller(id: string) {
                 <SelectItem value="previous">{{ t('startup_previous') }}</SelectItem>
               </SelectContent>
             </Select>
-            <Button data-startup-change @click="enregistrerReglages">{{ t('change') }}</Button>
+            <Button data-startup-change @click="saveSettings">{{ t('change') }}</Button>
           </CardContent>
         </Card>
       </section>
 
-      <!-- Date et heure. Deux reglages separes, a la demande du proprietaire :
-           l'ordre d'une date et le format 12/24 h ne varient pas ensemble d'un
-           pays a l'autre. Aucun reglage de fuseau — l'afficheur tourne sur
-           l'appareil, la page formate dans le fuseau du navigateur, et un
+      <!-- Date et heure. Deux settings separes, a la demande du proprietaire :
+           l'order d'une date et le format 12/24 h ne varient step ensemble d'un
+           country a l'autre. Aucun reglage de fuseau — l'afficheur tourne sur
+           l'appareil, la page formate dans le fuseau du browser, et un
            troisieme reglage ne pourrait que contredire l'un des deux. -->
       <section id="clock" class="scroll-mt-6">
         <Card>
@@ -476,7 +476,7 @@ function aller(id: string) {
           <CardContent class="flex flex-wrap items-end gap-4">
             <label class="grid gap-1 text-sm">
               {{ t('clock_date_label') }}
-              <Select v-model="reglages.date_format">
+              <Select v-model="settings.date_format">
                 <SelectTrigger class="min-w-36" data-date-format-select :aria-label="t('clock_date_label')"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="day_month_year">{{ t('clock_date_dmy') }}</SelectItem>
@@ -488,10 +488,10 @@ function aller(id: string) {
             <label class="grid gap-1 text-sm">
               {{ t('clock_hours_label') }}
               <!-- Un booleen rendu par deux choix nommes plutot qu'une case a
-                   cocher : « 24 h » n'est pas l'absence de « 12 h », et une
+                   cocher : « 24 h » n'est step l'absence de « 12 h », et une
                    case intitulee « 24 h » se lirait mal decochee. -->
-              <Select :model-value="reglages.clock_24h ? '24' : '12'"
-                      @update:model-value="(v) => (reglages.clock_24h = v === '24')">
+              <Select :model-value="settings.clock_24h ? '24' : '12'"
+                      @update:model-value="(v) => (settings.clock_24h = v === '24')">
                 <SelectTrigger class="min-w-36" data-clock-hours-select :aria-label="t('clock_hours_label')"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="24">{{ t('clock_24h') }}</SelectItem>
@@ -499,7 +499,7 @@ function aller(id: string) {
                 </SelectContent>
               </Select>
             </label>
-            <Button data-clock-change @click="enregistrerReglages">{{ t('change') }}</Button>
+            <Button data-clock-change @click="saveSettings">{{ t('change') }}</Button>
             <p class="w-full text-sm text-muted-foreground">{{ t('clock_hint') }}</p>
           </CardContent>
         </Card>
@@ -512,14 +512,14 @@ function aller(id: string) {
             <label class="grid gap-1 text-sm">
               {{ t('volume_hold_initial') }}
               <Input type="number" min="200" max="5000" step="100" class="w-28" data-hold-initial
-                v-model="reglages.volume_repeat_initial_ms" />
+                v-model="settings.volume_repeat_initial_ms" />
             </label>
             <label class="grid gap-1 text-sm">
               {{ t('volume_hold_interval') }}
               <Input type="number" min="100" max="2000" step="50" class="w-28" data-hold-interval
-                v-model="reglages.volume_repeat_interval_ms" />
+                v-model="settings.volume_repeat_interval_ms" />
             </label>
-            <Button data-hold-change @click="enregistrerReglages">{{ t('change') }}</Button>
+            <Button data-hold-change @click="saveSettings">{{ t('change') }}</Button>
           </CardContent>
         </Card>
       </section>
@@ -531,14 +531,14 @@ function aller(id: string) {
             <label class="grid gap-1 text-sm">
               {{ t('overlay_ms_label') }}
               <Input type="number" min="1000" max="15000" step="500" class="w-28" data-overlay-ms
-                v-model="reglages.overlay_ms" />
+                v-model="settings.overlay_ms" />
             </label>
             <label class="grid gap-1 text-sm">
               {{ t('tens_window_ms_label') }}
               <Input type="number" min="1000" max="15000" step="500" class="w-28" data-tens-window-ms
-                v-model="reglages.tens_window_ms" />
+                v-model="settings.tens_window_ms" />
             </label>
-            <Button data-overlays-change @click="enregistrerReglages">{{ t('change') }}</Button>
+            <Button data-overlays-change @click="saveSettings">{{ t('change') }}</Button>
           </CardContent>
         </Card>
       </section>
@@ -550,22 +550,22 @@ function aller(id: string) {
             <label class="grid gap-1 text-sm">
               {{ t('seek_step_label') }}
               <Input type="number" min="1" max="120" class="w-28" data-seek-step-s
-                v-model="reglages.seek_step_s" />
+                v-model="settings.seek_step_s" />
             </label>
-            <Button data-seek-change @click="enregistrerReglages">{{ t('change') }}</Button>
+            <Button data-seek-change @click="saveSettings">{{ t('change') }}</Button>
           </CardContent>
         </Card>
       </section>
 
-      <!-- Pochettes. Une seule carte, deux étages qu'il ne faut pas confondre,
+      <!-- Pochettes. Une seule carte, deux étages qu'il ne faut step confondre,
            et la mise en page porte cette distinction : le plafond de la source
            vient **en premier** et n'est jamais grisé, parce qu'il s'applique
            quoi que dise l'interrupteur — c'est la seule garde qui subsiste
            quand le réencodage est décoché. L'interrupteur vient ensuite, et
            grise les quatre réglages qui ne décrivent que la vignette.
 
-           Grisés, pas vidés : les valeurs restent lisibles et repartent dans le
-           PUT (voir `enregistrerReglages`), donc recocher l'interrupteur
+           Grisés, step vidés : les valeurs restent lisibles et repartent dans le
+           PUT (voir `saveSettings`), donc recocher l'interrupteur
            retrouve ce qu'on avait posé. -->
       <section id="covers" class="scroll-mt-6">
         <Card>
@@ -576,16 +576,16 @@ function aller(id: string) {
             <label class="grid gap-1 text-sm">
               {{ t('cover_cache_entries_label') }}
               <Input type="number" min="2" max="100" step="1" class="w-28" data-cover-cache-entries
-                v-model="reglages.cover_cache_entries" />
+                v-model="settings.cover_cache_entries" />
               <span class="max-w-md text-xs text-muted-foreground">{{ t('cover_cache_entries_help') }}</span>
               <span class="max-w-md text-xs text-muted-foreground" data-cover-cache-ram>
-                {{ t('cover_cache_entries_ram', { size: ramMaxCache, cap: plafondParPochette }) }}
+                {{ t('cover_cache_entries_ram', { size: ramMaxCache, cap: capPerCover }) }}
               </span>
             </label>
             <label class="grid gap-1 text-sm">
               {{ t('cover_source_max_label') }}
               <Input type="number" min="1" max="20" class="w-28" data-cover-source-max
-                v-model="reglages.cover_source_max_mio" />
+                v-model="settings.cover_source_max_mio" />
               <span class="text-xs text-muted-foreground">{{ t('cover_source_max_help') }}</span>
             </label>
 
@@ -593,8 +593,8 @@ function aller(id: string) {
               <label class="flex items-start gap-3 text-sm">
                 <Switch
                   data-cover-rendition
-                  :model-value="reglages.cover_rendition"
-                  @update:model-value="(v: boolean) => (reglages.cover_rendition = v)"
+                  :model-value="settings.cover_rendition"
+                  @update:model-value="(v: boolean) => (settings.cover_rendition = v)"
                 />
                 <span class="grid gap-1">
                   {{ t('cover_rendition_label') }}
@@ -604,43 +604,43 @@ function aller(id: string) {
             </div>
 
             <!-- `aria-disabled` en plus du `disabled` de chaque champ : le
-                 groupe entier est inactif, et un lecteur d'écran doit pouvoir
+                 groupe entier est inactif, et un player d'écran doit pouvoir
                  l'annoncer une fois plutôt que champ par champ. -->
             <div
               data-cover-rendition-group
-              :aria-disabled="!reglages.cover_rendition"
-              :class="['flex flex-wrap items-start gap-4', reglages.cover_rendition ? '' : 'opacity-50']"
+              :aria-disabled="!settings.cover_rendition"
+              :class="['flex flex-wrap items-start gap-4', settings.cover_rendition ? '' : 'opacity-50']"
             >
               <label class="grid gap-1 text-sm">
                 {{ t('cover_max_edge_label') }}
                 <Input type="number" min="64" max="2048" class="w-28" data-cover-max-edge
-                  :disabled="!reglages.cover_rendition"
-                  v-model="reglages.cover_max_edge_px" />
+                  :disabled="!settings.cover_rendition"
+                  v-model="settings.cover_max_edge_px" />
               </label>
               <label class="grid gap-1 text-sm">
                 {{ t('cover_jpeg_quality_label') }}
                 <Input type="number" min="40" max="100" class="w-28" data-cover-jpeg-quality
-                  :disabled="!reglages.cover_rendition"
-                  v-model="reglages.cover_jpeg_quality" />
+                  :disabled="!settings.cover_rendition"
+                  v-model="settings.cover_jpeg_quality" />
                 <span class="text-xs text-muted-foreground">{{ t('cover_jpeg_quality_help') }}</span>
               </label>
               <label class="grid gap-1 text-sm">
                 {{ t('cover_max_bytes_label') }}
                 <Input type="number" min="32" max="8192" class="w-28" data-cover-max-bytes
-                  :disabled="!reglages.cover_rendition"
-                  v-model="reglages.cover_max_bytes_ko" />
+                  :disabled="!settings.cover_rendition"
+                  v-model="settings.cover_max_bytes_ko" />
                 <span class="text-xs text-muted-foreground">{{ t('cover_max_bytes_help') }}</span>
               </label>
               <label class="grid gap-1 text-sm">
                 {{ t('cover_max_pixels_label') }}
                 <Input type="number" min="1" max="64" class="w-28" data-cover-max-pixels
-                  :disabled="!reglages.cover_rendition"
-                  v-model="reglages.cover_max_pixels_mpx" />
+                  :disabled="!settings.cover_rendition"
+                  v-model="settings.cover_max_pixels_mpx" />
                 <span class="text-xs text-muted-foreground">{{ t('cover_max_pixels_help') }}</span>
               </label>
             </div>
 
-            <Button data-cover-change @click="enregistrerReglages">{{ t('change') }}</Button>
+            <Button data-cover-change @click="saveSettings">{{ t('change') }}</Button>
           </CardContent>
         </Card>
       </section>
@@ -654,7 +654,7 @@ function aller(id: string) {
             data-toc-link
             :aria-current="active === s.id ? 'true' : undefined"
             :class="active === s.id ? 'font-medium text-foreground' : 'text-muted-foreground'"
-            @click.prevent="aller(s.id)"
+            @click.prevent="goTo(s.id)"
           >
             {{ t(s.key) }}
           </a>

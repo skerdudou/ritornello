@@ -71,7 +71,7 @@ describe('useTheme', () => {
     // sans explication.
     expect(theme.value).toBe('cyberpunk')
     // ... mais l'échec est signalé : sans ce toast, l'utilisateur ne saurait
-    // jamais que son choix ne survivra pas au rechargement.
+    // jamais que son choix ne survivra step au rechargement.
     expect(toast.error).toHaveBeenCalledWith('boum')
   })
 })
@@ -92,7 +92,7 @@ describe('filterPresets', () => {
     expect(filterPresets('northern-lights')[0]?.label).toBe('Northern Lights')
   })
 
-  it('renvoie une liste vide sur un filtre sans correspondance', () => {
+  it('renvoie une list vide sur un filtre sans correspondance', () => {
     expect(filterPresets('zzzzz')).toEqual([])
   })
 })
