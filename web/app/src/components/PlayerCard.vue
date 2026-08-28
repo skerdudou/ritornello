@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { Badge, Card, CardAction, CardContent, CardHeader, CardTitle } from '@ritornello/ui'
 import BarreProgression from './BarreProgression.vue'
 import IconeAppleMusic from './icones/IconeAppleMusic.vue'
@@ -29,8 +29,42 @@ watch(
   () => props.etat?.cover_href,
   () => {
     imageCassee.value = false
+    // Une pochette agrandie qui reste ouverte pendant que la piste change
+    // montrerait l'image de la piste suivante en plein ecran, sans que
+    // personne l'ait demande. Fermer est la seule reponse honnete.
+    agrandie.value = false
   },
 )
+// Vrai quand l'appareil annonce une image et que le navigateur a su la charger :
+// c'est la seule condition sous laquelle le carre est cliquable.
+const aUneImage = computed(() => !!props.etat?.cover_href && !imageCassee.value)
+/**
+ * L'URL de la **vignette**, celle que le carre de la carte affiche.
+ *
+ * Le carre fait 224 px sur telephone ; y charger le `folder.jpg` d'un NAS —
+ * couramment deux ou trois mebioctets — etait du gaspillage pur, surtout en
+ * Wi-Fi. Le coeur sait fabriquer la reduction (c'est celle qu'il pousse deja
+ * aux afficheurs), il suffit de la lui demander. L'URL nue reste l'image telle
+ * qu'elle est, et c'est elle que la vue agrandie charge.
+ */
+const vignetteHref = computed(() =>
+  props.etat?.cover_href ? `${props.etat.cover_href}?taille=vignette` : null,
+)
+/** La pochette est-elle ouverte en plein ecran ? */
+const agrandie = ref(false)
+// Echap ferme, comme toute surcouche modale. L'ecouteur n'existe que pendant
+// l'ouverture : un ecouteur global permanent pour une vue rarement ouverte est
+// une dette, et il capterait des touches sur des pages qui n'ont pas de
+// pochette du tout.
+function surEchap(e: KeyboardEvent) {
+  if (e.key === 'Escape') agrandie.value = false
+}
+watch(agrandie, (ouverte) => {
+  if (ouverte) window.addEventListener('keydown', surEchap)
+  else window.removeEventListener('keydown', surEchap)
+})
+// Sans cela, quitter la page pochette ouverte laisse l'ecouteur derriere lui.
+onUnmounted(() => window.removeEventListener('keydown', surEchap))
 // La duree ne s'affiche que faute de barre de progression : quand une position
 // est connue, la barre porte deja la duree totale.
 const dureeAAfficher = computed(
@@ -99,13 +133,26 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
         :class="{ 'opacity-50': etat?.standby }"
         data-pochette
       >
-        <img
-          v-if="etat?.cover_href && !imageCassee"
-          :src="etat.cover_href"
-          :alt="t('cover_alt')"
-          class="size-full object-cover"
-          @error="imageCassee = true"
-        />
+        <!-- Un vrai bouton et non un `@click` sur l'image : la vue agrandie
+             s'ouvre alors aussi au clavier et porte un nom accessible. Il n'y
+             en a pas quand il n'y a rien a agrandir — le repli ♫ n'est pas une
+             image, et un bouton qui n'ouvre rien est pire qu'aucun bouton. -->
+        <button
+          v-if="aUneImage"
+          type="button"
+          class="size-full cursor-zoom-in focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+          :aria-label="t('cover_zoom')"
+          :title="t('cover_zoom')"
+          data-pochette-agrandir
+          @click="agrandie = true"
+        >
+          <img
+            :src="vignetteHref!"
+            :alt="t('cover_alt')"
+            class="size-full object-cover"
+            @error="imageCassee = true"
+          />
+        </button>
         <div
           v-else
           class="flex size-full items-center justify-center text-muted-foreground"
@@ -228,5 +275,45 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
       />
       <slot name="commandes" />
     </CardContent>
+    <!-- La pochette en plein ecran. `Teleport` vers le `body` : la carte a un
+         `overflow-hidden` (arrondis) et son propre contexte d'empilement, une
+         surcouche rendue dedans s'y serait retrouvee coupee. Un clic
+         **n'importe ou** referme, y compris sur l'image : c'est la demande
+         (« fermer en cliquant de nouveau »), et c'est aussi ce que fait tout
+         visionneur d'images. -->
+    <Teleport to="body">
+      <div
+        v-if="agrandie"
+        class="fixed inset-0 z-50 flex cursor-zoom-out items-center justify-center bg-black/80 p-4"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="t('cover_alt')"
+        data-pochette-agrandie
+        @click="agrandie = false"
+      >
+        <!-- `object-contain` et non `object-cover` : agrandir sert justement a
+             voir la pochette entiere, une rognure la trahirait. -->
+        <img
+          :src="etat?.cover_href ?? ''"
+          :alt="t('cover_alt')"
+          class="max-h-full max-w-full rounded-lg object-contain shadow-2xl"
+        />
+        <!-- Le bouton de fermeture double le clic sur le fond, il ne le
+             remplace pas : sans lui, il n'existe aucun moyen de fermer au
+             clavier autre qu'Echap, qui ne s'annonce nulle part. -->
+        <button
+          type="button"
+          class="absolute right-4 top-4 rounded-full bg-black/50 p-3 text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+          :aria-label="t('cover_zoom_close')"
+          :title="t('cover_zoom_close')"
+          data-pochette-fermer
+          @click.stop="agrandie = false"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+    </Teleport>
   </Card>
 </template>

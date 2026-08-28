@@ -95,7 +95,13 @@ music-note glyph stands in for it, both while no `cover_href` is present
 and when the browser failed to load the one that was (without this flag
 the browser's own broken-image icon would show instead of the intended
 fallback; it resets on the next `cover_href`, so one failure doesn't
-condemn the square for the rest of the session). In standby only the cover
+condemn the square for the rest of the session). **Clicking it enlarges it**,
+full screen over a dark veil, at full resolution; clicking anywhere closes it
+again, as does Escape and the close button — which is there so the view can be
+left from the keyboard by something that announces itself. A track change
+closes it too: the next track's image appearing full screen is not something
+anyone asked for. There is no button when there is no image — the ♫ fallback is
+not a picture, and a button that opens nothing is worse than none. In standby only the cover
 itself dims, to half opacity (`PlayerCard.vue`'s own `opacity-50`) — not
 the rest of the card: the transport, mute and source-cycle buttons look
 dimmed too, but that's the kit's standard `disabled:opacity-50`, a
@@ -610,9 +616,24 @@ decode is dropped: the header check only reads magic bytes, so a truncated
 file used to pass it and reach every display, each showing a broken square
 its own way. The device now settles it once, centrally.
 
-The rendition applies to the push path only. `GET /api/cover/{key}` still
-streams a local file without ever holding it whole, the browser resizing and
-caching on its side.
+The rendition serves the HTTP route too, but **only on request**.
+`GET /api/cover/{key}` still streams a local file without ever holding it
+whole; `GET /api/cover/{key}?taille=vignette` returns the same rendition the
+displays get. The web page asks for the thumbnail in its 224 px square and for
+the bare URL in the enlarged view — loading a NAS's three-megabyte `folder.jpg`
+into a 224 px square was pure waste over Wi-Fi, while enlarging it deserves
+every pixel. The default stays "as it is", because `cover_href` is published in
+the state for every consumer of the protocol, present and future: the thumbnail
+is a service rendered to whoever asks, not a change in what the bare URL means.
+An unknown value falls back to full size rather than refusing the request — a
+typo in a URL must not blank the cover.
+
+Unlike the push path, these thumbnails **are** memoised — four of them, and the
+distinction is entirely in the key. `ligne` could memoise nothing because its
+key hashes the path; here the key carries the ETag as well (the file's mtime
+and size), so replacing the image under that path changes the key and the old
+thumbnail is never served again. Without it every page load would decode and
+re-encode on a Pi 2, which is the very cost the thumbnail exists to avoid.
 
 ## System page
 
