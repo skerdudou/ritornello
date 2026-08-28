@@ -56,15 +56,31 @@ pub(crate) const MUSICBRAINZ_EN: &str = include_str!("locales/en.toml");
 /// station qui a changé de forme, pas un titre que le catalogue ignore.
 const ECHECS_AVANT_RESONDAGE: u32 = 3;
 
+/// Le nom sous lequel le cœur connaît l'en-tête d'un flux.
+///
+/// Déclaré en `derived_from` par les deux enrichissements du chemin ICY : ce
+/// greffon **découpe** cette chaîne, il ne l'apporte pas. Voir
+/// `Enrichment::derived_from`.
+const SOURCE_ICY: &str = "icy";
+
 /// Délais des reprises différées d'une recherche de pochette, en secondes.
 ///
-/// **Deux, et espacées.** `cherche_release` a déjà réessayé trois fois en
+/// **Trois, très espacées.** `cherche_release` a déjà réessayé trois fois en
 /// interne (2 s puis 4 s) : ce qui arrive ici est une panne qui dure plus que
-/// quelques secondes, pas un hoquet. Vingt secondes, puis une minute, couvrent
-/// la charge passagère d'un service tiers gratuit sans jamais le marteler ; au
-/// delà, l'absence cesse d'être une panne et le changement de piste reste la
-/// reprise ultime. Voir `MusicBrainzPlugin::reprogramme_pochette`.
-const REPRISES_POCHETTE_S: &[u64] = &[20, 60];
+/// quelques secondes, pas un hoquet.
+///
+/// Mesuré sur l'appareil le 2026-08-28 : six 503 sur neuf requêtes en une
+/// minute, la pochette n'arrivant qu'à la sixième — trente-six secondes après
+/// le début du morceau. La cadence, elle, était conforme (1,1 s entre requêtes,
+/// étrangleur partagé), donc ces 503 viennent du serveur de recherche de
+/// MusicBrainz et rien de ce qu'on fait ne les évitera.
+///
+/// La troisième reprise à trois minutes est donc un filet pour une mauvaise
+/// passe qui dure : elle coûte une requête toutes les trois minutes au pire,
+/// très loin de la requête par seconde que le service autorise, et elle tient
+/// dans la durée d'un morceau. Au delà, l'absence cesse d'être une panne et le
+/// changement de piste reste la reprise ultime.
+const REPRISES_POCHETTE_S: &[u64] = &[20, 60, 180];
 
 /// Résultat d'une interrogation : la TOC concernée, et ce qu'on a trouvé.
 /// Ce qu'une interrogation de MusicBrainz rapporte.
@@ -782,6 +798,13 @@ impl MetadataPlugin for MusicBrainzPlugin {
                                     // quelle. Voir `IssueIcy::identite`, qui dit
                                     // pourquoi elle voyage avec le travail.
                                     identity: issue.identite,
+                                    // **La station reste la source.** Ce
+                                    // greffon a decoupe sa chaine et verifie le
+                                    // decoupage, il n'a appris le morceau a
+                                    // personne : s'attribuer le titre effacerait
+                                    // celui qui l'annonce. Le coeur note a part
+                                    // qui a retravaille.
+                                    derived_from: Some(SOURCE_ICY.to_string()),
                                     artist: Some(artist),
                                     title: Some(title),
                                     // URL déjà résolue par `premier_enregistrement`.
@@ -829,6 +852,12 @@ impl MetadataPlugin for MusicBrainzPlugin {
                                 };
                                 self.pret = Some(Enrichment {
                                     identity: issue.identite,
+                                    // Encore plus vrai ici qu'au-dessus : ce
+                                    // chemin ne porte **que** le decoupage
+                                    // local, MusicBrainz n'ayant rien valide du
+                                    // tout. Le titre vient de la station, mot
+                                    // pour mot.
+                                    derived_from: Some(SOURCE_ICY.to_string()),
                                     artist,
                                     title,
                                     fill_only: false,
@@ -1383,13 +1412,16 @@ mod tests {
         let cle = ("A".to_string(), "Disque".to_string());
         p.cle_generique = Some(cle.clone());
 
-        // Deux reprises, espacees, puis plus rien : au-dela, l'absence n'est
-        // plus une panne passagere et le changement de piste reste la reprise
-        // ultime.
+        // Trois reprises, de plus en plus espacees, puis plus rien : au-dela,
+        // l'absence n'est plus une panne passagere et le changement de piste
+        // reste la reprise ultime. La troisieme a ete ajoutee sur mesure — six
+        // 503 sur neuf requetes en une minute, constates sur l'appareil.
         assert_eq!(p.reprise_due(&cle), Some((0, Duration::from_secs(20))));
         p.reprises_pochette = Some((cle.clone(), 1));
         assert_eq!(p.reprise_due(&cle), Some((1, Duration::from_secs(60))));
         p.reprises_pochette = Some((cle.clone(), 2));
+        assert_eq!(p.reprise_due(&cle), Some((2, Duration::from_secs(180))));
+        p.reprises_pochette = Some((cle.clone(), 3));
         assert_eq!(p.reprise_due(&cle), None, "le budget doit etre borne");
 
         // Le compteur est porte par le couple : un autre album repart de zero

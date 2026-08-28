@@ -281,17 +281,62 @@ const TENTATIVES: u32 = 3;
 /// mémorisé.
 const RECUL_BASE: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Plafond appliqué à un `Retry-After` reçu du service.
+///
+/// Le service peut demander une attente arbitrairement longue ; la tenir
+/// bloquerait une tâche pour rien, alors que la reprise différée du greffon
+/// (voir `REPRISES_POCHETTE_S` côté `main.rs`) couvre déjà les pannes longues.
+/// Dix secondes bornent l'attente sans trahir l'intention du service.
+const RETRY_AFTER_MAX: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// L'attente que le service demande explicitement, telle qu'un en-tête
+/// `Retry-After` la porte.
+///
+/// **MusicBrainz envoie `Retry-After` sur ses 503**, et l'ignorer était une
+/// impolitesse doublée d'une inefficacité : notre recul fixe (2 s puis 4 s) peut
+/// retomber en plein dans la fenêtre où il refuse encore. Seule la forme en
+/// secondes est lue — la forme date HTTP existe dans la norme mais aucun service
+/// utilisé ici ne l'emploie, et la deviner mal vaudrait moins que l'ignorer.
+///
+/// Prend la **valeur brute** et non la réponse : la règle est alors une
+/// fonction pure, qui s'éprouve sans monter de serveur ni fabriquer une
+/// `reqwest::Response` — donc sans dépendance de test de plus.
+fn attente_demandee(brut: Option<&str>) -> Option<std::time::Duration> {
+    let secondes: u64 = brut?.trim().parse().ok()?;
+    Some(std::time::Duration::from_secs(secondes).min(RETRY_AFTER_MAX))
+}
+
+/// Ce qu'une tentative ratée demande d'attendre avant la suivante, en plus de
+/// son message.
+struct Echec {
+    raison: anyhow::Error,
+    /// L'attente demandée par le service, si elle l'a été.
+    demandee: Option<std::time::Duration>,
+}
+
 /// Une tentative : la requête, son statut, son corps.
-async fn tente(client: &reqwest::Client, url: &str) -> Result<String> {
-    let resp = client.get(url).send().await.context("unreachable")?;
+async fn tente(client: &reqwest::Client, url: &str) -> Result<String, Echec> {
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| Echec { raison: anyhow::Error::new(e).context("unreachable"), demandee: None })?;
     let statut = resp.status();
     if !statut.is_success() {
         // **Le statut est nommé.** Sans cette ligne un 503 ne laissait aucune
         // trace : ni dans `/api/logs`, ni ailleurs. C'est ce silence qui a
         // rendu la panne indiagnostiquable après coup.
-        bail!("HTTP {statut}");
+        let demandee = attente_demandee(
+            resp.headers().get(reqwest::header::RETRY_AFTER).and_then(|v| v.to_str().ok()),
+        );
+        return Err(Echec { raison: anyhow::anyhow!("HTTP {statut}"), demandee });
     }
-    resp.text().await.context("response read interrupted")
+    resp.text()
+        .await
+        .map_err(|e| Echec {
+            raison: anyhow::Error::new(e).context("response read interrupted"),
+            demandee: None,
+        })
 }
 
 /// Requête GET commune aux points d'entrée MusicBrainz utilisés ici, avec un
@@ -326,14 +371,28 @@ async fn requete_texte(url: &str) -> Result<String> {
                 }
                 return Ok(corps);
             }
-            Err(e) => {
-                tracing::info!("MusicBrainz attempt {tentative}/{TENTATIVES}: {e}");
-                derniere = Some(e);
+            Err(echec) => {
+                tracing::info!(
+                    "MusicBrainz attempt {tentative}/{TENTATIVES}: {}",
+                    echec.raison
+                );
+                if tentative < TENTATIVES {
+                    // **L'attente demandée l'emporte sur la nôtre quand elle
+                    // est plus longue.** Reculer moins que ce que le service
+                    // réclame le fait refuser à nouveau : c'est une requête
+                    // perdue pour nous et une charge inutile pour lui. Plus
+                    // courte, elle ne dispense pas de notre propre recul
+                    // progressif.
+                    //
+                    // Le recul vit **dans ce bras** et non après le `match` :
+                    // le succès rend la main plus haut, donc il n'y a jamais
+                    // d'attente à faire sur ce chemin-là.
+                    let attente = echec.demandee.map_or(recul, |d| d.max(recul));
+                    tokio::time::sleep(attente).await;
+                    recul *= 2;
+                }
+                derniere = Some(echec.raison);
             }
-        }
-        if tentative < TENTATIVES {
-            tokio::time::sleep(recul).await;
-            recul *= 2;
         }
     }
     Err(derniere.expect("la boucle tourne au moins une fois, donc une erreur a ete retenue"))
@@ -644,6 +703,27 @@ pub async fn cherche_enregistrement(artist: &str, title: &str) -> Result<Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lattente_demandee_par_le_service_est_lue_et_plafonnee() {
+        // **Mesure du 2026-08-28 sur l'appareil** : six 503 sur neuf requetes
+        // en une minute, cadence pourtant conforme (1,1 s entre requetes).
+        // MusicBrainz envoie `Retry-After` sur ses 503, et reculer moins que ce
+        // qu'il reclame le fait refuser a nouveau — une requete perdue pour
+        // nous, une charge inutile pour lui.
+        assert_eq!(attente_demandee(Some("3")), Some(std::time::Duration::from_secs(3)));
+        assert_eq!(attente_demandee(Some("  3  ")), Some(std::time::Duration::from_secs(3)));
+        // Plafonnee : une attente arbitrairement longue immobiliserait une
+        // tache pour rien, la reprise differee du greffon couvrant deja les
+        // pannes qui durent.
+        assert_eq!(attente_demandee(Some("600")), Some(RETRY_AFTER_MAX));
+        // Absente, ou dans la forme date HTTP que la norme autorise et
+        // qu'aucun service utilise ici n'emploie : rien, et le recul propre du
+        // greffon s'applique.
+        assert_eq!(attente_demandee(None), None);
+        assert_eq!(attente_demandee(Some("Wed, 21 Oct 2026 07:28:00 GMT")), None);
+        assert_eq!(attente_demandee(Some("")), None);
+    }
 
     const FIXTURE: &str = include_str!("../tests/fixtures/mb_discid.json");
 

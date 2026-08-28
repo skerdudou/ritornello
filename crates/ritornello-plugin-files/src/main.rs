@@ -193,12 +193,14 @@ impl FilesSource {
         };
         if let Some((connu, trouvee)) = &*self.pochette_par_repertoire.lock().unwrap() {
             if connu == &repertoire {
-                // Memorise « pas d'image ici » : la reponse reste valable, mais
-                // elle est silencieuse pour toute la session, donc elle merite
-                // d'etre redite a chaque piste — c'est une reponse a « pourquoi
-                // pas de pochette ».
+                // En `debug` et non en `info` : `arme_pochette` est appelee
+                // deux fois par piste (la lecture, puis le recalage), donc
+                // cette ligne sortait deux fois **par piste** pour un fait qui
+                // ne change pas de tout l'album. Le releve frais ci-dessous,
+                // lui, reste en `info` : une fois par repertoire, c'est la
+                // reponse utile a « pourquoi pas de pochette ».
                 if trouvee.is_none() {
-                    tracing::info!("no cover file in {} (remembered)", repertoire.display());
+                    tracing::debug!("no cover file in {} (remembered)", repertoire.display());
                 }
                 let _ = tx.send(trouvee.clone());
                 return;
