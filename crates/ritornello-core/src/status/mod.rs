@@ -1,3 +1,8 @@
+//! La surface HTTP du cœur : `AppState`, le routeur, la sortie audio, les
+//! réglages et la route de commande. Un module enfant par sujet — `greffons`,
+//! `journaux`, `locales`, `reglages_validation` — et ce fichier ré-exporte ce
+//! que le reste du crate importe, pour qu'aucun import externe ne nomme un enfant.
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -19,7 +24,7 @@ pub use greffons::{mark_plugin_disconnected, replace_plugin_lines, GreffonsContr
 mod reglages_validation;
 use journaux::{logs_json, player_sse};
 pub use journaux::{LogBuffer, LogBufferWriter};
-pub use reglages_validation::{validate_settings, SettingsError};
+pub use reglages_validation::validate_settings;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusState {
@@ -455,6 +460,7 @@ pub(crate) mod tests_support {
 
 #[cfg(test)]
 mod tests {
+    use super::reglages_validation::SettingsError;
     use super::tests_support::*;
     use super::*;
     use axum::body::Body;

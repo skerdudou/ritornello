@@ -283,6 +283,7 @@ pub fn replace_plugin_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::status::reglages_validation::SettingsError;
     use crate::status::tests_support::*;
     use axum::body::Body;
     use axum::http::Request;
