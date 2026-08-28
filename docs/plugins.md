@@ -609,6 +609,20 @@ reach every track, and the page lists them all — no digit designates
 them, that is all. (Same field as the radio's presets and the CD's
 tracks, driving the same web grid, see [interface.md](interface.md).)
 
+**And they are named.** `list_presets` returns those 99 entries with each
+track's title — the same name `preset_name` already published for the current
+track, and the same one the m3u writes as `#EXTINF`. Without that override the
+trait's default returned an empty list, so the home page's tiles carried a bare
+number where the radio shows "1 · FIP". The names travel again with the count,
+on the same channel: the watch fires on **every** list change (`watch::send`
+signals even on an equal value), so a mere reordering — which does not change
+the count — renames the tiles too. Keeping the old titles under the new numbers
+would be worse than no title at all. Dense and capped at 99, exactly like
+`preset_count`, because the two describe the same thing and must agree: a file
+list has no holes, so the index really is "position plus one" — which is *not*
+true of a sparse station table (see the MPD server's section, § Dense
+positions, sparse indices).
+
 **2000 tracks per list.** A recursive add that would go past it is
 **refused with a message** naming the ceiling, rather than silently
 truncated: a playlist that quietly shrinks is a defect that takes months

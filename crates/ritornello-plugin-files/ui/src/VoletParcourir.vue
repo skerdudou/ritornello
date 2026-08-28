@@ -175,9 +175,9 @@ function chargerListe(cible: string): void {
 </script>
 
 <template>
+  <!-- Sans titre, comme les deux autres volets : l'onglet le porte deja, et
+       `TabsContent` en fait le nom accessible de cette section. -->
   <section class="space-y-3" data-volet-parcourir>
-    <h2 class="font-medium">{{ t('browse_title') }}</h2>
-
     <p v-if="!donnees.roots.length" class="text-sm text-muted-foreground">
       {{ t('no_sources') }}
     </p>
