@@ -23,9 +23,6 @@ use tokio_util::io::ReaderStream;
 /// Archive, mesuré à 2 670 705 octets là où `front-500` en rend 75 249.
 const PLAFOND_RESEAU: usize = 2 * 1024 * 1024;
 
-/// Nombre d'entrées retenues : la pochette courante et quelques précédentes.
-const ENTREES: usize = 4;
-
 /// Préfixe de l'URL locale publiée dans `Morceau::cover_href`.
 ///
 /// Partagé entre `metadata::Metadonnees::etat`, qui la **fabrique**, et
@@ -157,7 +154,8 @@ pub fn cle(r: &CoverRef) -> String {
 /// fichier, donc un seul `href`, donc rien à repousser ni à redécoder : le cas
 /// embarqué rejoint ainsi le `folder.jpg` local, déjà gratuit. Sans cela, un
 /// album de quinze pistes faisait tourner à vide un cache qui n'en tient
-/// que quatre (`ENTREES`), extraction, écriture et éviction comprises.
+/// que le réglage en autorise (`Reglages::entrees`), extraction, écriture
+/// et éviction comprises.
 pub fn cle_contenu(octets: &[u8]) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     octets.hash(&mut h);
@@ -198,6 +196,9 @@ pub struct Rendu {
 /// `rendu` ne décrit que ce que le cœur **fabrique**.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reglages {
+    /// Combien de pochettes le cache garde. Voir
+    /// `state::Settings::cover_cache_entries`.
+    pub entrees: usize,
     /// Plafond de la pochette source, en octets.
     pub source_max: usize,
     /// `None` = pousser la source telle quelle.
@@ -217,6 +218,7 @@ impl Default for Reglages {
 impl From<&crate::state::Settings> for Reglages {
     fn from(s: &crate::state::Settings) -> Self {
         Self {
+            entrees: s.cover_cache_entries as usize,
             source_max: (s.cover_source_max_mio as usize) * 1024 * 1024,
             rendu: s.cover_rendition.then(|| Rendu {
                 cote_max_px: s.cover_max_edge_px,
@@ -410,7 +412,10 @@ impl CoverCache {
         let mut e = self.entrees.write().await;
         e.retain(|(k, _)| k != &cle);
         e.push_back((cle, p));
-        while e.len() > ENTREES {
+        // Relu à chaque insertion : abaisser le réglage doit reprendre la
+        // mémoire au prochain morceau, pas au prochain redémarrage.
+        let plafond = self.reglages().entrees.max(1);
+        while e.len() > plafond {
             let Some((_, evincee)) = e.pop_front() else { break };
             // Borne l'accumulation **pendant** la vie du processus, pas
             // seulement au démarrage (voir `purge_temporaires`) : une session
@@ -1436,16 +1441,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn le_cache_est_borne_et_oublie_la_plus_ancienne() {
+    async fn le_cache_est_borne_par_le_reglage_et_oublie_la_plus_ancienne() {
+        // **La borne est desormais un reglage** (`cover_cache_entries`, 20 par
+        // defaut) et non une constante : le test la pose donc lui-meme, ce qui
+        // prouve du meme coup qu'elle est bien lue a chaque insertion.
         let cache = CoverCache::new();
+        cache.set_reglages(Reglages { entrees: 4, ..Reglages::default() });
         for i in 0..6 {
             cache.insere(format!("k{i}"), Pochette::Octets(vec![i as u8], "image/jpeg")).await;
         }
-        // Quatre entrees : la pochette courante et quelques precedentes. Un Pi
-        // n'a pas a garder plus, et rien ne survit au redemarrage.
         assert!(!cache.contient("k0").await);
         assert!(!cache.contient("k1").await);
         assert!(cache.contient("k5").await);
+    }
+
+    #[tokio::test]
+    async fn abaisser_le_reglage_reprend_la_memoire_des_la_prochaine_insertion() {
+        // Le reglage est relu **a chaque insertion** : l'abaisser ne doit pas
+        // attendre un redemarrage pour rendre la memoire, sinon le regler ne
+        // sert a rien tant que l'appareil joue.
+        let cache = CoverCache::new();
+        cache.set_reglages(Reglages { entrees: 10, ..Reglages::default() });
+        for i in 0..10 {
+            cache.insere(format!("k{i}"), Pochette::Octets(vec![i as u8], "image/jpeg")).await;
+        }
+        assert!(cache.contient("k0").await, "prealable : les dix tiennent");
+
+        cache.set_reglages(Reglages { entrees: 3, ..Reglages::default() });
+        cache.insere("neuve".into(), Pochette::Octets(vec![99], "image/jpeg")).await;
+
+        assert!(cache.contient("neuve").await);
+        assert!(cache.contient("k9").await, "les plus recentes restent");
+        assert!(!cache.contient("k0").await, "les plus anciennes partent tout de suite");
+        assert!(!cache.contient("k7").await);
     }
 
     /// L'éviction hors bornes doit reprendre l'espace des fichiers
@@ -1476,9 +1504,12 @@ mod tests {
         std::fs::write(&folder_jpg, b"x").unwrap();
 
         let cache = CoverCache::new();
+        // Borne posee explicitement : la valeur par defaut est de vingt
+        // entrees, ce que ce test ne veut pas avoir a remplir.
+        cache.set_reglages(Reglages { entrees: 4, ..Reglages::default() });
         cache.insere("a-garder".into(), Pochette::Fichier(folder_jpg.clone())).await;
         cache.insere("notre".into(), Pochette::Fichier(notre_fichier.clone())).await;
-        // Assez d'insertions pour dépasser `ENTREES` et évincer les deux
+        // Assez d'insertions pour dépasser la borne et évincer les deux
         // premières.
         for i in 0..4u8 {
             cache.insere(format!("k{i}"), Pochette::Octets(vec![i], "image/jpeg")).await;
@@ -1980,6 +2011,7 @@ mod tests {
         // arrivé finirait sans jamais suspendre — aucun suiveur n'aurait le
         // temps d'arriver, et le test passerait sans rien prouver.
         cache.set_reglages(Reglages {
+            entrees: 20,
             source_max: 8 * 1024 * 1024,
             rendu: Some(rendu_de_test(64, 512 * 1024, 16_000_000)),
         });
@@ -2020,6 +2052,7 @@ mod tests {
         // au retrait de l'entrée.
         let cache = Arc::new(CoverCache::new());
         cache.set_reglages(Reglages {
+            entrees: 20,
             source_max: 8 * 1024 * 1024,
             rendu: Some(rendu_de_test(64, 512 * 1024, 16_000_000)),
         });
@@ -2132,7 +2165,7 @@ mod tests {
         let source = jpeg(1000);
         std::fs::write(&chemin, &source).unwrap();
         let cache = CoverCache::new();
-        cache.set_reglages(Reglages { source_max: plafond(), rendu: None });
+        cache.set_reglages(Reglages { entrees: 20, source_max: plafond(), rendu: None });
         cache.insere("k".into(), Pochette::Fichier(chemin)).await;
 
         let ligne = cache.ligne("k", "/api/cover/k").await.expect("la source doit partir telle quelle");

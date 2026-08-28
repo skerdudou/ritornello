@@ -50,6 +50,12 @@ pub(super) const COVER_JPEG_QUALITY: std::ops::RangeInclusive<u32> = 40..=100;
 /// réencodage.
 pub(super) const COVER_MAX_BYTES_KO: std::ops::RangeInclusive<u32> = 32..=8192;
 
+/// Nombre de pochettes gardées. 2 en bas — moins qu'un aller-retour entre deux
+/// pistes n'a aucun sens ; 100 en haut, ce qui plafonne le pire cas mémoire à
+/// 200 Mio (chaque entrée réseau est bornée à 2 Mio, une entrée locale ne garde
+/// qu'un chemin), au-delà de quoi un Pi à 1 Gio se mettrait en danger.
+pub(super) const COVER_CACHE_ENTRIES: std::ops::RangeInclusive<u32> = 2..=100;
+
 /// Plafond de pixels à décoder, en mégapixels — donc quatre fois autant de
 /// mébioctets de tampon. 1 Mpx en bas (déjà 4 Mio) ; 64 Mpx en haut, soit
 /// 256 Mio, ce qu'un Pi 2 à 1 Gio ne peut pas dépasser sans se mettre en
@@ -71,6 +77,7 @@ pub enum SettingsError {
     CoverJpegQuality { min: u32, max: u32 },
     CoverMaxBytes { min: u32, max: u32 },
     CoverMaxPixels { min: u32, max: u32 },
+    CoverCacheEntries { min: u32, max: u32 },
 }
 
 impl SettingsError {
@@ -110,6 +117,10 @@ impl SettingsError {
                 .replace("{max}", &max.to_string()),
             SettingsError::CoverMaxBytes { min, max } => catalog
                 .get("settings_cover_max_bytes_out_of_range")
+                .replace("{min}", &min.to_string())
+                .replace("{max}", &max.to_string()),
+            SettingsError::CoverCacheEntries { min, max } => catalog
+                .get("settings_cover_cache_entries_out_of_range")
                 .replace("{min}", &min.to_string())
                 .replace("{max}", &max.to_string()),
             SettingsError::CoverMaxPixels { min, max } => catalog
@@ -152,6 +163,9 @@ impl std::fmt::Display for SettingsError {
             }
             SettingsError::CoverMaxPixels { min, max } => {
                 write!(f, "cover decode ceiling out of range ({min}-{max} Mpx)")
+            }
+            SettingsError::CoverCacheEntries { min, max } => {
+                write!(f, "cover cache size out of range ({min}-{max} entries)")
             }
         }
     }
@@ -218,6 +232,12 @@ pub fn validate_settings(s: &crate::state::Settings) -> Result<(), SettingsError
         return Err(SettingsError::CoverMaxBytes {
             min: *COVER_MAX_BYTES_KO.start(),
             max: *COVER_MAX_BYTES_KO.end(),
+        });
+    }
+    if !COVER_CACHE_ENTRIES.contains(&s.cover_cache_entries) {
+        return Err(SettingsError::CoverCacheEntries {
+            min: *COVER_CACHE_ENTRIES.start(),
+            max: *COVER_CACHE_ENTRIES.end(),
         });
     }
     if !COVER_MAX_PIXELS_MPX.contains(&s.cover_max_pixels_mpx) {

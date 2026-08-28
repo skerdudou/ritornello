@@ -41,6 +41,13 @@ export interface Provenance {
   fields?: Record<string, string>
   /** Les greffons qui ont cherche et n'ont rien trouve pour ce morceau. */
   misses?: string[]
+  /**
+   * Qui a **retravaille** un champ sans en etre la source, par nom de champ.
+   *
+   * Complete `fields` au lieu de la remplacer : « Titre : icy, decoupe par
+   * musicbrainz » dit les deux faits.
+   */
+  derived?: Record<string, string>
 }
 
 export interface SettingsPayload {
@@ -64,6 +71,13 @@ export interface SettingsPayload {
   overlay_ms: number
   /** Fenêtre de saisie du cumul `+10` de la télécommande (temps laissé pour la seconde pression). */
   tens_window_ms: number
+  /**
+   * Combien de pochettes le coeur garde servables a la page.
+   *
+   * Hors de l'encart grise du reencodage : cette borne s'applique quoi qu'il
+   * arrive, comme le plafond de la source juste en dessous.
+   */
+  cover_cache_entries: number
   /**
    * Plafond de la pochette **source**, en mébioctets. Toujours appliqué, que le
    * réencodage soit actif ou non — c'est la seule garde qui subsiste quand il

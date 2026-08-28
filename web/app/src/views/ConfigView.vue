@@ -29,6 +29,7 @@ const reglages = ref<SettingsPayload>({
   overlay_ms: 5000,
   tens_window_ms: 5000,
   seek_step_s: 10,
+  cover_cache_entries: 20,
   cover_source_max_mio: 20,
   cover_rendition: true,
   cover_max_edge_px: 640,
@@ -36,6 +37,40 @@ const reglages = ref<SettingsPayload>({
   cover_max_bytes_ko: 512,
   cover_max_pixels_mpx: 16,
 })
+
+/**
+ * Plafond d'une pochette **reseau** en memoire, en mebioctets.
+ *
+ * C'est `cover::PLAFOND_RESEAU` cote coeur : un telechargement est coupe la,
+ * quoi que dise le plafond de la source. Recopie ici parce que la page ne le
+ * recoit pas — et une divergence ne rendrait que l'estimation legerement
+ * fausse, jamais le reglage incorrect.
+ */
+const PLAFOND_RESEAU_MIO = 2
+
+/**
+ * Ce qu'une entree du cache peut couter au maximum.
+ *
+ * Le plus petit des deux plafonds : au-dessous de 2 Mio, c'est le plafond de la
+ * source qui mord en premier — et il est reglable juste en dessous, donc les
+ * deux champs se repondent.
+ */
+const plafondParPochette = computed(() =>
+  Math.min(PLAFOND_RESEAU_MIO, Number(reglages.value.cover_source_max_mio) || PLAFOND_RESEAU_MIO),
+)
+
+/**
+ * L'estimation haute, en mebioctets : toutes les entrees pleines de pochettes
+ * **reseau** au plafond.
+ *
+ * Le pire cas absolu, et il est tres au-dessus du reel : une pochette locale ne
+ * garde qu'un chemin, et une pochette de 500 px pese une centaine de
+ * kibioctets. C'est justement ce qu'on veut afficher a cote d'un champ qu'on
+ * augmente — le majorant, pas la moyenne.
+ */
+const ramMaxCache = computed(
+  () => (Number(reglages.value.cover_cache_entries) || 0) * plafondParPochette.value,
+)
 
 /**
  * Valeur de vue pour « Par défaut (système) » : jamais envoyée telle quelle
@@ -536,6 +571,17 @@ function aller(id: string) {
         <Card>
           <CardHeader><CardTitle>{{ t('cover_card_title') }}</CardTitle></CardHeader>
           <CardContent class="space-y-4">
+            <!-- Hors de l'encart grise du reencodage, comme le plafond de la
+                 source : cette borne s'applique quoi qu'il arrive. -->
+            <label class="grid gap-1 text-sm">
+              {{ t('cover_cache_entries_label') }}
+              <Input type="number" min="2" max="100" step="1" class="w-28" data-cover-cache-entries
+                v-model="reglages.cover_cache_entries" />
+              <span class="max-w-md text-xs text-muted-foreground">{{ t('cover_cache_entries_help') }}</span>
+              <span class="max-w-md text-xs text-muted-foreground" data-cover-cache-ram>
+                {{ t('cover_cache_entries_ram', { size: ramMaxCache, cap: plafondParPochette }) }}
+              </span>
+            </label>
             <label class="grid gap-1 text-sm">
               {{ t('cover_source_max_label') }}
               <Input type="number" min="1" max="20" class="w-28" data-cover-source-max

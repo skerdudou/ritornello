@@ -1776,8 +1776,17 @@ are actually in hand, so the page never receives the URL of a broken
 image: a 404 from the Cover Art Archive, common since many releases have
 none, becomes silence rather than an empty frame.
 
-The cache is a small table, bounded to four entries, **in memory**, and
-it does **not** survive a restart. This is a deliberate rejection of a
+The cache is a small table, **in memory**, and it does **not** survive a
+restart. Its size is a setting (`cover_cache_entries`, twenty by default, two to
+a hundred) rather than the constant four it used to be: four did not even cover
+one album walked in both directions, and past the bound a cover already
+published in `cover_href` answers 404 — the page falls back to its ♫ for an
+image the appliance had and lost. The memory cost is bounded and modest, which
+is what makes the setting safe to raise: a local cover keeps only a path, and a
+network one is capped at `PLAFOND_RESEAU` (2 MiB) when downloaded, so twenty
+entries are 40 MiB in the absolute worst case and a couple in practice. The
+config page shows that worst case next to the field, computed from the two
+settings that bound it. This is a deliberate rejection of a
 disk cache, not an oversight: a radio changes track every few minutes, a
 disc's cover is already remembered per-disc inside `musicbrainz` itself,
 and a local file's cover is reread from disk in a fraction of a

@@ -116,6 +116,22 @@ pub struct Settings {
     // Les cinq autres ne décrivent que le **rendu** — ce que le cœur fabrique
     // pour le pousser sur un socket. Interrupteur décoché, aucun n'a de sens :
     // la source part telle quelle.
+    /// Combien de pochettes le cœur garde sous la main.
+    ///
+    /// **C'est ce que le navigateur peut encore demander.** Une pochette
+    /// publiée dans `cover_href` reste servie tant que sa clé est dans ce
+    /// cache ; au-delà, la page reçoit un 404 et retombe sur son ♫ — un
+    /// « l'appareil avait l'image et l'a perdue » que le journal signale
+    /// désormais en `warn`. Quatre entrées, la valeur d'origine, ne tenaient
+    /// même pas un album parcouru dans les deux sens.
+    ///
+    /// Le coût mémoire est **borné et modeste** : une pochette locale ne garde
+    /// qu'un chemin, et une pochette réseau est plafonnée à `PLAFOND_RESEAU`
+    /// (2 Mio) à son téléchargement. Vingt entrées valent donc 40 Mio dans le
+    /// pire des cas absolus, et en pratique deux (une pochette de 500 px pèse
+    /// une centaine de kibioctets).
+    pub cover_cache_entries: u32,
+
     /// Plafond de la pochette **source**, en mébioctets.
     ///
     /// Toujours actif, réencodage ou pas. Borné à
@@ -185,6 +201,9 @@ impl Default for Settings {
             // son propriétaire.
             date_format: DateFormat::DayMonthYear,
             clock_24h: true,
+            // Vingt : de quoi couvrir un album entier parcouru dans les deux
+            // sens, ce que quatre ne faisait pas.
+            cover_cache_entries: 20,
             // Le plafond du protocole lui-même : par défaut le cœur n'ajoute
             // aucune restriction à ce que les greffons savent déjà encaisser.
             cover_source_max_mio: ritornello_proto::COVER_MAX_BYTES as u32 / (1024 * 1024),
@@ -400,6 +419,7 @@ mod tests {
                 overlay_ms: 6000,
                 tens_window_ms: 7000,
                 seek_step_s: 45,
+                cover_cache_entries: 7,
                 // Non-défaut toutes les deux, même raison : le défaut est
                 // `DayMonthYear` et `true`.
                 date_format: DateFormat::YearMonthDay,

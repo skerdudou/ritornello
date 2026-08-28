@@ -43,6 +43,7 @@ const reglages = ref<SettingsPayload>({
   clock_24h: true,
   overlay_ms: 5000,
   tens_window_ms: 5000,
+  cover_cache_entries: 20,
   cover_source_max_mio: 20,
   cover_rendition: true,
   cover_max_edge_px: 640,
