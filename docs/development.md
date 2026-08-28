@@ -162,7 +162,7 @@ Three audiences, three rules — the boundary is the audience, not the file:
 - **Code comments, commit messages, and the specs and plans under
   `docs/superpowers/` are French.** Public `///` doc comments follow the
   file they live in: files documenting an API surface (`state.rs`,
-  `core.rs`) are English throughout and keep internal `//` comments French.
+  `core/mod.rs`) are English throughout and keep internal `//` comments French.
 - **Logs are English**, at every level, including the `anyhow!` and
   `.context(…)` strings they interpolate. They are read next to
   `journalctl` and rustc — and they are visible in the UI: the System
@@ -183,6 +183,41 @@ Three audiences, three rules — the boundary is the audience, not the file:
   applies to a save that fails on disk: the plugin admin backends turn the
   I/O failure into a catalogue phrase for the reader and log the raw detail,
   never the other way around.
+
+## Layout of the core crate: `core/` and `status/`
+
+`crates/ritornello-core/src/core/` is one struct, `Core<P>`, split by domain
+— one file per domain, each holding a partial `impl<P: Player> Core<P>`:
+
+| File | Owns |
+|---|---|
+| `mod.rs` | the struct, `new`, and `handle_source_update` — the entry point of a Source frame, which writes into every domain and stays here on purpose |
+| `commandes.rs` | remote and UI commands: play/standby machine, volume, tens offset, seek, held keys, startup |
+| `echeances.rs` | overlays and the deadlines the `main.rs` loop wakes on (`prochaine_echeance`) |
+| `lecteur.rs` | mpv events, retry with growing backoff, resume on wake |
+| `metadonnees.rs` | identity, ICY titles, file tags, plugin enrichments, covers and their extraction |
+| `position.rs` | the progression mpv reports and the anchor a plugin sets |
+| `publication.rs` | player state and source catalogue pushed to displays, SPA and metadata plugins |
+| `reglages.rs` | audio output, locale, theme, and writing `state.json` |
+| `sources.rs` | cycle order, switching, hot-plug and death of a plugin, applying a `SourceAction` |
+| `test_support.rs` | fake player and sources, shared test rigs (`pub(super)`, test-only) |
+
+`status/` follows the same shape for the HTTP surface: `mod.rs` keeps
+`AppState`, the router, audio output, settings GET/PUT and the command route;
+`reglages_validation.rs` the setting ranges and `SettingsError`;
+`journaux.rs` the log buffer, `/api/logs` and the `/api/player` SSE stream;
+`greffons.rs` `PluginStatus`, the plugin order, the enable switch and what a
+disconnect or a re-announce changes; `locales.rs` the locale and i18n routes.
+`mod.rs` re-exports what other files import, so `main.rs`, `admin.rs` and
+`system.rs` never name a child module.
+
+**The rule that made the split free:** a child module sees the private
+fields of a struct its parent defines. So `publie_etat` still reads its
+twenty-odd fields directly, `persist` still walks everything it writes, and
+not one field became `pub`, not one accessor was added. Adding a domain means
+adding a file with its own `impl<P: Player> Core<P>` — never widening a
+field's visibility. A method the parent or a sibling calls is `pub(super)`;
+that is the only visibility the split introduced.
 
 ## Tests
 
