@@ -60,6 +60,15 @@ describe('Transport', () => {
     expect(vide.getAttribute('aria-hidden')).toBe('true')
     expect(vide.className).toContain('flex-1')
     expect(secondaire.className).toContain('flex-1')
+    // **À toutes les largeurs.** Une première version masquait le vide au-delà
+    // de `md` et réalignait la rangée à gauche : sur PC le trio restait collé
+    // au bord et Arrêt partait à l'autre bout — le défaut que le propriétaire a
+    // signalé sur capture. Aucune des deux colonnes souples ne doit porter de
+    // variante qui la retire ou la fige.
+    for (const cote of [vide, secondaire]) {
+      expect(cote.className).not.toMatch(/\bmd:hidden\b/)
+      expect(cote.className).not.toMatch(/\bmd:flex-none\b/)
+    }
     expect(
       Array.from(principal.querySelectorAll('[data-remote-command]')).map((b) =>
         b.getAttribute('data-remote-command'),

@@ -32,16 +32,20 @@ const visibles = (liste: RemoteCommand[]) => liste.filter((c) => !masquee(c.cmd.
 </script>
 
 <template>
-  <!-- **Le groupe principal est centre, pas la rangee entiere.** Les cinq
-       boutons etaient tous enfants directs d'un `justify-center` : le groupe
-       secondaire (arret, ejection) comptait donc dans le centrage, et
-       precedent/lecture/suivant se retrouvaient decales vers la gauche de la
-       moitie de sa largeur. Un vide de meme souplesse a gauche (`flex-1` des
-       deux cotes) rend au trio le milieu de la carte. Il ne sert qu'en dessous
-       de `md` : a partir de la, la rangee s'aligne a gauche et le groupe
-       secondaire part a droite par `ml-auto`, comme avant. -->
-  <div class="flex items-center md:justify-start" data-transport>
-    <span class="flex-1 md:hidden" aria-hidden="true" />
+  <!-- **Le groupe principal est centre, pas la rangee entiere — et a toutes
+       les largeurs.** Les cinq boutons etaient tous enfants directs d'un
+       `justify-center` : le groupe secondaire (arret, ejection) comptait donc
+       dans le centrage, et precedent/lecture/suivant se retrouvaient decales
+       vers la gauche de la moitie de sa largeur.
+
+       Un vide de meme souplesse a gauche (`flex-1` des deux cotes) rend au
+       trio le milieu de la carte. Il n'a **pas** de `md:hidden` : sur PC la
+       rangee s'alignait a gauche, ce qui laissait le trio colle au bord et
+       Arret perdu a l'autre bout — le proprietaire l'a signale sur capture. Le
+       trio est desormais au milieu partout, et le groupe secondaire reste en
+       retrait a droite, la ou sa colonne souple le pousse. -->
+  <div class="flex items-center" data-transport>
+    <span class="flex-1" aria-hidden="true" />
     <div class="flex items-center gap-3 md:gap-2">
       <Button
         v-for="c in visibles(REMOTE_TRANSPORT)"
@@ -58,8 +62,9 @@ const visibles = (liste: RemoteCommand[]) => liste.filter((c) => !masquee(c.cmd.
         <component :is="icone(c)" :class="c.cmd.cmd === 'PlayPause' ? 'size-7 md:size-6' : 'size-6 md:size-5'" />
       </Button>
     </div>
-    <!-- En retrait : a droite sur PC, en fin de rangee sur telephone. -->
-    <div class="flex flex-1 items-center justify-end gap-1 md:flex-none md:ml-auto">
+    <!-- En retrait, a droite : sa colonne a la meme souplesse que le vide de
+         gauche, c'est ce qui garde le trio au milieu. -->
+    <div class="flex flex-1 items-center justify-end gap-1">
       <Button
         v-for="c in visibles(REMOTE_TRANSPORT_SECONDAIRE)"
         :key="c.key"

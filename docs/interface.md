@@ -83,7 +83,13 @@ competes for attention any more. A pastille badge in the card's header
 names the active source (`etat.source`, or "No source" before the first
 frame), with a small dot lit next to it while something is actually
 playing (`playback === 'playing'`); a second badge reads "STANDBY" in
-standby. The corner of the card carries the two commands that act on the
+standby. That dot is `bg-current` and not `bg-primary`: it inherits the badge's
+own text colour, so it contrasts with its own background **by construction**, in
+every theme. Painted in `primary` it put the theme's green on the secondary
+badge's blue — two saturated, neighbouring hues, reported unreadable by the
+owner. The colour carries no meaning anyway: it is the dot's **presence** that
+says something is playing, since it is only drawn then. Same idiom as the active
+preset tile's dot. The corner of the card carries the two commands that act on the
 whole appliance rather than on what's playing — source switch and
 standby — deliberately apart from the transport below it, which only ever
 acts on the current source.
@@ -239,13 +245,19 @@ button, then `▶|` — the order of a hi-fi remote and of VLC, previous/next
 either side of the frequent gesture. `Stop` and `Eject` sit apart, in
 retreat (to the right on desktop, at the end of the row on the phone).
 
-**The trio is centred, not the whole row.** All five buttons used to be direct
-children of one `justify-center`, so `Stop` — and `Eject` when the source has a
-drawer — counted towards the centring and pushed previous/play/next left by half
-their width. A flexible spacer of the same growth on the left restores the
-middle of the card to the three keys that matter. It exists below `md` only:
-from there the row aligns left and the secondary group goes right on `ml-auto`,
-as before.
+**The trio is centred, not the whole row — and at every width.** All five
+buttons used to be direct children of one `justify-center`, so `Stop` — and
+`Eject` when the source has a drawer — counted towards the centring and pushed
+previous/play/next left by half their width. A flexible spacer of the same
+growth on the left restores the middle of the card to the three keys that
+matter, and the secondary group's column grows the same way on the right, which
+is what holds the trio in the middle.
+
+It carries **no `md:` variant**: a first pass hid the spacer past `md` and
+realigned the row to the left, which left the trio stuck against the edge with
+`Stop` at the far end — the defect the owner reported on a screenshot. A unit
+test asserts the absence of those variants, since the classes are the whole
+mechanism and jsdom computes no layout.
 Play/Pause is the one filled, round, primary-colored button on the page —
 64 px on the phone, 48 px on desktop, larger than the other three keys at
 every width — and its icon now actually

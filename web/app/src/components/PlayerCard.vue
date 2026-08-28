@@ -106,12 +106,22 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
       <CardTitle class="flex items-center gap-2 text-base">
         {{ t('player_title') }}
         <!-- La source en pastille : un badge du kit, `data-source` conserve
-             pour les parcours. Le point vert dit « ca joue » (playback), la
-             ou l'ancienne ligne de texte ne disait rien. -->
+             pour les parcours. Le point dit « ca joue » (playback), la ou
+             l'ancienne ligne de texte ne disait rien.
+
+             `bg-current` et non `bg-primary` : le point herite de la couleur
+             de texte du badge, donc il contraste **par construction** avec son
+             propre fond, dans tous les themes. En `bg-primary` il peignait le
+             vert du theme sur le bleu du badge secondaire — deux teintes
+             saturees et proches, signalees illisibles par le proprietaire.
+             C'est aussi l'idiome deja retenu pour la pastille de la
+             preselection active (voir `GrillePresets.vue`). La couleur ne
+             porte d'ailleurs aucun sens ici : c'est la **presence** du point
+             qui dit que ca joue, il n'est rendu qu'a ce moment-la. -->
         <Badge variant="secondary" class="gap-1.5 font-normal">
           <span
             v-if="etat?.playback === 'playing'"
-            class="size-1.5 rounded-full bg-primary"
+            class="size-1.5 rounded-full bg-current"
             aria-hidden="true"
             data-lecture-en-cours
           />
