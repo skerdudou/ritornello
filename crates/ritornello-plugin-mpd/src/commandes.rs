@@ -49,6 +49,14 @@ pub enum Issue {
     Octets(Binaire),
     /// `close` : `OK` puis fermeture.
     Fermer,
+    /// `binarylimit <N>` : la session retient cette taille de tranche pour ses
+    /// réponses binaires, puis répond `OK`.
+    ///
+    /// Une issue à part parce que c'est un fait sur la **connexion** et non sur
+    /// l'appareil — la même raison qui fait vivre l'état de liste et l'attente
+    /// d'`idle` dans `session.rs`. La valeur portée est déjà bornée (voir
+    /// `binarylimit`), la session n'a rien à revérifier.
+    LimiteBinaire(usize),
 }
 
 /// Une réponse binaire toute décidée : l'en-tête textuel, l'image, et la
@@ -118,14 +126,23 @@ impl Issue {
 /// Ordre alphabétique : les clients n'en tirent rien, mais un trou se voit.
 pub const COMMANDES: &[&str] = &[
     "albumart",
+    "binarylimit",
     "close",
     "commands",
+    "count",
     "currentsong",
     "decoders",
+    "find",
+    "getvol",
     "idle",
+    "list",
+    "listall",
+    "listallinfo",
+    "listfiles",
     "listplaylistinfo",
     "listplaylists",
     "load",
+    "lsinfo",
     "next",
     "noidle",
     "notcommands",
@@ -139,6 +156,7 @@ pub const COMMANDES: &[&str] = &[
     "plchanges",
     "previous",
     "readpicture",
+    "search",
     "seek",
     "seekcur",
     "seekid",
@@ -177,7 +195,7 @@ fn entrees_nommees(presets: &[Preset]) -> Vec<Entree> {
 ///    cette liste (`position_vers_index`), jamais par une soustraction de 1.
 /// 2. La **synthèse**, à défaut : le greffon fabrique `1..=preset_count`, et la
 ///    suite est alors dense par construction (`Pos = Id - 1`). C'est le cas du
-///    cd et des fichiers, qui ne savent pas énumérer — leur entrée de catalogue
+///    cd, qui ne sait pas énumérer — son entrée de catalogue
 ///    porte une liste vide, ce qui veut dire « je n'ai que des numéros » et non
 ///    « je n'ai rien ». Retomber sur `preset_count` est alors la seule façon de
 ///    voir les douze pistes d'un disque.
@@ -212,7 +230,16 @@ const DATE_INCONNUE: &str = "1970-01-01T00:00:00Z";
 /// Traite une commande déjà découpée. `indice` est son rang dans une liste de
 /// commandes (0 hors liste) : il doit traverser jusqu'à l'`ACK`, sinon un
 /// client ne sait pas laquelle de ses commandes a échoué.
-pub fn traiter(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
+/// `limite_binaire` est la taille de tranche que **cette connexion** accepte
+/// (voir `binarylimit`) : un fait sur la connexion, que seule la session
+/// connaît, et qui n'entre nulle part ailleurs que dans les deux commandes de
+/// pochette.
+pub fn traiter(
+    inst: &Instantane,
+    indice: usize,
+    args: &[String],
+    limite_binaire: usize,
+) -> Issue {
     // Ligne vide : la session ne devrait pas en soumettre, mais cette fonction
     // est totale par construction plutôt que par convention — un `args[0]` sur
     // une tranche vide serait une panique, donc une connexion coupée.
@@ -319,13 +346,49 @@ pub fn traiter(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
         // puis l'autre : répondre à un seul des deux ferait dépendre l'affichage
         // de la pochette de l'ordre dans lequel le client s'y prend.
         // Seule différence, celle de MPD : `readpicture` publie un `type:`.
-        "albumart" => pochette(inst, indice, "albumart", reste),
-        "readpicture" => pochette(inst, indice, "readpicture", reste),
+        "albumart" => pochette(inst, indice, "albumart", reste, limite_binaire),
+        "readpicture" => pochette(inst, indice, "readpicture", reste, limite_binaire),
+        // La taille de tranche que ce client accepte. Gérée et non refusée : à
+        // la version que la bannière annonce (0.23.5), un client la considère
+        // comme acquise et l'envoie **au moment de se connecter** — M.A.L.P. le
+        // fait. Un `ACK 5` en pleine séquence de connexion est le pire moment
+        // pour être refusé, et la commande a de surcroît un effet réel ici :
+        // une pochette de 500 Kio demandait soixante-deux allers-retours en
+        // tranches de 8 Kio.
+        "binarylimit" => binarylimit(indice, reste),
+        // Le volume seul, sans le reste de `status` (MPD 0.23). Un client qui
+        // ne veut que le curseur n'a pas à relire quinze lignes.
+        "getvol" => Issue::lignes(vec![ligne("volume", volume_publie(inst))]),
         // `load <nom>` bascule de source. Elle n'ajoute pas à la file (MPD y
         // *concatène* une liste enregistrée) : ici la file d'attente **est**
         // la liste de la source active, donc la charger, c'est la choisir.
         // Le refus n'est plus fixe : le catalogue dit quels noms existent.
         "load" => load(inst, indice, reste),
+        // **Le navigateur de fichiers d'un client, rendu utile plutôt que
+        // refusé.** `lsinfo` était dans la liste des refus assumés, au motif
+        // qu'il n'y a pas de base de données à parcourir. C'est vrai des
+        // fichiers, et faux de ce que l'appareil contient réellement : ses
+        // sources, et les présélections de chacune. La racine rend donc les
+        // mêmes listes enregistrées que `listplaylists` — ce que fait le vrai
+        // MPD, qui les publie à la racine de son répertoire de musique — et un
+        // nom de source rend ses entrées. Un client y navigue alors comme dans
+        // une bibliothèque, celle que l'appareil a.
+        "lsinfo" => lsinfo(inst, indice, reste),
+        // Les interrogations de **base de données**, bien formées et vides.
+        //
+        // Vides parce qu'il n'y en a pas : rien n'indexe d'étiquettes ici, et
+        // les inventer serait mentir. Bien formées parce que le refus, lui,
+        // était un défaut visible — un client dont l'onglet « Albums » reçoit
+        // `ACK 5` affiche une erreur, là où une liste vide affiche un onglet
+        // vide. C'est exactement la distinction que la doc de `COMMANDES`
+        // énonce ; elle supposait un client qui grise ce qu'il ne trouve pas
+        // dans `commands`, et M.A.L.P. ne le fait pas.
+        //
+        // `count` est du même lot mais rend deux champs plutôt que rien : les
+        // clients les lisent sans les tester.
+        "list" | "listall" | "listallinfo" | "listfiles" => Issue::ok(),
+        "find" | "search" => recherche(indice, cmd, reste),
+        "count" => Issue::lignes(vec![ligne("songs", 0), ligne("playtime", 0)]),
         // Tout le reste est refusé du même refus, sans distinguer l'inconnu du
         // volontairement non géré — MPD ne les distingue pas non plus, et
         // `commands` dit déjà ce qui existe. Deux de ces refus méritent leur
@@ -367,7 +430,7 @@ fn courant(inst: &Instantane, file: &[Entree]) -> Option<(usize, u8)> {
 
 /// L'URI d'une entrée. Un schéma à nous : le greffon ne sert aucun octet, et
 /// un client n'a besoin que d'une clé stable pour distinguer deux entrées.
-fn uri(source: &str, index: u8) -> String {
+pub fn uri(source: &str, index: u8) -> String {
     format!("ritornello://{source}/{index}")
 }
 
@@ -488,7 +551,59 @@ pub const MAX_TRANCHE: usize = 8 * 1024;
 /// l'image de la piste précédente **sous l'URI de la nouvelle** — le cas
 /// empoisonnant décrit ci-dessus, atteint sans qu'aucun client n'ait rien fait
 /// de travers.
-fn pochette(inst: &Instantane, indice: usize, nom: &str, reste: &[String]) -> Issue {
+/// Cette commande demande-t-elle une image que l'appareil **a annoncée** mais
+/// que le greffon ne tient pas encore ?
+///
+/// **La fenêtre qu'elle nomme est celle qui faisait disparaître les pochettes.**
+/// Le cœur envoie l'état d'abord, les octets ensuite (voir `relais_afficheur`) :
+/// à chaque changement de piste il existe donc un instant — le temps de lire un
+/// `folder.jpg` sur un partage, ou de le télécharger — où la trame annonce déjà
+/// le `cover_href` suivant alors que la pochette tenue est encore la
+/// précédente. Or c'est exactement l'instant où le client se réveille et
+/// demande l'image, puisque c'est cette même trame qui l'a réveillé.
+///
+/// Le bras `albumart` répondait alors « No file exists ». Le raisonnement
+/// d'origine — le client redemandera au réveil suivant — vaut pour un client
+/// idéal ; M.A.L.P., lui, **mémorise l'absence** par piste pour ne pas
+/// marteler le serveur, et ne redemandait donc jamais. La pochette restait
+/// vide jusqu'au morceau suivant, où le même défaut recommençait.
+///
+/// La réponse est d'attendre, brièvement, plutôt que de refuser : la session
+/// s'en charge (voir `attendre_pochette`). Cette fonction ne fait que **dire
+/// s'il y a lieu d'attendre**, et reste donc pure comme le reste du module.
+///
+/// Faux dès que le refus est définitif — rien ne joue, aucune image annoncée,
+/// URI d'une autre piste, arguments mal formés : attendre ne changerait rien à
+/// aucun d'eux, et faire patienter un client trois secondes pour un refus
+/// certain serait pire que le refus.
+pub fn pochette_annoncee_mais_absente(inst: &Instantane, args: &[String]) -> bool {
+    let Some(nom) = args.first() else { return false };
+    if nom != "albumart" && nom != "readpicture" {
+        return false;
+    }
+    // Même forme que celle qu'exige `pochette` : deux arguments, un offset
+    // numérique. Une commande mal formée sera refusée, il n'y a rien à attendre.
+    let [_, demandee, offset] = args else { return false };
+    if offset.parse::<usize>().is_err() {
+        return false;
+    }
+    let Some(annoncee) = inst.etat.morceau.cover_href.as_deref() else { return false };
+    let Some(preset) = inst.etat.preset else { return false };
+    if *demandee != uri(&inst.etat.source, preset) {
+        return false;
+    }
+    // La seule situation qui se répare toute seule : l'image annoncée n'est pas
+    // (encore) celle qu'on tient.
+    inst.pochette.as_ref().map(|p| p.href.as_str()) != Some(annoncee)
+}
+
+fn pochette(
+    inst: &Instantane,
+    indice: usize,
+    nom: &str,
+    reste: &[String],
+    limite: usize,
+) -> Issue {
     let [demandee, offset] = reste else {
         return Issue::Refuser(ack(Ack::Arg, indice, nom, "wrong number of arguments"));
     };
@@ -524,7 +639,10 @@ fn pochette(inst: &Instantane, indice: usize, nom: &str, reste: &[String]) -> Is
     if offset > taille {
         return Issue::Refuser(ack(Ack::Arg, indice, nom, "Offset too large"));
     }
-    let fin = taille.min(offset + MAX_TRANCHE);
+    // La tranche que **ce client** accepte (voir `binarylimit`), jamais plus
+    // que le plafond du greffon. `MAX_TRANCHE` reste la valeur par défaut, celle
+    // que reçoit un client qui n'a rien demandé.
+    let fin = taille.min(offset + limite.min(MAX_TRANCHE_PLAFOND));
     // `size:` est la taille de **l'image entière** et non de la tranche : c'est
     // elle qui dit au client combien d'allers-retours il lui reste. Les
     // confondre ferait s'arrêter le client à la première tranche.
@@ -537,14 +655,27 @@ fn pochette(inst: &Instantane, indice: usize, nom: &str, reste: &[String]) -> Is
     Issue::Octets(Binaire { entete, image: pochette.octets.clone(), tranche: offset..fin })
 }
 
+/// Le volume tel que le protocole MPD l'exprime.
+///
+/// `muted` écrase le volume mémorisé. MPD n'a pas de sourdine : les clients
+/// coupent le son en posant `setvol 0` et s'attendent donc à relire 0 quand
+/// c'est coupé. Rapporter 65 sur un appareil muet ferait afficher un curseur à
+/// 65 sur un silence.
+///
+/// Un seul endroit pour `status` et `getvol` : deux volumes qui se
+/// contrediraient seraient un défaut invisible jusqu'au jour où un client lit
+/// les deux.
+fn volume_publie(inst: &Instantane) -> u8 {
+    if inst.etat.muted {
+        0
+    } else {
+        inst.etat.volume
+    }
+}
+
 fn status(inst: &Instantane) -> Vec<String> {
     let file = file_attente(inst);
-    // `muted` écrase le volume mémorisé. MPD n'a pas de sourdine : les clients
-    // coupent le son en posant `setvol 0` et s'attendent donc à relire 0 quand
-    // c'est coupé. Rapporter 65 sur un appareil muet ferait afficher un curseur
-    // à 65 sur un silence.
-    let volume = if inst.etat.muted { 0 } else { inst.etat.volume };
-    let mut lignes = vec![ligne("volume", volume)];
+    let mut lignes = vec![ligne("volume", volume_publie(inst))];
     // Rapportées à zéro et **pas omises** : les clients les lisent toujours, et
     // leur absence les fait mal se comporter. Les *écrire* est refusé (Task 7),
     // donc c'est le seul endroit où le greffon publie une valeur qu'il ne sait
@@ -784,23 +915,104 @@ fn liste_nommee<'a>(
     })
 }
 
+/// Les entrées d'une source nommée, telles que `listplaylistinfo` et `lsinfo`
+/// les rendent toutes deux.
+///
+/// **La même règle que `file_attente` là où elle peut s'appliquer, et il faut
+/// qu'elle soit la même** : une source qui ne sait pas énumérer (le cd) porte
+/// une liste vide, et ses entrées se synthétisent depuis le compte. Mais
+/// `preset_count` ne décrit que la source **active** — pour une autre, le
+/// greffon ne sait rien du nombre, et une liste vide est alors la réponse
+/// honnête. Le catalogue ne porte pas de compte, il n'y a pas de meilleure
+/// réponse.
+fn entrees_de_source(inst: &Instantane, source: &SourceCatalogue) -> Vec<Entree> {
+    if source.presets.is_empty() && source.name == inst.etat.source {
+        file_attente(inst)
+    } else {
+        entrees_nommees(&source.presets)
+    }
+}
+
+/// `lsinfo [URI]` : la racine, ou le contenu d'une source.
+///
+/// Sans argument (ou sur `/`, que des clients envoient pour la racine), rend
+/// les listes enregistrées — c'est-à-dire les sources —, exactement comme
+/// `listplaylists`. Avec un nom de source, ses entrées.
+///
+/// **Aucune ligne `directory:`**, et c'est délibéré : elle ferait attendre à un
+/// client une arborescence à descendre, alors que l'appareil n'en a pas. Les
+/// sources sont des listes, pas des dossiers, et `playlist:` est le mot juste —
+/// le même que celui sous lequel `load` les accepte.
+fn lsinfo(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
+    let cible = args.first().map(String::as_str).unwrap_or("");
+    if cible.is_empty() || cible == "/" {
+        return Issue::lignes(listplaylists(inst));
+    }
+    match inst.catalogue_source(cible) {
+        Some(source) => Issue::lignes(
+            entrees_de_source(inst, source)
+                .iter()
+                .flat_map(|e| lignes_de_liste(&source.name, e))
+                .collect(),
+        ),
+        // `ACK 50` comme `listplaylistinfo` : le nom est bien formé, c'est ce
+        // qu'il désigne qui n'existe pas.
+        None => Issue::Refuser(ack(Ack::NoExist, indice, "lsinfo", "No such directory")),
+    }
+}
+
+/// `find`/`search` : bien formées, et vides.
+///
+/// Le refus des arguments manquants est conservé — c'est celui de MPD, et un
+/// client qui envoie une requête tronquée doit l'apprendre plutôt que de croire
+/// que sa recherche n'a rien donné.
+fn recherche(indice: usize, cmd: &str, args: &[String]) -> Issue {
+    if args.is_empty() {
+        return Issue::Refuser(ack(Ack::Arg, indice, cmd, "too few arguments"));
+    }
+    Issue::ok()
+}
+
+/// Plafond d'une tranche binaire qu'un client peut demander, en octets.
+///
+/// **64 Kio, et le chiffre borne une dépense réelle.** Une tranche est un
+/// tampon que la session écrit d'un coup ; le pire cas est
+/// `MAX_SESSIONS × MAX_TRANCHE_PLAFOND`, soit 16 × 64 Kio = **1 Mio** sur un
+/// appareil d'un gibioctet — négligeable, là où laisser un client demander
+/// n'importe quoi ne le serait pas. Le gain est net dans l'autre sens : une
+/// pochette de 500 Kio passe de soixante-deux allers-retours à huit.
+pub const MAX_TRANCHE_PLAFOND: usize = 64 * 1024;
+
+/// Plancher d'une tranche binaire. En dessous, l'en-tête textuel coûterait plus
+/// que les octets qu'il annonce.
+const MIN_TRANCHE: usize = 64;
+
+/// `binarylimit <N>` : la taille de tranche que ce client accepte.
+///
+/// **Bornée des deux côtés, silencieusement.** MPD refuse une valeur sous son
+/// propre plancher ; ici la valeur est ramenée dans `[MIN_TRANCHE,
+/// MAX_TRANCHE_PLAFOND]` plutôt que refusée, parce que la borne haute est une
+/// décision **à nous** (voir `MAX_TRANCHE_PLAFOND`) et non une règle du
+/// protocole : refuser `binarylimit 1048576` ferait échouer la connexion d'un
+/// client parfaitement correct qui demande simplement plus que ce qu'on veut
+/// servir. Une tranche plus petite que demandée est toujours licite — la valeur
+/// est un **maximum** que le serveur ne doit pas dépasser, pas un contrat de
+/// taille exacte.
+fn binarylimit(indice: usize, args: &[String]) -> Issue {
+    let Some(n) = args.first().and_then(|a| a.parse::<usize>().ok()) else {
+        return Issue::Refuser(ack(Ack::Arg, indice, "binarylimit", "integer expected"));
+    };
+    Issue::LimiteBinaire(n.clamp(MIN_TRANCHE, MAX_TRANCHE_PLAFOND))
+}
+
 fn listplaylistinfo(inst: &Instantane, indice: usize, args: &[String]) -> Issue {
     let source = match liste_nommee(inst, indice, "listplaylistinfo", args) {
         Ok(source) => source,
         Err(refus) => return Issue::Refuser(refus),
     };
-    // La même règle que `file_attente` là où elle peut s'appliquer, et il faut
-    // qu'elle soit la même : une source qui ne sait pas énumérer (le cd) porte
-    // une liste vide, et ses entrées se synthétisent depuis le compte. Mais
-    // `preset_count` ne décrit que la source **active** — pour une autre, le
-    // greffon ne sait rien du nombre, et une liste vide est alors la réponse
-    // honnête. C'est le seul endroit du module où les deux se distinguent, et
-    // il n'y a pas de meilleure réponse : le catalogue ne porte pas de compte.
-    let entrees = if source.presets.is_empty() && source.name == inst.etat.source {
-        file_attente(inst)
-    } else {
-        entrees_nommees(&source.presets)
-    };
+    // Partagée avec `lsinfo`, qui doit répondre exactement la même chose du
+    // même nom : voir `entrees_de_source`.
+    let entrees = entrees_de_source(inst, source);
     Issue::lignes(entrees.iter().flat_map(|e| lignes_de_liste(&source.name, e)).collect())
 }
 
@@ -1278,8 +1490,8 @@ mod tests {
     }
 
     /// Une entrée de catalogue, telle que le cœur en émet une par source
-    /// déclarée. Une liste de présélections vide est la vérité du cd et des
-    /// fichiers, qui restent au corps par défaut de `list_presets`.
+    /// déclarée. Une liste de présélections vide est la vérité du cd, qui reste
+    /// au corps par défaut de `list_presets`.
     fn source_catalogue(nom: &str, presets: &[(u8, &str)]) -> SourceCatalogue {
         SourceCatalogue {
             name: nom.to_string(),
@@ -1362,7 +1574,7 @@ mod tests {
 
     fn traiter_mots(inst: &Instantane, indice: usize, mots: &[&str]) -> Issue {
         let args: Vec<String> = mots.iter().map(|m| (*m).to_string()).collect();
-        traiter(inst, indice, &args)
+        traiter(inst, indice, &args, MAX_TRANCHE)
     }
 
     /// Les lignes d'une réponse, ou une panique nommant ce qu'on a eu à la
@@ -1918,8 +2130,13 @@ mod tests {
     fn commands_nannonce_que_ce_qui_existe() {
         let lignes = traiter_ok(&instantane_arrete(), &["commands"]);
         assert!(lignes.contains(&"command: status".to_string()));
-        // La contrepartie, celle qui rend l'annonce honnete :
-        for absente in ["add", "search", "lsinfo", "save", "kill"] {
+        // La contrepartie, celle qui rend l'annonce honnete. `search` et
+        // `lsinfo` en sont sorties : elles sont desormais gerees — vide et bien
+        // formee pour la premiere, les sources pour la seconde — parce qu'un
+        // onglet vide vaut mieux qu'un onglet qui plante. Ce qui reste ici est
+        // ce qui n'existe vraiment pas : l'ecriture de la file, l'ecriture des
+        // listes, et l'extinction.
+        for absente in ["add", "delete", "move", "save", "rm", "playlistadd", "update", "kill"] {
             assert!(!lignes.contains(&format!("command: {absente}")), "{absente} annoncee a tort");
         }
     }
@@ -2207,13 +2424,13 @@ mod tests {
     #[test]
     fn play_hors_bornes_est_refuse_et_nemet_rien() {
         let inst = instantane_avec_presets("radio", &[(1, "FIP")]);
-        assert!(matches!(traiter(&inst, 0, &["play".into(), "7".into()]), Issue::Refuser(_)));
+        assert!(matches!(traiter(&inst, 0, &["play".into(), "7".into()], MAX_TRANCHE), Issue::Refuser(_)));
     }
 
     #[test]
     fn playid_dun_indice_absent_est_refuse() {
         let inst = instantane_avec_presets("radio", &[(1, "FIP")]);
-        assert!(matches!(traiter(&inst, 0, &["playid".into(), "9".into()]), Issue::Refuser(_)));
+        assert!(matches!(traiter(&inst, 0, &["playid".into(), "9".into()], MAX_TRANCHE), Issue::Refuser(_)));
     }
 
     #[test]
@@ -2283,9 +2500,9 @@ mod tests {
     fn setvol_borne_et_refuse_hors_intervalle() {
         let inst = instantane_arrete();
         assert_eq!(cmds(&inst, &["setvol", "40"]), vec![Command::SetVolume(40)]);
-        assert!(matches!(traiter(&inst, 0, &["setvol".into(), "101".into()]), Issue::Refuser(_)));
-        assert!(matches!(traiter(&inst, 0, &["setvol".into(), "abc".into()]), Issue::Refuser(_)));
-        assert!(matches!(traiter(&inst, 0, &["setvol".into()]), Issue::Refuser(_)));
+        assert!(matches!(traiter(&inst, 0, &["setvol".into(), "101".into()], MAX_TRANCHE), Issue::Refuser(_)));
+        assert!(matches!(traiter(&inst, 0, &["setvol".into(), "abc".into()], MAX_TRANCHE), Issue::Refuser(_)));
+        assert!(matches!(traiter(&inst, 0, &["setvol".into()], MAX_TRANCHE), Issue::Refuser(_)));
     }
 
     #[test]
@@ -2665,7 +2882,7 @@ mod tests {
     fn une_commande_inconnue_est_refusee_avec_son_indice_de_liste() {
         let inst = instantane_arrete();
         assert_eq!(
-            traiter(&inst, 3, &["nawak".to_string()]),
+            traiter(&inst, 3, &["nawak".to_string()], MAX_TRANCHE),
             Issue::Refuser("ACK [5@3] {nawak} unsupported".to_string())
         );
     }
@@ -2675,14 +2892,15 @@ mod tests {
         // Elles doivent l'etre explicitement, pas par defaut : c'est la liste
         // que la doc promet, et un futur `add` accidentellement gere se verrait
         // ici. La liste est celle du § « Ce que le greffon ne fait pas ».
+        //
+        // **Les six interrogations de bibliotheque en sont sorties** (`lsinfo`,
+        // `listall`, `listallinfo`, `search`, `find`, `list`, `count`) : elles
+        // repondent desormais, vide et bien forme faute de base de donnees —
+        // sauf `lsinfo`, qui rend les sources. Le refus etait un defaut visible
+        // chez le client, dont l'onglet affichait une erreur la ou une liste
+        // vide n'aurait rien affiche. Ce qui reste ici est l'ecriture, qui n'a
+        // pas de sens sur cet appareil, et elle seule.
         for cmd in [
-            "lsinfo",
-            "listall",
-            "listallinfo",
-            "search",
-            "find",
-            "list",
-            "count",
             "update",
             "add",
             "addid",
@@ -2708,17 +2926,11 @@ mod tests {
             "subscribe",
             "sendmessage",
             "kill",
-            // `albumart` et `readpicture` figuraient ici, et n'y sont plus :
-            // elles sont désormais gérées, et c'est bien cette liste-là qui
-            // devait changer — la retirer d'ici est la moitié « traité ⊆
-            // COMMANDES » du couple d'invariants, l'autre étant
+            // `albumart`, `readpicture` puis `binarylimit` ont figuré ici et
+            // n'y sont plus : elles sont désormais gérées, et c'est bien cette
+            // liste-là qui devait changer — la retirer d'ici est la moitié
+            // « traité ⊆ COMMANDES » du couple d'invariants, l'autre étant
             // `chaque_commande_annoncee_est_reellement_geree`.
-            // `binarylimit` prend leur place : c'est la commande que MPD
-            // associe aux réponses binaires (elle change la taille de tranche),
-            // et ce greffon ne la gère pas — sa tranche est fixée à
-            // `MAX_TRANCHE`. Un client qui l'envoie reçoit un refus lisible et
-            // garde la valeur par défaut, qui est justement la nôtre.
-            "binarylimit",
         ] {
             assert_eq!(
                 traiter_mots(&instantane_arrete(), 0, &[cmd]),
@@ -2728,12 +2940,123 @@ mod tests {
         }
     }
 
+    // ------------------------------------------------------------------
+    // La bibliothèque : ce qu'un client peut parcourir
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn lsinfo_a_la_racine_rend_les_sources_comme_listplaylists() {
+        // Le navigateur de fichiers d'un client doit montrer ce que l'appareil
+        // a : ses sources. Les deux commandes doivent répondre exactement la
+        // même chose de la racine, sinon un client verrait deux bibliothèques
+        // différentes selon l'onglet.
+        let inst = instantane_avec_catalogue(&["radio", "cd", "files"]);
+        let attendu = traiter_ok(&inst, &["listplaylists"]);
+        assert!(attendu.contains(&"playlist: radio".to_string()));
+        for racine in [vec!["lsinfo"], vec!["lsinfo", ""], vec!["lsinfo", "/"]] {
+            assert_eq!(traiter_ok(&inst, &racine), attendu, "{racine:?}");
+        }
+    }
+
+    #[test]
+    fn lsinfo_dune_source_rend_ses_entrees_comme_listplaylistinfo() {
+        // Descendre dans une source doit donner ses présélections, et les mêmes
+        // que la commande de liste enregistrée : c'est le même contenu vu par
+        // deux chemins, et les laisser diverger ferait jouer autre chose que ce
+        // qu'on a touché à l'écran.
+        let inst = instantane_avec_presets("radio", &[(1, "FIP"), (5, "Nova")]);
+        assert_eq!(
+            traiter_ok(&inst, &["lsinfo", "radio"]),
+            traiter_ok(&inst, &["listplaylistinfo", "radio"])
+        );
+    }
+
+    #[test]
+    fn lsinfo_dun_nom_inconnu_est_refuse() {
+        // Un `OK` vide laisserait croire à un dossier réellement vide.
+        assert_eq!(
+            traiter_mots(&instantane_avec_catalogue(&["radio"]), 0, &["lsinfo", "musique"]),
+            Issue::Refuser("ACK [50@0] {lsinfo} No such directory".to_string())
+        );
+    }
+
+    #[test]
+    fn les_interrogations_de_base_repondent_vide_et_bien_forme() {
+        // **Vide plutôt que refusé**, et c'est la correction : l'onglet
+        // « Albums » d'un client recevait `ACK 5` et affichait une erreur, là
+        // où une réponse vide n'affiche rien. Il n'y a pas de base de données
+        // ici, et le dire par une liste vide est honnête ; le dire par un refus
+        // était juste illisible.
+        let inst = instantane_en_lecture();
+        for mots in [
+            vec!["list", "album"],
+            vec!["listall"],
+            vec!["listallinfo"],
+            vec!["listfiles"],
+            vec!["find", "album", "Kind of Blue"],
+            vec!["search", "any", "miles"],
+        ] {
+            assert_eq!(traiter_ok(&inst, &mots), Vec::<String>::new(), "{mots:?}");
+        }
+        // `count` rend ses deux champs : les clients les lisent sans les tester.
+        assert_eq!(
+            traiter_ok(&inst, &["count", "album", "Kind of Blue"]),
+            vec!["songs: 0".to_string(), "playtime: 0".to_string()]
+        );
+    }
+
+    #[test]
+    fn une_recherche_sans_filtre_reste_refusee() {
+        // Une requête tronquée doit s'apprendre, sinon le client croit que sa
+        // recherche n'a rien donné.
+        for cmd in ["find", "search"] {
+            assert_eq!(
+                traiter_mots(&instantane_en_lecture(), 0, &[cmd]),
+                Issue::Refuser(format!("ACK [2@0] {{{cmd}}} too few arguments"))
+            );
+        }
+    }
+
+    #[test]
+    fn getvol_dit_le_meme_volume_que_status() {
+        // Deux volumes qui se contrediraient seraient un défaut invisible
+        // jusqu'au jour où un client lit les deux — sourdine comprise.
+        for inst in [instantane_en_lecture(), instantane_muet(65)] {
+            let du_status = traiter_ok(&inst, &["status"])[0].clone();
+            assert_eq!(traiter_ok(&inst, &["getvol"]), vec![du_status]);
+        }
+    }
+
+    #[test]
+    fn binarylimit_est_bornee_des_deux_cotes_plutot_que_refusee() {
+        // La borne haute est une décision à nous et non une règle du protocole :
+        // refuser un client qui demande plus que ce qu'on veut servir le
+        // ferait échouer à la connexion, alors qu'une tranche plus petite que
+        // demandée est toujours licite.
+        assert_eq!(
+            traiter_mots(&instantane_arrete(), 0, &["binarylimit", "16384"]),
+            Issue::LimiteBinaire(16 * 1024)
+        );
+        assert_eq!(
+            traiter_mots(&instantane_arrete(), 0, &["binarylimit", "1048576"]),
+            Issue::LimiteBinaire(MAX_TRANCHE_PLAFOND)
+        );
+        assert_eq!(
+            traiter_mots(&instantane_arrete(), 0, &["binarylimit", "1"]),
+            Issue::LimiteBinaire(MIN_TRANCHE)
+        );
+        assert_eq!(
+            traiter_mots(&instantane_arrete(), 0, &["binarylimit", "beaucoup"]),
+            Issue::Refuser("ACK [2@0] {binarylimit} integer expected".to_string())
+        );
+    }
+
     #[test]
     fn une_ligne_vide_est_refusee_sans_paniquer() {
         // La session ne devrait pas en soumettre, mais une panique ici
         // couperait la connexion d'un client pour une ligne blanche.
         assert_eq!(
-            traiter(&instantane_arrete(), 0, &[]),
+            traiter(&instantane_arrete(), 0, &[], MAX_TRANCHE),
             Issue::Refuser("ACK [5@0] {} unsupported".to_string())
         );
     }

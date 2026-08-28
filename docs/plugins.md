@@ -917,12 +917,28 @@ catalogue frame** gets nothing at all, which is the truth of that instant —
 the plugin then knows of no source — and it will re-read after its
 `stored_playlist` wake-up.
 
-**What a client does not get**, and this is a list, not an apology: no
-browsable database (nothing to index, so `update`, `lsinfo`, `find` and
-`search` are all refused), no queue editing (`add`, `delete`, `move` — the
-queue is not ours to rearrange, it is what the active source offers), and no
-writing playlists (`save`, `rm`, `playlistadd` — a source's presets are
-edited on that source's own admin page). `repeat`, `random`, `single` and
+**Browsing, and what browsing means here.** There is no tag database — nothing
+indexes artists or albums on this appliance — but there *is* content to walk:
+the sources, and each one's presets. `lsinfo` therefore answers the stored
+playlists at the root (exactly what real MPD does there, and exactly what
+`listplaylists` returns), and a source name lists that source's entries, the
+same lines `listplaylistinfo` gives. A client's file browser thus shows the
+library the appliance actually has. The tag queries — `list`, `find`, `search`,
+`count`, `listall`, `listallinfo`, `listfiles` — answer **well-formed and
+empty** (`count` answers `songs: 0`, `playtime: 0`, which clients read without
+testing). That is a correction, not a softening: they used to be refused, on
+the theory stated below that a client greys out whatever `commands` omits.
+M.A.L.P. does not — its Albums tab showed an error where an empty list shows
+nothing — and the whole point of that paragraph is the difference between
+"empty tabs" and "tabs that crash". A search with no filter is still refused,
+because a truncated request must be learned rather than mistaken for a search
+that found nothing.
+
+**What a client does not get**, and this is a list, not an apology: no queue
+editing (`add`, `delete`, `move` — the queue is not ours to rearrange, it is
+what the active source offers), no writing playlists (`save`, `rm`,
+`playlistadd` — a source's presets are edited on that source's own admin page),
+and no `update` (there is no database to index). `repeat`, `random`, `single` and
 `consume` are reported as `0` and cannot be set: reported rather than
 omitted, because clients read them unconditionally and misbehave without
 them, but writing them is refused. There is one audio output, always
@@ -944,7 +960,42 @@ version number and not from `commands` alone (libmpdclient and M.A.L.P.
 compare it before emitting `plchanges`, `seekcur` or `tagtypes`), so
 announcing a low version would make them give up commands that do work. The
 opposite risk is bounded by `commands`, which tells the truth, and by the
-`ACK 5` everything else gets.
+`ACK 5` everything else gets. `binarylimit` is part of that bargain: at the
+version announced a client treats it as a given and sends it **while
+connecting** (M.A.L.P. does), so refusing it meant an `ACK 5` at the worst
+possible moment. It is honoured, clamped to `[64, 65536]` rather than refused —
+the upper bound is our decision and not a rule of the protocol, and a slice
+smaller than asked for is always legal, since the value is a maximum. The gain
+is real: a 500 KiB cover took sixty-two round trips in the 8 KiB default.
+
+### Idle, and what counts as an event
+
+**The clock is not an event.** The core pushes a state frame **once per
+second** while playing, and the only field that moves is `position_s`. Treating
+that like any other change woke every client asleep on `idle player` once a
+second; M.A.L.P. then re-asked `status`, `currentsong` **and the cover art** at
+that rate, which chopped up the very chunked transfer it had just started. Real
+MPD never emits `player` for elapsed time — `elapsed` is read from `status`,
+whenever the client wants it. So a position change only counts when it is a
+*move*: an appearance or disappearance, any step backwards, or a jump forward
+of more than five seconds. Five and not one because frames travel through a
+`watch`, which coalesces: a relay momentarily behind sees the clock skip two or
+three seconds with nobody having moved anything. The price is that a seek under
+five seconds does not wake sleepers; they read it at their next `status`, where
+`elapsed` is always right.
+
+**A cover that is announced is waited for, not refused.** The core sends the
+state first and the bytes second, so at every track change there is a window —
+the time to read a `folder.jpg` off a share — where the frame already names the
+next `cover_href` while the plugin still holds the previous image. That window
+is exactly when the client asks, since that same frame is what woke it.
+`albumart` used to answer "No file exists" there. The reasoning (the client will
+re-ask at the next wake-up) holds for an ideal client; M.A.L.P. **remembers the
+absence** per track so as not to hammer the server, and never re-asked — the
+cover stayed blank until the next track, where it happened again. The session
+now waits up to three seconds for the announced image, and refuses only when
+nothing announced one, when the URI names another track, or when the wait runs
+out. Waiting costs nothing to anyone else: a session is a task of its own.
 
 ### Dense positions, sparse indices
 
@@ -1007,9 +1058,21 @@ defaults **with a log line** rather than refusing to start — a plugin that
 refuses to start disappears from the status page instead of explaining
 itself on it, which is the same policy the radio's station table follows.
 The admin page is at `http://<host>:8080/plugins/mpd/`; it writes the file
-through a temporary and a rename, so no power cut leaves a truncated toml,
-and it says on the page that a change **takes effect when the plugin
-restarts** — the TCP socket was bound at startup and nothing rebinds it.
+through a temporary and a rename, so no power cut leaves a truncated toml.
+
+**A change takes effect at once**: a successful save pushes the new settings to
+the network half, which binds the new address/port itself — no restart, which
+is what the page used to ask for. Three properties of that rebinding are worth
+knowing. The old listener is dropped **only once the new one is bound**, so a
+port already taken, or an address no interface carries, leaves the appliance
+serving where it was serving (the failure goes to the log; the page still says
+"saved", because the file *was* saved and validation cannot foresee an occupied
+port). Sessions already open are **not cut** — they hold their own socket,
+which closing a listener does not touch, so a phone that is listening keeps its
+connection on the previous port until it closes it itself, where a real MPD
+restart would have torn it away. And the session cap survives rebinding: the
+semaphore lives outside the loop, so `MAX_SESSIONS` cannot be worked around by
+saving repeatedly.
 
 **The port is bound before the plugin announces itself.** That is the same
 doctrine the SDK holds for its Unix sockets (bind first, announce second —

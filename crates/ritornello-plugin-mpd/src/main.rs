@@ -19,7 +19,7 @@ use etat::EtatPartage;
 use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::{DisplayPlugin, InputPlugin, Runtime};
 use ritornello_proto::{Catalogue, Cover, InputMessage, PlayerState};
-use session::accepter;
+use session::ecouter;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::net::TcpListener;
@@ -116,7 +116,13 @@ async fn main() -> Result<()> {
 
     let etat = Arc::new(EtatPartage::default());
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
-    tokio::spawn(accepter(ecoute, etat.clone(), cmd_tx));
+    // Le canal par lequel la page d'admin fait se relier la moitié réseau, sans
+    // redémarrage du greffon (voir `session::ecouter`). Un `watch` et non un
+    // `mpsc` : seule la **dernière** configuration compte, et deux
+    // enregistrements coup sur coup ne doivent pas provoquer deux reliaisons
+    // dont la première serait déjà périmée.
+    let (rebind_tx, rebind_rx) = tokio::sync::watch::channel(config.clone());
+    tokio::spawn(ecouter(ecoute, rebind_rx, etat.clone(), cmd_tx));
 
     // Un greffon Display/Input ne reçoit pas de `SetLocale` (le protocole ne
     // le prévoit que pour les sources) : la langue de la page vient de
@@ -124,7 +130,12 @@ async fn main() -> Result<()> {
     let locales_root = PathBuf::from(env_ou("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
     let locale = env_ou("RITORNELLO_LOCALE", "en");
     let catalog = Arc::new(RwLock::new(Catalog::load("mpd", &locale, &locales_root, MPD_EN)));
-    let admin = MpdAdmin { config_path: chemin, config: RwLock::new(config), catalog };
+    let admin = MpdAdmin {
+        config_path: chemin,
+        config: RwLock::new(config),
+        catalog,
+        rebind_tx: Some(rebind_tx),
+    };
 
     Runtime::from_args()?
         .input(EntreeMpd { rx: cmd_rx })?

@@ -1,7 +1,7 @@
 title = "MPD server"
 listen_label = "Listen address"
 port_label = "Port"
-restart_notice = "A change takes effect when the plugin restarts."
+restart_notice = "A change takes effect right away. Clients already connected keep their session on the previous port."
 btn_save = "Save"
 saved = "Saved ✓"
 listen_empty = "The listen address cannot be empty."

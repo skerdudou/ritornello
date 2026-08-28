@@ -13,8 +13,11 @@
 //! suivantes veulent dire, et `idle` ne fait rien d'autre que suspendre la
 //! lecture des lignes. `commandes.rs` reste pur, et se teste sans socket.
 
-use crate::commandes::{traiter, Binaire, Issue, MAX_TRANCHE};
-use crate::etat::{EtatPartage, Sujet};
+use crate::commandes::{
+    pochette_annoncee_mais_absente, traiter, Binaire, Issue, MAX_TRANCHE,
+    MAX_TRANCHE_PLAFOND,
+};
+use crate::etat::{EtatPartage, Instantane, Sujet};
 use crate::protocole::{ack, decouper, ligne, Ack};
 use anyhow::Result;
 use ritornello_proto::InputMessage;
@@ -333,6 +336,25 @@ impl Reponse {
     }
 }
 
+/// Ce qui n'appartient qu'à **une** connexion, et voyage donc avec elle.
+///
+/// Regroupés parce qu'ils ont exactement la même nature — deux faits sur le
+/// client, que rien ne partage entre sessions — et non pour raccourcir une
+/// signature : les séparer laisserait croire qu'ils ont des durées de vie
+/// différentes. L'état de liste de commandes leur ressemble mais reste dans
+/// `servir` : lui ne traverse jamais un appel à `executer`, puisque c'est
+/// `servir` qui décide ce qu'est un lot.
+struct Connexion {
+    /// Les compteurs de sujets que cette connexion a déjà vus : la référence de
+    /// tous ses `idle`. Lue par `executer`, avancée seulement par
+    /// `attendre_idle`, et pour les seuls sujets qu'un réveil annonce.
+    vues: [u64; 4],
+    /// La taille de tranche que ce client accepte pour les réponses binaires
+    /// (voir `commandes::binarylimit`). `MAX_TRANCHE` tant qu'il n'a rien
+    /// demandé — le défaut du protocole.
+    limite_binaire: usize,
+}
+
 /// Ce que la session doit faire après un lot de commandes.
 enum Suite {
     /// Continuer à lire des lignes.
@@ -341,19 +363,92 @@ enum Suite {
     Fermer,
 }
 
-/// Accepte les connexions et donne chacune à sa propre tâche.
+/// Accepte les connexions, chacune dans sa propre tâche, et **se relie quand
+/// les réglages changent**.
+///
+/// La page d'admin disait « le changement ne prend effet qu'au redémarrage du
+/// greffon », et c'était vrai : le socket était lié une fois pour toutes dans
+/// `main`. Ce n'est plus le cas — un enregistrement réussi pousse la nouvelle
+/// configuration sur `config_rx`, et cette boucle lie le nouveau couple
+/// adresse/port.
+///
+/// **Trois décisions, chacune pour une raison :**
+///
+/// - **L'ancien écouteur n'est lâché qu'une fois le nouveau lié.** Si le port
+///   demandé est déjà pris, ou l'adresse absente de la machine, l'appareil
+///   continue de servir là où il servait : un réglage fautif ne doit pas rendre
+///   le serveur MPD injoignable, alors même que la page qui l'a provoqué est
+///   toujours ouverte. L'échec part au journal, et la page dira l'inverse — le
+///   fichier, lui, a bien été enregistré. C'est le compromis assumé : la
+///   validation du port ne peut pas anticiper qu'il est occupé.
+/// - **Les sessions déjà ouvertes ne sont pas coupées.** Elles tiennent leur
+///   propre `TcpStream`, que la fermeture de l'écouteur ne touche pas. Un
+///   téléphone en train d'écouter garde donc sa connexion jusqu'à ce qu'il la
+///   ferme lui-même, là où un vrai redémarrage de MPD la lui aurait arrachée.
+/// - **Le plafond de sessions traverse les reliaisons.** Le sémaphore vit ici,
+///   hors de la boucle : le recréer à chaque changement de réglage rendrait
+///   `MAX_SESSIONS` contournable par une simple sauvegarde répétée.
+///
+/// `accept` est annulable sans perte (c'est la garantie de tokio), donc perdre
+/// la course du `select!` ne fait jamais tomber une connexion déjà acceptée.
+pub async fn ecouter(
+    ecoute: TcpListener,
+    mut config_rx: tokio::sync::watch::Receiver<crate::config::Config>,
+    etat: Arc<EtatPartage>,
+    cmd_tx: mpsc::Sender<InputMessage>,
+) {
+    let places = Arc::new(Semaphore::new(MAX_SESSIONS));
+    let mut ecoute = ecoute;
+    loop {
+        tokio::select! {
+            // Ne rend jamais la main : sa seule sortie est d'être annulée par
+            // l'autre bras.
+            () = boucle_accept(&ecoute, &places, &etat, &cmd_tx) => {}
+            change = config_rx.changed() => {
+                if change.is_err() {
+                    // La moitié admin a disparu (le greffon s'arrête) : plus
+                    // aucune reliaison ne viendra, mais il reste à servir.
+                    tracing::debug!("mpd settings channel closed; keeping the current socket");
+                    boucle_accept(&ecoute, &places, &etat, &cmd_tx).await;
+                    return;
+                }
+                let c = config_rx.borrow_and_update().clone();
+                match TcpListener::bind((c.listen.as_str(), c.port)).await {
+                    Ok(neuf) => {
+                        tracing::info!("mpd server now listening on {}:{}", c.listen, c.port);
+                        ecoute = neuf;
+                    }
+                    Err(e) => tracing::warn!(
+                        "mpd could not listen on {}:{} ({e}); keeping the previous socket",
+                        c.listen,
+                        c.port
+                    ),
+                }
+            }
+        }
+    }
+}
+
+/// La boucle d'acceptation elle-même. Ne rend jamais la main.
 ///
 /// Une erreur d'`accept` est journalisée et la boucle continue : un descripteur
 /// épuisé ou une connexion réinitialisée avant l'`accept` ne doit pas emporter
 /// le serveur, sinon le port reste ouvert dans un processus qui n'écoute plus.
-pub async fn accepter(ecoute: TcpListener, etat: Arc<EtatPartage>, cmd_tx: mpsc::Sender<InputMessage>) {
-    // Une place par session, rendue quoi qu'il arrive : le permis vit dans la
-    // tâche, donc il repart avec elle — y compris si elle panique, puisque c'est
-    // son `Drop` qui le rend. Un `Semaphore` plutôt qu'un compteur atomique pour
-    // exactement cette raison : un compteur demanderait de se souvenir de le
-    // décrémenter sur chaque chemin de sortie, et le jour où l'un serait oublié
-    // l'appareil refuserait tout le monde après seize connexions.
-    let places = Arc::new(Semaphore::new(MAX_SESSIONS));
+///
+/// Le sémaphore des places est **passé** et non créé ici : il vit dans
+/// `ecouter`, pour que le plafond de sessions traverse les reliaisons (voir sa
+/// doc). Une place par session, rendue quoi qu'il arrive — le permis vit dans
+/// la tâche, donc il repart avec elle, y compris si elle panique, puisque c'est
+/// son `Drop` qui le rend. Un `Semaphore` plutôt qu'un compteur atomique pour
+/// exactement cette raison : un compteur demanderait de se souvenir de le
+/// décrémenter sur chaque chemin de sortie, et le jour où l'un serait oublié
+/// l'appareil refuserait tout le monde après seize connexions.
+async fn boucle_accept(
+    ecoute: &TcpListener,
+    places: &Arc<Semaphore>,
+    etat: &Arc<EtatPartage>,
+    cmd_tx: &mpsc::Sender<InputMessage>,
+) {
     loop {
         match ecoute.accept().await {
             Ok((flux, adresse)) => {
@@ -421,7 +516,7 @@ pub async fn servir(flux: TcpStream, etat: Arc<EtatPartage>, cmd_tx: mpsc::Sende
     // peut-être déjà lu par un `status` est le sens d'erreur acceptable : un
     // réveil superflu lui coûte une interrogation redondante, un réveil
     // manquant lui coûte la justesse de son écran.
-    let mut vues = etat.versions().await;
+    let mut connexion = Connexion { vues: etat.versions().await, limite_binaire: MAX_TRANCHE };
 
     // Les commandes accumulées d'une liste en cours, `None` hors liste.
     // Un `Option<Vec<_>>` plutôt qu'un `Vec` plus un booléen : « pas dans une
@@ -460,7 +555,7 @@ pub async fn servir(flux: TcpStream, etat: Arc<EtatPartage>, cmd_tx: mpsc::Sende
             match mot {
                 "command_list_end" => {
                     let lot = liste.take().unwrap_or_default();
-                    match executer(&mut lignes, &mut ecriture, &etat, &cmd_tx, &lot, avec_ok, &mut vues)
+                    match executer(&mut lignes, &mut ecriture, &etat, &cmd_tx, &lot, avec_ok, &mut connexion)
                         .await?
                     {
                         Suite::Continuer => {}
@@ -556,7 +651,7 @@ pub async fn servir(flux: TcpStream, etat: Arc<EtatPartage>, cmd_tx: mpsc::Sende
             }
             _ => {
                 let lot = std::slice::from_ref(&args);
-                match executer(&mut lignes, &mut ecriture, &etat, &cmd_tx, lot, false, &mut vues)
+                match executer(&mut lignes, &mut ecriture, &etat, &cmd_tx, lot, false, &mut connexion)
                     .await?
                 {
                     Suite::Continuer => {}
@@ -579,9 +674,9 @@ pub async fn servir(flux: TcpStream, etat: Arc<EtatPartage>, cmd_tx: mpsc::Sende
 /// continuer à lire (le `noidle` qui l'annule, ou la commande qui la remplace)
 /// avant d'avoir répondu.
 ///
-/// `vues` est la référence de compteurs de la **connexion** (voir `servir`) :
-/// lue ici, jamais réécrite ici — seul un réveil annoncé l'avance, dans
-/// `attendre_idle`.
+/// `connexion` porte ce qui n'appartient qu'à ce client : la référence de
+/// compteurs de ses `idle` et la taille de tranche qu'il accepte (voir
+/// `Connexion`).
 async fn executer(
     lignes: &mut LecteurBorne,
     ecriture: &mut OwnedWriteHalf,
@@ -589,8 +684,9 @@ async fn executer(
     cmd_tx: &mpsc::Sender<InputMessage>,
     lot: &[Vec<String>],
     avec_ok: bool,
-    vues: &mut [u64; 4],
+    connexion: &mut Connexion,
 ) -> Result<Suite> {
+    let Connexion { vues, limite_binaire } = connexion;
     let mut sortie = Reponse::default();
     for (indice, args) in lot.iter().enumerate() {
         // **Un seul instantané, lu avant `traiter`.** Une seule prise de
@@ -605,8 +701,14 @@ async fn executer(
         // vivait ici affirmait le contraire : rien dans cette lecture ne rend
         // « le réveil manqué impossible ». C'est la comparaison d'`attendre`
         // contre la référence de la connexion qui l'interdit.
-        let instantane = etat.lire().await;
-        match traiter(&instantane, indice, args) {
+        let mut instantane = etat.lire().await;
+        // **La seule attente que ce module s'autorise avant de traiter**, et
+        // elle répare la pochette qui disparaissait à chaque changement de
+        // piste : voir `pochette_annoncee_mais_absente` et `attendre_pochette`.
+        if pochette_annoncee_mais_absente(&instantane, args) {
+            instantane = attendre_pochette(etat, instantane).await;
+        }
+        match traiter(&instantane, indice, args, *limite_binaire) {
             Issue::Repondre { lignes: rendues, cmds } => {
                 for cmd in &cmds {
                     // **Pousser d'abord, acter ensuite.** Le canal peut
@@ -674,6 +776,17 @@ async fn executer(
                     sortie.pousser("list_OK".to_string());
                 }
             }
+            // `binarylimit` : la valeur est déjà bornée par `commandes`, il n'y
+            // a qu'à la retenir. Elle vaut pour la **suite** de cette
+            // connexion, y compris pour les commandes qui suivent dans la même
+            // liste — c'est ce que fait MPD, et c'est le seul ordre qui rende
+            // `binarylimit` puis `albumart` groupés utilisables.
+            Issue::LimiteBinaire(n) => {
+                *limite_binaire = n;
+                if avec_ok {
+                    sortie.pousser("list_OK".to_string());
+                }
+            }
             // La première erreur produit son `ACK` et **rien de ce qui suit
             // n'est exécuté** : le `for` s'arrête là. Les lignes déjà
             // composées partent quand même, comme le fait MPD — un `ACK` ne
@@ -729,6 +842,73 @@ async fn executer(
     sortie.pousser("OK".to_string());
     ecrire(ecriture, &sortie.lignes).await?;
     Ok(Suite::Continuer)
+}
+
+/// Combien de temps une demande de pochette patiente pour une image que
+/// l'appareil a déjà annoncée.
+///
+/// Trois secondes, et le nombre vient des deux échéances qu'il doit couvrir :
+/// le cœur borne à `sante::DELAI` la lecture d'un fichier de pochette sur un
+/// partage, et un téléchargement réseau est du même ordre. Au-delà, l'image
+/// n'arrivera probablement pas pour cette piste, et le refus est la bonne
+/// réponse.
+///
+/// Ce que cette attente **ne** met pas en péril : une session est une tâche à
+/// elle seule, donc patienter ici ne retient personne d'autre (voir l'en-tête
+/// du module). M.A.L.P. ouvre d'ailleurs une connexion distincte pour les
+/// images.
+const DELAI_POCHETTE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Attend, au plus `DELAI_POCHETTE`, que la pochette annoncée arrive, et rend
+/// l'instantané qui décidera.
+///
+/// Rend la main **dès** que l'attente n'a plus d'objet : soit l'image est là,
+/// soit l'état a changé au point que la demande ne se répare plus (piste
+/// suivante, arrêt). C'est `pochette_annoncee_mais_absente` qui tranche, la
+/// même fonction que celle qui a décidé d'attendre — un seul énoncé de la
+/// condition, jamais deux à garder d'accord.
+///
+/// À l'échéance, rend le dernier instantané lu : `traiter` en tirera le refus
+/// ordinaire, comme si l'on n'avait jamais attendu.
+async fn attendre_pochette(etat: &EtatPartage, instantane: Instantane) -> Instantane {
+    let args = arguments_de_pochette(&instantane);
+    let mut courant = instantane;
+    let echeance = tokio::time::Instant::now() + DELAI_POCHETTE;
+    loop {
+        // `Sujet::Player` : c'est le sujet que `appliquer_pochette` déplace —
+        // le protocole MPD n'en a aucun pour les images, et le greffon a choisi
+        // celui-là (voir sa doc). Attendre sur lui, c'est attendre exactement
+        // l'arrivée de l'image, plus les changements de piste, qui doivent eux
+        // aussi nous réveiller pour cesser d'attendre.
+        let attente = etat.attendre(&[Sujet::Player], courant.versions);
+        if tokio::time::timeout_at(echeance, attente).await.is_err() {
+            tracing::debug!("mpd cover did not arrive within {DELAI_POCHETTE:?}");
+            return courant;
+        }
+        courant = etat.lire().await;
+        if !pochette_annoncee_mais_absente(&courant, &args) {
+            return courant;
+        }
+    }
+}
+
+/// Reconstruit les arguments d'une demande de pochette pour ce qui joue.
+///
+/// **Reconstruits et non transportés**, et la nuance est le sujet : la boucle
+/// d'attente doit réévaluer la condition contre l'état *courant*, or l'URI que
+/// le client a écrite désigne la piste d'alors. Les rebâtir depuis l'instantané
+/// de départ garde exactement la question posée — « l'image de cette piste-là
+/// est-elle arrivée ? » — et fait sortir la boucle dès que la piste change,
+/// puisque l'URI ne correspondra plus.
+fn arguments_de_pochette(inst: &Instantane) -> Vec<String> {
+    vec![
+        "albumart".to_string(),
+        inst.etat
+            .preset
+            .map(|p| crate::commandes::uri(&inst.etat.source, p))
+            .unwrap_or_default(),
+        "0".to_string(),
+    ]
 }
 
 /// Tient l'attente d'un `idle` : rend la main au réveil, ou sur ce que le
@@ -898,7 +1078,8 @@ async fn ecrire(ecriture: &mut OwnedWriteHalf, lignes: &[String]) -> Result<()> 
 /// **Un seul `write_all`, comme `ecrire`**, et la même raison : une réponse à
 /// moitié écrite serait lue comme une réponse complète par un client qui compte
 /// ses terminateurs. La recopie de la tranche dans le tampon coûte au plus
-/// `MAX_TRANCHE` octets — huit kibioctets, à comparer aux dizaines de
+/// `MAX_TRANCHE_PLAFOND` octets — soixante-quatre kibioctets si le client a
+/// relevé sa limite par `binarylimit`, huit sinon, à comparer aux dizaines de
 /// mébioctets que le chemin texte a dû se voir interdire.
 ///
 /// **Ce que cette fonction ne fait pas : allouer l'image.** `binaire.image` est
@@ -906,11 +1087,15 @@ async fn ecrire(ecriture: &mut OwnedWriteHalf, lignes: &[String]) -> Result<()> 
 /// le pire cas d'une connexion binaire indépendant de la taille de la pochette.
 async fn ecrire_octets(ecriture: &mut OwnedWriteHalf, binaire: &Binaire) -> Result<()> {
     // Indexation sans contrôle : c'est `commandes::pochette` qui établit
-    // l'intervalle, et son contrat est qu'il tient dans l'image et dans
-    // `MAX_TRANCHE`. L'assertion de débogage le dit plutôt que de le supposer
-    // en silence, sans rien coûter en production.
+    // l'intervalle, et son contrat est qu'il tient dans l'image et dans la
+    // limite de la connexion, elle-même plafonnée à `MAX_TRANCHE_PLAFOND`.
+    // L'assertion de débogage le dit plutôt que de le supposer en silence, sans
+    // rien coûter en production.
     let tranche = &binaire.image[binaire.tranche.clone()];
-    debug_assert!(tranche.len() <= MAX_TRANCHE, "une tranche depasse MAX_TRANCHE");
+    debug_assert!(
+        tranche.len() <= MAX_TRANCHE_PLAFOND,
+        "une tranche depasse le plafond du greffon"
+    );
     let binary = ligne("binary", tranche.len());
     let entete: usize =
         binaire.entete.iter().chain(std::iter::once(&binary)).map(|l| l.len() + 1).sum();
@@ -945,6 +1130,18 @@ mod tests {
     }
 
     impl Client {
+        /// Un client sur un flux déjà ouvert. Séparé de `Serveur::client` :
+        /// les tests de reliaison connectent une adresse qui n'est pas celle
+        /// que le `Serveur` de test porte.
+        fn depuis(flux: TcpStream) -> Client {
+            let (lecture, ecriture) = flux.into_split();
+            Client { lignes: BufReader::new(lecture).lines(), ecriture }
+        }
+
+        async fn connecter(adresse: std::net::SocketAddr) -> Client {
+            Client::depuis(TcpStream::connect(adresse).await.unwrap())
+        }
+
         async fn envoyer(&mut self, ligne: &str) {
             self.ecriture.write_all(format!("{ligne}\n").as_bytes()).await.unwrap();
         }
@@ -1042,6 +1239,11 @@ mod tests {
     struct Serveur {
         adresse: std::net::SocketAddr,
         etat: Arc<EtatPartage>,
+        /// Tenu vivant exprès : lâcher l'émetteur ferait sortir `ecouter` de
+        /// son `select!` (« la moitié admin a disparu ») et les tests
+        /// n'éprouveraient plus le chemin de service ordinaire, seulement celui
+        /// de l'extinction.
+        _config_tx: tokio::sync::watch::Sender<crate::config::Config>,
     }
 
     /// Lie l'écouteur **dans le test** et le donne au serveur, comme
@@ -1053,15 +1255,15 @@ mod tests {
         let adresse = ecoute.local_addr().unwrap();
         let etat = Arc::new(EtatPartage::default());
         let (tx, rx) = mpsc::channel(64);
-        tokio::spawn(accepter(ecoute, etat.clone(), tx));
-        (Serveur { adresse, etat }, rx)
+        let (config_tx, config_rx) =
+            tokio::sync::watch::channel(crate::config::Config::default());
+        tokio::spawn(ecouter(ecoute, config_rx, etat.clone(), tx));
+        (Serveur { adresse, etat, _config_tx: config_tx }, rx)
     }
 
     impl Serveur {
         async fn client(&self) -> Client {
-            let flux = TcpStream::connect(self.adresse).await.unwrap();
-            let (lecture, ecriture) = flux.into_split();
-            Client { lignes: BufReader::new(lecture).lines(), ecriture }
+            Client::connecter(self.adresse).await
         }
 
         /// Un client dont la bannière est déjà avalée.
@@ -1772,6 +1974,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn un_changement_de_reglages_relie_le_serveur_sans_redemarrage() {
+        // **La demande du propriétaire** : ne plus avoir à relancer le greffon à
+        // la main après avoir changé le port sur la page d'admin.
+        //
+        // Sans horloge, comme `un_client_qui_part_rend_sa_place` : la boucle
+        // réessaie jusqu'à ce que le nouveau port réponde, et rien ne l'arrête
+        // d'autre que ce succès. Une implémentation qui ne se relierait jamais
+        // fait *pendre* le test, ce qui est le mode d'échec voulu — et non un
+        // délai deviné qui deviendrait un flake sous charge.
+        let ecoute = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ancienne = ecoute.local_addr().unwrap();
+        // Un port libre, choisi par le noyau puis rendu : c'est la seule façon
+        // d'en nommer un qui ne soit pas déjà pris sur la machine du test.
+        let sonde = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let neuve = sonde.local_addr().unwrap();
+        drop(sonde);
+
+        let etat = Arc::new(EtatPartage::default());
+        let (cmd_tx, _cmd_rx) = mpsc::channel(64);
+        let (config_tx, config_rx) = tokio::sync::watch::channel(crate::config::Config {
+            listen: "127.0.0.1".into(),
+            port: ancienne.port(),
+        });
+        tokio::spawn(ecouter(ecoute, config_rx, etat, cmd_tx));
+
+        // L'ancien port sert bien avant tout changement.
+        let mut avant = Client::connecter(ancienne).await;
+        assert!(avant.recevoir().await.starts_with("OK MPD "));
+
+        config_tx
+            .send(crate::config::Config { listen: "127.0.0.1".into(), port: neuve.port() })
+            .unwrap();
+
+        let banniere = loop {
+            if let Ok(flux) = TcpStream::connect(neuve).await {
+                let mut c = Client::depuis(flux);
+                break c.recevoir().await;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert!(banniere.starts_with("OK MPD "), "banniere inattendue: {banniere}");
+
+        // Et la session déjà ouverte n'a pas été coupée : elle tient son propre
+        // flux, que la fermeture de l'écouteur ne touche pas. C'est la
+        // différence avec un vrai redémarrage de MPD, et elle est voulue.
+        avant.envoyer("ping").await;
+        assert_eq!(avant.reponse().await, vec!["OK".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn un_port_impossible_laisse_le_serveur_ou_il_etait() {
+        // Un réglage fautif — port déjà pris, adresse absente de la machine —
+        // ne doit pas rendre le serveur MPD injoignable. L'ancien écouteur
+        // n'est lâché qu'une fois le nouveau lié.
+        let ecoute = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ancienne = ecoute.local_addr().unwrap();
+        let etat = Arc::new(EtatPartage::default());
+        let (cmd_tx, _cmd_rx) = mpsc::channel(64);
+        let (config_tx, config_rx) = tokio::sync::watch::channel(crate::config::Config {
+            listen: "127.0.0.1".into(),
+            port: ancienne.port(),
+        });
+        tokio::spawn(ecouter(ecoute, config_rx, etat, cmd_tx));
+
+        // Une adresse qu'aucune interface ne porte : le `bind` échoue.
+        config_tx
+            .send(crate::config::Config { listen: "192.0.2.1".into(), port: 6600 })
+            .unwrap();
+
+        // Le serveur répond toujours là où il répondait. Boucle sans horloge,
+        // même raison que le test ci-dessus : c'est le succès qui l'arrête.
+        let banniere = loop {
+            if let Ok(flux) = TcpStream::connect(ancienne).await {
+                let mut c = Client::depuis(flux);
+                break c.recevoir().await;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert!(banniere.starts_with("OK MPD "), "banniere inattendue: {banniere}");
+    }
+
+    #[tokio::test]
     async fn un_client_qui_part_rend_sa_place() {
         // Le pendant indispensable : si le permis ne repartait pas avec la
         // tâche, l'appareil refuserait tout le monde après seize connexions
@@ -1851,7 +2135,7 @@ mod tests {
         for sujet in [Sujet::Player, Sujet::Mixer, Sujet::Playlist, Sujet::StoredPlaylist] {
             let args = vec!["idle".to_string(), nom_sujet(sujet).to_string()];
             assert_eq!(
-                traiter(&Instantane::default(), 0, &args),
+                traiter(&Instantane::default(), 0, &args, MAX_TRANCHE),
                 Issue::Attendre(vec![sujet]),
                 "nom_sujet({sujet:?}) n'est pas un nom qu'idle accepte"
             );
@@ -2018,8 +2302,19 @@ mod tests {
         // Le cas ordinaire : un flux sans image. Le client doit recevoir un
         // refus lisible et pouvoir continuer à parler — c'est ce refus qui le
         // fait basculer sur l'autre nom, puis renoncer proprement.
+        //
+        // **`cover_href: None`, et le détail est tout le test.** L'appareil
+        // n'annonce aucune image, donc le refus est définitif et doit tomber
+        // **tout de suite** : la nouvelle attente de `attendre_pochette` ne
+        // couvre que la fenêtre où une image *a été annoncée* et n'est pas
+        // encore arrivée. Une trame porteuse de `cover_href` ici — ce que ce
+        // test faisait avant — décrivait au contraire cette fenêtre-là, et le
+        // refus immédiat qu'il verrouillait était justement le défaut à
+        // corriger.
         let (s, _rx) = serveur().await;
-        s.etat.appliquer_etat(trame_avec_pochette()).await;
+        let mut trame = trame_avec_pochette();
+        trame.morceau.cover_href = None;
+        s.etat.appliquer_etat(trame).await;
         let mut c = s.client_pret().await;
 
         for nom in ["albumart", "readpicture"] {
@@ -2031,6 +2326,84 @@ mod tests {
         }
         c.envoyer("ping").await;
         assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn binarylimit_change_la_taille_des_tranches_de_cette_connexion() {
+        // **Ce que la commande sert vraiment à faire.** Une pochette se
+        // récupérait par tranches de 8 Kio, la valeur par défaut de MPD : une
+        // image de 500 Kio demandait soixante-deux allers-retours. Un client
+        // qui annonce accepter plus doit en recevoir plus — et la valeur ne
+        // vaut que pour **sa** connexion.
+        let (s, _rx) = serveur().await;
+        let attendus = avec_pochette(&s.etat, TAILLE).await;
+        let mut c = s.client_pret().await;
+
+        c.envoyer("binarylimit 32768").await;
+        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+
+        let r = c.recuperer("albumart", URI_COURANTE).await;
+        assert_eq!(r.image, attendus);
+        // TAILLE tient sous 32 Kio : une seule tranche, là où le défaut en
+        // demandait trois.
+        assert_eq!(r.tailles, vec![TAILLE], "la tranche demandee doit etre honoree");
+
+        // Un second client, qui n'a rien demandé, garde le défaut : la limite
+        // est un fait sur la connexion.
+        let mut autre = s.client_pret().await;
+        let r2 = autre.recuperer("albumart", URI_COURANTE).await;
+        assert_eq!(r2.tailles.first(), Some(&MAX_TRANCHE));
+    }
+
+    #[tokio::test]
+    async fn une_pochette_annoncee_mais_pas_encore_arrivee_est_attendue_et_servie() {
+        // **La correction de « la pochette disparaît au changement de piste ».**
+        // Le cœur envoie l'état d'abord, les octets ensuite : le client est
+        // réveillé par cette trame et demande l'image dans la foulée, pendant
+        // que le greffon tient encore celle d'avant — ou rien du tout. Il
+        // recevait « No file exists », et M.A.L.P., qui mémorise l'absence par
+        // piste, ne redemandait jamais.
+        //
+        // Ici la demande arrive **avant** les octets, et doit quand même
+        // aboutir.
+        let (s, _rx) = serveur().await;
+        s.etat.appliquer_etat(trame_avec_pochette()).await;
+        let mut c = s.client_pret().await;
+
+        let etat = s.etat.clone();
+        let attendus = crate::etat::cover_de_test(HREF, TAILLE).bytes;
+        // La pochette arrive pendant que la demande patiente. Une tâche à part,
+        // parce que c'est exactement la concurrence réelle : deux canaux
+        // distincts, l'un derrière l'autre.
+        tokio::spawn(async move {
+            etat.appliquer_pochette(crate::etat::cover_de_test(HREF, TAILLE)).await;
+        });
+
+        let r = c.recuperer("albumart", URI_COURANTE).await;
+        assert_eq!(r.image, attendus, "l'image attendue doit finir par etre servie");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn une_pochette_annoncee_qui_narrive_jamais_finit_par_etre_refusee() {
+        // Le pendant : l'attente est **bornée**. Sans cette borne, une image
+        // qui n'arrive pas — un partage endormi, un 404 du Cover Art Archive —
+        // laisserait le client suspendu pour toujours sur une commande dont il
+        // attend une réponse.
+        //
+        // Horloge simulée : tokio avance le temps virtuel dès que tout est en
+        // attente, donc ce test ne coûte pas les trois secondes réelles et ne
+        // suppose aucune durée d'exécution.
+        let (s, _rx) = serveur().await;
+        s.etat.appliquer_etat(trame_avec_pochette()).await;
+        let mut c = s.client_pret().await;
+
+        c.envoyer(&format!("albumart {URI_COURANTE} 0")).await;
+
+        assert_eq!(
+            c.reponse().await,
+            vec!["ACK [50@0] {albumart} No file exists".to_string()],
+            "l'attente doit finir par rendre le refus ordinaire"
+        );
     }
 
     #[tokio::test]
