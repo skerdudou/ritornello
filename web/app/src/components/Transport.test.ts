@@ -43,4 +43,32 @@ describe('Transport', () => {
     const w = monte({ standby: true })
     for (const b of w.findAll('[data-remote-command]')) expect(b.attributes('disabled')).toBeDefined()
   })
+
+  it('centre le trio de transport sans compter le groupe secondaire', () => {
+    // **La régression visée est un décentrage.** Les cinq boutons étaient tous
+    // enfants directs du `justify-center` : la largeur d'Arrêt (et d'Éjecter le
+    // cas échéant) entrait dans le centrage, et Précédent/Lecture/Suivant
+    // partaient vers la gauche. La rangée doit donc porter trois enfants — un
+    // vide souple, le trio, puis le groupe secondaire — et non cinq boutons.
+    const w = monte({ can_eject: true })
+    const rangee = w.get('[data-transport]').element
+    const enfants = Array.from(rangee.children)
+    expect(enfants).toHaveLength(3)
+    const [vide, principal, secondaire] = enfants as [Element, Element, Element]
+    // Le vide de gauche : même souplesse que le groupe de droite, c'est ce qui
+    // met le trio au milieu. Décoratif, donc masqué aux lecteurs d'écran.
+    expect(vide.getAttribute('aria-hidden')).toBe('true')
+    expect(vide.className).toContain('flex-1')
+    expect(secondaire.className).toContain('flex-1')
+    expect(
+      Array.from(principal.querySelectorAll('[data-remote-command]')).map((b) =>
+        b.getAttribute('data-remote-command'),
+      ),
+    ).toEqual(['Prev', 'PlayPause', 'Next'])
+    expect(
+      Array.from(secondaire.querySelectorAll('[data-remote-command]')).map((b) =>
+        b.getAttribute('data-remote-command'),
+      ),
+    ).toEqual(['Stop', 'Eject'])
+  })
 })

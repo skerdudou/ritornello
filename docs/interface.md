@@ -238,6 +238,14 @@ Three keys and a dominant Play/Pause: `|◀`, then the large `▶`/`❚❚`
 button, then `▶|` — the order of a hi-fi remote and of VLC, previous/next
 either side of the frequent gesture. `Stop` and `Eject` sit apart, in
 retreat (to the right on desktop, at the end of the row on the phone).
+
+**The trio is centred, not the whole row.** All five buttons used to be direct
+children of one `justify-center`, so `Stop` — and `Eject` when the source has a
+drawer — counted towards the centring and pushed previous/play/next left by half
+their width. A flexible spacer of the same growth on the left restores the
+middle of the card to the three keys that matter. It exists below `md` only:
+from there the row aligns left and the secondary group goes right on `ml-auto`,
+as before.
 Play/Pause is the one filled, round, primary-colored button on the page —
 64 px on the phone, 48 px on desktop, larger than the other three keys at
 every width — and its icon now actually

@@ -32,23 +32,34 @@ const visibles = (liste: RemoteCommand[]) => liste.filter((c) => !masquee(c.cmd.
 </script>
 
 <template>
-  <div class="flex items-center justify-center gap-3 md:justify-start md:gap-2" data-transport>
-    <Button
-      v-for="c in visibles(REMOTE_TRANSPORT)"
-      :key="c.key"
-      :data-remote-command="c.cmd.cmd"
-      :data-playback="c.cmd.cmd === 'PlayPause' ? (etat?.playback ?? 'stopped') : undefined"
-      :variant="c.cmd.cmd === 'PlayPause' ? 'default' : 'ghost'"
-      :class="c.cmd.cmd === 'PlayPause' ? 'size-16 rounded-full md:size-12' : 'size-12 rounded-full md:size-10'"
-      :aria-label="t(c.key)"
-      :title="t(c.key)"
-      :disabled="indisponible(c.cmd.cmd, etat)"
-      @click="emit('commande', c.cmd)"
-    >
-      <component :is="icone(c)" :class="c.cmd.cmd === 'PlayPause' ? 'size-7 md:size-6' : 'size-6 md:size-5'" />
-    </Button>
+  <!-- **Le groupe principal est centre, pas la rangee entiere.** Les cinq
+       boutons etaient tous enfants directs d'un `justify-center` : le groupe
+       secondaire (arret, ejection) comptait donc dans le centrage, et
+       precedent/lecture/suivant se retrouvaient decales vers la gauche de la
+       moitie de sa largeur. Un vide de meme souplesse a gauche (`flex-1` des
+       deux cotes) rend au trio le milieu de la carte. Il ne sert qu'en dessous
+       de `md` : a partir de la, la rangee s'aligne a gauche et le groupe
+       secondaire part a droite par `ml-auto`, comme avant. -->
+  <div class="flex items-center md:justify-start" data-transport>
+    <span class="flex-1 md:hidden" aria-hidden="true" />
+    <div class="flex items-center gap-3 md:gap-2">
+      <Button
+        v-for="c in visibles(REMOTE_TRANSPORT)"
+        :key="c.key"
+        :data-remote-command="c.cmd.cmd"
+        :data-playback="c.cmd.cmd === 'PlayPause' ? (etat?.playback ?? 'stopped') : undefined"
+        :variant="c.cmd.cmd === 'PlayPause' ? 'default' : 'ghost'"
+        :class="c.cmd.cmd === 'PlayPause' ? 'size-16 rounded-full md:size-12' : 'size-12 rounded-full md:size-10'"
+        :aria-label="t(c.key)"
+        :title="t(c.key)"
+        :disabled="indisponible(c.cmd.cmd, etat)"
+        @click="emit('commande', c.cmd)"
+      >
+        <component :is="icone(c)" :class="c.cmd.cmd === 'PlayPause' ? 'size-7 md:size-6' : 'size-6 md:size-5'" />
+      </Button>
+    </div>
     <!-- En retrait : a droite sur PC, en fin de rangee sur telephone. -->
-    <div class="flex items-center gap-1 md:ml-auto">
+    <div class="flex flex-1 items-center justify-end gap-1 md:flex-none md:ml-auto">
       <Button
         v-for="c in visibles(REMOTE_TRANSPORT_SECONDAIRE)"
         :key="c.key"
