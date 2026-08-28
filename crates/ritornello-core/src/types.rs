@@ -14,7 +14,12 @@ pub enum Event {
     /// Distinct d'`IcyTitle`, et exclusif de lui : l'un décrit un flux, l'autre
     /// un fichier. Le champ `origin` du morceau est déjà renseigné à
     /// l'extraction, l'événement porte donc un morceau prêt à afficher.
-    FileTags(ritornello_proto::Morceau),
+    ///
+    /// **Boxé**, contrairement aux autres variantes : `Morceau` porte désormais
+    /// une carte de provenance, et sa taille dépasse largement celle d'une
+    /// chaîne. Sans la boîte, *chaque* événement du lecteur — un par changement
+    /// de piste, d'état ou de titre — coûterait la taille du plus gros.
+    FileTags(Box<ritornello_proto::Morceau>),
     /// Chemin du fichier que mpv a réellement ouvert (propriété `path`).
     ///
     /// La seule façon dont le cœur apprend ce détail : il ne l'extrait jamais

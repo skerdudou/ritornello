@@ -32,6 +32,17 @@ export type StartupPower = 'on' | 'standby' | 'previous'
  */
 export type DateFormat = 'day_month_year' | 'year_month_day' | 'month_day_year'
 /** Réglages de comportement, tels que les sert `GET /api/settings`. */
+/**
+ * D'ou vient chaque morceau de ce qui s'affiche : le contributeur retenu pour
+ * chaque champ renseigne, et ceux qui ont cherche sans rien trouver.
+ */
+export interface Provenance {
+  /** Par nom de champ : `artist`, `title`, `album`, `year`, `duration`, `links`, `cover`. */
+  fields?: Record<string, string>
+  /** Les greffons qui ont cherche et n'ont rien trouve pour ce morceau. */
+  misses?: string[]
+}
+
 export interface SettingsPayload {
   volume_repeat_initial_ms: number
   volume_repeat_interval_ms: number
@@ -147,6 +158,13 @@ export interface PlayerPayload {
   cover_href: string | null
   /** Qui a fourni la pochette : nom de la Source, `tags`, ou nom du greffon. */
   cover_origin: string | null
+  /**
+   * D'ou vient chaque champ, et qui a cherche sans trouver.
+   *
+   * Facultatif : le coeur l'omet quand il n'a rien a dire, et une trame emise
+   * par une version anterieure n'en porte pas.
+   */
+  provenance?: Provenance
   /**
    * Ou en est ce qui joue, en secondes, a l'instant ou la trame a ete
    * publiee — le coeur en pousse une par seconde pendant la lecture.

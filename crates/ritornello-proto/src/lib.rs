@@ -10,7 +10,7 @@ pub use command::{Command, InputMessage};
 pub use display::{Catalogue, Cover, DisplayFrame, SourceCatalogue, COVER_MAX_BYTES};
 pub use metadata::{
     annee_valide, CoverRef, Enrichment, FormatDate, Horloge, IdentityUpdate, Known, Link, Morceau,
-    NowPlaying, Overlay, Playback, PlayerState,
+    NowPlaying, Overlay, Playback, PlayerState, Provenance,
 };
 pub use register::{Announcement, PluginKind};
 pub use source::{Preset, SourceAction, SourceMessage, SourceReq, SourceRequest};

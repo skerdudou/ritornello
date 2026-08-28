@@ -2,6 +2,7 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { Badge, Card, CardAction, CardContent, CardHeader, CardTitle } from '@ritornello/ui'
 import BarreProgression from './BarreProgression.vue'
+import DetailProvenance from './DetailProvenance.vue'
 import IconeAppleMusic from './icones/IconeAppleMusic.vue'
 import IconeDeezer from './icones/IconeDeezer.vue'
 import IconeYoutube from './icones/IconeYoutube.vue'
@@ -79,15 +80,18 @@ const dureeAAfficher = computed(
 const liens = computed(
   () => props.etat?.links?.filter((lien) => lien.platform in LIBELLE_LIEN) ?? [],
 )
-// La ligne basse du bloc morceau (badges d'origine, duree, liens) n'existe que
-// s'il y a quelque chose a y mettre : sinon `min-h-11` reserverait 44 px vides
-// sous l'album, ce qui est le cas le plus courant (un titre ICY nu).
+// La provenance a quelque chose a dire des que le coeur a nomme un champ ou un
+// contributeur bredouille. C'est ce qui decide de la presence du `(?)`, donc de
+// celle de la ligne quand rien d'autre ne l'occupe.
+const aUneProvenance = computed(() => {
+  const p = props.etat?.provenance
+  return Object.keys(p?.fields ?? {}).length > 0 || (p?.misses?.length ?? 0) > 0
+})
+// La ligne basse du bloc morceau (provenance, duree, liens) n'existe que s'il y
+// a quelque chose a y mettre : sinon `min-h-11` reserverait 44 px vides sous
+// l'album, ce qui est le cas le plus courant (un titre ICY nu).
 const ligneBadges = computed(
-  () =>
-    !!props.etat?.origin
-    || !!props.etat?.cover_origin
-    || dureeAAfficher.value
-    || liens.value.length > 0,
+  () => aUneProvenance.value || dureeAAfficher.value || liens.value.length > 0,
 )
 // Remonte au parent : c'est HomeView qui poste les commandes (comme pour le
 // reste de la telecommande), la carte elle-meme n'en poste aucune.
@@ -209,15 +213,14 @@ const emit = defineEmits<{ deplacer: [secondes: number] }>()
             class="mt-1 flex min-h-11 items-center gap-1.5"
             data-badges
           >
-            <Badge v-if="etat?.origin" variant="secondary" class="text-[10px]" data-origin>{{ etat.origin }}</Badge>
-            <Badge
-              v-if="etat?.cover_origin && etat.cover_origin !== etat.origin"
-              variant="secondary"
-              class="text-[10px]"
-              data-cover-origin
-            >
-              {{ etat.cover_origin }}
-            </Badge>
+            <!-- Les deux badges d'origine ont cede la place a ce bouton
+                 (decision du proprietaire) : ils occupaient la ligne la plus
+                 chargee de l'ecran avec deux mots que personne ne lit en
+                 ecoutant, et ils ne repondaient meme pas a la question qu'on
+                 se pose devant un titre faux — *quel champ* vient de *qui*.
+                 Le detail vit desormais dans une popin, ou il y a la place de
+                 le dire en toutes lettres. -->
+            <DetailProvenance :etat="etat" />
             <span
               v-if="dureeAAfficher"
               class="text-xs text-muted-foreground"

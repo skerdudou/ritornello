@@ -175,7 +175,6 @@ describe('PlayerCard', () => {
     expect(w.find('[data-artiste]').text()).toBe('Miles Davis')
     expect(w.find('[data-album]').text()).toBe('Kind of Blue')
     expect(w.find('[data-duree]').text()).toBe('9:05')
-    expect(w.find('[data-origin]').text()).toBe('musicbrainz')
   })
 
   it('affiche un titre seul, tel que le donne l en-tete ICY', () => {
@@ -184,7 +183,6 @@ describe('PlayerCard', () => {
     const w = monteAvec({ title: 'Made Up - TAHITI 80', origin: 'icy' })
     expect(w.find('[data-titre]').text()).toBe('Made Up - TAHITI 80')
     expect(w.find('[data-artiste]').exists()).toBe(false)
-    expect(w.find('[data-origin]').text()).toBe('icy')
   })
 
   it('affiche l artiste seul quand le titre manque', () => {
@@ -238,36 +236,48 @@ describe('PlayerCard', () => {
     // Et elle demande la **vignette** : le carre fait 224 px, le `folder.jpg`
     // d'un NAS en fait couramment trois mebioctets.
     expect(img.attributes('src')).toBe('/api/cover/1a2b?taille=vignette')
-    expect(w.find('[data-cover-origin]').text()).toContain('files')
-  })
-
-  it('ne repete pas le meme contributeur sur la pochette', () => {
-    // Le cas courant sur une radio : un seul greffon fournit le texte et
-    // l'image, et les deux badges affichaient alors le meme mot cote a cote.
-    // Le badge de gauche dit deja qui c'est.
-    const w = monteAvec({
-      title: 'So What',
-      origin: 'radiofrance-metas',
-      cover_href: '/api/cover/1a2b',
-      cover_origin: 'radiofrance-metas',
-    })
-    expect(w.get('[data-origin]').text()).toBe('radiofrance-metas')
+    // L'origine de la pochette n'est plus un badge : elle est dans la popin
+    // de provenance, avec les autres champs (voir plus bas).
     expect(w.find('[data-cover-origin]').exists()).toBe(false)
   })
 
-  it('montre l origine de la pochette quand elle differe de celle du texte', () => {
-    // Le controle de la regle ci-dessus, et ce pour quoi le badge existe :
-    // `icy` donne le titre du flux, `musicbrainz` la pochette. Sans ce test,
-    // masquer le doublon pourrait degenerer en ne jamais rien montrer, et la
-    // suite resterait verte.
+  it('detaille la provenance champ par champ dans une popin', async () => {
+    // **Ce que les deux badges d'origine ne disaient pas.** Ils nommaient le
+    // contributeur du texte et celui de l'image ; l'ecran est compose de plus
+    // de mains que ca — le titre d'ici, l'annee de la, la pochette d'ailleurs
+    // — et c'est cette question-la qu'on se pose devant un titre faux.
     const w = monteAvec({
       title: 'So What',
       origin: 'icy',
       cover_href: '/api/cover/1a2b',
       cover_origin: 'musicbrainz',
+      provenance: {
+        fields: { title: 'icy', year: 'musicbrainz', cover: 'musicbrainz' },
+        misses: ['ouifm-metas'],
+      },
     })
-    expect(w.get('[data-origin]').text()).toBe('icy')
-    expect(w.get('[data-cover-origin]').text()).toBe('musicbrainz')
+    // Les badges ont cede la place au bouton.
+    expect(w.find('[data-origin]').exists()).toBe(false)
+    expect(w.find('[data-cover-origin]').exists()).toBe(false)
+
+    await w.get('[data-provenance-ouvrir]').trigger('click')
+    const popin = document.body.querySelector('[data-provenance-popin]')
+    expect(popin).not.toBeNull()
+    expect(popin?.querySelector('[data-provenance-champ="title"]')?.textContent).toBe('icy')
+    expect(popin?.querySelector('[data-provenance-champ="year"]')?.textContent).toBe('musicbrainz')
+    expect(popin?.querySelector('[data-provenance-champ="cover"]')?.textContent).toBe('musicbrainz')
+    // « A cherche sans rien trouver » est une section a part : ce n'est pas la
+    // meme information qu'une absence de la liste ci-dessus, qui vaut aussi
+    // quand le greffon n'a jamais ete interroge.
+    expect(popin?.querySelector('[data-provenance-manques]')?.textContent).toContain('ouifm-metas')
+    w.unmount()
+  })
+
+  it("n'offre pas le bouton quand il n'y a rien a expliquer", () => {
+    // Un `(?)` qui ouvre une popin vide promet une explication et n'en donne
+    // aucune : c'est le cas ordinaire avant qu'un morceau ne soit identifie.
+    const w = monteAvec({ title: 'Made Up - TAHITI 80' })
+    expect(w.find('[data-provenance-ouvrir]').exists()).toBe(false)
   })
 
   it('garde le carre en place quand il n y a pas de pochette', () => {
@@ -470,8 +480,8 @@ describe('PlayerCard', () => {
       // curseur de volume sur telephone. La ligne des badges les accueille.
       const w = monteAvec({
         title: 'Get Lucky',
-        origin: 'musicbrainz',
         duration_s: 248,
+        provenance: { fields: { title: 'musicbrainz' } },
         links: [
           { platform: 'youtube', url: 'https://www.youtube.com/watch?v=a' },
           { platform: 'deezer', url: 'https://www.deezer.com/track/1' },
@@ -480,7 +490,8 @@ describe('PlayerCard', () => {
       })
       const ligne = w.get('[data-badges]').element
       expect(w.get('[data-liens]').element.parentElement).toBe(ligne)
-      expect(w.get('[data-origin]').element.parentElement).toBe(ligne)
+      // Le bouton de provenance a pris la place des deux badges d'origine.
+      expect(w.get('[data-provenance-ouvrir]').element.parentElement).toBe(ligne)
       expect(w.get('[data-duree]').element.parentElement).toBe(ligne)
     })
 
@@ -515,7 +526,10 @@ describe('PlayerCard', () => {
       // Sans hauteur minimale, l'arrivee tardive d'un lien (MusicBrainz repond
       // apres le titre) faisait grandir la carte et descendre le volume sous
       // le doigt deja pose.
-      const w = monteAvec({ title: 'Get Lucky', origin: 'icy' })
+      const w = monteAvec({
+        title: 'Get Lucky',
+        provenance: { fields: { title: 'icy' } },
+      })
       expect(w.get('[data-badges]').classes()).toContain('min-h-11')
     })
 

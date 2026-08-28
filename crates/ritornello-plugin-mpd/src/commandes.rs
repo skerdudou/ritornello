@@ -1532,6 +1532,10 @@ mod tests {
                 // ce qui force a revoir ce test quand un champ apparait.
                 cover_href: None,
                 cover_origin: None,
+                // Meme raison : le protocole MPD ne porte aucune provenance,
+                // le greffon n'en lit pas, et le litteral reste complet pour
+                // qu'un champ ajoute force a repasser ici.
+                provenance: Default::default(),
             },
             ..radio_arretee()
         }

@@ -71,7 +71,7 @@ impl MpvIpc {
                         // une priorité déguisée.
                         (Some("metadata"), data) => icy_title(data)
                             .map(Event::IcyTitle)
-                            .or_else(|| file_tags(data).map(Event::FileTags)),
+                            .or_else(|| file_tags(data).map(|m| Event::FileTags(Box::new(m)))),
                         // Le chemin réellement ouvert par mpv, jamais déduit
                         // de l'identité opaque de la Source (voir `OBSERVEES`).
                         (Some("path"), Value::String(p)) => Some(Event::Path(p.clone())),
@@ -218,6 +218,10 @@ pub fn file_tags(data: &Value) -> Option<Morceau> {
         origin: Some(crate::metadata::ORIGINE_TAGS.to_string()),
         cover_href: None,
         cover_origin: None,
+        // Laissée vide ici : c'est `Metadonnees::bloc_de_texte` qui attribue
+        // ces champs aux tags, au moment de la composition. La renseigner deux
+        // fois donnerait deux vérités à garder d'accord.
+        provenance: Default::default(),
     };
     (!morceau.est_vide()).then_some(morceau)
 }

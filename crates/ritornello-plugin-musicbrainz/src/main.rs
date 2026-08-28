@@ -341,22 +341,51 @@ impl MusicBrainzPlugin {
         });
     }
 
-    /// Prépare l'enrichissement générique (pochette seule) si la recherche a
-    /// abouti pour le couple (artiste, album) actuellement visé.
+    /// Prépare l'enrichissement générique pour le couple (artiste, album)
+    /// actuellement visé : la pochette trouvée, ou l'aveu de n'avoir rien
+    /// trouvé.
+    ///
+    /// **Le second cas est aussi une réponse**, et c'est ce qui manquait :
+    /// « MusicBrainz n'a pas de pochette pour cet album » et « MusicBrainz n'a
+    /// jamais été interrogé » se voyaient pareil à l'écran — c'est-à-dire pas
+    /// du tout. Un enrichissement portant `searched` et rien d'autre est le
+    /// seul que le cœur accepte vide ; il n'entre dans aucun arbitrage et
+    /// n'ajoute qu'une ligne à la provenance.
+    ///
+    /// À ne pas confondre avec une **panne** : celle-là n'émet rien et se
+    /// reprogramme (voir `reprogramme_pochette`). Ce qui arrive ici est une
+    /// réponse effective du service.
     fn prepare_generique(&mut self) {
         let (Some(identite), Some(cle)) = (&self.identite_generique, &self.cle_generique) else {
             return;
         };
-        let Some((connu, Some(cover_url))) = &self.pochette_connue else { return };
+        let Some((connu, trouvee)) = &self.pochette_connue else { return };
         if connu != cle {
             return;
         }
+        let Some(cover_url) = trouvee else {
+            self.pret = Some(Enrichment {
+                identity: identite.clone(),
+                searched: true,
+                // `fill_only` par honnêteté de forme : ce contributeur-là
+                // n'apporte rien, il ne peut donc rien vouloir écraser. Sans
+                // effet pratique — un enrichissement vide est écarté de
+                // l'arbitrage des deux côtés — mais un défaut `false`
+                // signifierait « j'écrase », ce qui serait faux.
+                fill_only: true,
+                ..Default::default()
+            });
+            return;
+        };
         self.pret = Some(Enrichment {
             identity: identite.clone(),
             // URL déjà résolue par `cherche_release` : ce chemin ne rebâtit
             // rien. Une recherche ne porte pas de bloc `cover-art-archive`,
             // donc c'est la pochette de l'album qui en sort.
             cover: Some(CoverRef::Url { url: cover_url.clone() }),
+            // Il a cherché, et il a trouvé : le dire aussi, pour que la
+            // provenance sache qu'il a été interrogé.
+            searched: true,
             // Ce chemin ne sait rien de plus que ce qu'on lui a donné : il ne
             // fait que compléter, jamais écraser un champ déjà renseigné.
             fill_only: true,
@@ -1240,7 +1269,15 @@ mod tests {
             ..Default::default()
         })
         .await;
-        assert!(p.pret.is_none());
+        // **Il prepare un aveu, pas une pochette** : « cherche, rien trouve »
+        // est une reponse, et c'est elle qui permet a l'ecran de distinguer
+        // MusicBrainz interroge sans succes de MusicBrainz jamais interroge.
+        // Elle n'apporte rien d'autre — aucun champ, aucune image — donc elle
+        // n'entre dans aucun arbitrage.
+        let aveu = p.pret.as_ref().expect("une recherche infructueuse doit se declarer");
+        assert!(aveu.searched);
+        assert!(aveu.artist.is_none() && aveu.title.is_none() && aveu.album.is_none());
+        assert!(aveu.cover.is_none() && aveu.year.is_none() && aveu.links.is_empty());
         assert!(p.pochette_en_vol.is_none());
         p.now_playing(NowPlaying { source: "files".into(), identity: Some(identite_fichier("/x")), known, ..Default::default() })
             .await;

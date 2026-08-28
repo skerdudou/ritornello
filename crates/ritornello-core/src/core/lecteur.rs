@@ -54,7 +54,7 @@ impl<P: Player> Core<P> {
             Event::IcyTitle(titre) => self.handle_icy_title(titre),
             // Même statut que l'ICY vis-à-vis de `retry_count` : des
             // métadonnées ne prouvent pas que la lecture est vivante.
-            Event::FileTags(morceau) => self.handle_file_tags(morceau),
+            Event::FileTags(morceau) => self.handle_file_tags(*morceau),
             // Même statut que les tags vis-à-vis de `retry_count` : le chemin
             // n'atteste rien de la vivacité du flux, il sert uniquement à la
             // pochette embarquée.

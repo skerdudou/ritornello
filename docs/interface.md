@@ -664,6 +664,33 @@ and size), so replacing the image under that path changes the key and the old
 thumbnail is never served again. Without it every page load would decode and
 re-encode on a Pi 2, which is the very cost the thumbnail exists to avoid.
 
+### Where the metadata comes from
+
+A small `(?)` on the badge row opens a dialog naming, **field by field**, who
+supplied what: "Title: icy · Year: musicbrainz · Cover: files". It replaces the
+two origin badges (`origin`, `cover_origin`), which took space on the busiest
+row of the screen for two words nobody reads while listening — and which did not
+answer the question one actually asks in front of a wrong title. The displayed
+text is composed by several hands: the winner of the arbitration, the
+`fill_only` contributors filling its gaps, the year and the links which are
+taken from any contributor at all, the cover which often comes from elsewhere.
+`origin` named only the first of them.
+
+The dialog has a second section: **searched and found nothing**. That is a
+different fact from a field's absence, which is also true of a plugin that was
+never asked — and the two used to look identical, that is, invisible. A plugin
+declares it with `Enrichment::searched`, and such an enrichment is the only
+empty one the core accepts. It enters no arbitration: with no text it cannot
+win, with no field it fills nothing; it only adds a line here. An outage is
+*not* declared this way — a plugin that could not reach its service emits
+nothing and retries.
+
+There is no button when there is nothing to explain: a `(?)` opening an empty
+dialog promises an explanation and gives none, which is the ordinary case before
+a track is identified. `origin` and `cover_origin` stay in the protocol: they
+are what a three-line display can show, and dropping them would take that away
+for the sake of a dialog no display can open.
+
 ### Date and time
 
 Two settings, not one, and not a free pattern. The owner asked for the pair

@@ -28,6 +28,39 @@ pub const ORIGINE_ICY: &str = "icy";
 /// est un détail d'implémentation susceptible de changer.
 pub const ORIGINE_TAGS: &str = "tags";
 
+/// Attribue à `contributeur` chacun des champs que `m` porte déjà.
+///
+/// Appelée sur un bloc **entier** — celui du gagnant, des tags ou de l'ICY —
+/// dont tous les champs viennent par construction de la même main. Les
+/// comblements ultérieurs se notent un par un, là où ils se font.
+///
+/// Ne note que ce qui est **renseigné** : la carte dit « d'où vient ce qu'on
+/// voit », pas « qui a été consulté ». Un champ absent n'y figure donc pas, et
+/// c'est `Provenance::misses` qui porte l'autre question.
+fn note_les_champs(m: &mut Morceau, contributeur: &str) {
+    for (nom, present) in [
+        ("artist", m.artist.is_some()),
+        ("title", m.title.is_some()),
+        ("album", m.album.is_some()),
+        ("duration", m.duration_s.is_some()),
+        ("year", m.year.is_some()),
+        ("links", !m.links.is_empty()),
+    ] {
+        if present {
+            m.provenance.fields.insert(nom.to_string(), contributeur.to_string());
+        }
+    }
+}
+
+/// Vrai pour un enrichissement qui n'apporte **rien du tout** — le cas du
+/// `searched` seul.
+///
+/// Distinct d'`Enrichment::is_empty`, qui ne parle que du texte : un
+/// contributeur qui n'a trouvé qu'une pochette n'est pas un échec.
+fn n_apporte_rien(e: &Enrichment) -> bool {
+    e.is_empty() && e.cover.is_none() && e.year.is_none() && e.links.is_empty()
+}
+
 /// État de résolution : ce qui joue, ce que le flux en dit, ce que les plugins
 /// en disent.
 #[derive(Debug, Default)]
@@ -219,7 +252,16 @@ impl Metadonnees {
         // Aucun de nos greffons n'est dans ce cas aujourd'hui : tous portent
         // du texte quand ils portent une année. C'est précisément pour ça que
         // l'oubli aurait été invisible.
-        if e.is_empty() && e.cover.is_none() && e.year.is_none() && e.links.is_empty() {
+        // **`searched` exempte du refus, et lui seul.** Un contributeur qui a
+        // cherché sans rien trouver a quelque chose à dire — « MusicBrainz n'a
+        // pas d'album pour ce morceau » n'est pas « MusicBrainz n'a jamais été
+        // interrogé », et l'écran confondait les deux. Il n'entre pour autant
+        // dans aucun arbitrage : sans texte il ne peut pas gagner
+        // (`bloc_de_texte` l'écarte), sans champ il ne comble rien
+        // (`texte_compose` ne lit que des `Some`). Il n'ajoute qu'une ligne à
+        // `Provenance::misses`.
+        if e.is_empty() && e.cover.is_none() && e.year.is_none() && e.links.is_empty() && !e.searched
+        {
             tracing::debug!("empty enrichment from {plugin}, counted as no response");
             return false;
         }
@@ -418,6 +460,7 @@ impl Metadonnees {
         if let Some(cle) = &self.cover_cle {
             if let Some((_, origine)) = self.cover_retenue() {
                 m.cover_href = Some(format!("{}{cle}", crate::cover::PREFIXE_HREF));
+                m.provenance.fields.insert("cover".into(), origine.clone());
                 m.cover_origin = Some(origine);
             }
         }
@@ -451,33 +494,50 @@ impl Metadonnees {
             // L'année et les liens se comblent depuis **tout** enrichissement
             // retenu, `fill_only` ou non (voir la doc ci-dessus) ; le texte,
             // lui, ne se comble que depuis un `fill_only`.
-            if m.year.is_none() {
+            if m.year.is_none() && e.year.is_some() {
                 m.year = e.year;
+                m.provenance.fields.insert("year".into(), plugin.clone());
             }
             // Même règle que les autres champs, décidée avec le propriétaire :
             // le gagnant l'emporte, un complément ne fait que combler un vide.
             // Pas de fusion par plateforme — ce serait une politique inventée
             // pour un cas que nos sources ne produisent pas, aucune ne donnant
             // à la fois du YouTube et du Deezer.
-            if m.links.is_empty() {
+            if m.links.is_empty() && !e.links.is_empty() {
                 m.links = e.links.clone();
+                m.provenance.fields.insert("links".into(), plugin.clone());
             }
             if !e.fill_only {
                 continue;
             }
-            if m.artist.is_none() {
+            if m.artist.is_none() && e.artist.is_some() {
                 m.artist = e.artist.clone();
+                m.provenance.fields.insert("artist".into(), plugin.clone());
             }
-            if m.title.is_none() {
+            if m.title.is_none() && e.title.is_some() {
                 m.title = e.title.clone();
+                m.provenance.fields.insert("title".into(), plugin.clone());
             }
-            if m.album.is_none() {
+            if m.album.is_none() && e.album.is_some() {
                 m.album = e.album.clone();
+                m.provenance.fields.insert("album".into(), plugin.clone());
             }
-            if m.duration_s.is_none() {
+            if m.duration_s.is_none() && e.duration_s.is_some() {
                 m.duration_s = e.duration_s;
+                m.provenance.fields.insert("duration".into(), plugin.clone());
             }
         }
+        // Ceux qui ont cherché sans rien trouver, dans l'ordre de déclaration :
+        // le même ordre que l'arbitrage, donc le même que celui qu'on lit
+        // partout ailleurs.
+        m.provenance.misses = self
+            .ordre
+            .iter()
+            .filter(|plugin| {
+                self.enrichissements.get(*plugin).is_some_and(|e| e.searched && n_apporte_rien(e))
+            })
+            .cloned()
+            .collect();
         m
     }
 
@@ -518,7 +578,7 @@ impl Metadonnees {
                 if e.fill_only || e.is_empty() {
                     continue;
                 }
-                return Morceau {
+                let mut m = Morceau {
                     artist: e.artist.clone(),
                     title: e.title.clone(),
                     album: e.album.clone(),
@@ -528,17 +588,27 @@ impl Metadonnees {
                     origin: Some(plugin.clone()),
                     ..Default::default()
                 };
+                note_les_champs(&mut m, plugin);
+                return m;
             }
         }
         if let Some(tags) = &self.tags {
-            return tags.clone();
+            let mut m = tags.clone();
+            // Les tags portent déjà `origin`, mais pas la provenance par champ :
+            // c'est ici qu'on la pose, sur ce qu'ils renseignent réellement.
+            note_les_champs(&mut m, ORIGINE_TAGS);
+            return m;
         }
         match &self.icy {
-            Some(icy) => Morceau {
-                title: Some(icy.clone()),
-                origin: Some(ORIGINE_ICY.to_string()),
-                ..Default::default()
-            },
+            Some(icy) => {
+                let mut m = Morceau {
+                    title: Some(icy.clone()),
+                    origin: Some(ORIGINE_ICY.to_string()),
+                    ..Default::default()
+                };
+                note_les_champs(&mut m, ORIGINE_ICY);
+                m
+            }
             None => Morceau::default(),
         }
     }
@@ -1360,6 +1430,75 @@ mod tests {
         m.set_identity(Some(id.clone()));
         assert!(!m.ajoute("inconnu", enrichissement(id, "A", "T")));
         assert!(m.etat().est_vide());
+    }
+
+    #[test]
+    fn la_provenance_nomme_le_contributeur_de_chaque_champ() {
+        // **La question à laquelle rien ne répondait** : « pourquoi ce titre
+        // est-il faux ? ». `origin` ne nomme que le gagnant du bloc de texte,
+        // alors que l'écran est composé de plusieurs mains — un `fill_only`
+        // comble, l'année et les liens se prennent partout, la pochette vient
+        // souvent d'ailleurs.
+        let mut m = Metadonnees::new(vec!["gagnant".into(), "complement".into()]);
+        m.set_identity(Some(json!(1)));
+        m.ajoute(
+            "gagnant",
+            Enrichment {
+                identity: json!(1),
+                artist: Some("Miles Davis".into()),
+                title: Some("So What".into()),
+                ..Default::default()
+            },
+        );
+        m.ajoute(
+            "complement",
+            Enrichment {
+                identity: json!(1),
+                album: Some("Kind of Blue".into()),
+                year: Some(1959),
+                fill_only: true,
+                ..Default::default()
+            },
+        );
+
+        let champs = m.etat().provenance.fields;
+        assert_eq!(champs.get("artist").map(String::as_str), Some("gagnant"));
+        assert_eq!(champs.get("title").map(String::as_str), Some("gagnant"));
+        // Comblés par l'autre : c'est précisément ce que `origin` ne pouvait
+        // pas dire, puisqu'il nomme « gagnant » pour tout le bloc.
+        assert_eq!(champs.get("album").map(String::as_str), Some("complement"));
+        assert_eq!(champs.get("year").map(String::as_str), Some("complement"));
+        assert_eq!(m.etat().origin.as_deref(), Some("gagnant"));
+        // Rien n'est nommé pour un champ absent : la carte dit d'où vient ce
+        // qu'on voit, pas qui a été consulté.
+        assert!(!champs.contains_key("duration"), "aucune duree n'a ete fournie");
+    }
+
+    #[test]
+    fn un_contributeur_qui_a_cherche_sans_trouver_est_nomme_a_part() {
+        // Le second volet de la demande : « musicbrainz n'a pas d'album pour ce
+        // morceau » n'est pas « musicbrainz n'a jamais été interrogé », et
+        // l'absence seule confondait les deux.
+        let mut m = Metadonnees::new(vec!["musicbrainz".into()]);
+        m.set_identity(Some(json!(1)));
+        m.set_icy("Miles Davis - So What".into());
+        // Un enrichissement entièrement vide est refusé... sauf s'il déclare
+        // avoir cherché. C'est la seule exemption, et elle est le mécanisme.
+        assert!(
+            !m.ajoute("musicbrainz", Enrichment { identity: json!(1), ..Default::default() }),
+            "un enrichissement vide sans `searched` reste refuse"
+        );
+        assert!(m.ajoute(
+            "musicbrainz",
+            Enrichment { identity: json!(1), searched: true, fill_only: true, ..Default::default() }
+        ));
+
+        let etat = m.etat();
+        assert_eq!(etat.provenance.misses, vec!["musicbrainz".to_string()]);
+        // Et il n'a rien gagné ni rien effacé : le titre ICY tient toujours.
+        assert_eq!(etat.title.as_deref(), Some("Miles Davis - So What"));
+        assert_eq!(etat.origin.as_deref(), Some(ORIGINE_ICY));
+        assert_eq!(etat.provenance.fields.get("title").map(String::as_str), Some(ORIGINE_ICY));
     }
 
     #[test]

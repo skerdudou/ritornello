@@ -371,6 +371,25 @@ pub struct Enrichment {
     /// circumstances ») et ce qui évite de toucher aux greffons livrés.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fill_only: bool,
+    /// Ce contributeur a **cherché** pour ce morceau.
+    ///
+    /// Renseigné avec les champs qu'il a trouvés, ou seul quand il n'a rien
+    /// trouvé — et c'est le seul cas où un enrichissement entièrement vide est
+    /// accepté par le cœur, qui refuse les autres. C'est ce qui permet à
+    /// l'écran de distinguer « MusicBrainz n'a pas d'album pour ce morceau » de
+    /// « MusicBrainz n'a jamais été interrogé », deux situations que l'absence
+    /// seule confondait.
+    ///
+    /// Un enrichissement ainsi vide **ne participe à rien** : il ne peut pas
+    /// gagner l'arbitrage (il ne dit rien du texte) ni combler quoi que ce soit
+    /// (tous ses champs sont absents). Il n'ajoute qu'une ligne à
+    /// `Provenance::misses`.
+    ///
+    /// À ne pas confondre avec « je n'ai pas pu chercher » : une panne du
+    /// service ne se déclare pas ici. Le contributeur n'émet alors rien du
+    /// tout, et réessaie.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub searched: bool,
 }
 
 impl Enrichment {
@@ -447,6 +466,55 @@ pub struct Morceau {
     /// venir de deux contributeurs différents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_origin: Option<String>,
+    /// Qui a fourni quoi, **champ par champ**, et qui a cherché sans trouver.
+    ///
+    /// `origin` et `cover_origin` restent : ils disent le contributeur du
+    /// **texte** et celui de l'**image**, ce qu'un afficheur à trois lignes
+    /// peut montrer et ce dont l'IHM fait ses deux badges. Ce champ-ci va plus
+    /// loin, parce que le texte lui-même est composé de plusieurs mains — le
+    /// gagnant, puis les `fill_only` qui comblent, puis l'année et les liens
+    /// qui se prennent partout — et `origin` ne nomme que le premier.
+    #[serde(default, skip_serializing_if = "Provenance::est_vide")]
+    pub provenance: Provenance,
+}
+
+/// D'où vient chaque morceau de ce qui s'affiche.
+///
+/// **Ce que ça répond, et que rien d'autre ne répondait** : « pourquoi ce titre
+/// est-il faux ? ». `origin` nomme le contributeur du bloc de texte, mais
+/// l'année peut venir d'un autre, la pochette d'un troisième, et un quatrième
+/// avoir cherché en vain — trois faits que l'écran ne portait nulle part.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Provenance {
+    /// Le contributeur retenu pour chaque champ **renseigné**, par nom de
+    /// champ : `artist`, `title`, `album`, `year`, `duration`, `links`,
+    /// `cover`.
+    ///
+    /// Une carte plutôt qu'une structure à sept champs : les consommateurs la
+    /// parcourent pour l'afficher, aucun ne teste un champ en particulier, et
+    /// une carte ne casse pas quand un champ s'ajoute au morceau. `BTreeMap`
+    /// et non `HashMap` : l'ordre de parcours est alors stable, donc la trame
+    /// sérialisée aussi — et le cœur déduplique ses trames par égalité.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub fields: std::collections::BTreeMap<String, String>,
+    /// Les greffons qui ont **cherché et n'ont rien trouvé** pour ce morceau.
+    ///
+    /// Distinct d'une absence de la carte ci-dessus : « musicbrainz n'a pas
+    /// fourni l'album » est vrai aussi quand il n'a jamais été interrogé, et
+    /// c'est une information très différente pour qui se demande pourquoi
+    /// l'écran est incomplet. Un greffon le déclare par
+    /// `Enrichment::searched`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub misses: Vec<String>,
+}
+
+impl Provenance {
+    /// Vrai quand il n'y a rien à dire : sert au `skip_serializing_if` de
+    /// `Morceau::provenance`, pour qu'aucune trame existante ne change de
+    /// forme.
+    pub fn est_vide(&self) -> bool {
+        self.fields.is_empty() && self.misses.is_empty()
+    }
 }
 
 /// A transient overlay the appliance is showing right now, carrying **both**
@@ -736,6 +804,7 @@ mod tests {
             position_s: None,
             cover: None,
             fill_only: false,
+            searched: false,
         };
         let back: Enrichment = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
         assert_eq!(back, e);
@@ -876,6 +945,7 @@ mod tests {
             position_s: None,
             cover: None,
             fill_only: false,
+            searched: false,
         }
         .cleaned();
         assert_eq!(e.artist, None);
