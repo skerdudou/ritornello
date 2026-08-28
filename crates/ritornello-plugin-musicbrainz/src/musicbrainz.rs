@@ -263,8 +263,45 @@ fn etrangleur() -> &'static Etrangleur {
 /// TOC, recherche par artiste/album). `Ok(None)` = hors ligne ou réponse en
 /// échec : les deux appelants traitent ça comme un silence, jamais une erreur
 /// à faire remonter.
-async fn requete_texte(url: &str) -> Result<Option<String>> {
-    etrangleur().attend().await;
+/// Nombre total de tentatives pour une requête.
+///
+/// Trois, décidé avec le propriétaire. MusicBrainz rend des 503 sous sa propre
+/// charge même quand on respecte sa cadence — mesuré huit fois en une séance de
+/// travail le 2026-08-27. Une tentative unique transformait chacun de ces
+/// hoquets en « cet album n'a pas de pochette », mémorisé jusqu'au redémarrage
+/// du greffon.
+const TENTATIVES: u32 = 3;
+
+/// Attente avant la deuxième tentative, doublée avant la troisième.
+///
+/// Même motif que le recul progressif des greffons Radio France et OUI FM.
+/// Borné à trois essais parce qu'un appareil qui tourne des mois sans
+/// surveillance ne doit pas insister indéfiniment chez un tiers : au-delà, la
+/// prochaine trame relancera de toute façon la recherche, l'échec n'étant plus
+/// mémorisé.
+const RECUL_BASE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Une tentative : la requête, son statut, son corps.
+async fn tente(client: &reqwest::Client, url: &str) -> Result<String> {
+    let resp = client.get(url).send().await.context("unreachable")?;
+    let statut = resp.status();
+    if !statut.is_success() {
+        // **Le statut est nommé.** Sans cette ligne un 503 ne laissait aucune
+        // trace : ni dans `/api/logs`, ni ailleurs. C'est ce silence qui a
+        // rendu la panne indiagnostiquable après coup.
+        bail!("HTTP {statut}");
+    }
+    resp.text().await.context("response read interrupted")
+}
+
+/// Requête GET commune aux points d'entrée MusicBrainz utilisés ici, avec un
+/// nombre borné de tentatives.
+///
+/// **`Err` veut dire « pas de réponse », jamais « rien trouvé ».** La
+/// distinction est le cœur de ce module : une version antérieure rendait
+/// `Ok(None)` dans les deux cas, et l'appelant, ne pouvant les séparer,
+/// mémorisait une panne passagère comme une absence définitive.
+async fn requete_texte(url: &str) -> Result<String> {
     // Version tirée du Cargo.toml, comme l'annuaire du plugin radio : un
     // user-agent figé mentirait à la première montée de version.
     let client = reqwest::Client::builder()
@@ -275,29 +312,37 @@ async fn requete_texte(url: &str) -> Result<Option<String>> {
         ))
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
-    let resp = match client.get(url).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::info!("MusicBrainz unreachable: {e}");
-            return Ok(None);
+    let mut recul = RECUL_BASE;
+    let mut derniere = None;
+    for tentative in 1..=TENTATIVES {
+        // Dans la boucle : une nouvelle tentative est une nouvelle requête, et
+        // doit donc être espacée comme les autres. L'étrangleur reste le seul
+        // garant de la cadence promise au service.
+        etrangleur().attend().await;
+        match tente(&client, url).await {
+            Ok(corps) => {
+                if tentative > 1 {
+                    tracing::info!("MusicBrainz answered on attempt {tentative}");
+                }
+                return Ok(corps);
+            }
+            Err(e) => {
+                tracing::info!("MusicBrainz attempt {tentative}/{TENTATIVES}: {e}");
+                derniere = Some(e);
+            }
         }
-    };
-    if !resp.status().is_success() {
-        return Ok(None);
-    }
-    match resp.text().await {
-        Ok(b) => Ok(Some(b)),
-        Err(e) => {
-            tracing::info!("MusicBrainz: response read interrupted: {e}");
-            Ok(None)
+        if tentative < TENTATIVES {
+            tokio::time::sleep(recul).await;
+            recul *= 2;
         }
     }
+    Err(derniere.expect("la boucle tourne au moins une fois, donc une erreur a ete retenue"))
 }
 
 /// Lookup TOC « fuzzy » MusicBrainz. `Ok(None)` = pas trouvé ou hors ligne :
 /// le plugin se tait alors, et l'affichage garde ce que la Source montrait.
 pub async fn lookup(toc: &str, ntracks: usize) -> Result<Option<DiscInfo>> {
-    let Some(body) = requete_texte(&url_lookup(toc)).await? else { return Ok(None) };
+    let body = requete_texte(&url_lookup(toc)).await?;
     Ok(parse_lookup(&body, ntracks))
 }
 
@@ -467,7 +512,7 @@ pub fn premiere_pochette(json: &str) -> Option<String> {
 /// tait, il ne sait rien de plus que ce qu'on lui a donné.
 pub async fn cherche_release(artist: &str, album: &str) -> Result<Option<String>> {
     let url = requete_release(artist, album);
-    let Some(body) = requete_texte(&url).await? else { return Ok(None) };
+    let body = requete_texte(&url).await?;
     Ok(premiere_pochette(&body))
 }
 
@@ -592,7 +637,7 @@ fn sans_diacritique(c: char) -> char {
 /// trouvé ou hors ligne, comme partout dans ce module.
 pub async fn cherche_enregistrement(artist: &str, title: &str) -> Result<Option<Enregistrement>> {
     let url = requete_recording(artist, title);
-    let Some(body) = requete_texte(&url).await? else { return Ok(None) };
+    let body = requete_texte(&url).await?;
     Ok(premier_enregistrement(&body))
 }
 

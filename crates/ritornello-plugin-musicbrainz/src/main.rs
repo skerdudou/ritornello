@@ -56,7 +56,34 @@ pub(crate) const MUSICBRAINZ_EN: &str = include_str!("locales/en.toml");
 const ECHECS_AVANT_RESONDAGE: u32 = 3;
 
 /// Résultat d'une interrogation : la TOC concernée, et ce qu'on a trouvé.
+/// Ce qu'une interrogation de MusicBrainz rapporte.
+///
+/// Un enum et non un `Option`, et c'est le correctif d'un defaut mesure :
+/// « le service n'a pas repondu » et « il a repondu qu'il ne connait pas »
+/// demandent deux traitements opposes.
+///
+/// Le second se **memorise** — c'est meme tout l'interet des caches de ce
+/// greffon : ne pas redemander douze fois de suite pour un disque inconnu. Le
+/// premier ne doit surtout pas l'etre. Une version anterieure les confondait
+/// derriere un `Option`, et un 503 passager de MusicBrainz — leurs serveurs en
+/// rendent sous leur propre charge, meme a cadence respectee — se figeait alors
+/// en « cet album n'a pas de pochette » jusqu'au redemarrage du greffon.
+/// Symptome rapporte par le proprietaire, et reproduit : redemarrer le greffon
+/// faisait apparaitre la pochette.
+#[derive(Debug, Clone, PartialEq)]
+enum Reponse<T> {
+    /// MusicBrainz a repondu. `None` = il ne connait pas, et c'est definitif.
+    Connue(Option<T>),
+    /// Aucune reponse exploitable apres les tentatives bornees. Rien a
+    /// memoriser : le prochain passage relancera la recherche.
+    Indisponible,
+}
+
+/// Ce qu'un disque interroge a rendu, tel qu'il est **memorise**.
 type Trouve = (String, Option<DiscInfo>);
+
+/// Ce que la tache d'interrogation d'un disque fait traverser au canal.
+type IssueDisque = (String, Reponse<DiscInfo>);
 
 /// Couple qui identifie une recherche du relai générique : artiste, puis
 /// album. C'est aussi la clé de mémorisation (voir `MusicBrainzPlugin`).
@@ -64,6 +91,9 @@ type CleGenerique = (String, String);
 
 /// Résultat d'une recherche générique : le couple concerné, et le MBID trouvé.
 type TrouvePochette = (CleGenerique, Option<String>);
+
+/// Ce que la tache de recherche de pochette fait traverser au canal.
+type IssuePochette = (CleGenerique, Reponse<String>);
 
 /// Ce qu'une identité de disque apprend à ce plugin.
 #[derive(Debug, Clone, PartialEq)]
@@ -135,8 +165,8 @@ struct MusicBrainzPlugin {
     /// Enrichissement prêt à partir. Un seul suffit : les deux chemins sont
     /// mutuellement exclusifs (une identité est un disque, ou ne l'est pas).
     pret: Option<Enrichment>,
-    trouve_tx: mpsc::Sender<Trouve>,
-    trouve_rx: mpsc::Receiver<Trouve>,
+    trouve_tx: mpsc::Sender<IssueDisque>,
+    trouve_rx: mpsc::Receiver<IssueDisque>,
 
     // --- Relai générique (fichier sans pochette, flux dont les métadonnées
     // textuelles suffisent...) ---
@@ -160,8 +190,8 @@ struct MusicBrainzPlugin {
     pochette_connue: Option<TrouvePochette>,
     /// Couple dont la recherche est en vol, pour ne pas la lancer deux fois.
     pochette_en_vol: Option<CleGenerique>,
-    pochette_tx: mpsc::Sender<TrouvePochette>,
-    pochette_rx: mpsc::Receiver<TrouvePochette>,
+    pochette_tx: mpsc::Sender<IssuePochette>,
+    pochette_rx: mpsc::Receiver<IssuePochette>,
 
     // --- Chemin ICY (radio) ---
     /// Le magasin, **partagé avec la page d'admin** : les deux moitiés du
@@ -332,14 +362,14 @@ impl MusicBrainzPlugin {
         let (artist, album) = cle.clone();
         let tx = self.pochette_tx.clone();
         tokio::spawn(async move {
-            let cover_url = match musicbrainz::cherche_release(&artist, &album).await {
-                Ok(id) => id,
+            let reponse = match musicbrainz::cherche_release(&artist, &album).await {
+                Ok(url) => Reponse::Connue(url),
                 Err(e) => {
-                    tracing::info!("MusicBrainz release search: {e}");
-                    None
+                    tracing::info!("MusicBrainz release search unavailable: {e}");
+                    Reponse::Indisponible
                 }
             };
-            let _ = tx.send((cle, cover_url)).await;
+            let _ = tx.send((cle, reponse)).await;
         });
     }
 
@@ -367,14 +397,14 @@ impl MusicBrainzPlugin {
         self.en_vol = Some(toc.clone());
         let tx = self.trouve_tx.clone();
         tokio::spawn(async move {
-            let info = match musicbrainz::lookup(&param, ntracks).await {
-                Ok(info) => info,
+            let reponse = match musicbrainz::lookup(&param, ntracks).await {
+                Ok(info) => Reponse::Connue(info),
                 Err(e) => {
-                    tracing::info!("MusicBrainz lookup: {e}");
-                    None
+                    tracing::info!("MusicBrainz lookup unavailable: {e}");
+                    Reponse::Indisponible
                 }
             };
-            let _ = tx.send((toc, info)).await;
+            let _ = tx.send((toc, reponse)).await;
         });
     }
 }
@@ -512,10 +542,14 @@ impl MetadataPlugin for MusicBrainzPlugin {
             // dans `self`, pas dans les variables locales de ce futur).
             tokio::select! {
                 r = self.trouve_rx.recv() => match r {
-                    Some((toc, info)) => {
+                    Some((toc, reponse)) => {
                         if self.en_vol.as_deref() == Some(toc.as_str()) {
                             self.en_vol = None;
                         }
+                        // Une panne passagère ne se mémorise pas : `en_vol`
+                        // vient d'être libéré, donc le prochain changement de
+                        // piste relancera l'interrogation de ce disque.
+                        let Reponse::Connue(info) = reponse else { continue };
                         // Un résultat n'est retenu que s'il décrit le disque
                         // suivi : deux lookups peuvent se croiser lors d'un
                         // échange rapide de disques (A en vol, B inséré, réponse
@@ -533,10 +567,17 @@ impl MetadataPlugin for MusicBrainzPlugin {
                     None => std::future::pending().await,
                 },
                 r = self.pochette_rx.recv() => match r {
-                    Some((cle, cover_url)) => {
+                    Some((cle, reponse)) => {
                         if self.pochette_en_vol.as_ref() == Some(&cle) {
                             self.pochette_en_vol = None;
                         }
+                        // Une panne passagère ne se mémorise pas. C'est **le**
+                        // correctif de ce chantier : sans cette ligne, un 503
+                        // de MusicBrainz devenait « cet album n'a pas de
+                        // pochette » pour toute la durée de l'album, et le seul
+                        // remède était de relancer le greffon. `pochette_en_vol`
+                        // vient d'être libéré, donc la prochaine trame relance.
+                        let Reponse::Connue(cover_url) = reponse else { continue };
                         // Même garde que côté disque : ne retenir le résultat
                         // que s'il décrit le couple (artiste, album) toujours
                         // visé — un changement de piste peut avoir rendu la
@@ -1036,7 +1077,7 @@ mod tests {
         p.en_vol = Some(TOC.to_string());
         p.now_playing(NowPlaying { source: "cd".into(), identity: Some(identite_disque(0)), ..Default::default() }).await;
         p.trouve_tx
-            .send(("42 1 2 3".to_string(), musicbrainz::parse_lookup(FIXTURE, 3)))
+            .send(("42 1 2 3".to_string(), Reponse::Connue(musicbrainz::parse_lookup(FIXTURE, 3))))
             .await
             .unwrap();
         // `next_enrichment` consomme le résultat périmé puis se remet en attente :
@@ -1112,6 +1153,61 @@ mod tests {
         p.now_playing(NowPlaying { source: "files".into(), identity: Some(identite_fichier("/x")), known, ..Default::default() })
             .await;
         assert!(p.pochette_en_vol.is_none(), "un couple deja recherche ne doit pas l'etre a nouveau");
+    }
+
+    // Voir `le_relai_generique_emet_une_pochette_seule_en_completion` : le
+    // `..Default::default()` est de la compatibilité ascendante, pas de la
+    // redondance.
+    #[allow(clippy::needless_update)]
+    #[tokio::test(start_paused = true)]
+    async fn une_panne_passagere_de_musicbrainz_ne_se_memorise_pas() {
+        // Le defaut rapporte par le proprietaire, en test. Un 503 de
+        // MusicBrainz se figeait en « cet album n'a pas de pochette » pour
+        // toute la duree de l'album : seul un redemarrage du greffon le
+        // debloquait. Ici on force la reponse `Indisponible` et on verifie que
+        // rien n'est memorise et que la trame suivante relance bien.
+        let mut p = plugin_test();
+        let cle = ("Rhapsody Of Fire".to_string(), "Triumph Or Agony".to_string());
+        let known = ritornello_proto::Known {
+            artist: Some("Rhapsody Of Fire".into()),
+            album: Some("Triumph Or Agony".into()),
+            ..Default::default()
+        };
+        p.now_playing(NowPlaying {
+            source: "files".into(),
+            identity: Some(identite_fichier("/x")),
+            known: known.clone(),
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(p.pochette_en_vol.as_ref(), Some(&cle), "prealable : une recherche est partie");
+
+        // La tache repond « pas de reponse ».
+        p.pochette_tx.send((cle.clone(), Reponse::Indisponible)).await.unwrap();
+        // Horloge virtuelle (`start_paused`) : ce `timeout` n'attend aucune
+        // duree reelle. Il laisse la boucle depiler le message — pret des
+        // qu'il est en file — puis rend la main faute d'enrichissement a
+        // produire. Le delai n'est donc pas une hypothese sur la vitesse
+        // d'execution, c'est le temps virtuel qui avance seul quand plus rien
+        // n'est pret.
+        let rien = tokio::time::timeout(std::time::Duration::from_secs(1), p.next_enrichment()).await;
+        assert!(rien.is_err(), "une panne passagere ne doit produire aucun enrichissement");
+
+        assert!(p.pochette_en_vol.is_none(), "le marqueur en vol doit etre libere");
+        assert!(
+            p.pochette_connue.is_none(),
+            "rien ne doit etre memorise : c'est ce qui figeait l'absence jusqu'au redemarrage"
+        );
+
+        // Et la trame suivante relance bien la recherche.
+        p.now_playing(NowPlaying {
+            source: "files".into(),
+            identity: Some(identite_fichier("/x")),
+            known,
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(p.pochette_en_vol.as_ref(), Some(&cle), "la trame suivante doit reessayer");
     }
 
     // Voir `le_relai_generique_emet_une_pochette_seule_en_completion` : le
