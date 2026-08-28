@@ -2,6 +2,8 @@
 name = "ritornello-plugin-files"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
+repository.workspace = true
 
 # Une cible `lib` est indispensable ici : deux `[[bin]]` d'un même crate ne
 # partagent pas leurs modules. Sans elle, le binaire racine de montage ne

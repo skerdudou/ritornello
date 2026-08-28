@@ -2,13 +2,13 @@
 
 <p align="center"><em>A standalone internet radio and CD player, in Rust, for the Raspberry Pi — and any Linux box.</em></p>
 
-<!-- <owner> à remplacer par le compte GitHub à la publication. -->
 <p align="center">
-  <a href="https://github.com/<owner>/ritornello/actions/workflows/ci.yml"><img src="https://github.com/<owner>/ritornello/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/skerdudou/ritornello/actions/workflows/ci.yml"><img src="https://github.com/skerdudou/ritornello/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/rust-2021%20edition-b7410e?logo=rust" alt="Rust 2021">
   <img src="https://img.shields.io/badge/targets-armv7%20%7C%20aarch64%20%7C%20x86__64-blue" alt="armv7, aarch64, x86_64">
   <img src="https://img.shields.io/badge/UI-Vue%203-42b883?logo=vue.js&logoColor=white" alt="Vue 3">
   <img src="https://img.shields.io/badge/status-0.1%20%E2%80%94%20daily%20use-yellow" alt="0.1, in daily use">
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green" alt="MIT OR Apache-2.0"></a>
 </p>
 
 <p align="center">
@@ -218,5 +218,9 @@ fixes and language packs can go straight to a pull request. Please keep
 
 ## License
 
-Not chosen yet — it will be an OSI-approved license before the first
-tagged release. Until then, all rights reserved.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT), at your option — the usual Rust convention.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in Ritornello by you shall be dual licensed as
+above, without any additional terms or conditions.
