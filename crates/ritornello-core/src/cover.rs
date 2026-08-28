@@ -1106,6 +1106,13 @@ pub async fn cover_get(
 ) -> Response {
     let vignette_demandee = params.taille.as_deref() == Some(TAILLE_VIGNETTE);
     let Some(p) = state.covers.lit(&cle).await else {
+        // **Un `warn`, et il manquait.** Cette clé a été publiée dans
+        // `cover_href` par le cœur lui-même : ne plus savoir la servir est une
+        // promesse rompue, pas un cas ordinaire. Le cache ne garde que
+        // `ENTREES` entrées, donc le suspect est l'éviction — c'est cette ligne
+        // qui le dira, là où l'écran ne montrait qu'un ♫ sans explication et où
+        // le propriétaire a rapporté « aucun warn ».
+        tracing::warn!("cover {cle} requested but no longer in the cache (evicted?)");
         return (StatusCode::NOT_FOUND, "inconnue").into_response();
     };
     match p {
@@ -1172,7 +1179,11 @@ pub async fn cover_get(
             let (mut fichier, meta) = match ouverture {
                 Ok(Ok(v)) => v,
                 Ok(Err(e)) => {
-                    tracing::debug!("cover file unreadable: {e}");
+                    // `warn` et non `debug` : le cœur a publié ce `cover_href`,
+                    // donc échouer à le servir est un défaut visible à l'écran
+                    // et doit l'être au journal. En `debug` il ne l'était nulle
+                    // part.
+                    tracing::warn!("cover {cle} unreadable: {e}");
                     return (StatusCode::NOT_FOUND, "illisible").into_response();
                 }
                 Err(_) => {
@@ -1238,7 +1249,11 @@ pub async fn cover_get(
             let (tete, lus) = match entete {
                 Ok(Ok(v)) => v,
                 Ok(Err(e)) => {
-                    tracing::debug!("cover file unreadable: {e}");
+                    // `warn` et non `debug` : le cœur a publié ce `cover_href`,
+                    // donc échouer à le servir est un défaut visible à l'écran
+                    // et doit l'être au journal. En `debug` il ne l'était nulle
+                    // part.
+                    tracing::warn!("cover {cle} unreadable: {e}");
                     return (StatusCode::NOT_FOUND, "illisible").into_response();
                 }
                 Err(_) => {
@@ -1247,7 +1262,10 @@ pub async fn cover_get(
                 }
             };
             let Some(mime) = type_image(&tete[..lus]) else {
-                tracing::debug!("cover file is no longer an image: {}", chemin.display());
+                tracing::warn!(
+                    "cover {cle} is no longer an image: {}",
+                    chemin.display()
+                );
                 return (StatusCode::NOT_FOUND, "illisible").into_response();
             };
             // En flux, pas en un `Vec` unique : cette route est joignable sans

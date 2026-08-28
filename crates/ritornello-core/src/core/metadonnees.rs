@@ -222,10 +222,31 @@ impl<P: Player> Core<P> {
         let sante = self.sante.clone();
         tokio::spawn(async move {
             let a_lire = chemin.clone();
-            let r = sante
+            // **Les deux `None` sont distingues, et le `.flatten()` d'avant les
+            // confondait.** « Ce fichier n'a pas de pochette embarquee » et « le
+            // partage n'a pas repondu dans le delai » donnent le meme ecran —
+            // aucune image — et donnaient la meme trace : aucune. C'est
+            // exactement ce qui manquait pour repondre a « pourquoi ce n'est pas
+            // pousse ».
+            let r = match sante
                 .borne(std::path::Path::new(&chemin), move || mpv::pochette_embarquee(&a_lire))
                 .await
-                .flatten();
+            {
+                // Le disjoncteur a rendu la main : incident reel (partage muet),
+                // donc `warn` — il a sa place dans la carte des dernieres
+                // erreurs.
+                None => {
+                    tracing::warn!("embedded cover: {chemin} did not answer in time");
+                    None
+                }
+                // Reponse effective : ce fichier ne porte pas d'image. Cas
+                // ordinaire, donc `info`.
+                Some(None) => {
+                    tracing::info!("no embedded cover in {chemin}");
+                    None
+                }
+                Some(Some(c)) => Some(c),
+            };
             let _ = tx.send((chemin, r)).await;
         });
     }
@@ -354,8 +375,14 @@ impl<P: Player> Core<P> {
                 let _ = tx.send((cle, true)).await;
                 return;
             }
+            // Chronometre : c'est **l'etape que le proprietaire soupconne** —
+            // le fournisseur de l'image qui met du temps a repondre. Sans
+            // mesure, le delai entre l'annonce d'un morceau et l'apparition de
+            // sa pochette n'etait attribuable a aucune etape en particulier.
+            let debut = std::time::Instant::now();
             match crate::cover::recupere(&r).await {
                 Some(p) => {
+                    tracing::info!("cover {cle} fetched in {:?}", debut.elapsed());
                     covers.insere(cle.clone(), p).await;
                     let _ = tx.send((cle, true)).await;
                 }
@@ -366,7 +393,15 @@ impl<P: Player> Core<P> {
                 // pour le reste du processus — y compris si le même dossier
                 // (donc la même clé) redevient la cible plus tard.
                 None => {
-                    tracing::debug!("no cover for {cle}");
+                    // `info` et non `debug` : c'est l'autre moitie du
+                    // diagnostic. « Aucune pochette trouvee » et « pochette
+                    // trouvee puis impossible a servir » (voir le `warn` de
+                    // `cover_get`) donnent le meme ecran — un ♫ — et rien ne
+                    // permettait de les distinguer apres coup. Un 404 du Cover
+                    // Art Archive reste un cas ordinaire, d'ou `info` plutot
+                    // que `warn` : il n'a rien a faire dans la carte des
+                    // dernieres erreurs.
+                    tracing::info!("no cover found for {cle}");
                     let _ = tx.send((cle, false)).await;
                 }
             }
@@ -434,8 +469,17 @@ impl<P: Player> Core<P> {
         // boucle de `main` — un cas d'autant plus réel que le canal est
         // volontairement étroit (capacité 4).
         if !self.covers.contient(&cle).await {
+            // Evincee entre le depot et la consommation de ce message : le
+            // cache ne garde que `ENTREES` entrees. Silencieux jusqu'ici, alors
+            // que c'est une pochette **perdue apres avoir ete recuperee** — le
+            // pire des cas, et le plus difficile a attribuer sans trace.
+            tracing::warn!("cover {cle} evicted before it could be published");
             return;
         }
+        // La trace positive, qui ferme la chronologie : c'est elle qui dit
+        // *quand* l'image est enfin arrivee, la ou le proprietaire ne pouvait
+        // qu'observer « beaucoup plus tard ».
+        tracing::info!("cover {cle} published");
         self.metadonnees.set_cover_href(Some(cle));
         self.publie_etat();
     }

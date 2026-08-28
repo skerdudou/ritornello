@@ -1740,6 +1740,33 @@ cannot start a second search for the same album. The decision (is a retry due,
 and after how long) is a separate, pure function from its execution, which is
 what makes it testable without a clock or a network.
 
+**Why there is no cover is now readable in the log**, and that was the whole
+problem: every way a cover could fail to appear was silent, so the same screen —
+a ♫ — meant four different things and none of them could be told apart after the
+fact. Each step now says what it did:
+
+- the `files` plugin, on the folder beside the track: "cover file found in …",
+  "no cover file in …" (including when the answer is the remembered one, since a
+  directory memoised as coverless stays silent forever otherwise), or a **`warn`**
+  when the share did not answer at all — the circuit breaker giving up is an
+  incident, not an absence;
+- the core, on the embedded picture: "no embedded cover in …" against a **`warn`**
+  for a share that timed out. Those two used to be flattened into one `None`,
+  which is precisely why they could not be told apart;
+- `musicbrainz`, on its own search: when it starts, and on the answer, "cover
+  found" / "no cover" / "unavailable" **with the elapsed time**. Between the
+  throttler, three in-process attempts and their ten-second timeouts, tens of
+  seconds can pass — that number is now in the log instead of being guessed from
+  the screen;
+- the core, when the bytes finally land: the fetch duration, then "cover …
+  published". Those two close the timeline, which is what "it turned up much
+  later" needed to become a measurement.
+
+Two refusals are `warn` rather than `info` because they are broken promises: a
+key requested by the browser that the cache no longer holds (`ENTREES` entries,
+FIFO), and a cover evicted between its retrieval and its publication. Both mean
+the appliance had the image and lost it.
+
 **`GET /api/cover/{key}`** serves the bytes. It is **the appliance** that
 fetches an image, never the browser — the same principle already stated
 for admin pages ("the page loads no external resource") — which also

@@ -193,6 +193,13 @@ impl FilesSource {
         };
         if let Some((connu, trouvee)) = &*self.pochette_par_repertoire.lock().unwrap() {
             if connu == &repertoire {
+                // Memorise « pas d'image ici » : la reponse reste valable, mais
+                // elle est silencieuse pour toute la session, donc elle merite
+                // d'etre redite a chaque piste — c'est une reponse a « pourquoi
+                // pas de pochette ».
+                if trouvee.is_none() {
+                    tracing::info!("no cover file in {} (remembered)", repertoire.display());
+                }
                 let _ = tx.send(trouvee.clone());
                 return;
             }
@@ -204,6 +211,10 @@ impl FilesSource {
             let a_chercher = chemin.clone();
             match sante.borne(&chemin, move || pochette::cherche(&a_chercher)).await {
                 Some(trouve) => {
+                    match &trouve {
+                        Some(_) => tracing::info!("cover file found in {}", repertoire.display()),
+                        None => tracing::info!("no cover file in {}", repertoire.display()),
+                    }
                     // Mémorisé y compris quand rien n'a été trouvé : c'est ce
                     // qui évite de re-sonder un répertoire sans image à
                     // chaque piste.
@@ -216,6 +227,9 @@ impl FilesSource {
                 // seule foi d'un NAS momentanément endormi, alors que `sante`
                 // rend justement la main dès qu'il répond de nouveau.
                 None => {
+                    // Incident reel — c'est le partage muet que `sante` existe
+                    // pour borner — donc `warn`, et non le silence d'avant.
+                    tracing::warn!("cover lookup in {} gave up: share not answering", repertoire.display());
                     let _ = tx.send(None);
                 }
             }

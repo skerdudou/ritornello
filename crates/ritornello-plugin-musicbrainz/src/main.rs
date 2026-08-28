@@ -474,14 +474,40 @@ impl MusicBrainzPlugin {
         self.pochette_en_vol = Some(cle.clone());
         let (artist, album) = cle.clone();
         let tx = self.pochette_tx.clone();
+        // Le depart d'une recherche, date. Avec l'etrangleur, les trois
+        // tentatives internes et leurs delais de dix secondes, le temps entre
+        // l'annonce d'un morceau et l'arrivee de sa pochette se compte parfois
+        // en dizaines de secondes : sans cette ligne, ce delai n'etait
+        // observable que sur l'ecran, et donc pas attribuable.
+        if apres.is_zero() {
+            tracing::info!("MusicBrainz: looking for a cover for {artist} — {album}");
+        } else {
+            tracing::info!("MusicBrainz: retrying {artist} — {album} in {apres:?}");
+        }
         tokio::spawn(async move {
             if !apres.is_zero() {
                 tokio::time::sleep(apres).await;
             }
+            // Chronometre, et l'issue nommee : « trouvee », « rien trouve »
+            // et « pas de reponse » se distinguent enfin, avec le temps que
+            // chacune a coute. L'etrangleur, les trois tentatives internes et
+            // leurs delais de dix secondes peuvent additionner des dizaines de
+            // secondes — c'est l'hypothese a confirmer ou a ecarter.
+            let debut = std::time::Instant::now();
             let reponse = match musicbrainz::cherche_release(&artist, &album).await {
-                Ok(url) => Reponse::Connue(url),
+                Ok(url) => {
+                    let issue = if url.is_some() { "cover found" } else { "no cover" };
+                    tracing::info!(
+                        "MusicBrainz: {issue} for {artist} — {album} after {:?}",
+                        debut.elapsed()
+                    );
+                    Reponse::Connue(url)
+                }
                 Err(e) => {
-                    tracing::info!("MusicBrainz release search unavailable: {e}");
+                    tracing::info!(
+                        "MusicBrainz release search unavailable after {:?}: {e}",
+                        debut.elapsed()
+                    );
                     Reponse::Indisponible
                 }
             };

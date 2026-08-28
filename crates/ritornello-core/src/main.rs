@@ -935,6 +935,34 @@ async fn rallume(
     }
 }
 
+/// Vrai pour une trame que le cœur accepte d'écrire au journal.
+///
+/// **Elle n'écarte qu'une chose : le bavardage de `lofty` sous le niveau
+/// erreur.** `player::mpv::pochette_embarquee` ouvre le fichier joué avec
+/// `lofty` pour en extraire une pochette, donc **à chaque changement de
+/// piste**, et `lofty` y émet un `WARN` par MP3 sans en-tête Xing —
+/// « MPEG: Using bitrate to estimate duration ». Ce n'est pas un incident :
+/// c'est la méthode d'estimation normale pour ce format, elle n'appelle aucune
+/// action, et elle se répète par piste.
+///
+/// Le coût est double, et c'est ce qui la rend nuisible plutôt que seulement
+/// bruyante : elle noie le journal, **et** elle chasse de vraies erreurs du
+/// tampon des « dernières erreurs », qui ne retient que les `WARN` et au-delà.
+///
+/// Le même filtre existe dans le greffon `files`, qui sonde les durées avec la
+/// même bibliothèque. Deux copies d'une règle de trois lignes, plutôt qu'un
+/// crate partagé pour l'occasion — mais si une troisième apparaît, c'est le
+/// signe qu'il faut le crate.
+///
+/// `lofty` garde ses `ERROR` : une trame que la bibliothèque juge fautive reste
+/// une information.
+fn trame_a_journaliser(metadata: &tracing::Metadata<'_>) -> bool {
+    // `>` et non `<` : dans `tracing`, l'ordre des niveaux est celui de la
+    // verbosité, donc `ERROR` est le plus **petit**. « Plus verbeux qu'erreur »
+    // s'écrit bien `> Level::ERROR`.
+    !(metadata.target().starts_with("lofty") && *metadata.level() > tracing::Level::ERROR)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // 500 et non 50 : l'IHM a désormais une popin qui liste tout le tampon
@@ -952,6 +980,9 @@ async fn main() -> Result<()> {
                 .with_writer(move || LogBufferWriter(log_buffer_for_writer.clone()))
                 .with_filter(LevelFilter::WARN),
         )
+        // Pose sur le registre et non sur une couche : les deux couches
+        // ci-dessus doivent l'ignorer, le terminal comme le tampon.
+        .with(tracing_subscriber::filter::filter_fn(trame_a_journaliser))
         .init();
 
     // Balaie les fichiers temporaires d'une exécution précédente avant que
