@@ -117,7 +117,7 @@ function fromKeyboard(e: KeyboardEvent): void {
     merge its margins with its children, which restores the expected addition;
     the static bar, without a margin of its own, is not affected.
   -->
-  <div v-if="elapsedText" class="-mt-3 flex flex-col" data-progression>
+  <div v-if="elapsedText" class="-mt-3 flex flex-col" data-progress>
     <div v-if="barVisible && seekable" @keydown.capture="fromKeyboard">
       <!--
         `-my-[19px]`: the slider keeps its 44 px touch area (the kit's
@@ -129,7 +129,7 @@ function fromKeyboard(e: KeyboardEvent): void {
         then overflows entirely onto its neighbours: the durations line below
         (text, never a target, it stays inert in the full sense) and the
         badges line above, which IS NOT inert when it carries platform links
-        (`data-lien`, 44 px anchors, cf. PlayerCard.vue) — the 19 px overflow
+        (`data-link`, 44 px anchors, cf. PlayerCard.vue) — the 19 px overflow
         would cover their bottom and steal their tap. It is PlayerCard.vue that
         brings them in front in the paint order (`relative z-10` on
         `[data-links]`) to give the tap back to the links; slider side, nothing
@@ -138,7 +138,7 @@ function fromKeyboard(e: KeyboardEvent): void {
         itself does not move).
       -->
       <Slider
-        data-barre
+        data-bar
         class="-my-[19px]"
         :model-value="[displayed ?? 0]"
         :min="0"
@@ -154,14 +154,14 @@ function fromKeyboard(e: KeyboardEvent): void {
          so that radio (static bar) and file (slider) share exactly the same
          geometry, the 6 px track sticking directly to its neighbours in both
          cases. -->
-    <div v-else-if="barVisible" class="py-0" data-barre>
+    <div v-else-if="barVisible" class="py-0" data-bar>
       <div class="h-1.5 w-full overflow-hidden rounded-full bg-muted">
-        <div class="h-full rounded-full bg-primary" :style="{ width: percent + '%' }" data-remplissage />
+        <div class="h-full rounded-full bg-primary" :style="{ width: percent + '%' }" data-fill />
       </div>
     </div>
     <div class="mt-0.5 flex justify-between text-xs text-muted-foreground">
       <span data-position>{{ elapsedText }}</span>
-      <span v-if="durationText" data-duration-totale>{{ durationText }}</span>
+      <span v-if="durationText" data-total-duration>{{ durationText }}</span>
     </div>
   </div>
 </template>

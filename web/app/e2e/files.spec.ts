@@ -295,7 +295,7 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   // the keyboard. The role and the aria-label live on the thumb, not on the
   // wrapper (see the kit's Slider.vue: the aria-label goes down to
   // `SliderThumb`, the only element a screen reader announces).
-  const thumb = page.locator('[data-barre] [role="slider"]')
+  const thumb = page.locator('[data-bar] [role="slider"]')
   await expect(thumb).toHaveCount(1)
   await expect(thumb).toHaveAttribute('aria-label', /.+/)
 
@@ -303,11 +303,11 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   // which mpv really applies. No unit test can catch it (see
   // `ProgressBar.test.ts`, simulated drag on the component) nor the phone
   // console (non-`seekable` source).
-  // `data-barre` is set on the Slider root itself (see the kit's Slider.vue:
+  // `data-bar` is set on the Slider root itself (see the kit's Slider.vue:
   // non-`aria-*` attrs forwarded to `SliderRoot`, which already carries
-  // `data-slot="slider"`) — same pattern as `data-volume-curseur` in
+  // `data-slot="slider"`) — same pattern as `data-volume-slider` in
   // phone.spec.ts, not a descendant.
-  const barTrack = page.locator('[data-barre]')
+  const barTrack = page.locator('[data-bar]')
   const barBox = await barTrack.boundingBox()
   if (!barBox) throw new Error('progress track not visible')
   const yBar = barBox.y + barBox.height / 2

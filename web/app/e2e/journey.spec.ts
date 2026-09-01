@@ -211,7 +211,7 @@ test('System tab: metrics and buttons present', async ({ page }) => {
   // phone's bottom bar — carries the same link, hidden but still in the DOM,
   // which would make the bare selector ambiguous.
   await page.goto('/')
-  await expect(page.locator('[data-nav-haut] a[href="/system"]')).toBeVisible()
+  await expect(page.locator('[data-top-nav] a[href="/system"]')).toBeVisible()
 })
 /**
  * **A plugin's CSS must not undo the shell's.**
@@ -228,20 +228,20 @@ test('System tab: metrics and buttons present', async ({ page }) => {
  */
 test('the top menu survives a visit to generic-input', async ({ page }) => {
   await page.goto('/')
-  await expect(page.locator('[data-nav-haut]')).toBeVisible()
+  await expect(page.locator('[data-top-nav]')).toBeVisible()
 
   // SPA navigation (a click), and not a `goto`: this is the real case. A full
   // reload would throw away the injected stylesheet, and so would precisely
   // mask the defect.
-  await page.locator('[data-nav-haut] a', { hasText: 'generic-input' }).click()
+  await page.locator('[data-top-nav] a', { hasText: 'generic-input' }).click()
   await expect(page.locator('[data-device-select]')).toBeVisible()
-  await expect(page.locator('[data-nav-haut]')).toBeVisible()
+  await expect(page.locator('[data-top-nav]')).toBeVisible()
 
   // And the plugin's file field — the one whose `.hidden` overrode the
-  // shell — stays hidden: the `greffon` layer must not have disarmed the
+  // shell — stays hidden: the `plugin` layer must not have disarmed the
   // plugin's CSS on its own markup.
   await expect(page.locator('[data-import]')).toBeHidden()
 
-  await page.locator('[data-nav-haut] a', { hasText: 'Configuration' }).click()
-  await expect(page.locator('[data-nav-haut]')).toBeVisible()
+  await page.locator('[data-top-nav] a', { hasText: 'Configuration' }).click()
+  await expect(page.locator('[data-top-nav]')).toBeVisible()
 })

@@ -228,23 +228,23 @@ describe('PluginView', () => {
     mountView(async () => ({ contract: 1, default: view }), 'single-sheet')
     mountView(async () => ({ contract: 1, default: view }), 'single-sheet')
     await flushPromises()
-    expect(document.head.querySelectorAll('style[data-feuille-greffon="single-sheet"]')).toHaveLength(1)
+    expect(document.head.querySelectorAll('style[data-plugin-sheet="single-sheet"]')).toHaveLength(1)
   })
 
-  it('files the plugin sheet in the `greffon` layer', async () => {
+  it('files the plugin sheet in the `plugin` layer', async () => {
     // **The regression targeted is the top menu disappearing.** Both Tailwind
     // passes (shell and plugin) wrote into the same `utilities` layer; the
     // plugin's sheet, injected later, won at equal specificity, and its
     // `.hidden` (InputAdmin's file field) overwrote the `md:flex` of
-    // `data-nav-haut`. Without this assertion, going back to a
+    // `data-top-nav`. Without this assertion, going back to a
     // `<link rel="stylesheet">` would break no other test.
     document.head.innerHTML = ''
     const view = defineComponent({ render: () => h('p', 'ok') })
     mountView(async () => ({ contract: 1, default: view }), 'layered-sheet')
     await flushPromises()
-    const style = document.head.querySelector('style[data-feuille-greffon="layered-sheet"]')
+    const style = document.head.querySelector('style[data-plugin-sheet="layered-sheet"]')
     expect(style?.textContent).toBe(
-      '@import url("/plugins/layered-sheet/ui.css") layer(greffon);',
+      '@import url("/plugins/layered-sheet/ui.css") layer(plugin);',
     )
   })
 })

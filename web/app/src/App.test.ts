@@ -101,7 +101,7 @@ describe('shell navigation', () => {
     // Scoped to the top nav: the bottom bar also points at `/plugins/mpd/`
     // when there is a single admin plugin (see `BottomNav.test.ts`), which is
     // a legitimate second link and not a duplicate from the same `v-for`.
-    expect(w.get('[data-nav-haut]').findAll('a[href="/plugins/mpd/"]')).toHaveLength(1)
+    expect(w.get('[data-top-nav]').findAll('a[href="/plugins/mpd/"]')).toHaveLength(1)
     w.unmount()
   })
 
@@ -121,9 +121,9 @@ describe('shell navigation', () => {
 
   it('hides the top nav below md and renders the bottom bar', async () => {
     const w = await mountAt('/') // the file's existing mount helper
-    expect(w.get('[data-nav-haut]').classes()).toContain('hidden')
-    expect(w.get('[data-nav-haut]').classes()).toContain('md:flex')
-    expect(w.find('[data-nav-basse]').exists()).toBe(true)
+    expect(w.get('[data-top-nav]').classes()).toContain('hidden')
+    expect(w.get('[data-top-nav]').classes()).toContain('md:flex')
+    expect(w.find('[data-bottom-nav]').exists()).toBe(true)
     w.unmount()
   })
 })

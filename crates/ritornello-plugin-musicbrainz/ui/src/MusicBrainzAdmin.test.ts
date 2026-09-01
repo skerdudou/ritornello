@@ -50,18 +50,18 @@ const BASE = '/plugins/musicbrainz/'
 
 const COMPLIANT_STATION = {
   url: 'http://icecast.radiofrance.fr/franceinter-midfi.mp3',
-  motif: { separe: { separateur: ' - ', artiste_en_premier: true } },
-  origine: 'standard_confirme',
-  dernier_usage: '2026-08-26T15:32:09Z',
-  titres_decoupes: 214,
+  pattern: { split: { separator: ' - ', artist_first: true } },
+  origin: 'standard_confirmed',
+  last_used: '2026-08-26T15:32:09Z',
+  split_titles: 214,
 }
 
 const EXCEPTION_STATION = {
-  url: 'http://exemple/parlotte.mp3',
-  motif: 'ne_pas_decouper',
-  origine: 'deviation_apprise',
-  dernier_usage: null,
-  titres_decoupes: 0,
+  url: 'http://example/chatter.mp3',
+  pattern: 'do_not_split',
+  origin: 'learned_deviation',
+  last_used: null,
+  split_titles: 0,
 }
 
 /** Mounts the component with a spied `fetch`: `data` serves the GET, PUTs are
@@ -102,23 +102,23 @@ describe('MusicBrainzAdmin', () => {
     // The filter is active from the first render (no click needed): without
     // this checked box the compliant station would remain visible on first
     // load.
-    expect((w.get('[data-filtre-exceptions]').element as HTMLInputElement).checked).toBe(true)
+    expect((w.get('[data-filter-exceptions]').element as HTMLInputElement).checked).toBe(true)
 
-    const rows = w.findAll('[data-station-ligne]')
+    const rows = w.findAll('[data-station-row]')
     expect(rows).toHaveLength(1)
-    expect(w.text()).toContain('parlotte.mp3')
+    expect(w.text()).toContain('chatter.mp3')
     expect(w.text()).not.toContain('franceinter-midfi.mp3')
   })
 
   it('shows them when the filter is unchecked', async () => {
     const { w } = await mountView()
 
-    await w.get('[data-filtre-exceptions]').setValue(false)
+    await w.get('[data-filter-exceptions]').setValue(false)
 
-    const rows = w.findAll('[data-station-ligne]')
+    const rows = w.findAll('[data-station-row]')
     expect(rows).toHaveLength(2)
     expect(w.text()).toContain('franceinter-midfi.mp3')
-    expect(w.text()).toContain('parlotte.mp3')
+    expect(w.text()).toContain('chatter.mp3')
   })
 
   it('distinguishes "nothing probed" from "no exception"', async () => {
@@ -140,36 +140,36 @@ describe('MusicBrainzAdmin', () => {
   it('"do not split" greys out the separator and the order', async () => {
     const { w } = await mountView()
 
-    await w.get('[data-editer]').trigger('click')
+    await w.get('[data-edit]').trigger('click')
 
-    const separatorField = w.get('[data-separateur]').element as HTMLInputElement
+    const separatorField = w.get('[data-separator]').element as HTMLInputElement
     const orderField = w.get('[data-order]').element as HTMLSelectElement
-    // The exception station is already `ne_pas_decouper`: the fields are thus
+    // The exception station is already `do_not_split`: the fields are thus
     // already greyed out on opening.
     expect(separatorField.disabled).toBe(true)
     expect(orderField.disabled).toBe(true)
 
     // Unchecking makes the fields editable again.
-    await w.get('[data-ne-pas-decouper]').setValue(false)
-    expect((w.get('[data-separateur]').element as HTMLInputElement).disabled).toBe(false)
+    await w.get('[data-do-not-split]').setValue(false)
+    expect((w.get('[data-separator]').element as HTMLInputElement).disabled).toBe(false)
     expect((w.get('[data-order]').element as HTMLSelectElement).disabled).toBe(false)
 
     // And rechecking greys both out again.
-    await w.get('[data-ne-pas-decouper]').setValue(true)
-    expect((w.get('[data-separateur]').element as HTMLInputElement).disabled).toBe(true)
+    await w.get('[data-do-not-split]').setValue(true)
+    expect((w.get('[data-separator]').element as HTMLInputElement).disabled).toBe(true)
     expect((w.get('[data-order]').element as HTMLSelectElement).disabled).toBe(true)
   })
 
-  it('posts a pose action with a pattern from the closed set', async () => {
+  it('posts a set action with a pattern from the closed set', async () => {
     const { w, puts } = await mountView()
 
-    await w.get('[data-editer]').trigger('click')
+    await w.get('[data-edit]').trigger('click')
     // The exception station opens with "do not split" checked: it must be
     // unchecked to reach the split pattern.
-    await w.get('[data-ne-pas-decouper]').setValue(false)
-    await w.get('[data-separateur]').setValue(' :: ')
+    await w.get('[data-do-not-split]').setValue(false)
+    await w.get('[data-separator]').setValue(' :: ')
     await w.get('[data-order]').setValue('title_first')
-    await w.get('[data-enregistrer-edition]').trigger('click')
+    await w.get('[data-save-edit]').trigger('click')
     await flushPromises()
 
     expect(puts).toHaveLength(1)
@@ -177,9 +177,9 @@ describe('MusicBrainzAdmin', () => {
     // A pattern from the closed set: never a regular expression field, just a
     // separator and an order boolean.
     expect(puts[0]!.body).toEqual({
-      action: 'pose',
-      url: 'http://exemple/parlotte.mp3',
-      motif: { separe: { separateur: ' :: ', artiste_en_premier: false, titre_au_milieu: false } },
+      action: 'set',
+      url: 'http://example/chatter.mp3',
+      pattern: { split: { separator: ' :: ', artist_first: false, title_in_middle: false } },
     })
   })
 
@@ -197,31 +197,31 @@ describe('MusicBrainzAdmin', () => {
     const { w, puts } = await mountView({
       stations: [
         {
-          url: 'http://exemple/trois-champs.mp3',
-          motif: { separe: { separateur: ' - ', artiste_en_premier: true, titre_au_milieu: true } },
-          origine: 'deviation_apprise',
-          dernier_usage: '2026-08-26T12:00:00Z',
-          titres_decoupes: 7,
+          url: 'http://example/trois-champs.mp3',
+          pattern: { split: { separator: ' - ', artist_first: true, title_in_middle: true } },
+          origin: 'learned_deviation',
+          last_used: '2026-08-26T12:00:00Z',
+          split_titles: 7,
         },
       ],
     })
 
     // The column names it, instead of displaying it like the standard.
-    expect(w.get('[data-station-ligne]').text()).toContain('title in the middle field')
+    expect(w.get('[data-station-row]').text()).toContain('title in the middle field')
 
-    await w.get('[data-editer]').trigger('click')
-    await w.get('[data-enregistrer-edition]').trigger('click')
+    await w.get('[data-edit]').trigger('click')
+    await w.get('[data-save-edit]').trigger('click')
     await flushPromises()
 
     expect(puts).toHaveLength(1)
     expect(puts[0]!.body).toEqual({
-      action: 'pose',
-      url: 'http://exemple/trois-champs.mp3',
-      motif: { separe: { separateur: ' - ', artiste_en_premier: true, titre_au_milieu: true } },
+      action: 'set',
+      url: 'http://example/trois-champs.mp3',
+      pattern: { split: { separator: ' - ', artist_first: true, title_in_middle: true } },
     })
   })
 
-  it('posts a supprime action, then refreshes', async () => {
+  it('posts a remove action, then refreshes', async () => {
     const { w, puts, gets } = await mountView()
     const getsBefore = gets.length
 
@@ -229,7 +229,7 @@ describe('MusicBrainzAdmin', () => {
     await flushPromises()
 
     expect(puts).toHaveLength(1)
-    expect(puts[0]!.body).toEqual({ action: 'supprime', url: 'http://exemple/parlotte.mp3' })
+    expect(puts[0]!.body).toEqual({ action: 'remove', url: 'http://example/chatter.mp3' })
     // Removal refreshes the list: a second GET leaves after the PUT.
     expect(gets.length).toBeGreaterThan(getsBefore)
   })
@@ -250,7 +250,7 @@ describe('MusicBrainzAdmin', () => {
     expect(toast.error).toHaveBeenCalledWith(serverMessage)
   })
 
-  it('the Clear button posts a vide action and refreshes', async () => {
+  it('the Clear button posts a clear action and refreshes', async () => {
     const { w, puts, gets } = await mountView()
     const getsBefore = gets.length
 
@@ -258,7 +258,7 @@ describe('MusicBrainzAdmin', () => {
     await flushPromises()
 
     expect(puts).toHaveLength(1)
-    expect(puts[0]!.body).toEqual({ action: 'vide' })
+    expect(puts[0]!.body).toEqual({ action: 'clear' })
     expect(gets.length).toBeGreaterThan(getsBefore)
   })
 })

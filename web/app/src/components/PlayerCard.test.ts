@@ -171,8 +171,8 @@ describe('PlayerCard', () => {
       origin: 'musicbrainz',
     })
     expect(w.find('[data-now-playing]').exists()).toBe(true)
-    expect(w.find('[data-titre]').text()).toBe('So What')
-    expect(w.find('[data-artiste]').text()).toBe('Miles Davis')
+    expect(w.find('[data-title]').text()).toBe('So What')
+    expect(w.find('[data-artist]').text()).toBe('Miles Davis')
     expect(w.find('[data-album]').text()).toBe('Kind of Blue')
     expect(w.find('[data-duration]').text()).toBe('9:05')
   })
@@ -181,15 +181,15 @@ describe('PlayerCard', () => {
     // ICY delivers a single, unsplit string: it arrives in `title`. The
     // OUI FM webradios even emit it in the order "Title - ARTIST".
     const w = mountWith({ title: 'Made Up - TAHITI 80', origin: 'icy' })
-    expect(w.find('[data-titre]').text()).toBe('Made Up - TAHITI 80')
-    expect(w.find('[data-artiste]').exists()).toBe(false)
+    expect(w.find('[data-title]').text()).toBe('Made Up - TAHITI 80')
+    expect(w.find('[data-artist]').exists()).toBe(false)
   })
 
   it('shows the artist alone when the title is missing', () => {
     // Owner's decision: every available piece of information is shown.
     const w = mountWith({ artist: 'Téléphone', origin: 'ouifm-metas' })
-    expect(w.find('[data-artiste]').text()).toBe('Téléphone')
-    expect(w.find('[data-titre]').exists()).toBe(false)
+    expect(w.find('[data-artist]').text()).toBe('Téléphone')
+    expect(w.find('[data-title]').exists()).toBe(false)
   })
 
   it('removes the track block when playback stops', async () => {
@@ -210,7 +210,7 @@ describe('PlayerCard', () => {
         seekStep: 10,
       },
     })
-    expect(w.find('[data-barre]').exists()).toBe(true)
+    expect(w.find('[data-bar]').exists()).toBe(true)
     expect(w.get('[data-position]').text()).toBe('1:27')
   })
 
@@ -225,12 +225,12 @@ describe('PlayerCard', () => {
       },
     })
     expect(w.find('[data-duration]').exists()).toBe(false)
-    expect(w.get('[data-duration-totale]').text()).toBe('4:14')
+    expect(w.get('[data-total-duration]').text()).toBe('4:14')
   })
 
   it('shows the cover when the device serves one', () => {
     const w = mountWith({ title: 'So What', cover_href: '/api/cover/1a2b', cover_origin: 'files' })
-    const img = w.find('[data-pochette] img')
+    const img = w.find('[data-cover-image] img')
     expect(img.exists()).toBe(true)
     // The UI must never point outside: the core serves the image. And it asks
     // for the **thumbnail**: the square is 224 px, a NAS's `folder.jpg` is
@@ -260,11 +260,11 @@ describe('PlayerCard', () => {
     expect(w.find('[data-origin]').exists()).toBe(false)
     expect(w.find('[data-cover-origin]').exists()).toBe(false)
 
-    await w.get('[data-provenance-ouvrir]').trigger('click')
-    const popover = document.body.querySelector('[data-provenance-popin]')
+    await w.get('[data-provenance-open]').trigger('click')
+    const popover = document.body.querySelector('[data-provenance-popover]')
     expect(popover).not.toBeNull()
     const by = (field: string) =>
-      popover?.querySelector(`[data-provenance-champ="${field}"]`)?.textContent?.trim()
+      popover?.querySelector(`[data-provenance-field="${field}"]`)?.textContent?.trim()
     expect(by('title')).toBe('icy')
     expect(by('year')).toBe('musicbrainz')
     expect(by('cover')).toBe('musicbrainz')
@@ -287,16 +287,16 @@ describe('PlayerCard', () => {
         derived: { title: 'musicbrainz', artist: 'musicbrainz' },
       },
     })
-    await w.get('[data-provenance-ouvrir]').trigger('click')
-    const popover = document.body.querySelector('[data-provenance-popin]')
-    const row = popover?.querySelector('[data-provenance-champ="title"]')
+    await w.get('[data-provenance-open]').trigger('click')
+    const popover = document.body.querySelector('[data-provenance-popover]')
+    const row = popover?.querySelector('[data-provenance-field="title"]')
     // The source, word for word: it is what was being erased.
     expect(row?.textContent).toContain('icy')
     // And the rework exists, **in the same row**. The label itself comes from
     // the catalog, which this mount does not load (`t()` falls back to the
     // key): its wording and the fr/en parity are covered by `i18nKeysUsed`,
     // this test only proves the layout.
-    expect(row?.querySelector('[data-provenance-derive="title"]')).not.toBeNull()
+    expect(row?.querySelector('[data-provenance-derived="title"]')).not.toBeNull()
     w.unmount()
   })
 
@@ -304,16 +304,16 @@ describe('PlayerCard', () => {
     // A `(?)` that opens an empty popover promises an explanation and gives
     // none: it is the ordinary case before a track is identified.
     const w = mountWith({ title: 'Made Up - TAHITI 80' })
-    expect(w.find('[data-provenance-ouvrir]').exists()).toBe(false)
+    expect(w.find('[data-provenance-open]').exists()).toBe(false)
   })
 
   it('keeps the square in place when there is no cover', () => {
     const w = mountWith({ title: 'So What' })
     // The square always exists: the cover arrives after the text, sometimes
     // several seconds after, and a square that appears would shift everything.
-    expect(w.find('[data-pochette]').exists()).toBe(true)
-    expect(w.find('[data-pochette] img').exists()).toBe(false)
-    expect(w.find('[data-pochette-repli]').exists()).toBe(true)
+    expect(w.find('[data-cover-image]').exists()).toBe(true)
+    expect(w.find('[data-cover-image] img').exists()).toBe(false)
+    expect(w.find('[data-cover-fallback]').exists()).toBe(true)
   })
 
   it('falls back to the placeholder when the browser cannot load the cover', async () => {
@@ -323,16 +323,16 @@ describe('PlayerCard', () => {
     // browser's broken-image glyph instead of the ♫ fallback intended for
     // exactly this situation.
     const w = mountWith({ title: 'So What', cover_href: '/api/cover/1a2b' })
-    await w.get('[data-pochette] img').trigger('error')
-    expect(w.find('[data-pochette] img').exists()).toBe(false)
-    expect(w.find('[data-pochette-repli]').exists()).toBe(true)
+    await w.get('[data-cover-image] img').trigger('error')
+    expect(w.find('[data-cover-image] img').exists()).toBe(false)
+    expect(w.find('[data-cover-fallback]').exists()).toBe(true)
     // The square itself does not move: nothing must shift.
-    expect(w.find('[data-pochette]').exists()).toBe(true)
+    expect(w.find('[data-cover-image]').exists()).toBe(true)
 
     // And a **different** image gives the element another chance: otherwise a
     // single failure would doom the square for the rest of the session.
     await w.setProps({ state: full({ title: 'So What', cover_href: '/api/cover/3c4d' }) })
-    expect(w.get('[data-pochette] img').attributes('src')).toBe(
+    expect(w.get('[data-cover-image] img').attributes('src')).toBe(
       '/api/cover/3c4d?taille=vignette',
     )
   })
@@ -340,10 +340,10 @@ describe('PlayerCard', () => {
   it('enlarges the cover on click, and closes it on the next click', async () => {
     const w = mountWith({ title: 'So What', cover_href: '/api/cover/1a2b' })
     // Nothing open at the start.
-    expect(document.body.querySelector('[data-pochette-enlarged]')).toBeNull()
+    expect(document.body.querySelector('[data-cover-enlarged]')).toBeNull()
 
-    await w.get('[data-pochette-agrandir]').trigger('click')
-    const overlay = document.body.querySelector('[data-pochette-enlarged]')
+    await w.get('[data-cover-enlarge]').trigger('click')
+    const overlay = document.body.querySelector('[data-cover-enlarged]')
     expect(overlay).not.toBeNull()
     // The enlarged view loads the **full** image, not the thumbnail: that is
     // the whole point of enlarging.
@@ -352,11 +352,11 @@ describe('PlayerCard', () => {
     // The overlay is **teleported to the body**: it does not belong to the
     // wrapper's subtree, so `w.get` does not see it. We drive it through the
     // DOM, as a real click would.
-    const close = document.body.querySelector<HTMLElement>('[data-pochette-fermer]')
+    const close = document.body.querySelector<HTMLElement>('[data-cover-close]')
     expect(close).not.toBeNull()
     close!.click()
     await nextTick()
-    expect(document.body.querySelector('[data-pochette-enlarged]')).toBeNull()
+    expect(document.body.querySelector('[data-cover-enlarged]')).toBeNull()
     w.unmount()
   })
 
@@ -364,11 +364,11 @@ describe('PlayerCard', () => {
     // Otherwise the next track's image shows up full screen without anyone
     // asking for it.
     const w = mountWith({ title: 'So What', cover_href: '/api/cover/1a2b' })
-    await w.get('[data-pochette-agrandir]').trigger('click')
-    expect(document.body.querySelector('[data-pochette-enlarged]')).not.toBeNull()
+    await w.get('[data-cover-enlarge]').trigger('click')
+    expect(document.body.querySelector('[data-cover-enlarged]')).not.toBeNull()
 
     await w.setProps({ state: full({ title: 'Blue in Green', cover_href: '/api/cover/9f9f' }) })
-    expect(document.body.querySelector('[data-pochette-enlarged]')).toBeNull()
+    expect(document.body.querySelector('[data-cover-enlarged]')).toBeNull()
     w.unmount()
   })
 
@@ -376,7 +376,7 @@ describe('PlayerCard', () => {
     // A button that opens nothing is worse than no button: the ♫ fallback is
     // not an image.
     const w = mountWith({ title: 'So What' })
-    expect(w.find('[data-pochette-agrandir]').exists()).toBe(false)
+    expect(w.find('[data-cover-enlarge]').exists()).toBe(false)
   })
 
   it('shows nothing of the progress when no position is known', () => {
@@ -402,7 +402,7 @@ describe('PlayerCard', () => {
     })
     expect(w.find('[data-now-playing]').exists()).toBe(false)
     expect(w.get('[data-position]').text()).toBe('1:27')
-    expect(w.find('[data-barre]').exists()).toBe(true)
+    expect(w.find('[data-bar]').exists()).toBe(true)
   })
 
   it('the cover and the track are at the center, the source as a pill', () => {
@@ -410,20 +410,20 @@ describe('PlayerCard', () => {
     expect(w.get('[data-source]').text()).toBe('radio')
     expect(w.get('[data-player-preset]').text()).toBe('1')
     expect(w.get('[data-player-preset-name]').text()).toBe('FIP')
-    expect(w.get('[data-titre]').classes()).toContain('text-xl')
-    expect(w.find('[data-pochette]').exists()).toBe(true)
+    expect(w.get('[data-title]').classes()).toContain('text-xl')
+    expect(w.find('[data-cover-image]').exists()).toBe(true)
   })
 
   it('the cover square stays even without a track: it is what holds the layout', () => {
     const w = mountWith({ status: 'NO DISC', preset_count: 0 })
-    expect(w.find('[data-pochette]').exists()).toBe(true)
-    expect(w.find('[data-pochette-repli]').exists()).toBe(true)
+    expect(w.find('[data-cover-image]').exists()).toBe(true)
+    expect(w.find('[data-cover-fallback]').exists()).toBe(true)
     expect(w.get('[data-player-status]').text()).toBe('NO DISC')
   })
 
   it('in standby the cover dims', () => {
     const w = mountWith({ standby: true })
-    expect(w.get('[data-pochette]').classes()).toContain('opacity-50')
+    expect(w.get('[data-cover-image]').classes()).toContain('opacity-50')
     expect(w.find('[data-standby]').exists()).toBe(true)
   })
 
@@ -431,17 +431,17 @@ describe('PlayerCard', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
     const w = mount(PlayerCard, {
       props: { state: full({}), seekStep: 10 },
-      slots: { actions: '<button data-test-action>a</button>', commandes: '<div data-test-commandes>c</div>' },
+      slots: { actions: '<button data-test-action>a</button>', commandes: '<div data-test-commands>c</div>' },
     })
     expect(w.find('[data-slot="card-action"] [data-test-action]').exists()).toBe(true)
-    expect(w.find('[data-test-commandes]').exists()).toBe(true)
+    expect(w.find('[data-test-commands]').exists()).toBe(true)
   })
 
   describe('year', () => {
     it('sits next to the album, separated by a middle dot', () => {
       const w = mountWith({ title: 'So What', album: 'Kind of Blue', year: 1959 })
       expect(w.find('[data-album]').text()).toBe('Kind of Blue')
-      expect(w.find('[data-annee]').text()).toBe('1959')
+      expect(w.find('[data-year]').text()).toBe('1959')
       // Both on the same line, with the separator between them.
       expect(w.find('[data-album]').element.parentElement?.textContent).toContain('Kind of Blue · 1959')
     })
@@ -450,13 +450,13 @@ describe('PlayerCard', () => {
       // Real: a stream may give the year without the album, the Radio France
       // schedule yields one far more often than the other.
       const w = mountWith({ title: 'Fire', album: null, year: 1960 })
-      expect(w.find('[data-annee]').text()).toBe('1960')
+      expect(w.find('[data-year]').text()).toBe('1960')
       expect(w.find('[data-album]').exists()).toBe(false)
     })
 
     it('leaves no trace when it is unknown', () => {
       const w = mountWith({ title: 'So What', album: 'Kind of Blue' })
-      expect(w.find('[data-annee]').exists()).toBe(false)
+      expect(w.find('[data-year]').exists()).toBe(false)
     })
   })
 
@@ -469,8 +469,8 @@ describe('PlayerCard', () => {
           { platform: 'deezer', url: 'https://www.deezer.com/track/9956167' },
         ],
       })
-      expect(w.findAll('[data-lien]')).toHaveLength(2)
-      const yt = w.get('[data-lien="youtube"]')
+      expect(w.findAll('[data-link]')).toHaveLength(2)
+      const yt = w.get('[data-link="youtube"]')
       expect(yt.attributes('href')).toBe('https://www.youtube.com/watch?v=5NV6Rdv1a3I')
       expect(yt.attributes('target')).toBe('_blank')
       // `noopener`: the target is a third party. `noreferrer`: it has no
@@ -479,7 +479,7 @@ describe('PlayerCard', () => {
       // A translated accessible name, not a mute icon.
       expect(yt.attributes('aria-label')).toBeTruthy()
       expect(yt.find('svg').exists()).toBe(true)
-      expect(w.find('[data-lien="deezer"]').exists()).toBe(true)
+      expect(w.find('[data-link="deezer"]').exists()).toBe(true)
     })
 
     it('tells the three platforms apart by their icon', () => {
@@ -496,9 +496,9 @@ describe('PlayerCard', () => {
       // `v-if` branches pass the old version of the test). The brand color
       // belongs to only one of the three icons.
       for (const [platform, color] of Object.entries(ICON_COLOR)) {
-        expect(w.get(`[data-lien="${platform}"] svg`).html()).toContain(`fill="${color}"`)
+        expect(w.get(`[data-link="${platform}"] svg`).html()).toContain(`fill="${color}"`)
       }
-      const svg = w.findAll('[data-lien] svg').map((s) => s.html())
+      const svg = w.findAll('[data-link] svg').map((s) => s.html())
       expect(new Set(svg).size).toBe(3)
     })
 
@@ -518,7 +518,7 @@ describe('PlayerCard', () => {
       const row = w.get('[data-badges]').element
       expect(w.get('[data-links]').element.parentElement).toBe(row)
       // The provenance button took the place of the two origin badges.
-      expect(w.get('[data-provenance-ouvrir]').element.parentElement).toBe(row)
+      expect(w.get('[data-provenance-open]').element.parentElement).toBe(row)
       expect(w.get('[data-duration]').element.parentElement).toBe(row)
     })
 
@@ -529,8 +529,8 @@ describe('PlayerCard', () => {
         title: 'Get Lucky',
         links: [{ platform: 'youtube', url: 'https://www.youtube.com/watch?v=a' }],
       })
-      expect(w.get('[data-lien="youtube"]').classes()).toContain('size-11')
-      expect(w.get('[data-lien="youtube"] svg').classes()).toContain('size-5')
+      expect(w.get('[data-link="youtube"]').classes()).toContain('size-11')
+      expect(w.get('[data-link="youtube"] svg').classes()).toContain('size-5')
     })
 
     it('goes in front of the overflow of the progress bar thumb', () => {
@@ -583,7 +583,7 @@ describe('PlayerCard', () => {
         title: 'Get Lucky',
         links: [{ platform: 'unknown' as 'youtube', url: 'https://example.test/x' }],
       })
-      expect(w.findAll('[data-lien]')).toHaveLength(0)
+      expect(w.findAll('[data-link]')).toHaveLength(0)
     })
 
     it('renders two anchors for two links from the same platform', () => {
@@ -596,7 +596,7 @@ describe('PlayerCard', () => {
           { platform: 'youtube', url: 'https://www.youtube.com/watch?v=b' },
         ],
       })
-      expect(w.findAll('[data-lien="youtube"]')).toHaveLength(2)
+      expect(w.findAll('[data-link="youtube"]')).toHaveLength(2)
     })
 
     it('does not show the row when there is no link', () => {

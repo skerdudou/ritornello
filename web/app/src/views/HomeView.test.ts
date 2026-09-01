@@ -439,12 +439,12 @@ describe('HomeView — unavailable buttons', () => {
     // carries its own state, in addition to the card's mention.
     const muted = await mountWith({ standby: false, muted: true })
     const key = muted.get('[data-remote-command="Mute"]')
-    expect(key.attributes('data-actif')).toBe('true')
+    expect(key.attributes('data-on')).toBe('true')
     expect(key.attributes('aria-pressed')).toBe('true')
 
     const audible = await mountWith({ standby: false, muted: false })
     const rendered = audible.get('[data-remote-command="Mute"]')
-    expect(rendered.attributes('data-actif')).toBeUndefined()
+    expect(rendered.attributes('data-on')).toBeUndefined()
     expect(rendered.attributes('aria-pressed')).toBe('false')
   })
 
@@ -490,7 +490,7 @@ describe('HomeView — sliders and names', () => {
     const w = mount(HomeView)
     FakeEventSource.last!.push({ volume: 60 })
     await nextTick()
-    const thumb = w.get('[data-volume-curseur] [role="slider"]')
+    const thumb = w.get('[data-volume-slider] [role="slider"]')
     ;(thumb.element as HTMLElement).focus()
     await thumb.trigger('keydown', { key: 'ArrowRight' })
     expect(posts).toContain(JSON.stringify({ cmd: 'SetVolume', arg: 61 }))
@@ -508,7 +508,7 @@ describe('HomeView — sliders and names', () => {
     const w = mount(HomeView)
     FakeEventSource.last!.push({ seekable: true, duration_s: 254, position_s: 87 })
     await flushPromises()
-    const thumb = w.get('[data-barre] [role="slider"]')
+    const thumb = w.get('[data-bar] [role="slider"]')
     ;(thumb.element as HTMLElement).focus()
     await thumb.trigger('keydown', { key: 'ArrowRight' })
     // The step comes from /api/settings (`seek_step_s: 10`, stubbed above):

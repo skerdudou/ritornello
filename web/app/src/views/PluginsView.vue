@@ -33,7 +33,7 @@ const list = computed(() => admins.value)
           </RouterLink>
         </li>
       </ul>
-      <p v-else class="text-sm text-muted-foreground" data-plugins-vide>{{ t('plugins_list_empty') }}</p>
+      <p v-else class="text-sm text-muted-foreground" data-plugins-empty>{{ t('plugins_list_empty') }}</p>
     </CardContent>
   </Card>
 </template>

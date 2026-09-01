@@ -19,35 +19,35 @@ function url(path: string): string {
 
 // --- The get_data / set_data contract (task 8), copied here as is ----------
 //
-// `motif` is an **externally tagged** enumeration: either the object
-// `{ separe: {...} }`, or the bare string `"ne_pas_decouper"`. It is not an
+// `pattern` is an **externally tagged** enumeration: either the object
+// `{ split: {...} }`, or the bare string `"do_not_split"`. It is not an
 // object with a `type` field — typing it as a union of these two exact shapes
 // avoids reconstructing a shape that does not exist on the server side.
 interface SplitPattern {
-  separe: {
-    separateur: string
-    artiste_en_premier: boolean
+  split: {
+    separator: string
+    artist_first: boolean
     /** The `Artist - Title - Album` shape: the title is the middle field.
      *
      * Optional because the field is additive on the backend side
      * (`serde(default)`), so a state file written before it reads back without
      * it. And the page never **produces** it: this pattern is only obtained by
      * probing, never by hand — the closed set of the editor does not offer it. */
-    titre_au_milieu?: boolean
+    title_in_middle?: boolean
   }
 }
-type Pattern = SplitPattern | 'ne_pas_decouper'
-type Origin = 'standard_confirme' | 'deviation_apprise' | 'manuel'
+type Pattern = SplitPattern | 'do_not_split'
+type Origin = 'standard_confirmed' | 'learned_deviation' | 'manual'
 
 interface Station {
   url: string
-  motif: Pattern
-  origine: Origin
+  pattern: Pattern
+  origin: Origin
   // Present and null when the station has never served (not absent): the type
   // carries this possibility explicitly rather than handling it downstream as
   // an optional field that could also be missing.
-  dernier_usage: string | null
-  titres_decoupes: number
+  last_used: string | null
+  split_titles: number
 }
 
 interface Data {
@@ -67,7 +67,7 @@ const filterExceptions = ref(true)
 
 const shownStations = computed(() =>
   filterExceptions.value
-    ? data.value.stations.filter((s) => s.origine !== 'standard_confirme')
+    ? data.value.stations.filter((s) => s.origin !== 'standard_confirmed')
     : data.value.stations,
 )
 
@@ -96,27 +96,27 @@ onMounted(reload)
 // escape it.
 function originText(o: Origin): string {
   switch (o) {
-    case 'standard_confirme':
+    case 'standard_confirmed':
       return t.value('origin_standard')
-    case 'deviation_apprise':
+    case 'learned_deviation':
       return t.value('origin_learned')
-    case 'manuel':
+    case 'manual':
       return t.value('origin_manual')
   }
 }
 
 function patternText(m: Pattern): string {
-  if (m === 'ne_pas_decouper') return t.value('pattern_no_split')
+  if (m === 'do_not_split') return t.value('pattern_no_split')
   // The `Artist - Title - Album` shape carries the same separator and the
   // same order as the standard: without its own mention, it would display
   // like it and the page would lie by omission on the only column one comes
   // here to read.
-  const order = m.separe.titre_au_milieu
+  const order = m.split.title_in_middle
     ? t.value('pattern_title_middle')
-    : m.separe.artiste_en_premier
+    : m.split.artist_first
       ? t.value('pattern_artist_first')
       : t.value('pattern_title_first')
-  return `"${m.separe.separateur}" (${order})`
+  return `"${m.split.separator}" (${order})`
 }
 
 // --- Editing --------------------------------------------------------------
@@ -139,20 +139,20 @@ const edTitleInMiddle = ref(false)
 
 function openEdit(s: Station): void {
   rowBeingEdited.value = s.url
-  if (s.motif === 'ne_pas_decouper') {
+  if (s.pattern === 'do_not_split') {
     edDoNotSplit.value = true
     edSeparator.value = ''
     edOrder.value = 'artist_first'
   } else {
     edDoNotSplit.value = false
-    edSeparator.value = s.motif.separe.separateur
-    edOrder.value = s.motif.separe.artiste_en_premier ? 'artist_first' : 'title_first'
+    edSeparator.value = s.pattern.split.separator
+    edOrder.value = s.pattern.split.artist_first ? 'artist_first' : 'title_first'
     // Preserved, not offered: the form does not propose this shape — it is
     // only obtained by probing — but it must **replay** it as is. Without this
     // line, opening the edit of a station in "Artist - Title - Album" then
     // saving without changing anything degraded its pattern, and as the entry
     // became manual, nothing repaired it anymore.
-    edTitleInMiddle.value = s.motif.separe.titre_au_milieu === true
+    edTitleInMiddle.value = s.pattern.split.title_in_middle === true
   }
 }
 
@@ -182,18 +182,18 @@ const separatorError = computed(() => {
 })
 
 function buildPattern(): Pattern {
-  if (edDoNotSplit.value) return 'ne_pas_decouper'
+  if (edDoNotSplit.value) return 'do_not_split'
   return {
-    separe: {
-      separateur: edSeparator.value,
-      artiste_en_premier: edOrder.value === 'artist_first',
-      titre_au_milieu: edTitleInMiddle.value,
+    split: {
+      separator: edSeparator.value,
+      artist_first: edOrder.value === 'artist_first',
+      title_in_middle: edTitleInMiddle.value,
     },
   }
 }
 
 /**
- * Posts the `pose` action. The page validates the separator for immediate
+ * Posts the `set` action. The page validates the separator for immediate
  * feedback (`separatorError`), **but** the backend remains the authority: this
  * same input may still be refused there (state file not writable, race with
  * another admin client), in which case its message — already a translated
@@ -203,7 +203,7 @@ async function saveEdit(): Promise<void> {
   if (separatorError.value) return
   const stationUrl = rowBeingEdited.value
   if (!stationUrl) return
-  const err = await api.put(url('api/data'), { action: 'pose', url: stationUrl, motif: buildPattern() })
+  const err = await api.put(url('api/data'), { action: 'set', url: stationUrl, pattern: buildPattern() })
   if (err) {
     toast.error(err)
     return
@@ -213,7 +213,7 @@ async function saveEdit(): Promise<void> {
 }
 
 async function remove(s: Station): Promise<void> {
-  const err = await api.put(url('api/data'), { action: 'supprime', url: s.url })
+  const err = await api.put(url('api/data'), { action: 'remove', url: s.url })
   if (err) {
     toast.error(err)
     return
@@ -225,7 +225,7 @@ async function remove(s: Station): Promise<void> {
 }
 
 async function clear(): Promise<void> {
-  const err = await api.put(url('api/data'), { action: 'vide' })
+  const err = await api.put(url('api/data'), { action: 'clear' })
   if (err) {
     toast.error(err)
     return
@@ -245,7 +245,7 @@ async function clear(): Promise<void> {
 
       <div class="flex flex-wrap items-center justify-between gap-2">
         <label class="flex items-center gap-2 text-sm">
-          <input type="checkbox" data-filtre-exceptions v-model="filterExceptions" />
+          <input type="checkbox" data-filter-exceptions v-model="filterExceptions" />
           {{ t('filter_exceptions_only') }}
         </label>
         <Button variant="secondary" data-clear @click="clear">{{ t('clear_all') }}</Button>
@@ -271,7 +271,7 @@ async function clear(): Promise<void> {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="s in shownStations" :key="s.url" data-station-ligne class="border-t border-border align-top">
+            <tr v-for="s in shownStations" :key="s.url" data-station-row class="border-t border-border align-top">
               <!-- `max-w-0` forces the column to respect the width of the
                    `<table>` rather than stretching to the length of the URL:
                    that is what lets `truncate` apply. -->
@@ -282,7 +282,7 @@ async function clear(): Promise<void> {
                   <div class="flex flex-col gap-1">
                     <Label class="text-xs font-normal text-muted-foreground">{{ t('field_separator') }}</Label>
                     <Input
-                      data-separateur v-model="edSeparator" :disabled="edDoNotSplit"
+                      data-separator v-model="edSeparator" :disabled="edDoNotSplit"
                       :aria-invalid="!!separatorError"
                     />
                     <Label class="text-xs font-normal text-muted-foreground">{{ t('field_order') }}</Label>
@@ -294,35 +294,35 @@ async function clear(): Promise<void> {
                       <option value="title_first">{{ t('pattern_title_first') }}</option>
                     </select>
                     <label class="flex items-center gap-2">
-                      <input type="checkbox" data-ne-pas-decouper v-model="edDoNotSplit" />
+                      <input type="checkbox" data-do-not-split v-model="edDoNotSplit" />
                       {{ t('field_no_split') }}
                     </label>
-                    <p v-if="separatorError" data-separateur-error class="text-xs text-destructive">
+                    <p v-if="separatorError" data-separator-error class="text-xs text-destructive">
                       {{ separatorError }}
                     </p>
                   </div>
                 </template>
-                <template v-else>{{ patternText(s.motif) }}</template>
+                <template v-else>{{ patternText(s.pattern) }}</template>
               </td>
 
-              <td class="py-2 pr-2">{{ originText(s.origine) }}</td>
-              <td class="py-2 pr-2">{{ s.dernier_usage ?? '—' }}</td>
-              <td class="py-2 pr-2">{{ s.titres_decoupes }}</td>
+              <td class="py-2 pr-2">{{ originText(s.origin) }}</td>
+              <td class="py-2 pr-2">{{ s.last_used ?? '—' }}</td>
+              <td class="py-2 pr-2">{{ s.split_titles }}</td>
 
               <td class="py-2">
                 <template v-if="rowBeingEdited === s.url">
                   <div class="flex flex-wrap gap-1">
-                    <Button size="sm" data-enregistrer-edition :disabled="!!separatorError" @click="saveEdit">
+                    <Button size="sm" data-save-edit :disabled="!!separatorError" @click="saveEdit">
                       {{ t('save') }}
                     </Button>
-                    <Button size="sm" variant="secondary" data-annuler-edition @click="cancelEdit">
+                    <Button size="sm" variant="secondary" data-cancel-edit @click="cancelEdit">
                       {{ t('cancel') }}
                     </Button>
                   </div>
                 </template>
                 <template v-else>
                   <div class="flex flex-wrap gap-1">
-                    <Button size="sm" variant="secondary" data-editer @click="openEdit(s)">
+                    <Button size="sm" variant="secondary" data-edit @click="openEdit(s)">
                       {{ t('edit') }}
                     </Button>
                     <Button size="sm" variant="secondary" data-remove @click="remove(s)">

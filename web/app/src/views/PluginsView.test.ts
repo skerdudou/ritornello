@@ -29,6 +29,6 @@ describe('PluginsView', () => {
 
   it('says so when no plugin has a page', async () => {
     const w = await mountView([])
-    expect(w.find('[data-plugins-vide]').exists()).toBe(true)
+    expect(w.find('[data-plugins-empty]').exists()).toBe(true)
   })
 })

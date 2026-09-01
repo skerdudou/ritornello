@@ -1,36 +1,37 @@
-/* **L'ordre des couches, declare avant tout le reste** — et c'est une
-   correction, pas un rangement.
+/* **The layer order, declared before everything else** — and it is a fix,
+   not tidying.
 
-   Le shell et chaque IHM de plugin sont deux passes Tailwind separees, qui
-   emettent chacune les seules classes qu'elle voit. Les deux ecrivaient dans la
-   meme couche `utilities`, et la feuille du plugin est injectee **apres** celle
-   du shell (voir `PluginView.ts`) : a specificite egale, ses regles gagnaient
-   donc sur celles du shell. Consequence mesuree : `InputAdmin.vue` porte un
-   `class="hidden"` sur son champ de fichier, donc `generic-input/ui.css`
-   contient `.hidden{display:none}` ; cette regle ecrasait le `md:flex` de la
-   barre de navigation du shell (`<div data-nav-haut class="hidden ... md:flex">`),
-   et le menu du haut disparaissait — pour toute la session, la feuille du
-   plugin restant en place a dessein.
+   The shell and each plugin UI are two separate Tailwind passes, each
+   emitting only the classes it sees. Both used to write into the same
+   `utilities` layer, and the plugin's sheet is injected **after** the
+   shell's (see `PluginView.ts`): at equal specificity, its rules therefore
+   won over the shell's. Measured consequence: `InputAdmin.vue` carries a
+   `class="hidden"` on its file input, so `generic-input/ui.css` contains
+   `.hidden{display:none}`; that rule crushed the `md:flex` of the shell's
+   navigation bar (`<div data-top-nav class="hidden ... md:flex">`), and the
+   top menu disappeared — for the whole session, the plugin's sheet staying
+   in place on purpose.
 
-   Le remede est une couche a part, **sous** `utilities` : tout ce qu'une IHM de
-   plugin apporte perd donc systematiquement contre le shell. Les classes que
-   les deux passes emettent portent les memes declarations (meme theme), donc
-   ceder ne change rien de visible ; ce qui change, c'est qu'un plugin ne peut
-   plus defaire la mise en page du shell.
+   The remedy is a separate layer, **below** `utilities`: whatever a plugin
+   UI brings therefore always loses against the shell. The classes both
+   passes emit carry the same declarations (same theme), so yielding changes
+   nothing visible; what changes is that a plugin can no longer undo the
+   shell's layout.
 
-   `@layer` en instruction est l'une des rares regles autorisees avant `@import`
-   par la specification CSS ; elle doit rester en tete de fichier. `properties`
-   est la couche que Tailwind v4 emet pour ses `@property` de repli : la nommer
-   ici la garde a sa place, faute de quoi elle serait ajoutee en fin de liste. */
-@layer properties, theme, base, components, greffon, utilities;
+   `@layer` as a statement is one of the few rules the CSS specification
+   allows before `@import`; it must stay at the top of the file. `properties`
+   is the layer Tailwind v4 emits for its fallback `@property` rules: naming
+   it here keeps it in its place, otherwise it would be appended at the end
+   of the list. */
+@layer properties, theme, base, components, plugin, utilities;
 
 @import "tailwindcss";
 @import "@ritornello/ui/theme.css";
 
-/* Les composants du kit vivent hors de ce paquet : sans cette directive,
-   Tailwind ne verrait pas leurs classes et le CSS du shell serait incomplet
-   (boutons et tables sans style, y compris quand ce sont des vues de plugin
-   qui les emploient). */
+/* The kit's components live outside this package: without this directive,
+   Tailwind would not see their classes and the shell's CSS would be
+   incomplete (unstyled buttons and tables, including when plugin views use
+   them). */
 @source "../../kit/src";
 
 body {

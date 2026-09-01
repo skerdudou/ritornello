@@ -89,7 +89,7 @@ const hasSomethingToSay = computed(() => fields.value.length > 0 || misses.value
         class="relative z-10 size-11 shrink-0 rounded-full text-muted-foreground"
         :aria-label="t('provenance_open')"
         :title="t('provenance_open')"
-        data-provenance-ouvrir
+        data-provenance-open
       >
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
           <circle cx="12" cy="12" r="9" />
@@ -98,7 +98,7 @@ const hasSomethingToSay = computed(() => fields.value.length > 0 || misses.value
         </svg>
       </Button>
     </DialogTrigger>
-    <DialogContent data-provenance-popin>
+    <DialogContent data-provenance-popover>
       <DialogHeader>
         <DialogTitle>{{ t('provenance_title') }}</DialogTitle>
         <DialogDescription>{{ t('provenance_hint') }}</DialogDescription>
@@ -109,12 +109,12 @@ const hasSomethingToSay = computed(() => fields.value.length > 0 || misses.value
       <dl v-if="fields.length" class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
         <template v-for="c in fields" :key="c.field">
           <dt class="text-muted-foreground">{{ t(LABEL[c.field]!) }}</dt>
-          <dd class="font-medium" :data-provenance-champ="c.field">
+          <dd class="font-medium" :data-provenance-field="c.field">
             {{ c.by }}
             <span
               v-if="c.derivedBy"
               class="font-normal text-muted-foreground"
-              :data-provenance-derive="c.field"
+              :data-provenance-derived="c.field"
             >{{ t('provenance_derived_by', { par: c.derivedBy }) }}</span>
           </dd>
         </template>

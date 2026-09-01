@@ -197,7 +197,7 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
             v-if="state?.playback === 'playing'"
             class="size-1.5 rounded-full bg-current"
             aria-hidden="true"
-            data-lecture-en-cours
+            data-now-playing-line
           />
           <span data-source>{{ state ? state.source || t('no_source') : '' }}</span>
         </Badge>
@@ -214,7 +214,7 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
       <div
         class="size-56 shrink-0 overflow-hidden rounded-lg border border-border bg-muted shadow-md md:size-44"
         :class="{ 'opacity-50': state?.standby }"
-        data-pochette
+        data-cover-image
       >
         <!-- A real button and not a `@click` on the image: the enlarged view
              then also opens from the keyboard and carries an accessible name.
@@ -227,7 +227,7 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
           class="size-full cursor-zoom-in focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
           :aria-label="t('cover_zoom')"
           :title="t('cover_zoom')"
-          data-pochette-agrandir
+          data-cover-enlarge
           @click="enlarged = true"
         >
           <img
@@ -240,7 +240,7 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
         <div
           v-else
           class="flex size-full items-center justify-center text-muted-foreground"
-          data-pochette-repli
+          data-cover-fallback
           aria-hidden="true"
         >
           <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -261,14 +261,14 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
           {{ state.status }}
         </p>
         <div v-if="!nothingToShow(state)" class="flex min-w-0 flex-col items-center gap-0.5 md:items-start" data-now-playing>
-          <p v-if="state?.title" class="text-xl font-semibold leading-tight text-foreground" data-titre>{{ state.title }}</p>
-          <p v-if="state?.artist" class="text-sm text-foreground" data-artiste>{{ state.artist }}</p>
+          <p v-if="state?.title" class="text-xl font-semibold leading-tight text-foreground" data-title>{{ state.title }}</p>
+          <p v-if="state?.artist" class="text-sm text-foreground" data-artist>{{ state.artist }}</p>
           <!-- The year sits next to the album, where a year is read. It also
                stands alone: a stream may know it without knowing the album. -->
           <p v-if="state?.album || state?.year" class="text-sm text-muted-foreground">
             <span v-if="state?.album" data-album>{{ state.album }}</span>
             <span v-if="state?.album && state?.year"> · </span>
-            <span v-if="state?.year" :title="t('release_year')" data-annee>{{ state.year }}</span>
+            <span v-if="state?.year" :title="t('release_year')" data-year>{{ state.year }}</span>
           </p>
           <!-- Who supplied the text, and the cover when it is not the same:
                the first question in front of a wrong title. The listening
@@ -330,7 +330,7 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
                 class="inline-flex size-11 items-center justify-center rounded-md transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                 :aria-label="t(LINK_LABEL[link.platform])"
                 :title="t(LINK_LABEL[link.platform])"
-                :data-lien="link.platform"
+                :data-link="link.platform"
               >
                 <!-- No `v-else`: the three branches exhaust the set already
                      filtered by `links`, and a `v-else` would render the Apple
@@ -373,7 +373,7 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
         role="dialog"
         aria-modal="true"
         :aria-label="t('cover_alt')"
-        data-pochette-enlarged
+        data-cover-enlarged
         @click="enlarged = false"
       >
         <!-- `object-contain` and not `object-cover`: enlarging is precisely
@@ -391,7 +391,7 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
           class="absolute right-4 top-4 rounded-full bg-black/50 p-3 text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
           :aria-label="t('cover_zoom_close')"
           :title="t('cover_zoom_close')"
-          data-pochette-fermer
+          data-cover-close
           @click.stop="enlarged = false"
         >
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">

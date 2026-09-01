@@ -51,13 +51,13 @@ function onCommit(v: number[]): void {
 </script>
 
 <template>
-  <div class="flex items-center gap-3" data-volume-ligne>
+  <div class="flex items-center gap-3" data-volume-row>
     <!-- The icon **is** the toggle: that is where one looks for the sound. -->
     <Button
       variant="ghost"
       size="icon"
       data-remote-command="Mute"
-      :data-actif="muted ? 'true' : undefined"
+      :data-on="muted ? 'true' : undefined"
       :aria-pressed="String(muted)"
       :aria-label="t('remote_mute')"
       :disabled="disabled"
@@ -68,7 +68,7 @@ function onCommit(v: number[]): void {
     </Button>
     <Slider
       class="flex-1"
-      data-volume-curseur
+      data-volume-slider
       :model-value="[displayed ?? 0]"
       :min="0"
       :max="100"

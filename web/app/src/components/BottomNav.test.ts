@@ -32,19 +32,19 @@ describe('BottomNav', () => {
       { name: 'files', kind: 'source', connected: true, admin: true },
       { name: 'generic-input', kind: 'input', connected: true, admin: true },
     ], active_source: 'radio' })
-    expect(w.findAll('[data-nav-basse] a')).toHaveLength(4)
+    expect(w.findAll('[data-bottom-nav] a')).toHaveLength(4)
     expect(w.get('[data-nav-plugins]').attributes('href')).toBe('/plugins/')
   })
 
   it('a single plugin: the tab leads directly to its page', async () => {
     const { w } = await mountWith({ plugins: [{ name: 'radio', kind: 'source', connected: true, admin: true }], active_source: 'radio' })
-    expect(w.findAll('[data-nav-basse] a')).toHaveLength(4)
+    expect(w.findAll('[data-bottom-nav] a')).toHaveLength(4)
     expect(w.get('[data-nav-plugins]').attributes('href')).toBe('/plugins/radio/')
   })
 
   it('no plugin with a page: the tab leads to the list, which will say it is empty', async () => {
     const { w } = await mountWith({ plugins: [], active_source: '' })
-    expect(w.findAll('[data-nav-basse] a')).toHaveLength(4)
+    expect(w.findAll('[data-bottom-nav] a')).toHaveLength(4)
     expect(w.get('[data-nav-plugins]').attributes('href')).toBe('/plugins/')
   })
 

@@ -69,7 +69,7 @@ onMounted(async () => {
         </RouterLink>
         <!-- Hidden below `md`: the fixed bottom bar (`BottomNav`) takes over
              on phones, with its four fixed tabs. -->
-        <div class="hidden items-center gap-4 md:flex" data-nav-haut>
+        <div class="hidden items-center gap-4 md:flex" data-top-nav>
           <RouterLink
             to="/config"
             :class="[LINK, 'text-sm text-muted-foreground']"

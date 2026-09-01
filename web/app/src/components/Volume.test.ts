@@ -51,7 +51,7 @@ describe('Volume', () => {
     const w = mounted({ muted: true })
     const button = w.get('[data-remote-command="Mute"]')
     expect(button.attributes('aria-pressed')).toBe('true')
-    expect(button.attributes('data-actif')).toBe('true')
+    expect(button.attributes('data-on')).toBe('true')
     expect(w.get('[data-volume]').classes()).toContain('line-through')
     await button.trigger('click')
     expect(w.emitted('mute')).toHaveLength(1)

@@ -82,7 +82,7 @@ const dimmed = computed(() => unavailable('Select', props.state))
 </script>
 
 <template>
-  <div class="space-y-3" data-grille-presets>
+  <div class="space-y-3" data-preset-grid>
     <div v-if="count !== null" class="flex items-center gap-2">
       <!-- The "Presets" label is already the card title (HomeView): here,
            only the count. -->

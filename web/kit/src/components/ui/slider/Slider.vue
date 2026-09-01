@@ -25,7 +25,7 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits)
 // on the thumb. Yet `SliderThumbImpl` computes ITS `aria-label` from the attrs
 // passed to IT (fallback on `getLabel()`, which for a single thumb returns
 // nothing): so it is `SliderThumb` that must receive the `aria-*`. The rest
-// (`data-barre`, `data-volume-curseur`, etc.) goes on to the root, where the
+// (`data-bar`, `data-volume-slider`, etc.) goes on to the root, where the
 // caller expects to find it.
 const attrs = useAttrs()
 const ariaAttrs = computed(() => Object.fromEntries(

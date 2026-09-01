@@ -54,16 +54,16 @@ export function pluginBase(name: string): string {
  * file field of `generic-input` thus made the top menu (`hidden ... md:flex`)
  * disappear for the rest of the session.
  */
-const PLUGIN_LAYER = 'greffon'
+const PLUGIN_LAYER = 'plugin'
 
 // A plugin's CSS is its own Tailwind pass: we inject it once and leave it in
 // place (coming back to the page must not replay a download).
 //
-// A `<style>@import url(...) layer(greffon)</style>` and not a
+// A `<style>@import url(...) layer(plugin)</style>` and not a
 // `<link rel="stylesheet">`: it is the only way to file an **external** sheet
 // in a named layer, and it holds for a third-party plugin whose CSS we do not
 // build. The internal layers of the imported sheet (`theme`, `utilities`)
-// become sublayers of `greffon`, so their relative order — the one Tailwind
+// become sublayers of `plugin`, so their relative order — the one Tailwind
 // computed for that plugin — is preserved.
 function ensureStylesheet(name: string): void {
   if (injectedStylesheets.has(name)) return
@@ -74,7 +74,7 @@ function ensureStylesheet(name: string): void {
   // `url(...)`: strip them rather than escape them, a plugin name never
   // contains any and a malformed `@import` would be ignored silently.
   const href = `${pluginBase(name)}ui.css`.replace(/["'()\\\s]/g, '')
-  style.setAttribute('data-feuille-greffon', name)
+  style.setAttribute('data-plugin-sheet', name)
   style.textContent = `@import url("${href}") layer(${PLUGIN_LAYER});`
   document.head.appendChild(style)
 }

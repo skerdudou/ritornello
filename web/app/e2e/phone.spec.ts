@@ -2,9 +2,9 @@ import { expect, test } from '@playwright/test'
 
 test('on a phone: bottom bar, top nav absent, named tile', async ({ page }) => {
   await page.goto('/')
-  await expect(page.locator('[data-nav-basse]')).toBeVisible()
-  await expect(page.locator('[data-nav-haut]')).toBeHidden()
-  await expect(page.locator('[data-nav-basse] a')).toHaveCount(4)
+  await expect(page.locator('[data-bottom-nav]')).toBeVisible()
+  await expect(page.locator('[data-top-nav]')).toBeHidden()
+  await expect(page.locator('[data-bottom-nav] a')).toHaveCount(4)
   // Preset 1 (FIP, the harness's stations.toml) is playing and carries its name.
   const tile = page.locator('[data-preset-button="1"]')
   await expect(tile).toHaveAttribute('aria-current', 'true')
@@ -21,8 +21,8 @@ test('on a phone: dragging the volume slider sends a SetVolume that the core ech
   // is informative, without a thumb — which is verified too.
   await page.goto('/')
   await expect(page.locator('[data-volume]')).not.toHaveText('')
-  await expect(page.locator('[data-barre] [role="slider"]')).toHaveCount(0)
-  const slider = page.locator('[data-volume-curseur]')
+  await expect(page.locator('[data-bar] [role="slider"]')).toHaveCount(0)
+  const slider = page.locator('[data-volume-slider]')
   const box = await slider.boundingBox()
   if (!box) throw new Error('volume slider not visible')
   const y = box.y + box.height / 2

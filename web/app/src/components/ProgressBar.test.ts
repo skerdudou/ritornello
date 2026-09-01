@@ -10,19 +10,19 @@ describe('ProgressBar', () => {
   it('shows the position and the duration', () => {
     const w = mounted({})
     expect(w.get('[data-position]').text()).toBe('1:27')
-    expect(w.get('[data-duration-totale]').text()).toBe('4:14')
+    expect(w.get('[data-total-duration]').text()).toBe('4:14')
   })
 
   // An endless bar teaches nothing: without a duration, only the elapsed time is shown.
   it('without a duration, no bar', () => {
     const w = mounted({ duration: null })
-    expect(w.find('[data-barre]').exists()).toBe(false)
+    expect(w.find('[data-bar]').exists()).toBe(false)
     expect(w.get('[data-position]').text()).toBe('1:27')
   })
 
   it('fills the bar proportionally', () => {
     const w = mounted({})
-    const style = w.get('[data-remplissage]').attributes('style') ?? ''
+    const style = w.get('[data-fill]').attributes('style') ?? ''
     const percent = Number(/width:\s*([\d.]+)%/.exec(style)?.[1])
     // 87 / 254 = 34.25 %. A value read and compared, rather than a substring
     // "34" that would pass just as well on "3.4" or "340".
@@ -33,15 +33,15 @@ describe('ProgressBar', () => {
   // France announces a duration on a live stream that cannot be rewound.
   it('inert when the content is not seekable', async () => {
     const w = mounted({ seekable: false })
-    await w.get('[data-barre]').trigger('click')
+    await w.get('[data-bar]').trigger('click')
     expect(w.emitted('seek')).toBeUndefined()
-    expect(w.get('[data-barre]').attributes('role')).toBeUndefined()
+    expect(w.get('[data-bar]').attributes('role')).toBeUndefined()
     expect(w.find('[role="slider"]').exists()).toBe(false)
     // The static bar is not a target: it must not pay for the 44 px touch
     // area (`py-[19px]`) reserved for the real slider, and must share the
     // exact same geometry as the slider (`py-0` on both sides, Playwright
     // measurement in support: radio and file must line up).
-    const classes = w.get('[data-barre]').classes()
+    const classes = w.get('[data-bar]').classes()
     expect(classes).not.toContain('py-[19px]')
     expect(classes).toContain('py-0')
   })
@@ -52,7 +52,7 @@ describe('ProgressBar', () => {
   // blocks visually.
   it('the durations line stays below the track, non seekable', () => {
     const w = mounted({ seekable: false })
-    const track = w.get('[data-barre]').element
+    const track = w.get('[data-bar]').element
     const durations = w.get('[data-position]').element.closest('div')!
     expect(track.compareDocumentPosition(durations) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
@@ -148,7 +148,7 @@ describe('ProgressBar', () => {
     await w.setProps({ position: null })
     // No more position: nothing is rendered (see the test "shows the position
     // and the duration"), so the target value must leave no trace.
-    expect(w.find('[data-progression]').exists()).toBe(false)
+    expect(w.find('[data-progress]').exists()).toBe(false)
     // A next track restarting at 0:01 proves it: without the release, the
     // target (127) would still have masked this brand-new value.
     await w.setProps({ position: 1 })

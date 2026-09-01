@@ -29,7 +29,7 @@ const ACTIVE = 'text-primary'
        Hidden from `md` up, where the top nav takes over. -->
   <nav
     class="fixed inset-x-0 bottom-0 z-10 grid grid-cols-4 border-t border-border bg-card pb-[env(safe-area-inset-bottom)] md:hidden"
-    data-nav-basse
+    data-bottom-nav
     :aria-label="t('nav_label')"
   >
     <RouterLink to="/" :class="TAB" :exact-active-class="ACTIVE">
