@@ -49,7 +49,18 @@ type RenditionInFlight =
 /// is the raw picture pulled out of the audio container, before any
 /// re-encoding — see `CoverCache::embedded_in_flight` for why this one exists
 /// at all.
-type EmbeddedInFlight = Arc<tokio::sync::OnceCell<Option<(&'static str, Arc<Vec<u8>>)>>>;
+///
+/// **`axum::body::Bytes`, not `Arc<Vec<u8>>` like `RenditionInFlight`.** A
+/// rendition's bytes are always consumed by cloning them out into an owned
+/// `Vec` — `line` must, to embed them in a `ritornello_proto::Cover` — so
+/// `Arc<Vec<u8>>` merely gets the *waiting* right; the eventual clone-out
+/// still costs one full copy per waiter. `cover_get`'s bare-URL branch has no
+/// such requirement: `Bytes` is what `axum::body::Body` is built from
+/// directly, refcounted like an `Arc` internally, so N waiters resolving
+/// together clone a *handle*, not the picture — one allocation serves every
+/// response.
+type EmbeddedInFlight =
+    Arc<tokio::sync::OnceCell<Option<(&'static str, axum::body::Bytes)>>>;
 
 /// What proves a source has not changed under its key.
 ///
@@ -729,13 +740,18 @@ impl CoverCache {
     /// afterwards by whichever caller finds it still pointing at the cell it
     /// registered.
     ///
-    /// **The picture travels behind an `Arc`, and that is the one property
-    /// that matters.** Cloning the `OnceCell`'s answer must stay a refcount
-    /// bump: were the shared value a bare `Vec<u8>` instead, every one of the
-    /// N waiters resolving together would pay for a full copy of the
-    /// picture on its way out of `get_or_init` — the rendezvous would have
-    /// spared the extraction and spent the memory right back, which is
-    /// precisely the property this task exists to establish.
+    /// **The picture travels as `axum::body::Bytes`, and that is the one
+    /// property that matters.** Cloning the `OnceCell`'s answer must stay a
+    /// refcount bump: an early version of this rendezvous shared an
+    /// `Arc<Vec<u8>>` instead, then had `cover_get` clone it out into an
+    /// owned `Vec` to build the response body — which meant every one of the
+    /// N waiters still paid for a full copy of the picture on its way out,
+    /// the rendezvous sparing the extraction but spending the memory right
+    /// back on the very last step. `Bytes` is refcounted the same way `Arc`
+    /// is, but is *also* what `axum::body::Body` is built from directly
+    /// (`Bytes: IntoResponse`), so there is no clone-out left to perform:
+    /// every response body shares the one buffer `read_embedded_bounded`
+    /// produced.
     ///
     /// Keyed by the bare cache key rather than a full identity, exactly like
     /// `renditions_in_flight`: concurrent callers on one key necessarily read
@@ -746,7 +762,7 @@ impl CoverCache {
         key: &str,
         audio: &std::path::Path,
         cap: usize,
-    ) -> Option<(&'static str, Arc<Vec<u8>>)> {
+    ) -> Option<(&'static str, axum::body::Bytes)> {
         let cell = {
             let mut in_flight = self.embedded_in_flight.lock().await;
             in_flight.entry(key.to_string()).or_insert_with(EmbeddedInFlight::default).clone()
@@ -754,7 +770,10 @@ impl CoverCache {
         let result = cell
             .get_or_init(|| async {
                 let (mime, bytes, _stamp) = self.read_embedded_bounded(audio, cap).await?;
-                Some((mime, Arc::new(bytes)))
+                // `Bytes::from(Vec<u8>)` takes ownership of the allocation
+                // as is — no copy, unlike `Arc::new` followed by a later
+                // clone-out would have needed.
+                Some((mime, axum::body::Bytes::from(bytes)))
             })
             .await
             .clone();
@@ -1957,13 +1976,16 @@ pub async fn cover_get(
                     (header::CACHE_CONTROL, "no-cache".to_string()),
                     (header::ETAG, etag),
                 ],
-                // Cloned out of the `Arc`, same as `line`'s `Some(_)` branch:
-                // `axum`'s response body wants an owned buffer, and this is
-                // the one copy each caller must eventually pay to hand its
-                // own bytes to its own socket — what the rendezvous above
-                // spares is the extraction and the N-fold container parse,
-                // not this final, unavoidable handoff.
-                bytes.as_ref().clone(),
+                // **No clone here, unlike `line`'s `Some(_)` branch.** `bytes`
+                // is `axum::body::Bytes`, not `Arc<Vec<u8>>`: it is what
+                // `Body` is built from directly, and cloning it is a
+                // refcount bump. N concurrent callers sharing one
+                // `extract_embedded` result therefore share one allocation
+                // all the way to their sockets — see `EmbeddedInFlight`'s
+                // doc for why this path can afford that and `line`'s
+                // rendition branch cannot (it must base64-encode into an
+                // owned buffer regardless).
+                bytes,
             )
                 .into_response()
         }
@@ -2917,6 +2939,54 @@ mod tests {
         }
         assert!(bodies.iter().all(|b| b == &bodies[0]), "all eight must get the same picture");
         assert_eq!(cache.embedded_extractions(), 1, "eight callers, one extraction");
+    }
+
+    #[tokio::test]
+    async fn concurrent_full_size_requests_share_one_allocation() {
+        // **What the extraction count above cannot see.** Sharing the
+        // extraction is not the whole property this task exists to
+        // establish: `EmbeddedInFlight` could still hand each waiter a
+        // distinct copy of the *result* (an `Arc<Vec<u8>>` cloned into an
+        // owned `Vec` for the response, as an earlier version of this fix
+        // did) and `concurrent_full_size_requests_extract_once` would not
+        // notice — equal bytes look the same whether they are one buffer or
+        // eight. Only comparing pointers can tell them apart.
+        //
+        // Named production change this guards: swapping `extract_embedded`'s
+        // shared type from `axum::body::Bytes` back to `Arc<Vec<u8>>` (with
+        // `cover_get` cloning it out via `.as_ref().clone()` to build the
+        // response, as `line`'s rendition branch does) would make each
+        // waiter's `Bytes` wrap its own freshly allocated buffer — same
+        // content, a different `as_ptr()` each time — while still passing
+        // the extraction-count test above.
+        let dir = tempfile::tempdir().unwrap();
+        let Some(track) =
+            crate::player::mpv::tests::mp3_with_cover_from(dir.path(), "color=c=blue:s=64x64:d=1")
+        else {
+            eprintln!("ffmpeg missing: skipping test");
+            return;
+        };
+        let cache = Arc::new(CoverCache::new());
+        cache.insert("k".into(), CoverPayload::Embedded(track.clone())).await;
+        let cap = cache.settings().source_max;
+
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let c = cache.clone();
+                let audio = track.clone();
+                tokio::spawn(async move { c.extract_embedded("k", &audio, cap).await })
+            })
+            .collect();
+        let mut ptrs = Vec::new();
+        for t in tasks {
+            let (_, bytes) =
+                t.await.expect("no task may panic").expect("the picture must be readable");
+            ptrs.push(bytes.as_ptr());
+        }
+        assert!(
+            ptrs.iter().all(|p| *p == ptrs[0]),
+            "all eight must share the very same buffer, not merely equal bytes"
+        );
     }
 
     // -- allowed_target: the SSRF safeguard, with no network at all ---------
