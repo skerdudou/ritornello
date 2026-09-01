@@ -403,7 +403,12 @@ impl<P: Player> Core<P> {
             // appearance of its cover could not be attributed to any
             // particular step.
             let started = std::time::Instant::now();
-            match crate::cover::fetch(&r).await {
+            // Read just before the fetch it bounds, like every other cover
+            // setting in this module: the download may take seconds, and a
+            // value read earlier could describe a budget the user has since
+            // changed.
+            let download_max = covers.settings().download_max;
+            match crate::cover::fetch(&r, download_max).await {
                 Some(p) => {
                     tracing::info!("cover {key} fetched in {:?}", started.elapsed());
                     covers.insert(key.clone(), p).await;
@@ -486,13 +491,13 @@ impl<P: Player> Core<P> {
             return;
         }
         // Re-checked rather than trusting `success` alone: the cache is
-        // bounded (`cover_cache_entries` entries, FIFO eviction) and this
-        // key may have been evicted between the deposit and the consumption
-        // of this message by `main`'s loop — a case all the more real since
-        // the channel is deliberately narrow (capacity 4).
+        // bounded (`cover_cache_budget_mio`, byte eviction) and this key may
+        // have been evicted between the deposit and the consumption of this
+        // message by `main`'s loop — a case all the more real since the
+        // channel is deliberately narrow (capacity 4).
         if !self.covers.contains(&key).await {
             // Evicted between the deposit and the consumption of this
-            // message: the cache only keeps `cover_cache_entries` entries.
+            // message: the cache is bounded by `cover_cache_budget_mio`.
             // Silent until now, even though it is a cover **lost after
             // having been fetched** — the worst case, and the hardest to
             // attribute without a trace.
@@ -896,7 +901,7 @@ mod tests {
         // The fetch is detached: the test waits for it explicitly rather
         // than sleeping, so as not to manufacture a flake.
         let key = crate::cover::key(&s);
-        let p = crate::cover::fetch(&s).await.expect("the test image must be readable");
+        let p = crate::cover::fetch(&s, crate::cover::CoverSettings::default().download_max).await.expect("the test image must be readable");
         core.app_covers().insert(key.clone(), p).await;
         core.cover_arrived(key.clone(), true).await;
 
@@ -1005,7 +1010,7 @@ mod tests {
 
         core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
         core.set_source_cover(Some(r), "files");
-        let p = crate::cover::fetch(&s).await.expect("the test image must be readable");
+        let p = crate::cover::fetch(&s, crate::cover::CoverSettings::default().download_max).await.expect("the test image must be readable");
         core.app_covers().insert(key.clone(), p).await;
         core.cover_arrived(key.clone(), true).await;
 
@@ -1056,7 +1061,7 @@ mod tests {
         state_rx.borrow_and_update();
 
         // The OLD cover's late reply arrives anyway.
-        let p = crate::cover::fetch(&s_old).await.expect("the test image must be readable");
+        let p = crate::cover::fetch(&s_old, crate::cover::CoverSettings::default().download_max).await.expect("the test image must be readable");
         core.app_covers().insert(key_old.clone(), p).await;
         core.cover_arrived(key_old, true).await;
 
@@ -1127,7 +1132,7 @@ mod tests {
             Some(key.as_str()),
             "a new retrieval must be able to restart for the same key"
         );
-        let p = crate::cover::fetch(&s).await.expect("the test image must be readable");
+        let p = crate::cover::fetch(&s, crate::cover::CoverSettings::default().download_max).await.expect("the test image must be readable");
         core.app_covers().insert(key.clone(), p).await;
         core.cover_arrived(key.clone(), true).await;
 
@@ -1243,7 +1248,7 @@ mod tests {
         // must be the one for the temp file the extraction wrote.
         let key = crate::cover::key(&r);
         assert_eq!(core.cover_in_flight.as_deref(), Some(key.as_str()));
-        let p = crate::cover::fetch(&r).await.expect("the temp file must be readable");
+        let p = crate::cover::fetch(&r, crate::cover::CoverSettings::default().download_max).await.expect("the temp file must be readable");
         core.app_covers().insert(key.clone(), p).await;
         core.cover_arrived(key.clone(), true).await;
 

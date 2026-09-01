@@ -19,11 +19,6 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::RwLock;
 use tokio_util::io::ReaderStream;
 
-/// Cap for an image coming from the network. Rules out the bare `front` of the
-/// Cover Art Archive, measured at 2,670,705 bytes where `front-500` returns
-/// 75,249.
-const NETWORK_CAP: usize = 2 * 1024 * 1024;
-
 /// Prefix of the local URL published in `Track::cover_href`.
 ///
 /// Shared between `metadata::Metadata::state`, which **builds** it, and
@@ -201,9 +196,8 @@ pub fn key(s: &CoverSource) -> String {
 /// a single cache key, hence a single `href`, hence nothing to fetch again nor
 /// to decode again: the embedded case thereby joins the local `folder.jpg`,
 /// which was already free. Without that, a fifteen-track album made a cache
-/// that only holds as many entries as the setting allows
-/// (`CoverSettings::entries`) churn for nothing, extraction and eviction
-/// included.
+/// bounded by memory (`CoverSettings::budget`) churn for nothing, extraction
+/// and eviction included.
 pub fn content_key(bytes: &[u8]) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut h);
@@ -266,9 +260,19 @@ fn rendition_identity(key: &str, stamp: &SourceStamp, rules: &Rendition) -> Stri
 /// `rendition` only describes what the core **produces**.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoverSettings {
-    /// How many covers the cache keeps. See
-    /// `state::Settings::cover_cache_entries`.
-    pub entries: usize,
+    /// Memory budget for the cache, in bytes. See
+    /// `state::Settings::cover_cache_budget_mio`.
+    ///
+    /// **Carried here, not yet consumed here.** This task (the settings and
+    /// their plumbing) only gets the figure from the config page to this
+    /// struct; the eviction that actually keeps `entries` and `renditions`
+    /// under it is a separate task, landing right after on this same branch.
+    pub budget: usize,
+    /// Cap on a cover **downloaded from the internet**, in bytes. See
+    /// `state::Settings::cover_download_max_mio`. Passed to `download`
+    /// rather than read from a constant — the only way to make the cut
+    /// testable at more than one value.
+    pub download_max: usize,
     /// Cap on the source cover, in bytes.
     pub source_max: usize,
     /// `None` = push the source as it is.
@@ -288,7 +292,8 @@ impl Default for CoverSettings {
 impl From<&crate::state::Settings> for CoverSettings {
     fn from(s: &crate::state::Settings) -> Self {
         Self {
-            entries: s.cover_cache_entries as usize,
+            budget: (s.cover_cache_budget_mio as usize) * 1024 * 1024,
+            download_max: (s.cover_download_max_mio as usize) * 1024 * 1024,
             source_max: (s.cover_source_max_mio as usize) * 1024 * 1024,
             rendition: s.cover_rendition.then(|| Rendition {
                 max_edge_px: s.cover_max_edge_px,
@@ -407,8 +412,8 @@ struct Rendered {
 /// ones, nobody asks again — a device plays one track at a time, and the page
 /// shows one square.
 ///
-/// Deliberately **not** `cover_cache_entries` (20 by default), which bounds
-/// the *sources*: a source costs a `PathBuf` for a file on a share, whereas a
+/// Deliberately **not** governed by `CoverSettings::budget`, which bounds the
+/// *sources*: a source costs a `PathBuf` for a file on a share, whereas a
 /// rendition costs its bytes, up to `cover_max_bytes_ko` each. A comment here
 /// once claimed the two were the same number; they never were.
 const RENDITIONS: usize = 4;
@@ -567,31 +572,33 @@ impl CoverCache {
     }
 
     /// Copy of the current settings, lock released immediately.
-    fn settings(&self) -> CoverSettings {
+    ///
+    /// `pub(crate)`: `Core::start_cover_fetch` reads `download_max` off it to
+    /// hand to `cover::fetch`, which must not read the cache's own lock
+    /// itself — it runs detached, well past where this cache's `Arc` was
+    /// cloned out.
+    pub(crate) fn settings(&self) -> CoverSettings {
         match self.settings.read() {
             Ok(g) => *g,
             Err(e) => *e.into_inner(),
         }
     }
 
+    /// Retains `p` under `key`.
+    ///
+    /// **No eviction happens here.** The count-based cap this method used to
+    /// enforce (`CoverSettings::entries`, a number of covers) is gone along
+    /// with the setting it read: the config page now hands over a memory
+    /// budget in bytes (`CoverSettings::budget`), and a cache that is meant
+    /// to stay under a byte budget cannot decide anything by counting its
+    /// entries — a `Bytes` payload and a `File` payload are not the same cost
+    /// at all (see `CoverPayload`). Landing the setting ahead of the eviction
+    /// that reads it is deliberate: this task is the settings and their
+    /// plumbing only, nothing that decides what to keep or drop.
     pub async fn insert(&self, key: String, p: CoverPayload) {
         let mut e = self.entries.write().await;
         e.retain(|(k, _)| k != &key);
         e.push_back((key, p));
-        // Re-read at every insertion: lowering the setting must reclaim the
-        // memory at the next track, not at the next restart.
-        let cap = self.settings().entries.max(1);
-        // `pop_front` only drops the `CoverPayload` from memory — a `File` or
-        // `Embedded` entry names a path on the user's own share or their own
-        // audio library, never a copy of ours, and eviction must never touch
-        // it. This used to also delete a leftover extraction file when
-        // eviction pushed one out; now that `Embedded` never names such a
-        // file (see `CoverPayload`), there is nothing left on disk that this
-        // cache is responsible for reclaiming — both variants cost only a
-        // path.
-        while e.len() > cap {
-            e.pop_front();
-        }
     }
 
     pub async fn contains(&self, key: &str) -> bool {
@@ -654,14 +661,15 @@ impl CoverCache {
                 None => return None,
                 // Already in memory, and already bounded by construction:
                 // these bytes come from an HTTP body that `download` cut at
-                // `NETWORK_CAP`.
+                // `CoverSettings::download_max`.
                 //
-                // The configurable cap is checked anyway: it can be lowered
-                // **below** `NETWORK_CAP`, and then the construction-time
-                // bound no longer says anything. Without this check, the
-                // setting would only apply to local files — true today by the
-                // mere coincidence of the two values, and false as soon as one
-                // of them is touched.
+                // The `cap` given to this method (`source_max`) is checked
+                // anyway: it is a **different** setting from `download_max`,
+                // and it can be lowered below it, at which point the
+                // construction-time bound no longer says anything. Without
+                // this check, `source_max` would only apply to local files —
+                // true today by the mere coincidence of the two defaults, and
+                // false as soon as either is touched.
                 Some(CoverPayload::Bytes(v, mime)) => {
                     if v.len() > cap {
                         tracing::warn!(
@@ -1232,7 +1240,12 @@ fn allowed_target(url: &str) -> bool {
 /// bytes of the received body. Split from `fetch` to stay testable against a
 /// local HTTP server (`127.0.0.1`) without ever going through
 /// `allowed_target`, which would refuse precisely that address.
-async fn download(url: &str) -> Option<CoverPayload> {
+///
+/// `cap` is `CoverSettings::download_max`, in bytes, **given by the caller**
+/// rather than read from a constant here: that is what makes the cut
+/// testable at more than one value, where a hard-coded bound could only ever
+/// be exercised at the one figure baked into the binary.
+async fn download(url: &str, cap: usize) -> Option<CoverPayload> {
     let mut response = client().get(url).send().await.ok()?;
     if !response.status().is_success() {
         tracing::debug!("cover fetch returned {}", response.status());
@@ -1252,8 +1265,8 @@ async fn download(url: &str) -> Option<CoverPayload> {
     // `Content-Length` protects from nothing, it is declarative.
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.ok()? {
-        if bytes.len() + chunk.len() > NETWORK_CAP {
-            tracing::debug!("cover fetch refused: over {NETWORK_CAP} bytes");
+        if bytes.len() + chunk.len() > cap {
+            tracing::debug!("cover fetch refused: over {cap} bytes");
             return None;
         }
         bytes.extend_from_slice(&chunk);
@@ -1296,7 +1309,12 @@ const FILE_TIMEOUT: std::time::Duration = crate::health::TIMEOUT;
 /// the probe already read the picture itself to compute its `content`
 /// fingerprint, and the picture is read a second time, on demand, only if a
 /// consumer actually asks for the bytes (`CoverCache::bytes`, `cover_get`).
-pub async fn fetch(s: &CoverSource) -> Option<CoverPayload> {
+///
+/// `download_max` is `CoverSettings::download_max`, in bytes: the caller's
+/// job, not this function's, to read the current setting — `fetch` runs
+/// detached (`Core::start_cover_fetch`), well away from any lock on the
+/// settings.
+pub async fn fetch(s: &CoverSource, download_max: usize) -> Option<CoverPayload> {
     let r = match s {
         CoverSource::Embedded { audio, .. } => return Some(CoverPayload::Embedded(audio.clone())),
         CoverSource::Ref(r) => r,
@@ -1337,7 +1355,7 @@ pub async fn fetch(s: &CoverSource) -> Option<CoverPayload> {
                 tracing::debug!("cover fetch refused: target not allowed");
                 return None;
             }
-            download(url).await
+            download(url, download_max).await
         }
     }
 }
@@ -1403,10 +1421,10 @@ pub async fn cover_get(
     let Some(p) = state.covers.read(&key).await else {
         // **A `warn`, and it was missing.** This key was published in
         // `cover_href` by the core itself: no longer knowing how to serve it
-        // is a broken promise, not an ordinary case. The cache only keeps
-        // `CoverSettings::entries` entries, so the suspect is eviction — this
-        // is the line that will say so, where the screen only showed a ♫ with
-        // no explanation and the owner reported "no warn at all".
+        // is a broken promise, not an ordinary case. The cache is bounded by
+        // `CoverSettings::budget`, so the suspect is eviction — this is the
+        // line that will say so, where the screen only showed a ♫ with no
+        // explanation and the owner reported "no warn at all".
         tracing::warn!("cover {key} requested but no longer in the cache (evicted?)");
         return (StatusCode::NOT_FOUND, "inconnue").into_response();
     };
@@ -1971,42 +1989,16 @@ mod tests {
         assert_eq!(cache.renditions_built(), 1, "eight callers, one decode");
     }
 
-    #[tokio::test]
-    async fn the_cache_is_bounded_by_the_setting_and_forgets_the_oldest() {
-        // **The bound is now a setting** (`cover_cache_entries`, 20 by
-        // default) and not a constant: the test therefore sets it itself,
-        // which proves at the same time that it is indeed read at every
-        // insertion.
-        let cache = CoverCache::new();
-        cache.set_cover_settings(CoverSettings { entries: 4, ..CoverSettings::default() });
-        for i in 0..6 {
-            cache.insert(format!("k{i}"), CoverPayload::Bytes(vec![i as u8], "image/jpeg")).await;
-        }
-        assert!(!cache.contains("k0").await);
-        assert!(!cache.contains("k1").await);
-        assert!(cache.contains("k5").await);
-    }
-
-    #[tokio::test]
-    async fn lowering_the_setting_reclaims_memory_at_the_next_insertion() {
-        // The setting is re-read **at every insertion**: lowering it must not
-        // wait for a restart to give the memory back, otherwise setting it is
-        // useless while the device is playing.
-        let cache = CoverCache::new();
-        cache.set_cover_settings(CoverSettings { entries: 10, ..CoverSettings::default() });
-        for i in 0..10 {
-            cache.insert(format!("k{i}"), CoverPayload::Bytes(vec![i as u8], "image/jpeg")).await;
-        }
-        assert!(cache.contains("k0").await, "precondition: all ten fit");
-
-        cache.set_cover_settings(CoverSettings { entries: 3, ..CoverSettings::default() });
-        cache.insert("fresh".into(), CoverPayload::Bytes(vec![99], "image/jpeg")).await;
-
-        assert!(cache.contains("fresh").await);
-        assert!(cache.contains("k9").await, "the most recent ones stay");
-        assert!(!cache.contains("k0").await, "the oldest ones leave right away");
-        assert!(!cache.contains("k7").await);
-    }
+    // The two tests that used to live here — a cache bounded by
+    // `cover_cache_entries` and forgetting its oldest, and the same bound
+    // reclaiming memory as soon as it was lowered — tested a count-based cap
+    // that no longer exists: `insert` performs no eviction at all in this
+    // task (see its doc), the setting it used to read having been replaced
+    // by a memory budget nothing here consumes yet. The task that brings
+    // eviction back under that budget (byte-accounted, and ordered
+    // renditions-then-sources) owns proving it bounds and reclaims memory;
+    // reintroducing a stand-in count-based version here would only be
+    // deleted again the moment that lands.
 
     /// **The guard for this task's whole deletion.** `CoverPayload::Embedded`
     /// names the user's own *audio* file, not a copy of ours — nothing here
@@ -2014,8 +2006,16 @@ mod tests {
     /// removed the temp-file machinery — the `remove_file` call this test
     /// guarded against — from `insert`, so that the removal was checked
     /// against a real assertion rather than against the absence of a crash.
-    /// See the mutation check recorded in this task's report: reintroducing
-    /// an unconditional delete on eviction turns this test red.
+    ///
+    /// **No longer forced through an eviction to prove it.** The count-based
+    /// cap this test used to lower (`entries: 1`) is gone along with the
+    /// setting that fed it: `insert` performs no eviction at all in this
+    /// task (see its doc). The property under test does not depend on that
+    /// mechanism existing — `insert` must never open or delete the file it
+    /// is handed, whether or not anything is evicted — so it still holds,
+    /// and still fails the moment an unconditional delete is reintroduced.
+    /// The task that brings eviction back under the byte budget must re-arm
+    /// an eviction-shaped version of this guard against its own code path.
     ///
     /// No real MP3 needed: `insert` never opens the file, it only ever moves
     /// a path in and out of the cache — so a one-byte stand-in exercises the
@@ -2023,32 +2023,28 @@ mod tests {
     /// deletion, is guarded unconditionally rather than skipping whenever
     /// ffmpeg happens to be absent.
     #[tokio::test]
-    async fn evicting_an_embedded_entry_deletes_no_file() {
+    async fn inserting_over_an_embedded_entry_deletes_no_file() {
         let dir = tempfile::tempdir().unwrap();
         let track = dir.path().join("t.mp3");
         std::fs::write(&track, b"x").unwrap();
         let cache = CoverCache::new();
-        cache.set_cover_settings(CoverSettings { entries: 1, ..CoverSettings::default() });
         cache.insert("a".into(), CoverPayload::Embedded(track.clone())).await;
-        // Pushes "a" out of a one-entry cache.
         cache.insert("b".into(), CoverPayload::Bytes(vec![1], "image/jpeg")).await;
-        assert!(track.exists(), "eviction must never delete the user's audio file");
+        assert!(track.exists(), "insertion must never delete the user's audio file");
     }
 
-    /// Eviction must never touch a `folder.jpg` declared by a Source, which
-    /// lives on its own share and is not ours to delete.
+    /// Insertion must never touch a `folder.jpg` declared by a Source, which
+    /// lives on its own share and is not ours to delete. See the doc of
+    /// `inserting_over_an_embedded_entry_deletes_no_file` just above for why
+    /// this no longer forces an eviction to make its point.
     #[tokio::test]
-    async fn eviction_never_deletes_a_source_folder_jpg() {
+    async fn inserting_over_a_source_folder_jpg_deletes_no_file() {
         let source_dir = tempfile::tempdir().unwrap();
         let folder_jpg = source_dir.path().join("folder.jpg");
         std::fs::write(&folder_jpg, b"x").unwrap();
 
         let cache = CoverCache::new();
-        // Bound set explicitly: the default value is twenty entries, which
-        // this test does not want to have to fill.
-        cache.set_cover_settings(CoverSettings { entries: 4, ..CoverSettings::default() });
         cache.insert("to-keep".into(), CoverPayload::File(folder_jpg.clone())).await;
-        // Enough insertions to exceed the bound and evict it.
         for i in 0..4u8 {
             cache.insert(format!("k{i}"), CoverPayload::Bytes(vec![i], "image/jpeg")).await;
         }
@@ -2063,7 +2059,7 @@ mod tests {
         std::fs::write(&fake, b"this is not an image").unwrap();
         let r = CoverSource::Ref(CoverRef::Path { path: fake.to_string_lossy().into_owned() });
         assert!(
-            fetch(&r).await.is_none(),
+            fetch(&r, download_cap()).await.is_none(),
             "the header bytes must be checked: without this, a badly written contributor \
              would get any file of the system served on a public HTTP route"
         );
@@ -2072,7 +2068,7 @@ mod tests {
         // Minimal JPEG header: SOI + APP0 marker.
         std::fs::write(&real, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
         let r = CoverSource::Ref(CoverRef::Path { path: real.to_string_lossy().into_owned() });
-        match fetch(&r).await {
+        match fetch(&r, download_cap()).await {
             Some(CoverPayload::File(p)) => assert_eq!(p, real),
             other => panic!("a local image must stay a path, not bytes: {other:?}"),
         }
@@ -2088,7 +2084,7 @@ mod tests {
         // ever hands `fetch` a path it just probed successfully.
         let audio = PathBuf::from("/does/not/exist.mp3");
         let s = CoverSource::Embedded { audio: audio.clone(), content: "abcd".into() };
-        match fetch(&s).await {
+        match fetch(&s, download_cap()).await {
             Some(CoverPayload::Embedded(p)) => assert_eq!(p, audio),
             other => panic!("an embedded source must yield CoverPayload::Embedded: {other:?}"),
         }
@@ -2106,6 +2102,14 @@ mod tests {
     /// applies.
     fn cap() -> usize {
         CoverSettings::default().source_max
+    }
+
+    /// The download cap of the default settings, for `fetch` calls in tests
+    /// that exercise a local `Ref`/`Embedded` source: `download_max` plays
+    /// no role there, but `fetch` now takes it regardless, so every call site
+    /// needs a value — the default is the one a factory-fresh device applies.
+    fn download_cap() -> usize {
+        CoverSettings::default().download_max
     }
 
     /// Minimal JPEG header, followed by `padding` arbitrary bytes.
@@ -2164,7 +2168,7 @@ mod tests {
         let path = dir.path().join("folder.jpg");
         std::fs::write(&path, jpeg(10)).unwrap();
         let r = CoverSource::Ref(CoverRef::Path { path: path.to_string_lossy().into_owned() });
-        let Some(p) = fetch(&r).await else { panic!("a local image must be accepted") };
+        let Some(p) = fetch(&r, download_cap()).await else { panic!("a local image must be accepted") };
         let cache = CoverCache::new();
         cache.insert("k".into(), p).await;
 
@@ -2549,7 +2553,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_network_cap_cuts_a_chunked_stream_before_the_end() {
+    async fn the_download_cap_cuts_a_chunked_stream_before_the_end() {
         // No `Content-Length` (`chunked` response): nothing to rely on except
         // the size actually received, chunk after chunk.
         let mut first = vec![0xFFu8, 0xD8, 0xFF, 0xE0];
@@ -2561,8 +2565,38 @@ mod tests {
             http_response("Content-Type: image/jpeg\r\nTransfer-Encoding: chunked\r\n", body);
         let url = serve(response, true).await;
         assert!(
-            download(&url).await.is_none(),
+            download(&url, download_cap()).await.is_none(),
             "the cap must cut the stream chunk by chunk, without waiting for the end"
+        );
+    }
+
+    /// **The cap is a setting, not a constant** — this is the property the
+    /// production change of this task exists to make true. Same body served
+    /// twice, two different caps: a hard-coded `NETWORK_CAP` would have
+    /// produced the same verdict both times, since nothing about the request
+    /// would have changed.
+    #[tokio::test]
+    async fn the_download_cap_follows_the_setting() {
+        let body = vec![0u8; 1_500_000];
+        let mut jpeg_body = vec![0xFFu8, 0xD8, 0xFF, 0xE0];
+        jpeg_body.extend(body);
+        let make_response = || {
+            http_response(
+                &format!("Content-Type: image/jpeg\r\nContent-Length: {}\r\n", jpeg_body.len()),
+                jpeg_body.clone(),
+            )
+        };
+
+        let url = serve(make_response(), true).await;
+        assert!(
+            download(&url, 1_000_000).await.is_none(),
+            "a cap below the body's size must refuse it"
+        );
+
+        let url = serve(make_response(), true).await;
+        assert!(
+            download(&url, 2_000_000).await.is_some(),
+            "the very same body must go through once the cap is raised above it"
         );
     }
 
@@ -2573,7 +2607,12 @@ mod tests {
         // the timeout below.
         let response = http_response("Content-Type: text/html\r\nContent-Length: 1000000\r\n", Vec::new());
         let url = serve(response, false).await;
-        match tokio::time::timeout(std::time::Duration::from_secs(2), download(&url)).await {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            download(&url, download_cap()),
+        )
+        .await
+        {
             Ok(None) => {}
             Ok(Some(p)) => panic!("content-type refused but a cover was produced: {p:?}"),
             Err(_) => panic!(
@@ -2614,7 +2653,12 @@ mod tests {
             // the wait for an unreachable host would last until the client's
             // ten-second timeout and return `None` — hence a green test for
             // the wrong reason.
-            match tokio::time::timeout(std::time::Duration::from_secs(2), download(&url)).await {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                download(&url, download_cap()),
+            )
+            .await
+            {
                 Ok(None) => {}
                 Ok(Some(p)) => panic!("redirect followed towards {target:?}: {p:?}"),
                 Err(_) => panic!("the hop towards {target:?} was attempted: the policy must refuse it"),
@@ -2631,7 +2675,7 @@ mod tests {
         );
         let url = serve(response, true).await;
         assert!(
-            download(&url).await.is_none(),
+            download(&url, download_cap()).await.is_none(),
             "the content declares `image/png` but the received bytes are not: must be refused"
         );
     }
@@ -2662,9 +2706,9 @@ mod tests {
         // have time to show up, and the test would pass without proving
         // anything.
         cache.set_cover_settings(CoverSettings {
-            entries: 20,
             source_max: 8 * 1024 * 1024,
             rendition: Some(test_rendition(64, 512 * 1024, 16_000_000)),
+            ..CoverSettings::default()
         });
         cache
             .insert("k".into(), CoverPayload::Bytes(fixtures::jpeg_decodable(600, 400), "image/jpeg"))
@@ -2703,9 +2747,9 @@ mod tests {
         // hinges on the removal of the entry.
         let cache = Arc::new(CoverCache::new());
         cache.set_cover_settings(CoverSettings {
-            entries: 20,
             source_max: 8 * 1024 * 1024,
             rendition: Some(test_rendition(64, 512 * 1024, 16_000_000)),
+            ..CoverSettings::default()
         });
         cache
             .insert("k".into(), CoverPayload::Bytes(fixtures::jpeg_decodable(600, 400), "image/jpeg"))
@@ -2818,7 +2862,7 @@ mod tests {
         let source = jpeg(1000);
         std::fs::write(&path, &source).unwrap();
         let cache = CoverCache::new();
-        cache.set_cover_settings(CoverSettings { entries: 20, source_max: cap(), rendition: None });
+        cache.set_cover_settings(CoverSettings { source_max: cap(), rendition: None, ..CoverSettings::default() });
         cache.insert("k".into(), CoverPayload::File(path)).await;
 
         let line = cache.line("k", "/api/cover/k").await.expect("the source must leave as it is");

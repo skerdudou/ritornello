@@ -50,11 +50,17 @@ pub(super) const COVER_JPEG_QUALITY: std::ops::RangeInclusive<u32> = 40..=100;
 /// neutralize it without unticking re-encoding.
 pub(super) const COVER_MAX_BYTES_KO: std::ops::RangeInclusive<u32> = 32..=8192;
 
-/// Number of covers kept. 2 at the bottom — less than a round trip between two
-/// tracks makes no sense; 100 at the top, which caps the worst-case memory at
-/// 200 MiB (each network entry is bounded to 2 MiB, a local entry keeps only a
-/// path), beyond which a 1 GiB Pi would put itself in danger.
-pub(super) const COVER_CACHE_ENTRIES: std::ops::RangeInclusive<u32> = 2..=100;
+/// Memory budget for covers, in mebibytes. 8 at the bottom, under which
+/// even one worst-case entry would not fit and the cache would thrash;
+/// 256 at the top, already a quarter of a 1 GiB Pi's memory.
+pub(super) const COVER_CACHE_BUDGET_MIO: std::ops::RangeInclusive<u32> = 8..=256;
+
+/// Cap on a downloaded cover, in mebibytes. Its ceiling is
+/// `ritornello_proto::COVER_MAX_BYTES` expressed in this unit, computed
+/// rather than written out, for the same reason as `COVER_SOURCE_MAX_MIO`:
+/// the two must never silently diverge from the protocol's promise.
+pub(super) const COVER_DOWNLOAD_MAX_MIO: std::ops::RangeInclusive<u32> =
+    1..=(ritornello_proto::COVER_MAX_BYTES as u32 / (1024 * 1024));
 
 /// Cap of pixels to decode, in megapixels — hence four times as many
 /// mebibytes of buffer. 1 Mpx at the bottom (already 4 MiB); 64 Mpx at the
@@ -77,7 +83,8 @@ pub enum SettingsError {
     CoverJpegQuality { min: u32, max: u32 },
     CoverMaxBytes { min: u32, max: u32 },
     CoverMaxPixels { min: u32, max: u32 },
-    CoverCacheEntries { min: u32, max: u32 },
+    CoverCacheBudget { min: u32, max: u32 },
+    CoverDownloadMax { min: u32, max: u32 },
 }
 
 impl SettingsError {
@@ -119,8 +126,12 @@ impl SettingsError {
                 .get("settings_cover_max_bytes_out_of_range")
                 .replace("{min}", &min.to_string())
                 .replace("{max}", &max.to_string()),
-            SettingsError::CoverCacheEntries { min, max } => catalog
-                .get("settings_cover_cache_entries_out_of_range")
+            SettingsError::CoverCacheBudget { min, max } => catalog
+                .get("settings_cover_cache_budget_out_of_range")
+                .replace("{min}", &min.to_string())
+                .replace("{max}", &max.to_string()),
+            SettingsError::CoverDownloadMax { min, max } => catalog
+                .get("settings_cover_download_max_out_of_range")
                 .replace("{min}", &min.to_string())
                 .replace("{max}", &max.to_string()),
             SettingsError::CoverMaxPixels { min, max } => catalog
@@ -164,8 +175,11 @@ impl std::fmt::Display for SettingsError {
             SettingsError::CoverMaxPixels { min, max } => {
                 write!(f, "cover decode ceiling out of range ({min}-{max} Mpx)")
             }
-            SettingsError::CoverCacheEntries { min, max } => {
-                write!(f, "cover cache size out of range ({min}-{max} entries)")
+            SettingsError::CoverCacheBudget { min, max } => {
+                write!(f, "cover cache budget out of range ({min}-{max} MiB)")
+            }
+            SettingsError::CoverDownloadMax { min, max } => {
+                write!(f, "cover download ceiling out of range ({min}-{max} MiB)")
             }
         }
     }
@@ -210,6 +224,18 @@ pub fn validate_settings(s: &crate::state::Settings) -> Result<(), SettingsError
             max: *COVER_SOURCE_MAX_MIO.end(),
         });
     }
+    if !COVER_CACHE_BUDGET_MIO.contains(&s.cover_cache_budget_mio) {
+        return Err(SettingsError::CoverCacheBudget {
+            min: *COVER_CACHE_BUDGET_MIO.start(),
+            max: *COVER_CACHE_BUDGET_MIO.end(),
+        });
+    }
+    if !COVER_DOWNLOAD_MAX_MIO.contains(&s.cover_download_max_mio) {
+        return Err(SettingsError::CoverDownloadMax {
+            min: *COVER_DOWNLOAD_MAX_MIO.start(),
+            max: *COVER_DOWNLOAD_MAX_MIO.end(),
+        });
+    }
     // The next four only describe the rendition. They are validated **even
     // when `cover_rendition` is false**, and that is intended: the UI greys
     // these fields out without clearing them, so their values keep travelling
@@ -232,12 +258,6 @@ pub fn validate_settings(s: &crate::state::Settings) -> Result<(), SettingsError
         return Err(SettingsError::CoverMaxBytes {
             min: *COVER_MAX_BYTES_KO.start(),
             max: *COVER_MAX_BYTES_KO.end(),
-        });
-    }
-    if !COVER_CACHE_ENTRIES.contains(&s.cover_cache_entries) {
-        return Err(SettingsError::CoverCacheEntries {
-            min: *COVER_CACHE_ENTRIES.start(),
-            max: *COVER_CACHE_ENTRIES.end(),
         });
     }
     if !COVER_MAX_PIXELS_MPX.contains(&s.cover_max_pixels_mpx) {
@@ -299,6 +319,31 @@ mod tests {
             validate_settings(&Settings { seek_step_s: 0, ..Default::default() }),
             Err(SettingsError::SeekStep { min: 1, max: 120 })
         );
+    }
+
+    #[test]
+    fn a_budget_outside_its_bounds_is_refused() {
+        use crate::state::Settings;
+        let mut s = Settings { cover_cache_budget_mio: 7, ..Default::default() };
+        assert!(validate_settings(&s).is_err(), "7 MiB is below the 8 MiB floor");
+        s.cover_cache_budget_mio = 257;
+        assert!(validate_settings(&s).is_err(), "257 MiB is above the 256 MiB ceiling");
+        s.cover_cache_budget_mio = 50;
+        assert!(validate_settings(&s).is_ok());
+    }
+
+    #[test]
+    fn a_download_ceiling_above_the_protocol_promise_is_refused() {
+        use crate::state::Settings;
+        // The protocol guarantees plugins at most COVER_MAX_BYTES; a download
+        // ceiling above it would promise what the protocol does not.
+        let mut s = Settings {
+            cover_download_max_mio: (ritornello_proto::COVER_MAX_BYTES as u32 / (1024 * 1024)) + 1,
+            ..Default::default()
+        };
+        assert!(validate_settings(&s).is_err());
+        s.cover_download_max_mio = 0;
+        assert!(validate_settings(&s).is_err(), "zero would refuse every download");
     }
 
     #[test]

@@ -29,7 +29,8 @@ const settings = ref<SettingsPayload>({
   overlay_ms: 5000,
   tens_window_ms: 5000,
   seek_step_s: 10,
-  cover_cache_entries: 20,
+  cover_cache_budget_mio: 50,
+  cover_download_max_mio: 2,
   cover_source_max_mio: 20,
   cover_rendition: true,
   cover_max_edge_px: 640,
@@ -41,36 +42,30 @@ const settings = ref<SettingsPayload>({
 /**
  * Cap of a **network** cover in memory, in mebibytes.
  *
- * This is `cover::PLAFOND_RESEAU` on the core side: a download is cut there,
- * whatever the source cap says. Copied here because the page does not receive
- * it — and a divergence would only make the estimate slightly wrong, never the
- * setting incorrect.
- */
-const NETWORK_CAP_MIO = 2
-
-/**
- * What one cache entry can cost at most.
+ * Now a setting in its own right (`cover_download_max_mio`) rather than a
+ * copy of a core constant: the estimate below reads the same figure the
+ * download itself is cut at, so the two can no longer silently diverge.
  *
- * The smaller of the two caps: below 2 MiB, it is the source cap that bites
- * first — and it is adjustable right below, so the two fields answer each
- * other.
+ * **Minimal wiring, not the redesigned panel** — the two-box layout and the
+ * live floor/typical estimate described in the design belong to the task
+ * that rebuilds this panel; this computed only keeps the existing line
+ * truthful now that the settings it reads have changed shape.
  */
 const capPerCover = computed(() =>
-  Math.min(NETWORK_CAP_MIO, Number(settings.value.cover_source_max_mio) || NETWORK_CAP_MIO),
+  Math.min(
+    Number(settings.value.cover_download_max_mio) || 2,
+    Number(settings.value.cover_source_max_mio) || 2,
+  ),
 )
 
 /**
- * The high estimate, in mebibytes: every entry full of **network** covers at
- * the cap.
+ * The memory budget, in mebibytes, as entered by the user.
  *
- * The absolute worst case, and it is far above reality: a local cover only
- * keeps a path, and a 500 px cover weighs about a hundred kibibytes. That is
- * precisely what we want to show next to a field being increased — the upper
- * bound, not the average.
+ * Used to read `entries * capPerCover`, the absolute worst case of a
+ * count-bounded cache. The budget **is** that figure directly now — there is
+ * no count left to multiply by a per-entry cost.
  */
-const ramMaxCache = computed(
-  () => (Number(settings.value.cover_cache_entries) || 0) * capPerCover.value,
-)
+const ramMaxCache = computed(() => Number(settings.value.cover_cache_budget_mio) || 0)
 
 /**
  * View value for "Default (system)": never sent as is ("Change" translates it
@@ -572,8 +567,8 @@ function goTo(id: string) {
                  this bound applies whatever happens. -->
             <label class="grid gap-1 text-sm">
               {{ t('cover_cache_entries_label') }}
-              <Input type="number" min="2" max="100" step="1" class="w-28" data-cover-cache-entries
-                v-model="settings.cover_cache_entries" />
+              <Input type="number" min="8" max="256" step="1" class="w-28" data-cover-cache-entries
+                v-model="settings.cover_cache_budget_mio" />
               <span class="max-w-md text-xs text-muted-foreground">{{ t('cover_cache_entries_help') }}</span>
               <span class="max-w-md text-xs text-muted-foreground" data-cover-cache-ram>
                 {{ t('cover_cache_entries_ram', { size: ramMaxCache, cap: capPerCover }) }}

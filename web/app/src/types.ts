@@ -72,12 +72,18 @@ export interface SettingsPayload {
   /** Input window of the remote's `+10` accumulation (time left for the second press). */
   tens_window_ms: number
   /**
-   * How many covers the core keeps servable to the page.
+   * Memory budget for the covers the core keeps at hand, in mebibytes.
    *
    * Outside the greyed-out re-encoding box: this bound applies no matter
    * what, like the source cap just below.
    */
-  cover_cache_entries: number
+  cover_cache_budget_mio: number
+  /**
+   * Cap on a cover **downloaded from the internet**, in mebibytes. The
+   * counterpart of `cover_source_max_mio` for a third-party origin rather
+   * than a trusted disk or share.
+   */
+  cover_download_max_mio: number
   /**
    * Cap of the **source** cover, in mebibytes. Always applied, whether
    * re-encoding is active or not — it is the only guard that remains when it

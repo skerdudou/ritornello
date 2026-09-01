@@ -116,21 +116,34 @@ pub struct Settings {
     // The five others only describe the **rendition** — what the core makes to
     // push onto a socket. Switch unchecked, none of them makes sense: the
     // source leaves as is.
-    /// How many covers the core keeps at hand.
+    /// Memory allowed to the covers the device keeps at hand, in mebibytes.
     ///
-    /// **This is what the browser can still request.** A cover published in
-    /// `cover_href` remains served as long as its key is in this cache; beyond
-    /// that, the page receives a 404 and falls back to its ♫ — a "the device
-    /// had the image and lost it" that the log now reports as `warn`. Four
-    /// entries, the original value, did not even hold an album browsed in
-    /// both directions.
+    /// **The budget, not a count** — and that inversion is the point. A number
+    /// of entries said nothing about memory: one had to multiply it by two
+    /// other settings to learn what it cost, and the product could reach
+    /// absurd values without anything objecting. Here the figure the user
+    /// reads *is* the memory, and the number of covers becomes a consequence
+    /// the page estimates for them.
     ///
-    /// The memory cost is **bounded and modest**: a local cover only keeps a
-    /// path, and a network cover is capped at `NETWORK_CAP` (2 MiB) at
-    /// download time. Twenty entries are therefore worth 40 MiB in the absolute
-    /// worst case, and in practice two (a 500 px cover weighs about a hundred
-    /// kibibytes).
-    pub cover_cache_entries: u32,
+    /// What it bounds: the bytes of covers downloaded from the internet, and
+    /// the retained thumbnails. A local cover — a `folder.jpg` on a share or a
+    /// picture embedded in the audio file — costs only a path, so it weighs on
+    /// this budget solely through its thumbnail.
+    pub cover_cache_budget_mio: u32,
+
+    /// Cap on a cover **downloaded from the internet**, in mebibytes.
+    ///
+    /// Was a hard-coded constant, and its value was chosen against a measured
+    /// case: the bare `front` of the Cover Art Archive weighs 2,670,705 bytes
+    /// where `front-500` returns 75,249. Two mebibytes rules the first out and
+    /// lets the second through.
+    ///
+    /// **The counterpart of `cover_source_max_mio`, and the pair is
+    /// deliberate.** One bounds what the device accepts to *download* from a
+    /// third party on the internet; the other what it accepts to *read* from a
+    /// disk or a share it trusts. Two origins, two questions, two answers —
+    /// rather than one figure that would have to mean both.
+    pub cover_download_max_mio: u32,
 
     /// Cap of the **source** cover, in mebibytes.
     ///
@@ -199,9 +212,16 @@ impl Default for Settings {
             // is no "neutral" date shape, and this one is its owner's.
             date_format: DateFormat::DayMonthYear,
             clock_24h: true,
-            // Twenty: enough to cover a whole album browsed in both directions,
-            // which four did not.
-            cover_cache_entries: 20,
+            // 50 MiB: a floor of about twenty covers even in the worst case
+            // (each at the 2 MiB download cap below plus its thumbnail), and
+            // closer to a hundred for a NAS library where every cover is
+            // local and therefore free — a local cover only ever costs its
+            // thumbnail, never the source bytes.
+            cover_cache_budget_mio: 50,
+            // Rules out the bare `front` of the Cover Art Archive (measured
+            // at 2,670,705 bytes) while letting `front-500` (75,249 bytes)
+            // through — see the field's doc for the full measurement.
+            cover_download_max_mio: 2,
             // The protocol's own cap: by default the core adds no restriction
             // to what the plugins already know how to take.
             cover_source_max_mio: ritornello_proto::COVER_MAX_BYTES as u32 / (1024 * 1024),
@@ -417,7 +437,8 @@ mod tests {
                 overlay_ms: 6000,
                 tens_window_ms: 7000,
                 seek_step_s: 45,
-                cover_cache_entries: 7,
+                cover_cache_budget_mio: 64,
+                cover_download_max_mio: 5,
                 // Both non-default, same reason: the default is
                 // `DayMonthYear` and `true`.
                 date_format: DateFormat::YearMonthDay,
