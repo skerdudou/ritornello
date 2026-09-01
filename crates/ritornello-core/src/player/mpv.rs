@@ -231,41 +231,45 @@ pub fn file_tags(data: &Value) -> Option<Track> {
     (!track.is_empty()).then_some(track)
 }
 
-/// Extracts the embedded cover of the played file, into a temp file.
+/// Probes the played file for an embedded cover, without writing anything.
 ///
 /// **Strictly blocking** (file playback via `lofty`, potentially on a
 /// network share): call only under `Health::bounded`, never directly from
 /// an async task — see `Core::handle_path` and `health.rs` for why.
 ///
-/// A file rather than in-memory bytes: this keeps **a single nature** of
-/// local cover on the cache side, which then loads nothing into RAM.
+/// **Symmetrical with a Source's `folder.jpg`, and that symmetry is the whole
+/// rework.** A local cover — wherever it lives — costs the core only a path:
+/// `CoverPayload::File` re-reads a `folder.jpg` from its path on every
+/// request, and `CoverPayload::Embedded` now does the same for a picture
+/// inside the audio file, re-opening it through `read_embedded_bounded`
+/// rather than keeping a copy anywhere. Nothing here loads the picture's
+/// bytes into a `CoverPayload`, and nothing here touches the disk to produce
+/// one: this function's only output is `cover::CoverSource::Embedded { audio,
+/// content }`, the audio file's own path plus a fingerprint of the picture's
+/// bytes.
 ///
 /// Only attempted on a path **with no scheme**: a stream has no tag, and
 /// `lofty` has nothing to open on a URL.
 ///
-/// Named after the **content of the image**, not the track (see
-/// `cover::content_key`): the tracks of a single-cover album therefore
-/// write a single file and publish a single `href`, which `display_relay`
-/// then recognizes as already pushed — no more decoding, no more frame, no
-/// more browser re-download after the first one. What remains, and cannot
-/// be avoided, is one `lofty` read per track: the bytes are needed to hash
-/// them.
+/// `content` (see `cover::content_key`) is what a fifteen-track album needs
+/// to collapse onto a single cache entry: two tracks sharing one embedded
+/// picture yield two different `audio` paths but the identical `content`,
+/// and `cover::key` hashes only the latter — see its doc. Computing it still
+/// costs one `lofty` read per track, that part is irreducible: the bytes must
+/// be in hand to be hashed, whether or not they end up written anywhere.
 ///
-/// **Only writes if the file is absent**, and it is content-based naming
-/// that makes this shortcut safe: a file already present under that name
-/// carries, by construction, the image about to be put there. This is not
-/// merely an optimization — rewriting would have truncated, for the
-/// duration of the write, the file the HTTP route might be serving at that
-/// moment for the previous track, which now bears the same name.
-///
-/// Freshness therefore no longer rests on systematic rewriting but on
-/// content addressing. What this naming does not cover, on the other hand,
-/// is a file **truncated** by an execution killed mid-write: its name
-/// would announce an image its content does not carry, and the conditional
-/// write would adopt it as-is. It is `cover::purge_temp_files`, at
-/// startup, that closes this case — the purge is no longer just a cap on
-/// accumulation, it has become necessary for correctness.
-pub fn embedded_cover(path: &str) -> Option<ritornello_proto::CoverRef> {
+/// **This function used to write a temp file here, named after that same
+/// `content`, and no longer does.** The write bought nothing this task's
+/// symmetry does not already give for free — the local-file path never
+/// needed to copy a `folder.jpg` into `/tmp` before serving it, and once the
+/// core stopped needing a filesystem path *distinct from the audio file* to
+/// name a `CoverPayload`, there was nothing left for the write to buy. What
+/// it used to cost is gone with it: a write per newly-seen track, the startup
+/// purge of leftovers (`cover::purge_temp_files`) that a killed-mid-write
+/// truncation made necessary for correctness, and the accumulation of one
+/// file per distinct embedded picture ever played, on a `tmpfs` that only a
+/// reboot clears.
+pub fn embedded_cover(path: &str) -> Option<crate::cover::CoverSource> {
     if path.contains("://") {
         return None;
     }
@@ -275,21 +279,10 @@ pub fn embedded_cover(path: &str) -> Option<ritornello_proto::CoverRef> {
         .pictures()
         .first()?
         .clone();
-    let extension = match image.mime_type() {
-        Some(m) if m.as_str().contains("png") => "png",
-        Some(m) if m.as_str().contains("webp") => "webp",
-        _ => "jpg",
-    };
-    let mut target = std::env::temp_dir();
-    target.push(format!(
-        "{}{}.{extension}",
-        crate::cover::TEMP_PREFIX,
-        crate::cover::content_key(image.data())
-    ));
-    if !target.exists() {
-        std::fs::write(&target, image.data()).ok()?;
-    }
-    Some(ritornello_proto::CoverRef::Path { path: target.to_string_lossy().into_owned() })
+    Some(crate::cover::CoverSource::Embedded {
+        audio: std::path::PathBuf::from(path),
+        content: crate::cover::content_key(image.data()),
+    })
 }
 
 pub struct MpvPlayer {
@@ -754,11 +747,12 @@ pub(crate) mod tests {
     /// the repo, and the test is skipped rather than failed where ffmpeg is
     /// missing — it is a development tool, not a core dependency.
     ///
-    /// `source_image` is an `lavfi` filter, hence the embedded image,
-    /// hence — since the temp file is named after its content — **the temp
-    /// file's own name**. Two parallel tests embedding the same image
-    /// would target the same path in the shared `temp_dir()`: each must
-    /// therefore ask for its own image.
+    /// `source_image` is an `lavfi` filter, hence the embedded image.
+    /// `embedded_cover` no longer writes anything to a shared location, so
+    /// two parallel tests embedding the same image can no longer collide the
+    /// way an earlier version of this fixture had to guard against; callers
+    /// nonetheless still pass their own filter, which is convenient to keep
+    /// assertions about `content` unambiguous per test.
     ///
     /// `pub(crate)` so `cover::tests` can build a fixture that carries a
     /// real embedded picture, rather than a second copy of this function
@@ -788,42 +782,46 @@ pub(crate) mod tests {
         ok.then_some(output)
     }
 
-    /// This module's image. **Must stay distinct from
-    /// `core::tests::test_mp3_with_cover`'s**: since the temp file is named
-    /// after its content, two identical fixtures would target the same
-    /// path in the shared `temp_dir()`, and `core`'s tests exercise
-    /// `CoverCache` there, whose eviction deletes these files. That is
-    /// exactly what produced an intermittent failure here.
+    /// This module's image.
     fn mp3_with_cover(dir: &Path) -> Option<std::path::PathBuf> {
         mp3_with_cover_from(dir, "color=c=red:s=16x16:d=1")
     }
 
     #[test]
-    fn a_local_files_embedded_cover_is_extracted_into_a_file() {
+    fn an_embedded_cover_is_probed_without_writing_anything() {
         let dir = tempfile::tempdir().unwrap();
         let Some(f) = mp3_with_cover(dir.path()) else {
             eprintln!("ffmpeg missing: skipping test");
             return;
         };
+        let before = temp_cover_files();
         let r = embedded_cover(f.to_str().unwrap()).expect("an embedded cover was expected");
-        let ritornello_proto::CoverRef::Path { path } = r else {
-            panic!("a local cover must yield a CoverRef::Path");
+        let crate::cover::CoverSource::Embedded { audio, content } = r else {
+            panic!("an embedded cover must yield CoverSource::Embedded");
         };
-        // A real JPEG was written to disk, not a fake or in-memory bytes:
-        // that is what keeps a single nature of local cover on the cache
-        // side.
-        let bytes = std::fs::read(&path).expect("the temp file must exist");
-        assert!(bytes.starts_with(&[0xFF, 0xD8, 0xFF]), "expected JPEG header, got {bytes:?}");
-        assert!(path.ends_with(".jpg"), "{path}");
+        assert_eq!(audio, std::path::Path::new(f.to_str().unwrap()));
+        assert!(!content.is_empty());
+        // The point of the whole rework: nothing is written to the temp dir.
+        assert_eq!(temp_cover_files(), before, "the probe must write no file");
+    }
 
-        // Replaying the same track must fall back to the same temp file:
-        // that is what avoids writing the same image twice.
-        let r2 = embedded_cover(f.to_str().unwrap()).unwrap();
-        assert_eq!(r2, ritornello_proto::CoverRef::Path { path });
+    /// Files left in the system temp dir by a previous design. Kept as a
+    /// guard: this set must never grow.
+    fn temp_cover_files() -> Vec<std::path::PathBuf> {
+        let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return Vec::new() };
+        let mut v: Vec<_> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("ritornello-cover-"))
+            })
+            .collect();
+        v.sort();
+        v
     }
 
     #[test]
-    fn two_tracks_of_the_same_album_share_a_single_temp_file() {
+    fn two_tracks_of_the_same_album_share_one_cache_key() {
         let dir = tempfile::tempdir().unwrap();
         // An image of its own for this test: see `mp3_with_cover_from`.
         let Some(track1) = mp3_with_cover_from(dir.path(), "color=c=blue:s=24x24:d=1") else {
@@ -831,32 +829,28 @@ pub(crate) mod tests {
             return;
         };
         // Two distinct track files carrying the same cover: the common
-        // case of an album, and the one track-path naming used to charge
+        // case of an album, and the one path-based naming used to charge
         // fifteen times over for a single image.
         let track2 = dir.path().join("track_2.mp3");
         std::fs::copy(&track1, &track2).unwrap();
 
         let r1 = embedded_cover(track1.to_str().unwrap()).expect("a cover was expected");
         let r2 = embedded_cover(track2.to_str().unwrap()).expect("a cover was expected");
-        assert_eq!(r1, r2, "two tracks with an identical cover must yield the same file");
-        let ritornello_proto::CoverRef::Path { path } = r1 else {
-            panic!("a local cover must yield a CoverRef::Path");
+        let crate::cover::CoverSource::Embedded { content: c1, .. } = &r1 else {
+            panic!("an embedded cover must yield CoverSource::Embedded");
         };
-
-        // Nothing is rewritten when the name is already taken: the
-        // sentinel survives. Without `if !target.exists()`, the HTTP route
-        // could serve this truncated file while it is being rewritten for
-        // the next track.
-        std::fs::write(&path, b"sentinel").unwrap();
-        let r3 = embedded_cover(track2.to_str().unwrap()).unwrap();
-        assert_eq!(r3, ritornello_proto::CoverRef::Path { path: path.clone() });
+        let crate::cover::CoverSource::Embedded { content: c2, .. } = &r2 else {
+            panic!("an embedded cover must yield CoverSource::Embedded");
+        };
+        assert_eq!(c1, c2, "two tracks with an identical embedded cover must yield the same content");
+        // The two `audio` paths differ (track1, track2): the dedup that
+        // matters is `cover::key`'s, which hashes the content, never the
+        // audio path — see its doc.
         assert_eq!(
-            std::fs::read(&path).unwrap(),
-            b"sentinel".to_vec(),
-            "a file already present must not be rewritten"
+            crate::cover::key(&r1),
+            crate::cover::key(&r2),
+            "two tracks with an identical cover must share the same cache key"
         );
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

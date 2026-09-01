@@ -252,7 +252,7 @@ impl<P: Player> Core<P> {
     /// A detached embedded-cover extraction (`handle_path`) has finished.
     /// Symmetric with `cover_arrived`: the staleness check happens here, on
     /// arrival, not at launch.
-    pub async fn extraction_arrived(&mut self, path: String, r: Option<ritornello_proto::CoverRef>) {
+    pub async fn extraction_arrived(&mut self, path: String, r: Option<crate::cover::CoverSource>) {
         // Released whatever the outcome and before any check below — same
         // reason as `cover_in_flight` in `cover_arrived`: without this,
         // this same track played again later would stay blocked for the
@@ -498,6 +498,7 @@ impl<P: Player> Core<P> {
 mod tests {
     use crate::core::*;
     use crate::core::test_support::*;
+    use crate::cover::CoverSource;
 
     #[tokio::test]
     async fn a_late_metadata_plugin_takes_its_manifest_place_in_arbitration() {
@@ -827,7 +828,7 @@ mod tests {
         core.handle_source_update("radio", update.clone());
         assert_eq!(
             core.metadata.selected_cover().map(|(r, _)| r),
-            Some(good),
+            Some(CoverSource::Ref(good)),
             "a malformed reference must neither settle nor erase the one that holds"
         );
 
@@ -865,13 +866,14 @@ mod tests {
         let image = tmp.path().join("folder.jpg");
         std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
         let r = ritornello_proto::CoverRef::Path { path: image.to_string_lossy().into_owned() };
+        let s = CoverSource::Ref(r.clone());
 
         core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
-        core.set_source_cover(Some(r.clone()), "files");
+        core.set_source_cover(Some(r), "files");
         // The fetch is detached: the test waits for it explicitly rather
         // than sleeping, so as not to manufacture a flake.
-        let key = crate::cover::key(&r);
-        let p = crate::cover::fetch(&r).await.expect("the test image must be readable");
+        let key = crate::cover::key(&s);
+        let p = crate::cover::fetch(&s).await.expect("the test image must be readable");
         core.app_covers().insert(key.clone(), p).await;
         core.cover_arrived(key.clone(), true).await;
 
@@ -909,7 +911,7 @@ mod tests {
 
         // What the detached task reports when the fetch yielded nothing:
         // `success == false`.
-        core.cover_arrived(crate::cover::key(&dead), false).await;
+        core.cover_arrived(crate::cover::key(&CoverSource::Ref(dead)), false).await;
         let np = np_rx.borrow_and_update().clone();
         assert!(!np.known.cover, "an unkept promise must give the floor back to the others");
         // And the text this same plugin provides has not moved: that is
@@ -945,7 +947,7 @@ mod tests {
         // Next track, then the previous one's failure finally arrives.
         let second = serde_json::json!({"url": "two"});
         core.handle_source_update("radio", plays(second.clone()));
-        core.cover_arrived(crate::cover::key(&image), false).await;
+        core.cover_arrived(crate::cover::key(&CoverSource::Ref(image.clone())), false).await;
 
         // The same plugin proposes the same image for this track: never
         // tried here, it must be retained.
@@ -975,11 +977,12 @@ mod tests {
         let image = tmp.path().join("folder.jpg");
         std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
         let r = ritornello_proto::CoverRef::Path { path: image.to_string_lossy().into_owned() };
-        let key = crate::cover::key(&r);
+        let s = CoverSource::Ref(r.clone());
+        let key = crate::cover::key(&s);
 
         core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
-        core.set_source_cover(Some(r.clone()), "files");
-        let p = crate::cover::fetch(&r).await.expect("the test image must be readable");
+        core.set_source_cover(Some(r), "files");
+        let p = crate::cover::fetch(&s).await.expect("the test image must be readable");
         core.app_covers().insert(key.clone(), p).await;
         core.cover_arrived(key.clone(), true).await;
 
@@ -1010,10 +1013,11 @@ mod tests {
         let old = tmp.path().join("old.jpg");
         std::fs::write(&old, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
         let r_old = ritornello_proto::CoverRef::Path { path: old.to_string_lossy().into_owned() };
-        let key_old = crate::cover::key(&r_old);
+        let s_old = CoverSource::Ref(r_old.clone());
+        let key_old = crate::cover::key(&s_old);
 
         core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
-        core.set_source_cover(Some(r_old.clone()), "files");
+        core.set_source_cover(Some(r_old), "files");
 
         // The track changes before the old cover's retrieval has had time
         // to arrive, and the new one declares its **own** cover (a
@@ -1029,7 +1033,7 @@ mod tests {
         state_rx.borrow_and_update();
 
         // The OLD cover's late reply arrives anyway.
-        let p = crate::cover::fetch(&r_old).await.expect("the test image must be readable");
+        let p = crate::cover::fetch(&s_old).await.expect("the test image must be readable");
         core.app_covers().insert(key_old.clone(), p).await;
         core.cover_arrived(key_old, true).await;
 
@@ -1056,7 +1060,8 @@ mod tests {
         let image = tmp.path().join("folder.jpg");
         std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
         let r = ritornello_proto::CoverRef::Path { path: image.to_string_lossy().into_owned() };
-        let key = crate::cover::key(&r);
+        let s = CoverSource::Ref(r.clone());
+        let key = crate::cover::key(&s);
 
         // 1. An album track declares cover K: `start_cover_fetch` arms the
         // marker. The real detached task also runs in the background, but
@@ -1099,7 +1104,7 @@ mod tests {
             Some(key.as_str()),
             "a new retrieval must be able to restart for the same key"
         );
-        let p = crate::cover::fetch(&r).await.expect("the test image must be readable");
+        let p = crate::cover::fetch(&s).await.expect("the test image must be readable");
         core.app_covers().insert(key.clone(), p).await;
         core.cover_arrived(key.clone(), true).await;
 
@@ -1151,10 +1156,13 @@ mod tests {
     ///
     /// The real channel is drained here, rather than replayed by hand as
     /// `cover_arrived` does elsewhere in this file: re-reading the tags a
-    /// second time to reconstruct the expected `CoverRef` would write
+    /// second time to reconstruct the expected `CoverSource` used to write
     /// concurrently with the detached task on the **same** temp file
-    /// (defect found in practice, see `test_core_with_extraction`). The
-    /// detached task must remain the sole writer.
+    /// (defect found in practice, see `test_core_with_extraction`). There is
+    /// no writer left to race today, but draining the real channel still
+    /// buys something a hand-reconstructed value cannot: proof that
+    /// production code, not a parallel computation believed to agree with
+    /// it, is what this assertion checks.
     #[tokio::test]
     async fn the_mpv_path_triggers_extraction_and_arms_the_retrieval() {
         let (mut core, mut state_rx, mut extraction_rx, tmp) = test_core_with_extraction();
@@ -1249,7 +1257,7 @@ mod tests {
         );
         let (retained, origin) = core.metadata.selected_cover().unwrap();
         assert_eq!(origin, "files", "the Source's folder.jpg keeps precedence");
-        assert_eq!(retained, r);
+        assert_eq!(retained, CoverSource::Ref(r));
     }
 
     #[tokio::test]

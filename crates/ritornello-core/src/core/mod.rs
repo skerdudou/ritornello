@@ -271,7 +271,7 @@ pub struct Core<P: Player> {
     /// Result of an extraction detached by `handle_path`, consumed by
     /// `main`'s `select!` loop (see `extraction_arrived`). Symmetric to
     /// `cover_tx` above.
-    extraction_tx: mpsc::Sender<(String, Option<ritornello_proto::CoverRef>)>,
+    extraction_tx: mpsc::Sender<(String, Option<crate::cover::CoverSource>)>,
     /// Circuit breaker that bounds the `lofty` call, strictly blocking and
     /// potentially on a network share: see `health.rs` and the comment on
     /// `handle_path`.
@@ -294,7 +294,7 @@ impl<P: Player> Core<P> {
         wiring: Wiring,
         covers: Arc<crate::cover::CoverCache>,
         cover_tx: mpsc::Sender<(String, bool)>,
-        extraction_tx: mpsc::Sender<(String, Option<ritornello_proto::CoverRef>)>,
+        extraction_tx: mpsc::Sender<(String, Option<crate::cover::CoverSource>)>,
     ) -> Self {
         let Wiring { sources, persisted, state_path, catalog, locales_root, metadata, sources_catalog } =
             wiring;

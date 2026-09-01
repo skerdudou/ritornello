@@ -32,43 +32,49 @@ const NETWORK_CAP: usize = 2 * 1024 * 1024;
 /// been a display that never receives a cover again, with no error anywhere.
 pub const HREF_PREFIX: &str = "/api/cover/";
 
-/// Prefix of the temporary files produced by embedded-cover extraction,
-/// dropped in `std::env::temp_dir()` by `player::mpv::embedded_cover`.
+/// Prefix of the temporary files a **previous** version of this process used
+/// to produce for embedded-cover extraction, dropped in
+/// `std::env::temp_dir()`.
 ///
-/// Shared between this module (purge at startup, bounded eviction) and
-/// `mpv.rs` (naming): both must recognize exactly the same files, on pain of
-/// either never purging them, or — worse — purging a file that is not ours.
+/// `player::mpv::embedded_cover` no longer writes any such file — it now
+/// probes the container and reports a `cover::CoverSource::Embedded`, read
+/// again on demand, exactly like a `folder.jpg`. What follows in this module
+/// (the purge, the eviction below) therefore only ever meets files left by an
+/// older build, never one produced by the code that ships today.
 pub const TEMP_PREFIX: &str = "ritornello-cover-";
 
-/// True if `path` is a temporary extraction file created by this process.
+/// True if `path` matches the naming a **previous** version of this process
+/// used for its temporary extraction files.
 ///
 /// **Never** true for a `folder.jpg` declared by a Source: that one lives on
 /// the user's share, and the core must never delete it of its own accord.
-/// `CoverPayload::File` carries both forms (see its doc); this is where the
-/// distinction is made before acting on the disk.
+/// Nothing in the current code path can produce a `CoverPayload::File`
+/// carrying this prefix anymore (see `TEMP_PREFIX`); this check only still
+/// matters for whatever an older binary may have left behind.
 fn is_cover_temp(path: &std::path::Path) -> bool {
     path.parent() == Some(std::env::temp_dir().as_path())
         && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(TEMP_PREFIX))
 }
 
-/// Sweeps the temporary files left by a previous run. Called once at startup,
-/// before anything can create new ones.
+/// Sweeps the temporary files left by a **previous version** of this process.
+/// Called once at startup, before anything else runs.
 ///
-/// **Two reasons, one of them about correctness.** Since `embedded_cover`
-/// names its files after their content and only writes when the name is free,
-/// a file left by a run **killed mid-write** would be truncated while carrying
-/// the name of a complete image: the conditional write would adopt it, and a
-/// display would receive a cut-off image. This sweep is what makes that case
-/// impossible, and that is why it must run **before** anything can create a
-/// temporary file.
+/// **This used to be necessary for correctness, and no longer is — the reason
+/// is worth keeping, since the mechanism it protected against is exactly what
+/// this rework removed.** `embedded_cover` used to name its files after their
+/// content and only write when the name was free; a file left by a run
+/// **killed mid-write** would then be truncated while carrying the name of a
+/// complete image, and the conditional write would adopt it as-is — a display
+/// would receive a cut-off image. Now that `embedded_cover` writes nothing at
+/// all (see `TEMP_PREFIX`), that hazard cannot occur for any file the current
+/// binary produces; what this sweep still clears is whatever an **older**
+/// binary left behind before this rework, or before its own restart.
 ///
-/// The second reason is accumulation, and it is worth spelling out because one
-/// could believe the system takes care of it: nothing else deletes these files
-/// between two startups, and a `systemctl restart` does **not** clear
+/// The second reason, accumulation, is unaffected by that history and still
+/// holds for those leftovers: nothing else deletes these files between two
+/// startups, and a `systemctl restart` does **not** clear
 /// `std::env::temp_dir()` — on a Pi it is often a `tmpfs`, which only a real
-/// reboot resets, and what piles up there eats RAM, not just disk. Relying on
-/// `/tmp` would therefore have leaked exactly the most frequent case, the
-/// service restart.
+/// reboot resets, and what piles up there eats RAM, not just disk.
 ///
 /// With no risk of purging something useful: the cache never survives a
 /// restart (`CoverCache` is rebuilt at every launch), so nothing still lying
@@ -181,13 +187,37 @@ pub enum CoverPayload {
     /// cover that lives on a share costs a path, whether it sits beside the
     /// track or inside it.
     ///
-    /// **Not constructed anywhere in production yet.** This variant's read
-    /// path — `CoverCache::bytes`, `cover_get` — is wired and exercised
-    /// directly from tests; what deposits it in a real `CoverCache` (reading
-    /// the currently playing file's own embedded picture) is a later task,
-    /// hence the `allow` below.
-    #[allow(dead_code)]
+    /// Deposited by `player::mpv::embedded_cover` through
+    /// `Core::extraction_arrived` and `cover::fetch`, exactly as `File` is
+    /// deposited through `Core::set_source_cover` and `fetch` — a probe, never
+    /// a copy: nothing is written to disk to produce this variant.
     Embedded(PathBuf),
+}
+
+/// A cover the core has found, whichever door it came through, before any
+/// fetch is attempted.
+///
+/// **`Ref` wraps the wire type verbatim, `Embedded` does not exist on the
+/// wire at all.** A Source or a `metadata` plugin can only ever announce a
+/// `ritornello_proto::CoverRef` — the protocol has exactly two variants,
+/// `Url` and `Path`, and this task changes neither. `Embedded` is what the
+/// core itself produces when it probes the played file's own tags
+/// (`player::mpv::embedded_cover`): there is nothing to name on the wire for
+/// it, since no Source declares it and no protocol message carries it. This
+/// type is therefore internal to the core, one layer above `CoverRef`, not a
+/// third protocol variant in disguise.
+///
+/// `content` on `Embedded` is deliberate, not `audio` alone: see `key`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoverSource {
+    /// Declared by a Source or a `metadata` plugin, the wire form unchanged.
+    Ref(CoverRef),
+    /// Found embedded in the currently playing audio file, by
+    /// `player::mpv::embedded_cover`. `audio` is what a later read reopens to
+    /// extract the picture again (`read_embedded_bounded`); `content` is the
+    /// fingerprint of the picture's own bytes, computed once at probe time so
+    /// that `key`, below, need not reopen the file to deduplicate.
+    Embedded { audio: PathBuf, content: String },
 }
 
 /// Fingerprint of the source, published in the local URL.
@@ -196,32 +226,47 @@ pub enum CoverPayload {
 /// and nothing else, which does not justify a cryptographic dependency.
 /// Computable **before** the download, which makes it possible to deduplicate
 /// two requests for the same image.
-pub fn key(r: &CoverRef) -> String {
+///
+/// **`Embedded` hashes `content`, never `audio`.** This is what makes the
+/// deduplication of an album survive the move away from a temp file: two
+/// tracks of the same album carry two different `audio` paths but the very
+/// same picture bytes, hence the same `content`, hence the same key, hence a
+/// single cache entry and a single `href` — exactly the property a
+/// path-keyed hash would have destroyed, one entry (and one fetch, one
+/// decode) per track instead of per album.
+pub fn key(s: &CoverSource) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    match r {
-        CoverRef::Url { url } => {
+    match s {
+        CoverSource::Ref(CoverRef::Url { url }) => {
             0u8.hash(&mut h);
             url.hash(&mut h);
         }
-        CoverRef::Path { path } => {
+        CoverSource::Ref(CoverRef::Path { path }) => {
             1u8.hash(&mut h);
             path.hash(&mut h);
+        }
+        CoverSource::Embedded { content, .. } => {
+            2u8.hash(&mut h);
+            content.hash(&mut h);
         }
     }
     format!("{:016x}", h.finish())
 }
 
-/// Fingerprint of an image's **content**, to name a temporary file.
+/// Fingerprint of an image's **content**, carried as `CoverSource::Embedded`'s
+/// `content` field so that `key` can deduplicate an album without reopening
+/// the file.
 ///
 /// Same hasher as `key`, and the same trade-off: a collision would display the
 /// wrong cover and nothing else. What changes is what gets hashed — the bytes
 /// of the image, not the path they come from. Two tracks of the same album
-/// carrying the same embedded cover thus land on a single file, hence a single
-/// `href`, hence nothing to push again nor to decode again: the embedded case
-/// thereby joins the local `folder.jpg`, which was already free. Without that,
-/// a fifteen-track album made a cache that only holds as many entries as the
-/// setting allows (`CoverSettings::entries`) churn for nothing, extraction,
-/// write and eviction included.
+/// carrying the same embedded cover thus land on a single `CoverSource`, hence
+/// a single cache key, hence a single `href`, hence nothing to fetch again nor
+/// to decode again: the embedded case thereby joins the local `folder.jpg`,
+/// which was already free. Without that, a fifteen-track album made a cache
+/// that only holds as many entries as the setting allows
+/// (`CoverSettings::entries`) churn for nothing, extraction and eviction
+/// included.
 pub fn content_key(bytes: &[u8]) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut h);
@@ -1309,7 +1354,20 @@ const FILE_TIMEOUT: std::time::Duration = crate::health::TIMEOUT;
 
 /// Goes and fetches the cover. `None` = failure, and the failure is
 /// **silent**: the device simply displays no image.
-pub async fn fetch(r: &CoverRef) -> Option<CoverPayload> {
+///
+/// **`Embedded` costs nothing here.** By the time a `CoverSource::Embedded`
+/// reaches this function, `player::mpv::embedded_cover` has already probed
+/// the container and found a picture — that is precisely what let it exist.
+/// There is therefore no IO left to attempt, unlike `Ref(CoverRef::Path)`
+/// just below, which still has to open the file once to check its header:
+/// the probe already read the picture itself to compute its `content`
+/// fingerprint, and the picture is read a second time, on demand, only if a
+/// consumer actually asks for the bytes (`CoverCache::bytes`, `cover_get`).
+pub async fn fetch(s: &CoverSource) -> Option<CoverPayload> {
+    let r = match s {
+        CoverSource::Embedded { audio, .. } => return Some(CoverPayload::Embedded(audio.clone())),
+        CoverSource::Ref(r) => r,
+    };
     match r {
         CoverRef::Path { path } => {
             let path = PathBuf::from(path);
@@ -1720,14 +1778,28 @@ mod tests {
 
     #[test]
     fn the_key_is_stable_and_distinguishes_two_sources() {
-        let a = CoverRef::Url { url: "https://x.org/a.jpg".into() };
-        let b = CoverRef::Url { url: "https://x.org/b.jpg".into() };
+        let a = CoverSource::Ref(CoverRef::Url { url: "https://x.org/a.jpg".into() });
+        let b = CoverSource::Ref(CoverRef::Url { url: "https://x.org/b.jpg".into() });
         assert_eq!(key(&a), key(&a), "the key must be stable: it is published in a URL");
         assert_ne!(key(&a), key(&b));
         // A different form for the same string must not collide.
-        assert_ne!(key(&a), key(&CoverRef::Path { path: "/https://x.org/a.jpg".into() }));
+        assert_ne!(
+            key(&a),
+            key(&CoverSource::Ref(CoverRef::Path { path: "/https://x.org/a.jpg".into() }))
+        );
         // Hexadecimal, so no surprises inside a URL path.
         assert!(key(&a).chars().all(|c| c.is_ascii_hexdigit()), "{}", key(&a));
+    }
+
+    #[test]
+    fn an_embedded_key_never_collides_with_a_ref_carrying_the_same_string() {
+        // The discriminant byte is what makes this hold: without it, an
+        // embedded cover whose `content` happens to equal some `Path`'s
+        // string would collide and serve the wrong image.
+        let embedded =
+            CoverSource::Embedded { audio: PathBuf::from("/a.mp3"), content: "same".into() };
+        let as_path = CoverSource::Ref(CoverRef::Path { path: "same".into() });
+        assert_ne!(key(&embedded), key(&as_path));
     }
 
     /// The body served by the real HTTP route for this key and this size.
@@ -2053,7 +2125,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("folder.jpg");
         std::fs::write(&fake, b"this is not an image").unwrap();
-        let r = CoverRef::Path { path: fake.to_string_lossy().into_owned() };
+        let r = CoverSource::Ref(CoverRef::Path { path: fake.to_string_lossy().into_owned() });
         assert!(
             fetch(&r).await.is_none(),
             "the header bytes must be checked: without this, a badly written contributor \
@@ -2063,10 +2135,26 @@ mod tests {
         let real = dir.path().join("cover.jpg");
         // Minimal JPEG header: SOI + APP0 marker.
         std::fs::write(&real, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
-        let r = CoverRef::Path { path: real.to_string_lossy().into_owned() };
+        let r = CoverSource::Ref(CoverRef::Path { path: real.to_string_lossy().into_owned() });
         match fetch(&r).await {
             Some(CoverPayload::File(p)) => assert_eq!(p, real),
             other => panic!("a local image must stay a path, not bytes: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetching_an_embedded_source_touches_no_disk() {
+        // The whole point of the probe: by the time a `CoverSource::Embedded`
+        // exists, `player::mpv::embedded_cover` has already established that a
+        // picture is there. `fetch` must therefore neither open nor even stat
+        // the audio file — a nonexistent path is the proof: any attempt to
+        // touch it would make this fail, where the real production path only
+        // ever hands `fetch` a path it just probed successfully.
+        let audio = PathBuf::from("/does/not/exist.mp3");
+        let s = CoverSource::Embedded { audio: audio.clone(), content: "abcd".into() };
+        match fetch(&s).await {
+            Some(CoverPayload::Embedded(p)) => assert_eq!(p, audio),
+            other => panic!("an embedded source must yield CoverPayload::Embedded: {other:?}"),
         }
     }
 
@@ -2139,7 +2227,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("folder.jpg");
         std::fs::write(&path, jpeg(10)).unwrap();
-        let r = CoverRef::Path { path: path.to_string_lossy().into_owned() };
+        let r = CoverSource::Ref(CoverRef::Path { path: path.to_string_lossy().into_owned() });
         let Some(p) = fetch(&r).await else { panic!("a local image must be accepted") };
         let cache = CoverCache::new();
         cache.insert("k".into(), p).await;

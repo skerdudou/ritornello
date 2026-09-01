@@ -84,9 +84,21 @@ pub struct Metadata {
     /// Cover declared by the Source on its channel, with its origin. The
     /// lowest tier, and yet the highest priority for the image: the
     /// `folder.jpg` placed in the directory is the one chosen by hand.
+    ///
+    /// **Stays a bare `CoverRef`, never a `CoverSource`.** A Source can only
+    /// ever declare what the wire protocol carries — `Url` or `Path` — so
+    /// there is nothing here for `CoverSource::Embedded` to widen: only the
+    /// core itself produces that variant, by probing the file it is playing
+    /// (see `cover_tags` below).
     cover_source: Option<(CoverRef, String)>,
-    /// Cover embedded in the file, read by the core.
-    cover_tags: Option<CoverRef>,
+    /// Cover embedded in the file, read by the core (`player::mpv::
+    /// embedded_cover`, via `Core::extraction_arrived`).
+    ///
+    /// A `CoverSource` and not a bare `CoverRef`: this is the one tier that
+    /// can carry `CoverSource::Embedded`, since it is the core's own probe
+    /// that fills it, never something a Source or a plugin declared on the
+    /// wire.
+    cover_tags: Option<crate::cover::CoverSource>,
     /// Cache key, once the bytes are in hand. As long as it is `None`, nothing
     /// is published: the UI must never receive the URL of a broken image.
     cover_cle: Option<String>,
@@ -355,8 +367,8 @@ impl Metadata {
         true
     }
 
-    /// Retains the embedded cover the core extracted. `true` if new.
-    pub fn set_cover_tags(&mut self, c: Option<CoverRef>) -> bool {
+    /// Retains the embedded cover the core probed. `true` if new.
+    pub fn set_cover_tags(&mut self, c: Option<crate::cover::CoverSource>) -> bool {
         if self.cover_tags == c {
             return false;
         }
@@ -378,15 +390,22 @@ impl Metadata {
     /// A reference whose fetch **failed** is skipped, at its tier as at the
     /// others (see `failed_covers`): precedence says whom we prefer, it does
     /// not say to prefer indefinitely an image the device failed to obtain.
-    pub fn selected_cover(&self) -> Option<(CoverRef, String)> {
+    ///
+    /// Returns a `CoverSource`, not a bare `CoverRef`: this is the junction
+    /// where the two natures meet. `cover_source` and a plugin's `e.cover`
+    /// only ever carry the wire form, wrapped here in `CoverSource::Ref`;
+    /// `cover_tags` already carries whichever `CoverSource` the core's own
+    /// probe produced, `Embedded` included, and is handed back as-is.
+    pub fn selected_cover(&self) -> Option<(crate::cover::CoverSource, String)> {
         if let Some((r, o)) = &self.cover_source {
-            if !self.has_failed(r) {
-                return Some((r.clone(), o.clone()));
+            let s = crate::cover::CoverSource::Ref(r.clone());
+            if !self.has_failed(&s) {
+                return Some((s, o.clone()));
             }
         }
-        if let Some(r) = &self.cover_tags {
-            if !self.has_failed(r) {
-                return Some((r.clone(), ORIGIN_TAGS.to_string()));
+        if let Some(s) = &self.cover_tags {
+            if !self.has_failed(s) {
+                return Some((s.clone(), ORIGIN_TAGS.to_string()));
             }
         }
         // An overriding plugin first, then a `fill_only`. Two passes rather
@@ -398,8 +417,9 @@ impl Metadata {
                 if let Some(e) = self.enrichments.get(plugin) {
                     if e.fill_only == fill_only {
                         if let Some(r) = &e.cover {
-                            if !self.has_failed(r) {
-                                return Some((r.clone(), plugin.clone()));
+                            let s = crate::cover::CoverSource::Ref(r.clone());
+                            if !self.has_failed(&s) {
+                                return Some((s, plugin.clone()));
                             }
                         }
                     }
@@ -409,10 +429,10 @@ impl Metadata {
         None
     }
 
-    /// Has this reference already failed for what is playing?
-    fn has_failed(&self, r: &CoverRef) -> bool {
+    /// Has this source already failed for what is playing?
+    fn has_failed(&self, s: &crate::cover::CoverSource) -> bool {
         !self.failed_covers.is_empty()
-            && self.failed_covers.contains(&crate::cover::key(r))
+            && self.failed_covers.contains(&crate::cover::key(s))
     }
 
     /// Notes that a fetch failed for this key. Returns `true` if the retained
@@ -489,7 +509,7 @@ impl Metadata {
     pub fn state(&self) -> Track {
         let mut m = self.composed_text();
         // Only compute `selected_cover()` — a walk of `order`, a clone of a
-        // `CoverRef` and of its origin — if there is a key to publish:
+        // `CoverSource` and of its origin — if there is a key to publish:
         // without a key, no cover reaches the display anyway (see
         // `set_cover_href`), and this method is called at least once per
         // second as long as a track is playing.
@@ -745,6 +765,7 @@ impl Metadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cover::CoverSource;
     use serde_json::json;
 
     fn enrichment(identity: Value, artist: &str, title: &str) -> Enrichment {
@@ -826,8 +847,11 @@ mod tests {
         let (_, origin) = m.selected_cover().expect("the plugin provides a cover");
         assert_eq!(origin, "musicbrainz");
 
-        // The embedded cover, read by the core, goes ahead of the plugin.
-        assert!(m.set_cover_tags(Some(CoverRef::Path { path: "/tmp/embedded.jpg".into() })));
+        // The embedded cover, probed by the core, goes ahead of the plugin.
+        assert!(m.set_cover_tags(Some(CoverSource::Embedded {
+            audio: "/mnt/nas/a.flac".into(),
+            content: "abcd".into(),
+        })));
         assert_eq!(m.selected_cover().unwrap().1, ORIGIN_TAGS);
 
         // The file placed alongside, declared by the Source, goes ahead of
@@ -838,7 +862,10 @@ mod tests {
         ));
         let (r, origin) = m.selected_cover().unwrap();
         assert_eq!(origin, "files");
-        assert_eq!(r, CoverRef::Path { path: "/mnt/nas/Album/folder.jpg".into() });
+        assert_eq!(
+            r,
+            CoverSource::Ref(CoverRef::Path { path: "/mnt/nas/Album/folder.jpg".into() })
+        );
     }
 
     #[test]
@@ -868,7 +895,12 @@ mod tests {
         ));
         let (r, origin) = m.selected_cover().expect("a cover alone must be retained");
         assert_eq!(origin, "musicbrainz");
-        assert_eq!(r, CoverRef::Url { url: "https://coverartarchive.org/release/x/front-500".into() });
+        assert_eq!(
+            r,
+            CoverSource::Ref(CoverRef::Url {
+                url: "https://coverartarchive.org/release/x/front-500".into()
+            })
+        );
         assert!(m.known().cover);
         // And nothing of the text: the `is_empty` convention has not moved.
         assert!(m.state().is_empty(), "a cover alone brings no text");
@@ -951,7 +983,10 @@ mod tests {
         ));
         let (r, origin) = m.selected_cover().expect("the specialized plugin provides a cover");
         assert_eq!(origin, "specialized", "declared lower, it must nevertheless not yield to the fill_only");
-        assert_eq!(r, CoverRef::Url { url: "https://coverartarchive.org/b/front-500".into() });
+        assert_eq!(
+            r,
+            CoverSource::Ref(CoverRef::Url { url: "https://coverartarchive.org/b/front-500".into() })
+        );
     }
 
     #[test]
@@ -1176,7 +1211,10 @@ mod tests {
         ));
         let (r, origin) = m.selected_cover().unwrap();
         assert_eq!(origin, "specialized");
-        assert_eq!(r, CoverRef::Url { url: "https://coverartarchive.org/b/front-500".into() });
+        assert_eq!(
+            r,
+            CoverSource::Ref(CoverRef::Url { url: "https://coverartarchive.org/b/front-500".into() })
+        );
         assert!(
             m.state().cover_href.is_none(),
             "the stale key must not stay published under the new origin"
@@ -1189,7 +1227,10 @@ mod tests {
         let mut m = Metadata::new(vec![]);
         m.set_identity(Some(id));
         m.set_cover_source(Some(CoverRef::Path { path: "/a/folder.jpg".into() }), "files");
-        m.set_cover_tags(Some(CoverRef::Path { path: "/b/embedded.jpg".into() }));
+        m.set_cover_tags(Some(CoverSource::Embedded {
+            audio: "/b.flac".into(),
+            content: "abcd".into(),
+        }));
         m.set_cover_href(Some("abcd".into()));
         assert!(m.set_identity(Some(json!({"kind": "file", "path": "/b.flac"}))));
         assert!(m.selected_cover().is_none(), "leaving the previous cover would be more misleading than nothing");
@@ -1222,8 +1263,9 @@ mod tests {
         assert!(!m.mark_cover_failed("another-key".into()));
         assert!(m.known().cover);
 
-        m.set_cover_href(Some(crate::cover::key(&dead)));
-        assert!(m.mark_cover_failed(crate::cover::key(&dead)));
+        let dead_source = CoverSource::Ref(dead.clone());
+        m.set_cover_href(Some(crate::cover::key(&dead_source)));
+        assert!(m.mark_cover_failed(crate::cover::key(&dead_source)));
         assert!(!m.known().cover, "an unkept promise must no longer silence the others");
         assert!(m.selected_cover().is_none());
         assert!(m.state().cover_href.is_none(), "the published key no longer describes anything");
@@ -1242,7 +1284,7 @@ mod tests {
             }
         ));
         let (r, origin) = m.selected_cover().expect("the compensator must get through");
-        assert_eq!((r, origin.as_str()), (caa, "musicbrainz"));
+        assert_eq!((r, origin.as_str()), (CoverSource::Ref(caa), "musicbrainz"));
     }
 
     #[test]
@@ -1254,14 +1296,14 @@ mod tests {
         m.set_identity(Some(json!({"url": "one"})));
         let r = CoverRef::Url { url: "https://www.radiofrance.fr/x.jpg".into() };
         m.set_cover_source(Some(r.clone()), "radio");
-        assert!(m.mark_cover_failed(crate::cover::key(&r)));
+        assert!(m.mark_cover_failed(crate::cover::key(&CoverSource::Ref(r.clone()))));
         assert!(m.selected_cover().is_none());
 
         assert!(m.set_identity(Some(json!({"url": "two"}))));
         m.set_cover_source(Some(r.clone()), "radio");
         assert_eq!(
             m.selected_cover().map(|(r, _)| r),
-            Some(r),
+            Some(CoverSource::Ref(r)),
             "the failure slate must be wiped clean with the rest"
         );
     }
@@ -1277,7 +1319,7 @@ mod tests {
         assert_eq!(k.album, None, "an empty field is what invites a contributor to search");
         assert!(!k.cover);
 
-        m.set_cover_tags(Some(CoverRef::Path { path: "/x/c.jpg".into() }));
+        m.set_cover_tags(Some(CoverSource::Embedded { audio: "/x.flac".into(), content: "c".into() }));
         assert!(m.known().cover, "a held cover must silence a fill_only");
     }
 

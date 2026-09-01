@@ -256,18 +256,21 @@ pub(super) fn test_core() -> (Core<FakePlayer>, watch::Receiver<NowPlaying>, wat
 /// Like `test_core`, but **keeps** the receiver of the embedded-cover
 /// extraction channel instead of dropping it.
 ///
-/// Needed by any test that really lets the detached task of
-/// `handle_path` run on a real file: that task is the only legitimate
-/// writer of the temporary file, and a test that re-read the tags a
-/// second time on its side (to reconstruct the expected `CoverRef`)
-/// would write concurrently with it on the same path — a real race
-/// between two writers, discovered in use (see the report of task 6,
-/// ruling 1 of the review).
+/// Needed by any test that really lets the detached task of `handle_path`
+/// run on a real file: the real result must be drained from the real
+/// channel, not reconstructed by a second, independent call to
+/// `mpv::embedded_cover` on the test's own side. Before this rework, that
+/// second call was worse than redundant — it raced the detached task's
+/// write to the same temp file, a real race between two writers discovered
+/// in use (see the report of task 6, ruling 1 of the review). The write is
+/// gone, but the reason to drain the real channel is not: it is still the
+/// only way to assert on the exact `CoverSource` production code produced,
+/// rather than one a duplicated computation happens to agree with today.
 #[allow(clippy::type_complexity)]
 pub(super) fn test_core_with_extraction() -> (
     Core<FakePlayer>,
     watch::Receiver<PlayerState>,
-    mpsc::Receiver<(String, Option<ritornello_proto::CoverRef>)>,
+    mpsc::Receiver<(String, Option<crate::cover::CoverSource>)>,
     tempfile::TempDir,
 ) {
     let dir = tempfile::tempdir().unwrap();
@@ -450,21 +453,22 @@ pub(super) fn quick_settings() -> crate::state::Settings {
 /// Returns `None` if ffmpeg is absent: the test skips itself rather than
 /// failing, it is not a dependency of the core.
 ///
-/// **The image must stay different from the one in `player::mpv::tests`,
-/// and this is not cosmetic.** Since the temporary file is named after
-/// the *content* of the image, two fixtures carrying the same image
-/// target the same path in the `temp_dir()` **shared** by every test of
-/// this binary — which run in parallel. The tests here additionally go
-/// through `CoverCache`, whose eviction **deletes** those files: the
-/// collision showed up as an intermittent failure in the neighbour,
-/// which read a file erased or rewritten under it. Both fixtures shared
-/// `color=c=red:s=16x16`.
+/// **The image used to have to stay different from the one in
+/// `player::mpv::tests`, and no longer does — kept distinct anyway, for
+/// clarity.** `player::mpv::embedded_cover` used to name a temp file after
+/// the *content* of the image and write it to the `temp_dir()` **shared** by
+/// every test of this binary — which run in parallel; two fixtures carrying
+/// the same image would then collide there, and the tests here additionally
+/// went through `CoverCache`, whose eviction **deleted** those files, which
+/// is exactly what produced an intermittent failure in the neighbour reading
+/// a file erased or rewritten under it. `embedded_cover` now only probes the
+/// container and writes nothing, so that collision cannot occur anymore;
+/// green and 32×32 remains distinct from the red 16×16 of
+/// `player::mpv::tests` simply so a mismatch between the two is easy to spot.
 pub(super) fn test_mp3_with_cover(dir: &std::path::Path) -> Option<std::path::PathBuf> {
     let image = dir.join("cover.jpg");
     let output = dir.join("with_cover.mp3");
     let ok = std::process::Command::new("ffmpeg")
-        // Green and 32×32: see the doc above, it **must not** coincide
-        // with the one in `player::mpv::tests`.
         .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=green:s=32x32:d=1"])
         .args(["-frames:v", "1"])
         .arg(&image)

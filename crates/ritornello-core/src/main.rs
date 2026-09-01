@@ -734,7 +734,7 @@ pub(crate) fn assemble_covers_and_core<P: player::Player>(
     player: P,
     wiring: core::Wiring,
     cover_tx: mpsc::Sender<(String, bool)>,
-    extraction_tx: mpsc::Sender<(String, Option<ritornello_proto::CoverRef>)>,
+    extraction_tx: mpsc::Sender<(String, Option<cover::CoverSource>)>,
     skeleton: AppState,
 ) -> (AppState, core::Core<P>) {
     let covers = Arc::new(cover::CoverCache::new());
@@ -1442,7 +1442,7 @@ async fn main() -> Result<()> {
     // carry different payloads, and nothing synchronizes them with each
     // other.
     let (extraction_tx, mut extraction_rx) =
-        mpsc::channel::<(String, Option<ritornello_proto::CoverRef>)>(4);
+        mpsc::channel::<(String, Option<cover::CoverSource>)>(4);
 
     // After wiring: ask each source for its sources catalog, **without
     // waiting**.
