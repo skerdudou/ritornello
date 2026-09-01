@@ -273,6 +273,23 @@ struct IcyOutcome {
     pattern: Option<patterns::Pattern>,
     /// The validated pair and its cover. `None` = validation failed.
     validated: Option<(String, String, Option<String>)>,
+    /// **MusicBrainz did not answer** during this handling: an outage, a
+    /// timeout, a 503 — never a verdict.
+    ///
+    /// The distinction is the whole point of this field, and the module
+    /// already held it one level down (`request_text` documents that `Err`
+    /// means "no response, never nothing found") only to throw it away here.
+    /// Two decisions depend on it, and both were wrong without it:
+    ///
+    /// * **what is learned**: a probe whose searches went unanswered proves
+    ///   nothing, and recorded "this station does not split" — definitively,
+    ///   since nothing reprobed such a station. Six 503s out of nine requests
+    ///   were measured on the device on 2026-08-28, at a compliant cadence:
+    ///   the window is wide open.
+    /// * **the failure counter**: three unanswered validations in a row on a
+    ///   station whose pattern is right and proven would trigger a reprobe of
+    ///   that good pattern.
+    unanswered: bool,
     /// The pair from the **local** split, whether validation succeeded or
     /// not.
     ///
@@ -813,7 +830,13 @@ impl MetadataPlugin for MusicBrainzPlugin {
                                 });
                             }
                             None => {
-                                *self.failures.entry(outcome.url.clone()).or_default() += 1;
+                                // **A non-answer is not a failure.** Three
+                                // 503s in a row would otherwise have reprobed
+                                // a station whose pattern is right and
+                                // proven. See `IcyOutcome::unanswered`.
+                                if !outcome.unanswered {
+                                    *self.failures.entry(outcome.url.clone()).or_default() += 1;
+                                }
                                 // **Emit anyway.** Emitting nothing let the
                                 // enrichment of the *previous* track win the
                                 // arbitration, a radio's identity not changing
@@ -922,18 +945,42 @@ fn best_accepted(attempts: &[(icy::Candidate, Option<musicbrainz::Recording>)]) 
 /// This is the continuous validation of the steady state (see the module
 /// doc): it also serves to find the cover, which a radio never announces
 /// otherwise.
-async fn validated_by_search(artist: &str, title: &str) -> Option<(String, String, Option<String>)> {
-    let answer = musicbrainz::search_recording(artist, title)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::info!("MusicBrainz recording search: {e}");
-            None
-        })?;
-    if validated(title, &answer) {
-        Some((artist.to_string(), title.to_string(), answer.cover_url))
-    } else {
-        None
-    }
+///
+/// **`Err` is propagated instead of being flattened into "not validated".**
+/// It used to be swallowed, and the caller could not tell "MusicBrainz does
+/// not know this track" — a legitimate failure that counts — from "MusicBrainz
+/// did not answer", which counts for nothing. See `IcyOutcome::unanswered`.
+async fn validated_by_search(
+    artist: &str,
+    title: &str,
+) -> Result<Option<(String, String, Option<String>)>> {
+    let Some(answer) = musicbrainz::search_recording(artist, title).await? else {
+        return Ok(None);
+    };
+    Ok(validated(title, &answer)
+        .then(|| (artist.to_string(), title.to_string(), answer.cover_url)))
+}
+
+/// The lesson a probe that kept **no** candidate may record.
+///
+/// `Some(DoNotSplit)` only when the probe really ruled the split out. There
+/// are two ways of keeping nothing that prove nothing, and an earlier version
+/// conflated both with "this station does not split" — a verdict that was then
+/// definitive, since nothing reprobes such a station:
+///
+/// * **no candidate probed at all** (`tried == 0`): the string carries no
+///   separator — a jingle, a slogan, the station's own name. No request was
+///   made, no split was ruled out, and the next title may well announce a real
+///   pair. This is the case the owner reported: arriving on a station for the
+///   first time while it was announcing something unsplittable.
+/// * **a search went unanswered**: see `IcyOutcome::unanswered`.
+///
+/// Worth noting for the first case: it also protects a **good** pattern. A
+/// station whose learned split stops applying for three titles in a row gets
+/// reprobed; if the reprobe falls on a jingle, the old code recorded
+/// `DoNotSplit` over a proven `Split`, and the station was mute for good.
+fn unwinnable_probe_lesson(tried: usize, unanswered: bool) -> Option<patterns::Pattern> {
+    (tried > 0 && !unanswered).then_some(patterns::Pattern::DoNotSplit)
 }
 
 /// Handles an ICY string: applies the known pattern, or probes the station.
@@ -954,7 +1001,15 @@ async fn handle_icy(
         match &known {
             Some(patterns::Pattern::DoNotSplit) => {
                 // The talk station: zero cost, no request.
-                return IcyOutcome { url, raw, identity, pattern: None, validated: None, pair: None };
+                return IcyOutcome {
+                    url,
+                    raw,
+                    identity,
+                    pattern: None,
+                    validated: None,
+                    pair: None,
+                    unanswered: false,
+                };
             }
             Some(m @ patterns::Pattern::Split { .. }) => {
                 // Steady state: local split, one single request that counts
@@ -965,11 +1020,28 @@ async fn handle_icy(
                 // produced it has already been confirmed on this station. See
                 // `IcyOutcome::pair`.
                 let pair = icy::apply(m, &cleaned);
-                let validated = match &pair {
-                    Some((artist, title)) => validated_by_search(artist, title).await,
-                    None => None,
+                let (validated, unanswered) = match &pair {
+                    Some((artist, title)) => match validated_by_search(artist, title).await {
+                        Ok(v) => (v, false),
+                        Err(e) => {
+                            tracing::info!("MusicBrainz recording search: {e}");
+                            (None, true)
+                        }
+                    },
+                    // The pattern no longer applies: nothing was asked, hence
+                    // nothing went unanswered. The station changed shape, and
+                    // that failure counts.
+                    None => (None, false),
                 };
-                return IcyOutcome { url, raw, identity, pattern: None, validated, pair };
+                return IcyOutcome {
+                    url,
+                    raw,
+                    identity,
+                    pattern: None,
+                    validated,
+                    pair,
+                    unanswered,
+                };
             }
             None => {} // Station never probed: falls through to the probe below.
         }
@@ -978,11 +1050,20 @@ async fn handle_icy(
     // Probe: unknown station, or reprobe triggered by three failures in a row.
     let candidates = icy::candidates(&cleaned);
     let mut attempts = Vec::with_capacity(candidates.len());
+    let mut unanswered = false;
     for c in candidates {
-        let answer = musicbrainz::search_recording(&c.artist, &c.title).await.unwrap_or_else(|e| {
-            tracing::info!("MusicBrainz recording search: {e}");
-            None
-        });
+        let answer = match musicbrainz::search_recording(&c.artist, &c.title).await {
+            Ok(answer) => answer,
+            Err(e) => {
+                tracing::info!("MusicBrainz recording search: {e}");
+                // **One unanswered search taints the whole probe**, and not
+                // only its own candidate: the candidates are in competition,
+                // so a missing answer may be the one that would have won. The
+                // probe therefore concludes nothing and will be replayed.
+                unanswered = true;
+                None
+            }
+        };
         attempts.push((c, answer));
     }
     let tried_count = attempts.len();
@@ -1012,17 +1093,27 @@ async fn handle_icy(
                 pattern: Some(patterns::Pattern::from_candidate(&winner)),
                 validated: Some((winner.artist.clone(), winner.title.clone(), cover_url)),
                 pair: Some((winner.artist, winner.title)),
+                unanswered,
             }
         }
         None => {
-            tracing::info!("ICY probe for {url}: tried {tried_count} candidate(s), none accepted");
+            let lesson = unwinnable_probe_lesson(tried_count, unanswered);
+            match &lesson {
+                Some(_) => tracing::info!(
+                    "ICY probe for {url}: tried {tried_count} candidate(s), none accepted"
+                ),
+                None => tracing::info!(
+                    "ICY probe for {url}: nothing learned ({tried_count} candidate(s) probed, unanswered: {unanswered})"
+                ),
+            }
             IcyOutcome {
                 url,
                 raw,
                 identity,
-                pattern: Some(patterns::Pattern::DoNotSplit),
+                pattern: lesson,
                 validated: None,
                 pair: None,
+                unanswered,
             }
         }
     }
@@ -1508,6 +1599,96 @@ mod tests {
         assert!(best_accepted(&attempts).is_none());
     }
 
+    #[test]
+    fn a_probe_that_kept_nothing_only_concludes_when_it_really_ruled_the_split_out() {
+        // The four cases of the predicate, and each one guards a distinct
+        // defect. `tried == 0` is the string with no separator; `unanswered`
+        // is the outage. Only "candidates probed, all answered" concludes.
+        assert_eq!(unwinnable_probe_lesson(2, false), Some(patterns::Pattern::DoNotSplit));
+        assert_eq!(unwinnable_probe_lesson(0, false), None, "no candidate proves nothing");
+        assert_eq!(unwinnable_probe_lesson(2, true), None, "an outage proves nothing");
+        assert_eq!(unwinnable_probe_lesson(0, true), None);
+    }
+
+    #[tokio::test]
+    async fn a_first_visit_on_an_unsplittable_string_learns_nothing() {
+        // **The case the owner reported.** Arriving on a station for the first
+        // time while it announces a jingle: no separator, hence no candidate,
+        // hence no request — and above all nothing recorded. The station stays
+        // unknown and will be probed again on the next title, which may well
+        // be a real track.
+        //
+        // The timeout proves the absence of a request, as in the neighbouring
+        // test: no network is reachable here, so an attempt would drag on.
+        let r = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            handle_icy(
+                "http://f".to_string(),
+                "Vous ecoutez Radio X".to_string(),
+                json!({"kind": "stream", "url": "http://f"}),
+                None,
+                false,
+            ),
+        )
+        .await;
+        let outcome = r.expect("no request must be attempted, hence no timeout");
+        assert_eq!(outcome.pattern, None, "nothing may be learned from a string with no separator");
+        assert_eq!(outcome.pair, None);
+    }
+
+    #[tokio::test]
+    async fn a_reprobe_that_falls_on_a_jingle_keeps_the_learned_pattern() {
+        // The other half of the same fix, and the graver one: a station whose
+        // split stops applying for three titles in a row gets reprobed. If the
+        // reprobe falls on a jingle, the old code recorded `DoNotSplit` **over
+        // a proven `Split`** — the station lost its pattern for good, on a
+        // string that says nothing.
+        let known = patterns::Pattern::Split {
+            separator: " - ".into(),
+            artist_first: true,
+            title_in_middle: false,
+        };
+        let r = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            handle_icy(
+                "http://f".to_string(),
+                "Radio X | le meilleur de la musique".to_string(),
+                json!({"kind": "stream", "url": "http://f"}),
+                Some(known),
+                true,
+            ),
+        )
+        .await;
+        let outcome = r.expect("no request must be attempted, hence no timeout");
+        assert_eq!(outcome.pattern, None, "the proven pattern must not be overwritten");
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_validation_is_not_counted_as_a_failure() {
+        // "MusicBrainz does not answer, it does not count" — on the steady
+        // state too. Three unanswered validations in a row would otherwise
+        // reprobe a station whose pattern is right, and six 503s out of nine
+        // requests were measured on the device at a compliant cadence.
+        let mut p = test_plugin();
+        let url = "http://f";
+        p.icy_seen = Some("raw".to_string());
+
+        send_unanswered(&mut p, url, "raw").await;
+        send_unanswered(&mut p, url, "raw").await;
+        send_unanswered(&mut p, url, "raw").await;
+        assert!(
+            !p.failures.contains_key(url),
+            "an outage must leave the counter untouched, got {:?}",
+            p.failures.get(url)
+        );
+        assert!(!should_reprobe(&p.failures, url), "and must therefore never arm a reprobe");
+
+        // The counterpart, without which "never count anything" would pass:
+        // a real verdict failure still counts.
+        send_failure(&mut p, url, "raw").await;
+        assert_eq!(p.failures.get(url), Some(&1));
+    }
+
     #[tokio::test]
     async fn a_station_classified_do_not_split_triggers_no_request() {
         // `handle_icy` with `known = DoNotSplit` and `reprobe = false` must
@@ -1545,6 +1726,16 @@ mod tests {
     /// announces. And the wait is **exact** (we await what must come) instead
     /// of relying on a time margin.
     async fn send_failure(p: &mut MusicBrainzPlugin, url: &str, raw: &str) {
+        send_outcome(p, url, raw, false).await;
+    }
+
+    /// Same thing, but MusicBrainz **did not answer**: the very same absence of
+    /// validation, which must not be counted the same way.
+    async fn send_unanswered(p: &mut MusicBrainzPlugin, url: &str, raw: &str) {
+        send_outcome(p, url, raw, true).await;
+    }
+
+    async fn send_outcome(p: &mut MusicBrainzPlugin, url: &str, raw: &str, unanswered: bool) {
         p.icy_tx
             .send(IcyOutcome {
                 url: url.to_string(),
@@ -1553,6 +1744,7 @@ mod tests {
                 pattern: None,
                 validated: None,
                 pair: None,
+                unanswered,
             })
             .await
             .unwrap();
@@ -1655,6 +1847,7 @@ mod tests {
                 pattern: None,
                 validated: Some(("Artist".to_string(), "Title".to_string(), None)),
                 pair: Some(("Artist".to_string(), "Title".to_string())),
+                unanswered: false,
             })
             .await
             .unwrap();
