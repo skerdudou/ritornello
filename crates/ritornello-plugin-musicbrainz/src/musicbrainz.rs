@@ -587,11 +587,18 @@ pub struct Recording {
     /// candidate after normalization, and that comparison carries the
     /// validation: the score alone is too generous.
     pub title: String,
-    /// Cover URL, taken from the first release if there is one.
+    /// Cover URL, taken from the **best ranked** release among the recordings
+    /// tied at the top score. See [`cover_rank`].
     ///
-    /// No "smart" choice between original, compilation and remaster:
-    /// MusicBrainz does not rank them by relevance, and it would be one more
-    /// heuristic for a 500-pixel square.
+    /// An earlier version took the first release of the first recording, and
+    /// declined to rank on the grounds that "MusicBrainz does not rank them by
+    /// relevance". The premise is right, the conclusion was not: taking the
+    /// first one lets an arbitrary order decide, and on a widely covered title
+    /// that order falls on a compilation almost every time. **Measured on
+    /// 2026-09-01** on `U2 / I Still Haven't Found What I'm Looking For`: 418
+    /// recordings match, all those at the top score 100, and the first one
+    /// listed only appears on two compilations — the first being German. That
+    /// is the cover the device displayed. `The Joshua Tree` came seventh.
     ///
     /// A URL and not an MBID, for the same reason as `DiscInfo::cover_url`:
     /// the level to aim at (album or pressing) is decided here, where the
@@ -610,30 +617,106 @@ pub struct Recording {
 pub fn request_recording(artist: &str, title: &str) -> String {
     let escape = |s: &str| percent_encode(&escape_lucene(s));
     format!(
-        "https://musicbrainz.org/ws/2/recording/?query=artist:%22{}%22%20AND%20recording:%22{}%22&fmt=json&limit=1",
+        "https://musicbrainz.org/ws/2/recording/?query=artist:%22{}%22%20AND%20recording:%22{}%22&fmt=json&limit={RECORDING_SEARCH_LIMIT}",
         escape(artist),
         escape(title)
     )
 }
 
-/// First recording of the response. `None` = nothing, unreadable, or without
-/// a score — see `first_cover` for the reasoning about the absent score.
+/// How many recordings the search asks for.
+///
+/// **One was not enough, and asking for more costs nothing**: it stays a
+/// single request, 50 kB of response instead of 3 kB on the measured case.
+/// With `limit=1` the cover could only come from whatever recording the API
+/// happened to list first — for U2 (see `Recording::cover_url`), one that
+/// exists only on compilations. The studio album was seventh, hence out of
+/// reach.
+const RECORDING_SEARCH_LIMIT: usize = 25;
+
+/// Ranking of a release as a source of cover art, **lower is better**.
+///
+/// Three criteria, in this order — and the order is the whole point:
+///
+/// 1. **status**: `Official`, then `Promotion`, then anything unnamed, and
+///    `Bootleg` last. A bootleg's artwork is at best a fan montage.
+/// 2. **nature**: an `Album` with **no** secondary type — the studio album —
+///    then anything with no secondary type (a single, an EP: real artwork for
+///    this very song), and everything carrying one (`Compilation`, `Live`,
+///    `Soundtrack`, …) last.
+/// 3. **date**: the oldest first, the original pressing rather than a
+///    remaster. An absent date sorts last (`"9999"`), and ISO-8601 compares
+///    correctly as a string.
+///
+/// The **nature** carries most of the discrimination, and that is not our
+/// invention: Picard weights `releasetype` at 14 among its match preferences,
+/// against 2 for `format` and 2 for `releasecountry`. beets, for its part,
+/// prefers the original year. Neither of the two takes the first release
+/// returned.
+///
+/// The country is deliberately **not** a criterion. It is tempting — the
+/// defect that prompted all this displayed a German cover — but it would be
+/// the wrong lesson: what makes that release wrong is that it is a
+/// *compilation*, not that it is German. Ranking by country would take a
+/// preferred-country list, which is a setting and not a heuristic, and it
+/// would leave the compilation problem untouched.
+fn cover_rank(release: &Value) -> (u8, u8, &str) {
+    let status_rank = match release.get("status").and_then(Value::as_str).unwrap_or("") {
+        "Official" => 0,
+        "Promotion" => 1,
+        "Bootleg" | "Pseudo-Release" => 3,
+        _ => 2,
+    };
+    let group = release.get("release-group");
+    let primary = group.and_then(|g| g.get("primary-type")).and_then(Value::as_str).unwrap_or("");
+    let secondary =
+        group.and_then(|g| g.get("secondary-types")).and_then(Value::as_array).map_or(0, Vec::len);
+    let kind_rank = match (primary, secondary) {
+        ("Album", 0) => 0,
+        (_, 0) => 1,
+        _ => 2,
+    };
+    let date =
+        release.get("date").and_then(Value::as_str).filter(|d| !d.is_empty()).unwrap_or("9999");
+    (status_rank, kind_rank, date)
+}
+
+/// What the response says about the searched recording. `None` = nothing,
+/// unreadable, or without a score — see `first_cover` for the reasoning about
+/// the absent score.
+///
+/// **The score and the title come from the first recording, the cover does
+/// not**, and the two halves answer two different questions. The score and the
+/// title serve the *validation* — is this really the track the station
+/// announced — where the first answer is the best match, and it is what the
+/// caller compares against its candidate. The cover only has to be the right
+/// image of the right album; the recording that best matches the *text* is not
+/// the one that best carries the *artwork*, U2 above existing only on
+/// compilations.
+///
+/// The cover is therefore chosen among the releases of **all** the recordings
+/// tied at the top score, ranked by [`cover_rank`]. "Tied at the top" is read
+/// as "scoring like the first one": MusicBrainz sorts its results by
+/// decreasing score. Should it ever stop doing so, this filter would merely
+/// consider fewer releases — a degradation, never a wrong pick.
 pub fn first_recording(json: &str) -> Option<Recording> {
     let v: Value = serde_json::from_str(json).ok()?;
-    let first = v.get("recordings")?.as_array()?.first()?;
+    let recordings = v.get("recordings")?.as_array()?;
+    let first = recordings.first()?;
     let Some(score) = first.get("score").and_then(Value::as_u64) else {
         tracing::warn!("recording search: no score field, refusing rather than guessing");
         return None;
     };
-    Some(Recording {
-        score,
-        title: first.get("title")?.as_str()?.to_string(),
-        cover_url: first
-            .get("releases")
-            .and_then(Value::as_array)
-            .and_then(|r| r.first())
-            .and_then(release_cover),
-    })
+    // `min_by` keeps the **first** minimum, so the order the API chose remains
+    // the last tiebreaker: two releases equal on all three criteria are
+    // separated by nothing of ours, and the pick stays deterministic.
+    let cover_url = recordings
+        .iter()
+        .filter(|r| r.get("score").and_then(Value::as_u64) == Some(score))
+        .filter_map(|r| r.get("releases").and_then(Value::as_array))
+        .flatten()
+        .min_by(|a, b| cover_rank(a).cmp(&cover_rank(b)))
+        .and_then(release_cover);
+    Some(Recording { score, title: first.get("title")?.as_str()?.to_string(), cover_url })
 }
 
 /// Comparable form of a title: lowercase, diacritics removed, and everything
@@ -1175,7 +1258,7 @@ mod tests {
         let url = request_recording(r#"AC"DC"#, "Back in Black & Co");
         assert!(url.starts_with("https://musicbrainz.org/ws/2/recording/?query="), "{url}");
         // Only two structural ampersands (before fmt, before limit): the brief
-        // expected `== 1`, but the URL always carries `&fmt=json&limit=1` in
+        // expected `== 1`, but the URL always carries `&fmt=json&limit=…` in
         // addition to `?query=`, hence two literal '&' at minimum, never a
         // single one — see the task report for details. The one from the
         // title is percent-encoded (%26) and therefore does not add to the
@@ -1210,6 +1293,101 @@ mod tests {
         let e = first_recording(&recording_response(100, "So What", false)).unwrap();
         assert_eq!(e.cover_url, None);
         assert_eq!(e.title, "So What");
+    }
+
+    /// The real MusicBrainz response, reduced to the fields this module reads.
+    ///
+    /// **Measured on 2026-09-01** with the very query the plugin builds for
+    /// `U2 / I Still Haven't Found What I'm Looking For`: 418 recordings
+    /// match, and the 25 returned **all score 100** — the score separates
+    /// nothing here. Kept: the recording the API lists first (which exists
+    /// only on two compilations, the first of them German), a bootleg concert,
+    /// the studio album — seventh in the full response, hence unreachable with
+    /// `limit=1` — and a compilation of singles.
+    const U2_FIXTURE: &str = include_str!("../tests/fixtures/mb_recording_u2.json");
+
+    /// `The Joshua Tree`, the studio album.
+    const JOSHUA_TREE_GROUP: &str = "6f3e9fa6-be7a-3de8-a2b2-2072ece8a54d";
+    /// `Super Power: Die heißen Hits`, the German compilation the device showed.
+    const GERMAN_COMPILATION_GROUP: &str = "25e45f24-78fa-4beb-bcbb-c9a2c9bfbc9b";
+
+    #[test]
+    fn the_cover_of_a_much_covered_title_comes_from_the_album_not_from_a_compilation() {
+        // **The defect itself, verbatim.** The owner saw a German cover under
+        // a U2 track; this fixture is the response that produced it.
+        let e = first_recording(U2_FIXTURE).expect("a readable response");
+        let url = e.cover_url.expect("a cover URL");
+        assert!(url.contains(JOSHUA_TREE_GROUP), "the album's cover was expected, got {url}");
+        assert!(!url.contains(GERMAN_COMPILATION_GROUP), "the compilation won again: {url}");
+    }
+
+    #[test]
+    fn the_score_and_the_title_keep_coming_from_the_best_match() {
+        // The other half of the contract: taking the cover elsewhere must not
+        // move what carries the *validation*. The fixture spells the title two
+        // ways (straight and curly apostrophes) — `normalize` absorbs that,
+        // but what is returned must remain the first recording's.
+        let e = first_recording(U2_FIXTURE).expect("a readable response");
+        assert_eq!(e.score, 100);
+        assert_eq!(e.title, "I Still Haven't Found What I'm Looking For");
+    }
+
+    #[test]
+    fn a_lower_scored_recording_never_lends_its_cover() {
+        // The score first, the ranking only afterwards: an official studio
+        // album hanging off a badly matched recording must not beat the
+        // compilation of the top-scoring one. Otherwise the image would no
+        // longer be that of the track at all — a worse defect than the one
+        // being fixed here.
+        let json = r#"{"recordings":[
+            {"score":100,"title":"So What","releases":[
+              {"id":"aaaaaaaa-0000-0000-0000-000000000001","status":"Official",
+               "release-group":{"id":"11111111-0000-0000-0000-000000000001",
+                                "primary-type":"Album","secondary-types":["Compilation"]}}]},
+            {"score":70,"title":"So What","releases":[
+              {"id":"aaaaaaaa-0000-0000-0000-000000000002","status":"Official",
+               "release-group":{"id":"22222222-0000-0000-0000-000000000002",
+                                "primary-type":"Album"}}]}]}"#;
+        let url = first_recording(json).unwrap().cover_url.expect("a cover URL");
+        assert!(
+            url.contains("11111111-0000-0000-0000-000000000001"),
+            "the top score must keep its cover: {url}"
+        );
+    }
+
+    /// A release reduced to what [`cover_rank`] reads. Empty string = absent
+    /// field, which is a case of its own for both the date and the secondary
+    /// types.
+    fn ranked_release(status: &str, primary: &str, secondary: &str, date: &str) -> Value {
+        let secondary = if secondary.is_empty() {
+            String::new()
+        } else {
+            format!(r#","secondary-types":["{secondary}"]"#)
+        };
+        let date = if date.is_empty() { String::new() } else { format!(r#","date":"{date}""#) };
+        serde_json::from_str(&format!(
+            r#"{{"id":"x","status":"{status}"{date},
+                 "release-group":{{"id":"g","primary-type":"{primary}"{secondary}}}}}"#
+        ))
+        .expect("a valid fixture")
+    }
+
+    #[test]
+    fn the_ranking_puts_the_official_studio_album_first_and_the_bootleg_last() {
+        let album = ranked_release("Official", "Album", "", "1987");
+        let remaster = ranked_release("Official", "Album", "", "2017");
+        let compilation = ranked_release("Official", "Album", "Compilation", "1987");
+        let single = ranked_release("Official", "Single", "", "1987");
+        let bootleg = ranked_release("Bootleg", "Album", "", "1987");
+        let undated = ranked_release("Official", "Album", "", "");
+        assert!(cover_rank(&album) < cover_rank(&single), "the album beats the single");
+        assert!(cover_rank(&single) < cover_rank(&compilation), "the single beats the compilation");
+        assert!(
+            cover_rank(&compilation) < cover_rank(&bootleg),
+            "anything official beats a bootleg, even a compilation"
+        );
+        assert!(cover_rank(&album) < cover_rank(&remaster), "the oldest pressing wins");
+        assert!(cover_rank(&album) < cover_rank(&undated), "an absent date sorts last");
     }
 
     #[test]
