@@ -209,6 +209,26 @@ writeFileSync(
   '[[stations]]\nname = "FIP"\nurl = "http://icecast.radiofrance.fr/fip-midfi.mp3"\npreset = 1\n',
 )
 
+// mpv gets its own configuration directory, with a null audio output in it.
+//
+// The journeys really start a playback, and that playback used to need a
+// working sound card. On a machine without one -- a CI runner, precisely --
+// mpv finds no output at all (measured on ubuntu-latest: ALSA answers
+// "Unknown PCM default", then mpv gives up with "Could not open/initialize
+// audio device -> no sound" and ends the file on an error), so
+// `[data-position]` never appears and the `files` journey fails on its
+// playback step. Worse, it then leaves the active source on `files`, which
+// knocks over the three journeys that expect the persisted `radio`: one
+// missing sound card, four red tests.
+//
+// `ao=null` is paced like a real device (mpv's null output is timed, not
+// untimed), so the position still advances -- which is all the journeys
+// observe. Two side benefits: the run no longer plays a 440 Hz sine out loud
+// on the developer's speakers, and `XDG_CONFIG_HOME` pointing here shields
+// the journeys from whatever sits in the developer's own ~/.config/mpv.
+mkdirSync(join(configDirNative, 'mpv'), { recursive: true })
+writeFileSync(join(configDirNative, 'mpv', 'mpv.conf'), 'ao=null\n')
+
 const env = {
   // See the header: 0.0.0.0 under Windows (reachable from the host on
   // 127.0.0.1 through WSL2 forwarding), 127.0.0.1 under native Linux
@@ -234,6 +254,10 @@ const env = {
   RITORNELLO_FILES_MPV_PLAYLIST: `${execDir}/plugin-files.m3u`,
   RITORNELLO_FILES_PLAYLISTS: `${execDir}/playlists`,
   RITORNELLO_FILES_PROC_MOUNTS: procMounts,
+  // Read by mpv, not by the core (which knows only its own
+  // `RITORNELLO_*`): this is what hands it the `ao=null` written just
+  // above, on both branches of the launch below.
+  XDG_CONFIG_HOME: configDir,
 }
 
 // Fixed name (not the random one of the throwaway directory):
