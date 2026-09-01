@@ -278,8 +278,7 @@ pub fn embedded_cover(path: &str) -> Option<crate::cover::CoverSource> {
     let image = lofty::file::TaggedFileExt::primary_tag(&file)
         .or_else(|| lofty::file::TaggedFileExt::first_tag(&file))?
         .pictures()
-        .first()?
-        .clone();
+        .first()?;
     Some(crate::cover::CoverSource::Embedded {
         audio: std::path::PathBuf::from(path),
         content: crate::cover::content_key(image.data()),

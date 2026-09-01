@@ -598,8 +598,12 @@ the upper bound is `COVER_MAX_BYTES` expressed in the setting's unit, not a
 comfort choice. That constant is the promise made to display plugins about
 what they may receive, and the MPD plugin sizes its own bounds on it without
 being able to read the core's settings, so this setting can only lower it.
-It is also the cheapest guard of the lot: judged on the file's size, before a
-single byte of its content is read.
+For a `folder.jpg`, it is the cheapest guard of the lot: judged on the file's
+size, before a single byte of its content is read. Not so for a cover
+embedded in the audio file: `lofty` exposes no way to learn a picture's size
+without parsing the container first, so there the cap is judged only after
+the file has been parsed and the picture copied into memory — cheap to state,
+not cheap to enforce, for that source.
 
 **`cover_rendition`** is the switch. On (the default), the core renders a
 thumbnail before pushing a cover on a socket; off, the original bytes are
@@ -646,16 +650,27 @@ file used to pass it and reach every display, each showing a broken square
 its own way. The device now settles it once, centrally.
 
 The rendition serves the HTTP route too, but **only on request**.
-`GET /api/cover/{key}` still streams a local file without ever holding it
-whole; `GET /api/cover/{key}?size=thumbnail` returns the same rendition the
-displays get. The web page asks for the thumbnail in its 224 px square and for
-the bare URL in the enlarged view — loading a NAS's three-megabyte `folder.jpg`
-into a 224 px square was pure waste over Wi-Fi, while enlarging it deserves
-every pixel. The default stays "as it is", because `cover_href` is published in
-the state for every consumer of the protocol, present and future: the thumbnail
-is a service rendered to whoever asks, not a change in what the bare URL means.
-An unknown value falls back to full size rather than refusing the request — a
-typo in a URL must not blank the cover.
+`GET /api/cover/{key}` streams a `folder.jpg` from a share without ever
+holding it whole, but that guarantee does not extend to a cover embedded in
+the audio file: a container must be parsed to find the picture's bytes, so
+that full-size case holds the picture whole, as a `Vec`, once it is served.
+`GET /api/cover/{key}?size=thumbnail` returns the same rendition the
+displays get, for either source. The web page asks for the thumbnail in its
+224 px square and for the bare URL in the enlarged view — loading a NAS's
+three-megabyte `folder.jpg` into a 224 px square was pure waste over Wi-Fi,
+while enlarging it deserves every pixel. The default stays "as it is",
+because `cover_href` is published in the state for every consumer of the
+protocol, present and future: the thumbnail is a service rendered to whoever
+asks, not a change in what the bare URL means. An unknown value falls back to
+full size rather than refusing the request — a typo in a URL must not blank
+the cover.
+
+One user-visible consequence of this is worth stating plainly: an embedded
+picture larger than `cover_source_max_mio` now yields a `404` and no cover at
+all, where a `folder.jpg` of the same size on a share would still stream —
+the cap that costs nothing to check for a file costs a full parse to check
+for an embedded picture, so it is enforced there too, and the picture simply
+does not come through.
 
 Unlike the push path, these thumbnails **are** memoised — four of them, and the
 distinction is entirely in the key. `ligne` could memoise nothing because its

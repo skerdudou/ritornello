@@ -79,7 +79,15 @@ enum SourceStamp {
 impl SourceStamp {
     /// The stamp of a file, read from the metadata of the descriptor that is
     /// about to be — or has just been — read. Same descriptor, so no window
-    /// between the stamp and the bytes it describes.
+    /// between the stamp and the bytes it describes — for a caller that reads
+    /// through one open. `read_embedded_bounded` does not: it takes a
+    /// separate `std::fs::metadata` and then a separate `Probe::open`, so a
+    /// replacement landing in that gap is possible there. The consequence is
+    /// benign rather than a correctness hole: a picture written into that
+    /// window is filed under a stamp that describes the file *before* the
+    /// replacement, an identity no later stat of the replaced file will ever
+    /// produce again — so the entry is orphaned in the cache, never wrongly
+    /// served to a caller validating against the file as it now is.
     fn of_file(meta: &std::fs::Metadata) -> Self {
         let modified_nanos = meta
             .modified()
@@ -1089,12 +1097,12 @@ async fn read_embedded_bounded(
             let meta = std::fs::metadata(&path).ok()?;
             let stamp = SourceStamp::of_file(&meta);
             let file = lofty::probe::Probe::open(&path).ok()?.read().ok()?;
-            let picture = lofty::file::TaggedFileExt::primary_tag(&file)
+            let bytes = lofty::file::TaggedFileExt::primary_tag(&file)
                 .or_else(|| lofty::file::TaggedFileExt::first_tag(&file))?
                 .pictures()
                 .first()?
-                .clone();
-            let bytes = picture.data().to_vec();
+                .data()
+                .to_vec();
             if bytes.len() > cap {
                 tracing::warn!(
                     "embedded cover in {} is {} bytes, over the {cap}-byte limit",
@@ -1585,8 +1593,18 @@ pub async fn cover_get(
             // around: unlike `File`, nothing downstream reuses a descriptor —
             // a container is not a stream of image bytes, so serving a body
             // means extracting through `read_embedded_bounded` regardless,
-            // which reopens the file itself. Stat-only is what keeps a
-            // conditional request from ever touching `lofty`.
+            // which stats the file **again** on its own. Stat-only here is
+            // what keeps a conditional request from ever touching `lofty`.
+            //
+            // That second stat is not a cost merely tolerated for the sake of
+            // this route's simplicity — it must stay. Passing this route's
+            // own stamp down instead would mean filing the rendition, once
+            // read, under the *caller's* stamp rather than the one describing
+            // the bytes actually read: exactly the hazard `rendition_for`'s
+            // comment on "the identity comes from the read, never from the
+            // caller's stamp" refuses. An identity must come from the read
+            // that produced the bytes, not from a stat taken earlier by
+            // someone else.
             let stat = tokio::time::timeout(FILE_TIMEOUT, tokio::fs::metadata(&audio)).await;
             let meta = match stat {
                 Ok(Ok(v)) => v,
@@ -1992,21 +2010,23 @@ mod tests {
 
     /// **The guard for this task's whole deletion.** `CoverPayload::Embedded`
     /// names the user's own *audio* file, not a copy of ours — nothing here
-    /// may ever delete it. Written and proven green **before** `is_cover_temp`
-    /// and the `remove_file` call it guarded are removed from `insert`, so
-    /// that the removal is checked against a real assertion rather than
-    /// against the absence of a crash. See the mutation check recorded in
-    /// this task's report: reintroducing an unconditional delete on eviction
-    /// turns this test red.
+    /// may ever delete it. Written and proven green before commit 901bbe2
+    /// removed the temp-file machinery — the `remove_file` call this test
+    /// guarded against — from `insert`, so that the removal was checked
+    /// against a real assertion rather than against the absence of a crash.
+    /// See the mutation check recorded in this task's report: reintroducing
+    /// an unconditional delete on eviction turns this test red.
+    ///
+    /// No real MP3 needed: `insert` never opens the file, it only ever moves
+    /// a path in and out of the cache — so a one-byte stand-in exercises the
+    /// same code path as a real track, and this, the branch's most dangerous
+    /// deletion, is guarded unconditionally rather than skipping whenever
+    /// ffmpeg happens to be absent.
     #[tokio::test]
     async fn evicting_an_embedded_entry_deletes_no_file() {
         let dir = tempfile::tempdir().unwrap();
-        let Some(track) =
-            crate::player::mpv::tests::mp3_with_cover_from(dir.path(), "color=c=green:s=16x16:d=1")
-        else {
-            eprintln!("ffmpeg missing: skipping test");
-            return;
-        };
+        let track = dir.path().join("t.mp3");
+        std::fs::write(&track, b"x").unwrap();
         let cache = CoverCache::new();
         cache.set_cover_settings(CoverSettings { entries: 1, ..CoverSettings::default() });
         cache.insert("a".into(), CoverPayload::Embedded(track.clone())).await;
