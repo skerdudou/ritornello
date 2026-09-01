@@ -114,7 +114,7 @@ const hasImage = computed(() => !!props.state?.cover_href && !imageBroken.value)
  */
 const thumbnailHref = computed(() => {
   if (!props.state?.cover_href) return null
-  const base = `${props.state.cover_href}?taille=vignette`
+  const base = `${props.state.cover_href}?size=thumbnail`
   // `attempt` only appears from the first retry onwards: see its doc.
   return attempt.value === 0 ? base : `${base}&attempt=${attempt.value}`
 })

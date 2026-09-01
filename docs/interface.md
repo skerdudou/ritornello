@@ -647,7 +647,7 @@ its own way. The device now settles it once, centrally.
 
 The rendition serves the HTTP route too, but **only on request**.
 `GET /api/cover/{key}` still streams a local file without ever holding it
-whole; `GET /api/cover/{key}?taille=vignette` returns the same rendition the
+whole; `GET /api/cover/{key}?size=thumbnail` returns the same rendition the
 displays get. The web page asks for the thumbnail in its 224 px square and for
 the bare URL in the enlarged view — loading a NAS's three-megabyte `folder.jpg`
 into a 224 px square was pure waste over Wi-Fi, while enlarging it deserves

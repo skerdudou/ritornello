@@ -235,7 +235,7 @@ describe('PlayerCard', () => {
     // The UI must never point outside: the core serves the image. And it asks
     // for the **thumbnail**: the square is 224 px, a NAS's `folder.jpg` is
     // commonly three mebibytes.
-    expect(img.attributes('src')).toBe('/api/cover/1a2b?taille=vignette')
+    expect(img.attributes('src')).toBe('/api/cover/1a2b?size=thumbnail')
     // The cover's origin is no longer a badge: it is in the provenance
     // popover, with the other fields (see below).
     expect(w.find('[data-cover-origin]').exists()).toBe(false)
@@ -333,7 +333,7 @@ describe('PlayerCard', () => {
     // single failure would doom the square for the rest of the session.
     await w.setProps({ state: full({ title: 'So What', cover_href: '/api/cover/3c4d' }) })
     expect(w.get('[data-cover-image] img').attributes('src')).toBe(
-      '/api/cover/3c4d?taille=vignette',
+      '/api/cover/3c4d?size=thumbnail',
     )
   })
 
