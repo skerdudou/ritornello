@@ -106,6 +106,64 @@ fn purge_temp_files_in(dir: &std::path::Path) {
 /// hold it after releasing the table's lock.
 type FrameInFlight = Arc<tokio::sync::OnceCell<Option<Arc<str>>>>;
 
+/// A rendition under construction, shared between the caller producing it and
+/// those waiting for it. The same rendezvous as `FrameInFlight`, one stage
+/// lower: what is shared here is the re-encoded image, not the protocol line
+/// wrapped around it.
+type RenditionInFlight =
+    Arc<tokio::sync::OnceCell<Option<(&'static str, Arc<Vec<u8>>)>>>;
+
+/// What proves a source has not changed under its key.
+///
+/// **Owned by this module, and that is a correction.** The HTTP route used to
+/// build a quoted `ETag` string and inject it into the cache's identity, so a
+/// protocol's validator leaked down into the core's memory. The dependency now
+/// runs the other way: the core stamps its sources, and `cover_get` *derives*
+/// its header from the stamp.
+///
+/// `Frozen` is not a degenerate case. A network cover is an HTTP body read
+/// whole, held in memory under a key derived from its URL: nothing can change
+/// it in place, so there is nothing to stamp. Only a file on a share can be
+/// replaced under its path without any code of ours running.
+///
+/// **What the file stamp is worth.** Modification date and size, the pair HTTP
+/// has validated caches with for thirty years, and the pair `cover_get`
+/// already trusted for its `304`. Two writes landing inside one clock tick
+/// *and* producing the same byte count would collide — on Windows the system
+/// clock advances about every 15 ms — where re-reading every time could not.
+/// That is a real weakening, and a bounded one: the defect the `line` doc
+/// describes was a cache that nothing could *ever* invalidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceStamp {
+    /// A body already read whole, immutable under its key.
+    Frozen,
+    /// A file on a share, which anyone can replace behind our back.
+    File { modified_nanos: u128, size: u64 },
+}
+
+impl SourceStamp {
+    /// The stamp of a file, read from the metadata of the descriptor that is
+    /// about to be — or has just been — read. Same descriptor, so no window
+    /// between the stamp and the bytes it describes.
+    fn of_file(meta: &std::fs::Metadata) -> Self {
+        let modified_nanos = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        Self::File { modified_nanos, size: meta.len() }
+    }
+
+    /// What this stamp contributes to a cache identity.
+    fn tag(&self) -> String {
+        match self {
+            Self::Frozen => "frozen".to_string(),
+            Self::File { modified_nanos, size } => format!("{modified_nanos:x}-{size:x}"),
+        }
+    }
+}
+
 /// What the core keeps of a cover.
 ///
 /// Two natures, and it is deliberate: a **local** cover does not enter memory.
@@ -179,6 +237,29 @@ pub struct Rendition {
     /// the header **before any allocation**, and carried into `image::Limits`
     /// for the case of a header that would lie about its own dimensions.
     pub pixel_cap: u64,
+}
+
+impl Rendition {
+    /// What these rules contribute to a cache identity.
+    ///
+    /// **This is what makes a settings change take effect**, and its absence
+    /// was a defect: nothing invalidated the memorized renditions, so lowering
+    /// `max_edge_px` in the admin page kept serving the old size until the
+    /// entry was evicted. Carrying the rules in the identity settles it
+    /// without a line of invalidation logic — other rules, other identity, and
+    /// the stale entry falls out on its own.
+    fn tag(&self) -> String {
+        let Self { max_edge_px, jpeg_quality, output_cap, pixel_cap } = self;
+        format!("{max_edge_px}-{jpeg_quality}-{output_cap}-{pixel_cap}")
+    }
+}
+
+/// The identity under which a rendition is memorized: the source's key, what
+/// proves that source has not changed, and the rules it was produced under.
+/// All three are needed — drop any one and the cache can serve bytes that
+/// answer a question nobody asked.
+fn rendition_identity(key: &str, stamp: &SourceStamp, rules: &Rendition) -> String {
+    format!("{key}:{}:{}", stamp.tag(), rules.tag())
 }
 
 /// The two stages of cover processing, not to be confused.
@@ -271,60 +352,81 @@ pub struct CoverCache {
     /// nobody reads is a debt.
     #[cfg(test)]
     builds: std::sync::atomic::AtomicUsize,
-    /// The thumbnails already built for the HTTP route, **cache key and ETag
-    /// combined**.
+    /// The renditions already produced, **shared by both consumers**.
     ///
     /// A cache, this time, and not a rendezvous like `in_flight` — the
     /// difference lies entirely in what serves as the key. `line` could not
     /// memorize anything because its key hashes the *path*: the user replaces
     /// the `folder.jpg` under that path and nothing invalidates the entry.
-    /// Here the key additionally carries the ETag, that is, the file's
-    /// modification date and size (see `file_etag`) — replacing the file
-    /// therefore changes the key, and the old thumbnail is never served again.
-    /// It then evicts itself on its own, like the rest.
+    /// Here the identity additionally carries the source's stamp (see
+    /// `SourceStamp`) — replacing the file therefore changes the identity, and
+    /// the old rendition is never served again — and the rules it was produced
+    /// under (see `Rendition::tag`), so a settings change lands too. It then
+    /// evicts itself on its own, like the rest.
     ///
-    /// Without this, every load of the home page would re-decode and re-encode
-    /// the image on a Pi 2, when the thumbnail is precisely what we build so
-    /// the browser *does not* have to download three megabytes. The browser
-    /// revalidates (`no-cache`), so the common case is a 304 with nothing
-    /// built; this cache covers the first load of each new browser, and the
-    /// multiple tabs of a single device.
-    thumbnails: RwLock<VecDeque<Thumbnail>>,
-    /// How many thumbnails were **actually** decoded and re-encoded.
+    /// **Both consumers, and that is new.** The page's 224 px square and the
+    /// socket of a subscribed display want the very same bytes, and each used
+    /// to decode and re-encode the image on its own side: on a Pi 2, a second
+    /// core busy for several hundred milliseconds per published cover. What
+    /// once forbade sharing was the identity, not the desire — the display
+    /// path had no way to name what it had built. Now it has.
+    renditions: RwLock<VecDeque<Rendered>>,
+    /// The renditions in progress, one entry per cache key.
+    ///
+    /// `in_flight` one stage higher already spares two displays subscribed at
+    /// the same instant, but it never covered the route: two browsers opening
+    /// the page together decoded the same image twice, and so did a display
+    /// and a browser arriving together. This rendezvous is keyed by the cache
+    /// key rather than the full identity, because concurrent callers on one
+    /// key necessarily see the same source — the stamp is not yet known when
+    /// the registration happens, and waiting to know it would mean reading the
+    /// share before finding out somebody else already is.
+    renditions_in_flight: tokio::sync::Mutex<HashMap<String, RenditionInFlight>>,
+    /// How many renditions were **actually** run, whichever consumer asked.
     ///
     /// Under `cfg(test)`, the same trade-off as `builds` just above and for
     /// the same reason: the only proof that a cache saves work is a count of
     /// executions. Comparing two responses says nothing — two successive
     /// builds return the same bytes.
+    ///
+    /// **Counting per consumer would prove nothing**, and a counter that once
+    /// watched the route alone taught us so: it stayed at one however many
+    /// times the display path re-encoded, because the display path never
+    /// touched it. An assertion that cannot fail is not an assertion.
     #[cfg(test)]
-    thumbnails_built: std::sync::atomic::AtomicUsize,
+    renditions_built: std::sync::atomic::AtomicUsize,
 }
 
-/// A retained thumbnail: its identity (cache key **plus** the source's ETag),
-/// its MIME type, and its bytes.
+/// A retained rendition: its identity (see `rendition_identity`), its MIME
+/// type, and its bytes.
 ///
 /// A named type rather than a triple: the first field is the only one that
 /// could be confused with another `String`, and it carries precisely the
-/// property that makes this cache safe — see the `thumbnails` field.
-struct Thumbnail {
+/// property that makes this cache safe — see the `renditions` field.
+struct Rendered {
     identity: String,
     mime: &'static str,
     bytes: Arc<Vec<u8>>,
 }
 
-/// Number of HTTP thumbnails retained. The same count as the cover cache
-/// entries setting: beyond the current cover and a few previous ones, nobody
-/// asks again.
-const THUMBNAILS: usize = 4;
+/// Number of renditions retained. Beyond the current cover and a few previous
+/// ones, nobody asks again — a device plays one track at a time, and the page
+/// shows one square.
+///
+/// Deliberately **not** `cover_cache_entries` (20 by default), which bounds
+/// the *sources*: a source costs a `PathBuf` for a file on a share, whereas a
+/// rendition costs its bytes, up to `cover_max_bytes_ko` each. A comment here
+/// once claimed the two were the same number; they never were.
+const RENDITIONS: usize = 4;
 
 impl CoverCache {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// The thumbnail already built for this identity, if there is one.
-    async fn cached_thumbnail(&self, identity: &str) -> Option<(&'static str, Arc<Vec<u8>>)> {
-        self.thumbnails
+    /// The rendition already produced under this identity, if there is one.
+    async fn cached_rendition(&self, identity: &str) -> Option<(&'static str, Arc<Vec<u8>>)> {
+        self.renditions
             .read()
             .await
             .iter()
@@ -332,41 +434,108 @@ impl CoverCache {
             .map(|v| (v.mime, v.bytes.clone()))
     }
 
-    /// Retains a thumbnail under its identity (key + ETag), evicting the
-    /// oldest beyond `THUMBNAILS`.
-    async fn remember_thumbnail(&self, identity: String, mime: &'static str, bytes: Arc<Vec<u8>>) {
-        let mut v = self.thumbnails.write().await;
+    /// Retains a rendition under its identity, evicting the oldest beyond
+    /// `RENDITIONS`.
+    async fn remember_rendition(&self, identity: String, mime: &'static str, bytes: Arc<Vec<u8>>) {
+        let mut v = self.renditions.write().await;
         v.retain(|e| e.identity != identity);
-        v.push_back(Thumbnail { identity, mime, bytes });
-        while v.len() > THUMBNAILS {
+        v.push_back(Rendered { identity, mime, bytes });
+        while v.len() > RENDITIONS {
             v.pop_front();
         }
     }
 
-    /// Builds — or retrieves — the thumbnail of `key`, under the identity
-    /// `identity` (the cache key **plus** the source's ETag, see the
-    /// `thumbnails` field).
+    /// Produces — or retrieves — the rendition of `key`. **The single place
+    /// where a cover is decoded and re-encoded**, whoever is asking.
     ///
-    /// `None` means "no thumbnail to serve" without distinguishing the cases:
+    /// `known_stamp` is what the caller already knows about the source's
+    /// freshness, and it exists so that neither consumer pays for the other's
+    /// shape:
+    ///
+    /// - `cover_get` passes `Some`. It has just opened the file and read its
+    ///   metadata to answer conditionally, so it can name the identity up
+    ///   front and be served from memory **without touching the share again**
+    ///   — the property that makes a second browser tab free, and one this
+    ///   rework must not regress.
+    /// - `line` passes `None`. It knows nothing before reading, and reading is
+    ///   what it must do anyway; it learns the stamp from the very metadata
+    ///   call the read already makes, then looks the identity up. It pays a
+    ///   read it was going to pay regardless, and skips the decode.
+    ///
+    /// `None` means "no rendition to serve" without distinguishing the cases:
     /// re-encoding disabled by the user, unreadable image, dimensions beyond
-    /// the cap. The caller then falls back to the original, which is the
-    /// answer it would have given without this route.
-    async fn thumbnail(&self, key: &str, identity: &str) -> Option<(&'static str, Arc<Vec<u8>>)> {
-        if let Some(found) = self.cached_thumbnail(identity).await {
-            return Some(found);
-        }
-        // A single read of the settings for the two stages, like `line`: two
-        // reads could straddle a change and produce a thumbnail under rules
-        // that never coexisted.
+    /// the cap. Each caller then falls back to the source, which is the answer
+    /// it would have given had this cache never existed.
+    async fn rendition_for(
+        &self,
+        key: &str,
+        known_stamp: Option<SourceStamp>,
+    ) -> Option<(&'static str, Arc<Vec<u8>>)> {
+        // A single read of the settings for every stage below, like `line`:
+        // two reads could straddle a change and produce a rendition under
+        // rules that never coexisted.
         let settings = self.settings();
-        let wanted_rendition = settings.rendition?;
-        let (mime, bytes) = self.bytes(key, settings.source_max).await?;
-        #[cfg(test)]
-        self.thumbnails_built.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let (mime, bytes) = rendition(mime, bytes, wanted_rendition).await?;
-        let bytes = Arc::new(bytes);
-        self.remember_thumbnail(identity.to_string(), mime, bytes.clone()).await;
-        Some((mime, bytes))
+        let rules = settings.rendition?;
+        if let Some(stamp) = known_stamp {
+            if let Some(found) =
+                self.cached_rendition(&rendition_identity(key, &stamp, &rules)).await
+            {
+                return Some(found);
+            }
+        }
+
+        // Registration at the rendezvous. The table's lock only covers the
+        // registration itself — never the work, which reads a file and
+        // occupies a core.
+        let cell = {
+            let mut in_flight = self.renditions_in_flight.lock().await;
+            in_flight.entry(key.to_string()).or_insert_with(RenditionInFlight::default).clone()
+        };
+        let result = cell
+            .get_or_init(|| async {
+                let (mime, bytes, stamp) = self.bytes(key, settings.source_max).await?;
+                // **The identity comes from the read, never from the caller's
+                // stamp**, even when the caller had one. The two can disagree:
+                // `cover_get` stat'ed the file to answer conditionally, and
+                // the share is not ours — the image may have been replaced in
+                // between. Filing under the caller's stamp would then store
+                // the *new* bytes under the *old* identity, and serve them to
+                // everyone who still validates against it. Filing under what
+                // was actually read cannot lie; the caller merely gets bytes
+                // fresher than the ETag it will label them with, and the next
+                // revalidation corrects that.
+                let identity = rendition_identity(key, &stamp, &rules);
+                // **Looked up again, now that the stamp is known.** This is
+                // where the caller that could not name the identity up front
+                // collects what the other one already built — the whole point
+                // of sharing. A caller that arrived with its stamp has already
+                // missed above, and pays one comparison against four entries.
+                if let Some(found) = self.cached_rendition(&identity).await {
+                    return Some(found);
+                }
+                #[cfg(test)]
+                self.renditions_built.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let (mime, bytes) = rendition(mime, bytes, rules).await?;
+                let bytes = Arc::new(bytes);
+                self.remember_rendition(identity, mime, bytes.clone()).await;
+                Some((mime, bytes))
+            })
+            .await
+            .clone();
+
+        // **The removal is what keeps the rendezvous from becoming a second
+        // cache**, exactly as for `in_flight`: a `OnceCell` keeps its value
+        // forever, and this one is keyed by the bare key, which says nothing
+        // about the source's freshness. All callers attempt it, and the
+        // identity is checked first so that a fresher cell registered
+        // meanwhile is not stolen from its owner.
+        {
+            let mut in_flight = self.renditions_in_flight.lock().await;
+            if in_flight.get(key).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
+                in_flight.remove(key);
+            }
+        }
+        result
     }
 
     /// How many times a frame was built since the cache was created.
@@ -375,14 +544,22 @@ impl CoverCache {
         self.builds.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// How many thumbnails were built since the cache was created.
+    /// How many renditions were run since the cache was created, both
+    /// consumers taken together. See the `renditions_built` field.
     #[cfg(test)]
-    pub(crate) fn thumbnails_built(&self) -> usize {
-        self.thumbnails_built.load(std::sync::atomic::Ordering::SeqCst)
+    pub(crate) fn renditions_built(&self) -> usize {
+        self.renditions_built.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Publishes new settings. Taken into account at the next publication:
-    /// nothing is memorized, so there is nothing to invalidate.
+    /// Publishes new settings, taken into account at the next publication.
+    ///
+    /// **Nothing to invalidate, and this line used to say so for the wrong
+    /// reason.** It read "nothing is memorized", which stopped being true the
+    /// day renditions were cached: lowering the longest edge then kept serving
+    /// the old size until the entry fell out on its own. What settles it is
+    /// not an absence of memory but the identity — a rendition is filed under
+    /// the rules that produced it (see `Rendition::tag`), so other rules mean
+    /// another identity, and the stale entry is simply never asked for again.
     pub fn set_cover_settings(&self, r: CoverSettings) {
         // A poisoned lock would mean a holder panicked while holding thirty
         // `Copy` bytes — impossible without a defect elsewhere. Overwrite
@@ -435,7 +612,14 @@ impl CoverCache {
         self.entries.read().await.iter().find(|(k, _)| k == key).map(|(_, p)| p.clone())
     }
 
-    /// Materializes the bytes of a cover: `(mime, bytes)`.
+    /// Materializes the bytes of a cover: `(mime, bytes, stamp)`.
+    ///
+    /// The stamp comes back with the bytes rather than from a separate call,
+    /// and that is what makes it trustworthy: for a file it is read from the
+    /// metadata of the **descriptor that was read**, so no window separates
+    /// the stamp from the content it describes. It also costs nothing —
+    /// `read_file_bounded` already asked for that metadata to check the size,
+    /// and threw the modification date away.
     ///
     /// **Precisely what the HTTP route avoids doing.** That one, for a local
     /// file, opens, checks the header and *streams* without ever holding the
@@ -451,7 +635,11 @@ impl CoverCache {
     /// The cap is **passed by the caller** rather than re-read here, so that
     /// `line` reads the settings only once: two reads could straddle a change,
     /// and produce a thumbnail under rules that never coexisted.
-    async fn bytes(&self, key: &str, cap: usize) -> Option<(&'static str, Vec<u8>)> {
+    async fn bytes(
+        &self,
+        key: &str,
+        cap: usize,
+    ) -> Option<(&'static str, Vec<u8>, SourceStamp)> {
         // The lock is released **before** any IO. A local cover commonly lives
         // on a sleeping share: holding the read lock during `FILE_TIMEOUT`
         // would block the cache's insertions, hence the detached task of
@@ -482,7 +670,7 @@ impl CoverCache {
                         );
                         return None;
                     }
-                    return Some((*mime, v.clone()));
+                    return Some((*mime, v.clone(), SourceStamp::Frozen));
                 }
                 Some(CoverPayload::File(c)) => c.clone(),
             }
@@ -494,18 +682,29 @@ impl CoverCache {
     /// complete JSON, base64 included, terminated by a newline, ready to be
     /// written as is onto a socket.
     ///
-    /// **Built at every call, never memorized, and that is the property that
-    /// matters.** An encoded line kept from one call to the next was tried
-    /// here, then removed: the cache key hashes the *path*, not the content,
-    /// so a kept line became wrong as soon as the user replaced the image
-    /// under that path. And the gesture leading there takes three clicks —
-    /// disable the display from the admin page, replace the `folder.jpg`,
-    /// re-enable it: the reconnected relay starts over with its deduplication
-    /// guard at zero (`main::display_relay`, `CoverTracking`), asks for the
-    /// current cover again, and used to receive the line from before. Nothing
-    /// invalidated it because nothing *could* invalidate it: replacing a file
-    /// on a share goes through no code of ours. A visibly wrong image is the
-    /// worst defect of this device, far above a memory spike.
+    /// **The line itself is built at every call and never memorized, and that
+    /// is the property that matters.** An encoded line kept from one call to
+    /// the next was tried here, then removed: the cache key hashes the *path*,
+    /// not the content, so a kept line became wrong as soon as the user
+    /// replaced the image under that path. And the gesture leading there takes
+    /// three clicks — disable the display from the admin page, replace the
+    /// `folder.jpg`, re-enable it: the reconnected relay starts over with its
+    /// deduplication guard at zero (`main::display_relay`, `CoverTracking`),
+    /// asks for the current cover again, and used to receive the line from
+    /// before. Nothing invalidated it because nothing *could* invalidate it:
+    /// replacing a file on a share goes through no code of ours. A visibly
+    /// wrong image is the worst defect of this device, far above a memory
+    /// spike.
+    ///
+    /// **The rendition inside it, on the other hand, is now shared** — and it
+    /// is the same objection that made it possible rather than a change of
+    /// mind about it. What forbade memorizing was the key, not the desire;
+    /// `rendition_for` files its work under an identity that carries the
+    /// source's stamp (see `SourceStamp`), so the replaced `folder.jpg` is a
+    /// different identity and the reconnected relay above still gets the new
+    /// image. What this call no longer pays for is the decode the page's
+    /// square may already have paid — several hundred milliseconds of a Pi 2's
+    /// core, per published cover.
     ///
     /// **Sharing remains desirable, but structural rather than memorized.**
     /// The intended saving — paying once per *publication* for the
@@ -550,18 +749,35 @@ impl CoverCache {
                 self.builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 // A single read of the settings for the two stages: see
                 // `bytes`. Two reads could straddle a change, and produce a
-                // thumbnail under rules that never coexisted.
+                // rendition under rules that never coexisted.
                 let settings = self.settings();
-                let (mime, bytes) = self.bytes(key, settings.source_max).await?;
-                // The rendition applies **here and not in `bytes`**, so on the
-                // push path only. The HTTP route `cover_get`, for its part,
-                // streams the local file without ever holding it whole:
-                // forcing a re-encode on it would make it lose exactly the
-                // property that makes it cheap, for an image the browser
-                // resizes and caches on its side.
+                // The rendition is asked of `rendition_for` and no longer
+                // performed here, so that what the page's square already had
+                // re-encoded is not re-encoded a second time for the socket.
+                // `None` as the stamp: this path knows nothing of the source
+                // before reading it, and reading is what it must do anyway.
+                //
+                // The rendition applies **on the push path only**. The HTTP
+                // route `cover_get`, for its part, streams the local file
+                // without ever holding it whole: forcing a re-encode on it
+                // would make it lose exactly the property that makes it cheap,
+                // for an image the browser resizes and caches on its side.
                 let (mime, bytes) = match settings.rendition {
-                    None => (mime, bytes),
-                    Some(r) => rendition(mime, bytes, r).await?,
+                    None => {
+                        let (mime, bytes, _) = self.bytes(key, settings.source_max).await?;
+                        (mime, bytes)
+                    }
+                    // Cloned out of the `Arc`: `ritornello_proto::Cover` owns
+                    // its bytes, as a wire type should — expressing sharing in
+                    // it would put an `Arc` inside a serialized structure, the
+                    // very thing the doc below refuses. A memcpy of a few
+                    // hundred kibibytes against the several hundred
+                    // milliseconds of a decode is not a trade worth hesitating
+                    // over.
+                    Some(_) => {
+                        let (mime, bytes) = self.rendition_for(key, None).await?;
+                        (mime, bytes.as_ref().clone())
+                    }
                 };
                 let cover = ritornello_proto::Cover {
                     href: href.to_string(),
@@ -622,11 +838,14 @@ impl CoverCache {
 /// weight when it is precisely the bomb we are trying to refuse. The
 /// pass-through therefore tests **both** criteria, and comes after the guard.
 ///
-/// **Nothing is memorized**, and this is consistent with `line`: the cache
-/// key hashes the path, not the content, so a kept thumbnail would become
-/// wrong as soon as the user replaces the image under that path. The price is
-/// one decode per publication, and `line` is only called once per cover
-/// change and per subscribed relay.
+/// **This function memorizes nothing — its caller does.** The distinction was
+/// blurred here, and the line used to read "nothing is memorized" while
+/// `rendition_for` was already filing the result away. What is true is
+/// narrower and worth keeping straight: the decode is a pure function of
+/// `(bytes, rules)`, so it is the wrong place to hold anything. Whether a
+/// result may be reused depends on facts this function cannot see — whether
+/// the source is still the one that produced those bytes — and that judgment
+/// belongs to `rendition_for`, which has the stamp to make it.
 ///
 /// `None` = nothing to push, as everywhere in this module: unreadable image,
 /// dimensions beyond the cap, or produced thumbnail beyond the safety net.
@@ -760,7 +979,7 @@ fn encode(bytes: Vec<u8>, r: Rendition, alloc_cap: usize) -> Option<(&'static st
 /// What the bounded read of a cover file returns, before the image type is
 /// validated.
 enum BoundedRead {
-    Bytes(Vec<u8>),
+    Bytes(Vec<u8>, SourceStamp),
     /// The file's size, **known through `metadata`, before any read of the
     /// bytes themselves**: see the doc of `read_file_bounded`.
     TooLarge(u64),
@@ -798,10 +1017,16 @@ enum BoundedRead {
 async fn read_file_bounded(
     path: &std::path::Path,
     cap: usize,
-) -> Option<(&'static str, Vec<u8>)> {
+) -> Option<(&'static str, Vec<u8>, SourceStamp)> {
     let read_attempt = tokio::time::timeout(FILE_TIMEOUT, async {
         let file = tokio::fs::File::open(path).await?;
-        let size = file.metadata().await?.len();
+        // The **whole** metadata and not just its length: the modification
+        // date completes the source's stamp, and it is free here — this call
+        // was already being made for the size check. Taken from the descriptor
+        // that is about to be read, so the stamp and the bytes cannot describe
+        // two different versions of the file.
+        let meta = file.metadata().await?;
+        let size = meta.len();
         if size > cap as u64 {
             return Ok::<_, std::io::Error>(BoundedRead::TooLarge(size));
         }
@@ -812,11 +1037,11 @@ async fn read_file_bounded(
         // the doc above): the common case has already been settled by
         // `metadata`.
         file.take(cap as u64 + 1).read_to_end(&mut bytes).await?;
-        Ok(BoundedRead::Bytes(bytes))
+        Ok(BoundedRead::Bytes(bytes, SourceStamp::of_file(&meta)))
     })
     .await;
-    let bytes = match read_attempt {
-        Ok(Ok(BoundedRead::Bytes(v))) => v,
+    let (bytes, stamp) = match read_attempt {
+        Ok(Ok(BoundedRead::Bytes(v, stamp))) => (v, stamp),
         Ok(Ok(BoundedRead::TooLarge(size))) => {
             // The exact size of the offense, known without having read any of
             // its content — which is what the read bounded at `+ 1` byte
@@ -845,7 +1070,7 @@ async fn read_file_bounded(
         return None;
     }
     let mime = image_type(&bytes)?;
-    Some((mime, bytes))
+    Some((mime, bytes, stamp))
 }
 
 /// Header bytes of a recognized image. Checked before serving a local file:
@@ -1053,12 +1278,16 @@ pub async fn fetch(r: &CoverRef) -> Option<CoverPayload> {
 /// its share. The ETag must therefore follow the content, not just the path,
 /// otherwise a conditional request would validate forever an image the user
 /// has in fact replaced.
-fn file_etag(modified: Option<std::time::SystemTime>, size: u64) -> String {
-    let nanos = modified
-        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("\"{nanos:x}-{size:x}\"")
+///
+/// **Derived from the stamp, and no longer the other way round.** This
+/// function used to be the one place where "has this source changed?" was
+/// written down, and the cache borrowed its answer — a quoted HTTP validator
+/// ending up as part of a key in the core's memory. The core now stamps its
+/// own sources (`SourceStamp`) and HTTP dresses that stamp in its own
+/// vocabulary here, which is the direction that lets the display path share
+/// the answer without knowing what an ETag is.
+fn file_etag(stamp: &SourceStamp) -> String {
+    format!("\"{}\"", stamp.tag())
 }
 
 /// What the route knows how to serve.
@@ -1125,7 +1354,7 @@ pub async fn cover_get(
                     return StatusCode::NOT_MODIFIED.into_response();
                 }
                 if let Some((mime, small)) =
-                    state.covers.thumbnail(&key, &format!("{key}:v")).await
+                    state.covers.rendition_for(&key, Some(SourceStamp::Frozen)).await
                 {
                     return (
                         [
@@ -1192,7 +1421,8 @@ pub async fn cover_get(
             // source content but not the same served bytes, and two different
             // responses under a single validator would make the browser serve
             // one for the other.
-            let source_etag = file_etag(meta.modified().ok(), meta.len());
+            let stamp = SourceStamp::of_file(&meta);
+            let source_etag = file_etag(&stamp);
             let etag = if thumbnail_requested {
                 format!("\"v-{}\"", source_etag.trim_matches('"'))
             } else {
@@ -1204,12 +1434,16 @@ pub async fn cover_get(
             }
             // **After the 304 and not before**: a conditional request must
             // build nothing, and that is what makes the thumbnail cheap in
-            // steady state. The memorized identity carries the source's ETag,
-            // so a `folder.jpg` replaced on the share changes key and its old
-            // thumbnail is never served again.
+            // steady state. The stamp is handed over rather than left to be
+            // rediscovered — this route has just opened the file and read its
+            // metadata, so a memorized rendition is served **without touching
+            // the share again**. And because the stamp is part of the
+            // identity, a `folder.jpg` replaced on the share is a different
+            // identity, and its old rendition is never served again.
             if thumbnail_requested {
-                let identity = format!("{key}:{source_etag}");
-                if let Some((mime, small)) = state.covers.thumbnail(&key, &identity).await {
+                if let Some((mime, small)) =
+                    state.covers.rendition_for(&key, Some(stamp)).await
+                {
                     return (
                         [
                             (header::CONTENT_TYPE, mime.to_string()),
@@ -1429,7 +1663,144 @@ mod tests {
         // **The count is the only proof**: comparing the two responses says
         // nothing, two successive builds return the same bytes. Same reason as
         // the rendezvous's `builds` counter.
-        assert_eq!(cache.thumbnails_built(), 1, "the second request must be free");
+        assert_eq!(cache.renditions_built(), 1, "the second request must be free");
+    }
+
+    #[tokio::test]
+    async fn a_display_push_reuses_the_rendition_the_http_route_already_built() {
+        // **The whole point of sharing.** A cover has two consumers — the
+        // socket of a subscribed display and the page's 224 px square — and
+        // each decoded then re-encoded the same image on its own side. On a
+        // Pi 2 that is a second core busy for several hundred milliseconds,
+        // producing bytes that are already in memory, byte for byte.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("folder.jpg");
+        std::fs::write(&path, fixtures::jpeg_decodable(1200, 1200)).unwrap();
+        let cache = Arc::new(CoverCache::new());
+        cache.insert("k".to_string(), CoverPayload::File(path)).await;
+
+        let (_, over_http) = served_body(&cache, "k", "?size=thumbnail").await;
+        assert_eq!(cache.renditions_built(), 1, "the route builds the first one");
+
+        let line =
+            cache.line("k", "/api/cover/k").await.expect("a local image must produce a line");
+        // **`renditions_built` and not `thumbnails_built`**: the latter only
+        // watches the HTTP path, so it stays at one however many times the
+        // display path re-encodes — an assertion that cannot fail proves
+        // nothing. Only a count spanning both consumers can.
+        assert_eq!(
+            cache.renditions_built(),
+            1,
+            "the display push must reuse the rendition rather than pay for it again"
+        );
+        match serde_json::from_str::<ritornello_proto::DisplayFrame>(&line).unwrap() {
+            ritornello_proto::DisplayFrame::Cover(c) => assert_eq!(
+                c.bytes, over_http,
+                "and it must be the very bytes the route serves, not merely as many"
+            ),
+            other => panic!("expected a cover frame, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn changing_the_rendition_rules_stops_serving_the_previous_size() {
+        // **A defect found while sharing this cache, not caused by it.**
+        // Nothing invalidated a memorized rendition when the owner changed the
+        // cover settings, and `set_cover_settings` still claimed there was
+        // nothing to invalidate — true only before the cache existed. Lowering
+        // the longest edge in the admin page kept serving the old size until
+        // the entry happened to fall out on its own.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("folder.jpg");
+        std::fs::write(&path, fixtures::jpeg_decodable(1200, 1200)).unwrap();
+        let cache = Arc::new(CoverCache::new());
+        cache.insert("k".to_string(), CoverPayload::File(path)).await;
+
+        cache.set_cover_settings(CoverSettings {
+            rendition: Some(test_rendition(400, 512 * 1024, 16_000_000)),
+            ..CoverSettings::default()
+        });
+        let (_, wide) = served_body(&cache, "k", "?size=thumbnail").await;
+        let (w, _) = dimensions(&wide).expect("a readable thumbnail");
+        assert_eq!(w, 400, "the first rules apply");
+
+        cache.set_cover_settings(CoverSettings {
+            rendition: Some(test_rendition(100, 512 * 1024, 16_000_000)),
+            ..CoverSettings::default()
+        });
+        let (_, narrow) = served_body(&cache, "k", "?size=thumbnail").await;
+        let (w, _) = dimensions(&narrow).expect("a readable thumbnail");
+        assert_eq!(
+            w, 100,
+            "the new longest edge must take effect at once, not at the next eviction"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_route_stops_serving_the_thumbnail_of_a_replaced_file() {
+        // The property the whole stamp exists for, seen from the browser: the
+        // owner drops a new `folder.jpg` on the share, and the square must
+        // stop showing the old one. Sharing the cache with the display path
+        // widened the blast radius of getting this wrong, so it is asserted
+        // here too and not only through `line`.
+        //
+        // **Two different shapes on purpose**: the stamp is modification date
+        // *and* size, and on Windows the system clock advances only about
+        // every 15 ms — two writes in a row can share a date. Different
+        // dimensions make the size differ, so this test measures the cache and
+        // not the host's clock granularity.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("folder.jpg");
+        std::fs::write(&path, fixtures::jpeg_decodable(1200, 1200)).unwrap();
+        let cache = Arc::new(CoverCache::new());
+        cache.insert("k".to_string(), CoverPayload::File(path.clone())).await;
+
+        let (_, before) = served_body(&cache, "k", "?size=thumbnail").await;
+        std::fs::write(&path, fixtures::jpeg_decodable(900, 1500)).unwrap();
+        let (_, after) = served_body(&cache, "k", "?size=thumbnail").await;
+
+        assert_ne!(before, after, "the replaced image must reach the square");
+        assert_eq!(cache.renditions_built(), 2, "and it must have been rendered afresh");
+        let (w, h) = dimensions(&after).expect("a readable thumbnail");
+        assert!(h > w, "the new cover is a portrait, the old one was square: {w}x{h}");
+    }
+
+    #[tokio::test]
+    async fn two_browsers_asking_at_the_same_instant_decode_the_image_once() {
+        // `line` had its rendezvous, the route had none: two tabs opening the
+        // page together — or a display and a browser — each paid for the same
+        // decode. Same proof as `eight_displays_…`: only a count of executions
+        // can show it, since both would return identical bytes either way.
+        let cache = Arc::new(CoverCache::new());
+        // Real work to do: 600 × 400 is over the longest edge, so the image is
+        // decoded and re-encoded rather than passed through. Without that the
+        // first arrival would finish without ever suspending, no follower
+        // would have time to show up, and the test would prove nothing.
+        cache.set_cover_settings(CoverSettings {
+            rendition: Some(test_rendition(64, 512 * 1024, 16_000_000)),
+            ..CoverSettings::default()
+        });
+        cache
+            .insert(
+                "k".to_string(),
+                CoverPayload::Bytes(fixtures::jpeg_decodable(600, 400), "image/jpeg"),
+            )
+            .await;
+
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let c = cache.clone();
+                tokio::spawn(async move { served_body(&c, "k", "?size=thumbnail").await })
+            })
+            .collect();
+        let mut bodies = Vec::new();
+        for t in tasks {
+            let (status, body) = t.await.expect("no task may panic");
+            assert_eq!(status, 200);
+            bodies.push(body);
+        }
+        assert!(bodies.iter().all(|b| b == &bodies[0]), "all eight must get the same image");
+        assert_eq!(cache.renditions_built(), 1, "eight callers, one decode");
     }
 
     #[tokio::test]
@@ -1577,7 +1948,11 @@ mod tests {
         let cache = CoverCache::new();
         let image = jpeg(10);
         cache.insert("k".into(), CoverPayload::Bytes(image.clone(), "image/png")).await;
-        assert_eq!(cache.bytes("k", cap()).await, Some(("image/png", image)));
+        assert_eq!(
+            cache.bytes("k", cap()).await,
+            Some(("image/png", image, SourceStamp::Frozen)),
+            "a body read whole needs no stamp: nothing can change it under its key"
+        );
         assert_eq!(cache.bytes("unknown", cap()).await, None);
     }
 
@@ -1591,7 +1966,13 @@ mod tests {
         std::fs::write(&path, &image).unwrap();
         let cache = CoverCache::new();
         cache.insert("k".into(), CoverPayload::File(path)).await;
-        assert_eq!(cache.bytes("k", cap()).await, Some(("image/jpeg", image)));
+        let (mime, read, stamp) = cache.bytes("k", cap()).await.expect("the file must be read");
+        assert_eq!(mime, "image/jpeg");
+        assert_eq!(read, image);
+        assert!(
+            matches!(stamp, SourceStamp::File { size, .. } if size == image.len() as u64),
+            "a file is stamped by what can change under its path, its size included: {stamp:?}"
+        );
     }
 
     #[tokio::test]
@@ -1634,7 +2015,7 @@ mod tests {
         let cache = CoverCache::new();
         cache.insert("exact".into(), CoverPayload::File(exact)).await;
         match cache.bytes("exact", cap).await {
-            Some((mime, o)) => {
+            Some((mime, o, _)) => {
                 assert_eq!(mime, "image/jpeg");
                 assert_eq!(o.len(), cap, "exactly the cap must pass, not be refused");
             }
