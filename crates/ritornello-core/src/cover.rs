@@ -32,77 +32,6 @@ const NETWORK_CAP: usize = 2 * 1024 * 1024;
 /// been a display that never receives a cover again, with no error anywhere.
 pub const HREF_PREFIX: &str = "/api/cover/";
 
-/// Prefix of the temporary files a **previous** version of this process used
-/// to produce for embedded-cover extraction, dropped in
-/// `std::env::temp_dir()`.
-///
-/// `player::mpv::embedded_cover` no longer writes any such file — it now
-/// probes the container and reports a `cover::CoverSource::Embedded`, read
-/// again on demand, exactly like a `folder.jpg`. What follows in this module
-/// (the purge, the eviction below) therefore only ever meets files left by an
-/// older build, never one produced by the code that ships today.
-pub const TEMP_PREFIX: &str = "ritornello-cover-";
-
-/// True if `path` matches the naming a **previous** version of this process
-/// used for its temporary extraction files.
-///
-/// **Never** true for a `folder.jpg` declared by a Source: that one lives on
-/// the user's share, and the core must never delete it of its own accord.
-/// Nothing in the current code path can produce a `CoverPayload::File`
-/// carrying this prefix anymore (see `TEMP_PREFIX`); this check only still
-/// matters for whatever an older binary may have left behind.
-fn is_cover_temp(path: &std::path::Path) -> bool {
-    path.parent() == Some(std::env::temp_dir().as_path())
-        && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(TEMP_PREFIX))
-}
-
-/// Sweeps the temporary files left by a **previous version** of this process.
-/// Called once at startup, before anything else runs.
-///
-/// **This used to be necessary for correctness, and no longer is — the reason
-/// is worth keeping, since the mechanism it protected against is exactly what
-/// this rework removed.** `embedded_cover` used to name its files after their
-/// content and only write when the name was free; a file left by a run
-/// **killed mid-write** would then be truncated while carrying the name of a
-/// complete image, and the conditional write would adopt it as-is — a display
-/// would receive a cut-off image. Now that `embedded_cover` writes nothing at
-/// all (see `TEMP_PREFIX`), that hazard cannot occur for any file the current
-/// binary produces; what this sweep still clears is whatever an **older**
-/// binary left behind before this rework, or before its own restart.
-///
-/// The second reason, accumulation, is unaffected by that history and still
-/// holds for those leftovers: nothing else deletes these files between two
-/// startups, and a `systemctl restart` does **not** clear
-/// `std::env::temp_dir()` — on a Pi it is often a `tmpfs`, which only a real
-/// reboot resets, and what piles up there eats RAM, not just disk.
-///
-/// With no risk of purging something useful: the cache never survives a
-/// restart (`CoverCache` is rebuilt at every launch), so nothing still lying
-/// around here can be referenced by anything.
-pub fn purge_temp_files() {
-    purge_temp_files_in(&std::env::temp_dir());
-}
-
-/// Testable core of `purge_temp_files`, parameterized by the directory to
-/// sweep.
-///
-/// `std::env::temp_dir()` is **shared** by the whole system, and by the other
-/// tests of this same binary, which write real `ritornello-cover-*` files
-/// there to exercise the extraction itself (see `player::mpv::tests`): running
-/// a real sweep there from a test would put it in competition with them. Split
-/// out so a test can point to a directory of its own, fully isolated.
-fn purge_temp_files_in(dir: &std::path::Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if name.to_str().is_some_and(|n| n.starts_with(TEMP_PREFIX)) {
-            if let Err(e) = std::fs::remove_file(entry.path()) {
-                tracing::debug!("purging leftover cover file {}: {e}", entry.path().display());
-            }
-        }
-    }
-}
-
 /// A cover frame under construction, shared between the caller building it
 /// and those waiting for it.
 ///
@@ -644,20 +573,16 @@ impl CoverCache {
         // Re-read at every insertion: lowering the setting must reclaim the
         // memory at the next track, not at the next restart.
         let cap = self.settings().entries.max(1);
+        // `pop_front` only drops the `CoverPayload` from memory — a `File` or
+        // `Embedded` entry names a path on the user's own share or their own
+        // audio library, never a copy of ours, and eviction must never touch
+        // it. This used to also delete a leftover extraction file when
+        // eviction pushed one out; now that `Embedded` never names such a
+        // file (see `CoverPayload`), there is nothing left on disk that this
+        // cache is responsible for reclaiming — both variants cost only a
+        // path.
         while e.len() > cap {
-            let Some((_, evicted)) = e.pop_front() else { break };
-            // Bounds the accumulation **during** the process's lifetime, not
-            // only at startup (see `purge_temp_files`): a session that runs
-            // for months and walks a large library must not leave one file per
-            // distinct track never replayed. Never touches a Source's
-            // `folder.jpg`, which is not ours.
-            if let CoverPayload::File(path) = &evicted {
-                if is_cover_temp(path) {
-                    if let Err(err) = tokio::fs::remove_file(path).await {
-                        tracing::debug!("purging evicted cover file {}: {err}", path.display());
-                    }
-                }
-            }
+            e.pop_front();
         }
     }
 
@@ -2065,28 +1990,35 @@ mod tests {
         assert!(!cache.contains("k7").await);
     }
 
-    /// Out-of-bounds eviction must reclaim the space of the temporary
-    /// extraction files it pushes out of the cache — otherwise nothing else
-    /// ever deletes them during the process's lifetime — but must **never**
-    /// touch a `folder.jpg` declared by a Source, which lives on its own
-    /// share.
+    /// **The guard for this task's whole deletion.** `CoverPayload::Embedded`
+    /// names the user's own *audio* file, not a copy of ours — nothing here
+    /// may ever delete it. Written and proven green **before** `is_cover_temp`
+    /// and the `remove_file` call it guarded are removed from `insert`, so
+    /// that the removal is checked against a real assertion rather than
+    /// against the absence of a crash. See the mutation check recorded in
+    /// this task's report: reintroducing an unconditional delete on eviction
+    /// turns this test red.
     #[tokio::test]
-    async fn eviction_deletes_our_own_temp_file_but_never_a_source_folder_jpg() {
-        // Unique name guaranteed by `tempfile`, in the real system temporary
-        // directory: that is where, and only where, `is_cover_temp`
-        // recognizes a file as ours. A random name avoids any collision with
-        // the files that other tests of this same binary write there in
-        // parallel (see `player::mpv::tests`).
-        let our_file = tempfile::Builder::new()
-            .prefix(TEMP_PREFIX)
-            .suffix(".jpg")
-            .tempfile_in(std::env::temp_dir())
-            .unwrap()
-            .into_temp_path()
-            .keep()
-            .unwrap();
-        // A Source's `folder.jpg` lives elsewhere, never in the system
-        // temporary directory: simulated here in a directory of its own.
+    async fn evicting_an_embedded_entry_deletes_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(track) =
+            crate::player::mpv::tests::mp3_with_cover_from(dir.path(), "color=c=green:s=16x16:d=1")
+        else {
+            eprintln!("ffmpeg missing: skipping test");
+            return;
+        };
+        let cache = CoverCache::new();
+        cache.set_cover_settings(CoverSettings { entries: 1, ..CoverSettings::default() });
+        cache.insert("a".into(), CoverPayload::Embedded(track.clone())).await;
+        // Pushes "a" out of a one-entry cache.
+        cache.insert("b".into(), CoverPayload::Bytes(vec![1], "image/jpeg")).await;
+        assert!(track.exists(), "eviction must never delete the user's audio file");
+    }
+
+    /// Eviction must never touch a `folder.jpg` declared by a Source, which
+    /// lives on its own share and is not ours to delete.
+    #[tokio::test]
+    async fn eviction_never_deletes_a_source_folder_jpg() {
         let source_dir = tempfile::tempdir().unwrap();
         let folder_jpg = source_dir.path().join("folder.jpg");
         std::fs::write(&folder_jpg, b"x").unwrap();
@@ -2096,28 +2028,12 @@ mod tests {
         // this test does not want to have to fill.
         cache.set_cover_settings(CoverSettings { entries: 4, ..CoverSettings::default() });
         cache.insert("to-keep".into(), CoverPayload::File(folder_jpg.clone())).await;
-        cache.insert("ours".into(), CoverPayload::File(our_file.clone())).await;
-        // Enough insertions to exceed the bound and evict the first two.
+        // Enough insertions to exceed the bound and evict it.
         for i in 0..4u8 {
             cache.insert(format!("k{i}"), CoverPayload::Bytes(vec![i], "image/jpeg")).await;
         }
 
-        assert!(!our_file.exists(), "one of our own temp files, once evicted, must be deleted from disk");
         assert!(folder_jpg.exists(), "a Source's folder.jpg must never be deleted on our own initiative");
-    }
-
-    #[test]
-    fn purge_deletes_our_own_files_and_nothing_else() {
-        let dir = tempfile::tempdir().unwrap();
-        let ours = dir.path().join(format!("{TEMP_PREFIX}abcd1234.jpg"));
-        let not_ours = dir.path().join("folder.jpg");
-        std::fs::write(&ours, b"x").unwrap();
-        std::fs::write(&not_ours, b"y").unwrap();
-
-        purge_temp_files_in(dir.path());
-
-        assert!(!ours.exists(), "a file of ours, left over from a previous run, must disappear");
-        assert!(not_ours.exists(), "a file that is not ours must never be touched");
     }
 
     #[tokio::test]

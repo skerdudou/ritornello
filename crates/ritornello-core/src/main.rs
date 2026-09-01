@@ -982,11 +982,6 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::filter::filter_fn(frame_to_log))
         .init();
 
-    // Sweeps the temp files from a previous run before anything can recreate
-    // them: see `cover::purge_temp_files` for the reason (accumulation, not
-    // freshness — that is already guaranteed elsewhere).
-    cover::purge_temp_files();
-
     let plugins_path = PathBuf::from(env_or("RITORNELLO_PLUGINS", "/etc/ritornello/plugins.toml"));
     let state_path = PathBuf::from(env_or("RITORNELLO_STATE", "/var/lib/ritornello/state.json"));
     let mpv_socket = PathBuf::from(env_or("RITORNELLO_MPV_SOCKET", "/run/ritornello/mpv.sock"));

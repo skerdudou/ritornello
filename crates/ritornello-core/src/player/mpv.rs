@@ -264,11 +264,12 @@ pub fn file_tags(data: &Value) -> Option<Track> {
 /// needed to copy a `folder.jpg` into `/tmp` before serving it, and once the
 /// core stopped needing a filesystem path *distinct from the audio file* to
 /// name a `CoverPayload`, there was nothing left for the write to buy. What
-/// it used to cost is gone with it: a write per newly-seen track, the startup
-/// purge of leftovers (`cover::purge_temp_files`) that a killed-mid-write
-/// truncation made necessary for correctness, and the accumulation of one
-/// file per distinct embedded picture ever played, on a `tmpfs` that only a
-/// reboot clears.
+/// it used to cost is gone with it, and so has the machinery that only
+/// existed to bound that cost: a write per newly-seen track, the startup
+/// sweep that a killed-mid-write truncation made necessary for correctness,
+/// and the accumulation — one file per distinct embedded picture ever
+/// played — on a `tmpfs` that only a reboot clears. None of `cover.rs` still
+/// names or sweeps such a file; there is nothing left to name.
 pub fn embedded_cover(path: &str) -> Option<crate::cover::CoverSource> {
     if path.contains("://") {
         return None;
