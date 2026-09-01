@@ -70,11 +70,11 @@ A single `HomeView` renders both arrangements; the breakpoint is Tailwind's
   progress bar, transport, volume), the Presets card on the right. The
   navigation stays at the top of the page, as before this refonte.
 
-![The home page in light mode, at desktop width: the Player card on the left, the preset tiles on the right](captures/accueil-clair.png)
+![The home page in light mode, at desktop width: the Player card on the left, the preset tiles on the right](captures/home-light.png)
 
-![The same home page in dark mode](captures/accueil-sombre.png)
+![The same home page in dark mode](captures/home-dark.png)
 
-![The home page at phone width: one column, the four-tab bar fixed at the bottom](captures/accueil-phone.png)
+![The home page at phone width: one column, the four-tab bar fixed at the bottom](captures/home-phone.png)
 
 ### The Player card
 
@@ -473,7 +473,7 @@ admin page, that page directly: a one-entry list would teach nothing a
 direct link doesn't. The route exists either way; nothing on desktop
 links to the list itself, the top bar already shows each plugin.
 
-![The radio plugin's administration page, reached from the "Plugins" tab: reorderable stations and directory search](captures/admin-radio.png)
+![The radio plugin's administration page, reached from the "Plugins" tab: reorderable stations and directory search](captures/radio-admin.png)
 
 Icons throughout the remote, the volume, the transport and the
 navigation come from `@radix-icons/vue` (already a dependency, for the
@@ -746,7 +746,7 @@ recognisable is left exactly as it is.
 
 ## System page
 
-![The system page, captured on a development machine (hence the missing temperature and frequency): CPU, memory, history graph, load average, storage](captures/systeme.png)
+![The system page, captured on a development machine (hence the missing temperature and frequency): CPU, memory, history graph, load average, storage](captures/system.png)
 
 `GET /api/system` reports OS metrics. **Every metric is optional and is
 `null` when the machine does not expose it** — no thermal zone under WSL, no

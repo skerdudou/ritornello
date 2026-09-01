@@ -15,8 +15,8 @@ pub enum DriveStatus {
     Unknown(i32),
 }
 
-/// Interroge le player via l'ioctl CDROM_DRIVE_STATUS.
-/// O_NONBLOCK est indispensable : sans lui, open() échoue quand il n'y a pas de disque.
+/// Queries the drive through the CDROM_DRIVE_STATUS ioctl.
+/// O_NONBLOCK is essential: without it, open() fails when there is no disc.
 pub fn drive_status(dev: &Path) -> Result<DriveStatus> {
     use std::os::unix::fs::OpenOptionsExt;
     let f = std::fs::OpenOptions::new()
@@ -24,8 +24,8 @@ pub fn drive_status(dev: &Path) -> Result<DriveStatus> {
         .custom_flags(libc::O_NONBLOCK)
         .open(dev)
         .with_context(|| format!("opening {}", dev.display()))?;
-    // SAFETY: ioctl en playback seule sur un fd valide ; l'argument est un int passé
-    // par valeur comme le définit linux/cdrom.h pour CDROM_DRIVE_STATUS.
+    // SAFETY: read-only ioctl on a valid fd; the argument is an int passed by
+    // value, as linux/cdrom.h defines it for CDROM_DRIVE_STATUS.
     let r = unsafe { libc::ioctl(f.as_raw_fd(), CDROM_DRIVE_STATUS, CDSL_CURRENT) };
     Ok(match r {
         1 => DriveStatus::NoDisc,
@@ -36,26 +36,26 @@ pub fn drive_status(dev: &Path) -> Result<DriveStatus> {
     })
 }
 
-/// Poll toutes les 2 s ; retourne `true`/`false` sur changement de présence du disque.
+/// Polls every 2 s; sends `true`/`false` whenever the disc presence changes.
 pub async fn watch(dev: PathBuf, tx: tokio::sync::mpsc::Sender<bool>) {
     let mut present = false;
-    // Une erreur de sonde équivaut à « pas de disque » pour la présence — un
-    // player débranché ne doit pas faire paniquer le plugin — mais elle est
-    // journalisée **au premier échec** (puis tue jusqu'au retour au normal) :
-    // un binaire hors du groupe `cdrom` ou un mauvais RITORNELLO_CD_DEV
-    // affichait « no disc » pour toujours sans une seule line de log, alors
-    // que les logs sont le seul outil de diagnostic sur l'appareil.
-    let mut derniere_erreur_signalee = false;
+    // A probe error counts as "no disc" for presence — an unplugged drive must
+    // not make the plugin panic — but it is logged **on the first failure**
+    // (then silenced until things return to normal): a binary outside the
+    // `cdrom` group, or a wrong RITORNELLO_CD_DEV, displayed "no disc" forever
+    // without a single log line, while the logs are the only diagnostic tool
+    // on the device.
+    let mut last_error_reported = false;
     loop {
         let now = match drive_status(&dev) {
-            Ok(statut) => {
-                derniere_erreur_signalee = false;
-                statut == DriveStatus::DiscOk
+            Ok(status) => {
+                last_error_reported = false;
+                status == DriveStatus::DiscOk
             }
             Err(e) => {
-                if !derniere_erreur_signalee {
+                if !last_error_reported {
                     tracing::warn!("cd drive probe {}: {e:#}", dev.display());
-                    derniere_erreur_signalee = true;
+                    last_error_reported = true;
                 }
                 false
             }
@@ -68,12 +68,12 @@ pub async fn watch(dev: PathBuf, tx: tokio::sync::mpsc::Sender<bool>) {
     }
 }
 
-/// TOC du disque via l'utilitaire cd-discid (paquet Debian).
+/// Disc TOC through the cd-discid utility (Debian package).
 ///
-/// La sortie brute (`NTRACKS OFF1 … OFFN LEADOUT`) est ce qui part dans
-/// l'identité du track, telle quelle : c'est une description standard de
-/// disque, et c'est au plugin `metadata` de la mettre au format qu'attend son
-/// fournisseur. Ce plugin-ci ne connaît aucun fournisseur de métadonnées.
+/// The raw output (`NTRACKS OFF1 … OFFN LEADOUT`) is what goes into the track
+/// identity, as is: it is a standard disc description, and it is up to the
+/// `metadata` plugin to put it in the format its provider expects. This plugin
+/// knows no metadata provider at all.
 pub fn read_toc(dev: &str) -> Result<String> {
     let out = std::process::Command::new("cd-discid")
         .arg("--musicbrainz")
@@ -86,12 +86,12 @@ pub fn read_toc(dev: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Nombre de pistes annoncé par la TOC, avec vérification de cohérence.
+/// Number of tracks announced by the TOC, with a consistency check.
 ///
-/// C'est tout ce dont ce plugin a besoin de la TOC : borner l'index de piste.
-/// La validation est néanmoins complète, parce qu'une TOC incohérente doit être
-/// refusée **ici** plutôt que d'être envoyée dans l'identité, où elle ferait
-/// interroger un service tiers pour rien.
+/// This is all this plugin needs from the TOC: bounding the track index. The
+/// validation is nevertheless complete, because an inconsistent TOC must be
+/// refused **here** rather than sent into the identity, where it would make a
+/// third-party service get queried for nothing.
 pub fn toc_ntracks(raw: &str) -> Result<usize> {
     let nums: Vec<u64> = raw
         .split_whitespace()
@@ -109,12 +109,12 @@ pub fn toc_ntracks(raw: &str) -> Result<usize> {
 }
 
 pub fn eject(dev: &str) {
-    // Best-effort — le tiroir peut être bloqué, c'est physique — mais jamais
-    // muet : un binaire `eject` absent du système donnait un tiroir qui ne
-    // s'ouvre jamais, sans aucune trace à mettre en face de la touche pressée.
+    // Best-effort — the tray may be stuck, that is physical — but never
+    // silent: an `eject` binary missing from the system gave a tray that never
+    // opens, with no trace to put next to the key that was pressed.
     match std::process::Command::new("eject").arg(dev).status() {
-        Ok(statut) if statut.success() => {}
-        Ok(statut) => tracing::warn!("eject {dev}: {statut}"),
+        Ok(status) if status.success() => {}
+        Ok(status) => tracing::warn!("eject {dev}: {status}"),
         Err(e) => tracing::warn!("eject {dev}: {e} (eject package installed?)"),
     }
 }
@@ -124,15 +124,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compte_les_pistes_dune_toc_bien_formee() {
-        // 3 pistes, offsets 150/22767/41887, leadout 63000
+    fn counts_the_tracks_of_a_well_formed_toc() {
+        // 3 tracks, offsets 150/22767/41887, leadout 63000
         assert_eq!(toc_ntracks("3 150 22767 41887 63000\n").unwrap(), 3);
     }
 
     #[test]
-    fn toc_invalide_rejete() {
+    fn invalid_toc_is_rejected() {
         assert!(toc_ntracks("").is_err());
-        assert!(toc_ntracks("3 150 22767\n").is_err()); // pas assez de champs
+        assert!(toc_ntracks("3 150 22767\n").is_err()); // not enough fields
         assert!(toc_ntracks("abc def\n").is_err());
     }
 }

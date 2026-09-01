@@ -7,73 +7,72 @@ const mounted = (props: Record<string, unknown>) =>
   mount(ProgressBar, { props: { position: 87, duration: 254, seekable: false, step: 10, ...props } })
 
 describe('ProgressBar', () => {
-  it('displayed la position et la duration', () => {
+  it('shows the position and the duration', () => {
     const w = mounted({})
     expect(w.get('[data-position]').text()).toBe('1:27')
     expect(w.get('[data-duration-totale]').text()).toBe('4:14')
   })
 
-  // Une barre sans fin n'apprend rien : sans duration, seul l'ecoule s'displayed.
-  it('sans duration, step de barre', () => {
+  // An endless bar teaches nothing: without a duration, only the elapsed time is shown.
+  it('without a duration, no bar', () => {
     const w = mounted({ duration: null })
     expect(w.find('[data-barre]').exists()).toBe(false)
     expect(w.get('[data-position]').text()).toBe('1:27')
   })
 
-  it('remplit la barre au prorata', () => {
+  it('fills the bar proportionally', () => {
     const w = mounted({})
     const style = w.get('[data-remplissage]').attributes('style') ?? ''
     const percent = Number(/width:\s*([\d.]+)%/.exec(style)?.[1])
-    // 87 / 254 = 34,25 %. Une valeur lue et comparee, plutot qu'une
-    // sous-chaine « 34 » qui passerait aussi bien sur « 3.4 » ou « 340 ».
+    // 87 / 254 = 34.25 %. A value read and compared, rather than a substring
+    // "34" that would pass just as well on "3.4" or "340".
     expect(percent).toBeCloseTo(34.25, 1)
   })
 
-  // C'est `seekable` qui decide, step la presence d'une duration : Radio France
-  // annonce une duration sur un direct qu'on ne peut step rembobiner.
-  it('inerte quand le contenu n est step seekable', async () => {
+  // It is `seekable` that decides, not the presence of a duration: Radio
+  // France announces a duration on a live stream that cannot be rewound.
+  it('inert when the content is not seekable', async () => {
     const w = mounted({ seekable: false })
     await w.get('[data-barre]').trigger('click')
     expect(w.emitted('seek')).toBeUndefined()
     expect(w.get('[data-barre]').attributes('role')).toBeUndefined()
     expect(w.find('[role="slider"]').exists()).toBe(false)
-    // La barre statique n'est step une cible : elle ne doit step payer la zone
-    // de contact de 44 px (`py-[19px]`) reservee au vrai curseur, et doit
-    // partager l'exacte meme geometrie que le curseur (`py-0` des deux
-    // cotes, mesure Playwright a l'appui : radio et fichier doivent
-    // s'aligner).
+    // The static bar is not a target: it must not pay for the 44 px touch
+    // area (`py-[19px]`) reserved for the real slider, and must share the
+    // exact same geometry as the slider (`py-0` on both sides, Playwright
+    // measurement in support: radio and file must line up).
     const classes = w.get('[data-barre]').classes()
     expect(classes).not.toContain('py-[19px]')
     expect(classes).toContain('py-0')
   })
 
-  // Peu importe l'state (barre statique ou curseur) : la ligne des durees
-  // reste sous la piste dans le DOM, jamais avant. Une regression possible
-  // avec des marges negatives (`-my-[19px]`, `-mt-4`) qui pourraient a tort
-  // faire chevaucher ou reordonner les blocs visuellement.
-  it('la ligne des durees reste sous la piste, non seekable', () => {
+  // Whatever the state (static bar or slider): the durations line stays below
+  // the track in the DOM, never before. A possible regression with negative
+  // margins (`-my-[19px]`, `-mt-4`) that could wrongly overlap or reorder the
+  // blocks visually.
+  it('the durations line stays below the track, non seekable', () => {
     const w = mounted({ seekable: false })
-    const piste = w.get('[data-barre]').element
-    const durees = w.get('[data-position]').element.closest('div')!
-    expect(piste.compareDocumentPosition(durees) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const track = w.get('[data-barre]').element
+    const durations = w.get('[data-position]').element.closest('div')!
+    expect(track.compareDocumentPosition(durations) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  it('la ligne des durees reste sous la piste, seekable', async () => {
+  it('the durations line stays below the track, seekable', async () => {
     const w = mounted({ seekable: true })
     await flushPromises()
-    const piste = w.get('[data-slot="slider"]').element
-    const durees = w.get('[data-position]').element.closest('div')!
-    expect(piste.compareDocumentPosition(durees) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const track = w.get('[data-slot="slider"]').element
+    const durations = w.get('[data-position]').element.closest('div')!
+    expect(track.compareDocumentPosition(durations) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  // reka-ui capture le pointeur pendant le glisser ; jsdom n'implemente step
-  // cette API. Trois cales, le temps du fichier.
+  // reka-ui captures the pointer during the drag; jsdom does not implement
+  // that API. Three shims, for the duration of the file.
   beforeAll(() => {
     Element.prototype.setPointerCapture ??= () => {}
     Element.prototype.releasePointerCapture ??= () => {}
     Element.prototype.hasPointerCapture ??= () => true
-    // jsdom ne fournit step ResizeObserver ; reka-ui l'utilise pour mesurer la
-    // piste du curseur au montage (voir web/kit/src/index.test.ts).
+    // jsdom does not provide ResizeObserver; reka-ui uses it to measure the
+    // slider track at mount time (see web/kit/src/index.test.ts).
     globalThis.ResizeObserver ??= class {
       observe() {}
       unobserve() {}
@@ -82,91 +81,91 @@ describe('ProgressBar', () => {
   })
 
   function rectangle(w: ReturnType<typeof mounted>) {
-    const piste = w.get('[data-slot="slider"]')
-    piste.element.getBoundingClientRect = () =>
+    const track = w.get('[data-slot="slider"]')
+    track.element.getBoundingClientRect = () =>
       ({ left: 0, width: 200, top: 0, height: 44, right: 200, bottom: 44, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect
-    return piste
+    return track
   }
 
-  it('un contenu seekable rend une poignee accessible', async () => {
-    // `await flushPromises()` : reka-ui resout l'index de la poignee depuis
-    // la collection des thumbs montes (`SliderThumb`), remplie a l'accroche
-    // de la ref DOM. Au premier rendu, l'index vaut -1 (poignee step encore
-    // dans la collection) et `aria-valuenow` reste absent ; un tick plus tard
-    // il vaut 0 et l'attribut apparait. Constate ici, meme cause que le stub
-    // ResizeObserver ci-dessus (mesure/collecte differee sous jsdom).
+  it('seekable content renders an accessible handle', async () => {
+    // `await flushPromises()`: reka-ui resolves the handle's index from the
+    // collection of mounted thumbs (`SliderThumb`), filled when the DOM ref
+    // attaches. On the first render the index is -1 (handle not yet in the
+    // collection) and `aria-valuenow` stays absent; one tick later it is 0
+    // and the attribute appears. Observed here, same cause as the
+    // ResizeObserver stub above (deferred measurement/collection under jsdom).
     const w = mounted({ seekable: true })
     await flushPromises()
-    const poignee = w.get('[role="slider"]')
-    expect(poignee.attributes('aria-valuenow')).toBe('87')
-    expect(poignee.attributes('aria-valuemax')).toBe('254')
+    const handle = w.get('[role="slider"]')
+    expect(handle.attributes('aria-valuenow')).toBe('87')
+    expect(handle.attributes('aria-valuemax')).toBe('254')
   })
 
-  it('le glisser suit le doigt localement et ne valide qu au relachement', async () => {
-    // Un seul `SeekTo` par geste : pendant le glisser, seul l'affichage bouge.
+  it('the drag follows the finger locally and only commits on release', async () => {
+    // A single `SeekTo` per gesture: during the drag, only the display moves.
     //
-    // Repli sur les evenements du composant plutot que de vrais
-    // pointerdown/move/up : sous jsdom, `thumb.clientWidth` vaut toujours 0
-    // (step de mise en page reelle), donc reka calcule le geste sur la largeur
-    // pleine de la piste (200 px). 150/200 x 254 tombe exactement sur 190,5 s,
-    // que `Math.round` de reka arrondit a 191 et non 190 — un desaccord de
-    // mesure propre a jsdom, step un defaut du composant (verifie en inspectant
-    // `SliderHorizontal.getValueFromPointerEvent`). Dans un browser reel, la
-    // poignee a une largeur non nulle et ne tombe step sur cette frontiere ; le
-    // geste reel est couvert par l'e2e (Tache 12).
+    // Fallback on the component's events rather than real
+    // pointerdown/move/up: under jsdom, `thumb.clientWidth` is always 0 (no
+    // real layout), so reka computes the gesture on the full track width
+    // (200 px). 150/200 x 254 lands exactly on 190.5 s, which reka's
+    // `Math.round` rounds to 191 and not 190 — a measurement disagreement
+    // specific to jsdom, not a defect of the component (verified by inspecting
+    // `SliderHorizontal.getValueFromPointerEvent`). In a real browser, the
+    // handle has a non-zero width and does not land on this boundary; the real
+    // gesture is covered by the e2e (Task 12).
     const w = mounted({ seekable: true })
     const slider = w.getComponent(Slider)
     await slider.vm.$emit('update:modelValue', [190])
     expect(w.emitted('seek')).toBeUndefined()
-    expect(w.get('[data-position]').text()).toBe('3:10') // 150/200 × 254 = 190 s, affiché pendant le geste
+    expect(w.get('[data-position]').text()).toBe('3:10') // 150/200 × 254 = 190 s, displayed during the gesture
     await slider.vm.$emit('valueCommit', [190])
     expect(w.emitted('seek')).toEqual([[190]])
   })
 
-  it('la valeur target tient jusqu a la trame qui la rejoint', async () => {
-    // Sans cela, la trame suivante (position d'avant le saut) ramenait la
-    // poignée en arrière un instant — le défaut visible des lecteurs naïfs.
+  it('the target value holds until the frame that reaches it', async () => {
+    // Without this, the next frame (position from before the jump) brought
+    // the handle back for an instant — the visible defect of naive players.
     const w = mounted({ seekable: true })
-    const piste = rectangle(w)
-    await piste.trigger('pointerdown', { clientX: 100, pointerId: 1, button: 0 })
-    await piste.trigger('pointerup', { clientX: 100, pointerId: 1 })
+    const track = rectangle(w)
+    await track.trigger('pointerdown', { clientX: 100, pointerId: 1, button: 0 })
+    await track.trigger('pointerup', { clientX: 100, pointerId: 1 })
     expect(w.emitted('seek')).toEqual([[127]])
-    await w.setProps({ position: 88 }) // la trame d'avant le saut
+    await w.setProps({ position: 88 }) // the frame from before the jump
     expect(w.get('[data-position]').text()).toBe('2:07')
-    await w.setProps({ position: 129 }) // à un step près : on la rejoint
+    await w.setProps({ position: 129 }) // within one step: we reach it
     expect(w.get('[data-position]').text()).toBe('2:09')
   })
 
-  it('une trame sans position relache la valeur target au lieu de la figer', async () => {
-    // Fin de piste, Stop, veille, changement de source : aucune de ces trames
-    // ne porte de position, et aucune ne viendra jamais confirm le saut —
-    // sans quoi la barre resterait bloquee sur l'ancienne cible pour toujours.
+  it('a frame without position releases the target value instead of freezing it', async () => {
+    // End of track, Stop, standby, source change: none of these frames carries
+    // a position, and none will ever confirm the jump — otherwise the bar
+    // would stay stuck on the old target forever.
     const w = mounted({ seekable: true, position: 87 })
-    const piste = rectangle(w)
-    await piste.trigger('pointerdown', { clientX: 100, pointerId: 1, button: 0 })
-    await piste.trigger('pointerup', { clientX: 100, pointerId: 1 })
+    const track = rectangle(w)
+    await track.trigger('pointerdown', { clientX: 100, pointerId: 1, button: 0 })
+    await track.trigger('pointerup', { clientX: 100, pointerId: 1 })
     expect(w.emitted('seek')).toEqual([[127]])
     await w.setProps({ position: null })
-    // Plus de position : rien n'est rendu (voir le test « displayed la position
-    // et la duration »), la valeur target ne doit donc laisser aucune trace.
+    // No more position: nothing is rendered (see the test "shows the position
+    // and the duration"), so the target value must leave no trace.
     expect(w.find('[data-progression]').exists()).toBe(false)
-    // Une piste suivante qui repart a 0:01 le prouve : sans le relachement,
-    // la target (127) aurait encore masque cette valeur toute neuve.
+    // A next track restarting at 0:01 proves it: without the release, the
+    // target (127) would still have masked this brand-new value.
     await w.setProps({ position: 1 })
     expect(w.get('[data-position]').text()).toBe('0:01')
   })
 
-  // Sans le clavier, la barre serait la seule command de la page hors
-  // d'atteinte sans souris. Le step est celui des touches physiques
-  // (`seek_step_s`), step la seconde du curseur.
-  it('le clavier deplace du step configure, borne aux deux bouts', async () => {
+  // Without the keyboard, the bar would be the only control of the page out of
+  // reach without a mouse. The step is the physical keys' (`seek_step_s`), not
+  // the slider's one second.
+  it('the keyboard moves by the configured step, bounded at both ends', async () => {
     const w = mounted({ seekable: true, position: 250 })
-    const poignee = w.get('[role="slider"]')
-    await poignee.trigger('keydown', { key: 'ArrowRight' })
+    const handle = w.get('[role="slider"]')
+    await handle.trigger('keydown', { key: 'ArrowRight' })
     expect(w.emitted('seek')?.[0]).toEqual([254])
-    await poignee.trigger('keydown', { key: 'Home' })
+    await handle.trigger('keydown', { key: 'Home' })
     expect(w.emitted('seek')?.[1]).toEqual([0])
-    await poignee.trigger('keydown', { key: 'ArrowLeft' })
+    await handle.trigger('keydown', { key: 'ArrowLeft' })
     expect(w.emitted('seek')?.[2]).toEqual([240])
   })
 })

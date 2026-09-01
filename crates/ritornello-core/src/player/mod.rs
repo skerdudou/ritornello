@@ -2,12 +2,12 @@ pub mod mpv;
 
 use anyhow::Result;
 
-/// Où en est la playback et combien elle dure, telles que le player les
-/// connaît à cet instant.
+/// Where playback stands and how long it lasts, as the player knows them at
+/// this instant.
 ///
-/// Les deux ensemble et non deux méthodes : elles sont lues au même moment,
-/// pour la même trame, et un appelant qui n'en prendrait qu'une publierait un
-/// couple incohérent (une position d'une piste, la durée de la suivante).
+/// Both together rather than two methods: they are read at the same moment,
+/// for the same frame, and a caller taking only one of them would publish an
+/// inconsistent pair (the position of one track, the duration of the next).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Progress {
     pub position_s: Option<f64>,
@@ -17,33 +17,34 @@ pub struct Progress {
 #[async_trait::async_trait]
 pub trait Player: Send + Sync + 'static {
     async fn play(&self, uri: &str) -> Result<()>;
-    /// Charge `uri` en tant que **liste de playback**, dépliée sur-le-champ.
+    /// Loads `uri` as a **playlist**, expanded right away.
     ///
-    /// Distinct de `play`, et c'est une leçon payée : `loadfile` sur un `.m3u`
-    /// ne le déplie qu'après coup. Mesuré sur mpv 0.37 — `playlist-count` vaut
-    /// 1, puis 3 seulement après un `end-file`/`start-file`. Tout ce qui suit
-    /// immédiatement (un `playlist-pos`) arrivait donc hors bornes, et le
-    /// `playlist-pos = 0` du dépliage ramenait la playback au début.
+    /// Distinct from `play`, and that is a lesson paid for: `loadfile` on a
+    /// `.m3u` only expands it after the fact. Measured on mpv 0.37 —
+    /// `playlist-count` is 1, then 3 only after an `end-file`/`start-file`.
+    /// Anything following immediately (a `playlist-pos`) therefore landed out
+    /// of bounds, and the `playlist-pos = 0` of the expansion sent playback
+    /// back to the beginning.
     async fn load_list(&self, uri: &str) -> Result<()>;
     async fn stop(&self) -> Result<()>;
     async fn toggle_pause(&self) -> Result<()>;
     async fn next(&self) -> Result<()>;
     async fn prev(&self) -> Result<()>;
-    /// Positionne la playback sur l'élément d'index `n` de la liste courante.
+    /// Positions playback on the element at index `n` of the current list.
     ///
-    /// À n'employer qu'après un `load_list`, jamais après un `play` : c'est
-    /// `loadlist` qui garantit que la liste est déjà dépliée au moment où cet
-    /// index est appliqué.
+    /// Only to be used after a `load_list`, never after a `play`: it is
+    /// `loadlist` that guarantees the list is already expanded by the time this
+    /// index is applied.
     async fn set_playlist_pos(&self, n: i64) -> Result<()>;
     async fn set_volume(&self, volume: u8) -> Result<()>;
     async fn set_mute(&self, mute: bool) -> Result<()>;
     async fn set_audio_device(&self, device: &str) -> Result<()>;
-    /// Position et durée courantes. `Ok` avec des champs à `None` quand le
-    /// player ne sait pas : une position inconnue est un cas normal (rien
-    /// n'est chargé, le stream n'a pas de durée), jamais une panne.
+    /// Current position and duration. `Ok` with `None` fields when the player
+    /// does not know: an unknown position is a normal case (nothing loaded,
+    /// the stream has no duration), never a failure.
     async fn progress(&self) -> Result<Progress>;
-    /// Déplacement relatif, en secondes (négatif pour reculer).
+    /// Relative move, in seconds (negative to go backwards).
     async fn seek_relative(&self, delta_s: i64) -> Result<()>;
-    /// Déplacement absolu, en secondes depuis le début.
+    /// Absolute move, in seconds from the beginning.
     async fn seek_absolute(&self, position_s: u32) -> Result<()>;
 }

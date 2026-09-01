@@ -1,23 +1,22 @@
-/* La feuille de style de vue-sonner, sans laquelle les notifications se rendent
-   **dans le flux du document** : signale a l'usage, une sauvegarde en page de
-   configuration faisait apparaitre un texte nu en bas de page, qu'il fallait
-   faire defiler pour voir. Le `<Toaster />` etait bien monte et les variables de
-   `Sonner.vue` bien posees -- elles habillent un positionnement que seule cette
-   feuille fournit.
+/* The vue-sonner stylesheet, without which notifications render **in the
+   document flow**: reported in use, a save on a configuration page made bare
+   text appear at the bottom of the page, which had to be scrolled to be seen.
+   The `<Toaster />` was properly mounted and the variables of `Sonner.vue`
+   properly set -- they dress a positioning that only this sheet provides.
 
-   Ici et non dans `Sonner.vue` : ce composant part dans `ui-kit.js`, que le
-   shell externalise, donc un import de CSS cote composant n'atteint jamais la
-   feuille servie. `theme.css` est le canal etabli du CSS du kit, importe par
-   `web/app/src/app.css`. jsdom ne calculant aucun style, cet oubli ne pouvait se
-   voir qu'a l'ecran ou par un parcours de bout en bout. */
+   Here and not in `Sonner.vue`: that component goes into `ui-kit.js`, which the
+   shell externalizes, so a component-side CSS import never reaches the served
+   sheet. `theme.css` is the established channel for the kit's CSS, imported by
+   `web/app/src/app.css`. Since jsdom computes no style, this omission could only
+   be seen on screen or through an end-to-end journey. */
 @import "vue-sonner/style.css";
 
-/* Pont entre les variables du moteur de themes et les espaces de noms
-   Tailwind v4. Aucune valeur en dur ici : les couleurs viennent du preset
-   applique a l'execution sur `documentElement`.
-   Les variables typographiques (`--font-sans`, `--font-serif`, `--font-mono`)
-   ne sont pas listees : elles appartiennent deja a l'espace de noms
-   `--font-*` de Tailwind v4, donc le moteur les surcharge directement. */
+/* Bridge between the theme engine's variables and the Tailwind v4 namespaces.
+   No hard-coded value here: the colors come from the preset applied at runtime
+   on `documentElement`.
+   The typographic variables (`--font-sans`, `--font-serif`, `--font-mono`) are
+   not listed: they already belong to Tailwind v4's `--font-*` namespace, so
+   the engine overrides them directly. */
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);

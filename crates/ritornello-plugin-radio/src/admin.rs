@@ -7,59 +7,58 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as AsyncRwLock;
 
-/// Opérations portées par `SetData`, discriminées par le champ `op` (modèle du
-/// plugin generic-input) : le protocol d'admin n'est **pas** étendu, tout
-/// passe par `GetAsset` / `GetCatalog` / `GetData` / `SetData`.
+/// Operations carried by `SetData`, discriminated by the `op` field (model of
+/// the generic-input plugin): the admin protocol is **not** extended, everything
+/// goes through `GetAsset` / `GetCatalog` / `GetData` / `SetData`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Op {
-    /// Enregistre la table complète. Seule opération qui écrit sur disque.
-    /// Les présélections sont attribuées par position côté navigateur, mais
-    /// `Stations::validate` reste l'autorité.
+    /// Saves the whole table. The only operation that writes to disk. Presets
+    /// are assigned by position on the browser side, but `Stations::validate`
+    /// remains the authority.
     Save {
         #[serde(default)]
         stations: Vec<Station>,
     },
-    /// Interroge l'annuaire en line et mémorise les résultats. Aucune station
-    /// n'est persistée : l'utilisateur add ensuite celles qui l'intéressent
-    /// puis clique « Enregistrer ». Le **pays**, lui, est retenu (voir
-    /// `PluginState::country`) : c'est une préférence de l'appareil, et la
-    /// retrouver au rechargement évite de la resaisir à chaque fois.
+    /// Queries the online directory and memorizes the results. No station is
+    /// persisted: the user then adds the ones of interest and clicks "Save".
+    /// The **country**, however, is retained (see `PluginState::country`): it
+    /// is a device preference, and finding it again on reload avoids typing it
+    /// in every time.
     Search {
         query: String,
-        /// Code pays ISO ; chaîne clear = « tous pays ».
+        /// ISO country code; empty string = "all countries".
         #[serde(default)]
         country: String,
     },
-    /// Récupère la liste des pays de l'annuaire et la mémorise.
+    /// Fetches the directory's country list and memorizes it.
     ///
-    /// Opération distincte, et **à la demande** : elle coûte un appel réseau que
-    /// rien ne justifie tant que l'utilisateur n'ouvre pas le sélecteur de pays.
-    /// La mémoriser évite de la redemander à chaque ouverture.
+    /// A distinct operation, and **on demand**: it costs a network call that
+    /// nothing justifies as long as the user does not open the country
+    /// selector. Memorizing it avoids asking again at every opening.
     Countries,
 }
 
 pub struct RadioAdmin {
     pub stations_path: PathBuf,
-    /// État persisté du plugin, partagé avec la moitié Source : c'est là que le
-    /// pays choisi est retenu, à côté de la présélection.
+    /// Persisted plugin state, shared with the Source half: this is where the
+    /// chosen country is retained, next to the preset.
     pub state_path: PathBuf,
     pub stations: Arc<AsyncRwLock<Stations>>,
     pub catalog: Arc<RwLock<Catalog>>,
-    /// Accès à l'annuaire derrière un trait : les tests injectent des
-    /// résultats sans jamais toucher au réseau.
+    /// Access to the directory behind a trait: tests inject results without
+    /// ever touching the network.
     pub directory: Arc<dyn Directory>,
-    /// Derniers résultats de recherche, exposés par `get_data` (champ
-    /// `search`) ; liste clear tant qu'aucune recherche n'a été faite. Une
-    /// recherche en échec les laisse intacts.
+    /// Last search results, exposed by `get_data` (field `search`); empty list
+    /// as long as no search has been made. A failed search leaves them intact.
     pub search: RwLock<Vec<DirectoryStation>>,
-    /// Liste des pays, une fois récupérée. Vide tant que l'utilisateur n'a pas
-    /// ouvert le sélecteur : aucun appel réseau n'est fait sans cela.
+    /// Country list, once fetched. Empty as long as the user has not opened the
+    /// selector: no network call is made without that.
     pub countries: RwLock<Vec<DirectoryCountry>>,
-    /// Annonce le nouveau `Stations::preset_count()` à la moitié Source après
-    /// un enregistrement réussi : c'est ce qui permet à la grille de la
-    /// télécommande web de se mettre à jour sans attendre qu'une présélection
-    /// soit jouée. Voir `RadioSource::poll_notification` côté Source.
+    /// Announces the new `Stations::preset_count()` to the Source half after a
+    /// successful save: this is what lets the web remote's grid update without
+    /// waiting for a preset to be played. See `RadioSource::poll_notification`
+    /// on the Source side.
     pub preset_count_tx: tokio::sync::watch::Sender<u8>,
 }
 
@@ -86,13 +85,13 @@ impl AdminPlugin for RadioAdmin {
 
     async fn get_data(&self) -> serde_json::Value {
         let stations = self.stations.read().await.stations.clone();
-        // Gardes `std::sync` prises après le seul `.await` de la fonction :
-        // aucune garde ne traverse un point d'attente.
+        // `std::sync` guards taken after the function's only `.await`: no guard
+        // crosses an await point.
         let search = self.search.read().unwrap().clone();
         let countries = self.countries.read().unwrap().clone();
-        // Le pays est relu du disque à chaque appel plutôt que gardé en mémoire :
-        // la moitié Source écrit dans le même fichier, et une copie en mémoire
-        // divergerait sans qu'on s'en aperçoive.
+        // The country is re-read from disk on every call rather than kept in
+        // memory: the Source half writes to the same file, and an in-memory
+        // copy would diverge without anyone noticing.
         let country = crate::state::load(&self.state_path).country;
         serde_json::json!({
             "stations": stations,
@@ -117,38 +116,37 @@ impl AdminPlugin for RadioAdmin {
                     .validate()
                     .map_err(|e| e.message(&self.catalog.read().unwrap()))?;
                 stations.save(&self.stations_path).map_err(|e| {
-                    // Le détail technique (path, cause I/O) reste dans le
-                    // journal : un `/var/lib` en playback seule doit rester
-                    // diagnosticable, mais pas au prix de serve ce diagnostic
-                    // comme texte d'interface.
+                    // The technical detail (path, I/O cause) stays in the log:
+                    // a read-only `/var/lib` must remain diagnosable, but not
+                    // at the price of serving that diagnosis as UI text.
                     tracing::warn!("failed to save stations: {e}");
                     self.catalog.read().unwrap().get("save_failed").to_string()
                 })?;
-                let compte = stations.preset_count();
+                let count = stations.preset_count();
                 *self.stations.write().await = stations;
-                // Annonce spontanée à la moitié Source, sur **chaque**
-                // enregistrement réussi — même si le compte ne change pas :
-                // comparer avant d'send_frame coûterait une garde pour un gain
-                // nul, la fusion côté cœur (`Core::handle_source_update`) et
-                // sa diffusion (`publish_state`) dédupliquant déjà toute trame
-                // identique à la précédente. Aucun récepteur en mode dégradé
-                // (pas d'admin) : `send` renvoie alors une erreur sans
-                // conséquence, ignorée.
-                let _ = self.preset_count_tx.send(compte);
+                // Spontaneous announcement to the Source half, on **every**
+                // successful save — even if the count does not change:
+                // comparing before sending would cost a guard for no gain, the
+                // core-side merge (`Core::handle_source_update`) and its
+                // broadcast (`publish_state`) already deduplicating any frame
+                // identical to the previous one. No receiver in degraded mode
+                // (no admin): `send` then returns an inconsequential error,
+                // ignored.
+                let _ = self.preset_count_tx.send(count);
                 Ok(())
             }
             Op::Search { query, country } => {
-                let pays = country.trim().to_string();
-                let pays = if pays.is_empty() { None } else { Some(pays) };
-                // L'appel réseau est attendu ici (pas de sondage, contrairement
-                // à l'apprentissage du plugin input) ; il ne concerne que la
-                // moitié Admin, la playback audio n'est jamais bloquée. C'est
-                // aussi le point qui doit rendre la main avant les 5 s
-                // qu'`AdminClient::request` accorde au cœur : le budget de
-                // `search_with_fallback` (4 s) est là pour ça.
-                let resultats = self
+                let country = country.trim().to_string();
+                let country = if country.is_empty() { None } else { Some(country) };
+                // The network call is awaited here (no polling, unlike the
+                // input plugin's learning); it only concerns the Admin half,
+                // audio playback is never blocked. It is also the point that
+                // must yield before the 5 s `AdminClient::request` grants the
+                // core: the `search_with_fallback` budget (4 s) is there for
+                // that.
+                let results = self
                     .directory
-                    .search(query.trim(), pays.as_deref())
+                    .search(query.trim(), country.as_deref())
                     .await
                     .map_err(|detail| {
                         self.catalog
@@ -157,28 +155,28 @@ impl AdminPlugin for RadioAdmin {
                             .get("search_error")
                             .replace("{detail}", &detail)
                     })?;
-                *self.search.write().unwrap() = resultats;
-                // Le pays n'est retenu qu'après une recherche **réussie** : une
-                // recherche en échec ne dit rien de l'intention de
-                // l'utilisateur, et mémoriser un pays qui vient d'échouer le
-                // ferait réessayer au rechargement.
-                let choisi = pays.unwrap_or_default();
-                if let Err(e) = crate::state::update(&self.state_path, |s| s.country = choisi) {
-                    // Sans conséquence sur la recherche qui vient d'aboutir :
-                    // seule la mémoire du choix est perdue.
+                *self.search.write().unwrap() = results;
+                // The country is only retained after a **successful** search: a
+                // failed search says nothing about the user's intent, and
+                // memorizing a country that just failed would make it retry on
+                // reload.
+                let chosen = country.unwrap_or_default();
+                if let Err(e) = crate::state::update(&self.state_path, |s| s.country = chosen) {
+                    // No consequence for the search that just succeeded: only
+                    // the memory of the choice is lost.
                     tracing::warn!("country not saved: {e}");
                 }
                 Ok(())
             }
             Op::Countries => {
-                let pays = self.directory.countries().await.map_err(|detail| {
+                let countries = self.directory.countries().await.map_err(|detail| {
                     self.catalog
                         .read()
                         .unwrap()
                         .get("search_error")
                         .replace("{detail}", &detail)
                 })?;
-                *self.countries.write().unwrap() = pays;
+                *self.countries.write().unwrap() = countries;
                 Ok(())
             }
         }
@@ -193,33 +191,33 @@ mod tests {
 
     const FIXTURE: &str = include_str!("../tests/fixtures/radio-browser-search.json");
 
-    /// Annuaire de test : renvoie un résultat figé (ou une erreur) et
-    /// enregistre les arguments reçus. Aucune socket, aucun réseau.
+    /// Test directory: returns a fixed result (or an error) and records the
+    /// arguments received. No socket, no network.
     struct StubDirectory {
-        resultat: Result<Vec<DirectoryStation>, String>,
-        pays: Result<Vec<DirectoryCountry>, String>,
-        vus: std::sync::Mutex<Vec<(String, Option<String>)>>,
-        appels_pays: std::sync::atomic::AtomicUsize,
+        result: Result<Vec<DirectoryStation>, String>,
+        countries: Result<Vec<DirectoryCountry>, String>,
+        seen: std::sync::Mutex<Vec<(String, Option<String>)>>,
+        country_calls: std::sync::atomic::AtomicUsize,
     }
 
     impl StubDirectory {
         fn ok(stations: Vec<DirectoryStation>) -> Arc<Self> {
             Arc::new(StubDirectory {
-                resultat: Ok(stations),
-                pays: Ok(vec![
+                result: Ok(stations),
+                countries: Ok(vec![
                     DirectoryCountry { code: "FR".into(), stations: 2746 },
                     DirectoryCountry { code: "BE".into(), stations: 300 },
                 ]),
-                vus: std::sync::Mutex::new(Vec::new()),
-                appels_pays: std::sync::atomic::AtomicUsize::new(0),
+                seen: std::sync::Mutex::new(Vec::new()),
+                country_calls: std::sync::atomic::AtomicUsize::new(0),
             })
         }
         fn err(msg: &str) -> Arc<Self> {
             Arc::new(StubDirectory {
-                resultat: Err(msg.to_string()),
-                pays: Err(msg.to_string()),
-                vus: std::sync::Mutex::new(Vec::new()),
-                appels_pays: std::sync::atomic::AtomicUsize::new(0),
+                result: Err(msg.to_string()),
+                countries: Err(msg.to_string()),
+                seen: std::sync::Mutex::new(Vec::new()),
+                country_calls: std::sync::atomic::AtomicUsize::new(0),
             })
         }
     }
@@ -231,20 +229,20 @@ mod tests {
             query: &str,
             country: Option<&str>,
         ) -> Result<Vec<DirectoryStation>, String> {
-            self.vus
+            self.seen
                 .lock()
                 .unwrap()
                 .push((query.to_string(), country.map(str::to_string)));
-            self.resultat.clone()
+            self.result.clone()
         }
 
         async fn countries(&self) -> Result<Vec<DirectoryCountry>, String> {
-            self.appels_pays.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.pays.clone()
+            self.country_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.countries.clone()
         }
     }
 
-    fn admin_avec(dir: &std::path::Path, directory: Arc<dyn Directory>) -> RadioAdmin {
+    fn admin_with(dir: &std::path::Path, directory: Arc<dyn Directory>) -> RadioAdmin {
         let path = dir.join("stations.toml");
         let stations = Stations {
             stations: vec![Station { name: "FIP".into(), url: "http://fip".into(), preset: 1 }],
@@ -263,51 +261,51 @@ mod tests {
             directory,
             search: RwLock::new(Vec::new()),
             countries: RwLock::new(Vec::new()),
-            // Sans observateur : les tests qui ne s'intéressent pas au compte
-            // de présélections n'ont rien à câbler. Voir `admin_avec_canal`
-            // pour ceux qui l'observent.
+            // No observer: tests that do not care about the preset count have
+            // nothing to wire. See `admin_with_channel` for those that observe
+            // it.
             preset_count_tx: tokio::sync::watch::channel(0).0,
         }
     }
 
     fn admin(dir: &std::path::Path) -> RadioAdmin {
-        admin_avec(dir, StubDirectory::ok(Vec::new()))
+        admin_with(dir, StubDirectory::ok(Vec::new()))
     }
 
-    /// Comme `admin_avec`, mais expose aussi le récepteur du canal de compte
-    /// de présélections, pour les tests qui vérifient ce qui y est publié.
-    fn admin_avec_canal(
+    /// Like `admin_with`, but also exposes the receiver of the preset count
+    /// channel, for tests that check what is published on it.
+    fn admin_with_channel(
         dir: &std::path::Path,
         directory: Arc<dyn Directory>,
     ) -> (RadioAdmin, tokio::sync::watch::Receiver<u8>) {
-        let mut a = admin_avec(dir, directory);
+        let mut a = admin_with(dir, directory);
         let (tx, rx) = tokio::sync::watch::channel(0);
         a.preset_count_tx = tx;
         (a, rx)
     }
 
     #[test]
-    fn asset_expose_ui_js_et_ui_css_et_rien_dautre() {
+    fn asset_exposes_ui_js_and_ui_css_and_nothing_else() {
         let dir = tempfile::tempdir().unwrap();
         let a = admin(dir.path());
-        let (mime, corps) = a.asset("ui.js").unwrap();
+        let (mime, body) = a.asset("ui.js").unwrap();
         assert_eq!(mime, "text/javascript");
-        assert!(!corps.is_empty());
+        assert!(!body.is_empty());
         assert_eq!(a.asset("ui.css").unwrap().0, "text/css");
-        // Un path inconnu n'est pas une erreur : c'est un 404 cote coeur.
+        // An unknown path is not an error: it is a 404 on the core side.
         assert!(a.asset("../../../etc/passwd").is_none());
         assert!(a.asset("index.html").is_none());
     }
 
     #[test]
-    fn catalog_expose_les_cles_du_composant() {
+    fn catalog_exposes_the_component_keys() {
         let dir = tempfile::tempdir().unwrap();
         let v = admin(dir.path()).catalog();
-        assert!(v["btn_save"].is_string(), "le sources_catalog doit porter les cles du plugin");
+        assert!(v["btn_save"].is_string(), "the sources_catalog must carry the plugin's keys");
     }
 
     #[tokio::test]
-    async fn get_data_renvoie_les_stations_et_une_recherche_vide() {
+    async fn get_data_returns_the_stations_and_an_empty_search() {
         let dir = tempfile::tempdir().unwrap();
         let a = admin(dir.path());
         let v = a.get_data().await;
@@ -316,80 +314,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_valide_persiste_et_met_a_jour() {
+    async fn valid_save_persists_and_updates() {
         let dir = tempfile::tempdir().unwrap();
         let mut a = admin(dir.path());
-        let nouveau = serde_json::json!({
+        let new = serde_json::json!({
             "op": "save",
             "stations": [{ "name": "Inter", "url": "http://inter", "preset": 1 }]
         });
-        assert!(a.set_data(nouveau).await.is_ok());
+        assert!(a.set_data(new).await.is_ok());
         assert_eq!(a.stations.read().await.stations[0].name, "Inter");
         assert_eq!(Stations::load(&a.stations_path).unwrap().stations[0].name, "Inter");
     }
 
     #[tokio::test]
-    async fn un_echec_decriture_renvoie_une_phrase_de_catalogue_pas_le_detail_io() {
-        // `stations_path` vise un fichier ordinaire comme s'il s'agissait
-        // d'un répertoire parent : `create_dir_all` échoue avec une erreur
-        // d'E/S, sans jamais toucher au disque des stations réelles.
-        // Régression visée : `Stations::save(...).map_err(|e| e.to_string())`
-        // mettait cette erreur brute (chemins compris) dans le corps de la
-        // réponse — le texte destiné au player doit rester une phrase de
-        // sources_catalog, le détail technique allant au journal.
+    async fn a_write_failure_returns_a_catalog_sentence_not_the_io_detail() {
+        // `stations_path` targets an ordinary file as if it were a parent
+        // directory: `create_dir_all` fails with an I/O error, without ever
+        // touching the real stations on disk.
+        // Targeted regression: `Stations::save(...).map_err(|e| e.to_string())`
+        // put that raw error (paths included) in the response body — the text
+        // meant for the player must remain a sources_catalog sentence, the
+        // technical detail going to the log.
         let dir = tempfile::tempdir().unwrap();
         let obstacle = dir.path().join("obstacle");
-        std::fs::write(&obstacle, b"pas un repertoire").unwrap();
+        std::fs::write(&obstacle, b"not a directory").unwrap();
         let mut a = admin(dir.path());
         a.stations_path = obstacle.join("stations.toml");
-        let nouveau = serde_json::json!({
+        let new = serde_json::json!({
             "op": "save",
             "stations": [{ "name": "Inter", "url": "http://inter", "preset": 1 }]
         });
-        let err = a.set_data(nouveau).await.unwrap_err();
+        let err = a.set_data(new).await.unwrap_err();
         assert_eq!(err, "the save failed");
     }
 
     #[tokio::test]
-    async fn un_enregistrement_reussi_publie_le_nouveau_compte() {
-        // C'est ce qui permet a la grille de la telecommande web de se mettre
-        // a jour des l'enregistrement, sans attendre qu'une preselection soit
-        // jouee — voir le defaut constate a l'usage.
+    async fn a_successful_save_publishes_the_new_count() {
+        // This is what lets the web remote's grid update as soon as the save
+        // happens, without waiting for a preset to be played — see the defect
+        // observed in use.
         let dir = tempfile::tempdir().unwrap();
-        let (mut a, mut rx) = admin_avec_canal(dir.path(), StubDirectory::ok(Vec::new()));
-        let nouveau = serde_json::json!({
+        let (mut a, mut rx) = admin_with_channel(dir.path(), StubDirectory::ok(Vec::new()));
+        let new = serde_json::json!({
             "op": "save",
             "stations": [
                 { "name": "A", "url": "http://a", "preset": 1 },
                 { "name": "B", "url": "http://b", "preset": 2 }
             ]
         });
-        assert!(a.set_data(nouveau).await.is_ok());
-        assert!(rx.has_changed().unwrap(), "le nouveau compte doit etre publie");
+        assert!(a.set_data(new).await.is_ok());
+        assert!(rx.has_changed().unwrap(), "the new count must be published");
         assert_eq!(*rx.borrow_and_update(), 2);
     }
 
     #[tokio::test]
-    async fn un_enregistrement_refuse_ne_publie_rien() {
-        // Un payload qui ne passe pas `Stations::validate` ne doit rien
-        // annoncer : rien n'a changé cote table.
+    async fn a_rejected_save_publishes_nothing() {
+        // A payload that does not pass `Stations::validate` must announce
+        // nothing: nothing changed on the table side.
         let dir = tempfile::tempdir().unwrap();
-        let (mut a, mut rx) = admin_avec_canal(dir.path(), StubDirectory::ok(Vec::new()));
+        let (mut a, mut rx) = admin_with_channel(dir.path(), StubDirectory::ok(Vec::new()));
         rx.borrow_and_update();
-        let mauvais = serde_json::json!({
+        let bad = serde_json::json!({
             "op": "save",
             "stations": [{ "name": "X", "url": "http://x", "preset": 200 }]
         });
-        assert!(a.set_data(mauvais).await.is_err());
-        assert!(!rx.has_changed().unwrap(), "un enregistrement refuse ne doit rien publier");
+        assert!(a.set_data(bad).await.is_err());
+        assert!(!rx.has_changed().unwrap(), "a rejected save must publish nothing");
     }
 
     #[tokio::test]
-    async fn save_numerote_de_1_a_n_par_position() {
-        // Charge utile telle que la produit l'IHM : `preset` = position.
+    async fn save_numbers_from_1_to_n_by_position() {
+        // Payload as produced by the UI: `preset` = position.
         let dir = tempfile::tempdir().unwrap();
         let mut a = admin(dir.path());
-        let nouveau = serde_json::json!({
+        let new = serde_json::json!({
             "op": "save",
             "stations": [
                 { "name": "A", "url": "http://a", "preset": 1 },
@@ -397,31 +395,31 @@ mod tests {
                 { "name": "C", "url": "http://c", "preset": 3 }
             ]
         });
-        assert!(a.set_data(nouveau).await.is_ok());
+        assert!(a.set_data(new).await.is_ok());
         let s = Stations::load(&a.stations_path).unwrap();
         assert_eq!(s.by_preset(2).unwrap().name, "B");
         assert_eq!(s.by_preset(3).unwrap().name, "C");
     }
 
     #[tokio::test]
-    async fn save_invalide_renvoie_erreur_et_ne_persiste_pas() {
+    async fn invalid_save_returns_an_error_and_does_not_persist() {
         let dir = tempfile::tempdir().unwrap();
         let mut a = admin(dir.path());
-        let mauvais = serde_json::json!({
+        let bad = serde_json::json!({
             "op": "save",
             "stations": [{ "name": "X", "url": "http://x", "preset": 200 }]
         });
-        assert!(a.set_data(mauvais).await.is_err());
-        // l'état partagé et le disque restent inchangés
+        assert!(a.set_data(bad).await.is_err());
+        // the shared state and the disk remain unchanged
         assert_eq!(a.stations.read().await.stations[0].name, "FIP");
         assert_eq!(Stations::load(&a.stations_path).unwrap().stations[0].name, "FIP");
     }
 
     #[tokio::test]
-    async fn save_dune_preselection_hors_bornes_est_refuse_cote_serveur() {
-        // Filet serveur : `Stations::validate` reste l'autorité même pour un
-        // payload qui ne passe pas par la page d'admin — la bounded est
-        // désormais 1..=99 (avant : 1..=9, d'où l'ancien name de ce test).
+    async fn saving_an_out_of_range_preset_is_rejected_server_side() {
+        // Server-side net: `Stations::validate` remains the authority even for
+        // a payload that does not go through the admin page — the bound is now
+        // 1..=99 (before: 1..=9, hence the former name of this test).
         let dir = tempfile::tempdir().unwrap();
         let mut a = admin(dir.path());
         let stations = vec![serde_json::json!({ "name": "S100", "url": "http://x", "preset": 100 })];
@@ -429,15 +427,15 @@ mod tests {
             .set_data(serde_json::json!({ "op": "save", "stations": stations }))
             .await
             .unwrap_err();
-        assert!(err.contains("100"), "message inattendu: {err}");
+        assert!(err.contains("100"), "unexpected message: {err}");
         assert!(!Stations::load(&a.stations_path).unwrap().stations.is_empty());
     }
 
     #[tokio::test]
-    async fn search_memorise_les_resultats_et_get_data_les_expose() {
+    async fn search_memorizes_the_results_and_get_data_exposes_them() {
         let dir = tempfile::tempdir().unwrap();
         let stub = StubDirectory::ok(parse_search_results(FIXTURE).unwrap());
-        let mut a = admin_avec(dir.path(), stub.clone());
+        let mut a = admin_with(dir.path(), stub.clone());
         let op = serde_json::json!({ "op": "search", "query": "france", "country": "FR" });
         assert!(a.set_data(op).await.is_ok());
 
@@ -448,35 +446,35 @@ mod tests {
         assert_eq!(v["search"][0]["codec"], "MP3");
         assert_eq!(v["search"][0]["bitrate"], 128);
         assert_eq!(v["search"][0]["country"], "FR");
-        // les stations configurées ne bougent pas
+        // the configured stations do not move
         assert_eq!(v["stations"][0]["name"], "FIP");
-        // rien n'est persisté par une recherche
+        // nothing is persisted by a search
         assert_eq!(Stations::load(&a.stations_path).unwrap().stations[0].name, "FIP");
-        assert_eq!(stub.vus.lock().unwrap()[0], ("france".to_string(), Some("FR".to_string())));
+        assert_eq!(stub.seen.lock().unwrap()[0], ("france".to_string(), Some("FR".to_string())));
     }
 
     #[tokio::test]
-    async fn search_sans_pays_ne_transmet_aucun_countrycode() {
+    async fn search_without_country_passes_no_countrycode() {
         let dir = tempfile::tempdir().unwrap();
         let stub = StubDirectory::ok(Vec::new());
-        let mut a = admin_avec(dir.path(), stub.clone());
+        let mut a = admin_with(dir.path(), stub.clone());
         let op = serde_json::json!({ "op": "search", "query": "  jazz  ", "country": "" });
         assert!(a.set_data(op).await.is_ok());
-        assert_eq!(stub.vus.lock().unwrap()[0], ("jazz".to_string(), None));
+        assert_eq!(stub.seen.lock().unwrap()[0], ("jazz".to_string(), None));
         assert_eq!(a.get_data().await["search"], serde_json::json!([]));
     }
 
     #[tokio::test]
-    async fn search_en_erreur_renvoie_un_message_traduit_et_laisse_letat_intact() {
+    async fn failed_search_returns_a_translated_message_and_leaves_the_state_intact() {
         let dir = tempfile::tempdir().unwrap();
         let stub = StubDirectory::ok(parse_search_results(FIXTURE).unwrap());
-        let mut a = admin_avec(dir.path(), stub);
+        let mut a = admin_with(dir.path(), stub);
         assert!(a
             .set_data(serde_json::json!({ "op": "search", "query": "france", "country": "FR" }))
             .await
             .is_ok());
 
-        // l'annuaire tombe : les résultats précédents restent affichables
+        // the directory goes down: the previous results remain displayable
         a.directory = StubDirectory::err("timeout");
         let err = a
             .set_data(serde_json::json!({ "op": "search", "query": "france", "country": "FR" }))
@@ -488,98 +486,99 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn les_pays_ne_sont_recuperes_qua_la_demande_et_memorises() {
-        // L'appel reseau ne doit pas partir au chargement de la page : il ne se
-        // justifie que quand l'utilisateur ouvre le selecteur de pays.
+    async fn countries_are_only_fetched_on_demand_and_memorized() {
+        // The network call must not leave when the page loads: it is only
+        // justified when the user opens the country selector.
         let dir = tempfile::tempdir().unwrap();
         let stub = StubDirectory::ok(Vec::new());
-        let mut a = admin_avec(dir.path(), stub.clone());
+        let mut a = admin_with(dir.path(), stub.clone());
         assert_eq!(a.get_data().await["countries"], serde_json::json!([]));
-        assert_eq!(stub.appels_pays.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(stub.country_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
 
         assert!(a.set_data(serde_json::json!({ "op": "countries" })).await.is_ok());
         let v = a.get_data().await;
         assert_eq!(v["countries"][0]["code"], "FR");
         assert_eq!(v["countries"][0]["stations"], 2746);
-        assert_eq!(stub.appels_pays.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(stub.country_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn les_pays_en_erreur_renvoient_un_message_traduit() {
+    async fn failed_countries_return_a_translated_message() {
         let dir = tempfile::tempdir().unwrap();
-        let mut a = admin_avec(dir.path(), StubDirectory::err("timeout"));
+        let mut a = admin_with(dir.path(), StubDirectory::err("timeout"));
         let err = a.set_data(serde_json::json!({ "op": "countries" })).await.unwrap_err();
         assert_eq!(err, "Directory search failed: timeout");
         assert_eq!(a.get_data().await["countries"], serde_json::json!([]));
     }
 
     #[tokio::test]
-    async fn une_recherche_reussie_memorise_le_pays_et_get_data_le_rend() {
-        // C'est ce qui evite de resaisir le pays a chaque ouverture de la page.
+    async fn a_successful_search_memorizes_the_country_and_get_data_returns_it() {
+        // This is what avoids typing the country in again every time the page
+        // opens.
         let dir = tempfile::tempdir().unwrap();
-        let mut a = admin_avec(dir.path(), StubDirectory::ok(Vec::new()));
+        let mut a = admin_with(dir.path(), StubDirectory::ok(Vec::new()));
         assert_eq!(a.get_data().await["country"], "");
         let op = serde_json::json!({ "op": "search", "query": "rock", "country": "BE" });
         assert!(a.set_data(op).await.is_ok());
         assert_eq!(a.get_data().await["country"], "BE");
-        // « tous pays » est un choix comme un autre, et doit se retenir aussi.
+        // "all countries" is a choice like any other, and must be retained too.
         let op = serde_json::json!({ "op": "search", "query": "rock", "country": "" });
         assert!(a.set_data(op).await.is_ok());
         assert_eq!(a.get_data().await["country"], "");
     }
 
     #[tokio::test]
-    async fn memoriser_le_pays_ne_perd_pas_la_preselection() {
-        // Les deux halves du plugin ecrivent dans le meme fichier d'state.
+    async fn memorizing_the_country_does_not_lose_the_preset() {
+        // Both halves of the plugin write to the same state file.
         let dir = tempfile::tempdir().unwrap();
-        let mut a = admin_avec(dir.path(), StubDirectory::ok(Vec::new()));
+        let mut a = admin_with(dir.path(), StubDirectory::ok(Vec::new()));
         crate::state::update(&a.state_path, |s| s.preset = 6).unwrap();
         let op = serde_json::json!({ "op": "search", "query": "rock", "country": "DE" });
         assert!(a.set_data(op).await.is_ok());
         let state = crate::state::load(&a.state_path);
         assert_eq!(state.country, "DE");
-        assert_eq!(state.preset, 6, "la preselection ne doit pas etre ecrasee");
+        assert_eq!(state.preset, 6, "the preset must not be overwritten");
     }
 
     #[tokio::test]
-    async fn une_recherche_en_echec_ne_memorise_pas_le_pays() {
-        // Retenir un pays qui vient d'echouer ferait reessayer au rechargement
-        // ce dont on sait deja qu'il ne marche pas.
+    async fn a_failed_search_does_not_memorize_the_country() {
+        // Retaining a country that just failed would make the reload retry
+        // what is already known not to work.
         let dir = tempfile::tempdir().unwrap();
-        let mut a = admin_avec(dir.path(), StubDirectory::err("timeout"));
+        let mut a = admin_with(dir.path(), StubDirectory::err("timeout"));
         let op = serde_json::json!({ "op": "search", "query": "rock", "country": "IT" });
         assert!(a.set_data(op).await.is_err());
         assert_eq!(crate::state::load(&a.state_path).country, "");
     }
 
     #[tokio::test]
-    async fn op_inconnue_ou_absente_renvoie_une_erreur() {
+    async fn unknown_or_missing_op_returns_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let mut a = admin(dir.path());
-        let err = a.set_data(serde_json::json!({ "op": "detruire" })).await.unwrap_err();
-        assert!(err.starts_with("invalid request:"), "message inattendu: {err}");
+        let err = a.set_data(serde_json::json!({ "op": "destroy" })).await.unwrap_err();
+        assert!(err.starts_with("invalid request:"), "unexpected message: {err}");
         let err2 = a
             .set_data(serde_json::json!({ "stations": [] }))
             .await
             .unwrap_err();
-        assert!(err2.starts_with("invalid request:"), "message inattendu: {err2}");
+        assert!(err2.starts_with("invalid request:"), "unexpected message: {err2}");
     }
 
-    /// Pack français livré dans le dépôt.
+    /// French pack shipped in the repository.
     fn fr_pack() -> String {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../deploy/locales/radio/fr.toml");
-        std::fs::read_to_string(p).expect("pack fr livre")
+        std::fs::read_to_string(p).expect("shipped fr pack")
     }
 
     #[test]
-    fn parite_des_cles_entre_len_embarque_et_le_pack_fr() {
+    fn key_parity_between_the_embedded_en_and_the_fr_pack() {
         let en = ritornello_i18n::try_parse(crate::RADIO_EN).unwrap();
         let fr = ritornello_i18n::try_parse(&fr_pack()).unwrap();
-        let mut cles_en: Vec<&String> = en.keys().collect();
-        let mut cles_fr: Vec<&String> = fr.keys().collect();
-        cles_en.sort();
-        cles_fr.sort();
-        assert_eq!(cles_en, cles_fr, "jeux de cles en/fr divergents");
+        let mut en_keys: Vec<&String> = en.keys().collect();
+        let mut fr_keys: Vec<&String> = fr.keys().collect();
+        en_keys.sort();
+        fr_keys.sort();
+        assert_eq!(en_keys, fr_keys, "en/fr key sets diverge");
     }
 }

@@ -23,39 +23,39 @@ function fail(message) {
 const indexHtml = readFileSync(`${distDir}/index.html`, 'utf8')
 if (!indexHtml.includes('<script type="importmap">')) {
   fail(
-    'aucune balise <script type="importmap"> dans dist/index.html — ' +
-      'le plugin shellPlugin (vite.config.ts) n\'a peut-etre step tourne, ' +
-      'ou le marqueur <!--IMPORTMAP--> a ete retire de index.html',
+    'no <script type="importmap"> tag in dist/index.html — ' +
+      'the shellPlugin plugin (vite.config.ts) may not have run, ' +
+      'or the <!--IMPORTMAP--> marker was removed from index.html',
   )
 }
 if (!indexHtml.includes('"vue":"/assets/vue.js"')) {
   fail(
-    'import map presente mais sans entree vers /assets/vue.js — ' +
-      'verifier la constante IMPORT_MAP dans vite.config.ts',
+    'import map present but without an entry to /assets/vue.js — ' +
+      'check the IMPORT_MAP constant in vite.config.ts',
   )
 }
 if (!indexHtml.includes('"@ritornello/ui":"/assets/ui-kit.js"')) {
   fail(
-    'import map presente mais sans entree vers /assets/ui-kit.js — ' +
-      'verifier la constante IMPORT_MAP dans vite.config.ts',
+    'import map present but without an entry to /assets/ui-kit.js — ' +
+      'check the IMPORT_MAP constant in vite.config.ts',
   )
 }
 
 const files = readdirSync(assetsDir).filter((f) => f.endsWith('.js'))
 
-for (const fichier of files) {
-  const contenu = readFileSync(`${assetsDir}/${fichier}`, 'utf8')
+for (const file of files) {
+  const content = readFileSync(`${assetsDir}/${file}`, 'utf8')
 
   // 2. `build.lib` mode (used for `vue.js` and, kit side, for
   // `ui-kit.js`) does not substitute `process.env.NODE_ENV`: a surviving
   // reference crashes the browser, which has no global `process`. This is
   // exactly fix round 1's Critical.
-  if (contenu.includes('process.env')) {
+  if (content.includes('process.env')) {
     fail(
-      `${fichier} contient encore "process.env" — ajouter/verifier le define ` +
-        "'process.env.NODE_ENV': JSON.stringify('production') dans la config vite.lib " +
-        "correspondante (vite.vue.config.ts pour vue.js, web/kit/vite.config.ts pour " +
-        'ui-kit.js), puis reconstruire (kit avant app).',
+      `${file} still contains "process.env" — add/check the define ` +
+        "'process.env.NODE_ENV': JSON.stringify('production') in the matching vite.lib " +
+        "config (vite.vue.config.ts for vue.js, web/kit/vite.config.ts for " +
+        'ui-kit.js), then rebuild (kit before app).',
     )
   }
 
@@ -63,13 +63,13 @@ for (const fichier of files) {
   // fingerprint: its presence would mean 'vue' was not externalized
   // (rollupOptions.external) and that two Vue instances, hence two
   // reactivity graphs, coexist in the page.
-  if (fichier.startsWith('app-')) {
-    for (const empreinte of ['__v_isRef', '__v_skip', '[Vue warn]']) {
-      if (contenu.includes(empreinte)) {
+  if (file.startsWith('app-')) {
+    for (const fingerprint of ['__v_isRef', '__v_skip', '[Vue warn]']) {
+      if (content.includes(fingerprint)) {
         fail(
-          `${fichier} contient l'empreinte de runtime Vue "${empreinte}" — ` +
-            "verifier que 'vue' figure dans rollupOptions.external de vite.config.ts " +
-            'et que ce fichier ne bundle step Vue en double.',
+          `${file} contains the Vue runtime fingerprint "${fingerprint}" — ` +
+            "check that 'vue' is listed in rollupOptions.external of vite.config.ts " +
+            'and that this file does not bundle Vue twice.',
         )
       }
     }

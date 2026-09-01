@@ -7,12 +7,12 @@ declare global {
   }
 }
 
-// Le coeur injecte le choix persiste directement dans le shell qu'il sert :
-// le theme est donc applique des le premier rendu, sans attendre un
-// goTo-retour `GET /api/theme` — step de clignotement. Le coeur ne
-// transporte que deux chaines ; il ne connait aucune color.
+// The core injects the persisted choice directly into the shell it serves:
+// the theme is therefore applied from the very first render, without waiting
+// for a `GET /api/theme` round trip — no flicker. The core only carries two
+// strings; it knows no color.
 export function readBootTheme(win: Window = window): ThemePayload {
-  const brut = win.__RITORNELLO_THEME__
-  const mode: Mode = brut?.mode === 'dark' || brut?.mode === 'light' ? brut.mode : DEFAULT_MODE
-  return { theme: brut?.theme || DEFAULT_PRESET, mode }
+  const raw = win.__RITORNELLO_THEME__
+  const mode: Mode = raw?.mode === 'dark' || raw?.mode === 'light' ? raw.mode : DEFAULT_MODE
+  return { theme: raw?.theme || DEFAULT_PRESET, mode }
 }

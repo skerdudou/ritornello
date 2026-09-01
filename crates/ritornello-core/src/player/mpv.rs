@@ -29,21 +29,23 @@ impl MpvIpc {
         let pending = ipc.pending.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(read).lines();
-            // Vrai jusqu'à la première notification d'`idle-active`.
+            // True until the first `idle-active` notification.
             //
-            // `observe_property` renvoie aussitôt la valeur courante, et mpv est
-            // lancé en démon **idle** : cette première valeur est donc toujours
-            // `true`, et elle décrit un état de départ, pas un arrêt de playback.
-            // Le cœur, lui, read `PlaybackIdle` comme la fin de ce qui jouait —
-            // il pose `playback = false` et notifie `Stop` à la Source.
+            // `observe_property` immediately returns the current value, and
+            // mpv is launched as an **idle** daemon: this first value is
+            // therefore always `true`, and it describes a starting state,
+            // not a playback stop. The core, for its part, reads
+            // `PlaybackIdle` as the end of what was playing — it sets
+            // `playback = false` and notifies `Stop` to the Source.
             //
-            // Mesuré à l'usage : l'événement attend dans le canal pendant que le
-            // démarrage lance la première playback, et il est traité juste après.
-            // Sur un contenu fini (un fichier), rien ne le rattrape — plus de
-            // « en écoute », rembobinage et avance grisés, position absente,
-            // jusqu'à ce qu'un play/pause recharge tout depuis le début. Un stream
-            // repassait par la restart et masquait le défaut.
-            let mut premier_idle = true;
+            // Measured in practice: the event waits in the channel while
+            // startup launches the first playback, and it is processed
+            // right after. On finite content (a file), nothing catches it
+            // — no more "listening", rewind and forward greyed out,
+            // position absent, until a play/pause reloads everything from
+            // the start. A stream would go back through the restart and
+            // mask the defect.
+            let mut first_idle = true;
             while let Ok(Some(line)) = lines.next_line().await {
                 let v = match serde_json::from_str::<Value>(&line) {
                     Ok(v) => v,
@@ -64,51 +66,53 @@ impl MpvIpc {
                 } else if v["event"] == json!("property-change") {
                     let ev = match (v["name"].as_str(), &v["data"]) {
                         (Some("media-title"), Value::String(t)) => Some(Event::Title(t.clone())),
-                        // Une même propriété, deux couches : l'en-tête ICY d'un
-                        // stream, ou les tags d'un fichier. `file_tags` se tait
-                        // dès qu'une clé ICY est présente, les deux branches
-                        // sont donc exclusives — l'order ci-dessous n'est pas
-                        // une priorité déguisée.
+                        // One property, two layers: the ICY header of a
+                        // stream, or the tags of a file. `file_tags` stays
+                        // silent as soon as an ICY key is present, so the
+                        // two branches are exclusive — the order below is
+                        // not a disguised priority.
                         (Some("metadata"), data) => icy_title(data)
                             .map(Event::IcyTitle)
                             .or_else(|| file_tags(data).map(|m| Event::FileTags(Box::new(m)))),
-                        // Le path réellement ouvert par mpv, jamais déduit
-                        // de l'identité opaque de la Source (voir `OBSERVED`).
+                        // The path mpv actually opened, never inferred from
+                        // the Source's opaque identity (see `OBSERVED`).
                         (Some("path"), Value::String(p)) => Some(Event::Path(p.clone())),
-                        // La valeur initiale de l'observation est avalée (voir
-                        // `premier_idle`) ; les suivantes suivent une playback et
-                        // sont de vrais arrêts, y compris la fin d'une liste.
+                        // The observation's initial value is swallowed (see
+                        // `first_idle`); the following ones follow a
+                        // playback and are true stops, including the end
+                        // of a playlist.
                         (Some("idle-active"), Value::Bool(true)) => {
-                            let initiale = std::mem::replace(&mut premier_idle, false);
-                            if initiale { None } else { Some(Event::PlaybackIdle) }
+                            let initial = std::mem::replace(&mut first_idle, false);
+                            if initial { None } else { Some(Event::PlaybackIdle) }
                         }
                         (Some("idle-active"), Value::Bool(false)) => {
-                            // Une entrée en playback consomme aussi le droit
-                            // d'avaler : si mpv announcement l'activité d'abord, le
-                            // `true` qui suivra est un arrêt véritable.
-                            premier_idle = false;
+                            // Entering playback also consumes the right to
+                            // swallow: if mpv announces activity first, the
+                            // `true` that follows is a genuine stop.
+                            first_idle = false;
                             Some(Event::PlaybackActive)
                         }
-                        // Deux propriétés pour un même fait, l'avance de piste :
-                        // mpv expose les pistes d'un CD comme des entrées de
-                        // liste de playback ou comme des chapitres selon la
-                        // façon dont le disque a été ouvert (`cdda://` entier
-                        // ou `cdda://<piste>`). Une seule des deux parle donc à
-                        // la fois, et le cœur relaie la même chose dans les deux
-                        // cas — c'est la Source qui sait ce que « piste n »
-                        // signifie. Un index négatif (mpv dit `-1` quand il n'y
-                        // a pas de chapitre) est transmis tel quel et écarté par
-                        // la Source.
+                        // Two properties for the same fact, track advance:
+                        // mpv exposes a CD's tracks either as playlist
+                        // entries or as chapters, depending on how the disc
+                        // was opened (whole `cdda://` or `cdda://<track>`).
+                        // Only one of the two speaks at a time, then, and
+                        // the core relays the same thing in both cases — it
+                        // is the Source that knows what "track n" means. A
+                        // negative index (mpv says `-1` when there is no
+                        // chapter) is passed through as-is and discarded by
+                        // the Source.
                         (Some("playlist-pos") | Some("chapter"), Value::Number(n)) => {
                             n.as_i64().map(Event::TrackChanged)
                         }
                         _ => None,
                     };
                     if let Some(ev) = ev {
-                        // `mpsc` sans perte : canal plein = contre-pression sur
-                        // cette pompe (la playback de la socket attend), jamais
-                        // d'événement jeté. Récepteur disparu = boucle du cœur
-                        // finie, plus personne à serve.
+                        // `mpsc` with no loss: a full channel means
+                        // backpressure on this pump (the socket's readback
+                        // waits), never a dropped event. A vanished
+                        // receiver means the core loop is done, nobody
+                        // left to serve.
                         if events.send(ev).await.is_err() {
                             break;
                         }
@@ -149,125 +153,125 @@ impl MpvIpc {
     }
 }
 
-/// Extrait le titre annoncé par le stream du contenu de la propriété `metadata`
-/// de mpv. Fonction pure, testable sur une capture réelle.
+/// Extracts the title the stream announces from the content of mpv's
+/// `metadata` property. Pure function, testable on a real capture.
 ///
-/// La clé est cherchée **sans égard à la casse** : mpv recopie les names de
-/// champs tels que la station les envoie, et l'en-tête ICY apparaît selon les
-/// serveurs en `icy-title`, `Icy-Title` ou `ICY-TITLE`.
+/// The key is looked up **case-insensitively**: mpv copies field names
+/// exactly as the station sends them, and the ICY header shows up,
+/// depending on the server, as `icy-title`, `Icy-Title` or `ICY-TITLE`.
 ///
-/// Une valeur clear ou blanche donne `None`, donc aucun événement : plusieurs
-/// stations mesurées émettent un `StreamTitle` clear entre deux morceaux (et OUI
-/// FM y met un texte de remplissage). Effacer l'affichage à chaque trou
-/// laisserait la line clignoter, alors que le changement de track, lui,
-/// remet déjà l'ardoise à zéro côté cœur.
+/// An empty or blank value gives `None`, hence no event: several stations
+/// measured emit an empty `StreamTitle` between two tracks (and OUI FM puts
+/// filler text there). Clearing the display on every gap would make the
+/// line flicker, while a track change already resets the slate on the core
+/// side.
 pub fn icy_title(data: &Value) -> Option<String> {
     let map = data.as_object()?;
-    let brut = map
+    let raw = map
         .iter()
         .find(|(key, _)| key.eq_ignore_ascii_case("icy-title"))
-        .and_then(|(_, valeur)| valeur.as_str())?;
-    let elague = brut.trim();
-    (!elague.is_empty()).then(|| elague.to_string())
+        .and_then(|(_, value)| value.as_str())?;
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-/// Extrait les trois champs affichables des **tags du fichier joué**, depuis
-/// cette même propriété `metadata`. Fonction pure, testable sur une capture
-/// réelle.
+/// Extracts the three displayable fields from the **tags of the played
+/// file**, from that same `metadata` property. Pure function, testable on a
+/// real capture.
 ///
-/// FFmpeg **normalise** les clés : ID3 (mp3), Vorbis comments (flac, ogg,
-/// opus), atomes iTunes (m4a) et RIFF INFO (wav) remontent tous sous
-/// `title` / `artist` / `album`, ce qui a été vérifié format par format. Une
-/// seule grammaire suffit donc, et elle couvre toute la bibliothèque.
+/// FFmpeg **normalizes** the keys: ID3 (mp3), Vorbis comments (flac, ogg,
+/// opus), iTunes atoms (m4a) and RIFF INFO (wav) all surface under
+/// `title` / `artist` / `album`, which was verified format by format. A
+/// single grammar is therefore enough, and it covers the whole library.
 ///
-/// Deux précautions, l'une et l'autre nées d'une mesure :
+/// Two precautions, both born from a measurement:
 ///
-/// - on **pioche trois clés nommées** au lieu d'absorber l'objet : un m4a y
-///   fait aussi remonter `major_brand`, `handler_name`, `vendor_id` et
-///   `compatible_brands`, qui n'ont rien à faire dans un affichage ;
-/// - la présence d'une clé `icy-*` **signe un stream** et rend `None`. Certaines
-///   stations renseignent un `title` valant leur propre name à côté d'un
-///   `icy-title` qui porte le vrai track : préférer le premier serait une
-///   régression pour la radio, silencieuse et difficile à attribuer.
+/// - only **three named keys are picked out** instead of absorbing the
+///   object: an m4a also surfaces `major_brand`, `handler_name`,
+///   `vendor_id` and `compatible_brands`, which have no place in a
+///   display;
+/// - the presence of an `icy-*` key **marks a stream** and returns `None`.
+///   Some stations fill in a `title` equal to their own name alongside an
+///   `icy-title` that carries the real track: preferring the former would
+///   be a silent regression for the radio.
 pub fn file_tags(data: &Value) -> Option<Track> {
     let map = data.as_object()?;
     if map.keys().any(|key| key.to_ascii_lowercase().starts_with("icy-")) {
         return None;
     }
-    let champ = |name: &str| {
+    let field = |name: &str| {
         map.iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .and_then(|(_, valeur)| valeur.as_str())
+            .and_then(|(_, value)| value.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
     };
     let track = Track {
-        artist: champ("artist"),
-        title: champ("title"),
-        album: champ("album"),
+        artist: field("artist"),
+        title: field("title"),
+        album: field("album"),
         duration_s: None,
-        // FFmpeg normalise l'année sous `date`, quel que soit le format du
-        // fichier — comme il le fait déjà pour les trois champs ci-dessus. Sa
-        // valeur va de `"1959"` à `"1959-08-17"` selon ce que l'étiquette
-        // porte, d'où le passage par `valid_year`.
-        year: champ("date").as_deref().and_then(ritornello_proto::valid_year),
-        // Un fichier local ne porte pas de lien de plateforme : ce sont les
-        // stream qui en annoncent.
+        // FFmpeg normalizes the year under `date`, whatever the file
+        // format — as it already does for the three fields above. Its
+        // value ranges from `"1959"` to `"1959-08-17"` depending on what
+        // the tag carries, hence the pass through `valid_year`.
+        year: field("date").as_deref().and_then(ritornello_proto::valid_year),
+        // A local file carries no platform link: only streams announce
+        // those.
         links: Vec::new(),
         origin: Some(crate::metadata::ORIGIN_TAGS.to_string()),
         cover_href: None,
         cover_origin: None,
-        // Laissée clear ici : c'est `Metadata::text_block` qui attribue
-        // ces champs aux tags, au moment de la composition. La renseigner deux
-        // fois donnerait deux vérités à garder d'accord.
+        // Left empty here: it is `Metadata::text_block` that attributes
+        // these fields to the tags, at composition time. Filling it in
+        // here too would give two truths to keep in sync.
         provenance: Default::default(),
     };
     (!track.is_empty()).then_some(track)
 }
 
-/// Extrait la cover embarquée du fichier joué, dans un fichier temporaire.
+/// Extracts the embedded cover of the played file, into a temp file.
 ///
-/// **Strictement bloquante** (playback de fichier via `lofty`, potentiellement
-/// sur un partage réseau) : à appeler uniquement sous `Health::bounded`, jamais
-/// directement depuis une tâche asynchrone — voir `Core::handle_path` et
-/// `health.rs` pour la raison.
+/// **Strictly blocking** (file playback via `lofty`, potentially on a
+/// network share): call only under `Health::bounded`, never directly from
+/// an async task — see `Core::handle_path` and `health.rs` for why.
 ///
-/// Un fichier plutôt que des bytes en mémoire : cela garde **une seule
-/// nature** de cover locale côté cache, qui ne charge alors rien en RAM.
+/// A file rather than in-memory bytes: this keeps **a single nature** of
+/// local cover on the cache side, which then loads nothing into RAM.
 ///
-/// Tenté uniquement sur un path **sans schéma** : un stream n'a pas de tag, et
-/// `lofty` n'a rien à ouvrir sur une URL.
+/// Only attempted on a path **with no scheme**: a stream has no tag, and
+/// `lofty` has nothing to open on a URL.
 ///
-/// Nommé d'après le **contenu de l'image**, pas d'après la piste (voir
-/// `cover::content_key`) : les pistes d'un même album à cover unique
-/// écrivent donc un seul fichier et publient un seul `href`, que
-/// `display_relay` reconnaît alors comme déjà poussé — plus de décodage,
-/// plus de trame, plus de retéléchargement navigateur après la première.
-/// Reste une playback `lofty` par piste, incontournable : il faut les bytes
-/// pour les hacher.
+/// Named after the **content of the image**, not the track (see
+/// `cover::content_key`): the tracks of a single-cover album therefore
+/// write a single file and publish a single `href`, which `display_relay`
+/// then recognizes as already pushed — no more decoding, no more frame, no
+/// more browser re-download after the first one. What remains, and cannot
+/// be avoided, is one `lofty` read per track: the bytes are needed to hash
+/// them.
 ///
-/// **N'écrit que si le fichier est absent**, et c'est le nommage par contenu
-/// qui rend ce raccourci sûr : un fichier déjà là sous ce name porte, par
-/// construction, l'image qu'on s'apprêtait à y mettre. Ce n'est pas qu'une
-/// économie — réécrire aurait tronqué, le temps de l'écriture, le fichier
-/// que la route HTTP est peut-être en train de serve pour la piste
-/// précédente, qui porte désormais le même name.
+/// **Only writes if the file is absent**, and it is content-based naming
+/// that makes this shortcut safe: a file already present under that name
+/// carries, by construction, the image about to be put there. This is not
+/// merely an optimization — rewriting would have truncated, for the
+/// duration of the write, the file the HTTP route might be serving at that
+/// moment for the previous track, which now bears the same name.
 ///
-/// La fraîcheur ne repose donc plus sur une réécriture systématique mais sur
-/// l'adressage par contenu. Ce que ce nommage ne couvre pas, en revanche,
-/// c'est un fichier **tronqué** laissé par une exécution tuée en pleine
-/// écriture : son name annoncerait une image que son contenu ne porte pas, et
-/// l'écriture conditionnelle l'adopterait. C'est `cover::purge_temp_files`,
-/// au démarrage, qui ferme ce cas — la purge n'est plus seulement une bounded
-/// à l'accumulation, elle est devenue nécessaire à la correction.
+/// Freshness therefore no longer rests on systematic rewriting but on
+/// content addressing. What this naming does not cover, on the other hand,
+/// is a file **truncated** by an execution killed mid-write: its name
+/// would announce an image its content does not carry, and the conditional
+/// write would adopt it as-is. It is `cover::purge_temp_files`, at
+/// startup, that closes this case — the purge is no longer just a cap on
+/// accumulation, it has become necessary for correctness.
 pub fn embedded_cover(path: &str) -> Option<ritornello_proto::CoverRef> {
     if path.contains("://") {
         return None;
     }
-    let fichier = lofty::probe::Probe::open(path).ok()?.read().ok()?;
-    let image = lofty::file::TaggedFileExt::primary_tag(&fichier)
-        .or_else(|| lofty::file::TaggedFileExt::first_tag(&fichier))?
+    let file = lofty::probe::Probe::open(path).ok()?.read().ok()?;
+    let image = lofty::file::TaggedFileExt::primary_tag(&file)
+        .or_else(|| lofty::file::TaggedFileExt::first_tag(&file))?
         .pictures()
         .first()?
         .clone();
@@ -276,91 +280,92 @@ pub fn embedded_cover(path: &str) -> Option<ritornello_proto::CoverRef> {
         Some(m) if m.as_str().contains("webp") => "webp",
         _ => "jpg",
     };
-    let mut cible = std::env::temp_dir();
-    cible.push(format!(
+    let mut target = std::env::temp_dir();
+    target.push(format!(
         "{}{}.{extension}",
         crate::cover::TEMP_PREFIX,
         crate::cover::content_key(image.data())
     ));
-    if !cible.exists() {
-        std::fs::write(&cible, image.data()).ok()?;
+    if !target.exists() {
+        std::fs::write(&target, image.data()).ok()?;
     }
-    Some(ritornello_proto::CoverRef::Path { path: cible.to_string_lossy().into_owned() })
+    Some(ritornello_proto::CoverRef::Path { path: target.to_string_lossy().into_owned() })
 }
 
 pub struct MpvPlayer {
     ipc: Arc<MpvIpc>,
 }
 
-/// Ramène une réponse de `get_property` à un nombre utilisable.
+/// Brings a `get_property` response down to a usable number.
 ///
-/// Trois façons pour mpv de dire « je ne sais pas », toutes ramenées à
-/// `None` : l'erreur (`property unavailable` sur un stream sans durée), le
-/// `null`, et la valeur négative que mpv produit brièvement au démarrage d'un
-/// fichier — mesuré à `-0.02`, et publier cela ferait reculer la barre.
+/// Three ways for mpv to say "I don't know", all brought down to `None`:
+/// the error (`property unavailable` on a stream with no duration), the
+/// `null`, and the negative value mpv briefly produces at a file's startup
+/// — measured at `-0.02`, and publishing that would make the bar go
+/// backwards.
 fn number_or_none(res: Result<Value>) -> Option<f64> {
     res.ok().and_then(|v| v.as_f64()).filter(|n| *n >= 0.0)
 }
 
-/// Tampon de sortie audio, en secondes. **On reprend le défaut de mpv**, donc
-/// ce module ne change rien au comportement tant que la variable n'est pas
-/// définie : la cause des microcoupures observées n'est pas établie, et élargir
-/// d'office aurait masqué le diagnostic plutôt que de le faire. La molette
-/// existe parce que la bonne valeur dépend de la machine — sur un Pi 2, une
-/// hausse de charge peut faire manquer une échéance d'écriture ALSA, ce qui
-/// s'entend comme une microcoupure, et monter à 0,5 s est alors le premier
-/// essai. Le coût est une latence d'autant sur la prise en compte du volume ou
-/// du muet, imperceptible pour de la radio.
+/// Audio output buffer, in seconds. **We reuse mpv's default**, so this
+/// module changes nothing about behavior as long as the variable is not
+/// set: the cause of the observed micro-glitches is not established, and
+/// widening it by default would have masked the diagnosis rather than
+/// making it. The dial exists because the right value depends on the
+/// machine — on a Pi 2, a load spike can make an ALSA write deadline be
+/// missed, which is heard as a micro-glitch, and raising it to 0.5 s is
+/// then the first thing to try. The cost is a matching latency on picking
+/// up volume or mute changes, imperceptible for radio.
 pub const AUDIO_BUFFER_DEFAULT: f64 = 0.2;
 
-/// Borne haute imposée par mpv à `--audio-buffer`.
+/// Upper bound mpv imposes on `--audio-buffer`.
 const AUDIO_BUFFER_MAX: f64 = 10.0;
 
-/// Avance de playback, en secondes. **On reprend le défaut de mpv**, pour la
-/// même raison que le buffer de sortie : ne rien changer sans avoir mesuré.
-/// Une seconde est pourtant mince pour un stream internet — la moindre gigue
-/// réseau clear l'avance et mpv met la playback en pause le temps de se remplir —
-/// donc c'est la molette à tourner en premier sur une liaison capricieuse.
-/// Dix secondes de MP3 à 128 kbit/s pèsent environ 160 Ko, négligeable même
-/// sur 1 Go de RAM.
+/// Playback read-ahead, in seconds. **We reuse mpv's default**, for the
+/// same reason as the output buffer: change nothing without having
+/// measured. One second is thin for an internet stream, though — the
+/// slightest network jitter clears the read-ahead and mpv pauses playback
+/// while it refills — so this is the dial to turn first on a flaky link.
+/// Ten seconds of 128 kbit/s MP3 weighs about 160 KB, negligible even on 1
+/// GB of RAM.
 pub const READAHEAD_DEFAULT: f64 = 1.0;
 
-/// Borne haute retenue ici : au-delà, le buffer coûte de la mémoire sans
-/// bénéfice audible, et retarde la prise en compte d'un changement de station.
+/// Upper bound kept here: beyond it, the buffer costs memory with no
+/// audible benefit, and delays picking up a station change.
 const READAHEAD_MAX: f64 = 120.0;
 
-/// Lit une durée fournie par l'environnement. Variable absente : le défaut, en
-/// silence. Valeur illisible, négative ou hors bornes : le défaut **avec** un
-/// avertissement, plutôt qu'un échec de démarrage — un appareil muet parce
-/// qu'une variable est mal écrite serait un pire résultat qu'un réglage par
-/// défaut.
-fn duration_setting(brut: Option<&str>, defaut: f64, max: f64, quoi: &str) -> f64 {
-    let Some(brut) = brut else { return defaut };
-    match brut.trim().parse::<f64>() {
+/// Reads a duration supplied by the environment. Variable absent: the
+/// default, silently. Value unreadable, negative or out of bounds: the
+/// default **with** a warning, rather than a startup failure — a silent
+/// device because a variable was mistyped would be a worse outcome than a
+/// default setting.
+fn duration_setting(raw: Option<&str>, default: f64, max: f64, what: &str) -> f64 {
+    let Some(raw) = raw else { return default };
+    match raw.trim().parse::<f64>() {
         Ok(v) if v.is_finite() && (0.0..=max).contains(&v) => v,
         Ok(v) => {
-            tracing::warn!("{quoi}={v} out of bounds (0..={max}), keeping {defaut}");
-            defaut
+            tracing::warn!("{what}={v} out of bounds (0..={max}), keeping {default}");
+            default
         }
         Err(e) => {
-            tracing::warn!("{quoi}={brut:?} unreadable ({e}), keeping {defaut}");
-            defaut
+            tracing::warn!("{what}={raw:?} unreadable ({e}), keeping {default}");
+            default
         }
     }
 }
 
-/// Tampon de sortie retenu, d'après `RITORNELLO_AUDIO_BUFFER` s'il est défini.
-pub fn audio_buffer_setting(brut: Option<&str>) -> f64 {
-    duration_setting(brut, AUDIO_BUFFER_DEFAULT, AUDIO_BUFFER_MAX, "RITORNELLO_AUDIO_BUFFER")
+/// Output buffer to keep, based on `RITORNELLO_AUDIO_BUFFER` if it is set.
+pub fn audio_buffer_setting(raw: Option<&str>) -> f64 {
+    duration_setting(raw, AUDIO_BUFFER_DEFAULT, AUDIO_BUFFER_MAX, "RITORNELLO_AUDIO_BUFFER")
 }
 
-/// Avance de playback retenue, d'après `RITORNELLO_NETWORK_READAHEAD`.
-pub fn readahead_setting(brut: Option<&str>) -> f64 {
-    duration_setting(brut, READAHEAD_DEFAULT, READAHEAD_MAX, "RITORNELLO_NETWORK_READAHEAD")
+/// Playback read-ahead to keep, based on `RITORNELLO_NETWORK_READAHEAD`.
+pub fn readahead_setting(raw: Option<&str>) -> f64 {
+    duration_setting(raw, READAHEAD_DEFAULT, READAHEAD_MAX, "RITORNELLO_NETWORK_READAHEAD")
 }
 
-/// Arguments de lancement de mpv. Fonction pure, séparée de `start` pour être
-/// testable sans lancer de processus.
+/// mpv launch arguments. Pure function, separate from `start` to be
+/// testable without spawning a process.
 pub fn mpv_args(socket: &Path, cd_dev: &str, audio_buffer: f64, readahead: f64) -> Vec<String> {
     vec![
         "--idle=yes".to_string(),
@@ -373,17 +378,19 @@ pub fn mpv_args(socket: &Path, cd_dev: &str, audio_buffer: f64, readahead: f64) 
     ]
 }
 
-/// Propriétés que le cœur demande à mpv de pousser. `metadata` porte l'en-tête
-/// ICY reçu de la station (clé `icy-title`), seule source de titre disponible
-/// pour une radio sans plugin `metadata` dédié. `path` est la seule façon dont
-/// le cœur apprend quel fichier plays : il a fait un principe de ne **jamais**
-/// interpréter l'identité opaque produite par la Source pour en tirer un
-/// path — c'est mpv, qui a réellement ouvert le fichier, qui le dit.
+/// Properties the core asks mpv to push. `metadata` carries the ICY header
+/// received from the station (key `icy-title`), the only title source
+/// available for a radio with no dedicated `metadata` plugin. `path` is the
+/// only way the core learns which file is playing: it made a principle of
+/// **never** interpreting the opaque identity produced by the Source to
+/// derive a path from it — it is mpv, which actually opened the file, that
+/// says so.
 const OBSERVED: [&str; 6] =
     ["media-title", "metadata", "idle-active", "playlist-pos", "chapter", "path"];
 
-/// Lance mpv en démon idle et s'y connecte. Le Child est rendition à l'appelant :
-/// s'il meurt, main quitte et systemd restart tout le service.
+/// Launches mpv as an idle daemon and connects to it. The Child is handed
+/// back to the caller: if it dies, main exits and systemd restarts the
+/// whole service.
 pub async fn start(
     mpv_bin: &str,
     socket: &Path,
@@ -412,8 +419,8 @@ pub async fn start(
     }
     let stream = stream.context("connecting to mpv socket (10 s)")?;
     let ipc = MpvIpc::from_stream(stream, events);
-    for propriete in OBSERVED {
-        ipc.observe(propriete).await?;
+    for property in OBSERVED {
+        ipc.observe(property).await?;
     }
     Ok((MpvPlayer { ipc }, child))
 }
@@ -425,14 +432,14 @@ impl super::Player for MpvPlayer {
         self.ipc.command(&[json!("set_property"), json!("pause"), json!(false)]).await?;
         Ok(())
     }
-    /// `loadlist` et non `loadfile` : la liste est dépliée **avant** que la
-    /// commande ne réponde (sa réponse porte même `num_entries`), si bien qu'un
-    /// `playlist-pos` envoyé juste après tombe dans les bornes.
+    /// `loadlist` and not `loadfile`: the list is unfolded **before** the
+    /// command answers (its response even carries `num_entries`), so a
+    /// `playlist-pos` sent right after falls within bounds.
     ///
-    /// Avec `loadfile`, mesuré sur mpv 0.37 : `playlist-count` vaut d'abord 1,
-    /// la position 0, puis viennent un `end-file` et un `start-file` avant que
-    /// le compte ne passe à 3. Le `playlist-pos` demandé arrivait donc hors
-    /// bornes, et le dépliage rejouait la première piste.
+    /// With `loadfile`, measured on mpv 0.37: `playlist-count` is first 1,
+    /// position 0, then an `end-file` and a `start-file` come before the
+    /// count reaches 3. The requested `playlist-pos` therefore arrived out
+    /// of bounds, and the unfolding replayed the first track.
     async fn load_list(&self, uri: &str) -> Result<()> {
         self.ipc.command(&[json!("loadlist"), json!(uri), json!("replace")]).await?;
         self.ipc.command(&[json!("set_property"), json!("pause"), json!(false)]).await?;
@@ -471,20 +478,20 @@ impl super::Player for MpvPlayer {
         Ok(())
     }
     async fn progress(&self) -> Result<Progress> {
-        // Deux allers-retours par seconde sur une socket Unix locale : le coût
-        // est nul devant l'intervalle. Un sondage plutôt qu'un
-        // `observe_property` parce que mpv ne cadence pas ses notifications de
-        // `time-pos` — il en émettrait plusieurs par seconde pour une
-        // information publiée une fois par seconde.
+        // Two round trips per second on a local Unix socket: the cost is
+        // nil next to the interval. A poll rather than an
+        // `observe_property` because mpv does not pace its `time-pos`
+        // notifications — it would emit several per second for information
+        // published once per second.
         //
-        // Réserve non levée sur un `cdda://` ouvert en disque entier : mpv
-        // expose alors ses pistes comme des chapitres (voir plus haut, à
-        // propos de l'avance de piste). Que vaut `time-pos` dans ce cas —
-        // relatif au disque ou à la piste ? Ce n'est pas mesuré sur le
-        // matériel, seulement noté dans un document de conception archivé. Si
-        // la réponse est « relatif au disque », cette valeur doit retrancher
-        // le début du chapitre courant, et `duration_s` refléter celle du
-        // chapitre plutôt que celle du disque entier.
+        // Open question, not resolved: on a `cdda://` opened as a whole
+        // disc, mpv exposes its tracks as chapters (see above, about track
+        // advance). What does `time-pos` mean in that case — relative to
+        // the disc or to the track? This is not measured on real hardware,
+        // only noted in an archived design document. If the answer is
+        // "relative to the disc", this value must subtract the start of
+        // the current chapter, and `duration_s` should reflect the
+        // chapter's rather than the whole disc's.
         let position = self.ipc.command(&[json!("get_property"), json!("time-pos")]).await;
         let duration = self.ipc.command(&[json!("get_property"), json!("duration")]).await;
         Ok(Progress { position_s: number_or_none(position), duration_s: number_or_none(duration) })
@@ -513,7 +520,7 @@ mod tests {
     use tokio::net::UnixStream;
 
     #[tokio::test]
-    async fn command_recoit_la_reponse_correspondante() {
+    async fn command_receives_the_matching_response() {
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, _rx) = mpsc::channel(16);
         let ipc = MpvIpc::from_stream(client, tx);
@@ -535,7 +542,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn property_change_devient_event() {
+    async fn property_change_becomes_an_event() {
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, mut rx) = mpsc::channel(16);
         let _ipc = MpvIpc::from_stream(client, tx);
@@ -555,37 +562,39 @@ mod tests {
             .unwrap();
 
         assert_eq!(rx.recv().await.unwrap(), Event::Title("FIP - Miles Davis".into()));
-        // Le `idle-active: true` envoyé ci-dessus est la **première** valeur
-        // observée : elle décrit l'état de départ du démon idle, pas un arrêt,
-        // et elle est donc avalée (voir
-        // `le_premier_idle_observe_n_est_pas_un_arret`). Ce test l'attendait
-        // autrefois comme un événement — il encodait le défaut.
+        // The `idle-active: true` sent above is the **first** observed
+        // value: it describes the idle daemon's starting state, not a
+        // stop, and is therefore swallowed (see
+        // `the_first_observed_idle_is_not_a_stop`). This test used to
+        // expect it as an event — it encoded the defect.
         assert_eq!(rx.recv().await.unwrap(), Event::PlaybackActive);
         assert_eq!(rx.recv().await.unwrap(), Event::TrackChanged(3));
     }
 
     #[tokio::test]
-    async fn le_premier_idle_observe_n_est_pas_un_arret() {
-        // mpv est lancé en démon idle, et `observe_property` renvoie aussitôt la
-        // valeur courante : `idle-active = true` arrive donc avant toute
-        // playback. C'est un état de départ, pas un arrêt — mais le cœur traite
-        // `PlaybackIdle` comme la fin de ce qui jouait (`playback = false`, et
-        // `Stop` notifié à la Source).
+    async fn the_first_observed_idle_is_not_a_stop() {
+        // mpv is launched as an idle daemon, and `observe_property`
+        // immediately returns the current value: `idle-active = true`
+        // therefore arrives before any playback. It is a starting state,
+        // not a stop — but the core treats `PlaybackIdle` as the end of
+        // what was playing (`playback = false`, and `Stop` notified to the
+        // Source).
         //
-        // Défaut mesuré à l'usage : cet événement attend dans le canal pendant
-        // que le démarrage lance la première playback, et il est traité juste
-        // après. Sur un contenu **fini** — un fichier — rien ne le rattrape :
-        // pas de « en écoute », rembobinage et avance grisés, position absente,
-        // jusqu'à ce qu'un play/pause recharge tout depuis le début. Un stream,
-        // lui, repassait par la branche de restart (`expecting_stream`) et
-        // rejouait tout seul, ce qui masquait le défaut côté radio.
+        // Defect measured in practice: this event waits in the channel
+        // while startup launches the first playback, and it is processed
+        // right after. On **finite** content — a file — nothing catches
+        // it: no "listening", rewind and forward greyed out, position
+        // absent, until a play/pause reloads everything from the start. A
+        // stream, on the other hand, would go back through the restart
+        // branch (`expecting_stream`) and replay on its own, which masked
+        // the defect on the radio side.
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, mut rx) = mpsc::channel(16);
         let _ipc = MpvIpc::from_stream(client, tx);
 
         let (_r, mut w) = server.into_split();
-        // Dans l'order : la valeur initiale de l'observation, un vrai
-        // chargement, puis un vrai arrêt en fin de liste.
+        // In order: the observation's initial value, a real load, then a
+        // real stop at the end of a playlist.
         for data in ["true", "false", "true"] {
             w.write_all(
                 format!("{{\"event\":\"property-change\",\"name\":\"idle-active\",\"data\":{data}}}\n")
@@ -595,16 +604,17 @@ mod tests {
             .unwrap();
         }
 
-        // Le premier `true` est avalé : le premier événement reçu est l'entrée
-        // en playback.
+        // The first `true` is swallowed: the first event received is
+        // entering playback.
         assert_eq!(rx.recv().await.unwrap(), Event::PlaybackActive);
-        // Le second, lui, suit une playback : c'est un arrêt véritable, et il
-        // doit passer — sans quoi la fin d'une liste ne s'afficherait plus.
+        // The second one, though, follows a playback: it is a genuine
+        // stop, and it must go through — otherwise the end of a playlist
+        // would no longer display.
         assert_eq!(rx.recv().await.unwrap(), Event::PlaybackIdle);
     }
 
     #[tokio::test]
-    async fn erreur_mpv_remonte_en_err() {
+    async fn mpv_error_bubbles_up_as_err() {
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, _rx) = mpsc::channel(16);
         let ipc = MpvIpc::from_stream(client, tx);
@@ -621,10 +631,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn metadata_icy_devient_un_evenement_de_titre() {
-        // Capture réelle : forme du `property-change` que mpv émet pour la
-        // propriété `metadata` sur un stream Icecast (SomaFM Groove Salad, le seul
-        // des cinq stream mesurés à émettre un StreamTitle exploitable).
+    async fn icy_metadata_becomes_a_title_event() {
+        // Real capture: shape of the `property-change` mpv emits for the
+        // `metadata` property on an Icecast stream (SomaFM Groove Salad,
+        // the only one of five streams measured to emit a usable
+        // StreamTitle).
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, mut rx) = mpsc::channel(16);
         let _ipc = MpvIpc::from_stream(client, tx);
@@ -638,13 +649,13 @@ mod tests {
     }
 
     #[test]
-    fn les_tags_dun_fichier_local_donnent_les_quatre_champs() {
-        // Charge relevée au banc sur un mp3 (ID3). FFmpeg normalise les clés :
-        // flac, ogg, opus, m4a et wav ont été vérifiés et remontent sous les
-        // mêmes names, donc une seule grammaire à connaître. `date` en fait
-        // partie et porte ici la forme longue : sans cette assertion, read
-        // `year` depuis la mauvaise clé (`year`, que FFmpeg n'émet pas) serait
-        // passé inaperçu.
+    fn a_local_files_tags_give_the_four_fields() {
+        // Payload recorded on the bench for an mp3 (ID3). FFmpeg normalizes
+        // the keys: flac, ogg, opus, m4a and wav were checked and surface
+        // under the same names, so a single grammar to know. `date` is one
+        // of them and carries the long form here: without this assertion,
+        // reading `year` from the wrong key (`year`, which FFmpeg does not
+        // emit) would have gone unnoticed.
         let data = serde_json::json!({
             "title": "So What", "artist": "Miles Davis",
             "album": "Kind of Blue", "date": "1959-08-17", "encoder": "Lavf60.16.100"
@@ -658,9 +669,9 @@ mod tests {
     }
 
     #[test]
-    fn les_cles_de_conteneur_m4a_sont_ignorees() {
-        // Relevé au banc : un m4a fait aussi remonter des clés de conteneur.
-        // On pioche quatre clés nommées, on n'absorbe jamais l'objet.
+    fn m4a_container_keys_are_ignored() {
+        // Recorded on the bench: an m4a also surfaces container keys. Four
+        // named keys are picked out, the object is never absorbed.
         let data = serde_json::json!({
             "title": "So What", "major_brand": "M4A ", "handler_name": "SoundHandler",
             "vendor_id": "[0][0][0][0]", "compatible_brands": "M4A mp42isom"
@@ -673,11 +684,11 @@ mod tests {
     }
 
     #[test]
-    fn une_charge_icy_ne_produit_aucun_tag() {
-        // La garde qui protège la radio : certaines stations renseignent un
-        // `title` valant le NOM DE LA STATION à côté d'un `icy-title` qui
-        // porte le vrai track. Préférer le premier serait une régression
-        // silencieuse — le titre du track remplacé par le name de la station.
+    fn an_icy_payload_produces_no_tag() {
+        // The guard that protects the radio: some stations fill in a
+        // `title` equal to the STATION NAME alongside an `icy-title` that
+        // carries the real track. Preferring the former would be a silent
+        // regression — the track's title replaced by the station's name.
         let data = serde_json::json!({
             "icy-br": "128", "icy-title": "Mandrillus Sphynx - Bikwix", "title": "OUI FM"
         });
@@ -686,9 +697,9 @@ mod tests {
     }
 
     #[test]
-    fn une_charge_sans_rien_de_lisible_ne_produit_aucun_tag() {
-        // Un enrichment clear compterait comme une réponse et masquerait
-        // l'ICY : il ne doit pas exister.
+    fn a_payload_with_nothing_readable_produces_no_tag() {
+        // An empty enrichment would count as a response and would mask the
+        // ICY: it must not exist.
         assert!(file_tags(&serde_json::json!({"encoder": "Lavf60.16.100"})).is_none());
         assert!(file_tags(&serde_json::json!({"title": "   "})).is_none());
         assert!(file_tags(&serde_json::json!({})).is_none());
@@ -696,22 +707,22 @@ mod tests {
     }
 
     #[test]
-    fn icy_title_ignore_le_vide_et_labsence() {
-        // Cas mesurés : Radio Nova envoie un StreamTitle clear, FIP n'envoie
-        // aucun en-tête ICY (pas d'icy-metaint du tout).
+    fn icy_title_ignores_empty_and_absent() {
+        // Measured cases: Radio Nova sends an empty StreamTitle, FIP sends
+        // no ICY header at all (no icy-metaint whatsoever).
         assert_eq!(icy_title(&serde_json::json!({"icy-title": ""})), None);
         assert_eq!(icy_title(&serde_json::json!({"icy-title": "   "})), None);
         assert_eq!(icy_title(&serde_json::json!({"icy-br": "128"})), None);
         assert_eq!(icy_title(&serde_json::json!({})), None);
-        // `metadata` vaut null tant qu'aucun fichier n'est chargé.
+        // `metadata` is null as long as no file is loaded.
         assert_eq!(icy_title(&Value::Null), None);
-        assert_eq!(icy_title(&serde_json::json!("pas un objet")), None);
-        // Une valeur non textuelle ne doit pas paniquer.
+        assert_eq!(icy_title(&serde_json::json!("not an object")), None);
+        // A non-textual value must not panic.
         assert_eq!(icy_title(&serde_json::json!({"icy-title": 42})), None);
     }
 
     #[test]
-    fn icy_title_tolere_la_casse_et_elague() {
+    fn icy_title_tolerates_case_and_trims() {
         assert_eq!(
             icy_title(&serde_json::json!({"Icy-Title": "  Miles Davis - So What "})).as_deref(),
             Some("Miles Davis - So What")
@@ -720,36 +731,37 @@ mod tests {
     }
 
     #[test]
-    fn la_propriete_path_est_observee() {
-        // Sans elle, le coeur ne sait jamais quel fichier mpv plays, et la
-        // cover embarquee n'est jamais lue. Le coeur ne read pas le path
-        // dans l'identity : il a fait un principe de ne jamais l'interpreter.
-        assert!(OBSERVED.contains(&"path"), "sans elle, aucune cover embarquee");
+    fn the_path_property_is_observed() {
+        // Without it, the core never knows which file mpv is playing, and
+        // the embedded cover is never read. The core does not read the
+        // path from the identity: it made a principle of never
+        // interpreting it.
+        assert!(OBSERVED.contains(&"path"), "without it, no embedded cover ever");
     }
 
     #[test]
-    fn un_flux_ne_declenche_aucune_extraction() {
-        // Tente uniquement sur un path sans schema.
+    fn a_stream_triggers_no_extraction() {
+        // Only attempted on a path with no scheme.
         assert!(embedded_cover("https://icecast.radiofrance.fr/fip-midfi.mp3").is_none());
         assert!(embedded_cover("http://ouifm3.ice.infomaniak.ch/ouifm3.mp3").is_none());
-        assert!(embedded_cover("/n/existe/pas.flac").is_none());
+        assert!(embedded_cover("/does/not/exist.flac").is_none());
     }
 
-    /// Fabrique un mp3 réel avec une cover embarquée, via ffmpeg, ou rend
-    /// `None` s'il est absent.
+    /// Builds a real mp3 with an embedded cover, via ffmpeg, or returns
+    /// `None` if it is absent.
     ///
-    /// Comme dans `ritornello-plugin-files::duration` : pas de binaire versionné
-    /// dans le dépôt, et le test se saute plutôt que d'échouer là où ffmpeg
-    /// manque — c'est un outil de développement, pas une dépendance du cœur.
+    /// As in `ritornello-plugin-files::duration`: no binary checked into
+    /// the repo, and the test is skipped rather than failed where ffmpeg is
+    /// missing — it is a development tool, not a core dependency.
     ///
-    /// `source_image` est un filtre `lavfi`, donc l'image embarquée, donc —
-    /// depuis que le temporaire est nommé d'après son contenu — **le name du
-    /// fichier temporaire lui-même**. Deux tests parallèles qui embarquent la
-    /// même image viseraient le même path dans le `temp_dir()` partagé :
-    /// chacun doit donc demander une image à lui.
-    fn mp3_avec_pochette_de(dir: &Path, source_image: &str) -> Option<std::path::PathBuf> {
+    /// `source_image` is an `lavfi` filter, hence the embedded image,
+    /// hence — since the temp file is named after its content — **the temp
+    /// file's own name**. Two parallel tests embedding the same image
+    /// would target the same path in the shared `temp_dir()`: each must
+    /// therefore ask for its own image.
+    fn mp3_with_cover_from(dir: &Path, source_image: &str) -> Option<std::path::PathBuf> {
         let image = dir.join("cover.jpg");
-        let sortie = dir.join("avec_pochette.mp3");
+        let output = dir.join("with_cover.mp3");
         let ok = std::process::Command::new("ffmpeg")
             .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", source_image])
             .args(["-frames:v", "1"])
@@ -765,141 +777,143 @@ mod tests {
                 .args(["-map", "0:a", "-map", "1:v", "-c:a", "libmp3lame", "-c:v", "copy"])
                 .args(["-id3v2_version", "3"])
                 .args(["-metadata:s:v", "title=Album cover", "-metadata:s:v", "comment=Cover (front)"])
-                .arg(&sortie)
+                .arg(&output)
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
-        ok.then_some(sortie)
+        ok.then_some(output)
     }
 
-    /// L'image de ce module. **Doit rester distincte de celle de
-    /// `core::tests::test_mp3_with_cover`** : le temporaire étant nommé
-    /// d'après son contenu, deux fixtures identiques viseraient le même path
-    /// dans le `temp_dir()` partagé, et les tests de `core` y font travailler
-    /// `CoverCache`, dont l'éviction supprime ces fichiers. C'est exactement ce
-    /// qui a produit un échec intermittent ici.
-    fn mp3_avec_pochette(dir: &Path) -> Option<std::path::PathBuf> {
-        mp3_avec_pochette_de(dir, "color=c=red:s=16x16:d=1")
+    /// This module's image. **Must stay distinct from
+    /// `core::tests::test_mp3_with_cover`'s**: since the temp file is named
+    /// after its content, two identical fixtures would target the same
+    /// path in the shared `temp_dir()`, and `core`'s tests exercise
+    /// `CoverCache` there, whose eviction deletes these files. That is
+    /// exactly what produced an intermittent failure here.
+    fn mp3_with_cover(dir: &Path) -> Option<std::path::PathBuf> {
+        mp3_with_cover_from(dir, "color=c=red:s=16x16:d=1")
     }
 
     #[test]
-    fn la_pochette_embarquee_dun_fichier_local_est_extraite_dans_un_fichier() {
+    fn a_local_files_embedded_cover_is_extracted_into_a_file() {
         let dir = tempfile::tempdir().unwrap();
-        let Some(f) = mp3_avec_pochette(dir.path()) else {
-            eprintln!("ffmpeg absent : test saute");
+        let Some(f) = mp3_with_cover(dir.path()) else {
+            eprintln!("ffmpeg missing: skipping test");
             return;
         };
-        let r = embedded_cover(f.to_str().unwrap()).expect("une cover embarquee attendue");
+        let r = embedded_cover(f.to_str().unwrap()).expect("an embedded cover was expected");
         let ritornello_proto::CoverRef::Path { path } = r else {
-            panic!("une cover locale doit rendre un CoverRef::Path");
+            panic!("a local cover must yield a CoverRef::Path");
         };
-        // Un vrai JPEG a été écrit sur disque, pas de bidon ni des bytes en
-        // mémoire : c'est ce qui garde une seule nature de cover locale
-        // côté cache.
-        let bytes = std::fs::read(&path).expect("le fichier temporaire doit exister");
-        assert!(bytes.starts_with(&[0xFF, 0xD8, 0xFF]), "en-tete JPEG attendu, lu {bytes:?}");
+        // A real JPEG was written to disk, not a fake or in-memory bytes:
+        // that is what keeps a single nature of local cover on the cache
+        // side.
+        let bytes = std::fs::read(&path).expect("the temp file must exist");
+        assert!(bytes.starts_with(&[0xFF, 0xD8, 0xFF]), "expected JPEG header, got {bytes:?}");
         assert!(path.ends_with(".jpg"), "{path}");
 
-        // Rejouer la même piste doit retomber sur le même fichier temporaire :
-        // c'est ce qui évite d'écrire deux fois la même image.
+        // Replaying the same track must fall back to the same temp file:
+        // that is what avoids writing the same image twice.
         let r2 = embedded_cover(f.to_str().unwrap()).unwrap();
         assert_eq!(r2, ritornello_proto::CoverRef::Path { path });
     }
 
     #[test]
-    fn deux_pistes_du_meme_album_partagent_un_seul_fichier_temporaire() {
+    fn two_tracks_of_the_same_album_share_a_single_temp_file() {
         let dir = tempfile::tempdir().unwrap();
-        // Une image propre à ce test : voir `mp3_avec_pochette_de`.
-        let Some(piste1) = mp3_avec_pochette_de(dir.path(), "color=c=blue:s=24x24:d=1") else {
-            eprintln!("ffmpeg absent : test saute");
+        // An image of its own for this test: see `mp3_with_cover_from`.
+        let Some(track1) = mp3_with_cover_from(dir.path(), "color=c=blue:s=24x24:d=1") else {
+            eprintln!("ffmpeg missing: skipping test");
             return;
         };
-        // Deux fichiers de piste distincts portant la même cover : le cas
-        // courant d'un album, et celui que le nommage par path de piste
-        // faisait payer quinze fois pour une seule image.
-        let piste2 = dir.path().join("piste_2.mp3");
-        std::fs::copy(&piste1, &piste2).unwrap();
+        // Two distinct track files carrying the same cover: the common
+        // case of an album, and the one track-path naming used to charge
+        // fifteen times over for a single image.
+        let track2 = dir.path().join("track_2.mp3");
+        std::fs::copy(&track1, &track2).unwrap();
 
-        let r1 = embedded_cover(piste1.to_str().unwrap()).expect("une cover attendue");
-        let r2 = embedded_cover(piste2.to_str().unwrap()).expect("une cover attendue");
-        assert_eq!(r1, r2, "deux pistes a cover identique doivent rendre le meme fichier");
+        let r1 = embedded_cover(track1.to_str().unwrap()).expect("a cover was expected");
+        let r2 = embedded_cover(track2.to_str().unwrap()).expect("a cover was expected");
+        assert_eq!(r1, r2, "two tracks with an identical cover must yield the same file");
         let ritornello_proto::CoverRef::Path { path } = r1 else {
-            panic!("une cover locale doit rendre un CoverRef::Path");
+            panic!("a local cover must yield a CoverRef::Path");
         };
 
-        // Rien n'est reecrit quand le name est deja pris : la sentinelle
-        // survit. Sans le `if !cible.exists()`, la route HTTP pourrait serve
-        // ce fichier tronque pendant sa reecriture pour la piste suivante.
-        std::fs::write(&path, b"sentinelle").unwrap();
-        let r3 = embedded_cover(piste2.to_str().unwrap()).unwrap();
+        // Nothing is rewritten when the name is already taken: the
+        // sentinel survives. Without `if !target.exists()`, the HTTP route
+        // could serve this truncated file while it is being rewritten for
+        // the next track.
+        std::fs::write(&path, b"sentinel").unwrap();
+        let r3 = embedded_cover(track2.to_str().unwrap()).unwrap();
         assert_eq!(r3, ritornello_proto::CoverRef::Path { path: path.clone() });
         assert_eq!(
             std::fs::read(&path).unwrap(),
-            b"sentinelle".to_vec(),
-            "un fichier deja present ne doit pas etre reecrit"
+            b"sentinel".to_vec(),
+            "a file already present must not be rewritten"
         );
 
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn les_proprietes_utiles_sont_toutes_observees() {
-        // Sans `observe_property`, mpv ne push_cover jamais la propriété : la couche
-        // ICY resterait muette sans qu'aucun test de `icy_title` ne s'en
-        // aperçoive. `start` lançant un vrai processus mpv, c'est la liste
-        // qu'elle parcourt qui est vérifiée ici.
-        assert!(OBSERVED.contains(&"metadata"), "sans elle, aucun titre ICY n'arrive jamais");
-        assert!(OBSERVED.contains(&"idle-active"), "sans elle, plus de restart apres coupure");
+    fn all_useful_properties_are_observed() {
+        // Without `observe_property`, mpv never pushes the property: the
+        // ICY layer would stay silent without any `icy_title` test
+        // noticing. Since `start` launches a real mpv process, it is the
+        // list it iterates over that is checked here.
+        assert!(OBSERVED.contains(&"metadata"), "without it, no ICY title ever arrives");
+        assert!(OBSERVED.contains(&"idle-active"), "without it, no more restart after a drop");
         assert!(OBSERVED.contains(&"media-title"));
         assert!(OBSERVED.contains(&"playlist-pos"));
     }
 
     #[test]
-    fn variable_absente_donne_le_defaut_sans_bruit() {
+    fn an_absent_variable_gives_the_default_silently() {
         assert_eq!(audio_buffer_setting(None), AUDIO_BUFFER_DEFAULT);
         assert_eq!(readahead_setting(None), READAHEAD_DEFAULT);
     }
 
     #[test]
-    fn une_valeur_valide_est_retenue() {
+    fn a_valid_value_is_kept() {
         assert_eq!(audio_buffer_setting(Some("1.5")), 1.5);
         assert_eq!(audio_buffer_setting(Some("  2  ")), 2.0);
         assert_eq!(readahead_setting(Some("30")), 30.0);
-        // 0 est légitime : c'est la façon de revenir au comportement le plus
-        // réactif, au prix de la robustesse.
+        // 0 is legitimate: it is how to fall back to the most responsive
+        // behavior, at the cost of robustness.
         assert_eq!(audio_buffer_setting(Some("0")), 0.0);
     }
 
     #[test]
-    fn une_valeur_invalide_retombe_sur_le_defaut() {
-        for brut in ["", "abc", "-1", "1,5", "NaN", "inf"] {
-            assert_eq!(audio_buffer_setting(Some(brut)), AUDIO_BUFFER_DEFAULT, "brut={brut:?}");
+    fn an_invalid_value_falls_back_to_the_default() {
+        for raw in ["", "abc", "-1", "1,5", "NaN", "inf"] {
+            assert_eq!(audio_buffer_setting(Some(raw)), AUDIO_BUFFER_DEFAULT, "raw={raw:?}");
         }
-        // Hors bounded haute : mpv refuserait au-delà de 10 s pour le buffer de
-        // sortie, et une avance de playback démesurée coûte de la mémoire sans
-        // bénéfice.
+        // Beyond the upper bound: mpv would refuse above 10 s for the
+        // output buffer, and an oversized read-ahead costs memory with no
+        // benefit.
         assert_eq!(audio_buffer_setting(Some("42")), AUDIO_BUFFER_DEFAULT);
         assert_eq!(readahead_setting(Some("999")), READAHEAD_DEFAULT);
     }
 
     #[test]
-    fn les_defauts_reproduisent_ceux_de_mpv() {
-        // mpv 0.37 : --audio-buffer=0.2 et --demuxer-readahead-secs=1 (mesuré
-        // par `mpv --list-options`). Ce module rend les deux réglables sans
-        // changer le comportement par défaut : sans variable définie, mpv doit
-        // se comporter exactement comme s'il était lancé sans ces options.
-        // Toute dérive de ces valeurs est un changement de comportement audio
-        // qui doit être voulu, pas un effet de bord — d'où ce test.
+    fn the_defaults_reproduce_mpvs_own() {
+        // mpv 0.37: --audio-buffer=0.2 and --demuxer-readahead-secs=1
+        // (measured via `mpv --list-options`). This module makes both
+        // configurable without changing the default behavior: with no
+        // variable set, mpv must behave exactly as if launched without
+        // these options. Any drift in these values is an audio behavior
+        // change that must be intentional, not a side effect — hence this
+        // test.
         assert_eq!(audio_buffer_setting(None), 0.2);
         assert_eq!(readahead_setting(None), 1.0);
     }
 
     #[test]
-    fn les_arguments_portent_les_deux_tampons() {
+    fn the_arguments_carry_both_buffers() {
         let args = mpv_args(std::path::Path::new("/run/rp/mpv.sock"), "/dev/sr0", 0.5, 10.0);
         assert!(args.contains(&"--audio-buffer=0.5".to_string()), "{args:?}");
         assert!(args.contains(&"--demuxer-readahead-secs=10".to_string()), "{args:?}");
-        // Les arguments préexistants ne doivent pas avoir été perdus au passage.
+        // The pre-existing arguments must not have been lost along the way.
         assert!(args.contains(&"--idle=yes".to_string()));
         assert!(args.contains(&"--no-video".to_string()));
         assert!(args.contains(&"--no-terminal".to_string()));
@@ -907,22 +921,22 @@ mod tests {
         assert!(args.contains(&"--cdda-device=/dev/sr0".to_string()));
     }
 
-    /// mpv répond `null` sur `time-pos` quand rien n'est chargé, et une
-    /// **erreur** quand la propriété n'est pas disponible. Les deux disent la
-    /// même chose — « je ne sais pas » — et aucune n'est une panne à faire
-    /// remonter : une position inconnue est un cas normal, pas un incident.
+    /// mpv answers `null` on `time-pos` when nothing is loaded, and an
+    /// **error** when the property is unavailable. Both say the same
+    /// thing — "I don't know" — and neither is a failure to surface: an
+    /// unknown position is a normal case, not an incident.
     #[test]
-    fn une_valeur_absente_ou_nulle_devient_none() {
+    fn an_absent_or_null_value_becomes_none() {
         assert_eq!(number_or_none(Ok(serde_json::json!(87.4))), Some(87.4));
         assert_eq!(number_or_none(Ok(serde_json::Value::Null)), None);
         assert_eq!(number_or_none(Err(anyhow::anyhow!("property unavailable"))), None);
     }
 
-    /// Une position négative n'existe pas, et mpv en produit brièvement au
-    /// démarrage d'un fichier (mesuré : `-0.02`). La publier ferait afficher
-    /// une barre qui recule.
+    /// A negative position does not exist, and mpv briefly produces one at
+    /// a file's startup (measured: `-0.02`). Publishing it would display a
+    /// bar going backwards.
     #[test]
-    fn une_valeur_negative_devient_none() {
+    fn a_negative_value_becomes_none() {
         assert_eq!(number_or_none(Ok(serde_json::json!(-0.02))), None);
     }
 }

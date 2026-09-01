@@ -1,11 +1,11 @@
 export type Catalog = Record<string, string>
 
-/// Résolution d'une clé puis interpolation des jetons `{nom}`, en miroir de
-/// ce que fait le Rust (`catalog.get(key)` puis `str::replace("{n}", …)`).
-/// Clé absente : on renvoie la clé elle-même, exactement comme
-/// `ritornello_i18n::Catalog::get`. Un jeton dont la valeur n'est pas fournie
-/// reste tel quel, plutôt que de disparaître : un texte visiblement incomplet
-/// est plus facile à diagnostiquer qu'un texte silencieusement tronqué.
+/// Resolution of a key then interpolation of the `{name}` tokens, mirroring
+/// what the Rust does (`catalog.get(key)` then `str::replace("{n}", …)`).
+/// Missing key: the key itself is returned, exactly like
+/// `ritornello_i18n::Catalog::get`. A token whose value is not provided stays
+/// as is, rather than disappearing: a visibly incomplete text is easier to
+/// diagnose than a silently truncated one.
 export function createT(catalog: Catalog) {
   return (key: string, params?: Record<string, string | number>): string => {
     let out = catalog[key] ?? key

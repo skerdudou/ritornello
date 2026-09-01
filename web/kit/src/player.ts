@@ -1,35 +1,35 @@
 /**
- * Abonnement aux changements d'état du player, poussés par le cœur.
+ * Subscription to the player's state changes, pushed by the core.
  *
- * Existe dans le kit — et non recopié dans chaque plugin — parce que les pages
- * de plugin en ont le même besoin que le shell : savoir *quand* quelque chose a
- * changé pour relire ce qui les concerne. Sans cela, une page qui affiche la
- * piste en cours ne peut que sonder, et le projet a déjà tranché contre le
- * sondage (voir `usePlayer` du shell : « le cœur pousse déjà chaque
- * changement »).
+ * Lives in the kit — rather than being copied into each plugin — because the
+ * plugin pages have the same need as the shell: knowing *when* something has
+ * changed in order to re-read what concerns them. Without it, a page that shows
+ * the current track can only poll, and the project has already ruled against
+ * polling (see the shell's `usePlayer`: "the core already pushes every
+ * change").
  *
- * La charge utile est passée **non typée**, à dessein : sa forme appartient au
- * cœur et changera sans prévenir. Un appelant qui n'a besoin que du signal
- * l'ignore ; celui qui a besoin d'un champ précis (la source active, par
- * exemple) le lit à ses risques, sans qu'on figé ici un type qui mentirait.
+ * The payload is passed **untyped**, on purpose: its shape belongs to the core
+ * and will change without notice. A caller that only needs the signal ignores
+ * it; one that needs a specific field (the active source, for instance) reads
+ * it at its own risk, without freezing here a type that would lie.
  */
-export function onPlayer(rappel: (etat: unknown) => void): () => void {
-  // `EventSource` n'existe pas partout (jsdom sous test, vieux moteurs) : son
-  // absence doit coûter la fraîcheur de l'affichage, jamais le rendu de la page.
+export function onPlayer(callback: (state: unknown) => void): () => void {
+  // `EventSource` does not exist everywhere (jsdom under test, old engines): its
+  // absence must cost the display's freshness, never the page's rendering.
   if (typeof EventSource === 'undefined') return () => {}
 
-  const flux = new EventSource('/api/player')
-  flux.onmessage = (e: MessageEvent) => {
+  const stream = new EventSource('/api/player')
+  stream.onmessage = (e: MessageEvent) => {
     try {
-      rappel(JSON.parse(e.data as string))
+      callback(JSON.parse(e.data as string))
     } catch {
-      // Trame illisible : le signal vaut quand même, l'appelant relira sa
-      // propre source de vérité.
-      rappel(null)
+      // Unreadable frame: the signal still counts, the caller will re-read its
+      // own source of truth.
+      callback(null)
     }
   }
-  // Aucun traitement d'erreur : `EventSource` se reconnecte de lui-même, et
-  // fermer ici priverait la page de toute reprise après un redémarrage du cœur
-  // — le cas le plus courant étant `systemctl restart ritornello`.
-  return () => flux.close()
+  // No error handling: `EventSource` reconnects on its own, and closing here
+  // would deprive the page of any recovery after a core restart — the most
+  // common case being `systemctl restart ritornello`.
+  return () => stream.close()
 }

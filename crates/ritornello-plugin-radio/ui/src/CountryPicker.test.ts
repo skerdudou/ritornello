@@ -2,76 +2,76 @@ import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 import CountryPicker from './CountryPicker.vue'
 
-const LISTE = [
+const LIST = [
   { code: 'DE', stations: 6081 },
   { code: 'FR', stations: 2746 },
   { code: 'BE', stations: 300 },
 ]
 
-function monter(current = '') {
+function makeMount(current = '') {
   return mount(CountryPicker, {
     props: {
-      liste: LISTE,
+      list: LIST,
       current,
-      labelTous: 'Tous les country',
-      placeholder: 'Country ou code',
-      vide: 'Aucun country',
+      allLabel: 'All countries',
+      placeholder: 'Country or code',
+      emptyLabel: 'No countries',
     },
   })
 }
 
 describe('CountryPicker', () => {
-  it('liste les country par nom lisible, et non par code', () => {
-    // Le composant emploie la langue du navigateur ; sous jsdom c'est `en-US`,
-    // donc Belgium / France / Germany. L'order obtenu (BE, FR, DE) differe de
-    // l'order des codes (DE, FR, BE) **et** de l'order d'entree : c'est
-    // exactement ce qu'on veut verifier ici. Le tri par langue explicite est
-    // couvert dans `country.test.ts`.
-    const w = monter()
+  it('lists countries by readable name, not by code', () => {
+    // The component uses the browser's language; under jsdom that is
+    // `en-US`, so Belgium / France / Germany. The resulting order (BE,
+    // FR, DE) differs from the code order (DE, FR, BE) **and** from the
+    // input order: that is exactly what we want to verify here. Sorting
+    // by an explicit language is covered in `country.test.ts`.
+    const w = makeMount()
     const codes = w.findAll('[data-country]').map((b) => b.attributes('data-country'))
     expect(codes[0]).toBe('ALL')
     expect(codes.slice(1)).toEqual(['BE', 'FR', 'DE'])
     expect(w.find('[data-country="FR"]').text()).toContain('2746')
   })
 
-  it('filter a la frappe', async () => {
-    const w = monter()
+  it('filters as you type', async () => {
+    const w = makeMount()
     await w.find('[data-country-filter]').setValue('belg')
     const codes = w.findAll('[data-country]').map((b) => b.attributes('data-country'))
     expect(codes).toEqual(['ALL', 'BE'])
   })
 
-  it('garde « tous les country » atteignable quel que soit le filter', async () => {
-    // C'est le moyen de revenir en arriere : le filtrer serait un piege.
-    const w = monter('FR')
+  it('keeps "all countries" reachable regardless of the filter', async () => {
+    // This is the way back: filtering it out would be a trap.
+    const w = makeMount('FR')
     await w.find('[data-country-filter]').setValue('zzzz')
     expect(w.find('[data-country="ALL"]').exists()).toBe(true)
-    expect(w.find('[data-country-empty]').text()).toBe('Aucun country')
+    expect(w.find('[data-country-empty]').text()).toBe('No countries')
   })
 
-  it('marque le country courant', () => {
-    const w = monter('BE')
+  it('marks the current country', () => {
+    const w = makeMount('BE')
     expect(w.find('[data-country="BE"]').attributes('data-active')).toBe('true')
     expect(w.find('[data-country="FR"]').attributes('data-active')).toBe('false')
     expect(w.find('[data-country="ALL"]').attributes('data-active')).toBe('false')
   })
 
-  it('marque « tous les country » quand aucun country n est choisi', () => {
-    expect(monter('').find('[data-country="ALL"]').attributes('data-active')).toBe('true')
+  it('marks "all countries" when no country is chosen', () => {
+    expect(makeMount('').find('[data-country="ALL"]').attributes('data-active')).toBe('true')
   })
 
-  it('emet le code choisi, et la chaine vide pour « tous »', async () => {
-    const w = monter()
+  it('emits the chosen code, and the emptyLabel string for "all"', async () => {
+    const w = makeMount()
     await w.find('[data-country="FR"]').trigger('click')
     await w.find('[data-country="ALL"]').trigger('click')
     expect(w.emitted('choose')).toEqual([['FR'], ['']])
   })
 
-  it('reste utilisable quand la liste est vide', () => {
-    // Annuaire injoignable : le selecteur ne doit pas disparaitre, « tous les
-    // country » reste choisissable.
+  it('stays usable when the list is empty', () => {
+    // Unreachable directory: the picker must not disappear, "all
+    // countries" remains selectable.
     const w = mount(CountryPicker, {
-      props: { liste: [], current: 'FR', labelTous: 'Tous', placeholder: 'p', vide: 'Aucun country' },
+      props: { list: [], current: 'FR', allLabel: 'All', placeholder: 'p', emptyLabel: 'No countries' },
     })
     expect(w.find('[data-country="ALL"]').exists()).toBe(true)
     expect(w.find('[data-country-empty]').exists()).toBe(true)

@@ -17,9 +17,9 @@ pub struct Stations {
     pub stations: Vec<Station>,
 }
 
-/// Erreur de validation typée : le texte utilisateur est produit à la
-/// frontière via `message(&Catalog)`. `Display` fournit une version anglaise
-/// pour les logs internes (dev), hors périmètre i18n.
+/// Typed validation error: the user-facing text is produced at the boundary
+/// via `message(&Catalog)`. `Display` provides an English version for internal
+/// (dev) logs, outside the i18n perimeter.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValidationError {
     PresetOutOfRange { preset: u8, name: String },
@@ -28,7 +28,7 @@ pub enum ValidationError {
 }
 
 impl ValidationError {
-    /// Message localisé remonté à l'utilisateur (corps du 422 côté admin).
+    /// Localized message surfaced to the user (body of the admin-side 422).
     pub fn message(&self, catalog: &Catalog) -> String {
         match self {
             ValidationError::PresetOutOfRange { preset, name } => catalog
@@ -71,9 +71,9 @@ impl Stations {
 
     pub fn save(&self, path: &Path) -> Result<()> {
         self.validate()?;
-        // Comme `state::save` et `Bindings::save` : sur une machine vierge
-        // sans /etc/ritornello, le premier « Enregistrer » de la page d'admin
-        // échouait sur une erreur d'E/S brute.
+        // Like `state::save` and `Bindings::save`: on a pristine machine
+        // without /etc/ritornello, the first "Save" of the admin page failed
+        // with a raw I/O error.
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
@@ -104,13 +104,13 @@ impl Stations {
         self.stations.iter().find(|s| s.preset == preset)
     }
 
-    /// La station dont l'URL est `url`, si elle est encore dans la table.
+    /// The station whose URL is `url`, if it is still in the table.
     ///
-    /// Sert à retrouver **où est passé** ce qui plays après un remaniement de la
-    /// table : la présélection est une *position*, donc réordonner les stations
-    /// fait pointer le numéro mémorisé sur une autre station. L'URL, elle, est ce
-    /// qui identifie durablement un stream — le name dépend de la configuration de
-    /// l'appareil, et le numéro de son order.
+    /// Used to find **where what is playing went** after the table was
+    /// reshuffled: the preset is a *position*, so reordering the stations
+    /// makes the memorized number point at another station. The URL is what
+    /// durably identifies a stream — the name depends on the device's
+    /// configuration, and the number on its order.
     pub fn by_url(&self, url: &str) -> Option<&Station> {
         self.stations.iter().find(|s| s.url == url)
     }
@@ -135,13 +135,13 @@ impl Stations {
         self.stations.iter().map(|s| s.preset).max().unwrap_or(0)
     }
 
-    /// Les présélections nommées de la table, **triées par numéro**.
+    /// The named presets of the table, **sorted by number**.
     ///
-    /// La liste peut être creuse (stations 1, 5, 99 : `preset_count` en est le
-    /// maximum, pas la longueur, et les deux divergent légitimement). L'order
-    /// des positions MPD suit cette liste : un `stations.toml` édité à la main,
-    /// dont l'order de fichier ne coïncide pas avec les numéros, ne doit donc
-    /// pas produire une liste en désordre chez le client.
+    /// The list may be sparse (stations 1, 5, 99: `preset_count` is its
+    /// maximum, not its length, and the two legitimately diverge). The order of
+    /// the MPD positions follows this list: a hand-edited `stations.toml` whose
+    /// file order does not match the numbers must therefore not produce an
+    /// out-of-order list on the client.
     pub fn presets(&self) -> Vec<Preset> {
         let mut v: Vec<Preset> =
             self.stations.iter().map(|s| Preset { index: s.preset, name: s.name.clone() }).collect();
@@ -172,22 +172,22 @@ mod tests {
     }
 
     #[test]
-    fn by_preset_trouve_la_station() {
+    fn by_preset_finds_the_station() {
         assert_eq!(sample().by_preset(3).unwrap().name, "France Inter");
         assert!(sample().by_preset(2).is_none());
     }
 
     #[test]
-    fn next_prev_preset_rebouclent() {
+    fn next_prev_preset_wrap_around() {
         let s = sample();
         assert_eq!(s.next_preset(1), Some(3));
-        assert_eq!(s.next_preset(3), Some(1)); // reboucle
+        assert_eq!(s.next_preset(3), Some(1)); // wraps around
         assert_eq!(s.prev_preset(3), Some(1));
-        assert_eq!(s.prev_preset(1), Some(3)); // reboucle
+        assert_eq!(s.prev_preset(1), Some(3)); // wraps around
     }
 
     #[test]
-    fn validate_refuse_doublons_et_hors_bornes() {
+    fn validate_rejects_duplicates_and_out_of_range() {
         let mut s = sample();
         s.stations[1].preset = 1;
         assert!(s.validate().is_err());
@@ -200,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_produit_une_erreur_typee() {
+    fn validation_produces_a_typed_error() {
         let mut s = sample();
         s.stations[0].preset = 100;
         assert!(matches!(
@@ -213,21 +213,21 @@ mod tests {
     }
 
     #[test]
-    fn la_validation_accepte_les_preselections_jusqua_99() {
-        // Une présélection à deux chiffres au-delà de 9 est désormais valide.
+    fn validation_accepts_presets_up_to_99() {
+        // A two-digit preset beyond 9 is now valid.
         let mut s = sample();
         s.stations[0].preset = 42;
         assert!(s.validate().is_ok());
 
-        // Toujours refusée au-delà de 99.
-        let mut trop_haute = sample();
-        trop_haute.stations[0].preset = 100;
+        // Still rejected beyond 99.
+        let mut too_high = sample();
+        too_high.stations[0].preset = 100;
         assert!(matches!(
-            trop_haute.validate(),
+            too_high.validate(),
             Err(ValidationError::PresetOutOfRange { preset: 100, .. })
         ));
 
-        // Et 0 reste toujours refusé (la bounded basse ne bouge pas).
+        // And 0 is still rejected (the lower bound does not move).
         let mut zero = sample();
         zero.stations[0].preset = 0;
         assert!(matches!(
@@ -237,9 +237,9 @@ mod tests {
     }
 
     #[test]
-    fn le_compte_est_la_plus_haute_preselection() {
-        // Table avec des trous (éditée à la main) : le compte suit le plus
-        // haut numéro, pas le nombre de stations.
+    fn the_count_is_the_highest_preset() {
+        // Table with holes (hand-edited): the count follows the highest
+        // number, not the number of stations.
         let s = Stations {
             stations: vec![
                 Station { name: "A".into(), url: "http://a".into(), preset: 1 },
@@ -252,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn les_stations_senumerent_avec_leurs_noms_et_leurs_numeros() {
+    fn stations_enumerate_with_their_names_and_numbers() {
         let s: Stations = toml::from_str(
             r#"
                 [[stations]]
@@ -276,12 +276,11 @@ mod tests {
     }
 
     #[test]
-    fn lenumeration_est_triee_par_numero_pas_par_ordre_de_fichier() {
-        // Les positions MPD suivront cet order : un stations.toml édité à la
-        // main ne doit pas donner une liste en désordre chez le client. Le
-        // fichier ci-dessous déclare Nova (5) avant FIP (1) : si `presets()`
-        // se contentait de l'order de la table, la liste rendue commencerait
-        // par Nova.
+    fn enumeration_is_sorted_by_number_not_by_file_order() {
+        // The MPD positions will follow this order: a hand-edited
+        // stations.toml must not give an out-of-order list on the client. The
+        // file below declares Nova (5) before FIP (1): if `presets()` settled
+        // for the table order, the rendered list would start with Nova.
         let s: Stations = toml::from_str(
             r#"
                 [[stations]]
@@ -310,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn message_de_validation_utilise_le_catalogue() {
+    fn validation_message_uses_the_catalog() {
         use ritornello_i18n::Catalog;
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("radio")).unwrap();

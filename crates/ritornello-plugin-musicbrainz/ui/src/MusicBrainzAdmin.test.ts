@@ -3,15 +3,15 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import MusicBrainzAdmin from './MusicBrainzAdmin.vue'
 
-// Meme approche que `MpdAdmin.test.ts` : on garde le vrai module (composants,
-// `api`, ...) et on remplace uniquement les deux entrees de `toast` que
-// cette vue utilise, pour pouvoir les observer sans afficher de notification.
+// Same approach as `MpdAdmin.test.ts`: keep the real module (components,
+// `api`, ...) and replace only the two `toast` entries this view uses, so
+// they can be observed without showing a notification.
 vi.mock('@ritornello/ui', async () => {
-  const reel = await vi.importActual<typeof import('@ritornello/ui')>('@ritornello/ui')
-  return { ...reel, toast: { ...reel.toast, error: vi.fn(), success: vi.fn() } }
+  const real = await vi.importActual<typeof import('@ritornello/ui')>('@ritornello/ui')
+  return { ...real, toast: { ...real.toast, error: vi.fn(), success: vi.fn() } }
 })
 
-const CATALOGUE = {
+const CATALOG = {
   title: 'ICY split patterns',
   intro: 'One entry per station this device has probed.',
   col_station: 'Stream',
@@ -44,11 +44,11 @@ const CATALOGUE = {
   save_failed: 'could not write the pattern file',
 }
 
-// Prefixe absolu que le shell passe par la prop `base` (requise) : c'est le
-// contract, cette vue ne connait pas le nom sous lequel elle est servie.
+// Absolute prefix the shell passes through the (required) `base` prop: that is
+// the contract, this view does not know the name under which it is served.
 const BASE = '/plugins/musicbrainz/'
 
-const STATION_CONFORME = {
+const COMPLIANT_STATION = {
   url: 'http://icecast.radiofrance.fr/franceinter-midfi.mp3',
   motif: { separe: { separateur: ' - ', artiste_en_premier: true } },
   origine: 'standard_confirme',
@@ -56,7 +56,7 @@ const STATION_CONFORME = {
   titres_decoupes: 214,
 }
 
-const STATION_EXCEPTION = {
+const EXCEPTION_STATION = {
   url: 'http://exemple/parlotte.mp3',
   motif: 'ne_pas_decouper',
   origine: 'deviation_apprise',
@@ -64,27 +64,27 @@ const STATION_EXCEPTION = {
   titres_decoupes: 0,
 }
 
-/** Monte le composant avec un `fetch` espionne : `data` sert le GET, les PUT
- *  sont journalises dans `puts` et repondent 204 sauf si `reponsePut` est
- *  fourni (pour simuler un refus). */
-async function monter(
-  data: { stations: unknown[] } = { stations: [STATION_CONFORME, STATION_EXCEPTION] },
-  reponsePut?: (corps: { action: string }) => Response,
+/** Mounts the component with a spied `fetch`: `data` serves the GET, PUTs are
+ *  logged in `puts` and answer 204 unless `putResponse` is provided (to
+ *  simulate a refusal). */
+async function mountView(
+  data: { stations: unknown[] } = { stations: [COMPLIANT_STATION, EXCEPTION_STATION] },
+  putResponse?: (body: { action: string }) => Response,
 ) {
-  const puts: Array<{ url: string; corps: Record<string, unknown> }> = []
+  const puts: Array<{ url: string; body: Record<string, unknown> }> = []
   const gets: string[] = []
   const spy = vi.fn(async (url: string, init?: RequestInit) => {
     if (init?.method === 'PUT') {
-      const corps = JSON.parse(String(init.body)) as { action: string }
-      puts.push({ url, corps })
-      if (reponsePut) return reponsePut(corps)
+      const body = JSON.parse(String(init.body)) as { action: string }
+      puts.push({ url, body })
+      if (putResponse) return putResponse(body)
       return new Response(null, { status: 204 })
     }
     gets.push(url)
     return new Response(JSON.stringify(data), { status: 200 })
   })
   vi.stubGlobal('fetch', spy)
-  const w = mount(MusicBrainzAdmin, { props: { catalog: CATALOGUE, base: BASE } })
+  const w = mount(MusicBrainzAdmin, { props: { catalog: CATALOG, base: BASE } })
   await flushPromises()
   return { w, spy, puts, gets }
 }
@@ -96,76 +96,76 @@ beforeEach(() => {
 })
 
 describe('MusicBrainzAdmin', () => {
-  it('masque les stations conformes par defaut', async () => {
-    const { w } = await monter()
+  it('hides compliant stations by default', async () => {
+    const { w } = await mountView()
 
-    // Le filtre est actif des le premier rendu (pas besoin d'un clic) :
-    // l'absence de cette case cochee laisserait la station conforme visible
-    // au premier chargement.
+    // The filter is active from the first render (no click needed): without
+    // this checked box the compliant station would remain visible on first
+    // load.
     expect((w.get('[data-filtre-exceptions]').element as HTMLInputElement).checked).toBe(true)
 
-    const lignes = w.findAll('[data-station-ligne]')
-    expect(lignes).toHaveLength(1)
+    const rows = w.findAll('[data-station-ligne]')
+    expect(rows).toHaveLength(1)
     expect(w.text()).toContain('parlotte.mp3')
     expect(w.text()).not.toContain('franceinter-midfi.mp3')
   })
 
-  it('les montre quand on decoche le filtre', async () => {
-    const { w } = await monter()
+  it('shows them when the filter is unchecked', async () => {
+    const { w } = await mountView()
 
     await w.get('[data-filtre-exceptions]').setValue(false)
 
-    const lignes = w.findAll('[data-station-ligne]')
-    expect(lignes).toHaveLength(2)
+    const rows = w.findAll('[data-station-ligne]')
+    expect(rows).toHaveLength(2)
     expect(w.text()).toContain('franceinter-midfi.mp3')
     expect(w.text()).toContain('parlotte.mp3')
   })
 
-  it('distingue « rien de sonde » de « aucune exception »', async () => {
-    // Rien n'a jamais ete sonde : la liste brute est vide.
-    const { w: vide } = await monter({ stations: [] })
-    expect(vide.find('[data-empty]').exists()).toBe(true)
-    expect(vide.find('[data-empty-filtered]').exists()).toBe(false)
-    expect(vide.text()).toContain('No station probed yet.')
+  it('distinguishes "nothing probed" from "no exception"', async () => {
+    // Nothing has ever been probed: the raw list is empty.
+    const { w: empty } = await mountView({ stations: [] })
+    expect(empty.find('[data-empty]').exists()).toBe(true)
+    expect(empty.find('[data-empty-filtered]').exists()).toBe(false)
+    expect(empty.text()).toContain('No station probed yet.')
 
-    // Des stations ont ete sondees, mais toutes sont conformes : le filtre
-    // (actif par defaut) les masque toutes, ce qui est une information
-    // opposee a « rien de sonde ».
-    const { w: filtre } = await monter({ stations: [STATION_CONFORME] })
-    expect(filtre.find('[data-empty-filtered]').exists()).toBe(true)
-    expect(filtre.find('[data-empty]').exists()).toBe(false)
-    expect(filtre.text()).toContain('No exception: every probed station follows the standard format.')
+    // Stations have been probed, but all are compliant: the filter (active by
+    // default) hides them all, which is the opposite information to "nothing
+    // probed".
+    const { w: filtered } = await mountView({ stations: [COMPLIANT_STATION] })
+    expect(filtered.find('[data-empty-filtered]').exists()).toBe(true)
+    expect(filtered.find('[data-empty]').exists()).toBe(false)
+    expect(filtered.text()).toContain('No exception: every probed station follows the standard format.')
   })
 
-  it('« ne pas decouper » grise le separateur et l order', async () => {
-    const { w } = await monter()
+  it('"do not split" greys out the separator and the order', async () => {
+    const { w } = await mountView()
 
     await w.get('[data-editer]').trigger('click')
 
-    const champSeparateur = w.get('[data-separateur]').element as HTMLInputElement
-    const champOrdre = w.get('[data-order]').element as HTMLSelectElement
-    // La station exception est deja `ne_pas_decouper` : les champs sont donc
-    // deja grises a l'ouverture.
-    expect(champSeparateur.disabled).toBe(true)
-    expect(champOrdre.disabled).toBe(true)
+    const separatorField = w.get('[data-separateur]').element as HTMLInputElement
+    const orderField = w.get('[data-order]').element as HTMLSelectElement
+    // The exception station is already `ne_pas_decouper`: the fields are thus
+    // already greyed out on opening.
+    expect(separatorField.disabled).toBe(true)
+    expect(orderField.disabled).toBe(true)
 
-    // Decocher rend les champs de nouveau modifiables.
+    // Unchecking makes the fields editable again.
     await w.get('[data-ne-pas-decouper]').setValue(false)
     expect((w.get('[data-separateur]').element as HTMLInputElement).disabled).toBe(false)
     expect((w.get('[data-order]').element as HTMLSelectElement).disabled).toBe(false)
 
-    // Et le recocher grise de nouveau les deux.
+    // And rechecking greys both out again.
     await w.get('[data-ne-pas-decouper]').setValue(true)
     expect((w.get('[data-separateur]').element as HTMLInputElement).disabled).toBe(true)
     expect((w.get('[data-order]').element as HTMLSelectElement).disabled).toBe(true)
   })
 
-  it('poste une action pose avec un motif du jeu ferme', async () => {
-    const { w, puts } = await monter()
+  it('posts a pose action with a pattern from the closed set', async () => {
+    const { w, puts } = await mountView()
 
     await w.get('[data-editer]').trigger('click')
-    // La station exception ouvre sur « ne pas decouper » coche : il faut le
-    // decocher pour atteindre le motif separe.
+    // The exception station opens with "do not split" checked: it must be
+    // unchecked to reach the split pattern.
     await w.get('[data-ne-pas-decouper]').setValue(false)
     await w.get('[data-separateur]').setValue(' :: ')
     await w.get('[data-order]').setValue('title_first')
@@ -174,27 +174,27 @@ describe('MusicBrainzAdmin', () => {
 
     expect(puts).toHaveLength(1)
     expect(puts[0]!.url).toBe('/plugins/musicbrainz/api/data')
-    // Un motif du jeu ferme : jamais de champ d'expression rationnelle, juste
-    // un separateur et un booleen d'order.
-    expect(puts[0]!.corps).toEqual({
+    // A pattern from the closed set: never a regular expression field, just a
+    // separator and an order boolean.
+    expect(puts[0]!.body).toEqual({
       action: 'pose',
       url: 'http://exemple/parlotte.mp3',
       motif: { separe: { separateur: ' :: ', artiste_en_premier: false, titre_au_milieu: false } },
     })
   })
 
-  it('enregistrer sans rien changer preserve la forme a trois champs', async () => {
-    // La regression que ce test existe pour empecher, trouvee en relecture : le
-    // formulaire n'**offre** pas la forme « Artiste - Titre - Album » — elle ne
-    // s'obtient que par un sondage — mais il doit la **rejouer** quand il a ete
-    // ouvert sur une entree qui la porte.
+  it('saving without changing anything preserves the three-field shape', async () => {
+    // The regression this test exists to prevent, found in review: the form
+    // does not **offer** the "Artist - Title - Album" shape — it is only
+    // obtained by probing — but it must **replay** it when it was opened on an
+    // entry that carries it.
     //
-    // Sans ca, l'operateur qui clique « Modifier » pour regarder puis
-    // « Enregistrer » sans toucher a rien degradait le motif : l'album se
-    // recollait au titre des le morceau suivant, et comme l'entree devenait
-    // manuelle, plus rien ne pouvait la reparer. Le geste destructeur n'etait
-    // pas de poser cette forme, c'etait d'enregistrer sans modification.
-    const { w, puts } = await monter({
+    // Without that, the operator who clicks "Edit" to look and then "Save"
+    // without touching anything degraded the pattern: the album got glued
+    // back onto the title from the next track on, and since the entry became
+    // manual, nothing could repair it anymore. The destructive gesture was not
+    // setting this shape, it was saving without modification.
+    const { w, puts } = await mountView({
       stations: [
         {
           url: 'http://exemple/trois-champs.mp3',
@@ -206,7 +206,7 @@ describe('MusicBrainzAdmin', () => {
       ],
     })
 
-    // La colonne le nomme, au lieu de l'afficher comme le standard.
+    // The column names it, instead of displaying it like the standard.
     expect(w.get('[data-station-ligne]').text()).toContain('title in the middle field')
 
     await w.get('[data-editer]').trigger('click')
@@ -214,51 +214,51 @@ describe('MusicBrainzAdmin', () => {
     await flushPromises()
 
     expect(puts).toHaveLength(1)
-    expect(puts[0]!.corps).toEqual({
+    expect(puts[0]!.body).toEqual({
       action: 'pose',
       url: 'http://exemple/trois-champs.mp3',
       motif: { separe: { separateur: ' - ', artiste_en_premier: true, titre_au_milieu: true } },
     })
   })
 
-  it('poste une action supprime, puis rafraichit', async () => {
-    const { w, puts, gets } = await monter()
-    const getsAvant = gets.length
+  it('posts a supprime action, then refreshes', async () => {
+    const { w, puts, gets } = await mountView()
+    const getsBefore = gets.length
 
     await w.get('[data-remove]').trigger('click')
     await flushPromises()
 
     expect(puts).toHaveLength(1)
-    expect(puts[0]!.corps).toEqual({ action: 'supprime', url: 'http://exemple/parlotte.mp3' })
-    // La suppression rafraichit la liste : un second GET part apres le PUT.
-    expect(gets.length).toBeGreaterThan(getsAvant)
+    expect(puts[0]!.body).toEqual({ action: 'supprime', url: 'http://exemple/parlotte.mp3' })
+    // Removal refreshes the list: a second GET leaves after the PUT.
+    expect(gets.length).toBeGreaterThan(getsBefore)
   })
 
-  it('affiche l erreur du dorsal telle quelle', async () => {
-    const messageServeur = 'no entry for that stream'
-    const { w } = await monter(
-      { stations: [STATION_EXCEPTION] },
-      () => new Response(JSON.stringify({ error: messageServeur }), { status: 422 }),
+  it('shows the backend error as is', async () => {
+    const serverMessage = 'no entry for that stream'
+    const { w } = await mountView(
+      { stations: [EXCEPTION_STATION] },
+      () => new Response(JSON.stringify({ error: serverMessage }), { status: 422 }),
     )
 
     await w.get('[data-remove]').trigger('click')
     await flushPromises()
 
-    // Le message affiche est exactement le texte renvoye par le serveur —
-    // deja une phrase traduite cote Rust — jamais retraduit ni remplace par
-    // une exception JS.
-    expect(toast.error).toHaveBeenCalledWith(messageServeur)
+    // The displayed message is exactly the text returned by the server —
+    // already a translated sentence on the Rust side — never retranslated nor
+    // replaced by a JS exception.
+    expect(toast.error).toHaveBeenCalledWith(serverMessage)
   })
 
-  it('le bouton Vider poste une action vide et rafraichit', async () => {
-    const { w, puts, gets } = await monter()
-    const getsAvant = gets.length
+  it('the Clear button posts a vide action and refreshes', async () => {
+    const { w, puts, gets } = await mountView()
+    const getsBefore = gets.length
 
     await w.get('[data-clear]').trigger('click')
     await flushPromises()
 
     expect(puts).toHaveLength(1)
-    expect(puts[0]!.corps).toEqual({ action: 'vide' })
-    expect(gets.length).toBeGreaterThan(getsAvant)
+    expect(puts[0]!.body).toEqual({ action: 'vide' })
+    expect(gets.length).toBeGreaterThan(getsBefore)
   })
 })

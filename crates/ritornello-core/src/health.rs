@@ -1,62 +1,61 @@
-//! Disjoncteur de l'extraction de cover embarquée : bounded l'appel
-//! `lofty`, qui peut ne jamais revenir sur un partage réseau muet, et
-//! retient les points de montage qui ne répondent plus.
+//! Circuit breaker for embedded cover extraction: bounds the `lofty` call,
+//! which may never return on a silent network share, and remembers the mount
+//! points that no longer answer.
 //!
-//! # Pourquoi cette bounded existe
+//! # Why this bound exists
 //!
-//! `player::mpv::embedded_cover` ouvre et parcourt le fichier **en cours
-//! de playback** avec `lofty`, un appel strictement bloquant. Ce fichier peut
-//! venir d'un partage réseau, et ce projet a déjà vécu l'incident que cela
-//! cause sans bounded : un montage cifs endormi a fait disparaître une page
-//! d'admin entière, une IO qui n'aboutit pas retenant la boucle qui aurait dû
-//! répondre à tout le reste (voir la mémoire du projet, et
-//! `ritornello-plugin-files::health`, qui a résolu le même problème pour le
-//! sondage des durées). Ici, l'appelant est directement la boucle
-//! d'événements du cœur : sans cette bounded, un partage muet figerait mpv,
-//! les commands et l'HTTP en même temps, pas seulement une page d'admin.
+//! `player::mpv::embedded_cover` opens and walks the file **currently
+//! playing** with `lofty`, a strictly blocking call. That file may come from a
+//! network share, and this project has already lived through the incident this
+//! causes without a bound: a sleeping cifs mount made a whole admin page
+//! disappear, an IO that never completes holding the loop that should have
+//! answered everything else (see the project memory, and
+//! `ritornello-plugin-files::health`, which solved the same problem for
+//! duration probing). Here, the caller is directly the core's event loop:
+//! without this bound, a silent share would freeze mpv, the commands and HTTP
+//! all at once, not just an admin page.
 //!
-//! # Pourquoi pas `ritornello-plugin-files::health` directement
+//! # Why not `ritornello-plugin-files::health` directly
 //!
-//! Ce module reprend la **forme** de ce disjoncteur (délai + `spawn_blocking` +
-//! marque par point de montage) sans en dépendre : le cœur ne doit pas se
-//! lier au greffon `files` pour un mécanisme qui lui est propre, et il n'a
-//! besoin ni de `volumes::parcourable` (la liste noire des pseudo-systèmes de
-//! fichiers), ni de `grouper`/`manquants` (pensés pour sonder des milliers de
-//! chemins d'un coup) — le cœur ne traite jamais qu'un seul fichier à la
-//! fois, celui que mpv vient d'ouvrir.
+//! This module takes the **shape** of that circuit breaker (timeout +
+//! `spawn_blocking` + mark per mount point) without depending on it: the core
+//! must not bind itself to the `files` plugin for a mechanism of its own, and
+//! it needs neither `volumes::browsable` (the blacklist of pseudo filesystems)
+//! nor `group`/`missing` (designed to probe thousands of paths at once) — the
+//! core only ever handles a single file at a time, the one mpv just opened.
 //!
-//! # Pourquoi un fil abandonné, et pourquoi un seul par montage
+//! # Why an abandoned thread, and why only one per mount
 //!
-//! Un appel système en sommeil non interruptible ne se tue pas — même
-//! `SIGKILL` ne le réveille pas. Le délai écoulé, le fil de `spawn_blocking`
-//! est donc **perdu** jusqu'à ce que le noyau rende la main. C'est pourquoi le
-//! point de montage est marqué : les appels suivants rendent la main aussitôt,
-//! sans en consommer un second — sans quoi changer de piste plusieurs fois de
-//! suite sur un même partage muet perdrait un fil du pool à chaque fois, sans
-//! jamais en récupérer un.
+//! A system call in uninterruptible sleep cannot be killed — even `SIGKILL`
+//! does not wake it. Once the timeout elapses, the `spawn_blocking` thread is
+//! therefore **lost** until the kernel hands control back. That is why the
+//! mount point is marked: subsequent calls return immediately, without
+//! consuming a second one — otherwise changing tracks several times in a row on
+//! the same silent share would lose a pool thread every time, never getting one
+//! back.
 //!
-//! Ce fil abandonné est aussi le **seul détecteur de reprise** : quand le
-//! noyau le libère enfin, il efface la marque.
+//! That abandoned thread is also the **only recovery detector**: when the
+//! kernel finally releases it, it clears the mark.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Délai accordé à l'extraction d'une cover embarquée.
+/// Timeout granted to the extraction of an embedded cover.
 ///
-/// Sous les cinq secondes que `MpvIpc::command` tolère déjà pour une réponse
-/// de mpv : une extraction bloquée ne doit pas devenir, à elle seule, la plus
-/// longue attente que la boucle du cœur puisse subir.
+/// Under the five seconds that `MpvIpc::command` already tolerates for an mpv
+/// response: a stuck extraction must not become, on its own, the longest wait
+/// the core loop can suffer.
 pub const TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Suit la réactivité des points de montage traversés par le fichier en
-/// cours de playback.
+/// Tracks the responsiveness of the mount points traversed by the file
+/// currently playing.
 pub struct Health {
-    /// Points de montage dont un appel n'est jamais revenu.
+    /// Mount points from which a call never came back.
     unreachable: Arc<Mutex<HashSet<PathBuf>>>,
     timeout: Duration,
-    /// Fournisseur de `/proc/mounts`, injectable pour les tests.
+    /// Provider of `/proc/mounts`, injectable for tests.
     mounts: Box<dyn Fn() -> String + Send + Sync>,
 }
 
@@ -75,22 +74,21 @@ impl Health {
         }
     }
 
-    /// Variante de test : délai court et `/proc/mounts` figé.
+    /// Test variant: short timeout and frozen `/proc/mounts`.
     #[cfg(test)]
     pub fn for_test(timeout: Duration, mounts: String) -> Self {
         Self { unreachable: Arc::new(Mutex::new(HashSet::new())), timeout, mounts: Box::new(move || mounts.clone()) }
     }
 
-    /// Point de montage propriétaire de `path` : le plus long préfixe de
-    /// `mounts` qui le précède. Retombe sur `path` lui-même si aucun ne
-    /// correspond (pas de privilège pour read `/proc/mounts`, environnement
-    /// de test) — faute de mieux à quoi rattacher une éventuelle panne.
+    /// Mount point owning `path`: the longest prefix in `mounts` that precedes
+    /// it. Falls back to `path` itself if none matches (no privilege to read
+    /// `/proc/mounts`, test environment) — for lack of anything better to
+    /// attach a possible failure to.
     ///
-    /// Contrairement à `ritornello-plugin-files::volumes::owner`, dont
-    /// c'est la version complète, ce module n'a pas besoin d'écarter les
-    /// pseudo-systèmes de fichiers (`proc`, `tmpfs`...) : il ne sert qu'à
-    /// grouper les échecs par montage, jamais à décider si un path est
-    /// parcourable.
+    /// Unlike `ritornello-plugin-files::volumes::owner`, of which this is the
+    /// full version, this module has no need to exclude pseudo filesystems
+    /// (`proc`, `tmpfs`...): it only serves to group failures per mount, never
+    /// to decide whether a path is browsable.
     fn owner(mounts: &str, path: &Path) -> PathBuf {
         mounts
             .lines()
@@ -105,14 +103,14 @@ impl Health {
             .unwrap_or_else(|| path.to_path_buf())
     }
 
-    /// Exécute `f` hors du fil asynchrone, sous délai, au compte du point de
-    /// montage propriétaire de `path`.
+    /// Runs `f` off the async thread, under a timeout, on the account of the
+    /// mount point owning `path`.
     ///
-    /// Rend `None` sans **rien exécuter** si ce point de montage est déjà
-    /// connu muet, `None` aussi si le délai s'écoule ou si `f` panique. Un
-    /// `None` ne dit donc jamais « pas de cover » à lui seul : il dit
-    /// « on ne sait pas », que l'appelant traite de toute façon comme
-    /// « rien à montrer », exactement comme l'absence d'image dans les tags.
+    /// Returns `None` without **executing anything** if that mount point is
+    /// already known silent, `None` too if the timeout elapses or if `f`
+    /// panics. A `None` therefore never says "no cover" on its own: it says
+    /// "we don't know", which the caller treats anyway as "nothing to show",
+    /// exactly like the absence of an image in the tags.
     pub async fn bounded<T, F>(&self, path: &Path, f: F) -> Option<T>
     where
         F: FnOnce() -> T + Send + 'static,
@@ -122,14 +120,13 @@ impl Health {
         if self.unreachable.lock().unwrap().contains(&key) {
             return None;
         }
-        // `spawn_blocking` et non le fil courant : même borné, l'appel doit
-        // sortir du fil asynchrone, sinon il retient tout le reste de la
-        // boucle du cœur pendant tout le délai.
-        let mut tache = tokio::task::spawn_blocking(f);
-        // `&mut tache` : le `JoinHandle` reste à nous après l'expiration, ce
-        // qui permet de confier le fil abandonné à la tâche de surveillance
-        // ci-dessous.
-        match tokio::time::timeout(self.timeout, &mut tache).await {
+        // `spawn_blocking` and not the current thread: even bounded, the call
+        // must leave the async thread, otherwise it holds the whole rest of the
+        // core loop for the entire timeout.
+        let mut task = tokio::task::spawn_blocking(f);
+        // `&mut task`: the `JoinHandle` remains ours after expiry, which lets us
+        // hand the abandoned thread over to the watch task below.
+        match tokio::time::timeout(self.timeout, &mut task).await {
             Ok(Ok(v)) => Some(v),
             Ok(Err(e)) => {
                 tracing::warn!("embedded cover extraction on {} failed: {e}", path.display());
@@ -145,10 +142,10 @@ impl Health {
                 self.unreachable.lock().unwrap().insert(key.clone());
                 let unreachable = Arc::clone(&self.unreachable);
                 tokio::spawn(async move {
-                    // Attend le fil perdu. Cette tâche peut ne jamais finir ;
-                    // elle ne coûte qu'une tâche, là où re-tenter coûterait un
-                    // fil du pool à chaque nouvelle piste sur le même partage.
-                    let _ = tache.await;
+                    // Waits for the lost thread. This task may never finish; it
+                    // only costs one task, whereas retrying would cost a pool
+                    // thread for every new track on the same share.
+                    let _ = task.await;
                     tracing::info!("{} answers again", key.display());
                     unreachable.lock().unwrap().remove(&key);
                 });
@@ -157,9 +154,9 @@ impl Health {
         }
     }
 
-    /// Points de montage actuellement silent. Réservé aux tests : rien
-    /// n'affiche encore cette information ailleurs (contrairement au
-    /// greffon `files`, qui la montre sur sa page).
+    /// Mount points currently silent. Reserved for tests: nothing displays
+    /// this information anywhere else yet (unlike the `files` plugin, which
+    /// shows it on its page).
     #[cfg(test)]
     pub fn silent(&self) -> Vec<PathBuf> {
         let mut v: Vec<PathBuf> = self.unreachable.lock().unwrap().iter().cloned().collect();
@@ -180,16 +177,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn un_appel_qui_repond_rend_sa_valeur() {
+    async fn a_call_that_answers_returns_its_value() {
         let s = health();
         assert_eq!(s.bounded(Path::new("/mnt/ritornello/nas/a.mp3"), || 7).await, Some(7));
-        assert!(s.silent().is_empty(), "un appel rendition ne doit marquer personne");
+        assert!(s.silent().is_empty(), "a call that returned must not mark anyone");
     }
 
     #[tokio::test]
-    async fn un_appel_qui_ne_revient_pas_rend_la_main_et_marque_son_montage() {
+    async fn a_call_that_never_returns_hands_back_control_and_marks_its_mount() {
         let s = health();
-        let debut = std::time::Instant::now();
+        let start = std::time::Instant::now();
         let r = s
             .bounded(Path::new("/mnt/ritornello/nas/a.mp3"), || {
                 std::thread::sleep(Duration::from_millis(400));
@@ -197,70 +194,70 @@ mod tests {
             })
             .await;
         assert_eq!(r, None);
-        // La bounded vaut son prix seulement si elle rend la main *avant* la fin
-        // de l'appel : sans la mesure, un `None` pourrait aussi bien venir
-        // d'un appel qui a simplement échoué au bout de ses 400 ms.
-        assert!(debut.elapsed() < Duration::from_millis(300), "{:?}", debut.elapsed());
+        // The bound is only worth its price if it hands back control *before*
+        // the end of the call: without the measurement, a `None` could just as
+        // well come from a call that simply failed after its 400 ms.
+        assert!(start.elapsed() < Duration::from_millis(300), "{:?}", start.elapsed());
         assert_eq!(s.silent(), vec![PathBuf::from("/mnt/ritornello/nas")]);
     }
 
     #[tokio::test]
-    async fn un_montage_marque_ne_consomme_plus_de_fil() {
+    async fn a_marked_mount_no_longer_consumes_a_thread() {
         let s = health();
         s.bounded(Path::new("/mnt/ritornello/nas/a.mp3"), || {
             std::thread::sleep(Duration::from_millis(400));
         })
         .await;
 
-        // C'est *l'exécution* qu'on interdit, pas seulement le résultat :
-        // chaque appel qui s'exécuterait perdrait un fil du pool de plus, et
-        // le pool est fini. Le drapeau prouve que la fermeture n'a pas tourné.
-        static TOURNE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        TOURNE.store(false, std::sync::atomic::Ordering::SeqCst);
+        // It is the *execution* that is forbidden, not just the result: every
+        // call that ran would lose one more pool thread, and the pool is
+        // finite. The flag proves the closure did not run.
+        static RAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        RAN.store(false, std::sync::atomic::Ordering::SeqCst);
         let r = s
             .bounded(Path::new("/mnt/ritornello/nas/autre/b.mp3"), || {
-                TOURNE.store(true, std::sync::atomic::Ordering::SeqCst)
+                RAN.store(true, std::sync::atomic::Ordering::SeqCst)
             })
             .await;
         assert_eq!(r, None);
-        assert!(!TOURNE.load(std::sync::atomic::Ordering::SeqCst), "le second appel n'aurait pas dû s'exécuter");
+        assert!(!RAN.load(std::sync::atomic::Ordering::SeqCst), "the second call should not have run");
     }
 
     #[tokio::test]
-    async fn un_montage_marque_n_ouvre_pas_les_autres() {
+    async fn a_marked_mount_does_not_open_the_others() {
         let s = health();
         s.bounded(Path::new("/mnt/ritornello/nas/a.mp3"), || {
             std::thread::sleep(Duration::from_millis(400));
         })
         .await;
-        // `/` est un autre montage : le NAS endormi ne doit pas rendre les
-        // pistes locales illisibles, ce qui serait guérir en amputant.
+        // `/` is another mount: the sleeping NAS must not make local tracks
+        // unreadable, which would be curing by amputation.
         assert_eq!(s.bounded(Path::new("/home/pi/musique/a.mp3"), || 7).await, Some(7));
     }
 
     #[tokio::test]
-    async fn la_marque_s_efface_quand_le_montage_repond_a_nouveau() {
+    async fn the_mark_clears_when_the_mount_answers_again() {
         let s = health();
         s.bounded(Path::new("/mnt/ritornello/nas/a.mp3"), || {
             std::thread::sleep(Duration::from_millis(150));
         })
         .await;
-        assert!(!s.silent().is_empty(), "le montage doit d'abord être marqué");
+        assert!(!s.silent().is_empty(), "the mount must first be marked");
 
-        // Le fil abandonné finit par revenir ; c'est lui, et lui seul, qui
-        // rouvre le disjoncteur.
+        // The abandoned thread eventually comes back; it, and it alone, reopens
+        // the circuit breaker.
         for _ in 0..100 {
             if s.silent().is_empty() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(s.silent().is_empty(), "la marque devait s'effacer d'elle-même");
+        assert!(s.silent().is_empty(), "the mark should have cleared by itself");
         assert_eq!(s.bounded(Path::new("/mnt/ritornello/nas/a.mp3"), || 7).await, Some(7));
     }
 
     #[tokio::test]
-    async fn sans_montage_connu_le_chemin_lui_meme_fait_cle() {
+    async fn without_a_known_mount_the_path_itself_is_the_key() {
         let s = Health::for_test(Duration::from_millis(50), String::new());
         s.bounded(Path::new("/home/pi/a.mp3"), || {
             std::thread::sleep(Duration::from_millis(150));

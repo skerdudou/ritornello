@@ -1,9 +1,9 @@
-//! État persisté : la liste courante et la piste en cours.
+//! Persisted state: the current playlist and the track being played.
 //!
-//! Même pattern que `crates/ritornello-plugin-radio/src/state.rs`, y compris
-//! l'`update` qui préserve les champs qu'il ne touche pas — la moitié Admin
-//! écrira in_dir ce même fichier, et un `save` reconstruit par la moitié Source
-//! l'effacerait.
+//! Same pattern as `crates/ritornello-plugin-radio/src/state.rs`, including the
+//! `update` that preserves the fields it does not touch — the Admin half will
+//! write into this same file, and a `save` rebuilt by the Source half would
+//! erase it.
 
 use ritornello_plugin_files::m3u::Entry;
 use serde::{Deserialize, Serialize};
@@ -38,9 +38,9 @@ impl From<&Entry> for StoredEntry {
     }
 }
 
-/// Un fichier absent ou illisible rend l'état clear, **sans paniquer** : une
-/// première installation, ou un `/var/lib` effacé, doit laisser le plugin
-/// démarrer et non refuser de se run.
+/// A missing or unreadable file yields an empty state, **without panicking**: a
+/// first installation, or an erased `/var/lib`, must let the plugin start and
+/// not refuse to run.
 pub fn load(path: &Path) -> State {
     std::fs::read_to_string(path)
         .ok()
@@ -48,8 +48,8 @@ pub fn load(path: &Path) -> State {
         .unwrap_or_default()
 }
 
-/// Écriture atomique : `.tmp` puis `rename`, pour qu'une coupure ne laisse
-/// jamais un fichier tronqué que le démarrage suivant jetterait en silence.
+/// Atomic write: `.tmp` then `rename`, so that a power cut never leaves a
+/// truncated file that the next startup would silently discard.
 pub fn save(path: &Path, state: &State) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -60,7 +60,7 @@ pub fn save(path: &Path, state: &State) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Relit, modifie, réécrit — et préserve donc ce que l'appelant ne touche pas.
+/// Re-reads, modifies, rewrites — and therefore preserves what the caller does not touch.
 pub fn update(path: &Path, f: impl FnOnce(&mut State)) -> anyhow::Result<()> {
     let mut state = load(path);
     f(&mut state);
@@ -71,7 +71,7 @@ pub fn update(path: &Path, f: impl FnOnce(&mut State)) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    fn entree_de_test() -> StoredEntry {
+    fn test_entry() -> StoredEntry {
         StoredEntry {
             path: "/mnt/ritornello/nas/Album/01.mp3".into(),
             title: Some("So What".into()),
@@ -80,45 +80,45 @@ mod tests {
     }
 
     #[test]
-    fn un_etat_absent_ou_illisible_donne_un_etat_vide_sans_paniquer() {
+    fn a_missing_or_unreadable_state_gives_an_empty_state_without_panicking() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load(&dir.path().join("absent.json")).index, 0);
-        let abime = dir.path().join("abime.json");
-        std::fs::write(&abime, b"{ ceci n'est pas du json").unwrap();
-        assert!(load(&abime).playlist.is_empty());
+        let damaged = dir.path().join("damaged.json");
+        std::fs::write(&damaged, b"{ this is not json").unwrap();
+        assert!(load(&damaged).playlist.is_empty());
     }
 
     #[test]
-    fn la_liste_et_l_index_survivent_a_un_aller_retour() {
+    fn the_playlist_and_the_index_survive_a_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("plugin-files.json");
-        save(&f, &State { playlist: vec![entree_de_test()], index: 0 }).unwrap();
-        let relu = load(&f);
-        assert_eq!(relu.index, 0);
-        assert_eq!(relu.playlist, vec![entree_de_test()]);
+        save(&f, &State { playlist: vec![test_entry()], index: 0 }).unwrap();
+        let reread = load(&f);
+        assert_eq!(reread.index, 0);
+        assert_eq!(reread.playlist, vec![test_entry()]);
     }
 
     #[test]
-    fn update_ne_perd_pas_les_champs_qu_il_ne_touche_pas() {
-        // La moitié Admin écrit la liste in_dir ce même fichier ; un `save`
-        // reconstruit par la moitié Source l'effacerait.
+    fn update_does_not_lose_the_fields_it_does_not_touch() {
+        // The Admin half writes the playlist into this same file; a `save`
+        // rebuilt by the Source half would erase it.
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("plugin-files.json");
-        save(&f, &State { playlist: vec![entree_de_test()], index: 0 }).unwrap();
+        save(&f, &State { playlist: vec![test_entry()], index: 0 }).unwrap();
         update(&f, |s| s.index = 1).unwrap();
-        let relu = load(&f);
-        assert_eq!(relu.index, 1);
-        assert_eq!(relu.playlist.len(), 1, "la liste a ete effacee par l'update");
+        let reread = load(&f);
+        assert_eq!(reread.index, 1);
+        assert_eq!(reread.playlist.len(), 1, "the playlist was erased by the update");
     }
 
     #[test]
-    fn la_conversion_avec_lentree_m3u_fait_laller_retour() {
+    fn the_conversion_with_the_m3u_entry_round_trips() {
         let e = Entry {
             path: "/musique/01.mp3".into(),
             title: Some("So What".into()),
             duration_s: Some(245),
         };
-        let stocke = StoredEntry::from(&e);
-        assert_eq!(Entry::from(&stocke), e);
+        let stored = StoredEntry::from(&e);
+        assert_eq!(Entry::from(&stored), e);
     }
 }

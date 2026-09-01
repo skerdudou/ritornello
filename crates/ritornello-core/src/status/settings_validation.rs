@@ -1,11 +1,11 @@
-//! Validation des settings recus par PUT /api/settings : les plages admises et l'erreur typee qui cite ses bornes.
+//! Validation of the settings received by PUT /api/settings: the admitted ranges and the typed error that quotes its bounds.
 
 use super::*;
 
-/// Bornes des réglages, définies une seule fois et prises à la
-/// comparaison elle-même : `SettingsError` les reporte telles quelles dans
-/// ses paramètres, pour qu'un changement de bounded ne puisse plus laisser un
-/// message qui mente sur ses propres limites.
+/// Bounds of the settings, defined once and taken from the comparison
+/// itself: `SettingsError` reports them as they are in its parameters, so
+/// that a change of bound can no longer leave a message lying about its own
+/// limits.
 pub(super) const INITIAL_DELAY_MS: std::ops::RangeInclusive<u32> = 200..=5000;
 
 pub(super) const REPEAT_INTERVAL_MS: std::ops::RangeInclusive<u32> = 100..=2000;
@@ -18,53 +18,53 @@ pub(super) const OVERLAY_MS: std::ops::RangeInclusive<u32> = 1000..=15000;
 
 pub(super) const TENS_WINDOW_MS: std::ops::RangeInclusive<u32> = 1000..=15000;
 
-/// Bornes du pas de déplacement, en secondes. Une seconde en bas parce qu'un
-/// pas nul ne déplace rien ; deux minutes en haut parce qu'au-delà, la touche
-/// ne sert plus à se déplacer dans une piste mais à en changer.
+/// Bounds of the seek step, in seconds. One second at the bottom because a
+/// zero step moves nothing; two minutes at the top because beyond that, the
+/// key no longer serves to move within a track but to change it.
 pub(super) const SEEK_STEP_S: std::ops::RangeInclusive<u32> = 1..=120;
 
-/// Plafond de la cover source, en mébioctets.
+/// Cap of the source cover, in mebibytes.
 ///
-/// La bounded haute n'est **pas** un choix de confort : c'est
-/// `ritornello_proto::COVER_MAX_BYTES`, exprimée dans l'unité du réglage.
-/// Cette constante est la promesse faite aux plugins sur ce qu'ils peuvent
-/// recevoir, et le greffon MPD dimensionne ses propres bornes dessus sans
-/// pouvoir read les réglages du cœur. La calculer ici plutôt que d'écrire
-/// « 20 » interdit qu'un jour les deux divergent en silence.
+/// The upper bound is **not** a comfort choice: it is
+/// `ritornello_proto::COVER_MAX_BYTES`, expressed in the setting's unit. That
+/// constant is the promise made to the plugins about what they may receive,
+/// and the MPD plugin sizes its own bounds on it without being able to read
+/// the core's settings. Computing it here rather than writing "20" forbids
+/// the two from ever silently diverging.
 pub(super) const COVER_SOURCE_MAX_MIO: std::ops::RangeInclusive<u32> =
     1..=(ritornello_proto::COVER_MAX_BYTES as u32 / (1024 * 1024));
 
-/// Côté maximal de la thumbnail. 64 px en bas parce qu'en dessous ce n'est plus
-/// une cover mais une pastille ; 2048 px en haut parce qu'au-delà le rendition
-/// coûte plus que ce qu'il économise — c'est déjà le double de ce que le plus
-/// grand afficheur du parc sait montrer.
+/// Maximum edge of the thumbnail. 64 px at the bottom because below that it is
+/// no longer a cover but a dot; 2048 px at the top because beyond that the
+/// rendition costs more than it saves — it is already twice what the largest
+/// display in the fleet can show.
 pub(super) const COVER_MAX_EDGE_PX: std::ops::RangeInclusive<u32> = 64..=2048;
 
-/// Qualité JPEG. 40 en bas : en dessous, les artefacts sont visibles sur les
-/// dégradés d'une cover. 100 en haut, la bounded du format.
+/// JPEG quality. 40 at the bottom: below that, artifacts are visible on the
+/// gradients of a cover. 100 at the top, the bound of the format.
 pub(super) const COVER_JPEG_QUALITY: std::ops::RangeInclusive<u32> = 40..=100;
 
-/// Plafond de la thumbnail produite, en kibioctets. 32 Kio en bas, sous quoi une
-/// thumbnail 640 px ne tient pas et le filet se déclencherait toujours ; 8 Mio en
-/// haut, ce qui le rend inopérant pour qui veut le neutraliser sans décocher le
-/// réencodage.
+/// Cap of the produced thumbnail, in kibibytes. 32 KiB at the bottom, under
+/// which a 640 px thumbnail does not fit and the safety net would always
+/// trigger; 8 MiB at the top, which makes it inoperative for whoever wants to
+/// neutralize it without unticking re-encoding.
 pub(super) const COVER_MAX_BYTES_KO: std::ops::RangeInclusive<u32> = 32..=8192;
 
-/// Nombre de pochettes gardées. 2 en bas — moins qu'un aller-retour entre deux
-/// pistes n'a aucun sens ; 100 en haut, ce qui plafonne le pire cas mémoire à
-/// 200 Mio (chaque entrée réseau est bornée à 2 Mio, une entrée locale ne garde
-/// qu'un path), au-delà de quoi un Pi à 1 Gio se mettrait en danger.
+/// Number of covers kept. 2 at the bottom — less than a round trip between two
+/// tracks makes no sense; 100 at the top, which caps the worst-case memory at
+/// 200 MiB (each network entry is bounded to 2 MiB, a local entry keeps only a
+/// path), beyond which a 1 GiB Pi would put itself in danger.
 pub(super) const COVER_CACHE_ENTRIES: std::ops::RangeInclusive<u32> = 2..=100;
 
-/// Plafond de pixels à décoder, en mégapixels — donc quatre fois autant de
-/// mébioctets de buffer. 1 Mpx en bas (déjà 4 Mio) ; 64 Mpx en haut, soit
-/// 256 Mio, ce qu'un Pi 2 à 1 Gio ne peut pas dépasser sans se mettre en
-/// danger.
+/// Cap of pixels to decode, in megapixels — hence four times as many
+/// mebibytes of buffer. 1 Mpx at the bottom (already 4 MiB); 64 Mpx at the
+/// top, i.e. 256 MiB, which a 1 GiB Pi 2 cannot exceed without putting itself
+/// in danger.
 pub(super) const COVER_MAX_PIXELS_MPX: std::ops::RangeInclusive<u32> = 1..=64;
 
-/// Erreur de validation des réglages, une variante par bounded violée. Même
-/// modèle que `AudioOutputError` : les paramètres `min`/`max` viennent de la
-/// bounded effectivement comparée, jamais recopiés à la main.
+/// Settings validation error, one variant per violated bound. Same model as
+/// `AudioOutputError`: the `min`/`max` parameters come from the bound actually
+/// compared, never copied by hand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsError {
     InitialDelay { min: u32, max: u32 },
@@ -210,12 +210,12 @@ pub fn validate_settings(s: &crate::state::Settings) -> Result<(), SettingsError
             max: *COVER_SOURCE_MAX_MIO.end(),
         });
     }
-    // Les quatre suivants ne décrivent que le rendition. Ils sont validés **même
-    // quand `cover_rendition` est faux**, et c'est voulu : l'IHM grise ces
-    // champs sans les vider, donc leurs valeurs continuent de voyager dans le
-    // PUT. Les laisser passer sans contrôle sous prétexte qu'ils dorment
-    // ferait accepter une valeur absurde qui ne se révélerait qu'au moment de
-    // recocher l'interrupteur, très loin du geste qui l'a introduite.
+    // The next four only describe the rendition. They are validated **even
+    // when `cover_rendition` is false**, and that is intended: the UI greys
+    // these fields out without clearing them, so their values keep travelling
+    // in the PUT. Letting them through unchecked because they are dormant
+    // would accept an absurd value that would only reveal itself when the
+    // switch is ticked again, very far from the gesture that introduced it.
     if !COVER_MAX_EDGE_PX.contains(&s.cover_max_edge_px) {
         return Err(SettingsError::CoverMaxEdge {
             min: *COVER_MAX_EDGE_PX.start(),
@@ -254,7 +254,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validate_settings_borne_les_deux_delais() {
+    fn validate_settings_bounds_both_delays() {
         use crate::state::Settings;
         assert!(validate_settings(&Settings::default()).is_ok());
         assert!(validate_settings(&Settings { volume_repeat_initial_ms: 200, volume_repeat_interval_ms: 100, ..Default::default() }).is_ok());
@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_settings_borne_les_deux_durees_dincrustation() {
+    fn validate_settings_bounds_both_overlay_durations() {
         use crate::state::Settings;
         assert!(validate_settings(&Settings { overlay_ms: 1000, tens_window_ms: 1000, ..Default::default() }).is_ok());
         assert!(validate_settings(&Settings { overlay_ms: 15000, tens_window_ms: 15000, ..Default::default() }).is_ok());
@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_settings_rend_la_bonne_variante_avec_ses_bornes() {
+    fn validate_settings_returns_the_right_variant_with_its_bounds() {
         use crate::state::Settings;
         assert_eq!(
             validate_settings(&Settings { volume_repeat_initial_ms: 1, ..Default::default() }),
@@ -302,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn message_settings_interpole_les_bornes_contre_le_catalogue() {
+    fn settings_message_interpolates_the_bounds_against_the_catalog() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("core")).unwrap();
         std::fs::write(
@@ -315,22 +315,22 @@ mod tests {
         assert_eq!(err.message(&cat), "timeout hors bornes (200-5000)");
     }
 
-    /// Le refus est une phrase du sources_catalog, jamais une chaîne en dur, et il
-    /// **cite ses bornes** : c'est la règle « les bornes ne peuvent pas
-    /// mentir » que le chantier i18n a posée.
+    /// The refusal is a sentence from the catalog, never a hard-coded string,
+    /// and it **quotes its bounds**: that is the rule "the bounds cannot lie"
+    /// that the i18n work laid down.
     #[test]
-    fn le_refus_du_pas_cite_ses_bornes() {
-        // Chemin inexistant : le sources_catalog retombe sur l'anglais embarqué,
-        // celui-là même que la clé doit désormais contenir.
-        let sources_catalog = ritornello_i18n::Catalog::load(
+    fn the_seek_step_refusal_quotes_its_bounds() {
+        // Nonexistent path: the catalog falls back to the embedded English,
+        // the very one the key must now contain.
+        let catalog = ritornello_i18n::Catalog::load(
             "core",
             "en",
-            std::path::Path::new("/inexistant"),
+            std::path::Path::new("/nonexistent"),
             crate::i18n::EN,
         );
-        let message = SettingsError::SeekStep { min: 1, max: 120 }.message(&sources_catalog);
+        let message = SettingsError::SeekStep { min: 1, max: 120 }.message(&catalog);
         assert!(message.contains('1') && message.contains("120"), "{message}");
-        assert!(!message.contains("{min}"), "clé non substituée : {message}");
-        assert_ne!(message, "settings_seek_step_out_of_range", "clé absente du sources_catalog");
+        assert!(!message.contains("{min}"), "key not substituted: {message}");
+        assert_ne!(message, "settings_seek_step_out_of_range", "key missing from the catalog");
     }
 }

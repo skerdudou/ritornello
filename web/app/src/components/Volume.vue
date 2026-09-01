@@ -4,47 +4,47 @@ import { SpeakerLoudIcon, SpeakerOffIcon } from '@radix-icons/vue'
 import { computed, ref, watch } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
 
-// Le volume est un reglage continu : un curseur, step deux touches. Le clavier
-// (fleches = 1 %, Page = 10 %, Debut/Fin) et le `role=slider` de reka couvrent
-// l'accessibilite ; les touches − / + restent celles de la telecommande
-// physique. La command envoyee est `SetVolume` (absolue), une seule au
-// relachement — pendant le geste, seul l'affichage bouge.
+// Volume is a continuous setting: a slider, not two keys. The keyboard
+// (arrows = 1 %, Page = 10 %, Home/End) and reka's `role=slider` cover
+// accessibility; the − / + keys remain those of the physical remote. The
+// command sent is `SetVolume` (absolute), a single one on release — during
+// the gesture, only the display moves.
 const { t } = useCatalog()
 const props = defineProps<{ volume: number | null; muted: boolean; disabled: boolean }>()
 const emit = defineEmits<{ set: [percent: number]; mute: [] }>()
 
-// Valeur sous le doigt pendant le glisser ; null hors geste.
-const locale = ref<number | null>(null)
-// Valeur validee, en wait de la trame qui la confirme. Meme raison que
-// dans ProgressBar : la trame d'avant le reglage ne doit step faire
-// reculer la poignee un instant.
+// Value under the finger during the drag; null outside a gesture.
+const local = ref<number | null>(null)
+// Committed value, awaiting the frame that confirms it. Same reason as in
+// ProgressBar: the frame from before the adjustment must not make the handle
+// step back for an instant.
 const target = ref<number | null>(null)
 watch(
   () => props.volume,
-  (v, avant) => {
+  (v, previous) => {
     if (target.value === null) return
-    // Egalite stricte, step la tolerance au `step` de ProgressBar : le
-    // volume est un entier exact que le coeur renvoie tel quel, sans lissage
-    // ni arrondi cote appareil — la trame qui confirme tombe forcement pile.
-    // Mais une source externe (telecommande infrarouge) fait aussi bouger le
-    // volume sans jamais tomber sur `target` : tout changement du volume reel
-    // (par rapport a la trame precedente) prouve que l'appareil a parle, et
-    // relache la target. Une trame en vol qui repete encore l'ancienne valeur
-    // ne change step `avant` -> `v`, donc ne relache rien a tort.
-    if (v === target.value || (avant !== undefined && v !== avant)) target.value = null
+    // Strict equality, not ProgressBar's tolerance to the `step`: the volume
+    // is an exact integer the core returns as is, without smoothing nor
+    // rounding device side — the confirming frame necessarily lands exactly.
+    // But an external source (infrared remote) also moves the volume without
+    // ever landing on `target`: any change of the real volume (relative to
+    // the previous frame) proves the device has spoken, and releases the
+    // target. An in-flight frame still repeating the old value does not
+    // change `previous` -> `v`, so releases nothing wrongly.
+    if (v === target.value || (previous !== undefined && v !== previous)) target.value = null
   },
 )
-const displayed = computed(() => locale.value ?? target.value ?? props.volume)
+const displayed = computed(() => local.value ?? target.value ?? props.volume)
 
-// `update:modelValue` de reka peut emettre `undefined` (cas d'une poignee
-// retiree, hors de notre usage a une seule poignee) : le type le prevoit, step
-// notre logique — on retombe alors sur 0 sans planter.
+// reka's `update:modelValue` may emit `undefined` (case of a removed handle,
+// outside our single-handle usage): the type allows for it, not our logic —
+// we then fall back to 0 without crashing.
 function onChange(v: number[] | undefined): void {
-  locale.value = v?.[0] ?? 0
+  local.value = v?.[0] ?? 0
 }
 function onCommit(v: number[]): void {
   const p = Math.round(v[0] ?? 0)
-  locale.value = null
+  local.value = null
   target.value = p
   emit('set', p)
 }
@@ -52,7 +52,7 @@ function onCommit(v: number[]): void {
 
 <template>
   <div class="flex items-center gap-3" data-volume-ligne>
-    <!-- L'icône **est** la bascule : c'est là qu'on cherche le son. -->
+    <!-- The icon **is** the toggle: that is where one looks for the sound. -->
     <Button
       variant="ghost"
       size="icon"

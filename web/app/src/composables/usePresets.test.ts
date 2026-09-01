@@ -4,7 +4,7 @@ import { usePresets } from './usePresets'
 describe('usePresets', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('nomme une présélection par source et numéro', async () => {
+  it('names a preset by source and number', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
       sources: [
         { name: 'radio', presets: [{ index: 1, name: 'FIP' }, { index: 2, name: 'France Inter' }] },
@@ -16,15 +16,15 @@ describe('usePresets', () => {
     await reload()
     expect(nameOf('radio', 1)).toBe('FIP')
     expect(nameOf('radio', 2)).toBe('France Inter')
-    // Une source sans list (le cd) : numéros seuls, comme aujourd'hui.
+    // A source without a list (the cd): numbers only, as today.
     expect(nameOf('cd', 1)).toBeNull()
     expect(nameOf('radio', 9)).toBeNull()
   })
 
-  it('un cœur injoignable laisse la list précédente', async () => {
+  it('an unreachable core leaves the previous list', async () => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ sources: [{ name: 'radio', presets: [{ index: 1, name: 'FIP' }] }] }), { status: 200 }))
-      .mockRejectedValueOnce(new Error('réseau'))
+      .mockRejectedValueOnce(new Error('network'))
     vi.stubGlobal('fetch', fetch)
     const { reload, nameOf } = usePresets()
     await reload()
@@ -32,7 +32,7 @@ describe('usePresets', () => {
     expect(nameOf('radio', 1)).toBe('FIP')
   })
 
-  it('une réponse sans `sources` laisse la list précédente', async () => {
+  it('a response without `sources` leaves the previous list', async () => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ sources: [{ name: 'radio', presets: [{ index: 1, name: 'FIP' }] }] }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 }))

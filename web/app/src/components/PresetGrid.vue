@@ -12,34 +12,33 @@ const emit = defineEmits<{ choose: [n: number] }>()
 
 const page = ref(0)
 
-// Compte déclaré par la source (null = source muette sur le sujet : grille
-// 1-10, pour ne jamais désarmer la télécommande).
+// Count declared by the source (null = the source says nothing about it: grid
+// 1-10, so the remote is never disarmed).
 const count = computed(() => props.state?.preset_count ?? null)
 
-// Numéros de la page courante, seulement ceux qui existent. Page k :
-// 10k+1 à 10k+10 — donc 1-10, 11-20, 21-30. **Mêmes bornes que le `+10` du
-// cœur**, et ce n'est step une coïncidence à entretenir mais une contrainte :
-// la page web et la touche physique doivent désigner les mêmes groupes, sans
-// quoi « page 2 » ne veut step dire la même chose selon qu'on regarde l'écran
-// ou la télécommande. Côté cœur, la touche 0 vaut dix (voir
-// `Command::Select`), ce qui est exactement ce qui fait tenir dix numéros dans
-// une dizaine.
+// Numbers of the current page, only those that exist. Page k: 10k+1 to
+// 10k+10 — so 1-10, 11-20, 21-30. **Same bounds as the core's `+10`**, and
+// this is not a coincidence to maintain but a constraint: the web page and the
+// physical key must designate the same groups, otherwise "page 2" does not
+// mean the same thing depending on whether you look at the screen or the
+// remote. Core side, key 0 is worth ten (see `Command::Select`), which is
+// exactly what makes ten numbers fit in one decade.
 //
-// Ne step « simplifier » en fenêtres de 6 ou 12 pour des raisons de mise en
-// page : le pavé numérique n'a que dix chiffres.
+// Do not "simplify" into windows of 6 or 12 for layout reasons: the numeric
+// keypad only has ten digits.
 const presets = computed(() => {
   const c = count.value
   if (c === null) return Array.from({ length: 10 }, (_, i) => i + 1)
-  const debut = page.value * 10 + 1
-  const fin = Math.min(page.value * 10 + 10, c)
-  return debut > fin ? [] : Array.from({ length: fin - debut + 1 }, (_, i) => debut + i)
+  const start = page.value * 10 + 1
+  const end = Math.min(page.value * 10 + 10, c)
+  return start > end ? [] : Array.from({ length: end - start + 1 }, (_, i) => start + i)
 })
 
 const paginationVisible = computed(() => (count.value ?? 0) > 10)
 
-// Dernière page non vide. Une page k couvre 10k+1..10k+10, donc la dernière
-// qui contient quelque chose est `floor((count - 1) / 10)` — même borne que
-// le rebouclage du `+10` côté cœur, qui s'écrit là-bas `((count - 1) / 10) * 10`.
+// Last non-empty page. A page k covers 10k+1..10k+10, so the last one that
+// holds something is `floor((count - 1) / 10)` — same bound as the wrap-around
+// of the core's `+10`, written there as `((count - 1) / 10) * 10`.
 const lastPage = computed(() => {
   const c = count.value ?? 0
   return c > 0 ? Math.floor((c - 1) / 10) : 0
@@ -59,25 +58,24 @@ function nextPage() {
 
 const activePreset = computed(() => props.state?.preset ?? null)
 
-// La page qui contient la présélection `n` (1-based). `n - 1` parce qu'une
-// page couvre 10k+1..10k+10 : 10 appartient à la page 0, 11 à la page 1.
+// The page that holds preset `n` (1-based). `n - 1` because a page covers
+// 10k+1..10k+10: 10 belongs to page 0, 11 to page 1.
 function pageOf(n: number) {
   return Math.floor((n - 1) / 10)
 }
 
-// La page suit ce qui joue (télécommande infrarouge, +10, piste suivante) ;
-// faute de présélection déclarée, un changement de count ramène en première
-// page. Un seul observateur pour les deux fields : ils arrivent dans la même
-// trame. (Déplacé tel quel depuis HomeView, avec `immediate` en plus : ici
-// `state` arrive en prop déjà peuplée dès le montage — dans HomeView elle
-// partait de `null` puis se peuplait plus tard, ce qui déclenchait le watch
-// sans qu'il ait besoin d'un appel immédiat.)
-watch([count, activePreset], (_, [compteAvant]) => {
+// The page follows what is playing (infrared remote, +10, next track); absent
+// a declared preset, a change of count brings back to the first page. A single
+// watcher for both fields: they arrive in the same frame. (Moved as is from
+// HomeView, with `immediate` added: here `state` arrives as a prop already
+// populated at mount time — in HomeView it started at `null` and got populated
+// later, which triggered the watch without needing an immediate call.)
+watch([count, activePreset], (_, [previousCount]) => {
   if (activePreset.value !== null) {
     page.value = Math.min(pageOf(activePreset.value), lastPage.value)
     return
   }
-  if (count.value !== compteAvant) page.value = 0
+  if (count.value !== previousCount) page.value = 0
 }, { immediate: true })
 
 const dimmed = computed(() => unavailable('Select', props.state))
@@ -86,8 +84,8 @@ const dimmed = computed(() => unavailable('Select', props.state))
 <template>
   <div class="space-y-3" data-grille-presets>
     <div v-if="count !== null" class="flex items-center gap-2">
-      <!-- Le label "Présélections" est deja le titre de la carte (HomeView) :
-           ici, seul le count. -->
+      <!-- The "Presets" label is already the card title (HomeView): here,
+           only the count. -->
       <p data-preset-count class="text-xs text-muted-foreground">{{ count }}</p>
       <span class="flex-1" />
       <template v-if="paginationVisible">
@@ -100,8 +98,8 @@ const dimmed = computed(() => unavailable('Select', props.state))
         </Button>
       </template>
     </div>
-    <!-- Une tuile = numero + nom. Deux colonnes : assez pour un nom de station,
-         et la meme grille sur phone et dans la demi-largeur du PC. -->
+    <!-- One tile = number + name. Two columns: enough for a station name,
+         and the same grid on the phone and in the half-width of the PC. -->
     <div class="grid grid-cols-2 gap-2">
       <Button
         v-for="n in presets"

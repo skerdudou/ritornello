@@ -1,26 +1,26 @@
-//! Listes enregistrées : in_dir le stockage interne, ou sur une racine.
+//! Saved playlists: in the internal storage, or on a root.
 //!
-//! Le format est le m3u, au même titre que ce qu'on charge : une liste déposée
-//! sur le NAS doit y être relisible par n'importe quel autre player, et donc
-//! porter des chemins **relatifs** à la racine où elle est posée.
+//! The format is m3u, the same as what we load: a playlist dropped on the NAS
+//! must be readable there by any other player, and therefore carry paths
+//! **relative** to the root it is placed on.
 //!
-//! Deux asymétries valent d'être dites, parce qu'elles sont volontaires :
-//! enregistrer exige `writable = true` alors que charger ne demande rien (une
-//! racine en playback seule est parfaitement légitime à la playback) ; et une
-//! racine unreachable est ignorée par `list` sans jamais lever d'erreur, faute
-//! de quoi un NAS endormi empêcherait de voir ses playlists internes.
+//! Two asymmetries deserve to be stated, because they are deliberate:
+//! saving requires `writable = true` whereas loading requires nothing (a
+//! read-only root is perfectly legitimate for playback); and an unreachable
+//! root is ignored by `list` without ever raising an error, failing which a
+//! sleeping NAS would prevent seeing the internal playlists.
 
 use crate::m3u::{self, Entry};
 use crate::roots::Roots;
 use ritornello_i18n::Catalog;
 use std::path::{Path, PathBuf};
 
-/// Où vit une liste enregistrée.
+/// Where a saved playlist lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Location {
-    /// Le répertoire d'état du plugin, sur l'appareil.
+    /// The plugin's state directory, on the device.
     Internal,
-    /// Une racine déclarée, désignée par son name.
+    /// A declared root, designated by its name.
     Root(String),
 }
 
@@ -30,9 +30,9 @@ pub struct Saved {
     pub location: Location,
 }
 
-/// Erreur typée : le texte utilisateur est produit à la frontière HTTP via
-/// `message(&Catalog)`. `Display` fournit une version anglaise pour les
-/// logs internes, hors périmètre i18n.
+/// Typed error: the user-facing text is produced at the HTTP boundary via
+/// `message(&Catalog)`. `Display` provides an English version for the internal
+/// logs, outside the i18n scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
     BadPlaylistName { name: String },
@@ -41,14 +41,14 @@ pub enum StoreError {
     Io { path: String },
 }
 
-/// Un name de liste devient un **name de fichier**, écrit soit in_dir `/var/lib`,
-/// soit **sur le partage réseau**. Tout ce qui pourrait traverser est refusé :
-/// pas de séparateur (in_dir les deux sens, un m3u venu de Windows en portant),
-/// pas de name réservé, pas de point initial qui cacherait la liste, pas
-/// d'octet nul qui tronquerait une chaîne C côté noyau.
+/// A playlist name becomes a **file name**, written either in `/var/lib` or
+/// **on the network share**. Anything that could traverse is refused: no
+/// separator (in either direction, an m3u coming from Windows carrying one),
+/// no reserved name, no leading dot that would hide the playlist, no NUL byte
+/// that would truncate a C string on the kernel side.
 ///
-/// La bounded de longueur n'est pas cosmétique : bien des systèmes de fichiers
-/// plafonnent un composant à 255 bytes, et le name reçoit encore un suffixe.
+/// The length bound is not cosmetic: many file systems cap a component at
+/// 255 bytes, and the name still receives a suffix.
 fn valid_playlist_name(name: &str) -> bool {
     !name.is_empty()
         && name.chars().count() <= 64
@@ -60,9 +60,9 @@ fn valid_playlist_name(name: &str) -> bool {
         && !name.contains('\0')
 }
 
-/// Répertoire de destination d'une **écriture**. Le montage est `ro` par
-/// défaut : refuser ici par une phrase vaut mieux que de laisser remonter une
-/// erreur d'entrée-sortie du noyau, que personne ne saurait attribuer.
+/// Destination directory of a **write**. The mount is `ro` by default:
+/// refusing here with a sentence beats letting a kernel I/O error bubble up,
+/// which nobody could attribute.
 fn writable_dir(
     dest: &Location,
     internal_dir: &Path,
@@ -81,8 +81,8 @@ fn writable_dir(
     }
 }
 
-/// Répertoire de **playback**. Aucune vérification d'écriture : c'est tout
-/// l'objet de la distinction avec `writable_dir`.
+/// **Read** directory. No write check: that is the whole point of the
+/// distinction with `writable_dir`.
 fn readable_dir(
     from: &Location,
     internal_dir: &Path,
@@ -97,12 +97,11 @@ fn readable_dir(
     }
 }
 
-/// Écriture atomique : un fichier temporaire, puis `rename`. Un enregistrement
-/// interrompu ne doit jamais laisser derrière lui une liste tronquée à la
-/// place de la précédente.
-fn write_atomically(fichier: &Path, tmp: &Path, texte: &str) -> std::io::Result<()> {
-    std::fs::write(tmp, texte)?;
-    std::fs::rename(tmp, fichier)
+/// Atomic write: a temporary file, then `rename`. An interrupted save must
+/// never leave behind a truncated playlist in place of the previous one.
+fn write_atomically(file: &Path, tmp: &Path, text: &str) -> std::io::Result<()> {
+    std::fs::write(tmp, text)?;
+    std::fs::rename(tmp, file)
 }
 
 pub fn save(
@@ -116,27 +115,27 @@ pub fn save(
         return Err(StoreError::BadPlaylistName { name: name.to_string() });
     }
     let dir = writable_dir(dest, internal_dir, roots)?;
-    // Le répertoire interne, on le crée : au premier enregistrement il n'existe
-    // pas encore. Celui d'une racine, **jamais** : un partage non monté a un
-    // point de montage clear, et y créer l'arborescence écrirait sur le disque
-    // local une liste qui disparaîtrait au montage suivant.
+    // The internal directory, we create: on the first save it does not exist
+    // yet. A root's directory, **never**: an unmounted share has an empty
+    // mount point, and creating the tree there would write onto the local disk
+    // a playlist that would vanish at the next mount.
     if matches!(dest, Location::Internal) {
         std::fs::create_dir_all(&dir)
             .map_err(|_| StoreError::Io { path: dir.display().to_string() })?;
     }
-    // Chemins relatifs quand la destination est une racine : c'est ce qui rend
-    // la liste relisible ailleurs et survivante à un changement de point de
-    // montage. En interne, une base n'aurait pas de sens — les pistes ne sont
-    // pas sous le répertoire d'état : chemins absolus.
+    // Relative paths when the destination is a root: that is what makes the
+    // playlist readable elsewhere and lets it survive a change of mount point.
+    // Internally, a base would make no sense — the tracks are not under the
+    // state directory: absolute paths.
     let base = matches!(dest, Location::Root(_)).then(|| dir.clone());
-    let texte = m3u::render(entries, base.as_deref());
-    let fichier = dir.join(format!("{name}.m3u"));
+    let text = m3u::render(entries, base.as_deref());
+    let file = dir.join(format!("{name}.m3u"));
     let tmp = dir.join(format!("{name}.m3u.tmp"));
-    write_atomically(&fichier, &tmp, &texte).map_err(|_| {
-        // Un temporaire abandonné sur le partage serait visible de all et ne
-        // servirait plus à rien.
+    write_atomically(&file, &tmp, &text).map_err(|_| {
+        // A temporary file abandoned on the share would be visible to everyone
+        // and serve no purpose any more.
         let _ = std::fs::remove_file(&tmp);
-        StoreError::Io { path: fichier.display().to_string() }
+        StoreError::Io { path: file.display().to_string() }
     })
 }
 
@@ -150,18 +149,18 @@ pub fn load(
         return Err(StoreError::BadPlaylistName { name: name.to_string() });
     }
     let dir = readable_dir(from, internal_dir, roots)?;
-    let fichier = dir.join(format!("{name}.m3u"));
-    let texte = std::fs::read_to_string(&fichier)
-        .map_err(|_| StoreError::Io { path: fichier.display().to_string() })?;
-    Ok(m3u::parse(&texte, &dir, &dir))
+    let file = dir.join(format!("{name}.m3u"));
+    let text = std::fs::read_to_string(&file)
+        .map_err(|_| StoreError::Io { path: file.display().to_string() })?;
+    Ok(m3u::parse(&text, &dir, &dir))
 }
 
-/// Toutes les playlists visibles, l'interne et les racines confondues.
+/// Every visible playlist, internal and roots combined.
 ///
-/// Une racine unreachable est **ignorée sans erreur** : un NAS endormi ne doit
-/// pas empêcher de voir ses playlists internes. Chaque répertoire est rendition trié,
-/// l'order de `read_dir` n'étant garanti par aucun système de fichiers — sans
-/// quoi la page réordonnerait ses playlists d'un rafraîchissement à l'autre.
+/// An unreachable root is **ignored without error**: a sleeping NAS must not
+/// prevent seeing the internal playlists. Each directory is returned sorted,
+/// since no file system guarantees the order of `read_dir` — otherwise the
+/// page would reorder its playlists from one refresh to the next.
 pub fn list(internal_dir: &Path, roots: &Roots) -> Vec<Saved> {
     let mut out = in_dir(internal_dir, Location::Internal);
     for r in &roots.root {
@@ -170,11 +169,11 @@ pub fn list(internal_dir: &Path, roots: &Roots) -> Vec<Saved> {
     out
 }
 
-/// Les playlists d'**un seul** répertoire.
+/// The playlists of **a single** directory.
 ///
-/// Séparée de `list` pour que l'appelant puisse borner chaque répertoire
-/// individuellement : `read_dir` sur un partage en reconnexion ne rend pas la
-/// main, et la moitié Admin sert ses requêtes en série. Voir `health`.
+/// Separated from `list` so the caller can bound each directory individually:
+/// `read_dir` on a reconnecting share does not return, and the Admin half
+/// serves its requests serially. See `health`.
 pub fn in_dir(dir: &Path, loc: Location) -> Vec<Saved> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut names: Vec<String> = Vec::new();
@@ -196,7 +195,7 @@ pub fn in_dir(dir: &Path, loc: Location) -> Vec<Saved> {
 }
 
 impl StoreError {
-    /// Message localisé remonté à l'utilisateur (corps du refus HTTP).
+    /// Localized message handed to the user (body of the HTTP refusal).
     pub fn message(&self, catalog: &Catalog) -> String {
         match self {
             StoreError::BadPlaylistName { name } => {
@@ -230,12 +229,12 @@ mod tests {
     use crate::roots::{Root, RootKind};
     use tempfile::TempDir;
 
-    /// Les racines de test sont bâties **in_dir un `tempdir`**, donc en
-    /// `RootKind::Local` : une racine `Smb` aurait pour `base_dir()`
-    /// `/mnt/ritornello/<name>`, où la suite de tests ne peut pas écrire. Le
-    /// drapeau `writable` étant vérifié quel que soit le kind, la règle reste
-    /// éprouvable sans le moindre montage.
-    fn decor_avec(writable: bool) -> (TempDir, Roots) {
+    /// The test roots are built **inside a `tempdir`**, hence as
+    /// `RootKind::Local`: an `Smb` root would have `/mnt/ritornello/<name>` as
+    /// `base_dir()`, where the test suite cannot write. Since the `writable`
+    /// flag is checked whatever the kind, the rule remains provable without
+    /// any mount at all.
+    fn fixture_with(writable: bool) -> (TempDir, Roots) {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("nas");
         std::fs::create_dir_all(&base).unwrap();
@@ -255,15 +254,15 @@ mod tests {
         (dir, roots)
     }
 
-    fn decor() -> (TempDir, Roots) {
-        decor_avec(false)
+    fn fixture() -> (TempDir, Roots) {
+        fixture_with(false)
     }
 
-    fn decor_inscriptible() -> (TempDir, Roots) {
-        decor_avec(true)
+    fn writable_fixture() -> (TempDir, Roots) {
+        fixture_with(true)
     }
 
-    fn trois_fichiers(dir: &TempDir) -> Vec<PathBuf> {
+    fn three_files(dir: &TempDir) -> Vec<PathBuf> {
         let mut out = Vec::new();
         for name in ["Musique/01.mp3", "Musique/02.mp3", "Musique/03.mp3"] {
             let p = dir.path().join(name);
@@ -275,117 +274,117 @@ mod tests {
     }
 
     #[test]
-    fn un_nom_de_liste_qui_traverse_est_refuse() {
-        // Le name devient un name de fichier, écrit soit in_dir /var/lib, soit sur
-        // le partage : « ../../etc/cron.d/x » ne doit jamais atteindre le
-        // disque. La contre-barre compte autant que la barre, un name saisi
-        // depuis un poste Windows en portant ; le point initial cacherait la
-        // liste ; l'octet nul tronquerait une chaîne C côté noyau.
-        let (dir, roots) = decor();
-        let trop_long = "x".repeat(65);
-        let mauvais =
-            ["../evasion", "a/b", "a\\b", "", ".", "..", ".cache", "x\0y", trop_long.as_str()];
-        for m in mauvais {
+    fn a_playlist_name_that_traverses_is_refused() {
+        // The name becomes a file name, written either in /var/lib or on the
+        // share: "../../etc/cron.d/x" must never reach the disk. The backslash
+        // counts as much as the slash, since a name typed from a Windows
+        // machine carries one; the leading dot would hide the playlist; the
+        // NUL byte would truncate a C string on the kernel side.
+        let (dir, roots) = fixture();
+        let too_long = "x".repeat(65);
+        let bad =
+            ["../evasion", "a/b", "a\\b", "", ".", "..", ".cache", "x\0y", too_long.as_str()];
+        for m in bad {
             assert!(
                 matches!(
                     save(&[], m, &Location::Internal, dir.path(), &roots),
                     Err(StoreError::BadPlaylistName { .. })
                 ),
-                "accepte a tort a l'enregistrement : {m:?}"
+                "wrongly accepted on save: {m:?}"
             );
-            // Le chargement valide le name lui aussi : il construit le même
-            // path, et le refuser d'un seul côté laisserait la traversée
-            // ouverte en playback.
+            // Loading validates the name too: it builds the same path, and
+            // refusing on one side only would leave the traversal open on
+            // read.
             assert!(
                 matches!(
                     load(m, &Location::Internal, dir.path(), &roots),
                     Err(StoreError::BadPlaylistName { .. })
                 ),
-                "accepte a tort a la playback : {m:?}"
+                "wrongly accepted on load: {m:?}"
             );
         }
-        // Et un name ordinaire, lui, passe — la règle ne doit pas être si
-        // stricte qu'elle interdise d'enregistrer.
+        // And an ordinary name does pass — the rule must not be so strict that
+        // it forbids saving.
         assert!(save(&[], "Jazz du dimanche", &Location::Internal, dir.path(), &roots).is_ok());
     }
 
     #[test]
-    fn enregistrer_sur_une_racine_en_lecture_seule_est_refuse_avec_une_phrase() {
-        // Le montage est `ro` par défaut : il faut le dire clairement plutôt
-        // que de laisser remonter une erreur d'entrée-sortie du noyau, qui ne
-        // désignerait ni la racine ni le remède.
-        let (dir, roots) = decor(); // « nas » est writable = false
+    fn saving_on_a_read_only_root_is_refused_with_a_sentence() {
+        // The mount is `ro` by default: it has to be said clearly rather than
+        // letting a kernel I/O error bubble up, which would name neither the
+        // root nor the remedy.
+        let (dir, roots) = fixture(); // "nas" is writable = false
         let err = save(&[], "Jazz", &Location::Root("nas".into()), dir.path(), &roots).unwrap_err();
         assert!(matches!(err, StoreError::ReadOnlyRoot { .. }), "{err:?}");
-        assert!(!dir.path().join("nas/Jazz.m3u").exists(), "ecrit malgre le refus");
+        assert!(!dir.path().join("nas/Jazz.m3u").exists(), "written despite the refusal");
     }
 
     #[test]
-    fn charger_depuis_une_racine_en_lecture_seule_reste_permis() {
-        // L'asymétrie est le cœur de la règle : read ne demande aucune
-        // écriture, et le cas courant est justement un partage monté `ro`.
-        let (dir, roots) = decor(); // writable = false
+    fn loading_from_a_read_only_root_stays_allowed() {
+        // The asymmetry is the heart of the rule: reading requires no write,
+        // and the common case is precisely a share mounted `ro`.
+        let (dir, roots) = fixture(); // writable = false
         let base = dir.path().join("nas");
         std::fs::write(base.join("Album.m3u"), "#EXTM3U\n#EXTINF:-1,So What\nAlbum/01.mp3\n")
             .unwrap();
         std::fs::create_dir_all(base.join("Album")).unwrap();
         std::fs::write(base.join("Album/01.mp3"), b"").unwrap();
-        let relu = load("Album", &Location::Root("nas".into()), dir.path(), &roots).unwrap();
-        assert_eq!(relu.entries.len(), 1, "non resolu : {:?}", relu.unresolved);
-        assert_eq!(relu.entries[0].path, base.join("Album/01.mp3"));
+        let reloaded = load("Album", &Location::Root("nas".into()), dir.path(), &roots).unwrap();
+        assert_eq!(reloaded.entries.len(), 1, "unresolved: {:?}", reloaded.unresolved);
+        assert_eq!(reloaded.entries[0].path, base.join("Album/01.mp3"));
     }
 
     #[test]
-    fn une_liste_enregistree_en_interne_se_recharge_a_l_identique() {
-        let (dir, roots) = decor();
-        let fichiers = trois_fichiers(&dir);
-        let entries: Vec<Entry> = fichiers
+    fn a_playlist_saved_internally_reloads_identically() {
+        let (dir, roots) = fixture();
+        let files = three_files(&dir);
+        let entries: Vec<Entry> = files
             .iter()
             .map(|p| Entry { path: p.clone(), title: None, duration_s: None })
             .collect();
         save(&entries, "Jazz", &Location::Internal, dir.path(), &roots).unwrap();
-        let relu = load("Jazz", &Location::Internal, dir.path(), &roots).unwrap();
-        assert_eq!(relu.entries.len(), 3);
-        assert!(relu.unresolved.is_empty());
-        assert_eq!(relu.entries[0].path, fichiers[0]);
+        let reloaded = load("Jazz", &Location::Internal, dir.path(), &roots).unwrap();
+        assert_eq!(reloaded.entries.len(), 3);
+        assert!(reloaded.unresolved.is_empty());
+        assert_eq!(reloaded.entries[0].path, files[0]);
     }
 
     #[test]
-    fn une_liste_enregistree_sur_une_racine_porte_des_chemins_relatifs() {
-        // C'est ce qui la rend relisible par un autre player et survivante à
-        // un changement de point de montage.
-        let (dir, roots) = decor_inscriptible();
+    fn a_playlist_saved_on_a_root_carries_relative_paths() {
+        // That is what makes it readable by another player and lets it survive
+        // a change of mount point.
+        let (dir, roots) = writable_fixture();
         let base = roots.by_name("nas").unwrap().base_dir();
         let entries =
             vec![Entry { path: base.join("Album/01.mp3"), title: None, duration_s: None }];
         save(&entries, "Jazz", &Location::Root("nas".into()), dir.path(), &roots).unwrap();
-        let texte = std::fs::read_to_string(base.join("Jazz.m3u")).unwrap();
-        assert!(texte.contains("Album/01.mp3"), "{texte}");
-        assert!(!texte.contains(base.to_str().unwrap()), "path absolu ecrit : {texte}");
+        let text = std::fs::read_to_string(base.join("Jazz.m3u")).unwrap();
+        assert!(text.contains("Album/01.mp3"), "{text}");
+        assert!(!text.contains(base.to_str().unwrap()), "absolute path written: {text}");
     }
 
     #[test]
-    fn lister_montre_l_interne_et_les_racines_ensemble() {
-        let (dir, roots) = decor_inscriptible();
+    fn listing_shows_internal_and_roots_together() {
+        let (dir, roots) = writable_fixture();
         save(&[], "Jazz", &Location::Internal, dir.path(), &roots).unwrap();
         save(&[], "Rock", &Location::Root("nas".into()), dir.path(), &roots).unwrap();
-        let listees = list(dir.path(), &roots);
-        let mut names: Vec<String> = listees.iter().map(|s| s.name.clone()).collect();
+        let listed = list(dir.path(), &roots);
+        let mut names: Vec<String> = listed.iter().map(|s| s.name.clone()).collect();
         names.sort();
         assert_eq!(names, vec!["Jazz", "Rock"]);
-        // Et chacune sait d'où elle vient : sans quoi recharger « Rock »
-        // irait chercher in_dir le stockage interne.
+        // And each one knows where it comes from: otherwise reloading "Rock"
+        // would look in the internal storage.
         assert_eq!(
-            listees.iter().find(|s| s.name == "Rock").unwrap().location,
+            listed.iter().find(|s| s.name == "Rock").unwrap().location,
             Location::Root("nas".into())
         );
     }
 
     #[test]
-    fn une_racine_injoignable_n_empeche_pas_de_voir_les_listes_internes() {
-        // Un NAS endormi rend son point de montage illisible. Si `list`
-        // échouait pour autant, la page n'afficherait plus rien du tout.
-        let (dir, mut roots) = decor_inscriptible();
+    fn an_unreachable_root_does_not_prevent_seeing_internal_playlists() {
+        // A sleeping NAS makes its mount point unreadable. If `list` failed
+        // because of it, the page would show nothing at all any more.
+        let (dir, mut roots) = writable_fixture();
         save(&[], "Jazz", &Location::Internal, dir.path(), &roots).unwrap();
         roots.root[0].path = Some("/inexistant/nulle-part".into());
         let names: Vec<String> = list(dir.path(), &roots).into_iter().map(|s| s.name).collect();
@@ -393,53 +392,53 @@ mod tests {
     }
 
     #[test]
-    fn l_ecriture_ne_laisse_aucun_temporaire_derriere_elle() {
-        // Le `.tmp` du rename atomique ne doit pas rester visible sur le
-        // partage, ni se faire prendre pour une liste enregistrée.
-        let (dir, roots) = decor_inscriptible();
+    fn writing_leaves_no_temporary_file_behind() {
+        // The `.tmp` of the atomic rename must not stay visible on the share,
+        // nor be mistaken for a saved playlist.
+        let (dir, roots) = writable_fixture();
         save(&[], "Jazz", &Location::Root("nas".into()), dir.path(), &roots).unwrap();
-        let restants: Vec<String> = std::fs::read_dir(dir.path().join("nas"))
+        let remaining: Vec<String> = std::fs::read_dir(dir.path().join("nas"))
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(restants, vec!["Jazz.m3u".to_string()], "{restants:?}");
+        assert_eq!(remaining, vec!["Jazz.m3u".to_string()], "{remaining:?}");
     }
 
     #[test]
-    fn une_racine_inconnue_est_nommee_plutot_que_devinee() {
-        // Une racine supprimée de la configuration alors qu'une liste la
-        // désigne encore : le refus doit dire laquelle, des deux côtés.
-        let (dir, roots) = decor_inscriptible();
-        let absente = Location::Root("absente".into());
+    fn an_unknown_root_is_named_rather_than_guessed() {
+        // A root removed from the configuration while a playlist still
+        // designates it: the refusal must say which one, on both sides.
+        let (dir, roots) = writable_fixture();
+        let absent = Location::Root("absente".into());
         assert!(matches!(
-            save(&[], "Jazz", &absente, dir.path(), &roots),
+            save(&[], "Jazz", &absent, dir.path(), &roots),
             Err(StoreError::UnknownRoot { .. })
         ));
         assert!(matches!(
-            load("Jazz", &absente, dir.path(), &roots),
+            load("Jazz", &absent, dir.path(), &roots),
             Err(StoreError::UnknownRoot { .. })
         ));
     }
 
     #[test]
-    fn charger_une_liste_absente_echoue_en_nommant_le_fichier() {
-        // Sans le path in_dir le refus, « impossible de read » n'aide
-        // personne à comprendre où le plugin est allé chercher.
-        let (dir, roots) = decor();
+    fn loading_a_missing_playlist_fails_naming_the_file() {
+        // Without the path in the refusal, "cannot read" helps nobody
+        // understand where the plugin went looking.
+        let (dir, roots) = fixture();
         let err = load("Jazz", &Location::Internal, dir.path(), &roots).unwrap_err();
         match err {
             StoreError::Io { path } => assert!(path.ends_with("Jazz.m3u"), "{path}"),
-            autre => panic!("attendu Io, obtenu {autre:?}"),
+            other => panic!("expected Io, got {other:?}"),
         }
     }
 
     #[test]
-    fn chaque_refus_de_store_resout_contre_le_catalogue_embarque() {
-        // `Catalog::get` rend la clé quand il ne la trouve pas : sans ce test,
-        // une faute de frappe afficherait « read_only_root » à l'écran sans
-        // que rien ne bronche. On résout donc contre le sources_catalog réellement
-        // embarqué, et on refuse un message réduit à sa propre clé.
+    fn every_store_refusal_resolves_against_the_embedded_catalog() {
+        // `Catalog::get` returns the key when it cannot find it: without this
+        // test, a typo would display "read_only_root" on screen without
+        // anything complaining. So we resolve against the catalog actually
+        // embedded, and refuse a message reduced to its own key.
         let catalog =
             Catalog::load("files", "en", std::path::Path::new("/inexistant"), crate::FILES_EN);
         let messages = [
@@ -449,11 +448,11 @@ mod tests {
             StoreError::Io { path: "/x".into() }.message(&catalog),
         ];
         for m in &messages {
-            assert!(m.contains(' '), "message reduit a une key brute : {m:?}");
+            assert!(m.contains(' '), "message reduced to a raw key: {m:?}");
         }
-        // Et l'interpolation aboutit : pas de jeton laissé tel quel.
-        let bounded = StoreError::ReadOnlyRoot { root: "nas".into() }.message(&catalog);
-        assert!(bounded.contains("nas"), "le refus doit nommer la racine : {bounded:?}");
-        assert!(!bounded.contains("{name}"), "jeton laisse tel quel : {bounded:?}");
+        // And the interpolation goes through: no token left as is.
+        let interpolated = StoreError::ReadOnlyRoot { root: "nas".into() }.message(&catalog);
+        assert!(interpolated.contains("nas"), "the refusal must name the root: {interpolated:?}");
+        assert!(!interpolated.contains("{name}"), "token left as is: {interpolated:?}");
     }
 }

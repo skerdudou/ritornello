@@ -4,10 +4,9 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "cmd", content = "arg")]
 pub enum Command {
     Select(u8),
-    /// La distinction présélection/piste n'est pas portée par la commande
-    /// elle-même mais par la source active : la radio interprète
-    /// `Next`/`Prev` comme un changement de présélection, le player CD
-    /// comme piste suivante/précédente.
+    /// The preset/track distinction is not carried by the command itself but
+    /// by the active source: the radio interprets `Next`/`Prev` as a preset
+    /// change, the CD player as next/previous track.
     Next,
     Prev,
     VolumeUp,
@@ -23,27 +22,26 @@ pub enum Command {
     /// The pending offset lives in the core — which also displays it and
     /// expires it; input plugins just relay the key press.
     Plus10,
-    /// Avancer d'un pas dans ce qui plays. Le pas vit dans le cœur (réglage
-    /// `seek_step_s`), exactement comme les 5 % du volume : la touche ne
-    /// porte aucune quantité, donc changer le pas ne demande pas de
-    /// reprogrammer une télécommande.
+    /// Step forward in what is playing. The step lives in the core (setting
+    /// `seek_step_s`), exactly like the 5 % of the volume: the key carries no
+    /// quantity, so changing the step does not require reprogramming a remote.
     SeekForward,
     SeekBackward,
-    /// Positionnement absolu, en secondes. Sert la barre cliquable de la SPA ;
-    /// aucune touche physique ne l'émet.
+    /// Absolute positioning, in seconds. Serves the clickable bar of the SPA;
+    /// no physical key emits it.
     SeekTo(u32),
-    /// Volume absolu, en pourcent. Sert le `setvol` de MPD ; aucune touche
-    /// physique ne l'émet — même raison d'être que `SeekTo`.
+    /// Absolute volume, in percent. Serves MPD's `setvol`; no physical key
+    /// emits it — same reason for being as `SeekTo`.
     ///
-    /// Empiler des `VolumeUp` ne remplacerait pas cette commande : le pas est
-    /// un réglage et non une constante, et chaque pas écrit une incrustation à
-    /// l'écran.
+    /// Stacking `VolumeUp`s would not replace this command: the step is a
+    /// setting and not a constant, and each step writes an overlay on the
+    /// screen.
     SetVolume(u8),
-    /// Source désignée par son **name**, là où `SourceCycle` ne sait qu'avancer
-    /// d'un cran. Sert le `load "radio"` de MPD.
+    /// Source designated by its **name**, where `SourceCycle` only knows how to
+    /// move one notch forward. Serves MPD's `load "radio"`.
     ///
-    /// Un name inconnu est ignoré en silence par le cœur, comme une touche non
-    /// liée : c'est l'émetteur qui sait ce qu'il propose.
+    /// An unknown name is silently ignored by the core, like an unbound key:
+    /// the emitter is the one who knows what it offers.
     SelectSource(String),
 }
 
@@ -74,7 +72,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roundtrip_json_avec_argument() {
+    fn json_roundtrip_with_argument() {
         let c = Command::Select(3);
         let json = serde_json::to_string(&c).unwrap();
         assert_eq!(json, r#"{"cmd":"Select","arg":3}"#);
@@ -82,7 +80,7 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_json_sans_argument() {
+    fn json_roundtrip_without_argument() {
         let c = Command::Stop;
         let json = serde_json::to_string(&c).unwrap();
         assert_eq!(json, r#"{"cmd":"Stop"}"#);
@@ -90,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn input_message_sans_held_est_une_commande_nue() {
+    fn input_message_without_held_is_a_bare_command() {
         // Backward compatibility: an input plugin that writes a plain Command
         // line keeps working, and the non-held serialization is byte-identical.
         let msg: InputMessage = serde_json::from_str(r#"{"cmd":"VolumeUp"}"#).unwrap();
@@ -99,7 +97,7 @@ mod tests {
     }
 
     #[test]
-    fn input_message_held_roundtrip_avec_argument() {
+    fn input_message_held_roundtrip_with_argument() {
         let msg: InputMessage = serde_json::from_str(r#"{"cmd":"Select","arg":3,"held":true}"#).unwrap();
         assert_eq!(msg, InputMessage { cmd: Command::Select(3), held: true });
         let json = serde_json::to_string(&msg).unwrap();
@@ -112,9 +110,9 @@ mod tests {
     }
 
     #[test]
-    fn plus10_et_select_zero_font_le_tour() {
-        // Plus10 est la touche +10 de la télécommande, Select(0) sa touche 0 :
-        // les deux doivent voyager tels quels.
+    fn plus10_and_select_zero_roundtrip() {
+        // Plus10 is the remote's +10 key, Select(0) its 0 key: both must
+        // travel as they are.
         let p = Command::Plus10;
         let json = serde_json::to_string(&p).unwrap();
         assert_eq!(json, r#"{"cmd":"Plus10"}"#);
@@ -126,26 +124,26 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_des_commandes_de_deplacement() {
-        for (cmd, attendu) in [
+    fn seek_commands_roundtrip() {
+        for (cmd, expected) in [
             (Command::SeekForward, r#"{"cmd":"SeekForward"}"#),
             (Command::SeekBackward, r#"{"cmd":"SeekBackward"}"#),
             (Command::SeekTo(198), r#"{"cmd":"SeekTo","arg":198}"#),
         ] {
             let json = serde_json::to_string(&cmd).unwrap();
-            assert_eq!(json, attendu);
+            assert_eq!(json, expected);
             assert_eq!(serde_json::from_str::<Command>(&json).unwrap(), cmd);
         }
     }
 
     #[test]
-    fn roundtrip_des_commandes_a_valeur_absolue() {
-        for (cmd, attendu) in [
+    fn absolute_value_commands_roundtrip() {
+        for (cmd, expected) in [
             (Command::SetVolume(40), r#"{"cmd":"SetVolume","arg":40}"#),
             (Command::SelectSource("radio".into()), r#"{"cmd":"SelectSource","arg":"radio"}"#),
         ] {
             let json = serde_json::to_string(&cmd).unwrap();
-            assert_eq!(json, attendu);
+            assert_eq!(json, expected);
             assert_eq!(serde_json::from_str::<Command>(&json).unwrap(), cmd);
         }
     }

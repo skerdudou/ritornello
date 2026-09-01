@@ -1,4 +1,4 @@
-import brut from './presets.json'
+import raw from './presets.json'
 
 export type Mode = 'light' | 'dark'
 
@@ -7,21 +7,21 @@ export interface Preset {
   styles: { light: Record<string, string>; dark: Record<string, string> }
 }
 
-export const presets = brut as unknown as Record<string, Preset>
+export const presets = raw as unknown as Record<string, Preset>
 
 export const DEFAULT_PRESET = 'northern-lights'
 export const DEFAULT_MODE: Mode = 'light'
 
-/** Familles génériques : citées par les presets mais jamais à télécharger. */
+/** Generic families: cited by the presets but never to be downloaded. */
 const GENERICS = new Set([
   'sans-serif', 'serif', 'monospace', 'system-ui', 'ui-monospace', 'ui-serif',
   'ui-sans-serif', 'cursive', 'fantasy', 'inherit',
 ])
 
 /**
- * Repli ajouté en fin de pile par famille typographique, pour que l'IHM
- * reste lisible quand le CDN de polices est injoignable (appareil hors
- * ligne) : c'est la seule ressource externe de l'interface.
+ * Fallback appended at the end of the stack per typographic family, so that
+ * the UI stays readable when the font CDN is unreachable (device offline):
+ * it is the interface's only external resource.
  */
 const FALLBACKS: Record<string, string> = {
   'font-sans': 'system-ui, sans-serif',
@@ -30,21 +30,21 @@ const FALLBACKS: Record<string, string> = {
 }
 
 /**
- * Le bloc `light` sert de base, le bloc du mode le surcharge : les blocs
- * `dark` de l'amont omettent le plus souvent les clés non chromatiques
- * (polices, rayon), qui doivent alors venir du bloc clair.
+ * The `light` block serves as the base, the mode's block overrides it: the
+ * upstream `dark` blocks most often omit the non-chromatic keys (fonts,
+ * radius), which must then come from the light block.
  */
 export function resolveVars(preset: Preset, mode: Mode): Record<string, string> {
   return { ...preset.styles.light, ...preset.styles[mode] }
 }
 
 export function withFallback(key: string, value: string): string {
-  const repli = FALLBACKS[key]
-  if (!repli) return value
-  const deja = value
+  const fallback = FALLBACKS[key]
+  if (!fallback) return value
+  const already = value
     .split(',')
     .some((part) => GENERICS.has(part.trim().toLowerCase()))
-  return deja ? value : `${value}, ${repli}`
+  return already ? value : `${value}, ${fallback}`
 }
 
 export function fontFamilies(vars: Record<string, string>): string[] {
@@ -52,59 +52,59 @@ export function fontFamilies(vars: Record<string, string>): string[] {
   for (const key of Object.keys(FALLBACKS)) {
     const value = vars[key]
     if (!value) continue
-    const premiere = value.split(',')[0]?.trim().replace(/^["']|["']$/g, '')
-    if (!premiere || GENERICS.has(premiere.toLowerCase())) continue
-    if (!out.includes(premiere)) out.push(premiere)
+    const first = value.split(',')[0]?.trim().replace(/^["']|["']$/g, '')
+    if (!first || GENERICS.has(first.toLowerCase())) continue
+    if (!out.includes(first)) out.push(first)
   }
   return out
 }
 
 /**
- * Un seul lien de polices vit dans le document : il est remplacé à chaque
- * application de thème (marqué par `data-ritornello-fonts`). Aucune police
- * n'est embarquée dans les binaires — voir la spec.
+ * A single font link lives in the document: it is replaced at every theme
+ * application (marked by `data-ritornello-fonts`). No font is embedded in the
+ * binaries — see the spec.
  */
-function ensureFontLink(familles: string[], doc: Document): void {
-  const existant = doc.head.querySelector('link[data-ritornello-fonts]')
-  if (existant) existant.remove()
-  if (familles.length === 0) return
-  const familles_url = familles
+function ensureFontLink(families: string[], doc: Document): void {
+  const existing = doc.head.querySelector('link[data-ritornello-fonts]')
+  if (existing) existing.remove()
+  if (families.length === 0) return
+  const families_url = families
     .map((f) => `family=${encodeURIComponent(f).replace(/%20/g, '+')}:wght@400;500;600;700`)
     .join('&')
   const link = doc.createElement('link')
   link.rel = 'stylesheet'
   link.setAttribute('data-ritornello-fonts', '')
-  link.href = `https://fonts.googleapis.com/css2?${familles_url}&display=swap`
+  link.href = `https://fonts.googleapis.com/css2?${families_url}&display=swap`
   doc.head.appendChild(link)
 }
 
 /**
- * Clés posées par la dernière application, par `root`, pour pouvoir les
- * retirer : un preset qui ne définit pas une variable ne doit pas hériter de
- * celle du preset précédent. Indexé par `root` (et non un état global unique)
- * car plusieurs roots peuvent recevoir des thèmes différents : purger d'après
- * une liste partagée ferait fuiter les clés d'un root vers un autre. Une
- * `WeakMap` est utilisée pour ne pas retenir en mémoire un root détruit.
+ * Keys set by the last application, per `root`, so they can be removed: a
+ * preset that does not define a variable must not inherit it from the previous
+ * preset. Indexed by `root` (and not a single global state) because several
+ * roots may receive different themes: purging from a shared list would leak
+ * the keys of one root into another. A `WeakMap` is used so as not to keep a
+ * destroyed root in memory.
  */
 const applied = new WeakMap<HTMLElement, string[]>()
 
 /**
- * Écrit chaque entrée du preset résolu en variable CSS sur `root`, itération
- * **générique** : aucune liste de clés en dur, pour qu'un preset amont qui
- * gagne une variable fonctionne sans toucher au code.
+ * Writes each entry of the resolved preset as a CSS variable on `root`,
+ * **generic** iteration: no hard-coded list of keys, so that an upstream preset
+ * gaining a variable works without touching the code.
  *
- * `root`, `doc` et `catalogue` ne sont paramétrables que pour les tests.
+ * `root`, `doc` and `catalog` are only parameterizable for the tests.
  */
 export function applyTheme(
   id: string,
   mode: Mode,
   root: HTMLElement = document.documentElement,
   doc: Document = document,
-  catalogue: Record<string, Preset> = presets,
+  catalog: Record<string, Preset> = presets,
 ): void {
-  const preset = catalogue[id]
+  const preset = catalog[id]
   if (!preset) {
-    console.warn(`thème inconnu ignoré : ${id}`)
+    console.warn(`unknown theme ignored: ${id}`)
     return
   }
   for (const key of applied.get(root) ?? []) root.style.removeProperty(`--${key}`)

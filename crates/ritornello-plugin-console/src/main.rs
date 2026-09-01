@@ -13,25 +13,25 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-/// Période du battement qui fait avancer l'horloge de veille.
+/// Period of the heartbeat that makes the standby clock advance.
 ///
-/// **Dix secondes pour une horloge à la minute**, et ce n'est pas du gâchis :
-/// `ConsoleDisplay::show` compare son rendition au précédent et n'écrit rien quand
-/// les trois lines sont identiques, donc un tour ne coûte qu'une playback de
-/// l'heure et trois comparaisons de chaînes tant que la minute n'a pas tourné.
-/// Une période d'une minute, elle, ne serait pas alignée sur les minutes
-/// rondes : l'affichage aurait pu retarder de presque une minute entière.
+/// **Ten seconds for a clock to the minute**, and it is not waste:
+/// `ConsoleDisplay::show` compares its rendering with the previous one and
+/// writes nothing when the three lines are identical, so a tick only costs one
+/// read of the time and three string comparisons as long as the minute has not
+/// turned. A one-minute period, on the other hand, would not be aligned on
+/// round minutes: the display could have lagged by almost a whole minute.
 const CLOCK_TICK: std::time::Duration = std::time::Duration::from_secs(10);
 
 struct ConsolePlugin {
-    /// Partagé avec le battement : les deux écrivent sur le même tty, et
-    /// jamais en même temps.
+    /// Shared with the heartbeat: both write to the same tty, and never at the
+    /// same time.
     display: Arc<Mutex<ConsoleDisplay>>,
-    /// La dernière trame reçue, que le battement réutilise pour redessiner.
+    /// The last frame received, which the heartbeat reuses to redraw.
     ///
-    /// **Le battement ne fabrique pas d'état**, il rejoue le last : sans
-    /// cela il devrait deviner ce que le cœur a annoncé, et un écran en veille
-    /// perdrait le mot de veille au premier tour d'horloge.
+    /// **The heartbeat makes up no state**, it replays the last one: without
+    /// that it would have to guess what the core announced, and a screen in
+    /// standby would lose the standby word on the first clock tick.
     last: Arc<Mutex<Option<PlayerState>>>,
 }
 
@@ -43,13 +43,13 @@ impl DisplayPlugin for ConsolePlugin {
     }
 }
 
-/// Redessine périodiquement tant que l'appareil est en veille, pour que
-/// l'horloge avance.
+/// Redraws periodically as long as the device is in standby, so that the clock
+/// advances.
 ///
-/// Ne fait rien hors veille : c'est le cœur qui push_cover alors, et à une cadence
-/// bien supérieure. Ne fait rien non plus avant la première trame — il n'y a
-/// alors rien à redessiner, et inventer un écran clear effacerait ce que le tty
-/// montrait avant le lancement du greffon.
+/// Does nothing outside standby: the core pushes then, and at a much higher
+/// cadence. Does nothing before the first frame either — there is nothing to
+/// redraw then, and inventing an empty screen would erase what the tty showed
+/// before the plugin was launched.
 async fn tick_clock(display: Arc<Mutex<ConsoleDisplay>>, last: Arc<Mutex<Option<PlayerState>>>) {
     loop {
         tokio::time::sleep(CLOCK_TICK).await;
@@ -58,8 +58,8 @@ async fn tick_clock(display: Arc<Mutex<ConsoleDisplay>>, last: Arc<Mutex<Option<
             continue;
         }
         if let Err(e) = display.lock().await.show(&state) {
-            // Journalisé et non fatal : un tty momentanément indisponible ne
-            // doit pas emporter le greffon, qui reste utile dès qu'il revient.
+            // Logged and not fatal: a momentarily unavailable tty must not take
+            // the plugin down, which stays useful as soon as it comes back.
             tracing::warn!("could not refresh the standby clock: {e}");
         }
     }
@@ -81,47 +81,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn la_console_ne_demande_pas_les_pochettes() {
-        // Le pendant du `wants_covers` du serveur MPD, et la raison d'être du
-        // corps par défaut : cet afficheur écrit trois lines sur un tty de
-        // vingt colonnes. Lui pousser jusqu'à deux mébioctets par piste, sur un
-        // appareil qui en a mille, serait payé pour être jeté — et l'announcement
-        // étant dérivée de cette méthode (voir `Runtime::display`), c'est
-        // exactement ce que redéfinir ici provoquerait.
+    fn the_console_does_not_ask_for_covers() {
+        // The counterpart of the MPD server's `wants_covers`, and the reason
+        // for the default body: this display writes three lines on a
+        // twenty-column tty. Pushing up to two mebibytes per track to it, on a
+        // device that has a thousand of them, would be paid to be thrown away —
+        // and the announcement being derived from this method (see
+        // `Runtime::display`), that is exactly what overriding it here would
+        // cause.
         //
-        // Écrit du côté qui doit rester silencieux, et non du côté qui demande :
-        // c'est ici que la régression se produirait, en ajoutant une surcharge
-        // par mimétisme.
+        // Written on the side that must stay silent, and not on the side that
+        // asks: this is where the regression would happen, by adding an
+        // override out of mimicry.
         let tty = tempfile::NamedTempFile::new().unwrap();
         let plugin = ConsolePlugin {
             display: Arc::new(Mutex::new(ConsoleDisplay::open(tty.path()).unwrap())),
             last: Arc::new(Mutex::new(None)),
         };
-        assert!(!plugin.wants_covers(), "la console n'a que faire des bytes d'une image");
+        assert!(!plugin.wants_covers(), "the console has no use for an image's bytes");
     }
 
     #[tokio::test]
-    async fn le_battement_redessine_en_veille_et_se_tait_le_reste_du_temps() {
-        // Le battement rejoue la **dernière trame reçue** : sans elle, un tour
-        // d'horloge effacerait le mot de veille que le cœur avait annoncé. Et
-        // il ne touche à rien hors veille, où le cœur push_cover déjà à la seconde.
+    async fn the_heartbeat_redraws_in_standby_and_stays_quiet_the_rest_of_the_time() {
+        // The heartbeat replays the **last frame received**: without it, a
+        // clock tick would erase the standby word the core had announced. And
+        // it touches nothing outside standby, where the core already pushes
+        // every second.
         let tty = tempfile::NamedTempFile::new().unwrap();
         let display = Arc::new(Mutex::new(ConsoleDisplay::open(tty.path()).unwrap()));
         let last = Arc::new(Mutex::new(None));
         let mut plugin =
             ConsolePlugin { display: display.clone(), last: last.clone() };
 
-        // Rien reçu : rien à redessiner.
+        // Nothing received: nothing to redraw.
         assert!(last.lock().await.is_none());
 
         plugin
             .show(PlayerState { standby: true, status: Some("VEILLE".into()), ..Default::default() })
             .await
             .unwrap();
-        let garde = last.lock().await;
-        let retenu = garde.clone().expect("la trame doit etre retenue pour le battement");
-        drop(garde);
-        assert!(retenu.standby);
-        assert_eq!(retenu.status.as_deref(), Some("VEILLE"));
+        let guard = last.lock().await;
+        let retained = guard.clone().expect("the frame must be retained for the heartbeat");
+        drop(guard);
+        assert!(retained.standby);
+        assert_eq!(retained.status.as_deref(), Some("VEILLE"));
     }
 }

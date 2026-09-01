@@ -1,80 +1,79 @@
 import { expect, test } from '@playwright/test'
 
-test('sur téléphone : barre basse, nav du haut absente, tuile nommée', async ({ page }) => {
+test('on a phone: bottom bar, top nav absent, named tile', async ({ page }) => {
   await page.goto('/')
   await expect(page.locator('[data-nav-basse]')).toBeVisible()
   await expect(page.locator('[data-nav-haut]')).toBeHidden()
   await expect(page.locator('[data-nav-basse] a')).toHaveCount(4)
-  // La présélection 1 (FIP, stations.toml du harness) joue et porte son nom.
-  const tuile = page.locator('[data-preset-button="1"]')
-  await expect(tuile).toHaveAttribute('aria-current', 'true')
-  await expect(tuile.locator('[data-preset-name]')).toHaveText('FIP')
-  // Le transport n'a ni ±10 s ni volume step à step, et step d'Éjecter sur la radio.
+  // Preset 1 (FIP, the harness's stations.toml) is playing and carries its name.
+  const tile = page.locator('[data-preset-button="1"]')
+  await expect(tile).toHaveAttribute('aria-current', 'true')
+  await expect(tile.locator('[data-preset-name]')).toHaveText('FIP')
+  // The transport has neither ±10 s nor step-by-step volume, and no Eject on the radio.
   await expect(page.locator('[data-remote-command="Eject"]')).toHaveCount(0)
   await expect(page.locator('[data-remote-command]')).toHaveCount(5) // Prev PlayPause Next Stop Mute
 })
 
-test('sur téléphone : glisser le curseur de volume envoie un SetVolume que le cœur renvoie', async ({ page }) => {
-  // La preuve de bout en bout du Slider : un vrai geste tactile, une seule
-  // command au relâchement, et la trame SSE qui revient avec la valeur.
-  // Le volume plutôt que la progression parce que la radio n'est step
-  // `seekable` : la barre y est informative, sans poignée — ce qui se vérifie
-  // aussi.
+test('on a phone: dragging the volume slider sends a SetVolume that the core echoes back', async ({ page }) => {
+  // The end-to-end proof of the Slider: a real touch gesture, a single
+  // command on release, and the SSE frame that comes back with the value.
+  // Volume rather than progress because the radio is not `seekable`: its bar
+  // is informative, without a thumb — which is verified too.
   await page.goto('/')
   await expect(page.locator('[data-volume]')).not.toHaveText('')
   await expect(page.locator('[data-barre] [role="slider"]')).toHaveCount(0)
-  const curseur = page.locator('[data-volume-curseur]')
-  const boite = await curseur.boundingBox()
-  if (!boite) throw new Error('curseur de volume invisible')
-  const y = boite.y + boite.height / 2
-  // L'affichage [data-volume] est optimiste (mis a jour des le valueCommit
-  // local), la trame SSE ne l'est step : sans attendre la reponse du POST, la
-  // lecture du flux plus bas peut arriver avant que le coeur ait vraiment
-  // applique la command.
-  const reponse = page.waitForResponse(
+  const slider = page.locator('[data-volume-curseur]')
+  const box = await slider.boundingBox()
+  if (!box) throw new Error('volume slider not visible')
+  const y = box.y + box.height / 2
+  // The [data-volume] display is optimistic (updated as soon as the local
+  // valueCommit fires), the SSE frame is not: without waiting for the POST's
+  // response, the stream read further down may arrive before the core has
+  // really applied the command.
+  const response = page.waitForResponse(
     (r) => r.url().endsWith('/api/command') && r.request().method() === 'POST',
   )
-  await page.mouse.move(boite.x + boite.width * 0.5, y)
+  await page.mouse.move(box.x + box.width * 0.5, y)
   await page.mouse.down()
-  await page.mouse.move(boite.x + boite.width * 0.25, y, { steps: 5 })
+  await page.mouse.move(box.x + box.width * 0.25, y, { steps: 5 })
   await page.mouse.up()
-  expect((await reponse).status()).toBe(204)
-  // Entre 20 et 30 % : la position exacte dépend du padding de la poignée.
+  expect((await response).status()).toBe(204)
+  // Between 20 and 30 %: the exact position depends on the thumb's padding.
   await expect(page.locator('[data-volume]')).toHaveText(/^(2\d|30) %$/)
-  // Le 204 ne prouve que la mise en file : `command_post` envoie sur
-  // `cmd_tx` et repond aussitot, avant que la loop du coeur ne traite la
-  // command (appel mpv puis publication sur le canal d'state). Une seule
-  // lecture SSE peut donc encore tomber sur la trame d'avant — d'ou le poll,
-  // qui rouvre la connexion jusqu'a une trame a jour (chaque connexion
-  // reçoit l'state courant des l'ouverture, voir journey.spec.ts).
-  const lireVolumeSse = () =>
+  // The 204 only proves the enqueueing: `command_post` sends on `cmd_tx` and
+  // replies immediately, before the core's loop handles the command (mpv call
+  // then publication on the state channel). A single SSE read may therefore
+  // still land on the previous frame — hence the poll, which reopens the
+  // connection until an up-to-date frame (each connection receives the
+  // current state as soon as it opens, see journey.spec.ts).
+  const readVolumeSse = () =>
     page.evaluate(
       () =>
         new Promise<number>((resolve, reject) => {
-          const flux = new EventSource('/api/player')
-          const timer = setTimeout(() => { flux.close(); reject(new Error('aucune trame en 2 s')) }, 2000)
-          flux.onmessage = (e) => {
+          const stream = new EventSource('/api/player')
+          const timer = setTimeout(() => { stream.close(); reject(new Error('no frame within 2 s')) }, 2000)
+          stream.onmessage = (e) => {
             clearTimeout(timer)
-            flux.close()
+            stream.close()
             resolve((JSON.parse(e.data as string) as { volume: number }).volume)
           }
         }),
     )
-  let dernierVolume = -1
+  let lastVolume = -1
   await expect
     .poll(async () => {
-      dernierVolume = await lireVolumeSse()
-      return dernierVolume >= 20 && dernierVolume <= 30
+      lastVolume = await readVolumeSse()
+      return lastVolume >= 20 && lastVolume <= 30
     }, { timeout: 5000 })
     .toBe(true)
-  expect(dernierVolume).toBeGreaterThanOrEqual(20)
-  expect(dernierVolume).toBeLessThanOrEqual(30)
+  expect(lastVolume).toBeGreaterThanOrEqual(20)
+  expect(lastVolume).toBeLessThanOrEqual(30)
 })
 
-test('sur téléphone : l’onglet Greffons mène à la list, qui mène à la page du greffon', async ({ page }) => {
+test('on a phone: the Plugins tab leads to the list, which leads to the plugin page', async ({ page }) => {
   await page.goto('/')
   await page.locator('[data-nav-plugins]').click()
-  // Trois plugins à page dans le harness (radio, files, generic-input) : la list.
+  // Three plugins with a page in the harness (radio, files, generic-input): the list.
   await expect(page).toHaveURL(/\/plugins\/$/)
   await expect(page.locator('[data-plugins-list] a')).toHaveCount(3)
   await page.locator('[data-plugins-list] a').first().click()

@@ -12,13 +12,13 @@ const forwardedProps = useForwardProps(delegatedProps)
 </script>
 
 <template>
-  <!-- `data-[state=inactive]:hidden` n'est pas une precaution : avec
-       `force-mount`, reka-ui rend le panneau inactif **sans** attribut
-       `hidden` (il laisse le consommateur le masquer, pour pouvoir animer la
-       transition). Mesure : le panneau inactif ne porte que
-       `data-state="inactive"`. Sans cette classe, tous les panneaux
-       s'affichent en meme temps et les onglets n'ont plus aucun effet visible
-       -- exactement le defaut signale a l'usage. -->
+  <!-- `data-[state=inactive]:hidden` is not a precaution: with `force-mount`,
+       reka-ui renders the inactive panel **without** a `hidden` attribute (it
+       leaves it to the consumer to hide it, so the transition can be
+       animated). Measured: the inactive panel only carries
+       `data-state="inactive"`. Without this class, all panels show at the
+       same time and the tabs have no visible effect anymore -- exactly the
+       defect reported in use. -->
   <TabsContent
     data-slot="tabs-content"
     v-bind="forwardedProps"

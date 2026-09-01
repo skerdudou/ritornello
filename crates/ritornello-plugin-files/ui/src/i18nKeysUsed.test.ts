@@ -1,93 +1,94 @@
-// Garde-fou repris du plugin radio : toute clé appelée par l'IHM doit exister
-// dans le catalogue anglais embarqué du plugin
-// (`crates/ritornello-plugin-files/src/locales/en.toml`) ou dans le vocabulaire
-// commun (`crates/ritornello-i18n/src/locales/common_en.toml`), que
-// `Catalog::entries` fusionne. Sans cette garantie, une clé absente s'affiche
-// **telle quelle** à l'écran — l'utilisateur lit « btn_mount_now » — au lieu
-// d'échouer au build ou aux tests.
+// Guard rail borrowed from the radio plugin: every key called by the UI must
+// exist in the plugin's embedded English catalog
+// (`crates/ritornello-plugin-files/src/locales/en.toml`) or in the common
+// vocabulary (`crates/ritornello-i18n/src/locales/common_en.toml`), which
+// `Catalog::entries` merges. Without this guarantee, a missing key displays
+// **as is** on screen — the user reads "btn_mount_now" — instead of failing
+// the build or the tests.
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-// Chemins résolus via `process.cwd()` (le répertoire du paquet, cf. le script
-// npm `test`) plutôt que via `import.meta.url` : sous vitest en environnement
-// `jsdom`, une URL relative qui remonte hors de la root du projet vite est
-// réécrite en `http://localhost/@fs/...` au lieu de rester un `file://`, et
-// `fileURLToPath` lève alors « The URL must be of scheme file ».
-const RACINE_PAQUET = process.cwd()
+// Paths resolved via `process.cwd()` (the package's directory, see the npm
+// `test` script) rather than via `import.meta.url`: under vitest in a
+// `jsdom` environment, a relative URL that climbs out of the vite project
+// root is rewritten as `http://localhost/@fs/...` instead of staying a
+// `file://` one, and `fileURLToPath` then throws "The URL must be of scheme
+// file".
+const PACKAGE_ROOT = process.cwd()
 
 /**
- * Clés de la page **pas encore** dans les catalogues du server.
+ * Page keys **not yet** in the server's catalogs.
  *
- * Elles y seront ajoutées en même temps que leur traduction française : les
- * deux fichiers (`src/locales/en.toml` et `deploy/locales/files/fr.toml`) sont
- * tenus à la parité par un test côté Rust, donc une clé n'entre que dans les
- * deux à la fois. Cette liste est le contract entre ce module et ce chantier-là,
- * et elle est vérifiée dans les deux sens : une clé qui y figure alors qu'elle
- * existe désormais dans le catalogue doit en être retirée, sans quoi la liste
- * se transformerait en trou permanent dans le garde-fou.
+ * They will be added there together with their French translation: the two
+ * files (`src/locales/en.toml` and `deploy/locales/files/fr.toml`) are kept
+ * at parity by a Rust-side test, so a key only enters both at once. This
+ * list is the contract between this module and that effort, and it is
+ * checked both ways: a key listed here while it now exists in the catalog
+ * must be removed from it, or else the list would turn into a permanent
+ * hole in the guard rail.
  */
-const EN_ATTENTE: string[] = []
+const PENDING: string[] = []
 
-// Lecteur TOML plat écrit à la main : le format des catalogues embarqués est
-// une simple suite de lignes `cle = "valeur"`, jamais de table `[[...]]`.
-function clesToml(path: string): Set<string> {
-  const cles = new Set<string>()
-  for (const ligneBrute of readFileSync(path, 'utf8').split(/\r?\n/)) {
-    const ligne = ligneBrute.trim()
-    if (!ligne || ligne.startsWith('#')) continue
-    const i = ligne.indexOf('=')
+// Flat TOML reader written by hand: the embedded catalogs' format is a
+// plain sequence of `key = "value"` lines, never a `[[...]]` table.
+function tomlKeys(path: string): Set<string> {
+  const keys = new Set<string>()
+  for (const rawLine of readFileSync(path, 'utf8').split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#')) continue
+    const i = line.indexOf('=')
     if (i === -1) continue
-    const cle = ligne.slice(0, i).trim()
-    if (/^[A-Za-z0-9_]+$/.test(cle)) cles.add(cle)
+    const key = line.slice(0, i).trim()
+    if (/^[A-Za-z0-9_]+$/.test(key)) keys.add(key)
   }
-  return cles
+  return keys
 }
 
-function fichiersSource(dir: string): string[] {
+function sourceFiles(dir: string): string[] {
   const results: string[] = []
-  for (const entree of readdirSync(dir)) {
-    const path = join(dir, entree)
+  for (const entry of readdirSync(dir)) {
+    const path = join(dir, entry)
     if (statSync(path).isDirectory()) {
-      results.push(...fichiersSource(path))
-    } else if (/\.(vue|ts)$/.test(entree) && !entree.endsWith('.test.ts')) {
+      results.push(...sourceFiles(path))
+    } else if (/\.(vue|ts)$/.test(entry) && !entry.endsWith('.test.ts')) {
       results.push(path)
     }
   }
   return results
 }
 
-// Clés appelées via `t('...')` (gabarit) ou `t.value('...')` (script) avec une
-// clé littérale. LIMITE CONNUE, assumée : une clé construite dynamiquement
-// échapperait à cette expression. Cette page n'en a aucune — toutes ses clés
-// sont des littéraux, y compris dans les branches ternaires.
-function clesAppelsLitteraux(fichiers: string[]): Set<string> {
-  const cles = new Set<string>()
-  const motif = /\bt(?:\.value)?\(\s*['"]([A-Za-z0-9_]+)['"]/g
-  for (const fichier of fichiers) {
-    for (const m of readFileSync(fichier, 'utf8').matchAll(motif)) if (m[1]) cles.add(m[1])
+// Keys called via `t('...')` (template) or `t.value('...')` (script) with a
+// literal key. KNOWN LIMITATION, accepted: a dynamically built key would
+// escape this expression. This page has none — all its keys are literals,
+// including in ternary branches.
+function keysFromLiteralCalls(files: string[]): Set<string> {
+  const keys = new Set<string>()
+  const pattern = /\bt(?:\.value)?\(\s*['"]([A-Za-z0-9_]+)['"]/g
+  for (const file of files) {
+    for (const m of readFileSync(file, 'utf8').matchAll(pattern)) if (m[1]) keys.add(m[1])
   }
-  return cles
+  return keys
 }
 
-describe('clés i18n utilisées par le plugin files', () => {
-  const catalogue = new Set([
-    ...clesToml(resolve(RACINE_PAQUET, '../src/locales/en.toml')),
-    ...clesToml(resolve(RACINE_PAQUET, '../../ritornello-i18n/src/locales/common_en.toml')),
+describe('i18n keys used by the files plugin', () => {
+  const catalog = new Set([
+    ...tomlKeys(resolve(PACKAGE_ROOT, '../src/locales/en.toml')),
+    ...tomlKeys(resolve(PACKAGE_ROOT, '../../ritornello-i18n/src/locales/common_en.toml')),
   ])
 
-  it('n’en introduit aucune hors du catalogue et hors de la liste en attente', () => {
-    const utilisees = clesAppelsLitteraux(fichiersSource(join(RACINE_PAQUET, 'src')))
-    const attendues = new Set(EN_ATTENTE)
-    const manquantes = [...utilisees].filter((c) => !catalogue.has(c) && !attendues.has(c)).sort()
-    expect(manquantes).toEqual([])
+  it('introduces none outside the catalog and outside the pending list', () => {
+    const used = keysFromLiteralCalls(sourceFiles(join(PACKAGE_ROOT, 'src')))
+    const pending = new Set(PENDING)
+    const missing = [...used].filter((c) => !catalog.has(c) && !pending.has(c)).sort()
+    expect(missing).toEqual([])
   })
 
-  it('ne garde en attente que des clés réellement absentes du catalogue', () => {
-    // Sans cette moitié, `EN_ATTENTE` deviendrait un trou permanent : une clé
-    // supprimée du code ou ajoutée au catalogue y resterait, et masquerait la
-    // prochaine vraie absence portant le même nom.
-    const arrivees = EN_ATTENTE.filter((c) => catalogue.has(c))
-    expect(arrivees).toEqual([])
+  it('only keeps keys pending that are genuinely absent from the catalog', () => {
+    // Without this half, `PENDING` would become a permanent hole: a key
+    // removed from the code or added to the catalog would stay in it, and
+    // would mask the next real absence bearing the same name.
+    const arrived = PENDING.filter((c) => catalog.has(c))
+    expect(arrived).toEqual([])
   })
 })

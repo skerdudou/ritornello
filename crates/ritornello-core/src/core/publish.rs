@@ -1,34 +1,34 @@
-//! Publication : l'state du player et le sources_catalog des sources, pousses aux afficheurs, a la SPA et aux plugins metadata.
+//! Publication: the player state and the sources catalog, pushed to the displays, to the SPA and to the metadata plugins.
 
 use super::*;
 
 impl<P: Player> Core<P> {
-    /// Diffuse l'état structuré du player : à la SPA, et aux plugins Display
-    /// (qui composent eux-mêmes leur mise en page depuis cette même trame).
+    /// Broadcasts the structured state of the player: to the SPA, and to
+    /// the Display plugins (which compose their own layout from this same frame).
     pub(crate) fn publish_state(&self) {
         let state = self.player_state();
-        // Publié généreusement (à la fin de chaque commande, en plus des
-        // chemins de métadonnées), donc dédupliqué : sans cette garde, chaque
-        // navigateur connecté et chaque afficheur recevrait une trame
-        // identique à la précédente.
-        self.state_tx.send_if_modified(|courant| {
-            if *courant == state {
+        // Published generously (at the end of every command, in addition to
+        // the metadata paths), hence deduplicated: without this guard, every
+        // connected browser and every display would receive a frame
+        // identical to the previous one.
+        self.state_tx.send_if_modified(|current| {
+            if *current == state {
                 false
             } else {
-                *courant = state;
+                *current = state;
                 true
             }
         });
-        // `known` republié au même point de passage que l'état structuré :
-        // c'est ici que tout path qui vient d'ajouter ou de corriger une
-        // information de métadonnées (ICY, tags, enrichment, cover)
-        // finit par converger, et c'est ce qui permet à un plugin `metadata`
-        // câblé à chaud — ou simplement lent à répondre — de voir ce qui est
-        // déjà connu sans attendre un hypothétique prochain changement
-        // d'identité, qui peut ne jamais survenir tant que le même track
-        // plays. `set_identity` construit lui-même son `NowPlaying` (source et
-        // identité en changent aussi) ; ce `send_if_modified` ne fait alors
-        // que constater l'égalité et ne republie rien en trop.
+        // `known` republished at the same checkpoint as the structured
+        // state: this is where every path that has just added or corrected
+        // a piece of metadata (ICY, tags, enrichment, cover) ends up
+        // converging, and this is what lets a hotplugged `metadata` plugin —
+        // or simply one slow to answer — see what is already known without
+        // waiting for a hypothetical next identity change, which may never
+        // happen as long as the same track plays. `set_identity` builds its
+        // own `NowPlaying` (source and identity change too); this
+        // `send_if_modified` then merely observes equality and republishes
+        // nothing extra.
         let known = self.metadata.known();
         self.now_playing_tx.send_if_modified(|np| {
             if np.known == known {
@@ -40,15 +40,15 @@ impl<P: Player> Core<P> {
         });
     }
 
-    /// Ce qui est structurel : les sources déclarées, **dans l'order de
-    /// bascule** de `SourceCycle`, et les présélections nommées de chacune
-    /// quand elle sait les énumérer.
+    /// What is structural: the declared sources, **in the switching order**
+    /// of `SourceCycle`, and the named presets of each one when it knows how
+    /// to enumerate them.
     ///
-    /// L'order vient de `source_order` et non des clés de la table : c'est
-    /// l'order que les clients verront dans `listplaylists`, et il doit être
-    /// celui de la touche `SourceCycle` — sinon la liste et la touche
-    /// divergent. Une source qui n'énumère pas figure quand même, avec une
-    /// liste clear : elle existe, et le consommateur retombe sur `preset_count`.
+    /// The order comes from `source_order` and not from the table keys: it
+    /// is the order clients will see in `listplaylists`, and it must be that
+    /// of the `SourceCycle` key — otherwise the list and the key diverge. A
+    /// source that does not enumerate still appears, with an empty list: it
+    /// exists, and the consumer falls back on `preset_count`.
     pub fn sources_catalog(&self) -> SourcesCatalog {
         SourcesCatalog {
             sources: self
@@ -62,37 +62,37 @@ impl<P: Player> Core<P> {
         }
     }
 
-    /// Diffuse le sources_catalog vers les afficheurs. Jumeau de `publish_state`, sur
-    /// **son propre** canal.
+    /// Broadcasts the catalog to the displays. Twin of `publish_state`, on
+    /// **its own** channel.
     ///
-    /// Appelé là où le sources_catalog peut changer, et seulement là : à la
-    /// construction du cœur (les sources du démarrage), à l'arrivée de
-    /// présélections, à `add_source` (une source câblée à chaud apparaît dans la
-    /// liste) et à `remove_source` (un greffon éteint en disparaît, sans quoi un
-    /// client MPD garderait une liste enregistrée sur laquelle agir). Jamais
-    /// depuis `publish_state`, et `publish_state` jamais depuis
-    /// ici : les deux canaux sont séparés précisément pour ne pas se déclencher
-    /// l'un l'autre — sinon les names de 51 stations repartiraient sur chaque
-    /// trame par seconde de playback, et la déduplication par égalité ne
-    /// rattraperait rien puisque les deux valeurs changeraient ensemble.
+    /// Called where the catalog can change, and only there: at the core's
+    /// construction (the startup sources), on the arrival of presets, at
+    /// `add_source` (a hotplugged source appears in the list) and at
+    /// `remove_source` (a plugin that went off disappears from it, otherwise
+    /// an MPD client would keep a stored list to act upon). Never from
+    /// `publish_state`, and `publish_state` never from here: the two
+    /// channels are separated precisely so as not to trigger each other —
+    /// otherwise the names of 51 stations would go out again on every frame
+    /// per second of playback, and deduplication by equality would catch
+    /// nothing since both values would change together.
     ///
-    /// Même déduplication que l'état, pour la même raison : une source qui
-    /// réannonce la même liste — la radio le fait à chaque enregistrement de sa
-    /// page d'admin — ne doit pas réveiller les afficheurs.
+    /// Same deduplication as the state, for the same reason: a source that
+    /// re-announces the same list — the radio does it at every save of its
+    /// admin page — must not wake the displays.
     pub(crate) fn publish_catalog(&self) {
         let sources_catalog = self.sources_catalog();
-        self.sources_catalog_tx.send_if_modified(|courant| {
-            if *courant == sources_catalog {
+        self.sources_catalog_tx.send_if_modified(|current| {
+            if *current == sources_catalog {
                 false
             } else {
-                *courant = sources_catalog;
+                *current = sources_catalog;
                 true
             }
         });
     }
 
-    /// État complet du player : ce qui est volatil, donc ce que la SPA reçoit
-    /// en stream poussé.
+    /// Complete state of the player: what is volatile, hence what the SPA
+    /// receives as a pushed stream.
     pub fn player_state(&self) -> PlayerState {
         PlayerState {
             source: self.active_source.clone(),
@@ -102,27 +102,25 @@ impl<P: Player> Core<P> {
             preset: self.preset,
             preset_name: self.preset_name.clone(),
             preset_count: self.preset_count,
-            // La veille gagne sur le statut de la source : l'appareil dort, ce
-            // que raconte la source n'a plus cours.
+            // Standby wins over the source status: the device sleeps, what
+            // the source says no longer applies.
             status: if self.standby { self.standby_status.clone() } else { self.source_status.clone() },
             overlay: self.overlay.as_ref().map(|(o, deadline)| {
-                let restant = deadline.saturating_duration_since(Instant::now()).as_millis();
-                // Le `remaining_ms` mémorisé n'est jamais lu : il est réécrit
-                // ici à chaque publication. L'égalité d'`Overlay` l'ignore,
-                // donc ce rafraîchissement ne défait pas la déduplication des
-                // trames.
-                o.clone().with_remaining(u32::try_from(restant).unwrap_or(u32::MAX))
+                let remaining = deadline.saturating_duration_since(Instant::now()).as_millis();
+                // The stored `remaining_ms` is never read: it is rewritten
+                // here at every publication. `Overlay` equality ignores it,
+                // so this refresh does not undo frame deduplication.
+                o.clone().with_remaining(u32::try_from(remaining).unwrap_or(u32::MAX))
             }),
-            // Gardée **ici**, à la publication, et non effacée dans chacun des
-            // cinq chemins qui posent `playback = false` (arrêt, veille,
-            // changement de source, fin de contenu, `SourceAction::Stop`).
-            // Un point unique ne peut pas être oublié ; cinq appels
-            // sprinkled le seraient au sixième path ajouté, et la barre
-            // resterait figée sur la dernière valeur connue sans que rien ne
-            // le signale.
+            // Guarded **here**, at publication, and not cleared in each of
+            // the five paths that set `playback = false` (stop, standby,
+            // source change, end of content, `SourceAction::Stop`).
+            // A single point cannot be forgotten; five sprinkled calls would
+            // be at the sixth path added, and the bar would stay frozen on
+            // the last known value without anything signalling it.
             position_s: if self.playback && !self.standby { self.position_s } else { None },
-            // Même raison qu'au-dessus : calculé à la publication plutôt
-            // qu'entretenu dans les cinq chemins qui posent `playback = false`.
+            // Same reason as above: computed at publication rather than
+            // maintained in the five paths that set `playback = false`.
             playback: if !self.playback || self.standby {
                 Playback::Stopped
             } else if self.paused {
@@ -130,19 +128,18 @@ impl<P: Player> Core<P> {
             } else {
                 Playback::Playing
             },
-            // `playback` et non `expecting_stream` : la première dit « quelque
-            // chose plays », la seconde « c'est un stream relançable ». Un
-            // contenu déplaçable est exactement ce qui plays sans être un stream.
+            // `playback` and not `expecting_stream`: the first says
+            // "something plays", the second "it is a restartable stream".
+            // Seekable content is exactly what plays without being a stream.
             seekable: self.playback && !self.standby && !self.expecting_stream,
-            // Rien à voir avec ce qui plays : un tiroir clear s'ouvre quand
-            // même, et c'est la Source qui a le tiroir. La veille est le seul
-            // état qui l'annule, parce qu'elle n'y laisse passer aucune
-            // commande.
+            // Nothing to do with what plays: an empty tray still opens, and
+            // it is the Source that has the tray. Standby is the only state
+            // that cancels it, because it lets no command through.
             can_eject: self.can_eject && !self.standby,
-            // Une préférence de rendition, poussée avec le reste : un afficheur ne
-            // va jamais rien chercher de côté, et l'horloge qu'il dessine en
-            // veille est quelque chose qu'il montre. Elle ne bouge qu'au geste
-            // de l'utilisateur, donc elle ne provoque aucune trame en trop.
+            // A rendering preference, pushed with the rest: a display never
+            // fetches anything on the side, and the clock it draws in
+            // standby is something it shows. It only moves on a user
+            // gesture, so it causes no extra frame.
             clock: ritornello_proto::Clock {
                 date: match self.settings.date_format {
                     crate::state::DateFormat::DayMonthYear => ritornello_proto::DateFormat::DayMonthYear,
@@ -153,11 +150,11 @@ impl<P: Player> Core<P> {
             },
             track: {
                 let mut m = self.metadata.state();
-                // Précédence : la durée mesurée par mpv l'emporte sur celle
-                // qu'un plugin announcement. `origin` continue de désigner qui a
-                // fourni le **track** (artiste, titre, album) et non qui a
-                // fourni la durée — imprécision assumée plutôt qu'un second
-                // champ d'origine pour une seule valeur numérique.
+                // Precedence: the duration measured by mpv wins over the one
+                // a plugin announces. `origin` keeps designating who provided
+                // the **track** (artist, title, album) and not who provided
+                // the duration — an accepted imprecision rather than a second
+                // origin field for a single numeric value.
                 if self.playback && !self.standby && self.measured_duration_s.is_some() {
                     m.duration_s = self.measured_duration_s;
                 }
@@ -173,16 +170,17 @@ mod tests {
     use crate::core::test_support::*;
 
     #[tokio::test]
-    async fn letat_du_lecteur_diffuse_volume_muet_veille_et_source() {
-        // Le volume n'est expose par aucune route : sa place est ce canal
-        // push_cover, avec le reste de ce qui est volatil. Une branche de
-        // `handle_command` qui oublierait de publier laisserait l'IHM afficher
-        // un state perime sans que rien ne le signale — d'ou la publication a la
-        // sortie de **toute** commande, et d'ou ce test qui les parcourt.
+    async fn the_player_state_broadcasts_volume_mute_standby_and_source() {
+        // The volume is exposed by no route: its place is this pushed
+        // channel, with the rest of what is volatile. A branch of
+        // `handle_command` that forgot to publish would let the UI display
+        // a stale state without anything signalling it — hence publication
+        // at the exit of **every** command, and hence this test that walks
+        // through them.
         let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
         core.resume().await.unwrap();
         let initial = state_rx.borrow().clone();
-        assert_eq!(initial.volume, 60, "le volume persiste doit etre connu des le startup");
+        assert_eq!(initial.volume, 60, "the persisted volume must be known from startup");
         assert_eq!(initial.source, "radio");
         assert!(!initial.muted);
         assert!(!initial.standby);
@@ -198,16 +196,16 @@ mod tests {
         assert!(!state_rx.borrow().muted);
 
         core.handle_command(Command::Power).await.unwrap();
-        assert!(state_rx.borrow().standby, "la veille doit se voir dans l'IHM");
+        assert!(state_rx.borrow().standby, "standby must be visible in the UI");
         core.handle_command(Command::Power).await.unwrap();
         assert!(!state_rx.borrow().standby);
     }
 
     #[tokio::test]
-    async fn le_morceau_est_aplati_dans_le_json_de_letat() {
-        // L'IHM recoit un objet plat : un seul encart, pas deux niveaux a
-        // distinguer.
-        let (mut core, _np_rx, _etat_rx, _d) = setup_metadata(vec!["ouifm".into()]);
+    async fn the_track_is_flattened_in_the_state_json() {
+        // The UI receives a flat object: a single panel, not two levels to
+        // tell apart.
+        let (mut core, _np_rx, _state_rx, _d) = setup_metadata(vec!["ouifm".into()]);
         core.resume().await.unwrap();
         let id = serde_json::json!({"url": "un"});
         core.handle_source_update("radio", plays(id.clone()));
@@ -215,98 +213,100 @@ mod tests {
         let json = serde_json::to_value(core.player_state()).unwrap();
         assert_eq!(json["source"], "radio");
         assert_eq!(json["volume"], 60);
-        assert_eq!(json["artist"], "Miles Davis", "aplati, pas sous `track`");
+        assert_eq!(json["artist"], "Miles Davis", "flattened, not under `track`");
         assert_eq!(json["title"], "So What");
         assert_eq!(json["origin"], "ouifm");
     }
 
     #[tokio::test]
-    async fn le_catalogue_suit_lordre_de_bascule_des_sources() {
-        // C'est l'order que les clients verront dans `listplaylists`, et il doit
-        // etre celui de `SourceCycle` : sinon la liste et la touche divergent.
+    async fn the_catalog_follows_the_source_switching_order() {
+        // This is the order clients will see in `listplaylists`, and it must
+        // be that of `SourceCycle`: otherwise the list and the key diverge.
         //
-        // Compare a l'order **observe** en pressant la touche, et non a
-        // `source_order` : comparer le sources_catalog au champ dont il est construit
-        // ne prouverait rien.
+        // Compared to the order **observed** by pressing the key, and not to
+        // `source_order`: comparing the catalog to the field it is built
+        // from would prove nothing.
         let (mut core, _pc, source_calls, _rx, _d) = setup();
         core.add_source("files".into(), Arc::new(FakeSource { name: "files", calls: source_calls }));
-        let attendu = names(&core.sources_catalog());
-        assert_eq!(attendu.len(), 3);
+        let expected = names(&core.sources_catalog());
+        assert_eq!(expected.len(), 3);
 
-        core.handle_command(Command::SelectSource(attendu[0].clone())).await.unwrap();
-        let mut tour = vec![core.active_source().to_string()];
-        for _ in 1..attendu.len() {
+        core.handle_command(Command::SelectSource(expected[0].clone())).await.unwrap();
+        let mut round = vec![core.active_source().to_string()];
+        for _ in 1..expected.len() {
             core.handle_command(Command::SourceCycle).await.unwrap();
-            tour.push(core.active_source().to_string());
+            round.push(core.active_source().to_string());
         }
-        assert_eq!(attendu, tour, "le sources_catalog doit enumerer dans le sens de la touche");
+        assert_eq!(expected, round, "the catalog must enumerate in the direction of the key");
     }
 
     #[tokio::test]
-    async fn le_catalogue_porte_les_sources_du_demarrage_sans_attendre_une_preselection() {
-        // Les sources cablees au rendez-vous sont connues des la construction :
-        // c'est `Core::new` qui publie, et sans cette publication le canal
-        // garderait son `SourcesCatalog::default()` clear. Un afficheur relaye avant la
-        // premiere preselection — donc avant tout changement — lirait alors
-        // « aucune source », et un client MPD repondrait un `listplaylists` clear.
+    async fn the_catalog_carries_the_startup_sources_without_waiting_for_a_preset() {
+        // The sources wired at the rendezvous are known from construction:
+        // it is `Core::new` that publishes, and without this publication the
+        // channel would keep its empty `SourcesCatalog::default()`. A display
+        // relayed before the first preset — hence before any change — would
+        // then read "no source", and an MPD client would answer an empty
+        // `listplaylists`.
         //
-        // Assere la valeur **courante** du canal, celle que le relais envoie a la
-        // connexion, et non un changement : c'est exactement ce que voit un
-        // afficheur qui arrive.
+        // Asserts the **current** value of the channel, the one the relay
+        // sends at connection, and not a change: this is exactly what a
+        // display that arrives sees.
         let (core, _pc, _sc, _rx, _d) = setup();
         let cat_rx = core.sources_catalog_tx.subscribe();
         assert_eq!(
             names(&cat_rx.borrow()),
             vec!["cd".to_string(), "radio".into()],
-            "le sources_catalog doit porter les sources du startup des la construction"
+            "the catalog must carry the startup sources from construction"
         );
     }
 
     #[tokio::test]
-    async fn le_catalogue_ne_republie_pas_pour_une_liste_identique() {
-        // Meme deduplication que l'state : une source qui reannonce la meme liste
-        // — la radio le fait a chaque enregistrement de sa page d'admin — ne doit
-        // pas reveiller les afficheurs.
+    async fn the_catalog_does_not_republish_for_an_identical_list() {
+        // Same deduplication as the state: a source that re-announces the
+        // same list — the radio does it at every save of its admin page —
+        // must not wake the displays.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         let mut cat_rx = core.sources_catalog_tx.subscribe();
         core.handle_source_update("radio", with_presets(vec![preset_of(1, "FIP")]));
-        assert!(cat_rx.has_changed().unwrap(), "la premiere liste, elle, est une nouvelle");
+        assert!(cat_rx.has_changed().unwrap(), "the first list, though, is a new one");
         let _ = cat_rx.borrow_and_update();
 
         core.handle_source_update("radio", with_presets(vec![preset_of(1, "FIP")]));
-        assert!(!cat_rx.has_changed().unwrap(), "la meme liste ne doit rien reveiller");
+        assert!(!cat_rx.has_changed().unwrap(), "the same list must wake nothing");
 
         core.handle_source_update("radio", with_presets(vec![preset_of(1, "FIP 2")]));
-        assert!(cat_rx.has_changed().unwrap(), "une liste differente, si");
+        assert!(cat_rx.has_changed().unwrap(), "a different list does");
     }
 
     #[tokio::test]
-    async fn publier_letat_ne_republie_pas_le_catalogue() {
-        // La propriete des deux canaux separes. Sans elle, 51 names de station
-        // voyageraient sur chaque trame par seconde de playback.
+    async fn publishing_the_state_does_not_republish_the_catalog() {
+        // The property of the two separate channels. Without it, 51 station
+        // names would travel on every frame per second of playback.
         //
-        // Ce qui est assere est **la notification**, pas l'absence d'appel : un
-        // couplage qui passerait par `publish_catalog` serait dedoublonne, donc
-        // n'atteindrait aucun afficheur, donc ne casserait pas la propriete. Un
-        // `sources_catalog_tx.send(...)` depuis `publish_state` — l'ecriture naturelle du
-        // couplage — la casse, et ce test tombe.
+        // What is asserted is **the notification**, not the absence of a
+        // call: a coupling that went through `publish_catalog` would be
+        // deduplicated, hence would reach no display, hence would not break
+        // the property. A `sources_catalog_tx.send(...)` from `publish_state`
+        // — the natural way to write the coupling — breaks it, and this test
+        // falls.
         let (mut core, _pc, _sc, mut state_rx, _d) = setup();
         core.handle_source_update("radio", with_presets(vec![preset_of(1, "FIP")]));
         let cat_rx = core.sources_catalog_tx.subscribe();
-        let vu = cat_rx.borrow().clone();
+        let seen = cat_rx.borrow().clone();
         let _ = state_rx.borrow_and_update();
 
         core.handle_command(Command::VolumeUp).await.unwrap();
         core.publish_state();
-        assert!(state_rx.has_changed().unwrap(), "l'state, lui, a bien bouge");
-        assert!(!cat_rx.has_changed().unwrap(), "le sources_catalog a bouge pour rien");
-        assert_eq!(*cat_rx.borrow(), vu, "et il porte toujours la meme chose");
+        assert!(state_rx.has_changed().unwrap(), "the state, for its part, did move");
+        assert!(!cat_rx.has_changed().unwrap(), "the catalog moved for nothing");
+        assert_eq!(*cat_rx.borrow(), seen, "and it still carries the same thing");
     }
 
     #[tokio::test]
-    async fn la_veille_gagne_sur_le_statut_de_la_source() {
-        // L'appareil dort : ce que raconte la source n'a plus cours, même si
-        // elle continue (en pratique elle ne le fait pas) à en déclarer un.
+    async fn standby_wins_over_the_source_status() {
+        // The device sleeps: what the source says no longer applies, even
+        // if it keeps (in practice it does not) declaring one.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         let mut update = bare_update();
         update.status = Some("FIP".into());
@@ -317,21 +317,21 @@ mod tests {
         assert_eq!(
             core.player_state().status.as_deref(),
             Some("STANDBY"),
-            "le mot de veille gagne sur le statut mémorisé de la source"
+            "the standby word wins over the stored source status"
         );
 
-        // Révision I2 (revue de branche) : ce test affirmait auparavant que le
-        // réveil rendait la main au statut mémorisé ("FIP"), inchangé tant que
-        // la Source n'en redéclarait pas un nouveau. C'était exactement le
-        // bogue signalé par la revue — le statut d'une source pouvait survivre
-        // à la veille et réapparaître sous une source qui n'a encore rien dit
-        // (voir `le_statut_de_la_source_ne_survit_pas_a_la_mise_en_veille`).
-        // La veille l'oublie désormais, comme `preset_count`.
+        // Revision I2 (branch review): this test previously asserted that
+        // waking gave the floor back to the stored status ("FIP"), unchanged
+        // as long as the Source did not redeclare a new one. That was
+        // exactly the bug reported by the review — a source's status could
+        // survive standby and reappear under a source that has not said
+        // anything yet (see `the_source_status_does_not_survive_entering_standby`).
+        // Standby now forgets it, like `preset_count`.
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(
             core.player_state().status,
             None,
-            "le réveil ne doit pas faire réapparaître un statut que la source n'a pas redéclaré"
+            "waking must not make a status reappear that the source has not redeclared"
         );
     }
 }

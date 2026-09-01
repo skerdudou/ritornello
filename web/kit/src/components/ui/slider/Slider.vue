@@ -10,23 +10,23 @@ defineOptions({
   inheritAttrs: false,
 })
 
-// Une seule poignee, toujours : les deux usages du projet (progression, volume)
-// sont des valeurs scalaires. `py-[19px]` : 19 + 6 + 19 = 44 px de zone de
-// contact autour d'une piste de 6 px — la cible minimale au doigt, portee par
-// le padding et non par la piste, qui garde sa finesse.
+// A single thumb, always: the project's two usages (progress, volume) are
+// scalar values. `py-[19px]`: 19 + 6 + 19 = 44 px of touch area around a 6 px
+// track — the minimum finger target, carried by the padding and not by the
+// track, which keeps its thinness.
 const props = defineProps<SliderRootProps & { class?: HTMLAttributes["class"] }>()
 const emits = defineEmits<SliderRootEmits>()
 const delegatedProps = reactiveOmit(props, "class")
 const forwarded = useForwardPropsEmits(delegatedProps, emits)
 
-// `aria-label` n'est pas une prop declaree de `SliderRootProps` : sans ce
-// tri, elle tombe dans `$attrs` du composant et `v-bind="forwarded"` la
-// laisse filer vers `SliderRoot`, qui la pose sur son `<span>` englobant —
-// pas sur la poignee. Or `SliderThumbImpl` calcule SON `aria-label` a partir
-// des attrs qui LUI sont passes (repli sur `getLabel()`, qui pour une seule
-// poignee ne renvoie rien) : c'est donc `SliderThumb` qui doit recevoir les
-// `aria-*`. Le reste (`data-barre`, `data-volume-curseur`, etc.) continue
-// vers le root, la ou l'appelant s'attend a le retrouver.
+// `aria-label` is not a declared prop of `SliderRootProps`: without this
+// sorting, it falls into the component's `$attrs` and `v-bind="forwarded"`
+// lets it leak to `SliderRoot`, which sets it on its enclosing `<span>` — not
+// on the thumb. Yet `SliderThumbImpl` computes ITS `aria-label` from the attrs
+// passed to IT (fallback on `getLabel()`, which for a single thumb returns
+// nothing): so it is `SliderThumb` that must receive the `aria-*`. The rest
+// (`data-barre`, `data-volume-curseur`, etc.) goes on to the root, where the
+// caller expects to find it.
 const attrs = useAttrs()
 const ariaAttrs = computed(() => Object.fromEntries(
   Object.entries(attrs).filter(([key]) => key.startsWith('aria-')),

@@ -11,13 +11,13 @@ const { t } = useCatalog()
 const query = ref('')
 const list = computed(() => filterPresets(query.value))
 
-// Les quatre pastilles rendues dans le mode affiché : un preset se reconnaît
-// bien plus vite à ses couleurs qu'à son nom.
+// The four swatches rendered in the displayed mode: a preset is recognised
+// far faster by its colours than by its name.
 const SWATCHES = ['background', 'primary', 'secondary', 'accent'] as const
 
-function color(id: string, cle: string): string {
+function color(id: string, key: string): string {
   const p = presets[id]
-  return p ? (resolveVars(p, props.mode)[cle] ?? 'transparent') : 'transparent'
+  return p ? (resolveVars(p, props.mode)[key] ?? 'transparent') : 'transparent'
 }
 </script>
 
@@ -37,11 +37,11 @@ function color(id: string, cle: string): string {
         <span class="truncate">{{ p.label }}</span>
         <span class="flex gap-1">
           <span
-            v-for="cle in SWATCHES"
-            :key="cle"
-            :data-swatch="cle"
+            v-for="key in SWATCHES"
+            :key="key"
+            :data-swatch="key"
             class="h-4 w-4 rounded-full border border-border"
-            :style="{ background: color(p.id, cle) }"
+            :style="{ background: color(p.id, key) }"
           />
         </span>
       </button>

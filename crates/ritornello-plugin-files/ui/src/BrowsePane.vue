@@ -4,42 +4,42 @@ import { computed, ref, watch } from 'vue'
 import { truncateStart, type Data, type Entry, type Send, type T } from './data'
 
 /**
- * Le navigateur de fichiers d'une source déclarée.
+ * The file browser of a declared source.
  *
- * Un seul niveau à l'écran, et non un arbre qu'on déplie : sur une
- * bibliothèque réelle, l'arbre déplié devenait plus haut que la page et le
- * geste utile — descend — se perdait dans les rangées des niveaux
- * précédents. Même forme que l'assistant de déclaration (`FolderPicker`), à
- * ceci près qu'ici les fichiers sont montrés, et pas seulement les dossiers.
+ * A single level on screen, and not a tree one unfolds: on a real library, the
+ * unfolded tree became taller than the page and the useful gesture — going down
+ * — got lost among the rows of the previous levels. Same shape as the
+ * declaration wizard (`FolderPicker`), except that here files are shown, and
+ * not only folders.
  */
-const props = defineProps<{ data: Data; t: T; send: Send; fige: boolean }>()
+const props = defineProps<{ data: Data; t: T; send: Send; frozen: boolean }>()
 
-/** Chemin du niveau supérieur d'une root : la chaîne vide, comme côté plugin. */
+/** Path of the top level of a root: the empty string, as on the plugin side. */
 const TOP = ''
 
 const root = ref('')
-/** Dossier ouvert, relatif à la root. */
+/** Open folder, relative to the root. */
 const path = ref(TOP)
 /**
- * Contenu du dossier ouvert.
+ * Content of the open folder.
  *
- * Mémorisé ici plutôt que lu directement dans `data.browse` : le plugin
- * range journey **et** recherche au même endroit, donc une recherche viderait
- * la liste sous les yeux de l'utilisateur. `null` tant que rien n'a abouti —
- * ce qui n'est pas la même chose qu'un dossier vide.
+ * Kept here rather than read directly from `data.browse`: the plugin stores
+ * browse **and** search in the same place, so a search would empty the list
+ * before the user's eyes. `null` as long as nothing has succeeded — which is
+ * not the same thing as an empty folder.
  */
 const entries = ref<Entry[] | null>(null)
 const query = ref('')
 const results = ref<Entry[] | null>(null)
 const truncated = ref(false)
-/** La recherche a été interrompue avant d'avoir tout vu, distinct de `truncated`. */
+/** The search was interrupted before it had seen everything, distinct from `truncated`. */
 const abort = ref(false)
 
-function isOpen(nom: string): boolean {
-  return props.data.roots.some((r) => r.name === nom)
+function isOpen(name: string): boolean {
+  return props.data.roots.some((r) => r.name === name)
 }
 
-/** Change de root ou de dossier : ce qui était affiché ne parle plus du bon. */
+/** Changing root or folder: what was displayed no longer speaks of the right one. */
 function reset(): void {
   path.value = TOP
   entries.value = null
@@ -50,13 +50,13 @@ function reset(): void {
 }
 
 watch(
-  // Un nom de root ne peut contenir ni espace ni virgule (`champ_sur`, côté
-  // plugin) : les joindre par un espace donne bien une empreinte injective.
+  // A root name can contain neither a space nor a comma (`champ_sur`, on the
+  // plugin side): joining them with a space does give an injective fingerprint.
   () => props.data.roots.map((r) => r.name).join(' '),
   () => {
-    // La root choisie a pu disparaître d'un enregistrement à l'autre : sans
-    // ce recalage, le volet continuerait d'adresser ses `browse` à un nom que
-    // le plugin ne connaît plus, et n'afficherait que des refus.
+    // The chosen root may have disappeared from one save to the next: without
+    // this realignment, the pane would keep addressing its `browse` to a name
+    // the plugin no longer knows, and would only display refusals.
     if (isOpen(root.value)) return
     root.value = props.data.roots[0]?.name ?? ''
     reset()
@@ -65,46 +65,46 @@ watch(
   { immediate: true },
 )
 
-function changeRoot(nom: string): void {
-  if (nom === root.value) return
-  root.value = nom
+function changeRoot(name: string): void {
+  if (name === root.value) return
+  root.value = name
   reset()
   void load(TOP)
 }
 
-async function load(cible: string): Promise<void> {
+async function load(target: string): Promise<void> {
   if (!root.value) return
-  const state = await props.send({ op: 'browse', root: root.value, path: cible })
-  // Refus : on ne mémorise rien. Mémoriser un niveau vide le ferait passer
-  // pour un dossier vide, et l'utilisateur n'aurait aucun moyen de réessayer
-  // sans reload la page.
+  const state = await props.send({ op: 'browse', root: root.value, path: target })
+  // Refusal: nothing is stored. Storing an empty level would make it pass for
+  // an empty folder, and the user would have no way to retry without reloading
+  // the page.
   if (!state) return
   const nav = state.browse
-  // On n'accepte que la réponse à la demande qu'on vient de faire : journey et
-  // recherche se rangent au même endroit côté plugin, et une réponse en retard
-  // viendrait remplir le mauvais niveau. `query` vide est ce qui distingue un
-  // journey d'une recherche portant sur le même dossier.
-  if (nav.root !== root.value || nav.path !== cible || nav.query !== '') return
-  // Les résultats affichés appartiennent au dossier où la recherche a eu
-  // lieu : en changer signifie changer de contexte. Sans cet effacement,
-  // `search_scope` — un `computed` sur le dossier ouvert — se met à jour
-  // seul, et la légende annonce le nouveau dossier au-dessus de résultats
-  // qui viennent de l'ancien. Comparé au path **accepté**, et non déclenché
-  // à chaque appel : `load` est aussi invoqué au premier affichage et par
-  // le recalage de root, où il n'y a encore rien à effacer — et effacer sans
-  // condition y annulerait une input en cours de frappe sans rapport.
-  if (cible !== path.value) {
+  // Only the answer to the request we just made is accepted: browse and search
+  // are stored in the same place on the plugin side, and a late answer would
+  // fill the wrong level. An empty `query` is what tells a browse apart from a
+  // search over the same folder.
+  if (nav.root !== root.value || nav.path !== target || nav.query !== '') return
+  // The displayed results belong to the folder where the search took place:
+  // changing it means changing context. Without this clearing, `search_scope`
+  // — a `computed` on the open folder — updates on its own, and the caption
+  // announces the new folder above results that come from the old one.
+  // Compared to the **accepted** path, and not triggered on every call: `load`
+  // is also invoked on first display and by the root realignment, where there
+  // is nothing to clear yet — and clearing unconditionally there would cancel
+  // an unrelated input being typed.
+  if (target !== path.value) {
     results.value = null
     truncated.value = false
     abort.value = false
     query.value = ''
   }
-  path.value = cible
+  path.value = target
   entries.value = nav.entries
 }
 
-function descend(nom: string): void {
-  void load(path.value ? `${path.value}/${nom}` : nom)
+function descend(name: string): void {
+  void load(path.value ? `${path.value}/${name}` : name)
 }
 
 function goUp(): void {
@@ -113,71 +113,70 @@ function goUp(): void {
 }
 
 /**
- * Adresse du dossier ouvert, nom de la root compris.
+ * Address of the open folder, root name included.
  *
- * Le path du plugin est relatif à la root : affiché seul, il ne dit pas
- * dans laquelle on se trouve dès que plusieurs sources sont déclarées.
+ * The plugin's path is relative to the root: displayed alone, it does not say
+ * which one we are in as soon as several sources are declared.
  */
 const displayedPath = computed(() => [root.value, path.value].filter(Boolean).join('/'))
-/** Tronqué **par le début** : sur un path, l'information utile est la fin. */
+/** Truncated **from the start**: on a path, the useful information is the end. */
 const shortPath = computed(() => truncateStart(displayedPath.value))
 
 async function search(): Promise<void> {
   const q = query.value.trim()
   if (!q) {
-    // Les trois vont ensemble : sans eux, une recherche tronquée ou
-    // abandonnée laisserait ces drapeaux à vrai derrière un `results` nul —
-    // inerte aujourd'hui (le bloc entier est masqué par `v-if="results"`),
-    // mais c'est la paire d'états que la boucle de correction de la tâche 6
-    // s'est employée à garder cohérente partout ailleurs.
+    // The three go together: without them, a truncated or abandoned search
+    // would leave these flags true behind a null `results` — inert today (the
+    // whole block is hidden by `v-if="results"`), but this is the pair of
+    // states the correction loop of task 6 worked to keep consistent
+    // everywhere else.
     results.value = null
     truncated.value = false
     abort.value = false
     return
   }
-  const cible = path.value
-  const state = await props.send({ op: 'search', root: root.value, path: cible, query: q })
+  const target = path.value
+  const state = await props.send({ op: 'search', root: root.value, path: target, query: q })
   if (!state) return
   const nav = state.browse
-  if (nav.root !== root.value || nav.path !== cible || nav.query !== q) return
+  if (nav.root !== root.value || nav.path !== target || nav.query !== q) return
   results.value = nav.results
-  // Le plugin plafonne la recherche : sans ce drapeau, une liste tronquée
-  // passerait pour complète et l'utilisateur conclurait que son fichier n'est
-  // pas là.
+  // The plugin caps the search: without this flag, a truncated list would pass
+  // for complete and the user would conclude that their file is not there.
   truncated.value = nav.truncated
-  // Cause distincte : un journey interrompu avant d'avoir tout vu n'est pas
-  // la même chose qu'un motif trop large. Les confondre faisait afficher
-  // « Aucun résultat » pour une recherche qui avait simplement renoncé avant
-  // d'arriver jusqu'au fichier cherché.
+  // Distinct cause: a walk interrupted before it had seen everything is not the
+  // same thing as a pattern that is too broad. Confusing them made the page
+  // show "No result" for a search that had simply given up before reaching the
+  // wanted file.
   abort.value = nav.abort
 }
 
-function addFolder(cible: string): void {
-  // Récursif et **asynchrone** côté plugin : la réponse n'attend pas la fin du
-  // balayage, c'est le sondage de la page qui en montre l'avancement.
-  void props.send({ op: 'add_dir', root: root.value, path: cible })
+function addFolder(target: string): void {
+  // Recursive and **asynchronous** on the plugin side: the answer does not wait
+  // for the end of the scan, it is the page's probe that shows its progress.
+  void props.send({ op: 'add_dir', root: root.value, path: target })
 }
 
-function addFile(cible: string): void {
-  void props.send({ op: 'add_file', root: root.value, path: cible })
+function addFile(target: string): void {
+  void props.send({ op: 'add_file', root: root.value, path: target })
 }
 
 /**
- * Charge un m3u trouvé en parcourant : il **remplace** la liste en cours.
+ * Loads an m3u found while browsing: it **replaces** the current playlist.
  *
- * Distinct de la liste déroulante des listes *enregistrées* du volet Liste :
- * celle-ci va search un nom dans un magasin, tandis qu'ici on désigne un
- * fichier par son path, là où il se trouve sur la source.
+ * Distinct from the dropdown of *saved* playlists in the Playlist pane: that
+ * one looks a name up in a store, whereas here a file is designated by its
+ * path, where it sits on the source.
  */
-function loadPlaylist(cible: string): void {
-  void props.send({ op: 'load_m3u', root: root.value, path: cible })
+function loadPlaylist(target: string): void {
+  void props.send({ op: 'load_m3u', root: root.value, path: target })
 }
 </script>
 
 <template>
-  <!-- Sans titre, comme les deux autres volets : l'onglet le porte deja, et
-       `TabsContent` en fait le nom accessible de cette section. -->
-  <section class="space-y-3" data-volet-parcourir>
+  <!-- No title, like the two other panes: the tab already carries it, and
+       `TabsContent` makes it the accessible name of this section. -->
+  <section class="space-y-3" data-browse-pane>
     <p v-if="!data.roots.length" class="text-sm text-muted-foreground">
       {{ t('no_sources') }}
     </p>
@@ -192,24 +191,23 @@ function loadPlaylist(cible: string): void {
           data-browse-root
           class="h-9 rounded-md border border-input bg-transparent px-2 text-sm"
           :value="root"
-          :disabled="fige"
+          :disabled="frozen"
           @change="changeRoot(($event.target as HTMLSelectElement).value)"
         >
           <option v-for="r in data.roots" :key="r.name" :value="r.name">{{ r.name }}</option>
         </select>
       </div>
 
-      <!-- `min-w-0` partout où du texte long descend : la largeur minimale d'un
-           enfant de flex vaut par défaut celle de son contenu, et un path long
-           pousserait la rangée hors du cadre. C'est aussi ce qui rend `truncate`
-           opérant. -->
+      <!-- `min-w-0` wherever long text goes down: the minimum width of a flex
+           child defaults to that of its content, and a long path would push
+           the row out of the frame. It is also what makes `truncate` work. -->
       <div class="flex min-w-0 items-center gap-2 text-sm">
         <Button
           variant="ghost"
           size="sm"
           class="shrink-0"
           data-browse-up
-          :disabled="fige || !path"
+          :disabled="frozen || !path"
           @click="goUp"
         >
           ↑ {{ t('btn_up') }}
@@ -221,25 +219,25 @@ function loadPlaylist(cible: string): void {
         >
           {{ shortPath }}
         </span>
-        <!-- Absent au sommet : ajouter la source entière vit sur la ligne de la
-             source, dans le volet Sources. Deux boutons pour le même effet
-             faisaient search une différence qui n'existait pas. -->
+        <!-- Absent at the top: adding the whole source lives on the source's
+             row, in the Sources pane. Two buttons for the same effect made one
+             look for a difference that did not exist. -->
         <Button
           v-if="path"
           variant="secondary"
           size="sm"
           data-add-current
-          :disabled="fige"
+          :disabled="frozen"
           @click="addFolder(path)"
         >
           {{ t('btn_add_current_folder') }}
         </Button>
       </div>
 
-      <!-- La recherche vit **au-dessus** du listing : elle porte sur le dossier
-           ouvert, et la ligne `data-search-scope` le nomme juste en dessous, ce
-           qui suffit à dire son périmètre. Sous une liste devenue aussi longue
-           que le dossier, il fallait la search en défilant. -->
+      <!-- The search lives **above** the listing: it bears on the open folder,
+           and the `data-search-scope` line names it right below, which is
+           enough to state its scope. Under a list that had become as long as
+           the folder, one had to scroll to find it. -->
       <div class="flex flex-wrap items-center gap-2">
         <Input
           v-model="query"
@@ -248,16 +246,16 @@ function loadPlaylist(cible: string): void {
           :placeholder="t('search_placeholder')"
           @keydown.enter="search"
         />
-        <Button data-search :disabled="fige" @click="search">{{ t('btn_search') }}</Button>
+        <Button data-search :disabled="frozen" @click="search">{{ t('btn_search') }}</Button>
       </div>
       <p class="text-xs text-muted-foreground" data-search-scope>
         {{ t('search_scope', { path: displayedPath }) }}
       </p>
 
       <div v-if="results" class="space-y-1" data-search-results>
-        <!-- Réservé au journey **complet** : un journey interrompu avant
-             d'avoir tout vu ne dit rien sur la présence du fichier, et
-             l'annoncer comme « Aucun résultat » affirmerait le contraire. -->
+        <!-- Reserved for the **complete** walk: a walk interrupted before it
+             had seen everything says nothing about the presence of the file,
+             and announcing it as "No result" would assert the opposite. -->
         <p
           v-if="!results.length && !abort"
           class="text-sm text-muted-foreground"
@@ -265,39 +263,38 @@ function loadPlaylist(cible: string): void {
         >
           {{ t('no_results') }}
         </p>
-        <!-- Le plafond du plugin est silencieux dans la liste : sans cette
-             phrase, une recherche tronquée passerait pour complète et
-             l'utilisateur conclurait que son fichier n'est pas là. -->
+        <!-- The plugin's cap is silent in the list: without this sentence, a
+             truncated search would pass for complete and the user would
+             conclude that their file is not there. -->
         <p v-if="truncated" class="text-sm text-muted-foreground" data-search-truncated>
           {{ t('search_truncated', { count: results.length }) }}
         </p>
-        <!-- Cause distincte de `truncated` : ici la marche a renoncé avant
-             d'avoir tout parcouru, elle n'a pas trouvé plus que ce qu'elle
-             rapporte. Le conseil est donc différent : descend dans un
-             sous-dossier plutôt que préciser le motif. -->
+        <!-- Cause distinct from `truncated`: here the walk gave up before it
+             had browsed everything, it did not find more than what it reports.
+             So the advice is different: go down into a subfolder rather than
+             refine the pattern. -->
         <p v-if="abort" class="text-sm text-muted-foreground" data-search-gave-up>
           {{ t('search_gave_up') }}
         </p>
-        <!-- Une recherche ne rapporte que des fichiers : `scan::search` filtre
-             sur l'audio, et `normalizeBrowse` pose `dir: false` en dur pour ses
-             résultats. Le ternaire qui distinguait un dossier ici avait donc une
-             branche prouvablement morte, et la clé n'a pas à porter un type qui
-             ne varie pas. -->
+        <!-- A search only reports files: `scan::search` filters on audio, and
+             `normalizeBrowse` hard-codes `dir: false` for its results. The
+             ternary that distinguished a folder here thus had a provably dead
+             branch, and the key does not have to carry a type that does not
+             vary. -->
         <div
           v-for="e in results"
           :key="e.path"
           class="flex min-w-0 items-center gap-2 text-sm"
           data-search-row
         >
-          <!-- Le path complet, pas seulement le nom : une recherche rapporte
-               des homonymes de dossiers différents, et rien d'autre ne permet
-               de les distinguer. -->
+          <!-- The full path, not only the name: a search reports namesakes from
+               different folders, and nothing else allows telling them apart. -->
           <span class="min-w-0 flex-1 truncate">{{ e.path }}</span>
           <Button
             variant="secondary"
             size="sm"
             data-add-result
-            :disabled="fige"
+            :disabled="frozen"
             @click="addFile(e.path)"
           >
             {{ t('btn_add_to_playlist') }}
@@ -305,10 +302,10 @@ function loadPlaylist(cible: string): void {
         </div>
       </div>
 
-      <!-- Aucune hauteur bornée ici : la liste défile **avec** la page. Un
-           cadre à barre propre imbriquait deux défilements, et la molette
-           s'arrêtait au bord de la liste au lieu de continuer la page. Rien
-           n'est repoussé hors de l'écran puisque la recherche est au-dessus. -->
+      <!-- No bounded height here: the list scrolls **with** the page. A frame
+           with its own scrollbar nested two scrolls, and the wheel stopped at
+           the edge of the list instead of continuing the page. Nothing is
+           pushed off screen since the search is above. -->
       <ul class="min-w-0 space-y-1 text-sm" data-browse-list>
         <li
           v-for="e in entries ?? []"
@@ -321,7 +318,7 @@ function loadPlaylist(cible: string): void {
               type="button"
               data-browse-dir
               class="min-w-0 flex-1 truncate rounded px-2 py-1 text-left hover:bg-accent"
-              :disabled="fige"
+              :disabled="frozen"
               :title="e.name"
               @click="descend(e.name)"
             >
@@ -332,15 +329,15 @@ function loadPlaylist(cible: string): void {
               variant="secondary"
               size="sm"
               data-add-dir
-              :disabled="fige"
+              :disabled="frozen"
               @click="addFolder(e.path)"
             >
               {{ t('btn_add_to_playlist') }}
             </Button>
           </template>
-          <!-- Une liste de lecture porte une action **différente** : elle
-               remplace la liste en cours au lieu de s'y ajouter. Les confondre
-               ferait ajouter un fichier texte que mpv tenterait de jouer. -->
+          <!-- A playlist carries a **different** action: it replaces the
+               current playlist instead of being added to it. Confusing them
+               would add a text file that mpv would try to play. -->
           <template v-else-if="e.playlist">
             <span class="min-w-0 flex-1 truncate px-2">
               <span aria-hidden="true" class="mr-1">☰</span
@@ -350,7 +347,7 @@ function loadPlaylist(cible: string): void {
               variant="secondary"
               size="sm"
               data-load-m3u
-              :disabled="fige"
+              :disabled="frozen"
               @click="loadPlaylist(e.path)"
             >
               {{ t('btn_load_m3u') }}
@@ -362,15 +359,15 @@ function loadPlaylist(cible: string): void {
               variant="ghost"
               size="sm"
               data-add-file
-              :disabled="fige"
+              :disabled="frozen"
               @click="addFile(e.path)"
             >
               {{ t('btn_add_to_playlist') }}
             </Button>
           </template>
         </li>
-        <!-- `entries` non nul, donc un niveau a bien été rapporté : un dossier
-             réellement vide, et non un journey qui n'a pas abouti. -->
+        <!-- `entries` non-null, so a level was indeed reported: a genuinely
+             empty folder, and not a browse that did not succeed. -->
         <li
           v-if="entries && !entries.length"
           class="px-2 text-muted-foreground"

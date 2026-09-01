@@ -1,17 +1,17 @@
 /**
- * La cle de catalogue par plateforme d'ecoute.
+ * The catalog key per listening platform.
  *
- * Une table, et non une cle fabriquee par concatenation a la volee :
- * `i18nKeysUsed.test.ts` releve les cles citees litteralement dans un appel de
- * traduction, et une cle composee lui echapperait — elle pourrait disparaitre
- * du catalogue sans qu'aucun test ne s'en apercoive.
+ * A table, and not a key built by concatenation on the fly:
+ * `i18nKeysUsed.test.ts` collects the keys quoted literally inside a
+ * translation call, and a composed key would escape it — it could disappear
+ * from the catalog without any test noticing.
  *
- * Attention : la table **n'est step** vue par ce releve non plus, ses valeurs
- * n'etant step ecrites a l'interieur d'un appel de traduction. C'est l'ajout
- * explicite de `Object.values(LINK_LABEL)` dans `i18nKeysUsed.test.ts` qui
- * les couvre — d'ou ce fichier plutot qu'une constante locale a
- * `PlayerCard.vue` : un `<script setup>` ne peut rien exporter, le test ne
- * pourrait donc step l'importer.
+ * Beware: the table **is not** seen by that collection either, since its
+ * values are not written inside a translation call. It is the explicit
+ * addition of `Object.values(LINK_LABEL)` in `i18nKeysUsed.test.ts` that
+ * covers them — hence this file rather than a constant local to
+ * `PlayerCard.vue`: a `<script setup>` cannot export anything, so the test
+ * could not import it.
  */
 export const LINK_LABEL = {
   youtube: 'listen_on_youtube',

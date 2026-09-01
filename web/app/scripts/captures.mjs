@@ -1,43 +1,43 @@
-// Regenere docs/captures/*.png depuis un coeur en marche (voir docs/development.md).
-// Les captures a la main vieillissaient a chaque chantier ; celles-ci se
-// refont en une command, aux deux modes et aux deux largeurs.
+// Regenerates docs/captures/*.png from a running core (see docs/development.md).
+// Hand-made screenshots went stale with every piece of work; these are redone
+// in one command, in both modes and at both widths.
 import { chromium } from '@playwright/test'
 import { mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const BASE = process.env.RITORNELLO_URL ?? 'http://127.0.0.1:8099'
 
-// `../../docs/captures` n'a de sens que lance depuis `web/app` : ailleurs il
-// resoudrait silencieusement vers un autre dossier (voire en dehors du
-// depot) sans jamais toucher les captures reellement documentees. Mieux vaut
-// fail bruyamment que d'ecrire au mauvais endroit sans un mot.
+// `../../docs/captures` only makes sense when launched from `web/app`: anywhere
+// else it would silently resolve to another folder (possibly outside the
+// repository) without ever touching the screenshots actually documented. Better
+// to fail loudly than to write to the wrong place without a word.
 const cwd = process.cwd().replace(/\\/g, '/')
 if (!cwd.endsWith('/web/app')) {
-  throw new Error(`lancer ce script depuis web/app (cwd actuel : ${process.cwd()})`)
+  throw new Error(`run this script from web/app (current cwd: ${process.cwd()})`)
 }
 const OUT = resolve(process.cwd(), '../../docs/captures')
 mkdirSync(OUT, { recursive: true })
 
-// `wait` : delai avant la prise, en ms. 800 suffit partout sauf sur /system,
-// dont l'usage CPU est un delta calcule dans la page et l'history une
-// window glissante : ouverts depuis moins d'un cycle de rafraichissement,
-// ils affichent « — » et une courbe vide.
-async function capture(browser, nom, { largeur, hauteur, mode, chemin = '/', wait = 800 }) {
-  const page = await browser.newPage({ viewport: { width: largeur, height: hauteur }, deviceScaleFactor: 2 })
+// `wait`: delay before the shot, in ms. 800 is enough everywhere except on
+// /system, whose CPU usage is a delta computed in the page and whose history is
+// a sliding window: opened less than one refresh cycle ago, they show "—" and
+// an empty curve.
+async function capture(browser, name, { width, height, mode, path = '/', wait = 800 }) {
+  const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 2 })
   try {
     await page.goto(`${BASE}/`)
     await page.waitForSelector('[data-preset-button]')
-    // Le mode est un reglage de l'appareil (PUT /api/theme), step du browser.
+    // The mode is a device setting (PUT /api/theme), not a browser one.
     const theme = await page.evaluate(() => fetch('/api/theme').then((r) => r.json()))
     try {
       await page.evaluate((m) => fetch('/api/theme', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(m) }), { ...theme, mode })
-      await page.goto(`${BASE}${chemin}`)
+      await page.goto(`${BASE}${path}`)
       await page.waitForTimeout(wait)
-      await page.screenshot({ path: resolve(OUT, `${nom}.png`), fullPage: false })
+      await page.screenshot({ path: resolve(OUT, `${name}.png`), fullPage: false })
     } finally {
-      // Remis dans l'state trouve meme si la capture plante en chemin : sans
-      // ce `finally`, un echec au milieu du script laisserait l'appareil
-      // reel dans le mode de la derniere capture tentee.
+      // Restored to the state we found even if the shot crashes midway: without
+      // this `finally`, a failure in the middle of the script would leave the
+      // real device in the mode of the last attempted shot.
       await page.evaluate((m) => fetch('/api/theme', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(m) }), theme)
     }
   } finally {
@@ -47,14 +47,14 @@ async function capture(browser, nom, { largeur, hauteur, mode, chemin = '/', wai
 
 const browser = await chromium.launch()
 try {
-  await capture(browser, 'accueil-clair', { largeur: 1280, hauteur: 800, mode: 'light' })
-  await capture(browser, 'accueil-sombre', { largeur: 1280, hauteur: 800, mode: 'dark' })
-  await capture(browser, 'accueil-phone', { largeur: 390, hauteur: 844, mode: 'light' })
-  await capture(browser, 'admin-radio', { largeur: 1280, hauteur: 800, mode: 'light', chemin: '/plugins/radio/' })
-  await capture(browser, 'systeme', { largeur: 1280, hauteur: 800, mode: 'light', chemin: '/system', wait: 25_000 })
+  await capture(browser, 'home-light', { width: 1280, height: 800, mode: 'light' })
+  await capture(browser, 'home-dark', { width: 1280, height: 800, mode: 'dark' })
+  await capture(browser, 'home-phone', { width: 390, height: 844, mode: 'light' })
+  await capture(browser, 'radio-admin', { width: 1280, height: 800, mode: 'light', path: '/plugins/radio/' })
+  await capture(browser, 'system', { width: 1280, height: 800, mode: 'light', path: '/system', wait: 25_000 })
 } finally {
-  // Sinon un browser Chromium reste open (et le process ne se termine
-  // jamais) des qu'une des quatre captures echoue.
+  // Otherwise a Chromium browser stays open (and the process never exits) as
+  // soon as one of the four shots fails.
   await browser.close()
 }
-console.log(`captures ecrites dans ${OUT}`)
+console.log(`screenshots written to ${OUT}`)

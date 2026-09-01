@@ -4,19 +4,19 @@ import { beforeAll, describe, expect, it, vi } from 'vitest'
 import PlayerCard from './PlayerCard.vue'
 import type { PlayerPayload } from '../types'
 
-// La color de marque : l'exception assumee a la regle « aucune color en
-// dur » (decision du proprietaire, voir docs/interface.md § Player card).
-// Verifier qu'elle est bien la, plateforme par plateforme, documente
-// l'exception autant que ca ne la prouve.
-const COULEUR_ICONE = {
+// The brand color: the acknowledged exception to the "no hard-coded color"
+// rule (owner's decision, see docs/interface.md § Player card). Checking that
+// it is indeed there, platform by platform, documents the exception as much as
+// it proves it.
+const ICON_COLOR = {
   youtube: '#FF0000',
   deezer: '#A238FF',
   apple_music: '#FA243C',
 } as const
 
-// jsdom ne fournit step ResizeObserver ; reka-ui l'utilise pour mesurer la
-// piste du curseur de ProgressBar, mounted ici des que `seekable` est vrai
-// (voir web/kit/src/index.test.ts et ProgressBar.test.ts).
+// jsdom does not provide ResizeObserver; reka-ui uses it to measure the
+// ProgressBar slider's track, mounted here as soon as `seekable` is true
+// (see web/kit/src/index.test.ts and ProgressBar.test.ts).
 beforeAll(() => {
   globalThis.ResizeObserver ??= class {
     observe() {}
@@ -26,11 +26,11 @@ beforeAll(() => {
 })
 
 /**
- * Etat complet a partir d'un fragment : le composant recoit l'state en prop —
- * c'est HomeView qui tient l'unique connexion SSE de la page (le flux reel
- * est couvre par les tests de HomeView et le journey e2e).
+ * Full state from a fragment: the component receives the state as a prop —
+ * HomeView is what holds the page's single SSE connection (the real stream is
+ * covered by the HomeView tests and the e2e journey).
  */
-function complet(state: Partial<PlayerPayload>): PlayerPayload {
+function full(state: Partial<PlayerPayload>): PlayerPayload {
   return {
     source: 'radio',
     volume: 60,
@@ -56,114 +56,114 @@ function complet(state: Partial<PlayerPayload>): PlayerPayload {
   }
 }
 
-function monteAvec(state: Partial<PlayerPayload> | null) {
+function mountWith(state: Partial<PlayerPayload> | null) {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
-  return mount(PlayerCard, { props: { state: state ? complet(state) : null, seekStep: 10 } })
+  return mount(PlayerCard, { props: { state: state ? full(state) : null, seekStep: 10 } })
 }
 
 describe('PlayerCard', () => {
-  it('displayed la source dès la première trame', () => {
-    const w = monteAvec({ source: 'cd' })
+  it('shows the source from the first frame', () => {
+    const w = mountWith({ source: 'cd' })
     expect(w.get('[data-source]').text()).toBe('cd')
   })
 
-  it('nomme l absence de source au lieu d afficher un vide', () => {
-    // Le coeur demarre desormais sans aucune source (un greffon lent peut
-    // s'annoncer bien apres), et le protocole dit cette absence par la chaine
-    // vide. Sans label, on lisait « Source active : » suivi de rien — un
-    // affichage qu'on prend pour une panne d'IHM. La cle brute suffit ici : le
-    // catalogue n'est step load sous test, `createT` rend la cle.
-    const w = monteAvec({ source: '' })
+  it('names the absence of a source instead of showing a blank', () => {
+    // The core now starts without any source (a slow plugin may announce
+    // itself much later), and the protocol says this absence with the empty
+    // string. Without a label, one read "Active source:" followed by nothing —
+    // a display one takes for a UI failure. The raw key is enough here: the
+    // catalog is not loaded under test, `createT` returns the key.
+    const w = mountWith({ source: '' })
     expect(w.find('[data-source]').text()).toBe('no_source')
   })
 
-  it('ne dit step « aucune source » avant la premiere trame', () => {
-    // `state` a `null`, c'est « l'state n'est step encore arrive » et non « il n'y
-    // a step de source » : annoncer l'absence a cet instant serait faux, et
-    // c'est le piege d'un `||` pose sur `state?.source`.
-    const w = monteAvec(null)
+  it('does not say "no source" before the first frame', () => {
+    // `state` at `null` means "the state has not arrived yet" and not "there
+    // is no source": announcing the absence at that instant would be wrong,
+    // and that is the trap of a `||` placed on `state?.source`.
+    const w = mountWith(null)
     expect(w.find('[data-source]').text()).toBe('')
   })
 
-  it('displayed la présélection en cours quand la Source en déclare une', () => {
-    const w = monteAvec({ preset: 4 })
+  it('shows the current preset when the source declares one', () => {
+    const w = mountWith({ preset: 4 })
     expect(w.get('[data-player-preset]').text()).toBe('4')
   })
 
-  it('n displayed step de ligne de présélection quand la Source n en déclare aucune', () => {
-    // `null` couvre deux situations où il n'y a rien à numéroter — rien ne joue,
-    // ou la Source ne numérote step (cd sans disque, entrée auxiliaire) — et une
-    // ligne vide y laisserait croire à une panne.
-    const w = monteAvec({ preset: null })
+  it('shows no preset line when the source declares none', () => {
+    // `null` covers two situations where there is nothing to number — nothing
+    // is playing, or the source does not number (cd without a disc, aux
+    // input) — and an empty line there would suggest a failure.
+    const w = mountWith({ preset: null })
     expect(w.find('[data-player-preset]').exists()).toBe(false)
   })
 
-  it('displayed la présélection 0 plutôt que de la confondre avec une absence', () => {
-    // Garde contre un `v-if` écrit sur la valeur elle-même : `0` est faux en
-    // JavaScript mais reste une présélection déclarée.
-    const w = monteAvec({ preset: 0 })
+  it('shows preset 0 rather than mistaking it for an absence', () => {
+    // Guard against a `v-if` written on the value itself: `0` is falsy in
+    // JavaScript but remains a declared preset.
+    const w = mountWith({ preset: 0 })
     expect(w.find('[data-player-preset]').text()).toBe('0')
   })
 
-  it('ajoute le nom de la présélection quand la Source en déclare un', () => {
-    const w = monteAvec({ preset: 4, preset_name: 'FIP' })
+  it('adds the preset name when the source declares one', () => {
+    const w = mountWith({ preset: 4, preset_name: 'FIP' })
     expect(w.find('[data-player-preset]').text()).toBe('4')
     expect(w.find('[data-player-preset-name]').text()).toBe('FIP')
   })
 
-  it('n displayed que le numéro quand la Source ne nomme rien', () => {
-    // Cas du cd : une présélection déclarée (la piste), mais aucun nom — step
-    // de clé i18n générique du type « station » qui serait fausse ici.
-    const w = monteAvec({ preset: 3, preset_name: null })
+  it('shows only the number when the source names nothing', () => {
+    // The cd case: a declared preset (the track), but no name — no generic
+    // i18n key like "station" that would be wrong here.
+    const w = mountWith({ preset: 3, preset_name: null })
     expect(w.find('[data-player-preset]').text()).toBe('3')
     expect(w.find('[data-player-preset-name]').exists()).toBe(false)
   })
 
-  it('displayed le statut déclaré par la source', () => {
-    const w = monteAvec({ status: 'PAS DE DISQUE' })
+  it('shows the status declared by the source', () => {
+    const w = mountWith({ status: 'PAS DE DISQUE' })
     expect(w.find('[data-player-status]').text()).toBe('PAS DE DISQUE')
   })
 
-  it('n displayed aucune ligne de statut quand il n y en a step', () => {
-    const w = monteAvec({ status: null })
+  it('shows no status line when there is none', () => {
+    const w = mountWith({ status: null })
     expect(w.find('[data-player-status]').exists()).toBe(false)
   })
 
-  it('masque la ligne de statut en veille pour ne step doubler le badge VEILLE', () => {
-    // Le statut publié en veille est le même mot du même catalogue que le
-    // badge "VEILLE" affiché juste au-dessus (voir M2, revue de branche) :
-    // sans ce masquage, la carte montrerait "VEILLE" deux fois, la seconde
-    // sans libellé contrairement à ses voisines ("Présélection :", "Volume :").
-    const w = monteAvec({ status: 'VEILLE', standby: true })
+  it('hides the status line in standby so as not to duplicate the STANDBY badge', () => {
+    // The status published in standby is the same word from the same catalog
+    // as the "VEILLE" badge shown just above (see M2, branch review): without
+    // this masking, the card would show "VEILLE" twice, the second time
+    // without a label unlike its neighbours ("Présélection :", "Volume :").
+    const w = mountWith({ status: 'VEILLE', standby: true })
     expect(w.find('[data-player-status]').exists()).toBe(false)
     expect(w.find('[data-standby]').exists()).toBe(true)
   })
 
-  it('signale la veille', () => {
-    const w = monteAvec({ standby: true })
+  it('signals standby', () => {
+    const w = mountWith({ standby: true })
     expect(w.find('[data-standby]').exists()).toBe(true)
   })
 
-  it('n displayed step de veille quand elle est inactive', () => {
-    const w = monteAvec({ standby: false })
+  it('shows no standby when it is inactive', () => {
+    const w = mountWith({ standby: false })
     expect(w.find('[data-standby]').exists()).toBe(false)
   })
 
-  it('n displayed step de bloc morceau tant que rien n est connu', () => {
-    // La plupart des stations francaises n'annoncent rien : un bloc « En
-    // ecoute » vide ferait croire a une panne. L'encart du player, lui, reste.
-    const w = monteAvec(null)
+  it('shows no track block while nothing is known', () => {
+    // Most French stations announce nothing: an empty "Now playing" block
+    // would suggest a failure. The player card itself stays.
+    const w = mountWith(null)
     expect(w.find('[data-player]').exists()).toBe(true)
     expect(w.find('[data-now-playing]').exists()).toBe(false)
   })
 
-  it('n displayed step de bloc morceau pour une duration seule', () => {
-    const w = monteAvec({ duration_s: 214 })
+  it('shows no track block for a duration alone', () => {
+    const w = mountWith({ duration_s: 214 })
     expect(w.find('[data-now-playing]').exists()).toBe(false)
   })
 
-  it('ajoute artiste, titre, album, duration et origine quand ils arrivent', () => {
-    const w = monteAvec({
+  it('adds artist, title, album, duration and origin when they arrive', () => {
+    const w = mountWith({
       artist: 'Miles Davis',
       title: 'So What',
       album: 'Kind of Blue',
@@ -177,36 +177,36 @@ describe('PlayerCard', () => {
     expect(w.find('[data-duration]').text()).toBe('9:05')
   })
 
-  it('displayed un titre seul, tel que le donne l en-tete ICY', () => {
-    // L'ICY livre une chaine unique, non decoupee : elle arrive dans `title`.
-    // Les webradios OUI FM l'emettent meme dans l'order « Titre - ARTISTE ».
-    const w = monteAvec({ title: 'Made Up - TAHITI 80', origin: 'icy' })
+  it('shows a title alone, as the ICY header gives it', () => {
+    // ICY delivers a single, unsplit string: it arrives in `title`. The
+    // OUI FM webradios even emit it in the order "Title - ARTIST".
+    const w = mountWith({ title: 'Made Up - TAHITI 80', origin: 'icy' })
     expect(w.find('[data-titre]').text()).toBe('Made Up - TAHITI 80')
     expect(w.find('[data-artiste]').exists()).toBe(false)
   })
 
-  it('displayed l artiste seul quand le titre manque', () => {
-    // Decision du proprietaire : toute information disponible est displayed.
-    const w = monteAvec({ artist: 'Téléphone', origin: 'ouifm-metas' })
+  it('shows the artist alone when the title is missing', () => {
+    // Owner's decision: every available piece of information is shown.
+    const w = mountWith({ artist: 'Téléphone', origin: 'ouifm-metas' })
     expect(w.find('[data-artiste]').text()).toBe('Téléphone')
     expect(w.find('[data-titre]').exists()).toBe(false)
   })
 
-  it('retire le bloc morceau quand la lecture s stopped', async () => {
-    // Changement d'identite ou arret : le coeur diffuse un state sans morceau,
-    // et l'ancien titre ne doit step rester a l'ecran — mais l'encart du player
-    // reste, lui, avec la source (le volume vit desormais dans le slot
-    // `commandes`, hors de cette carte).
-    const w = monteAvec({ title: 'premier' })
-    await w.setProps({ state: complet({}) })
+  it('removes the track block when playback stops', async () => {
+    // Identity change or stop: the core broadcasts a state without a track,
+    // and the old title must not stay on screen — but the player card stays,
+    // with the source (the volume now lives in the `commandes` slot, outside
+    // this card).
+    const w = mountWith({ title: 'first' })
+    await w.setProps({ state: full({}) })
     expect(w.find('[data-now-playing]').exists()).toBe(false)
     expect(w.find('[data-player]').exists()).toBe(true)
   })
 
-  it('montre la barre quand une position est connue', () => {
+  it('shows the bar when a position is known', () => {
     const w = mount(PlayerCard, {
       props: {
-        state: complet({ title: 'Bikwix', position_s: 87, duration_s: 254, seekable: true }),
+        state: full({ title: 'Bikwix', position_s: 87, duration_s: 254, seekable: true }),
         seekStep: 10,
       },
     })
@@ -214,13 +214,13 @@ describe('PlayerCard', () => {
     expect(w.get('[data-position]').text()).toBe('1:27')
   })
 
-  it('n displayed step la duration en en-tete quand la barre la porte deja', () => {
-    // Defaut corrige : titre + position connus (le cas nominal d'un CD
-    // reconnu) affichait "4:14" en en-tete ET "1:27 ... 4:14" dans la barre,
-    // deux fois la meme information.
+  it('does not show the duration in the header when the bar already carries it', () => {
+    // Fixed defect: title + known position (the nominal case of a recognized
+    // CD) showed "4:14" in the header AND "1:27 ... 4:14" in the bar, the same
+    // information twice.
     const w = mount(PlayerCard, {
       props: {
-        state: complet({ title: 'Bikwix', position_s: 87, duration_s: 254, seekable: true }),
+        state: full({ title: 'Bikwix', position_s: 87, duration_s: 254, seekable: true }),
         seekStep: 10,
       },
     })
@@ -228,25 +228,25 @@ describe('PlayerCard', () => {
     expect(w.get('[data-duration-totale]').text()).toBe('4:14')
   })
 
-  it("displayed la pochette quand l'appareil en sert une", () => {
-    const w = monteAvec({ title: 'So What', cover_href: '/api/cover/1a2b', cover_origin: 'files' })
+  it('shows the cover when the device serves one', () => {
+    const w = mountWith({ title: 'So What', cover_href: '/api/cover/1a2b', cover_origin: 'files' })
     const img = w.find('[data-pochette] img')
     expect(img.exists()).toBe(true)
-    // L'IHM ne doit jamais pointer vers l'exterieur : le coeur sert l'image.
-    // Et elle demande la **vignette** : le carre fait 224 px, le `folder.jpg`
-    // d'un NAS en fait couramment trois mebioctets.
+    // The UI must never point outside: the core serves the image. And it asks
+    // for the **thumbnail**: the square is 224 px, a NAS's `folder.jpg` is
+    // commonly three mebibytes.
     expect(img.attributes('src')).toBe('/api/cover/1a2b?taille=vignette')
-    // L'origine de la pochette n'est plus un badge : elle est dans la popin
-    // de provenance, avec les autres fields (voir plus bas).
+    // The cover's origin is no longer a badge: it is in the provenance
+    // popover, with the other fields (see below).
     expect(w.find('[data-cover-origin]').exists()).toBe(false)
   })
 
-  it('detaille la provenance champ par champ dans une popin', async () => {
-    // **Ce que les deux badges d'origine ne disaient step.** Ils nommaient le
-    // contributeur du text et celui de l'image ; l'ecran est compose de plus
-    // de mains que ca — le titre d'ici, l'annee de la, la pochette d'ailleurs
-    // — et c'est cette question-la qu'on se pose devant un titre faux.
-    const w = monteAvec({
+  it('details the provenance field by field in a popover', async () => {
+    // **What the two origin badges did not say.** They named the contributor
+    // of the text and that of the image; the screen is composed by more hands
+    // than that — the title from here, the year from there, the cover from
+    // elsewhere — and that is the question one asks in front of a wrong title.
+    const w = mountWith({
       title: 'So What',
       origin: 'icy',
       cover_href: '/api/cover/1a2b',
@@ -256,31 +256,31 @@ describe('PlayerCard', () => {
         misses: ['ouifm-metas'],
       },
     })
-    // Les badges ont cede la place au bouton.
+    // The badges gave way to the button.
     expect(w.find('[data-origin]').exists()).toBe(false)
     expect(w.find('[data-cover-origin]').exists()).toBe(false)
 
     await w.get('[data-provenance-ouvrir]').trigger('click')
-    const popin = document.body.querySelector('[data-provenance-popin]')
-    expect(popin).not.toBeNull()
-    const par = (champ: string) =>
-      popin?.querySelector(`[data-provenance-champ="${champ}"]`)?.textContent?.trim()
-    expect(par('title')).toBe('icy')
-    expect(par('year')).toBe('musicbrainz')
-    expect(par('cover')).toBe('musicbrainz')
-    // « A cherche sans rien trouver » est une section a part : ce n'est step la
-    // meme information qu'une absence de la list ci-dessus, qui vaut aussi
-    // quand le greffon n'a jamais ete interroge.
-    expect(popin?.querySelector('[data-provenance-misses]')?.textContent).toContain('ouifm-metas')
+    const popover = document.body.querySelector('[data-provenance-popin]')
+    expect(popover).not.toBeNull()
+    const by = (field: string) =>
+      popover?.querySelector(`[data-provenance-champ="${field}"]`)?.textContent?.trim()
+    expect(by('title')).toBe('icy')
+    expect(by('year')).toBe('musicbrainz')
+    expect(by('cover')).toBe('musicbrainz')
+    // "Searched and found nothing" is a separate section: it is not the same
+    // information as an absence from the list above, which also holds when
+    // the plugin was never queried.
+    expect(popover?.querySelector('[data-provenance-misses]')?.textContent).toContain('ouifm-metas')
     w.unmount()
   })
 
-  it('nomme le retravail a cote de la source, jamais a sa place', async () => {
-    // **Le defaut signale par le proprietaire** : sur une radio sans greffon de
-    // metadonnees, l'ICY donnait l'information, `musicbrainz` la decoupait, et
-    // l'ecran affichait « Titre : musicbrainz ». La station est la source ; le
-    // decoupage se dit a cote.
-    const w = monteAvec({
+  it('names the rework next to the source, never in its place', async () => {
+    // **The defect reported by the owner**: on a radio without a metadata
+    // plugin, ICY gave the information, `musicbrainz` split it, and the screen
+    // showed "Title: musicbrainz". The station is the source; the split is
+    // said alongside.
+    const w = mountWith({
       title: 'Miles Davis - So What',
       provenance: {
         fields: { title: 'icy', artist: 'icy' },
@@ -288,115 +288,115 @@ describe('PlayerCard', () => {
       },
     })
     await w.get('[data-provenance-ouvrir]').trigger('click')
-    const popin = document.body.querySelector('[data-provenance-popin]')
-    const ligne = popin?.querySelector('[data-provenance-champ="title"]')
-    // La source, mot pour mot : c'est elle qui etait effacee.
-    expect(ligne?.textContent).toContain('icy')
-    // Et le retravail existe, **dans la meme ligne**. Le label lui-meme vient
-    // du catalogue, que ce montage ne load step (`t()` retombe sur la cle) :
-    // sa redaction et la parite fr/en sont couvertes par `i18nKeysUsed`, ce
-    // test-ci ne prouve que l'agencement.
-    expect(ligne?.querySelector('[data-provenance-derive="title"]')).not.toBeNull()
+    const popover = document.body.querySelector('[data-provenance-popin]')
+    const row = popover?.querySelector('[data-provenance-champ="title"]')
+    // The source, word for word: it is what was being erased.
+    expect(row?.textContent).toContain('icy')
+    // And the rework exists, **in the same row**. The label itself comes from
+    // the catalog, which this mount does not load (`t()` falls back to the
+    // key): its wording and the fr/en parity are covered by `i18nKeysUsed`,
+    // this test only proves the layout.
+    expect(row?.querySelector('[data-provenance-derive="title"]')).not.toBeNull()
     w.unmount()
   })
 
-  it("n'offre step le bouton quand il n'y a rien a expliquer", () => {
-    // Un `(?)` qui ouvre une popin vide promet une explication et n'en donne
-    // aucune : c'est le cas ordinaire avant qu'un morceau ne soit identifie.
-    const w = monteAvec({ title: 'Made Up - TAHITI 80' })
+  it('does not offer the button when there is nothing to explain', () => {
+    // A `(?)` that opens an empty popover promises an explanation and gives
+    // none: it is the ordinary case before a track is identified.
+    const w = mountWith({ title: 'Made Up - TAHITI 80' })
     expect(w.find('[data-provenance-ouvrir]').exists()).toBe(false)
   })
 
-  it('garde le carre en place quand il n y a step de pochette', () => {
-    const w = monteAvec({ title: 'So What' })
-    // Le carre existe toujours : la pochette arrive apres le text, parfois
-    // plusieurs secondes apres, et un carre qui apparait decalerait tout.
+  it('keeps the square in place when there is no cover', () => {
+    const w = mountWith({ title: 'So What' })
+    // The square always exists: the cover arrives after the text, sometimes
+    // several seconds after, and a square that appears would shift everything.
     expect(w.find('[data-pochette]').exists()).toBe(true)
     expect(w.find('[data-pochette] img').exists()).toBe(false)
     expect(w.find('[data-pochette-repli]').exists()).toBe(true)
   })
 
-  it('retombe sur le repli quand le browser ne peut step charger la pochette', async () => {
-    // Le cas reel : la cle du cache du coeur est bornee a quelques entries, et
-    // le fichier lui-meme vit sur un partage qui peut disparaitre — les deux
-    // rendent un 404 sous une URL deja publiee. Sans `@error`, le carre
-    // reserve montrait le glyphe d'image cassee du browser au lieu du repli
-    // ♫ prevu pour exactement cette situation.
-    const w = monteAvec({ title: 'So What', cover_href: '/api/cover/1a2b' })
+  it('falls back to the placeholder when the browser cannot load the cover', async () => {
+    // The real case: the core's cache key is capped at a few entries, and the
+    // file itself lives on a share that can vanish — both yield a 404 under an
+    // already-published URL. Without `@error`, the reserved square showed the
+    // browser's broken-image glyph instead of the ♫ fallback intended for
+    // exactly this situation.
+    const w = mountWith({ title: 'So What', cover_href: '/api/cover/1a2b' })
     await w.get('[data-pochette] img').trigger('error')
     expect(w.find('[data-pochette] img').exists()).toBe(false)
     expect(w.find('[data-pochette-repli]').exists()).toBe(true)
-    // Le carre lui-meme ne bouge step : rien ne doit se decaler.
+    // The square itself does not move: nothing must shift.
     expect(w.find('[data-pochette]').exists()).toBe(true)
 
-    // Et une **autre** image redonne sa chance a l'element : sans cela, un
-    // seul echec condamnerait le carre pour le reste de la session.
-    await w.setProps({ state: complet({ title: 'So What', cover_href: '/api/cover/3c4d' }) })
+    // And a **different** image gives the element another chance: otherwise a
+    // single failure would doom the square for the rest of the session.
+    await w.setProps({ state: full({ title: 'So What', cover_href: '/api/cover/3c4d' }) })
     expect(w.get('[data-pochette] img').attributes('src')).toBe(
       '/api/cover/3c4d?taille=vignette',
     )
   })
 
-  it('agrandit la pochette au clic, et la referme au clic suivant', async () => {
-    const w = monteAvec({ title: 'So What', cover_href: '/api/cover/1a2b' })
-    // Rien d'open au depart.
+  it('enlarges the cover on click, and closes it on the next click', async () => {
+    const w = mountWith({ title: 'So What', cover_href: '/api/cover/1a2b' })
+    // Nothing open at the start.
     expect(document.body.querySelector('[data-pochette-enlarged]')).toBeNull()
 
     await w.get('[data-pochette-agrandir]').trigger('click')
-    const surcouche = document.body.querySelector('[data-pochette-enlarged]')
-    expect(surcouche).not.toBeNull()
-    // La vue enlarged load l'image **pleine**, step la vignette : c'est tout
-    // l'interet d'agrandir.
-    expect(surcouche?.querySelector('img')?.getAttribute('src')).toBe('/api/cover/1a2b')
+    const overlay = document.body.querySelector('[data-pochette-enlarged]')
+    expect(overlay).not.toBeNull()
+    // The enlarged view loads the **full** image, not the thumbnail: that is
+    // the whole point of enlarging.
+    expect(overlay?.querySelector('img')?.getAttribute('src')).toBe('/api/cover/1a2b')
 
-    // La surcouche est **teleportee vers le body** : elle n'appartient step au
-    // sous-arbre du wrapper, donc `w.get` ne la voit step. On la pilote par le
-    // DOM, comme le ferait un vrai clic.
-    const fermer = document.body.querySelector<HTMLElement>('[data-pochette-fermer]')
-    expect(fermer).not.toBeNull()
-    fermer!.click()
+    // The overlay is **teleported to the body**: it does not belong to the
+    // wrapper's subtree, so `w.get` does not see it. We drive it through the
+    // DOM, as a real click would.
+    const close = document.body.querySelector<HTMLElement>('[data-pochette-fermer]')
+    expect(close).not.toBeNull()
+    close!.click()
     await nextTick()
     expect(document.body.querySelector('[data-pochette-enlarged]')).toBeNull()
     w.unmount()
   })
 
-  it('referme la pochette enlarged quand la piste change', async () => {
-    // Sinon l'image de la piste suivante s'displayed en plein ecran sans que
-    // personne l'ait demande.
-    const w = monteAvec({ title: 'So What', cover_href: '/api/cover/1a2b' })
+  it('closes the enlarged cover when the track changes', async () => {
+    // Otherwise the next track's image shows up full screen without anyone
+    // asking for it.
+    const w = mountWith({ title: 'So What', cover_href: '/api/cover/1a2b' })
     await w.get('[data-pochette-agrandir]').trigger('click')
     expect(document.body.querySelector('[data-pochette-enlarged]')).not.toBeNull()
 
-    await w.setProps({ state: complet({ title: 'Blue in Green', cover_href: '/api/cover/9f9f' }) })
+    await w.setProps({ state: full({ title: 'Blue in Green', cover_href: '/api/cover/9f9f' }) })
     expect(document.body.querySelector('[data-pochette-enlarged]')).toBeNull()
     w.unmount()
   })
 
-  it("n'offre step d'agrandissement quand il n'y a step de pochette", () => {
-    // Un bouton qui n'ouvre rien est pire qu'aucun bouton : le repli ♫ n'est
-    // step une image.
-    const w = monteAvec({ title: 'So What' })
+  it('does not offer enlarging when there is no cover', () => {
+    // A button that opens nothing is worse than no button: the ♫ fallback is
+    // not an image.
+    const w = mountWith({ title: 'So What' })
     expect(w.find('[data-pochette-agrandir]').exists()).toBe(false)
   })
 
-  it('ne montre rien de la progression quand aucune position n est connue', () => {
+  it('shows nothing of the progress when no position is known', () => {
     const w = mount(PlayerCard, {
       props: {
-        state: complet({ title: 'Bikwix', position_s: null, duration_s: 254 }),
+        state: full({ title: 'Bikwix', position_s: null, duration_s: 254 }),
         seekStep: 10,
       },
     })
     expect(w.find('[data-position]').exists()).toBe(false)
   })
 
-  // Sans titre ni artiste ni album, le bloc « en ecoute » est masque : la
-  // progression, elle, doit rester visible. C'est le cas d'un fichier sans
-  // etiquettes ou d'un disque que MusicBrainz ne reconnait step, ou mpv
-  // connait pourtant parfaitement la position.
-  it('montre la progression meme sans aucune metadonnee', () => {
+  // Without title, artist or album, the "now playing" block is hidden: the
+  // progress, however, must stay visible. This is the case of a file without
+  // tags or of a disc MusicBrainz does not recognize, where mpv nonetheless
+  // knows the position perfectly well.
+  it('shows the progress even without any metadata', () => {
     const w = mount(PlayerCard, {
       props: {
-        state: complet({ position_s: 87, duration_s: 254, seekable: true }),
+        state: full({ position_s: 87, duration_s: 254, seekable: true }),
         seekStep: 10,
       },
     })
@@ -405,8 +405,8 @@ describe('PlayerCard', () => {
     expect(w.find('[data-barre]').exists()).toBe(true)
   })
 
-  it('la pochette et le morceau sont au centre, la source en pastille', () => {
-    const w = monteAvec({ title: 'Blue in Green', artist: 'Miles Davis', album: 'Kind of Blue', preset: 1, preset_name: 'FIP' })
+  it('the cover and the track are at the center, the source as a pill', () => {
+    const w = mountWith({ title: 'Blue in Green', artist: 'Miles Davis', album: 'Kind of Blue', preset: 1, preset_name: 'FIP' })
     expect(w.get('[data-source]').text()).toBe('radio')
     expect(w.get('[data-player-preset]').text()).toBe('1')
     expect(w.get('[data-player-preset-name]').text()).toBe('FIP')
@@ -414,55 +414,55 @@ describe('PlayerCard', () => {
     expect(w.find('[data-pochette]').exists()).toBe(true)
   })
 
-  it('le carre de pochette reste la meme sans morceau : c est lui qui tient la mise en page', () => {
-    const w = monteAvec({ status: 'NO DISC', preset_count: 0 })
+  it('the cover square stays even without a track: it is what holds the layout', () => {
+    const w = mountWith({ status: 'NO DISC', preset_count: 0 })
     expect(w.find('[data-pochette]').exists()).toBe(true)
     expect(w.find('[data-pochette-repli]').exists()).toBe(true)
     expect(w.get('[data-player-status]').text()).toBe('NO DISC')
   })
 
-  it('en veille la pochette s eteint', () => {
-    const w = monteAvec({ standby: true })
+  it('in standby the cover dims', () => {
+    const w = mountWith({ standby: true })
     expect(w.get('[data-pochette]').classes()).toContain('opacity-50')
     expect(w.find('[data-standby]').exists()).toBe(true)
   })
 
-  it('rend les slots actions et commandes', () => {
+  it('renders the actions and commandes slots', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
     const w = mount(PlayerCard, {
-      props: { state: complet({}), seekStep: 10 },
+      props: { state: full({}), seekStep: 10 },
       slots: { actions: '<button data-test-action>a</button>', commandes: '<div data-test-commandes>c</div>' },
     })
     expect(w.find('[data-slot="card-action"] [data-test-action]').exists()).toBe(true)
     expect(w.find('[data-test-commandes]').exists()).toBe(true)
   })
 
-  describe('année', () => {
-    it("s'accole à l'album, séparée par un point médian", () => {
-      const w = monteAvec({ title: 'So What', album: 'Kind of Blue', year: 1959 })
+  describe('year', () => {
+    it('sits next to the album, separated by a middle dot', () => {
+      const w = mountWith({ title: 'So What', album: 'Kind of Blue', year: 1959 })
       expect(w.find('[data-album]').text()).toBe('Kind of Blue')
       expect(w.find('[data-annee]').text()).toBe('1959')
-      // Les deux dans la meme ligne, avec le separateur entre eux.
+      // Both on the same line, with the separator between them.
       expect(w.find('[data-album]').element.parentElement?.textContent).toContain('Kind of Blue · 1959')
     })
 
-    it('sort seule quand aucun album n’est connu', () => {
-      // Reel : un flux peut donner l'annee sans l'album, la grille Radio France
-      // rend l'une bien plus souvent que l'autre.
-      const w = monteAvec({ title: 'Fire', album: null, year: 1960 })
+    it('stands alone when no album is known', () => {
+      // Real: a stream may give the year without the album, the Radio France
+      // schedule yields one far more often than the other.
+      const w = mountWith({ title: 'Fire', album: null, year: 1960 })
       expect(w.find('[data-annee]').text()).toBe('1960')
       expect(w.find('[data-album]').exists()).toBe(false)
     })
 
-    it('ne laisse aucune trace quand elle est inconnue', () => {
-      const w = monteAvec({ title: 'So What', album: 'Kind of Blue' })
+    it('leaves no trace when it is unknown', () => {
+      const w = mountWith({ title: 'So What', album: 'Kind of Blue' })
       expect(w.find('[data-annee]').exists()).toBe(false)
     })
   })
 
-  describe('links de plateformes', () => {
-    it('rend une icône par plateforme, en lien externe sûr', () => {
-      const w = monteAvec({
+  describe('platform links', () => {
+    it('renders one icon per platform, as a safe external link', () => {
+      const w = mountWith({
         title: 'Get Lucky',
         links: [
           { platform: 'youtube', url: 'https://www.youtube.com/watch?v=5NV6Rdv1a3I' },
@@ -473,17 +473,17 @@ describe('PlayerCard', () => {
       const yt = w.get('[data-lien="youtube"]')
       expect(yt.attributes('href')).toBe('https://www.youtube.com/watch?v=5NV6Rdv1a3I')
       expect(yt.attributes('target')).toBe('_blank')
-      // `noopener` : la cible est un tiers. `noreferrer` : il n'a step a savoir
-      // d'ou on vient.
+      // `noopener`: the target is a third party. `noreferrer`: it has no
+      // business knowing where we come from.
       expect(yt.attributes('rel')).toBe('noopener noreferrer')
-      // Un nom accessible traduit, step une icon muette.
+      // A translated accessible name, not a mute icon.
       expect(yt.attributes('aria-label')).toBeTruthy()
       expect(yt.find('svg').exists()).toBe(true)
       expect(w.find('[data-lien="deezer"]').exists()).toBe(true)
     })
 
-    it('distingue les trois plateformes par leur icône', () => {
-      const w = monteAvec({
+    it('tells the three platforms apart by their icon', () => {
+      const w = mountWith({
         title: 'Get Lucky',
         links: [
           { platform: 'youtube', url: 'https://www.youtube.com/watch?v=a' },
@@ -491,21 +491,21 @@ describe('PlayerCard', () => {
           { platform: 'apple_music', url: 'https://music.apple.com/us/song/1' },
         ],
       })
-      // Assertion **par plateforme** et non « trois icons distinctes » : trois
-      // icons differentes peuvent tres bien etre les trois mauvaises (deux
-      // branches d'un `v-if` inversees passent l'ancienne version du test).
-      // La color de marque n'appartient qu'a une des trois icons.
-      for (const [plateforme, color] of Object.entries(COULEUR_ICONE)) {
-        expect(w.get(`[data-lien="${plateforme}"] svg`).html()).toContain(`fill="${color}"`)
+      // Assertion **per platform** and not "three distinct icons": three
+      // different icons may very well be the three wrong ones (two inverted
+      // `v-if` branches pass the old version of the test). The brand color
+      // belongs to only one of the three icons.
+      for (const [platform, color] of Object.entries(ICON_COLOR)) {
+        expect(w.get(`[data-lien="${platform}"] svg`).html()).toContain(`fill="${color}"`)
       }
       const svg = w.findAll('[data-lien] svg').map((s) => s.html())
       expect(new Set(svg).size).toBe(3)
     })
 
-    it('rend les icônes sur la même ligne que les badges d’origine', () => {
-      // Decision du proprietaire : une ligne a elles seules decalait trop le
-      // curseur de volume sur phone. La ligne des badges les accueille.
-      const w = monteAvec({
+    it('renders the icons on the same row as the origin badges', () => {
+      // Owner's decision: a row of their own pushed the volume slider down too
+      // far on a phone. The badges row hosts them.
+      const w = mountWith({
         title: 'Get Lucky',
         duration_s: 248,
         provenance: { fields: { title: 'musicbrainz' } },
@@ -515,17 +515,17 @@ describe('PlayerCard', () => {
           { platform: 'apple_music', url: 'https://music.apple.com/us/song/1' },
         ],
       })
-      const ligne = w.get('[data-badges]').element
-      expect(w.get('[data-links]').element.parentElement).toBe(ligne)
-      // Le bouton de provenance a pris la place des deux badges d'origine.
-      expect(w.get('[data-provenance-ouvrir]').element.parentElement).toBe(ligne)
-      expect(w.get('[data-duration]').element.parentElement).toBe(ligne)
+      const row = w.get('[data-badges]').element
+      expect(w.get('[data-links]').element.parentElement).toBe(row)
+      // The provenance button took the place of the two origin badges.
+      expect(w.get('[data-provenance-ouvrir]').element.parentElement).toBe(row)
+      expect(w.get('[data-duration]').element.parentElement).toBe(row)
     })
 
-    it('donne aux ancres une cible tactile de 44 px', () => {
-      // 44 px, la cible minimale recommandee au doigt : l'icon seule (20 px)
-      // se rate une fois sur trois depuis le canape.
-      const w = monteAvec({
+    it('gives the anchors a 44 px touch target', () => {
+      // 44 px, the recommended minimum finger target: the icon alone (20 px)
+      // is missed one time in three from the couch.
+      const w = mountWith({
         title: 'Get Lucky',
         links: [{ platform: 'youtube', url: 'https://www.youtube.com/watch?v=a' }],
       })
@@ -533,14 +533,14 @@ describe('PlayerCard', () => {
       expect(w.get('[data-lien="youtube"] svg').classes()).toContain('size-5')
     })
 
-    it('passe devant le debordement du curseur de la barre de progression', () => {
-      // La zone de contact de 44 px du curseur deborde de 19 px au-dessus de
-      // sa piste (voir ProgressBar.vue), alors que cette ligne n'est
-      // qu'a 8 px plus haut : sans `relative z-10`, un tap au bas d'une
-      // ancre de lien tomberait sur le curseur (un SeekTo) plutot que sur le
-      // lien. jsdom ne peint rien : ce test documente l'agencement, il ne le
-      // prouve step a l'ecran (mesure par le controleur via Playwright).
-      const w = monteAvec({
+    it('goes in front of the overflow of the progress bar thumb', () => {
+      // The thumb's 44 px hit area overflows 19 px above its track (see
+      // ProgressBar.vue), while this row is only 8 px higher: without
+      // `relative z-10`, a tap at the bottom of a link anchor would land on
+      // the thumb (a SeekTo) rather than on the link. jsdom paints nothing:
+      // this test documents the layout, it does not prove it on screen
+      // (measured by the controller through Playwright).
+      const w = mountWith({
         title: 'Get Lucky',
         links: [{ platform: 'youtube', url: 'https://www.youtube.com/watch?v=a' }],
       })
@@ -549,47 +549,47 @@ describe('PlayerCard', () => {
       expect(classes).toContain('z-10')
     })
 
-    it('reserve la hauteur de la ligne meme sans lien', () => {
-      // Sans hauteur minimale, l'arrivee tardive d'un lien (MusicBrainz repond
-      // apres le titre) faisait grandir la carte et descendre le volume sous
-      // le doigt deja pose.
-      const w = monteAvec({
+    it('reserves the row height even without a link', () => {
+      // Without a minimum height, the late arrival of a link (MusicBrainz
+      // answers after the title) grew the card and pushed the volume down
+      // under the finger already placed.
+      const w = mountWith({
         title: 'Get Lucky',
         provenance: { fields: { title: 'icy' } },
       })
       expect(w.get('[data-badges]').classes()).toContain('min-h-11')
     })
 
-    it('n’ouvre step la ligne des badges quand il n’y a rien a y mettre', () => {
-      // Un titre nu (le cas ICY le plus courant) ne doit step reserver 44 px
-      // vides sous l'album.
-      const w = monteAvec({ title: 'Made Up - TAHITI 80' })
+    it('does not open the badges row when there is nothing to put in it', () => {
+      // A bare title (the most common ICY case) must not reserve 44 empty px
+      // under the album.
+      const w = mountWith({ title: 'Made Up - TAHITI 80' })
       expect(w.find('[data-badges]').exists()).toBe(false)
     })
 
-    it('ouvre la ligne des badges pour un lien seul', () => {
-      const w = monteAvec({
+    it('opens the badges row for a link alone', () => {
+      const w = mountWith({
         title: 'Get Lucky',
         links: [{ platform: 'youtube', url: 'https://www.youtube.com/watch?v=a' }],
       })
       expect(w.find('[data-badges]').exists()).toBe(true)
     })
 
-    it('ne rend rien pour une plateforme inconnue', () => {
-      // Le protocole ferme l'ensemble, mais un `v-else` rendait l'icon Apple
-      // pour tout ce qui n'etait ni YouTube ni Deezer : un greffon en avance
-      // sur le coeur aurait displayed « Ecouter sur Apple Music » vers Spotify.
-      const w = monteAvec({
+    it('renders nothing for an unknown platform', () => {
+      // The protocol closes the set, but a `v-else` rendered the Apple icon
+      // for anything that was neither YouTube nor Deezer: a plugin ahead of
+      // the core would have shown "Listen on Apple Music" pointing at Spotify.
+      const w = mountWith({
         title: 'Get Lucky',
-        links: [{ platform: 'inconnue' as 'youtube', url: 'https://exemple.test/x' }],
+        links: [{ platform: 'unknown' as 'youtube', url: 'https://example.test/x' }],
       })
       expect(w.findAll('[data-lien]')).toHaveLength(0)
     })
 
-    it('rend deux ancres pour deux links d’une même plateforme', () => {
-      // Rien dans le protocole n'interdit deux links de la meme plateforme :
-      // une cle de rendu posee sur `platform` en aurait perdu un.
-      const w = monteAvec({
+    it('renders two anchors for two links from the same platform', () => {
+      // Nothing in the protocol forbids two links from the same platform: a
+      // render key placed on `platform` would have lost one.
+      const w = mountWith({
         title: 'Get Lucky',
         links: [
           { platform: 'youtube', url: 'https://www.youtube.com/watch?v=a' },
@@ -599,17 +599,17 @@ describe('PlayerCard', () => {
       expect(w.findAll('[data-lien="youtube"]')).toHaveLength(2)
     })
 
-    it("n'displayed step la rangée quand il n'y a aucun lien", () => {
-      expect(monteAvec({ title: 'So What' }).find('[data-links]').exists()).toBe(false)
-      expect(monteAvec({ title: 'So What', links: [] }).find('[data-links]').exists()).toBe(false)
+    it('does not show the row when there is no link', () => {
+      expect(mountWith({ title: 'So What' }).find('[data-links]').exists()).toBe(false)
+      expect(mountWith({ title: 'So What', links: [] }).find('[data-links]').exists()).toBe(false)
     })
 
-    it('reste mute quand on ne sait rien du morceau par ailleurs', () => {
-      // Toute la zone est derriere `nothingToShow` : des icons de plateformes
-      // seules, sans titre ni artiste, seraient des boutons sans sujet. Regle
-      // heritee du composant, verifiee ici parce que les links sont la
-      // premiere donnee qui pourrait arriver seule.
-      const w = monteAvec({ links: [{ platform: 'youtube', url: 'https://www.youtube.com/watch?v=a' }] })
+    it('stays silent when nothing else is known about the track', () => {
+      // The whole area is behind `nothingToShow`: platform icons alone,
+      // without title or artist, would be buttons without a subject. Rule
+      // inherited from the component, checked here because the links are the
+      // first piece of data that could arrive alone.
+      const w = mountWith({ links: [{ platform: 'youtube', url: 'https://www.youtube.com/watch?v=a' }] })
       expect(w.find('[data-links]').exists()).toBe(false)
     })
   })

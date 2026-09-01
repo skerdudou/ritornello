@@ -3,15 +3,15 @@ use ritornello_i18n::Catalog;
 use serde::Deserialize;
 use std::path::Path;
 
-/// Un preset est une simple liste de bindings, sans name de périphérique.
+/// A preset is a simple list of bindings, with no device name.
 #[derive(Debug, Clone, Default, Deserialize)]
 struct Preset {
     #[serde(default)]
     bindings: Vec<Binding>,
 }
 
-/// Preset introuvable, illisible ou invalide — un seul cas d'erreur côté
-/// utilisateur : « ce preset n'existe pas ». Le détail part dans les logs.
+/// Preset not found, unreadable or invalid — a single user-facing error
+/// case: "this preset does not exist". The detail goes to the logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownPreset(pub String);
 
@@ -29,16 +29,16 @@ impl std::fmt::Display for UnknownPreset {
 
 impl std::error::Error for UnknownPreset {}
 
-/// Un name de preset est un identifiant simple : il vient du navigateur et sert
-/// à construire un path, donc ni séparateur ni point (pas de `../`).
+/// A preset name is a simple identifier: it comes from the browser and is
+/// used to build a path, so no separator and no dot (no `../`).
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Parse pur du listing d'un répertoire : ne garde que les `*.toml` au name
-/// valide, sans l'extension, triés et dédoublonnés. Séparé de l'accès disque
-/// pour être testable (comme `audio_output::parse_device_list` du cœur).
+/// Pure parse of a directory listing: keeps only `*.toml` files with a valid
+/// name, without the extension, sorted and deduplicated. Separated from disk
+/// access to stay testable (like the core's `audio_output::parse_device_list`).
 pub fn parse_preset_names(entries: &[String]) -> Vec<String> {
     let mut names: Vec<String> = entries
         .iter()
@@ -51,7 +51,7 @@ pub fn parse_preset_names(entries: &[String]) -> Vec<String> {
     names
 }
 
-/// Noms des presets disponibles. Répertoire absent ou illisible → liste clear.
+/// Names of the available presets. Missing or unreadable directory → empty list.
 pub fn list(root: &Path) -> Vec<String> {
     let Ok(rd) = std::fs::read_dir(root) else {
         tracing::warn!("preset directory {} unreadable: no preset", root.display());
@@ -64,17 +64,17 @@ pub fn list(root: &Path) -> Vec<String> {
     parse_preset_names(&entries)
 }
 
-/// Parse pur d'un contenu TOML de preset (sans accès disque) : c'est
-/// l'unique point de conversion texte → bindings, utilisé aussi bien par
-/// `load` (preset livré) que par l'import depuis un fichier téléversé
-/// (`admin::Op::ImportPreset`), pour qu'un seul parseur existe.
+/// Pure parse of a preset's TOML content (no disk access): this is the only
+/// text → bindings conversion point, used both by `load` (shipped preset)
+/// and by the import from an uploaded file (`admin::Op::ImportPreset`), so
+/// that only one parser exists.
 pub fn parse_preset(content: &str) -> Result<Vec<Binding>, String> {
     let preset: Preset = toml::from_str(content).map_err(|e| e.to_string())?;
     Ok(preset.bindings)
 }
 
-/// Charge les bindings d'un preset. Nom invalide, fichier absent ou TOML
-/// illisible → `UnknownPreset` (avec un `warn` détaillant la vraie cause).
+/// Loads the bindings of a preset. Invalid name, missing file or unreadable
+/// TOML → `UnknownPreset` (with a `warn` detailing the real cause).
 pub fn load(root: &Path, name: &str) -> Result<Vec<Binding>, UnknownPreset> {
     if !valid_name(name) {
         tracing::warn!("preset name rejected: {name}");
@@ -96,13 +96,13 @@ mod tests {
     use super::*;
     use ritornello_proto::Command;
 
-    /// Racine des presets livrés dans le dépôt (`deploy/input-presets`).
-    fn presets_livres() -> std::path::PathBuf {
+    /// Root of the presets shipped in the repo (`deploy/input-presets`).
+    fn shipped_presets() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/input-presets")
     }
 
     #[test]
-    fn parse_preset_names_ne_garde_que_les_toml_valides() {
+    fn parse_preset_names_keeps_only_valid_toml_files() {
         let entries = vec![
             "mce.toml".to_string(),
             "keyboard.toml".to_string(),
@@ -115,7 +115,7 @@ mod tests {
     }
 
     #[test]
-    fn list_decouvre_les_presets_dun_repertoire() {
+    fn list_discovers_the_presets_of_a_directory() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("mce.toml"), "").unwrap();
         std::fs::write(dir.path().join("keyboard.toml"), "").unwrap();
@@ -124,12 +124,12 @@ mod tests {
     }
 
     #[test]
-    fn list_repertoire_absent_donne_une_liste_vide() {
+    fn list_missing_directory_gives_an_empty_list() {
         assert!(list(Path::new("/nonexistent-presets-xyz")).is_empty());
     }
 
     #[test]
-    fn parse_preset_valide_donne_les_bindings_attendus() {
+    fn parse_preset_valid_gives_the_expected_bindings() {
         let toml =
             "[[bindings]]\ncode = 115\ncmd = \"VolumeUp\"\n\n[[bindings]]\ncode = 2\ncmd = \"Select\"\narg = 1\n";
         let b = parse_preset(toml).unwrap();
@@ -140,41 +140,41 @@ mod tests {
     }
 
     #[test]
-    fn parse_preset_toml_invalide_donne_une_erreur() {
-        assert!(parse_preset("ceci n'est pas = du toml [").is_err());
+    fn parse_preset_invalid_toml_gives_an_error() {
+        assert!(parse_preset("this is not = toml [").is_err());
     }
 
     #[test]
-    fn parse_preset_lit_le_meme_contenu_que_le_fichier_livre() {
-        let root = presets_livres();
+    fn parse_preset_reads_the_same_content_as_the_shipped_file() {
+        let root = shipped_presets();
         let text = std::fs::read_to_string(root.join("mce.toml")).unwrap();
-        let via_texte = parse_preset(&text).unwrap();
-        let via_fichier = load(&root, "mce").unwrap();
-        assert_eq!(via_texte, via_fichier, "le parseur texte diverge du chargement fichier");
-        assert!(!via_texte.is_empty());
+        let via_text = parse_preset(&text).unwrap();
+        let via_file = load(&root, "mce").unwrap();
+        assert_eq!(via_text, via_file, "text parser diverges from file loading");
+        assert!(!via_text.is_empty());
     }
 
     #[test]
-    fn le_preset_mce_couvre_les_dix_preselections_et_le_plus_dix() {
-        // La table livrée vient d'un relevé sur le matériel. Elle ne portait ni
-        // la touche 0 ni le « +10 » : deux touches de la télécommande ne
-        // faisaient rien alors que le cœur savait déjà les traiter.
-        let b = load(&presets_livres(), "mce").unwrap();
+    fn the_mce_preset_covers_the_ten_presets_and_plus_ten() {
+        // The shipped table comes from a measurement on the hardware. It
+        // carried neither the 0 key nor the "+10": two remote keys did
+        // nothing even though the core already knew how to handle them.
+        let b = load(&shipped_presets(), "mce").unwrap();
         for n in 0..=9u8 {
             assert!(
                 b.iter().any(|x| x.command() == Some(Command::Select(n))),
-                "aucune touche ne selectionne la preselection {n}"
+                "no key selects preset {n}"
             );
         }
-        assert!(b.iter().any(|x| x.command() == Some(Command::Plus10)), "pas de touche +10");
+        assert!(b.iter().any(|x| x.command() == Some(Command::Plus10)), "no +10 key");
     }
 
     #[test]
-    fn le_preset_mce_porte_les_codes_de_transport_releves_sur_le_materiel() {
-        // La table précédente était transcrite d'une vieille keymap, jamais
-        // confrontée à un appareil : elle liait Stop à 166 et Eject à 161, que
-        // ce récepteur n'émet pas. Ces codes-ci sont mesurés.
-        let b = load(&presets_livres(), "mce").unwrap();
+    fn the_mce_preset_carries_the_transport_codes_measured_on_the_hardware() {
+        // The previous table was transcribed from an old keymap, never
+        // checked against a real device: it bound Stop to 166 and Eject to
+        // 161, which this receiver does not emit. These codes are measured.
+        let b = load(&shipped_presets(), "mce").unwrap();
         let cmd = |code: u16| b.iter().find(|x| x.code == code).and_then(Binding::command);
         assert_eq!(cmd(128), Some(Command::Stop));
         assert_eq!(cmd(174), Some(Command::Eject));
@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn load_lit_les_bindings_dun_preset() {
+    fn load_reads_the_bindings_of_a_preset() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("test.toml"),
@@ -201,20 +201,20 @@ mod tests {
     }
 
     #[test]
-    fn load_preset_inconnu_renvoie_une_erreur() {
+    fn load_unknown_preset_returns_an_error() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load(dir.path(), "absent"), Err(UnknownPreset("absent".into())));
     }
 
     #[test]
-    fn load_refuse_un_nom_detourne() {
+    fn load_rejects_a_hijacked_name() {
         let dir = tempfile::tempdir().unwrap();
         assert!(load(dir.path(), "../../etc/passwd").is_err());
         assert!(load(dir.path(), "").is_err());
     }
 
     #[test]
-    fn message_de_preset_inconnu_utilise_le_catalogue() {
+    fn unknown_preset_message_uses_the_catalog() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("generic-input")).unwrap();
         std::fs::write(
@@ -227,17 +227,17 @@ mod tests {
     }
 
     #[test]
-    fn les_presets_livres_se_chargent_et_sont_non_vides() {
-        let root = presets_livres();
+    fn the_shipped_presets_load_and_are_non_empty() {
+        let root = shipped_presets();
         assert_eq!(list(&root), vec!["keyboard", "mce"]);
 
         let mce = load(&root, "mce").unwrap();
         assert!(!mce.is_empty());
         assert_eq!(mce.iter().find(|b| b.code == 115).unwrap().command(), Some(Command::VolumeUp));
         assert_eq!(mce.iter().find(|b| b.code == 513).unwrap().command(), Some(Command::Select(1)));
-        // 142 (KEY_SLEEP) et non 356 : la table a été relevée sur l'appareil, et
-        // ce récepteur n'émet pas les codes que l'ancienne transcription lui
-        // prêtait.
+        // 142 (KEY_SLEEP), not 356: the table was measured on the device, and
+        // this receiver does not emit the codes the old transcription
+        // attributed to it.
         assert_eq!(mce.iter().find(|b| b.code == 142).unwrap().command(), Some(Command::Power));
 
         let kbd = load(&root, "keyboard").unwrap();

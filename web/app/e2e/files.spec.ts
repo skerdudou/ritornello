@@ -3,22 +3,22 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
- * Racine de fixtures preparee par le harness, **telle que le coeur la voit**.
+ * Fixtures root prepared by the harness, **as the core sees it**.
  *
- * Elle est tiree au sort a chaque execution (repertoire jetable), donc elle ne
- * peut step etre ecrite en dur ici ; et sous Windows le coeur tourne dans WSL,
- * ou le meme repertoire s'appelle `/mnt/c/...`. Taper le chemin Windows dans la
- * page ferait fail la validation (`Roots::validate` veut un chemin absolu,
- * et `C:\...` n'en est step un pour Linux) : c'est donc serve.mjs qui publie la
- * forme utile, dans le meme fichier d'state que celui dont teardown.mjs se sert.
+ * It is drawn at random on every run (throwaway directory), so it cannot be
+ * hard-coded here; and under Windows the core runs inside WSL, where the same
+ * directory is called `/mnt/c/...`. Typing the Windows path into the page would
+ * fail validation (`Roots::validate` wants an absolute path, and `C:\...` is
+ * not one for Linux): so it is serve.mjs that publishes the useful form, in the
+ * same state file that teardown.mjs uses.
  *
- * Lu **dans le test** et non au chargement du module : le fichier n'est ecrit
- * qu'au demarrage du serveur web, qui suit la collecte des tests.
+ * Read **inside the test** and not at module load: the file is only written
+ * when the web server starts, which follows test collection.
  */
 function fixturesRoot(): string {
-  // Meme calcul que serve.mjs et teardown.mjs : `process.cwd()` vaut `web/app`
-  // (npm y place le process pour un script `-w app`), le fichier d'state vit a
-  // la root du depot, sous `target/`.
+  // Same computation as serve.mjs and teardown.mjs: `process.cwd()` is
+  // `web/app` (npm puts the process there for a `-w app` script), the state
+  // file lives at the repository root, under `target/`.
   const rootNative = process.cwd().replace(/[\\/]web[\\/]app$/, '')
   const state = JSON.parse(
     readFileSync(join(rootNative, 'target', 'e2e-state.json'), 'utf8'),
@@ -26,157 +26,155 @@ function fixturesRoot(): string {
   return state.mediaRoot
 }
 
-// Un seul test, et c'est delibere : chaque etape s'appuie sur l'state serveur
-// laisse par la precedente (la root declaree, puis la list balayee, puis la
-// list enregistree). Les separer en autant de tests les rendrait dependants de
-// leur order d'execution sans que rien ne le dise.
-test('journey du plugin files : root locale, balayage, list enregistrée, présélections', async ({
+// A single test, and deliberately so: each step relies on the server state
+// left by the previous one (the declared root, then the scanned list, then the
+// saved list). Splitting them into as many tests would make them dependent on
+// their execution order without anything saying so.
+test('files plugin journey: local root, scan, saved list, presets', async ({
   page,
   request,
 }) => {
-  // Le balayage est sonde a la seconde, le changement de source relance une
-  // vraie lecture mpv : la marge par defaut de 30 s est courte pour l'ensemble.
+  // The scan is polled every second, the source change starts a real mpv
+  // playback: the default 30 s margin is short for the whole.
   test.setTimeout(120_000)
   const root = fixturesRoot()
 
-  // Les trois volets vivent desormais dans des onglets. Ils restent tous
-  // montes (`force-mount`, pour ne step perdre le dossier open du browser
-  // en changeant d'onglet), donc presents dans le DOM mais masques : Playwright
-  // refuse de cliquer ce qui n'est step visible, et chaque etape doit ouvrir
-  // l'onglet dont elle se sert. La valeur, jamais le label, qui est traduit.
-  const ouvrirOnglet = async (nom: 'list' | 'parcourir' | 'sources') => {
-    await page.locator(`[data-onglet="${nom}"]`).click()
+  // The three panels now live in tabs. They all stay mounted (`force-mount`,
+  // so as not to lose the browser's open folder when switching tabs), hence
+  // present in the DOM but hidden: Playwright refuses to click what is not
+  // visible, and each step must open the tab it uses. The value, never the
+  // label, which is translated.
+  const openTab = async (name: 'list' | 'parcourir' | 'sources') => {
+    await page.locator(`[data-tab="${name}"]`).click()
   }
 
-  // --- La page de gestion, sur un bac a sable vraiment vide -----------------
+  // --- The management page, on a truly empty sandbox -------------------------
   await page.goto('/plugins/files/')
-  // Le module ESM du plugin est load dynamiquement et resolu par l'import
-  // map : c'est ce qu'aucun test unitaire ne peut verifier.
-  // Un onglet open doit en **fermer** un autre. Signale a l'usage : les
-  // panneaux restent montes (`force-mount`, pour ne step perdre le dossier
-  // open du browser), et reka-ui ne pose alors aucun `hidden` -- il laisse
-  // le consommateur masquer. Sans la classe qui s'en load, les trois volets
-  // s'affichaient d'un coup et les onglets n'avaient aucun effet visible.
-  // Rien d'autre que ce journey ne peut l'attraper : jsdom n'a step de moteur
-  // de mise en page, et l'assertion unitaire equivalente passerait a tort.
-  await expect(page.locator('[data-volet-list]')).toBeVisible()
-  await expect(page.locator('[data-volet-parcourir]')).toBeHidden()
-  await expect(page.locator('[data-volet-sources]')).toBeHidden()
+  // The plugin's ESM module is loaded dynamically and resolved through the
+  // import map: that is what no unit test can verify.
+  // An open tab must **close** another. Reported in use: the panels stay
+  // mounted (`force-mount`, so as not to lose the browser's open folder), and
+  // reka-ui then sets no `hidden` -- it leaves the hiding to the consumer.
+  // Without the class that takes care of it, the three panels showed up at
+  // once and the tabs had no visible effect. Nothing but this journey can
+  // catch it: jsdom has no layout engine, and the equivalent unit assertion
+  // would wrongly pass.
+  await expect(page.locator('[data-playlist-pane]')).toBeVisible()
+  await expect(page.locator('[data-browse-pane]')).toBeHidden()
+  await expect(page.locator('[data-sources-pane]')).toBeHidden()
 
-  await ouvrirOnglet('sources')
-  await expect(page.locator('[data-volet-sources]')).toBeVisible()
-  await expect(page.locator('[data-volet-list]')).toBeHidden()
-  // Aucune source : la preuve que le harness a bien detourne
-  // `RITORNELLO_FILES_ROOTS` vers son repertoire jetable. Sans cela, une
-  // execution sur une machine ou Ritornello est installe lirait — et
-  // ecraserait — le `/etc/ritornello/media-roots.toml` du proprietaire.
+  await openTab('sources')
+  await expect(page.locator('[data-sources-pane]')).toBeVisible()
+  await expect(page.locator('[data-playlist-pane]')).toBeHidden()
+  // No source: the proof that the harness really redirected
+  // `RITORNELLO_FILES_ROOTS` to its throwaway directory. Without that, a run on
+  // a machine where Ritornello is installed would read — and overwrite — the
+  // owner's `/etc/ritornello/media-roots.toml`.
   await expect(page.locator('[data-no-sources]')).toBeVisible()
 
-  // --- Declarer un dossier de l'appareil, par l'assistant -------------------
-  // Le coeur du chantier : on ne tape plus un chemin absolu qu'aucun ecran
-  // n'displayed, on part des volumes montes. Le harness en *decrit* un dans un
-  // faux /proc/mounts, faute de pouvoir en monter un sans privilege.
+  // --- Declare a folder of the device, through the wizard ---------------------
+  // The heart of this work: we no longer type an absolute path that no screen
+  // shows, we start from the mounted volumes. The harness *describes* one in a
+  // fake /proc/mounts, for lack of being able to mount one without privilege.
   await page.locator('[data-add-device]').click()
-  // Le contenu de la popin vit dans un portail : Playwright le voit (il
-  // interroge le document), la ou `wrapper.find` d'un test unitaire ne le
-  // verrait step.
+  // The dialog content lives in a portal: Playwright sees it (it queries the
+  // document), whereas a unit test's `wrapper.find` would not.
   await expect(page.locator('[data-volume]')).toHaveCount(1)
   await page.locator('[data-volume]').click()
 
-  // La popin ne doit step deborder de son propre cadre. `DialogContent` est une
-  // grille, et la largeur minimale d'un child de grille vaut par defaut celle
-  // de son contenu : un nom de dossier long poussait le panneau au-dela de son
-  // fond blanc, et la barre de defilement comme les boutons se retrouvaient
-  // peints dehors. jsdom n'a step de moteur de mise en page et ne peut step le
-  // voir — c'est mesurable ici, et nulle part ailleurs.
-  const popin = page.locator('[data-dlg-appareil]')
-  await expect(popin.locator('[data-choix-dossier]').first()).toBeVisible()
-  const debordement = await popin.evaluate(
+  // The dialog must not overflow its own frame. `DialogContent` is a grid, and
+  // the minimum width of a grid child defaults to that of its content: a long
+  // folder name pushed the panel beyond its white background, and the
+  // scrollbar as well as the buttons ended up painted outside. jsdom has no
+  // layout engine and cannot see it — it is measurable here, and nowhere else.
+  const dialog = page.locator('[data-device-dialog]')
+  await expect(dialog.locator('[data-picker-folder]').first()).toBeVisible()
+  const overflow = await dialog.evaluate(
     (el) => el.scrollWidth - el.clientWidth,
   )
-  expect(debordement, 'la popin deborde horizontalement de son cadre').toBeLessThanOrEqual(1)
-  // On descend dans `media`, le dossier des fixtures. `proc` n'est step
-  // proposable : le volume unique est le repertoire jetable, et la list
-  // blanche des systemes de files ecarte les pseudo-systemes.
-  await page.locator('[data-choix-dossier]', { hasText: 'media' }).first().click()
+  expect(overflow, 'the dialog overflows its frame horizontally').toBeLessThanOrEqual(1)
+  // We descend into `media`, the fixtures folder. `proc` is not offered: the
+  // single volume is the throwaway directory, and the filesystem whitelist
+  // rules out pseudo-filesystems.
+  await page.locator('[data-picker-folder]', { hasText: 'media' }).first().click()
   await expect(page.locator('[data-audio-count]')).toBeVisible()
   await page.locator('[data-choose]').click()
-  // Un refus s'displayed verbatim dans `[data-message]` : l'exiger absent donne
-  // un echec qui nomme la cause au lieu d'un simple « step de source ».
+  // A refusal shows verbatim in `[data-message]`: requiring it absent gives a
+  // failure that names the cause instead of a mere "no source".
   await expect(page.locator('[data-message]')).toHaveCount(0)
   await expect(page.locator('[data-source-row]')).toHaveCount(1)
-  // Relu depuis le plugin, et step seulement displayed : c'est le seul moyen de
-  // prouver que la table a bien atteint `media-roots.toml`, la page pouvant
-  // afficher la ligne qu'on vient de choose meme si l'enregistrement a echoue.
-  const apresRacines = await (await request.get('/plugins/files/api/data')).json()
-  expect(apresRacines.roots).toHaveLength(1)
-  // Le nom n'est plus saisi : il est **derive** du last segment du chemin.
-  expect(apresRacines.roots[0].name).toBe('media')
-  expect(apresRacines.roots[0].path).toBe(root)
-  // Le mot de passe ne traverse jamais vers le browser — garanti par le type
-  // cote plugin (`Root` ne porte step le champ), verifie ici de bout en bout.
-  expect(JSON.stringify(apresRacines)).not.toContain('password')
+  // Read back from the plugin, and not only displayed: it is the only way to
+  // prove that the table really reached `media-roots.toml`, since the page
+  // could show the row just chosen even if the save failed.
+  const afterRoots = await (await request.get('/plugins/files/api/data')).json()
+  expect(afterRoots.roots).toHaveLength(1)
+  // The name is no longer typed: it is **derived** from the last path segment.
+  expect(afterRoots.roots[0].name).toBe('media')
+  expect(afterRoots.roots[0].path).toBe(root)
+  // The password never travels to the browser — guaranteed by the type on the
+  // plugin side (`Root` does not carry the field), verified here end to end.
+  expect(JSON.stringify(afterRoots)).not.toContain('password')
 
-  // --- Parcourir, puis ajouter le dossier recursivement ---------------------
-  // Aucun rechargement ici, et c'est la regression que cette etape epingle : le
-  // volet Parcourir demande son premier niveau depuis un observateur qui se
-  // declenche **pendant** le rendu provoque par l'enregistrement. Tant que le
-  // vol unique de la page couvrait aussi la relecture, cet observateur recevait
-  // `null` et le niveau restait vide indefiniment — mesure : `[data-browse-row]`
-  // bloque a 0 pendant les 5 s d'wait. Le vol ne couvre plus que l'envoi.
-  await ouvrirOnglet('parcourir')
-  const rangees = page.locator('[data-browse-row]')
-  // Un seul niveau demande a l'ouverture : la root ne contient que `Album`,
-  // et aucun fichier audio a son sommet.
-  await expect(rangees).toHaveCount(1)
-  await expect(rangees.first().locator('[data-browse-name]')).toHaveText('Album')
-  // Entrer dans le dossier : le browser remplace le niveau displayed, il ne
-  // le deplie step en dessous.
-  await rangees.first().locator('[data-browse-dir]').click()
-  // Les listes de lecture viennent **avant** les tracks : c'est souvent elles
-  // qu'on cherche dans un dossier d'album, et une list noyee sous cent
-  // files ne se voit step. Et `Album` a disparu de l'ecran : c'est le niveau
-  // precedent, remplace par celui qu'on vient d'ouvrir.
+  // --- Browse, then add the folder recursively --------------------------------
+  // No reload here, and that is the regression this step pins down: the Browse
+  // panel requests its first level from a watcher that fires **during** the
+  // render triggered by the save. As long as the page's single in-flight
+  // request also covered the read-back, this watcher received `null` and the
+  // level stayed empty indefinitely — measured: `[data-browse-row]` stuck at 0
+  // for the whole 5 s wait. The in-flight request now only covers the send.
+  await openTab('browse')
+  const rows = page.locator('[data-browse-row]')
+  // A single level requested on opening: the root only contains `Album`, and
+  // no audio file at its top.
+  await expect(rows).toHaveCount(1)
+  await expect(rows.first().locator('[data-browse-name]')).toHaveText('Album')
+  // Entering the folder: the browser replaces the displayed level, it does not
+  // unfold it underneath.
+  await rows.first().locator('[data-browse-dir]').click()
+  // Playlists come **before** the tracks: they are often what one looks for in
+  // an album folder, and a list drowned under a hundred files goes unseen. And
+  // `Album` has vanished from the screen: it is the previous level, replaced by
+  // the one just opened.
   await expect(page.locator('[data-browse-name]')).toHaveText([
     'tout.m3u',
     '01.mp3',
     '02.mp3',
     '03.mp3',
   ])
-  // « Ajouter ce dossier » : au sommet d'une source ce bouton n'existe step
-  // (l'ajout de la source entiere vit sur sa ligne, dans le volet Sources),
-  // mais une fois entre dans `Album` il designe le dossier open.
+  // "Add this folder": at the top of a source this button does not exist
+  // (adding the whole source lives on its row, in the Sources panel), but once
+  // inside `Album` it designates the open folder.
   await page.locator('[data-add-current]').click()
-  // Le balayage est **asynchrone** cote plugin : `add_dir` rend la main avant
-  // la fin de la marche, et le protocole d'admin ne pousse rien. C'est le
-  // sondage a la seconde de la page qui fait arriver les tracks — on attend
-  // donc l'state observable, jamais un delai fixe.
-  await ouvrirOnglet('list')
+  // The scan is **asynchronous** on the plugin side: `add_dir` returns before
+  // the walk ends, and the admin protocol pushes nothing. It is the page's
+  // per-second polling that makes the tracks arrive — so we wait for the
+  // observable state, never a fixed delay.
+  await openTab('playlist')
   const tracks = page.locator('[data-track-row]')
   await expect(tracks).toHaveCount(3, { timeout: 30_000 })
   await expect(page.locator('[data-track-name]')).toHaveText(['01', '02', '03'])
-  // Aucun incident de balayage, et aucune piste introuvable : les chemins que
-  // le plugin a memorises se relisent depuis le processus qui les a ecrits.
+  // No scan incident, and no missing track: the paths the plugin memorized are
+  // read back from the process that wrote them.
   await expect(page.locator('[data-scan-error]')).toHaveCount(0)
   await expect(page.locator('[data-track-missing]')).toHaveCount(0)
 
-  // Les durees se relevent en tache de fond, par l'en-tete des files.
+  // Durations are collected in the background, from the files' headers.
   //
-  // Un balayage ne fournit aucune duration — seul un `#EXTINF` en porte — donc la
-  // colonne affichait un tiret. Le plugin lit desormais les en-tetes, par lots,
-  // et la page sonde le temps que ca dure. Les fixtures font 30 s : c'est cette
-  // valeur qu'on doit voir arriver, ce qui prouve une lecture reelle et non une
-  // valeur inventee.
+  // A scan provides no duration — only an `#EXTINF` carries one — so the
+  // column showed a dash. The plugin now reads the headers, in batches, and
+  // the page polls for as long as it takes. The fixtures are 30 s long: that
+  // is the value we must see arrive, which proves a real read and not an
+  // invented value.
   await expect(page.locator('[data-track-row]').first().locator('td').nth(2)).toHaveText(
     /0:(29|30|31)/,
     { timeout: 30_000 },
   )
 
-  // --- Enregistrer, vider, reload ---------------------------------------
+  // --- Save, clear, reload ----------------------------------------------------
   await expect(page.locator('[data-no-saved]')).toBeVisible()
   await page.locator('[data-playlist-name]').fill('journey')
-  // La destination reste le stockage interne : la root de fixtures n'est step
-  // declaree inscriptible, et le plugin refuserait d'y ecrire.
+  // The destination stays the internal storage: the fixtures root is not
+  // declared writable, and the plugin would refuse to write there.
   await page.locator('[data-save-playlist]').click()
   await expect(page.locator('[data-saved-pick] option')).toHaveCount(1)
   await expect(page.locator('[data-saved-pick] option').first()).toContainText('journey')
@@ -185,29 +183,28 @@ test('journey du plugin files : root locale, balayage, list enregistrée, prés�
   await expect(tracks).toHaveCount(0)
   await expect(page.locator('[data-empty-playlist]')).toBeVisible()
 
-  // --- Charger un m3u trouve en parcourant ----------------------------------
-  // Un fichier de list posé sur la source, avec des chemins relatifs a
-  // lui-meme. Il apparait dans le niveau **a part** des tracks, et porte une
-  // action differente : il remplace la list au lieu de s'y ajouter.
-  // Le niveau open est toujours `Album`, etabli par l'etape de journey
-  // ci-dessus : rien ne l'a fait changer depuis (ajouter, enregistrer, vider
-  // et reload la list ne navigue step ailleurs). Le detour par l'onglet
-  // Liste non plus, et c'est precisement ce que `force-mount` garantit — sans
-  // lui le volet serait remonte sur la root de la source.
-  await ouvrirOnglet('parcourir')
-  const ligneM3u = page
+  // --- Load an m3u found while browsing --------------------------------------
+  // A playlist file placed on the source, with paths relative to itself. It
+  // appears in the level **apart** from the tracks, and carries a different
+  // action: it replaces the list instead of appending to it.
+  // The open level is still `Album`, established by the journey step above:
+  // nothing has changed it since (adding, saving, clearing and reloading the
+  // list does not navigate elsewhere). Nor does the detour through the List
+  // tab, and that is precisely what `force-mount` guarantees — without it the
+  // panel would be remounted on the source root.
+  await openTab('browse')
+  const m3uRow = page
     .locator('[data-browse-row]')
     .filter({ has: page.locator('[data-browse-name]', { hasText: 'tout.m3u' }) })
-  await expect(ligneM3u).toHaveCount(1)
-  // Et surtout step l'action d'ajout d'une piste : le geste juste ne doit step
-  // etre un choix parmi deux.
-  await expect(ligneM3u.locator('[data-add-file]')).toHaveCount(0)
-  await ligneM3u.locator('[data-load-m3u]').click()
-  await ouvrirOnglet('list')
+  await expect(m3uRow).toHaveCount(1)
+  // And above all not the add-a-track action: the right gesture must not be a
+  // choice between two.
+  await expect(m3uRow.locator('[data-add-file]')).toHaveCount(0)
+  await m3uRow.locator('[data-load-m3u]').click()
+  await openTab('playlist')
   await expect(tracks).toHaveCount(3)
-  // Les chemins relatifs se sont resolus contre le repertoire du m3u : des
-  // tracks marquees introuvables signaleraient une resolution contre le mauvais
-  // repertoire.
+  // The relative paths resolved against the m3u's directory: tracks marked
+  // missing would signal a resolution against the wrong directory.
   await expect(page.locator('[data-track-missing]')).toHaveCount(0)
 
   await page.locator('[data-clear]').click()
@@ -215,44 +212,44 @@ test('journey du plugin files : root locale, balayage, list enregistrée, prés�
 
   await page.locator('[data-load-playlist]').click()
   await expect(tracks).toHaveCount(3)
-  // Les chemins ont survecu a l'goTo-retour par le m3u interne : une list
-  // rechargee dont les tracks seraient marquees introuvables signalerait des
-  // chemins relatifs la ou le stockage interne exige de l'absolu.
+  // The paths survived the round trip through the internal m3u: a reloaded
+  // list whose tracks were marked missing would signal relative paths where
+  // the internal storage requires absolute ones.
   await expect(page.locator('[data-track-missing]')).toHaveCount(0)
   await expect(page.locator('[data-track-name]')).toHaveText(['01', '02', '03'])
 
-  // --- L'accueil : la grille suit la source active -------------------------
+  // --- The home page: the grid follows the active source ----------------------
   await page.goto('/')
   await expect(page.locator('[data-source]')).toHaveText('radio')
-  // `SourceCycle` : le coeur trie les sources par nom (`files`, `radio`) et
-  // demarre sur celle que `state.json` a memorisee — `radio`. Un cycle mene
-  // donc a `files`, un second ramene.
+  // `SourceCycle`: the core sorts the sources by name (`files`, `radio`) and
+  // starts on the one `state.json` memorized — `radio`. One cycle therefore
+  // leads to `files`, a second one brings it back.
   const source = page.getByRole('button', { name: 'Source', exact: true })
   await source.click()
   await expect(page.locator('[data-source]')).toHaveText('files')
-  // Trois tracks, trois numeros : le count est declare par la moitie Source a
-  // l'activation, et c'est lui qui arme la telecommande.
+  // Three tracks, three numbers: the count is declared by the Source half on
+  // activation, and it is what arms the remote.
   await expect(page.locator('[data-preset-button]')).toHaveCount(3)
   await expect(page.locator('[data-preset-count]')).toContainText('3')
-  // Pas de pagination sous dix preselections.
+  // No pagination under ten presets.
   await expect(page.locator('[data-preset-prev]')).toHaveCount(0)
   await expect(page.locator('[data-preset-next]')).toHaveCount(0)
-  // **Et chaque tuile porte un titre**, comme celles de la radio. La source ne
-  // declarait qu'un count, donc le corps par defaut de `list_presets` rendait
-  // une list vide et la grille n'affichait que des numeros nus. Le chemin
-  // complet ne se voit qu'ici : la source enumere, le coeur tient le
-  // catalogue, `/api/presets` le sert, la grille le lit.
+  // **And every tile carries a title**, like the radio's. The source only
+  // declared a count, so the default body of `list_presets` returned an empty
+  // list and the grid only showed bare numbers. The complete path is only seen
+  // here: the source enumerates, the core holds the catalogue, `/api/presets`
+  // serves it, the grid reads it.
   await expect(page.locator('[data-preset-name]')).toHaveText(['01', '02', '03'])
 
-  // Choisir une piste par son numero doit reellement y goTo.
+  // Choosing a track by its number must really go there.
   //
-  // C'est le defaut central de ce chantier, et seul un journey avec un vrai
-  // mpv pouvait le voir : le coeur chargeait le m3u par `loadfile`, que mpv ne
-  // deplie qu'**apres** coup (mesure : `playlist-count` vaut 1, puis 3 apres un
-  // `end-file`). Le `playlist-pos` enchaine tombait donc hors bornes, la
-  // lecture repartait de la piste 1, et l'affichage perdait numero et nom.
-  // `loadlist` deplie sur-le-champ. Aucun test unitaire ne pouvait l'attraper :
-  // il n'y a step de mpv dedans.
+  // This is the central defect of this work, and only a journey with a real
+  // mpv could see it: the core loaded the m3u with `loadfile`, which mpv only
+  // unfolds **afterwards** (measured: `playlist-count` is 1, then 3 after an
+  // `end-file`). The chained `playlist-pos` therefore fell out of bounds,
+  // playback restarted from track 1, and the display lost number and name.
+  // `loadlist` unfolds on the spot. No unit test could catch it: there is no
+  // mpv in there.
   await page.locator('[data-preset-button]').nth(1).click()
   await expect(page.locator('[data-player-preset]')).toHaveText('2')
   await expect(page.locator('[data-player-preset-name]')).toHaveText('02')
@@ -260,150 +257,148 @@ test('journey du plugin files : root locale, balayage, list enregistrée, prés�
   await expect(page.locator('[data-player-preset]')).toHaveText('3')
   await expect(page.locator('[data-player-preset-name]')).toHaveText('03')
 
-  // Stop, puis Lecture : la lecture repart sur la piste ecoutee.
+  // Stop, then Play: playback resumes on the track being listened to.
   //
-  // `stop` vide la list de mpv, si bien que « basculer la pause » n'avait plus
-  // rien a resume : la touche Lecture ne faisait rien du tout, sur toutes les
-  // sources. Elle redemande desormais a la source active de jouer.
+  // `stop` empties mpv's playlist, so that "toggle pause" had nothing left to
+  // resume: the Play key did nothing at all, on every source. It now asks the
+  // active source to play again.
   //
-  // Et un arret **garde la piste armee** a l'affichage — numero et nom — au lieu
-  // de ne laisser qu'un statut nu : l'afficheur dit ainsi « rien ne joue, voila
-  // ce qui repartira ». C'est ce que cette etape verifie de bout en bout.
+  // And a stop **keeps the track armed** on the display — number and name —
+  // instead of leaving only a bare status: the display thus says "nothing is
+  // playing, here is what will start again". That is what this step verifies
+  // end to end.
   //
-  // Ce qu'elle ne sait **step** distinguer : stopped ou en lecture, l'affichage est
-  // le meme sur ces fixtures (une sinusoide n'a aucune metadonnee, donc step de
-  // bloc « en cours de lecture » a observe). La discrimination reelle est portee
-  // par les tests unitaires de `stop()` et de `PlayPause`.
+  // What it **cannot** distinguish: stopped or playing, the display is the same
+  // on these fixtures (a sine wave has no metadata, hence no "now playing"
+  // block to observe). The real discrimination is carried by the unit tests of
+  // `stop()` and `PlayPause`.
   await page.getByRole('button', { name: 'Stop', exact: true }).click()
   await expect(page.locator('[data-player-preset]')).toHaveText('3')
   await expect(page.locator('[data-player-preset-name]')).toHaveText('03')
   await page.getByRole('button', { name: 'Play/Pause', exact: true }).click()
   await expect(page.locator('[data-player-preset]')).toHaveText('3')
 
-  // La progression, de bout en bout : mpv mesure, le coeur publie une trame
-  // par seconde, la SPA dessine. Aucun test unitaire ne couvre cette chaine —
-  // il n'y a step de mpv dedans.
+  // Progress, end to end: mpv measures, the core publishes one frame per
+  // second, the SPA draws. No unit test covers this chain — there is no mpv in
+  // there.
   //
-  // Ces fixtures sont des sinusoides **sans aucune metadonnee** : elles
-  // prouvent au passage que la barre ne depend step d'un titre. Tant qu'elle
-  // vivait dans le bloc « en ecoute », garde par la presence de metadonnees,
-  // elle etait invisible sur un fichier sans etiquettes — c'est-a-dire
-  // precisement quand mpv connait le mieux la position.
+  // These fixtures are sine waves **without any metadata**: in passing they
+  // prove that the bar does not depend on a title. As long as it lived in the
+  // "now playing" block, guarded by the presence of metadata, it was invisible
+  // on a file without tags — that is, precisely when mpv knows the position
+  // best.
   const position = page.locator('[data-position]')
   await expect(position).toBeVisible({ timeout: 15_000 })
-  const premiere = await position.textContent()
-  await expect(position).not.toHaveText(premiere ?? '', { timeout: 10_000 })
-  // Un fichier local se parcourt : la barre est un curseur, nomme et
-  // atteignable au clavier. Le role et l'aria-label vivent sur la poignee, step
-  // sur l'enveloppe (voir Slider.vue du kit : l'aria-label descend sur
-  // `SliderThumb`, seul element que le player d'ecran annonce).
-  const poignee = page.locator('[data-barre] [role="slider"]')
-  await expect(poignee).toHaveCount(1)
-  await expect(poignee).toHaveAttribute('aria-label', /.+/)
+  const first = await position.textContent()
+  await expect(position).not.toHaveText(first ?? '', { timeout: 10_000 })
+  // A local file is seekable: the bar is a slider, named and reachable from
+  // the keyboard. The role and the aria-label live on the thumb, not on the
+  // wrapper (see the kit's Slider.vue: the aria-label goes down to
+  // `SliderThumb`, the only element a screen reader announces).
+  const thumb = page.locator('[data-barre] [role="slider"]')
+  await expect(thumb).toHaveCount(1)
+  await expect(thumb).toHaveAttribute('aria-label', /.+/)
 
-  // Le glisser de la barre, de bout en bout : un vrai geste souris pose un
-  // `SeekTo`, que mpv applique reellement. Aucun test unitaire ne peut
-  // l'attraper (voir `ProgressBar.test.ts`, glisser simule sur le
-  // composant) ni le pupitre phone (source non `seekable`).
-  // `data-barre` est pose sur la root du Slider elle-meme (voir Slider.vue
-  // du kit : attrs non-`aria-*` transmis a `SliderRoot`, qui porte deja
-  // `data-slot="slider"`) — meme motif que `data-volume-curseur` dans
-  // phone.spec.ts, step un descendant.
-  const pisteBarre = page.locator('[data-barre]')
-  const boiteBarre = await pisteBarre.boundingBox()
-  if (!boiteBarre) throw new Error('piste de progression invisible')
-  const yBarre = boiteBarre.y + boiteBarre.height / 2
+  // Dragging the bar, end to end: a real mouse gesture issues a `SeekTo`,
+  // which mpv really applies. No unit test can catch it (see
+  // `ProgressBar.test.ts`, simulated drag on the component) nor the phone
+  // console (non-`seekable` source).
+  // `data-barre` is set on the Slider root itself (see the kit's Slider.vue:
+  // non-`aria-*` attrs forwarded to `SliderRoot`, which already carries
+  // `data-slot="slider"`) — same pattern as `data-volume-curseur` in
+  // phone.spec.ts, not a descendant.
+  const barTrack = page.locator('[data-barre]')
+  const barBox = await barTrack.boundingBox()
+  if (!barBox) throw new Error('progress track not visible')
+  const yBar = barBox.y + barBox.height / 2
   const seekResponse = page.waitForResponse(
     (r) => r.url().endsWith('/api/command') && r.request().method() === 'POST',
   )
-  // Meme motif que le curseur de volume (voir phone.spec.ts) : partir
-  // d'un point de la piste, step forcement de la poignee elle-meme.
-  await page.mouse.move(boiteBarre.x + boiteBarre.width * 0.2, yBarre)
+  // Same pattern as the volume slider (see phone.spec.ts): start from a point
+  // on the track, not necessarily from the thumb itself.
+  await page.mouse.move(barBox.x + barBox.width * 0.2, yBar)
   await page.mouse.down()
-  await page.mouse.move(boiteBarre.x + boiteBarre.width * 0.5, yBarre, { steps: 5 })
+  await page.mouse.move(barBox.x + barBox.width * 0.5, yBar, { steps: 5 })
   await page.mouse.up()
   expect((await seekResponse).status()).toBe(204)
-  // Le 204 ne prouve que la mise en file (voir le meme commentaire dans
-  // phone.spec.ts) : on sonde une connexion SSE fraiche jusqu'a une trame
-  // qui montre le saut vraiment applique par mpv, plutot que de supposer un
-  // delai fixe.
-  const lireProgressionSse = () =>
+  // The 204 only proves the enqueueing (see the same comment in phone.spec.ts):
+  // we probe a fresh SSE connection until a frame shows the seek really
+  // applied by mpv, rather than assuming a fixed delay.
+  const readProgressSse = () =>
     page.evaluate(
       () =>
         new Promise<{ position: number | null; duration: number | null }>((resolve, reject) => {
-          const flux = new EventSource('/api/player')
-          const timer = setTimeout(() => { flux.close(); reject(new Error('aucune trame en 2 s')) }, 2000)
-          flux.onmessage = (e) => {
+          const stream = new EventSource('/api/player')
+          const timer = setTimeout(() => { stream.close(); reject(new Error('no frame within 2 s')) }, 2000)
+          stream.onmessage = (e) => {
             clearTimeout(timer)
-            flux.close()
-            const trame = JSON.parse(e.data as string) as { position_s: number | null; duration_s: number | null }
-            resolve({ position: trame.position_s, duration: trame.duration_s })
+            stream.close()
+            const frame = JSON.parse(e.data as string) as { position_s: number | null; duration_s: number | null }
+            resolve({ position: frame.position_s, duration: frame.duration_s })
           }
         }),
     )
-  let derniereProgression: { position: number | null; duration: number | null } = { position: null, duration: null }
+  let lastProgress: { position: number | null; duration: number | null } = { position: null, duration: null }
   await expect
     .poll(async () => {
-      derniereProgression = await lireProgressionSse()
-      const { position, duration } = derniereProgression
+      lastProgress = await readProgressSse()
+      const { position, duration } = lastProgress
       if (position == null || duration == null || duration <= 0) return false
       return position >= duration * 0.4
     }, { timeout: 10_000 })
     .toBe(true)
 
-  // Remettre le harness dans l'state ou on l'a trouve : les journey partagent
-  // un unique coeur et `files.spec.ts` s'execute **avant** `journey.spec.ts`,
-  // qui exige la radio active. La remise est verifiee, step esperee.
+  // Put the harness back in the state we found it: the journeys share a single
+  // core and `files.spec.ts` runs **before** `journey.spec.ts`, which requires
+  // the radio to be active. The restoration is verified, not hoped for.
   await source.click()
   await expect(page.locator('[data-source]')).toHaveText('radio')
 
-  // --- L'assistant reseau, sans NAS ----------------------------------------
-  // En last, et deliberement : declarer un partage demande une
-  // reconciliation de montage qui echouera ici (ni polkit ni unite systemd
-  // dans le bac a sable), et cet echec ne doit surtout step defaire ce que les
-  // etapes precedentes ont etabli.
+  // --- The network wizard, without a NAS --------------------------------------
+  // Last, and deliberately: declaring a share requires a mount reconciliation
+  // that will fail here (neither polkit nor a systemd unit in the sandbox),
+  // and that failure must above all not undo what the previous steps
+  // established.
   //
-  // Le `smbclient` que le plugin trouve est celui du harness, qui rend des
-  // sorties **captees sur un vrai NAS**. C'est ce qui rend cette etape jouable
-  // sur n'importe quelle machine tout en eprouvant l'analyse contre du reel.
+  // The `smbclient` the plugin finds is the harness's, which returns outputs
+  // **captured on a real NAS**. That is what makes this step playable on any
+  // machine while testing the parsing against real data.
   await page.goto('/plugins/files/')
-  // Le rechargement ramene l'onglet par defaut, la list.
-  await ouvrirOnglet('sources')
+  // The reload brings back the default tab, the list.
+  await openTab('sources')
   await page.locator('[data-add-share]').click()
   await page.locator('[data-host]').fill('192.168.1.15')
   await page.locator('[data-user]').fill('ritornello')
   await page.locator('[data-password]').fill('peu-importe')
   await page.locator('[data-connect]').click()
-  // Deux partages, step trois : `IPC$` porte le type `IPC|` et non `Disk|`, et
-  // la ligne de bruit « SMB1 disabled » n'est step un partage non plus.
+  // Two shares, not three: `IPC$` carries the type `IPC|` and not `Disk|`, and
+  // the "SMB1 disabled" noise line is not a share either.
   await expect(page.locator('[data-share]')).toHaveCount(2, { timeout: 30_000 })
   await page.locator('[data-share]', { hasText: 'music' }).first().click()
-  // Un nom de dossier a espaces survit a l'analyse par la droite du `ls` :
-  // c'est le cas qui condamne toute lecture par la gauche.
-  await expect(page.locator('[data-choix-dossier]', { hasText: 'Yann Tiersen' })).toHaveCount(1)
-  await page.locator('[data-choix-dossier]', { hasText: 'Yann Tiersen' }).click()
+  // A folder name with spaces survives the right-to-left parsing of `ls`: it is
+  // the case that condemns any left-to-right read.
+  await expect(page.locator('[data-picker-folder]', { hasText: 'Yann Tiersen' })).toHaveCount(1)
+  await page.locator('[data-picker-folder]', { hasText: 'Yann Tiersen' }).click()
   await page.locator('[data-choose]').click()
 
-  // La source n'est plus declaree quand le montage echoue : la declaration est
-  // defaite en entier (table, fichier d'identifiants), et le refus remonte a
-  // la popin plutot que de la fermer — perdre la saisie parce qu'un NAS dort
-  // serait la pire des reponses. Une seule source reste : celle du dossier
-  // local etabli au debut du journey.
+  // The source is no longer declared when the mount fails: the declaration is
+  // undone entirely (table, credentials file), and the refusal surfaces in the
+  // dialog rather than closing it — losing the input because a NAS is asleep
+  // would be the worst response. A single source remains: the local folder
+  // established at the beginning of the journey.
   await expect(page.locator('[data-source-row]')).toHaveCount(1)
-  // Le refus s'displayed verbatim dans la popin, step seulement sur la page
-  // (derriere son voile gris, le bandeau de la page serait invisible au
-  // moment ou il count).
+  // The refusal shows verbatim in the dialog, not only on the page (behind its
+  // grey veil, the page banner would be invisible at the moment it matters).
   await expect(page.locator('[data-dlg-message]')).toContainText(
     'the share was not mounted, so it has not been declared',
   )
-  // La popin reste ouverte, saisie comprise : rien ne force a tout retaper.
-  // Les deux fields, et step seulement l'hote : la promesse porte sur la
-  // saisie entiere.
-  await expect(page.locator('[data-dlg-partage]')).toBeVisible()
+  // The dialog stays open, input included: nothing forces retyping everything.
+  // Both fields, and not only the host: the promise covers the whole input.
+  await expect(page.locator('[data-share-dialog]')).toBeVisible()
   await expect(page.locator('[data-host]')).toHaveValue('192.168.1.15')
   await expect(page.locator('[data-user]')).toHaveValue('ritornello')
-  const apresPartage = await (await request.get('/plugins/files/api/data')).json()
-  expect(apresPartage.roots).toHaveLength(1)
-  // Et le mot de passe n'a jamais atteint la page, meme dans ce refus.
-  expect(JSON.stringify(apresPartage)).not.toContain('peu-importe')
+  const afterShare = await (await request.get('/plugins/files/api/data')).json()
+  expect(afterShare.roots).toHaveLength(1)
+  // And the password never reached the page, even in this refusal.
+  expect(JSON.stringify(afterShare)).not.toContain('peu-importe')
 })

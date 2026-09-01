@@ -15,8 +15,8 @@ import { unavailable, REMOTE_MUTE, REMOTE_POWER, REMOTE_SOURCE } from './remoteC
 
 const { t } = useCatalog()
 
-// L'unique connexion SSE de la page vit ici : la carte Lecteur, le transport,
-// le volume et la grille consomment le meme state, pousse par `/api/player`.
+// The page's single SSE connection lives here: the Player card, the transport,
+// the volume and the grid consume the same state, pushed by `/api/player`.
 const { state, ouvre } = usePlayer()
 onMounted(ouvre)
 
@@ -25,16 +25,16 @@ async function send(cmd: Command) {
   if (err) toast.error(err)
 }
 
-// Les noms des tuiles : charges au montage, recharges quand la source active
-// change — c'est la trame qui le dit, rien n'est sonde.
+// The tile names: loaded on mount, reloaded when the active source changes —
+// it is the frame that says so, nothing is probed.
 const { reload, nameOf } = usePresets()
 onMounted(reload)
-watch(() => state.value?.source, (apres, avant) => {
-  if (apres !== undefined && apres !== avant) reload()
+watch(() => state.value?.source, (after, before) => {
+  if (after !== undefined && after !== before) reload()
 })
 
-// Le step de deplacement au clavier de la barre : celui des touches physiques,
-// servi par /api/settings. Le defaut couvre le temps du GET et son echec.
+// The keyboard seek step of the bar: that of the physical keys, served by
+// /api/settings. The default covers the duration of the GET and its failure.
 const settings = ref<SettingsPayload>({
   volume_repeat_initial_ms: 800,
   volume_repeat_interval_ms: 200,
@@ -58,15 +58,15 @@ onMounted(async () => {
 </script>
 
 <template>
-  <!-- Une colonne sur phone ; deux cartes cote a cote a partir de `md`. -->
+  <!-- One column on a phone; two cards side by side from `md` up. -->
   <div class="grid gap-4 md:grid-cols-2 md:items-start">
     <PlayerCard
       :state="state"
       :seek-step="settings.seek_step_s"
       @seek="(s: number) => send({ cmd: 'SeekTo', arg: s })"
     >
-      <!-- Les deux commandes qui portent sur l'appareil entier, au coin de la
-           carte : la source, puis la veille au coin extreme. -->
+      <!-- The two commands bearing on the whole device, in the corner of the
+           card: the source, then standby in the far corner. -->
       <template #actions>
         <div class="flex items-center gap-1">
           <Button

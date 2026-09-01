@@ -1,33 +1,33 @@
-//! SourcesCatalog i18n partagé de ritornello.
+//! Shared i18n catalog for ritornello.
 //!
-//! Deux couches indépendantes par composant :
-//! - `own` : anglais embarqué du composant (`en.toml`), surchargé par le pack
-//!   externe `<root>/<composant>/<lang>.toml`.
-//! - `common` : anglais embarqué dans ce crate, surchargé par
+//! Two independent layers per component:
+//! - `own`: the component's embedded English (`en.toml`), overlaid by the
+//!   external pack `<root>/<component>/<lang>.toml`.
+//! - `common`: English embedded in this crate, overlaid by
 //!   `<root>/common/<lang>.toml`.
 //!
-//! Résolution par clé : `own` → `common` → la clé elle-même (filet de secours).
-//! Interpolation : le composant fait `catalog.get(key)` puis
-//! `str::replace("{n}", &n.to_string())` (aucun moteur de template).
+//! Resolution by key: `own` → `common` → the key itself (safety net).
+//! Interpolation: the component does `catalog.get(key)` then
+//! `str::replace("{n}", &n.to_string())` (no template engine).
 
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Vocabulaire commun anglais embarqué dans le crate.
+/// Common English vocabulary embedded in the crate.
 const COMMON_EN: &str = include_str!("locales/common_en.toml");
 
-/// Parse pur d'un pack TOML plat (`clé = "valeur"`). Renvoie l'erreur de parse
-/// pour l'appelant qui souhaite la logguer (chargement des couches de base).
+/// Pure parse of a flat TOML pack (`key = "value"`). Returns the parse error
+/// to the caller that wants to log it (loading of the base layers).
 pub fn try_parse(s: &str) -> Result<HashMap<String, String>, toml::de::Error> {
     toml::from_str(s)
 }
 
-/// Surcharge `base` avec le pack TOML lu sur disque en `path`. File
-/// **absent** : silencieux (cas normal — la plupart des composants n'ont pas de
-/// pack pour la plupart des langues). Toute autre erreur — droits refusés,
-/// UTF-8 invalide, TOML invalide — laisse `base` inchangée mais est **tracée** :
-/// un pack présent que l'opérateur a voulu installer ne doit pas disparaître
-/// sans une line de journal.
+/// Overlays `base` with the TOML pack read from disk at `path`. File
+/// **absent**: silent (the normal case — most components have no
+/// pack for most languages). Any other error — permission denied,
+/// invalid UTF-8, invalid TOML — leaves `base` unchanged but is **traced**:
+/// a pack present that the operator meant to install must not disappear
+/// without a log line.
 fn overlay_from_disk(base: &mut HashMap<String, String>, path: &Path) {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -49,10 +49,10 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// Construit le sources_catalog d'un composant pour une langue donnée.
-    /// Part de l'anglais embarqué (`own_en` pour `own`, `COMMON_EN` pour
-    /// `common`), puis superpose les packs externes présents et valides.
-    /// Jamais de panique : un pack absent ou invalide laisse l'anglais.
+    /// Builds the catalog of a component for a given language.
+    /// Starts from the embedded English (`own_en` for `own`, `COMMON_EN` for
+    /// `common`), then layers on the external packs that are present and valid.
+    /// Never panics: an absent or invalid pack leaves the English in place.
     pub fn load(component: &str, locale: &str, root: &Path, own_en: &str) -> Catalog {
         let mut own = match try_parse(own_en) {
             Ok(m) => m,
@@ -73,7 +73,7 @@ impl Catalog {
         Catalog { own, common }
     }
 
-    /// Résout une clé : `own` → `common` → la clé elle-même.
+    /// Resolves a key: `own` → `common` → the key itself.
     pub fn get<'a>(&'a self, key: &'a str) -> &'a str {
         self.own
             .get(key)
@@ -82,14 +82,14 @@ impl Catalog {
             .unwrap_or(key)
     }
 
-    /// Carte plate de **toutes** les clés connues, `own` surchargeant
-    /// `common` — même order de priorité que `get`, mais exposé d'un bloc.
+    /// Flat map of **all** known keys, `own` overriding
+    /// `common` — the same priority order as `get`, but exposed as one block.
     ///
-    /// Sert à livrer le sources_catalog au navigateur (`GET /api/i18n`) : la SPA
-    /// résout ses clés côté client, ce qui remplace la substitution `{{clé}}`
-    /// d'autrefois. Les valeurs restent des **données** de bout en bout :
-    /// aucun caractère n'est dangereux, contrairement à la substitution brute
-    /// dans du source JS.
+    /// Used to ship the catalog to the browser (`GET /api/i18n`): the SPA
+    /// resolves its keys client-side, which replaces the `{{key}}`
+    /// substitution of old. The values remain **data** end to end:
+    /// no character is dangerous, unlike raw substitution
+    /// into JS source.
     pub fn entries(&self) -> HashMap<&str, &str> {
         let mut out: HashMap<&str, &str> =
             self.common.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -105,117 +105,117 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    /// Écrit `<root>/<sous_dossier>/<fichier>` et retourne le TempDir racine.
-    fn ecrire(dir: &std::path::Path, sous_dossier: &str, fichier: &str, contenu: &str) {
-        let d = dir.join(sous_dossier);
+    /// Writes `<root>/<subdir>/<file>` and returns the root TempDir.
+    fn write(dir: &std::path::Path, subdir: &str, file: &str, content: &str) {
+        let d = dir.join(subdir);
         std::fs::create_dir_all(&d).unwrap();
-        let mut f = std::fs::File::create(d.join(fichier)).unwrap();
-        f.write_all(contenu.as_bytes()).unwrap();
+        let mut f = std::fs::File::create(d.join(file)).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
     }
 
     #[test]
-    fn own_prime_sur_common() {
+    fn own_takes_priority_over_common() {
         let dir = tempfile::tempdir().unwrap();
-        // own_en définit "error", common l'a aussi : own doit gagner.
+        // own_en defines "error", common has it too: own must win.
         let cat = Catalog::load("core", "en", dir.path(), "error = \"own-error\"\n");
         assert_eq!(cat.get("error"), "own-error");
     }
 
     #[test]
-    fn externe_surcharge_l_embarque_own() {
+    fn an_external_pack_overrides_the_embedded_own() {
         let dir = tempfile::tempdir().unwrap();
-        ecrire(dir.path(), "core", "fr.toml", "standby = \"VEILLE\"\n");
+        write(dir.path(), "core", "fr.toml", "standby = \"VEILLE\"\n");
         let cat = Catalog::load("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
         assert_eq!(cat.get("standby"), "VEILLE");
     }
 
     #[test]
-    fn externe_surcharge_l_embarque_common() {
+    fn an_external_pack_overrides_the_embedded_common() {
         let dir = tempfile::tempdir().unwrap();
-        ecrire(dir.path(), "common", "fr.toml", "error = \"Erreur\"\n");
+        write(dir.path(), "common", "fr.toml", "error = \"Erreur\"\n");
         let cat = Catalog::load("core", "fr", dir.path(), "");
         assert_eq!(cat.get("error"), "Erreur");
     }
 
     #[test]
-    fn cle_manquante_repli_anglais_puis_cle_elle_meme() {
+    fn a_missing_key_falls_back_to_english_then_to_the_key_itself() {
         let dir = tempfile::tempdir().unwrap();
         let cat = Catalog::load("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
-        // pas de pack fr : on garde l'anglais embarqué
+        // no fr pack: the embedded English is kept
         assert_eq!(cat.get("standby"), "STANDBY");
-        // clé inconnue : on renvoie la clé elle-même
-        assert_eq!(cat.get("inconnue"), "inconnue");
+        // unknown key: the key itself is returned
+        assert_eq!(cat.get("unknown"), "unknown");
     }
 
     #[test]
-    fn toml_invalide_est_ignore_sans_paniquer() {
+    fn invalid_toml_is_ignored_without_panicking() {
         let dir = tempfile::tempdir().unwrap();
-        ecrire(dir.path(), "core", "fr.toml", "ceci = n'est pas valide");
+        write(dir.path(), "core", "fr.toml", "this = is not valid");
         let cat = Catalog::load("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
-        assert_eq!(cat.get("standby"), "STANDBY"); // repli anglais, pas de panique
+        assert_eq!(cat.get("standby"), "STANDBY"); // fallback to English, no panic
     }
 
     #[test]
-    fn try_parse_du_common_en_embarque_est_non_vide() {
+    fn try_parse_of_the_embedded_common_en_is_non_empty() {
         assert!(!try_parse(COMMON_EN).unwrap().is_empty());
     }
 
     #[test]
-    fn try_parse_renvoie_err_sur_toml_invalide() {
-        assert!(try_parse("ceci n'est pas du toml =").is_err());
+    fn try_parse_returns_err_on_invalid_toml() {
+        assert!(try_parse("this is not toml =").is_err());
     }
 
     #[test]
-    fn entries_fusionne_own_par_dessus_common() {
+    fn entries_merges_own_over_common() {
         let dir = tempfile::tempdir().unwrap();
-        // `error` existe dans le common embarque : `own` doit primer, comme
-        // dans `get`.
-        let cat = Catalog::load("core", "en", dir.path(), "error = \"own-error\"\nautre = \"x\"\n");
+        // `error` exists in the embedded common: `own` must take priority, as
+        // in `get`.
+        let cat = Catalog::load("core", "en", dir.path(), "error = \"own-error\"\nother = \"x\"\n");
         let e = cat.entries();
         assert_eq!(e.get("error").copied(), Some("own-error"));
-        assert_eq!(e.get("autre").copied(), Some("x"));
-        // Les cles du common non redefinies sont presentes : la carte est
-        // complete, c'est elle qui alimente `t()` cote navigateur.
+        assert_eq!(e.get("other").copied(), Some("x"));
+        // The common keys not redefined are present: the map is
+        // complete, and it's what feeds `t()` on the browser side.
         assert!(e.len() > 1);
-        assert!(e.keys().any(|k| *k == "play"), "le vocabulaire commun doit etre inclus");
+        assert!(e.keys().any(|k| *k == "play"), "the common vocabulary must be included");
     }
 
-    /// Pack `common` français livré dans le dépôt. Même invariant de parité que
-    /// pour chaque composant (voir `core.rs::parite_des_cles_entre_len_embarque_et_le_pack_fr`),
-    /// qui manquait à la couche commune : rien ne signalait qu'une clé ajoutée
-    /// dans `common_en.toml` n'avait pas de traduction française.
-    fn pack_common_fr() -> String {
+    /// French `common` pack shipped in the repo. Same parity invariant as
+    /// for each component (see `core::settings::key_parity_between_the_embedded_en_and_the_fr_pack`),
+    /// which was missing from the common layer: nothing flagged a key added
+    /// to `common_en.toml` that had no French translation.
+    fn common_fr_pack() -> String {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../deploy/locales/common/fr.toml");
-        std::fs::read_to_string(p).expect("pack common fr livre")
+        std::fs::read_to_string(p).expect("common fr pack shipped")
     }
 
     #[test]
-    fn parite_des_cles_entre_le_common_embarque_et_le_pack_fr() {
+    fn key_parity_between_the_embedded_common_and_the_fr_pack() {
         let en = try_parse(COMMON_EN).unwrap();
-        let fr = try_parse(&pack_common_fr()).unwrap();
-        let mut cles_en: Vec<&String> = en.keys().collect();
-        let mut cles_fr: Vec<&String> = fr.keys().collect();
-        cles_en.sort();
-        cles_fr.sort();
-        assert_eq!(cles_en, cles_fr, "jeux de cles common en/fr divergents");
+        let fr = try_parse(&common_fr_pack()).unwrap();
+        let mut en_keys: Vec<&String> = en.keys().collect();
+        let mut fr_keys: Vec<&String> = fr.keys().collect();
+        en_keys.sort();
+        fr_keys.sort();
+        assert_eq!(en_keys, fr_keys, "common en/fr key sets diverge");
     }
 
     #[test]
-    fn les_cles_de_chargement_dihm_de_plugin_vivent_dans_la_couche_commune() {
-        // Ces trois clés sont affichées par le shell de la SPA
-        // (`web/app/src/views/PluginView.ts`). Elles doivent vivre dans
-        // `common` — héritée par TOUS les catalogues — et non dans celui du
-        // cœur : le shell les résout d'abord dans le sources_catalog **du plugin**,
-        // qui est clear précisément quand le plugin est injoignable, le cas même
-        // qui produit `plugin_unavailable`.
+    fn the_plugin_ui_loading_keys_live_in_the_common_layer() {
+        // These three keys are shown by the SPA shell
+        // (`web/app/src/views/PluginView.ts`). They must live in
+        // `common` — inherited by ALL catalogs — and not in the core's own:
+        // the shell resolves them first in the **plugin's** catalog,
+        // which is empty precisely when the plugin is unreachable, the very case
+        // that produces `plugin_unavailable`.
         let dir = tempfile::tempdir().unwrap();
-        // SourcesCatalog d'un plugin dont le `own` ne définit rien : les clés
-        // doivent quand même se résoudre, et jamais renvoyer la clé elle-même.
+        // Catalog of a plugin whose `own` defines nothing: the keys
+        // must still resolve, and never return the key itself.
         //
-        // `plugin_unavailable_cause` a rejoint la liste : c'est la variante qui
-        // nomme la cause du refus, et elle s'affiche exactement dans le même cas
-        // — un plugin injoignable, donc un sources_catalog de plugin clear.
+        // `plugin_unavailable_cause` joined the list: it's the variant that
+        // names the cause of the refusal, and it's shown in exactly the same
+        // case — an unreachable plugin, hence an empty plugin catalog.
         let cat = Catalog::load("radio", "en", dir.path(), "");
         for key in [
             "loading",
@@ -223,17 +223,17 @@ mod tests {
             "plugin_unavailable_cause",
             "plugin_contract_mismatch",
         ] {
-            assert_ne!(cat.get(key), key, "key {key} absente du vocabulaire commun");
-            // `entries()` est ce qui part vers le navigateur : la clé doit y
-            // être, sinon le `t()` de la SPA retombe sur la clé brute.
-            assert!(cat.entries().contains_key(key), "key {key} absente de entries()");
+            assert_ne!(cat.get(key), key, "key {key} absent from the common vocabulary");
+            // `entries()` is what goes to the browser: the key must be
+            // there, otherwise the SPA's `t()` falls back to the raw key.
+            assert!(cat.entries().contains_key(key), "key {key} absent from entries()");
         }
     }
 
     #[test]
-    fn entries_reflete_les_surcharges_externes() {
+    fn entries_reflects_external_overrides() {
         let dir = tempfile::tempdir().unwrap();
-        ecrire(dir.path(), "core", "fr.toml", "standby = \"VEILLE\"\n");
+        write(dir.path(), "core", "fr.toml", "standby = \"VEILLE\"\n");
         let cat = Catalog::load("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
         assert_eq!(cat.entries().get("standby").copied(), Some("VEILLE"));
     }

@@ -4,34 +4,34 @@ import { configDefaults, defineConfig, type Plugin } from 'vitest/config'
 
 const appSrc = fileURLToPath(new URL('./src', import.meta.url))
 const kitSrc = fileURLToPath(new URL('../kit/src', import.meta.url))
-// Prefixe absolu, normalise et termine par '/', contre lequel comparer les
-// importeurs. Une comparaison par sous-chaine (`includes('/web/kit/')`) se
-// declencherait a tort si le depot lui-meme etait clone sous un chemin
-// contenant "web/kit" ailleurs que dans ce monorepo ; un prefixe absolu
-// derive de l'URL reelle du paquet ne peut step produire ce faux positif.
-const kitSrcPrefixe = `${kitSrc.replaceAll('\\', '/').replace(/\/$/, '')}/`
+// Absolute prefix, normalized and ending with '/', to compare importers
+// against. A substring comparison (`includes('/web/kit/')`) would trigger
+// wrongly if the repo itself were cloned under a path containing
+// "web/kit" elsewhere than in this monorepo; an absolute prefix derived
+// from the package's real URL cannot produce that false positive.
+const kitSrcPrefix = `${kitSrc.replaceAll('\\', '/').replace(/\/$/, '')}/`
 
-// `@ritornello/ui` expose ses sources TypeScript brutes (non compilees) :
-// ses propres files importent via l'alias '@', qui designe `web/kit/src`
-// dans son atelier. Le meme alias designe `web/app/src` ici. Vite resolvant
-// les alias par specificateur et non par importeur, un alias global unique
-// casserait l'un des deux ateliers (par ex. Button.vue important
-// `@/lib/utils` se verrait redirige vers `web/app/src/lib/utils`, inexistant).
-// Ce plugin route donc `@/...` vers la root du paquet qui importe.
+// `@ritornello/ui` exposes its raw (uncompiled) TypeScript sources: its own
+// files import via the '@' alias, which points to `web/kit/src` in its
+// own workspace. The same alias points to `web/app/src` here. Since Vite
+// resolves aliases by specifier and not by importer, a single global alias
+// would break one of the two workspaces (e.g. Button.vue importing
+// `@/lib/utils` would get redirected to `web/app/src/lib/utils`, which
+// doesn't exist). This plugin therefore routes `@/...` to the root of the
+// package doing the importing.
 function crossPackageAlias(): Plugin {
   return {
     name: 'ritornello-cross-package-alias',
     resolveId(source, importer) {
       if (!source.startsWith('@/') || !importer) return null
-      const importeurNormalise = importer.replaceAll('\\', '/')
-      // `node_modules` (y compris nos propres paquets, symlinkes par npm
-      // workspaces) n'est jamais concerne par cet alias : seuls les
-      // files sources de web/app et de web/kit y ont droit. Sans ce
-      // garde, tout importateur ne matchant step web/kit se voyait
-      // revendique silencieusement par web/app, y compris depuis une
-      // dependance tierce.
-      if (importeurNormalise.includes('/node_modules/')) return null
-      const root = importeurNormalise.startsWith(kitSrcPrefixe) ? kitSrc : appSrc
+      const normalizedImporter = importer.replaceAll('\\', '/')
+      // `node_modules` (including our own packages, symlinked by npm
+      // workspaces) is never concerned by this alias: only source files
+      // of web/app and web/kit are entitled to it. Without this guard,
+      // any importer not matching web/kit would be silently claimed by
+      // web/app, including from a third-party dependency.
+      if (normalizedImporter.includes('/node_modules/')) return null
+      const root = normalizedImporter.startsWith(kitSrcPrefix) ? kitSrc : appSrc
       return this.resolve(source.replace('@/', `${root}/`), importer, { skipSelf: true })
     },
   }
@@ -39,24 +39,24 @@ function crossPackageAlias(): Plugin {
 
 export default defineConfig({
   plugins: [vue(), crossPackageAlias()],
-  // `restoreMocks` : les `vi.spyOn(console, 'warn')` de PluginView.test.ts
-  // fuyaient sinon d'un test a l'autre au sein du meme fichier.
-  // `exclude` : `e2e/*.spec.ts` sont des journey Playwright (Task 13), step
-  // des tests vitest — sans cette exclusion, `vitest run` tenterait de les
-  // executer et echouerait sur l'import de `@playwright/test`.
+  // `restoreMocks`: the `vi.spyOn(console, 'warn')` calls in PluginView.test.ts
+  // would otherwise leak from one test to the next within the same file.
+  // `exclude`: `e2e/*.spec.ts` are Playwright journeys (Task 13), not
+  // vitest tests — without this exclusion, `vitest run` would try to
+  // run them and fail on the `@playwright/test` import.
   test: {
     environment: 'jsdom',
     globals: true,
     restoreMocks: true,
-    // 20 s au lieu des 5 s par defaut, et ce n'est step masquer une lenteur du
-    // produit : quatre tests preexistants tiennent 2 a 4,6 s a eux seuls, non
-    // step en *attendant* quoi que ce soit mais en faisant **transformer** les
-    // vues importees paresseusement (`router.push('/config')` compile la vue a
-    // la volee). Mesure : `router.test.ts` seul prend 2,2 s ; dans la suite
-    // complete, ou plusieurs workers transforment en parallele, il franchissait
-    // les 5 s environ une passe sur deux. Le plafond mesurait donc la load de
-    // la machine, step le code teste — exactement ce qu'un plafond ne doit step
-    // faire.
+    // 20 s instead of the default 5 s, and this is not hiding a product
+    // slowness: four pre-existing tests alone take 2 to 4.6 s, not by
+    // *waiting* for anything but by **transforming** lazily-imported
+    // views (`router.push('/config')` compiles the view on the fly).
+    // Measured: `router.test.ts` alone takes 2.2 s; in the full suite,
+    // where several workers transform in parallel, it crossed the 5 s
+    // mark about every other run. The cap was therefore measuring the
+    // machine's load, not the code under test — exactly what a cap must
+    // not do.
     testTimeout: 20000,
     exclude: [...configDefaults.exclude, 'e2e/**'],
   },

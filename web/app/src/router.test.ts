@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { router } from './router'
 
 describe('router', () => {
-  it('conserve les URL historiques', async () => {
+  it('preserves historical URLs', async () => {
     await router.push('/')
     expect(router.currentRoute.value.name).toBe('home')
     await router.push('/config')
@@ -10,35 +10,36 @@ describe('router', () => {
     await router.push('/plugins/radio/')
     expect(router.currentRoute.value.name).toBe('plugin')
     expect(router.currentRoute.value.params.name).toBe('radio')
-    // La forme canonique ne bouge step : c'est un invariant epingle par ailleurs
-    // cote coeur (`serves_shell("/plugins/radio/")`).
+    // The canonical form does not move: it is an invariant pinned
+    // elsewhere on the core side (`serves_shell("/plugins/radio/")`).
     expect(router.currentRoute.value.fullPath).toBe('/plugins/radio/')
   })
 
-  it("redirige l'ancienne URL /status vers /config", async () => {
-    // La page a ete renommee (elle configure plus qu'elle ne rapporte), mais
-    // /status est restee une URL valide depuis l'epoque du rendu cote
-    // serveur : elle atterrit desormais sur la meme page sous son nouveau nom.
+  it('redirects the old /status URL to /config', async () => {
+    // The page was renamed (it configures more than it reports), but
+    // /status has remained a valid URL since the server-side rendering
+    // era: it now lands on the same page under its new name.
     await router.push('/status')
     expect(router.currentRoute.value.fullPath).toBe('/config')
     expect(router.currentRoute.value.name).toBe('config')
   })
 
-  it('redirige la forme sans slash final vers la forme canonique', async () => {
-    // IMPORTANT 6 de la revue finale. `/plugins/radio` et `/plugins/radio/`
-    // matchaient tous deux la route du plugin (le routeur n'est step strict par
-    // defaut) : la page se montait sur la forme sans slash, mais les modules
-    // resolvaient alors `./api/data` vers `/plugins/api/data` — que le coeur
-    // interprete comme le plugin « api » -> 404, table vide et tous les boutons
-    // en echec. La prop `base` supprime la dependance a la forme de l'URL ; on
-    // canonise en plus l'URL pour ne step laisser vivre deux formes.
+  it('redirects the form without a trailing slash to the canonical form', async () => {
+    // IMPORTANT 6 from the final review. `/plugins/radio` and
+    // `/plugins/radio/` both matched the plugin route (the router is not
+    // strict by default): the page mounted on the slash-less form, but its
+    // modules then resolved `./api/data` to `/plugins/api/data` — which the
+    // core interprets as the "api" plugin -> 404, empty table and every
+    // button failing. The `base` prop removes the dependency on the URL's
+    // shape; on top of that we canonicalize the URL so two forms never
+    // coexist.
     await router.push('/plugins/generic-input')
     expect(router.currentRoute.value.fullPath).toBe('/plugins/generic-input/')
     expect(router.currentRoute.value.name).toBe('plugin')
     expect(router.currentRoute.value.params.name).toBe('generic-input')
   })
 
-  it('/plugins/ est la list des plugins, distincte de /plugins/<nom>/', async () => {
+  it('/plugins/ is the plugin list, distinct from /plugins/<name>/', async () => {
     await router.push('/plugins/')
     expect(router.currentRoute.value.name).toBe('plugins')
     await router.push('/plugins/radio/')

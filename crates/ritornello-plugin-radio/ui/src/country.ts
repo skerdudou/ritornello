@@ -1,54 +1,54 @@
-// Country de l'annuaire : logique pure, sans Vue et sans reseau, donc testable
-// telle quelle.
+// Directory country: pure logic, no Vue and no network, so testable as-is.
 //
-// Le plugin ne transporte que des **codes ISO** (voir `DirectoryCountry`) : le
-// nom lisible est rendu ici par `Intl.DisplayNames`, donc dans la langue du
-// navigateur et sans table de 241 country a tenir a jour ni a traduire de notre
-// cote. C'est aussi ce qui evite le defaut qu'avait la version precedente, ou
-// le label affiche venait d'une cle de traduction resolue trop tot.
+// The plugin only carries **ISO codes** (see `DirectoryCountry`): the
+// readable name is rendered here by `Intl.DisplayNames`, so in the
+// browser's language and with no 241-country table to keep up to date or
+// to translate on our side. This also avoids the bug the previous version
+// had, where the displayed label came from a translation key resolved too
+// early.
 
 export interface Country {
   code: string
   stations: number
 }
 
-/** Un country pret a afficher : code, nom lisible, nombre de stations. */
+/** A country ready to display: code, readable name, station count. */
 export interface DisplayableCountry extends Country {
-  nom: string
+  name: string
 }
 
-/** Code du choix « tous les country » : c'est ce que le plugin attend (`country: ''`). */
+/** Code for the "all countries" choice: this is what the plugin expects (`country: ''`). */
 export const ALL_COUNTRIES = ''
 
 /**
- * Langue a employer pour les noms de country.
+ * Language to use for country names.
  *
- * Celle du navigateur, et non celle de l'appareil : le catalogue transmis aux
- * IHM de plugin ne porte pas le code de langue, et l'add au contract pour ce
- * seul usage serait disproportionne. Consequence assumee : un navigateur en
- * anglais affichera « Germany » sur un appareil en francais.
+ * The browser's, not the device's: the catalog passed to plugin UIs does
+ * not carry the language code, and adding it to the contract for this sole
+ * use would be disproportionate. Accepted consequence: a browser set to
+ * English will display "Germany" on a device set to French.
  */
 function browserLanguage(): string {
   return (typeof navigator !== 'undefined' && navigator.language) || 'en'
 }
 
 /**
- * Nom lisible d'un code ISO. Repli sur le code lui-meme : un code inconnu du
- * moteur (ou un moteur sans `Intl.DisplayNames`) doit rester selectionnable,
- * pas disparaitre de la liste.
+ * Readable name of an ISO code. Falls back to the code itself: a code
+ * unknown to the engine (or an engine with no `Intl.DisplayNames`) must
+ * stay selectable, not disappear from the list.
  */
-export function countryName(code: string, langue: string = browserLanguage()): string {
-  const brut = code.trim().toUpperCase()
-  if (!brut) return ''
+export function countryName(code: string, language: string = browserLanguage()): string {
+  const raw = code.trim().toUpperCase()
+  if (!raw) return ''
   try {
-    const noms = new Intl.DisplayNames([langue], { type: 'region' })
-    return noms.of(brut) ?? brut
+    const names = new Intl.DisplayNames([language], { type: 'region' })
+    return names.of(raw) ?? raw
   } catch {
-    return brut
+    return raw
   }
 }
 
-/** Retire accents et casse, pour que « etats » trouve « États-Unis ». */
+/** Strips accents and case, so that "etats" finds "États-Unis". */
 function fold(s: string): string {
   return s
     .normalize('NFD')
@@ -57,20 +57,21 @@ function fold(s: string): string {
 }
 
 /**
- * Liste a afficher : filtree sur le nom **ou** le code, puis triee par nom.
+ * List to display: filtered on the name **or** the code, then sorted by
+ * name.
  *
- * Le tri est fait sur le nom lisible et non sur le code : « Allemagne » se
- * cherche a la lettre A, pas a DE. Le filter accepte aussi le code, parce que
- * c'est ce qu'on tape quand on le connait.
+ * The sort is done on the readable name, not the code: "Allemagne" is
+ * searched under the letter A, not DE. The filter also accepts the code,
+ * because that's what one types when they know it.
  */
 export function displayableCountries(
-  liste: Country[],
+  list: Country[],
   filter = '',
-  langue: string = browserLanguage(),
+  language: string = browserLanguage(),
 ): DisplayableCountry[] {
   const f = fold(filter.trim())
-  return liste
-    .map((p) => ({ ...p, nom: countryName(p.code, langue) }))
-    .filter((p) => !f || fold(p.nom).includes(f) || fold(p.code).includes(f))
-    .sort((a, b) => a.nom.localeCompare(b.nom, langue))
+  return list
+    .map((p) => ({ ...p, name: countryName(p.code, language) }))
+    .filter((p) => !f || fold(p.name).includes(f) || fold(p.code).includes(f))
+    .sort((a, b) => a.name.localeCompare(b.name, language))
 }

@@ -4,27 +4,27 @@ import { computed, ref } from 'vue'
 import { countryName, displayableCountries, ALL_COUNTRIES, type Country } from './country'
 
 const props = defineProps<{
-  /** Liste renvoyee par le plugin. Vide = pas encore recuperee, ou annuaire injoignable. */
-  liste: Country[]
-  /** Code selectionne, `''` pour « tous les country ». */
+  /** List returned by the plugin. Empty = not yet fetched, or unreachable directory. */
+  list: Country[]
+  /** Selected code, `''` for "all countries". */
   current: string
-  /** Libelles fournis par l'appelant, qui a le catalogue. */
-  labelTous: string
+  /** Labels provided by the caller, which holds the catalog. */
+  allLabel: string
   placeholder: string
-  vide: string
+  emptyLabel: string
 }>()
 defineEmits<{ choose: [code: string] }>()
 
 const filter = ref('')
-const displayable = computed(() => displayableCountries(props.liste, filter.value))
+const displayable = computed(() => displayableCountries(props.list, filter.value))
 </script>
 
 <template>
   <div class="space-y-3">
     <Input v-model="filter" data-country-filter :placeholder="placeholder" />
     <div class="max-h-[60vh] space-y-1 overflow-y-auto">
-      <!-- « Tous les country » n'est jamais filter : c'est le moyen de revenir en
-           arriere, il doit rester atteignable quel que soit le texte saisi. -->
+      <!-- "All countries" is never filtered out: it is the way back, it must
+           stay reachable regardless of the text typed. -->
       <button
         :data-country="ALL_COUNTRIES || 'ALL'"
         :data-active="String(props.current === ALL_COUNTRIES)"
@@ -32,7 +32,7 @@ const displayable = computed(() => displayableCountries(props.liste, filter.valu
         :class="props.current === ALL_COUNTRIES ? 'border-primary ring-1 ring-primary' : 'border-border'"
         @click="$emit('choose', ALL_COUNTRIES)"
       >
-        <span>{{ labelTous }}</span>
+        <span>{{ allLabel }}</span>
       </button>
       <button
         v-for="p in displayable"
@@ -43,13 +43,13 @@ const displayable = computed(() => displayableCountries(props.liste, filter.valu
         :class="p.code === props.current ? 'border-primary ring-1 ring-primary' : 'border-border'"
         @click="$emit('choose', p.code)"
       >
-        <span class="truncate">{{ p.nom }}</span>
-        <!-- Le nombre de stations aide a choisir : un country a huit stations ne
-             donnera pas grand-chose. -->
+        <span class="truncate">{{ p.name }}</span>
+        <!-- The station count helps in choosing: a country with eight
+             stations won't give much. -->
         <span class="shrink-0 text-xs tabular-nums text-muted-foreground">{{ p.stations }}</span>
       </button>
       <p v-if="!displayable.length" class="text-sm text-muted-foreground" data-country-empty>
-        {{ vide }}
+        {{ emptyLabel }}
       </p>
     </div>
   </div>

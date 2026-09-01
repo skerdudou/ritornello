@@ -2,26 +2,26 @@ use crate::metadata::PlayerState;
 use crate::source::Preset;
 use serde::{Deserialize, Serialize};
 
-/// Une line du protocol `display`.
+/// A line of the `display` protocol.
 ///
-/// Étiquetage **adjacent** et non interne : `PlayerState` contains un
-/// `serde(flatten)` (`Track`), et le croisement flatten × internally-tagged
-/// est un angle mort connu de serde. Ici le `data` d'une trame d'état est
-/// exactement le JSON qui voyageait avant l'enveloppe.
+/// **Adjacent** tagging, not internal: `PlayerState` contains a
+/// `serde(flatten)` (`Track`), and the crossing of flatten × internally-tagged
+/// is a known serde blind spot. Here the `data` of a state frame is
+/// exactly the JSON that used to travel before the envelope.
 ///
-/// **Cet enum est fait pour grandir** : chaque nouvelle variante est un message
-/// qu'un afficheur peut ignorer jusqu'à ce qu'il s'y intéresse (voir le corps
-/// par défaut de `DisplayPlugin::sources_catalog` dans le SDK). Rien ne doit donc
-/// supposer le nombre de variantes — ni un `match` exhaustif hors du SDK, ni un
-/// comptage dans un test.
+/// **This enum is meant to grow**: every new variant is a message
+/// that a display can ignore until it cares about it (see the default
+/// body of `DisplayPlugin::sources_catalog` in the SDK). Nothing should therefore
+/// assume the number of variants — neither an exhaustive `match` outside the SDK,
+/// nor a count in a test.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "frame", content = "data", rename_all = "lowercase")]
-// `PlayerState` pèse une bonne centaine d'bytes de plus qu'un sources_catalog, et
-// clippy voudrait le mettre dans un `Box`. Refusé : cette enveloppe est
-// construite, sérialisée puis jetée dans la même expression — les bytes
-// vivent sur la pile le temps d'un `to_string`. La boîte échangerait cela
-// contre une allocation par trame et par afficheur, plusieurs fois par seconde
-// de playback, ce qui est exactement le sens contraire sur un Pi 2 B.
+// `PlayerState` weighs a good hundred bytes more than a sources_catalog, and
+// clippy would like to put it in a `Box`. Refused: this envelope is
+// built, serialized, then dropped within the same expression — the bytes
+// live on the stack for the duration of a `to_string`. The box would trade that
+// for one allocation per frame and per display, several times per second
+// of playback, which is exactly the wrong direction on a Pi 2 B.
 #[allow(clippy::large_enum_variant)]
 pub enum DisplayFrame {
     State(PlayerState),
@@ -29,79 +29,79 @@ pub enum DisplayFrame {
     Cover(Cover),
 }
 
-/// Plafond des bytes d'une cover poussée dans ce protocol.
+/// Cap on the bytes of a cover pushed over this protocol.
 ///
-/// **Propre au transport, et indépendant de tout autre cap.** Le cœur
-/// applique déjà un cap à un *téléchargement* (2 Mio, pour écarter le
-/// `front` nu du Cover Art Archive), mais celui-là ne couvre que ce qui vient
-/// du réseau : un `folder.jpg` d'un partage est traité comme de confiance et
-/// servi en stream, sans bounded de size — la route HTTP n'a jamais à le
-/// matérialiser. Pousser sur un socket **force** la matérialisation, donc
-/// oblige à une bounded d'ici, qui ne doit pas dépendre de la leur.
+/// **Specific to this transport, and independent of any other cap.** The core
+/// already applies a cap to a *download* (2 MiB, to rule out the bare
+/// `front` from the Cover Art Archive), but that one only covers what comes
+/// from the network: a `folder.jpg` from a share is treated as trusted and
+/// streamed, with no size bound — the HTTP route never has to
+/// materialize it. Pushing over a socket **forces** materialization, hence
+/// the need for a bound here, which must not depend on that other one.
 ///
-/// La valeur vient de la mesure : sérialiser une image de `n` bytes en une
-/// line de ce protocol coûte, au pic, environ `3,6 × n` résidents (les
-/// bytes, leur base64, la line rendue).
+/// The value comes from measurement: serializing an image of `n` bytes into a
+/// line of this protocol costs, at peak, about `3.6 × n` resident bytes (the
+/// bytes, their base64, the rendered line).
 ///
-/// **20 Mio, relevé de 2 Mio.** L'utilisateur garde des pochettes sur son NAS
-/// qui dépassaient 2 Mio — des extraits d'album, pas de simples thumbnails — et
-/// a explicitement accepté le coût mémoire après avoir vérifié que l'appareil
-/// reste sous 30 % de sa RAM à ce cap. Au ratio mesuré, 20 Mio de cover
-/// coûtent environ 72 Mio de pic transitoire le temps d'un changement de
-/// piste, par afficheur abonné — sous 7 % des 1024 Mio de l'appareil. Cette
-/// valeur couvre même un scan d'album en PNG sans perte, bien plus lourd qu'un
-/// JPEG comparable. Au-delà, ce n'est plus une cover mais un accident : le
-/// PNG de 150 Mio sur un partage — le cas que la route HTTP du cœur cite
-/// nommément (`cover_get`) comme réel — coûterait, matérialisé sur ce
-/// protocol, 540 Mio, soit la moitié de la machine.
+/// **20 MiB, raised from 2 MiB.** The user keeps covers on their NAS
+/// that exceeded 2 MiB — album scans, not plain thumbnails — and
+/// explicitly accepted the memory cost after checking that the device
+/// stays under 30% of its RAM at this cap. At the measured ratio, a 20 MiB cover
+/// costs about 72 MiB of transient peak for the duration of a track
+/// change, per subscribed display — under 7% of the device's 1024 MiB. This
+/// value even covers a lossless PNG album scan, far heavier than a
+/// comparable JPEG. Beyond that, it's no longer a cover but an accident: the
+/// 150 MiB PNG on a share — the case the core's HTTP route names
+/// explicitly (`cover_get`) as real — would cost, materialized over this
+/// protocol, 540 MiB, half the machine.
 ///
-/// Dépasser n'est pas une erreur d'allocation mais un refus : le producteur ne
-/// matérialise jamais au-delà (il read `COVER_MAX_BYTES + 1` bytes et s'arrête,
-/// ou refuse sur la size connue à l'avance quand elle est disponible sans
-/// playback — voir `cover::read_file_bounded` côté cœur), aucune trame n'est
-/// émise, et l'afficheur n'a simplement pas d'image — la même politique
-/// d'échec silencieux que la récupération elle-même.
+/// Exceeding it is not an allocation error but a refusal: the producer never
+/// materializes beyond it (it reads `COVER_MAX_BYTES + 1` bytes and stops,
+/// or refuses on the size known in advance when it's available without
+/// playback — see `cover::read_file_bounded` on the core side), no frame is
+/// emitted, and the display simply has no image — the same silent-failure
+/// policy as the retrieval itself.
 pub const COVER_MAX_BYTES: usize = 20 * 1024 * 1024;
 
-/// La cover de ce qui plays, poussée aux seuls afficheurs qui l'ont demandée
-/// (voir `Announcement::covers`).
+/// The cover of what's currently playing, pushed only to the displays that
+/// requested it (see `Announcement::covers`).
 ///
-/// Une trame **autonome** : une line porte une image entière, jamais une
-/// tranche. C'est ce qui la rend compatible avec la politique de line
-/// illisible du SDK — `warn` puis `continue`, la connexion survit : sauter une
-/// line autonome ne perd qu'une image, sauter une tranche produirait une image
-/// tronquée qu'aucun contrôle n'écarterait.
+/// A **self-contained** frame: one line carries an entire image, never a
+/// chunk. This is what makes it compatible with the SDK's unreadable-line
+/// policy — `warn` then `continue`, the connection survives: skipping a
+/// self-contained line only loses one image, skipping a chunk would produce a
+/// truncated image that no check would catch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cover {
-    /// Exactement le `cover_href` que la trame d'état publie pour la même
-    /// image (`/api/cover/{clé}`).
+    /// Exactly the `cover_href` that the state frame publishes for the same
+    /// image (`/api/cover/{key}`).
     ///
-    /// Sans lui, un afficheur devrait deviner à quel état la cover qu'il
-    /// vient de recevoir correspond : les trames arrivent bien dans l'order sur
-    /// un socket unique, mais rien dans l'image ne dit *laquelle* elle est, et
-    /// un greffon qui doit répondre « la cover de cette piste-là » (le
-    /// serveur MPD) n'a pas d'autre corrélation à sa disposition.
+    /// Without it, a display would have to guess which state the cover it
+    /// just received corresponds to: frames do arrive in order over
+    /// a single socket, but nothing in the image itself says *which one* it is,
+    /// and a plugin that must answer "the cover for that track" (the
+    /// MPD server) has no other correlation available to it.
     pub href: String,
-    /// Type MIME reconnu aux bytes d'en-tête, jamais à l'extension ni à un
-    /// `Content-Type` déclaré.
+    /// MIME type recognized from the header bytes, never from the extension
+    /// nor a declared `Content-Type`.
     pub mime: String,
-    /// Les bytes de l'image. En **base64** sur le fil : le protocol est du
-    /// JSON par line, et un `Vec<u8>` que serde sérialise nu devient un
-    /// tableau de nombres décimaux — mesuré à 3,57 fois la size de l'image,
-    /// contre 1,33 pour le base64, et 7,1 × n de pic résident contre 3,6.
+    /// The image bytes. In **base64** on the wire: the protocol is
+    /// JSON per line, and a `Vec<u8>` that serde serializes raw becomes a
+    /// decimal-number array — measured at 3.57 times the image's size,
+    /// against 1.33 for base64, and 7.1 × n resident peak against 3.6.
     #[serde(with = "octets_base64")]
     pub bytes: Vec<u8>,
 }
 
-/// Les bytes d'une cover, en base64 sur le fil.
+/// The bytes of a cover, in base64 on the wire.
 ///
-/// Le cap est appliqué **à la playback** et **avant le décodage** : c'est ce
-/// qui empêche une line démesurée de faire allouer les bytes qu'elle announcement.
-/// Pas à l'écriture, et c'est délibéré — un refus de sérialisation
-/// remonterait à l'appelant comme un échec d'envoi indistinguable d'un socket
-/// mort, ce qui fait sortir de boucle le relais du cœur et prive l'afficheur de
-/// *tout* pour le reste du processus. Le cap est donc gardé là où il peut
-/// être traité : au moment de matérialiser les bytes, qui ne dépasse jamais.
+/// The cap is applied **on read** and **before decoding**: this is what
+/// keeps an oversized line from allocating the bytes it announces.
+/// Not on write, and that's deliberate — a serialization refusal
+/// would surface to the caller as a send failure indistinguishable from a
+/// dead socket, which would break the core's relay loop and deprive the display
+/// of *everything* for the rest of the process. So the cap is kept where it can
+/// be handled: at the point of materializing the bytes, which never exceeds it.
 mod octets_base64 {
     use base64::Engine as _;
     use serde::{Deserialize as _, Deserializer, Serializer};
@@ -112,36 +112,36 @@ mod octets_base64 {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         use serde::de::Error as _;
-        // `Cow` et non `String` : `serde_json::from_str` emprunte le texte de
-        // la line quand il n'a pas d'échappement à défaire, ce qui évite une
-        // copie de 1,33 × n avant même le décodage.
-        let texte = std::borrow::Cow::<str>::deserialize(d)?;
-        // Le cap, contrôlé sur la **longueur du texte** : quatre caractères
-        // de base64 valent trois bytes, donc la size décodée est connue
-        // avant d'allouer quoi que ce soit. Les `=` de remplissage sont
-        // retirés, sans quoi la bounded serait effective jusqu'à deux bytes trop
-        // tôt — assez pour refuser une image de *exactement* `COVER_MAX_BYTES`,
-        // que le producteur a le droit d'émettre.
-        let remplissage = texte.bytes().rev().take_while(|b| *b == b'=').count();
-        if (texte.len() / 4 * 3).saturating_sub(remplissage) > super::COVER_MAX_BYTES {
+        // `Cow` and not `String`: `serde_json::from_str` borrows the text of
+        // the line when it has no escapes to undo, which avoids a
+        // copy of 1.33 × n before decoding even starts.
+        let text = std::borrow::Cow::<str>::deserialize(d)?;
+        // The cap, checked on the **text length**: four base64
+        // characters are worth three bytes, so the decoded size is known
+        // before allocating anything at all. Padding `=` characters are
+        // stripped, without which the bound would kick in up to two bytes too
+        // early — enough to reject an image of *exactly* `COVER_MAX_BYTES`,
+        // which the producer is entitled to emit.
+        let padding = text.bytes().rev().take_while(|b| *b == b'=').count();
+        if (text.len() / 4 * 3).saturating_sub(padding) > super::COVER_MAX_BYTES {
             return Err(D::Error::custom(format!(
                 "cover refused: over {} bytes",
                 super::COVER_MAX_BYTES
             )));
         }
         base64::engine::general_purpose::STANDARD
-            .decode(texte.as_bytes())
+            .decode(text.as_bytes())
             .map_err(D::Error::custom)
     }
 }
 
-/// Ce qui est structurel et rarement changeant : les sources déclarées, dans
-/// l'order de bascule de `SourceCycle`, et les présélections nommées de chacune
-/// quand elle sait les énumérer.
+/// What is structural and rarely changing: the declared sources, in
+/// `SourceCycle`'s switch order, and each one's named presets
+/// when it knows how to enumerate them.
 ///
-/// Volontairement **hors** de `PlayerState` : celui-ci est un instantané,
-/// déduplique par égalité et se reconstruit à chaque publication ; un sources_catalog
-/// y ferait voyager cinquante names de station sur chaque trame de playback.
+/// Deliberately **outside** `PlayerState`: that one is a snapshot,
+/// deduplicates by equality and is rebuilt on every publish; a catalog
+/// there would send fifty station names on every playback frame.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SourcesCatalog {
     pub sources: Vec<SourceCatalog>,
@@ -150,8 +150,8 @@ pub struct SourcesCatalog {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceCatalog {
     pub name: String,
-    /// Vide = cette source ne sait pas énumérer. Le consommateur retombe sur
-    /// `preset_count`, qui reste la vérité du nombre.
+    /// Empty = this source doesn't know how to enumerate. The consumer falls
+    /// back to `preset_count`, which remains the source of truth for the count.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub presets: Vec<Preset>,
 }
@@ -161,39 +161,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lenveloppe_dune_trame_detat_porte_le_json_qui_voyageait_avant() {
-        // L'étiquetage adjacent garantit que le `data` est exactement l'ancienne
-        // charge utile : c'est ce qui rend la migration vérifiable.
+    fn state_frame_envelope_carries_the_json_that_used_to_travel_before() {
+        // Adjacent tagging guarantees that `data` is exactly the old
+        // payload: this is what makes the migration verifiable.
         let state = PlayerState { source: "radio".into(), volume: 40, ..Default::default() };
-        let nu = serde_json::to_value(&state).unwrap();
-        let enveloppe = serde_json::to_value(DisplayFrame::State(state.clone())).unwrap();
-        assert_eq!(enveloppe["frame"], "state");
-        assert_eq!(enveloppe["data"], nu);
+        let bare = serde_json::to_value(&state).unwrap();
+        let envelope = serde_json::to_value(DisplayFrame::State(state.clone())).unwrap();
+        assert_eq!(envelope["frame"], "state");
+        assert_eq!(envelope["data"], bare);
     }
 
     #[test]
-    fn une_trame_de_catalogue_fait_le_tour() {
-        let trame = DisplayFrame::Catalog(SourcesCatalog {
+    fn a_catalog_frame_round_trips() {
+        let frame = DisplayFrame::Catalog(SourcesCatalog {
             sources: vec![SourceCatalog {
                 name: "radio".into(),
                 presets: vec![Preset { index: 1, name: "FIP".into() }],
             }],
         });
-        let json = serde_json::to_string(&trame).unwrap();
-        assert!(json.contains(r#""frame":"sources_catalog""#), "{json}");
-        assert_eq!(serde_json::from_str::<DisplayFrame>(&json).unwrap(), trame);
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(json.contains(r#""frame":"catalog""#), "{json}");
+        assert_eq!(serde_json::from_str::<DisplayFrame>(&json).unwrap(), frame);
     }
 
     #[test]
-    fn une_ligne_detat_du_fil_se_relit_en_trame_detat() {
-        // Le sens **playback**, depuis les bytes écrits à la main plutôt que
-        // depuis un aller-retour : un aller-retour reste vrai si l'étiquetage
-        // change des deux côtés à la fois, ce qui est exactement le cas où un
-        // afficheur d'une version et un cœur d'une autre ne se comprennent plus.
+    fn a_wire_state_line_reads_back_as_a_state_frame() {
+        // The **read** direction, from bytes written by hand rather than
+        // from a round trip: a round trip stays true if the tagging
+        // changes on both sides at once, which is exactly the case where a
+        // display on one version and a core on another no longer understand
+        // each other.
         //
-        // Séparé du test de sources_catalog exprès : une boucle sur un tableau de
-        // trames aurait à être retouchée à chaque variante ajoutée, et
-        // `DisplayFrame` est fait pour grandir.
+        // Deliberately separate from the catalog test: a loop over an array of
+        // frames would need touching up on every variant added, and
+        // `DisplayFrame` is meant to grow.
         let line = r#"{"frame":"state","data":{"source":"cd","volume":30,"muted":false,"standby":false,"preset":3}}"#;
         match serde_json::from_str::<DisplayFrame>(line).unwrap() {
             DisplayFrame::State(e) => {
@@ -201,39 +202,39 @@ mod tests {
                 assert_eq!(e.preset, Some(3));
                 assert_eq!(e.volume, 30);
             }
-            autre => panic!("une trame d'state etait attendue, obtenu {autre:?}"),
+            other => panic!("expected a state frame, got {other:?}"),
         }
     }
 
     #[test]
-    fn une_source_sans_preselections_nommees_ne_serialise_aucune_liste() {
+    fn a_source_without_named_presets_serializes_no_list() {
         let c = SourceCatalog { name: "cd".into(), presets: Vec::new() };
         assert!(!serde_json::to_string(&c).unwrap().contains("presets"));
     }
 
     #[test]
-    fn une_source_sans_liste_se_relit_sans_erreur() {
-        // Le pendant du `skip_serializing_if` : ce que le sérialiseur omet, le
-        // désérialiseur doit l'accepter, sans quoi une trame émise par le cœur
-        // serait illisible par l'afficheur.
+    fn a_source_without_a_list_reads_back_without_error() {
+        // The counterpart of `skip_serializing_if`: what the serializer omits,
+        // the deserializer must accept, otherwise a frame emitted by the core
+        // would be unreadable by the display.
         let c: SourceCatalog = serde_json::from_str(r#"{"name":"cd"}"#).unwrap();
         assert_eq!(c.presets, Vec::new());
     }
 
-    // Ce qu'une trame d'un kind inconnu devient est vérifié là où c'est
-    // observable, dans le SDK : voir
-    // `une_trame_illisible_ne_ferme_pas_la_connexion`. Le tester ici n'aurait
-    // rien mordu — aucune configuration de `DisplayFrame` ne peut avaler un
-    // kind inconnu, les champs de `PlayerState` étant obligatoires, et
-    // l'assertion aurait passé même en retirant l'étiquetage (mesuré).
+    // What becomes of a frame of an unknown kind is checked where it's
+    // observable, in the SDK: see
+    // `a_cover_beyond_the_cap_is_an_unreadable_line_and_the_connection_survives`.
+    // Testing it here would catch nothing — no configuration of `DisplayFrame`
+    // can swallow an unknown kind, since `PlayerState`'s fields are mandatory,
+    // and the assertion would pass even with the tagging removed (measured).
 
-    // -- la trame de cover ------------------------------------------------
+    // -- the cover frame ---------------------------------------------------
 
-    /// Des bytes qui ne sont pas du texte : c'est justement ce qu'un JSON par
-    /// line ne peut pas porter nu, et ce que l'encodage doit rendre au bit
-    /// près. `0x0A` y est présent exprès — c'est le séparateur de line du
-    /// protocol, et le voir survivre est la propriété qui compte.
-    fn octets_hostiles() -> Vec<u8> {
+    /// Bytes that are not text: exactly what JSON-per-line
+    /// cannot carry raw, and what the encoding must render bit for
+    /// bit. `0x0A` is present on purpose — it's the protocol's line
+    /// separator, and seeing it survive is the property that matters.
+    fn hostile_bytes() -> Vec<u8> {
         let mut v = vec![0xFFu8, 0xD8, 0xFF, 0xE0];
         v.extend_from_slice(b"\n\r\0\"\\{}");
         v.extend((0u16..=255).map(|b| b as u8));
@@ -241,75 +242,75 @@ mod tests {
     }
 
     #[test]
-    fn une_trame_de_pochette_rend_les_octets_au_bit_pres_et_sans_saut_de_ligne() {
-        let bytes = octets_hostiles();
-        let trame = DisplayFrame::Cover(Cover {
+    fn a_cover_frame_renders_the_bytes_bit_for_bit_and_without_a_newline() {
+        let bytes = hostile_bytes();
+        let frame = DisplayFrame::Cover(Cover {
             href: "/api/cover/1a2b3c4d".into(),
             mime: "image/jpeg".into(),
             bytes: bytes.clone(),
         });
-        let json = serde_json::to_string(&trame).unwrap();
+        let json = serde_json::to_string(&frame).unwrap();
         assert!(json.contains(r#""frame":"cover""#), "{json}");
-        // Le protocol est délimité par des sauts de line : une trame qui en
-        // contiendrait un couperait la line en deux, et les deux moitiés
-        // seraient illisibles.
-        assert!(!json.contains('\n'), "une trame ne doit contenir aucun saut de line");
-        assert_eq!(serde_json::from_str::<DisplayFrame>(&json).unwrap(), trame);
+        // The protocol is delimited by line breaks: a frame containing
+        // one would cut the line in two, and both halves
+        // would be unreadable.
+        assert!(!json.contains('\n'), "a frame must not contain any line break");
+        assert_eq!(serde_json::from_str::<DisplayFrame>(&json).unwrap(), frame);
     }
 
     #[test]
-    fn les_octets_dune_pochette_voyagent_en_base64_pas_en_tableau_de_nombres() {
-        // Ce que serde ferait d'un `Vec<u8>` nu — `[255,216,...]` — a été
-        // mesuré à 3,57 fois la size de l'image et 7,1 × n de pic résident,
-        // contre 1,33 et 3,6 pour le base64. C'est la seule raison de
-        // l'encodage, et c'est donc ce que ce test garde.
-        let trame = DisplayFrame::Cover(Cover {
+    fn a_covers_bytes_travel_as_base64_not_as_a_number_array() {
+        // What serde would do with a raw `Vec<u8>` — `[255,216,...]` — has
+        // been measured at 3.57 times the image's size and 7.1 × n resident
+        // peak, against 1.33 and 3.6 for base64. This is the only reason for
+        // the encoding, and so it's what this test guards.
+        let frame = DisplayFrame::Cover(Cover {
             href: "/api/cover/x".into(),
             mime: "image/png".into(),
             bytes: vec![0xFF, 0xD8, 0xFF],
         });
-        let json = serde_json::to_string(&trame).unwrap();
+        let json = serde_json::to_string(&frame).unwrap();
         assert!(json.contains(r#""bytes":"/9j/""#), "{json}");
-        assert!(!json.contains("255"), "les bytes ne doivent pas voyager en nombres : {json}");
+        assert!(!json.contains("255"), "bytes must not travel as numbers: {json}");
     }
 
     #[test]
-    fn une_pochette_au_dela_du_plafond_est_refusee_a_la_lecture() {
-        // Refusée **avant** le décodage : la longueur du texte base64 dit déjà
-        // la size décodée, donc rien n'est alloué pour une line démesurée.
-        // Un refus, pas une panique d'allocation.
-        let trop = "A".repeat((COVER_MAX_BYTES + 3) / 3 * 4 + 4);
+    fn a_cover_over_the_cap_is_rejected_on_read() {
+        // Rejected **before** decoding: the base64 text's length already
+        // tells the decoded size, so nothing is allocated for an oversized
+        // line. A rejection, not an allocation panic.
+        let too_big = "A".repeat((COVER_MAX_BYTES + 3) / 3 * 4 + 4);
         let line = format!(
-            r#"{{"frame":"cover","data":{{"href":"/api/cover/x","mime":"image/jpeg","bytes":"{trop}"}}}}"#
+            r#"{{"frame":"cover","data":{{"href":"/api/cover/x","mime":"image/jpeg","bytes":"{too_big}"}}}}"#
         );
         let e = serde_json::from_str::<DisplayFrame>(&line).unwrap_err();
-        assert!(e.to_string().contains("over"), "message inattendu : {e}");
+        assert!(e.to_string().contains("over"), "unexpected message: {e}");
     }
 
     #[test]
-    fn une_pochette_juste_sous_le_plafond_passe() {
-        // Le pendant du refus : la bounded doit être *au* cap, pas en
-        // dessous. Sans ce test, un cap divisé par deux par erreur
-        // passerait inaperçu.
+    fn a_cover_just_under_the_cap_passes() {
+        // The counterpart of the rejection: the bound must be *at* the cap,
+        // not below it. Without this test, a cap accidentally halved
+        // would go unnoticed.
         let bytes = vec![0x41u8; COVER_MAX_BYTES];
-        let trame = DisplayFrame::Cover(Cover {
+        let frame = DisplayFrame::Cover(Cover {
             href: "/api/cover/x".into(),
             mime: "image/jpeg".into(),
             bytes: bytes.clone(),
         });
-        let json = serde_json::to_string(&trame).unwrap();
+        let json = serde_json::to_string(&frame).unwrap();
         match serde_json::from_str::<DisplayFrame>(&json).unwrap() {
             DisplayFrame::Cover(c) => assert_eq!(c.bytes.len(), bytes.len()),
-            autre => panic!("une trame de cover etait attendue : {autre:?}"),
+            other => panic!("expected a cover frame: {other:?}"),
         }
     }
 
     #[test]
-    fn un_base64_invalide_est_une_erreur_pas_des_octets_arbitraires() {
+    fn invalid_base64_is_an_error_not_arbitrary_bytes() {
         let line = r#"{"frame":"cover","data":{"href":"/api/cover/x","mime":"image/jpeg","bytes":"!!!!"}}"#;
         assert!(
             serde_json::from_str::<DisplayFrame>(line).is_err(),
-            "un encodage invalide doit etre une erreur : le SDK la traite en line illisible"
+            "invalid encoding must be an error: the SDK treats it as an unreadable line"
         );
     }
 }

@@ -5,11 +5,11 @@ import { useCatalog } from '../composables/useCatalog'
 import { resetMetrics, useMetrics } from '../composables/useMetrics'
 import SystemView from './SystemView.vue'
 
-// Charge utile complète, réutilisée en la modifiant par cas. Les jiffies CPU
-// valent `null` par défaut : c'est le cas « la machine ne les expose step »,
-// step une panne — les tests qui ont besoin d'un delta calculable les
-// fournissent explicitement via `prochainsJiffies`.
-function payload(surcharge: Record<string, unknown> = {}) {
+// Complete payload, reused and tweaked per case. The CPU jiffies default to
+// `null`: that is the "the machine does not expose them" case, not a
+// failure — tests that need a computable delta provide them explicitly via
+// `nextJiffies`.
+function payload(overrides: Record<string, unknown> = {}) {
   return {
     temperature_c: 47.8,
     cpu_mhz: 900,
@@ -31,16 +31,16 @@ function payload(surcharge: Record<string, unknown> = {}) {
     logind_reachable: true,
     cpu_total_jiffies: null,
     cpu_idle_jiffies: null,
-    ...surcharge,
+    ...overrides,
   }
 }
 
 /**
- * Compteurs jiffies croissants à chaque appel : Δtotal 1000, Δidle 750, donc
- * 25 % d'utilisation calculable dès le second sondage. Sert aux tests
- * d'history, qui ont besoin d'un delta réel plutôt que de valeurs figées.
+ * Jiffies counters growing on every call: Δtotal 1000, Δidle 750, hence 25 %
+ * usage computable from the second probe on. Used by the history tests, which
+ * need a real delta rather than frozen values.
  */
-function prochainsJiffies() {
+function nextJiffies() {
   let n = 0
   return () => {
     n += 1
@@ -48,8 +48,8 @@ function prochainsJiffies() {
   }
 }
 
-/** Catalogue minimal : les unités, le gabarit de la fenêtre d'history et
- *  celui du bouton des erreurs sont assertés à l'affichage. */
+/** Minimal catalog: the units, the template of the history window and the
+ *  one of the errors button are asserted on display. */
 const CATALOGUE = {
   system_unit_mb: 'Mo',
   system_unit_gb: 'Go',
@@ -61,51 +61,50 @@ const CATALOGUE = {
 }
 
 /**
- * Stub de `fetch` qui répond selon l'URL : le catalogue i18n d'un côté,
- * `/api/system` de l'autre, `{}` pour les POST (ou un refus, voir `refusPost`).
- * `corps` accepte une fonction, appelée à chaque sondage, pour faire varier
- * les réponses successives.
+ * `fetch` stub answering by URL: the i18n catalog on one side, `/api/system`
+ * on the other, `{}` for POSTs (or a refusal, see `postRefusal`). `body`
+ * accepts a function, called on every probe, to vary successive responses.
  *
- * Le catalogue est bel et bien servi : sans lui, `createT` renvoie la clé
- * elle-même et les unités s'afficheraient « system_unit_day ». Le test
- * vérifierait alors le repli, step la vue.
+ * The catalog really is served: without it, `createT` returns the key itself
+ * and the units would display as "system_unit_day". The test would then be
+ * checking the fallback, not the view.
  */
 function stub(
-  corps: unknown | (() => unknown),
-  catalogue: Record<string, string> = CATALOGUE,
+  body: unknown | (() => unknown),
+  catalog: Record<string, string> = CATALOGUE,
   log: unknown = { lines: [] },
-  refusPost?: string,
+  postRefusal?: string,
 ) {
   const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
     if (init?.method === 'POST') {
-      // `refusPost` fourni : le POST échoue avec ce message, comme le fait
-      // logind quand la règle polkit manque. Même convention que `log`
-      // ci-dessous — un paramètre qui, renseigné, fait répondre `ok: false`.
-      if (refusPost !== undefined) {
+      // `postRefusal` provided: the POST fails with that message, as logind
+      // does when the polkit rule is missing. Same convention as `log`
+      // below — a parameter which, when set, makes the response `ok: false`.
+      if (postRefusal !== undefined) {
         return Promise.resolve({
           ok: false,
           status: 502,
-          json: async () => ({ error: refusPost }),
+          json: async () => ({ error: postRefusal }),
         } as Response)
       }
       return Promise.resolve({ ok: true, json: async () => ({}) } as Response)
     }
     const u = String(url)
-    // `/api/logs` distingué de `/api/system` : la page sonde les deux à chaque
-    // tour, et servir la load des métriques au log lui donnerait un
-    // `lines` absent — le test échouerait alors pour une raison qui n'est step
-    // la sienne.
+    // `/api/logs` told apart from `/api/system`: the page probes both on every
+    // round, and serving the metrics payload to the log would give it a
+    // missing `lines` — the test would then fail for a reason that is not
+    // its own.
     if (u.includes('/api/logs')) {
       if (log === undefined) {
         return Promise.resolve({ ok: false, status: 503, json: async () => ({}) } as Response)
       }
       return Promise.resolve({ ok: true, json: async () => log } as Response)
     }
-    // `/api/settings` distingue lui aussi : la page le releve une fois au
-    // montage, pour dater le log au format regle. Sans cette branche, il
-    // tombait dans le repli ci-dessous et **consommait un sample de
-    // metriques**, ce qui decalait tous les deltas CPU calcules ensuite — un
-    // echec qui n'a rien a voir avec ce que ces tests verifient.
+    // `/api/settings` told apart too: the page fetches it once at mount, to
+    // date the log in the configured format. Without this branch, it fell
+    // into the fallback below and **consumed a metrics sample**, which
+    // shifted every CPU delta computed afterwards — a failure unrelated to
+    // what these tests verify.
     if (u.includes('/api/settings')) {
       return Promise.resolve({
         ok: true,
@@ -113,10 +112,10 @@ function stub(
       } as Response)
     }
     const j = u.includes('/api/i18n')
-      ? catalogue
-      : typeof corps === 'function'
-        ? (corps as () => unknown)()
-        : corps
+      ? catalog
+      : typeof body === 'function'
+        ? (body as () => unknown)()
+        : body
     return Promise.resolve({ ok: true, json: async () => j } as Response)
   })
   vi.stubGlobal('fetch', f)
@@ -126,84 +125,83 @@ function stub(
 describe('SystemView', () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
-    // L'état des métriques vit au niveau module : sans remise à zéro, un test
-    // hérite de l'history, de la période et du timer du précédent.
+    // The metrics state lives at module level: without a reset, a test
+    // inherits the history, the period and the timer of the previous one.
     resetMetrics()
   })
   afterEach(() => {
     resetMetrics()
     vi.useRealTimers()
     vi.unstubAllGlobals()
-    // `unstubAllGlobals` ne défait step un `spyOn` : sans ça, le
-    // `document.hidden` forcé à `true` par le test de l'arrière-plan fuiterait
-    // dans tous les tests suivants du fichier.
+    // `unstubAllGlobals` does not undo a `spyOn`: without this, the
+    // `document.hidden` forced to `true` by the background test would leak
+    // into every following test of the file.
     vi.restoreAllMocks()
-    // Les dialogues sont montés dans un portail : sans ce nettoyage, le DOM
-    // d'un test fuiterait dans les `document.body.querySelector` du suivant.
+    // Dialogs are mounted in a portal: without this cleanup, the DOM of one
+    // test would leak into the `document.body.querySelector` of the next.
     document.body.innerHTML = ''
   })
 
   /**
-   * Charge le catalogue puis mounted la vue — c'est l'order de l'application,
-   * `App.vue` rechargeant le catalogue au montage. `attachTo` est nécessaire
-   * aux tests du dialog et inoffensif pour les autres.
+   * Loads the catalog then mounts the view — that is the application's order,
+   * `App.vue` reloading the catalog at mount. `attachTo` is required by the
+   * dialog tests and harmless for the others.
    */
-  async function monter() {
+  async function mountView() {
     await useCatalog().reload()
-    // `App.vue` amorce le sondage au montage de la SPA, plus la vue : le
-    // harness de test tient ce rôle, dans le même order que l'application.
+    // `App.vue` starts the probing when the SPA mounts, not the view: the
+    // test harness plays that role, in the same order as the application.
     useMetrics().start()
     const w = mount(SystemView, { attachTo: document.body })
     await flushPromises()
     return w
   }
 
-  it('displayed les métriques du premier sondage', async () => {
+  it('displays the metrics of the first probe', async () => {
     stub(payload())
-    const w = await monter()
+    const w = await mountView()
     expect(w.get('[data-system-temperature]').text()).toContain('47.8')
     expect(w.get('[data-system-frequency]').text()).toContain('900')
     expect(w.get('[data-system-cores]').text()).toBe('4')
     expect(w.get('[data-system-hostname]').text()).toBe('ritornello')
     expect(w.get('[data-system-kernel]').text()).toBe('6.6.51+rpt-rpi-v7')
-    // 90 061 s = 1 jour 1 heure, au plus deux unités.
+    // 90 061 s = 1 day 1 hour, at most two units.
     expect(w.get('[data-system-uptime]').text()).toBe('1 j 1 h')
-    // 600 000 kio utilisés sur 1 000 000, arrondis en Mo, puis le taux entre parenthèses.
+    // 600 000 KiB used out of 1 000 000, rounded to MB, then the ratio in parentheses.
     expect(w.get('[data-system-memory]').text()).toBe('586 / 977 Mo (60 %)')
     w.unmount()
   })
 
-  it('displayed un tiret pour ce que la machine n expose step', async () => {
+  it('displays a dash for what the machine does not expose', async () => {
     stub(payload({ temperature_c: null, cpu_mhz: null, ip: null }))
-    const w = await monter()
+    const w = await mountView()
     expect(w.get('[data-system-temperature]').text()).toBe('—')
     expect(w.get('[data-system-frequency]').text()).toBe('—')
     expect(w.get('[data-system-ip]').text()).toBe('—')
     w.unmount()
   })
 
-  it('signale un cœur injoignable sans vider la page', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('réseau')))
-    const w = await monter()
+  it('reports an unreachable core without emptying the page', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network')))
+    const w = await mountView()
     expect(w.find('[data-system-unavailable]').exists()).toBe(true)
     w.unmount()
   })
 
-  it('arrive avec un history vide et le remplit au fil des sondages', async () => {
-    const jiffies = prochainsJiffies()
+  it('arrives with an empty history and fills it probe after probe', async () => {
+    const jiffies = nextJiffies()
     stub(() => payload(jiffies()))
-    const w = await monter()
-    // Un seul échantillon : le graphe est **déjà là** mais ne trace rien, et
-    // sa légende annonce « — » plutôt que « 0 % ». C'est ce qui évite le saut
-    // de mise en page au deuxième sondage, quand un message d'wait cédait
-    // d'un coup la place à une figure de 96 px.
+    const w = await mountView()
+    // A single sample: the chart is **already there** but draws nothing, and
+    // its legend announces "—" rather than "0 %". That is what avoids the
+    // layout jump at the second probe, when a waiting message used to give
+    // way all at once to a 96 px figure.
     expect(w.find('[data-system-history]').exists()).toBe(true)
     expect(w.get('[data-system-history]').html()).not.toContain('M0.00,')
     expect(w.get('[data-system-history-legend]').text()).toContain('—')
-    // Un échantillon exige un delta de jiffies : le premier sondage ne fait
-    // que poser la référence, sans rien pousser. Deux sondages
-    // supplémentaires (10 s) en poussent donc deux, assez pour tracer une
-    // ligne.
+    // A sample requires a jiffies delta: the first probe only sets the
+    // reference, pushing nothing. Two more probes (10 s) therefore push two,
+    // enough to draw a line.
     await vi.advanceTimersByTimeAsync(10000)
     await flushPromises()
     expect(w.find('[data-system-history]').exists()).toBe(true)
@@ -211,35 +209,34 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('plafonne l history à 240 échantillons', async () => {
-    const jiffies = prochainsJiffies()
+  it('caps the history at 240 samples', async () => {
+    const jiffies = nextJiffies()
     stub(() => payload(jiffies()))
-    const w = await monter()
-    // Le montage ne pousse aucun échantillon : il faut un delta de jiffies,
-    // donc un premier sondage de référence avant que quoi que ce soit ne
-    // soit calculable. 241 sondages supplémentaires (période de 5 s) poussent
-    // donc 241 échantillons, le 241e faisant sortir le plus ancien par
-    // `shift()` : il doit en rester exactement 240, soit 239 commandes « L »
-    // dans le tracé (un « M » puis n-1 « L »).
+    const w = await mountView()
+    // Mounting pushes no sample: a jiffies delta is needed, hence a first
+    // reference probe before anything is computable. 241 more probes (5 s
+    // period) therefore push 241 samples, the 241st evicting the oldest via
+    // `shift()`: exactly 240 must remain, i.e. 239 "L" commands in the path
+    // (an "M" then n-1 "L").
     await vi.advanceTimersByTimeAsync(241 * 5000)
     await flushPromises()
-    // Le tracé est porté par le premier `<path>`, `[data-system-history]`
-    // marquant le `<svg>` qui les contient tous les deux.
+    // The path is carried by the first `<path>`, `[data-system-history]`
+    // marking the `<svg>` that contains both of them.
     const d = w.get('[data-system-history] path').attributes('d')!
     expect((d.match(/L/g) ?? []).length).toBe(239)
     w.unmount()
   })
 
-  it('espace les points selon le temps réel quand la période change en cours de route', async () => {
-    // Le comportement demandé : après un passage de 5 s à 1 s, les
-    // échantillons anciens restent largement espacés et les récents se
-    // resserrent. Un placement par rang les aurait rendus tous égaux, faisant
-    // passer 5 s d'histoire pour 1 s. Ce test couvre le **câblage** (les deux
-    // tracés, le trait de survol et le popin partagent `chartXValues`) ;
-    // le calcul lui-même est testé dans `sparkline.test.ts`.
-    const jiffies = prochainsJiffies()
+  it('spaces the points by real time when the period changes midway', async () => {
+    // The requested behaviour: after switching from 5 s to 1 s, the old
+    // samples stay widely spaced and the recent ones tighten. Rank-based
+    // placement would have made them all equal, passing 5 s of history off
+    // as 1 s. This test covers the **wiring** (both paths, the hover line and
+    // the popover share `chartXValues`); the computation itself is tested in
+    // `sparkline.test.ts`.
+    const jiffies = nextJiffies()
     stub(() => payload(jiffies()))
-    const w = await monter()
+    const w = await mountView()
     await vi.advanceTimersByTimeAsync(4 * 5000)
     await flushPromises()
     await w.findComponent(Select).vm.$emit('update:modelValue', '1')
@@ -249,134 +246,134 @@ describe('SystemView', () => {
 
     const d = w.get('[data-system-history] path').attributes('d')!
     const xs = [...d.matchAll(/[ML](-?\d+\.\d+),/g)].map((m) => Number(m[1]))
-    // Assez d'échantillons de part et d'autre du changement pour que la
-    // comparaison ait un sens.
+    // Enough samples on both sides of the change for the comparison to be
+    // meaningful.
     expect(xs.length).toBeGreaterThanOrEqual(5)
-    const ecarts = xs.slice(1).map((x, i) => x - (xs[i] ?? 0))
-    const premier = ecarts[0] ?? 0
-    const last = ecarts.at(-1) ?? 0
-    // Rapport théorique 5 (5 s contre 1 s) ; on exige 3 pour laisser passer le
-    // temps réel qui s'écoule aussi sous `shouldAdvanceTime`.
-    expect(premier).toBeGreaterThan(last * 3)
+    const gaps = xs.slice(1).map((x, i) => x - (xs[i] ?? 0))
+    const first = gaps[0] ?? 0
+    const last = gaps.at(-1) ?? 0
+    // Theoretical ratio 5 (5 s against 1 s); we require 3 to allow for the
+    // real time that also elapses under `shouldAdvanceTime`.
+    expect(first).toBeGreaterThan(last * 3)
     w.unmount()
   })
 
-  it('le sondage survit au démontage de la vue', async () => {
-    // Le sondage n'appartient plus à la page mais au store de module, partagé
-    // par toute la SPA : une vue qui s'en va n'est step une raison de cesser de
-    // mesurer. Quitter la page Système pour la configuration et revenir doit
-    // retrouver un history continu, step un graphe vide.
+  it('the probing survives unmounting the view', async () => {
+    // The probing no longer belongs to the page but to the module store,
+    // shared by the whole SPA: a view going away is no reason to stop
+    // measuring. Leaving the System page for the configuration and coming
+    // back must find a continuous history, not an empty chart.
     const f = stub(payload())
-    const w = await monter()
-    const appels = f.mock.calls.length
+    const w = await mountView()
+    const calls = f.mock.calls.length
     w.unmount()
-    // Trois périodes de 5 s : le timer du store tique toujours.
+    // Three 5 s periods: the store timer still ticks.
     await vi.advanceTimersByTimeAsync(15000)
-    expect(f.mock.calls.length).toBeGreaterThan(appels)
+    expect(f.mock.calls.length).toBeGreaterThan(calls)
   })
 
-  it('continue de probe quand l onglet passe en arrière-plan, et démarre dans un onglet déjà caché', async () => {
+  it('keeps probing when the tab goes to the background, and starts in an already hidden tab', async () => {
     const f = stub(payload())
-    const w = await monter()
-    const avant = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
-    // L'onglet passe en arrière-plan. Le sondage ne doit plus s'arrêter : le
-    // graphe est là pour dire ce qui s'est passé pendant qu'on regardait
-    // ailleurs.
+    const w = await mountView()
+    const before = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
+    // The tab goes to the background. The probing must no longer stop: the
+    // chart is there to tell what happened while one was looking elsewhere.
     vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
     document.dispatchEvent(new Event('visibilitychange'))
     await vi.advanceTimersByTimeAsync(15000)
     await flushPromises()
-    const apres = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
-    expect(apres).toBeGreaterThanOrEqual(avant + 3)
+    const after = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
+    expect(after).toBeGreaterThanOrEqual(before + 3)
     w.unmount()
 
-    // Ce qui précède prouve que le passage en arrière-plan n'arrête plus le
-    // timer déjà installé ; le cas propre à la garde de `start()` est
-    // l'autre : la SPA qui s'amorce dans un onglet **déjà** caché — session
-    // restaurée, onglet open en arrière-plan. `document.hidden` valant
-    // toujours `true`, `start()` doit installer le timer quand même.
+    // The above proves that going to the background no longer stops an
+    // already installed timer; the case specific to the guard of `start()`
+    // is the other one: the SPA booting in a tab that is **already** hidden —
+    // restored session, tab opened in the background. `document.hidden`
+    // still being `true`, `start()` must install the timer anyway.
     resetMetrics()
-    const repart = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
+    const restarted = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
     useMetrics().start()
     await vi.advanceTimersByTimeAsync(15000)
     await flushPromises()
-    const cache = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
-    expect(cache).toBeGreaterThanOrEqual(repart + 3)
+    const hidden = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
+    expect(hidden).toBeGreaterThanOrEqual(restarted + 3)
   })
 
-  it('garde l history quand on quitte la vue et qu on y revient', async () => {
-    const jiffies = prochainsJiffies()
+  it('keeps the history when leaving the view and coming back', async () => {
+    const jiffies = nextJiffies()
     stub(() => payload(jiffies()))
-    const w = await monter()
-    // Trois sondages : le premier pose la référence de jiffies, les deux
-    // suivants poussent deux échantillons — de quoi tracer une ligne.
+    const w = await mountView()
+    // Three probes: the first sets the jiffies reference, the next two push
+    // two samples — enough to draw a line.
     await vi.advanceTimersByTimeAsync(15000)
     await flushPromises()
-    const avant = (w.get('[data-system-history] path').attributes('d')!.match(/L/g) ?? []).length
-    expect(avant).toBeGreaterThanOrEqual(1)
+    const before = (w.get('[data-system-history] path').attributes('d')!.match(/L/g) ?? []).length
+    expect(before).toBeGreaterThanOrEqual(1)
     w.unmount()
 
-    // La vue est démontée : le sondage continue pour autant, et la vue
-    // remontée retrouve un graphe déjà tracé au lieu de repartir de zéro.
+    // The view is unmounted: the probing goes on regardless, and the
+    // remounted view finds an already drawn chart instead of starting from
+    // scratch.
     await vi.advanceTimersByTimeAsync(15000)
     await flushPromises()
-    const revenu = mount(SystemView, { attachTo: document.body })
+    const remounted = mount(SystemView, { attachTo: document.body })
     await flushPromises()
-    const apres = (revenu.get('[data-system-history] path').attributes('d')!.match(/L/g) ?? []).length
-    expect(apres).toBeGreaterThan(avant)
-    revenu.unmount()
+    const after = (remounted.get('[data-system-history] path').attributes('d')!.match(/L/g) ?? []).length
+    expect(after).toBeGreaterThan(before)
+    remounted.unmount()
   })
 
-  it('désactive les boutons système quand polkit n est step configuré', async () => {
+  it('disables the system buttons when polkit is not configured', async () => {
     stub(payload({ can_power_off: false, can_reboot: false }))
-    const w = await monter()
+    const w = await mountView()
     expect(w.get('[data-power-poweroff]').attributes('disabled')).toBeDefined()
     expect(w.get('[data-power-reboot]').attributes('disabled')).toBeDefined()
-    // Le redémarrage du service ne dépend d'aucune autorisation.
+    // Restarting the service depends on no authorization.
     expect(w.get('[data-power-restart]').attributes('disabled')).toBeUndefined()
     expect(w.find('[data-power-unavailable]').exists()).toBe(true)
     w.unmount()
   })
 
-  it('accuse polkit quand logind a repondu, logind quand il n a step repondu', async () => {
-    // Les deux causes d'un bouton grisé ne se réparent step pareil, et la
-    // phrase qui les confond envoie chercher une règle polkit déjà en place.
-    // Le catalogue de test ne porte step ces clés : `t` rend la clé, ce qui
-    // suffit à distinguer les deux phrases.
+  it('blames polkit when logind answered, logind when it did not answer', async () => {
+    // The two causes of a greyed-out button are not fixed the same way, and
+    // the sentence that conflates them sends one looking for a polkit rule
+    // that is already in place. The test catalog does not carry these keys:
+    // `t` returns the key, which is enough to tell the two sentences apart.
     stub(payload({ can_power_off: false, can_reboot: false, logind_reachable: true }))
-    const refus = await monter()
-    expect(refus.get('[data-power-unavailable]').text()).toContain('system_power_unavailable')
-    refus.unmount()
+    const refused = await mountView()
+    expect(refused.get('[data-power-unavailable]').text()).toContain('system_power_unavailable')
+    refused.unmount()
 
     stub(payload({ can_power_off: false, can_reboot: false, logind_reachable: false }))
-    // Deuxième visite dans le même test : l'état des métriques vit au niveau
-    // module, donc l'échéance du sondage précédent lui survit et `start()`
-    // attendrait la fin de la période au lieu de probe tout de suite. On
-    // repart d'un démarrage de SPA, comme le fait le `beforeEach`.
+    // Second visit within the same test: the metrics state lives at module
+    // level, so the deadline of the previous probe outlives it and `start()`
+    // would wait for the end of the period instead of probing right away. We
+    // start over from an SPA boot, as the `beforeEach` does.
     resetMetrics()
-    const absent = await monter()
-    expect(absent.get('[data-power-unavailable]').text()).toContain('system_power_no_logind')
-    absent.unmount()
+    const noLogind = await mountView()
+    expect(noLogind.get('[data-power-unavailable]').text()).toContain('system_power_no_logind')
+    noLogind.unmount()
   })
 
-  it('n en désactive qu un seul quand une seule autorisation manque', async () => {
-    // Le message d'indisponibilité est un OU sur les deux drapeaux : il doit
-    // rester affiché même quand un seul des deux manque, sans désactiver
-    // l'autre bouton.
+  it('disables only one of them when a single authorization is missing', async () => {
+    // The unavailability message is an OR over the two flags: it must stay
+    // displayed even when only one of the two is missing, without disabling
+    // the other button.
     stub(payload({ can_power_off: false, can_reboot: true }))
-    const w = await monter()
+    const w = await mountView()
     expect(w.find('[data-power-unavailable]').exists()).toBe(true)
     expect(w.get('[data-power-poweroff]').attributes('disabled')).toBeDefined()
     expect(w.get('[data-power-reboot]').attributes('disabled')).toBeUndefined()
     w.unmount()
   })
 
-  it('n envoie rien avant confirmation', async () => {
+  it('sends nothing before confirmation', async () => {
     const f = stub(payload())
-    const w = await monter()
+    const w = await mountView()
     await w.get('[data-power-poweroff]').trigger('click')
     await flushPromises()
-    // Le dialog est monté dans un portail : il vit dans document.body.
+    // The dialog is mounted in a portal: it lives in document.body.
     expect(document.body.querySelector('[data-power-confirm]')).not.toBeNull()
     expect(f.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === 'POST')).toBe(false)
     document.body.querySelector<HTMLElement>('[data-power-cancel]')!.click()
@@ -385,61 +382,61 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('poste l action confirmée puis annonce l arrêt et cesse de probe', async () => {
+  it('posts the confirmed action then announces the shutdown and stops probing', async () => {
     const f = stub(payload())
-    const w = await monter()
+    const w = await mountView()
     await w.get('[data-power-poweroff]').trigger('click')
     await flushPromises()
     document.body.querySelector<HTMLElement>('[data-power-confirm]')!.click()
     await flushPromises()
-    const poste = f.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'POST')
-    expect(poste).toBeDefined()
-    expect(poste?.[0]).toBe('/api/system/power')
-    expect(JSON.parse(String((poste?.[1] as RequestInit).body))).toEqual({ action: 'poweroff' })
+    const posted = f.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === 'POST')
+    expect(posted).toBeDefined()
+    expect(posted?.[0]).toBe('/api/system/power')
+    expect(JSON.parse(String((posted?.[1] as RequestInit).body))).toEqual({ action: 'poweroff' })
     expect(w.find('[data-power-progress]').exists()).toBe(true)
-    // Le cœur s'en va : plus aucun sondage, sans quoi la page afficherait
-    // une erreur réseau alors que tout se passe comme demandé.
-    const appels = f.mock.calls.length
+    // The core goes away: no more probing, otherwise the page would display
+    // a network error while everything happens as requested.
+    const calls = f.mock.calls.length
     await vi.advanceTimersByTimeAsync(15000)
-    expect(f.mock.calls.length).toBe(appels)
+    expect(f.mock.calls.length).toBe(calls)
     w.unmount()
   })
 
-  it('ne relance step le sondage sur un changement de période pendant un arrêt confirmé', async () => {
+  it('does not restart the probing on a period change during a confirmed shutdown', async () => {
     const f = stub(payload())
-    const w = await monter()
+    const w = await mountView()
     await w.get('[data-power-poweroff]').trigger('click')
     await flushPromises()
     document.body.querySelector<HTMLElement>('[data-power-confirm]')!.click()
     await flushPromises()
     expect(w.find('[data-power-progress]').exists()).toBe(true)
-    const appels = f.mock.calls.length
-    // Le sélecteur de période reste affiché pendant l'arrêt : rien n'empêche
-    // l'utilisateur d'y toucher pendant que le cœur s'en va. C'est désormais le
-    // seul chemin à sa portée qui repasse par `start()` (son setter fait
-    // `stop()` puis `start()`), et la garde `paused` doit refuser de
-    // repartir, sans quoi la page sonderait un cœur déjà parti et afficherait
-    // une erreur réseau sur un arrêt qui se déroule comme demandé. Une seconde
-    // de période contre cinq secondes d'avance : la garde absente, cinq
-    // sondages atterriraient ici.
+    const calls = f.mock.calls.length
+    // The period selector stays displayed during the shutdown: nothing stops
+    // the user from touching it while the core goes away. It is now the only
+    // path within their reach that goes through `start()` again (its setter
+    // does `stop()` then `start()`), and the `paused` guard must refuse to
+    // restart, otherwise the page would probe a core already gone and
+    // display a network error on a shutdown that proceeds as requested. A
+    // one-second period against five seconds of advance: with the guard
+    // missing, five probes would land here.
     await w.findComponent(Select).vm.$emit('update:modelValue', '1')
     await vi.advanceTimersByTimeAsync(5000)
-    expect(f.mock.calls.length).toBe(appels)
+    expect(f.mock.calls.length).toBe(calls)
     w.unmount()
   })
 
-  it('reprend la main quand le redémarrage du service aboutit', async () => {
-    // Uptime décroissant : le service est bien revenu, ce qu'une simple
-    // réponse ne prouverait step (le premier sondage peut encore atteindre
-    // l'ancien process). Les deux premières réponses portent un uptime
-    // largement supérieur à `avant + écoulé` (3600 + quelques secondes tout
-    // au plus dans ce test) : sans cette marge, elles satisferaient déjà le
-    // nouveau seuil et l'wait s'arrêterait dès le premier sondage au lieu
-    // du troisième, ce que ce test doit précisément distinguer.
-    const reponses = [payload(), payload({ service_uptime_s: 9999 }), payload({ service_uptime_s: 2 })]
+  it('takes over again when the service restart completes', async () => {
+    // Decreasing uptime: the service really came back, which a mere response
+    // would not prove (the first probe may still reach the old process). The
+    // first two responses carry an uptime well above `before + elapsed`
+    // (3600 + a few seconds at most in this test): without that margin, they
+    // would already satisfy the new threshold and the wait would stop at the
+    // first probe instead of the third, which is precisely what this test
+    // must tell apart.
+    const responses = [payload(), payload({ service_uptime_s: 9999 }), payload({ service_uptime_s: 2 })]
     let i = 0
-    stub(() => reponses[Math.min(i++, reponses.length - 1)])
-    const w = await monter()
+    stub(() => responses[Math.min(i++, responses.length - 1)])
+    const w = await mountView()
     await w.get('[data-power-restart]').trigger('click')
     await flushPromises()
     document.body.querySelector<HTMLElement>('[data-power-confirm]')!.click()
@@ -451,25 +448,25 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('atteint le plafond de 30 s même si un sondage reste sans réponse', async () => {
-    // Après le POST, chaque GET reste en wait pour toujours : une
-    // requête qui se connected mais ne répond jamais. Sans la course contre
-    // un délai dans `waitForReturn`, l'wait resterait bloquée dessus au
-    // lieu d'atteindre le plafond promis.
-    let poste = false
+  it('reaches the 30 s cap even if a probe never answers', async () => {
+    // After the POST, every GET stays pending forever: a request that
+    // connects but never answers. Without the race against a delay in
+    // `waitForReturn`, the wait would stay stuck on it instead of reaching
+    // the promised cap.
+    let posted = false
     const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
       if (init?.method === 'POST') {
-        poste = true
+        posted = true
         return Promise.resolve({ ok: true, json: async () => ({}) } as Response)
       }
       if (String(url).includes('/api/i18n')) {
         return Promise.resolve({ ok: true, json: async () => CATALOGUE } as Response)
       }
-      if (poste) return new Promise<Response>(() => {})
+      if (posted) return new Promise<Response>(() => {})
       return Promise.resolve({ ok: true, json: async () => payload() } as Response)
     })
     vi.stubGlobal('fetch', f)
-    const w = await monter()
+    const w = await mountView()
     await w.get('[data-power-restart]').trigger('click')
     await flushPromises()
     document.body.querySelector<HTMLElement>('[data-power-confirm]')!.click()
@@ -481,53 +478,53 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('démonter pendant l wait laisse le sondage resume', async () => {
-    // L'ancien processus répond encore, donc son uptime **croît** avec
-    // l'clock — c'est ce que fait un processus toujours vivant. La condition
-    // de retour le compare à `avant + écoulé` : un uptime qui suit l'clock
-    // ne peut jamais passer sous ce seuil, donc l'wait tourne jusqu'à ce
-    // qu'on démonte la vue. Un échantillon figé, lui, finirait par être pris
-    // pour un redémarrage réussi et ce test ne dirait plus ce qu'il annonce.
+  it('unmounting during the wait lets the probing resume', async () => {
+    // The old process still answers, so its uptime **grows** with the clock —
+    // that is what a process still alive does. The return condition compares
+    // it to `before + elapsed`: an uptime that follows the clock can never
+    // drop below that threshold, so the wait runs until the view is
+    // unmounted. A frozen sample, on the other hand, would end up being taken
+    // for a successful restart and this test would no longer say what it
+    // claims.
     //
-    // Le sondage appartient au store, partagé par toute la SPA : quitter la
-    // page pendant un redémarrage de service ne peut step figer la mesure pour
-    // toutes les autres. `waitForReturn` doit donc rendre la main à
-    // `resume()` sur sa sortie par démontage comme sur celle par plafond ;
-    // sans ça, `paused` reste vrai pour la vie de la page et aucun
-    // `start()` ultérieur ne repart jamais.
-    const debut = Date.now()
-    const f = stub(() => payload({ service_uptime_s: 3600 + Math.floor((Date.now() - debut) / 1000) }))
-    const w = await monter()
+    // The probing belongs to the store, shared by the whole SPA: leaving the
+    // page during a service restart cannot freeze the measurement for all
+    // the others. `waitForReturn` must therefore hand back to `resume()` on
+    // its exit by unmount as on its exit by cap; without that, `paused`
+    // stays true for the life of the page and no later `start()` ever
+    // restarts.
+    const startedAt = Date.now()
+    const f = stub(() => payload({ service_uptime_s: 3600 + Math.floor((Date.now() - startedAt) / 1000) }))
+    const w = await mountView()
     await w.get('[data-power-restart]').trigger('click')
     await flushPromises()
     document.body.querySelector<HTMLElement>('[data-power-confirm]')!.click()
     await flushPromises()
     w.unmount()
-    // Assez de temps pour que la loop constate le démontage au tour suivant
-    // et reprenne le sondage régulier.
+    // Enough time for the loop to notice the unmount on the next round and
+    // resume the regular probing.
     await vi.advanceTimersByTimeAsync(10000)
-    const appels = f.mock.calls.length
+    const calls = f.mock.calls.length
     await vi.advanceTimersByTimeAsync(30000)
-    expect(f.mock.calls.length).toBeGreaterThan(appels)
+    expect(f.mock.calls.length).toBeGreaterThan(calls)
   })
 
-  it('un redémarrage de l appareil confirmé reprend le sondage quand la machine revient', async () => {
-    // Le Pi s'en va puis **revient** en 20 à 40 s, et l'onglet, lui, n'a step
-    // bougé : le redémarrage de la machine s'attend donc comme la relance du
-    // service, seul le plafond diffère. Sans cette wait, `paused` restait
-    // vrai pour la vie de la page — le graphe figé sur les échantillons
-    // d'avant le redémarrage, sur *toutes* les pages, `unavailable` toujours
-    // faux et donc rien à l'écran pour l'expliquer.
+  it('a confirmed device reboot resumes the probing when the machine comes back', async () => {
+    // The Pi goes away then **comes back** in 20 to 40 s, while the tab has
+    // not moved: the machine reboot is therefore awaited like the service
+    // restart, only the cap differs. Without this wait, `paused` stayed true
+    // for the life of the page — the chart frozen on the samples from before
+    // the reboot, on *every* page, `unavailable` still false and therefore
+    // nothing on screen to explain it.
     //
-    // Même gradation d'uptime que pour la relance du service : les deux
-    // premières réponses portent un uptime bien supérieur à `avant + écoulé`,
-    // seule la troisième prouve un service reparti de zéro — ce que
-    // `service_uptime_s` fait aussi après un redémarrage complet, puisque le
-    // service repart avec la machine.
-    const reponses = [payload(), payload({ service_uptime_s: 9999 }), payload({ service_uptime_s: 2 })]
+    // Same uptime gradation as for the service restart: the first two
+    // responses carry an uptime well above `before + elapsed`, only the third
+    // proves a service restarted from zero — which `service_uptime_s` also
+    // does after a full reboot, since the service restarts with the machine.
+    const responses = [payload(), payload({ service_uptime_s: 9999 }), payload({ service_uptime_s: 2 })]
     let i = 0
-    const f = stub(() => reponses[Math.min(i++, reponses.length - 1)])
-    const w = await monter()
+    const f = stub(() => responses[Math.min(i++, responses.length - 1)])
+    const w = await mountView()
     await w.get('[data-power-reboot]').trigger('click')
     await flushPromises()
     document.body.querySelector<HTMLElement>('[data-power-confirm]')!.click()
@@ -536,102 +533,101 @@ describe('SystemView', () => {
     await vi.advanceTimersByTimeAsync(6000)
     await flushPromises()
     expect(w.find('[data-power-progress]').exists()).toBe(false)
-    // L'assertion qui count : le sondage régulier a bien repris.
-    const appels = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
+    // The assertion that counts: the regular probing did resume.
+    const calls = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
     await vi.advanceTimersByTimeAsync(15000)
     await flushPromises()
     expect(
       f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length,
-    ).toBeGreaterThan(appels)
+    ).toBeGreaterThan(calls)
     w.unmount()
   })
 
-  it('un refus du POST d alimentation rend la main au sondage', async () => {
-    // Chemin banal sur ce matériel, step un cas limite : une installation
-    // DietPi sans la règle polkit — ou avec `systemd-logind` masqué — refuse
-    // le tout premier `POST /api/system/power`. C'est l'une des deux seules
-    // portes de sortie de la suspension globale, et rien ne s'arrête : le
-    // sondage doit resume comme si l'action n'avait jamais été demandée.
-    const f = stub(payload(), CATALOGUE, { lines: [] }, 'logind a refuse')
-    const w = await monter()
+  it('a refused power POST hands back to the probing', async () => {
+    // An ordinary path on this hardware, not an edge case: a DietPi install
+    // without the polkit rule — or with `systemd-logind` masked — refuses the
+    // very first `POST /api/system/power`. It is one of the only two exits
+    // from the global suspension, and nothing stops: the probing must resume
+    // as if the action had never been requested.
+    const f = stub(payload(), CATALOGUE, { lines: [] }, 'logind refused')
+    const w = await mountView()
     await w.get('[data-power-poweroff]').trigger('click')
     await flushPromises()
     document.body.querySelector<HTMLElement>('[data-power-confirm]')!.click()
     await flushPromises()
-    // L'action ne court step : son message a disparu.
+    // The action is not running: its message is gone.
     expect(w.find('[data-power-progress]').exists()).toBe(false)
-    // L'assertion qui count : la suspension a bien été levée.
-    const appels = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
+    // The assertion that counts: the suspension was indeed lifted.
+    const calls = f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length
     await vi.advanceTimersByTimeAsync(15000)
     await flushPromises()
     expect(
       f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length,
-    ).toBeGreaterThan(appels)
+    ).toBeGreaterThan(calls)
     w.unmount()
   })
 
-  it('calcule un pourcentage d utilisation CPU exact entre deux sondages', async () => {
-    // Δtotal 1000, Δidle 250 : 100 × (1 − 250/1000) = 75 %.
-    const reponses = [
+  it('computes an exact CPU usage percentage between two probes', async () => {
+    // Δtotal 1000, Δidle 250: 100 × (1 − 250/1000) = 75 %.
+    const responses = [
       payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 500 }),
       payload({ cpu_total_jiffies: 2000, cpu_idle_jiffies: 750 }),
     ]
     let i = 0
-    stub(() => reponses[Math.min(i++, reponses.length - 1)])
-    const w = await monter()
+    stub(() => responses[Math.min(i++, responses.length - 1)])
+    const w = await mountView()
     await vi.advanceTimersByTimeAsync(5000)
     await flushPromises()
     expect(w.get('[data-system-cpu-usage]').text()).toBe('75 %')
     w.unmount()
   })
 
-  it('displayed un tiret pour l utilisation CPU au premier sondage', async () => {
-    // Pas de sondage précédent : aucun delta n'est calculable, et ce n'est
-    // step une panne.
+  it('displays a dash for the CPU usage at the first probe', async () => {
+    // No previous probe: no delta is computable, and that is not a failure.
     stub(payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 500 }))
-    const w = await monter()
+    const w = await mountView()
     expect(w.get('[data-system-cpu-usage]').text()).toBe('—')
     w.unmount()
   })
 
-  it('displayed un tiret quand le delta total est nul ou négatif', async () => {
-    // Mêmes compteurs à chaque sondage : Δtotal = 0.
+  it('displays a dash when the total delta is zero or negative', async () => {
+    // Same counters at every probe: Δtotal = 0.
     stub(payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 500 }))
-    const w = await monter()
+    const w = await mountView()
     await vi.advanceTimersByTimeAsync(5000)
     await flushPromises()
     expect(w.get('[data-system-cpu-usage]').text()).toBe('—')
     w.unmount()
   })
 
-  /** Deux sondages dont le delta donne le pourcentage voulu. */
-  function jiffiesPour(percent: number) {
+  /** Two probes whose delta yields the wanted percentage. */
+  function jiffiesFor(percent: number) {
     const idle = 1000 - percent * 10
-    const reponses = [
+    const responses = [
       payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 1000 }),
       payload({ cpu_total_jiffies: 2000, cpu_idle_jiffies: 1000 + idle }),
     ]
     let i = 0
-    return () => reponses[Math.min(i++, reponses.length - 1)]
+    return () => responses[Math.min(i++, responses.length - 1)]
   }
 
-  it('la barre d utilisation CPU suit le pourcentage', async () => {
-    stub(jiffiesPour(75))
-    const w = await monter()
+  it('the CPU usage bar follows the percentage', async () => {
+    stub(jiffiesFor(75))
+    const w = await mountView()
     await vi.advanceTimersByTimeAsync(5000)
     await flushPromises()
     expect(w.get('[data-system-cpu-usage]').text()).toBe('75 %')
-    const barre = w.get('[data-system-cpu-bar] div')
-    expect(barre.attributes('style')).toContain('width: 75%')
-    // En dessous du seuil : color normale, pour les deux éléments.
-    expect(barre.classes()).toContain('bg-primary')
+    const bar = w.get('[data-system-cpu-bar] div')
+    expect(bar.attributes('style')).toContain('width: 75%')
+    // Below the threshold: normal colour, for both elements.
+    expect(bar.classes()).toContain('bg-primary')
     expect(w.get('[data-system-cpu-usage]').classes()).not.toContain('text-destructive')
     w.unmount()
   })
 
-  it('passe l utilisation CPU en rouge au dela de 90 pour cent', async () => {
-    stub(jiffiesPour(95))
-    const w = await monter()
+  it('turns the CPU usage red above 90 percent', async () => {
+    stub(jiffiesFor(95))
+    const w = await mountView()
     await vi.advanceTimersByTimeAsync(5000)
     await flushPromises()
     expect(w.get('[data-system-cpu-usage]').text()).toBe('95 %')
@@ -640,10 +636,10 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('90 pour cent pile n est step encore une alerte', async () => {
-    // Le seuil est strict : sans cela une load nominale afficherait du rouge.
-    stub(jiffiesPour(90))
-    const w = await monter()
+  it('exactly 90 percent is not an alert yet', async () => {
+    // The threshold is strict: otherwise a nominal load would show red.
+    stub(jiffiesFor(90))
+    const w = await mountView()
     await vi.advanceTimersByTimeAsync(5000)
     await flushPromises()
     expect(w.get('[data-system-cpu-usage]').text()).toBe('90 %')
@@ -652,13 +648,13 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('un pourcentage entre 90 et 90 virgule 5 displayed 90 pour cent sans alerte', async () => {
-    // Le libellé affiché est arrondi (`Math.round`) : le seuil doit comparer
-    // cette même valeur arrondie, step la valeur brute — sinon 90 < u <= 90,5
-    // afficherait « 90 % » tout en étant rouge, ce qui contredirait le
-    // libellé lui-même.
-    stub(jiffiesPour(90.2))
-    const w = await monter()
+  it('a percentage between 90 and 90 point 5 displays 90 percent without alert', async () => {
+    // The displayed label is rounded (`Math.round`): the threshold must
+    // compare that same rounded value, not the raw one — otherwise
+    // 90 < u <= 90.5 would display "90 %" while being red, contradicting the
+    // label itself.
+    stub(jiffiesFor(90.2))
+    const w = await mountView()
     await vi.advanceTimersByTimeAsync(5000)
     await flushPromises()
     expect(w.get('[data-system-cpu-usage]').text()).toBe('90 %')
@@ -667,308 +663,306 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('displayed la barre CPU à zéro tant que le pourcentage est inconnu', async () => {
-    // La barre est là dès le premier rendu, vide : elle apparaissait sinon
-    // d'un coup au deuxième sondage en poussant la mise en page. Rien ne
-    // prétend « 0 % » pour autant — la ligne de lecture displayed « — ».
+  it('displays the CPU bar at zero as long as the percentage is unknown', async () => {
+    // The bar is there from the first render, empty: otherwise it appeared
+    // all at once at the second probe, pushing the layout. Nothing claims
+    // "0 %" for all that — the reading line displays "—".
     stub(payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 500 }))
-    const w = await monter()
+    const w = await mountView()
     expect(w.get('[data-system-cpu-usage]').text()).toBe('—')
     expect(w.get('[data-system-cpu-bar] div').attributes('style')).toContain('width: 0%')
     w.unmount()
   })
 
-  it('un sondage en vol empêche un second sondage de corrompre le delta suivant', async () => {
-    // Chaque GET reste en wait jusqu'à ce que le test le résolve
-    // explicitement, pour simuler un sondage qui n'a step encore répondu
-    // quand le timer tique à nouveau.
-    const differes: { resolve: (v: unknown) => void }[] = []
+  it('an in-flight probe prevents a second probe from corrupting the next delta', async () => {
+    // Every GET stays pending until the test resolves it explicitly, to
+    // simulate a probe that has not answered yet when the timer ticks again.
+    const deferred: { resolve: (v: unknown) => void }[] = []
     let n = 0
     const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
       if (init?.method === 'POST') return Promise.resolve({ ok: true, json: async () => ({}) } as Response)
       if (String(url).includes('/api/i18n')) return Promise.resolve({ ok: true, json: async () => CATALOGUE } as Response)
-      // Le log est relevé une fois au montage et ne passe step par le verrou
-      // de sondage : le compter ici mesurerait autre chose que ce test. Même
-      // chose pour les réglages, relevés une fois pour dater ce log.
+      // The log is fetched once at mount and does not go through the probing
+      // lock: counting it here would measure something other than this test.
+      // Same for the settings, fetched once to date that log.
       if (String(url).includes('/api/logs')) return Promise.resolve({ ok: true, json: async () => ({ lines: [] }) } as Response)
       if (String(url).includes('/api/settings')) {
         return Promise.resolve({ ok: true, json: async () => ({ date_format: 'day_month_year', clock_24h: true }) } as Response)
       }
       n += 1
-      return new Promise((resolve) => differes.push({ resolve }))
+      return new Promise((resolve) => deferred.push({ resolve }))
     })
     vi.stubGlobal('fetch', f)
-    const w = await monter()
-    // Premier sondage (déclenché par `start()` au montage) : en vol.
+    const w = await mountView()
+    // First probe (triggered by `start()` at mount): in flight.
     expect(n).toBe(1)
-    // Le timer tique pendant que ce premier sondage n'a toujours step
-    // répondu : sans le verrou, ça déclencherait un second `fetch` par-dessus.
+    // The timer ticks while this first probe still has not answered: without
+    // the lock, that would trigger a second `fetch` on top.
     await vi.advanceTimersByTimeAsync(5000)
     expect(n).toBe(1)
-    // Le premier sondage répond enfin, posant la référence de jiffies.
-    differes[0]!.resolve({ ok: true, json: async () => payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 500 }) })
+    // The first probe finally answers, setting the jiffies reference.
+    deferred[0]!.resolve({ ok: true, json: async () => payload({ cpu_total_jiffies: 1000, cpu_idle_jiffies: 500 }) })
     await flushPromises()
-    // Le timer retique : le verrou est levé, un second sondage part bien.
+    // The timer ticks again: the lock is released, a second probe does go out.
     await vi.advanceTimersByTimeAsync(5000)
     expect(n).toBe(2)
-    differes[1]!.resolve({ ok: true, json: async () => payload({ cpu_total_jiffies: 2000, cpu_idle_jiffies: 750 }) })
+    deferred[1]!.resolve({ ok: true, json: async () => payload({ cpu_total_jiffies: 2000, cpu_idle_jiffies: 750 }) })
     await flushPromises()
-    // Le delta n'a step été corrompu par un chevauchement : 75 % exact, comme
-    // dans le test sans chevauchement ci-dessus.
+    // The delta was not corrupted by an overlap: 75 % exactly, as in the
+    // test without overlap above.
     expect(w.get('[data-system-cpu-usage]').text()).toBe('75 %')
     w.unmount()
   })
 
-  it('pose un repère sur chaque minute pleine de l clock couverte par le graphe', async () => {
-    // Heure système figée à une minute pleine : les repères marquant des
-    // instants absolus, leur number dépend de la **phase** de la fenêtre par
-    // rapport à l'clock. Sans cette ancre, le test serait tantôt vert
-    // tantôt rouge selon l'heure réelle de son exécution.
+  it('places a tick on every full minute of the clock covered by the chart', async () => {
+    // System time frozen on a full minute: the ticks mark absolute instants,
+    // so their number depends on the **phase** of the window relative to the
+    // clock. Without this anchor, the test would be green or red depending
+    // on the real time of its run.
     vi.setSystemTime(new Date('2026-08-14T12:00:00.000Z'))
-    const jiffies = prochainsJiffies()
+    const jiffies = nextJiffies()
     stub(() => payload(jiffies()))
-    const w = await monter()
-    // Premier échantillon à 12:00:10 (deux sondages pour un delta), last à
-    // 12:00:15 : aucune minute pleine dans cette fenêtre.
+    const w = await mountView()
+    // First sample at 12:00:10 (two probes for a delta), last at 12:00:15:
+    // no full minute in that window.
     await vi.advanceTimersByTimeAsync(3 * 5000)
     await flushPromises()
     expect(w.findAll('[data-system-history-tick]').length).toBe(0)
-    // 28 sondages de plus mènent à 12:02:35 : 12:01:00 et 12:02:00 tombent
-    // dans la fenêtre, 12:00:00 est avant son début.
+    // 28 more probes lead to 12:02:35: 12:01:00 and 12:02:00 fall within the
+    // window, 12:00:00 is before its start.
     await vi.advanceTimersByTimeAsync(28 * 5000)
     await flushPromises()
     expect(w.findAll('[data-system-history-tick]').length).toBe(2)
     w.unmount()
   })
 
-  it('changer la période ne sonde step sur-le-champ tant que l échéance court encore', async () => {
-    // 5 s par défaut, on avance de 1 s, puis on passe à 10 s : le last
-    // sondage a 1 s, l'échéance neuve est à 10 s, donc rien ne doit partir
-    // avant les 9 s remaining.
+  it('changing the period does not probe right away while the deadline is still running', async () => {
+    // 5 s by default, we advance 1 s, then switch to 10 s: the last probe is
+    // 1 s old, the new deadline is at 10 s, so nothing must go out before the
+    // remaining 9 s.
     const f = stub(payload())
-    const w = await monter()
+    const w = await mountView()
     await vi.advanceTimersByTimeAsync(1000)
-    const avant = f.mock.calls.length
+    const before = f.mock.calls.length
     await w.findComponent(Select).vm.$emit('update:modelValue', '10')
     await flushPromises()
-    expect(f.mock.calls.length).toBe(avant)
+    expect(f.mock.calls.length).toBe(before)
     await vi.advanceTimersByTimeAsync(8000)
-    expect(f.mock.calls.length).toBe(avant)
+    expect(f.mock.calls.length).toBe(before)
     await vi.advanceTimersByTimeAsync(1500)
-    expect(f.mock.calls.length).toBe(avant + 1)
+    expect(f.mock.calls.length).toBe(before + 1)
     w.unmount()
   })
 
-  it('changer la période sonde tout de suite si elle rend le last sondage périmé', async () => {
-    // 5 s par défaut, on avance de 4 s, puis on passe à 1 s : le last
-    // sondage a 4 s pour une période de 1 s, il est donc déjà périmé et la
-    // reprise doit être immédiate — sans quoi la page resterait sur des
-    // chiffres vieux de plusieurs périodes après avoir demandé d'accélérer.
+  it('changing the period probes immediately if it makes the last probe stale', async () => {
+    // 5 s by default, we advance 4 s, then switch to 1 s: the last probe is
+    // 4 s old for a 1 s period, so it is already stale and the resumption
+    // must be immediate — otherwise the page would stay on figures several
+    // periods old after asking to speed up.
     const f = stub(payload())
-    const w = await monter()
+    const w = await mountView()
     await vi.advanceTimersByTimeAsync(4000)
-    const avant = f.mock.calls.length
+    const before = f.mock.calls.length
     await w.findComponent(Select).vm.$emit('update:modelValue', '1')
     await flushPromises()
-    expect(f.mock.calls.length).toBe(avant + 1)
+    expect(f.mock.calls.length).toBe(before + 1)
     w.unmount()
   })
 
-  it('un changement de période pendant un sondage en vol n écrase step un état plus frais', async () => {
-    type Differe = { signal: AbortSignal | null | undefined; resolve: (v: unknown) => void }
-    const differes: Differe[] = []
+  it('a period change during an in-flight probe does not overwrite a fresher state', async () => {
+    type Deferred = { signal: AbortSignal | null | undefined; resolve: (v: unknown) => void }
+    const deferred: Deferred[] = []
     const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
       if (init?.method === 'POST') return Promise.resolve({ ok: true, json: async () => ({}) } as Response)
       if (String(url).includes('/api/i18n')) return Promise.resolve({ ok: true, json: async () => CATALOGUE } as Response)
-      // Même raison que dans le test du verrou : le log est relevé une seule
-      // fois au montage, hors du sondage, et n'a rien à faire dans `differes`.
-      // Les réglages non plus, relevés une fois pour dater ce log.
+      // Same reason as in the lock test: the log is fetched a single time at
+      // mount, outside the probing, and has no business in `deferred`.
+      // Neither do the settings, fetched once to date that log.
       if (String(url).includes('/api/logs')) return Promise.resolve({ ok: true, json: async () => ({ lines: [] }) } as Response)
       if (String(url).includes('/api/settings')) {
         return Promise.resolve({ ok: true, json: async () => ({ date_format: 'day_month_year', clock_24h: true }) } as Response)
       }
       return new Promise((resolve, reject) => {
         const signal = init?.signal
-        // Un `AbortSignal` réel rejette son `fetch` à l'annulation : le stub
-        // reproduit ce comportement plutôt que de laisser la promesse en
-        // vol pour toujours.
+        // A real `AbortSignal` rejects its `fetch` on cancellation: the stub
+        // reproduces that behaviour rather than leaving the promise in flight
+        // forever.
         signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
-        differes.push({ signal, resolve })
+        deferred.push({ signal, resolve })
       })
     })
     vi.stubGlobal('fetch', f)
-    const w = await monter()
-    expect(differes.length).toBe(1)
-    // Changement de période pendant que ce premier sondage est encore en vol.
+    const w = await mountView()
+    expect(deferred.length).toBe(1)
+    // Period change while this first probe is still in flight.
     await w.findComponent(Select).vm.$emit('update:modelValue', '1')
     await flushPromises()
-    // `stop()` a dû annuler la requête en vol...
-    expect(differes[0]!.signal?.aborted).toBe(true)
-    // ... sans que cette annulation count pour une panne : une requête
-    // abandonnée par notre propre code n'est step un échec du cœur.
+    // `stop()` must have cancelled the in-flight request...
+    expect(deferred[0]!.signal?.aborted).toBe(true)
+    // ... without that cancellation counting as a failure: a request
+    // abandoned by our own code is not a failure of the core.
     expect(w.find('[data-system-unavailable]').exists()).toBe(false)
-    // ... et la reprise n'est plus immédiate : le last sondage venant tout
-    // juste d'être lancé, l'échéance du nouveau rythme (1 s) n'est step
-    // atteinte. C'est elle qui relancera.
-    expect(differes.length).toBe(1)
+    // ... and the resumption is no longer immediate: the last probe having
+    // just been launched, the deadline of the new rhythm (1 s) is not
+    // reached. It is what will relaunch.
+    expect(deferred.length).toBe(1)
     await vi.advanceTimersByTimeAsync(1000)
-    expect(differes.length).toBe(2)
-    // La requête annulée finit par « répondre » avec des données pourtant
-    // plus anciennes que celles déjà posées par la requête plus fraîche :
-    // elle ne doit ni les écraser, ni afficher la ligne d'indisponibilité —
-    // une requête abandonnée par notre propre code n'est step un échec du
-    // cœur.
-    differes[1]!.resolve({ ok: true, json: async () => payload({ cpu_total_jiffies: 2000, cpu_idle_jiffies: 1000 }) })
+    expect(deferred.length).toBe(2)
+    // The cancelled request eventually "answers" with data that is however
+    // older than what the fresher request already set: it must neither
+    // overwrite it nor display the unavailability line — a request abandoned
+    // by our own code is not a failure of the core.
+    deferred[1]!.resolve({ ok: true, json: async () => payload({ cpu_total_jiffies: 2000, cpu_idle_jiffies: 1000 }) })
     await flushPromises()
     expect(w.find('[data-system-unavailable]').exists()).toBe(false)
     w.unmount()
   })
 
-  it('re-choose la période déjà active ne redéclenche step le sondage', async () => {
+  it('re-choosing the already active period does not retrigger the probing', async () => {
     const f = stub(payload())
-    const w = await monter()
+    const w = await mountView()
     await flushPromises()
-    const appels = f.mock.calls.length
-    // La valeur initiale du sélecteur est déjà « 5 » (période par défaut) :
-    // la re-choose ne doit ni probe immédiatement, ni réinitialiser le
-    // timer.
+    const calls = f.mock.calls.length
+    // The initial value of the selector is already "5" (default period):
+    // re-choosing it must neither probe immediately nor reset the timer.
     await w.findComponent(Select).vm.$emit('update:modelValue', '5')
     await flushPromises()
-    expect(f.mock.calls.length).toBe(appels)
+    expect(f.mock.calls.length).toBe(calls)
     w.unmount()
   })
 
-  it('change la cadence de sondage en changeant la période', async () => {
+  it('changes the probing cadence by changing the period', async () => {
     const f = stub(payload())
-    const w = await monter()
+    const w = await mountView()
     await w.findComponent(Select).vm.$emit('update:modelValue', '1')
     await flushPromises()
-    const appels = f.mock.calls.length
+    const calls = f.mock.calls.length
     await vi.advanceTimersByTimeAsync(3000)
     await flushPromises()
-    // À une seconde, trois sondages supplémentaires en 3 s ; la période
-    // précédente de 5 s n'en aurait produit aucun sur la même durée.
-    expect(f.mock.calls.length - appels).toBe(3)
+    // At one second, three more probes in 3 s; the previous 5 s period would
+    // have produced none over the same duration.
+    expect(f.mock.calls.length - calls).toBe(3)
     w.unmount()
   })
 
-  it('ordonne les cartes CPU, Mémoire, Historique, Stockage, Appareil, Alimentation', async () => {
+  it('orders the cards CPU, Memory, History, Storage, Device, Power', async () => {
     stub(payload())
-    const w = await monter()
-    const titres = w.findAllComponents(CardTitle).map((c) => c.text())
-    expect(titres[0]).toBe('system_cpu')
-    expect(titres[1]).toBe('system_memory')
-    expect(titres[2]).toContain('system_history')
-    expect(titres[3]).toBe('system_storage')
-    expect(titres[4]).toBe('system_device')
-    expect(titres[5]).toBe('system_power')
+    const w = await mountView()
+    const titles = w.findAllComponents(CardTitle).map((c) => c.text())
+    expect(titles[0]).toBe('system_cpu')
+    expect(titles[1]).toBe('system_memory')
+    expect(titles[2]).toContain('system_history')
+    expect(titles[3]).toBe('system_storage')
+    expect(titles[4]).toBe('system_device')
+    expect(titles[5]).toBe('system_power')
     w.unmount()
   })
 
-  it('displayed la load moyenne dans la carte history', async () => {
+  it('displays the load average in the history card', async () => {
     stub(payload())
-    const w = await monter()
+    const w = await mountView()
     expect(w.get('[data-system-load]').text()).toBe('0.50 · 0.40 · 0.30')
     w.unmount()
   })
 
-  it('displayed un tiret pour la voltage quand aucune sonde n est presente', async () => {
-    // `null` : step de capteur `rpi_volt`, à distinguer d'une alimentation
-    // saine (`false`) — l'ancien affichage confondait les deux.
+  it('displays a dash for the voltage when no probe is present', async () => {
+    // `null`: no `rpi_volt` sensor, to be told apart from a healthy power
+    // supply (`false`) — the old display conflated the two.
     stub(payload({ under_voltage: null }))
-    const w = await monter()
+    const w = await mountView()
     const voltage = w.get('[data-system-under-voltage]')
     expect(voltage.text()).toBe('—')
     expect(voltage.classes()).not.toContain('text-destructive')
     w.unmount()
   })
 
-  it('displayed la voltage nominale quand la sonde ne detecte rien', async () => {
+  it('displays the nominal voltage when the sensor detects nothing', async () => {
     stub(payload({ under_voltage: false }))
-    const w = await monter()
+    const w = await mountView()
     const voltage = w.get('[data-system-under-voltage]')
     expect(voltage.text()).toBe('system_voltage_ok')
     expect(voltage.classes()).not.toContain('text-destructive')
     w.unmount()
   })
 
-  it('displayed l antecedent quand la sonde est saine mais un episode a eu lieu depuis le demarrage', async () => {
-    // `under_voltage: false` (rien à l'instant) mais `under_voltage_since_boot:
-    // true` (le bit collant du micrologiciel) : un troisième état, distinct
-    // de la sous-voltage en cours, sans le rouge de l'alerte immédiate.
+  it('displays the past episode when the sensor is healthy but an episode occurred since boot', async () => {
+    // `under_voltage: false` (nothing right now) but `under_voltage_since_boot:
+    // true` (the firmware's sticky bit): a third state, distinct from an
+    // ongoing under-voltage, without the red of the immediate alert.
     stub(payload({ under_voltage: false, under_voltage_since_boot: true }))
-    const w = await monter()
+    const w = await mountView()
     const voltage = w.get('[data-system-under-voltage]')
     expect(voltage.text()).toBe('system_voltage_since_boot')
     expect(voltage.classes()).not.toContain('text-destructive')
-    // La phrase de conseil reste réservée à l'alerte instantanée.
+    // The advice sentence stays reserved for the instantaneous alert.
     expect(w.find('[data-system-under-voltage-avis]').exists()).toBe(false)
     w.unmount()
   })
 
-  it('l alerte instantanee l emporte sur l antecedent quand les deux sont vrais', async () => {
+  it('the instantaneous alert wins over the past episode when both are true', async () => {
     stub(payload({ under_voltage: true, under_voltage_since_boot: true }))
-    const w = await monter()
+    const w = await mountView()
     expect(w.get('[data-system-under-voltage]').text()).toBe('system_voltage_low')
     w.unmount()
   })
 
-  it('displayed l alerte en rouge en cas de sous-voltage detectee', async () => {
+  it('displays the alert in red when under-voltage is detected', async () => {
     stub(payload({ under_voltage: true }))
-    const w = await monter()
+    const w = await mountView()
     const voltage = w.get('[data-system-under-voltage]')
-    // Le mot court dans la grille, step la phrase entière : voir le test
-    // suivant pour la phrase de conseil, affichée à part.
+    // The short word in the grid, not the whole sentence: see the next test
+    // for the advice sentence, displayed separately.
     expect(voltage.text()).toBe('system_voltage_low')
     expect(voltage.classes()).toContain('text-destructive')
     w.unmount()
   })
 
-  it('displayed la phrase de conseil sous la grille seulement quand l alerte est active', async () => {
+  it('displays the advice sentence below the grid only when the alert is active', async () => {
     stub(payload({ under_voltage: false }))
-    const w = await monter()
+    const w = await mountView()
     expect(w.find('[data-system-under-voltage-avis]').exists()).toBe(false)
     w.unmount()
   })
 
-  it('displayed la phrase de conseil avec role status en cas de sous-voltage', async () => {
+  it('displays the advice sentence with role status on under-voltage', async () => {
     stub(payload({ under_voltage: true }))
-    const w = await monter()
-    const avis = w.get('[data-system-under-voltage-avis]')
-    expect(avis.text()).toBe('system_under_voltage')
-    expect(avis.attributes('role')).toBe('status')
+    const w = await mountView()
+    const notice = w.get('[data-system-under-voltage-avis]')
+    expect(notice.text()).toBe('system_under_voltage')
+    expect(notice.attributes('role')).toBe('status')
     w.unmount()
   })
 
-  it('le bouton d aide sur la voltage porte un nom accessible et ouvre la popin', async () => {
+  it('the voltage help button has an accessible name and opens the dialog', async () => {
     stub(payload())
-    const w = await monter()
-    const bouton = w.get('[data-system-voltage-help]')
-    expect(bouton.attributes('aria-label')).toBe('system_voltage_help')
-    // Fermée au départ : la popin ne doit step s'imposer à l'arrivée sur la page.
+    const w = await mountView()
+    const button = w.get('[data-system-voltage-help]')
+    expect(button.attributes('aria-label')).toBe('system_voltage_help')
+    // Closed at first: the dialog must not impose itself on arrival on the page.
     expect(document.body.querySelector('[role="dialog"]')).toBeNull()
-    await bouton.trigger('click')
+    await button.trigger('click')
     await flushPromises()
-    // Montée dans un portail, comme le dialog d'alimentation.
+    // Mounted in a portal, like the power dialog.
     expect(document.body.textContent).toContain('system_voltage_help_title')
     expect(document.body.textContent).toContain('system_voltage_help_body')
     w.unmount()
   })
 
-  it('l étiquette de période se corrige quand le catalogue arrive après le montage', async () => {
-    // Reproduit l'order réel d'un premier chargement : `App.vue` lance le
-    // rechargement du catalogue à SON montage, donc la vue se mounted avant que
-    // la réponse arrive. Tous les libellés se corrigent ensuite d'eux-mêmes,
-    // `t` étant une computed — sauf celui du déclencheur du Select, que
-    // `SelectValue` sans contenu figeait sur le text capturé au montage : la
-    // list affichait « 5 system_unit_second » pour toujours.
+  it('the period label corrects itself when the catalog arrives after mount', async () => {
+    // Reproduces the real order of a first load: `App.vue` launches the
+    // catalog reload at ITS mount, so the view mounts before the response
+    // arrives. Every label then corrects itself, `t` being a computed —
+    // except the one of the Select trigger, which a `SelectValue` without
+    // content froze on the text captured at mount: the list displayed
+    // "5 system_unit_second" forever.
     //
-    // Ce test échouerait donc en rendant `<SelectValue />` sans contenu.
-    // `monter()` ne peut step le voir : il load le catalogue AVANT de monter.
+    // This test would therefore fail when rendering `<SelectValue />` without
+    // content. `mountView()` cannot see it: it loads the catalog BEFORE
+    // mounting.
     stub(payload(), {})
     await useCatalog().reload()
-    // `App.vue` amorce le sondage au montage de la SPA, plus la vue : le
-    // harness de test tient ce rôle, dans le même order que l'application.
+    // `App.vue` starts the probing when the SPA mounts, not the view: the
+    // test harness plays that role, in the same order as the application.
     useMetrics().start()
     const w = mount(SystemView, { attachTo: document.body })
     await flushPromises()
@@ -981,9 +975,9 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('le libellé de la fenêtre suit la période choisie', async () => {
+  it('the window label follows the chosen period', async () => {
     stub(payload())
-    const w = await monter()
+    const w = await mountView()
     expect(w.get('[data-system-history-span]').text()).toBe('20 min')
     await w.findComponent(Select).vm.$emit('update:modelValue', '30')
     await flushPromises()
@@ -991,72 +985,71 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('displayed la fenêtre de repli (capacité × période) tant que l history ne mesure rien', async () => {
-    // Page fraîche : aucun échantillon encore poussé (seul le premier sondage
-    // de référence a eu lieu), donc rien à mesurer — repli sur la capacité
-    // théorique à la période par défaut (5 s × 240 = 20 min).
+  it('displays the fallback window (capacity × period) as long as the history measures nothing', async () => {
+    // Fresh page: no sample pushed yet (only the first reference probe took
+    // place), so nothing to measure — fallback on the theoretical capacity at
+    // the default period (5 s × 240 = 20 min).
     stub(payload({ cpu_total_jiffies: 0, cpu_idle_jiffies: 0 }))
-    const w = await monter()
+    const w = await mountView()
     expect(w.get('[data-system-history-span]').text()).toBe('20 min')
     w.unmount()
   })
 
-  it('displayed la durée réelle de l history plutôt que la capacité une fois mesurable', async () => {
-    const jiffies = prochainsJiffies()
+  it('displays the real duration of the history rather than the capacity once measurable', async () => {
+    const jiffies = nextJiffies()
     stub(() => payload(jiffies()))
-    const w = await monter()
-    // Trois sondages supplémentaires à 5 s : le premier ne fait que poser la
-    // référence de jiffies, les deux suivants poussent deux échantillons
-    // distants de 5 s réels — bien moins que les 20 min que promettrait la
-    // capacité théorique à cette période.
+    const w = await mountView()
+    // Three more probes at 5 s: the first only sets the jiffies reference,
+    // the next two push two samples 5 real seconds apart — far less than the
+    // 20 min the theoretical capacity would promise at this period.
     await vi.advanceTimersByTimeAsync(15000)
     await flushPromises()
     expect(w.get('[data-system-history-span]').text()).toBe('0 min')
     w.unmount()
   })
 
-  describe('survol de l history', () => {
+  describe('history hover', () => {
     /**
-     * Cinq réponses successives aux valeurs bien séparées (cpu 10/30/50/70/90 %,
-     * ram 5/25/45/65/85 %) : de quoi distinguer sans ambiguïté la colonne
-     * pointée. La toute première réponse ne fait que poser la référence de
-     * jiffies (voir `cpuUsage`) et ne pousse aucun échantillon.
+     * Five successive responses with well separated values (cpu 10/30/50/70/90 %,
+     * ram 5/25/45/65/85 %): enough to tell the pointed column apart without
+     * ambiguity. The very first response only sets the jiffies reference (see
+     * `cpuUsage`) and pushes no sample.
      */
-    function reponsesSurvol() {
-      const cibles: [cpu: number, ram: number][] = [
+    function hoverResponses() {
+      const targets: [cpu: number, ram: number][] = [
         [10, 5],
         [30, 25],
         [50, 45],
         [70, 65],
         [90, 85],
       ]
-      const reponses = [payload({ cpu_total_jiffies: 0, cpu_idle_jiffies: 0 })]
+      const responses = [payload({ cpu_total_jiffies: 0, cpu_idle_jiffies: 0 })]
       let total = 0
       let idle = 0
-      for (const [cpuCible, ramCible] of cibles) {
+      for (const [cpuTarget, ramTarget] of targets) {
         total += 1000
-        idle += 1000 * (1 - cpuCible / 100)
-        reponses.push(
+        idle += 1000 * (1 - cpuTarget / 100)
+        responses.push(
           payload({
             cpu_total_jiffies: total,
             cpu_idle_jiffies: idle,
-            memory: { total_kb: 1_000_000, available_kb: 1_000_000 * (1 - ramCible / 100) },
+            memory: { total_kb: 1_000_000, available_kb: 1_000_000 * (1 - ramTarget / 100) },
           }),
         )
       }
-      return reponses
+      return responses
     }
 
     /**
-     * Monte la vue avec les cinq échantillons ci-dessus déjà en history, et
-     * stube le rectangle du graphe : sous jsdom, `getBoundingClientRect`
-     * renvoie des zéros, et tout x se ramènerait au même index sans ce stub.
+     * Mounts the view with the five samples above already in the history, and
+     * stubs the chart rectangle: under jsdom, `getBoundingClientRect` returns
+     * zeros, and every x would collapse to the same index without this stub.
      */
-    async function monterAvecHistorique() {
-      const reponses = reponsesSurvol()
+    async function mountWithHistory() {
+      const responses = hoverResponses()
       let i = 0
-      stub(() => reponses[Math.min(i++, reponses.length - 1)])
-      const w = await monter()
+      stub(() => responses[Math.min(i++, responses.length - 1)])
+      const w = await mountView()
       await vi.advanceTimersByTimeAsync(5 * 5000)
       await flushPromises()
       const svg = w.get('[data-system-history]')
@@ -1066,35 +1059,35 @@ describe('SystemView', () => {
       return { w, svg }
     }
 
-    it('un pointeur au milieu du graphe displayed l échantillon du milieu', async () => {
-      const { w, svg } = await monterAvecHistorique()
+    it('a pointer in the middle of the chart displays the middle sample', async () => {
+      const { w, svg } = await mountWithHistory()
       await svg.trigger('pointermove', { clientX: 100 })
-      const popin = w.get('[data-system-history-popin]')
-      expect(popin.text()).toContain('50 %')
-      expect(popin.text()).toContain('45 %')
+      const popover = w.get('[data-system-history-popin]')
+      expect(popover.text()).toContain('50 %')
+      expect(popover.text()).toContain('45 %')
       w.unmount()
     })
 
-    it('un pointeur sur la première colonne displayed le premier échantillon', async () => {
-      const { w, svg } = await monterAvecHistorique()
+    it('a pointer on the first column displays the first sample', async () => {
+      const { w, svg } = await mountWithHistory()
       await svg.trigger('pointermove', { clientX: 0 })
-      const popin = w.get('[data-system-history-popin]')
-      expect(popin.text()).toContain('10 %')
-      expect(popin.text()).toContain('5 %')
+      const popover = w.get('[data-system-history-popin]')
+      expect(popover.text()).toContain('10 %')
+      expect(popover.text()).toContain('5 %')
       w.unmount()
     })
 
-    it('un pointeur sur la dernière colonne displayed le last échantillon', async () => {
-      const { w, svg } = await monterAvecHistorique()
+    it('a pointer on the last column displays the last sample', async () => {
+      const { w, svg } = await mountWithHistory()
       await svg.trigger('pointermove', { clientX: 200 })
-      const popin = w.get('[data-system-history-popin]')
-      expect(popin.text()).toContain('90 %')
-      expect(popin.text()).toContain('85 %')
+      const popover = w.get('[data-system-history-popin]')
+      expect(popover.text()).toContain('90 %')
+      expect(popover.text()).toContain('85 %')
       w.unmount()
     })
 
-    it('le popin apparaît au survol et disparaît en quittant le graphe', async () => {
-      const { w, svg } = await monterAvecHistorique()
+    it('the popover appears on hover and disappears on leaving the chart', async () => {
+      const { w, svg } = await mountWithHistory()
       expect(w.find('[data-system-history-popin]').exists()).toBe(false)
       await svg.trigger('pointermove', { clientX: 100 })
       expect(w.find('[data-system-history-popin]').exists()).toBe(true)
@@ -1103,21 +1096,21 @@ describe('SystemView', () => {
       w.unmount()
     })
 
-    it('un appui tactile displayed le popin sans attendre un mouvement', async () => {
-      // `pointerdown` seul, sans `pointermove` : un tap immobile sur écran
-      // tactile ne déclencherait jamais `pointermove`.
-      const { w, svg } = await monterAvecHistorique()
+    it('a touch press displays the popover without waiting for a move', async () => {
+      // `pointerdown` alone, without `pointermove`: a still tap on a touch
+      // screen would never trigger `pointermove`.
+      const { w, svg } = await mountWithHistory()
       expect(w.find('[data-system-history-popin]').exists()).toBe(false)
       await svg.trigger('pointerdown', { clientX: 100 })
-      const popin = w.get('[data-system-history-popin]')
-      expect(popin.text()).toContain('50 %')
+      const popover = w.get('[data-system-history-popin]')
+      expect(popover.text()).toContain('50 %')
       w.unmount()
     })
 
-    it('un geste interrompu efface le popin', async () => {
-      // `pointercancel` : le geste est interrompu (un défilement de page qui
-      // démarre, par exemple) sans qu'un `pointerup` n'ait jamais eu lieu.
-      const { w, svg } = await monterAvecHistorique()
+    it('an interrupted gesture clears the popover', async () => {
+      // `pointercancel`: the gesture is interrupted (a page scroll starting,
+      // for instance) without any `pointerup` ever happening.
+      const { w, svg } = await mountWithHistory()
       await svg.trigger('pointerdown', { clientX: 100 })
       expect(w.find('[data-system-history-popin]').exists()).toBe(true)
       await svg.trigger('pointercancel')
@@ -1125,81 +1118,79 @@ describe('SystemView', () => {
       w.unmount()
     })
 
-    it('le trait de survol suit la colonne pointée', async () => {
-      // `WIDTH` du viewBox vaut 100, n = 5 : le step entre colonnes vaut
-      // 25. La colonne 2 (survolée par `clientX: 100`, voir le test du
-      // milieu ci-dessus) doit donc placer le trait à x = 50.
-      const { w, svg } = await monterAvecHistorique()
+    it('the hover line follows the pointed column', async () => {
+      // The viewBox `WIDTH` is 100, n = 5: the step between columns is 25.
+      // Column 2 (hovered by `clientX: 100`, see the middle test above) must
+      // therefore place the line at x = 50.
+      const { w, svg } = await mountWithHistory()
       await svg.trigger('pointermove', { clientX: 100 })
-      const ligne = w.get('[data-system-history-line]')
-      expect(ligne.attributes('x1')).toBe('50')
-      expect(ligne.attributes('x2')).toBe('50')
+      const line = w.get('[data-system-history-line]')
+      expect(line.attributes('x1')).toBe('50')
+      expect(line.attributes('x2')).toBe('50')
       w.unmount()
     })
 
-    it('arrondit à la colonne la plus proche plutôt que d arrondir vers le bas', async () => {
-      // n = 5 sur une largeur de 200 px : les colonnes tombent à 0, 50, 100,
-      // 150, 200. `clientX: 95` (fraction 1,9) et `clientX: 105` (fraction
-      // 2,1) doivent tous deux désigner la colonne 2 : un `Math.floor`
-      // donnerait 1 pour le premier et 2 pour le second, deux réponses
-      // différentes là où « la plus proche » n'en admet qu'une.
-      const { w, svg } = await monterAvecHistorique()
+    it('rounds to the nearest column rather than rounding down', async () => {
+      // n = 5 over a width of 200 px: the columns fall at 0, 50, 100, 150,
+      // 200. `clientX: 95` (fraction 1.9) and `clientX: 105` (fraction 2.1)
+      // must both designate column 2: a `Math.floor` would give 1 for the
+      // first and 2 for the second, two different answers where "the
+      // nearest" admits only one.
+      const { w, svg } = await mountWithHistory()
       await svg.trigger('pointermove', { clientX: 95 })
-      let ligne = w.get('[data-system-history-line]')
-      expect(ligne.attributes('x1')).toBe('50')
+      let line = w.get('[data-system-history-line]')
+      expect(line.attributes('x1')).toBe('50')
       await svg.trigger('pointermove', { clientX: 105 })
-      ligne = w.get('[data-system-history-line]')
-      expect(ligne.attributes('x1')).toBe('50')
-      // `clientX: 125` (fraction 2,5, à cheval entre les colonnes 2 et 3) :
-      // `Math.round` arrondit les demis vers le haut, donc la colonne 3
-      // (x = 75), ce qu'un arrondi « au plus proche » différent (vers le
-      // pair, par exemple) ne donnerait step forcément.
+      line = w.get('[data-system-history-line]')
+      expect(line.attributes('x1')).toBe('50')
+      // `clientX: 125` (fraction 2.5, halfway between columns 2 and 3):
+      // `Math.round` rounds halves up, hence column 3 (x = 75), which a
+      // different "nearest" rounding (to even, for instance) would not
+      // necessarily give.
       await svg.trigger('pointermove', { clientX: 125 })
-      ligne = w.get('[data-system-history-line]')
-      expect(ligne.attributes('x1')).toBe('75')
+      line = w.get('[data-system-history-line]')
+      expect(line.attributes('x1')).toBe('75')
       w.unmount()
     })
 
-    it('le popin est centré par une transformation constante, bornée en pixels sur les trois régimes', async () => {
-      // Graphe large de 200 px (voir le stub de `getBoundingClientRect`
-      // ci-dessus), popin large de 100 px (`POPOVER_WIDTH_PX`) : le centre
-      // idéal ne peut descendre sous 50 px ni dépasser 150 px sans faire
-      // déborder le popin de la carte.
-      const { w, svg } = await monterAvecHistorique()
-      // Première colonne (i = 0 sur 5) : centre idéal à 0 px, borné à 50 px —
-      // la transformation reste -50 % constante, c'est la position qui est
-      // bornée, step un cas particulier de transformation comme avant cette
-      // série.
+    it('the popover is centred by a constant transform, clamped in pixels over the three regimes', async () => {
+      // Chart 200 px wide (see the `getBoundingClientRect` stub above),
+      // popover 100 px wide (`POPOVER_WIDTH_PX`): the ideal centre cannot go
+      // below 50 px nor above 150 px without the popover overflowing the
+      // card.
+      const { w, svg } = await mountWithHistory()
+      // First column (i = 0 of 5): ideal centre at 0 px, clamped to 50 px —
+      // the transform stays a constant -50 %, it is the position that is
+      // clamped, not a special-cased transform as before this series.
       await svg.trigger('pointermove', { clientX: 0 })
-      let popin = w.get('[data-system-history-popin]').element as HTMLElement
-      expect(popin.style.transform).toBe('translateX(-50%)')
-      expect(popin.style.left).toBe('50px')
-      // Colonne du milieu (i = 2 sur 5) : centre idéal à 100 px, dans la
-      // bande non bornée — c'était la branche non testée avant cette série,
-      // celle où l'ancien code centrait sans jamais borner.
+      let popover = w.get('[data-system-history-popin]').element as HTMLElement
+      expect(popover.style.transform).toBe('translateX(-50%)')
+      expect(popover.style.left).toBe('50px')
+      // Middle column (i = 2 of 5): ideal centre at 100 px, in the unclamped
+      // band — that was the untested branch before this series, the one where
+      // the old code centred without ever clamping.
       await svg.trigger('pointermove', { clientX: 100 })
-      popin = w.get('[data-system-history-popin]').element as HTMLElement
-      expect(popin.style.transform).toBe('translateX(-50%)')
-      expect(popin.style.left).toBe('100px')
-      // Dernière colonne (i = 4 sur 5) : centre idéal à 200 px, borné à
-      // 150 px, symétrique de la première colonne.
+      popover = w.get('[data-system-history-popin]').element as HTMLElement
+      expect(popover.style.transform).toBe('translateX(-50%)')
+      expect(popover.style.left).toBe('100px')
+      // Last column (i = 4 of 5): ideal centre at 200 px, clamped to 150 px,
+      // symmetric to the first column.
       await svg.trigger('pointermove', { clientX: 200 })
-      popin = w.get('[data-system-history-popin]').element as HTMLElement
-      expect(popin.style.transform).toBe('translateX(-50%)')
-      expect(popin.style.left).toBe('150px')
+      popover = w.get('[data-system-history-popin]').element as HTMLElement
+      expect(popover.style.transform).toBe('translateX(-50%)')
+      expect(popover.style.left).toBe('150px')
       w.unmount()
     })
 
-    it('survoler un graphe encore vide n displayed ni popin ni trait', async () => {
-      // Un seul sondage : la référence de jiffies est posée, aucun échantillon
-      // poussé. Le graphe est là quand même (il l'est désormais toujours, pour
-      // que la mise en page ne saute step), donc il est **survolable** avant
-      // d'avoir la moindre donnée — ce que l'ancienne version rendait
-      // impossible en ne le dessinant step. Le garde `< 2` de `hoverPointer`
-      // et celui de `hoverLineX` deviennent donc porteurs : ce test les
-      // épingle.
+    it('hovering a still empty chart displays neither popover nor line', async () => {
+      // A single probe: the jiffies reference is set, no sample pushed. The
+      // chart is there anyway (it now always is, so the layout does not
+      // jump), so it is **hoverable** before having the slightest data —
+      // which the old version made impossible by not drawing it. The `< 2`
+      // guard of `hoverPointer` and the one of `hoverLineX` therefore become
+      // load-bearing: this test pins them.
       stub(payload({ cpu_total_jiffies: 0, cpu_idle_jiffies: 0 }))
-      const w = await monter()
+      const w = await mountView()
       const svg = w.get('[data-system-history]')
       await svg.trigger('pointermove', { clientX: 100 })
       expect(w.find('[data-system-history-popin]').exists()).toBe(false)
@@ -1208,77 +1199,77 @@ describe('SystemView', () => {
     })
   })
 
-  describe('courbe de température', () => {
-    it('trace la température comme troisième courbe', async () => {
-      const jiffies = prochainsJiffies()
+  describe('temperature curve', () => {
+    it('draws the temperature as a third curve', async () => {
+      const jiffies = nextJiffies()
       stub(() => payload({ ...jiffies(), temperature_c: 47.8 }))
-      const w = await monter()
+      const w = await mountView()
       await vi.advanceTimersByTimeAsync(15000)
       await flushPromises()
       const d = w.get('[data-system-history-temp]').attributes('d')!
       expect(d).not.toBe('')
-      // Même échelle que les pourcentages : 47,8 °C se lit à mi-hauteur d'un
-      // repère de 30, donc autour de y = 15.
+      // Same scale as the percentages: 47.8 °C reads at mid-height of a
+      // 30-unit frame, hence around y = 15.
       expect(d).toMatch(/^M[\d.]+,1[0-9]\.\d\d/)
       w.unmount()
     })
 
-    it('ne trace rien sans sonde de température', async () => {
-      const jiffies = prochainsJiffies()
+    it('draws nothing without a temperature sensor', async () => {
+      const jiffies = nextJiffies()
       stub(() => payload({ ...jiffies(), temperature_c: null }))
-      const w = await monter()
+      const w = await mountView()
       await vi.advanceTimersByTimeAsync(15000)
       await flushPromises()
-      // Les deux autres courbes restent : une machine sans sonde ne perd step
-      // son graphe.
+      // The two other curves remain: a machine without a sensor does not lose
+      // its chart.
       expect(w.get('[data-system-history] path').attributes('d')).not.toBe('')
       expect(w.get('[data-system-history-temp]').attributes('d')).toBe('')
       w.unmount()
     })
 
-    it('un trou passager dans la série creuse la courbe sans l effacer', async () => {
-      // Une lecture manquante n'efface plus la courbe entière : chaque
-      // température présente reste sur sa propre abscisse (son horodatage),
-      // exactement comme dans les deux autres courbes, donc rien ne dérive
-      // même quand la série a un trou au milieu. `sparklinePath` referme le
-      // sous-tracé courant sur le `null` et rouvre un `M` au prochain point
-      // présent : deux sous-tracés SVG plutôt qu'un tracé absent.
-      const jiffies = prochainsJiffies()
-      let tour = 0
-      stub(() => payload({ ...jiffies(), temperature_c: tour++ === 2 ? null : 47.8 }))
-      const w = await monter()
+    it('a transient gap in the series hollows the curve without erasing it', async () => {
+      // A missing reading no longer erases the whole curve: every present
+      // temperature stays on its own abscissa (its timestamp), exactly as in
+      // the two other curves, so nothing drifts even when the series has a
+      // gap in the middle. `sparklinePath` closes the current sub-path on the
+      // `null` and reopens an `M` at the next present point: two SVG
+      // sub-paths rather than a missing path.
+      const jiffies = nextJiffies()
+      let round = 0
+      stub(() => payload({ ...jiffies(), temperature_c: round++ === 2 ? null : 47.8 }))
+      const w = await mountView()
       await vi.advanceTimersByTimeAsync(20000)
       await flushPromises()
       const d = w.get('[data-system-history-temp]').attributes('d')!
       expect(d).not.toBe('')
-      // Deux sous-tracés : celui d'avant le trou, celui d'après.
+      // Two sub-paths: the one before the gap, the one after.
       expect((d.match(/M/g) ?? []).length).toBe(2)
       w.unmount()
     })
 
-    it('annonce la température dans la légende', async () => {
-      const jiffies = prochainsJiffies()
+    it('announces the temperature in the legend', async () => {
+      const jiffies = nextJiffies()
       stub(() => payload({ ...jiffies(), temperature_c: 47.8 }))
-      const w = await monter()
+      const w = await mountView()
       await vi.advanceTimersByTimeAsync(15000)
       await flushPromises()
       expect(w.get('[data-system-history-legend]').text()).toContain('47.8 °C')
       w.unmount()
     })
 
-    it('n annonce step de température dans la légende sans sonde', async () => {
+    it('announces no temperature in the legend without a sensor', async () => {
       stub(payload({ temperature_c: null }))
-      const w = await monter()
-      // Pas de série annoncée quand aucune courbe ne peut exister : l'absence
-      // de sonde est connue dès le premier sondage, donc rien ne saute.
+      const w = await mountView()
+      // No series announced when no curve can exist: the absence of a sensor
+      // is known from the first probe, so nothing jumps.
       expect(w.get('[data-system-history-legend]').text()).not.toContain('°C')
       w.unmount()
     })
 
-    it('displayed la température dans le popin de survol', async () => {
-      const jiffies = prochainsJiffies()
+    it('displays the temperature in the hover popover', async () => {
+      const jiffies = nextJiffies()
       stub(() => payload({ ...jiffies(), temperature_c: 47.8 }))
-      const w = await monter()
+      const w = await mountView()
       await vi.advanceTimersByTimeAsync(15000)
       await flushPromises()
       const svg = w.get('[data-system-history]')
@@ -1292,53 +1283,54 @@ describe('SystemView', () => {
     })
   })
 
-  describe('dernières erreurs', () => {
-    it('rend une ligne par entrée de log, dans l’order reçu', async () => {
-      // `/api/logs` rend déjà les plus récentes en premier (le cœur inverse son
-      // tampon), la vue ne retrie step : elle doit rendre l'order tel quel.
+  describe('recent errors', () => {
+    it('renders one line per log entry, in the order received', async () => {
+      // `/api/logs` already returns the most recent first (the core reverses
+      // its buffer), the view does not re-sort: it must render the order as
+      // is.
       stub(payload(), CATALOGUE, {
-        lines: ['WARN la plus recente', 'WARN la plus ancienne'],
+        lines: ['WARN most recent', 'WARN oldest'],
       })
-      const w = await monter()
+      const w = await mountView()
       expect(w.findAll('[data-log-line]').map((l) => l.text())).toEqual([
-        'WARN la plus recente',
-        'WARN la plus ancienne',
+        'WARN most recent',
+        'WARN oldest',
       ])
       w.unmount()
     })
 
-    it('aucune erreur récente : aucune ligne, et la carte reste rendue', async () => {
-      stub(payload(), { ...CATALOGUE, recent_errors: 'Dernières erreurs' })
-      const w = await monter()
+    it('no recent error: no line, and the card stays rendered', async () => {
+      stub(payload(), { ...CATALOGUE, recent_errors: 'Recent errors' })
+      const w = await mountView()
       expect(w.findAll('[data-log-line]')).toHaveLength(0)
-      expect(w.text()).toContain('Dernières erreurs')
+      expect(w.text()).toContain('Recent errors')
       w.unmount()
     })
 
-    it('un log injoignable ne prive step la page de ses métriques', async () => {
-      // Les deux relevés sont indépendants, chacun avec son `.catch` : un
-      // `/api/logs` en panne ne doit step faire passer la machine pour muette —
-      // ce sont justement les métriques qu'on regarde quand le log manque.
+    it('an unreachable log does not deprive the page of its metrics', async () => {
+      // The two fetches are independent, each with its own `.catch`: a
+      // failing `/api/logs` must not make the machine look mute — the metrics
+      // are precisely what one looks at when the log is missing.
       stub(payload(), CATALOGUE, undefined)
-      const w = await monter()
+      const w = await mountView()
       expect(w.findAll('[data-log-line]')).toHaveLength(0)
       expect(w.find('[data-system-unavailable]').exists()).toBe(false)
       expect(w.get('[data-system-hostname]').text()).toBe('ritornello')
       w.unmount()
     })
 
-    it('le sondage périodique ne relève step le log', async () => {
-      // Greffer le log sur `probe()` allongerait la prise du verrou « en
-      // vol » et changerait la cadence observée : mesuré, quatre tests de
-      // cadence tombaient. Ce test épingle la séparation.
-      const f = stub(payload(), CATALOGUE, { lines: ['WARN une erreur'] })
-      const w = await monter()
-      const auMontage = f.mock.calls.filter((c) => String(c[0]).includes('/api/logs')).length
-      expect(auMontage).toBe(1)
+    it('the periodic probing does not fetch the log', async () => {
+      // Grafting the log onto `probe()` would lengthen the hold of the
+      // "in-flight" lock and change the observed cadence: measured, four
+      // cadence tests fell. This test pins the separation.
+      const f = stub(payload(), CATALOGUE, { lines: ['WARN an error'] })
+      const w = await mountView()
+      const atMount = f.mock.calls.filter((c) => String(c[0]).includes('/api/logs')).length
+      expect(atMount).toBe(1)
       await vi.advanceTimersByTimeAsync(20000)
       await flushPromises()
-      expect(f.mock.calls.filter((c) => String(c[0]).includes('/api/logs')).length).toBe(auMontage)
-      // Et les métriques, elles, ont bien continué d'être sondées.
+      expect(f.mock.calls.filter((c) => String(c[0]).includes('/api/logs')).length).toBe(atMount)
+      // And the metrics, for their part, did keep being probed.
       expect(
         f.mock.calls.filter((c) => String(c[0]).includes('/api/system')).length,
       ).toBeGreaterThan(1)
@@ -1346,112 +1338,112 @@ describe('SystemView', () => {
     })
   })
 
-  describe('popin des erreurs', () => {
-    /** Douze lignes : plus que les huit de la carte, assez pour que le filtre
-     *  ait quelque chose à écarter. */
-    const DOUZE = Array.from({ length: 12 }, (_, i) =>
-      i === 3 ? 'ERROR mpv socket closed' : `WARN ligne ${i}`,
+  describe('errors dialog', () => {
+    /** Twelve lines: more than the eight of the card, enough for the filter
+     *  to have something to discard. */
+    const TWELVE = Array.from({ length: 12 }, (_, i) =>
+      i === 3 ? 'ERROR mpv socket closed' : `WARN line ${i}`,
     )
 
-    it('la carte ne montre que les huit erreurs les plus récentes', async () => {
-      stub(payload(), CATALOGUE, { lines: DOUZE })
-      const w = await monter()
+    it('the card shows only the eight most recent errors', async () => {
+      stub(payload(), CATALOGUE, { lines: TWELVE })
+      const w = await mountView()
       expect(w.findAll('[data-log-line]')).toHaveLength(8)
-      expect(w.findAll('[data-log-line]')[0]!.text()).toBe(DOUZE[0])
+      expect(w.findAll('[data-log-line]')[0]!.text()).toBe(TWELVE[0])
       w.unmount()
     })
 
-    it('le bouton annonce le total et s offre dès la première erreur', async () => {
-      stub(payload(), CATALOGUE, { lines: DOUZE })
-      const w = await monter()
+    it('the button announces the total and is offered from the first error', async () => {
+      stub(payload(), CATALOGUE, { lines: TWELVE })
+      const w = await mountView()
       expect(w.get('[data-logs-all]').text()).toContain('12')
       w.unmount()
 
-      // Trois erreurs : la carte les montre déjà toutes, et le bouton reste
-      // offert quand même. Signalé à l'usage — reserve au log long, le
-      // filtre ne se decouvrait qu'au pire moment, quand il y a trop a lire
-      // pour explorer l'ecran.
-      stub(payload(), CATALOGUE, { lines: DOUZE.slice(0, 3) })
-      const peu = await monter()
-      expect(peu.get('[data-logs-all]').text()).toContain('3')
-      peu.unmount()
+      // Three errors: the card already shows them all, and the button is
+      // offered anyway. Reported in use — reserved for a long log, the filter
+      // was only discovered at the worst moment, when there is too much to
+      // read to explore the screen.
+      stub(payload(), CATALOGUE, { lines: TWELVE.slice(0, 3) })
+      const few = await mountView()
+      expect(few.get('[data-logs-all]').text()).toContain('3')
+      few.unmount()
 
-      // Journal vide : il n'y a rien a ouvrir, le bouton disparait.
+      // Empty log: there is nothing to open, the button disappears.
       stub(payload(), CATALOGUE, { lines: [] })
-      const vide = await monter()
-      expect(vide.find('[data-logs-all]').exists()).toBe(false)
-      vide.unmount()
+      const empty = await mountView()
+      expect(empty.find('[data-logs-all]').exists()).toBe(false)
+      empty.unmount()
     })
 
-    it('la popin list tout le log', async () => {
-      stub(payload(), CATALOGUE, { lines: DOUZE })
-      const w = await monter()
+    it('the dialog lists the whole log', async () => {
+      stub(payload(), CATALOGUE, { lines: TWELVE })
+      const w = await mountView()
       await w.get('[data-logs-all]').trigger('click')
       await flushPromises()
-      // La popin est rendue dans un portail : elle vit dans document.body.
+      // The dialog is rendered in a portal: it lives in document.body.
       expect(document.body.querySelectorAll('[data-logs-dialog-line]')).toHaveLength(12)
       expect(document.body.querySelector('[data-logs-count]')!.textContent).toContain('12 / 12')
       w.unmount()
     })
 
-    it('le champ filtre la list et met à jour le compteur', async () => {
-      stub(payload(), CATALOGUE, { lines: DOUZE })
-      const w = await monter()
+    it('the field filters the list and updates the counter', async () => {
+      stub(payload(), CATALOGUE, { lines: TWELVE })
+      const w = await mountView()
       await w.get('[data-logs-all]').trigger('click')
       await flushPromises()
-      const champ = document.body.querySelector<HTMLInputElement>('[data-logs-filter]')!
-      champ.value = 'mpv'
-      champ.dispatchEvent(new Event('input'))
+      const field = document.body.querySelector<HTMLInputElement>('[data-logs-filter]')!
+      field.value = 'mpv'
+      field.dispatchEvent(new Event('input'))
       await flushPromises()
-      const lignes = document.body.querySelectorAll('[data-logs-dialog-line]')
-      expect(lignes).toHaveLength(1)
-      expect(lignes[0]!.textContent).toBe('ERROR mpv socket closed')
+      const lines = document.body.querySelectorAll('[data-logs-dialog-line]')
+      expect(lines).toHaveLength(1)
+      expect(lines[0]!.textContent).toBe('ERROR mpv socket closed')
       expect(document.body.querySelector('[data-logs-count]')!.textContent).toContain('1 / 12')
       w.unmount()
     })
 
-    it('annonce l absence de correspondance', async () => {
-      stub(payload(), CATALOGUE, { lines: DOUZE })
-      const w = await monter()
+    it('announces the absence of a match', async () => {
+      stub(payload(), CATALOGUE, { lines: TWELVE })
+      const w = await mountView()
       await w.get('[data-logs-all]').trigger('click')
       await flushPromises()
-      const champ = document.body.querySelector<HTMLInputElement>('[data-logs-filter]')!
-      champ.value = 'zzz'
-      champ.dispatchEvent(new Event('input'))
+      const field = document.body.querySelector<HTMLInputElement>('[data-logs-filter]')!
+      field.value = 'zzz'
+      field.dispatchEvent(new Event('input'))
       await flushPromises()
       expect(document.body.querySelectorAll('[data-logs-dialog-line]')).toHaveLength(0)
       expect(document.body.querySelector('[data-logs-empty]')).not.toBeNull()
       w.unmount()
     })
 
-    it('relève le log à l ouverture', async () => {
-      const f = stub(payload(), CATALOGUE, { lines: DOUZE })
-      const w = await monter()
-      const avant = f.mock.calls.filter((c) => String(c[0]).includes('/api/logs')).length
+    it('fetches the log on opening', async () => {
+      const f = stub(payload(), CATALOGUE, { lines: TWELVE })
+      const w = await mountView()
+      const before = f.mock.calls.filter((c) => String(c[0]).includes('/api/logs')).length
       await w.get('[data-logs-all]').trigger('click')
       await flushPromises()
-      // Une requête de plus, sur geste utilisateur : le log reste hors du
-      // sondage périodique (verrou « en vol » et delta CPU de `probe`).
-      expect(f.mock.calls.filter((c) => String(c[0]).includes('/api/logs')).length).toBe(avant + 1)
+      // One more request, on a user gesture: the log stays outside the
+      // periodic probing ("in-flight" lock and CPU delta of `probe`).
+      expect(f.mock.calls.filter((c) => String(c[0]).includes('/api/logs')).length).toBe(before + 1)
       w.unmount()
     })
 
-    it('rouvre sans le filtre précédent', async () => {
-      stub(payload(), CATALOGUE, { lines: DOUZE })
-      const w = await monter()
+    it('reopens without the previous filter', async () => {
+      stub(payload(), CATALOGUE, { lines: TWELVE })
+      const w = await mountView()
       await w.get('[data-logs-all]').trigger('click')
       await flushPromises()
-      const champ = document.body.querySelector<HTMLInputElement>('[data-logs-filter]')!
-      champ.value = 'mpv'
-      champ.dispatchEvent(new Event('input'))
+      const field = document.body.querySelector<HTMLInputElement>('[data-logs-filter]')!
+      field.value = 'mpv'
+      field.dispatchEvent(new Event('input'))
       await flushPromises()
       expect(document.body.querySelectorAll('[data-logs-dialog-line]')).toHaveLength(1)
 
-      // Fermeture par le bouton du dialog — le vrai geste, et le seul
-      // `[data-slot="dialog-close"]` présent puisque seul le dialog open
-      // est rendu dans le portail. Puis réouverture : le champ repart vide,
-      // sinon la popin s'ouvrirait sur une list tronquée sans que rien à
-      // l'écran ne l'explique.
+      // Closing through the dialog button — the real gesture, and the only
+      // `[data-slot="dialog-close"]` present since only the open dialog is
+      // rendered in the portal. Then reopening: the field starts empty again,
+      // otherwise the dialog would open on a truncated list without anything
+      // on screen to explain it.
       document.body.querySelector<HTMLElement>('[data-slot="dialog-close"]')!.click()
       await flushPromises()
       await w.get('[data-logs-all]').trigger('click')

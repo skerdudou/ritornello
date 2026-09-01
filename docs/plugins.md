@@ -697,7 +697,7 @@ what made that migration verifiable.
 
 - `{"frame":"state","data":{…}}` — the `PlayerState`, up to once a second
   while something plays.
-- `{"frame":"catalogue","data":{…}}` — the declared sources, in
+- `{"frame":"catalog","data":{…}}` — the declared sources, in
   `SourceCycle` order, and for each one that can enumerate them its named
   presets (see [`ListPresets`](#ritornello-plugin-radio--internet-radio) in
   the radio section). A source that does not enumerate is still listed, with

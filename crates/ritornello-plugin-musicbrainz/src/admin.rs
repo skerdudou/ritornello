@@ -1,13 +1,13 @@
-//! Dorsal d'admin du greffon musicbrainz : sert la page Vue livrée dans
-//! `ui/dist`, et apply les trois actions qu'elle peut send_frame sur le
-//! store de patterns ICY (voir `patterns.rs`) — le même store que la boucle
-//! `metadata` read et écrit pour sonder et découper les stream radio.
+//! Admin backend of the musicbrainz plugin: serves the Vue page shipped in
+//! `ui/dist`, and applies the three actions it can emit to the store of ICY
+//! patterns (see `patterns.rs`) — the same store the `metadata` loop reads and
+//! writes to probe and split radio streams.
 //!
-//! Un greffon `metadata` ne reçoit **jamais** de trame `SetLocale` : cette
-//! trame n'existe que pour `SourcePlugin` (voir `ritornello_proto`). Le
-//! sources_catalog chargé ici est donc figé à la langue passée au lancement du
-//! greffon — un changement de langue de l'appareil ne se voit sur cette page
-//! qu'après un redémarrage du greffon. Même limite que la page du greffon MPD
+//! A `metadata` plugin **never** receives a `SetLocale` frame: that frame only
+//! exists for `SourcePlugin` (see `ritornello_proto`). The catalog loaded here
+//! is therefore frozen to the language passed at the plugin's launch — a
+//! change of the device's language only shows on this page after a restart of
+//! the plugin. Same limit as the MPD plugin's page
 //! (`ritornello-plugin-mpd::admin`).
 
 use crate::patterns::{Store, Pattern};
@@ -16,37 +16,36 @@ use ritornello_plugin_sdk::AdminPlugin;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use tokio::sync::RwLock as MagasinLock;
+use tokio::sync::RwLock as StoreLock;
 
-/// Ce que la page envoie. Structure dédiée et champs **obligatoires**, comme
-/// `EcritureConfig` du greffon MPD : `Entry` (le type persisté) a des
-/// `#[serde(default)]` pour relire un fichier d'une version antérieure, et
-/// les réutiliser ici ferait qu'un champ oublié par la page passerait pour un
-/// choix délibéré plutôt que pour une requête mal formée à refuser.
+/// What the page sends. Dedicated structure and **mandatory** fields, like the
+/// MPD plugin's `ConfigWrite`: `Entry` (the persisted type) has
+/// `#[serde(default)]` to reread a file from an earlier version, and reusing
+/// them here would make a field forgotten by the page pass for a deliberate
+/// choice rather than for a malformed request to reject.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum Write {
-    /// Poser un pattern à la main sur une station. Toujours `Origin::Manual` :
-    /// c'est `set_manual` qui porte cette règle, la page n'a pas à l'send_frame.
+    /// Set a pattern by hand on a station. Always `Origin::Manual`: it is
+    /// `set_manual` that carries this rule, the page does not have to emit it.
     Set { url: String, pattern: WrittenPattern },
     Remove { url: String },
     Clear,
 }
 
-/// Même forme externe que `patterns::Pattern` (étiquetage externe : l'objet
-/// `{"separe": {...}}` ou la chaîne nue `"ne_pas_decouper"`), mais un type à
-/// part : celui-ci est le contrat d'écriture de la page, l'autre est le
-/// format persisté du store. Les deux évoluent pour des raisons
-/// différentes.
+/// Same external shape as `patterns::Pattern` (externally tagged: the object
+/// `{"split": {...}}` or the bare string `"do_not_split"`), but a separate
+/// type: this one is the page's write contract, the other is the store's
+/// persisted format. The two evolve for different reasons.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum WrittenPattern {
     Split {
         separator: String,
         artist_first: bool,
-        /// `serde(default)` alors que les autres champs sont obligatoires, et
-        /// c'est délibéré : une page qui ne connaît pas cette forme continue
-        /// d'écrire, et l'absence vaut « non » — la forme courante.
+        /// `serde(default)` while the other fields are mandatory, and it is
+        /// deliberate: a page that does not know this form keeps writing, and
+        /// absence means "no" — the common form.
         #[serde(default)]
         title_in_middle: bool,
     },
@@ -57,17 +56,16 @@ impl From<WrittenPattern> for Pattern {
     fn from(m: WrittenPattern) -> Self {
         match m {
             WrittenPattern::Split { separator, artist_first, title_in_middle } => {
-                // `title_in_middle` est **reporté** et non remis à faux.
+                // `title_in_middle` is **carried over** and not reset to false.
                 //
-                // La page ne l'*offre* pas dans son jeu fermé — cette forme ne
-                // s'obtient que par un sondage — mais elle le **rejoue** quand
-                // le formulaire a été ouvert sur une entrée qui la porte. Le
-                // reposer à faux ici faisait qu'« Enregistrer » sans rien
-                // changer dégradait le pattern : l'album se recollait au title dès
-                // le track suivant, et comme l'entrée devenait `Manual`, plus
-                // rien ne pouvait la réparer. Le geste destructeur n'était pas
-                // « poser cette forme », c'était « enregistrer sans
-                // modification ».
+                // The page does not *offer* it in its closed set — this form is
+                // only obtained through a probe — but it **replays** it when the
+                // form was opened on an entry that carries it. Resetting it to
+                // false here meant that "Save" without changing anything
+                // degraded the pattern: the album got glued back onto the title
+                // from the next track, and since the entry became `Manual`,
+                // nothing could repair it anymore. The destructive gesture was
+                // not "set this form", it was "save without modification".
                 Pattern::Split { separator, artist_first, title_in_middle }
             }
             WrittenPattern::DoNotSplit => Pattern::DoNotSplit,
@@ -76,17 +74,17 @@ impl From<WrittenPattern> for Pattern {
 }
 
 pub struct MusicBrainzAdmin {
-    store: Arc<MagasinLock<Store>>,
+    store: Arc<StoreLock<Store>>,
     state_path: PathBuf,
     catalog: Arc<RwLock<Catalog>>,
 }
 
 impl MusicBrainzAdmin {
-    pub fn new(store: Arc<MagasinLock<Store>>, state_path: PathBuf, catalog: Arc<RwLock<Catalog>>) -> Self {
+    pub fn new(store: Arc<StoreLock<Store>>, state_path: PathBuf, catalog: Arc<RwLock<Catalog>>) -> Self {
         Self { store, state_path, catalog }
     }
 
-    /// Résout une clé de sources_catalog en la phrase de la langue courante.
+    /// Resolves a catalog key into the sentence of the current language.
     fn translate(&self, key: &str) -> String {
         self.catalog.read().unwrap().get(key).to_string()
     }
@@ -111,44 +109,44 @@ impl AdminPlugin for MusicBrainzAdmin {
 
     async fn get_data(&self) -> serde_json::Value {
         let store = self.store.read().await;
-        // Copie triée : le store conserve l'order d'insertion, seule la
-        // page a besoin d'un order. `Option<String>` ordonne `None` avant
-        // tout `Some` ; comparer `b` à `a` (plutôt que `a` à `b`) donne donc
-        // le plus récent en premier et les stations jamais servies en
-        // dernier, sans repasser par un tri à deux étages.
+        // Sorted copy: the store keeps insertion order, only the page needs an
+        // order. `Option<String>` orders `None` before any `Some`; comparing
+        // `b` to `a` (rather than `a` to `b`) therefore gives the most recent
+        // first and the never-served stations last, without going through a
+        // two-stage sort.
         let mut stations = store.entries().to_vec();
         stations.sort_by(|a, b| b.last_used.cmp(&a.last_used));
         serde_json::json!({ "stations": stations })
     }
 
     async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String> {
-        // `Write`, pas un type calqué sur `Entry` : voir le commentaire
-        // sur le type. Un champ manquant ou une action inconnue doit refuser
-        // la requête, pas se faire compléter par un défaut de *chargement*.
-        let ecriture: Write =
+        // `Write`, not a type modeled on `Entry`: see the comment on the type.
+        // A missing field or an unknown action must reject the request, not
+        // get completed by a *loading* default.
+        let write: Write =
             serde_json::from_value(data).map_err(|e| {
-                // Par le sources_catalog, comme tous les autres refus de cette
-                // méthode : une chaîne anglaise en dur n'est pas « une phrase
-                // traduite », elle est juste une clé déguisée — un utilisateur
-                // en français verrait de l'anglais. Le sources_catalog du greffon
-                // n'avait pas cette clé (oubli de mon brief), elle a été ajoutée
-                // sur le modèle exact de celle du greffon mpd.
+                // Through the catalog, like every other refusal of this method:
+                // a hard-coded English string is not "a translated sentence",
+                // it is just a key in disguise — a user in French would see
+                // English. The plugin's catalog did not have this key (an
+                // omission of my brief), it was added on the exact model of the
+                // mpd plugin's.
                 self.catalog.read().unwrap().get("bad_request").replace("{detail}", &e.to_string())
             })?;
 
         let mut store = self.store.write().await;
-        match ecriture {
+        match write {
             Write::Set { url, pattern } => {
-                // Validation **avant** toute écriture : un séparateur clear ou
-                // sans espace de chaque côté couperait un name composé en
-                // deux (« Jean-Michel Jarre »). La page validated déjà pour un
-                // retour immédiat, mais le dorsal reste l'autorité.
+                // Validation **before** any write: an empty separator, or one
+                // without a space on each side, would cut a hyphenated name in
+                // two ("Jean-Michel Jarre"). The page already validates for
+                // immediate feedback, but the backend remains the authority.
                 if let WrittenPattern::Split { separator, .. } = &pattern {
-                    // `trim()` et non `is_empty()` : un séparateur qui n'est
-                    // que des espaces passait les deux contrôles — `" "`
-                    // commence *et* finit par une espace, la même — et aurait
-                    // découpé sur **chaque** espace de la chaîne annoncée.
-                    // « Clear » est le bon mot pour lui : il ne porte rien.
+                    // `trim()` and not `is_empty()`: a separator made only of
+                    // spaces passed both checks — `" "` starts *and* ends with a
+                    // space, the same one — and would have split on **every**
+                    // space of the announced string. "Empty" is the right word
+                    // for it: it carries nothing.
                     if separator.trim().is_empty() {
                         return Err(self.translate("separator_empty"));
                     }
@@ -159,28 +157,28 @@ impl AdminPlugin for MusicBrainzAdmin {
                 store.set_manual(&url, pattern.into());
             }
             Write::Remove { url } => {
-                // Un refus, pas un succès silencieux : la page afficherait
-                // « fait » sur un geste sans effet.
+                // A refusal, not a silent success: the page would show "done"
+                // on a gesture with no effect.
                 if store.entry(&url).is_none() {
                     return Err(self.translate("unknown_station"));
                 }
                 store.remove(&url);
             }
             Write::Clear => {
-                // Rien à effacer : un « tout vider » sur un store déjà clear
-                // ne doit pas déclencher une écriture disc pour rien — et
-                // donc pas risquer un refus `save_failed` sur un geste qui ne
-                // changerait de toute façon rien.
+                // Nothing to erase: a "clear all" on an already empty store
+                // must not trigger a disk write for nothing — and hence not
+                // risk a `save_failed` refusal on a gesture that would change
+                // nothing anyway.
                 if store.is_empty() {
                     return Ok(());
                 }
                 store.clear_all();
             }
         }
-        // Aucune méthode du store n'écrit seule sur le disc : c'est
-        // délibéré (voir `patterns.rs`), pour qu'une écriture ne se cache pas
-        // derrière un name qui n'en parle pas. C'est donc ici, et seulement
-        // ici, que la mutation devient persistante.
+        // No method of the store writes to disk on its own: this is deliberate
+        // (see `patterns.rs`), so that a write does not hide behind a name that
+        // does not mention it. So it is here, and only here, that the mutation
+        // becomes persistent.
         store.save(&self.state_path).map_err(|e| {
             tracing::warn!("could not save ICY patterns: {e}");
             self.translate("save_failed")
@@ -210,7 +208,7 @@ mod tests {
         )));
         Fixture {
             admin: MusicBrainzAdmin::new(
-                Arc::new(MagasinLock::new(Store::default())),
+                Arc::new(StoreLock::new(Store::default())),
                 state_path.clone(),
                 catalog,
             ),
@@ -220,63 +218,63 @@ mod tests {
     }
 
     #[test]
-    fn les_actifs_inconnus_ne_sont_pas_servis() {
+    fn unknown_assets_are_not_served() {
         let f = fixture();
-        let (mime, corps) = f.admin.asset("ui.js").unwrap();
+        let (mime, body) = f.admin.asset("ui.js").unwrap();
         assert_eq!(mime, "text/javascript");
-        assert!(!corps.is_empty());
+        assert!(!body.is_empty());
         assert_eq!(f.admin.asset("ui.css").unwrap().0, "text/css");
-        // Un path inconnu n'est pas une erreur : c'est un 404 côté cœur.
-        // Servir autre chose ouvrirait une route de playback arbitraire.
+        // An unknown path is not an error: it is a 404 on the core's side.
+        // Serving anything else would open an arbitrary read route.
         assert!(f.admin.asset("../../../etc/passwd").is_none());
         assert!(f.admin.asset("index.html").is_none());
     }
 
     #[test]
-    fn catalog_expose_les_cles_du_composant() {
+    fn catalog_exposes_the_components_keys() {
         let f = fixture();
         let v = f.admin.catalog();
-        assert!(v["title"].is_string(), "le sources_catalog doit porter les cles du plugin");
+        assert!(v["title"].is_string(), "the catalog must carry the plugin's keys");
     }
 
-    /// Pack français livré dans le dépôt.
+    /// French pack shipped in the repository.
     fn fr_pack() -> String {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales/musicbrainz/fr.toml");
-        std::fs::read_to_string(p).expect("pack fr livre")
+        std::fs::read_to_string(p).expect("shipped fr pack")
     }
 
     #[test]
-    fn parite_des_cles_entre_len_embarque_et_le_pack_fr() {
+    fn key_parity_between_the_embedded_en_and_the_fr_pack() {
         let en = ritornello_i18n::try_parse(crate::MUSICBRAINZ_EN).unwrap();
         let fr = ritornello_i18n::try_parse(&fr_pack()).unwrap();
-        let mut cles_en: Vec<&String> = en.keys().collect();
-        let mut cles_fr: Vec<&String> = fr.keys().collect();
-        cles_en.sort();
-        cles_fr.sort();
-        assert_eq!(cles_en, cles_fr, "jeux de cles en/fr divergents");
+        let mut en_keys: Vec<&String> = en.keys().collect();
+        let mut fr_keys: Vec<&String> = fr.keys().collect();
+        en_keys.sort();
+        fr_keys.sort();
+        assert_eq!(en_keys, fr_keys, "en/fr key sets diverge");
     }
 
     #[tokio::test]
-    async fn poser_un_motif_le_rend_manuel_et_le_persiste() {
+    async fn setting_a_pattern_makes_it_manual_and_persists_it() {
         let mut f = fixture();
         let op = serde_json::json!({
-            "action": "pose",
-            "url": "http://exemple/stream.mp3",
-            "pattern": { "separe": { "separator": " - ", "artist_first": true } }
+            "action": "set",
+            "url": "http://example/stream.mp3",
+            "pattern": { "split": { "separator": " - ", "artist_first": true } }
         });
         assert!(f.admin.set_data(op).await.is_ok());
 
         let data = f.admin.get_data().await;
-        assert_eq!(data["stations"][0]["url"], "http://exemple/stream.mp3");
-        assert_eq!(data["stations"][0]["origin"], "manuel");
-        // `title_in_middle` figure dans la forme sérialisée : le champ est
-        // additif (`serde(default)`), donc la page qui l'ignore continue de
-        // read, et celle qui n'envoie que les deux autres continue d'écrire.
-        // Figé ici parce que c'est le contrat que la page consomme.
+        assert_eq!(data["stations"][0]["url"], "http://example/stream.mp3");
+        assert_eq!(data["stations"][0]["origin"], "manual");
+        // `title_in_middle` appears in the serialized form: the field is
+        // additive (`serde(default)`), so the page that ignores it keeps
+        // reading, and the one that only sends the other two keeps writing.
+        // Pinned here because it is the contract the page consumes.
         assert_eq!(
             data["stations"][0]["pattern"],
             serde_json::json!({
-                "separe": {
+                "split": {
                     "separator": " - ",
                     "artist_first": true,
                     "title_in_middle": false
@@ -284,56 +282,56 @@ mod tests {
             })
         );
 
-        // Persisté sur disc, pas seulement en mémoire : `save` a été
-        // appelé après la mutation, comme le contrat l'exige.
-        let relu = Store::load(&f.state_path);
-        assert_eq!(relu.entry("http://exemple/stream.mp3").unwrap().origin, Origin::Manual);
+        // Persisted to disk, not only in memory: `save` was called after the
+        // mutation, as the contract requires.
+        let reread = Store::load(&f.state_path);
+        assert_eq!(reread.entry("http://example/stream.mp3").unwrap().origin, Origin::Manual);
     }
 
-    /// Un séparateur qui n'est **que** des espaces est refusé comme clear.
+    /// A separator made **only** of spaces is refused as empty.
     ///
-    /// `" "` passait les deux contrôles d'origin — il commence et finit par une
-    /// espace, la même — et aurait découpé sur chaque espace de la chaîne
-    /// annoncée : « Miles Davis - So What » devenait artist « Miles ». Constat
-    /// de la relecture croisée.
+    /// `" "` passed the two original checks — it starts and ends with a space,
+    /// the same one — and would have split on every space of the announced
+    /// string: "Miles Davis - So What" became artist "Miles". Finding of the
+    /// cross review.
     #[tokio::test]
-    async fn un_separateur_qui_nest_que_des_espaces_est_refuse() {
+    async fn a_separator_made_only_of_spaces_is_refused() {
         let mut f = fixture();
         for sep in [" ", "  ", "\t"] {
             let op = serde_json::json!({
-                "action": "pose",
-                "url": "http://exemple/stream.mp3",
-                "pattern": { "separe": { "separator": sep, "artist_first": true } }
+                "action": "set",
+                "url": "http://example/stream.mp3",
+                "pattern": { "split": { "separator": sep, "artist_first": true } }
             });
-            let err = f.admin.set_data(op).await.expect_err("un separator clear doit etre refuse");
-            assert!(!err.contains("separator_"), "jamais la key brute : {err}");
+            let err = f.admin.set_data(op).await.expect_err("an empty separator must be refused");
+            assert!(!err.contains("separator_"), "never the raw key: {err}");
         }
     }
 
     #[tokio::test]
-    async fn un_separateur_sans_espaces_est_refuse_par_une_phrase_pas_une_cle() {
-        // Le contrat du SDK, et la règle réelle : sans espaces autour,
-        // `Jean-Michel Jarre` se ferait couper en deux.
+    async fn a_separator_without_spaces_is_refused_by_a_sentence_not_a_key() {
+        // The SDK's contract, and the real rule: without surrounding spaces,
+        // `Jean-Michel Jarre` would get cut in two.
         let mut f = fixture();
         let op = serde_json::json!({
-            "action": "pose",
+            "action": "set",
             "url": "http://f",
-            "pattern": { "separe": { "separator": "-", "artist_first": true } }
+            "pattern": { "split": { "separator": "-", "artist_first": true } }
         });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert!(err.contains("space"), "doit etre la phrase du sources_catalog : {err}");
-        assert!(!err.contains("separator_no_space"), "jamais la key brute : {err}");
-        // Rien n'a du etre pose.
+        assert!(err.contains("space"), "must be the catalog's sentence: {err}");
+        assert!(!err.contains("separator_no_space"), "never the raw key: {err}");
+        // Nothing should have been set.
         assert!(f.admin.get_data().await["stations"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn un_separateur_vide_est_refuse_par_une_phrase_distincte() {
+    async fn an_empty_separator_is_refused_by_a_distinct_sentence() {
         let mut f = fixture();
         let op = serde_json::json!({
-            "action": "pose",
+            "action": "set",
             "url": "http://f",
-            "pattern": { "separe": { "separator": "", "artist_first": true } }
+            "pattern": { "split": { "separator": "", "artist_first": true } }
         });
         let err = f.admin.set_data(op).await.unwrap_err();
         assert_eq!(err, "the separator cannot be empty");
@@ -341,20 +339,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supprimer_une_station_inconnue_est_un_refus_et_non_un_succes_muet() {
+    async fn removing_an_unknown_station_is_a_refusal_and_not_a_silent_success() {
         let mut f = fixture();
-        let op = serde_json::json!({ "action": "remove", "url": "http://inconnue" });
+        let op = serde_json::json!({ "action": "remove", "url": "http://unknown" });
         let err = f.admin.set_data(op).await.unwrap_err();
         assert_eq!(err, "no entry for that stream");
         assert_ne!(err, "unknown_station");
     }
 
     #[tokio::test]
-    async fn supprimer_une_station_connue_reussit_et_persiste() {
+    async fn removing_a_known_station_succeeds_and_persists() {
         let mut f = fixture();
         f.admin
             .set_data(serde_json::json!({
-                "action": "pose", "url": "http://f", "pattern": "ne_pas_decouper"
+                "action": "set", "url": "http://f", "pattern": "do_not_split"
             }))
             .await
             .unwrap();
@@ -364,10 +362,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vider_efface_toutes_les_stations_et_persiste() {
+    async fn clear_erases_all_the_stations_and_persists() {
         let mut f = fixture();
         f.admin
-            .set_data(serde_json::json!({ "action": "pose", "url": "http://f", "pattern": "ne_pas_decouper" }))
+            .set_data(serde_json::json!({ "action": "set", "url": "http://f", "pattern": "do_not_split" }))
             .await
             .unwrap();
         assert!(f.admin.set_data(serde_json::json!({ "action": "clear" })).await.is_ok());
@@ -376,37 +374,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vider_un_magasin_deja_vide_necrit_pas_sur_le_disque() {
-        // Le raccourci de `Write::Clear` : rien a effacer, donc rien a
-        // ecrire. Prouve par l'absence du fichier d'state, que `save`
-        // aurait cree.
+    async fn clearing_an_already_empty_store_does_not_write_to_disk() {
+        // The shortcut of `Write::Clear`: nothing to erase, hence nothing to
+        // write. Proven by the absence of the state file, which `save` would
+        // have created.
         let mut f = fixture();
         assert!(f.admin.set_data(serde_json::json!({ "action": "clear" })).await.is_ok());
-        assert!(!f.state_path.exists(), "aucune ecriture ne devait avoir lieu sur un store deja clear");
+        assert!(!f.state_path.exists(), "no write should have happened on an already empty store");
     }
 
     #[tokio::test]
-    async fn get_data_trie_par_dernier_usage_decroissant() {
-        // Écrit directement le fichier d'état plutôt que d'espacer des appels
-        // à `record_success()` dans le temps réel (qui produiraient des horodatages à
-        // la même seconde, donc un order non observable) : c'est exactement
-        // la forme que `Store::save` produit elle-même (voir le test
-        // d'aller-retour de `patterns.rs`), pas un JSON inventé.
+    async fn get_data_sorts_by_last_used_descending() {
+        // Writes the state file directly rather than spacing calls to
+        // `record_success()` in real time (which would produce timestamps in
+        // the same second, hence an unobservable order): this is exactly the
+        // form `Store::save` produces itself (see the round-trip test of
+        // `patterns.rs`), not an invented JSON.
         let f = fixture();
         let raw = serde_json::json!({
             "stations": [
-                { "url": "http://b", "pattern": "ne_pas_decouper", "origin": "deviation_apprise",
+                { "url": "http://b", "pattern": "do_not_split", "origin": "learned_deviation",
                   "last_used": "2024-01-01T00:00:00Z", "split_titles": 5 },
-                { "url": "http://a", "pattern": { "separe": { "separator": " - ", "artist_first": true } },
-                  "origin": "standard_confirme", "last_used": "2026-01-01T00:00:00Z", "split_titles": 10 },
-                { "url": "http://c", "pattern": "ne_pas_decouper", "origin": "manuel",
+                { "url": "http://a", "pattern": { "split": { "separator": " - ", "artist_first": true } },
+                  "origin": "standard_confirmed", "last_used": "2026-01-01T00:00:00Z", "split_titles": 10 },
+                { "url": "http://c", "pattern": "do_not_split", "origin": "manual",
                   "last_used": null, "split_titles": 0 }
             ]
         });
         std::fs::write(&f.state_path, serde_json::to_string(&raw).unwrap()).unwrap();
         let store = Store::load(&f.state_path);
         let admin = MusicBrainzAdmin::new(
-            Arc::new(MagasinLock::new(store)),
+            Arc::new(StoreLock::new(store)),
             f.state_path.clone(),
             Arc::new(RwLock::new(Catalog::load(
                 "musicbrainz",
@@ -418,35 +416,34 @@ mod tests {
 
         let data = admin.get_data().await;
         let urls: Vec<&str> = data["stations"].as_array().unwrap().iter().map(|s| s["url"].as_str().unwrap()).collect();
-        assert_eq!(urls, vec!["http://a", "http://b", "http://c"], "plus recent d'abord, jamais sondee en dernier");
+        assert_eq!(urls, vec!["http://a", "http://b", "http://c"], "most recent first, never probed last");
     }
 
     #[tokio::test]
-    async fn une_ecriture_malformee_est_rejetee() {
-        // Champ manquant, action inconnue : refus, pas un défaut appliqué.
+    async fn a_malformed_write_is_rejected() {
+        // Missing field, unknown action: refusal, not a default applied.
         let mut f = fixture();
-        let err = f.admin.set_data(serde_json::json!({ "action": "pose", "pattern": "ne_pas_decouper" })).await.unwrap_err();
-        assert!(err.starts_with("Unexpected request:"), "message inattendu: {err}");
+        let err = f.admin.set_data(serde_json::json!({ "action": "set", "pattern": "do_not_split" })).await.unwrap_err();
+        assert!(err.starts_with("Unexpected request:"), "unexpected message: {err}");
 
-        let err = f.admin.set_data(serde_json::json!({ "action": "efface_tout" })).await.unwrap_err();
-        assert!(err.starts_with("Unexpected request:"), "message inattendu: {err}");
+        let err = f.admin.set_data(serde_json::json!({ "action": "wipe_everything" })).await.unwrap_err();
+        assert!(err.starts_with("Unexpected request:"), "unexpected message: {err}");
 
-        assert!(f.admin.get_data().await["stations"].as_array().unwrap().is_empty(), "rien n'a du etre apply");
+        assert!(f.admin.get_data().await["stations"].as_array().unwrap().is_empty(), "nothing should have been applied");
     }
 
     #[tokio::test]
-    async fn un_echec_decriture_renvoie_une_phrase_de_catalogue_pas_le_detail_io() {
-        // Même régression qu'en mpd, generic-input et radio :
-        // `enregistrer(...).map_err(|e| e.to_string())` mettrait le détail
-        // I/O raw dans le corps de la réponse. `state_path` vise ici un
-        // fichier ordinaire comme s'il s'agissait d'un répertoire parent,
-        // pour faire échouer l'écriture du temporaire sans toucher au disc
-        // réel.
+    async fn a_write_failure_returns_a_catalog_sentence_not_the_io_detail() {
+        // Same regression as in mpd, generic-input and radio:
+        // `save(...).map_err(|e| e.to_string())` would put the raw I/O detail
+        // in the response body. `state_path` here points at an ordinary file
+        // as if it were a parent directory, to make the write of the temporary
+        // file fail without touching the real disk.
         let mut f = fixture();
         let obstacle = f.state_path.parent().unwrap().join("obstacle");
-        std::fs::write(&obstacle, b"pas un repertoire").unwrap();
+        std::fs::write(&obstacle, b"not a directory").unwrap();
         f.admin.state_path = obstacle.join("patterns.json");
-        let op = serde_json::json!({ "action": "pose", "url": "http://f", "pattern": "ne_pas_decouper" });
+        let op = serde_json::json!({ "action": "set", "url": "http://f", "pattern": "do_not_split" });
         let err = f.admin.set_data(op).await.unwrap_err();
         assert_eq!(err, "could not write the pattern file");
     }

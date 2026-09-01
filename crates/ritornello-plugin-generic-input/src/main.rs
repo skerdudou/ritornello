@@ -2,11 +2,11 @@ mod admin;
 mod bindings;
 mod devices;
 mod learn;
-// Uniquement compile sous `cargo test` : `ui_placeholder_js` ne sert au run-
-// time nulle part dans ce crate (contrairement a `placeholder_html` du coeur,
-// utilise en repli par `web.rs`), seulement a `build.rs` (compilation
-// separee, via `include!`) et a ses propres tests. Le compiler en continu
-// dans le binaire declencherait un `dead_code` que `-D warnings` refuserait.
+// Only compiled under `cargo test`: `ui_placeholder_js` is not used at
+// runtime anywhere in this crate (unlike the core's `placeholder_html`, used
+// as a fallback by `web.rs`), only by `build.rs` (separate compilation, via
+// `include!`) and by its own tests. Compiling it into the binary at all
+// times would trigger a `dead_code` that `-D warnings` would reject.
 #[cfg(test)]
 mod placeholder;
 mod presets;
@@ -28,8 +28,8 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-/// Moitié Input : consomme le mpsc alimenté par toutes les tâches de playback
-/// evdev, quel que soit le périphérique d'origine.
+/// Input half: consumes the mpsc fed by all the evdev playback tasks,
+/// regardless of the originating device.
 struct EvdevInput {
     rx: mpsc::Receiver<InputMessage>,
 }
@@ -53,8 +53,8 @@ async fn main() -> Result<()> {
     let presets_root =
         PathBuf::from(env_or("RITORNELLO_INPUT_PRESETS", "/etc/ritornello/input-presets"));
     let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
-    // Un plugin Input ne reçoit pas de `SetLocale` (le protocol ne le prévoit
-    // que pour les sources) : la langue de la page vient de l'environnement.
+    // An Input plugin does not receive a `SetLocale` (the protocol only
+    // provides it for sources): the page's language comes from the environment.
     let locale = env_or("RITORNELLO_LOCALE", "en");
     let catalog = Arc::new(RwLock::new(Catalog::load(
         "generic-input",
@@ -66,13 +66,13 @@ async fn main() -> Result<()> {
     let (tx, rx) = mpsc::channel(32);
     let hub = Hub::new(Bindings::load(&bindings_path), tx);
     let input_root = PathBuf::from(devices::INPUT_DIR);
-    let ouverts = hub.open_new_devices(&input_root);
-    tracing::info!("{ouverts} input device(s) opened");
+    let opened = hub.open_new_devices(&input_root);
+    tracing::info!("{opened} input device(s) opened");
 
-    // Les deux moitiés restent indépendantes : une panne de la page ne doit
-    // pas couper la télécommande. C'est `Runtime::run` qui les tient
-    // désormais, chacune dans sa tâche — la page n'est plus conditionnelle,
-    // puisque le greffon announcement lui-même qu'il en a une.
+    // The two halves stay independent: a page failure must not cut off the
+    // remote. `Runtime::run` now holds both, each in its own task — the page
+    // is no longer conditional, since the plugin itself announces that it
+    // has one.
     let admin = GenericInputAdmin { bindings_path, presets_root, input_root, hub, catalog };
     Runtime::from_args()?.input(EvdevInput { rx })?.admin(admin)?.run().await
 }
@@ -82,32 +82,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn en_embarque_generic_input_est_non_vide() {
+    fn embedded_generic_input_en_is_non_empty() {
         assert!(!ritornello_i18n::try_parse(GENERIC_INPUT_EN).unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn la_moitie_input_vit_tant_quun_emetteur_du_canal_existe() {
-        // Régression (2026-07-27) : déclaré sans `admin = true` et sans aucun
-        // périphérique evdev ouvert (WSL, droits manquants sur /dev/input),
-        // le plugin sortait aussitôt en exit 0 — la closure du `.map(...)`
-        // qui construisait la moitié admin capturait le hub même sans être
-        // appelée, et le lâchait ; or le hub tient l'émetteur du canal des
-        // commands. Le contrat que `main` doit tenir est celui-ci : tant
-        // qu'un émetteur vit, `next_command` attend au lieu de se terminer.
+    async fn the_input_half_lives_as_long_as_a_channel_sender_exists() {
+        // Regression (2026-07-27): declared without `admin = true` and with
+        // no evdev device open (WSL, missing rights on /dev/input), the
+        // plugin exited immediately with exit 0 — the `.map(...)` closure
+        // that built the admin half captured the hub even without being
+        // called, and dropped it; but the hub holds the sender of the
+        // commands channel. The contract `main` must uphold is this: as
+        // long as a sender lives, `next_command` waits instead of ending.
         let (tx, rx) = mpsc::channel::<InputMessage>(4);
         let mut input = EvdevInput { rx };
         tokio::select! {
-            _ = input.next_command() => panic!("next_command ne doit pas se terminer tant qu'un emetteur vit"),
+            _ = input.next_command() => panic!("next_command must not end while a sender lives"),
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
         }
-        // Émetteur lâché : fin propre, l'erreur nomme la cause.
+        // Sender dropped: clean end, the error names the cause.
         drop(tx);
         let e = input.next_command().await.unwrap_err();
         assert!(e.to_string().contains("evdev loops"));
     }
 
-    // Le test `chemins_par_defaut` qui vivait ici ne testait que `env_or`,
-    // c'est-à-dire `std::env` : il passait sur n'importe quel programme.
-    // Supprimé plutôt que gardé pour le nombre (revue 2026-07-27).
+    // The `default_paths` test that used to live here only tested `env_or`,
+    // i.e. `std::env`: it passed for any program whatsoever. Removed rather
+    // than kept for the count (review 2026-07-27).
 }

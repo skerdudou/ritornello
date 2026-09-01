@@ -1,5 +1,5 @@
-Les presets de `presets.json` proviennent de [tweakcn](https://tweakcn.com)
-(dépôt `jnsahaj/tweakcn`), distribué sous licence **Apache-2.0**.
+The presets in `presets.json` come from [tweakcn](https://tweakcn.com)
+(repository `jnsahaj/tweakcn`), distributed under the **Apache-2.0** license.
 
-Régénérer avec `node scripts/fetch-presets.mjs`. Ne pas éditer `presets.json`
-à la main : la modification serait perdue à la prochaine régénération.
+Regenerate with `node scripts/fetch-presets.mjs`. Do not edit `presets.json`
+by hand: the change would be lost at the next regeneration.

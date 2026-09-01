@@ -1,49 +1,48 @@
-// Module ESM servi tant que l'IHM du plugin n'a pas ete construite.
+// ESM module served as long as the plugin's UI has not been built.
 //
-// Inclus **textuellement** par `build.rs` (`include!`) autant que compile
-// comme module du crate : c'est ce qui permet de tester la fabrication du
-// bouchon par `cargo test`, alors que Cargo n'execute jamais les tests d'un
-// script de build. Aucune dependance externe autorisee ici.
+// Included **textually** by `build.rs` (`include!`) as well as compiled as a
+// module of the crate: that is what makes it possible to test the making of
+// the placeholder through `cargo test`, whereas Cargo never runs the tests of
+// a build script. No external dependency allowed here.
 //
-// Remarque : ce commentaire de module est volontairement un commentaire
-// ordinaire (`//`) et non une doc interne (`//!`). Une doc interne provoque
-// `E0753 : expected outer doc comment` une fois ce fichier inclus tel quel
-// par `build.rs` via `include!` — la restriction du compilateur porte sur la
-// position dans le stream de tokens du fichier hote, pas sur le fichier source
-// tel qu'on le read ici (voir `ritornello-core/src/placeholder.rs`).
+// Note: this module comment is deliberately an ordinary comment (`//`) and
+// not an inner doc comment (`//!`). An inner doc comment triggers
+// `E0753: expected outer doc comment` once this file is included verbatim by
+// `build.rs` via `include!` — the compiler's restriction bears on the position
+// in the token stream of the host file, not on the source file as read here
+// (see `ritornello-core/src/placeholder.rs`).
 
-/// Marqueur reconnaissable dans les deux active de bouchon. Equivalent du
-/// `MARKER` du coeur (`ritornello-core/src/placeholder.rs`), qui permet a
-/// `build.rs` de distinguer un active de bouchon deja present d'un vrai
-/// livrable.
+/// Recognizable marker in both placeholder assets. Counterpart of the core's
+/// `MARKER` (`ritornello-core/src/placeholder.rs`), which lets `build.rs`
+/// tell an already-present placeholder asset from a real deliverable.
 pub const MARKER: &str = "ritornello-ihm-plugin-non-construite";
 
-/// Contrat volontairement invalide : le shell affiche alors son message
-/// « plugin à reconstruire », qui décrit exactement la situation.
-pub fn ui_placeholder_js(commande: &str) -> String {
+/// Deliberately invalid contract: the shell then shows its "plugin to be
+/// rebuilt" message, which describes the situation exactly.
+pub fn ui_placeholder_js(command: &str) -> String {
     format!(
-        "// {MARKER}\n// IHM non construite. Lancer : {commande}\nexport const contract = -1;\n"
+        "// {MARKER}\n// IHM non construite. Lancer : {command}\nexport const contract = -1;\n"
     )
 }
 
-/// Feuille de style de bouchon, porteuse du même marqueur : un `ui.css` de
-/// bouchon laissé derrière un `ui.js` reconstruit donnerait une IHM sans
-/// aucun style, autre dégradation silencieuse.
+/// Placeholder stylesheet, carrying the same marker: a placeholder `ui.css`
+/// left behind a rebuilt `ui.js` would give a UI with no style at all,
+/// another silent degradation.
 pub fn ui_placeholder_css() -> String {
     format!("/* {MARKER} : IHM non construite */\n")
 }
 
-/// Vrai si `contenu` est un active de bouchon plutôt qu'un vrai livrable.
+/// True if `content` is a placeholder asset rather than a real deliverable.
 ///
-/// Fonction **pure** du contenu, donc testable ici alors que Cargo n'exécute
-/// jamais les tests d'un script de build. Elle existe parce que
-/// `cargo::warning` n'était émis qu'à la **création** du bouchon : un
-/// `cargo build` nu (bouchon créé, avertissement affiché une fois) suivi d'un
-/// `cross build --release --target armv7…` — les scripts de build sont rejoués
-/// par cible, mais `ui/dist/ui.js` existe désormais — ne disait plus rien, et
-/// le binaire de release embarquait le bouchon en silence.
-pub fn is_placeholder(contenu: &str) -> bool {
-    contenu.contains(MARKER)
+/// A **pure** function of the content, hence testable here whereas Cargo
+/// never runs the tests of a build script. It exists because
+/// `cargo::warning` was only emitted at the **creation** of the placeholder: a
+/// bare `cargo build` (placeholder created, warning shown once) followed by a
+/// `cross build --release --target armv7…` — build scripts are replayed per
+/// target, but `ui/dist/ui.js` now exists — said nothing more, and the
+/// release binary embedded the placeholder in silence.
+pub fn is_placeholder(content: &str) -> bool {
+    content.contains(MARKER)
 }
 
 #[cfg(test)]
@@ -51,32 +50,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn le_bouchon_exporte_un_contrat_invalide_et_invite_a_construire_lihm() {
+    fn the_placeholder_exports_an_invalid_contract_and_invites_to_build_the_ui() {
         let js = ui_placeholder_js("npm ci && npm run build --workspaces");
         assert!(js.contains("npm ci && npm run build --workspaces"));
         assert!(js.contains("export const contract = -1"));
-        // Le marqueur est porte par un commentaire JS : le module reste
-        // validated et chargeable, il announcement seulement un contrat invalide.
+        // The marker is carried by a JS comment: the module stays valid and
+        // loadable, it only announces an invalid contract.
         assert!(js.starts_with("// "));
     }
 
     #[test]
-    fn est_un_bouchon_reconnait_les_deux_actifs_de_bouchon() {
+    fn is_placeholder_recognizes_both_placeholder_assets() {
         assert!(is_placeholder(&ui_placeholder_js("npm ci")));
         assert!(is_placeholder(&ui_placeholder_css()));
     }
 
     #[test]
-    fn est_un_bouchon_ne_se_declenche_pas_sur_un_vrai_livrable() {
-        // Forme d'un `ui.js` reellement produit par Vite : imports externes
-        // resolus par l'import map du shell, contrat validated, export par
-        // defaut. Aucun marqueur, donc aucun avertissement.
-        let vrai_js = "import{defineComponent as e}from\"vue\";\
+    fn is_placeholder_does_not_trigger_on_a_real_deliverable() {
+        // Shape of a `ui.js` actually produced by Vite: external imports
+        // resolved by the shell's import map, valid contract, default export.
+        // No marker, hence no warning.
+        let real_js = "import{defineComponent as e}from\"vue\";\
                        import{api as t}from\"@ritornello/ui\";\
                        const o=e({});export const contract=1;export default o;\n";
-        assert!(!is_placeholder(vrai_js));
-        let vrai_css = ".space-y-6>:not([hidden])~:not([hidden]){margin-top:1.5rem}\n";
-        assert!(!is_placeholder(vrai_css));
+        assert!(!is_placeholder(real_js));
+        let real_css = ".space-y-6>:not([hidden])~:not([hidden]){margin-top:1.5rem}\n";
+        assert!(!is_placeholder(real_css));
         assert!(!is_placeholder(""));
     }
 }

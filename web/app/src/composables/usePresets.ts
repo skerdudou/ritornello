@@ -3,34 +3,34 @@ import { ref } from 'vue'
 import type { PresetsPayload } from '../types'
 
 /**
- * Les noms des présélections, par source puis par numéro, lus sur
- * `GET /api/presets` — le catalogue que le cœur tient déjà pour les afficheurs.
+ * The names of the presets, by source then by number, read from
+ * `GET /api/presets` — the catalog the core already keeps for the displays.
  *
- * Local à l'appelant (step d'état de module) : seule la page d'accueil s'en
- * sert, et elle recharge quand la source active change (voir `HomeView`). Un
- * échec conserve la list précédente : une coupure passagère ne doit step
- * dénommer les tuiles.
+ * Local to the caller (no module state): only the home page uses it, and it
+ * reloads when the active source changes (see `HomeView`). A failure keeps
+ * the previous list: a transient outage must not strip the tiles of their
+ * names.
  */
 export function usePresets() {
-  const noms = ref<Map<string, Map<number, string>>>(new Map())
+  const names = ref<Map<string, Map<number, string>>>(new Map())
 
   async function reload(): Promise<void> {
     const load = await api.get<PresetsPayload>('/api/presets').catch((e: unknown) => {
-      console.warn('GET /api/presets unavailable : tuiles sans nom', e)
+      console.warn('GET /api/presets unavailable: tiles without names', e)
       return null
     })
-    // Garde contre une trame sans `sources` : les tests de `HomeView` bouchent
-    // chaque GET avec `{ seek_step_s: 10 }`, ce corps atteint donc aussi
-    // `/api/presets`. Sans elle, `.sources.map` explose et le rechargement
-    // rate silencieusement — mieux vaut garder la list précédente.
+    // Guard against a frame without `sources`: the `HomeView` tests stub every
+    // GET with `{ seek_step_s: 10 }`, so that body also reaches
+    // `/api/presets`. Without it, `.sources.map` blows up and the reload fails
+    // silently — better to keep the previous list.
     if (!load || !Array.isArray(load.sources)) return
-    noms.value = new Map(
+    names.value = new Map(
       load.sources.map((s) => [s.name, new Map((s.presets ?? []).map((p) => [p.index, p.name]))]),
     )
   }
 
   function nameOf(source: string, n: number): string | null {
-    return noms.value.get(source)?.get(n) ?? null
+    return names.value.get(source)?.get(n) ?? null
   }
 
   return { reload, nameOf }

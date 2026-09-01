@@ -2,33 +2,33 @@ import { describe, expect, it } from 'vitest'
 import { createT } from './i18n'
 
 describe('createT', () => {
-  it('résout une clé présente', () => {
-    const t = createT({ saved: 'Enregistré' })
-    expect(t('saved')).toBe('Enregistré')
+  it('resolves a present key', () => {
+    const t = createT({ saved: 'Saved' })
+    expect(t('saved')).toBe('Saved')
   })
 
-  it('retombe sur la clé elle-même quand elle est absente', () => {
+  it('falls back to the key itself when it is missing', () => {
     const t = createT({})
-    expect(t('inconnue')).toBe('inconnue')
+    expect(t('unknown')).toBe('unknown')
   })
 
-  it('interpole les jetons nommés comme le fait le Rust', () => {
-    const t = createT({ bad_request: 'Requête invalide : {detail}' })
-    expect(t('bad_request', { detail: 'preset en double' })).toBe(
-      'Requête invalide : preset en double',
+  it('interpolates named tokens the way the Rust does', () => {
+    const t = createT({ bad_request: 'Invalid request: {detail}' })
+    expect(t('bad_request', { detail: 'duplicate preset' })).toBe(
+      'Invalid request: duplicate preset',
     )
   })
 
-  it('interpole un jeton numérique et laisse les jetons non fournis intacts', () => {
-    const t = createT({ msg: '{n} sur {total}' })
-    expect(t('msg', { n: 3 })).toBe('3 sur {total}')
+  it('interpolates a numeric token and leaves unprovided tokens intact', () => {
+    const t = createT({ msg: '{n} of {total}' })
+    expect(t('msg', { n: 3 })).toBe('3 of {total}')
   })
 
-  it("n'interprète pas la valeur : une apostrophe droite passe telle quelle", () => {
-    // C'est précisément ce que l'ancienne substitution `{{cle}}` cassait
-    // (défaut Critical de dbfa771) : ici la valeur est une donnée, jamais du
-    // source, donc aucun caractère n'est dangereux.
-    const t = createT({ hint: "choisir d'abord un périphérique" })
-    expect(t('hint')).toBe("choisir d'abord un périphérique")
+  it('does not interpret the value: a straight apostrophe passes through as is', () => {
+    // This is precisely what the old `{{key}}` substitution broke (Critical
+    // defect of dbfa771): here the value is data, never source, so no
+    // character is dangerous.
+    const t = createT({ hint: "you haven't picked a device yet" })
+    expect(t('hint')).toBe("you haven't picked a device yet")
   })
 })

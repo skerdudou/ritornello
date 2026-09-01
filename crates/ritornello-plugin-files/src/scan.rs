@@ -1,47 +1,45 @@
-//! Marche récursive d'un répertoire : filtre d'extensions, garde contre les
-//! boucles de liens symboliques, cap.
+//! Recursive walk of a directory: extension filter, guard against symbolic
+//! link loops, cap.
 
 use ritornello_i18n::Catalog;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Plafond d'une liste. Protège trois choses à la fois : la charge utile JSON
-/// servie à la page, l'écriture du m3u, et la liste de playback de mpv.
+/// Cap of a playlist. Protects three things at once: the JSON payload served
+/// to the page, the writing of the m3u, and mpv's playback list.
 pub const MAX_TRACKS: usize = 2000;
 
-/// Plafond de **visite** d'une recherche, distinct de `MAX_TRACKS`.
+/// **Visit** cap of a search, distinct from `MAX_TRACKS`.
 ///
-/// `MAX_TRACKS` bounded ce que la liste de playback peut contenir ; le confondre
-/// avec le coût d'un parcours faisait refuser toute recherche lancée in_dir un
-/// dossier de plus de 2000 pistes, avec le message de l'ajout — mesuré à la
-/// racine d'un NAS. Une recherche ne remplit rien : elle n'a besoin que d'une
-/// bounded qui l'empêche de tourner sans fin, et le dépassement se rapporte
-/// comme « tronqué ».
+/// `MAX_TRACKS` caps what the playback list may hold; confusing it with the
+/// cost of a walk made every search launched in a folder of more than 2000
+/// tracks refused, with the add message — measured at the root of a NAS. A
+/// search fills nothing: it only needs a bound that keeps it from running
+/// forever, and exceeding it is reported as "truncated".
 ///
-/// Compte désormais **chaque entrée inspectée** — dossier ou fichier, audio ou
-/// non — et non plus seulement les fichiers audio rencontrés : un dossier
-/// plein de fichiers non-audio n'était borné par rien avant ce changement.
-/// Relevé en conséquence : c'est [`SEARCH_TIMEOUT`] qui protège désormais un
-/// partage lent (le coût dominant y est le `read_dir` par dossier, pas le
-/// compte d'entrées) ; ce cap reste un filet pour le cas local, rapide par
-/// entrée, où seul un nombre démesuré d'entrées doit être refusé.
+/// Now counts **every inspected entry** — folder or file, audio or not — and
+/// no longer only the audio files met: a folder full of non-audio files was
+/// bounded by nothing before this change. Raised accordingly: it is
+/// [`SEARCH_TIMEOUT`] that now protects a slow share (the dominant cost there
+/// is the `read_dir` per folder, not the entry count); this cap remains a
+/// safety net for the local case, fast per entry, where only an outsized
+/// number of entries must be refused.
 pub const MAX_VISITS: usize = 500_000;
 
-/// Délai maximal accordé à une recherche.
+/// Maximum time granted to a search.
 ///
-/// Franchement sous les 5 s du protocol d'admin, qui est **sériel** : passé
-/// ce délai, les `get_data` du sondage de la page s'empilent derrière la
-/// recherche en cours et expirent all — c'est le mode de panne de l'incident
-/// du 2026-08-17, où la page disparaissait. La marge restante couvre la
-/// résolution des chemins et la sérialisation qui suivent la walk_dir.
+/// Well under the 5 s of the admin protocol, which is **serial**: past that
+/// timeout, the page's polling `get_data` pile up behind the running search
+/// and all expire — this is the failure mode of the 2026-08-17 incident, where
+/// the page disappeared. The remaining margin covers the path resolution and
+/// the serialization that follow the walk.
 pub const SEARCH_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Nombre d'entrées inspectées entre deux mesures de l'échéance.
+/// Number of inspected entries between two deadline measurements.
 ///
-/// `Instant::elapsed` n'est pas gratuit : le mesurer à chaque entrée
-/// ajouterait un appel système par fichier, sur le path le plus chaud de la
-/// walk_dir.
+/// `Instant::elapsed` is not free: measuring it at every entry would add one
+/// system call per file, on the hottest path of the walk.
 const DEADLINE_STEP: usize = 64;
 
 const EXTENSIONS: &[&str] = &[
@@ -61,27 +59,27 @@ pub fn is_audio(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Parcourt `dir` récursivement et rend les fichiers audio, **triés**.
+/// Walks `dir` recursively and returns the audio files, **sorted**.
 ///
-/// Le tri rend l'ajout reproductible : sans lui, deux ajouts du même dossier
-/// donneraient des numéros de présélection différents d'un jour à l'autre,
-/// l'order de `read_dir` n'étant garanti par aucun système de fichiers.
+/// Sorting makes the add reproducible: without it, two adds of the same folder
+/// would give different preset numbers from one day to the next, the order of
+/// `read_dir` being guaranteed by no file system.
 ///
-/// La garde anti-boucle mémorise les répertoires **canonisés** déjà visités :
-/// un lien symbolique pointant vers un ancêtre ferait sinon tourner la walk_dir
-/// jusqu'au cap, avec un symptôme qui ressemble à une bibliothèque énorme
-/// plutôt qu'à un défaut.
+/// The anti-loop guard remembers the **canonicalized** directories already
+/// visited: a symbolic link pointing to an ancestor would otherwise make the
+/// walk spin until the cap, with a symptom that looks like a huge library
+/// rather than a defect.
 pub fn walk(dir: &Path, cap: usize) -> Result<Vec<PathBuf>, ScanError> {
     walk_with(dir, cap, &|_, _| {})
 }
 
-/// Même walk_dir, avec un **crochet de progress** appelé à chaque répertoire
-/// visité : le nombre de pistes trouvées jusque-là, et le répertoire en cours.
+/// Same walk, with a **progress hook** called at every visited directory: the
+/// number of tracks found so far, and the current directory.
 ///
-/// Il existe parce qu'une walk_dir sur un partage SMB endormi peut durer
-/// longtemps, et que le protocol admin ne push_cover rien : la page interroge, et
-/// il lui faut quelque chose à montrer entre-temps. Sans lui, l'utilisateur
-/// verrait un écran figé sans savoir si quelque chose avance.
+/// It exists because a walk over a sleeping SMB share can take a long time,
+/// and the admin protocol pushes nothing: the page polls, and it needs
+/// something to show in the meantime. Without it, the user would see a frozen
+/// screen without knowing whether anything is moving.
 pub fn walk_with(
     dir: &Path,
     cap: usize,
@@ -94,11 +92,11 @@ pub fn walk_with(
     Ok(out)
 }
 
-/// Extensions des fichiers de liste de playback.
+/// Extensions of playlist files.
 ///
-/// Écartées des extensions audio : un m3u ne s'add pas à la liste, il la
-/// **remplace**. Les confondre ferait add un fichier texte que mpv
-/// tenterait de play.
+/// Kept apart from the audio extensions: an m3u is not added to the playlist,
+/// it **replaces** it. Confusing them would add a text file that mpv would try
+/// to play.
 const PLAYLIST_EXTENSIONS: &[&str] = &["m3u", "m3u8"];
 
 pub fn is_playlist(p: &Path) -> bool {
@@ -108,33 +106,33 @@ pub fn is_playlist(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Contents d'un seul niveau, chaque catégorie triée.
+/// Contents of a single level, each category sorted.
 ///
-/// Une structure nommée plutôt qu'un triplet : trois `Vec<String>` anonymes
-/// s'inversent au premier refactor, et l'erreur se voit seulement à l'écran.
+/// A named structure rather than a triple: three anonymous `Vec<String>` get
+/// swapped at the first refactor, and the error only shows on screen.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Contents {
     pub dirs: Vec<String>,
     pub audio: Vec<String>,
-    /// Fichiers de liste de playback, qui se **chargent** au lieu de s'add.
+    /// Playlist files, which are **loaded** instead of being added.
     pub playlists: Vec<String>,
 }
 
-/// Contents d'un seul niveau : sous-répertoires, fichiers audio et playlists de
-/// playback. C'est ce que consomme l'arbre **paresseux** de la page, qui ne
-/// demande jamais toute l'arborescence d'un coup.
+/// Contents of a single level: subdirectories, audio files and playlist files.
+/// This is what the page's **lazy** tree consumes, which never asks for the
+/// whole tree at once.
 pub fn list_dir(dir: &Path) -> Result<Contents, ScanError> {
-    let playback =
+    let read =
         std::fs::read_dir(dir).map_err(|_| ScanError::Io { path: dir.display().to_string() })?;
     let mut out = Contents::default();
-    for entree in playback.flatten() {
-        let path = entree.path();
+    for entry in read.flatten() {
+        let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
             continue;
         };
-        // Les entrées cachées ne sont pas montrées : une bibliothèque en est
-        // pleine (`.DS_Store`, `@eaDir` d'un Synology) et elles n'ont rien à
-        // faire in_dir un arbre de navigation musicale.
+        // Hidden entries are not shown: a library is full of them (`.DS_Store`,
+        // a Synology's `@eaDir`) and they have no business in a music
+        // navigation tree.
         if name.starts_with('.') {
             continue;
         }
@@ -153,34 +151,34 @@ pub fn list_dir(dir: &Path) -> Result<Contents, ScanError> {
     Ok(out)
 }
 
-/// Pourquoi une recherche s'est arrêtée.
+/// Why a search stopped.
 ///
-/// Deux causes, deux conseils à donner : trop de correspondances invite à
-/// préciser le pattern, un parcours interrompu invite à descendre in_dir un
-/// sous-dossier. Les confondre faisait afficher « Aucun résultat » — donc « ce
-/// fichier n'existe pas » — à quelqu'un dont la recherche avait simplement
-/// renoncé avant d'arriver jusqu'à lui.
+/// Two causes, two pieces of advice to give: too many matches invites
+/// narrowing the pattern, an interrupted walk invites descending into a
+/// subfolder. Confusing them showed "No results" — that is, "this file does
+/// not exist" — to someone whose search had simply given up before reaching
+/// it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchEnd {
-    /// Tout le dossier a été parcouru.
+    /// The whole folder was walked.
     Complete,
-    /// Le cap de résultats est atteint : il y en avait davantage.
+    /// The result cap is reached: there were more.
     TooManyResults,
-    /// Le parcours a été interrompu avant d'avoir tout vu.
+    /// The walk was interrupted before seeing everything.
     Interrupted,
 }
 
-/// Cherche récursivement les fichiers audio dont le name contains `pattern`
-/// (comparaison insensible à la casse).
+/// Recursively searches the audio files whose name contains `pattern`
+/// (case-insensitive comparison).
 ///
-/// Deux bornes, et deux raisons distinctes : `cap` limite ce qu'on **rapporte**
-/// à la page, `visit_cap` ce qu'on accepte de **browse**. L'une comme
-/// l'autre rend une [`SearchEnd`] distincte, jamais un refus : une liste
-/// partielle annoncée comme telle est utile, un refus ne l'est pas.
+/// Two bounds, and two distinct reasons: `cap` limits what we **report** to
+/// the page, `visit_cap` what we agree to **browse**. Either one returns a
+/// distinct [`SearchEnd`], never a refusal: a partial list announced as such is
+/// useful, a refusal is not.
 ///
-/// Le filtre s'applique **pendant** la walk_dir : collecter d'abord tout le
-/// dossier pour ne garder ensuite qu'une poignée de names était ce qui faisait
-/// buter la recherche sur le cap de la liste de playback.
+/// The filter applies **during** the walk: collecting the whole folder first
+/// to then keep only a handful of names was what made the search hit the
+/// playback list cap.
 pub fn search(
     dir: &Path,
     pattern: &str,
@@ -196,10 +194,10 @@ pub fn search(
     let mut visits = 0usize;
     let mut seen = HashSet::new();
     let start = Instant::now();
-    // `cap + 1` : on en search un de plus que ce qu'on rend, pour distinguer
-    // « exactement cap résultats » de « il y en avait davantage ». Sans cela une
-    // liste complète de cap éléments serait annoncée comme tronquée.
-    let arrete = walk_searching(
+    // `cap + 1`: we search for one more than we return, to tell "exactly cap
+    // results" from "there were more". Without that, a complete list of cap
+    // elements would be announced as truncated.
+    let stopped = walk_searching(
         dir,
         &pattern,
         cap + 1,
@@ -211,14 +209,14 @@ pub fn search(
         &mut seen,
     )?;
     out.truncate(cap);
-    Ok((out, arrete.unwrap_or(SearchEnd::Complete)))
+    Ok((out, stopped.unwrap_or(SearchEnd::Complete)))
 }
 
-/// Marche filtrante. Rend la cause d'un arrêt anticipé, `None` si la walk_dir a
-/// couvert tout le dossier.
-// Neuf paramètres : les trois derniers sont l'état de la récursion, les six
-// premiers ses bornes. Les regrouper in_dir une struct n'apporterait qu'un name
-// de plus à read — accepté tel quel.
+/// Filtering walk. Returns the cause of an early stop, `None` if the walk
+/// covered the whole folder.
+// Nine parameters: the last three are the recursion state, the first six its
+// bounds. Grouping them in a struct would only add one more name to read —
+// accepted as is.
 #[allow(clippy::too_many_arguments)]
 fn walk_searching(
     dir: &Path,
@@ -233,56 +231,56 @@ fn walk_searching(
 ) -> Result<Option<SearchEnd>, ScanError> {
     let canon =
         dir.canonicalize().map_err(|_| ScanError::Io { path: dir.display().to_string() })?;
-    // Même garde que `walk_dir` : un lien pointant vers un ancêtre ferait tourner
-    // la walk_dir en produisant des chemins de plus en plus longs.
+    // Same guard as `walk_dir`: a link pointing to an ancestor would make the
+    // walk spin, producing ever longer paths.
     if !seen.insert(canon) {
         return Ok(None);
     }
-    let playback =
+    let read =
         std::fs::read_dir(dir).map_err(|_| ScanError::Io { path: dir.display().to_string() })?;
-    let mut sous_dossiers = Vec::new();
-    for entree in playback {
-        let Ok(entree) = entree else { continue };
-        let path = entree.path();
-        // Chaque entrée compte, dossier ou fichier, audio ou non : un dossier
-        // plein de fichiers non-audio n'était borné par rien tant que seuls
-        // les fichiers audio étaient comptés.
+    let mut subdirs = Vec::new();
+    for entry in read {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        // Every entry counts, folder or file, audio or not: a folder full of
+        // non-audio files was bounded by nothing as long as only audio files
+        // were counted.
         *visits += 1;
         if *visits > visit_cap {
             return Ok(Some(SearchEnd::Interrupted));
         }
-        // Mesurée toutes les `DEADLINE_STEP` entrées, pas à chaque entrée :
-        // `Instant::elapsed` n'est pas gratuit.
+        // Measured every `DEADLINE_STEP` entries, not at every entry:
+        // `Instant::elapsed` is not free.
         if visits.is_multiple_of(DEADLINE_STEP) && start.elapsed() >= timeout {
             return Ok(Some(SearchEnd::Interrupted));
         }
-        // `metadata` et non `symlink_metadata`, comme in_dir `walk_dir` : un lien
-        // vers un dossier réel doit être suivi.
+        // `metadata` and not `symlink_metadata`, as in `walk_dir`: a link to a
+        // real folder must be followed.
         let Ok(meta) = std::fs::metadata(&path) else { continue };
         if meta.is_dir() {
-            sous_dossiers.push(path);
+            subdirs.push(path);
             continue;
         }
         if !(meta.is_file() && is_audio(&path)) {
             continue;
         }
-        let correspond = path
+        let matches = path
             .file_name()
             .and_then(|n| n.to_str())
             .is_some_and(|n| n.to_lowercase().contains(pattern));
-        if correspond {
+        if matches {
             out.push(path);
             if out.len() >= cap {
                 return Ok(Some(SearchEnd::TooManyResults));
             }
         }
     }
-    sous_dossiers.sort();
-    for d in sous_dossiers {
-        if let Some(raison) =
+    subdirs.sort();
+    for d in subdirs {
+        if let Some(reason) =
             walk_searching(&d, pattern, cap, visit_cap, start, timeout, out, visits, seen)?
         {
-            return Ok(Some(raison));
+            return Ok(Some(reason));
         }
     }
     Ok(None)
@@ -301,20 +299,20 @@ fn walk_dir(
         return Ok(());
     }
     progress(out.len(), dir);
-    let playback =
+    let read =
         std::fs::read_dir(dir).map_err(|_| ScanError::Io { path: dir.display().to_string() })?;
-    let mut sous_dossiers = Vec::new();
-    for entree in playback {
-        let Ok(entree) = entree else { continue };
-        let path = entree.path();
-        // `metadata` et non `symlink_metadata` : un lien vers un dossier réel
-        // doit être suivi. C'est la boucle qu'on refuse, pas le lien. Un lien
-        // cassé ou un répertoire interdit fait passer au suivant plutôt que
-        // d'échouer : une bibliothèque est rarement parfaite, et refuser tout
-        // l'ajout pour un fichier bancal serait disproportionné.
+    let mut subdirs = Vec::new();
+    for entry in read {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        // `metadata` and not `symlink_metadata`: a link to a real folder must
+        // be followed. It is the loop we refuse, not the link. A broken link
+        // or a forbidden directory moves on to the next rather than failing: a
+        // library is rarely perfect, and refusing the whole add for one
+        // wonky file would be disproportionate.
         let Ok(meta) = std::fs::metadata(&path) else { continue };
         if meta.is_dir() {
-            sous_dossiers.push(path);
+            subdirs.push(path);
         } else if meta.is_file() && is_audio(&path) {
             if out.len() >= cap {
                 return Err(ScanError::TooMany { cap });
@@ -322,8 +320,8 @@ fn walk_dir(
             out.push(path);
         }
     }
-    sous_dossiers.sort();
-    for d in sous_dossiers {
+    subdirs.sort();
+    for d in subdirs {
         walk_dir(&d, cap, out, seen, progress)?;
     }
     Ok(())
@@ -355,17 +353,17 @@ impl std::error::Error for ScanError {}
 mod tests {
     use super::*;
 
-    fn fichier(dir: &Path, rel: &str) {
+    fn touch(dir: &Path, rel: &str) {
         let p = dir.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, b"").unwrap();
     }
 
     #[test]
-    fn seuls_les_fichiers_audio_sont_retenus_quelle_que_soit_la_casse() {
+    fn only_audio_files_are_kept_whatever_the_case() {
         let dir = tempfile::tempdir().unwrap();
         for name in ["a.mp3", "b.FLAC", "c.Opus", "cover.jpg", "notes.txt", "sans-extension"] {
-            fichier(dir.path(), name);
+            touch(dir.path(), name);
         }
         let mut names: Vec<String> = walk(dir.path(), MAX_TRACKS)
             .unwrap()
@@ -377,27 +375,27 @@ mod tests {
     }
 
     #[test]
-    fn un_niveau_separe_dossiers_pistes_et_listes_de_lecture() {
-        // Les playlists voyagent à part parce qu'elles portent une action
-        // différente : elles **remplacent** la liste en cours au lieu de s'y
-        // add. Les ranger avec les pistes ferait add un fichier texte
-        // que mpv tenterait de play.
+    fn a_single_level_separates_folders_tracks_and_playlists() {
+        // Playlists travel apart because they carry a different action: they
+        // **replace** the current playlist instead of being added to it.
+        // Filing them with the tracks would add a text file that mpv would try
+        // to play.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("Album")).unwrap();
         for name in ["a.mp3", "tout.m3u", "autre.M3U8", "cover.jpg", ".cache.m3u"] {
-            fichier(dir.path(), name);
+            touch(dir.path(), name);
         }
         let c = list_dir(dir.path()).unwrap();
         assert_eq!(c.dirs, vec!["Album"]);
         assert_eq!(c.audio, vec!["a.mp3"]);
-        // Casse indifférente, comme pour l'audio ; l'entrée cachée reste écartée.
+        // Case-insensitive, as for audio; the hidden entry stays out.
         assert_eq!(c.playlists, vec!["autre.M3U8", "tout.m3u"]);
     }
 
     #[test]
-    fn un_m3u_nest_pas_un_fichier_audio() {
-        // Garde-fou de la séparation ci-dessus, du côté des prédicats : un
-        // balayage récursif ne doit pas ramasser les playlists comme des pistes.
+    fn an_m3u_is_not_an_audio_file() {
+        // Safeguard of the separation above, on the predicates' side: a
+        // recursive sweep must not pick up playlists as tracks.
         assert!(is_playlist(Path::new("x/tout.m3u")));
         assert!(is_playlist(Path::new("x/tout.M3U8")));
         assert!(!is_audio(Path::new("x/tout.m3u")));
@@ -405,205 +403,201 @@ mod tests {
     }
 
     #[test]
-    fn la_marche_est_recursive_et_ordonnee() {
-        // L'order doit être stable : deux ajouts du même dossier produisent la
-        // même liste, sinon les numéros de présélection changeraient d'un jour
-        // à l'autre.
+    fn the_walk_is_recursive_and_ordered() {
+        // The order must be stable: two adds of the same folder produce the
+        // same list, otherwise the preset numbers would change from one day to
+        // the next.
         let dir = tempfile::tempdir().unwrap();
-        fichier(dir.path(), "A/02.mp3");
-        fichier(dir.path(), "A/01.mp3");
-        fichier(dir.path(), "B/sous/03.mp3");
-        let relatifs: Vec<String> = walk(dir.path(), MAX_TRACKS)
+        touch(dir.path(), "A/02.mp3");
+        touch(dir.path(), "A/01.mp3");
+        touch(dir.path(), "B/sous/03.mp3");
+        let relative: Vec<String> = walk(dir.path(), MAX_TRACKS)
             .unwrap()
             .iter()
             .map(|p| p.strip_prefix(dir.path()).unwrap().to_string_lossy().replace('\\', "/"))
             .collect();
-        assert_eq!(relatifs, vec!["A/01.mp3", "A/02.mp3", "B/sous/03.mp3"]);
+        assert_eq!(relative, vec!["A/01.mp3", "A/02.mp3", "B/sous/03.mp3"]);
     }
 
     #[test]
-    fn le_plafond_est_refuse_et_non_tronque_en_silence() {
+    fn the_cap_is_refused_and_not_silently_truncated() {
         let dir = tempfile::tempdir().unwrap();
         for i in 0..5 {
-            fichier(dir.path(), &format!("{i}.mp3"));
+            touch(dir.path(), &format!("{i}.mp3"));
         }
         assert!(matches!(walk(dir.path(), 3), Err(ScanError::TooMany { cap: 3 })));
     }
 
     #[cfg(unix)]
     #[test]
-    fn une_boucle_de_liens_symboliques_ne_fait_pas_tourner_la_marche() {
-        // Sans garde, un lien pointant vers un ancêtre fait tourner la walk_dir
-        // jusqu'au cap en produisant des chemins de plus en plus longs. Le
-        // symptôme ressemble à une bibliothèque énorme, pas à un défaut.
+    fn a_symbolic_link_loop_does_not_make_the_walk_spin() {
+        // Without a guard, a link pointing to an ancestor makes the walk spin
+        // until the cap, producing ever longer paths. The symptom looks like a
+        // huge library, not like a defect.
         let dir = tempfile::tempdir().unwrap();
-        fichier(dir.path(), "sous/a.mp3");
+        touch(dir.path(), "sous/a.mp3");
         std::os::unix::fs::symlink(dir.path(), dir.path().join("sous/boucle")).unwrap();
-        let trouves = walk(dir.path(), MAX_TRACKS).unwrap();
-        assert_eq!(trouves.len(), 1, "la boucle a ete suivie : {trouves:?}");
+        let found = walk(dir.path(), MAX_TRACKS).unwrap();
+        assert_eq!(found.len(), 1, "the loop was followed: {found:?}");
     }
 
     #[test]
-    fn un_repertoire_inexistant_donne_une_erreur_nommee() {
+    fn a_nonexistent_directory_gives_a_named_error() {
         let dir = tempfile::tempdir().unwrap();
         let err = walk(&dir.path().join("absent"), MAX_TRACKS).unwrap_err();
         assert!(matches!(err, ScanError::Io { .. }));
     }
 
     #[test]
-    fn une_recherche_au_dela_du_plafond_tronque_au_lieu_de_refuser() {
-        // Symptôme mesuré sur un vrai NAS : chercher à la racine renvoyait « this
+    fn a_search_beyond_the_cap_truncates_instead_of_refusing() {
+        // Symptom measured on a real NAS: searching at the root returned "this
         // folder holds more than 2000 tracks: narrow it down, or add its
-        // subfolders one by one » — le message de l'AJOUT — pour une recherche
-        // qui n'add rien à la liste. La cause : `search` réutilisait
-        // `MAX_TRACKS`, le cap de la liste de playback, comme cap de
-        // walk_dir. Une recherche trop large se tronque et le dit ; elle ne se
-        // refuse pas.
+        // subfolders one by one" — the ADD message — for a search that adds
+        // nothing to the playlist. The cause: `search` reused `MAX_TRACKS`,
+        // the playback list cap, as the walk cap. A search that is too broad
+        // truncates and says so; it does not refuse.
         let dir = tempfile::tempdir().unwrap();
         for i in 0..5 {
-            fichier(dir.path(), &format!("{i}.mp3"));
+            touch(dir.path(), &format!("{i}.mp3"));
         }
-        let (trouves, fin) = search(dir.path(), "mp3", 200, 3, SEARCH_TIMEOUT).expect("aucun refus attendu");
-        assert_ne!(fin, SearchEnd::Complete, "un cap atteint doit se dire");
-        assert!(!trouves.is_empty(), "des resultats partiels valent mieux que rien");
+        let (found, end) = search(dir.path(), "mp3", 200, 3, SEARCH_TIMEOUT).expect("no refusal expected");
+        assert_ne!(end, SearchEnd::Complete, "a reached cap must be reported");
+        assert!(!found.is_empty(), "partial results are better than nothing");
     }
 
     #[test]
-    fn une_recherche_interrompue_par_le_plafond_de_visites_le_dit_comme_telle() {
-        // Défaut trouvé en revue : la walk_dir rendait `Ok(true)` que le cap
-        // atteint soit celui des VISITES ou celui des RÉSULTATS, et la page
-        // affichait alors « Aucun résultat » — donc « ce fichier n'existe pas »
-        // — pour une recherche qui avait simplement renoncé avant d'arriver
-        // jusqu'à lui. Ici le cap de visits est atteint bien avant celui
-        // des résultats (200) : la cause doit se distinguer.
+    fn a_search_interrupted_by_the_visit_cap_says_so() {
+        // Defect found in review: the walk returned `Ok(true)` whether the cap
+        // reached was the VISITS one or the RESULTS one, and the page then
+        // showed "No results" — that is, "this file does not exist" — for a
+        // search that had simply given up before reaching it. Here the visit
+        // cap is reached well before the result one (200): the cause must be
+        // told apart.
         let dir = tempfile::tempdir().unwrap();
         for i in 0..5 {
-            fichier(dir.path(), &format!("{i}.mp3"));
+            touch(dir.path(), &format!("{i}.mp3"));
         }
-        let (_, fin) = search(dir.path(), "mp3", 200, 3, SEARCH_TIMEOUT).unwrap();
-        assert_eq!(fin, SearchEnd::Interrupted);
+        let (_, end) = search(dir.path(), "mp3", 200, 3, SEARCH_TIMEOUT).unwrap();
+        assert_eq!(end, SearchEnd::Interrupted);
     }
 
     #[test]
-    fn une_recherche_qui_depasse_le_plafond_de_resultats_le_dit_comme_telle() {
-        // L'autre cause d'arrêt : ici le cap de visits est large, seul
-        // celui des résultats est en cause.
+    fn a_search_exceeding_the_result_cap_says_so() {
+        // The other stop cause: here the visit cap is wide, only the result
+        // one is at play.
         let dir = tempfile::tempdir().unwrap();
         for i in 0..5 {
-            fichier(dir.path(), &format!("miles{i}.mp3"));
+            touch(dir.path(), &format!("miles{i}.mp3"));
         }
-        let (trouves, fin) = search(dir.path(), "miles", 3, MAX_VISITS, SEARCH_TIMEOUT).unwrap();
-        assert_eq!(fin, SearchEnd::TooManyResults);
-        assert_eq!(trouves.len(), 3);
+        let (found, end) = search(dir.path(), "miles", 3, MAX_VISITS, SEARCH_TIMEOUT).unwrap();
+        assert_eq!(end, SearchEnd::TooManyResults);
+        assert_eq!(found.len(), 3);
     }
 
     #[test]
-    fn une_recherche_qui_a_tout_parcouru_est_complete() {
+    fn a_search_that_walked_everything_is_complete() {
         let dir = tempfile::tempdir().unwrap();
-        fichier(dir.path(), "A/miles.flac");
-        let (_, fin) = search(dir.path(), "miles", 200, MAX_VISITS, SEARCH_TIMEOUT).unwrap();
-        assert_eq!(fin, SearchEnd::Complete);
+        touch(dir.path(), "A/miles.flac");
+        let (_, end) = search(dir.path(), "miles", 200, MAX_VISITS, SEARCH_TIMEOUT).unwrap();
+        assert_eq!(end, SearchEnd::Complete);
     }
 
     #[test]
-    fn une_recherche_avec_exactement_cap_resultats_est_complete() {
-        // Régime non couvert avant la revue, et pourtant toute la raison du
-        // `cap + 1` : sans lui, une liste complète de `cap` éléments serait
-        // annoncée comme tronquée alors qu'elle est exhaustive.
+    fn a_search_with_exactly_cap_results_is_complete() {
+        // Regime not covered before the review, and yet the whole reason for
+        // the `cap + 1`: without it, a complete list of `cap` elements would be
+        // announced as truncated although it is exhaustive.
         let dir = tempfile::tempdir().unwrap();
         for i in 0..3 {
-            fichier(dir.path(), &format!("miles{i}.mp3"));
+            touch(dir.path(), &format!("miles{i}.mp3"));
         }
-        let (trouves, fin) = search(dir.path(), "miles", 3, MAX_VISITS, SEARCH_TIMEOUT).unwrap();
-        assert_eq!(trouves.len(), 3);
-        assert_eq!(fin, SearchEnd::Complete);
+        let (found, end) = search(dir.path(), "miles", 3, MAX_VISITS, SEARCH_TIMEOUT).unwrap();
+        assert_eq!(found.len(), 3);
+        assert_eq!(end, SearchEnd::Complete);
     }
 
     #[test]
-    fn une_recherche_avec_plus_de_cap_resultats_et_un_plafond_de_visites_large_est_tronquee() {
-        // L'autre régime non couvert : le cap de visits n'entre pas en
-        // line de compte, seul celui des résultats doit se déclencher.
+    fn a_search_with_more_than_cap_results_and_a_wide_visit_cap_is_truncated() {
+        // The other regime not covered: the visit cap does not come into play,
+        // only the result one must trigger.
         let dir = tempfile::tempdir().unwrap();
         for i in 0..10 {
-            fichier(dir.path(), &format!("miles{i}.mp3"));
+            touch(dir.path(), &format!("miles{i}.mp3"));
         }
-        let (trouves, fin) = search(dir.path(), "miles", 3, 1_000_000, SEARCH_TIMEOUT).unwrap();
-        assert_eq!(trouves.len(), 3);
-        assert_eq!(fin, SearchEnd::TooManyResults);
+        let (found, end) = search(dir.path(), "miles", 3, 1_000_000, SEARCH_TIMEOUT).unwrap();
+        assert_eq!(found.len(), 3);
+        assert_eq!(end, SearchEnd::TooManyResults);
     }
 
     #[test]
-    fn le_delai_de_recherche_est_franchement_sous_le_plafond_du_protocole() {
-        // Le protocol admin abandonne une requête après 5 s ; il faut de la
-        // marge pour la résolution des chemins et la sérialisation qui suivent
-        // la walk_dir, sans quoi le délai lui-même dépasserait le cap du
-        // cœur.
+    fn the_search_timeout_is_well_under_the_protocol_cap() {
+        // The admin protocol gives up on a request after 5 s; margin is needed
+        // for the path resolution and the serialization that follow the walk,
+        // otherwise the timeout itself would exceed the core's cap.
         assert!(SEARCH_TIMEOUT < std::time::Duration::from_secs(5));
     }
 
     #[test]
-    fn une_recherche_qui_depasse_son_delai_est_interrompue_sans_attendre() {
-        // Le compte de visits ne protège pas un partage lent : le coût y est
-        // dominant par `read_dir`, pas par entrée. Un délai nul permet
-        // d'observer l'interruption sans faire dépendre le test d'une horloge.
+    fn a_search_exceeding_its_timeout_is_interrupted_without_waiting() {
+        // The visit count does not protect a slow share: the cost there is
+        // dominated by `read_dir`, not per entry. A zero timeout lets the
+        // interruption be observed without making the test depend on a clock.
         let dir = tempfile::tempdir().unwrap();
         for i in 0..(DEADLINE_STEP * 2) {
-            fichier(dir.path(), &format!("{i}.mp3"));
+            touch(dir.path(), &format!("{i}.mp3"));
         }
-        let (_, fin) = search(dir.path(), "mp3", 200, MAX_VISITS, Duration::ZERO).unwrap();
-        assert_eq!(fin, SearchEnd::Interrupted);
+        let (_, end) = search(dir.path(), "mp3", 200, MAX_VISITS, Duration::ZERO).unwrap();
+        assert_eq!(end, SearchEnd::Interrupted);
     }
 
     #[test]
-    fn un_dossier_plein_de_fichiers_non_audio_est_borne_par_le_plafond_de_visites() {
-        // Défaut corrigé : `visits` ne comptait que les fichiers AUDIO, donc un
-        // dossier plein de fichiers non-audio n'était borné par rien — la
-        // walk_dir pouvait inspecter un nombre de fichiers arbitraire sans jamais
-        // s'arrêter sur ce cap.
+    fn a_folder_full_of_non_audio_files_is_bounded_by_the_visit_cap() {
+        // Defect fixed: `visits` only counted AUDIO files, so a folder full of
+        // non-audio files was bounded by nothing — the walk could inspect an
+        // arbitrary number of files without ever stopping on this cap.
         let dir = tempfile::tempdir().unwrap();
         for i in 0..5 {
-            fichier(dir.path(), &format!("{i}.txt"));
+            touch(dir.path(), &format!("{i}.txt"));
         }
-        let (trouves, fin) = search(dir.path(), "txt", 200, 3, SEARCH_TIMEOUT).unwrap();
-        assert_eq!(fin, SearchEnd::Interrupted);
-        assert!(trouves.is_empty(), "aucun fichier non-audio ne doit etre rapporte");
+        let (found, end) = search(dir.path(), "txt", 200, 3, SEARCH_TIMEOUT).unwrap();
+        assert_eq!(end, SearchEnd::Interrupted);
+        assert!(found.is_empty(), "no non-audio file must be reported");
     }
 
-    // Les deux plafonds ne mesurent pas la même chose : `MAX_TRACKS` bounded ce
-    // qu'on peut AJOUTER, `MAX_VISITS` ce qu'on peut PARCOURIR en cherchant.
-    // Les confondre est exactement le défaut corrigé ici. Vérifié à la
-    // compilation : un test sur deux constantes ne peut pas échouer à
-    // l'exécution, clippy le refuse à raison.
+    // The two caps do not measure the same thing: `MAX_TRACKS` caps what can
+    // be ADDED, `MAX_VISITS` what can be BROWSED while searching. Confusing
+    // them is exactly the defect fixed here. Checked at compile time: a test on
+    // two constants cannot fail at runtime, clippy rightly refuses it.
     const _: () = assert!(MAX_VISITS > MAX_TRACKS);
 
     #[test]
-    fn une_recherche_rend_les_correspondances_et_seulement_elles() {
+    fn a_search_returns_the_matches_and_only_them() {
         let dir = tempfile::tempdir().unwrap();
-        fichier(dir.path(), "A/miles.flac");
-        fichier(dir.path(), "A/autre.mp3");
-        fichier(dir.path(), "B/sous/MILES live.mp3");
-        let (trouves, fin) = search(dir.path(), "miles", 200, MAX_VISITS, SEARCH_TIMEOUT).unwrap();
-        let mut relatifs: Vec<String> = trouves
+        touch(dir.path(), "A/miles.flac");
+        touch(dir.path(), "A/autre.mp3");
+        touch(dir.path(), "B/sous/MILES live.mp3");
+        let (found, end) = search(dir.path(), "miles", 200, MAX_VISITS, SEARCH_TIMEOUT).unwrap();
+        let mut relative: Vec<String> = found
             .iter()
             .map(|p| p.strip_prefix(dir.path()).unwrap().to_string_lossy().replace('\\', "/"))
             .collect();
-        relatifs.sort();
-        // Insensible à la casse, et sur le name de fichier seul.
-        assert_eq!(relatifs, vec!["A/miles.flac", "B/sous/MILES live.mp3"]);
-        assert_eq!(fin, SearchEnd::Complete, "trois fichiers ne remplissent aucun cap");
+        relative.sort();
+        // Case-insensitive, and on the file name alone.
+        assert_eq!(relative, vec!["A/miles.flac", "B/sous/MILES live.mp3"]);
+        assert_eq!(end, SearchEnd::Complete, "three files fill no cap");
     }
 
     #[test]
-    fn chaque_refus_resout_contre_le_catalogue_embarque() {
+    fn every_refusal_resolves_against_the_embedded_catalog() {
         let catalog = Catalog::load("files", "en", Path::new("/inexistant"), crate::FILES_EN);
         for m in [
             ScanError::TooMany { cap: 2000 }.message(&catalog),
             ScanError::Io { path: "/mnt/ritornello/nas".into() }.message(&catalog),
         ] {
-            assert!(m.contains(' '), "message reduit a une key brute : {m:?}");
+            assert!(m.contains(' '), "message reduced to a raw key: {m:?}");
         }
-        let bounded = ScanError::TooMany { cap: 2000 }.message(&catalog);
-        assert!(bounded.contains("2000"), "bounded non interpolee : {bounded:?}");
-        assert!(!bounded.contains("{cap}"), "jeton laisse tel quel : {bounded:?}");
+        let capped = ScanError::TooMany { cap: 2000 }.message(&catalog);
+        assert!(capped.contains("2000"), "cap not interpolated: {capped:?}");
+        assert!(!capped.contains("{cap}"), "token left as is: {capped:?}");
     }
 }

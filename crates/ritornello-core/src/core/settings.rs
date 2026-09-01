@@ -1,4 +1,4 @@
-//! CoverSettings persistes : sortie audio, langue, theme, et l'ecriture de state.json.
+//! Persisted settings: audio output, language, theme, and the writing of state.json.
 
 use super::*;
 
@@ -17,22 +17,22 @@ impl<P: Player> Core<P> {
         Ok(())
     }
 
-    /// Change la langue courante : reconstruit le sources_catalog partagé du cœur
-    /// (lu par la page de statut), persiste l'état, et push_cover `SetLocale` à
-    /// chaque plugin Source connecté (best-effort).
+    /// Changes the current language: rebuilds the core's shared catalog
+    /// (read by the status page), persists the state, and pushes `SetLocale`
+    /// to every connected Source plugin (best-effort).
     ///
-    /// Appelée depuis la boucle `select!` de `main` sur réception du canal
-    /// `locale_rx`, lui-même alimenté par la route `PUT /api/locale`.
+    /// Called from the `select!` loop of `main` on reception from the
+    /// `locale_rx` channel, itself fed by the `PUT /api/locale` route.
     ///
-    /// Résout aussi `standby_status` dans le sources_catalog tout neuf, et publie
-    /// l'état : sans ce dernier, changer de langue pendant la veille laissait
-    /// le mot affiché dans l'ancienne langue jusqu'au prochain cycle
-    /// `Command::Power` (voir la doc de `standby_status`).
+    /// Also resolves `standby_status` in the brand-new catalog, and publishes
+    /// the state: without the latter, changing language during standby left
+    /// the word displayed in the old language until the next
+    /// `Command::Power` cycle (see the doc of `standby_status`).
     pub async fn set_locale(&mut self, locale: String) -> Result<()> {
         self.locale = Some(locale.clone());
-        let nouveau = Catalog::load("core", &locale, &self.locales_root, crate::i18n::EN);
-        self.standby_status = Some(resolve_standby_status(&nouveau));
-        *self.catalog.write().await = nouveau;
+        let new_catalog = Catalog::load("core", &locale, &self.locales_root, crate::i18n::EN);
+        self.standby_status = Some(resolve_standby_status(&new_catalog));
+        *self.catalog.write().await = new_catalog;
         self.persist();
         for name in self.source_order.clone() {
             if let Some(src) = self.sources.get(&name) {
@@ -45,12 +45,12 @@ impl<P: Player> Core<P> {
         Ok(())
     }
 
-    /// Change le thème courant et le persiste. Contrairement à `set_locale`,
-    /// rien n'est poussé aux plugins : le thème est un réglage d'apparence de
-    /// l'IHM web, dont aucun plugin n'a connaissance.
+    /// Changes the current theme and persists it. Unlike `set_locale`,
+    /// nothing is pushed to the plugins: the theme is an appearance setting
+    /// of the web UI, of which no plugin is aware.
     ///
-    /// Appelée depuis la boucle `select!` de `main` sur réception du canal
-    /// `theme_rx`, lui-même alimenté par la route `PUT /api/theme`.
+    /// Called from the `select!` loop of `main` on reception from the
+    /// `theme_rx` channel, itself fed by the `PUT /api/theme` route.
     pub fn set_theme(&mut self, t: crate::theme::ThemeState) {
         self.theme = Some(t.theme);
         self.mode = Some(t.mode);
@@ -81,7 +81,7 @@ mod tests {
     use std::sync::Mutex;
 
     #[tokio::test]
-    async fn resume_applique_la_sortie_audio_persistee() {
+    async fn resume_applies_the_persisted_audio_output() {
         let dir = tempfile::tempdir().unwrap();
         let player = FakePlayer::default();
         let player_calls = player.calls.clone();
@@ -106,7 +106,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_audio_device_applique_et_persiste() {
+    async fn set_audio_device_applies_and_persists() {
         let (mut core, player_calls, _sc, _rx, dir) = setup();
         core.set_audio_device(Some("hw:CARD=Headphones".into())).await.unwrap();
         assert!(player_calls.lock().unwrap().contains(&"audio_device hw:CARD=Headphones".to_string()));
@@ -115,7 +115,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_audio_device_none_revient_au_defaut_systeme() {
+    async fn set_audio_device_none_returns_to_the_system_default() {
         // "System default" from the config page: nothing imposed on mpv
         // anymore (its native `auto`), and no device recorded on disk.
         let (mut core, player_calls, _sc, _rx, dir) = setup();
@@ -127,7 +127,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_locale_persiste_et_notifie_les_sources() {
+    async fn set_locale_persists_and_notifies_the_sources() {
         let (mut core, _pc, source_calls, _rx, dir) = setup();
         core.set_locale("fr".into()).await.unwrap();
         let calls = source_calls.lock().unwrap();
@@ -139,7 +139,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn le_mot_de_veille_est_traduit_par_le_catalogue() {
+    async fn the_standby_word_is_translated_by_the_catalog() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("core")).unwrap();
         std::fs::write(dir.path().join("core/fr.toml"), "standby = \"VEILLE\"\n").unwrap();
@@ -162,12 +162,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changer_de_langue_en_veille_republie_aussitot_le_mot_de_veille() {
-        // Régression (M1+M9, revue de branche) : le mot de veille n'était
-        // résolu qu'au moment de poser la veille (`Command::Power`), et
-        // `set_locale` ne publiait de toute façon aucun état. Changer de
-        // langue *pendant* la veille laissait donc le mot affiché dans
-        // l'ancienne langue jusqu'au prochain cycle Power.
+    async fn changing_language_in_standby_republishes_the_standby_word_at_once() {
+        // Regression (M1+M9, branch review): the standby word was only
+        // resolved when entering standby (`Command::Power`), and
+        // `set_locale` published no state anyway. Changing language
+        // *during* standby therefore left the word displayed in the old
+        // language until the next Power cycle.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("core")).unwrap();
         std::fs::write(dir.path().join("core/fr.toml"), "standby = \"VEILLE\"\n").unwrap();
@@ -176,7 +176,7 @@ mod tests {
         sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())) }));
         let (state_tx, mut state_rx) = watch::channel(PlayerState::default());
         let root = dir.path().to_path_buf();
-        // Construction en anglais : "STANDBY", la valeur embarquée de la clé.
+        // Built in English: "STANDBY", the embedded value of the key.
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
         let metadata = MetadataWiring {
             plugins: vec![],
@@ -192,46 +192,46 @@ mod tests {
         assert_eq!(
             state_rx.borrow_and_update().status.as_deref(),
             Some("VEILLE"),
-            "set_locale doit republier aussitot le nouveau mot de veille, sans attendre un nouveau cycle Power"
+            "set_locale must republish the new standby word at once, without waiting for a new Power cycle"
         );
     }
 
-    /// La veille sur disque doit decrire l'appareil, pas une intention : c'est
-    /// tout ce que `StartupPower::Previous` a pour se decider au prochain
-    /// startup. Les deux sens de la bascule et les deux branches du
-    /// startup l'ecrivent.
+    /// Standby on disk must describe the device, not an intention: it is
+    /// all `StartupPower::Previous` has to decide at the next startup.
+    /// Both directions of the toggle and both branches of the startup
+    /// write it.
     #[tokio::test]
-    async fn la_veille_est_persistee_a_chaque_bascule() {
+    async fn standby_is_persisted_at_every_toggle() {
         let (mut core, _pc, _sc, _rx, dir) = setup();
-        let sur_disque = || crate::state::load(&dir.path().join("state.json")).standby;
+        let on_disk = || crate::state::load(&dir.path().join("state.json")).standby;
 
-        core.handle_command(Command::Power).await.unwrap(); // veille
-        assert!(sur_disque(), "la mise en veille s'ecrit");
-        core.handle_command(Command::Power).await.unwrap(); // reveil
-        assert!(!sur_disque(), "le reveil aussi");
+        core.handle_command(Command::Power).await.unwrap(); // standby
+        assert!(on_disk(), "entering standby is written");
+        core.handle_command(Command::Power).await.unwrap(); // wake
+        assert!(!on_disk(), "waking too");
 
-        // Et un startup remet le fichier d'accord avec ce qu'il a fait,
-        // dans les deux sens : sans cela, « state precedent » choisi plus tard
-        // ressusciterait une veille que l'appareil a quittee depuis longtemps.
+        // And a startup puts the file back in agreement with what it did,
+        // in both directions: without this, "previous state" chosen later
+        // would resurrect a standby the device left long ago.
         core.start_in_standby().await.unwrap();
-        assert!(sur_disque());
-        core.startup().await.unwrap(); // reglage par defaut : « allume »
-        assert!(!sur_disque());
+        assert!(on_disk());
+        core.startup().await.unwrap(); // default setting: "on"
+        assert!(!on_disk());
     }
 
     #[test]
-    fn en_embarque_du_coeur_est_non_vide() {
+    fn the_core_embedded_en_is_non_empty() {
         assert!(!ritornello_i18n::try_parse(crate::i18n::EN).unwrap().is_empty());
     }
 
     #[test]
-    fn parite_des_cles_entre_len_embarque_et_le_pack_fr() {
+    fn key_parity_between_the_embedded_en_and_the_fr_pack() {
         let en = ritornello_i18n::try_parse(crate::i18n::EN).unwrap();
         let fr = ritornello_i18n::try_parse(&fr_pack()).unwrap();
-        let mut cles_en: Vec<&String> = en.keys().collect();
-        let mut cles_fr: Vec<&String> = fr.keys().collect();
-        cles_en.sort();
-        cles_fr.sort();
-        assert_eq!(cles_en, cles_fr, "jeux de cles en/fr divergents");
+        let mut en_keys: Vec<&String> = en.keys().collect();
+        let mut fr_keys: Vec<&String> = fr.keys().collect();
+        en_keys.sort();
+        fr_keys.sort();
+        assert_eq!(en_keys, fr_keys, "en/fr key sets diverge");
     }
 }

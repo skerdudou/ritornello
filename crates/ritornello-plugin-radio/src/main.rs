@@ -1,11 +1,11 @@
 mod admin;
 mod config;
 mod directory;
-// Uniquement compile sous `cargo test` : `ui_placeholder_js` ne sert au run-
-// time nulle part dans ce crate (contrairement a `placeholder_html` du coeur,
-// utilise en repli par `web.rs`), seulement a `build.rs` (compilation
-// separee, via `include!`) et a ses propres tests. Le compiler en continu
-// dans le binaire declencherait un `dead_code` que `-D warnings` refuserait.
+// Only compiled under `cargo test`: `ui_placeholder_js` serves nowhere at
+// run time in this crate (unlike the core's `placeholder_html`, used as a
+// fallback by `web.rs`), only `build.rs` (separate compilation, via
+// `include!`) and its own tests. Compiling it into the binary permanently
+// would trigger a `dead_code` that `-D warnings` would refuse.
 #[cfg(test)]
 mod placeholder;
 mod state;
@@ -30,34 +30,35 @@ struct RadioSource {
     state_path: PathBuf,
     stations: Arc<AsyncRwLock<Stations>>,
     preset: u8,
-    /// URL du stream qui plays, quand quelque chose plays.
+    /// URL of the playing stream, when something is playing.
     ///
-    /// La présélection est une **position** : remanier la table depuis la page
-    /// fait donc pointer le numéro mémorisé sur une autre station, et l'écran
-    /// annonçait le mauvais name pour le stream qui continuait. L'URL, elle,
-    /// identifie durablement ce qui plays, et permet de retrouver le bon numéro
-    /// dans la table remaniée.
+    /// The preset is a **position**: reshuffling the table from the page
+    /// therefore made the memorized number point at another station, and the
+    /// screen announced the wrong name for the stream that kept playing. The
+    /// URL, on the other hand, durably identifies what is playing, and makes
+    /// it possible to find the right number back in the reshuffled table.
     current_url: Option<String>,
     catalog: Arc<RwLock<Catalog>>,
     locales_root: PathBuf,
-    /// Reçoit le nouveau `Stations::preset_count()` annoncé par la moitié
-    /// Admin après un enregistrement réussi (voir `RadioAdmin::set_data`).
-    /// `main()` construit toujours ce champ à `Some` : la page d'admin est
-    /// enregistrée sans condition auprès de `Runtime`. `None` n'apparaît que
-    /// dans les tests, qui construisent `RadioSource` directement sans passer
-    /// par `Runtime` et donc sans moitié Admin pour émettre sur ce canal ;
-    /// `poll_notification` reste alors en attente pour toujours plutôt que de
-    /// rendre `None`, qui est **terminal** pour le SDK.
+    /// Receives the new `Stations::preset_count()` announced by the Admin
+    /// half after a successful save (see `RadioAdmin::set_data`). `main()`
+    /// always builds this field as `Some`: the admin page is registered
+    /// unconditionally with `Runtime`. `None` only appears in tests, which
+    /// build `RadioSource` directly without going through `Runtime` and thus
+    /// without an Admin half to emit on this channel; `poll_notification`
+    /// then waits forever instead of returning `None`, which is **terminal**
+    /// for the SDK.
     preset_count_rx: Option<tokio::sync::watch::Receiver<u8>>,
 }
 
 impl RadioSource {
-    /// Identité de ce que plays la radio : le stream, désigné par son URL.
+    /// Identity of what the radio is playing: the stream, designated by its
+    /// URL.
     ///
-    /// Opaque pour le cœur, qui ne fait que la comparer et la relayer. C'est en
-    /// revanche ce qu'un plugin `metadata` read pour reconnaître une station :
-    /// l'URL est la seule chose qui distingue durablement un stream (le name de
-    /// présélection, lui, dépend de la configuration de l'appareil).
+    /// Opaque to the core, which only compares and relays it. It is, on the
+    /// other hand, what a `metadata` plugin reads to recognize a station: the
+    /// URL is the only thing that durably distinguishes a stream (the preset
+    /// name, for its part, depends on the device's configuration).
     fn stream_identity(url: &str) -> serde_json::Value {
         serde_json::json!({ "kind": "stream", "url": url })
     }
@@ -71,32 +72,33 @@ impl RadioSource {
         if let Some(st) = stations.by_preset(n) {
             self.preset = n;
             self.current_url = Some(st.url.clone());
-            // `update` et non `save` : la moitié Admin écrit le pays choisi dans
-            // ce même fichier, et un `save` construit ici l'effacerait.
-            // L'échec est journalisé, comme le fait déjà la moitié Admin : un
-            // /var/lib en playback seule perdrait la présélection à chaque
-            // redémarrage sans que rien ne le dise.
+            // `update` and not `save`: the Admin half writes the chosen
+            // country into this same file, and a `save` built here would
+            // erase it. The failure is logged, as the Admin half already
+            // does: a read-only /var/lib would lose the preset on every
+            // reboot without anything saying so.
             if let Err(e) = state::update(&self.state_path, |s| s.preset = n) {
                 tracing::warn!("failed to persist preset: {e}");
             }
             SourceOutcome::new(SourceAction::play(st.url.clone()))
                 .plays(Self::stream_identity(&st.url))
-                // La touche que l'IHM doit mettre en évidence : seule la
-                // Source sait à quelle présélection correspond ce qui plays.
+                // The key the UI must highlight: only the Source knows which
+                // preset what is playing corresponds to.
                 .preset(n)
-                // Le name configuré de la station : c'est ce que la carte
-                // Lecteur affiche à côté du numéro de présélection.
+                // The station's configured name: it is what the Player card
+                // displays next to the preset number.
                 .preset_name(st.name.clone())
                 .preset_count(count)
         } else {
             let empty = self.catalog.read().unwrap().get("empty_preset").to_string();
-            // Message **éphémère** : rien n'a été lancé, donc la station
-            // précédente plays toujours et doit reparaître à l'écran. Le laisser
-            // permanent faisait décrire durablement un état qui n'existait pas.
+            // **Ephemeral** message: nothing was launched, so the previous
+            // station is still playing and must reappear on screen. Leaving
+            // it permanent durably described a state that did not exist.
             //
-            // Et surtout, aucune déclaration d'identité : `plays_nothing()`
-            // serait faux ici, puisque le stream précédent continue — cela aurait
-            // fait cesser les plugins `metadata` et vidé le titre affiché.
+            // And above all, no identity declaration: `plays_nothing()` would
+            // be false here, since the previous stream carries on — that
+            // would have made the `metadata` plugins stop and blanked the
+            // displayed title.
             SourceOutcome::new(SourceAction::Noop)
                 .transient()
                 .status(empty)
@@ -112,8 +114,8 @@ impl SourcePlugin for RadioSource {
         self.play_preset(preset).await
     }
     async fn deactivate(&mut self) -> SourceOutcome {
-        // Plus rien ne plays : oublier l'URL, sinon un remaniement de la table
-        // corrigerait la présélection d'un stream arrêté.
+        // Nothing is playing anymore: forget the URL, otherwise a reshuffle
+        // of the table would correct the preset of a stopped stream.
         self.current_url = None;
         SourceOutcome::new(SourceAction::Stop).plays_nothing()
     }
@@ -123,11 +125,12 @@ impl SourcePlugin for RadioSource {
     async fn next(&mut self) -> SourceOutcome {
         let next = self.stations.read().await.next_preset(self.preset);
         match next {
-            // Une seule station configurée : next_preset reboucle sur le
-            // preset courant. Rejouer provoquerait une reconnexion du stream
-            // live (loadfile mpv), audible comme un changement de station
-            // alors que l'affichage ne bouge pas. Rien à faire dans ce cas —
-            // et surtout ne rien dire de l'identité, qui n'a pas changé.
+            // Only one station configured: next_preset loops back onto the
+            // current preset. Replaying would cause a reconnection of the
+            // live stream (mpv loadfile), audible as a station change while
+            // the display does not move. Nothing to do in that case — and
+            // above all say nothing about the identity, which has not
+            // changed.
             Some(n) if n == self.preset => SourceOutcome::new(SourceAction::Noop),
             Some(n) => self.play_preset(n).await,
             None => SourceOutcome::new(SourceAction::Noop),
@@ -136,8 +139,8 @@ impl SourcePlugin for RadioSource {
     async fn prev(&mut self) -> SourceOutcome {
         let prev = self.stations.read().await.prev_preset(self.preset);
         match prev {
-            // Voir commentaire dans next() : même garde contre la
-            // reconnexion audible quand une seule station est configurée.
+            // See the comment in next(): same guard against the audible
+            // reconnection when only one station is configured.
             Some(n) if n == self.preset => SourceOutcome::new(SourceAction::Noop),
             Some(n) => self.play_preset(n).await,
             None => SourceOutcome::new(SourceAction::Noop),
@@ -150,92 +153,93 @@ impl SourcePlugin for RadioSource {
         *self.catalog.write().unwrap() = Catalog::load("radio", &locale, &self.locales_root, RADIO_EN);
     }
 
-    /// Les présélections nommées de la radio : ses stations, sous la
-    /// `AsyncRwLock` partagée avec la moitié Admin. Seule source à surcharger
-    /// cette méthode pour l'instant — le cd n'a pas de name par nature, et la
-    /// liste des fichiers est déjà la file d'attente, pas un jeu de
-    /// présélections.
+    /// The radio's named presets: its stations, under the `AsyncRwLock`
+    /// shared with the Admin half. Only source overriding this method for
+    /// now — the cd has no names by nature, and the file list is already the
+    /// queue, not a set of presets.
     async fn list_presets(&mut self) -> Vec<Preset> {
         self.stations.read().await.presets()
     }
 
-    /// Annonce spontanément le nouveau `preset_count` quand la moitié Admin
-    /// vient d'enregistrer une table de stations — c'est ce qui met à jour la
-    /// grille de la télécommande web sans attendre qu'une présélection soit
-    /// jouée (défaut constaté à l'usage : la grille restait sur l'ancien jeu
-    /// de numéros jusque-là).
+    /// Spontaneously announces the new `preset_count` when the Admin half has
+    /// just saved a station table — this is what updates the web remote's
+    /// grid without waiting for a preset to be played (defect observed in
+    /// use: the grid stayed on the old set of numbers until then).
     ///
-    /// Elle corrige aussi le **numéro et le name** de ce qui plays quand le
-    /// remaniement les a déplacés : la présélection est une position, donc
-    /// réordonner les stations faisait annoncer le name d'une autre station pour
-    /// le stream qui continuait, et un redémarrage reprenait la mauvaise. Le stream
-    /// est retrouvé par son URL, seule chose qui l'identifie durablement.
+    /// It also corrects the **number and name** of what is playing when the
+    /// reshuffle moved them: the preset is a position, so reordering the
+    /// stations made the name of another station be announced for the stream
+    /// that kept playing, and a reboot resumed the wrong one. The stream is
+    /// found back by its URL, the only thing that durably identifies it.
     ///
-    /// Elle republie aussi les présélections nommées (`presets`) : la table
-    /// venant d'être réenregistrée, c'est ce qui fait propager le renommage
-    /// d'une station sans qu'un client MPD ait à la redemander.
+    /// It also republishes the named presets (`presets`): the table having
+    /// just been re-saved, this is what propagates a station's renaming
+    /// without an MPD client having to ask for it again.
     ///
-    /// Ne porte **ni statut, ni identité, et jamais d'action** : la radio plays un
-    /// stream unique, il n'y a rien à recharger, seulement à redire juste — et le
-    /// son n'est pas interrompu. `presets`, `preset`, `preset_name` et
-    /// `preset_count` sont des faits sur la source, pas un statut ou une
-    /// identité : c'est justement ce qui garde cette trame hors du garde
-    /// d'effacement décrit ci-dessous.
+    /// Carries **no status, no identity, and never an action**: the radio
+    /// plays a single stream, there is nothing to reload, only the record to
+    /// set straight — and the sound is not interrupted. `presets`, `preset`,
+    /// `preset_name` and `preset_count` are facts about the source, not a
+    /// status or an identity: that is precisely what keeps this frame out of
+    /// the erasure guard described below.
     ///
-    /// Attention : `Core::handle_source_update` ne fusionne **pas** tout, contre
-    /// ce que cette place affirmait. `preset`, `preset_name` et `preset_count`
-    /// sont bien conservés quand ils sont absents, mais `status` est *remplacé*
-    /// par ce que porte la trame, absence comprise (`if !update.transient {
-    /// self.source_status = update.status.clone(); }`) : c'est la seule
-    /// convention qui permette d'effacer un statut. Cet notice n'en efface pourtant
-    /// aucun, parce que le cœur rend la main **avant** ce traitement pour une
-    /// trame qui ne déclare ni identité ni statut. La radio ne déclarant jamais
-    /// de statut permanent, le défaut était invisible ici ; il était bien réel
-    /// dans `plugin-files`, qui en déclare un.
+    /// Beware: `Core::handle_source_update` does **not** merge everything,
+    /// contrary to what this spot used to claim. `preset`, `preset_name` and
+    /// `preset_count` are indeed kept when absent, but `status` is *replaced*
+    /// by what the frame carries, absence included (`if !update.transient {
+    /// self.source_status = update.status.clone(); }`): it is the only
+    /// convention that makes erasing a status possible. This notification
+    /// erases none, however, because the core returns **before** that
+    /// handling for a frame that declares neither identity nor status. The
+    /// radio never declaring a permanent status, the defect was invisible
+    /// here; it was quite real in `plugin-files`, which declares one.
     async fn poll_notification(&mut self) -> Option<Notification> {
         let Some(rx) = &mut self.preset_count_rx else {
-            // N'arrive qu'en test (voir le commentaire sur le champ) : `main()`
-            // construit toujours ce récepteur. Jamais `None` ici, qui serait
-            // terminal pour le SDK.
+            // Only happens in tests (see the comment on the field): `main()`
+            // always builds this receiver. Never `None` here, which would be
+            // terminal for the SDK.
             return std::future::pending().await;
         };
         match rx.changed().await {
             Ok(()) => {
                 let n = *rx.borrow_and_update();
                 let mut notice = Notification::new().preset_count(n);
-                // Même path que `preset_count` : la table vient d'être
-                // remaniée (page d'admin), donc republier les présélections
-                // nommées à côté, pour qu'une station renommée se propage sans
-                // qu'on la redemande. Liste clear non déclarée : c'est le même
-                // énoncé que l'absence (voir `SourceOutcome::presets`), et une
-                // trame qui ne porte que ça ne doit pas prétendre un fait
-                // qu'elle n'a pas.
+                // Same path as `preset_count`: the table has just been
+                // reshuffled (admin page), so republish the named presets
+                // alongside, so that a renamed station propagates without
+                // being asked for again. An empty list is not declared: it is
+                // the same statement as absence (see `SourceOutcome::presets`),
+                // and a frame that carries only that must not claim a fact it
+                // does not have.
                 let presets = self.stations.read().await.presets();
                 if !presets.is_empty() {
                     notice = notice.presets(presets);
                 }
-                // La table vient d'être remaniée : retrouver **où est passé** le
-                // stream qui plays, et corriger le numéro et le name affichés.
+                // The table has just been reshuffled: find out **where the
+                // playing stream went**, and correct the displayed number and
+                // name.
                 //
-                // Sans cela, la présélection étant une position, réordonner les
-                // stations faisait annoncer le name d'une autre station pour le
-                // stream qui continuait — et un redémarrage reprenait la mauvaise.
+                // Without this, the preset being a position, reordering the
+                // stations made the name of another station be announced for
+                // the stream that kept playing — and a reboot resumed the
+                // wrong one.
                 //
-                // Aucune action ici, et c'est bien : la radio plays un stream
-                // unique, il n'y a rien à recharger, seulement à redire juste.
+                // No action here, and rightly so: the radio plays a single
+                // stream, there is nothing to reload, only the record to set
+                // straight.
                 if let Some(url) = self.current_url.clone() {
                     let stations = self.stations.read().await;
-                    // Station retirée de la table : son numéro ne désigne plus
-                    // rien de sûr, et le protocol n'a pas de « plus aucune
-                    // présélection ». On se garde alors de mentir davantage en
-                    // ne touchant à rien.
+                    // Station removed from the table: its number no longer
+                    // designates anything reliable, and the protocol has no
+                    // "no presets left". We then refrain from lying further
+                    // by touching nothing.
                     if let Some(st) = stations.by_url(&url) {
                         let (p, name) = (st.preset, st.name.clone());
                         drop(stations);
                         if p != self.preset {
                             self.preset = p;
-                            // Persister aussi : sinon un redémarrage reprendrait
-                            // le numéro d'avant le remaniement, donc une autre
+                            // Persist too: otherwise a reboot would resume
+                            // the pre-reshuffle number, hence another
                             // station.
                             if let Err(e) = state::update(&self.state_path, |s| s.preset = p) {
                                 tracing::warn!("failed to persist preset: {e}");
@@ -246,11 +250,12 @@ impl SourcePlugin for RadioSource {
                 }
                 Some(notice)
             }
-            // L'émetteur (moitié Admin) a disparu — ne devrait pas arriver en
-            // pratique tant que les deux moitiés partagent le même processus,
-            // mais rien ne justifie de traiter ça comme une fin définitive de
-            // notifications : on retombe sur la même attente indéfinie que la
-            // branche `None` du champ plutôt que de rendre `None` nous-mêmes.
+            // The sender (Admin half) vanished — should not happen in
+            // practice as long as both halves share the same process, but
+            // nothing justifies treating that as a definitive end of
+            // notifications: we fall back onto the same indefinite wait as
+            // the field's `None` branch rather than returning `None`
+            // ourselves.
             Err(_) => std::future::pending().await,
         }
     }
@@ -272,29 +277,29 @@ async fn main() -> Result<()> {
     let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
     let catalog = Arc::new(RwLock::new(Catalog::load("radio", "en", &locales_root, RADIO_EN)));
 
-    // Canal Admin -> Source pour l'announcement spontanée de `preset_count` (voir
-    // `RadioAdmin::set_data` et `RadioSource::poll_notification`). La valeur
-    // initiale ne sert jamais : seuls les changements ultérieurs comptent, le
-    // compte de démarrage est déjà porté par `activate`/`select`.
+    // Admin -> Source channel for the spontaneous `preset_count` announcement
+    // (see `RadioAdmin::set_data` and `RadioSource::poll_notification`). The
+    // initial value is never used: only later changes count, the startup
+    // count is already carried by `activate`/`select`.
     let (preset_count_tx, preset_count_rx) = tokio::sync::watch::channel(0u8);
 
     let source = RadioSource {
         state_path: state_path.clone(),
         stations: stations_shared.clone(),
         preset,
-        // Rien ne plays encore : renseigné au premier `Play`.
+        // Nothing is playing yet: filled in at the first `Play`.
         current_url: None,
         catalog: catalog.clone(),
         locales_root,
-        // Le récepteur n'a de sens que si une moitié Admin existe pour
-        // émettre dessus (voir plus bas) : sinon `poll_notification` doit
-        // rester en attente pour toujours, pas se rabattre sur un canal mort.
+        // The receiver only makes sense if an Admin half exists to emit on
+        // it (see below): otherwise `poll_notification` must wait forever,
+        // not fall back onto a dead channel.
         preset_count_rx: Some(preset_count_rx),
     };
-    // Annuaire en line : la liste intégrée de serveurs, essayés dans l'order
-    // jusqu'au premier qui répond, ou l'unique serveur épinglé par
-    // `RITORNELLO_RADIO_DIRECTORY`. Journalisé au démarrage : sur un Pi sans
-    // écran, savoir quels serveurs seront interrogés évite de deviner.
+    // Online directory: the built-in server list, tried in order until the
+    // first one that answers, or the single server pinned by
+    // `RITORNELLO_RADIO_DIRECTORY`. Logged at startup: on a headless Pi,
+    // knowing which servers will be queried saves the guessing.
     let directory = directory::HttpDirectory::from_env();
     tracing::info!("radio directory, candidate servers: {}", directory.bases.join(", "));
     let admin = RadioAdmin {
@@ -316,7 +321,7 @@ mod tests {
     use ritornello_plugin_sdk::AdminPlugin;
 
     #[tokio::test]
-    async fn empty_preset_utilise_le_catalogue_apres_set_locale() {
+    async fn empty_preset_uses_the_catalog_after_set_locale() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("radio")).unwrap();
         std::fs::write(dir.path().join("radio/fr.toml"), "empty_preset = \"PRESET VIDE\"\n").unwrap();
@@ -333,13 +338,13 @@ mod tests {
             preset_count_rx: None,
         };
         source.set_locale("fr".into()).await;
-        // aucun preset chargé → branche "empty_preset"
+        // no preset loaded → "empty_preset" branch
         let outcome = source.select(1).await;
         assert_eq!(outcome.status.as_deref(), Some("PRESET VIDE"));
     }
 
     #[test]
-    fn en_embarque_radio_est_non_vide() {
+    fn embedded_en_for_radio_is_not_empty() {
         assert!(!ritornello_i18n::try_parse(RADIO_EN).unwrap().is_empty());
     }
 
@@ -384,12 +389,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn une_seule_station_next_et_prev_sont_sans_effet() {
+    async fn with_a_single_station_next_and_prev_have_no_effect() {
         let mut source = make_source(one_station(), 1);
         let outcome = source.next().await;
         assert!(matches!(outcome.action, SourceAction::Noop));
-        // Ne rien dire de l'identité : la station n'a pas changé, et annoncer un
-        // changement remettrait à zéro les métadonnées du track en cours.
+        // Say nothing about the identity: the station has not changed, and
+        // announcing a change would reset the current track's metadata.
         assert!(outcome.identity.is_none());
 
         let outcome = source.prev().await;
@@ -398,7 +403,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn jouer_une_station_declare_son_flux_comme_identite() {
+    async fn playing_a_station_declares_its_stream_as_identity() {
         let mut source = make_source(two_stations(), 1);
         let outcome = source.select(2).await;
         assert_eq!(
@@ -411,51 +416,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn jouer_une_preselection_la_declare_pour_lihm() {
-        // C'est ce qui permet a la telecommande web de mettre la touche active
-        // en evidence : seule la Source sait a quelle preselection correspond
-        // ce qui plays.
+    async fn playing_a_preset_declares_it_for_the_ui() {
+        // This is what lets the web remote highlight the active key: only
+        // the Source knows which preset what is playing corresponds to.
         let mut source = make_source(two_stations(), 1);
         let outcome = source.select(2).await;
         assert_eq!(outcome.preset, Some(2));
-        // Le name configure de la station accompagne toujours le numero.
+        // The station's configured name always accompanies the number.
         assert_eq!(outcome.preset_name.as_deref(), Some("France Inter"));
-        // Le compte de preselections (ici 2, la plus haute de two_stations)
-        // est declare sur la branche "trouvee".
+        // The preset count (here 2, the highest of two_stations) is declared
+        // on the "found" branch.
         assert_eq!(outcome.preset_count, Some(2));
-        // Et une preselection clear ne declare ni preset ni name : ce qui plays
-        // n'a pas change, la station precedente continue.
+        // And an empty preset declares neither preset nor name: what is
+        // playing has not changed, the previous station carries on.
         let outcome = source.select(7).await;
         assert_eq!(outcome.preset, None);
-        assert_eq!(outcome.preset_name, None, "aucun name sur la branche clear : rien n'a change");
-        // ... mais le compte reste declare sur la branche "clear" aussi : la
-        // table n'a pas change, seule la selection a echoue.
+        assert_eq!(outcome.preset_name, None, "no name on the empty branch: nothing changed");
+        // ... but the count is still declared on the "empty" branch too: the
+        // table has not changed, only the selection failed.
         assert_eq!(outcome.preset_count, Some(2));
     }
 
     #[tokio::test]
-    async fn une_preselection_vide_affiche_un_message_ephemere_sans_couper_la_lecture() {
-        // Defaut constate a l'usage : le message restait a l'ecran
-        // indefiniment. Or rien n'a ete lance — la station precedente plays
-        // toujours — donc l'affichage doit revenir a elle, et surtout les
-        // metadata ne doivent pas etre effacees.
+    async fn an_empty_preset_shows_an_ephemeral_message_without_cutting_playback() {
+        // Defect observed in use: the message stayed on screen indefinitely.
+        // Yet nothing was launched — the previous station is still playing —
+        // so the display must come back to it, and above all the metadata
+        // must not be erased.
         let mut source = make_source(Stations::default(), 1);
         let outcome = source.select(4).await;
         assert!(matches!(outcome.action, SourceAction::Noop));
-        assert!(outcome.transient, "le message doit s'effacer de lui-meme");
+        assert!(outcome.transient, "the message must clear by itself");
         assert!(
             outcome.identity.is_none(),
-            "declarer un arret serait faux : le stream precedent continue"
+            "declaring a stop would be false: the previous stream carries on"
         );
-        // Le mot ephemere est declare via `status` : c'est lui qui alimente
-        // l'incrustation cote coeur.
+        // The ephemeral word is declared via `status`: it is what feeds the
+        // overlay on the core side.
         assert_eq!(outcome.status.as_deref(), Some("empty preset"));
-        // Table clear : le compte declare est 0, pas absent.
+        // Empty table: the declared count is 0, not absent.
         assert_eq!(outcome.preset_count, Some(0));
     }
 
     #[tokio::test]
-    async fn se_desactiver_declare_que_plus_rien_ne_joue() {
+    async fn deactivating_declares_that_nothing_plays_anymore() {
         let mut source = make_source(two_stations(), 1);
         let outcome = source.deactivate().await;
         assert!(matches!(outcome.action, SourceAction::Stop));
@@ -463,7 +467,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deux_stations_next_et_prev_rebouclent_toujours_vers_l_autre() {
+    async fn with_two_stations_next_and_prev_always_wrap_to_the_other() {
         let mut source = make_source(two_stations(), 1);
         let outcome = source.next().await;
         assert!(matches!(outcome.action, SourceAction::Play { .. }));
@@ -474,49 +478,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn activate_sur_le_preset_courant_rejoue_quand_meme_le_flux() {
-        // Chemin de récupération après coupure (retry_stream côté cœur) :
-        // activate() doit continuer à rejouer le même preset, sans la garde
-        // ajoutée à next()/prev().
+    async fn activate_on_the_current_preset_still_replays_the_stream() {
+        // Recovery path after an outage (retry_stream on the core side):
+        // activate() must keep replaying the same preset, without the guard
+        // added to next()/prev().
         let mut source = make_source(one_station(), 1);
         let outcome = source.activate().await;
         assert!(matches!(outcome.action, SourceAction::Play { .. }));
     }
 
     #[tokio::test]
-    async fn poll_notification_ne_touche_ni_a_l_identite_ni_au_son() {
-        // Propriete de surete : l'announcement spontanee (enregistrement depuis la
-        // page d'admin) ne doit ni couper le stream ni changer ce que les plugins
-        // `metadata` croient entendre. Rien ne plays ici, donc pas de
-        // presélection a corriger non plus.
+    async fn poll_notification_touches_neither_identity_nor_sound() {
+        // Safety property: the spontaneous announcement (save from the admin
+        // page) must neither cut the stream nor change what the `metadata`
+        // plugins believe they hear. Nothing is playing here, so no preset to
+        // correct either.
         let (tx, rx) = tokio::sync::watch::channel(0u8);
         let mut source = make_source(two_stations(), 1);
         source.preset_count_rx = Some(rx);
         tx.send(5).unwrap();
 
-        let n = source.poll_notification().await.expect("notification attendue");
+        let n = source.poll_notification().await.expect("notification expected");
         assert_eq!(n.preset_count, Some(5));
-        assert!(n.identity.is_none(), "le track en cours ne doit pas bouger");
-        assert!(n.preset.is_none(), "rien ne plays : aucun numero a corriger");
+        assert!(n.identity.is_none(), "the current track must not move");
+        assert!(n.preset.is_none(), "nothing is playing: no number to correct");
     }
 
     #[tokio::test]
-    async fn un_remaniement_de_la_table_corrige_le_numero_de_ce_qui_joue() {
-        // Defaut de conception signale : la presélection est une **position**.
-        // Reordonner les stations depuis la page faisait pointer le numero
-        // memorisé sur une autre station — l'ecran annoncait le mauvais name pour
-        // le stream qui continuait, et un redemarrage reprenait la mauvaise. Le
-        // stream est retrouve par son URL, seule chose qui l'identifie durablement.
+    async fn a_table_reshuffle_corrects_the_number_of_what_is_playing() {
+        // Reported design defect: the preset is a **position**. Reordering
+        // the stations from the page made the memorized number point at
+        // another station — the screen announced the wrong name for the
+        // stream that kept playing, and a reboot resumed the wrong one. The
+        // stream is found back by its URL, the only thing that durably
+        // identifies it.
         let (tx, rx) = tokio::sync::watch::channel(0u8);
         let mut source = make_source(two_stations(), 1);
         source.preset_count_rx = Some(rx);
-        // La station 1 plays.
+        // Station 1 is playing.
         let url = match source.activate().await.action {
             SourceAction::Play { uri, .. } => uri,
-            autre => panic!("attendu un Play, recu {autre:?}"),
+            other => panic!("expected a Play, got {other:?}"),
         };
 
-        // La page remanie la table : ce meme stream passe en presélection 2.
+        // The page reshuffles the table: this same stream moves to preset 2.
         {
             let mut st = source.stations.write().await;
             for s in st.stations.iter_mut() {
@@ -525,19 +530,19 @@ mod tests {
         }
         tx.send(2).unwrap();
 
-        let n = source.poll_notification().await.expect("notification attendue");
-        assert_eq!(n.preset, Some(2), "le numero doit suivre la station");
-        assert!(n.preset_name.is_some(), "et le name avec");
-        assert_eq!(source.preset, 2, "memorise, pour que suivant/precedent partent de la");
-        // Et surtout : aucune action, donc le stream n'est pas coupe pour autant.
-        assert!(n.identity.is_none(), "l'identity du stream n'a pas change");
+        let n = source.poll_notification().await.expect("notification expected");
+        assert_eq!(n.preset, Some(2), "the number must follow the station");
+        assert!(n.preset_name.is_some(), "and the name with it");
+        assert_eq!(source.preset, 2, "memorized, so that next/prev start from there");
+        // And above all: no action, so the stream is not cut because of it.
+        assert!(n.identity.is_none(), "the stream's identity has not changed");
     }
 
     #[tokio::test]
-    async fn une_station_retiree_ne_fait_pas_inventer_de_numero() {
-        // Son numero ne designe plus rien de sur, et le protocol n'a pas de
-        // « plus aucune presélection » : mieux vaut ne rien dire que designer
-        // une station au hasard.
+    async fn a_removed_station_does_not_make_up_a_number() {
+        // Its number no longer designates anything reliable, and the protocol
+        // has no "no presets left": better to say nothing than to designate a
+        // station at random.
         let (tx, rx) = tokio::sync::watch::channel(0u8);
         let mut source = make_source(two_stations(), 1);
         source.preset_count_rx = Some(rx);
@@ -545,58 +550,57 @@ mod tests {
         source.stations.write().await.stations.clear();
         tx.send(0).unwrap();
 
-        let n = source.poll_notification().await.expect("notification attendue");
+        let n = source.poll_notification().await.expect("notification expected");
         assert_eq!(n.preset_count, Some(0));
-        assert!(n.preset.is_none(), "aucun numero invente");
+        assert!(n.preset.is_none(), "no number made up");
     }
 
     #[tokio::test]
-    async fn la_valeur_initiale_dun_watch_frais_nest_pas_vue_comme_un_changement() {
-        // Pilier dont dépend `poll_notification` : un `watch::channel(v).1`
-        // fraîchement créé ne signale jamais sa valeur de départ comme un
-        // changement pour `changed()`. Si cette propriété cessait d'être
-        // vraie — ou si le câblage passait par `subscribe()` puis
-        // `mark_changed()`, ou déplaçait la création du canal ailleurs —
-        // chaque démarrage radio annoncerait `preset_count(0)` avant même
-        // la première playback : grille clear et « Présélections : 0 » jusqu'à
-        // ce que quelque chose plays.
+    async fn the_initial_value_of_a_fresh_watch_is_not_seen_as_a_change() {
+        // Pillar `poll_notification` depends on: a freshly created
+        // `watch::channel(v).1` never signals its starting value as a change
+        // for `changed()`. If this property stopped being true — or if the
+        // wiring went through `subscribe()` then `mark_changed()`, or moved
+        // the channel creation elsewhere — every radio startup would announce
+        // `preset_count(0)` before playback even starts: empty grid and
+        // "Presets: 0" until something plays.
         let mut source = make_source(two_stations(), 1);
         source.preset_count_rx = Some(tokio::sync::watch::channel(0u8).1);
-        let resultat = tokio::time::timeout(
+        let result = tokio::time::timeout(
             std::time::Duration::from_millis(50),
             source.poll_notification(),
         )
         .await;
         assert!(
-            resultat.is_err(),
-            "la valeur initiale du watch ne doit produire aucune notification"
+            result.is_err(),
+            "the watch's initial value must produce no notification"
         );
     }
 
     #[tokio::test]
-    async fn sans_moitie_admin_poll_notification_reste_en_attente() {
-        // Source construite directement, sans passer par `Runtime` (comme le
-        // fait ce test), donc sans canal d'announcement de `preset_count` : aucun
-        // émetteur n'existe, donc rien ne doit jamais en sortir — surtout pas
-        // un `None`, terminal pour le SDK (voir le commentaire sur le champ
-        // `preset_count_rx`). `main()`, lui, enregistre toujours la page
-        // d'admin et fournit donc toujours ce canal.
+    async fn without_an_admin_half_poll_notification_keeps_waiting() {
+        // Source built directly, without going through `Runtime` (as this
+        // test does), hence without a `preset_count` announcement channel: no
+        // sender exists, so nothing must ever come out of it — least of all a
+        // `None`, terminal for the SDK (see the comment on the
+        // `preset_count_rx` field). `main()`, for its part, always registers
+        // the admin page and therefore always provides this channel.
         let mut source = make_source(two_stations(), 1);
         assert!(source.preset_count_rx.is_none());
-        let resultat = tokio::time::timeout(
+        let result = tokio::time::timeout(
             std::time::Duration::from_millis(50),
             source.poll_notification(),
         )
         .await;
-        assert!(resultat.is_err(), "poll_notification n'aurait jamais du se terminer");
+        assert!(result.is_err(), "poll_notification should never have finished");
     }
 
     #[tokio::test]
-    async fn list_presets_lit_la_table_sous_le_verrou_partage() {
-        // Vérifie le branchement de `SourcePlugin::list_presets` sur
-        // `Stations::presets` (déjà couvert par ses propres tests dans
-        // `config.rs`) : ici, c'est le passage par le verrou partagé qui est
-        // sous test, pas le tri.
+    async fn list_presets_reads_the_table_under_the_shared_lock() {
+        // Checks the wiring of `SourcePlugin::list_presets` onto
+        // `Stations::presets` (already covered by its own tests in
+        // `config.rs`): here, it is the trip through the shared lock that is
+        // under test, not the sorting.
         let mut source = make_source(two_stations(), 1);
         assert_eq!(
             source.list_presets().await,
@@ -608,11 +612,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enregistrer_les_stations_propage_la_nouvelle_liste() {
-        // Même canal que `preset_count` (voir la doc de `poll_notification`) :
-        // l'admin et la source partagent la même table et le même canal, donc
-        // un enregistrement réussi doit faire apparaître la nouvelle liste
-        // nommée sans qu'un client la redemande.
+    async fn saving_the_stations_propagates_the_new_list() {
+        // Same channel as `preset_count` (see the doc of `poll_notification`):
+        // the admin and the source share the same table and the same channel,
+        // so a successful save must make the new named list appear without a
+        // client asking for it again.
         let dir = tempfile::tempdir().unwrap();
         let stations_shared = Arc::new(AsyncRwLock::new(one_station()));
         let (tx, rx) = tokio::sync::watch::channel(0u8);
@@ -637,7 +641,7 @@ mod tests {
             preset_count_rx: Some(rx),
         };
 
-        let nouveau = serde_json::json!({
+        let new_table = serde_json::json!({
             "op": "save",
             "stations": [{
                 "name": "FIP renommée",
@@ -645,9 +649,9 @@ mod tests {
                 "preset": 1,
             }]
         });
-        admin.set_data(nouveau).await.expect("enregistrement valide");
+        admin.set_data(new_table).await.expect("valid save");
 
-        let n = source.poll_notification().await.expect("notification attendue");
+        let n = source.poll_notification().await.expect("notification expected");
         assert_eq!(n.presets, Some(vec![Preset { index: 1, name: "FIP renommée".into() }]));
     }
 }

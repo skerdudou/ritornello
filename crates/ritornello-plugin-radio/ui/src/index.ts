@@ -2,7 +2,7 @@ import { UI_CONTRACT } from '@ritornello/ui'
 import RadioAdmin from './RadioAdmin.vue'
 import './ui.css'
 
-// Version du contract contre laquelle ce module est compilé. Le shell la
-// compare à la sienne avant de monter le composant.
+// Contract version this module is compiled against. The shell compares it
+// to its own before mounting the component.
 export const contract = UI_CONTRACT
 export default RadioAdmin

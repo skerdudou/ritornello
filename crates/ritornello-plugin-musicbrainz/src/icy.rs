@@ -1,101 +1,101 @@
-//! Le découpage d'une chaîne ICY : deux fonctions pures, aucun réseau, aucun
-//! état. C'est le seul endroit où l'on décide **comment** couper ; la décision
-//! de savoir *quel* découpage est le bon appartient à la validation.
+//! Splitting an ICY string: two pure functions, no network, no state. This is
+//! the only place where we decide **how** to cut; deciding *which* split is
+//! the right one belongs to validation.
 
-/// Séparateurs reconnus, par order de priorité — c'est aussi l'order dans
-/// lequel les candidates sont sondés.
+/// Recognized separators, by order of priority — which is also the order in
+/// which the candidates are probed.
 ///
-/// `" - "` d'abord : c'est la convention de fait du champ `StreamTitle`, le
-/// défaut de la plupart des automates de diffusion. Les espaces autour font
-/// partie du pattern, et ce n'est pas un détail : sans eux, `Jean-Michel Jarre`
-/// se ferait couper en deux.
+/// `" - "` first: it is the de facto convention of the `StreamTitle` field, the
+/// default of most broadcast automation systems. The surrounding spaces are
+/// part of the pattern, and that is no detail: without them, `Jean-Michel Jarre`
+/// would get cut in two.
 pub const SEPARATORS: [&str; 5] = [" - ", " – ", " — ", " / ", " : "];
 
-/// Plafond de candidates sondés pour une station.
+/// Cap on the candidates probed for one station.
 ///
-/// Chaque candidat coûte une requête, espacée d'`MIN_INTERVAL` : quatre font
-/// un sondage de quatre secondes, une fois par station, que personne n'wait.
-/// Sans cap, une chaîne portant plusieurs types de séparateurs en
-/// produirait dix.
+/// Each candidate costs one request, spaced by `MIN_INTERVAL`: four make a
+/// four-second probe, once per station, that nobody waits for. Without a cap, a
+/// string carrying several kinds of separators would produce ten.
 pub const MAX_CANDIDATES: usize = 4;
 
-/// Un découpage possible, et de quoi le rejouer plus tard.
+/// A possible split, and what it takes to replay it later.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub artist: String,
     pub title: String,
     pub separator: &'static str,
     pub artist_first: bool,
-    /// Le title est le champ du **milieu** — la forme `Artiste - Titre - Album`.
+    /// The title is the **middle** field — the `Artiste - Titre - Album` form.
     ///
-    /// Ce drapeau existe parce que `Pattern` doit pouvoir **rejouer** ce candidat.
-    /// Une première version ne le portait pas, et le défaut était une boucle
-    /// infinie plutôt qu'un simple title faux : le candidat du milieu validait,
-    /// le pattern enregistré ne retenait que le séparateur et l'order, donc
-    /// `apply` recollait l'album au title au track suivant, la validation
-    /// échouait, trois échecs déclenchaient un resondage, le même candidat
-    /// validait de nouveau — et ainsi de suite pour toujours.
+    /// This flag exists because `Pattern` must be able to **replay** this
+    /// candidate. A first version did not carry it, and the defect was an
+    /// infinite loop rather than a mere wrong title: the middle candidate
+    /// validated, the recorded pattern only retained the separator and the
+    /// order, so `apply` glued the album back onto the title on the next track,
+    /// validation failed, three failures triggered a reprobe, the same
+    /// candidate validated again — and so on forever.
     pub title_in_middle: bool,
 }
 
-/// Retire le bruit qu'une station accole à ce qu'elle announcement.
+/// Strips the noise a station tacks onto what it announces.
 ///
-/// **Avant** tout découpage, et c'est l'order qui compte : une station qui
-/// accole sa réclame ferait échouer *tous* les candidates, donc serait classée
-/// « ne pas découper » — c'est-à-dire définitivement, puisque rien ne reprobe
-/// une station ainsi classée.
+/// **Before** any split, and the order is what matters: a station that tacks
+/// on its jingle would make *all* the candidates fail, hence would be
+/// classified "do not split" — that is, permanently, since nothing reprobes a
+/// station so classified.
 ///
-/// Délibérément **conservateur**. Trois formes seulement, celles qui ne peuvent
-/// pas appartenir à un title :
+/// Deliberately **conservative**. Three forms only, those that cannot belong
+/// to a title:
 ///
-/// * tout ce qui suit une barre verticale — elle n'apparaît pas dans un title ;
-/// * un groupe entre crochets en fin de chaîne (durées, marqueurs de régie) ;
-/// * les espaces de bord et les espaces répétés.
+/// * everything following a vertical bar — it does not appear in a title;
+/// * a bracketed group at the end of the string (durations, control-room
+///   markers);
+/// * leading/trailing spaces and repeated spaces.
 ///
-/// Ce qu'on ne fait **pas**, et pourquoi : retirer un suffixe du kind
-/// `" - Radio X"` serait indistinguable d'un vrai séparateur, donc casserait
-/// autant de stations qu'il en réparerait. Et les parenthèses restent : `(Radio
-/// Edit)`, `(Live)`, `(feat. …)` font partie du title, et les retirer
-/// empêcherait la validation au lieu de l'aider. Une station que ce nettoyage
-/// ne suffit pas à traiter finira en « ne pas découper », et la page d'admin
-/// est le remède prévu pour elle.
+/// What we do **not** do, and why: stripping a suffix of the kind
+/// `" - Radio X"` would be indistinguishable from a real separator, hence would
+/// break as many stations as it would repair. And parentheses stay: `(Radio
+/// Edit)`, `(Live)`, `(feat. …)` are part of the title, and removing them would
+/// prevent validation instead of helping it. A station this cleaning is not
+/// enough to handle will end up "do not split", and the admin page is the
+/// remedy planned for it.
 pub fn clean(raw: &str) -> String {
-    let sans_barre = raw.split('|').next().unwrap_or(raw);
-    let mut s = sans_barre.trim();
-    // Un seul groupe retiré, en fin de chaîne : boucler couperait un title qui
-    // finirait légitimement par des crochets.
-    if let Some(ouvrant) = s.rfind('[') {
+    let without_bar = raw.split('|').next().unwrap_or(raw);
+    let mut s = without_bar.trim();
+    // A single group removed, at the end of the string: looping would cut a
+    // title that legitimately ended with brackets.
+    if let Some(opening) = s.rfind('[') {
         if s.trim_end().ends_with(']') {
-            s = s[..ouvrant].trim_end();
+            s = s[..opening].trim_end();
         }
     }
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Dérive les découpages plausibles de la chaîne **nettoyée**.
+/// Derives the plausible splits of the **cleaned** string.
 ///
-/// Les candidates se dérivent de la chaîne et non d'une liste fixe : on ne
-/// construit que pour les séparateurs réellement présents. Une chaîne n'en
-/// contains qu'un type en pratique, donc deux candidates — les deux ordres —, et
-/// le cap ne mord que sur les chaînes bavardes.
+/// The candidates derive from the string and not from a fixed list: we only
+/// build for the separators actually present. A string contains only one kind
+/// in practice, hence two candidates — both orders —, and the cap only bites
+/// on chatty strings.
 ///
-/// Pour un séparateur présent au moins deux fois — la forme
-/// `Artiste - Titre - Album`, réelle — un troisième candidat prend le champ du
-/// **milieu** comme title. Sans lui, le title porterait l'album collé et ne
-/// validerait jamais.
+/// For a separator present at least twice — the `Artiste - Titre - Album`
+/// form, a real one — a third candidate takes the **middle** field as title.
+/// Without it, the title would carry the album glued on and would never
+/// validate.
 ///
-/// Une moitié clear ne produit pas de candidat : une requête avec un champ clear
-/// est une requête pour rien.
-pub fn candidates(nettoye: &str) -> Vec<Candidate> {
+/// An empty half produces no candidate: a request with an empty field is a
+/// request for nothing.
+pub fn candidates(cleaned: &str) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = Vec::new();
     for separator in SEPARATORS {
-        let parts: Vec<&str> = nettoye.split(separator).map(str::trim).collect();
+        let parts: Vec<&str> = cleaned.split(separator).map(str::trim).collect();
         if parts.len() < 2 {
             continue;
         }
-        let tete = parts[0];
-        let reste = parts[1..].join(separator);
-        let mut push_cover =
+        let head = parts[0];
+        let rest = parts[1..].join(separator);
+        let mut push_candidate =
             |artist: &str, title: &str, artist_first: bool, title_in_middle: bool| {
                 if artist.is_empty() || title.is_empty() || out.len() >= MAX_CANDIDATES {
                     return;
@@ -108,52 +108,52 @@ pub fn candidates(nettoye: &str) -> Vec<Candidate> {
                     title_in_middle,
                 });
             };
-        push_cover(tete, &reste, true, false);
-        push_cover(&reste, tete, false, false);
+        push_candidate(head, &rest, true, false);
+        push_candidate(&rest, head, false, false);
         if parts.len() >= 3 {
-            push_cover(tete, parts[1], true, true);
+            push_candidate(head, parts[1], true, true);
         }
     }
     out
 }
 
-/// Rejoue un pattern appris sur une chaîne nettoyée.
+/// Replays a learned pattern on a cleaned string.
 ///
-/// **Aucun réseau** : c'est là tout l'intérêt du souvenir. Une fois le pattern
-/// d'une station known, séparer artist et title est une opération locale, et
-/// seule la cover demande encore une requête.
+/// **No network**: that is the whole point of remembering. Once a station's
+/// pattern is known, separating artist and title is a local operation, and
+/// only the cover still requires a request.
 ///
-/// `None` quand le pattern ne s'apply pas : la chaîne ne porte pas ce
-/// séparateur, une moitié est clear, ou le pattern est `DoNotSplit`. Ce `None`
-/// **est** l'échec de validation dont parle la règle des trois échecs
-/// consécutifs — pas une erreur, un track qui ne rentre pas dans la forme.
-pub fn apply(pattern: &crate::patterns::Pattern, nettoye: &str) -> Option<(String, String)> {
+/// `None` when the pattern does not apply: the string does not carry this
+/// separator, one half is empty, or the pattern is `DoNotSplit`. This `None`
+/// **is** the validation failure the three-consecutive-failures rule speaks
+/// of — not an error, a track that does not fit the form.
+pub fn apply(pattern: &crate::patterns::Pattern, cleaned: &str) -> Option<(String, String)> {
     let crate::patterns::Pattern::Split { separator, artist_first, title_in_middle } = pattern
     else {
         return None;
     };
-    // `title_in_middle` : la forme `Artiste - Titre - Album`, où le title est le
-    // **deuxième** champ et le reste est ignoré. Sans cette branche, le pattern
-    // appris d'un candidat du milieu recollait l'album au title — et comme la
-    // validation échouait alors à chaque track, la station se faisait
-    // resonder sans fin. Voir `Candidate::title_in_middle`.
+    // `title_in_middle`: the `Artiste - Titre - Album` form, where the title is
+    // the **second** field and the rest is ignored. Without this branch, the
+    // pattern learned from a middle candidate glued the album back onto the
+    // title — and as validation then failed on every track, the station got
+    // reprobed endlessly. See `Candidate::title_in_middle`.
     if *title_in_middle {
-        let parts: Vec<&str> = nettoye.split(separator.as_str()).map(str::trim).collect();
+        let parts: Vec<&str> = cleaned.split(separator.as_str()).map(str::trim).collect();
         let (artist, title) = (parts.first()?, parts.get(1)?);
         if artist.is_empty() || title.is_empty() {
             return None;
         }
         return Some((artist.to_string(), title.to_string()));
     }
-    let (tete, reste) = nettoye.split_once(separator.as_str())?;
-    let (tete, reste) = (tete.trim(), reste.trim());
-    if tete.is_empty() || reste.is_empty() {
+    let (head, rest) = cleaned.split_once(separator.as_str())?;
+    let (head, rest) = (head.trim(), rest.trim());
+    if head.is_empty() || rest.is_empty() {
         return None;
     }
     Some(if *artist_first {
-        (tete.to_string(), reste.to_string())
+        (head.to_string(), rest.to_string())
     } else {
-        (reste.to_string(), tete.to_string())
+        (rest.to_string(), head.to_string())
     })
 }
 
@@ -163,128 +163,130 @@ mod tests {
     use crate::patterns::Pattern;
 
     #[test]
-    fn le_nettoyage_retire_la_reclame_apres_une_barre() {
+    fn cleaning_removes_the_jingle_after_a_bar() {
         assert_eq!(clean("Miles Davis - So What | Radio X"), "Miles Davis - So What");
         assert_eq!(clean("  Miles Davis - So What  "), "Miles Davis - So What");
     }
 
     #[test]
-    fn le_nettoyage_retire_une_duree_entre_crochets_en_fin() {
+    fn cleaning_removes_a_bracketed_duration_at_the_end() {
         assert_eq!(clean("Miles Davis - So What [00:09:22]"), "Miles Davis - So What");
     }
 
     #[test]
-    fn le_nettoyage_garde_une_parenthese_qui_fait_partie_du_titre() {
-        // `(Radio Edit)`, `(Live)`, `(feat. X)` appartiennent au title. Les
-        // retirer casserait la validation au lieu de l'aider.
+    fn cleaning_keeps_a_parenthesis_that_is_part_of_the_title() {
+        // `(Radio Edit)`, `(Live)`, `(feat. X)` belong to the title. Removing
+        // them would break validation instead of helping it.
         let s = "Daft Punk - Around the World (Radio Edit)";
         assert_eq!(clean(s), s);
     }
 
     #[test]
-    fn le_nettoyage_precede_le_decoupage_donc_la_reclame_ne_casse_pas_les_candidats() {
-        // La régression que cette étape existe pour empêcher : sans nettoyage,
-        // le title du dernier candidat porte « | Radio X », aucun candidat ne
-        // validated, et la station est classée « ne pas découper » — c'est-à-dire
-        // définitivement, puisque rien ne reprobe une station ainsi classée.
+    fn cleaning_precedes_splitting_so_the_jingle_does_not_break_the_candidates() {
+        // The regression this step exists to prevent: without cleaning, the
+        // title of the last candidate carries "| Radio X", no candidate
+        // validates, and the station is classified "do not split" — that is,
+        // permanently, since nothing reprobes a station so classified.
         let c = candidates(&clean("Miles Davis - So What | Radio X"));
         assert!(
             c.iter().any(|c| c.artist == "Miles Davis" && c.title == "So What"),
-            "candidates obtenus : {c:?}"
+            "candidates obtained: {c:?}"
         );
     }
 
     #[test]
-    fn deux_candidats_pour_un_seul_separateur_les_deux_ordres() {
+    fn two_candidates_for_a_single_separator_both_orders() {
         let c = candidates("Miles Davis - So What");
         assert_eq!(c.len(), 2);
         assert_eq!((c[0].artist.as_str(), c[0].title.as_str()), ("Miles Davis", "So What"));
-        assert!(c[0].artist_first, "le standard passe en premier");
+        assert!(c[0].artist_first, "the standard comes first");
         assert_eq!((c[1].artist.as_str(), c[1].title.as_str()), ("So What", "Miles Davis"));
         assert!(!c[1].artist_first);
     }
 
     #[test]
-    fn le_demi_cadratin_est_reconnu_comme_separateur() {
+    fn the_en_dash_is_recognized_as_a_separator() {
         let c = candidates("Miles Davis – So What");
         assert_eq!(c.len(), 2);
         assert_eq!(c[0].separator, " – ");
     }
 
     #[test]
-    fn trois_champs_donnent_aussi_le_candidat_du_milieu() {
-        // La forme `Artiste - Titre - Album`, réelle. Sans ce candidat, le
-        // title porterait « So What - Kind of Blue » et ne validerait jamais.
+    fn three_fields_also_give_the_middle_candidate() {
+        // The `Artiste - Titre - Album` form, a real one. Without this
+        // candidate, the title would carry "So What - Kind of Blue" and would
+        // never validate.
         let c = candidates("Miles Davis - So What - Kind of Blue");
         assert!(
             c.iter().any(|c| c.artist == "Miles Davis" && c.title == "So What"),
-            "candidates obtenus : {c:?}"
+            "candidates obtained: {c:?}"
         );
     }
 
     #[test]
-    fn le_plafond_de_candidats_est_tenu() {
-        // Plusieurs types de séparateurs dans la même chaîne : le cap doit
-        // mordre, sinon un sondage part en dix requêtes.
+    fn the_candidate_cap_holds() {
+        // Several kinds of separators in the same string: the cap must bite,
+        // otherwise a probe turns into ten requests.
         let c = candidates("A - B / C : D – E");
         assert!(c.len() <= MAX_CANDIDATES, "{} candidates", c.len());
     }
 
     #[test]
-    fn sans_separateur_il_ny_a_aucun_candidat() {
-        // Un slogan, un name d'émission : rien à contraindre côté artist, donc
-        // rien de validable. L'appelant en conclut « ne pas découper ».
+    fn without_a_separator_there_is_no_candidate() {
+        // A slogan, a show name: nothing to constrain on the artist side,
+        // hence nothing to validate. The caller concludes "do not split".
         assert!(candidates("Vous ecoutez Radio X").is_empty());
         assert!(candidates("").is_empty());
     }
 
     #[test]
-    fn une_moitie_vide_ne_produit_pas_de_candidat() {
-        // Une requête avec un champ clear est une requête pour rien.
+    fn an_empty_half_produces_no_candidate() {
+        // A request with an empty field is a request for nothing.
         //
-        // **Les espaces de bord sont l'essentiel de ces deux fixtures**, et une
-        // première version les avait oubliés (`"- So What"`, `"Miles Davis -"`) :
-        // le séparateur étant `" - "`, ces chaînes n'en contenaient aucun, la
-        // garde n'était jamais atteinte, et le test passait pour une mauvaise
-        // reason — retirer la garde ne le faisait pas tomber. Trouvé par la
-        // preuve par mutation, qui est faite pour ça.
+        // **The edge spaces are the essence of these two fixtures**, and a
+        // first version had forgotten them (`"- So What"`, `"Miles Davis -"`):
+        // the separator being `" - "`, those strings contained none, the guard
+        // was never reached, and the test passed for a wrong reason — removing
+        // the guard did not make it fail. Found by mutation testing, which is
+        // made for that.
         //
-        // Ces deux formes ne sortent **pas** de `clean`, qui coupe les bords :
-        // ce test éprouve donc le contrat de `candidates`, qui est une fonction
-        // publique et ne doit pas dépendre de qui l'appelle, et non un path de
-        // production. La distinction vaut d'être sue avant d'y toucher.
-        assert!(candidates(" - So What").is_empty(), "artist clear");
-        assert!(candidates("Miles Davis - ").is_empty(), "title clear");
+        // These two forms do **not** come out of `clean`, which trims the
+        // edges: this test therefore exercises the contract of `candidates`,
+        // which is a public function and must not depend on who calls it, and
+        // not a production path. The distinction is worth knowing before
+        // touching it.
+        assert!(candidates(" - So What").is_empty(), "empty artist");
+        assert!(candidates("Miles Davis - ").is_empty(), "empty title");
     }
 
     #[test]
-    fn appliquer_un_motif_redonne_le_couple() {
+    fn applying_a_pattern_gives_back_the_pair() {
         let m =
             Pattern::Split { separator: " - ".into(), artist_first: false, title_in_middle: false };
         assert_eq!(
             apply(&m, "So What - Miles Davis"),
             Some(("Miles Davis".to_string(), "So What".to_string())),
-            "order inverse : l'artist est en second"
+            "reverse order: the artist comes second"
         );
     }
 
-    /// **La propriété qui relie les deux moitiés du chantier**, et que rien ne
-    /// prouvait : rejouer le pattern d'un candidat sur la chaîne dont il est issu
-    /// doit redonner ce candidat, à l'identique.
+    /// **The property that ties the two halves of the work together**, and
+    /// that nothing proved: replaying a candidate's pattern on the string it
+    /// came from must give back that candidate, identically.
     ///
-    /// Son intérêt n'est pas théorique. Le sondage retient le candidat que
-    /// MusicBrainz a validé, puis tous les morceaux suivants sont découpés par
-    /// `apply` sans plus aucune requête. Si les deux fonctions divergeaient
-    /// sur une forme quelconque, l'appareil afficherait un artist et un title
-    /// **faux après un sondage réussi** — la pire des combinaisons, puisque la
-    /// validation a bien eu lieu et que rien au journal ne le signalerait.
+    /// Its interest is not theoretical. The probe retains the candidate that
+    /// MusicBrainz validated, then all the following tracks are split by
+    /// `apply` without any further request. If the two functions diverged on
+    /// any form, the device would show a wrong artist and title **after a
+    /// successful probe** — the worst combination, since validation did take
+    /// place and nothing in the log would report it.
     ///
-    /// Éprouvée sur toutes les formes que les autres tests traitent une à une,
-    /// **plus** celles qui les combinent : plusieurs séparateurs dans la même
-    /// chaîne, trois champs, séparateurs rares, et un name composé.
+    /// Exercised on all the forms the other tests handle one by one, **plus**
+    /// those that combine them: several separators in the same string, three
+    /// fields, rare separators, and a hyphenated name.
     #[test]
-    fn appliquer_le_motif_dun_candidat_redonne_ce_candidat() {
-        let formes = [
+    fn applying_a_candidates_pattern_gives_back_that_candidate() {
+        let forms = [
             "Miles Davis - So What",
             "So What - Miles Davis",
             "Miles Davis – So What",
@@ -296,32 +298,32 @@ mod tests {
             "Daft Punk - Around the World (Radio Edit)",
             "Jean-Michel Jarre - Oxygene Pt. 4",
         ];
-        for forme in formes {
-            let nettoye = clean(forme);
-            let cands = candidates(&nettoye);
-            assert!(!cands.is_empty(), "« {forme} » doit produire au moins un candidat");
+        for form in forms {
+            let cleaned = clean(form);
+            let cands = candidates(&cleaned);
+            assert!(!cands.is_empty(), "\"{form}\" must produce at least one candidate");
             for c in cands {
                 let pattern = crate::patterns::Pattern::from_candidate(&c);
                 assert_eq!(
-                    apply(&pattern, &nettoye),
+                    apply(&pattern, &cleaned),
                     Some((c.artist.clone(), c.title.clone())),
-                    "pattern {pattern:?} rejoue sur « {nettoye} » doit redonner {c:?}"
+                    "pattern {pattern:?} replayed on \"{cleaned}\" must give back {c:?}"
                 );
             }
         }
     }
 
     #[test]
-    fn appliquer_un_motif_absent_de_la_chaine_rend_none() {
-        // Le track où la station change de forme : pas un pair bancal,
-        // rien du tout. C'est ce `None` qui compte comme échec de validation.
+    fn applying_a_pattern_absent_from_the_string_returns_none() {
+        // The track where the station changes form: not a lopsided pair,
+        // nothing at all. This `None` is what counts as a validation failure.
         let m =
             Pattern::Split { separator: " - ".into(), artist_first: true, title_in_middle: false };
         assert_eq!(apply(&m, "Vous ecoutez Radio X"), None);
     }
 
     #[test]
-    fn ne_pas_decouper_ne_produit_jamais_de_couple() {
+    fn do_not_split_never_produces_a_pair() {
         assert_eq!(apply(&Pattern::DoNotSplit, "Miles Davis - So What"), None);
     }
 }

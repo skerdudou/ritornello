@@ -1,33 +1,35 @@
-// Reordonnancement des stations : logique pure, testable sans DOM.
+// Reordering of stations: pure logic, testable without a DOM.
 //
-// La preselection **est** la position de la row (voir `save()` dans
-// RadioAdmin.vue et `save_numerote_de_1_a_n_par_position` cote plugin) : glisser
-// une station change donc son numero de telecommande, et c'est bien l'intention.
+// The preset **is** the row's position (see `save()` in RadioAdmin.vue and
+// `save_numbers_from_1_to_n_by_position` on the plugin side): dragging a
+// station therefore changes its remote-control number, and that is indeed
+// the intent.
 
 /**
- * Deplace l'element d'index `de` a l'index `vers`, en renvoyant une **nouvelle**
- * liste.
+ * Moves the element at index `from` to index `to`, returning a **new**
+ * list.
  *
- * Un index hors bornes ou un deplacement sur place rend la liste inchangee
- * plutot que de lever : les indices viennent d'evenements de glisser-drop du
- * navigateur, ou une cible peut disparaitre entre le `dragstart` et le `drop`.
+ * An out-of-bounds index or a move to the same spot leaves the list
+ * unchanged rather than throwing: the indices come from the browser's
+ * drag-and-drop events, where a target can disappear between `dragstart`
+ * and `drop`.
  */
-export function move<T>(liste: readonly T[], de: number, vers: number): T[] {
-  const copie = [...liste]
+export function move<T>(list: readonly T[], from: number, to: number): T[] {
+  const copy = [...list]
   if (
-    !Number.isInteger(de) ||
-    !Number.isInteger(vers) ||
-    de < 0 ||
-    vers < 0 ||
-    de >= copie.length ||
-    vers >= copie.length ||
-    de === vers
+    !Number.isInteger(from) ||
+    !Number.isInteger(to) ||
+    from < 0 ||
+    to < 0 ||
+    from >= copy.length ||
+    to >= copy.length ||
+    from === to
   ) {
-    return copie
+    return copy
   }
-  const [element] = copie.splice(de, 1)
-  // `element` ne peut pas etre `undefined` ici (index verifie ci-dessus), mais
-  // le type de `splice` ne le sait pas.
-  copie.splice(vers, 0, element as T)
-  return copie
+  const [element] = copy.splice(from, 1)
+  // `element` cannot be `undefined` here (index checked above), but
+  // `splice`'s type does not know that.
+  copy.splice(to, 0, element as T)
+  return copy
 }

@@ -1,10 +1,10 @@
-//! La cover de ce qui plays : la chercher, la retenir, la serve.
+//! The cover of what is playing: fetch it, keep it, serve it.
 //!
-//! C'est **l'appareil** qui va chercher l'image, jamais le navigateur. Trois
-//! raisons : la page ne doit charger aucune ressource externe — principe déjà
-//! posé pour les pages d'admin ; l'image devient disponible à un futur
-//! afficheur graphique ; et une cover embarquée dans un fichier, que seul
-//! l'appareil peut read, n'aurait aucune URL à donner au navigateur.
+//! It is **the device** that goes and fetches the image, never the browser.
+//! Three reasons: the page must not load any external resource — a principle
+//! already established for the admin pages; the image becomes available to a
+//! future graphical display; and a cover embedded in a file, which only the
+//! device can read, would have no URL to hand to the browser.
 
 use axum::body::Body;
 use axum::extract::{Path, State};
@@ -19,117 +19,113 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::RwLock;
 use tokio_util::io::ReaderStream;
 
-/// Plafond d'une image venue du réseau. Écarte le `front` nu du Cover Art
-/// Archive, mesuré à 2 670 705 bytes là où `front-500` en rend 75 249.
+/// Cap for an image coming from the network. Rules out the bare `front` of the
+/// Cover Art Archive, measured at 2,670,705 bytes where `front-500` returns
+/// 75,249.
 const NETWORK_CAP: usize = 2 * 1024 * 1024;
 
-/// Préfixe de l'URL locale publiée dans `Track::cover_href`.
+/// Prefix of the local URL published in `Track::cover_href`.
 ///
-/// Partagé entre `metadata::Metadata::state`, qui la **fabrique**, et
-/// `main::display_relay`, qui la **relit** pour retrouver la clé du cache :
-/// deux littéraux auraient pu diverger en silence, et la conséquence aurait été
-/// un afficheur qui ne reçoit plus jamais de cover, sans erreur nulle part.
+/// Shared between `metadata::Metadata::state`, which **builds** it, and
+/// `main::display_relay`, which **re-reads** it to recover the cache key: two
+/// literals could have drifted apart silently, and the consequence would have
+/// been a display that never receives a cover again, with no error anywhere.
 pub const HREF_PREFIX: &str = "/api/cover/";
 
-/// Préfixe des fichiers temporaires d'extraction de cover embarquée,
-/// posés dans `std::env::temp_dir()` par `player::mpv::embedded_cover`.
+/// Prefix of the temporary files produced by embedded-cover extraction,
+/// dropped in `std::env::temp_dir()` by `player::mpv::embedded_cover`.
 ///
-/// Partagé entre ce module (purge au démarrage, éviction bornée) et `mpv.rs`
-/// (nommage) : les deux doivent reconnaître exactement les mêmes fichiers,
-/// sous peine soit de ne jamais les purger, soit — pire — de purger un
-/// fichier qui n'est pas de nous.
+/// Shared between this module (purge at startup, bounded eviction) and
+/// `mpv.rs` (naming): both must recognize exactly the same files, on pain of
+/// either never purging them, or — worse — purging a file that is not ours.
 pub const TEMP_PREFIX: &str = "ritornello-cover-";
 
-/// Vrai si `path` est un fichier temporaire d'extraction créé par ce
-/// processus.
+/// True if `path` is a temporary extraction file created by this process.
 ///
-/// **Jamais** vrai pour un `folder.jpg` déclaré par une Source : celui-là vit
-/// sur le partage de l'utilisateur, et le cœur ne doit jamais le supprimer de
-/// son propre chef. `CoverPayload::File` porte les deux formes (voir sa doc),
-/// c'est ici que la distinction se fait avant d'agir sur le disque.
+/// **Never** true for a `folder.jpg` declared by a Source: that one lives on
+/// the user's share, and the core must never delete it of its own accord.
+/// `CoverPayload::File` carries both forms (see its doc); this is where the
+/// distinction is made before acting on the disk.
 fn is_cover_temp(path: &std::path::Path) -> bool {
     path.parent() == Some(std::env::temp_dir().as_path())
         && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(TEMP_PREFIX))
 }
 
-/// Balaie les fichiers temporaires d'une exécution précédente. Appelée une
-/// fois au démarrage, avant que quoi que ce soit ne puisse en créer de
-/// nouveaux.
+/// Sweeps the temporary files left by a previous run. Called once at startup,
+/// before anything can create new ones.
 ///
-/// **Deux raisons, dont une de correction.** Depuis que `embedded_cover`
-/// nomme ses fichiers d'après leur contenu et n'écrit que si le name est libre,
-/// un fichier laissé par une exécution **tuée en pleine écriture** serait
-/// tronqué tout en portant le name d'une image complète : l'écriture
-/// conditionnelle l'adopterait, et un afficheur recevrait une image coupée.
-/// Ce balayage est ce qui rend ce cas impossible, et c'est pourquoi il doit
-/// tourner **avant** que quoi que ce soit ne puisse créer un temporaire.
+/// **Two reasons, one of them about correctness.** Since `embedded_cover`
+/// names its files after their content and only writes when the name is free,
+/// a file left by a run **killed mid-write** would be truncated while carrying
+/// the name of a complete image: the conditional write would adopt it, and a
+/// display would receive a cut-off image. This sweep is what makes that case
+/// impossible, and that is why it must run **before** anything can create a
+/// temporary file.
 ///
-/// La seconde raison est l'accumulation, et elle vaut d'être dite parce
-/// qu'on pourrait croire le système s'en charger : rien d'autre n'efface ces
-/// fichiers entre deux démarrages, et un `systemctl restart` ne clear **pas**
-/// `std::env::temp_dir()` — sur un Pi c'est souvent une `tmpfs`, que seul un
-/// vrai redémarrage remet à zéro, et ce qui s'y entasse grignote de la RAM,
-/// pas seulement du disque. Compter sur `/tmp` aurait donc laissé fuir
-/// exactement le cas le plus fréquent, le redémarrage de service.
+/// The second reason is accumulation, and it is worth spelling out because one
+/// could believe the system takes care of it: nothing else deletes these files
+/// between two startups, and a `systemctl restart` does **not** clear
+/// `std::env::temp_dir()` — on a Pi it is often a `tmpfs`, which only a real
+/// reboot resets, and what piles up there eats RAM, not just disk. Relying on
+/// `/tmp` would therefore have leaked exactly the most frequent case, the
+/// service restart.
 ///
-/// Sans risque de purger quelque chose d'utile : le cache ne survit jamais à
-/// un redémarrage (`CoverCache` est reconstruit à chaque lancement), donc
-/// rien de ce qui traîne encore ici ne peut être référencé par quoi que ce
-/// soit.
+/// With no risk of purging something useful: the cache never survives a
+/// restart (`CoverCache` is rebuilt at every launch), so nothing still lying
+/// around here can be referenced by anything.
 pub fn purge_temp_files() {
     purge_temp_files_in(&std::env::temp_dir());
 }
 
-/// Cœur testable de `purge_temp_files`, paramétré par le répertoire à
-/// balayer.
+/// Testable core of `purge_temp_files`, parameterized by the directory to
+/// sweep.
 ///
-/// `std::env::temp_dir()` est **partagé** par tout le système, et par les
-/// autres tests de ce même binaire, qui y écrivent de vrais fichiers
-/// `ritornello-cover-*` pour éprouver l'extraction elle-même (voir
-/// `player::mpv::tests`) : y lancer un vrai balayage depuis un test le
-/// mettrait en concurrence avec eux. Séparée pour qu'un test puisse pointer
-/// vers un répertoire à lui, entièrement isolé.
+/// `std::env::temp_dir()` is **shared** by the whole system, and by the other
+/// tests of this same binary, which write real `ritornello-cover-*` files
+/// there to exercise the extraction itself (see `player::mpv::tests`): running
+/// a real sweep there from a test would put it in competition with them. Split
+/// out so a test can point to a directory of its own, fully isolated.
 fn purge_temp_files_in(dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entree in entries.flatten() {
-        let name = entree.file_name();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
         if name.to_str().is_some_and(|n| n.starts_with(TEMP_PREFIX)) {
-            if let Err(e) = std::fs::remove_file(entree.path()) {
-                tracing::debug!("purging leftover cover file {}: {e}", entree.path().display());
+            if let Err(e) = std::fs::remove_file(entry.path()) {
+                tracing::debug!("purging leftover cover file {}: {e}", entry.path().display());
             }
         }
     }
 }
 
-/// Une trame de cover en cours de construction, partagée entre l'appelant
-/// qui la construit et ceux qui l'attendent.
+/// A cover frame under construction, shared between the caller building it
+/// and those waiting for it.
 ///
-/// L'`Option` extérieure est celle de `line` — « rien à pousser », pour les
-/// mêmes raisons que partout dans ce module ; l'`Arc<str>` intérieur est la
-/// line de texte déjà sérialisée. La cellule est derrière un `Arc` pour que les
-/// attendants la tiennent après avoir rendition le verrou de la table.
+/// The outer `Option` is the one of `line` — "nothing to push", for the same
+/// reasons as everywhere in this module; the inner `Arc<str>` is the already
+/// serialized line of text. The cell sits behind an `Arc` so the waiters can
+/// hold it after releasing the table's lock.
 type FrameInFlight = Arc<tokio::sync::OnceCell<Option<Arc<str>>>>;
 
-/// Ce que le cœur retient d'une cover.
+/// What the core keeps of a cover.
 ///
-/// Deux natures, et c'est délibéré : une cover **locale** n'entre pas en
-/// mémoire. Un `folder.jpg` de trois mégaoctets est banal sur un NAS, et le
-/// charger en RAM sur un Pi pour une image que le navigateur cachera de son
-/// côté serait du gaspillage.
+/// Two natures, and it is deliberate: a **local** cover does not enter memory.
+/// A three-megabyte `folder.jpg` is commonplace on a NAS, and loading it into
+/// RAM on a Pi for an image the browser will cache on its side would be a
+/// waste.
 #[derive(Debug, Clone)]
 pub enum CoverPayload {
-    /// Venue du réseau : les bytes sont en mémoire.
+    /// From the network: the bytes are in memory.
     Bytes(Vec<u8>, &'static str),
-    /// Locale : seul le path est retenu, la route relit le fichier.
+    /// Local: only the path is kept, the route re-reads the file.
     File(PathBuf),
 }
 
-/// Empreinte de la source, publiée dans l'URL locale.
+/// Fingerprint of the source, published in the local URL.
 ///
-/// `DefaultHasher` et non `sha2` : une collision ferait afficher la mauvaise
-/// cover et rien d'autre, ce qui ne justifie pas une dépendance
-/// cryptographique. Calculable **avant** le téléchargement, ce qui permet de
-/// dédupliquer deux demandes pour la même image.
+/// `DefaultHasher` and not `sha2`: a collision would display the wrong cover
+/// and nothing else, which does not justify a cryptographic dependency.
+/// Computable **before** the download, which makes it possible to deduplicate
+/// two requests for the same image.
 pub fn key(r: &CoverRef) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     match r {
@@ -145,71 +141,70 @@ pub fn key(r: &CoverRef) -> String {
     format!("{:016x}", h.finish())
 }
 
-/// Empreinte du **contenu** d'une image, pour nommer un fichier temporaire.
+/// Fingerprint of an image's **content**, to name a temporary file.
 ///
-/// Même hacheur que `key`, et le même arbitrage : une collision afficherait la
-/// mauvaise cover et rien d'autre. Ce qui change est ce qu'on hache — les
-/// bytes de l'image, pas le path d'où ils sortent. Deux pistes d'un même
-/// album portant la même cover embarquée retombent donc sur un seul
-/// fichier, donc un seul `href`, donc rien à repousser ni à redécoder : le cas
-/// embarqué rejoint ainsi le `folder.jpg` local, déjà gratuit. Sans cela, un
-/// album de quinze pistes faisait tourner à clear un cache qui n'en tient
-/// que le réglage en autorise (`CoverSettings::entries`), extraction, écriture
-/// et éviction comprises.
+/// Same hasher as `key`, and the same trade-off: a collision would display the
+/// wrong cover and nothing else. What changes is what gets hashed — the bytes
+/// of the image, not the path they come from. Two tracks of the same album
+/// carrying the same embedded cover thus land on a single file, hence a single
+/// `href`, hence nothing to push again nor to decode again: the embedded case
+/// thereby joins the local `folder.jpg`, which was already free. Without that,
+/// a fifteen-track album made a cache that only holds as many entries as the
+/// setting allows (`CoverSettings::entries`) churn for nothing, extraction,
+/// write and eviction included.
 pub fn content_key(bytes: &[u8]) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut h);
     format!("{:016x}", h.finish())
 }
 
-/// Ce que le cœur fabrique d'une cover avant de la pousser sur un socket.
+/// What the core makes of a cover before pushing it onto a socket.
 ///
-/// Absent (`CoverSettings::rendition` à `None`) quand l'utilisateur a décoché le
-/// réencodage : les bytes d'origine partent tels quels. Un `Option` plutôt
-/// qu'un booléen à l'intérieur, et ce n'est pas cosmétique — les quatre
-/// réglages n'existent que là où ils veulent dire quelque chose, si bien qu'un
-/// code qui read `max_edge_px` ne peut pas oublier de vérifier d'abord que le
-/// rendition est active.
+/// Absent (`CoverSettings::rendition` at `None`) when the user has unchecked
+/// re-encoding: the original bytes leave as they are. An `Option` rather than
+/// a boolean inside, and this is not cosmetic — the four settings only exist
+/// where they mean something, so that code reading `max_edge_px` cannot forget
+/// to first check that the rendition is enabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rendition {
-    /// Côté le plus long de la thumbnail, en pixels. Le rapport est conservé.
+    /// Longest edge of the thumbnail, in pixels. The aspect ratio is kept.
     pub max_edge_px: u32,
-    /// Qualité JPEG, 1 à 100. Ignorée pour une image à canal alpha, réencodée
-    /// en PNG sans perte.
+    /// JPEG quality, 1 to 100. Ignored for an image with an alpha channel,
+    /// re-encoded as lossless PNG.
     pub jpeg_quality: u8,
-    /// Plafond de la thumbnail produite, en bytes. Un filet : au-delà, rien
-    /// n'est poussé.
+    /// Cap on the produced thumbnail, in bytes. A safety net: beyond it,
+    /// nothing is pushed.
     pub output_cap: usize,
-    /// Plafond de pixels à décoder. Comparé aux dimensions lues dans l'en-tête
-    /// **avant toute allocation**, et reporté dans `image::Limits` pour le cas
-    /// d'un en-tête qui mentirait sur ses propres dimensions.
+    /// Cap on the pixels to decode. Compared against the dimensions read from
+    /// the header **before any allocation**, and carried into `image::Limits`
+    /// for the case of a header that would lie about its own dimensions.
     pub pixel_cap: u64,
 }
 
-/// Les deux étages du traitement d'une cover, qu'il ne faut pas confondre.
+/// The two stages of cover processing, not to be confused.
 ///
-/// `source_max` bounded ce que le cœur accepte de **read**, quoi qu'il arrive
-/// ensuite : c'est la seule garde qui subsiste quand le rendition est désactivé, et
-/// la plus économique de toutes, puisqu'elle se juge sur la size du fichier
-/// sans read un octet de son contenu.
+/// `source_max` bounds what the core agrees to **read**, whatever happens
+/// next: it is the only guard that remains when the rendition is disabled, and
+/// the cheapest of all, since it is judged on the file size without reading a
+/// single byte of its content.
 ///
-/// `rendition` ne décrit que ce que le cœur **fabrique**.
+/// `rendition` only describes what the core **produces**.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoverSettings {
-    /// Combien de pochettes le cache garde. Voir
+    /// How many covers the cache keeps. See
     /// `state::Settings::cover_cache_entries`.
     pub entries: usize,
-    /// Plafond de la cover source, en bytes.
+    /// Cap on the source cover, in bytes.
     pub source_max: usize,
-    /// `None` = pousser la source telle quelle.
+    /// `None` = push the source as it is.
     pub rendition: Option<Rendition>,
 }
 
 impl Default for CoverSettings {
-    /// Les défauts du produit, pas des défauts neutres : un `CoverCache::new()`
-    /// se comporte comme un appareil sorti d'usine, y compris dans les tests
-    /// qui ne parlent pas de réglages. Dérivés de `state::Settings::default()`
-    /// pour qu'il n'existe qu'un seul endroit où ces valeurs sont écrites.
+    /// The product's defaults, not neutral defaults: a `CoverCache::new()`
+    /// behaves like a device fresh out of the factory, including in tests that
+    /// do not mention settings. Derived from `state::Settings::default()` so
+    /// that there is only one place where these values are written.
     fn default() -> Self {
         Self::from(&crate::state::Settings::default())
     }
@@ -233,93 +228,93 @@ impl From<&crate::state::Settings> for CoverSettings {
 #[derive(Default)]
 pub struct CoverCache {
     entries: RwLock<VecDeque<(String, CoverPayload)>>,
-    /// Réglages vivants, relus à chaque publication.
+    /// Live settings, re-read at every publication.
     ///
-    /// Un verrou `std::sync` et non celui de `tokio`, à la différence de
-    /// `entries` juste au-dessus : la section critique est la copie d'une
-    /// structure `Copy` de trente bytes, jamais une IO. Cela garde
-    /// `Core::set_settings` synchrone — le rendre `async` pour ce champ aurait
-    /// contaminé sa signature et tous ses appelants de test. La valeur est
-    /// **copiée hors du verrou** avant tout `await` : aucun garde ne traverse
-    /// un point de suspension.
+    /// A `std::sync` lock and not tokio's, unlike `entries` just above: the
+    /// critical section is the copy of a thirty-byte `Copy` structure, never
+    /// an IO. This keeps `Core::set_settings` synchronous — making it `async`
+    /// for this field would have contaminated its signature and all its test
+    /// callers. The value is **copied out of the lock** before any `await`: no
+    /// guard crosses a suspension point.
     settings: std::sync::RwLock<CoverSettings>,
-    /// Les builds de trame en cours, une entrée par clé.
+    /// The frame builds in progress, one entry per key.
     ///
-    /// **Un rendez-vous, pas un cache — la distinction est tout.** Mémoriser une
-    /// trame serait faux pour la raison que dit la doc de `rendition` : la clé hache
-    /// le *path*, pas le contenu, donc une thumbnail gardée deviendrait fausse
-    /// dès que l'utilisateur remplace l'image sous ce path. Une entrée d'ici ne
-    /// survit pas à sa construction : le dernier appelant à en sortir la retire,
-    /// et l'appelant suivant repart d'une playback neuve du fichier.
+    /// **A rendezvous, not a cache — the distinction is everything.**
+    /// Memorizing a frame would be wrong for the reason the `rendition` doc
+    /// gives: the key hashes the *path*, not the content, so a kept thumbnail
+    /// would become wrong as soon as the user replaces the image under that
+    /// path. An entry here does not outlive its construction: the last caller
+    /// out removes it, and the next caller starts over from a fresh read of
+    /// the file.
     ///
-    /// Ce que cela économise : deux afficheurs abonnés qui reçoivent la même
-    /// trame d'état demandent la même cover dans le même instant, et
-    /// décodaient puis réencodaient deux fois la même image. Sur un Pi 2, c'est
-    /// un cœur occupé plusieurs centaines de millisecondes en double.
+    /// What this saves: two subscribed displays receiving the same state frame
+    /// ask for the same cover at the same instant, and used to decode then
+    /// re-encode the same image twice. On a Pi 2, that is one core busy for
+    /// several hundred milliseconds, in duplicate.
     ///
-    /// `tokio::sync::OnceCell::get_or_init` **est** le rendez-vous : le premier
-    /// arrivé exécute, les suivants attendent son résultat. La cellule est
-    /// derrière un `Arc` pour que les suiveurs la tiennent après avoir rendition le
-    /// verrou de la table — le verrou ne couvre jamais le travail, seulement
-    /// l'inscription.
+    /// `tokio::sync::OnceCell::get_or_init` **is** the rendezvous: the first
+    /// arrival executes, the followers wait for its result. The cell sits
+    /// behind an `Arc` so the followers can hold it after releasing the
+    /// table's lock — the lock never covers the work, only the registration.
     in_flight: tokio::sync::Mutex<HashMap<String, FrameInFlight>>,
-    /// Combien de builds de trame ont **réellement** été exécutées.
+    /// How many frame builds were **actually** executed.
     ///
-    /// Sous `cfg(test)`, et c'est le bon compromis. Le rendez-vous ne peut se
-    /// prouver que par un décompte d'exécutions : `Arc::ptr_eq` sur les trames
-    /// rendues montrerait qu'un `Arc` est partagé, ce qui est déjà vrai sans
-    /// aucun rendez-vous — chaque appelant reçoit son propre `Arc` sur sa propre
-    /// chaîne, et rien dans l'égalité des contenus ne dit combien de fois
-    /// l'image a été décodée. Or c'est *cela* qu'on économise.
+    /// Under `cfg(test)`, and that is the right compromise. The rendezvous can
+    /// only be proven by a count of executions: `Arc::ptr_eq` on the returned
+    /// frames would show that an `Arc` is shared, which is already true
+    /// without any rendezvous — each caller receives its own `Arc` over its
+    /// own string, and nothing in the equality of the contents says how many
+    /// times the image was decoded. Yet *that* is what we are saving.
     ///
-    /// Rien en service n'a besoin de ce nombre, donc il n'entre pas dans le
-    /// binaire livré : sur un Pi 2, un compteur atomique de plus n'est pas un
-    /// coût, mais un champ que personne ne read est une dette.
+    /// Nothing in service needs this number, so it does not enter the shipped
+    /// binary: on a Pi 2, one more atomic counter is not a cost, but a field
+    /// nobody reads is a debt.
     #[cfg(test)]
     builds: std::sync::atomic::AtomicUsize,
-    /// Les thumbnails déjà fabriquées pour la route HTTP, **clé du cache et
-    /// ETag réunis**.
+    /// The thumbnails already built for the HTTP route, **cache key and ETag
+    /// combined**.
     ///
-    /// Un cache, cette fois, et non un rendez-vous comme `in_flight` — la
-    /// différence tient entièrement à ce qui sert de clé. `line` ne pouvait
-    /// rien mémoriser parce que sa clé hache le *path* : l'utilisateur
-    /// remplace le `folder.jpg` sous ce path et rien n'invalide l'entrée. Ici
-    /// la clé porte en plus l'ETag, c'est-à-dire la date de modification et la
-    /// size du fichier (voir `file_etag`) — remplacer le fichier change
-    /// donc la clé, et l'ancienne thumbnail n'est plus jamais servie. Elle
-    /// s'évince ensuite d'elle-même, comme le reste.
+    /// A cache, this time, and not a rendezvous like `in_flight` — the
+    /// difference lies entirely in what serves as the key. `line` could not
+    /// memorize anything because its key hashes the *path*: the user replaces
+    /// the `folder.jpg` under that path and nothing invalidates the entry.
+    /// Here the key additionally carries the ETag, that is, the file's
+    /// modification date and size (see `file_etag`) — replacing the file
+    /// therefore changes the key, and the old thumbnail is never served again.
+    /// It then evicts itself on its own, like the rest.
     ///
-    /// Sans cela, chaque chargement de la page d'accueil redécoderait et
-    /// réencoderait l'image sur un Pi 2, alors que la thumbnail est justement ce
-    /// qu'on fabrique pour que le navigateur *n'ait pas* à télécharger trois
-    /// mégaoctets. Le navigateur revalide (`no-cache`), donc le cas courant est
-    /// un 304 sans rien fabriquer ; ce cache couvre le premier chargement de
-    /// chaque nouveau navigateur, et les onglets multiples d'un même appareil.
+    /// Without this, every load of the home page would re-decode and re-encode
+    /// the image on a Pi 2, when the thumbnail is precisely what we build so
+    /// the browser *does not* have to download three megabytes. The browser
+    /// revalidates (`no-cache`), so the common case is a 304 with nothing
+    /// built; this cache covers the first load of each new browser, and the
+    /// multiple tabs of a single device.
     thumbnails: RwLock<VecDeque<Thumbnail>>,
-    /// Combien de thumbnails ont **réellement** été décodées et réencodées.
+    /// How many thumbnails were **actually** decoded and re-encoded.
     ///
-    /// Sous `cfg(test)`, le même arbitrage que `builds` juste au-dessus
-    /// et pour la même raison : la seule preuve qu'un cache économise du
-    /// travail est un décompte d'exécutions. Comparer deux réponses ne dit
-    /// rien — deux fabrications successives rendent les mêmes bytes.
+    /// Under `cfg(test)`, the same trade-off as `builds` just above and for
+    /// the same reason: the only proof that a cache saves work is a count of
+    /// executions. Comparing two responses says nothing — two successive
+    /// builds return the same bytes.
     #[cfg(test)]
     thumbnails_built: std::sync::atomic::AtomicUsize,
 }
 
-/// Une thumbnail retenue : son identité (clé du cache **plus** ETag de la
-/// source), son type MIME, et ses bytes.
+/// A retained thumbnail: its identity (cache key **plus** the source's ETag),
+/// its MIME type, and its bytes.
 ///
-/// Un type nommé plutôt qu'un triplet : le premier champ est le seul qui puisse
-/// se confondre avec un autre `String`, et il porte justement la propriété qui
-/// rend ce cache sûr — voir le champ `thumbnails`.
+/// A named type rather than a triple: the first field is the only one that
+/// could be confused with another `String`, and it carries precisely the
+/// property that makes this cache safe — see the `thumbnails` field.
 struct Thumbnail {
     identity: String,
     mime: &'static str,
     bytes: Arc<Vec<u8>>,
 }
 
-/// Nombre de thumbnails HTTP retenues. Le même compte que `ENTREES` : au-delà de
-/// la cover courante et de quelques précédentes, personne ne redemande.
+/// Number of HTTP thumbnails retained. The same count as the cover cache
+/// entries setting: beyond the current cover and a few previous ones, nobody
+/// asks again.
 const THUMBNAILS: usize = 4;
 
 impl CoverCache {
@@ -327,7 +322,7 @@ impl CoverCache {
         Self::default()
     }
 
-    /// La thumbnail déjà fabriquée pour cette identité, s'il y en a une.
+    /// The thumbnail already built for this identity, if there is one.
     async fn cached_thumbnail(&self, identity: &str) -> Option<(&'static str, Arc<Vec<u8>>)> {
         self.thumbnails
             .read()
@@ -337,8 +332,8 @@ impl CoverCache {
             .map(|v| (v.mime, v.bytes.clone()))
     }
 
-    /// Retient une thumbnail sous son identité (clé + ETag), en évinçant la plus
-    /// ancienne au-delà de `THUMBNAILS`.
+    /// Retains a thumbnail under its identity (key + ETag), evicting the
+    /// oldest beyond `THUMBNAILS`.
     async fn remember_thumbnail(&self, identity: String, mime: &'static str, bytes: Arc<Vec<u8>>) {
         let mut v = self.thumbnails.write().await;
         v.retain(|e| e.identity != identity);
@@ -348,59 +343,59 @@ impl CoverCache {
         }
     }
 
-    /// Fabrique — ou retrouve — la thumbnail de `key`, sous l'identité
-    /// `identity` (la clé du cache **plus** l'ETag de la source, voir le champ
-    /// `thumbnails`).
+    /// Builds — or retrieves — the thumbnail of `key`, under the identity
+    /// `identity` (the cache key **plus** the source's ETag, see the
+    /// `thumbnails` field).
     ///
-    /// `None` veut dire « pas de thumbnail à serve » sans distinguer les cas :
-    /// réencodage désactivé par l'utilisateur, image illisible, dimensions
-    /// au-delà du cap. L'appelant retombe alors sur l'original, qui est la
-    /// réponse qu'il aurait donnée sans cette route.
+    /// `None` means "no thumbnail to serve" without distinguishing the cases:
+    /// re-encoding disabled by the user, unreadable image, dimensions beyond
+    /// the cap. The caller then falls back to the original, which is the
+    /// answer it would have given without this route.
     async fn thumbnail(&self, key: &str, identity: &str) -> Option<(&'static str, Arc<Vec<u8>>)> {
-        if let Some(trouvee) = self.cached_thumbnail(identity).await {
-            return Some(trouvee);
+        if let Some(found) = self.cached_thumbnail(identity).await {
+            return Some(found);
         }
-        // Une seule playback des réglages pour les deux étages, comme `line` :
-        // deux lectures pourraient encadrer un changement et produire une
-        // thumbnail selon des règles qui n'ont jamais coexisté.
+        // A single read of the settings for the two stages, like `line`: two
+        // reads could straddle a change and produce a thumbnail under rules
+        // that never coexisted.
         let settings = self.settings();
-        let rendu_voulu = settings.rendition?;
+        let wanted_rendition = settings.rendition?;
         let (mime, bytes) = self.bytes(key, settings.source_max).await?;
         #[cfg(test)]
         self.thumbnails_built.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let (mime, bytes) = rendition(mime, bytes, rendu_voulu).await?;
+        let (mime, bytes) = rendition(mime, bytes, wanted_rendition).await?;
         let bytes = Arc::new(bytes);
         self.remember_thumbnail(identity.to_string(), mime, bytes.clone()).await;
         Some((mime, bytes))
     }
 
-    /// Combien de fois une trame a été construite depuis la création du cache.
+    /// How many times a frame was built since the cache was created.
     #[cfg(test)]
     pub(crate) fn builds(&self) -> usize {
         self.builds.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Combien de thumbnails ont été fabriquées depuis la création du cache.
+    /// How many thumbnails were built since the cache was created.
     #[cfg(test)]
     pub(crate) fn thumbnails_built(&self) -> usize {
         self.thumbnails_built.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Publie de nouveaux réglages. Prise en compte à la publication suivante :
-    /// rien n'est mémorisé, donc il n'y a rien à invalider.
+    /// Publishes new settings. Taken into account at the next publication:
+    /// nothing is memorized, so there is nothing to invalidate.
     pub fn set_cover_settings(&self, r: CoverSettings) {
-        // Un verrou empoisonné voudrait dire qu'un porteur a paniqué en tenant
-        // trente bytes `Copy` — impossible sans un défaut ailleurs. Écraser
-        // plutôt que propager : des réglages perdus dégraderaient la publication
-        // suivante en silence, là où l'empoisonnement, lui, se voit au journal
-        // de la panique d'origine.
+        // A poisoned lock would mean a holder panicked while holding thirty
+        // `Copy` bytes — impossible without a defect elsewhere. Overwrite
+        // rather than propagate: lost settings would silently degrade the next
+        // publication, whereas the poisoning, for its part, shows up in the
+        // log of the original panic.
         match self.settings.write() {
             Ok(mut g) => *g = r,
             Err(e) => *e.into_inner() = r,
         }
     }
 
-    /// Copie des réglages courants, verrou rendition immédiatement.
+    /// Copy of the current settings, lock released immediately.
     fn settings(&self) -> CoverSettings {
         match self.settings.read() {
             Ok(g) => *g,
@@ -412,17 +407,17 @@ impl CoverCache {
         let mut e = self.entries.write().await;
         e.retain(|(k, _)| k != &key);
         e.push_back((key, p));
-        // Relu à chaque insertion : abaisser le réglage doit reprendre la
-        // mémoire au prochain track, pas au prochain redémarrage.
+        // Re-read at every insertion: lowering the setting must reclaim the
+        // memory at the next track, not at the next restart.
         let cap = self.settings().entries.max(1);
         while e.len() > cap {
-            let Some((_, evincee)) = e.pop_front() else { break };
-            // Borne l'accumulation **pendant** la vie du processus, pas
-            // seulement au démarrage (voir `purge_temp_files`) : une session
-            // qui tourne des mois et parcourt une grande bibliothèque ne doit
-            // pas laisser un fichier par piste distincte jamais rejouée. Ne
-            // touche jamais un `folder.jpg` de Source, qui n'est pas à nous.
-            if let CoverPayload::File(path) = &evincee {
+            let Some((_, evicted)) = e.pop_front() else { break };
+            // Bounds the accumulation **during** the process's lifetime, not
+            // only at startup (see `purge_temp_files`): a session that runs
+            // for months and walks a large library must not leave one file per
+            // distinct track never replayed. Never touches a Source's
+            // `folder.jpg`, which is not ours.
+            if let CoverPayload::File(path) = &evicted {
                 if is_cover_temp(path) {
                     if let Err(err) = tokio::fs::remove_file(path).await {
                         tracing::debug!("purging evicted cover file {}: {err}", path.display());
@@ -440,46 +435,45 @@ impl CoverCache {
         self.entries.read().await.iter().find(|(k, _)| k == key).map(|(_, p)| p.clone())
     }
 
-    /// Matérialise les bytes d'une cover : `(mime, bytes)`.
+    /// Materializes the bytes of a cover: `(mime, bytes)`.
     ///
-    /// **Ce que la route HTTP évite justement de faire.** Elle, pour un fichier
-    /// local, ouvre, vérifie l'en-tête et *diffuse en stream* sans jamais tenir
-    /// l'image entière. Pousser sur un socket n'en laisse pas le choix, d'où
-    /// cette méthode — et d'où le cap, qui n'existait pas côté local (voir
-    /// `COVER_MAX_BYTES` et la doc de `fetch`).
+    /// **Precisely what the HTTP route avoids doing.** That one, for a local
+    /// file, opens, checks the header and *streams* without ever holding the
+    /// whole image. Pushing onto a socket leaves no such choice, hence this
+    /// method — and hence the cap, which did not exist on the local side (see
+    /// `COVER_MAX_BYTES` and the doc of `fetch`).
     ///
-    /// `None` couvre indistinctement : clé inconnue, fichier disparu ou
-    /// illisible, partage qui ne répond pas, contenu qui n'est plus une image,
-    /// et **size au-delà du cap**. L'appelant n'a rien à en distinguer :
-    /// dans tous les cas l'afficheur n'a pas d'image, comme il n'en a pas quand
-    /// la récupération échoue.
-    /// Le cap est **passé par l'appelant** plutôt que relu ici, pour que
-    /// `line` ne lise les réglages qu'une seule fois : deux lectures pourraient
-    /// encadrer un changement, et produire une thumbnail selon des règles qui
-    /// n'ont jamais coexisté.
+    /// `None` covers indistinctly: unknown key, file vanished or unreadable,
+    /// share not answering, content that is no longer an image, and **size
+    /// beyond the cap**. The caller has nothing to distinguish among them: in
+    /// every case the display has no image, just as it has none when the fetch
+    /// fails.
+    /// The cap is **passed by the caller** rather than re-read here, so that
+    /// `line` reads the settings only once: two reads could straddle a change,
+    /// and produce a thumbnail under rules that never coexisted.
     async fn bytes(&self, key: &str, cap: usize) -> Option<(&'static str, Vec<u8>)> {
-        // Le verrou est rendition **avant** toute IO. Une cover locale vit
-        // couramment sur un partage endormi : tenir le verrou de playback
-        // pendant `FILE_TIMEOUT` bloquerait les insertions du cache, donc la
-        // tâche détachée de `Core::start_cover_fetch`, pour une image.
+        // The lock is released **before** any IO. A local cover commonly lives
+        // on a sleeping share: holding the read lock during `FILE_TIMEOUT`
+        // would block the cache's insertions, hence the detached task of
+        // `Core::start_cover_fetch`, for one image.
         //
-        // La branche `Bytes` répond sous le verrou plutôt que de passer par
-        // `read` : celui-ci clone la `CoverPayload` entière, ce qui ferait deux
-        // copies des bytes au lieu d'une.
+        // The `Bytes` branch answers under the lock rather than going through
+        // `read`: that one clones the whole `CoverPayload`, which would make
+        // two copies of the bytes instead of one.
         let path = {
             let e = self.entries.read().await;
             match e.iter().find(|(k, _)| k == key).map(|(_, p)| p) {
                 None => return None,
-                // Déjà en mémoire, et déjà borné par construction : ces
-                // bytes viennent d'un corps HTTP que `download` a coupé à
+                // Already in memory, and already bounded by construction:
+                // these bytes come from an HTTP body that `download` cut at
                 // `NETWORK_CAP`.
                 //
-                // Le cap réglable est vérifié quand même : il peut être
-                // descendu **sous** `NETWORK_CAP`, et alors la bounded de
-                // construction ne dit plus rien. Sans ce contrôle, le réglage
-                // ne vaudrait que pour les fichiers locaux — vrai aujourd'hui
-                // par la seule coïncidence des deux valeurs, et faux dès qu'on
-                // y touche.
+                // The configurable cap is checked anyway: it can be lowered
+                // **below** `NETWORK_CAP`, and then the construction-time
+                // bound no longer says anything. Without this check, the
+                // setting would only apply to local files — true today by the
+                // mere coincidence of the two values, and false as soon as one
+                // of them is touched.
                 Some(CoverPayload::Bytes(v, mime)) => {
                     if v.len() > cap {
                         tracing::warn!(
@@ -496,75 +490,75 @@ impl CoverCache {
         read_file_bounded(&path, cap).await
     }
 
-    /// Construit la line de protocol `DisplayFrame::Cover` pour `key`/`href` :
-    /// le JSON complet, base64 compris, terminé par un saut de line, prêt à
-    /// être écrit tel quel sur un socket.
+    /// Builds the `DisplayFrame::Cover` protocol line for `key`/`href`: the
+    /// complete JSON, base64 included, terminated by a newline, ready to be
+    /// written as is onto a socket.
     ///
-    /// **Construite à chaque appel, jamais mémorisée, et c'est la propriété qui
-    /// compte.** Une line encodée retenue d'un appel sur l'autre a été essayée
-    /// ici, puis retirée : la clé du cache hache le *path*, pas le contenu, si
-    /// bien qu'une line gardée devenait fausse dès que l'utilisateur remplaçait
-    /// l'image sous ce path. Et le geste qui y menait tient en trois clics —
-    /// désactiver l'afficheur depuis la page d'admin, remplacer le `folder.jpg`,
-    /// le réactiver : le relais rebranché repart avec sa garde de déduplication
-    /// à zéro (`main::display_relay`, `CoverTracking`), redemande la
-    /// cover courante, et recevait la line d'avant. Rien ne l'invalidait
-    /// parce que rien ne *pouvait* l'invalider : remplacer un fichier sur un
-    /// partage ne passe par aucun code à nous. Une image visiblement fausse est
-    /// le pire des défauts de cet appareil, très au-dessus d'un pic mémoire.
+    /// **Built at every call, never memorized, and that is the property that
+    /// matters.** An encoded line kept from one call to the next was tried
+    /// here, then removed: the cache key hashes the *path*, not the content,
+    /// so a kept line became wrong as soon as the user replaced the image
+    /// under that path. And the gesture leading there takes three clicks —
+    /// disable the display from the admin page, replace the `folder.jpg`,
+    /// re-enable it: the reconnected relay starts over with its deduplication
+    /// guard at zero (`main::display_relay`, `CoverTracking`), asks for the
+    /// current cover again, and used to receive the line from before. Nothing
+    /// invalidated it because nothing *could* invalidate it: replacing a file
+    /// on a share goes through no code of ours. A visibly wrong image is the
+    /// worst defect of this device, far above a memory spike.
     ///
-    /// **Le partage reste souhaitable, mais structurel plutôt que mémorisé.**
-    /// L'économie visée — payer une fois par *publication* la matérialisation
-    /// des bytes et leur base64, jusqu'à `COVER_MAX_BYTES`, plutôt qu'une fois
-    /// par relais abonné — s'obtient en construisant la line **au moment de la
-    /// publication** et en donnant le même `Arc` à chaque relais. C'est une
-    /// refonte à part entière : la construction read un fichier, elle ne peut
-    /// donc pas s'installer sur la boucle principale du cœur. Et il n'y avait
-    /// rien à gagner à l'anticiper par un memo, parce qu'en service il n'avait
-    /// **aucun** appelant second à serve : `wants_covers` est faux par défaut,
-    /// un seul greffon le redéfinit, et `display_relay` n'appelle cette
-    /// fonction qu'une fois par changement de `cover_href`. Le greffon MPD ne
-    /// repasse pas non plus par ici pour serve ses tranches de 8 Kio — il garde
-    /// sa propre copie de la trame reçue.
+    /// **Sharing remains desirable, but structural rather than memorized.**
+    /// The intended saving — paying once per *publication* for the
+    /// materialization of the bytes and their base64, up to
+    /// `COVER_MAX_BYTES`, rather than once per subscribed relay — is obtained
+    /// by building the line **at publication time** and handing the same
+    /// `Arc` to each relay. That is a full-blown rework: the construction
+    /// reads a file, so it cannot settle on the core's main loop. And there
+    /// was nothing to gain from anticipating it with a memo, because in
+    /// service it had **no** second caller to serve: `wants_covers` is false
+    /// by default, a single plugin overrides it, and `display_relay` only
+    /// calls this function once per `cover_href` change. The MPD plugin does
+    /// not come back through here either to serve its 8 KiB slices — it keeps
+    /// its own copy of the received frame.
     ///
-    /// **Jamais d'`Arc` dans un type sérialisé** : ce qui voyage derrière l'`Arc`
-    /// rendition est la line de texte déjà produite par `serde_json`, pas une valeur
-    /// `ritornello_proto::Cover` — ce type-là reste un type de fil ordinaire,
-    /// sans partage à exprimer. L'`Arc` sert à `DisplayClient::send_cover_line`,
-    /// qui écrit ces bytes tels quels plutôt que de recopier et réencoder.
+    /// **Never an `Arc` inside a serialized type**: what travels behind the
+    /// returned `Arc` is the line of text already produced by `serde_json`,
+    /// not a `ritornello_proto::Cover` value — that type remains an ordinary
+    /// wire type, with no sharing to express. The `Arc` serves
+    /// `DisplayClient::send_cover_line`, which writes these bytes as they are
+    /// rather than copying and re-encoding.
     ///
-    /// `None` couvre les mêmes cas que `bytes` : rien à pousser.
+    /// `None` covers the same cases as `bytes`: nothing to push.
     pub async fn line(&self, key: &str, href: &str) -> Option<Arc<str>> {
-        // Inscription au rendez-vous. Le verrou de la table ne couvre que
-        // l'inscription elle-même — jamais la construction, qui read un fichier
-        // et occupe un cœur. Le tenir pendant le travail sérialiserait des clés
-        // *différentes*, ce qui est le contraire du but.
-        let cellule = {
+        // Registration at the rendezvous. The table's lock only covers the
+        // registration itself — never the construction, which reads a file and
+        // occupies a core. Holding it during the work would serialize
+        // *different* keys, which is the opposite of the goal.
+        let cell = {
             let mut in_flight = self.in_flight.lock().await;
             in_flight.entry(key.to_string()).or_insert_with(FrameInFlight::default).clone()
         };
 
-        // `href` n'a pas besoin d'être comparé entre appelants : `key` en est
-        // dérivée (`display_relay` la tire de `href` par
-        // `strip_prefix(HREF_PREFIX)`), donc deux appelants de même clé
-        // portent la même chaîne. Un suiveur reçoit bien la trame du premier
-        // arrivé, et elle décrit la même image sous le même name.
-        let resultat = cellule
+        // `href` does not need to be compared between callers: `key` is
+        // derived from it (`display_relay` extracts it from `href` via
+        // `strip_prefix(HREF_PREFIX)`), so two callers with the same key carry
+        // the same string. A follower does receive the frame of the first
+        // arrival, and it describes the same image under the same name.
+        let result = cell
             .get_or_init(|| async {
                 #[cfg(test)]
                 self.builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                // Une seule playback des réglages pour les deux étages : voir
-                // `octets_bornes`. Deux lectures pourraient encadrer un
-                // changement, et produire une thumbnail selon des règles qui
-                // n'ont jamais coexisté.
+                // A single read of the settings for the two stages: see
+                // `bytes`. Two reads could straddle a change, and produce a
+                // thumbnail under rules that never coexisted.
                 let settings = self.settings();
                 let (mime, bytes) = self.bytes(key, settings.source_max).await?;
-                // Le rendition s'applique **ici et pas dans `bytes`**, donc sur le
-                // seul path de poussée. La route HTTP `cover_get`, elle,
-                // diffuse le fichier local en stream sans jamais le tenir en
-                // entier : lui imposer un réencodage lui ferait perdre
-                // exactement la propriété qui la rend économique, pour une image
-                // que le navigateur redimensionne et met en cache de son côté.
+                // The rendition applies **here and not in `bytes`**, so on the
+                // push path only. The HTTP route `cover_get`, for its part,
+                // streams the local file without ever holding it whole:
+                // forcing a re-encode on it would make it lose exactly the
+                // property that makes it cheap, for an image the browser
+                // resizes and caches on its side.
                 let (mime, bytes) = match settings.rendition {
                     None => (mime, bytes),
                     Some(r) => rendition(mime, bytes, r).await?,
@@ -582,108 +576,108 @@ impl CoverCache {
             .await
             .clone();
 
-        // **Le retrait est ce qui empêche le rendez-vous de devenir un cache.**
-        // Une `OnceCell` garde sa valeur pour toujours ; laissée dans la table,
-        // elle servirait la même thumbnail à un appelant survenu une heure plus
-        // tard, alors que le fichier a pu changer sous son path.
+        // **The removal is what keeps the rendezvous from becoming a cache.**
+        // A `OnceCell` keeps its value forever; left in the table, it would
+        // serve the same thumbnail to a caller showing up one hour later, when
+        // the file may have changed under its path.
         //
-        // Tous les appelants tentent le retrait, pas seulement le premier
-        // arrivé : si celui-là est abandonné en cours (sa tâche annulée), un
-        // suiveur reprend l'initialisation, et personne d'autre ne serait là
-        // pour nettoyer.
+        // All callers attempt the removal, not just the first arrival: if that
+        // one is abandoned midway (its task cancelled), a follower takes over
+        // the initialization, and nobody else would be there to clean up.
         //
-        // L'identité est vérifiée avant de retirer : entre la fin du travail et
-        // ce verrou, un appelant plus récent a pu inscrire une cellule **neuve**
-        // sous la même clé. La retirer lui ferait perdre son rendez-vous — pas
-        // un défaut de justesse, mais exactement l'économie qu'on installe ici.
+        // The identity is checked before removing: between the end of the work
+        // and this lock, a more recent caller may have registered a **fresh**
+        // cell under the same key. Removing it would make that caller lose its
+        // rendezvous — not a correctness defect, but exactly the saving we are
+        // installing here.
         {
             let mut in_flight = self.in_flight.lock().await;
-            if in_flight.get(key).is_some_and(|c| Arc::ptr_eq(c, &cellule)) {
+            if in_flight.get(key).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
                 in_flight.remove(key);
             }
         }
-        resultat
+        result
     }
 }
 
-/// Réencode une cover en thumbnail, ou rend les bytes d'origine quand il n'y
-/// a rien à gagner.
+/// Re-encodes a cover into a thumbnail, or returns the original bytes when
+/// there is nothing to gain.
 ///
-/// Quatre étapes, dans cet order, et l'order **est** la protection :
+/// Four steps, in this order, and the order **is** the protection:
 ///
-/// 1. **Les dimensions sont lues dans l'en-tête**, sans décoder. Quelques
-///    dizaines d'bytes suffisent, et rien n'est alloué à la size de l'image.
-/// 2. **La garde anti-bombe** compare le nombre de pixels au cap. C'est la
-///    seule bounded qui protège vraiment : la size du fichier ne dit *rien* du
-///    coût du décodage — un PNG de 200 Kio peut annoncer 30000 × 30000 pixels,
-///    soit 3,6 Gio de buffer, et `source_max` le laisse passer sans broncher.
-/// 3. **Le passe-droit** : une image déjà petite en pixels *et* en bytes part
-///    telle quelle, sans décodage ni réencodage. Une cover de 300 × 300 tirée
-///    d'un fichier n'a rien à gagner d'un aller-retour qui la dégraderait.
-/// 4. **Le décodage et l'encodage**, sur un fil bloquant.
+/// 1. **The dimensions are read from the header**, without decoding. A few
+///    dozen bytes suffice, and nothing is allocated at the image's size.
+/// 2. **The bomb guard** compares the pixel count against the cap. It is the
+///    only bound that truly protects: the file size says *nothing* about the
+///    decoding cost — a 200 KiB PNG can announce 30000 × 30000 pixels, that
+///    is a 3.6 GiB buffer, and `source_max` lets it through without blinking.
+/// 3. **The pass-through**: an image already small in pixels *and* in bytes
+///    leaves as it is, without decoding or re-encoding. A 300 × 300 cover
+///    pulled from a file has nothing to gain from a round trip that would
+///    degrade it.
+/// 4. **The decoding and encoding**, on a blocking thread.
 ///
-/// Inverser 2 et 1 serait absurde ; inverser 3 et 2 serait dangereux — une
-/// image de 30000 × 30000 pesant 200 Kio passerait le passe-droit sur son poids
-/// alors qu'elle est précisément la bombe qu'on cherche à refuser. Le
-/// passe-droit teste donc les **deux** critères, et vient après la garde.
+/// Swapping 2 and 1 would be absurd; swapping 3 and 2 would be dangerous —
+/// a 30000 × 30000 image weighing 200 KiB would pass the pass-through on its
+/// weight when it is precisely the bomb we are trying to refuse. The
+/// pass-through therefore tests **both** criteria, and comes after the guard.
 ///
-/// **Rien n'est mémorisé**, et c'est cohérent avec `line` : la clé du cache
-/// hache le path, pas le contenu, donc une thumbnail gardée deviendrait fausse
-/// dès que l'utilisateur remplace l'image sous ce path. Le prix est un
-/// décodage par publication, et `line` n'est appelée qu'une fois par changement
-/// de cover et par relais abonné.
+/// **Nothing is memorized**, and this is consistent with `line`: the cache
+/// key hashes the path, not the content, so a kept thumbnail would become
+/// wrong as soon as the user replaces the image under that path. The price is
+/// one decode per publication, and `line` is only called once per cover
+/// change and per subscribed relay.
 ///
-/// `None` = rien à pousser, comme partout dans ce module : image illisible,
-/// dimensions au-delà du cap, ou thumbnail produite au-delà du filet.
+/// `None` = nothing to push, as everywhere in this module: unreadable image,
+/// dimensions beyond the cap, or produced thumbnail beyond the safety net.
 async fn rendition(
     mime: &'static str,
     bytes: Vec<u8>,
     r: Rendition,
 ) -> Option<(&'static str, Vec<u8>)> {
-    let (largeur, hauteur) = dimensions(&bytes)?;
-    let pixels = u64::from(largeur) * u64::from(hauteur);
+    let (width, height) = dimensions(&bytes)?;
+    let pixels = u64::from(width) * u64::from(height);
     if pixels > r.pixel_cap {
         tracing::warn!(
-            "cover not pushed: {largeur}x{hauteur} is {pixels} pixels, over the {} allowed \
+            "cover not pushed: {width}x{height} is {pixels} pixels, over the {} allowed \
              (decoding it would need about {} MiB)",
             r.pixel_cap,
             pixels * 4 / (1024 * 1024)
         );
         return None;
     }
-    if largeur.max(hauteur) <= r.max_edge_px && bytes.len() <= r.output_cap {
-        tracing::debug!("cover already small ({largeur}x{hauteur}, {} bytes), pushed as it is", bytes.len());
+    if width.max(height) <= r.max_edge_px && bytes.len() <= r.output_cap {
+        tracing::debug!("cover already small ({width}x{height}, {} bytes), pushed as it is", bytes.len());
         return Some((mime, bytes));
     }
 
-    // `spawn_blocking` : décoder puis réencoder une image de plusieurs
-    // mégapixels occupe un cœur pendant des centaines de millisecondes sur un
-    // Pi 2. Le faire sur un fil de l'ordonnanceur figerait la boucle du cœur —
-    // donc l'horloge de position, les commands de la télécommande et les
-    // requêtes HTTP — le temps d'une cover.
+    // `spawn_blocking`: decoding then re-encoding a multi-megapixel image
+    // occupies a core for hundreds of milliseconds on a Pi 2. Doing it on a
+    // scheduler thread would freeze the core's loop — hence the position
+    // clock, the remote-control commands and the HTTP requests — for the
+    // duration of one cover.
     //
-    // Cette tâche n'est **pas annulable** : abandonner la future ici ne
-    // l'arrête pas, elle ira jusqu'au bout et son résultat sera jeté. C'est
-    // acceptable précisément grâce à la garde de l'étape 2, qui bounded ce
-    // qu'elle peut coûter avant de la lancer.
-    let plafond_alloc = (r.pixel_cap as usize).saturating_mul(4);
-    let travail = tokio::task::spawn_blocking(move || encode(bytes, r, plafond_alloc)).await;
-    let (mime, sortie) = match travail {
+    // This task is **not cancellable**: dropping the future here does not stop
+    // it, it will run to completion and its result will be thrown away. That
+    // is acceptable precisely thanks to the guard of step 2, which bounds what
+    // it can cost before launching it.
+    let alloc_cap = (r.pixel_cap as usize).saturating_mul(4);
+    let work = tokio::task::spawn_blocking(move || encode(bytes, r, alloc_cap)).await;
+    let (mime, output) = match work {
         Ok(Some(v)) => v,
         Ok(None) => return None,
         Err(e) => {
-            // Une panique du décodeur sur une entrée venue du réseau : refusée
-            // comme le reste, mais journalisée en `warn` — c'est un défaut de la
-            // bibliothèque ou une entrée qui l'a mise en défaut, pas un cas
-            // d'usage.
+            // A decoder panic on an input coming from the network: refused
+            // like the rest, but logged at `warn` — it is a defect of the
+            // library or an input that broke it, not a use case.
             tracing::warn!("cover rendition panicked: {e}");
             return None;
         }
     };
-    if sortie.len() > r.output_cap {
+    if output.len() > r.output_cap {
         tracing::warn!(
             "cover not pushed: rendered to {} bytes, over the {}-byte net",
-            sortie.len(),
+            output.len(),
             r.output_cap
         );
         return None;
@@ -691,20 +685,20 @@ async fn rendition(
     tracing::debug!(
         "cover rendered: {} bytes in, {} bytes out ({mime})",
         pixels * 4,
-        sortie.len()
+        output.len()
     );
-    Some((mime, sortie))
+    Some((mime, output))
 }
 
-/// Dimensions annoncées par l'en-tête, sans décoder l'image.
+/// Dimensions announced by the header, without decoding the image.
 ///
-/// Séparée pour être testable seule : c'est la valeur dont dépend la garde
-/// anti-bombe, et une garde qui read mal ses dimensions ne garde rien.
+/// Split out to be testable on its own: it is the value the bomb guard
+/// depends on, and a guard that misreads its dimensions guards nothing.
 fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    let player = image::ImageReader::new(std::io::Cursor::new(bytes))
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
-    match player.into_dimensions() {
+    match reader.into_dimensions() {
         Ok(d) => Some(d),
         Err(e) => {
             tracing::debug!("cover header unreadable: {e}");
@@ -713,21 +707,21 @@ fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
-/// Le décodage et l'encodage eux-mêmes. **Bloquant** : appelé sous
+/// The decoding and encoding themselves. **Blocking**: called under
 /// `spawn_blocking`.
-fn encode(bytes: Vec<u8>, r: Rendition, plafond_alloc: usize) -> Option<(&'static str, Vec<u8>)> {
-    let mut player = image::ImageReader::new(std::io::Cursor::new(&bytes))
+fn encode(bytes: Vec<u8>, r: Rendition, alloc_cap: usize) -> Option<(&'static str, Vec<u8>)> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(&bytes))
         .with_guessed_format()
         .ok()?;
-    // La ceinture après les bretelles : la garde de `rendition` a déjà refusé les
-    // dimensions trop grandes, mais elle croit l'en-tête. `Limits` bounded
-    // l'allocation réelle du décodeur, donc couvre le cas d'un en-tête qui
-    // mentirait sur ses propres dimensions — le fichier fabriqué exprès, pas le
-    // fichier maladroit.
-    let mut limites = image::Limits::default();
-    limites.max_alloc = Some(plafond_alloc as u64);
-    player.limits(limites);
-    let image = match player.decode() {
+    // Belt after the braces: the guard in `rendition` has already refused
+    // oversized dimensions, but it believes the header. `Limits` bounds the
+    // decoder's actual allocation, so it covers the case of a header that
+    // would lie about its own dimensions — the file crafted on purpose, not
+    // the clumsy one.
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(alloc_cap as u64);
+    reader.limits(limits);
+    let image = match reader.decode() {
         Ok(i) => i,
         Err(e) => {
             tracing::debug!("cover undecodable: {e}");
@@ -735,100 +729,99 @@ fn encode(bytes: Vec<u8>, r: Rendition, plafond_alloc: usize) -> Option<(&'stati
         }
     };
 
-    // `thumbnail` et non `resize` : à qualité d'échantillonnage comparable pour
-    // une réduction forte (chaque pixel source contribue à un pixel cible), il
-    // est nettement moins coûteux — et sur un Pi 2 c'est le facteur qui décide.
-    // Le rapport est conservé, l'image tient dans le carré demandé.
+    // `thumbnail` and not `resize`: at comparable sampling quality for a
+    // strong reduction (every source pixel contributes to a target pixel), it
+    // is markedly cheaper — and on a Pi 2 that is the deciding factor. The
+    // aspect ratio is kept, the image fits in the requested square.
     let thumbnail = image.thumbnail(r.max_edge_px, r.max_edge_px);
 
-    let mut sortie = Vec::new();
-    // PNG dès qu'il y a un canal alpha, sans perte. Aplatir la transparence
-    // demanderait de choisir une couleur de fond — un parti pris visuel que
-    // l'appareil n'a pas à prendre sur la cover de quelqu'un d'autre.
+    let mut output = Vec::new();
+    // PNG as soon as there is an alpha channel, lossless. Flattening the
+    // transparency would require choosing a background color — a visual
+    // stance the device has no business taking on somebody else's cover.
     if thumbnail.color().has_alpha() {
-        if let Err(e) = thumbnail.write_to(&mut std::io::Cursor::new(&mut sortie), image::ImageFormat::Png) {
+        if let Err(e) = thumbnail.write_to(&mut std::io::Cursor::new(&mut output), image::ImageFormat::Png) {
             tracing::warn!("cover PNG encoding failed: {e}");
             return None;
         }
-        return Some(("image/png", sortie));
+        return Some(("image/png", output));
     }
-    let mut encodeur =
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut sortie, r.jpeg_quality);
-    // `to_rgb8` : l'encodeur JPEG refuse un buffer à canal alpha, et une image
-    // en niveaux de gris ou en palette doit de toute façon être convertie.
-    if let Err(e) = encodeur.encode_image(&thumbnail.to_rgb8()) {
+    let mut encoder =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, r.jpeg_quality);
+    // `to_rgb8`: the JPEG encoder refuses a buffer with an alpha channel, and
+    // a grayscale or paletted image has to be converted anyway.
+    if let Err(e) = encoder.encode_image(&thumbnail.to_rgb8()) {
         tracing::warn!("cover JPEG encoding failed: {e}");
         return None;
     }
-    Some(("image/jpeg", sortie))
+    Some(("image/jpeg", output))
 }
 
-/// Ce que la playback bornée d'un fichier de cover rend, avant validation
-/// du type d'image.
+/// What the bounded read of a cover file returns, before the image type is
+/// validated.
 enum BoundedRead {
     Bytes(Vec<u8>),
-    /// La size du fichier, **connue par `metadata`, avant toute playback des
-    /// bytes eux-mêmes** : voir la doc de `read_file_bounded`.
+    /// The file's size, **known through `metadata`, before any read of the
+    /// bytes themselves**: see the doc of `read_file_bounded`.
     TooLarge(u64),
 }
 
-/// Lit un fichier de cover pour le pousser, borné et validé.
+/// Reads a cover file in order to push it, bounded and validated.
 ///
-/// **La validation d'en-tête est faite sur les bytes rendus eux-mêmes**, et
-/// non sur une première playback séparée. La route HTTP, elle, ne peut pas :
-/// elle doit vérifier puis diffuser, donc elle prend soin de garder le *même
-/// descripteur* entre les deux lectures — sans quoi un contributeur pourrait
-/// remplacer le contenu du partage entre la vérification et le service. Ici le
-/// contenu vérifié **est** le contenu rendition, un seul descripteur et une seule
-/// playback : la fenêtre n'existe pas du tout, plutôt que d'être fermée. La
-/// garantie n'est donc pas affaiblie mais renforcée.
+/// **The header validation is done on the returned bytes themselves**, not on
+/// a separate first read. The HTTP route, for its part, cannot: it must check
+/// then stream, so it takes care to keep the *same descriptor* between the two
+/// reads — otherwise a contributor could replace the share's content between
+/// the check and the serving. Here the checked content **is** the returned
+/// content, a single descriptor and a single read: the window does not exist
+/// at all, rather than being closed. The guarantee is therefore not weakened
+/// but strengthened.
 ///
-/// **La size est vérifiée avant toute playback des bytes**, sur `metadata`,
-/// et c'est délibéré : une size de fichier ne demande aucune connaissance du
-/// format — pas d'en-tête à interpréter, pas de décodeur, indifférente à un
-/// JPEG, un PNG, un WebP ou ce qui viendra ensuite. Un fichier du NAS
-/// démesuré (le PNG de 150 Mo que `cover_get` cite comme cas réel) est ainsi
-/// refusé sans qu'un seul octet de son contenu ne soit lu, plutôt que d'être
-/// découvert après une playback bornée à `COVER_MAX_BYTES + 1` bytes — un
-/// coût qui n'a de sens que si le fichier passe la bounded. `take` avant
-/// `read_to_end` reste en place ensuite, en filet : si le fichier grossit
-/// *entre* le `metadata` et la playback, la fenêtre TOCTOU rouverte ne laisse
-/// jamais read plus de `COVER_MAX_BYTES + 1` bytes.
+/// **The size is checked before any read of the bytes**, via `metadata`, and
+/// that is deliberate: a file size requires no knowledge of the format — no
+/// header to interpret, no decoder, indifferent to a JPEG, a PNG, a WebP or
+/// whatever comes next. An outsized file on the NAS (the 150 MB PNG that
+/// `cover_get` cites as a real case) is thus refused without a single byte of
+/// its content being read, rather than being discovered after a read bounded
+/// at `COVER_MAX_BYTES + 1` bytes — a cost that only makes sense if the file
+/// passes the bound. `take` before `read_to_end` stays in place afterwards, as
+/// a safety net: if the file grows *between* the `metadata` and the read, the
+/// reopened TOCTOU window never lets more than `COVER_MAX_BYTES + 1` bytes be
+/// read.
 ///
-/// Deux bornes de temps sous le même délai, et une de size avant tout :
+/// Two time bounds under the same timeout, and a size one before anything:
 ///
-/// * `metadata` puis, si la size passe, `COVER_MAX_BYTES + 1` bytes au plus
-///   sont lus (le filet TOCTOU ci-dessus).
-/// * `FILE_TIMEOUT`, comme partout où ce module touche un fichier : le
-///   partage peut être endormi, et l'attente doit être bornée par nous plutôt
-///   que par le noyau.
+/// * `metadata` then, if the size passes, at most `COVER_MAX_BYTES + 1` bytes
+///   are read (the TOCTOU net above).
+/// * `FILE_TIMEOUT`, as everywhere this module touches a file: the share may
+///   be asleep, and the wait must be bounded by us rather than by the kernel.
 async fn read_file_bounded(
     path: &std::path::Path,
     cap: usize,
 ) -> Option<(&'static str, Vec<u8>)> {
-    let playback = tokio::time::timeout(FILE_TIMEOUT, async {
-        let fichier = tokio::fs::File::open(path).await?;
-        let size = fichier.metadata().await?.len();
+    let read_attempt = tokio::time::timeout(FILE_TIMEOUT, async {
+        let file = tokio::fs::File::open(path).await?;
+        let size = file.metadata().await?.len();
         if size > cap as u64 {
             return Ok::<_, std::io::Error>(BoundedRead::TooLarge(size));
         }
         let mut bytes = Vec::new();
-        // `take` **avant** `read_to_end` : `read_to_end` seul lirait le
-        // fichier entier, et le contrôle de size arriverait après
-        // l'allocation qu'il est censé éviter. N'agit ici que sur la fenêtre
-        // TOCTOU (voir la doc au-dessus) : le cas courant a déjà été tranché
-        // par `metadata`.
-        fichier.take(cap as u64 + 1).read_to_end(&mut bytes).await?;
+        // `take` **before** `read_to_end`: `read_to_end` alone would read the
+        // whole file, and the size check would come after the very allocation
+        // it is supposed to avoid. Only acts here on the TOCTOU window (see
+        // the doc above): the common case has already been settled by
+        // `metadata`.
+        file.take(cap as u64 + 1).read_to_end(&mut bytes).await?;
         Ok(BoundedRead::Bytes(bytes))
     })
     .await;
-    let bytes = match playback {
+    let bytes = match read_attempt {
         Ok(Ok(BoundedRead::Bytes(v))) => v,
         Ok(Ok(BoundedRead::TooLarge(size))) => {
-            // La size exacte de l'offense, connue sans avoir rien lu de son
-            // contenu — c'est ce que la playback bornée à `+ 1` octet ne
-            // pourrait jamais journaliser : elle ne verrait jamais que
-            // `cap + 1`, quelle que soit la size réelle.
+            // The exact size of the offense, known without having read any of
+            // its content — which is what the read bounded at `+ 1` byte
+            // could never log: it would never see anything but `cap + 1`,
+            // whatever the actual size.
             tracing::warn!(
                 "cover file {} not read: {size} bytes over the {cap}-byte limit",
                 path.display()
@@ -855,9 +848,9 @@ async fn read_file_bounded(
     Some((mime, bytes))
 }
 
-/// Bytes d'en-tête d'une image reconnue. Vérifiés avant de serve un fichier
-/// local : sans cela, un contributeur mal écrit ferait serve n'importe quel
-/// fichier du système sur une route HTTP publique.
+/// Header bytes of a recognized image. Checked before serving a local file:
+/// without this, a badly written contributor could get any file of the system
+/// served on a public HTTP route.
 fn image_type(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
         Some("image/jpeg")
@@ -870,29 +863,28 @@ fn image_type(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// Nombre de sauts de redirection tolérés, la valeur par défaut de `reqwest`.
+/// Number of redirect hops tolerated, `reqwest`'s default value.
 ///
-/// Reprise explicitement : remplacer la politique par défaut par une
-/// politique personnalisée fait aussi perdre son cap, et une chaîne de
-/// redirections sans fin est un déni de service à un aller-retour de coût.
+/// Restated explicitly: replacing the default policy with a custom one also
+/// loses its cap, and an endless redirect chain is a denial of service at the
+/// cost of one round trip.
 const MAX_HOPS: usize = 10;
 
-/// Client HTTP partagé : le construire à chaque appel referait à chaque fois
-/// la configuration de `rustls` et le chargement du magasin de racines, ce
-/// que la documentation de `reqwest` demande justement d'éviter. La
-/// configuration est figée (pas de proxy, pas d'entrée utilisateur) : un
-/// échec de construction serait un défaut de l'environnement, pas une
-/// panne par requête, d'où l'`expect`.
+/// Shared HTTP client: building it at every call would redo the `rustls`
+/// configuration and the loading of the root store each time, which
+/// `reqwest`'s documentation asks precisely to avoid. The configuration is
+/// frozen (no proxy, no user input): a build failure would be a defect of the
+/// environment, not a per-request outage, hence the `expect`.
 ///
-/// **Les redirections sont suivies, mais chaque saut est revalidé.** La
-/// conception exige de les suivre (Radio France répond une 301 cross-host,
-/// mesurée), et la politique par défaut de `reqwest` les suivait sans rien
-/// vérifier : `allowed_target` ne s'appliquait qu'à l'URL de départ, donc
-/// l'hôte d'image — un tiers auquel la conception ne fait justement pas
-/// confiance, puisque le `coverUrl` d'OUI FM est écrit par autrui — n'avait
-/// qu'à répondre `302 http://192.168.1.1/…` pour faire émettre à l'appareil
-/// un GET sur son réseau local, changement de schéma compris. Un saut
-/// d'indirection annulait tout le garde-fou.
+/// **Redirects are followed, but every hop is revalidated.** The design
+/// requires following them (Radio France answers a cross-host 301, measured),
+/// and `reqwest`'s default policy followed them without checking anything:
+/// `allowed_target` only applied to the starting URL, so the image host — a
+/// third party the design precisely does not trust, since OUI FM's `coverUrl`
+/// is written by someone else — only had to answer
+/// `302 http://192.168.1.1/…` to make the device issue a GET on its local
+/// network, scheme change included. One hop of indirection cancelled the
+/// entire safeguard.
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -903,41 +895,41 @@ fn client() -> &'static reqwest::Client {
                 " (https://github.com/skerdudou/ritornello)"
             ))
             .timeout(std::time::Duration::from_secs(10))
-            .redirect(reqwest::redirect::Policy::custom(|saut| {
-                if saut.previous().len() >= MAX_HOPS {
-                    return saut.stop();
+            .redirect(reqwest::redirect::Policy::custom(|hop| {
+                if hop.previous().len() >= MAX_HOPS {
+                    return hop.stop();
                 }
-                if allowed_target(saut.url().as_str()) {
-                    saut.follow()
+                if allowed_target(hop.url().as_str()) {
+                    hop.follow()
                 } else {
                     tracing::debug!("cover redirect refused: target not allowed");
-                    saut.stop()
+                    hop.stop()
                 }
             }))
             .build()
-            .expect("configuration HTTP figée, ne doit jamais échouer")
+            .expect("frozen HTTP configuration, must never fail")
     })
 }
 
-/// La cible est-elle acceptable pour une requête sortante ?
+/// Is the target acceptable for an outgoing request?
 ///
-/// Le contrôle vit ici, et non dans `ritornello-proto`, pour deux raisons :
-/// c'est ici que la requête part, et rejouer à la main les règles d'analyse
-/// d'URL est une course perdue — un point final (`192.168.1.1.`) ou un
-/// libellé hexadécimal (`0x7f.0.0.1`) suffisent à faire passer une adresse
-/// littérale pour un name d'hôte devant le découpage de chaînes de
-/// `ritornello-proto`. `Url::domain()` s'appuie sur l'analyse WHATWG déjà
-/// faite par `reqwest` (ré-exportée, donc aucune dépendance de plus) : elle
-/// classe l'hôte en IPv4/IPv6 **après** normalisation, quelle qu'ait été sa
-/// graphie d'origine, et ne renvoie `Some` que pour un vrai name de domaine.
+/// The check lives here, and not in `ritornello-proto`, for two reasons: this
+/// is where the request leaves from, and replaying URL parsing rules by hand
+/// is a losing race — a trailing dot (`192.168.1.1.`) or a hexadecimal label
+/// (`0x7f.0.0.1`) is enough to make a literal address pass for a hostname in
+/// front of `ritornello-proto`'s string splitting. `Url::domain()` relies on
+/// the WHATWG parsing already done by `reqwest` (re-exported, so no extra
+/// dependency): it classifies the host as IPv4/IPv6 **after** normalization,
+/// whatever its original spelling, and only returns `Some` for a real domain
+/// name.
 ///
-/// `ritornello-proto` garde la forme (https, extension) ; ce module-ci garde
-/// la cible : c'est lui qui émet la requête, et c'est le SSE d'une source
-/// tierce (OUI FM, par exemple) qui peut fournir l'URL.
+/// `ritornello-proto` guards the form (https, extension); this module guards
+/// the target: it is the one issuing the request, and it is the SSE of a
+/// third-party source (OUI FM, for example) that can supply the URL.
 ///
-/// Appliquée à **chaque** cible atteinte, pas seulement à la première :
-/// `fetch` filtre l'URL de départ, la politique de redirection de
-/// `client()` filtre tous les sauts suivants.
+/// Applied to **every** target reached, not only the first: `fetch` filters
+/// the starting URL, the redirect policy of `client()` filters all subsequent
+/// hops.
 fn allowed_target(url: &str) -> bool {
     let Ok(u) = reqwest::Url::parse(url) else {
         return false;
@@ -946,26 +938,26 @@ fn allowed_target(url: &str) -> bool {
         return false;
     }
     match u.domain() {
-        // `None` couvre aussi bien l'absence d'hôte qu'une adresse IP
-        // littérale (v4 ou v6) : `domain()` ne renvoie `Some` que pour un
-        // name de domaine, jamais pour un `HostInternal::Ipv4`/`Ipv6`.
+        // `None` covers both the absence of a host and a literal IP address
+        // (v4 or v6): `domain()` only returns `Some` for a domain name, never
+        // for a `HostInternal::Ipv4`/`Ipv6`.
         Some(d) => d.contains('.'),
         None => false,
     }
 }
 
-/// Effectue la requête et applique les trois garde-fous réseau : le
-/// `Content-Type`, le cap appliqué en lisant par morceaux, et les bytes
-/// magiques du corps reçu. Séparée de `fetch` pour rester testable contre
-/// un serveur HTTP local (`127.0.0.1`) sans jamais passer par
-/// `allowed_target`, qui refuserait justement cette adresse.
+/// Performs the request and applies the three network safeguards: the
+/// `Content-Type`, the cap applied while reading chunk by chunk, and the magic
+/// bytes of the received body. Split from `fetch` to stay testable against a
+/// local HTTP server (`127.0.0.1`) without ever going through
+/// `allowed_target`, which would refuse precisely that address.
 async fn download(url: &str) -> Option<CoverPayload> {
-    let mut reponse = client().get(url).send().await.ok()?;
-    if !reponse.status().is_success() {
-        tracing::debug!("cover fetch returned {}", reponse.status());
+    let mut response = client().get(url).send().await.ok()?;
+    if !response.status().is_success() {
+        tracing::debug!("cover fetch returned {}", response.status());
         return None;
     }
-    let mime = reponse
+    let mime = response
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -975,63 +967,62 @@ async fn download(url: &str) -> Option<CoverPayload> {
         tracing::debug!("cover fetch refused: content-type {mime:?}");
         return None;
     }
-    // Plafond appliqué **en lisant par morceaux** : contrôler le
-    // `Content-Length` annoncé ne protège de rien, il est déclaratif.
+    // Cap applied **while reading chunk by chunk**: checking the announced
+    // `Content-Length` protects from nothing, it is declarative.
     let mut bytes = Vec::new();
-    while let Some(track) = reponse.chunk().await.ok()? {
-        if bytes.len() + track.len() > NETWORK_CAP {
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if bytes.len() + chunk.len() > NETWORK_CAP {
             tracing::debug!("cover fetch refused: over {NETWORK_CAP} bytes");
             return None;
         }
-        bytes.extend_from_slice(&track);
+        bytes.extend_from_slice(&chunk);
     }
     let mime = image_type(&bytes)?;
     Some(CoverPayload::Bytes(bytes, mime))
 }
 
-/// Délai accordé à un accès au fichier image lui-même — ouverture,
-/// `metadata`, premiers bytes.
+/// Timeout granted to an access to the image file itself — opening,
+/// `metadata`, first bytes.
 ///
-/// **Le même que celui de l'extraction embarquée** (`health::TIMEOUT`), et pour
-/// la même raison : ces deux chemins-ci touchent des fichiers qui vivent
-/// couramment sur un partage SMB endormi, et ce projet a déjà vécu la panne
-/// qu'une IO qui n'aboutit pas provoque. Aucune boucle d'événements n'est
-/// retenue ici — la récupération est détachée, la route HTTP est une tâche par
-/// requête — donc l'audio ne risque rien ; ce qui est borné, c'est l'attente
-/// elle-même, plutôt que de la laisser durer aussi longtemps que le noyau
-/// voudra.
+/// **The same as the one for embedded extraction** (`health::TIMEOUT`), and
+/// for the same reason: these two paths touch files that commonly live on a
+/// sleeping SMB share, and this project has already lived through the outage
+/// that an IO that never completes causes. No event loop is held here — the
+/// fetch is detached, the HTTP route is one task per request — so the audio
+/// risks nothing; what is bounded is the wait itself, rather than letting it
+/// last as long as the kernel pleases.
 ///
-/// Une bounded de temps et non `Health` : le disjoncteur prend une **fermeture
-/// bloquante** (`spawn_blocking`), là où ces deux chemins sont déjà
-/// asynchrones et, dans le cas de `cover_get`, doivent rendre un
-/// `tokio::fs::File` à diffuser en stream. L'y faire entrer demanderait de
-/// repasser en `std::fs` puis de reconvertir, et de câbler le disjoncteur
-/// jusque dans l'`AppState` HTTP — une refonte pour une propriété que la
-/// bounded donne déjà. Ce que `Health` apporterait en plus, et qu'on n'a donc
-/// pas ici, est la mémoire du montage muet : un fil du pool bloquant reste
-/// perdu par tentative, exactement ce que `health.rs` documente comme
-/// inévitable une fois le noyau parti.
+/// A time bound and not `Health`: the circuit breaker takes a **blocking
+/// closure** (`spawn_blocking`), whereas these two paths are already
+/// asynchronous and, in the case of `cover_get`, must return a
+/// `tokio::fs::File` to stream. Fitting them in would require going back to
+/// `std::fs` then converting again, and wiring the circuit breaker all the
+/// way into the HTTP `AppState` — a rework for a property the bound already
+/// gives. What `Health` would bring in addition, and that we therefore do not
+/// have here, is the memory of the mute mount: one thread of the blocking
+/// pool remains lost per attempt, exactly what `health.rs` documents as
+/// unavoidable once the kernel is gone.
 const FILE_TIMEOUT: std::time::Duration = crate::health::TIMEOUT;
 
-/// Va chercher la cover. `None` = échec, et l'échec est **silencieux** :
-/// l'appareil n'affiche simplement pas d'image.
+/// Goes and fetches the cover. `None` = failure, and the failure is
+/// **silent**: the device simply displays no image.
 pub async fn fetch(r: &CoverRef) -> Option<CoverPayload> {
     match r {
         CoverRef::Path { path } => {
             let path = PathBuf::from(path);
-            let a_lire = path.clone();
-            // Ouverture **et** première playback sous la même bounded : c'est
-            // l'ouverture qui bloque sur un partage endormi, mais un partage
-            // qui répond à l'`open` et plus au `read` est le cas d'une
-            // déconnexion en cours — les deux doivent être couverts.
-            let reconnu = tokio::time::timeout(FILE_TIMEOUT, async move {
-                let mut fichier = tokio::fs::File::open(&a_lire).await.ok()?;
-                let mut tete = [0u8; 12];
-                let lus = fichier.read(&mut tete).await.ok()?;
-                image_type(&tete[..lus])
+            let to_read = path.clone();
+            // Opening **and** first read under the same bound: it is the
+            // opening that blocks on a sleeping share, but a share that
+            // answers the `open` and no longer the `read` is the case of a
+            // disconnection in progress — both must be covered.
+            let recognized = tokio::time::timeout(FILE_TIMEOUT, async move {
+                let mut file = tokio::fs::File::open(&to_read).await.ok()?;
+                let mut head = [0u8; 12];
+                let n = file.read(&mut head).await.ok()?;
+                image_type(&head[..n])
             })
             .await;
-            match reconnu {
+            match recognized {
                 Ok(Some(_)) => {}
                 Ok(None) => return None,
                 Err(_) => {
@@ -1039,11 +1030,12 @@ pub async fn fetch(r: &CoverRef) -> Option<CoverPayload> {
                     return None;
                 }
             }
-            // Le cap ne s'applique pas au local : il protège d'un tiers sur
-            // le réseau, et un fichier du NAS est de confiance. Ses bytes
-            // d'en-tête ont été vérifiés, c'est ce qui compte. La route relira
-            // le fichier au moment de serve : entre les deux, le partage n'est
-            // plus sous le contrôle de l'appareil (voir `cover_get`).
+            // The cap does not apply to local files: it protects against a
+            // third party on the network, and a file on the NAS is trusted.
+            // Its header bytes have been checked, that is what matters. The
+            // route will re-read the file at serving time: between the two,
+            // the share is no longer under the device's control (see
+            // `cover_get`).
             Some(CoverPayload::File(path))
         }
         CoverRef::Url { url } => {
@@ -1056,83 +1048,83 @@ pub async fn fetch(r: &CoverRef) -> Option<CoverPayload> {
     }
 }
 
-/// ETag d'un fichier local : contrairement à la clé du cache — qui hache la
-/// **source** (le path), pas le contenu — ce fichier reste modifiable après
-/// coup sur son partage. L'ETag doit donc suivre le contenu, pas seulement le
-/// path, sans quoi une requête conditionnelle validerait indéfiniment une
-/// image que l'utilisateur a pourtant remplacée.
-fn file_etag(modifie: Option<std::time::SystemTime>, size: u64) -> String {
-    let nanos = modifie
+/// ETag of a local file: unlike the cache key — which hashes the **source**
+/// (the path), not the content — this file remains modifiable afterwards on
+/// its share. The ETag must therefore follow the content, not just the path,
+/// otherwise a conditional request would validate forever an image the user
+/// has in fact replaced.
+fn file_etag(modified: Option<std::time::SystemTime>, size: u64) -> String {
+    let nanos = modified
         .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("\"{nanos:x}-{size:x}\"")
 }
 
-/// Ce que la route sait serve.
+/// What the route knows how to serve.
 ///
-/// **Deux tailles et non une, parce que la page en a deux usages.** Le carré de
-/// la carte fait 224 px sur téléphone : y charger le `folder.jpg` de trois
-/// mégaoctets d'un NAS est du gaspillage pur, surtout en Wi-Fi. Mais la même
-/// image agrandie au clic (voir `PlayerCard.vue`) mérite, elle, tous ses
-/// pixels. La size est donc **demandée par l'appelant** plutôt que devinée
-/// ici.
+/// **Two sizes and not one, because the page has two uses for it.** The card's
+/// square is 224 px on a phone: loading the three-megabyte `folder.jpg` of a
+/// NAS into it is pure waste, especially over Wi-Fi. But the same image
+/// enlarged on click (see `PlayerCard.vue`) deserves, for its part, all its
+/// pixels. The size is therefore **requested by the caller** rather than
+/// guessed here.
 ///
-/// Pleine size par défaut, et c'est délibéré : le `cover_href` publié dans
-/// l'état désigne l'image telle qu'elle est, sans transformation, pour tout
-/// consommateur présent ou futur du protocol. La thumbnail est un service rendition
-/// à qui la demande, pas un changement de ce que l'URL nue veut dire.
-/// La chaîne de requête de `cover_get`.
+/// Full size by default, and that is deliberate: the `cover_href` published in
+/// the state designates the image as it is, without transformation, for any
+/// present or future consumer of the protocol. The thumbnail is a service
+/// rendered to whoever asks for it, not a change of what the bare URL means.
+/// The query string of `cover_get`.
 ///
-/// **Une chaîne libre et non une énumération sérialisée**, et c'est une
-/// correction : un `enum` faisait refuser la requête entière par l'extracteur
-/// `Query` — un `?size=nawak` rendait un 400, donc le repli ♫ sur la page,
-/// pour une simple faute de frappe dans une URL. Une valeur inconnue doit
-/// valoir le défaut, comme une valeur absente : la size est un service rendition
-/// à qui la demande, jamais une condition de service.
+/// **A free-form string and not a serialized enumeration**, and this is a
+/// fix: an `enum` made the extractor `Query` refuse the whole request — a
+/// `?size=nawak` returned a 400, hence the ♫ fallback on the page, for a mere
+/// typo in a URL. An unknown value must mean the default, like an absent
+/// value: the size is a service rendered to whoever asks for it, never a
+/// condition of service.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct CoverParams {
     #[serde(default)]
     size: Option<String>,
 }
 
-/// Le mot qui demande la réduction, tel que la page l'écrit dans son URL.
+/// The word that requests the reduction, as the page writes it in its URL.
 const THUMBNAIL_SIZE: &str = "thumbnail";
 
-/// `GET /api/cover/{clé}[?size=thumbnail]`. La clé est une empreinte de la
-/// **source**, donc son immuabilité ne dit rien du contenu : une cover
-/// réseau est bien figée sous sa clé (elle vient d'un corps déjà entièrement
-/// vérifié), mais un fichier local reste modifiable sur son partage après coup.
+/// `GET /api/cover/{key}[?size=thumbnail]`. The key is a fingerprint of the
+/// **source**, so its immutability says nothing about the content: a network
+/// cover is indeed frozen under its key (it comes from a body already fully
+/// checked), but a local file remains modifiable on its share afterwards.
 pub async fn cover_get(
     State(state): State<crate::status::AppState>,
     Path(key): Path<String>,
     axum::extract::Query(params): axum::extract::Query<CoverParams>,
     headers: HeaderMap,
 ) -> Response {
-    let vignette_demandee = params.size.as_deref() == Some(THUMBNAIL_SIZE);
+    let thumbnail_requested = params.size.as_deref() == Some(THUMBNAIL_SIZE);
     let Some(p) = state.covers.read(&key).await else {
-        // **Un `warn`, et il manquait.** Cette clé a été publiée dans
-        // `cover_href` par le cœur lui-même : ne plus savoir la serve est une
-        // promesse rompue, pas un cas ordinaire. Le cache ne garde que
-        // `ENTREES` entrées, donc le suspect est l'éviction — c'est cette line
-        // qui le dira, là où l'écran ne montrait qu'un ♫ sans explication et où
-        // le propriétaire a rapporté « aucun warn ».
+        // **A `warn`, and it was missing.** This key was published in
+        // `cover_href` by the core itself: no longer knowing how to serve it
+        // is a broken promise, not an ordinary case. The cache only keeps
+        // `CoverSettings::entries` entries, so the suspect is eviction — this
+        // is the line that will say so, where the screen only showed a ♫ with
+        // no explanation and the owner reported "no warn at all".
         tracing::warn!("cover {key} requested but no longer in the cache (evicted?)");
         return (StatusCode::NOT_FOUND, "inconnue").into_response();
     };
     match p {
         CoverPayload::Bytes(bytes, mime) => {
-            // Une cover réseau est figée sous sa clé : son ETag n'a rien à
-            // porter de plus que la clé et la size demandée, et sa thumbnail
-            // est aussi immuable qu'elle.
-            if vignette_demandee {
+            // A network cover is frozen under its key: its ETag has nothing to
+            // carry beyond the key and the requested size, and its thumbnail
+            // is as immutable as it is.
+            if thumbnail_requested {
                 let etag = format!("\"{key}-v\"");
                 if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok())
                     == Some(etag.as_str())
                 {
                     return StatusCode::NOT_MODIFIED.into_response();
                 }
-                if let Some((mime, petite)) =
+                if let Some((mime, small)) =
                     state.covers.thumbnail(&key, &format!("{key}:v")).await
                 {
                     return (
@@ -1144,14 +1136,14 @@ pub async fn cover_get(
                             ),
                             (header::ETAG, etag),
                         ],
-                        petite.as_slice().to_vec(),
+                        small.as_slice().to_vec(),
                     )
                         .into_response();
                 }
-                // Pas de thumbnail (réencodage désactivé, image illisible,
-                // dimensions au-delà du cap) : l'original, qui est la
-                // réponse qu'on aurait donnée sans ce paramètre. Mieux vaut une
-                // image trop grande que pas d'image.
+                // No thumbnail (re-encoding disabled, unreadable image,
+                // dimensions beyond the cap): the original, which is the
+                // answer we would have given without this parameter. Better an
+                // oversized image than no image.
             }
             (
                 [
@@ -1164,30 +1156,30 @@ pub async fn cover_get(
                 .into_response()
         }
         CoverPayload::File(path) => {
-            // Ouverture et `metadata` sous une bounded de temps : ce fichier
-            // vit couramment sur un partage réseau, et cette route est
-            // joignable par n'importe quel navigateur du LAN. Sans bounded, un
-            // partage endormi retenait la requête aussi longtemps que le
-            // noyau le voulait — l'incident même que `health.rs` existe pour
-            // borner. L'expiration est traitée comme l'illisibilité qui
-            // existait déjà : un 404, que l'IHM rend par son repli ♫.
+            // Opening and `metadata` under a time bound: this file commonly
+            // lives on a network share, and this route is reachable by any
+            // browser on the LAN. Without a bound, a sleeping share held the
+            // request for as long as the kernel wanted — the very incident
+            // `health.rs` exists to bound. The expiry is handled like the
+            // unreadability that already existed: a 404, which the UI renders
+            // through its ♫ fallback.
             //
-            // Bornée **en deux temps**, l'en-tête juste en dessous : garder la
-            // réponse 304 avant toute playback du corps est ce qui rend une
-            // requête conditionnelle réellement bon marché.
-            let ouverture = tokio::time::timeout(FILE_TIMEOUT, async {
-                let fichier = tokio::fs::File::open(&path).await?;
-                let meta = fichier.metadata().await?;
-                Ok::<_, std::io::Error>((fichier, meta))
+            // Bounded **in two stages**, the header just below: keeping the
+            // 304 answer ahead of any read of the body is what makes a
+            // conditional request genuinely cheap.
+            let opening = tokio::time::timeout(FILE_TIMEOUT, async {
+                let file = tokio::fs::File::open(&path).await?;
+                let meta = file.metadata().await?;
+                Ok::<_, std::io::Error>((file, meta))
             })
             .await;
-            let (mut fichier, meta) = match ouverture {
+            let (mut file, meta) = match opening {
                 Ok(Ok(v)) => v,
                 Ok(Err(e)) => {
-                    // `warn` et non `debug` : le cœur a publié ce `cover_href`,
-                    // donc échouer à le serve est un défaut visible à l'écran
-                    // et doit l'être au journal. En `debug` il ne l'était nulle
-                    // part.
+                    // `warn` and not `debug`: the core published this
+                    // `cover_href`, so failing to serve it is a defect visible
+                    // on screen and must be visible in the log. At `debug` it
+                    // was visible nowhere.
                     tracing::warn!("cover {key} unreadable: {e}");
                     return (StatusCode::NOT_FOUND, "illisible").into_response();
                 }
@@ -1196,68 +1188,68 @@ pub async fn cover_get(
                     return (StatusCode::NOT_FOUND, "illisible").into_response();
                 }
             };
-            // L'ETag de la thumbnail n'est pas celui de l'original : c'est le
-            // même contenu source mais pas les mêmes bytes servis, et deux
-            // réponses différentes sous un même validateur feraient serve au
-            // navigateur l'une pour l'autre.
-            let etag_source = file_etag(meta.modified().ok(), meta.len());
-            let etag = if vignette_demandee {
-                format!("\"v-{}\"", etag_source.trim_matches('"'))
+            // The thumbnail's ETag is not the original's: it is the same
+            // source content but not the same served bytes, and two different
+            // responses under a single validator would make the browser serve
+            // one for the other.
+            let source_etag = file_etag(meta.modified().ok(), meta.len());
+            let etag = if thumbnail_requested {
+                format!("\"v-{}\"", source_etag.trim_matches('"'))
             } else {
-                etag_source.clone()
+                source_etag.clone()
             };
             if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) == Some(etag.as_str())
             {
                 return StatusCode::NOT_MODIFIED.into_response();
             }
-            // **Après le 304 et pas avant** : une requête conditionnelle ne doit
-            // rien fabriquer, et c'est ce qui rend la thumbnail bon marché en
-            // régime établi. L'identité mémorisée porte l'ETag de la source,
-            // donc un `folder.jpg` remplacé sur le partage change de clé et son
-            // ancienne thumbnail n'est plus jamais servie.
-            if vignette_demandee {
-                let identity = format!("{key}:{etag_source}");
-                if let Some((mime, petite)) = state.covers.thumbnail(&key, &identity).await {
+            // **After the 304 and not before**: a conditional request must
+            // build nothing, and that is what makes the thumbnail cheap in
+            // steady state. The memorized identity carries the source's ETag,
+            // so a `folder.jpg` replaced on the share changes key and its old
+            // thumbnail is never served again.
+            if thumbnail_requested {
+                let identity = format!("{key}:{source_etag}");
+                if let Some((mime, small)) = state.covers.thumbnail(&key, &identity).await {
                     return (
                         [
                             (header::CONTENT_TYPE, mime.to_string()),
                             (header::CACHE_CONTROL, "no-cache".to_string()),
                             (header::ETAG, etag),
                         ],
-                        petite.as_slice().to_vec(),
+                        small.as_slice().to_vec(),
                     )
                         .into_response();
                 }
-                // Rien à réduire : on retombe sur la diffusion en stream de
-                // l'original, ci-dessous, avec l'ETag de la thumbnail — le
-                // contenu servi sous cette URL reste cohérent avec son
-                // validateur, ce qui est tout ce que le cache exige.
+                // Nothing to shrink: we fall back to streaming the original,
+                // below, with the thumbnail's ETag — the content served under
+                // this URL stays consistent with its validator, which is all
+                // the cache requires.
             }
-            // Revalidation des bytes d'en-tête au moment de serve, et non
-            // seulement au moment de la découverte (`fetch`) : entre les
-            // deux, le partage n'est pas sous le contrôle de l'appareil, et un
-            // contributeur qui remplacerait le contenu ne doit pas voir serve
-            // n'importe quoi sous cette route publique. Même descripteur de
-            // fichier pour la vérification et pour le stream servi ensuite : le
-            // contenu ne peut pas changer entre les deux lectures.
+            // Revalidation of the header bytes at serving time, and not only
+            // at discovery time (`fetch`): between the two, the share is not
+            // under the device's control, and a contributor who replaced the
+            // content must not get just anything served under this public
+            // route. Same file descriptor for the check and for the stream
+            // served next: the content cannot change between the two reads.
             //
-            // Seconde bounded, sur la playback cette fois : un partage qui
-            // répond à l'`open` et plus au premier `read` est le cas d'une
-            // déconnexion en cours, et rien ne l'écarterait sans cela.
-            let entete = tokio::time::timeout(FILE_TIMEOUT, async {
-                let mut tete = [0u8; 12];
-                let lus = fichier.read(&mut tete).await?;
-                fichier.seek(std::io::SeekFrom::Start(0)).await?;
-                Ok::<_, std::io::Error>((tete, lus))
+            // Second bound, on the read this time: a share that answers the
+            // `open` and no longer the first `read` is the case of a
+            // disconnection in progress, and nothing would rule it out
+            // otherwise.
+            let header_read = tokio::time::timeout(FILE_TIMEOUT, async {
+                let mut head = [0u8; 12];
+                let n = file.read(&mut head).await?;
+                file.seek(std::io::SeekFrom::Start(0)).await?;
+                Ok::<_, std::io::Error>((head, n))
             })
             .await;
-            let (tete, lus) = match entete {
+            let (head, n) = match header_read {
                 Ok(Ok(v)) => v,
                 Ok(Err(e)) => {
-                    // `warn` et non `debug` : le cœur a publié ce `cover_href`,
-                    // donc échouer à le serve est un défaut visible à l'écran
-                    // et doit l'être au journal. En `debug` il ne l'était nulle
-                    // part.
+                    // `warn` and not `debug`: the core published this
+                    // `cover_href`, so failing to serve it is a defect visible
+                    // on screen and must be visible in the log. At `debug` it
+                    // was visible nowhere.
                     tracing::warn!("cover {key} unreadable: {e}");
                     return (StatusCode::NOT_FOUND, "illisible").into_response();
                 }
@@ -1266,72 +1258,71 @@ pub async fn cover_get(
                     return (StatusCode::NOT_FOUND, "illisible").into_response();
                 }
             };
-            let Some(mime) = image_type(&tete[..lus]) else {
+            let Some(mime) = image_type(&head[..n]) else {
                 tracing::warn!(
                     "cover {key} is no longer an image: {}",
                     path.display()
                 );
                 return (StatusCode::NOT_FOUND, "illisible").into_response();
             };
-            // En stream, pas en un `Vec` unique : cette route est joignable sans
-            // authentification depuis le LAN, et un fichier local n'a par
-            // conception aucun cap de size. Un PNG de 150 Mo sur le
-            // partage, ou quelques requêtes concurrentes sur un fichier de
-            // quelques mégaoctets, ne doivent pas épuiser la mémoire d'un Pi.
-            let corps = Body::from_stream(ReaderStream::new(fichier));
+            // Streamed, not a single `Vec`: this route is reachable without
+            // authentication from the LAN, and a local file has by design no
+            // size cap. A 150 MB PNG on the share, or a few concurrent
+            // requests on a file of a few megabytes, must not exhaust a Pi's
+            // memory.
+            let body = Body::from_stream(ReaderStream::new(file));
             (
                 [
                     (header::CONTENT_TYPE, mime.to_string()),
                     (header::CACHE_CONTROL, "no-cache".to_string()),
                     (header::ETAG, etag),
                 ],
-                corps,
+                body,
             )
                 .into_response()
         }
     }
 }
 
-/// Fixtures d'image partagées par les tests de ce module et ceux de `main`.
+/// Image fixtures shared by this module's tests and those of `main`.
 ///
-/// Ici et non dans chaque `mod tests` : deux copies d'un générateur d'image
-/// dériveraient, et un test qui croit produire une image décodable alors qu'il
-/// n'en produit plus est un faux positif silencieux.
+/// Here and not in each `mod tests`: two copies of an image generator would
+/// drift apart, and a test that believes it produces a decodable image when it
+/// no longer does is a silent false positive.
 #[cfg(test)]
 pub(crate) mod fixtures {
-    /// Un JPEG **réellement décodable** de `largeur × hauteur`.
+    /// A **genuinely decodable** JPEG of `width × height`.
     ///
-    /// Nécessaire dès qu'un test traverse `CoverCache::line` : le rendition, active
-    /// par défaut, décode l'image, et un en-tête suivi de remplissage est refusé
-    /// — à juste titre, c'est un fichier tronqué.
+    /// Needed as soon as a test goes through `CoverCache::line`: the
+    /// rendition, enabled by default, decodes the image, and a header followed
+    /// by padding is refused — rightly so, it is a truncated file.
     ///
-    /// Un dégradé et non un aplat : un aplat se comprime à quelques centaines
-    /// d'bytes quelle que soit sa size, ce qui rendrait indistinguables « la
-    /// thumbnail a été produite » et « le cap de sortie n'a jamais été
-    /// approché ».
-    pub fn jpeg_decodable(largeur: u32, hauteur: u32) -> Vec<u8> {
-        let mut img = image::RgbImage::new(largeur, hauteur);
+    /// A gradient and not a flat fill: a flat fill compresses down to a few
+    /// hundred bytes whatever its size, which would make "the thumbnail was
+    /// produced" and "the output cap was never approached" indistinguishable.
+    pub fn jpeg_decodable(width: u32, height: u32) -> Vec<u8> {
+        let mut img = image::RgbImage::new(width, height);
         for (x, y, px) in img.enumerate_pixels_mut() {
             *px = image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8]);
         }
-        let mut sortie = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut sortie, 90)
+        let mut output = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, 90)
             .encode_image(&img)
-            .expect("encodage de la fixture");
-        sortie
+            .expect("fixture encoding");
+        output
     }
 
-    /// Un PNG décodable **à canal alpha**, pour le path sans perte.
-    pub fn png_alpha(largeur: u32, hauteur: u32) -> Vec<u8> {
-        let mut img = image::RgbaImage::new(largeur, hauteur);
+    /// A decodable PNG **with an alpha channel**, for the lossless path.
+    pub fn png_alpha(width: u32, height: u32) -> Vec<u8> {
+        let mut img = image::RgbaImage::new(width, height);
         for (x, y, px) in img.enumerate_pixels_mut() {
             *px = image::Rgba([(x % 256) as u8, (y % 256) as u8, 0, ((x + y) % 256) as u8]);
         }
-        let mut sortie = Vec::new();
+        let mut output = Vec::new();
         image::DynamicImage::ImageRgba8(img)
-            .write_to(&mut std::io::Cursor::new(&mut sortie), image::ImageFormat::Png)
-            .expect("encodage de la fixture");
-        sortie
+            .write_to(&mut std::io::Cursor::new(&mut output), image::ImageFormat::Png)
+            .expect("fixture encoding");
+        output
     }
 }
 
@@ -1341,24 +1332,25 @@ mod tests {
     use ritornello_proto::CoverRef;
 
     #[test]
-    fn la_cle_est_stable_et_distingue_deux_sources() {
+    fn the_key_is_stable_and_distinguishes_two_sources() {
         let a = CoverRef::Url { url: "https://x.org/a.jpg".into() };
         let b = CoverRef::Url { url: "https://x.org/b.jpg".into() };
-        assert_eq!(key(&a), key(&a), "la key doit etre stable : elle est publiee dans une URL");
+        assert_eq!(key(&a), key(&a), "the key must be stable: it is published in a URL");
         assert_ne!(key(&a), key(&b));
-        // Une forme differente pour la meme chaine ne doit pas collisionner.
+        // A different form for the same string must not collide.
         assert_ne!(key(&a), key(&CoverRef::Path { path: "/https://x.org/a.jpg".into() }));
-        // Hexadecimal, donc sans surprise dans un path d'URL.
+        // Hexadecimal, so no surprises inside a URL path.
         assert!(key(&a).chars().all(|c| c.is_ascii_hexdigit()), "{}", key(&a));
     }
 
-    /// Le corps servi par la vraie route HTTP pour cette clé et cette size.
+    /// The body served by the real HTTP route for this key and this size.
     ///
-    /// Par `status::router` et une vraie requête, comme
-    /// `la_route_http_sert_ce_que_le_coeur_vient_de_deposer` : la chaîne
-    /// d'extracteurs (dont le `Query` qui read `size`) fait partie de ce qu'on
-    /// éprouve, et l'appeler en fonction la court-circuiterait.
-    async fn corps_servi(cache: &Arc<CoverCache>, key: &str, requete: &str) -> (u16, Vec<u8>) {
+    /// Through `status::router` and a real request, like
+    /// `the_http_route_serves_what_the_core_just_deposited` (in
+    /// `core::track_metadata`): the extractor chain (including the `Query`
+    /// that reads `size`) is part of what is being exercised, and calling the
+    /// handler as a function would short-circuit it.
+    async fn served_body(cache: &Arc<CoverCache>, key: &str, query: &str) -> (u16, Vec<u8>) {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt;
@@ -1368,83 +1360,84 @@ mod tests {
             ..crate::status::tests_support::app_state()
         });
         let resp = app
-            .oneshot(Request::get(format!("/api/cover/{key}{requete}")).body(Body::empty()).unwrap())
+            .oneshot(Request::get(format!("/api/cover/{key}{query}")).body(Body::empty()).unwrap())
             .await
             .unwrap();
-        let statut = resp.status().as_u16();
+        let status = resp.status().as_u16();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        (statut, bytes.to_vec())
+        (status, bytes.to_vec())
     }
 
     #[tokio::test]
-    async fn la_route_sert_une_vignette_a_qui_la_demande_et_loriginal_sinon() {
-        // **La demande du propriétaire** : le carré de 224 px de la page
-        // d'accueil ne doit plus télécharger le `folder.jpg` entier d'un NAS.
-        // L'URL nue, elle, ne change pas de sens — c'est elle que la vue
-        // agrandie charge, et elle doit rendre tous les pixels.
+    async fn the_route_serves_a_thumbnail_when_asked_and_the_original_otherwise() {
+        // **The owner's request**: the 224 px square of the home page must no
+        // longer download a NAS's whole `folder.jpg`. The bare URL, for its
+        // part, does not change meaning — it is the one the enlarged view
+        // loads, and it must return all the pixels.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("folder.jpg");
-        let grande = fixtures::jpeg_decodable(1500, 1500);
-        std::fs::write(&path, &grande).unwrap();
+        let large = fixtures::jpeg_decodable(1500, 1500);
+        std::fs::write(&path, &large).unwrap();
         let cache = Arc::new(CoverCache::new());
         cache.insert("k".to_string(), CoverPayload::File(path)).await;
 
-        let (statut, pleine) = corps_servi(&cache, "k", "").await;
-        assert_eq!(statut, 200);
-        assert_eq!(pleine.len(), grande.len(), "l'URL nue sert le fichier tel quel");
+        let (status, full) = served_body(&cache, "k", "").await;
+        assert_eq!(status, 200);
+        assert_eq!(full.len(), large.len(), "the bare URL serves the file as it is");
 
-        let (statut, thumbnail) = corps_servi(&cache, "k", "?size=thumbnail").await;
-        assert_eq!(statut, 200);
+        let (status, thumbnail) = served_body(&cache, "k", "?size=thumbnail").await;
+        assert_eq!(status, 200);
         assert!(
-            thumbnail.len() < pleine.len(),
-            "la thumbnail doit peser moins ({} contre {})",
+            thumbnail.len() < full.len(),
+            "the thumbnail must weigh less ({} against {})",
             thumbnail.len(),
-            pleine.len()
+            full.len()
         );
-        let (l, h) = dimensions(&thumbnail).expect("la thumbnail doit rester une image lisible");
-        let cote = crate::state::Settings::default().cover_max_edge_px;
-        assert!(l <= cote && h <= cote, "thumbnail {l}x{h}, cap {cote}");
+        let (w, h) = dimensions(&thumbnail).expect("the thumbnail must remain a readable image");
+        let edge = crate::state::Settings::default().cover_max_edge_px;
+        assert!(w <= edge && h <= edge, "thumbnail {w}x{h}, cap {edge}");
     }
 
     #[tokio::test]
-    async fn une_taille_inconnue_retombe_sur_loriginal_plutot_que_sur_une_erreur() {
-        // Une URL mal formée ne doit pas rendre la cover introuvable : le
-        // carré de la page afficherait le repli ♫ pour une faute de frappe.
+    async fn an_unknown_size_falls_back_to_the_original_rather_than_an_error() {
+        // A malformed URL must not make the cover unfindable: the page's
+        // square would show the ♫ fallback for a typo.
         let cache = Arc::new(CoverCache::new());
         let bytes = fixtures::jpeg_decodable(40, 40);
         cache.insert("k".to_string(), CoverPayload::Bytes(bytes.clone(), "image/jpeg")).await;
-        let (statut, corps) = corps_servi(&cache, "k", "?size=nawak").await;
-        assert_eq!(statut, 200);
-        assert_eq!(corps, bytes);
+        let (status, body) = served_body(&cache, "k", "?size=nawak").await;
+        assert_eq!(status, 200);
+        assert_eq!(body, bytes);
     }
 
     #[tokio::test]
-    async fn la_vignette_dun_fichier_nest_fabriquee_quune_fois() {
-        // Décoder puis réencoder coûte des centaines de millisecondes sur un
-        // Pi 2 : deux navigateurs qui ouvrent la page ne doivent pas le payer
-        // deux fois. L'identité mémorisée porte l'ETag de la source, donc rien
-        // de périmé ne peut être servi (voir le champ `thumbnails`).
+    async fn a_file_thumbnail_is_only_built_once() {
+        // Decoding then re-encoding costs hundreds of milliseconds on a Pi 2:
+        // two browsers opening the page must not pay for it twice. The
+        // memorized identity carries the source's ETag, so nothing stale can
+        // be served (see the `thumbnails` field).
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("folder.jpg");
         std::fs::write(&path, fixtures::jpeg_decodable(1200, 1200)).unwrap();
         let cache = Arc::new(CoverCache::new());
         cache.insert("k".to_string(), CoverPayload::File(path.clone())).await;
 
-        let (_, une) = corps_servi(&cache, "k", "?size=thumbnail").await;
-        let (statut, deux) = corps_servi(&cache, "k", "?size=thumbnail").await;
-        assert_eq!(statut, 200);
-        assert_eq!(une, deux);
-        // **Le décompte est la seule preuve** : comparer les deux réponses ne
-        // dit rien, deux fabrications successives rendent les mêmes bytes.
-        // Même raison que le compteur `builds` du rendez-vous.
-        assert_eq!(cache.thumbnails_built(), 1, "la seconde demande doit etre gratuite");
+        let (_, first) = served_body(&cache, "k", "?size=thumbnail").await;
+        let (status, second) = served_body(&cache, "k", "?size=thumbnail").await;
+        assert_eq!(status, 200);
+        assert_eq!(first, second);
+        // **The count is the only proof**: comparing the two responses says
+        // nothing, two successive builds return the same bytes. Same reason as
+        // the rendezvous's `builds` counter.
+        assert_eq!(cache.thumbnails_built(), 1, "the second request must be free");
     }
 
     #[tokio::test]
-    async fn le_cache_est_borne_par_le_reglage_et_oublie_la_plus_ancienne() {
-        // **La bounded est desormais un reglage** (`cover_cache_entries`, 20 par
-        // defaut) et non une constante : le test la pose donc lui-meme, ce qui
-        // prouve du meme coup qu'elle est bien lue a chaque insertion.
+    async fn the_cache_is_bounded_by_the_setting_and_forgets_the_oldest() {
+        // **The bound is now a setting** (`cover_cache_entries`, 20 by
+        // default) and not a constant: the test therefore sets it itself,
+        // which proves at the same time that it is indeed read at every
+        // insertion.
         let cache = CoverCache::new();
         cache.set_cover_settings(CoverSettings { entries: 4, ..CoverSettings::default() });
         for i in 0..6 {
@@ -1456,40 +1449,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abaisser_le_reglage_reprend_la_memoire_des_la_prochaine_insertion() {
-        // Le reglage est relu **a chaque insertion** : l'abaisser ne doit pas
-        // attendre un redemarrage pour rendre la memoire, sinon le regler ne
-        // sert a rien tant que l'appareil plays.
+    async fn lowering_the_setting_reclaims_memory_at_the_next_insertion() {
+        // The setting is re-read **at every insertion**: lowering it must not
+        // wait for a restart to give the memory back, otherwise setting it is
+        // useless while the device is playing.
         let cache = CoverCache::new();
         cache.set_cover_settings(CoverSettings { entries: 10, ..CoverSettings::default() });
         for i in 0..10 {
             cache.insert(format!("k{i}"), CoverPayload::Bytes(vec![i as u8], "image/jpeg")).await;
         }
-        assert!(cache.contains("k0").await, "prealable : les dix tiennent");
+        assert!(cache.contains("k0").await, "precondition: all ten fit");
 
         cache.set_cover_settings(CoverSettings { entries: 3, ..CoverSettings::default() });
-        cache.insert("neuve".into(), CoverPayload::Bytes(vec![99], "image/jpeg")).await;
+        cache.insert("fresh".into(), CoverPayload::Bytes(vec![99], "image/jpeg")).await;
 
-        assert!(cache.contains("neuve").await);
-        assert!(cache.contains("k9").await, "les plus recentes restent");
-        assert!(!cache.contains("k0").await, "les plus anciennes partent tout de suite");
+        assert!(cache.contains("fresh").await);
+        assert!(cache.contains("k9").await, "the most recent ones stay");
+        assert!(!cache.contains("k0").await, "the oldest ones leave right away");
         assert!(!cache.contains("k7").await);
     }
 
-    /// L'éviction hors bornes doit reprendre l'espace des fichiers
-    /// temporaires d'extraction qu'elle fait sortir du cache — sinon rien
-    /// d'autre ne les efface jamais pendant la vie du processus — mais ne
-    /// doit **jamais** toucher un `folder.jpg` déclaré par une Source, qui
-    /// vit sur son propre partage.
+    /// Out-of-bounds eviction must reclaim the space of the temporary
+    /// extraction files it pushes out of the cache — otherwise nothing else
+    /// ever deletes them during the process's lifetime — but must **never**
+    /// touch a `folder.jpg` declared by a Source, which lives on its own
+    /// share.
     #[tokio::test]
-    async fn l_eviction_supprime_un_fichier_temporaire_a_nous_mais_jamais_un_folder_jpg_de_source() {
-        // Nom unique garanti par `tempfile`, dans le vrai répertoire
-        // temporaire système : c'est là, et seulement là, qu'
-        // `is_cover_temp` reconnaît un fichier comme étant à
-        // nous. Un name aléatoire évite toute collision avec les fichiers que
-        // d'autres tests de ce même binaire y écrivent en parallèle (voir
-        // `player::mpv::tests`).
-        let notre_fichier = tempfile::Builder::new()
+    async fn eviction_deletes_our_own_temp_file_but_never_a_source_folder_jpg() {
+        // Unique name guaranteed by `tempfile`, in the real system temporary
+        // directory: that is where, and only where, `is_cover_temp`
+        // recognizes a file as ours. A random name avoids any collision with
+        // the files that other tests of this same binary write there in
+        // parallel (see `player::mpv::tests`).
+        let our_file = tempfile::Builder::new()
             .prefix(TEMP_PREFIX)
             .suffix(".jpg")
             .tempfile_in(std::env::temp_dir())
@@ -1497,103 +1489,102 @@ mod tests {
             .into_temp_path()
             .keep()
             .unwrap();
-        // Un `folder.jpg` de Source vit ailleurs, jamais dans le répertoire
-        // temporaire système : simulé ici dans un répertoire à lui.
-        let dir_source = tempfile::tempdir().unwrap();
-        let folder_jpg = dir_source.path().join("folder.jpg");
+        // A Source's `folder.jpg` lives elsewhere, never in the system
+        // temporary directory: simulated here in a directory of its own.
+        let source_dir = tempfile::tempdir().unwrap();
+        let folder_jpg = source_dir.path().join("folder.jpg");
         std::fs::write(&folder_jpg, b"x").unwrap();
 
         let cache = CoverCache::new();
-        // Borne posee explicitement : la valeur par defaut est de vingt
-        // entries, ce que ce test ne veut pas avoir a remplir.
+        // Bound set explicitly: the default value is twenty entries, which
+        // this test does not want to have to fill.
         cache.set_cover_settings(CoverSettings { entries: 4, ..CoverSettings::default() });
-        cache.insert("a-garder".into(), CoverPayload::File(folder_jpg.clone())).await;
-        cache.insert("notre".into(), CoverPayload::File(notre_fichier.clone())).await;
-        // Assez d'insertions pour dépasser la bounded et évincer les deux
-        // premières.
+        cache.insert("to-keep".into(), CoverPayload::File(folder_jpg.clone())).await;
+        cache.insert("ours".into(), CoverPayload::File(our_file.clone())).await;
+        // Enough insertions to exceed the bound and evict the first two.
         for i in 0..4u8 {
             cache.insert(format!("k{i}"), CoverPayload::Bytes(vec![i], "image/jpeg")).await;
         }
 
-        assert!(!notre_fichier.exists(), "un fichier temporaire a nous, evince, doit etre supprime du disque");
-        assert!(folder_jpg.exists(), "un folder.jpg de Source ne doit jamais etre supprime de son propre chef");
+        assert!(!our_file.exists(), "one of our own temp files, once evicted, must be deleted from disk");
+        assert!(folder_jpg.exists(), "a Source's folder.jpg must never be deleted on our own initiative");
     }
 
     #[test]
-    fn purge_temporaires_efface_les_fichiers_a_nous_mais_rien_dautre() {
+    fn purge_deletes_our_own_files_and_nothing_else() {
         let dir = tempfile::tempdir().unwrap();
-        let a_nous = dir.path().join(format!("{TEMP_PREFIX}abcd1234.jpg"));
-        let pas_a_nous = dir.path().join("folder.jpg");
-        std::fs::write(&a_nous, b"x").unwrap();
-        std::fs::write(&pas_a_nous, b"y").unwrap();
+        let ours = dir.path().join(format!("{TEMP_PREFIX}abcd1234.jpg"));
+        let not_ours = dir.path().join("folder.jpg");
+        std::fs::write(&ours, b"x").unwrap();
+        std::fs::write(&not_ours, b"y").unwrap();
 
         purge_temp_files_in(dir.path());
 
-        assert!(!a_nous.exists(), "un fichier a nous, reste d'une execution precedente, doit disparaitre");
-        assert!(pas_a_nous.exists(), "un fichier qui n'est pas a nous ne doit jamais etre touche");
+        assert!(!ours.exists(), "a file of ours, left over from a previous run, must disappear");
+        assert!(not_ours.exists(), "a file that is not ours must never be touched");
     }
 
     #[tokio::test]
-    async fn un_fichier_local_qui_n_est_pas_une_image_est_refuse() {
+    async fn a_local_file_that_is_not_an_image_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let faux = dir.path().join("folder.jpg");
-        std::fs::write(&faux, b"ceci n'est pas une image").unwrap();
-        let r = CoverRef::Path { path: faux.to_string_lossy().into_owned() };
+        let fake = dir.path().join("folder.jpg");
+        std::fs::write(&fake, b"this is not an image").unwrap();
+        let r = CoverRef::Path { path: fake.to_string_lossy().into_owned() };
         assert!(
             fetch(&r).await.is_none(),
-            "les bytes d'en-tete doivent etre verifies : sans cela, un contributeur mal ecrit \
-             ferait serve n'importe quel fichier du systeme sur une route HTTP publique"
+            "the header bytes must be checked: without this, a badly written contributor \
+             would get any file of the system served on a public HTTP route"
         );
 
-        let vrai = dir.path().join("cover.jpg");
-        // En-tete JPEG minimal : SOI + marqueur APP0.
-        std::fs::write(&vrai, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
-        let r = CoverRef::Path { path: vrai.to_string_lossy().into_owned() };
+        let real = dir.path().join("cover.jpg");
+        // Minimal JPEG header: SOI + APP0 marker.
+        std::fs::write(&real, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
+        let r = CoverRef::Path { path: real.to_string_lossy().into_owned() };
         match fetch(&r).await {
-            Some(CoverPayload::File(p)) => assert_eq!(p, vrai),
-            autre => panic!("une image locale doit rester un path, pas des bytes : {autre:?}"),
+            Some(CoverPayload::File(p)) => assert_eq!(p, real),
+            other => panic!("a local image must stay a path, not bytes: {other:?}"),
         }
     }
 
-    // -- `bytes` : la matérialisation pour le protocol d'affichage ---------
+    // -- `bytes`: the materialization for the display protocol -------------
 
-    /// Le cap de source des réglages par défaut.
+    /// The source cap of the default settings.
     ///
-    /// Les tests d'`bytes` ci-dessous portent sur le cap, pas sur le rendition :
-    /// le passer explicitement rend visible dans le test la bounded qu'il éprouve,
-    /// là où elle était cachée dans une constante de module. Le prendre des
-    /// réglages **par défaut** plutôt que de `COVER_MAX_BYTES` en direct est
-    /// délibéré : c'est la valeur qu'un appareil sorti d'usine applique
-    /// réellement.
+    /// The `bytes` tests below are about the cap, not the rendition: passing
+    /// it explicitly makes the bound being exercised visible in the test,
+    /// where it used to be hidden in a module constant. Taking it from the
+    /// **default** settings rather than from `COVER_MAX_BYTES` directly is
+    /// deliberate: it is the value a device fresh out of the factory actually
+    /// applies.
     fn cap() -> usize {
         CoverSettings::default().source_max
     }
 
-    /// En-tête JPEG minimal, suivi de `remplissage` bytes quelconques.
+    /// Minimal JPEG header, followed by `padding` arbitrary bytes.
     ///
-    /// **Indécodable exprès** : ces bytes valident l'en-tête que `image_type`
-    /// inspecte, et rien de plus. Cela convient à tout ce qui porte sur les
-    /// tailles et les plafonds, et cela ne convient **pas** à ce qui porte sur
-    /// le rendition — voir `image_reelle`, plus bas.
-    fn jpeg(remplissage: usize) -> Vec<u8> {
+    /// **Undecodable on purpose**: these bytes validate the header that
+    /// `image_type` inspects, and nothing more. That suits everything about
+    /// sizes and caps, and it does **not** suit anything about the rendition —
+    /// see the real-image fixtures, further down.
+    fn jpeg(padding: usize) -> Vec<u8> {
         let mut v = vec![0xFFu8, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
-        v.resize(6 + remplissage, 0x42);
+        v.resize(6 + padding, 0x42);
         v
     }
 
     #[tokio::test]
-    async fn octets_rend_les_octets_dune_pochette_reseau_avec_son_mime() {
+    async fn bytes_returns_a_network_cover_bytes_with_its_mime() {
         let cache = CoverCache::new();
         let image = jpeg(10);
         cache.insert("k".into(), CoverPayload::Bytes(image.clone(), "image/png")).await;
         assert_eq!(cache.bytes("k", cap()).await, Some(("image/png", image)));
-        assert_eq!(cache.bytes("inconnue", cap()).await, None);
+        assert_eq!(cache.bytes("unknown", cap()).await, None);
     }
 
     #[tokio::test]
-    async fn octets_lit_un_fichier_local_que_la_route_aurait_diffuse_en_flux() {
-        // La différence avec `cover_get` : ici les bytes sont matérialisés,
-        // parce que pousser sur un socket n'offre pas d'autre choix.
+    async fn bytes_reads_a_local_file_the_route_would_have_streamed() {
+        // The difference with `cover_get`: here the bytes are materialized,
+        // because pushing onto a socket offers no other choice.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("folder.jpg");
         let image = jpeg(1000);
@@ -1604,85 +1595,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn octets_revalide_len_tete_sur_les_octets_quil_rend() {
-        // `fetch` a validé l'en-tête à la découverte, mais entre les deux le
-        // partage n'est pas sous le contrôle de l'appareil. Comme la route HTTP,
-        // cette playback-ci ne fait donc pas confiance à la découverte — et elle
-        // va plus loin : le contenu vérifié **est** le contenu rendition, une seule
-        // playback sur un seul descripteur, donc il n'y a aucune fenêtre entre
-        // la vérification et l'usage.
+    async fn bytes_revalidates_the_header_on_the_bytes_it_returns() {
+        // `fetch` validated the header at discovery time, but between the two
+        // the share is not under the device's control. Like the HTTP route,
+        // this read therefore does not trust the discovery — and it goes
+        // further: the checked content **is** the returned content, a single
+        // read on a single descriptor, so there is no window at all between
+        // the check and the use.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("folder.jpg");
         std::fs::write(&path, jpeg(10)).unwrap();
         let r = CoverRef::Path { path: path.to_string_lossy().into_owned() };
-        let Some(p) = fetch(&r).await else { panic!("une image locale doit etre acceptee") };
+        let Some(p) = fetch(&r).await else { panic!("a local image must be accepted") };
         let cache = CoverCache::new();
         cache.insert("k".into(), p).await;
 
-        // Quelqu'un remplace le contenu du partage après la découverte.
-        std::fs::write(&path, b"ceci n'est plus une image").unwrap();
+        // Someone replaces the share's content after the discovery.
+        std::fs::write(&path, b"this is no longer an image").unwrap();
         assert_eq!(
             cache.bytes("k", cap()).await,
             None,
-            "les bytes rendus doivent etre ceux qui ont ete valides, jamais un contenu suppose"
+            "the returned bytes must be the ones that were validated, never assumed content"
         );
     }
 
     #[tokio::test]
-    async fn octets_refuse_un_fichier_local_au_dela_du_plafond_et_accepte_le_plafond_pile() {
-        // Le cap du transport, éprouvé sur sa bounded exacte. Le local n'a par
-        // conception **aucune** limite de size (voir `fetch`) : c'est donc
-        // ici, et nulle part ailleurs, que la bounded existe. Un refus, pas une
-        // allocation de la size du fichier — la playback s'arrête à
-        // `COVER_MAX_BYTES + 1` bytes, quelle que soit la size réelle.
+    async fn bytes_refuses_a_local_file_over_the_cap_and_accepts_exactly_the_cap() {
+        // The transport cap, exercised on its exact bound. Local files have by
+        // design **no** size limit (see `fetch`): so it is here, and nowhere
+        // else, that the bound exists. A refusal, not an allocation of the
+        // file's size — the read stops at `COVER_MAX_BYTES + 1` bytes,
+        // whatever the actual size.
         let cap = cap();
         let dir = tempfile::tempdir().unwrap();
 
-        let pile = dir.path().join("pile.jpg");
-        std::fs::write(&pile, jpeg(cap - 6)).unwrap();
+        let exact = dir.path().join("exact.jpg");
+        std::fs::write(&exact, jpeg(cap - 6)).unwrap();
         let cache = CoverCache::new();
-        cache.insert("pile".into(), CoverPayload::File(pile)).await;
-        match cache.bytes("pile", cap).await {
+        cache.insert("exact".into(), CoverPayload::File(exact)).await;
+        match cache.bytes("exact", cap).await {
             Some((mime, o)) => {
                 assert_eq!(mime, "image/jpeg");
-                assert_eq!(o.len(), cap, "le cap pile doit passer, pas etre refuse");
+                assert_eq!(o.len(), cap, "exactly the cap must pass, not be refused");
             }
-            None => panic!("une image de exactement COVER_MAX_BYTES doit passer"),
+            None => panic!("an image of exactly COVER_MAX_BYTES must pass"),
         }
 
-        let trop = dir.path().join("trop.jpg");
-        std::fs::write(&trop, jpeg(cap - 5)).unwrap();
-        cache.insert("trop".into(), CoverPayload::File(trop)).await;
+        let over = dir.path().join("over.jpg");
+        std::fs::write(&over, jpeg(cap - 5)).unwrap();
+        cache.insert("over".into(), CoverPayload::File(over)).await;
         assert_eq!(
-            cache.bytes("trop", cap).await,
+            cache.bytes("over", cap).await,
             None,
-            "un seul octet au-dela du cap doit suffire a refuser"
+            "a single byte over the cap must be enough to refuse"
         );
     }
 
     #[tokio::test]
-    async fn octets_rend_none_sur_un_fichier_disparu() {
+    async fn bytes_returns_none_on_a_vanished_file() {
         let dir = tempfile::tempdir().unwrap();
         let cache = CoverCache::new();
         cache.insert("k".into(), CoverPayload::File(dir.path().join("absent.jpg"))).await;
         assert_eq!(cache.bytes("k", cap()).await, None);
     }
 
-    /// Prouve que le refus vient de `metadata`, appelé **avant** toute playback
-    /// des bytes — pas de la playback bornée à `COVER_MAX_BYTES + 1` bytes
-    /// qui reste en filet plus loin dans `read_file_bounded`. Un test qui se
-    /// contenterait de vérifier le `None` ne distinguerait pas les deux : la
-    /// playback bornée refuse tout aussi bien. La preuve tient dans le
-    /// journal : il doit nommer la size **réelle** du fichier, très au-delà
-    /// de `COVER_MAX_BYTES + 1` — un nombre que la playback bornée ne pourrait
-    /// jamais rendre, puisqu'elle ne read jamais plus que cette bounded.
+    /// Proves that the refusal comes from `metadata`, called **before** any
+    /// read of the bytes — not from the read bounded at
+    /// `COVER_MAX_BYTES + 1` bytes that remains as a net further down in
+    /// `read_file_bounded`. A test that merely checked the `None` would not
+    /// distinguish the two: the bounded read refuses just as well. The proof
+    /// lies in the log: it must name the **actual** size of the file, far
+    /// beyond `COVER_MAX_BYTES + 1` — a number the bounded read could never
+    /// return, since it never reads more than that bound.
     #[tokio::test]
-    async fn le_plafond_est_verifie_sur_la_taille_du_fichier_avant_toute_lecture() {
+    async fn the_cap_is_checked_on_the_file_size_before_any_read() {
         use tracing_subscriber::fmt::MakeWriter;
 
         #[derive(Clone, Default)]
-        struct Tampon(Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for Tampon {
+        struct Buffer(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buffer {
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
                 self.0.lock().unwrap().extend_from_slice(buf);
                 Ok(buf.len())
@@ -1691,94 +1682,95 @@ mod tests {
                 Ok(())
             }
         }
-        impl<'a> MakeWriter<'a> for Tampon {
-            type Writer = Tampon;
+        impl<'a> MakeWriter<'a> for Buffer {
+            type Writer = Buffer;
             fn make_writer(&'a self) -> Self::Writer {
                 self.clone()
             }
         }
 
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("trop-gros.png");
-        // Bien au-dela de COVER_MAX_BYTES + 1 : une playback bornee a cette
-        // limite ne pourrait jamais journaliser un nombre pareil. File
-        // creux (`set_len`) : aucune ecriture reelle des bytes, seul le
-        // metadata doit y suffire.
-        let taille_reelle = ritornello_proto::COVER_MAX_BYTES as u64 + 50_000_000;
-        let fichier = std::fs::File::create(&path).unwrap();
-        fichier.set_len(taille_reelle).unwrap();
-        drop(fichier);
+        let path = dir.path().join("too-big.png");
+        // Well beyond COVER_MAX_BYTES + 1: a read bounded at that limit could
+        // never log such a number. Sparse file (`set_len`): no actual write
+        // of the bytes, `metadata` alone must suffice.
+        let real_size = ritornello_proto::COVER_MAX_BYTES as u64 + 50_000_000;
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(real_size).unwrap();
+        drop(file);
 
-        let buffer = Tampon::default();
-        // `#[tokio::test]` est mono-thread par defaut : le repartiteur pose
-        // par thread reste donc valide a travers le `.await` qui suit.
+        let buffer = Buffer::default();
+        // `#[tokio::test]` is single-threaded by default: the per-thread
+        // subscriber set here therefore remains valid across the `.await`
+        // that follows.
         let subscriber = tracing_subscriber::fmt().with_writer(buffer.clone()).with_ansi(false).finish();
-        let garde = tracing::subscriber::set_default(subscriber);
-        let resultat = read_file_bounded(&path, cap()).await;
-        drop(garde);
+        let guard = tracing::subscriber::set_default(subscriber);
+        let result = read_file_bounded(&path, cap()).await;
+        drop(guard);
 
-        assert!(resultat.is_none(), "un fichier bien au-dela du cap doit etre refuse");
-        let journal = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+        assert!(result.is_none(), "a file well beyond the cap must be refused");
+        let log_output = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
         assert!(
-            journal.contains(&taille_reelle.to_string()),
-            "le journal doit nommer la size reelle du fichier, connue par metadata avant toute playback : {journal}"
+            log_output.contains(&real_size.to_string()),
+            "the log must name the file's actual size, known through metadata before any read: {log_output}"
         );
     }
 
-    // -- `line` : la trame de cover, relue a chaque appel ---------------
+    // -- `line`: the cover frame, re-read at every call --------------------
 
     #[tokio::test]
-    async fn ligne_relit_le_fichier_donc_une_image_remplacee_sous_le_meme_chemin_est_servie_neuve() {
-        // **Le defaut le plus grave de la passe, a la maille du cache.** La key
-        // hache le path, pas le contenu : rien dans le cache ne peut voir
-        // qu'un `folder.jpg` a ete remplace sur le partage. Tant que `line`
-        // relit le fichier a chaque appel, ce n'est pas un probleme ; une line
-        // encodee mise en memoire, elle, servait pour toujours l'image d'avant.
+    async fn line_rereads_the_file_so_an_image_replaced_under_the_same_path_is_served_fresh() {
+        // **The most serious defect of the review pass, at the cache's
+        // granularity.** The key hashes the path, not the content: nothing in
+        // the cache can see that a `folder.jpg` was replaced on the share. As
+        // long as `line` re-reads the file at every call, that is not a
+        // problem; an encoded line kept in memory, for its part, served the
+        // previous image forever.
         //
-        // Le scenario reel est en trois clics : desactiver l'afficheur depuis la
-        // page d'admin, remplacer l'image, le reactiver. Le relais rebranche
-        // redemande la cover courante — donc `line` avec la **meme key** —
-        // et personne n'a insert quoi que ce soit entre-temps. C'est pourquoi ce
-        // test n'appelle pas `insert` une seconde fois : une invalidation posee
-        // dans `insert` ne couvrirait pas ce path-la.
+        // The real scenario takes three clicks: disable the display from the
+        // admin page, replace the image, re-enable it. The reconnected relay
+        // asks for the current cover again — hence `line` with the **same
+        // key** — and nobody has inserted anything in between. That is why
+        // this test does not call `insert` a second time: an invalidation
+        // placed in `insert` would not cover that path.
         //
-        // Deux images **decodables**, et petites : sous 640 px et sous le
-        // cap de sortie, le rendition par defaut les laisse passer telles
-        // quelles (voir `rendition`, etape 3). Les bytes servis sont donc ceux du
-        // fichier, ce qui garde a ce test l'assertion la plus tranchante
-        // possible sur la fraicheur — et documente le passe-droit au passage.
+        // Two **decodable** images, and small ones: under 640 px and under
+        // the output cap, the default rendition lets them through as they are
+        // (see `rendition`, step 3). The served bytes are therefore those of
+        // the file, which keeps this test the sharpest possible assertion
+        // about freshness — and documents the pass-through along the way.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("folder.jpg");
         std::fs::write(&path, fixtures::jpeg_decodable(48, 48)).unwrap();
         let cache = CoverCache::new();
         cache.insert("k".into(), CoverPayload::File(path.clone())).await;
 
-        let avant = cache.line("k", "/api/cover/k").await.expect("une image locale doit produire une line");
-        // L'utilisateur remplace la cover sur le partage. Dimensions
-        // differentes, pour que l'inegalite ne tienne pas au seul remplissage.
+        let before = cache.line("k", "/api/cover/k").await.expect("a local image must produce a line");
+        // The user replaces the cover on the share. Different dimensions, so
+        // that the inequality does not hinge on the padding alone.
         std::fs::write(&path, fixtures::jpeg_decodable(64, 64)).unwrap();
-        let apres = cache.line("k", "/api/cover/k").await.expect("le second appel doit reussir aussi");
+        let after = cache.line("k", "/api/cover/k").await.expect("the second call must succeed too");
 
         assert_ne!(
-            &*avant, &*apres,
-            "apres remplacement du fichier sous la meme key, la line servie doit etre la nouvelle"
+            &*before, &*after,
+            "after replacing the file under the same key, the served line must be the new one"
         );
-        match serde_json::from_str::<ritornello_proto::DisplayFrame>(&apres).unwrap() {
+        match serde_json::from_str::<ritornello_proto::DisplayFrame>(&after).unwrap() {
             ritornello_proto::DisplayFrame::Cover(c) => {
                 assert_eq!(
                     c.bytes,
                     fixtures::jpeg_decodable(64, 64),
-                    "les bytes servis doivent etre ceux du fichier actuel"
+                    "the served bytes must be those of the current file"
                 );
             }
-            autre => panic!("une trame de cover etait attendue : {autre:?}"),
+            other => panic!("a cover frame was expected: {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn ligne_change_quand_la_cle_change_et_reste_une_trame_de_pochette_valide() {
-        // Le pendant du test ci-dessus : deux cles distinctes designent deux
-        // images distinctes, et chacune doit rendre la sienne.
+    async fn line_changes_when_the_key_changes_and_stays_a_valid_cover_frame() {
+        // The counterpart of the test above: two distinct keys designate two
+        // distinct images, and each must return its own.
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("a.jpg");
         let b = dir.path().join("b.jpg");
@@ -1788,108 +1780,108 @@ mod tests {
         cache.insert("a".into(), CoverPayload::File(a)).await;
         cache.insert("b".into(), CoverPayload::File(b)).await;
 
-        let ligne_a = cache.line("a", "/api/cover/a").await.unwrap();
-        let ligne_b = cache.line("b", "/api/cover/b").await.unwrap();
-        assert_ne!(&*ligne_a, &*ligne_b, "deux cles differentes doivent produire des lines differentes");
+        let line_a = cache.line("a", "/api/cover/a").await.unwrap();
+        let line_b = cache.line("b", "/api/cover/b").await.unwrap();
+        assert_ne!(&*line_a, &*line_b, "two different keys must produce different lines");
 
-        match serde_json::from_str::<ritornello_proto::DisplayFrame>(&ligne_a).unwrap() {
+        match serde_json::from_str::<ritornello_proto::DisplayFrame>(&line_a).unwrap() {
             ritornello_proto::DisplayFrame::Cover(c) => {
                 assert_eq!(c.href, "/api/cover/a");
                 assert_eq!(c.mime, "image/jpeg");
             }
-            autre => panic!("une trame de cover etait attendue : {autre:?}"),
+            other => panic!("a cover frame was expected: {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn la_route_rend_404_sur_une_cle_inconnue() {
+    async fn the_route_returns_404_on_an_unknown_key() {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
 
         let app = crate::status::router(crate::status::tests_support::app_state());
         let resp = app
-            .oneshot(Request::get("/api/cover/inexistante").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/api/cover/nonexistent").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
-    // -- allowed_target : le garde-fou SSRF, sans aucun réseau -------------
+    // -- allowed_target: the SSRF safeguard, with no network at all ---------
 
     #[test]
-    fn cible_autorisee_rejette_une_ip_litterale_a_point_final() {
-        // `!l.is_empty()` du parseur de `ritornello-proto` échoue sur le
-        // libellé clear final, ce qui fait *passer* cette forme là-bas.
-        // `Url::domain()` s'appuie sur l'hôte réellement résolu par le
-        // navigateur/reqwest, qui la normalise en IPv4.
+    fn allowed_target_rejects_a_literal_ip_with_trailing_dot() {
+        // The `!l.is_empty()` of `ritornello-proto`'s parser fails on the
+        // trailing empty label, which makes this form *pass* over there.
+        // `Url::domain()` relies on the host actually resolved by the
+        // browser/reqwest, which normalizes it to an IPv4.
         assert!(!allowed_target("https://192.168.1.1./a.jpg"));
     }
 
     #[test]
-    fn cible_autorisee_rejette_une_ip_litterale_en_hexadecimal() {
+    fn allowed_target_rejects_a_literal_ip_in_hexadecimal() {
         assert!(!allowed_target("https://0x7f.0.0.1/a.jpg"));
     }
 
     #[test]
-    fn cible_autorisee_rejette_localhost_faute_de_point() {
+    fn allowed_target_rejects_localhost_for_lack_of_a_dot() {
         assert!(!allowed_target("https://localhost/a.jpg"));
     }
 
     #[test]
-    fn cible_autorisee_rejette_une_adresse_ipv6_litterale() {
+    fn allowed_target_rejects_a_literal_ipv6_address() {
         assert!(!allowed_target("https://[::1]/a.jpg"));
     }
 
     #[test]
-    fn cible_autorisee_accepte_un_vrai_nom_dhote_https() {
+    fn allowed_target_accepts_a_real_https_hostname() {
         assert!(allowed_target("https://coverartarchive.org/x/front-500"));
     }
 
-    // -- download : les trois garde-fous réseau, contre un vrai serveur ---
+    // -- download: the three network safeguards, against a real server -----
     //
-    // `download` et non `fetch` : `allowed_target` refuse justement
-    // `127.0.0.1`, donc passer par `fetch` empêcherait ces tests
-    // d'atteindre le code qu'ils veulent exercer.
+    // `download` and not `fetch`: `allowed_target` refuses precisely
+    // `127.0.0.1`, so going through `fetch` would prevent these tests from
+    // reaching the code they want to exercise.
 
-    /// Sérialise un corps en `Transfer-Encoding: chunked`.
-    fn corps_chunked(morceaux: &[Vec<u8>]) -> Vec<u8> {
+    /// Serializes a body as `Transfer-Encoding: chunked`.
+    fn chunked_body(chunks: &[Vec<u8>]) -> Vec<u8> {
         let mut out = Vec::new();
-        for m in morceaux {
-            out.extend_from_slice(format!("{:x}\r\n", m.len()).as_bytes());
-            out.extend_from_slice(m);
+        for c in chunks {
+            out.extend_from_slice(format!("{:x}\r\n", c.len()).as_bytes());
+            out.extend_from_slice(c);
             out.extend_from_slice(b"\r\n");
         }
         out.extend_from_slice(b"0\r\n\r\n");
         out
     }
 
-    fn reponse_http(entetes: &str, corps: Vec<u8>) -> Vec<u8> {
+    fn http_response(headers: &str, body: Vec<u8>) -> Vec<u8> {
         let mut out = Vec::new();
-        out.extend_from_slice(format!("HTTP/1.1 200 OK\r\n{entetes}\r\n").as_bytes());
-        out.extend_from_slice(&corps);
+        out.extend_from_slice(format!("HTTP/1.1 200 OK\r\n{headers}\r\n").as_bytes());
+        out.extend_from_slice(&body);
         out
     }
 
-    /// Sert `reponse` à la première connexion reçue sur `127.0.0.1`, sur un
-    /// port choisi par l'OS. `fermer` ferme la connexion juste après l'avoir
-    /// écrite ; sinon la connexion reste ouverte, sans plus jamais rien
-    /// send_frame — ce qui permet à un test de prouver qu'un appelant n'a pas
-    /// tenté de read au-delà de ce qui a été servi.
-    async fn sert(reponse: Vec<u8>, fermer: bool) -> String {
+    /// Serves `response` to the first connection received on `127.0.0.1`, on
+    /// a port chosen by the OS. `close` closes the connection right after
+    /// writing it; otherwise the connection stays open, never sending
+    /// anything more — which lets a test prove that a caller did not try to
+    /// read beyond what was served.
+    async fn serve(response: Vec<u8>, close: bool) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
             if let Ok((mut socket, _)) = listener.accept().await {
-                let mut ignore = [0u8; 4096];
-                let _ = socket.read(&mut ignore).await;
-                let _ = socket.write_all(&reponse).await;
-                if fermer {
+                let mut ignored = [0u8; 4096];
+                let _ = socket.read(&mut ignored).await;
+                let _ = socket.write_all(&response).await;
+                if close {
                     let _ = socket.shutdown().await;
                 } else {
-                    // Ne ferme jamais : si l'appelant read malgré tout le
-                    // corps, il restera bloqué jusqu'au timeout du test.
+                    // Never closes: if the caller reads the body regardless,
+                    // it will stay blocked until the test's timeout.
                     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 }
             }
@@ -1898,163 +1890,163 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn le_plafond_reseau_coupe_un_flux_par_morceaux_avant_la_fin() {
-        // Aucun `Content-Length` (réponse `chunked`) : rien à quoi se fier
-        // sinon la size effectivement reçue, track après track.
-        let mut premier = vec![0xFFu8, 0xD8, 0xFF, 0xE0];
-        premier.resize(900_000, 0);
+    async fn the_network_cap_cuts_a_chunked_stream_before_the_end() {
+        // No `Content-Length` (`chunked` response): nothing to rely on except
+        // the size actually received, chunk after chunk.
+        let mut first = vec![0xFFu8, 0xD8, 0xFF, 0xE0];
+        first.resize(900_000, 0);
         let second = vec![0u8; 900_000];
-        let troisieme = vec![0u8; 900_000]; // total ~2,7 Mo, au-dela du cap de 2 Mo
-        let corps = corps_chunked(&[premier, second, troisieme]);
-        let reponse =
-            reponse_http("Content-Type: image/jpeg\r\nTransfer-Encoding: chunked\r\n", corps);
-        let url = sert(reponse, true).await;
+        let third = vec![0u8; 900_000]; // ~2.7 MB total, beyond the 2 MB cap
+        let body = chunked_body(&[first, second, third]);
+        let response =
+            http_response("Content-Type: image/jpeg\r\nTransfer-Encoding: chunked\r\n", body);
+        let url = serve(response, true).await;
         assert!(
             download(&url).await.is_none(),
-            "le cap doit couper le stream track par track, sans attendre la fin"
+            "the cap must cut the stream chunk by chunk, without waiting for the end"
         );
     }
 
     #[tokio::test]
-    async fn un_content_type_refuse_ne_lit_jamais_le_corps() {
-        // Le serveur n'envoie jamais le corps qu'il announcement : si `download`
-        // le lisait malgré le content-type refusé, cette attente resterait
-        // bloquée jusqu'au timeout ci-dessous.
-        let reponse = reponse_http("Content-Type: text/html\r\nContent-Length: 1000000\r\n", Vec::new());
-        let url = sert(reponse, false).await;
+    async fn a_refused_content_type_never_reads_the_body() {
+        // The server never sends the body it announces: if `download` read it
+        // despite the refused content-type, this wait would stay blocked until
+        // the timeout below.
+        let response = http_response("Content-Type: text/html\r\nContent-Length: 1000000\r\n", Vec::new());
+        let url = serve(response, false).await;
         match tokio::time::timeout(std::time::Duration::from_secs(2), download(&url)).await {
             Ok(None) => {}
-            Ok(Some(p)) => panic!("content-type refuse mais une cover a ete produite : {p:?}"),
+            Ok(Some(p)) => panic!("content-type refused but a cover was produced: {p:?}"),
             Err(_) => panic!(
-                "timeout : le corps a ete lu (ou son attente entamee) malgre le content-type refuse"
+                "timeout: the body was read (or its wait begun) despite the refused content-type"
             ),
         }
     }
 
-    /// Sert une redirection vers `cible`, puis ne répond plus rien : si le
-    /// client suivait le saut, il tenterait de joindre `cible` — ce que
-    /// l'assertion du test constate par l'échec de la requête entière.
-    fn reponse_redirection(cible: &str) -> Vec<u8> {
-        format!("HTTP/1.1 302 Found\r\nLocation: {cible}\r\nContent-Length: 0\r\n\r\n").into_bytes()
+    /// Serves a redirect towards `target`, then answers nothing more: if the
+    /// client followed the hop, it would try to reach `target` — which the
+    /// test's assertion observes through the failure of the whole request.
+    fn redirect_response(target: &str) -> Vec<u8> {
+        format!("HTTP/1.1 302 Found\r\nLocation: {target}\r\nContent-Length: 0\r\n\r\n").into_bytes()
     }
 
     #[tokio::test]
-    async fn une_redirection_vers_une_ip_litterale_est_refusee() {
-        // Le garde-fou SSRF ne valait que pour l'URL de depart : l'hote
-        // d'image — un tiers, puisque le `coverUrl` d'OUI FM est ecrit par
-        // autrui — n'avait qu'a repondre `302` vers une adresse du LAN pour
-        // faire emettre a l'appareil un GET dessus, changement de schema
-        // compris. Un saut d'indirection annulait tout le controle.
+    async fn a_redirect_to_a_literal_ip_is_refused() {
+        // The SSRF safeguard only applied to the starting URL: the image
+        // host — a third party, since OUI FM's `coverUrl` is written by
+        // someone else — only had to answer a `302` towards a LAN address to
+        // make the device issue a GET on it, scheme change included. One hop
+        // of indirection cancelled the whole check.
         //
-        // `192.0.2.1` (bloc de documentation RFC 5737) plutot que la passerelle
-        // du reseau de developpement : si la politique laissait passer, ce test
-        // doit echouer sans avoir joint quoi que ce soit de reel.
-        for cible in [
+        // `192.0.2.1` (RFC 5737 documentation block) rather than the
+        // development network's gateway: if the policy let it through, this
+        // test must fail without having reached anything real.
+        for target in [
             "http://192.0.2.1/a.jpg",
             "https://192.0.2.1/a.jpg",
-            // Meme forme d'hote qu'une cible legitime, mais le schema retombe
-            // en clair : refuse aussi. Domaine en `.invalid`, qui ne resout
-            // jamais — aucun test d'ici ne touche le reseau.
+            // Same host form as a legitimate target, but the scheme falls
+            // back to cleartext: refused too. Domain in `.invalid`, which
+            // never resolves — no test here touches the network.
             "http://coverartarchive.invalid/a.jpg",
         ] {
-            let url = sert(reponse_redirection(cible), true).await;
-            // Le timeout n'est pas une hypothese de rythme mais un detecteur de
-            // panne, comme dans le test du content-type ci-dessus : si le saut
-            // etait suivi, l'attente d'un hote injoignable durerait jusqu'au
-            // timeout de dix secondes du client et rendrait `None` — donc un
-            // test vert pour la mauvaise raison.
+            let url = serve(redirect_response(target), true).await;
+            // The timeout is not a pacing assumption but a failure detector,
+            // as in the content-type test above: if the hop were followed,
+            // the wait for an unreachable host would last until the client's
+            // ten-second timeout and return `None` — hence a green test for
+            // the wrong reason.
             match tokio::time::timeout(std::time::Duration::from_secs(2), download(&url)).await {
                 Ok(None) => {}
-                Ok(Some(p)) => panic!("redirection suivie vers {cible:?} : {p:?}"),
-                Err(_) => panic!("le saut vers {cible:?} a ete tente : la politique doit le refuser"),
+                Ok(Some(p)) => panic!("redirect followed towards {target:?}: {p:?}"),
+                Err(_) => panic!("the hop towards {target:?} was attempted: the policy must refuse it"),
             }
         }
     }
 
     #[tokio::test]
-    async fn un_corps_qui_nest_pas_une_image_est_refuse_malgre_le_content_type() {
-        let corps = b"ceci n'est pas une image".to_vec();
-        let reponse = reponse_http(
-            &format!("Content-Type: image/png\r\nContent-Length: {}\r\n", corps.len()),
-            corps,
+    async fn a_body_that_is_not_an_image_is_refused_despite_the_content_type() {
+        let body = b"this is not an image".to_vec();
+        let response = http_response(
+            &format!("Content-Type: image/png\r\nContent-Length: {}\r\n", body.len()),
+            body,
         );
-        let url = sert(reponse, true).await;
+        let url = serve(response, true).await;
         assert!(
             download(&url).await.is_none(),
-            "le contenu declare `image/png` mais les bytes recus ne le sont pas : doit etre refuse"
+            "the content declares `image/png` but the received bytes are not: must be refused"
         );
     }
-    // -- Le rendition : ce que le cœur fabrique avant de pousser ----------------
+    // -- The rendition: what the core builds before pushing -----------------
 
-    /// Un `Rendition` dont chaque champ est nommé par le test qui s'en sert : les
-    /// défauts du produit (640 px, 512 Kio, 16 Mpx) rendraient la plupart des
-    /// cas inatteignables sans fabriquer des images énormes.
-    fn rendu_de_test(max_edge_px: u32, output_cap: usize, pixel_cap: u64) -> Rendition {
+    /// A `Rendition` whose every field is named by the test using it: the
+    /// product defaults (640 px, 512 KiB, 16 Mpx) would make most cases
+    /// unreachable without fabricating huge images.
+    fn test_rendition(max_edge_px: u32, output_cap: usize, pixel_cap: u64) -> Rendition {
         Rendition { max_edge_px, jpeg_quality: 85, output_cap, pixel_cap }
     }
 
     #[tokio::test]
-    async fn huit_afficheurs_qui_demandent_la_meme_pochette_ne_la_construisent_quune_fois() {
-        // Le rendez-vous. Deux afficheurs abonnés reçoivent la **même** trame
-        // d'état, donc demandent la même cover dans le même instant, et
-        // décodaient puis réencodaient deux fois la même image — plusieurs
-        // centaines de millisecondes de cœur en double sur un Pi 2.
+    async fn eight_displays_asking_for_the_same_cover_build_it_only_once() {
+        // The rendezvous. Two subscribed displays receive the **same** state
+        // frame, so they ask for the same cover at the same instant, and used
+        // to decode then re-encode the same image twice — several hundred
+        // milliseconds of core in duplicate on a Pi 2.
         //
-        // La preuve est un **décompte d'exécutions**, et il n'y en a pas
-        // d'autre : comparer les trames rendues ne dirait rien, deux
-        // builds successives de la même image produisant des bytes
-        // identiques.
+        // The proof is a **count of executions**, and there is no other:
+        // comparing the returned frames would say nothing, two successive
+        // builds of the same image producing identical bytes.
         let cache = Arc::new(CoverCache::new());
-        // Un rendition qui a vraiment du travail : 600 × 400 dépasse le côté
-        // maximal, donc l'image est décodée et réencodée pour de bon. Sans
-        // cela, le passe-droit rendrait la source telle quelle et le premier
-        // arrivé finirait sans jamais suspendre — aucun suiveur n'aurait le
-        // temps d'arriver, et le test passerait sans rien prouver.
+        // A rendition with real work to do: 600 × 400 exceeds the maximum
+        // edge, so the image is decoded and re-encoded for real. Without
+        // that, the pass-through would return the source as is and the first
+        // arrival would finish without ever suspending — no follower would
+        // have time to show up, and the test would pass without proving
+        // anything.
         cache.set_cover_settings(CoverSettings {
             entries: 20,
             source_max: 8 * 1024 * 1024,
-            rendition: Some(rendu_de_test(64, 512 * 1024, 16_000_000)),
+            rendition: Some(test_rendition(64, 512 * 1024, 16_000_000)),
         });
         cache
             .insert("k".into(), CoverPayload::Bytes(fixtures::jpeg_decodable(600, 400), "image/jpeg"))
             .await;
 
-        let taches: Vec<_> = (0..8)
+        let tasks: Vec<_> = (0..8)
             .map(|_| {
                 let c = cache.clone();
                 tokio::spawn(async move { c.line("k", "/api/cover/k").await })
             })
             .collect();
-        let mut trames = Vec::new();
-        for t in taches {
-            trames.push(t.await.expect("aucune tache ne doit paniquer"));
+        let mut frames = Vec::new();
+        for t in tasks {
+            frames.push(t.await.expect("no task must panic"));
         }
 
-        assert!(trames.iter().all(|t| t.is_some()), "les huit doivent recevoir une trame");
-        let premiere = trames[0].as_deref().unwrap();
+        assert!(frames.iter().all(|t| t.is_some()), "all eight must receive a frame");
+        let first = frames[0].as_deref().unwrap();
         assert!(
-            trames.iter().all(|t| t.as_deref() == Some(premiere)),
-            "les huit doivent recevoir la meme trame"
+            frames.iter().all(|t| t.as_deref() == Some(first)),
+            "all eight must receive the same frame"
         );
         assert_eq!(
             cache.builds(),
             1,
-            "une seule construction pour huit demandes concurrentes de la meme key"
+            "a single build for eight concurrent requests of the same key"
         );
     }
 
     #[tokio::test]
-    async fn le_rendez_vous_ne_retient_rien_une_fois_la_trame_construite() {
-        // Le rendez-vous n'est **pas** un cache, et c'est ce qui le rend
-        // acceptable : la clé hache le *path*, pas le contenu, donc une trame
-        // retenue deviendrait fausse dès que l'utilisateur remplace l'image sous
-        // ce path. Une `OnceCell` gardant sa valeur pour toujours, tout tient
-        // au retrait de l'entrée.
+    async fn the_rendezvous_keeps_nothing_once_the_frame_is_built() {
+        // The rendezvous is **not** a cache, and that is what makes it
+        // acceptable: the key hashes the *path*, not the content, so a kept
+        // frame would become wrong as soon as the user replaces the image
+        // under that path. A `OnceCell` keeping its value forever, everything
+        // hinges on the removal of the entry.
         let cache = Arc::new(CoverCache::new());
         cache.set_cover_settings(CoverSettings {
             entries: 20,
             source_max: 8 * 1024 * 1024,
-            rendition: Some(rendu_de_test(64, 512 * 1024, 16_000_000)),
+            rendition: Some(test_rendition(64, 512 * 1024, 16_000_000)),
         });
         cache
             .insert("k".into(), CoverPayload::Bytes(fixtures::jpeg_decodable(600, 400), "image/jpeg"))
@@ -2063,103 +2055,105 @@ mod tests {
         assert!(cache.line("k", "/api/cover/k").await.is_some());
         assert!(
             cache.in_flight.lock().await.is_empty(),
-            "la table des builds en cours doit etre clear apres coup"
+            "the table of in-progress builds must be empty afterwards"
         );
 
-        // Et la seconde demande **reconstruit**, au lieu d'être servie par une
-        // cellule restée en place.
+        // And the second request **rebuilds**, instead of being served by a
+        // cell left in place.
         assert!(cache.line("k", "/api/cover/k").await.is_some());
         assert_eq!(
             cache.builds(),
             2,
-            "deux demandes separees dans le temps doivent produire deux builds"
+            "two requests separated in time must produce two builds"
         );
     }
 
     #[tokio::test]
-    async fn une_image_deja_petite_part_telle_quelle_sans_etre_reencodee() {
-        // Le passe-droit. L'identité **binaire** est l'assertion qui compte :
-        // un aller-retour décodage/encodage produirait des bytes différents
-        // même à dimensions égales, donc l'égalité prouve qu'aucun n'a eu lieu.
+    async fn an_already_small_image_leaves_as_is_without_reencoding() {
+        // The pass-through. The **binary** identity is the assertion that
+        // matters: a decode/encode round trip would produce different bytes
+        // even at equal dimensions, so the equality proves that none took
+        // place.
         let source = fixtures::jpeg_decodable(64, 64);
-        let sortie = rendition("image/jpeg", source.clone(), rendu_de_test(640, 512 * 1024, 16_000_000))
+        let output = rendition("image/jpeg", source.clone(), test_rendition(640, 512 * 1024, 16_000_000))
             .await
-            .expect("une petite image doit passer");
-        assert_eq!(sortie, ("image/jpeg", source));
+            .expect("a small image must pass");
+        assert_eq!(output, ("image/jpeg", source));
     }
 
     #[tokio::test]
-    async fn une_image_trop_grande_est_reduite_en_gardant_son_rapport() {
-        // 300 × 150, réduite à un côté de 100 : le rapport 2:1 doit survivre.
-        // Vérifié en **décodant la sortie**, pas en croyant le code sur parole.
+    async fn an_oversized_image_is_shrunk_keeping_its_aspect_ratio() {
+        // 300 × 150, reduced to an edge of 100: the 2:1 ratio must survive.
+        // Verified by **decoding the output**, not by taking the code's word
+        // for it.
         let source = fixtures::jpeg_decodable(300, 150);
-        let (mime, sortie) = rendition("image/jpeg", source.clone(), rendu_de_test(100, 512 * 1024, 16_000_000))
+        let (mime, output) = rendition("image/jpeg", source.clone(), test_rendition(100, 512 * 1024, 16_000_000))
             .await
-            .expect("une grande image doit etre reduite, pas refusee");
+            .expect("a large image must be shrunk, not refused");
         assert_eq!(mime, "image/jpeg");
-        assert_eq!(dimensions(&sortie), Some((100, 50)), "le rapport 2:1 doit etre conserve");
+        assert_eq!(dimensions(&output), Some((100, 50)), "the 2:1 ratio must be kept");
         assert!(
-            sortie.len() < source.len(),
-            "une thumbnail de 100x50 doit peser moins que son original de 300x150 : {} contre {}",
-            sortie.len(),
+            output.len() < source.len(),
+            "a 100x50 thumbnail must weigh less than its 300x150 original: {} against {}",
+            output.len(),
             source.len()
         );
     }
 
     #[tokio::test]
-    async fn une_image_a_canal_alpha_est_reencodee_en_png_sans_perte() {
-        // Aplatir la transparence demanderait de choisir une couleur de fond,
-        // parti pris visuel que l'appareil n'a pas à prendre. Le mime change,
-        // donc la trame poussée le déclare — un afficheur qui reçoit
-        // `image/jpeg` avec des bytes PNG afficherait un carré cassé.
+    async fn an_image_with_alpha_channel_is_reencoded_as_lossless_png() {
+        // Flattening the transparency would require choosing a background
+        // color, a visual stance the device has no business taking. The mime
+        // changes, so the pushed frame declares it — a display receiving
+        // `image/jpeg` with PNG bytes would show a broken square.
         let source = fixtures::png_alpha(300, 300);
-        let (mime, sortie) = rendition("image/png", source, rendu_de_test(100, 512 * 1024, 16_000_000))
+        let (mime, output) = rendition("image/png", source, test_rendition(100, 512 * 1024, 16_000_000))
             .await
-            .expect("un png alpha doit etre rendition");
-        assert_eq!(mime, "image/png", "le mime doit suivre le format reellement produit");
-        assert_eq!(dimensions(&sortie), Some((100, 100)));
+            .expect("an alpha png must be rendered");
+        assert_eq!(mime, "image/png", "the mime must follow the format actually produced");
+        assert_eq!(dimensions(&output), Some((100, 100)));
     }
 
-    /// **La garde anti-bombe, et son order.**
+    /// **The bomb guard, and its order.**
     ///
-    /// L'image de ce test franchirait le passe-droit sans difficulté : 100 px de
-    /// côté sous les 640 autorisés, deux kilooctets sous le cap de sortie.
-    /// Seule la garde de pixels la refuse. Le test échoue donc si la garde
-    /// disparaît **et** si elle est déplacée après le passe-droit — c'est ce
-    /// second cas qui compte, parce qu'une bombe est précisément une image
-    /// minuscule en bytes et démesurée en pixels.
+    /// The image of this test would clear the pass-through without
+    /// difficulty: 100 px per edge under the 640 allowed, two kilobytes under
+    /// the output cap. Only the pixel guard refuses it. The test therefore
+    /// fails if the guard disappears **and** if it is moved after the
+    /// pass-through — it is this second case that matters, because a bomb is
+    /// precisely an image tiny in bytes and outsized in pixels.
     #[tokio::test]
-    async fn le_plafond_de_pixels_refuse_avant_tout_decodage_et_avant_le_passe_droit() {
+    async fn the_pixel_cap_refuses_before_any_decoding_and_before_the_pass_through() {
         let source = fixtures::jpeg_decodable(100, 100);
         assert!(
             source.len() < 512 * 1024,
-            "la fixture doit tenir sous le cap de sortie, sinon le test ne prouve pas l'order"
+            "the fixture must fit under the output cap, otherwise the test does not prove the order"
         );
         assert_eq!(
-            rendition("image/jpeg", source, rendu_de_test(640, 512 * 1024, 1_000)).await,
+            rendition("image/jpeg", source, test_rendition(640, 512 * 1024, 1_000)).await,
             None,
-            "10000 pixels au-dela d'un cap de 1000 doivent etre refuses"
+            "10000 pixels beyond a cap of 1000 must be refused"
         );
     }
 
     #[tokio::test]
-    async fn une_vignette_au_dela_du_filet_de_sortie_nest_pas_poussee() {
-        // Le filet, éprouvé sur un cap volontairement minuscule : une
-        // thumbnail 200 × 200 d'un dégradé ne tient pas dans 200 bytes.
+    async fn a_thumbnail_over_the_output_net_is_not_pushed() {
+        // The safety net, exercised on a deliberately tiny cap: a 200 × 200
+        // thumbnail of a gradient does not fit in 200 bytes.
         let source = fixtures::jpeg_decodable(400, 400);
         assert_eq!(
-            rendition("image/jpeg", source, rendu_de_test(200, 200, 16_000_000)).await,
+            rendition("image/jpeg", source, test_rendition(200, 200, 16_000_000)).await,
             None,
-            "une thumbnail au-dela du filet ne doit pas etre pushed"
+            "a thumbnail beyond the net must not be pushed"
         );
     }
 
     #[tokio::test]
-    async fn linterrupteur_decoche_pousse_la_source_sans_la_decoder() {
-        // Deux propriétés en une, et la fixture est l'astuce : ces bytes ont un
-        // en-tête JPEG valide mais un contenu **indécodable**. S'ils arrivent
-        // intacts au bout de `line`, c'est que le décodeur n'a pas été appelé
-        // du tout — pas seulement que son résultat a été ignoré.
+    async fn the_switch_unchecked_pushes_the_source_without_decoding_it() {
+        // Two properties in one, and the fixture is the trick: these bytes
+        // have a valid JPEG header but **undecodable** content. If they come
+        // out of `line` intact, it means the decoder was not called at all —
+        // not merely that its result was ignored.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("folder.jpg");
         let source = jpeg(1000);
@@ -2168,23 +2162,23 @@ mod tests {
         cache.set_cover_settings(CoverSettings { entries: 20, source_max: cap(), rendition: None });
         cache.insert("k".into(), CoverPayload::File(path)).await;
 
-        let line = cache.line("k", "/api/cover/k").await.expect("la source doit partir telle quelle");
+        let line = cache.line("k", "/api/cover/k").await.expect("the source must leave as it is");
         match serde_json::from_str::<ritornello_proto::DisplayFrame>(&line).unwrap() {
             ritornello_proto::DisplayFrame::Cover(c) => {
-                assert_eq!(c.bytes, source, "les bytes pousses doivent etre ceux de la source");
+                assert_eq!(c.bytes, source, "the pushed bytes must be those of the source");
                 assert_eq!(c.mime, "image/jpeg");
             }
-            autre => panic!("une trame de cover etait attendue : {autre:?}"),
+            other => panic!("a cover frame was expected: {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn linterrupteur_coche_ecarte_une_image_dont_les_octets_ne_se_decodent_pas() {
-        // Le pendant du test ci-dessus, et un **changement de comportement**
-        // assumé : `image_type` ne read que les bytes magiques, donc un fichier
-        // tronqué passait cette validation et partait vers les afficheurs, qui
-        // montraient chacun un carré cassé à leur façon. Le rendition le tranche une
-        // fois pour tous, au centre.
+    async fn the_switch_checked_discards_an_image_whose_bytes_do_not_decode() {
+        // The counterpart of the test above, and a deliberate **behavior
+        // change**: `image_type` only reads the magic bytes, so a truncated
+        // file passed that validation and left for the displays, each of
+        // which showed a broken square in its own way. The rendition settles
+        // it once for all, at the center.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("folder.jpg");
         std::fs::write(&path, jpeg(1000)).unwrap();
@@ -2192,16 +2186,16 @@ mod tests {
         cache.insert("k".into(), CoverPayload::File(path)).await;
         assert!(
             cache.line("k", "/api/cover/k").await.is_none(),
-            "un fichier dont l'en-tete ment sur son contenu ne doit pas etre push_cover"
+            "a file whose header lies about its content must not be pushed"
         );
     }
 
     #[tokio::test]
-    async fn les_reglages_du_produit_reencodent_une_grande_pochette() {
-        // Le path de production complet, avec les défauts et sans les
-        // paramétrer : une cover 1000 × 1000 doit arriver en 640 px.
-        // Sans ce test, tous les autres pourraient passer avec des réglages
-        // qu'aucun appareil n'applique.
+    async fn the_product_settings_reencode_a_large_cover() {
+        // The complete production path, with the defaults and without
+        // parameterizing them: a 1000 × 1000 cover must arrive at 640 px.
+        // Without this test, all the others could pass with settings no
+        // device applies.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("folder.jpg");
         let source = fixtures::jpeg_decodable(1000, 1000);
@@ -2209,40 +2203,41 @@ mod tests {
         let cache = CoverCache::new();
         cache.insert("k".into(), CoverPayload::File(path)).await;
 
-        let line = cache.line("k", "/api/cover/k").await.expect("une cover doit etre pushed");
+        let line = cache.line("k", "/api/cover/k").await.expect("a cover must be pushed");
         match serde_json::from_str::<ritornello_proto::DisplayFrame>(&line).unwrap() {
             ritornello_proto::DisplayFrame::Cover(c) => {
                 assert_eq!(
                     dimensions(&c.bytes),
                     Some((640, 640)),
-                    "les settings par defaut doivent ramener le cote long a 640 px"
+                    "the default settings must bring the long edge down to 640 px"
                 );
                 assert!(
                     c.bytes.len() < source.len(),
-                    "la thumbnail doit peser moins que la source : {} contre {}",
+                    "the thumbnail must weigh less than the source: {} against {}",
                     c.bytes.len(),
                     source.len()
                 );
             }
-            autre => panic!("une trame de cover etait attendue : {autre:?}"),
+            other => panic!("a cover frame was expected: {other:?}"),
         }
     }
 
     #[test]
-    fn les_reglages_traduisent_linterrupteur_en_absence_de_rendu() {
-        // La conversion `Settings -> CoverSettings`, qui est le seul endroit où
-        // l'interrupteur devient une structure. `None` plutôt qu'un booléen
-        // porté à côté : c'est ce qui rend impossible de read `max_edge_px`
-        // sans avoir vérifié d'abord que le rendition est active.
+    fn settings_translate_the_switch_into_an_absent_rendition() {
+        // The `Settings -> CoverSettings` conversion, which is the only place
+        // where the switch becomes a structure. `None` rather than a boolean
+        // carried alongside: it is what makes it impossible to read
+        // `max_edge_px` without having first checked that the rendition is
+        // enabled.
         let mut s = crate::state::Settings::default();
-        assert!(CoverSettings::from(&s).rendition.is_some(), "le defaut du produit reencode");
+        assert!(CoverSettings::from(&s).rendition.is_some(), "the product default re-encodes");
 
         s.cover_rendition = false;
         assert!(CoverSettings::from(&s).rendition.is_none());
         assert_eq!(
             CoverSettings::from(&s).source_max,
             20 * 1024 * 1024,
-            "le cap de source survit a l'interrupteur : c'est sa raison d'etre"
+            "the source cap survives the switch: that is its reason for being"
         );
     }
 }

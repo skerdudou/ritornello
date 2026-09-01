@@ -14,12 +14,12 @@ const UPSTREAM_URL =
   'https://raw.githubusercontent.com/jnsahaj/tweakcn/main/utils/theme-presets.ts'
 
 const source = await fetch(UPSTREAM_URL).then((r) => {
-  if (!r.ok) throw new Error(`amont injoignable : HTTP ${r.status}`)
+  if (!r.ok) throw new Error(`upstream unreachable: HTTP ${r.status}`)
   return r.text()
 })
 
 const start = source.indexOf('{', source.indexOf('defaultPresets'))
-if (start < 0) throw new Error("`defaultPresets` introuvable dans l'amont")
+if (start < 0) throw new Error('`defaultPresets` not found upstream')
 const body = source
   .slice(start)
   .replace(/;?\s*$/, '')
@@ -32,11 +32,11 @@ const body = source
 
 const presets = JSON.parse(body)
 const names = Object.keys(presets)
-if (names.length < 40) throw new Error(`trop peu de presets analysés : ${names.length}`)
-if (!presets['northern-lights']) throw new Error('`northern-lights` absent')
-for (const [nom, p] of Object.entries(presets)) {
+if (names.length < 40) throw new Error(`too few presets parsed: ${names.length}`)
+if (!presets['northern-lights']) throw new Error('`northern-lights` missing')
+for (const [name, p] of Object.entries(presets)) {
   if (!p.label || !p.styles?.light || !p.styles?.dark) {
-    throw new Error(`preset ${nom} incomplet`)
+    throw new Error(`preset ${name} incomplete`)
   }
 }
 
@@ -44,4 +44,4 @@ writeFileSync(
   new URL('../src/themes/presets.json', import.meta.url),
   JSON.stringify(presets, null, 2) + '\n',
 )
-console.log(`${names.length} presets écrits`)
+console.log(`${names.length} presets written`)

@@ -13,112 +13,112 @@ import FolderPicker from './FolderPicker.vue'
 import type { Data, Send, T } from './data'
 
 /**
- * Assistant « dossier de l'appareil ».
+ * "Device folder" wizard.
  *
- * Il ouvre sur la liste des volumes, jamais sur `/` : le path absolu d'une
- * clé USB n'est connu de personne, et c'est précisément ce que l'ancien
- * formulaire demandait de taper.
+ * It opens on the list of volumes, never on `/`: nobody knows the absolute
+ * path of a USB key, and that is precisely what the old form asked for
+ * typing.
  */
 const props = defineProps<{
   data: Data
   t: T
   send: Send
-  fige: boolean
-  ouvert: boolean
+  frozen: boolean
+  open: boolean
   /**
-   * Dernier refus du plugin, tel que la page l'a reçu.
+   * Last refusal from the plugin, as the page received it.
    *
-   * Il arrive ici parce qu'un refus né dans la popin doit s'y afficher : le
-   * bandeau de la page principale est derrière le voile gris de la boîte de
-   * dialogue, donc à peu près invisible au moment où il compte le plus.
+   * It lands here because a refusal born inside the dialog must display
+   * there: the main page's banner is behind the dialog's grey veil, hence
+   * about invisible right when it matters most.
    */
   message: string
 }>()
 const emit = defineEmits<{ close: [] }>()
 
 const ex = computed(() => props.data.explore)
-/** Un volume a été choisi : on est dans l'arbre plutôt que dans la liste. */
+/** A volume has been chosen: we are in the tree rather than in the list. */
 const inTree = computed(() => ex.value.kind === 'local' && ex.value.path !== '')
 
 /**
- * Volume contenant le path courant : le plus long préfixe déclaré.
+ * Volume containing the current path: the longest declared prefix.
  *
- * Sert à borner la remontée. Sans lui, « goUp » depuis le sommet d'une clé
- * USB emmenait dans `/media`, puis `/` — on sortait du volume qu'on venait de
- * choose, sans jamais retrouver la liste.
+ * Used to bound going up. Without it, `goUp` from the top of a USB key would
+ * lead into `/media`, then `/` — leaving the volume just chosen, without ever
+ * finding the list again.
  */
 const currentVolume = computed(() => {
-  const sous = (base: string) =>
+  const under = (base: string) =>
     ex.value.path === base || ex.value.path.startsWith(`${base.replace(/\/$/, '')}/`)
   return (
     props.data.volumes
-      .filter((v) => sous(v.path))
+      .filter((v) => under(v.path))
       .sort((a, b) => b.path.length - a.path.length)[0] ?? null
   )
 })
 
 const input = ref('')
 
-// Le `Dialog` reste **monté** quand il est fermé : sans cette remise à zéro, la
-// input d'une ouverture précédente réapparaîtrait à la suivante, comme si on
-// n'avait jamais fermé.
+// The `Dialog` stays **mounted** when closed: without this reset, the input
+// of a previous opening would reappear at the next one, as if it had never
+// been closed.
 watch(
-  () => props.ouvert,
-  (ouvert) => {
-    if (ouvert) input.value = ''
+  () => props.open,
+  (open) => {
+    if (open) input.value = ''
   },
 )
 
-function aller(path: string): void {
+function goTo(path: string): void {
   void props.send({ op: 'explore_local', path: path })
 }
 
 /**
- * Ouvre le path saisi à la main.
+ * Opens the path typed by hand.
  *
- * L'assistant **navigue** vers ce path au lieu de le déclarer directement, et
- * c'est délibéré : on garde la vérification qui fait tout l'intérêt de la popin
- * — on voit le contenu et le number_ de fichiers audio avant de valider. Un
- * path refusé s'affiche ici même.
+ * The wizard **navigates** to this path instead of declaring it directly,
+ * and that is deliberate: it keeps the verification that is the whole point
+ * of the dialog — seeing the content and the count of audio files before
+ * confirming. A refused path displays right here.
  *
- * Elle sert quand le dossier visé n'est sous aucun volume proposé, ou quand on
- * a déjà le path sous la main et qu'il serait absurde de le retrouver clic
- * par clic.
+ * It is useful when the target folder is under no offered volume, or when
+ * the path is already at hand and it would be absurd to find it again click
+ * by click.
  */
 function openInput(): void {
   const path = input.value.trim()
   if (!path) return
-  aller(path)
+  goTo(path)
 }
 
 /**
- * Revient au choix du volume.
+ * Returns to picking a volume.
  *
- * Rouvrir l'assistant remet son état à zéro côté plugin : c'est exactement ce
- * qu'il faut, et cela évite d'inventer une opération pour le dire.
+ * Reopening the wizard resets its state on the plugin side: that is exactly
+ * what is needed, and it avoids inventing an operation to say so.
  */
 function toVolumes(): void {
   void props.send({ op: 'explore_open', kind: 'local' })
 }
 
-function descend(nom: string): void {
-  // Le path se compose ici : l'arbre n'émet que des noms, parce qu'un path
-  // local et un path SMB ne se composent pas de la même façon.
-  aller(`${ex.value.path.replace(/\/$/, '')}/${nom}`)
+function descend(name: string): void {
+  // The path is composed here: the tree only emits names, because a local
+  // path and an SMB path are not composed the same way.
+  goTo(`${ex.value.path.replace(/\/$/, '')}/${name}`)
 }
 
 function goUp(): void {
   const v = currentVolume.value
-  // Au sommet d'un volume, goUp ramène à la **liste des volumes** et non au
-  // parent : on ne veut pas se retrouver à parcourir `/media` parce qu'on
-  // cherchait une clé USB, ni surtout rester enfermé dans le premier volume
-  // choisi sans pouvoir en essayer un autre.
+  // At the top of a volume, goUp returns to the **volume list** and not to
+  // the parent: we do not want to end up browsing `/media` because a USB key
+  // was being searched for, nor especially stay locked into the first volume
+  // chosen without being able to try another one.
   if (!v || ex.value.path === v.path) {
     toVolumes()
     return
   }
   const parent = ex.value.path.replace(/\/[^/]+\/?$/, '')
-  aller(parent.startsWith(v.path) && parent !== '' ? parent : v.path)
+  goTo(parent.startsWith(v.path) && parent !== '' ? parent : v.path)
 }
 
 async function choose(): Promise<void> {
@@ -144,29 +144,29 @@ function close(): void {
 </script>
 
 <template>
-  <Dialog :open="ouvert" @update:open="(v: boolean) => !v && close()">
-    <!-- Plus large que le défaut du kit : un arbre de dossiers vit mal dans une
-         colonne étroite, et c'est déjà la largeur que la popin des thèmes
-         emploie. -->
-    <DialogContent class="sm:max-w-2xl" data-dlg-appareil>
+  <Dialog :open="open" @update:open="(v: boolean) => !v && close()">
+    <!-- Wider than the kit's default: a folder tree fares poorly in a
+         narrow column, and it is already the width the themes dialog
+         uses. -->
+    <DialogContent class="sm:max-w-2xl" data-device-dialog>
       <DialogHeader>
         <DialogTitle>{{ t('dlg_device_title') }}</DialogTitle>
-        <!-- Pas décorative : reka-ui la rattache par `aria-describedby`, et son
-             absence laisse un player d'écran annoncer une boîte de dialogue
-             dont il ne sait rien dire. -->
+        <!-- Not decorative: reka-ui ties it in via `aria-describedby`, and
+             its absence leaves a screen reader announcing a dialog it can
+             say nothing about. -->
         <DialogDescription>{{ t('dlg_device_desc') }}</DialogDescription>
       </DialogHeader>
 
-      <!-- `min-w-0` n'est pas décoratif : `DialogContent` est une grille, et la
-           largeur minimale d'un enfant de grille vaut par défaut celle de son
-           contenu. Un nom de dossier long poussait donc la grille au-delà du
-           fond de la popin, et la barre de défilement comme les boutons se
-           retrouvaient peints hors du cadre blanc. L'autoriser à rétrécir est ce
-           qui rend `truncate` opérant à l'intérieur. -->
+      <!-- `min-w-0` is not decorative: `DialogContent` is a grid, and a grid
+           child's minimum width defaults to that of its content. A long
+           folder name therefore pushed the grid past the dialog's
+           background, and the scrollbar as well as the buttons ended up
+           painted outside the white frame. Allowing it to shrink is what
+           makes `truncate` work inside it. -->
       <div v-if="!inTree" class="min-w-0 space-y-2">
         <p class="text-sm text-muted-foreground">{{ t('volumes_label') }}</p>
-        <!-- Une liste vide sans phrase se lirait comme un chargement qui n'a
-             pas fini. -->
+        <!-- An empty list without a sentence would read like a loading that
+             never finished. -->
         <p v-if="!data.volumes.length" class="text-sm text-muted-foreground" data-no-volumes>
           {{ t('no_volumes') }}
         </p>
@@ -176,8 +176,8 @@ function close(): void {
           type="button"
           data-volume
           class="flex w-full min-w-0 items-center gap-2 rounded px-2 py-1 text-left text-sm hover:bg-accent"
-          :disabled="fige"
-          @click="aller(v.path)"
+          :disabled="frozen"
+          @click="goTo(v.path)"
         >
           <span class="min-w-0 flex-1 truncate">{{ v.path }}</span>
           <span class="shrink-0 text-xs text-muted-foreground">{{ v.fstype }}</span>
@@ -185,13 +185,13 @@ function close(): void {
       </div>
 
       <template v-else>
-        <!-- Retour explicite au choix du volume : le seul autre path est de
-             goUp jusqu'au sommet, ce qui ne se devine pas. -->
+        <!-- Explicit return to picking the volume: the only other path is
+             going up to the top, which is not guessable. -->
         <button
           type="button"
-          data-aux-volumes
+          data-to-volumes
           class="self-start rounded px-2 py-1 text-left text-sm text-muted-foreground hover:bg-accent"
-          :disabled="fige"
+          :disabled="frozen"
           @click="toVolumes"
         >
           ← {{ t('volumes_label') }}
@@ -199,18 +199,18 @@ function close(): void {
         <FolderPicker
           :exploration="ex"
           :t="t"
-          :fige="fige"
+          :frozen="frozen"
           :path="ex.path"
           @descend="descend"
           @goUp="goUp"
         />
       </template>
 
-      <!-- Saisie directe d'un path. Elle **navigue** au lieu de déclarer :
-           on garde ainsi la vérification qui fait l'intérêt de la popin — le
-           contenu du dossier et son compte de fichiers audio avant de valider.
-           Utile quand le dossier visé n'est sous aucun volume proposé, ou quand
-           on a déjà le path sous la main. -->
+      <!-- Direct entry of a path. It **navigates** instead of declaring:
+           this keeps the verification that is the whole point of the
+           dialog — the folder's content and its audio file count before
+           confirming. Useful when the target folder is under no offered
+           volume, or when the path is already at hand. -->
       <form class="flex min-w-0 gap-2" @submit.prevent="openInput">
         <Input
           v-model="input"
@@ -223,22 +223,22 @@ function close(): void {
           type="submit"
           data-manual-go
           class="shrink-0"
-          :disabled="fige || !input.trim()"
+          :disabled="frozen || !input.trim()"
         >
           {{ t('btn_go') }}
         </Button>
       </form>
 
-      <!-- Le refus s'affiche **ici** et pas seulement sur la page : derrière le
-           voile gris de la boîte de dialogue, le bandeau de la page est à peu
-           près invisible au moment précis où il compte. -->
+      <!-- The refusal displays **here** and not only on the page: behind
+           the dialog's grey veil, the page's banner is about invisible at
+           the precise moment it matters. -->
       <p v-if="message" class="min-w-0 break-words text-sm text-destructive" data-dlg-message>
         {{ message }}
       </p>
 
       <div class="flex justify-end gap-2">
-        <Button variant="ghost" data-annuler @click="close">{{ t('btn_cancel') }}</Button>
-        <Button data-choose :disabled="fige || !inTree" @click="choose">
+        <Button variant="ghost" data-cancel @click="close">{{ t('btn_cancel') }}</Button>
+        <Button data-choose :disabled="frozen || !inTree" @click="choose">
           {{ t('btn_choose_folder') }}
         </Button>
       </div>

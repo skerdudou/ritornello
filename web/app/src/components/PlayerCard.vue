@@ -11,42 +11,42 @@ import { useCatalog } from '../composables/useCatalog'
 import { formatDuration, nothingToShow } from '../composables/usePlayer'
 import type { PlayerPayload } from '../types'
 
-// L'state vient du parent (HomeView), qui tient l'**unique** connexion SSE de
-// la page : la telecommande en a besoin elle aussi (touche active), et ouvrir
-// une seconde connexion ici doublerait les flux pour le meme contenu.
+// The state comes from the parent (HomeView), which holds the page's **single**
+// SSE connection: the remote needs it too (active key), and opening a second
+// connection here would double the streams for the same content.
 const { t } = useCatalog()
 const props = defineProps<{ state: PlayerPayload | null; seekStep: number }>()
-// L'appareil a annonce une pochette, le browser n'a step pu la charger.
+// The device announced a cover, the browser could not load it.
 //
-// Le cas n'est step theorique : la cle du cache du coeur est bornee a quelques
-// entries, et le fichier lui-meme vit sur un partage qui peut disparaitre —
-// les deux rendent un 404 sous une URL deja publiee. Sans ce drapeau, le carre
-// reserve montrait le glyphe d'image cassee du browser au lieu du repli ♫
-// prevu pour exactement cette situation.
+// The case is not theoretical: the core's cache key is capped at a few
+// entries, and the file itself lives on a share that can vanish — both yield
+// a 404 under an already-published URL. Without this flag, the reserved square
+// showed the browser's broken-image glyph instead of the ♫ fallback intended
+// for exactly this situation.
 const imageBroken = ref(false)
 
 /**
- * Nombre de reprises accordees a une image annoncee, avant le repli ♫.
+ * Number of retries granted to an announced image, before the ♫ fallback.
  *
- * **Un echec n'est plus definitif pour la piste**, et c'est le point. Le
- * proprietaire rapporte des pochettes qui ne se chargent step, dont certaines
- * finissent par arriver « beaucoup plus tard » : la publication de l'URL et la
- * disponibilite reelle des octets ne sont step le meme instant, et le premier
- * `error` de l'`<img>` condamnait le carre jusqu'au morceau suivant. Deux
- * reprises espacees rattrapent un creux passager sans marteler l'appareil.
+ * **A failure is no longer final for the track**, and that is the point. The
+ * owner reports covers that do not load, some of which end up arriving "much
+ * later": publishing the URL and the actual availability of the bytes are not
+ * the same instant, and the first `error` of the `<img>` doomed the square
+ * until the next track. Two spaced-out retries catch a transient dip without
+ * hammering the device.
  */
 const IMAGE_RETRIES = 2
-/** Delai avant chaque reprise, en millisecondes : court, puis moins court. */
+/** Delay before each retry, in milliseconds: short, then less short. */
 const RETRY_DELAYS_MS = [800, 3000]
-/** Combien de reprises ont deja ete consommees pour l'URL courante. */
+/** How many retries have already been consumed for the current URL. */
 const retriesDone = ref(0)
 /**
- * Compteur ajoute a l'URL des reprises.
+ * Counter appended to the URL on retries.
  *
- * Sans lui le browser resservirait son propre echec mis en cache : une
- * reponse 404 est cachable, et redemander la meme URL ne repartirait step sur le
- * reseau. Il ne bouge qu'aux reprises, donc le cas nominal garde une URL stable
- * et le cache du browser joue son role.
+ * Without it the browser would serve back its own cached failure: a 404
+ * response is cacheable, and requesting the same URL again would not go back
+ * to the network. It only moves on retries, so the nominal case keeps a stable
+ * URL and the browser cache plays its role.
  */
 const attempt = ref(0)
 let retryTimer: ReturnType<typeof setTimeout> | null = null
@@ -59,140 +59,139 @@ function cancelRetry() {
 }
 
 /**
- * L'`<img>` a echoue : resume si le budget le permet, sinon replier.
+ * The `<img>` failed: retry if the budget allows, otherwise fall back.
  *
- * **Le repli ♫ est pose dans les deux cas**, tout de suite. Laisser l'`<img>`
- * en place pendant l'wait rendrait le glyphe d'image cassee du browser —
- * exactement ce que `imageBroken` existe pour eviter — et une reprise le
- * ferait clignoter. Le carre montre donc le repli, et l'image revient d'elle
- * meme si la reprise aboutit.
+ * **The ♫ fallback is shown in both cases**, immediately. Leaving the `<img>`
+ * in place while waiting would render the browser's broken-image glyph —
+ * exactly what `imageBroken` exists to avoid — and a retry would make it
+ * flicker. So the square shows the fallback, and the image comes back on its
+ * own if the retry succeeds.
  */
 function onImageError() {
   imageBroken.value = true
   if (retriesDone.value >= IMAGE_RETRIES) return
-  const delai = RETRY_DELAYS_MS[retriesDone.value] ?? 3000
+  const delay = RETRY_DELAYS_MS[retriesDone.value] ?? 3000
   retriesDone.value += 1
   cancelRetry()
   retryTimer = setTimeout(() => {
     retryTimer = null
-    // L'order count : la nouvelle URL d'abord, le remontage ensuite. En
-    // sens inverse, l'`<img>` reparaitrait un instant avec l'URL qui vient
-    // d'fail, et le browser resservirait son echec en cache.
+    // Order matters: the new URL first, the remount second. The other way
+    // round, the `<img>` would reappear for an instant with the URL that just
+    // failed, and the browser would serve back its cached failure.
     attempt.value += 1
     imageBroken.value = false
-  }, delai)
+  }, delay)
 }
 
-// Remis a zero des que l'appareil designe une **autre** image : sans cela, un
-// seul echec condamnerait le carre pour le reste de la session.
+// Reset as soon as the device points at a **different** image: otherwise a
+// single failure would doom the square for the rest of the session.
 watch(
   () => props.state?.cover_href,
   () => {
     imageBroken.value = false
-    // Le budget de reprises est **par image** : une nouvelle URL repart avec
-    // le sien, et la minuterie de la precedente n'a plus d'objet.
+    // The retry budget is **per image**: a new URL starts over with its own,
+    // and the previous one's timer no longer has a purpose.
     retriesDone.value = 0
     attempt.value = 0
     cancelRetry()
-    // Une pochette enlarged qui reste ouverte pendant que la piste change
-    // montrerait l'image de la piste suivante en plein ecran, sans que
-    // personne l'ait demande. Fermer est la seule reponse honnete.
+    // An enlarged cover left open while the track changes would show the next
+    // track's image full screen, without anyone asking for it. Closing is the
+    // only honest answer.
     enlarged.value = false
   },
 )
-// Vrai quand l'appareil annonce une image et que le browser a su la charger :
-// c'est la seule condition sous laquelle le carre est cliquable.
+// True when the device announces an image and the browser managed to load it:
+// the only condition under which the square is clickable.
 const hasImage = computed(() => !!props.state?.cover_href && !imageBroken.value)
 /**
- * L'URL de la **vignette**, celle que le carre de la carte displayed.
+ * The URL of the **thumbnail**, the one the card's square displays.
  *
- * Le carre fait 224 px sur phone ; y charger le `folder.jpg` d'un NAS —
- * couramment deux ou trois mebioctets — etait du gaspillage pur, surtout en
- * Wi-Fi. Le coeur sait fabriquer la reduction (c'est celle qu'il pousse deja
- * aux afficheurs), il suffit de la lui demander. L'URL nue reste l'image telle
- * qu'elle est, et c'est elle que la vue enlarged load.
+ * The square is 224 px on a phone; loading a NAS's `folder.jpg` into it —
+ * commonly two or three mebibytes — was pure waste, especially over Wi-Fi.
+ * The core knows how to produce the reduced version (it is the one it already
+ * pushes to the displays), it just has to be asked. The bare URL stays the
+ * image as it is, and that is what the enlarged view loads.
  */
 const thumbnailHref = computed(() => {
   if (!props.state?.cover_href) return null
   const base = `${props.state.cover_href}?taille=vignette`
-  // `attempt` n'apparait qu'a partir de la premiere reprise : voir sa doc.
+  // `attempt` only appears from the first retry onwards: see its doc.
   return attempt.value === 0 ? base : `${base}&attempt=${attempt.value}`
 })
-/** La pochette est-elle ouverte en plein ecran ? */
+/** Is the cover open full screen? */
 const enlarged = ref(false)
-// Echap ferme, comme toute surcouche modale. L'ecouteur n'existe que pendant
-// l'ouverture : un ecouteur global permanent pour une vue rarement ouverte est
-// une dette, et il capterait des touches sur des pages qui n'ont step de
-// pochette du tout.
+// Escape closes, like any modal overlay. The listener only exists while open:
+// a permanent global listener for a rarely-opened view is a debt, and it would
+// catch keys on pages that have no cover at all.
 function onEscape(e: KeyboardEvent) {
   if (e.key === 'Escape') enlarged.value = false
 }
-watch(enlarged, (ouverte) => {
-  if (ouverte) window.addEventListener('keydown', onEscape)
+watch(enlarged, (open) => {
+  if (open) window.addEventListener('keydown', onEscape)
   else window.removeEventListener('keydown', onEscape)
 })
-// Sans cela, quitter la page pochette ouverte laisse l'ecouteur derriere lui —
-// et la minuterie de reprise tournerait contre un composant demonte.
+// Without this, leaving the page with the cover open leaves the listener
+// behind — and the retry timer would run against an unmounted component.
 onUnmounted(() => {
   window.removeEventListener('keydown', onEscape)
   cancelRetry()
 })
-// La duration ne s'displayed que faute de barre de progression : quand une position
-// est connue, la barre porte deja la duration totale.
+// The duration is only shown when there is no progress bar: when a position is
+// known, the bar already carries the total duration.
 const durationToShow = computed(
   () => props.state?.position_s == null && !!formatDuration(props.state?.duration_s),
 )
-// Les links que cette version sait rendre. Le protocole ferme l'ensemble des
-// plateformes, mais un greffon en avance sur l'IHM peut en nommer une nouvelle :
-// la laisser passer donnerait une ancre de 44 px sans icon et sans nom
-// accessible (`LINK_LABEL` n'aurait aucune entree pour elle). Filtrer ici
-// plutot que de tenter un rendu par defaut, qui annoncerait « Ecouter sur Apple
-// Music » pour un lien qui n'y mene step.
+// The links this version knows how to render. The protocol closes the set of
+// platforms, but a plugin ahead of the UI may name a new one: letting it
+// through would give a 44 px anchor with no icon and no accessible name
+// (`LINK_LABEL` would have no entry for it). Filter here rather than attempt a
+// default rendering, which would announce "Listen on Apple Music" for a link
+// that does not lead there.
 const links = computed(
-  () => props.state?.links?.filter((lien) => lien.platform in LINK_LABEL) ?? [],
+  () => props.state?.links?.filter((link) => link.platform in LINK_LABEL) ?? [],
 )
-// La provenance a quelque chose a dire des que le coeur a nomme un champ ou un
-// contributeur bredouille. C'est ce qui decide de la presence du `(?)`, donc de
-// celle de la ligne quand rien d'autre ne l'occupe.
+// Provenance has something to say as soon as the core has named a field or an
+// empty-handed contributor. This decides the presence of the `(?)`, hence that
+// of the row when nothing else occupies it.
 const hasOrigins = computed(() => {
   const p = props.state?.provenance
   return Object.keys(p?.fields ?? {}).length > 0 || (p?.misses?.length ?? 0) > 0
 })
-// La ligne basse du bloc morceau (provenance, duration, links) n'existe que s'il y
-// a quelque chose a y mettre : sinon `min-h-11` reserverait 44 px vides sous
-// l'album, ce qui est le cas le plus courant (un titre ICY nu).
+// The bottom row of the track block (provenance, duration, links) only exists
+// if there is something to put in it: otherwise `min-h-11` would reserve 44
+// empty px under the album, which is the most common case (a bare ICY title).
 const badgeRow = computed(
   () => hasOrigins.value || durationToShow.value || links.value.length > 0,
 )
-// Remonte au parent : c'est HomeView qui poste les commandes (comme pour le
-// reste de la telecommande), la carte elle-meme n'en poste aucune.
-const emit = defineEmits<{ seek: [secondes: number] }>()
+// Bubbled up to the parent: HomeView is what posts the commands (as for the
+// rest of the remote), the card itself posts none.
+const emit = defineEmits<{ seek: [seconds: number] }>()
 </script>
 
 <template>
   <!--
-    La pochette et le morceau sont le sujet : c'est la seule chose qu'on
-    regarde depuis le canape. L'state (source, veille) tient dans l'en-tete ;
-    le volume est le curseur du slot `commandes`. Sur phone tout est
-    centre en colonne ; a partir de `md` la pochette passe a gauche du text.
+    The cover and the track are the subject: they are the only thing one looks
+    at from the couch. The state (source, standby) fits in the header; the
+    volume is the slider in the `commandes` slot. On a phone everything is
+    centered in a column; from `md` up the cover moves to the left of the text.
   -->
   <Card data-player>
     <CardHeader class="pb-2">
       <CardTitle class="flex items-center gap-2 text-base">
         {{ t('player_title') }}
-        <!-- La source en pastille : un badge du kit, `data-source` conserve
-             pour les journey. Le point dit « ca joue » (playback), la ou
-             l'ancienne ligne de text ne disait rien.
+        <!-- The source as a pill: a kit badge, `data-source` kept for the
+             journeys. The dot says "it's playing" (playback), where the old
+             text line said nothing.
 
-             `bg-current` et non `bg-primary` : le point herite de la color
-             de text du badge, donc il contraste **par construction** avec son
-             propre fond, dans tous les themes. En `bg-primary` il peignait le
-             vert du theme sur le bleu du badge secondaire — deux teintes
-             saturees et proches, signalees illisibles par le proprietaire.
-             C'est aussi l'idiome deja retenu pour la pastille de la
-             preselection active (voir `PresetGrid.vue`). La color ne
-             porte d'ailleurs aucun sens ici : c'est la **presence** du point
-             qui dit que ca joue, il n'est rendu qu'a ce moment-la. -->
+             `bg-current` and not `bg-primary`: the dot inherits the badge's
+             text color, so it contrasts **by construction** with its own
+             background, in every theme. With `bg-primary` it painted the
+             theme's green over the secondary badge's blue — two saturated,
+             close hues, reported unreadable by the owner. It is also the
+             idiom already chosen for the active preset pill (see
+             `PresetGrid.vue`). The color carries no meaning here anyway: it
+             is the **presence** of the dot that says it is playing, it is
+             only rendered at that moment. -->
         <Badge variant="secondary" class="gap-1.5 font-normal">
           <span
             v-if="state?.playback === 'playing'"
@@ -209,19 +208,19 @@ const emit = defineEmits<{ seek: [secondes: number] }>()
       </CardAction>
     </CardHeader>
     <CardContent class="flex flex-col items-center gap-4 md:flex-row md:items-start md:gap-5">
-      <!-- Le carre est toujours la, image ou repli : c'est lui qui tient la
-           mise en page, et une image qui arrive apres le text ne doit rien
-           decaler. 224 px sur phone (le sujet), 176 px a cote du text
-           sur PC. -->
+      <!-- The square is always there, image or fallback: it is what holds the
+           layout, and an image arriving after the text must shift nothing.
+           224 px on a phone (the subject), 176 px next to the text on a PC. -->
       <div
         class="size-56 shrink-0 overflow-hidden rounded-lg border border-border bg-muted shadow-md md:size-44"
         :class="{ 'opacity-50': state?.standby }"
         data-pochette
       >
-        <!-- Un vrai bouton et non un `@click` sur l'image : la vue enlarged
-             s'ouvre alors aussi au clavier et porte un nom accessible. Il n'y
-             en a step quand il n'y a rien a agrandir — le repli ♫ n'est step une
-             image, et un bouton qui n'ouvre rien est pire qu'aucun bouton. -->
+        <!-- A real button and not a `@click` on the image: the enlarged view
+             then also opens from the keyboard and carries an accessible name.
+             There is none when there is nothing to enlarge — the ♫ fallback is
+             not an image, and a button that opens nothing is worse than no
+             button. -->
         <button
           v-if="hasImage"
           type="button"
@@ -250,47 +249,46 @@ const emit = defineEmits<{ seek: [secondes: number] }>()
         </div>
       </div>
       <div class="flex min-w-0 flex-1 flex-col items-center gap-1 text-center md:items-start md:text-left">
-        <!-- La presélection en surligne : `P1 · FIP`. Absente quand la source
-             n'en declare step (cd sans disque, entree aux). -->
+        <!-- The preset as an overline: `P1 · FIP`. Absent when the source
+             declares none (cd without a disc, aux input). -->
         <p v-if="state?.preset != null" class="text-[11px] font-semibold uppercase tracking-wider text-primary">
           P<span data-player-preset>{{ state.preset }}</span>
           <template v-if="state.preset_name"> · <span data-player-preset-name>{{ state.preset_name }}</span></template>
         </p>
-        <!-- Le statut de la source (« PAS DE DISQUE »), masque en veille : le
-             badge VEILLE porte deja le mot. -->
+        <!-- The source's status ("PAS DE DISQUE"), hidden in standby: the
+             STANDBY badge already carries the word. -->
         <p v-if="state?.status && !state.standby" class="text-sm text-muted-foreground" data-player-status>
           {{ state.status }}
         </p>
         <div v-if="!nothingToShow(state)" class="flex min-w-0 flex-col items-center gap-0.5 md:items-start" data-now-playing>
           <p v-if="state?.title" class="text-xl font-semibold leading-tight text-foreground" data-titre>{{ state.title }}</p>
           <p v-if="state?.artist" class="text-sm text-foreground" data-artiste>{{ state.artist }}</p>
-          <!-- L'annee s'accole a l'album, la ou une annee se lit. Elle sort
-               aussi seule : un flux peut la connaitre sans connaitre l'album. -->
+          <!-- The year sits next to the album, where a year is read. It also
+               stands alone: a stream may know it without knowing the album. -->
           <p v-if="state?.album || state?.year" class="text-sm text-muted-foreground">
             <span v-if="state?.album" data-album>{{ state.album }}</span>
             <span v-if="state?.album && state?.year"> · </span>
             <span v-if="state?.year" :title="t('release_year')" data-annee>{{ state.year }}</span>
           </p>
-          <!-- Qui a fourni le text, et la pochette quand ce n'est step le meme :
-               la premiere question devant un titre faux. Les plateformes
-               d'ecoute partagent cette ligne : une rangee a elles seules
-               poussait le curseur de volume hors de portee du pouce sur
-               phone. `min-h-11` reserve d'emblee la hauteur de la cible
-               tactile, sinon un lien qui arrive apres le titre (MusicBrainz
-               repond plus tard) ferait grandir la carte sous le doigt.
-               La ligne n'existe que s'il y a quelque chose a y mettre. -->
+          <!-- Who supplied the text, and the cover when it is not the same:
+               the first question in front of a wrong title. The listening
+               platforms share this row: a row of their own pushed the volume
+               slider out of the thumb's reach on a phone. `min-h-11` reserves
+               the touch target's height up front, otherwise a link arriving
+               after the title (MusicBrainz answers later) would grow the card
+               under the finger. The row only exists if there is something to
+               put in it. -->
           <div
             v-if="badgeRow"
             class="mt-1 flex min-h-11 items-center gap-1.5"
             data-badges
           >
-            <!-- Les deux badges d'origine ont cede la place a ce bouton
-                 (decision du proprietaire) : ils occupaient la ligne la plus
-                 chargee de l'ecran avec deux mots que personne ne lit en
-                 ecoutant, et ils ne repondaient meme step a la question qu'on
-                 se pose devant un titre faux — *quel champ* vient de *qui*.
-                 Le detail vit desormais dans une popin, ou il y a la place de
-                 le dire en toutes lettres. -->
+            <!-- The two origin badges gave way to this button (owner's
+                 decision): they occupied the busiest row of the screen with
+                 two words nobody reads while listening, and they did not even
+                 answer the question one asks in front of a wrong title —
+                 *which field* comes from *whom*. The detail now lives in a
+                 popover, where there is room to spell it out. -->
             <ProvenanceDetails :state="state" />
             <span
               v-if="durationToShow"
@@ -300,58 +298,58 @@ const emit = defineEmits<{ seek: [secondes: number] }>()
             >
               {{ formatDuration(state?.duration_s) }}
             </span>
-            <!-- `platform` est un ensemble ferme cote protocole et l'URL a deja
-                 ete validee contre l'hote de cette plateforme : rien a
-                 revalider ici. `noopener` parce que la cible est un tiers,
-                 `noreferrer` parce qu'il n'a step a savoir d'ou on vient.
-                 La cle est l'URL et non la plateforme : rien n'interdit deux
-                 links d'une meme plateforme, et Vue en perdrait un.
-                 L'ancre ne porte plus de color elle-meme (ni au repos, ni au
-                 survol) : chaque icon porte deja sa color de marque en dur
-                 (decision du proprietaire, exception assumee a la regle
-                 « aucune color en dur », voir docs/interface.md § Player
-                 card), et une teinte de text par-dessus la brouillerait sans
-                 rien apporter. `hover:opacity-80` garde un retour perceptible
-                 au survol malgre l'absence de changement de color.
-                 `relative z-10` : la zone de contact de 44 px du curseur de
-                 ProgressBar deborde de 19 px au-dessus de sa piste (voir
-                 ProgressBar.vue), alors que cette ligne n'est qu'a 8 px
-                 plus haut — le debordement recouvre donc le bas de ces
-                 ancres (des cibles reelles, contrairement aux durees en
-                 dessous de la piste). Les faire passer devant dans l'order
-                 de peinture rend le tap aux links : le curseur garde toute
-                 sa zone de contact basse et au moins 33 px en haut, largement
-                 assez pour rester utilisable. -->
+            <!-- `platform` is a closed set on the protocol side and the URL
+                 has already been validated against that platform's host:
+                 nothing to revalidate here. `noopener` because the target is
+                 a third party, `noreferrer` because it has no business
+                 knowing where we come from. The key is the URL and not the
+                 platform: nothing forbids two links from the same platform,
+                 and Vue would lose one.
+                 The anchor no longer carries a color itself (neither at rest
+                 nor on hover): each icon already carries its hard-coded brand
+                 color (owner's decision, an acknowledged exception to the "no
+                 hard-coded color" rule, see docs/interface.md § Player card),
+                 and a text tint on top would muddle it without adding
+                 anything. `hover:opacity-80` keeps a perceptible hover
+                 feedback despite the absence of a color change.
+                 `relative z-10`: the 44 px hit area of ProgressBar's thumb
+                 overflows 19 px above its track (see ProgressBar.vue), while
+                 this row is only 8 px higher — the overflow therefore covers
+                 the bottom of these anchors (real targets, unlike the
+                 durations below the track). Moving them in front in the paint
+                 order gives the tap back to the links: the thumb keeps its
+                 whole lower hit area and at least 33 px at the top, plenty to
+                 remain usable. -->
             <span v-if="links.length" class="relative z-10 inline-flex items-center gap-1" data-links>
               <a
-                v-for="lien in links"
-                :key="lien.url"
-                :href="lien.url"
+                v-for="link in links"
+                :key="link.url"
+                :href="link.url"
                 target="_blank"
                 rel="noopener noreferrer"
                 class="inline-flex size-11 items-center justify-center rounded-md transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                :aria-label="t(LINK_LABEL[lien.platform])"
-                :title="t(LINK_LABEL[lien.platform])"
-                :data-lien="lien.platform"
+                :aria-label="t(LINK_LABEL[link.platform])"
+                :title="t(LINK_LABEL[link.platform])"
+                :data-lien="link.platform"
               >
-                <!-- Aucun `v-else` : les trois branches epuisent l'ensemble
-                     deja filtre par `links`, et un `v-else` rendrait l'icon
-                     Apple pour tout le reste. -->
-                <YoutubeIcon v-if="lien.platform === 'youtube'" class="size-5" />
-                <DeezerIcon v-else-if="lien.platform === 'deezer'" class="size-5" />
-                <AppleMusicIcon v-else-if="lien.platform === 'apple_music'" class="size-5" />
+                <!-- No `v-else`: the three branches exhaust the set already
+                     filtered by `links`, and a `v-else` would render the Apple
+                     icon for everything else. -->
+                <YoutubeIcon v-if="link.platform === 'youtube'" class="size-5" />
+                <DeezerIcon v-else-if="link.platform === 'deezer'" class="size-5" />
+                <AppleMusicIcon v-else-if="link.platform === 'apple_music'" class="size-5" />
               </a>
             </span>
           </div>
         </div>
       </div>
     </CardContent>
-    <!-- L'entourage de la barre de progression a ete resserre a la demande du
-         proprietaire, puis **desserre de 4 px** : a `space-y-2` la ligne des
-         durees touchait les commandes, « colle au pixel pres ». `space-y-3`
-         rend le tout petit ecart demande sans revenir a l'air d'avant. Le
-         pendant au-dessus de la piste vit dans `ProgressBar.vue`
-         (`-mt-3`), le `gap-6` du `Card` du kit n'etant step modifiable ici. -->
+    <!-- The spacing around the progress bar was tightened at the owner's
+         request, then **loosened by 4 px**: at `space-y-2` the durations row
+         touched the commands, "glued to the pixel". `space-y-3` gives the tiny
+         gap requested without going back to the previous airiness. The
+         counterpart above the track lives in `ProgressBar.vue` (`-mt-3`), the
+         `gap-6` of the kit's `Card` not being adjustable here. -->
     <CardContent class="space-y-3 pt-0">
       <ProgressBar
         :position="state?.position_s ?? null"
@@ -362,12 +360,12 @@ const emit = defineEmits<{ seek: [secondes: number] }>()
       />
       <slot name="commandes" />
     </CardContent>
-    <!-- La pochette en plein ecran. `Teleport` vers le `body` : la carte a un
-         `overflow-hidden` (arrondis) et son propre contexte d'empilement, une
-         surcouche rendue dedans s'y serait retrouvee coupee. Un clic
-         **n'importe ou** referme, y compris sur l'image : c'est la demande
-         (« fermer en cliquant de nouveau »), et c'est aussi ce que fait tout
-         visionneur d'images. -->
+    <!-- The cover full screen. `Teleport` to the `body`: the card has an
+         `overflow-hidden` (rounded corners) and its own stacking context, an
+         overlay rendered inside it would have ended up clipped. A click
+         **anywhere** closes, including on the image: that is the request
+         ("close by clicking again"), and it is also what every image viewer
+         does. -->
     <Teleport to="body">
       <div
         v-if="enlarged"
@@ -378,16 +376,16 @@ const emit = defineEmits<{ seek: [secondes: number] }>()
         data-pochette-enlarged
         @click="enlarged = false"
       >
-        <!-- `object-contain` et non `object-cover` : agrandir sert justement a
-             voir la pochette entiere, une rognure la trahirait. -->
+        <!-- `object-contain` and not `object-cover`: enlarging is precisely
+             for seeing the whole cover, a crop would betray it. -->
         <img
           :src="state?.cover_href ?? ''"
           :alt="t('cover_alt')"
           class="max-h-full max-w-full rounded-lg object-contain shadow-2xl"
         />
-        <!-- Le bouton de fermeture double le clic sur le fond, il ne le
-             remplace step : sans lui, il n'existe aucun moyen de fermer au
-             clavier autre qu'Echap, qui ne s'annonce nulle part. -->
+        <!-- The close button doubles the click on the backdrop, it does not
+             replace it: without it, there is no way to close from the
+             keyboard other than Escape, which is announced nowhere. -->
         <button
           type="button"
           class="absolute right-4 top-4 rounded-full bg-black/50 p-3 text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"

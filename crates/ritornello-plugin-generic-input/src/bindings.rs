@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
 
-/// Une touche liée à une commande. Le couple `cmd`/`arg` est exactement la
-/// représentation sérialisée de `Command` (`#[serde(tag = "cmd", content =
-/// "arg")]`) aplatie dans le binding : aucune liste de commands n'est
-/// dupliquée, et le même objet transite tel quel en JSON vers l'IHM.
+/// A key bound to a command. The `cmd`/`arg` pair is exactly the serialized
+/// representation of `Command` (`#[serde(tag = "cmd", content = "arg")]`)
+/// flattened into the binding: no list of commands is duplicated, and the
+/// same object flows unchanged as JSON to the UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Binding {
     pub code: u16,
@@ -17,25 +17,25 @@ pub struct Binding {
 }
 
 impl Binding {
-    /// Constructeur pratique pour les tests (partout ailleurs, un `Binding`
-    /// arrive par désérialisation TOML/JSON, jamais construit à la main).
+    /// Convenience constructor for tests (everywhere else, a `Binding`
+    /// arrives via TOML/JSON deserialization, never built by hand).
     #[cfg(test)]
     pub fn new(code: u16, command: &Command) -> Self {
         Binding { code, command: command.clone() }
     }
 
-    /// Commande portée par ce binding. `Option` parce que la forme de repli
-    /// documentée dans la spec (`cmd: String` + `arg: Option<u8>`) peut porter
-    /// une commande inconnue ; sous la forme aplatie nominale, c'est toujours
-    /// `Some`. Tout le reste du crate passe par cet accesseur, ce qui confine
-    /// le repli éventuel à ce fichier.
+    /// Command carried by this binding. `Option` because the fallback form
+    /// documented in the spec (`cmd: String` + `arg: Option<u8>`) can carry
+    /// an unknown command; under the nominal flattened form, it is always
+    /// `Some`. The rest of the crate always goes through this accessor,
+    /// which confines any fallback to this file.
     pub fn command(&self) -> Option<Command> {
         Some(self.command.clone())
     }
 }
 
-/// Les bindings d'un périphérique, identifié par son **name** (stable au
-/// redémarrage) : tous les nœuds evdev portant ce name sont concernés.
+/// The bindings of a device, identified by its **name** (stable across
+/// reboots): every evdev node carrying this name is affected.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Device {
     pub name: String,
@@ -49,9 +49,9 @@ pub struct Bindings {
     pub devices: Vec<Device>,
 }
 
-/// Erreur de validation typée : le texte utilisateur est produit à la
-/// frontière via `message(&Catalog)` (modèle du plugin radio). `Display`
-/// fournit une version anglaise pour les logs internes.
+/// Typed validation error: the user-facing text is produced at the boundary
+/// via `message(&Catalog)` (the radio plugin's model). `Display` provides an
+/// English version for internal logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationError {
     DuplicateCode { device: String, code: u16 },
@@ -60,7 +60,7 @@ pub enum ValidationError {
 }
 
 impl ValidationError {
-    /// Message localisé remonté à l'utilisateur (corps du 422 côté admin).
+    /// Localized message surfaced to the user (body of the admin-side 422).
     pub fn message(&self, catalog: &Catalog) -> String {
         match self {
             ValidationError::DuplicateCode { device, code } => catalog
@@ -98,9 +98,9 @@ impl std::fmt::Display for ValidationError {
 impl std::error::Error for ValidationError {}
 
 impl Bindings {
-    /// Charge la table. Best-effort : fichier absent ou TOML invalide donnent
-    /// une table clear avec un `warn` — jamais de panique, le plugin démarre et
-    /// l'utilisateur corrige depuis la page d'admin.
+    /// Loads the table. Best-effort: a missing file or invalid TOML give an
+    /// empty table with a `warn` — never a panic, the plugin starts and the
+    /// user fixes it from the admin page.
     pub fn load(path: &Path) -> Bindings {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
@@ -124,8 +124,8 @@ impl Bindings {
         }
     }
 
-    /// Écriture atomique : fichier temporaire puis `rename`, jamais de fichier
-    /// tronqué si l'alimentation saute au mauvais moment.
+    /// Atomic write: temporary file then `rename`, never a truncated file if
+    /// power is lost at the wrong moment.
     pub fn save(&self, path: &Path) -> Result<()> {
         self.validate()?;
         if let Some(parent) = path.parent() {
@@ -139,9 +139,9 @@ impl Bindings {
 
     pub fn validate(&self) -> std::result::Result<(), ValidationError> {
         for dev in &self.devices {
-            let mut vus = HashSet::new();
+            let mut seen = HashSet::new();
             for b in &dev.bindings {
-                if !vus.insert(b.code) {
+                if !seen.insert(b.code) {
                     return Err(ValidationError::DuplicateCode {
                         device: dev.name.clone(),
                         code: b.code,
@@ -167,8 +167,8 @@ impl Bindings {
         Ok(())
     }
 
-    /// Résolution au moment de l'événement : (name du périphérique, code) →
-    /// commande. `None` = touche non liée, ignorée silencieusement.
+    /// Resolution at event time: (device name, code) → command. `None` =
+    /// unbound key, silently ignored.
     pub fn resolve(&self, device_name: &str, code: u16) -> Option<Command> {
         self.devices
             .iter()
@@ -177,8 +177,8 @@ impl Bindings {
             .and_then(|b| b.command())
     }
 
-    /// Remplace l'intégralité des bindings d'un périphérique (création de
-    /// l'entrée si elle n'existe pas). Utilisé par `load_preset`.
+    /// Replaces the entire set of bindings of a device (creating the entry
+    /// if it doesn't exist). Used by `load_preset`.
     pub fn replace_device(&mut self, device: &str, bindings: Vec<Binding>) {
         match self.devices.iter_mut().find(|d| d.name == device) {
             Some(d) => d.bindings = bindings,
@@ -191,7 +191,7 @@ impl Bindings {
 mod tests {
     use super::*;
 
-    fn exemple() -> Bindings {
+    fn sample() -> Bindings {
         Bindings {
             devices: vec![
                 Device {
@@ -209,28 +209,28 @@ mod tests {
         }
     }
 
-    /// PREMIER test du chantier : `#[serde(flatten)]` sur un enum à tag
-    /// adjacent est éprouvé en JSON dans ce projet, pas en TOML. S'il échoue,
-    /// appliquer sans discussion le repli documenté dans la spec (champs
-    /// `cmd: String` + `arg: Option<u8>` et conversions vers `Command`), qui
-    /// garde exactement la même forme de fichier et de JSON.
+    /// FIRST test of this effort: `#[serde(flatten)]` on an adjacently-tagged
+    /// enum is proven in JSON on this project, not in TOML. If it fails,
+    /// apply without discussion the fallback documented in the spec (fields
+    /// `cmd: String` + `arg: Option<u8>` and conversions to `Command`),
+    /// which keeps exactly the same file and JSON shape.
     #[test]
     fn binding_roundtrip_toml() {
-        let avec_arg = Binding::new(2, &Command::Select(1));
-        let t = toml::to_string_pretty(&avec_arg).unwrap();
-        assert!(t.contains("code = 2"), "TOML produit: {t}");
-        assert!(t.contains("cmd = \"Select\""), "TOML produit: {t}");
-        assert!(t.contains("arg = 1"), "TOML produit: {t}");
-        assert_eq!(toml::from_str::<Binding>(&t).unwrap(), avec_arg);
+        let with_arg = Binding::new(2, &Command::Select(1));
+        let t = toml::to_string_pretty(&with_arg).unwrap();
+        assert!(t.contains("code = 2"), "TOML produced: {t}");
+        assert!(t.contains("cmd = \"Select\""), "TOML produced: {t}");
+        assert!(t.contains("arg = 1"), "TOML produced: {t}");
+        assert_eq!(toml::from_str::<Binding>(&t).unwrap(), with_arg);
 
-        let sans_arg = Binding::new(115, &Command::VolumeUp);
-        let t2 = toml::to_string_pretty(&sans_arg).unwrap();
-        assert!(!t2.contains("arg"), "TOML produit: {t2}");
-        assert_eq!(toml::from_str::<Binding>(&t2).unwrap(), sans_arg);
+        let without_arg = Binding::new(115, &Command::VolumeUp);
+        let t2 = toml::to_string_pretty(&without_arg).unwrap();
+        assert!(!t2.contains("arg"), "TOML produced: {t2}");
+        assert_eq!(toml::from_str::<Binding>(&t2).unwrap(), without_arg);
     }
 
     #[test]
-    fn binding_json_porte_cmd_et_arg_a_plat() {
+    fn binding_json_carries_cmd_and_arg_flattened() {
         assert_eq!(
             serde_json::to_value(Binding::new(2, &Command::Select(1))).unwrap(),
             serde_json::json!({ "code": 2, "cmd": "Select", "arg": 1 })
@@ -246,39 +246,39 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_fichier() {
+    fn file_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("input-bindings.toml");
-        exemple().save(&path).unwrap();
-        assert_eq!(Bindings::load(&path), exemple());
+        sample().save(&path).unwrap();
+        assert_eq!(Bindings::load(&path), sample());
     }
 
     #[test]
-    fn fichier_absent_donne_une_table_vide() {
+    fn missing_file_gives_an_empty_table() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(Bindings::load(&dir.path().join("absent.toml")), Bindings::default());
     }
 
     #[test]
-    fn toml_invalide_donne_une_table_vide() {
+    fn invalid_toml_gives_an_empty_table() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("casse.toml");
-        std::fs::write(&path, "ceci n'est pas = du toml [").unwrap();
+        let path = dir.path().join("broken.toml");
+        std::fs::write(&path, "this is not = toml [").unwrap();
         assert_eq!(Bindings::load(&path), Bindings::default());
     }
 
     #[test]
-    fn save_ne_laisse_pas_de_fichier_temporaire() {
+    fn save_leaves_no_temporary_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("input-bindings.toml");
-        exemple().save(&path).unwrap();
+        sample().save(&path).unwrap();
         assert!(path.exists());
         assert!(!dir.path().join("input-bindings.toml.tmp").exists());
     }
 
     #[test]
-    fn validate_refuse_un_code_lie_deux_fois_sur_un_meme_peripherique() {
-        let mut b = exemple();
+    fn validate_rejects_a_code_bound_twice_on_the_same_device() {
+        let mut b = sample();
         b.devices[0].bindings.push(Binding::new(115, &Command::Mute));
         assert_eq!(
             b.validate(),
@@ -290,22 +290,22 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepte_le_meme_code_sur_deux_peripheriques_differents() {
-        let mut b = exemple();
+    fn validate_accepts_the_same_code_on_two_different_devices() {
+        let mut b = sample();
         b.devices[1].bindings.push(Binding::new(115, &Command::VolumeUp));
         assert!(b.validate().is_ok());
     }
 
     #[test]
-    fn validate_accepte_select_0_la_touche_0_de_la_telecommande() {
-        let mut b = exemple();
+    fn validate_accepts_select_0_the_remotes_0_key() {
+        let mut b = sample();
         b.devices[1].bindings.push(Binding::new(11, &Command::Select(0)));
         assert!(b.validate().is_ok());
     }
 
     #[test]
-    fn validate_refuse_un_select_hors_bornes() {
-        let mut b2 = exemple();
+    fn validate_rejects_a_select_out_of_bounds() {
+        let mut b2 = sample();
         b2.devices[1].bindings.push(Binding::new(11, &Command::Select(10)));
         assert_eq!(
             b2.validate(),
@@ -314,11 +314,11 @@ mod tests {
     }
 
     #[test]
-    fn plus10_se_lie_et_fait_le_tour_en_toml() {
+    fn plus10_binds_and_roundtrips_in_toml() {
         let b = Binding::new(11, &Command::Plus10);
         let t = toml::to_string_pretty(&b).unwrap();
-        assert!(t.contains("cmd = \"Plus10\""), "TOML produit: {t}");
-        assert!(!t.contains("arg"), "TOML produit: {t}");
+        assert!(t.contains("cmd = \"Plus10\""), "TOML produced: {t}");
+        assert!(!t.contains("arg"), "TOML produced: {t}");
         assert_eq!(toml::from_str::<Binding>(&t).unwrap(), b);
         let mut table = Bindings::default();
         table.devices.push(Device { name: "X".into(), bindings: vec![b] });
@@ -326,17 +326,17 @@ mod tests {
     }
 
     #[test]
-    fn save_refuse_une_table_invalide_et_necrit_rien() {
+    fn save_rejects_an_invalid_table_and_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("input-bindings.toml");
-        let mut b = exemple();
+        let mut b = sample();
         b.devices[0].bindings.push(Binding::new(115, &Command::Mute));
         assert!(b.save(&path).is_err());
         assert!(!path.exists());
     }
 
     #[test]
-    fn message_de_validation_utilise_le_catalogue() {
+    fn validation_message_uses_the_catalog() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("generic-input")).unwrap();
         std::fs::write(
@@ -351,24 +351,24 @@ mod tests {
     }
 
     #[test]
-    fn resolve_trouve_la_commande_du_bon_peripherique() {
-        let b = exemple();
+    fn resolve_finds_the_right_devices_command() {
+        let b = sample();
         assert_eq!(b.resolve("eHome Infrared Transceiver", 115), Some(Command::VolumeUp));
         assert_eq!(b.resolve("eHome Infrared Transceiver", 2), Some(Command::Select(1)));
         assert_eq!(b.resolve("USB Keyboard", 57), Some(Command::PlayPause));
-        // code non lié sur ce périphérique
+        // code not bound on this device
         assert_eq!(b.resolve("USB Keyboard", 115), None);
-        // périphérique inconnu
-        assert_eq!(b.resolve("Souris", 115), None);
+        // unknown device
+        assert_eq!(b.resolve("Mouse", 115), None);
     }
 
     #[test]
-    fn replace_device_remplace_ou_cree_lentree() {
-        let mut b = exemple();
+    fn replace_device_replaces_or_creates_the_entry() {
+        let mut b = sample();
         b.replace_device("USB Keyboard", vec![Binding::new(50, &Command::Mute)]);
         assert_eq!(b.devices[1].bindings, vec![Binding::new(50, &Command::Mute)]);
-        b.replace_device("Nouveau", vec![Binding::new(1, &Command::Power)]);
+        b.replace_device("New", vec![Binding::new(1, &Command::Power)]);
         assert_eq!(b.devices.len(), 3);
-        assert_eq!(b.devices[2].name, "Nouveau");
+        assert_eq!(b.devices[2].name, "New");
     }
 }

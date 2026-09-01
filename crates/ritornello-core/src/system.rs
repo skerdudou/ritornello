@@ -187,11 +187,11 @@ pub fn parse_khz_to_mhz(raw: &str) -> Option<u32> {
 /// `/proc/loadavg`: "0.12 0.15 0.09 1/234 5678" — the three averages, then
 /// task counts and the last pid, which are of no interest here.
 pub fn parse_loadavg(raw: &str) -> Option<[f32; 3]> {
-    let mut champs = raw.split_whitespace();
-    let un = champs.next()?.parse().ok()?;
-    let cinq = champs.next()?.parse().ok()?;
-    let quinze = champs.next()?.parse().ok()?;
-    Some([un, cinq, quinze])
+    let mut fields = raw.split_whitespace();
+    let one = fields.next()?.parse().ok()?;
+    let five = fields.next()?.parse().ok()?;
+    let fifteen = fields.next()?.parse().ok()?;
+    Some([one, five, fifteen])
 }
 
 /// `/proc/meminfo`: "MemTotal:         948000 kB".
@@ -202,26 +202,26 @@ pub fn parse_loadavg(raw: &str) -> Option<[f32; 3]> {
 /// take. A kernel too old to publish it reports no measurement rather than
 /// a misleading one.
 pub fn parse_meminfo(raw: &str) -> Option<Usage> {
-    let champ = |name: &str| -> Option<u64> {
+    let field = |name: &str| -> Option<u64> {
         raw.lines()
             .find_map(|l| l.strip_prefix(name)?.strip_prefix(':'))
-            .and_then(|reste| reste.split_whitespace().next())
+            .and_then(|rest| rest.split_whitespace().next())
             .and_then(|v| v.parse().ok())
     };
-    Some(Usage { total_kb: champ("MemTotal")?, available_kb: champ("MemAvailable")? })
+    Some(Usage { total_kb: field("MemTotal")?, available_kb: field("MemAvailable")? })
 }
 
 /// `/proc/uptime`: "84213.42 512345.10" — seconds since boot, then idle
 /// time summed over all cores.
 pub fn parse_uptime(raw: &str) -> Option<u64> {
-    let secondes: f64 = raw.split_whitespace().next()?.parse().ok()?;
-    Some(secondes as u64)
+    let seconds: f64 = raw.split_whitespace().next()?.parse().ok()?;
+    Some(seconds as u64)
 }
 
 /// `/etc/os-release`: `PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"`.
 pub fn parse_os_release(raw: &str) -> Option<String> {
-    let valeur = raw.lines().find_map(|l| l.strip_prefix("PRETTY_NAME="))?;
-    Some(valeur.trim().trim_matches('"').to_string())
+    let value = raw.lines().find_map(|l| l.strip_prefix("PRETTY_NAME="))?;
+    Some(value.trim().trim_matches('"').to_string())
 }
 
 /// hwmon alarm files hold "1" while the alarm is raised, "0" otherwise.
@@ -243,9 +243,9 @@ pub fn parse_alarm(raw: &str) -> Option<bool> {
 /// the consequence of bit 16, and a second field for the same underlying
 /// event would read as two separate problems instead of one.
 pub fn parse_throttled(raw: &str) -> Option<bool> {
-    let valeur = raw.trim().strip_prefix("throttled=0x")?;
-    let masque = u32::from_str_radix(valeur, 16).ok()?;
-    Some(masque & (1 << 16) != 0)
+    let value = raw.trim().strip_prefix("throttled=0x")?;
+    let mask = u32::from_str_radix(value, 16).ok()?;
+    Some(mask & (1 << 16) != 0)
 }
 
 /// `/proc/stat`'s first line: "cpu  123456 789 34567 9876543 1234 0 567 0 0
@@ -273,19 +273,19 @@ pub fn parse_throttled(raw: &str) -> Option<bool> {
 /// fields — not enough to know `idle` and `iowait`.
 pub fn parse_cpu_jiffies(raw: &str) -> Option<(u64, u64)> {
     let line = raw.lines().find(|l| l.starts_with("cpu "))?;
-    let champs: Vec<u64> = line
+    let fields: Vec<u64> = line
         .split_whitespace()
         .skip(1)
         .map(|v| v.parse::<u64>())
         .collect::<Result<_, _>>()
         .ok()?;
-    if champs.len() < 4 {
+    if fields.len() < 4 {
         return None;
     }
-    let total: u64 = champs.iter().sum();
-    let invite = champs.get(8).copied().unwrap_or(0) + champs.get(9).copied().unwrap_or(0);
-    let idle = champs[3] + champs.get(4).copied().unwrap_or(0);
-    Some((total - invite, idle))
+    let total: u64 = fields.iter().sum();
+    let guest = fields.get(8).copied().unwrap_or(0) + fields.get(9).copied().unwrap_or(0);
+    let idle = fields[3] + fields.get(4).copied().unwrap_or(0);
+    Some((total - guest, idle))
 }
 
 /// Reads a pseudo-file, `None` on any error. Absence is the normal case for
@@ -299,13 +299,13 @@ fn read(path: &str) -> Option<String> {
 /// the scan by driver `name` rather than a hardcoded `hwmon0`. `vcgencmd`
 /// was rejected: it needs the `video` group and a spawned process per poll.
 fn under_voltage() -> Option<bool> {
-    for entree in std::fs::read_dir("/sys/class/hwmon").ok()?.flatten() {
+    for entry in std::fs::read_dir("/sys/class/hwmon").ok()?.flatten() {
         // `unwrap_or_default` and not `?`: one unreadable entry must not
         // abandon the scan of the others.
-        let name = std::fs::read_to_string(entree.path().join("name")).unwrap_or_default();
+        let name = std::fs::read_to_string(entry.path().join("name")).unwrap_or_default();
         if name.trim() == "rpi_volt" {
-            let alarme = std::fs::read_to_string(entree.path().join("in0_lcrit_alarm")).ok()?;
-            return parse_alarm(&alarme);
+            let alarm = std::fs::read_to_string(entry.path().join("in0_lcrit_alarm")).ok()?;
+            return parse_alarm(&alarm);
         }
     }
     None
@@ -338,15 +338,15 @@ fn under_voltage_since_boot(info: &SystemInfo) -> Option<bool> {
     if info.under_voltage_latched.load(Ordering::Relaxed) {
         return Some(true);
     }
-    let sortie = std::process::Command::new(&info.vcgencmd).arg("get_throttled").output().ok()?;
-    if !sortie.status.success() {
+    let output = std::process::Command::new(&info.vcgencmd).arg("get_throttled").output().ok()?;
+    if !output.status.success() {
         return None;
     }
-    let vu = parse_throttled(&String::from_utf8_lossy(&sortie.stdout))?;
-    if vu {
+    let seen = parse_throttled(&String::from_utf8_lossy(&output.stdout))?;
+    if seen {
         info.under_voltage_latched.store(true, Ordering::Relaxed);
     }
-    Some(vu)
+    Some(seen)
 }
 
 /// Root filesystem usage through `statvfs`, in kilobytes.
@@ -376,10 +376,10 @@ fn disk_usage(path: &str) -> Option<Usage> {
     if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
         return None;
     }
-    let bloc = u64::from(st.f_frsize);
+    let block = u64::from(st.f_frsize);
     Some(Usage {
-        total_kb: u64::from(st.f_blocks) * bloc / 1024,
-        available_kb: u64::from(st.f_bavail) * bloc / 1024,
+        total_kb: u64::from(st.f_blocks) * block / 1024,
+        available_kb: u64::from(st.f_bavail) * block / 1024,
     })
 }
 
@@ -391,9 +391,9 @@ fn disk_usage(path: &str) -> Option<Usage> {
 /// a routable address, not a server we talk to. `None` when there is no
 /// route at all.
 fn ip_address() -> Option<String> {
-    let prise = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    prise.connect("8.8.8.8:53").ok()?;
-    Some(prise.local_addr().ok()?.ip().to_string())
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:53").ok()?;
+    Some(socket.local_addr().ok()?.ip().to_string())
 }
 
 /// Reads everything, once, for one HTTP response.
@@ -444,10 +444,10 @@ pub enum PowerAction {
     RestartService,
 }
 
-/// Action d'alimentation inconnue. Suit le modèle de `ValidationError`
-/// (`ritornello-plugin-radio/src/config.rs`) : le texte utilisateur est
-/// produit à la frontière via `message(&Catalog)`, `Display` fournit une
-/// version anglaise pour les logs.
+/// Unknown power action. Follows the `ValidationError` model
+/// (`ritornello-plugin-radio/src/config.rs`): the user-facing text is
+/// produced at the boundary via `message(&Catalog)`, `Display` provides an
+/// English version for the logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownPowerAction;
 
@@ -479,11 +479,11 @@ pub fn parse_action(action: &str) -> Result<PowerAction, UnknownPowerAction> {
     }
 }
 
-/// `systemctl` a rendition la main avec un code d'échec et rien sur stderr. Le
-/// seul cas qui passe par sources_catalog : quand logind a écrit un message
-/// (branche voisine, non touchée), c'est celui-là qui est relayé mot pour
-/// mot — il nomme la règle polkit manquante, ce qu'aucune phrase générique
-/// ne pourrait faire.
+/// `systemctl` returned with a failure code and nothing on stderr. The only
+/// case that goes through the catalog: when logind wrote a message
+/// (neighbouring branch, untouched), that message is relayed word for
+/// word — it names the missing polkit rule, which no generic sentence
+/// could do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SystemctlFailed {
     pub code: i32,
@@ -503,7 +503,7 @@ impl std::fmt::Display for SystemctlFailed {
 
 impl std::error::Error for SystemctlFailed {}
 
-/// `systemctl` n'a pas pu être lancé du tout (path absent, permissions…).
+/// `systemctl` could not be launched at all (missing path, permissions…).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemctlUnreachable {
     pub detail: String,
@@ -552,23 +552,23 @@ pub async fn probe_capabilities() -> PowerProbe {
     probe_summary(off, reboot)
 }
 
-/// La règle de playback des deux réponses, **séparée de leur obtention** : elle
-/// se teste alors sans logind, ce qu'aucune machine de développement n'a.
+/// The rule for reading the two answers, **separated from obtaining them**: it
+/// can then be tested without logind, which no development machine has.
 pub fn probe_summary(off: Option<bool>, reboot: Option<bool>) -> PowerProbe {
     PowerProbe {
         can_power_off: off == Some(true),
         can_reboot: reboot == Some(true),
-        // Une seule réponse suffit à établir que logind est joignable : les
-        // deux appels ne peuvent diverger que sur la réponse, jamais sur
-        // l'existence de l'interlocuteur.
+        // A single answer is enough to establish that logind is reachable: the
+        // two calls can only diverge on the answer, never on the existence of
+        // the other party.
         logind_reachable: off.is_some() || reboot.is_some(),
     }
 }
 
-/// Ce que la sonde de démarrage a appris.
+/// What the startup probe learned.
 ///
-/// Trois faits et non deux : voir `Metrics::logind_reachable` pour ce que le
-/// troisième évite de dire à tort.
+/// Three facts rather than two: see `Metrics::logind_reachable` for what the
+/// third one avoids saying wrongly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PowerProbe {
     pub can_power_off: bool,
@@ -576,28 +576,28 @@ pub struct PowerProbe {
     pub logind_reachable: bool,
 }
 
-/// `Some(true)` autorisé, `Some(false)` refusé, `None` **pas de réponse** —
-/// les trois cas sont distincts, le dernier ne se rattrapant pas par une règle
-/// polkit.
-async fn query_logind(methode: &str) -> Option<bool> {
-    let appel = tokio::process::Command::new("busctl")
+/// `Some(true)` allowed, `Some(false)` refused, `None` **no answer** — the
+/// three cases are distinct, the last one not being fixable by a polkit
+/// rule.
+async fn query_logind(method: &str) -> Option<bool> {
+    let call = tokio::process::Command::new("busctl")
         .args([
             "--system",
             "call",
             "org.freedesktop.login1",
             "/org/freedesktop/login1",
             "org.freedesktop.login1.Manager",
-            methode,
+            method,
         ])
         .output();
     // INFO and not WARN throughout: a development machine without logind is
     // a normal situation, and WARN lines are surfaced on the config page.
-    match tokio::time::timeout(std::time::Duration::from_secs(3), appel).await {
+    match tokio::time::timeout(std::time::Duration::from_secs(3), call).await {
         Ok(Ok(out)) if out.status.success() => {
             Some(parse_can(&String::from_utf8_lossy(&out.stdout)))
         }
         Ok(Ok(out)) => {
-            tracing::info!("logind {methode}: {}", String::from_utf8_lossy(&out.stderr).trim());
+            tracing::info!("logind {method}: {}", String::from_utf8_lossy(&out.stderr).trim());
             None
         }
         Ok(Err(e)) => {
@@ -605,7 +605,7 @@ async fn query_logind(methode: &str) -> Option<bool> {
             None
         }
         Err(_) => {
-            tracing::info!("logind {methode}: no response within 3s");
+            tracing::info!("logind {method}: no response within 3s");
             None
         }
     }
@@ -641,7 +641,7 @@ pub async fn power_post(
                 .into_response();
         }
     };
-    let verbe = match action {
+    let verb = match action {
         PowerAction::PowerOff => "poweroff",
         PowerAction::Reboot => "reboot",
         PowerAction::RestartService => {
@@ -654,9 +654,9 @@ pub async fn power_post(
             return StatusCode::ACCEPTED.into_response();
         }
     };
-    tracing::warn!("{verbe} of the OS requested from the UI");
-    let appel = tokio::process::Command::new(&state.system.systemctl).arg(verbe).output();
-    match tokio::time::timeout(std::time::Duration::from_secs(5), appel).await {
+    tracing::warn!("{verb} of the OS requested from the UI");
+    let call = tokio::process::Command::new(&state.system.systemctl).arg(verb).output();
+    match tokio::time::timeout(std::time::Duration::from_secs(5), call).await {
         // Still running after 5 s: the machine is on its way out, which is
         // the successful case. The child is not killed — dropping the
         // future leaves it alone, `kill_on_drop` being off by default.
@@ -664,16 +664,16 @@ pub async fn power_post(
         Ok(Ok(out)) if out.status.success() => StatusCode::ACCEPTED.into_response(),
         Ok(Ok(out)) => {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            // Deux textes pour deux publics : le corps de la réponse garde la
-            // phrase destinée au player (résolue par sources_catalog), le log
-            // reste technique et entièrement en anglais — `Display` fournit
-            // cette version-là dans le cas de repli.
+            // Two texts for two audiences: the response body keeps the
+            // sentence meant for the user (resolved through the catalog), the
+            // log stays technical and entirely in English — `Display` provides
+            // that version in the fallback case.
             let msg = if stderr.is_empty() {
                 let err = SystemctlFailed { code: out.status.code().unwrap_or(-1) };
-                tracing::warn!("{verbe} refused: {err}");
+                tracing::warn!("{verb} refused: {err}");
                 err.message(&*state.catalog.read().await)
             } else {
-                tracing::warn!("{verbe} refused: {stderr}");
+                tracing::warn!("{verb} refused: {stderr}");
                 stderr
             };
             (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": msg }))).into_response()
@@ -690,84 +690,84 @@ mod tests {
     use super::*;
 
     #[test]
-    fn temperature_en_millidegres() {
+    fn temperature_in_millidegrees() {
         assert_eq!(parse_temperature("47800\n"), Some(47.8));
         assert_eq!(parse_temperature("0"), Some(0.0));
-        assert_eq!(parse_temperature("bavard"), None);
+        assert_eq!(parse_temperature("chatty"), None);
         assert_eq!(parse_temperature(""), None);
     }
 
     #[test]
-    fn frequence_en_kilohertz() {
+    fn frequency_in_kilohertz() {
         assert_eq!(parse_khz_to_mhz("900000\n"), Some(900));
         assert_eq!(parse_khz_to_mhz("1500000"), Some(1500));
         assert_eq!(parse_khz_to_mhz("-"), None);
     }
 
     #[test]
-    fn charge_moyenne_et_reste_ignore() {
+    fn load_average_and_rest_ignored() {
         assert_eq!(parse_loadavg("0.12 0.15 0.09 1/234 5678\n"), Some([0.12, 0.15, 0.09]));
-        // Deux valeurs seulement : la line n'est pas celle attendue.
+        // Only two values: the line is not the expected one.
         assert_eq!(parse_loadavg("0.12 0.15\n"), None);
         assert_eq!(parse_loadavg(""), None);
     }
 
     #[test]
-    fn meminfo_lit_total_et_disponible() {
+    fn meminfo_reads_total_and_available() {
         let raw = "MemTotal:         948000 kB\nMemFree:          120000 kB\nMemAvailable:     512000 kB\n";
         assert_eq!(parse_meminfo(raw), Some(Usage { total_kb: 948_000, available_kb: 512_000 }));
-        // MemAvailable absent (noyau très ancien) : pas de mesure plutôt
-        // qu'une mesure fausse tirée de MemFree.
+        // MemAvailable missing (very old kernel): no measurement rather than
+        // a wrong one derived from MemFree.
         assert_eq!(parse_meminfo("MemTotal:  948000 kB\nMemFree: 120000 kB\n"), None);
     }
 
     #[test]
-    fn uptime_garde_les_secondes_entieres() {
+    fn uptime_keeps_whole_seconds() {
         assert_eq!(parse_uptime("84213.42 512345.10\n"), Some(84_213));
         assert_eq!(parse_uptime("nope"), None);
     }
 
     #[test]
-    fn os_release_sans_les_guillemets() {
+    fn os_release_without_the_quotes() {
         let raw = "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\nID=debian\n";
         assert_eq!(parse_os_release(raw), Some("Debian GNU/Linux 12 (bookworm)".to_string()));
         assert_eq!(parse_os_release("ID=debian\n"), None);
     }
 
     #[test]
-    fn alarme_hwmon_binaire() {
+    fn hwmon_alarm_is_binary() {
         assert_eq!(parse_alarm("0\n"), Some(false));
         assert_eq!(parse_alarm("1\n"), Some(true));
         assert_eq!(parse_alarm(""), None);
     }
 
     #[test]
-    fn bit_collant_de_sous_tension_lu_dans_le_masque_vcgencmd() {
-        // Valeur réelle constatée sur le Pi du propriétaire : bit 16 (sous-tension
-        // survenue depuis le démarrage) et bit 18 (throttling survenu, non exposé
-        // séparément — voir le commentaire de `parse_throttled`) à la fois.
+    fn sticky_under_voltage_bit_read_from_vcgencmd_mask() {
+        // Real value observed on the owner's Pi: bit 16 (under-voltage
+        // occurred since boot) and bit 18 (throttling occurred, not exposed
+        // separately — see the comment on `parse_throttled`) at the same time.
         assert_eq!(parse_throttled("throttled=0x50000\n"), Some(true));
         assert_eq!(parse_throttled("throttled=0x0\n"), Some(false));
-        // Bit 0 seul : sous-tension *courante*, mais jamais vue depuis le
-        // démarrage — ce que ce bit collant ne doit pas affirmer.
+        // Bit 0 alone: *current* under-voltage, but never seen since boot —
+        // which this sticky bit must not claim.
         assert_eq!(parse_throttled("throttled=0x1\n"), Some(false));
-        // Bit 16 seul, sans le 18 : le bit qui nous intéresse suffit.
+        // Bit 16 alone, without 18: the bit we care about is enough.
         assert_eq!(parse_throttled("throttled=0x10000\n"), Some(true));
-        // Entrées aberrantes : aucune affirmation plutôt qu'un mensonge.
+        // Aberrant inputs: no claim rather than a lie.
         assert_eq!(parse_throttled(""), None);
         assert_eq!(parse_throttled("0x0\n"), None);
         assert_eq!(parse_throttled("throttled=zz\n"), None);
     }
 
-    /// Un script exécutable qui, à chaque appel, add une line à
-    /// `compteur` (pour compter les lancements) et répond `reponse` sur
-    /// stdout. Sert à vérifier le verrouillage sans dépendre d'un vrai Pi.
-    fn stub_vcgencmd(dir: &std::path::Path, reponse: &str) -> (String, std::path::PathBuf) {
+    /// An executable script which, on every call, appends a line to
+    /// `counter` (to count the launches) and answers `reply` on stdout.
+    /// Used to verify the latching without depending on a real Pi.
+    fn stub_vcgencmd(dir: &std::path::Path, reply: &str) -> (String, std::path::PathBuf) {
         let script = dir.join("vcgencmd");
-        let compteur = dir.join("appels");
+        let counter = dir.join("calls");
         std::fs::write(
             &script,
-            format!("#!/bin/sh\necho x >> '{}'\necho '{reponse}'\n", compteur.display()),
+            format!("#!/bin/sh\necho x >> '{}'\necho '{reply}'\n", counter.display()),
         )
         .unwrap();
         #[cfg(unix)]
@@ -775,43 +775,43 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        (script.to_string_lossy().to_string(), compteur)
+        (script.to_string_lossy().to_string(), counter)
     }
 
     #[test]
-    fn sous_tension_depuis_le_demarrage_ne_relance_plus_vcgencmd_une_fois_vue_a_vrai() {
+    fn under_voltage_since_boot_stops_relaunching_vcgencmd_once_seen_true() {
         let dir = tempfile::tempdir().unwrap();
-        let (vcgencmd, compteur) = stub_vcgencmd(dir.path(), "throttled=0x50000");
+        let (vcgencmd, counter) = stub_vcgencmd(dir.path(), "throttled=0x50000");
         let info = SystemInfo { vcgencmd, ..Default::default() };
         assert_eq!(under_voltage_since_boot(&info), Some(true));
         assert_eq!(under_voltage_since_boot(&info), Some(true));
-        // Un seul appel malgré les deux lectures : le second passe par le
-        // verrou, pas par une nouvelle exécution.
-        assert_eq!(std::fs::read_to_string(&compteur).unwrap().lines().count(), 1);
+        // A single call despite the two reads: the second goes through the
+        // latch, not through a new execution.
+        assert_eq!(std::fs::read_to_string(&counter).unwrap().lines().count(), 1);
     }
 
     #[test]
-    fn sous_tension_depuis_le_demarrage_relance_vcgencmd_tant_que_le_bit_reste_faux() {
+    fn under_voltage_since_boot_relaunches_vcgencmd_while_the_bit_stays_false() {
         let dir = tempfile::tempdir().unwrap();
-        let (vcgencmd, compteur) = stub_vcgencmd(dir.path(), "throttled=0x0");
+        let (vcgencmd, counter) = stub_vcgencmd(dir.path(), "throttled=0x0");
         let info = SystemInfo { vcgencmd, ..Default::default() };
         assert_eq!(under_voltage_since_boot(&info), Some(false));
         assert_eq!(under_voltage_since_boot(&info), Some(false));
-        // Rien n'est encore acquis : chaque playback restart la commande.
-        assert_eq!(std::fs::read_to_string(&compteur).unwrap().lines().count(), 2);
+        // Nothing is settled yet: every read relaunches the command.
+        assert_eq!(std::fs::read_to_string(&counter).unwrap().lines().count(), 2);
     }
 
     #[test]
-    fn sous_tension_depuis_le_demarrage_sans_vcgencmd_rend_rien() {
-        // Chemin inexistant : machine qui n'est simplement pas un Pi.
+    fn under_voltage_since_boot_without_vcgencmd_returns_nothing() {
+        // Nonexistent path: a machine that simply is not a Pi.
         let info = SystemInfo { vcgencmd: "/nonexistent".to_string(), ..Default::default() };
         assert_eq!(under_voltage_since_boot(&info), None);
     }
 
     #[test]
-    fn jiffies_cpu_ligne_agregee_et_coeurs_ignores() {
+    fn cpu_jiffies_aggregate_line_and_cores_ignored() {
         let raw = "cpu  123456 789 34567 9876543 1234 0 567 0 0 0\ncpu0 61728 394 17283 4938271 617 0 283 0 0 0\ncpu1 61728 395 17284 4938272 617 0 284 0 0 0\n";
-        // idle + iowait : 9876543 + 1234.
+        // idle + iowait: 9876543 + 1234.
         assert_eq!(
             parse_cpu_jiffies(raw),
             Some((123456 + 789 + 34567 + 9876543 + 1234 + 567, 9876543 + 1234))
@@ -819,48 +819,48 @@ mod tests {
     }
 
     #[test]
-    fn jiffies_cpu_colonnes_supplementaires_incluses_dans_le_total() {
-        // Un noyau futur qui add une colonne : la somme doit la compter.
+    fn cpu_jiffies_extra_columns_included_in_total() {
+        // A future kernel that adds a column: the sum must count it.
         let raw = "cpu  100 200 300 400 500 0 0 0 0 0 999\n";
         assert_eq!(parse_cpu_jiffies(raw), Some((100 + 200 + 300 + 400 + 500 + 999, 400 + 500)));
     }
 
     #[test]
-    fn jiffies_cpu_soustrait_le_temps_invite_deja_compte_dans_user_et_nice() {
-        // Le noyau compte déjà le temps invité dans `user` (ici 1000) et le
-        // temps invité "nice" dans `nice` (ici 500) : les additionner aussi
-        // via `guest`/`guest_nice` (200 et 100) compterait ce temps deux
-        // fois. Somme brute des dix champs : 1000+500+300+400+500+0+0+0+200+
-        // 100 = 3000, moins les 300 de guest+guest_nice = 2700. idle reste
-        // idle + iowait : 400 + 500 = 900.
+    fn cpu_jiffies_subtracts_guest_time_already_counted_in_user_and_nice() {
+        // The kernel already counts guest time in `user` (here 1000) and
+        // "nice" guest time in `nice` (here 500): adding them again through
+        // `guest`/`guest_nice` (200 and 100) would count that time twice.
+        // Raw sum of the ten fields: 1000+500+300+400+500+0+0+0+200+
+        // 100 = 3000, minus the 300 of guest+guest_nice = 2700. idle stays
+        // idle + iowait: 400 + 500 = 900.
         let raw = "cpu  1000 500 300 400 500 0 0 0 200 100\n";
         assert_eq!(parse_cpu_jiffies(raw), Some((2700, 900)));
     }
 
     #[test]
-    fn jiffies_cpu_ligne_absente_ou_malformee() {
+    fn cpu_jiffies_line_missing_or_malformed() {
         assert_eq!(parse_cpu_jiffies(""), None);
         assert_eq!(parse_cpu_jiffies("cpu0 123 456 789 0\n"), None);
-        assert_eq!(parse_cpu_jiffies("cpu  123 bavard 789 0\n"), None);
-        // Moins de quatre champs : pas assez pour idle + iowait.
+        assert_eq!(parse_cpu_jiffies("cpu  123 chatty 789 0\n"), None);
+        // Fewer than four fields: not enough for idle + iowait.
         assert_eq!(parse_cpu_jiffies("cpu  123 456\n"), None);
     }
 
     #[test]
-    fn collect_remplit_ce_que_la_machine_expose() {
-        // Test de fumée : la suite tourne sous Linux, donc /proc existe et
-        // ces trois mesures sont toujours lisibles. Les champs propres au
-        // Raspberry Pi (température, fréquence, sous-tension) restent
-        // volontairement hors assertion : absents sous WSL comme sur un PC.
+    fn collect_fills_what_the_machine_exposes() {
+        // Smoke test: the suite runs on Linux, so /proc exists and these
+        // three measurements are always readable. The Raspberry Pi-specific
+        // fields (temperature, frequency, under-voltage) are deliberately
+        // left out of the assertions: absent under WSL as on a PC.
         let info = SystemInfo::default();
         let m = collect(&info);
-        assert!(m.load.is_some(), "loadavg lisible sous Linux");
+        assert!(m.load.is_some(), "loadavg readable on Linux");
         assert!(m.memory.is_some_and(|u| u.total_kb > 0));
         assert!(m.disk.is_some_and(|u| u.total_kb > 0));
         assert!(m.kernel.is_some());
         assert_eq!(m.version, env!("CARGO_PKG_VERSION"));
-        assert!(!m.can_power_off, "capacités à false par défaut");
-        assert!(m.cpu_total_jiffies.is_some(), "/proc/stat lisible sous Linux");
+        assert!(!m.can_power_off, "capabilities default to false");
+        assert!(m.cpu_total_jiffies.is_some(), "/proc/stat readable on Linux");
         assert!(m.cpu_idle_jiffies.is_some());
     }
 
@@ -871,13 +871,13 @@ mod tests {
     use std::sync::Arc;
     use tower::util::ServiceExt;
 
-    /// Rig HTTP avec un `SystemInfo` choisi, sur le montage partagé des
-    /// tests de `status.rs`.
+    /// HTTP rig with a chosen `SystemInfo`, on the shared setup of the
+    /// `status` tests.
     fn app(info: SystemInfo) -> axum::Router {
         router(AppState { system: Arc::new(info), ..crate::status::tests_support::app_state() })
     }
 
-    async fn corps_json(app: axum::Router, uri: &str) -> serde_json::Value {
+    async fn json_body(app: axum::Router, uri: &str) -> serde_json::Value {
         let resp = app.oneshot(Request::get(uri).body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -885,17 +885,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_system_expose_toutes_les_cles() {
-        let v = corps_json(app(SystemInfo::default()), "/api/system").await;
-        // Jeu de clés stable : un champ illisible vaut `null` et reste
-        // présent, pour que la vue n'ait pas deux cas à distinguer.
+    async fn get_system_exposes_every_key() {
+        let v = json_body(app(SystemInfo::default()), "/api/system").await;
+        // Stable key set: an unreadable field is `null` and stays present,
+        // so the view does not have two cases to tell apart.
         for key in [
             "temperature_c", "cpu_mhz", "load", "cpus", "memory", "disk", "under_voltage",
             "under_voltage_since_boot", "uptime_s", "service_uptime_s", "hostname", "ip", "os",
             "kernel", "version", "can_power_off", "can_reboot", "logind_reachable",
             "cpu_total_jiffies", "cpu_idle_jiffies",
         ] {
-            assert!(v.get(key).is_some(), "clé {key} absente");
+            assert!(v.get(key).is_some(), "key {key} missing");
         }
         assert!(v["version"].is_string());
         assert_eq!(v["can_power_off"], false);
@@ -903,84 +903,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_system_reflete_les_capacites_connues() {
+    async fn get_system_reflects_known_capabilities() {
         let info = SystemInfo {
             can_power_off: true,
             can_reboot: true,
             logind_reachable: true,
             ..Default::default()
         };
-        let v = corps_json(app(info), "/api/system").await;
+        let v = json_body(app(info), "/api/system").await;
         assert_eq!(v["can_power_off"], true);
         assert_eq!(v["can_reboot"], true);
         assert_eq!(v["logind_reachable"], true);
     }
 
     #[test]
-    fn un_refus_de_logind_ne_se_confond_pas_avec_son_absence() {
-        // Les deux laissent les boutons grisés, mais ne se réparent pas de la
-        // même façon : le refus veut la règle polkit, l'absence veut un
-        // `systemd-logind` qui tourne. La page choisit sa phrase là-dessus.
-        let refus = probe_summary(Some(false), Some(false));
-        assert!(refus.logind_reachable, "logind a bien répondu, fût-ce non");
-        assert!(!refus.can_power_off);
+    fn a_logind_refusal_is_not_confused_with_its_absence() {
+        // Both leave the buttons greyed out, but are not fixed the same way:
+        // the refusal wants the polkit rule, the absence wants a running
+        // `systemd-logind`. The page picks its sentence on that basis.
+        let refused = probe_summary(Some(false), Some(false));
+        assert!(refused.logind_reachable, "logind did answer, even if with no");
+        assert!(!refused.can_power_off);
 
         let absent = probe_summary(None, None);
         assert!(!absent.logind_reachable);
         assert!(!absent.can_power_off);
 
-        let ouvert = probe_summary(Some(true), Some(true));
-        assert!(ouvert.logind_reachable);
-        assert!(ouvert.can_power_off && ouvert.can_reboot);
+        let open = probe_summary(Some(true), Some(true));
+        assert!(open.logind_reachable);
+        assert!(open.can_power_off && open.can_reboot);
     }
 
     #[test]
-    fn une_seule_reponse_suffit_a_dire_logind_joignable() {
-        // Cas mixte : un appel aboutit, l'autre expire. L'interlocuteur existe.
+    fn a_single_answer_is_enough_to_call_logind_reachable() {
+        // Mixed case: one call succeeds, the other times out. The other party exists.
         let m = probe_summary(Some(true), None);
         assert!(m.logind_reachable);
         assert!(m.can_power_off);
-        assert!(!m.can_reboot, "sans réponse, on n'offre rien");
+        assert!(!m.can_reboot, "without an answer, nothing is offered");
     }
 
     #[test]
-    fn action_connue_ou_refusee() {
+    fn action_known_or_refused() {
         assert_eq!(parse_action("poweroff"), Ok(PowerAction::PowerOff));
         assert_eq!(parse_action("reboot"), Ok(PowerAction::Reboot));
         assert_eq!(parse_action("restart-service"), Ok(PowerAction::RestartService));
         assert!(parse_action("").is_err());
         assert!(parse_action("halt").is_err());
-        // Pas de tolérance de casse ni d'alias : le seul client est la SPA,
-        // qui envoie ces trois chaînes exactes.
+        // No case tolerance and no aliases: the only client is the SPA,
+        // which sends these three exact strings.
         assert!(parse_action("PowerOff").is_err());
     }
 
-    /// SourcesCatalog minimal chargé depuis un répertoire temporaire, pour tester
-    /// l'interpolation sans dépendre des packs livrés.
-    fn catalogue_de_test(cles: &str) -> ritornello_i18n::Catalog {
+    /// Minimal catalog loaded from a temporary directory, to test the
+    /// interpolation without depending on the shipped packs.
+    fn test_catalog(keys: &str) -> ritornello_i18n::Catalog {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("core")).unwrap();
-        std::fs::write(dir.path().join("core/fr.toml"), cles).unwrap();
-        // `Catalog::load` copie tout en mémoire, la racine temporaire peut
-        // donc être jetée à la fin de la fonction.
+        std::fs::write(dir.path().join("core/fr.toml"), keys).unwrap();
+        // `Catalog::load` copies everything into memory, so the temporary
+        // root can be thrown away at the end of the function.
         ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::i18n::EN)
     }
 
     #[test]
-    fn message_action_inconnue_utilise_le_catalogue() {
-        let cat = catalogue_de_test("power_action_unknown = \"action inconnue\"\n");
+    fn unknown_action_message_uses_the_catalog() {
+        let cat = test_catalog("power_action_unknown = \"action inconnue\"\n");
         assert_eq!(UnknownPowerAction.message(&cat), "action inconnue");
     }
 
     #[test]
-    fn message_systemctl_echoue_interpole_le_code() {
-        let cat = catalogue_de_test("systemctl_failed = \"echec systemctl (code {code})\"\n");
+    fn systemctl_failed_message_interpolates_the_code() {
+        let cat = test_catalog("systemctl_failed = \"echec systemctl (code {code})\"\n");
         assert_eq!(SystemctlFailed { code: 1 }.message(&cat), "echec systemctl (code 1)");
     }
 
     #[test]
-    fn message_systemctl_injoignable_interpole_le_detail() {
-        let cat = catalogue_de_test("systemctl_unreachable = \"injoignable : {detail}\"\n");
+    fn systemctl_unreachable_message_interpolates_the_detail() {
+        let cat = test_catalog("systemctl_unreachable = \"injoignable : {detail}\"\n");
         assert_eq!(
             SystemctlUnreachable { detail: "No such file or directory".to_string() }.message(&cat),
             "injoignable : No such file or directory"
@@ -988,21 +988,21 @@ mod tests {
     }
 
     #[test]
-    fn reponse_de_logind() {
+    fn logind_answer() {
         assert!(parse_can("s \"yes\"\n"));
         assert!(!parse_can("s \"no\"\n"));
-        // « challenge » = authentification interactive, qu'un service
-        // système ne peut jamais satisfaire : c'est un non.
+        // "challenge" = interactive authentication, which a system service
+        // can never satisfy: it is a no.
         assert!(!parse_can("s \"challenge\"\n"));
         assert!(!parse_can(""));
     }
 
-    async fn post_power(app: axum::Router, corps: &str) -> (StatusCode, serde_json::Value) {
+    async fn post_power(app: axum::Router, body: &str) -> (StatusCode, serde_json::Value) {
         let resp = app
             .oneshot(
                 Request::post("/api/system/power")
                     .header("content-type", "application/json")
-                    .body(Body::from(corps.to_string()))
+                    .body(Body::from(body.to_string()))
                     .unwrap(),
             )
             .await
@@ -1014,40 +1014,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_power_action_inconnue_renvoie_422_exploitable() {
+    async fn post_power_unknown_action_returns_usable_422() {
         let (status, v) = post_power(app(SystemInfo::default()), r#"{"action":"halt"}"#).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        // Un message dans le champ `error`, comme /api/theme et
-        // /api/audio-output : c'est ce que la SPA transforme en toast.
+        // A message in the `error` field, like /api/theme and
+        // /api/audio-output: that is what the SPA turns into a toast.
         assert!(v["error"].is_string());
     }
 
     #[tokio::test]
-    async fn post_power_accepte_quand_systemctl_reussit() {
-        // `/bin/true` tient le rôle de systemctl : le path réel du code
-        // est exercé (lancement, attente, code de sortie) sans risquer la
-        // machine qui exécute les tests.
+    async fn post_power_accepts_when_systemctl_succeeds() {
+        // `/bin/true` plays the role of systemctl: the real code path is
+        // exercised (spawn, await, exit code) without endangering the
+        // machine running the tests.
         let info = SystemInfo { systemctl: "/bin/true".to_string(), ..Default::default() };
         let (status, _) = post_power(app(info), r#"{"action":"poweroff"}"#).await;
         assert_eq!(status, StatusCode::ACCEPTED);
     }
 
     #[tokio::test]
-    async fn post_power_relaie_lechec_de_systemctl() {
+    async fn post_power_relays_systemctl_failure() {
         let info = SystemInfo { systemctl: "/bin/false".to_string(), ..Default::default() };
         let (status, v) = post_power(app(info), r#"{"action":"reboot"}"#).await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
-        // /bin/false n'écrit rien sur stderr : le repli nomme le code de
-        // sortie plutôt que de renvoyer une chaîne clear.
+        // /bin/false writes nothing on stderr: the fallback names the exit
+        // code rather than returning an empty string.
         assert!(v["error"].as_str().is_some_and(|m| !m.is_empty()));
     }
 
     #[tokio::test]
-    async fn post_power_relaie_lechec_de_lancement_de_systemctl() {
-        // Chemin inexistant : `Command::output` échoue avant même de lancer
-        // un processus (branche `Ok(Err(e))`, distincte de l'échec exercé par
-        // /bin/false, qui lance bien systemctl mais lui fait rendre un code
-        // d'erreur).
+    async fn post_power_relays_systemctl_launch_failure() {
+        // Nonexistent path: `Command::output` fails before even launching a
+        // process (branch `Ok(Err(e))`, distinct from the failure exercised
+        // by /bin/false, which does launch systemctl but has it return an
+        // error code).
         let info = SystemInfo { systemctl: "/nonexistent".to_string(), ..Default::default() };
         let (status, v) = post_power(app(info), r#"{"action":"poweroff"}"#).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -1055,49 +1055,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_power_redemarre_le_service_par_le_crochet() {
+    async fn post_power_restarts_the_service_through_the_hook() {
         use std::sync::atomic::{AtomicBool, Ordering};
-        let declenche = Arc::new(AtomicBool::new(false));
-        let temoin = declenche.clone();
+        let triggered = Arc::new(AtomicBool::new(false));
+        let witness = triggered.clone();
         let info = SystemInfo {
             restart_delay: std::time::Duration::from_millis(10),
-            restart: Arc::new(move || temoin.store(true, Ordering::SeqCst)),
+            restart: Arc::new(move || witness.store(true, Ordering::SeqCst)),
             ..Default::default()
         };
         let (status, _) = post_power(app(info), r#"{"action":"restart-service"}"#).await;
         assert_eq!(status, StatusCode::ACCEPTED);
-        // La réponse part avant la sortie du process : le crochet est
-        // appelé par une tâche détachée, après le délai.
+        // The response leaves before the process exits: the hook is called
+        // by a detached task, after the delay.
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-        assert!(declenche.load(Ordering::SeqCst), "le crochet de redémarrage doit être appelé");
+        assert!(triggered.load(Ordering::SeqCst), "the restart hook must be called");
     }
 
     #[tokio::test]
-    async fn terminate_process_tue_vraiment_le_processus_vise() {
-        // Régression constatée à l'usage : la restart du service laissait mpv
-        // vivant, à jouer, parce que `std::process::exit` n'exécute aucun
-        // `Drop` et donc jamais le `kill_on_drop(true)` de son lancement. Le
-        // test porte sur un vrai processus : une garantie de nettoyage qu'on
-        // ne vérifie pas est exactement ce qui a produit ce défaut.
-        let mut enfant = tokio::process::Command::new("/bin/sleep")
+    async fn terminate_process_really_kills_the_targeted_process() {
+        // Regression observed in use: restarting the service left mpv alive,
+        // playing, because `std::process::exit` runs no `Drop` and therefore
+        // never the `kill_on_drop(true)` of its spawn. The test targets a
+        // real process: a cleanup guarantee that goes unchecked is exactly
+        // what produced this defect.
+        let mut child = tokio::process::Command::new("/bin/sleep")
             .arg("30")
             .spawn()
-            .expect("/bin/sleep doit exister");
-        terminate_process(enfant.id());
-        let status = tokio::time::timeout(std::time::Duration::from_secs(5), enfant.wait())
+            .expect("/bin/sleep must exist");
+        terminate_process(child.id());
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
             .await
-            .expect("le processus doit mourir bien avant ce délai")
-            .expect("attente du processus");
-        // Terminé par un signal, donc pas une sortie réussie : c'est la preuve
-        // que le signal est bien parti, et pas que `sleep 30` a fini tout seul.
-        assert!(!status.success(), "le processus doit être tué par le signal");
+            .expect("the process must die well before this timeout")
+            .expect("waiting for the process");
+        // Terminated by a signal, hence not a successful exit: that is the
+        // proof the signal was sent, and not that `sleep 30` finished on its own.
+        assert!(!status.success(), "the process must be killed by the signal");
     }
 
     #[tokio::test]
-    async fn terminate_process_sans_pid_ne_fait_rien() {
-        // Le cas d'un enfant déjà moissonné (`Child::id()` rend alors `None`) :
-        // il ne doit pas paniquer, et surtout pas viser un pid par défaut — un
-        // `unwrap_or(0)` enverrait le signal à tout le groupe de processus.
+    async fn terminate_process_without_pid_does_nothing() {
+        // The case of a child already reaped (`Child::id()` then returns `None`):
+        // it must not panic, and above all not target a default pid — an
+        // `unwrap_or(0)` would send the signal to the whole process group.
         terminate_process(None);
     }
 }

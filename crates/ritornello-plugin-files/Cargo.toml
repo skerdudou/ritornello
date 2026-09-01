@@ -5,11 +5,11 @@ edition = "2021"
 license.workspace = true
 repository.workspace = true
 
-# Une cible `lib` est indispensable ici : deux `[[bin]]` d'un même crate ne
-# partagent pas leurs modules. Sans elle, le binaire racine de montage ne
-# pourrait pas employer `roots.rs`, et l'argument qui justifie de les loger
-# ensemble — le côté privilégié et le côté qui écrit la configuration lisent
-# exactement la même grammaire — tomberait.
+# A `lib` target is indispensable here: two `[[bin]]` of the same crate do not
+# share their modules. Without it, the root mount binary could not use
+# `roots.rs`, and the argument that justifies housing them together — the
+# privileged side and the side that writes the configuration read exactly the
+# same grammar — would fall apart.
 [lib]
 name = "ritornello_plugin_files"
 path = "src/lib.rs"
@@ -31,18 +31,17 @@ async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-# `time` est déclaré parce que ce crate emploie `tokio::time` (délais de `smb`
-# et de `sante`). Il compilait déjà sans, la caractéristique venant du SDK par
-# unification : une dépendance qu'on ne demande pas est une dépendance qu'un
-# jour on perd.
+# `time` is declared because this crate uses `tokio::time` (timeouts in `smb`
+# and `health`). It already compiled without it, the feature coming from the SDK
+# through unification: a dependency one does not ask for is a dependency one
+# loses some day.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
-# Lecture de la durée par l'en-tête, dans le processus.
+# Reading the duration from the header, in-process.
 #
-# `default-features = false` a été essayé et **ne compile pas** : les types
-# d'erreur ID3v2 vivent derrière une caractéristique par défaut. Ne pas
-# retenter sans vérifier.
+# `default-features = false` was tried and **does not compile**: the ID3v2 error
+# types live behind a default feature. Do not retry without checking.
 lofty = "0.25.1"
 
 [dev-dependencies]

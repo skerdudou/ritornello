@@ -18,25 +18,25 @@ pub enum StartupPower {
     Previous,
 }
 
-/// Comment une date s'écrit sur cet appareil.
+/// How a date is written on this device.
 ///
-/// **Un choix fermé et non un motif libre.** Le propriétaire a demandé deux
-/// réglages séparés, date et heure ; un motif à la `strftime` serait plus
-/// souple et donnerait un afficheur clear au premier motif fautif, sur un
-/// appareil de salon où personne ne read de journal. Trois formes couvrent ce
-/// que les pays écrivent réellement, et chacune est infalsifiable.
+/// **A closed choice and not a free pattern.** The owner asked for two separate
+/// settings, date and time; a `strftime`-style pattern would be more flexible
+/// and would give a blank display at the first faulty pattern, on a living-room
+/// device where nobody reads a log. Three shapes cover what countries actually
+/// write, and each is tamper-proof.
 ///
-/// Le **séparateur** appartient à la forme et n'est pas un réglage de plus :
-/// `2026-12-31` avec des barres obliques ne se read nulle part.
+/// The **separator** belongs to the shape and is not one more setting:
+/// `2026-12-31` with slashes is read nowhere.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DateFormat {
-    /// `31/12/2026` — la forme française, et le défaut.
+    /// `31/12/2026` — the French shape, and the default.
     #[default]
     DayMonthYear,
-    /// `2026-12-31` — ISO 8601, celle qui se trie.
+    /// `2026-12-31` — ISO 8601, the one that sorts.
     YearMonthDay,
-    /// `12/31/2026` — la forme nord-américaine.
+    /// `12/31/2026` — the North American shape.
     MonthDayYear,
 }
 
@@ -75,115 +75,114 @@ pub struct Settings {
     /// clear the offset too, so it never survives behind a display that
     /// no longer shows it.
     pub tens_window_ms: u32,
-    /// Pas des touches « avancer » / « reculer », en secondes.
+    /// Step of the "seek forward" / "seek backward" keys, in seconds.
     ///
-    /// Réglable là où le pas de volume est figé, parce que la bonne valeur
-    /// dépend de ce qu'on écoute : dix secondes pour rattraper une phrase,
-    /// une minute pour traverser un mouvement.
+    /// Adjustable where the volume step is fixed, because the right value
+    /// depends on what one listens to: ten seconds to catch a sentence again,
+    /// a minute to cross a movement.
     pub seek_step_s: u32,
 
-    // ---- Comment l'appareil écrit une date et une heure ------------------
+    // ---- How the device writes a date and a time ---------------------------
     //
-    // **Deux réglages et non un**, à la demande du propriétaire, et la
-    // séparation se défend : l'order des composants d'une date et le choix
-    // 12/24 h ne varient pas ensemble d'un pays à l'autre. Un anglophone peut
-    // vouloir `2026-12-31` et 24 h, un autre `12/31/2026` et 12 h.
+    // **Two settings and not one**, at the owner's request, and the separation
+    // is defensible: the order of a date's components and the 12/24 h choice
+    // do not vary together from one country to another. One English speaker
+    // may want `2026-12-31` and 24 h, another `12/31/2026` and 12 h.
     //
-    // Ils servent deux publics, et c'est pour cela qu'ils vivent ici plutôt
-    // que dans chaque consommateur : l'heure de l'afficheur en veille, et la
-    // date des « dernières erreurs » de la page Système.
+    // They serve two audiences, and that is why they live here rather than in
+    // each consumer: the time on the display in standby, and the date of the
+    // "last errors" on the System page.
     //
-    // **Aucun réglage de fuseau**, et c'est délibéré : l'afficheur tourne
-    // *sur* l'appareil, donc son horloge est déjà la bonne ; la page web
-    // formate côté navigateur, donc dans le fuseau de qui regarde — ce qui est
-    // juste pour un téléphone qui voyage. Un réglage de plus ne pourrait que
-    // contredire l'un des deux.
-    /// L'order des composants d'une date. Voir `DateFormat`.
+    // **No timezone setting**, and that is deliberate: the display runs *on*
+    // the device, so its clock is already the right one; the web page formats
+    // on the browser side, hence in the timezone of whoever is looking — which
+    // is right for a phone that travels. One more setting could only
+    // contradict one of the two.
+    /// The order of a date's components. See `DateFormat`.
     pub date_format: DateFormat,
-    /// Heure sur 24 h (`13:05`) plutôt que sur 12 h (`1:05 PM`).
+    /// 24-hour time (`13:05`) rather than 12-hour (`1:05 PM`).
     pub clock_24h: bool,
 
-    // ---- Pochettes : ce qui entre, puis ce qui sort ----------------------
+    // ---- Covers: what comes in, then what goes out -------------------------
     //
-    // Deux étages qu'il ne faut pas confondre, et c'est pourquoi le premier
-    // réglage vit **hors** de l'interrupteur dans l'IHM.
+    // Two stages that must not be confused, and that is why the first setting
+    // lives **outside** the switch in the UI.
     //
-    // `cover_source_max_mio` bounded ce que le cœur accepte de read, quoi qu'il
-    // arrive ensuite : c'est la seule protection quand le réencodage est
-    // désactivé, et la plus économique de toutes, puisqu'elle se juge sur la
-    // size du fichier sans read un octet de son contenu.
+    // `cover_source_max_mio` bounds what the core agrees to read, whatever
+    // happens next: it is the only protection when re-encoding is disabled,
+    // and the cheapest of all, since it is judged on the file size without
+    // reading a byte of its content.
     //
-    // Les cinq autres ne décrivent que le **rendition** — ce que le cœur fabrique
-    // pour le pousser sur un socket. Interrupteur décoché, aucun n'a de sens :
-    // la source part telle quelle.
-    /// Combien de pochettes le cœur garde sous la main.
+    // The five others only describe the **rendition** — what the core makes to
+    // push onto a socket. Switch unchecked, none of them makes sense: the
+    // source leaves as is.
+    /// How many covers the core keeps at hand.
     ///
-    /// **C'est ce que le navigateur peut encore demander.** Une cover
-    /// publiée dans `cover_href` reste servie tant que sa clé est dans ce
-    /// cache ; au-delà, la page reçoit un 404 et retombe sur son ♫ — un
-    /// « l'appareil avait l'image et l'a perdue » que le journal signale
-    /// désormais en `warn`. Quatre entrées, la valeur d'origine, ne tenaient
-    /// même pas un album parcouru dans les deux sens.
+    /// **This is what the browser can still request.** A cover published in
+    /// `cover_href` remains served as long as its key is in this cache; beyond
+    /// that, the page receives a 404 and falls back to its ♫ — a "the device
+    /// had the image and lost it" that the log now reports as `warn`. Four
+    /// entries, the original value, did not even hold an album browsed in
+    /// both directions.
     ///
-    /// Le coût mémoire est **borné et modeste** : une cover locale ne garde
-    /// qu'un path, et une cover réseau est plafonnée à `NETWORK_CAP`
-    /// (2 Mio) à son téléchargement. Vingt entrées valent donc 40 Mio dans le
-    /// pire des cas absolus, et en pratique deux (une cover de 500 px pèse
-    /// une centaine de kibioctets).
+    /// The memory cost is **bounded and modest**: a local cover only keeps a
+    /// path, and a network cover is capped at `NETWORK_CAP` (2 MiB) at
+    /// download time. Twenty entries are therefore worth 40 MiB in the absolute
+    /// worst case, and in practice two (a 500 px cover weighs about a hundred
+    /// kibibytes).
     pub cover_cache_entries: u32,
 
-    /// Plafond de la cover **source**, en mébioctets.
+    /// Cap of the **source** cover, in mebibytes.
     ///
-    /// Toujours active, réencodage ou pas. Borné à
-    /// `ritornello_proto::COVER_MAX_BYTES` (20 Mio) par la validation, et c'est
-    /// structurel : cette constante est une promesse de **protocol** — elle dit
-    /// aux plugins le maximum qu'ils peuvent recevoir, et le greffon MPD
-    /// dimensionne ses propres bornes dessus sans pouvoir consulter les
-    /// réglages du cœur. Ce champ ne peut donc que l'abaisser.
+    /// Always active, re-encoding or not. Bounded by
+    /// `ritornello_proto::COVER_MAX_BYTES` (20 MiB) by validation, and that is
+    /// structural: this constant is a **protocol** promise — it tells the
+    /// plugins the maximum they can receive, and the MPD plugin sizes its own
+    /// bounds on it without being able to consult the core's settings. This
+    /// field can therefore only lower it.
     pub cover_source_max_mio: u32,
 
-    /// Réencoder les pochettes avant de les pousser, ou pousser la source
-    /// telle quelle ?
+    /// Re-encode covers before pushing them, or push the source as is?
     ///
-    /// Décoché, le cœur ne décode plus rien : il push_cover les bytes d'origine, et
-    /// le pic mémoire d'une publication redevient celui de l'image source (près
-    /// de 72 Mio pour une cover de 20 Mio, entre les bytes, leur base64 et
-    /// la line JSON) au lieu de ~1,8 Mio pour une thumbnail. C'est un choix
-    /// défendable — un afficheur qui veut la pleine résolution, une machine qui
-    /// a la RAM — mais il faut le faire en le sachant.
+    /// Unchecked, the core no longer decodes anything: it pushes the original
+    /// bytes, and the memory peak of a publication becomes that of the source
+    /// image again (close to 72 MiB for a 20 MiB cover, between the bytes,
+    /// their base64 and the JSON line) instead of ~1.8 MiB for a thumbnail. It
+    /// is a defensible choice — a display that wants full resolution, a
+    /// machine that has the RAM — but it must be made knowingly.
     pub cover_rendition: bool,
 
-    /// Côté le plus long de la thumbnail, en pixels. Le rapport est conservé.
+    /// Longest side of the thumbnail, in pixels. The ratio is preserved.
     pub cover_max_edge_px: u32,
 
-    /// Qualité JPEG de la thumbnail, de 1 à 100.
+    /// JPEG quality of the thumbnail, from 1 to 100.
     ///
-    /// Ne s'applique qu'au JPEG : une cover à canal alpha est réencodée en
-    /// PNG, sans perte, parce qu'aplatir sa transparence sur un fond deviné
-    /// serait un choix visuel que l'appareil n'a pas à faire.
+    /// Only applies to JPEG: a cover with an alpha channel is re-encoded as
+    /// PNG, losslessly, because flattening its transparency onto a guessed
+    /// background would be a visual choice the device has no business making.
     pub cover_jpeg_quality: u8,
 
-    /// Plafond de la thumbnail **produite**, en kibioctets.
+    /// Cap of the **produced** thumbnail, in kibibytes.
     ///
-    /// Un filet, pas une cible : le côté maximal bounded déjà le nombre de pixels,
-    /// donc une thumbnail dépasse ce cap seulement sur une image
-    /// pathologiquement bruitée. Dépassement = rien n'est poussé, et le journal
-    /// nomme ce réglage — plutôt qu'une boucle de réencodages dégressifs dont le
-    /// coût serait invisible.
+    /// A safety net, not a target: the maximum side already bounds the number
+    /// of pixels, so a thumbnail exceeds this cap only on a pathologically
+    /// noisy image. Exceeding it = nothing is pushed, and the log names this
+    /// setting — rather than a loop of decreasing re-encodings whose cost would
+    /// be invisible.
     pub cover_max_bytes_ko: u32,
 
-    /// Plafond de **pixels** à décoder, en mégapixels.
+    /// Cap of **pixels** to decode, in megapixels.
     ///
-    /// La garde anti-bombe de décompression, et la seule qui compte vraiment :
-    /// les dimensions sont lues dans l'en-tête **avant toute allocation**, et un
-    /// fichier qui les dépasse est refusé sans être décodé. Un PNG de 200 Kio
-    /// peut annoncer 30000 × 30000 pixels, soit 3,6 Gio de buffer décodé — la
-    /// size du fichier ne dit rien du coût du décodage, et c'est exactement ce
-    /// que ce réglage bounded là où `cover_source_max_mio` ne peut rien.
+    /// The anti-decompression-bomb guard, and the only one that really counts:
+    /// the dimensions are read in the header **before any allocation**, and a
+    /// file that exceeds them is refused without being decoded. A 200 KiB PNG
+    /// can announce 30000 × 30000 pixels, i.e. 3.6 GiB of decoded buffer — the
+    /// file size says nothing about the decoding cost, and that is exactly
+    /// what this setting bounds where `cover_source_max_mio` can do nothing.
     ///
-    /// Son libellé dans l'IHM porte le calcul `l × h × 4`, parce que la valeur
-    /// utile n'est pas le nombre de mégapixels mais les mébioctets qu'ils
-    /// coûtent : 16 Mpx, c'est 64 Mio de buffer.
+    /// Its label in the UI carries the `w × h × 4` computation, because the
+    /// useful value is not the number of megapixels but the mebibytes they
+    /// cost: 16 Mpx is 64 MiB of buffer.
     pub cover_max_pixels_mpx: u32,
 }
 
@@ -196,34 +195,33 @@ impl Default for Settings {
             overlay_ms: 5000,
             tens_window_ms: 5000,
             seek_step_s: 10,
-            // Les défauts du pays de l'appareil, pas des défauts neutres : il
-            // n'y a pas de forme « neutre » de date, et celle-ci est celle de
-            // son propriétaire.
+            // The defaults of the device's country, not neutral defaults: there
+            // is no "neutral" date shape, and this one is its owner's.
             date_format: DateFormat::DayMonthYear,
             clock_24h: true,
-            // Vingt : de quoi couvrir un album entier parcouru dans les deux
-            // sens, ce que quatre ne faisait pas.
+            // Twenty: enough to cover a whole album browsed in both directions,
+            // which four did not.
             cover_cache_entries: 20,
-            // Le cap du protocol lui-même : par défaut le cœur n'add
-            // aucune restriction à ce que les plugins savent déjà encaisser.
+            // The protocol's own cap: by default the core adds no restriction
+            // to what the plugins already know how to take.
             cover_source_max_mio: ritornello_proto::COVER_MAX_BYTES as u32 / (1024 * 1024),
-            // Activé par défaut : sur un Pi 2 à 1 Gio partagé entre mpv, le
-            // cœur, l'IHM et dix plugins, pousser 20 Mio d'image brute est le
-            // mauvais défaut même si l'appareil y survit.
+            // Enabled by default: on a Pi 2 with 1 GiB shared between mpv, the
+            // core, the UI and ten plugins, pushing 20 MiB of raw image is the
+            // wrong default even if the device survives it.
             cover_rendition: true,
-            // 640 px : au-delà de ce que le plus grand afficheur du parc sait
-            // montrer, et l'IHM web n'affiche la cover qu'à 224 px sur son
-            // plus grand palier.
+            // 640 px: beyond what the largest display in the fleet can show,
+            // and the web UI only displays the cover at 224 px on its largest
+            // breakpoint.
             cover_max_edge_px: 640,
-            // 85 : le seuil au-delà duquel un JPEG grossit sans que l'œil y
-            // gagne, sur une image de cette size.
+            // 85: the threshold beyond which a JPEG grows without the eye
+            // gaining anything, on an image of this size.
             cover_jpeg_quality: 85,
-            // 512 Kio, soit largement au-dessus d'une thumbnail 640 px typique
-            // (60 à 120 Kio) : le filet ne doit pas se déclencher en usage
-            // normal, sinon ce n'est plus un filet mais une limite.
+            // 512 KiB, i.e. well above a typical 640 px thumbnail (60 to
+            // 120 KiB): the safety net must not trigger in normal use,
+            // otherwise it is no longer a net but a limit.
             cover_max_bytes_ko: 512,
-            // 16 Mpx = 64 Mio de buffer décodé. Couvre une cover scannée en
-            // 4000 × 4000 avec de la marge, et refuse la bombe.
+            // 16 Mpx = 64 MiB of decoded buffer. Covers a cover scanned at
+            // 4000 × 4000 with margin, and refuses the bomb.
             cover_max_pixels_mpx: 16,
         }
     }
@@ -243,11 +241,11 @@ pub struct PersistedState {
     pub audio_device: Option<String>,
     #[serde(default)]
     pub locale: Option<String>,
-    /// Preset de thème choisi (name opaque pour le cœur : la liste des presets
-    /// vit dans la SPA). Absent = `theme::DEFAULT_THEME`.
+    /// Chosen theme preset (opaque name for the core: the preset list lives in
+    /// the SPA). Absent = `theme::DEFAULT_THEME`.
     #[serde(default)]
     pub theme: Option<String>,
-    /// `"light"` ou `"dark"`. Absent = `theme::DEFAULT_MODE`.
+    /// `"light"` or `"dark"`. Absent = `theme::DEFAULT_MODE`.
     #[serde(default)]
     pub mode: Option<String>,
     /// Behavior settings (hold-to-repeat timings, startup power state).
@@ -283,12 +281,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaut_si_fichier_absent_ou_corrompu() {
+    fn default_if_file_missing_or_corrupted() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("absent.json");
         assert_eq!(load(&missing), PersistedState::default());
         let bad = dir.path().join("bad.json");
-        std::fs::write(&bad, "{pas du json").unwrap();
+        std::fs::write(&bad, "{not json").unwrap();
         assert_eq!(load(&bad), PersistedState::default());
     }
 
@@ -311,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn defaut_est_radio_vol60_sans_sortie_choisie() {
+    fn default_is_radio_vol60_without_chosen_output() {
         let d = PersistedState::default();
         assert_eq!(d.active_source, "radio");
         assert_eq!(d.volume, 60);
@@ -319,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn locale_absente_par_defaut_et_roundtrip() {
+    fn locale_absent_by_default_and_roundtrip() {
         assert_eq!(PersistedState::default().locale, None);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
@@ -338,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn theme_et_mode_absents_par_defaut_et_roundtrip() {
+    fn theme_and_mode_absent_by_default_and_roundtrip() {
         assert_eq!(PersistedState::default().theme, None);
         assert_eq!(PersistedState::default().mode, None);
         let dir = tempfile::tempdir().unwrap();
@@ -358,9 +356,9 @@ mod tests {
     }
 
     #[test]
-    fn un_state_json_anterieur_reste_lisible() {
-        // Compatibilite ascendante : un fichier ecrit avant cette version n'a
-        // ni `theme` ni `mode` ; il doit se charger sans erreur.
+    fn an_earlier_state_json_remains_readable() {
+        // Backward compatibility: a file written before this version has
+        // neither `theme` nor `mode`; it must load without error.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         std::fs::write(
@@ -376,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_par_defaut() {
+    fn default_settings() {
         let s = Settings::default();
         assert_eq!(s.volume_repeat_initial_ms, 800);
         assert_eq!(s.volume_repeat_interval_ms, 200);
@@ -388,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn un_state_json_sans_settings_reste_lisible() {
+    fn a_state_json_without_settings_remains_readable() {
         // Backward compatibility: a state.json written before this version has
         // no `settings` block; it must load with the defaults.
         let dir = tempfile::tempdir().unwrap();
@@ -404,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_roundtrip_et_bloc_partiel() {
+    fn settings_roundtrip_and_partial_block() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         // Non-default values throughout, overlay_ms/tens_window_ms included:
@@ -420,16 +418,16 @@ mod tests {
                 tens_window_ms: 7000,
                 seek_step_s: 45,
                 cover_cache_entries: 7,
-                // Non-défaut toutes les deux, même raison : le défaut est
-                // `DayMonthYear` et `true`.
+                // Both non-default, same reason: the default is
+                // `DayMonthYear` and `true`.
                 date_format: DateFormat::YearMonthDay,
                 clock_24h: false,
-                // Six valeurs non-défaut de plus, pour la raison écrite
-                // au-dessus : une fixture qui reprendrait les défauts ne
-                // distinguerait pas « la valeur écrite a survécu » de « le
-                // défaut s'est appliqué ». `cover_rendition` à `false` est le
-                // cas qui compte le plus ici — c'est le seul booléen du lot, et
-                // son défaut est `true`.
+                // Six more non-default values, for the reason written above: a
+                // fixture that reused the defaults would not distinguish "the
+                // written value survived" from "the default applied".
+                // `cover_rendition` at `false` is the case that matters most
+                // here — it is the only boolean of the lot, and its default is
+                // `true`.
                 cover_source_max_mio: 12,
                 cover_rendition: false,
                 cover_max_edge_px: 800,
@@ -452,11 +450,11 @@ mod tests {
     }
 
     #[test]
-    fn la_veille_persistee_vaut_faux_sans_la_cle_et_survit_au_roundtrip() {
+    fn persisted_standby_is_false_without_the_key_and_survives_the_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         std::fs::write(&path, r#"{"active_source":"radio","volume":42}"#).unwrap();
-        assert!(!load(&path).standby, "sans la key, on repart eveille");
+        assert!(!load(&path).standby, "without the key, we start awake");
 
         let st = PersistedState { standby: true, ..Default::default() };
         save(&path, &st).unwrap();

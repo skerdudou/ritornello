@@ -5,16 +5,16 @@ export interface PluginStatus {
   kind: string
   connected: boolean
   admin: boolean
-  /** Lancé, step encore annoncé, et **passé** le délai normal : un diagnostic. */
+  /** Launched, not yet announced, and **past** the normal timeout: a diagnostic. */
   stalled?: boolean
-  /** Lancé à l'instant, step encore annoncé, et c'est normal. Exclusif avec
-   * `stalled`, dont il ne diffère que par le temps écoulé — mais la différence
-   * est tout : « figé » accuse, « démarrage » constate. */
+  /** Launched just now, not yet announced, and that is normal. Mutually
+   * exclusive with `stalled`, from which it only differs by the elapsed time —
+   * but that difference is everything: "stalled" accuses, "starting" observes. */
   starting?: boolean
   disabled?: boolean
-  /** Joint, mais sa page d'admin ne répond step au ping : un `set_data` long
-   * tient son verrou (le plus souvent un partage réseau). Calculé au moment
-   * du `/api/status`, donc peut changer d'un rafraîchissement à l'autre. */
+  /** Connected, but its admin page does not answer the ping: a long `set_data`
+   * holds its lock (most often a network share). Computed at the time of
+   * `/api/status`, so it can change from one refresh to the next. */
   busy?: boolean
 }
 export interface StatusPayload { plugins: PluginStatus[]; active_source: string }
@@ -23,29 +23,29 @@ export interface AudioPayload { devices: AudioDevice[]; current: string | null }
 export interface LocalePayload { locales: string[]; current: string | null }
 export interface ThemePayload { theme: string; mode: Mode }
 export interface LogsPayload { lines: string[] }
-/** Les trois valeurs de `settings.startup_power`, cote coeur comme cote IHM. */
+/** The three values of `settings.startup_power`, on the core side as on the UI side. */
 export type StartupPower = 'on' | 'standby' | 'previous'
 
 /**
- * L'order des composants d'une date, tel que l'appareil l'ecrit. Un choix
- * ferme et non un motif libre : un motif fautif donnerait un afficheur vide.
+ * The order of a date's components, as the device writes it. A closed choice
+ * and not a free pattern: a faulty pattern would yield an empty display.
  */
 export type DateFormat = 'day_month_year' | 'year_month_day' | 'month_day_year'
-/** Réglages de comportement, tels que les sert `GET /api/settings`. */
+/** Behavior settings, as served by `GET /api/settings`. */
 /**
- * D'ou vient chaque morceau de ce qui s'displayed : le contributeur retenu pour
- * chaque champ renseigne, et ceux qui ont cherche sans rien trouver.
+ * Where each piece of what is displayed comes from: the contributor retained
+ * for each filled field, and those who searched without finding anything.
  */
 export interface Provenance {
-  /** Par nom de champ : `artist`, `title`, `album`, `year`, `duration`, `links`, `cover`. */
+  /** By field name: `artist`, `title`, `album`, `year`, `duration`, `links`, `cover`. */
   fields?: Record<string, string>
-  /** Les plugins qui ont cherche et n'ont rien trouve pour ce morceau. */
+  /** The plugins that searched and found nothing for this track. */
   misses?: string[]
   /**
-   * Qui a **retravaille** un champ sans en etre la source, par nom de champ.
+   * Who **reworked** a field without being its source, by field name.
    *
-   * Complete `fields` au lieu de la remplacer : « Titre : icy, decoupe par
-   * musicbrainz » dit les deux faits.
+   * Complements `fields` instead of replacing it: "Title: icy, split by
+   * musicbrainz" states both facts.
    */
   derived?: Record<string, string>
 }
@@ -54,59 +54,59 @@ export interface SettingsPayload {
   volume_repeat_initial_ms: number
   volume_repeat_interval_ms: number
   /**
-   * Comportement au demarrage du service : `on` reveille la source active,
-   * `standby` laisse l'appareil en veille, `previous` reprend l'state qu'il
-   * avait au last arret.
+   * Behavior at service startup: `on` wakes the active source, `standby`
+   * leaves the device in standby, `previous` resumes the state it had at the
+   * last shutdown.
    */
   startup_power: StartupPower
   /**
-   * L'order des composants d'une date. Deux settings separes et non un motif
-   * unique : l'order d'une date et le choix 12/24 h ne varient step ensemble
-   * d'un country a l'autre.
+   * The order of a date's components. Two separate settings and not a single
+   * pattern: the order of a date and the 12/24 h choice do not vary together
+   * from one country to another.
    */
   date_format: DateFormat
-  /** Heure sur 24 h (`13:05`) plutot que sur 12 h (`1:05 PM`). */
+  /** 24 h clock (`13:05`) rather than 12 h (`1:05 PM`). */
   clock_24h: boolean
-  /** Durée d'affichage de l'incrustation volume/mute et des messages éphémères des sources. */
+  /** Display duration of the volume/mute overlay and of the sources' ephemeral messages. */
   overlay_ms: number
-  /** Fenêtre de saisie du cumul `+10` de la télécommande (temps laissé pour la seconde pression). */
+  /** Input window of the remote's `+10` accumulation (time left for the second press). */
   tens_window_ms: number
   /**
-   * Combien de pochettes le coeur garde servables a la page.
+   * How many covers the core keeps servable to the page.
    *
-   * Hors de l'encart grise du reencodage : cette borne s'applique quoi qu'il
-   * arrive, comme le plafond de la source juste en dessous.
+   * Outside the greyed-out re-encoding box: this bound applies no matter
+   * what, like the source cap just below.
    */
   cover_cache_entries: number
   /**
-   * Plafond de la pochette **source**, en mébioctets. Toujours appliqué, que le
-   * réencodage soit actif ou non — c'est la seule garde qui subsiste quand il
-   * est décoché, et la raison pour laquelle l'IHM le sort de l'encart grisé.
+   * Cap of the **source** cover, in mebibytes. Always applied, whether
+   * re-encoding is active or not — it is the only guard that remains when it
+   * is unchecked, and the reason the UI takes it out of the greyed-out box.
    */
   cover_source_max_mio: number
-  /** Réencoder les pochettes en vignette, ou pousser la source telle quelle. */
+  /** Re-encode covers into a thumbnail, or push the source as-is. */
   cover_rendition: boolean
-  /** Côté le plus long de la vignette, en pixels. Rendu seulement. */
+  /** Longest side of the thumbnail, in pixels. Rendition only. */
   cover_max_edge_px: number
-  /** Qualité JPEG de la vignette. Rendu seulement, et ignorée si l'image a un canal alpha. */
+  /** JPEG quality of the thumbnail. Rendition only, and ignored if the image has an alpha channel. */
   cover_jpeg_quality: number
-  /** Plafond de la vignette produite, en kibioctets. Rendu seulement. */
+  /** Cap of the produced thumbnail, in kibibytes. Rendition only. */
   cover_max_bytes_ko: number
-  /** Plafond de pixels à décoder, en mégapixels. Rendu seulement. */
+  /** Cap of pixels to decode, in megapixels. Rendition only. */
   cover_max_pixels_mpx: number
-  /** Pas des touches « avancer » / « reculer », en secondes. */
+  /** Step of the "forward" / "rewind" keys, in seconds. */
   seek_step_s: number
 }
 /**
- * Etat du player, tel que le pousse `/api/player` : tout ce qui est volatil.
+ * State of the player, as pushed by `/api/player`: everything that is volatile.
  *
- * Un seul objet, plat, pour un seul encart. `/api/status` porte a cote le
- * contract de navigation, structurellement stable et lu une fois au montage —
- * c'est pourquoi le volume n'y est step.
+ * A single, flat object for a single panel. `/api/status` carries alongside
+ * the navigation contract, structurally stable and read once at mount time —
+ * which is why the volume is not in it.
  *
- * Les fields du morceau sont optionnels : on displayed toute information
- * disponible, meme partielle. `origin` dit qui l'a fournie — `"icy"` pour ce
- * que le flux annonce lui-meme, sinon le nom du plugin `metadata` qui a gagne.
+ * The track's fields are optional: any available information is displayed,
+ * even partial. `origin` says who provided it — `"icy"` for what the stream
+ * announces itself, otherwise the name of the `metadata` plugin that won.
  */
 export interface PlayerPayload {
   source: string
@@ -114,117 +114,116 @@ export interface PlayerPayload {
   muted: boolean
   standby: boolean
   /**
-   * Touche numerotee correspondant a ce qui joue (preselection radio, piste cd),
-   * telle que la source active l'a declaree — c'est elle que la telecommande
-   * met en evidence. `null` : rien ne joue, ou rien de declare.
+   * Numbered key matching what is playing (radio preset, cd track), as the
+   * active source declared it — this is what the remote highlights. `null`:
+   * nothing is playing, or nothing declared.
    */
   preset: number | null
   /**
-   * Nombre de preselections que la source active declare (stations radio,
-   * tracks cd), ou `null` si elle ne le declare step — la grille retombe alors
-   * sur les 9 touches nues historiques. `0` est significatif ("rien a
-   * numeroter", ex. cd sans disque) et distinct de `null`.
+   * Number of presets the active source declares (radio stations, cd tracks),
+   * or `null` if it does not declare it — the grid then falls back to the 9
+   * historical bare keys. `0` is meaningful ("nothing to number", e.g. cd
+   * without a disc) and distinct from `null`.
    */
   preset_count: number | null
   /**
-   * Nom lisible que la source active donne a la preselection en cours
-   * (nom configure de la station pour la radio), ou `null` quand elle n'en
-   * declare step (le cd, ou rien ne joue). Vit et meurt avec `preset`.
+   * Readable name the active source gives to the current preset (configured
+   * station name for the radio), or `null` when it declares none (the cd, or
+   * nothing playing). Lives and dies with `preset`.
    */
   preset_name: string | null
   /**
-   * Phrase d'state deja traduite : le statut declare par la source (« PAS DE
-   * DISQUE ») ou le mot de veille resolu par le coeur. `null` quand il n'y a
-   * rien a dire.
+   * Already translated state sentence: the status declared by the source
+   * ("NO DISC") or the standby word resolved by the core. `null` when there
+   * is nothing to say.
    */
   status: string | null
   /**
-   * Incrustation en cours cote afficheur. La SPA l'ignore — elle montre deja
-   * le volume en clair, et un ecran de browser n'a step les contraintes de
-   * largeur d'un afficheur de vingt colonnes — mais le champ voyage parce que
-   * la load utile est unique.
+   * Overlay in progress on the display side. The SPA ignores it — it already
+   * shows the volume in plain text, and a browser screen does not have the
+   * width constraints of a twenty-column display — but the field travels
+   * because the payload is unique.
    */
   overlay: unknown | null
   artist: string | null
   title: string | null
   album: string | null
   /**
-   * Année de sortie, quand un contributeur la connaît.
+   * Release year, when a contributor knows it.
    *
-   * Optionnelle, comme `links` : le cœur **omet** le champ plutôt que d'émettre
-   * un `null`, pour qu'une trame sans année reste identique à l'octet près à
-   * ce qu'elle était avant ce chantier.
+   * Optional, like `links`: the core **omits** the field rather than emitting
+   * a `null`, so that a frame without a year stays byte-for-byte identical to
+   * what it was before this work.
    */
   year?: number | null
   /**
-   * Les plateformes d'écoute où trouver ce morceau.
+   * The listening platforms where this track can be found.
    *
-   * Absent de la trame quand la list est vide, d'où l'optionnel : le cœur
-   * omet le champ plutôt que d'émettre un tableau vide. `platform` est un
-   * ensemble fermé côté protocole, et l'URL a déjà été validée contre l'hôte
-   * de cette plateforme — l'IHM n'a donc rien à revérifier avant d'en faire
-   * un lien.
+   * Absent from the frame when the list is empty, hence optional: the core
+   * omits the field rather than emitting an empty array. `platform` is a
+   * closed set on the protocol side, and the URL has already been validated
+   * against that platform's host — so the UI has nothing to re-check before
+   * turning it into a link.
    */
   links?: { platform: 'youtube' | 'deezer' | 'apple_music'; url: string }[]
   duration_s: number | null
   origin: string | null
-  /** URL locale de la pochette, servie par l'appareil. Jamais une URL externe. */
+  /** Local URL of the cover, served by the device. Never an external URL. */
   cover_href: string | null
-  /** Qui a fourni la pochette : nom de la Source, `tags`, ou nom du greffon. */
+  /** Who provided the cover: name of the Source, `tags`, or name of the plugin. */
   cover_origin: string | null
   /**
-   * D'ou vient chaque champ, et qui a cherche sans trouver.
+   * Where each field comes from, and who searched without finding.
    *
-   * Facultatif : le coeur l'omet quand il n'a rien a dire, et une trame emise
-   * par une version anterieure n'en porte step.
+   * Optional: the core omits it when it has nothing to say, and a frame
+   * emitted by an earlier version does not carry it.
    */
   provenance?: Provenance
   /**
-   * Ou en est ce qui joue, en secondes, a l'instant ou la trame a ete
-   * publiee — le coeur en pousse une par seconde pendant la lecture.
-   * `null` quand personne ne sait : rien ne joue, ou c'est un flux qu'aucun
-   * plugin `metadata` ne suit.
+   * Where what is playing stands, in seconds, at the instant the frame was
+   * published — the core pushes one per second during playback. `null` when
+   * nobody knows: nothing is playing, or it is a stream that no `metadata`
+   * plugin tracks.
    */
   position_s: number | null
   /**
-   * Ce qui joue accepte un deplacement. Distinct de « une duration est connue » :
-   * Radio France annonce la duration d'un morceau sur un direct qu'on ne peut step
-   * rembobiner. C'est ce champ, et lui seul, qui rend la barre cliquable.
+   * What is playing accepts a seek. Distinct from "a duration is known":
+   * Radio France announces the duration of a track on a live stream that
+   * cannot be rewound. This field, and it alone, makes the bar clickable.
    */
   seekable: boolean
   /**
-   * La source active a de quoi ejecter : c'est ce qui grise la touche Eject
-   * ailleurs que sur le player de cd. Une capacite de la **source**, step du
-   * contenu — un tiroir vide s'ouvre aussi.
+   * The active source has something to eject: this is what greys out the
+   * Eject key anywhere but on the cd player. A capability of the **source**,
+   * not of the content — an empty tray opens too.
    *
-   * Faux par defaut, et absent de la trame quand il est faux (comme
-   * `seekable`) : ne step savoir, c'est n'offrir rien.
+   * False by default, and absent from the frame when false (like `seekable`):
+   * not knowing means offering nothing.
    */
   can_eject: boolean
   /**
-   * Ce que fait le player : `playing`, `paused`, ou absent quand rien ne joue.
-   * C'est ce qui choisit l'icône du bouton de lecture (▶ ou ❚❚). Le champ
-   * voyageait déjà sans être lu.
+   * What the player is doing: `playing`, `paused`, or absent when nothing is
+   * playing. This is what picks the play button's icon (▶ or ❚❚). The field
+   * was already travelling without being read.
    */
   playback?: Playback
 }
 export type Command = { cmd: string; arg?: number }
-/** Ce que fait le player. Absent de la trame quand il est arrêté (idiome de `seekable`). */
+/** What the player is doing. Absent from the frame when it is stopped (`seekable` idiom). */
 export type Playback = 'playing' | 'paused'
-/** Une présélection nommée telle que `GET /api/presets` la sert. */
+/** A named preset as `GET /api/presets` serves it. */
 export interface NamedPreset { index: number; name: string }
-/** Une source et sa list ; `presets` est absent quand elle n'énumère step. */
+/** A source and its list; `presets` is absent when it does not enumerate. */
 export interface SourcePresets { name: string; presets?: NamedPreset[] }
-/** Le catalogue des sources, tel que le cœur le diffuse aux afficheurs. */
+/** The catalog of sources, as the core broadcasts it to the displays. */
 export interface PresetsPayload { sources: SourcePresets[] }
 export interface SystemUsage { total_kb: number; available_kb: number }
 /**
- * Metriques de l'OS, telles que les sert `GET /api/system`.
+ * OS metrics, as served by `GET /api/system`.
  *
- * Tout champ que la machine n'expose step vaut `null` — step de capteur
- * thermique, step de cpufreq, step de sonde de sous-voltage — et la vue
- * displayed « — » sans traiter cela comme une panne. Le jeu de cles, lui, est
- * stable.
+ * Any field the machine does not expose is `null` — no thermal sensor, no
+ * cpufreq, no under-voltage probe — and the view displays "—" without
+ * treating that as a failure. The key set, however, is stable.
  */
 export interface SystemPayload {
   temperature_c: number | null
@@ -234,11 +233,10 @@ export interface SystemPayload {
   memory: SystemUsage | null
   disk: SystemUsage | null
   under_voltage: boolean | null
-  /** Sous-voltage survenue depuis le démarrage (bit collant du micrologiciel),
-   *  distincte de `under_voltage` (l'alarme instantanée) : un épisode dure
-   *  quelques millisecondes à quelques secondes et un sondage à 5 s a peu de
-   *  chances de tomber pile dessus, alors que ce bit reste vrai jusqu'au
-   *  prochain démarrage. */
+  /** Under-voltage that occurred since boot (sticky firmware bit), distinct
+   *  from `under_voltage` (the instantaneous alarm): an episode lasts a few
+   *  milliseconds to a few seconds and a 5 s probe has little chance of
+   *  landing right on it, whereas this bit stays true until the next boot. */
   under_voltage_since_boot: boolean | null
   uptime_s: number | null
   service_uptime_s: number
@@ -250,16 +248,16 @@ export interface SystemPayload {
   can_power_off: boolean
   can_reboot: boolean
   /**
-   * logind a-t-il répondu à la sonde de démarrage, quelle qu'ait été sa
-   * réponse ? Départage les deux causes d'un bouton grisé : un refus appelle
-   * la règle polkit, une absence de réponse appelle un `systemd-logind` qui
-   * tourne. Deux réparations différentes, donc deux phrases.
+   * Did logind answer the startup probe, whatever its answer was? Separates
+   * the two causes of a greyed-out button: a refusal calls for the polkit
+   * rule, no answer calls for a running `systemd-logind`. Two different
+   * repairs, hence two sentences.
    */
   logind_reachable: boolean
   /**
-   * Compteurs cumulatifs de `/proc/stat` depuis le démarrage — jamais un
-   * pourcentage : deux onglets sondant hors phase corrompraient un delta
-   * calculé côté cœur. La vue les compare entre deux sondages successifs.
+   * Cumulative counters from `/proc/stat` since boot — never a percentage:
+   * two tabs probing out of phase would corrupt a delta computed on the core
+   * side. The view compares them between two successive probes.
    */
   cpu_total_jiffies: number | null
   cpu_idle_jiffies: number | null

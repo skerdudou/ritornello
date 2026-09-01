@@ -2,11 +2,11 @@ mod admin;
 mod commands;
 mod config;
 mod state;
-// Uniquement compilé sous `cargo test` : `ui_placeholder_js` ne sert au
-// run-time nulle part dans ce crate, seulement à `build.rs` (compilation
-// séparée, via `include!`) et à ses propres tests. Le compiler en continu
-// dans le binaire déclencherait un `dead_code` que `-D warnings` refuserait
-// (voir `generic-input/src/main.rs`, même piège).
+// Only compiled under `cargo test`: `ui_placeholder_js` is used nowhere at
+// run time in this crate, only by `build.rs` (separate compilation, via
+// `include!`) and by its own tests. Compiling it permanently into the binary
+// would trigger a `dead_code` that `-D warnings` would refuse (see
+// `generic-input/src/main.rs`, same trap).
 #[cfg(test)]
 mod placeholder;
 mod protocol;
@@ -27,12 +27,12 @@ use tokio::sync::mpsc;
 
 pub(crate) const MPD_EN: &str = include_str!("locales/en.toml");
 
-fn env_or(key: &str, defaut: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| defaut.to_string())
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-/// Moitié `display` : reçoit chaque trame du cœur et la dépose dans l'état
-/// partagé, lu par les sessions clientes.
+/// `display` half: receives each frame from the core and drops it into the
+/// shared state, read by the client sessions.
 struct MpdDisplay {
     state: Arc<SharedState>,
 }
@@ -44,44 +44,43 @@ impl DisplayPlugin for MpdDisplay {
         Ok(())
     }
 
-    /// Le sources_catalog, sur son propre canal : c'est de lui que viennent les
-    /// listes enregistrées (`listplaylists`) et les vrais names de la file
-    /// d'attente.
+    /// The catalog, on its own channel: it is where the saved playlists
+    /// (`listplaylists`) and the real names of the queue come from.
     ///
-    /// Le corps par défaut du trait ignore cette trame ; ce greffon est le
-    /// premier afficheur à s'y intéresser. Un seul appel au démarrage, puis un
-    /// par changement réel — pas un par trame d'état, et c'est tout le sens des
-    /// deux canaux (voir `SharedState::apply_catalog`).
+    /// The trait's default body ignores this frame; this plugin is the first
+    /// display to take an interest in it. A single call at startup, then one
+    /// per real change — not one per state frame, and that is the whole point
+    /// of the two channels (see `SharedState::apply_catalog`).
     async fn sources_catalog(&mut self, c: SourcesCatalog) -> Result<()> {
         self.state.apply_catalog(c).await;
         Ok(())
     }
 
-    /// **C'est cette line qui allume la fonction pochettes de tout
-    /// l'appareil.** Le cœur ne push_cover les bytes qu'aux afficheurs qui les
-    /// demandent, l'announcement est dérivée de cette méthode (voir
-    /// `Runtime::display`), et ce greffon est le seul du dépôt à la redéfinir :
-    /// la console garde le corps par défaut et ne reçoit donc jamais de
-    /// mégaoctet qu'elle jetterait.
+    /// **This is the line that switches on the cover feature for the whole
+    /// device.** The core only pushes the bytes to the displays that ask for
+    /// them, the announcement is derived from this method (see
+    /// `Runtime::display`), and this plugin is the only one in the repository
+    /// to override it: the console keeps the default body and therefore never
+    /// receives a megabyte it would throw away.
     ///
-    /// Redéfinie parce qu'il en a un usage réel et non parce qu'il *peut* :
-    /// `albumart` et `readpicture` doivent rendre des bytes, et aucune autre
-    /// voie ne les lui donne — le `cover_href` de la trame d'état est une URL
-    /// du serveur HTTP du cœur, que le greffon n'a ni le droit ni le moyen
-    /// d'aller read.
+    /// Overridden because it has a real use for it and not because it *can*:
+    /// `albumart` and `readpicture` must return bytes, and no other route gives
+    /// them to it — the `cover_href` of the state frame is a URL of the core's
+    /// HTTP server, which the plugin has neither the right nor the means to go
+    /// and read.
     fn wants_covers(&self) -> bool {
         true
     }
 
-    /// La cover de ce qui plays. Déposée dans l'état partagé, d'où les
-    /// sessions la servent par tranches.
+    /// The cover of what is playing. Dropped into the shared state, from which
+    /// the sessions serve it in chunks.
     async fn cover(&mut self, c: Cover) -> Result<()> {
         self.state.apply_cover(c).await;
         Ok(())
     }
 }
 
-/// Moitié `input` : dépile le canal alimenté par les sessions clientes.
+/// `input` half: drains the channel fed by the client sessions.
 struct MpdInput {
     rx: mpsc::Receiver<InputMessage>,
 }
@@ -89,12 +88,12 @@ struct MpdInput {
 #[async_trait::async_trait]
 impl InputPlugin for MpdInput {
     async fn next_command(&mut self) -> Result<InputMessage> {
-        // Tant qu'`accepter` tourne (sa boucle est infinie, voir
-        // `session.rs`), il détient un clone de l'émetteur, donc ce `recv()`
-        // remainder en attente indéfiniment plutôt que de rendre `None` — même
-        // contrat que `EvdevInput::next_command` côté `generic-input`, où
-        // l'oubli de cette propriété avait fait sortir le greffon en `exit 0`
-        // dès le démarrage (régression du 2026-07-27).
+        // As long as `accept_loop` runs (its loop is infinite, see
+        // `session.rs`), it holds a clone of the sender, so this `recv()`
+        // stays pending indefinitely rather than returning `None` — same
+        // contract as `EvdevInput::next_command` on the `generic-input` side,
+        // where forgetting this property had made the plugin exit with
+        // `exit 0` right at startup (regression of 2026-07-27).
         self.rx.recv().await.ok_or_else(|| anyhow::anyhow!("no mpd session sends commands yet"))
     }
 }
@@ -105,28 +104,29 @@ async fn main() -> Result<()> {
     let path = PathBuf::from(env_or("RITORNELLO_MPD_CONFIG", "/etc/ritornello/mpd.toml"));
     let config = Config::load(&path);
 
-    // **Lié avant l'announcement.** C'est la même doctrine que le SDK tient pour ses
-    // sockets Unix — lier d'abord, annoncer ensuite — et elle donne ici un
-    // comportement utile : un port 6600 déjà pris fait échouer le greffon (le
-    // `?` sort de `main` avant même de construire un `Runtime`) sans qu'il
-    // s'announcement, donc le cœur le rapporte mort avant announcement et la page de
-    // statut le montre. Sinon un port occupé se devinerait dans les logs.
+    // **Bound before the announcement.** This is the same doctrine the SDK
+    // holds for its Unix sockets — bind first, announce next — and it gives a
+    // useful behaviour here: a port 6600 already taken makes the plugin fail
+    // (the `?` leaves `main` before even building a `Runtime`) without it
+    // announcing itself, so the core reports it dead before announcement and
+    // the status page shows it. Otherwise a busy port would have to be guessed
+    // from the logs.
     let listener = TcpListener::bind((config.listen.as_str(), config.port)).await?;
     tracing::info!("mpd server listening on {}:{}", config.listen, config.port);
 
     let state = Arc::new(SharedState::default());
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
-    // Le canal par lequel la page d'admin fait se relier la moitié réseau, sans
-    // redémarrage du greffon (voir `session::listen`). Un `watch` et non un
-    // `mpsc` : seule la **dernière** configuration compte, et deux
-    // enregistrements coup sur coup ne doivent pas provoquer deux reliaisons
-    // dont la première serait déjà périmée.
+    // The channel through which the admin page makes the network half rebind,
+    // without restarting the plugin (see `session::listen`). A `watch` and not
+    // an `mpsc`: only the **last** configuration matters, and two saves in a
+    // row must not cause two rebinds of which the first would already be
+    // stale.
     let (rebind_tx, rebind_rx) = tokio::sync::watch::channel(config.clone());
     tokio::spawn(listen(listener, rebind_rx, state.clone(), cmd_tx));
 
-    // Un greffon Display/Input ne reçoit pas de `SetLocale` (le protocol ne
-    // le prévoit que pour les sources) : la langue de la page vient de
-    // l'environnement, comme en generic-input.
+    // A Display/Input plugin receives no `SetLocale` (the protocol only
+    // provides it for sources): the page's language comes from the
+    // environment, as in generic-input.
     let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
     let locale = env_or("RITORNELLO_LOCALE", "en");
     let catalog = Arc::new(RwLock::new(Catalog::load("mpd", &locale, &locales_root, MPD_EN)));
@@ -150,116 +150,116 @@ mod tests {
     use super::*;
 
     #[test]
-    fn en_embarque_mpd_est_non_vide() {
+    fn embedded_mpd_en_is_not_empty() {
         assert!(!ritornello_i18n::try_parse(MPD_EN).unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn afficheur_mpd_depose_letat_recu_dans_letat_partage() {
+    async fn mpd_display_drops_the_received_state_into_the_shared_state() {
         let state = Arc::new(SharedState::default());
-        let mut afficheur = MpdDisplay { state: state.clone() };
-        let envoye = PlayerState { volume: 17, ..Default::default() };
-        afficheur.show(envoye.clone()).await.unwrap();
-        assert_eq!(state.read().await.state, envoye);
+        let mut display = MpdDisplay { state: state.clone() };
+        let sent = PlayerState { volume: 17, ..Default::default() };
+        display.show(sent.clone()).await.unwrap();
+        assert_eq!(state.read().await.state, sent);
     }
 
     #[tokio::test]
-    async fn afficheur_mpd_depose_le_catalogue_recu_dans_letat_partage() {
-        // Le seul path par lequel le sources_catalog entre dans le greffon : sans
-        // cette surcharge, le corps par défaut du trait l'ignorerait en
-        // silence et `listplaylists` resterait clear pour toujours.
+    async fn mpd_display_drops_the_received_catalog_into_the_shared_state() {
+        // The only path through which the catalog enters the plugin: without
+        // this override, the trait's default body would ignore it silently and
+        // `listplaylists` would stay empty forever.
         let state = Arc::new(SharedState::default());
-        let mut afficheur = MpdDisplay { state: state.clone() };
-        let envoye = SourcesCatalog {
+        let mut display = MpdDisplay { state: state.clone() };
+        let sent = SourcesCatalog {
             sources: vec![ritornello_proto::SourceCatalog {
                 name: "radio".into(),
                 presets: vec![ritornello_proto::Preset { index: 5, name: "Nova".into() }],
             }],
         };
 
-        afficheur.sources_catalog(envoye.clone()).await.unwrap();
+        display.sources_catalog(sent.clone()).await.unwrap();
 
-        assert_eq!(state.read().await.sources_catalog, envoye);
+        assert_eq!(state.read().await.sources_catalog, sent);
     }
 
     #[tokio::test]
-    async fn une_trame_detat_ne_touche_pas_au_catalogue_deja_recu() {
-        // Les deux moitiés d'un même afficheur écrivent dans le même état
-        // partagé, et chacune ne doit toucher que le sien : un `show` qui
-        // remettrait l'instantané à neuf effacerait le sources_catalog reçu au
-        // démarrage, et plus rien ne le renverrait.
+    async fn a_state_frame_does_not_touch_the_catalog_already_received() {
+        // Both halves of the same display write into the same shared state,
+        // and each must touch only its own: a `show` that reset the snapshot
+        // afresh would erase the catalog received at startup, and nothing
+        // would send it again.
         let state = Arc::new(SharedState::default());
-        let mut afficheur = MpdDisplay { state: state.clone() };
+        let mut display = MpdDisplay { state: state.clone() };
         let sources_catalog = SourcesCatalog {
             sources: vec![ritornello_proto::SourceCatalog { name: "radio".into(), presets: vec![] }],
         };
-        afficheur.sources_catalog(sources_catalog.clone()).await.unwrap();
+        display.sources_catalog(sources_catalog.clone()).await.unwrap();
 
-        afficheur.show(PlayerState { source: "radio".into(), volume: 17, ..Default::default() }).await.unwrap();
+        display.show(PlayerState { source: "radio".into(), volume: 17, ..Default::default() }).await.unwrap();
 
-        let inst = state.read().await;
-        assert_eq!(inst.sources_catalog, sources_catalog);
-        assert_eq!(inst.state.volume, 17);
+        let snapshot = state.read().await;
+        assert_eq!(snapshot.sources_catalog, sources_catalog);
+        assert_eq!(snapshot.state.volume, 17);
     }
 
     #[test]
-    fn lafficheur_mpd_demande_les_pochettes() {
-        // **L'opt-in, épinglé.** C'est cette valeur qui allume la fonction pour
-        // tout l'appareil : le cœur dérive l'announcement de `wants_covers` (voir
-        // `Runtime::display`), et personne d'autre ne la redéfinit. Sans ce
-        // test, la put_back au corps par défaut ne casserait *aucun* autre
-        // test du greffon — les tests de session poussent la cover dans
-        // l'état partagé directement — et `albumart` répondrait `ACK 50` sur
-        // l'appareil réel sans que rien ne le signale.
-        let afficheur = MpdDisplay { state: Arc::new(SharedState::default()) };
-        assert!(afficheur.wants_covers(), "le serveur MPD doit recevoir les bytes");
+    fn the_mpd_display_asks_for_covers() {
+        // **The opt-in, pinned.** This is the value that switches the feature
+        // on for the whole device: the core derives the announcement from
+        // `wants_covers` (see `Runtime::display`), and nobody else overrides
+        // it. Without this test, reverting to the default body would break
+        // *no* other test of the plugin — the session tests push the cover
+        // into the shared state directly — and `albumart` would reply
+        // `ACK 50` on the real device without anything flagging it.
+        let display = MpdDisplay { state: Arc::new(SharedState::default()) };
+        assert!(display.wants_covers(), "the MPD server must receive the bytes");
     }
 
     #[tokio::test]
-    async fn afficheur_mpd_depose_la_pochette_recue_dans_letat_partage() {
-        // Le seul path par lequel une image entre dans le greffon. Sans cette
-        // surcharge, le corps par défaut du trait l'avalerait en silence et
-        // `albumart` ne répondrait jamais rien — un greffon qui *demande* les
-        // pochettes et les jette est exactement ce que le cœur ne peut pas
-        // distinguer tout seul.
+    async fn mpd_display_drops_the_received_cover_into_the_shared_state() {
+        // The only path through which an image enters the plugin. Without this
+        // override, the trait's default body would swallow it silently and
+        // `albumart` would never reply anything — a plugin that *asks for*
+        // covers and throws them away is exactly what the core cannot tell
+        // apart on its own.
         let state = Arc::new(SharedState::default());
-        let mut afficheur = MpdDisplay { state: state.clone() };
-        let envoyee = Cover {
+        let mut display = MpdDisplay { state: state.clone() };
+        let sent = Cover {
             href: "/api/cover/1a2b3c".into(),
             mime: "image/jpeg".into(),
             bytes: vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3],
         };
 
-        afficheur.cover(envoyee.clone()).await.unwrap();
+        display.cover(sent.clone()).await.unwrap();
 
-        let tenue = state.read().await.cover.expect("la cover doit etre tenue");
-        assert_eq!(tenue.href, envoyee.href);
-        assert_eq!(tenue.mime, envoyee.mime);
-        assert_eq!(*tenue.bytes, envoyee.bytes);
+        let held = state.read().await.cover.expect("the cover must be held");
+        assert_eq!(held.href, sent.href);
+        assert_eq!(held.mime, sent.mime);
+        assert_eq!(*held.bytes, sent.bytes);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn la_moitie_input_attend_tant_quun_emetteur_du_canal_vit() {
-        // Régression visée : celle documentée sur `EvdevInput` côté
-        // `generic-input` (2026-07-27), où l'oubli de cette propriété faisait
-        // sortir le greffon en exit 0 dès le démarrage faute de périphérique
-        // ouvert. Ici l'émetteur vivant tant qu'`accepter` tourne, ce
-        // `next_command` ne doit jamais se terminer tout seul.
+    async fn the_input_half_waits_as_long_as_a_channel_sender_lives() {
+        // Targeted regression: the one documented on `EvdevInput` on the
+        // `generic-input` side (2026-07-27), where forgetting this property
+        // made the plugin exit with exit 0 right at startup for lack of an
+        // open device. Here, the sender living as long as `accept_loop` runs,
+        // this `next_command` must never finish on its own.
         //
-        // Clock simulée (`start_paused`) : sans émetteur qui envoie ni
-        // aucun autre minuteur en jeu, tokio avance le temps virtuel jusqu'à
-        // l'échéance du `sleep` dès que tout le remainder est en attente — la
-        // propriété testée ne dépend donc pas de deviner combien de temps
-        // "assez longtemps" représente sur la machine qui exécute le test.
+        // Simulated clock (`start_paused`): with no sender sending and no
+        // other timer in play, tokio advances virtual time up to the `sleep`
+        // deadline as soon as everything else is pending — the property under
+        // test therefore does not depend on guessing how long "long enough"
+        // is on the machine running the test.
         let (tx, rx) = mpsc::channel::<InputMessage>(4);
-        let mut entree = MpdInput { rx };
+        let mut input = MpdInput { rx };
         tokio::select! {
-            _ = entree.next_command() => panic!("next_command ne doit pas se terminer tant qu'un emetteur vit"),
+            _ = input.next_command() => panic!("next_command must not finish while a sender lives"),
             _ = tokio::time::sleep(std::time::Duration::from_secs(3600)) => {}
         }
-        // Émetteur lâché : fin propre, l'erreur nomme la cause.
+        // Sender dropped: clean end, the error names the cause.
         drop(tx);
-        let e = entree.next_command().await.unwrap_err();
-        assert!(e.to_string().contains("mpd session"), "erreur inattendue: {e}");
+        let e = input.next_command().await.unwrap_err();
+        assert!(e.to_string().contains("mpd session"), "unexpected error: {e}");
     }
 }

@@ -5,58 +5,58 @@ export interface RemoteCommand {
   cmd: Command
 }
 
-// La load utile est un `ritornello_proto::Command` serialise : c'est le meme
-// canal que celui alimente par les plugins Input, donc aucune logique metier
-// n'est dupliquee ici.
+// The payload is a serialized `ritornello_proto::Command`: it is the same
+// channel as the one fed by the Input plugins, so no business logic is
+// duplicated here.
 //
-// Huit commandes sur la page, sur les dix-sept du protocole : les ±10 s et le
-// volume step a step n'ont plus de touche web (voir `REMOTE_TRANSPORT`).
+// Eight commands on the page, out of the seventeen of the protocol: the ±10 s
+// and the step-by-step volume no longer have a web key (see `REMOTE_TRANSPORT`).
 
 /**
- * La veille, a part : elle occupe le coin de la carte et non la grille des
- * commandes. C'est l'action la plus consequente du lot, et la seule qui agisse
- * sur l'appareil entier plutot que sur la lecture.
+ * Standby, set apart: it occupies the corner of the card and not the command
+ * grid. It is the most consequential action of the lot, and the only one that
+ * acts on the whole device rather than on playback.
  */
 export const REMOTE_POWER: RemoteCommand = { key: 'remote_power', cmd: { cmd: 'Power' } }
 
 /**
- * Le changement de source, a part elle aussi, et voisine de la veille dans le
- * coin de la carte.
+ * The source change, set apart as well, and next to standby in the corner of
+ * the card.
  *
- * Meme raison qu'elle : ce n'est step une command de lecture mais un choix
- * portant sur l'appareil entier — ce qui joue change de nature, step de piste.
- * Elle etait en fond de grille, dans la rangee « appareil », ou elle se lisait
- * comme un cran de plus apres le volume. La sortir la met au niveau de la
- * decision qu'elle represente, et laisse la grille aux seules commandes de la
- * lecture en cours.
+ * Same reason as standby: it is not a playback command but a choice bearing
+ * on the whole device — what plays changes in nature, not in track. It used
+ * to be at the bottom of the grid, in the "device" row, where it read as one
+ * more notch after the volume. Taking it out puts it at the level of the
+ * decision it represents, and leaves the grid to the commands of the current
+ * playback only.
  *
- * Elle garde son grisage, a la difference de la veille : en veille, le coeur
- * retourne sans rien faire sur tout ce qui n'est step `Power` (voir
- * `unavailable`). Le bouton mentirait autrement.
+ * It keeps its greying, unlike standby: in standby, the core returns without
+ * doing anything on everything that is not `Power` (see `unavailable`). The
+ * button would lie otherwise.
  */
 export const REMOTE_SOURCE: RemoteCommand = { key: 'remote_source', cmd: { cmd: 'SourceCycle' } }
 
 /**
- * Le mute, a part lui aussi : c'est une bascule, step un cran sur l'echelle du
- * volume, et il vit sur l'icon du haut-parleur au bout du curseur — la ou on
- * cherche le son.
+ * Mute, set apart as well: it is a toggle, not a notch on the volume scale,
+ * and it lives on the speaker icon at the end of the slider — where one looks
+ * for the sound.
  */
 export const REMOTE_MUTE: RemoteCommand = { key: 'remote_mute', cmd: { cmd: 'Mute' } }
 
 /**
- * Le transport : |◀ ▶ ▶| — precedent et suivant **adjacents** a la lecture,
- * qui est le seul bouton plein. C'est l'order des telecommandes hi-fi, de VLC
- * et des lecteurs de bureau : changer de piste est le geste frequent.
+ * Transport: |◀ ▶ ▶| — previous and next **adjacent** to play, which is the
+ * only filled button. That is the order of hi-fi remotes, VLC and desktop
+ * players: changing track is the frequent gesture.
  *
- * Plus de « reculer / avancer de 10 s » : decide au chantier refonte, au vu de
- * VLC, Deezer et WMP qui n'en ont step — c'est la barre d'avancement qui fait
- * ce travail (voir `ProgressBar`). `SeekBackward`/`SeekForward` restent
- * dans le protocole et sur la telecommande physique.
+ * No more "back / forward 10 s": decided during the redesign, in view of VLC,
+ * Deezer and WMP which do not have it — the progress bar does that job (see
+ * `ProgressBar`). `SeekBackward`/`SeekForward` remain in the protocol and on
+ * the physical remote.
  *
- * Plus de « volume − / + » non plus : le volume est un curseur (`Volume.vue`),
- * pilote au clavier par fleches et Page ↑/↓, ce qui couvre l'accessibilite
- * que les deux touches auraient apportee. Elles restent le geste de la
- * telecommande physique, avec son appui maintenu.
+ * No more "volume − / +" either: the volume is a slider (`Volume.vue`), driven
+ * from the keyboard by arrows and Page ↑/↓, which covers the accessibility
+ * the two keys would have brought. They remain the gesture of the physical
+ * remote, with its held press.
  */
 export const REMOTE_TRANSPORT: RemoteCommand[] = [
   { key: 'remote_prev', cmd: { cmd: 'Prev' } },
@@ -65,7 +65,7 @@ export const REMOTE_TRANSPORT: RemoteCommand[] = [
 ]
 
 /**
- * En retrait du transport : l'arret, et l'ejection quand la source a un tiroir.
+ * Behind the transport: stop, and eject when the source has a tray.
  */
 export const REMOTE_TRANSPORT_SECONDARY: RemoteCommand[] = [
   { key: 'remote_stop', cmd: { cmd: 'Stop' } },
@@ -73,8 +73,8 @@ export const REMOTE_TRANSPORT_SECONDARY: RemoteCommand[] = [
 ]
 
 /**
- * Toutes les commandes de la page : sert au garde-fou i18n
- * (`i18nKeysUsed.test.ts`) et a verrouiller le count de huit.
+ * All the commands of the page: used by the i18n safeguard
+ * (`i18nKeysUsed.test.ts`) and to lock the count of eight.
  */
 export const REMOTE_COMMANDS: RemoteCommand[] = [
   REMOTE_POWER,
@@ -85,35 +85,33 @@ export const REMOTE_COMMANDS: RemoteCommand[] = [
 ]
 
 /**
- * Une command que l'appareil ignorerait dans l'état courant : son bouton est
- * grisé plutôt qu'offert.
+ * A command the device would ignore in the current state: its button is
+ * greyed rather than offered.
  *
- * Une seule règle désormais : en **veille**, le cœur retourne sans rien faire
- * sur tout ce qui n'est step `Power` (première ligne de `handle_command`),
- * grille des présélections comprise. Le déplacement n'a plus de touche (c'est
- * la barre qui se rend inerte, sur `seekable`), et l'éjection se **masque**
- * plutôt que de se griser — voir `hidden`.
+ * A single rule now: in **standby**, the core returns without doing anything
+ * on everything that is not `Power` (first line of `handle_command`), preset
+ * grid included. Seeking no longer has a key (it is the bar that goes inert,
+ * on `seekable`), and eject is **hidden** rather than greyed — see `hidden`.
  *
- * Un état step encore reçu (`null`) ne grise rien : la télécommande s'ouvre
- * utilisable, et la trame corrige aussitôt.
+ * A state not yet received (`null`) greys nothing: the remote opens usable,
+ * and the frame corrects at once.
  */
-export function unavailable(nom: string, state: PlayerPayload | null): boolean {
+export function unavailable(name: string, state: PlayerPayload | null): boolean {
   if (!state) return false
-  return state.standby && nom !== 'Power'
+  return state.standby && name !== 'Power'
 }
 
 /**
- * Une command qui n'a step lieu d'être sur cette source : son bouton n'est step
- * rendu du tout.
+ * A command that has no place on this source: its button is not rendered at
+ * all.
  *
- * Seul `Eject` est concerné. `can_eject` est une capacité que le greffon source
- * déclare **pour lui-même** (`SourcePlugin::can_eject` du sdk) : le player de
- * cd la déclare qu'il y ait un disque ou non, la radio ne la déclare step.
- * Masquer sur cette base ne cache donc jamais un player qui existe — au
- * contraire d'un grisage, qui affirmait une touche là où il n'y a step de
- * tiroir. Avant la première trame on ne sait step : rien n'est rendu, et la
- * trame corrige.
+ * Only `Eject` is concerned. `can_eject` is a capability the source plugin
+ * declares **for itself** (`SourcePlugin::can_eject` of the sdk): the cd
+ * player declares it whether there is a disc or not, the radio does not
+ * declare it. Hiding on that basis therefore never hides a player that exists
+ * — unlike greying, which asserted a key where there is no tray. Before the
+ * first frame we do not know: nothing is rendered, and the frame corrects.
  */
-export function hidden(nom: string, state: PlayerPayload | null): boolean {
-  return nom === 'Eject' && !(state?.can_eject ?? false)
+export function hidden(name: string, state: PlayerPayload | null): boolean {
+  return name === 'Eject' && !(state?.can_eject ?? false)
 }

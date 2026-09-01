@@ -1,47 +1,48 @@
-# Stations Radio France : correspondance entre le mount de diffusion (présent
-# dans l’URL du flux audio) et l’identifiant attendu par le point d’entrée du
-# direct.
+# Radio France stations: mapping between the broadcast mount (present in the
+# audio stream's URL) and the identifier expected by the live entry point.
 #
-# RELEVÉ, PAS DEVINÉ. Source principale : la documentation publique de l’Open
-# API de Radio France (https://developers.radiofrance.fr/doc/tutorial-by-example
-# /list-brands et /list-locals-and-webradios), dont les réponses d’exemple
-# donnent pour chaque station son `liveStream` (donc son mount Icecast) et son
-# `playerUrl`, qui porte `id_station=<n>`. Les deux champs viennent de la même
-# réponse : la correspondance est écrite par Radio France, pas reconstituée.
+# MEASURED, NOT GUESSED. Primary source: Radio France's public Open API
+# documentation (https://developers.radiofrance.fr/doc/tutorial-by-example
+# /list-brands and /list-locals-and-webradios), whose sample responses give
+# each station's `liveStream` (hence its Icecast mount) and its
+# `playerUrl`, which carries `id_station=<n>`. Both fields come from the
+# same response: the mapping is written by Radio France, not reconstructed.
 #
-# Les 13 stations absentes de cette documentation — les webradios France
-# Musique, plus FIP Sacré français et FIP Cultes — sont relevées des cartes de
-# https://www.radiofrance.fr/francemusique et /fip, où le slug de marque et
-# l’identifiant se lisent sur la même carte. Leur mount est vérifié station par
-# station contre icecast.radiofrance.fr. `scripts/fetch-stations.mjs` régénère
-# ce fichier depuis ces mêmes sources.
+# The 13 stations absent from that documentation — the France Musique
+# webradios, plus FIP Sacré français and FIP Cultes — are gathered from the
+# cards at https://www.radiofrance.fr/francemusique and /fip, where the
+# brand slug and the identifier are read off the same card. Their mount is
+# checked station by station against icecast.radiofrance.fr.
+# `scripts/fetch-stations.mjs` regenerates this file from those same
+# sources.
 #
-# Chaque mount est cherché comme **jeton** de l’URL du flux : bordé de part et
-# d’autre par un caractère non alphanumérique. C’est ce qui permet une seule
-# entrée par station là où la même station se diffuse sous plusieurs formes
-# (`icecast.radiofrance.fr/<mount>-midfi.mp3`, le nom historique
-# `direct.fipradio.fr/live/<mount>-midfi.mp3`, le HLS
-# `stream.radiofrance.fr/<mount>/<mount>.m3u8`, et les qualités `-lofi`,
-# `-hifi.aac`) — et ce qui empêche `fip` de capturer `fipgroove`.
+# Each mount is looked up as a **token** of the stream URL: bordered on
+# both sides by a non-alphanumeric character. That is what allows a single
+# entry per station where the same station is broadcast in several forms
+# (`icecast.radiofrance.fr/<mount>-midfi.mp3`, the historical name
+# `direct.fipradio.fr/live/<mount>-midfi.mp3`, the HLS
+# `stream.radiofrance.fr/<mount>/<mount>.m3u8`, and the `-lofi`,
+# `-hifi.aac` qualities) — and what stops `fip` from capturing `fipgroove`.
 #
-# `rules` est le **profil de rendu** demandé au serveur, et son choix n’est pas
-# cosmétique : c’est lui qui décide si le plugin dit quelque chose. Mesuré au
-# même instant sur Mouv’, `webrf_fip_player` répond « Le direct » / « Mouv’ »
-# (le slogan) quand `webrf_mouv_player` répond « La Playlist » / « SOOLKING -
-# Bye Bye (feat. TAYC) », qui était bien ce qui passait à l’antenne.
-#   - `webrf_fip_player` : la réponse est l’objet MORCEAU, titre et artiste
-#     déjà séparés, bornes du morceau. Seules FIP, ses webradios et celles de
-#     France Musique répondent ainsi.
-#   - `webrf_mouv_player` : la réponse est l’objet ÉMISSION, avec ce qui s’y
-#     joue en une seule chaîne « ARTISTE - Titre ». Seul profil qui sorte le
-#     morceau sur Mouv’, France Musique et les 45 locales ; sur les stations
-#     parlées il rend la même paire que le profil propre à la marque (vérifié
-#     sur France Inter, franceinfo et France Culture). Son nom est fortuit :
-#     c’est un profil du serveur, pas un point d’entrée de Mouv’.
+# `rules` is the **rendering profile** requested from the server, and its
+# choice is not cosmetic: it is what decides whether the plugin says
+# anything at all. Measured at the same instant on Mouv', `webrf_fip_player`
+# answers "Le direct" / "Mouv'" (the slogan) while `webrf_mouv_player`
+# answers "La Playlist" / "SOOLKING - Bye Bye (feat. TAYC)", which was
+# indeed what was on air.
+#   - `webrf_fip_player`: the response is the TRACK object, title and
+#     artist already separated, track boundaries. Only FIP, its webradios
+#     and France Musique's answer this way.
+#   - `webrf_mouv_player`: the response is the SHOW object, with whatever
+#     is playing in a single "ARTIST - Title" string. The only profile that
+#     yields the track on Mouv', France Musique and the 45 local stations;
+#     on the talk stations it renders the same pair as the brand's own
+#     profile (checked on France Inter, franceinfo and France Culture). Its
+#     name is incidental: it is a server profile, not a Mouv' endpoint.
 #
-# Relevé le 2026-08-14. 74 stations.
+# Measured on 2026-08-14. 74 stations.
 
-# --- Les six marques nationales --------------------------------------------------
+# --- The six national brands --------------------------------------------------
 
 [[station]]
 label = "France Inter"
@@ -191,11 +192,11 @@ mounts = ["francemusiquelacontemporaine"]
 id = 406
 rules = "webrf_fip_player"
 
-# Mount « labo » = « la B.O. » (bandes originales), la webradio des musiques de
-# films — que le site appelle « Films » et dont le slug de marque est
-# `francemusique_evenementielle`. C’est la seule entrée dont le rapprochement
-# repose sur l’élimination : après attribution des dix autres webradios France
-# Musique, il restait exactement un mount et exactement une station.
+# Mount "labo" = "la B.O." (original soundtracks), the webradio for film
+# music — which the site calls "Films" and whose brand slug is
+# `francemusique_evenementielle`. This is the only entry whose matching
+# rests on elimination: after assigning the ten other France Musique
+# webradios, exactly one mount and exactly one station remained.
 [[station]]
 label = "France Musique Films"
 mounts = ["francemusiquelabo"]
@@ -226,7 +227,7 @@ mounts = ["francemusiqueclassiquelove"]
 id = 411
 rules = "webrf_fip_player"
 
-# --- Les 45 locales ici (ex-France Bleu) -----------------------------------------
+# --- The 45 "ici" locals (formerly France Bleu) -----------------------------------------
 
 [[station]]
 label = "France Bleu RCFM"

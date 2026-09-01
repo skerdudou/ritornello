@@ -1,42 +1,42 @@
-//! Line de commande d'un plugin, telle que le cœur la construit
-//! (`plugins::spawn`) : `--register <path>`, `--name <name>`, et
-//! `--socket-prefix <préfixe>`, obligatoires.
+//! A plugin's command line, as the core builds it
+//! (`plugins::spawn`): `--register <path>`, `--name <name>`, and
+//! `--socket-prefix <prefix>`, all mandatory.
 //!
-//! Un seul exemplaire ici plutôt qu'une copie par binaire : la revue de
-//! 2026-07-27 a compté six variantes de cette analyse dans les plugins, dont
-//! une seule refusait proprement une option sans valeur — les cinq autres
-//! paniquaient en « index out of bounds », anonyme, quand `--socket` était le
-//! dernier argument.
+//! A single copy here rather than one per binary: the 2026-07-27 review
+//! counted six variants of this parsing across the plugins, of which
+//! only one properly rejected an option without a value — the other five
+//! panicked with an anonymous "index out of bounds" when `--socket` was the
+//! last argument.
 
 use std::path::PathBuf;
 use ritornello_proto::PluginKind;
 
-/// Valeur de l'option `flag` dans `args` (forme `--flag <valeur>`).
+/// Value of the `flag` option in `args` (form `--flag <value>`).
 ///
-/// Fonction pure pour être testable. `None` si l'option est absente ; panique
-/// **en nommant l'option** si elle est présente sans valeur — ces lines de
-/// commande sont construites par le cœur, une valeur manquante est un bug de
-/// montage à désigner clairement.
+/// Pure function so it's testable. `None` if the option is absent; panics
+/// **naming the option** if it is present without a value — these command
+/// lines are built by the core, a missing value is a wiring bug to be
+/// pointed out clearly.
 pub fn arg_value(args: &[String], flag: &str) -> Option<PathBuf> {
     args.iter().position(|a| a == flag).map(|i| {
-        let valeur = args
+        let value = args
             .get(i + 1)
             .unwrap_or_else(|| panic!("{flag} requires a value (no argument after {flag})"));
-        PathBuf::from(valeur)
+        PathBuf::from(value)
     })
 }
 
-/// Chemin du socket d'enregistrement du cœur (`--register`), obligatoire.
+/// Path to the core's registration socket (`--register`), mandatory.
 pub fn register_socket() -> PathBuf {
     let args: Vec<String> = std::env::args().collect();
     arg_value(&args, "--register").expect("--register <path> required")
 }
 
-/// Nom sous lequel le cœur connaît ce greffon (`--name`), obligatoire.
+/// Name under which the core knows this plugin (`--name`), mandatory.
 ///
-/// Le greffon le **renvoie** dans son announcement sans jamais l'inventer : c'est
-/// le manifest qui a autorité, sinon deux binaires pourraient réclamer le
-/// même name et collisionner sur les chemins de sockets.
+/// The plugin **echoes it back** in its announcement without ever inventing it:
+/// it's the manifest that has authority, otherwise two binaries could claim
+/// the same name and collide on their socket paths.
 pub fn plugin_name() -> String {
     let args: Vec<String> = std::env::args().collect();
     arg_value(&args, "--name")
@@ -45,16 +45,16 @@ pub fn plugin_name() -> String {
         .into_owned()
 }
 
-/// Préfixe des sockets que ce greffon doit lier (`--socket-prefix`).
+/// Prefix of the sockets this plugin must bind (`--socket-prefix`).
 ///
-/// Le cœur garde la maîtrise du répertoire et du préfixe ; le greffon n'a
-/// autorité que sur les suffixes, qui sont exactement ce qu'il announcement.
+/// The core keeps control of the directory and the prefix; the plugin only
+/// has authority over the suffixes, which are exactly what it announces.
 pub fn socket_prefix() -> PathBuf {
     let args: Vec<String> = std::env::args().collect();
     arg_value(&args, "--socket-prefix").expect("--socket-prefix <path> required")
 }
 
-/// `{prefixe}-{kind}.sock`.
+/// `{prefix}-{kind}.sock`.
 pub fn socket_kind(prefix: &std::path::Path, kind: PluginKind) -> PathBuf {
     let kind = match kind {
         PluginKind::Source => "source",
@@ -65,7 +65,7 @@ pub fn socket_kind(prefix: &std::path::Path, kind: PluginKind) -> PathBuf {
     PathBuf::from(format!("{}-{kind}.sock", prefix.display()))
 }
 
-/// `{prefixe}-admin.sock`.
+/// `{prefix}-admin.sock`.
 pub fn admin_socket(prefix: &std::path::Path) -> PathBuf {
     PathBuf::from(format!("{}-admin.sock", prefix.display()))
 }
@@ -79,25 +79,25 @@ mod tests {
     }
 
     #[test]
-    fn extrait_la_valeur_qui_suit_le_drapeau() {
+    fn extracts_the_value_following_the_flag() {
         let a = args(&["plugin", "--register", "/run/register.sock", "--name", "radio"]);
         assert_eq!(arg_value(&a, "--register"), Some(PathBuf::from("/run/register.sock")));
         assert_eq!(arg_value(&a, "--name"), Some(PathBuf::from("radio")));
-        assert_eq!(arg_value(&a, "--autre"), None);
+        assert_eq!(arg_value(&a, "--other"), None);
     }
 
     #[test]
-    fn drapeau_sans_valeur_panique_en_nommant_le_drapeau() {
-        // C'était le défaut des cinq copies non robustes : « index out of
-        // bounds » ne désigne rien.
+    fn a_flag_without_a_value_panics_naming_the_flag() {
+        // This was the flaw of the five non-robust copies: "index out of
+        // bounds" points at nothing.
         let a = args(&["plugin", "--socket-prefix"]);
         let e = std::panic::catch_unwind(|| arg_value(&a, "--socket-prefix")).unwrap_err();
         let msg = e.downcast_ref::<String>().cloned().unwrap_or_default();
-        assert!(msg.contains("--socket-prefix"), "le message doit nommer l'option: {msg}");
+        assert!(msg.contains("--socket-prefix"), "the message must name the option: {msg}");
     }
 
     #[test]
-    fn extrait_les_trois_options_du_nouveau_montage() {
+    fn extracts_the_three_options_of_the_new_setup() {
         let a = args(&[
             "plugin",
             "--register", "/run/ritornello/sockets/register.sock",
@@ -116,7 +116,7 @@ mod tests {
     }
 
     #[test]
-    fn suffixe_un_prefixe_par_genre_et_par_admin() {
+    fn suffixes_a_prefix_per_kind_and_per_admin() {
         let p = PathBuf::from("/run/ritornello/sockets/radio");
         assert_eq!(
             super::socket_kind(&p, ritornello_proto::PluginKind::Source),

@@ -9,16 +9,16 @@ import {
   REMOTE_TRANSPORT, REMOTE_TRANSPORT_SECONDARY,
 } from './remoteCommands'
 
-/** Faux `EventSource` : jsdom n'en fournit step. */
-class FauxEventSource {
-  static derniere: FauxEventSource | null = null
+/** Fake `EventSource`: jsdom does not provide one. */
+class FakeEventSource {
+  static last: FakeEventSource | null = null
   onmessage: ((e: MessageEvent) => void) | null = null
   constructor(public url: string) {
-    FauxEventSource.derniere = this
+    FakeEventSource.last = this
   }
   close() {}
-  pousse(state: Partial<PlayerPayload>) {
-    const complet: PlayerPayload = {
+  push(state: Partial<PlayerPayload>) {
+    const full: PlayerPayload = {
       source: 'radio',
       volume: 60,
       muted: false,
@@ -40,13 +40,13 @@ class FauxEventSource {
       can_eject: false,
       ...state,
     }
-    this.onmessage?.({ data: JSON.stringify(complet) } as MessageEvent)
+    this.onmessage?.({ data: JSON.stringify(full) } as MessageEvent)
   }
 }
 
-// HomeView mounted toujours le curseur de volume (reka-ui `Slider`) : jsdom ne
-// fournit ni ResizeObserver (mesure de la piste au montage) ni les méthodes
-// de capture de pointeur qu'il appelle. Une fois pour tout le fichier.
+// HomeView always mounts the volume slider (reka-ui `Slider`): jsdom provides
+// neither ResizeObserver (measuring the track on mount) nor the pointer
+// capture methods it calls. Once for the whole file.
 beforeAll(() => {
   Element.prototype.setPointerCapture ??= () => {}
   Element.prototype.releasePointerCapture ??= () => {}
@@ -59,24 +59,24 @@ beforeAll(() => {
 })
 
 describe('REMOTE_COMMANDS', () => {
-  it('couvre les 8 commandes de la page : les ±10 s et le volume step à step ont quitté le web', () => {
-    // Décidé au chantier refonte : le déplacement passe par la barre, le
-    // volume par le curseur. Les quatre commandes retirées restent dans le
-    // protocole et sur la télécommande physique.
+  it('covers the 8 commands of the page: the ±10 s and the step-by-step volume left the web', () => {
+    // Decided during the redesign: seeking goes through the bar, the volume
+    // through the slider. The four removed commands remain in the protocol
+    // and on the physical remote.
     expect(REMOTE_COMMANDS).toHaveLength(8)
     expect(REMOTE_COMMANDS.map((c) => c.cmd.cmd).sort()).toEqual(
       ['Eject', 'Mute', 'Next', 'PlayPause', 'Power', 'Prev', 'SourceCycle', 'Stop'].sort(),
     )
   })
 
-  it('le transport va dans le sens du geste, la lecture au centre', () => {
-    // |◀ ▶ ▶| : précédent/suivant adjacents à lecture, c'est l'order des
-    // télécommandes hi-fi ; Stop et Éjecter en retrait.
+  it('the transport goes in the direction of the gesture, play in the middle', () => {
+    // |◀ ▶ ▶|: previous/next adjacent to play, that is the order of hi-fi
+    // remotes; Stop and Eject behind.
     expect(REMOTE_TRANSPORT.map((c) => c.cmd.cmd)).toEqual(['Prev', 'PlayPause', 'Next'])
     expect(REMOTE_TRANSPORT_SECONDARY.map((c) => c.cmd.cmd)).toEqual(['Stop', 'Eject'])
   })
 
-  it('la veille, la source et le mute sont à part', () => {
+  it('standby, source and mute are set apart', () => {
     expect(REMOTE_POWER.cmd.cmd).toBe('Power')
     expect(REMOTE_SOURCE.cmd.cmd).toBe('SourceCycle')
     expect(REMOTE_MUTE.cmd.cmd).toBe('Mute')
@@ -86,13 +86,13 @@ describe('REMOTE_COMMANDS', () => {
     expect(transport).not.toContain('Mute')
   })
 
-  it('chaque command porte une clé de traduction', () => {
+  it('every command carries a translation key', () => {
     for (const c of REMOTE_COMMANDS) expect(c.key).toMatch(/^remote_/)
   })
 })
 
 describe('HomeView', () => {
-  it('poste la command Select avec le numéro de présélection', async () => {
+  it('posts the Select command with the preset number', async () => {
     const spy = vi.fn().mockImplementation(async () => new Response(null, { status: 204 }))
     vi.stubGlobal('fetch', spy)
     const HomeView = (await import('./HomeView.vue')).default
@@ -104,10 +104,10 @@ describe('HomeView', () => {
     )
   })
 
-  it('sans count déclaré, la grille retombe sur 1-10', async () => {
-    // `preset_count: null` (defaut de FauxEventSource, jamais poussee ici) :
-    // la source ne declare rien, on garde la grille nue history et step de
-    // +10 (rien a decaler vers).
+  it('without a declared count, the grid falls back on 1-10', async () => {
+    // `preset_count: null` (FakeEventSource default, never pushed here): the
+    // source declares nothing, we keep the historical bare grid and no +10
+    // (nothing to shift towards).
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
@@ -116,12 +116,11 @@ describe('HomeView', () => {
     expect(w.find('[data-preset-next]').exists()).toBe(false)
   })
 
-  it('la veille est dans le slot d’action de l’en-tête, donc sur la ligne du titre', async () => {
-    // Ce n'est step cosmetique : `CardHeader` est une grille qui ne passe en deux
-    // colonnes qu'en presence d'un child `data-slot="card-action"`. Sans lui, le
-    // bouton tombe sur la deuxieme ligne, sous le titre — c'est exactement ce
-    // qui s'etait produit, et aucune classe utilitaire ajoutee a la main ne le
-    // corrigeait.
+  it('standby is in the header action slot, hence on the title line', async () => {
+    // This is not cosmetic: `CardHeader` is a grid that only switches to two
+    // columns in the presence of a `data-slot="card-action"` child. Without
+    // it, the button falls on the second line, under the title — exactly what
+    // had happened, and no hand-added utility class fixed it.
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
@@ -130,69 +129,69 @@ describe('HomeView', () => {
     expect(action.find('[data-remote-power]').exists()).toBe(true)
   })
 
-  it('met en évidence la touche de la présélection qui joue, et l’éteint à l’arrêt', async () => {
-    // « On ne sait step sur quel preset on est » : la touche correspondant à ce
-    // qui joue (déclarée par la source active via le flux poussé) porte
-    // aria-current et la variante pleine ; les autres restent neutres.
-    vi.stubGlobal('EventSource', FauxEventSource)
+  it('highlights the key of the playing preset, and turns it off on stop', async () => {
+    // "We don't know which preset we are on": the key matching what plays
+    // (declared by the active source through the pushed stream) carries
+    // aria-current and the filled variant; the others stay neutral.
+    vi.stubGlobal('EventSource', FakeEventSource)
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
-    FauxEventSource.derniere!.pousse({ preset: 3 })
+    FakeEventSource.last!.push({ preset: 3 })
     await w.vm.$nextTick()
-    const actif = w.find('[data-preset-button="3"]')
-    expect(actif.attributes('data-preset-active')).toBe('true')
-    expect(actif.attributes('aria-current')).toBe('true')
+    const active = w.find('[data-preset-button="3"]')
+    expect(active.attributes('data-preset-active')).toBe('true')
+    expect(active.attributes('aria-current')).toBe('true')
     expect(w.findAll('[data-preset-active]')).toHaveLength(1)
-    // Plus rien ne joue : plus aucune touche en évidence.
-    FauxEventSource.derniere!.pousse({ preset: null })
+    // Nothing plays any more: no key highlighted any more.
+    FakeEventSource.last!.push({ preset: null })
     await w.vm.$nextTick()
     expect(w.findAll('[data-preset-active]')).toHaveLength(0)
   })
 
-  it('annonce le number de présélections déclaré par la source', async () => {
-    vi.stubGlobal('EventSource', FauxEventSource)
+  it('announces the number of presets declared by the source', async () => {
+    vi.stubGlobal('EventSource', FakeEventSource)
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
-    FauxEventSource.derniere!.pousse({ preset_count: 24 })
+    FakeEventSource.last!.push({ preset_count: 24 })
     await w.vm.$nextTick()
-    // Le count porte au-delà de la fenêtre affichée : c'est justement ce qu'il
-    // apprend, la grille n'en montrant que dix à la fois.
+    // The count reaches beyond the displayed window: that is precisely what
+    // it teaches, the grid only showing ten at a time.
     expect(w.get('[data-preset-count]').text()).toContain('24')
     expect(w.findAll('[data-preset-button]')).toHaveLength(10)
-    // Zéro est une information, step une absence : il explique la grille vide
-    // d'un cd sans disque.
-    FauxEventSource.derniere!.pousse({ preset_count: 0 })
+    // Zero is information, not an absence: it explains the empty grid of a
+    // cd without a disc.
+    FakeEventSource.last!.push({ preset_count: 0 })
     await w.vm.$nextTick()
     expect(w.get('[data-preset-count]').text()).toContain('0')
   })
 
-  it('n’annonce aucun count quand la source ne déclare rien', async () => {
-    // Grille nue 1-10 : c'est un repli, step un inventaire — annoncer « 10 »
-    // serait une affirmation que personne n'a faite.
-    vi.stubGlobal('EventSource', FauxEventSource)
+  it('announces no count when the source declares nothing', async () => {
+    // Bare grid 1-10: it is a fallback, not an inventory — announcing "10"
+    // would be a claim nobody made.
+    vi.stubGlobal('EventSource', FakeEventSource)
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
-    FauxEventSource.derniere!.pousse({ preset_count: null })
+    FakeEventSource.last!.push({ preset_count: null })
     await w.vm.$nextTick()
     expect(w.find('[data-preset-count]').exists()).toBe(false)
   })
 
-  it('relaie l’état poussé à l’encart Lecteur', async () => {
-    // L'unique connexion SSE de la page vit dans HomeView : l'encart doit
-    // recevoir le même état en prop (c'était son propre flux auparavant).
-    vi.stubGlobal('EventSource', FauxEventSource)
+  it('relays the pushed state to the Player card', async () => {
+    // The page's single SSE connection lives in HomeView: the card must
+    // receive the same state as a prop (it used to be its own stream).
+    vi.stubGlobal('EventSource', FakeEventSource)
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
-    FauxEventSource.derniere!.pousse({ volume: 45 })
+    FakeEventSource.last!.push({ volume: 45 })
     await w.vm.$nextTick()
     expect(w.find('[data-volume]').text()).toBe('45 %')
   })
 
-  it('le bouton de veille poste la command Power', async () => {
+  it('the standby button posts the Power command', async () => {
     const spy = vi.fn().mockImplementation(async () => new Response(null, { status: 204 }))
     vi.stubGlobal('fetch', spy)
     const HomeView = (await import('./HomeView.vue')).default
@@ -205,9 +204,9 @@ describe('HomeView', () => {
   })
 })
 
-describe('HomeView — pagination des présélections', () => {
-  /** Monte la vue et pousse un état poussé avec ces fields surchargés. */
-  async function monterAvec(state: Partial<PlayerPayload>) {
+describe('HomeView — preset pagination', () => {
+  /** Mounts the view and pushes a state with these fields overridden. */
+  async function mountWith(state: Partial<PlayerPayload>) {
     vi.useFakeTimers()
     const posts: string[] = []
     const spy = vi.fn(async (url: string, init?: RequestInit) => {
@@ -218,16 +217,16 @@ describe('HomeView — pagination des présélections', () => {
       return new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })
     })
     vi.stubGlobal('fetch', spy)
-    vi.stubGlobal('EventSource', FauxEventSource)
+    vi.stubGlobal('EventSource', FakeEventSource)
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
-    FauxEventSource.derniere!.pousse(state)
+    FakeEventSource.last!.push(state)
     await nextTick()
     return { w, posts }
   }
 
-  /** Numéros actuellement rendus, dans l'order — step seulement leur number. */
-  function numeros(w: Awaited<ReturnType<typeof monterAvec>>['w']) {
+  /** Numbers currently rendered, in order — not only how many. */
+  function numbers(w: Awaited<ReturnType<typeof mountWith>>['w']) {
     return w.findAll('[data-preset-button]').map((b) => b.text())
   }
 
@@ -236,50 +235,50 @@ describe('HomeView — pagination des présélections', () => {
     vi.unstubAllGlobals()
   })
 
-  it('la grille ne montre que les numéros existants', async () => {
-    const { w } = await monterAvec({ preset_count: 5 })
+  it('the grid only shows the existing numbers', async () => {
+    const { w } = await mountWith({ preset_count: 5 })
     expect(w.findAll('[data-preset-button]')).toHaveLength(5)
     expect(w.find('[data-preset-prev]').exists()).toBe(false)
     expect(w.find('[data-preset-next]').exists()).toBe(false)
   })
 
-  it('un count nul ne montre aucune touche numérotée', async () => {
-    const { w } = await monterAvec({ preset_count: 0 })
+  it('a zero count shows no numbered key', async () => {
+    const { w } = await mountWith({ preset_count: 0 })
     expect(w.findAll('[data-preset-button]')).toHaveLength(0)
     expect(w.find('[data-preset-prev]').exists()).toBe(false)
     expect(w.find('[data-preset-next]').exists()).toBe(false)
   })
 
-  it('les deux flèches sont absentes avec 10 présélections ou moins', async () => {
-    const { w } = await monterAvec({ preset_count: 10 })
+  it('both arrows are absent with 10 presets or fewer', async () => {
+    const { w } = await mountWith({ preset_count: 10 })
     expect(w.find('[data-preset-prev]').exists()).toBe(false)
     expect(w.find('[data-preset-next]').exists()).toBe(false)
   })
 
-  it('> avance d’une page à travers toute la plage', async () => {
-    const { w } = await monterAvec({ preset_count: 24 })
-    expect(numeros(w)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'])
+  it('> advances one page through the whole range', async () => {
+    const { w } = await mountWith({ preset_count: 24 })
+    expect(numbers(w)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'])
     await w.find('[data-preset-next]').trigger('click')
     await nextTick()
-    expect(numeros(w)).toEqual(['11', '12', '13', '14', '15', '16', '17', '18', '19', '20'])
+    expect(numbers(w)).toEqual(['11', '12', '13', '14', '15', '16', '17', '18', '19', '20'])
     await w.find('[data-preset-next]').trigger('click')
     await nextTick()
-    expect(numeros(w)).toEqual(['21', '22', '23', '24'])
+    expect(numbers(w)).toEqual(['21', '22', '23', '24'])
   })
 
-  it('< revient à la page précédente', async () => {
-    const { w } = await monterAvec({ preset_count: 24 })
+  it('< goes back to the previous page', async () => {
+    const { w } = await mountWith({ preset_count: 24 })
     await w.find('[data-preset-next]').trigger('click')
     await w.find('[data-preset-next]').trigger('click')
     await nextTick()
-    expect(numeros(w)).toEqual(['21', '22', '23', '24'])
+    expect(numbers(w)).toEqual(['21', '22', '23', '24'])
     await w.find('[data-preset-prev]').trigger('click')
     await nextTick()
-    expect(numeros(w)).toEqual(['11', '12', '13', '14', '15', '16', '17', '18', '19', '20'])
+    expect(numbers(w)).toEqual(['11', '12', '13', '14', '15', '16', '17', '18', '19', '20'])
   })
 
-  it('bornes : < inactive sur la première page, > sur la dernière', async () => {
-    const { w } = await monterAvec({ preset_count: 24 })
+  it('bounds: < inactive on the first page, > on the last', async () => {
+    const { w } = await mountWith({ preset_count: 24 })
     expect(w.get('[data-preset-prev]').attributes('disabled')).toBeDefined()
     expect(w.get('[data-preset-next]').attributes('disabled')).toBeUndefined()
     await w.find('[data-preset-next]').trigger('click')
@@ -289,57 +288,57 @@ describe('HomeView — pagination des présélections', () => {
     expect(w.get('[data-preset-prev]').attributes('disabled')).toBeUndefined()
   })
 
-  it('aucun retour automatique après avoir avancé', async () => {
-    // Ce test échouerait sans la suppression de la minuterie de retour.
-    const { w } = await monterAvec({ preset_count: 23 })
+  it('no automatic return after advancing', async () => {
+    // This test would fail without the removal of the return timer.
+    const { w } = await mountWith({ preset_count: 23 })
     await w.find('[data-preset-next]').trigger('click')
     await nextTick()
     vi.advanceTimersByTime(60_000)
     await nextTick()
-    expect(numeros(w)).toEqual(['11', '12', '13', '14', '15', '16', '17', '18', '19', '20'])
+    expect(numbers(w)).toEqual(['11', '12', '13', '14', '15', '16', '17', '18', '19', '20'])
   })
 
-  it('un changement de count ramène à la première page', async () => {
-    const { w } = await monterAvec({ preset_count: 24 })
+  it('a count change brings back to the first page', async () => {
+    const { w } = await mountWith({ preset_count: 24 })
     await w.find('[data-preset-next]').trigger('click')
     await nextTick()
-    expect(numeros(w)).toEqual(['11', '12', '13', '14', '15', '16', '17', '18', '19', '20'])
-    // Nouvelle source, nouveau count : la fenêtre ne doit step survivre.
-    FauxEventSource.derniere!.pousse({ preset_count: 5 })
+    expect(numbers(w)).toEqual(['11', '12', '13', '14', '15', '16', '17', '18', '19', '20'])
+    // New source, new count: the window must not survive.
+    FakeEventSource.last!.push({ preset_count: 5 })
     await nextTick()
-    expect(numeros(w)).toEqual(['1', '2', '3', '4', '5'])
+    expect(numbers(w)).toEqual(['1', '2', '3', '4', '5'])
   })
 
-  it('choose une présélection laisse la page en place', async () => {
-    const { w, posts } = await monterAvec({ preset_count: 23 })
+  it('choosing a preset leaves the page in place', async () => {
+    const { w, posts } = await mountWith({ preset_count: 23 })
     await w.find('[data-preset-next]').trigger('click')
     await nextTick()
     await w.find('[data-preset-button="14"]').trigger('click')
     expect(posts).toEqual([JSON.stringify({ cmd: 'Select', arg: 14 })])
-    expect(numeros(w)).toEqual(['11', '12', '13', '14', '15', '16', '17', '18', '19', '20'])
+    expect(numbers(w)).toEqual(['11', '12', '13', '14', '15', '16', '17', '18', '19', '20'])
   })
 
-  it('met en évidence la touche active au-delà de 9', async () => {
-    // Plus de `>` à cliquer ici : la page s'ouvre déjà sur celle qui contient
-    // le numéro qui joue (voir le bloc « la page suit ce qui joue »).
-    const { w } = await monterAvec({ preset_count: 23, preset: 14 })
+  it('highlights the active key beyond 9', async () => {
+    // No more `>` to click here: the page already opens on the one containing
+    // the playing number (see the block "the page follows what plays").
+    const { w } = await mountWith({ preset_count: 23, preset: 14 })
     expect(w.find('[data-preset-button="14"]').attributes('data-preset-active')).toBe('true')
   })
 })
 
-describe('HomeView — la page suit ce qui joue', () => {
-  /** Monte la vue, pousse un premier état, et rend de quoi en pousser d'autres. */
-  async function monterAvec(state: Partial<PlayerPayload>) {
+describe('HomeView — the page follows what plays', () => {
+  /** Mounts the view, pushes a first state, and returns what it takes to push others. */
+  async function mountWith(state: Partial<PlayerPayload>) {
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
-    vi.stubGlobal('EventSource', FauxEventSource)
+    vi.stubGlobal('EventSource', FakeEventSource)
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
-    FauxEventSource.derniere!.pousse(state)
+    FakeEventSource.last!.push(state)
     await nextTick()
     return w
   }
 
-  function numeros(w: Awaited<ReturnType<typeof monterAvec>>) {
+  function numbers(w: Awaited<ReturnType<typeof mountWith>>) {
     return w.findAll('[data-preset-button]').map((b) => b.text())
   }
 
@@ -347,70 +346,69 @@ describe('HomeView — la page suit ce qui joue', () => {
     vi.unstubAllGlobals()
   })
 
-  it('s’ouvre sur la page de la présélection qui joue', async () => {
-    // Le cas qui motivait tout : arriver sur l'onglet pendant que la station 24
-    // joue montrait 1-10, sans aucune touche en évidence.
-    const w = await monterAvec({ preset_count: 40, preset: 24 })
-    expect(numeros(w)).toEqual(['21', '22', '23', '24', '25', '26', '27', '28', '29', '30'])
+  it('opens on the page of the playing preset', async () => {
+    // The case that motivated everything: arriving on the tab while station 24
+    // plays showed 1-10, with no key highlighted.
+    const w = await mountWith({ preset_count: 40, preset: 24 })
+    expect(numbers(w)).toEqual(['21', '22', '23', '24', '25', '26', '27', '28', '29', '30'])
     expect(w.findAll('[data-preset-active]')).toHaveLength(1)
   })
 
-  it('suit un changement de page venu d’ailleurs (télécommande infrarouge, +10)', async () => {
-    const w = await monterAvec({ preset_count: 40, preset: 3 })
-    expect(numeros(w)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'])
-    FauxEventSource.derniere!.pousse({ preset_count: 40, preset: 31 })
+  it('follows a page change coming from elsewhere (infrared remote, +10)', async () => {
+    const w = await mountWith({ preset_count: 40, preset: 3 })
+    expect(numbers(w)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'])
+    FakeEventSource.last!.push({ preset_count: 40, preset: 31 })
     await nextTick()
-    expect(numeros(w)).toEqual(['31', '32', '33', '34', '35', '36', '37', '38', '39', '40'])
+    expect(numbers(w)).toEqual(['31', '32', '33', '34', '35', '36', '37', '38', '39', '40'])
   })
 
-  it('10 et 11 sont de part et d’autre de la frontière', async () => {
-    // Les bornes de la grille sont celles du décalage du cœur : une page
-    // couvre 10k+1..10k+10, donc 10 clôt la page 0 et 11 ouvre la page 1. La
-    // frontière était à 9/10 quand la touche 0 de la télécommande ne valait
-    // rien seule.
-    const w = await monterAvec({ preset_count: 40, preset: 10 })
-    expect(numeros(w)[0]).toBe('1')
-    FauxEventSource.derniere!.pousse({ preset_count: 40, preset: 11 })
+  it('10 and 11 are on either side of the boundary', async () => {
+    // The grid's bounds are those of the core's offset: a page covers
+    // 10k+1..10k+10, so 10 closes page 0 and 11 opens page 1. The boundary was
+    // at 9/10 when the remote's key 0 was worth nothing on its own.
+    const w = await mountWith({ preset_count: 40, preset: 10 })
+    expect(numbers(w)[0]).toBe('1')
+    FakeEventSource.last!.push({ preset_count: 40, preset: 11 })
     await nextTick()
-    expect(numeros(w)[0]).toBe('11')
+    expect(numbers(w)[0]).toBe('11')
   })
 
-  it('un arrêt laisse la page où elle est', async () => {
-    // `preset` retombe à null sans que le count bouge : rien ne justifie de
-    // renvoyer l'utilisateur en première page, il regarde encore ce groupe.
-    const w = await monterAvec({ preset_count: 40, preset: 24 })
-    FauxEventSource.derniere!.pousse({ preset_count: 40, preset: null })
+  it('a stop leaves the page where it is', async () => {
+    // `preset` falls back to null without the count moving: nothing justifies
+    // sending the user back to the first page, they are still looking at this
+    // group.
+    const w = await mountWith({ preset_count: 40, preset: 24 })
+    FakeEventSource.last!.push({ preset_count: 40, preset: null })
     await nextTick()
-    expect(numeros(w)[0]).toBe('21')
+    expect(numbers(w)[0]).toBe('21')
   })
 
-  it('une pagination à la main survit aux trames qui ne changent rien', async () => {
-    const w = await monterAvec({ preset_count: 40, preset: 3 })
+  it('a manual pagination survives frames that change nothing', async () => {
+    const w = await mountWith({ preset_count: 40, preset: 3 })
     await w.find('[data-preset-next]').trigger('click')
     await nextTick()
-    expect(numeros(w)[0]).toBe('11')
-    // Même présélection, même count, seul le volume change : la page reste.
-    FauxEventSource.derniere!.pousse({ preset_count: 40, preset: 3, volume: 42 })
+    expect(numbers(w)[0]).toBe('11')
+    // Same preset, same count, only the volume changes: the page stays.
+    FakeEventSource.last!.push({ preset_count: 40, preset: 3, volume: 42 })
     await nextTick()
-    expect(numeros(w)[0]).toBe('11')
+    expect(numbers(w)[0]).toBe('11')
   })
 
-  it('un numéro au-delà du count n’ouvre step une page vide', async () => {
-    // Source incohérente (le count a rétréci avant que la présélection ne
-    // suive) : on borne sur la dernière page non vide plutôt que de n'afficher
-    // aucune touche.
-    const w = await monterAvec({ preset_count: 12, preset: 35 })
-    expect(numeros(w)).toEqual(['11', '12'])
+  it('a number beyond the count does not open an empty page', async () => {
+    // Inconsistent source (the count shrank before the preset followed): we
+    // clamp on the last non-empty page rather than showing no key.
+    const w = await mountWith({ preset_count: 12, preset: 35 })
+    expect(numbers(w)).toEqual(['11', '12'])
   })
 })
 
-describe('HomeView — boutons indisponibles', () => {
-  async function monterAvec(state: Partial<PlayerPayload>) {
+describe('HomeView — unavailable buttons', () => {
+  async function mountWith(state: Partial<PlayerPayload>) {
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
-    vi.stubGlobal('EventSource', FauxEventSource)
+    vi.stubGlobal('EventSource', FakeEventSource)
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
-    FauxEventSource.derniere!.pousse(state)
+    FakeEventSource.last!.push(state)
     await nextTick()
     return w
   }
@@ -419,12 +417,12 @@ describe('HomeView — boutons indisponibles', () => {
     vi.unstubAllGlobals()
   })
 
-  it('en veille, tout est grisé sauf la veille elle-même', async () => {
-    // Le cœur ignore tout ce qui n'est step `Power` en veille : les boutons le
-    // disent au lieu d'envoyer une command sans effet. Pas de count poussé
-    // ici : la veille l'efface côté cœur, la grille retombe donc sur 1-10 —
-    // désactivée elle aussi.
-    const w = await monterAvec({ standby: true })
+  it('in standby, everything is greyed except standby itself', async () => {
+    // The core ignores everything that is not `Power` in standby: the buttons
+    // say so instead of sending a command with no effect. No count pushed
+    // here: standby clears it on the core side, so the grid falls back on
+    // 1-10 — disabled as well.
+    const w = await mountWith({ standby: true })
     for (const b of w.findAll('[data-remote-command]')) {
       expect(b.attributes('disabled'), b.attributes('data-remote-command')).toBeDefined()
     }
@@ -435,37 +433,37 @@ describe('HomeView — boutons indisponibles', () => {
     expect(w.get('[data-remote-power]').attributes('disabled')).toBeUndefined()
   })
 
-  it('la touche Muet montre son état, là où on agit sur le volume', async () => {
-    // Demandé à l'usage : le son coupé se lisait dans l'encart, en haut de la
-    // page, alors qu'on le coupe depuis cette rangée — en bas. La touche porte
-    // donc son propre état, en plus de la mention de l'encart.
-    const coupe = await monterAvec({ standby: false, muted: true })
-    const touche = coupe.get('[data-remote-command="Mute"]')
-    expect(touche.attributes('data-actif')).toBe('true')
-    expect(touche.attributes('aria-pressed')).toBe('true')
+  it('the Mute key shows its state, where one acts on the volume', async () => {
+    // Requested from use: muted sound was read in the card, at the top of the
+    // page, whereas it is muted from this row — at the bottom. The key thus
+    // carries its own state, in addition to the card's mention.
+    const muted = await mountWith({ standby: false, muted: true })
+    const key = muted.get('[data-remote-command="Mute"]')
+    expect(key.attributes('data-actif')).toBe('true')
+    expect(key.attributes('aria-pressed')).toBe('true')
 
-    const audible = await monterAvec({ standby: false, muted: false })
-    const rendue = audible.get('[data-remote-command="Mute"]')
-    expect(rendue.attributes('data-actif')).toBeUndefined()
-    expect(rendue.attributes('aria-pressed')).toBe('false')
+    const audible = await mountWith({ standby: false, muted: false })
+    const rendered = audible.get('[data-remote-command="Mute"]')
+    expect(rendered.attributes('data-actif')).toBeUndefined()
+    expect(rendered.attributes('aria-pressed')).toBe('false')
   })
 
-  it('Eject est masqué sur la radio et présent sur le player de cd, disque ou step', async () => {
-    // La source le déclare elle-même — la page ne compare jamais `source` à
-    // `'cd'`, ce nom venant de plugins.toml. Masqué plutôt que grisé (voir
-    // `hidden`) : la radio n'a step de tiroir, un cd sans disque en a un.
-    const w = await monterAvec({ source: 'radio', can_eject: false })
+  it('Eject is hidden on the radio and present on the cd player, disc or not', async () => {
+    // The source declares it itself — the page never compares `source` to
+    // `'cd'`, that name coming from plugins.toml. Hidden rather than greyed
+    // (see `hidden`): the radio has no tray, a cd without a disc has one.
+    const w = await mountWith({ source: 'radio', can_eject: false })
     expect(w.find('[data-remote-command="Eject"]').exists()).toBe(false)
-    FauxEventSource.derniere!.pousse({ can_eject: true, preset_count: 0, status: 'NO DISC' })
+    FakeEventSource.last!.push({ can_eject: true, preset_count: 0, status: 'NO DISC' })
     await nextTick()
     expect(w.find('[data-remote-command="Eject"]').exists()).toBe(true)
   })
 
-  it('avant la première trame, rien n’est grisé', async () => {
-    // La télécommande s'ouvre utilisable : griser à l'aveugle, puis dégriser,
-    // ferait clignoter la carte entière à chaque ouverture d'onglet.
+  it('before the first frame, nothing is greyed', async () => {
+    // The remote opens usable: greying blindly, then un-greying, would make
+    // the whole card flicker on every tab opening.
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
-    vi.stubGlobal('EventSource', FauxEventSource)
+    vi.stubGlobal('EventSource', FakeEventSource)
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     for (const b of w.findAll('[data-remote-command]')) {
@@ -475,50 +473,50 @@ describe('HomeView — boutons indisponibles', () => {
   })
 })
 
-describe('HomeView — curseurs et noms', () => {
+describe('HomeView — sliders and names', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
   })
 
-  it('le curseur de volume poste SetVolume, absolu', async () => {
+  it('the volume slider posts SetVolume, absolute', async () => {
     const posts: string[] = []
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
       if (init?.method === 'POST') { posts.push(String(init.body)); return new Response(null, { status: 204 }) }
       if (url === '/api/presets') return new Response(JSON.stringify({ sources: [] }), { status: 200 })
       return new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })
     }))
-    vi.stubGlobal('EventSource', FauxEventSource)
+    vi.stubGlobal('EventSource', FakeEventSource)
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
-    FauxEventSource.derniere!.pousse({ volume: 60 })
+    FakeEventSource.last!.push({ volume: 60 })
     await nextTick()
-    const poignee = w.get('[data-volume-curseur] [role="slider"]')
-    ;(poignee.element as HTMLElement).focus()
-    await poignee.trigger('keydown', { key: 'ArrowRight' })
+    const thumb = w.get('[data-volume-curseur] [role="slider"]')
+    ;(thumb.element as HTMLElement).focus()
+    await thumb.trigger('keydown', { key: 'ArrowRight' })
     expect(posts).toContain(JSON.stringify({ cmd: 'SetVolume', arg: 61 }))
   })
 
-  it('la barre poste SeekTo, du step configure par /api/settings', async () => {
+  it('the bar posts SeekTo, by the step configured by /api/settings', async () => {
     const posts: string[] = []
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
       if (init?.method === 'POST') { posts.push(String(init.body)); return new Response(null, { status: 204 }) }
       if (url === '/api/presets') return new Response(JSON.stringify({ sources: [] }), { status: 200 })
       return new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })
     }))
-    vi.stubGlobal('EventSource', FauxEventSource)
+    vi.stubGlobal('EventSource', FakeEventSource)
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
-    FauxEventSource.derniere!.pousse({ seekable: true, duration_s: 254, position_s: 87 })
+    FakeEventSource.last!.push({ seekable: true, duration_s: 254, position_s: 87 })
     await flushPromises()
-    const poignee = w.get('[data-barre] [role="slider"]')
-    ;(poignee.element as HTMLElement).focus()
-    await poignee.trigger('keydown', { key: 'ArrowRight' })
-    // Le step vient de /api/settings (`seek_step_s: 10`, stubbe ci-dessus) :
+    const thumb = w.get('[data-barre] [role="slider"]')
+    ;(thumb.element as HTMLElement).focus()
+    await thumb.trigger('keydown', { key: 'ArrowRight' })
+    // The step comes from /api/settings (`seek_step_s: 10`, stubbed above):
     // 87 + 10 = 97.
     expect(posts).toContain(JSON.stringify({ cmd: 'SeekTo', arg: 97 }))
   })
 
-  it('nomme les tuiles depuis /api/presets et recharge au changement de source', async () => {
+  it('names the tiles from /api/presets and reloads on source change', async () => {
     const gets: string[] = []
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
       if (init?.method === 'POST') return new Response(null, { status: 204 })
@@ -531,17 +529,17 @@ describe('HomeView — curseurs et noms', () => {
       }
       return new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })
     }))
-    vi.stubGlobal('EventSource', FauxEventSource)
+    vi.stubGlobal('EventSource', FakeEventSource)
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     await flushPromises()
-    FauxEventSource.derniere!.pousse({ source: 'radio', preset_count: 3 })
+    FakeEventSource.last!.push({ source: 'radio', preset_count: 3 })
     await nextTick()
     expect(w.get('[data-preset-button="1"] [data-preset-name]').text()).toBe('FIP')
-    const avant = gets.filter((u) => u === '/api/presets').length
-    FauxEventSource.derniere!.pousse({ source: 'files', preset_count: 3 })
+    const before = gets.filter((u) => u === '/api/presets').length
+    FakeEventSource.last!.push({ source: 'files', preset_count: 3 })
     await flushPromises()
-    expect(gets.filter((u) => u === '/api/presets').length).toBe(avant + 1)
+    expect(gets.filter((u) => u === '/api/presets').length).toBe(before + 1)
     expect(w.get('[data-preset-button="1"] [data-preset-name]').text()).toBe('tout.m3u')
   })
 })
@@ -554,28 +552,28 @@ describe('unavailable / hidden', () => {
     seekable: false, can_eject: false, ...e,
   })
 
-  it('la veille ne laisse passer que Power', () => {
+  it('standby only lets Power through', () => {
     expect(unavailable('Power', state({ standby: true }))).toBe(false)
     expect(unavailable('PlayPause', state({ standby: true }))).toBe(true)
     expect(unavailable('Select', state({ standby: true }))).toBe(true)
   })
 
-  it('hors veille, rien n’est grisé : le déplacement n’a plus de touche, l’éjection se masque', () => {
+  it('out of standby, nothing is greyed: seeking no longer has a key, eject hides itself', () => {
     expect(unavailable('PlayPause', state({}))).toBe(false)
     expect(unavailable('Eject', state({ can_eject: false }))).toBe(false)
   })
 
-  it('Eject est masqué tant que la source ne déclare step de tiroir, y compris avant la première trame', () => {
-    // `can_eject` est une capacité que le greffon déclare pour lui-même (le cd
-    // la déclare disque ou step) : la masquer ne cache jamais un player qui
-    // existe. Avant la première trame, on ne sait step — donc rien.
+  it('Eject is hidden as long as the source declares no tray, including before the first frame', () => {
+    // `can_eject` is a capability the plugin declares for itself (the cd
+    // declares it disc or not): hiding it never hides a player that exists.
+    // Before the first frame, we do not know — so nothing.
     expect(hidden('Eject', null)).toBe(true)
     expect(hidden('Eject', state({ can_eject: false }))).toBe(true)
     expect(hidden('Eject', state({ can_eject: true }))).toBe(false)
     expect(hidden('Stop', state({ can_eject: false }))).toBe(false)
   })
 
-  it('un état inconnu ne grise rien', () => {
+  it('an unknown state greys nothing', () => {
     expect(unavailable('PlayPause', null)).toBe(false)
   })
 })

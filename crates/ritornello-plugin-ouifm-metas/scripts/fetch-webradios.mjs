@@ -18,15 +18,14 @@
 //        exits nonzero if the bundled table differs from the source —
 //        useful in review)
 //
-// Note: the generated file's header (`entete` below) and the diagnostic
-// messages stay in French on purpose — the header is committed as
+// Note: the generated file's header (`header` below) is committed as
 // src/webradios.toml and locked by the --verifier comparison.
 import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const PAGE = 'https://www.ouifm.fr/player'
-const CIBLE = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'webradios.toml')
+const TARGET = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'webradios.toml')
 
 // Historical Icecast mounts (Infomaniak distribution), **absent from
 // `apidata`** which only knows the `streams.lesindesradios.fr` URLs. Yet
@@ -49,7 +48,7 @@ const CIBLE = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'webrad
 // Each fragment is matched as a substring of the URL; the trailing dot of
 // `ouifmN.` makes it match the host (`ouifm3.ice...`) as well as the
 // mount (`.../ouifm3.mp3`), whatever format is served.
-const MOUNTS_HERITES = {
+const LEGACY_MOUNTS = {
   2174546520932614531n: ['ouifm-high'], // OUI FM (inferred, see above)
   3134161803443976382n: ['ouifm2.'], // icy-name: OUI FM Alternatif
   3134161803443976427n: ['ouifm3.'], // icy-name: OUI FM Classic Rock
@@ -59,35 +58,36 @@ const MOUNTS_HERITES = {
 /** Extracts the JSON object assigned to `apidata` in the page source. */
 function apidata(html) {
   const m = /apidata\s*=\s*(\{.*?\})\s*(?:;|<\/script>)/s.exec(html)
-  if (!m) throw new Error('variable `apidata` introuvable : la page a change de forme')
+  if (!m) throw new Error('`apidata` variable not found: the page changed shape')
   return JSON.parse(m[1])
 }
 
-function toml(flux, date) {
-  const entete = [
-    '# Webradios OUI FM : correspondance entre l’identifiant de flux (présent dans',
-    '# l’URL du flux audio) et l’identifiant attendu par le flux de métadonnées.',
+function toml(streams, date) {
+  const header = [
+    '# OUI FM webradios: mapping between the stream identifier (present in the',
+    '# audio stream\'s URL) and the identifier expected by the metadata stream.',
     '#',
-    '# RELEVÉ, PAS DEVINÉ. Source : la variable JavaScript `apidata` de',
-    `# ${PAGE}, dont les champs \`id\` (identifiant de flux) et`,
-    '# `idMds` (identifiant de métadonnées) sont repris ici tels quels.',
-    '# `scripts/fetch-webradios.mjs` régénère ce fichier depuis cette même source.',
+    '# MEASURED, NOT GUESSED. Source: the `apidata` JavaScript variable from',
+    `# ${PAGE}, whose \`id\` (stream identifier) and`,
+    '# `idMds` (metadata identifier) fields are carried over here verbatim.',
+    '# `scripts/fetch-webradios.mjs` regenerates this file from that same source.',
     '#',
-    '# Vérifié à la main sur `?id=` du flux de métadonnées : l’identifiant `metas`',
-    '# renvoie artiste et titre, l’identifiant de flux renvoie une trame vide.',
+    '# Checked by hand against `?id=` on the metadata stream: the `metas`',
+    '# identifier returns artist and title, the stream identifier returns an',
+    '# empty frame.',
     '#',
-    '# Chaque entrée de `urls` est cherchée comme sous-chaîne de l’URL du flux :',
-    '# l’URL de diffusion porte un jeton signé et un format variables, mais',
-    '# toujours l’identifiant de flux. Les fragments `ouifmN.` reconnaissent les',
-    '# mounts Icecast historiques (diffusion Infomaniak), qui sont les URL',
-    '# publiées de longue date — donc celles qu’un annuaire référence et qu’un',
-    '# utilisateur copie. Voir `scripts/fetch-webradios.mjs` pour leur relevé.',
+    '# Each `urls` entry is looked up as a substring of the stream URL: the',
+    '# broadcast URL carries a signed token and a variable format, but always',
+    '# the stream identifier. The `ouifmN.` fragments recognize the historical',
+    '# Icecast mounts (Infomaniak broadcast), which are the long-published',
+    '# URLs — hence the ones a directory references and a user copies. See',
+    '# `scripts/fetch-webradios.mjs` for how they were measured.',
     '#',
-    `# Relevé le ${date}. ${flux.length} flux.`,
+    `# Measured on ${date}. ${streams.length} streams.`,
     '',
   ]
-  const corps = flux.flatMap((f) => {
-    const fragments = [f.id, ...(MOUNTS_HERITES[BigInt(f.idMds)] ?? [])]
+  const body = streams.flatMap((f) => {
+    const fragments = [f.id, ...(LEGACY_MOUNTS[BigInt(f.idMds)] ?? [])]
     return [
       '[[webradio]]',
       `label = "${f.label.replace(/"/g, '\\"')}"`,
@@ -96,55 +96,55 @@ function toml(flux, date) {
       '',
     ]
   })
-  return [...entete, ...corps].join('\n')
+  return [...header, ...body].join('\n')
 }
 
 const html = await fetch(PAGE, {
   headers: { 'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) Chrome/120' },
 }).then((r) => {
-  if (!r.ok) throw new Error(`HTTP ${r.status} sur ${PAGE}`)
+  if (!r.ok) throw new Error(`HTTP ${r.status} on ${PAGE}`)
   return r.text()
 })
 
 const data = apidata(html)
-const flux = [...(data.radiostreams ?? []), ...(data.webradios ?? [])]
-const manquants = flux.filter((f) => !f.id || !f.idMds)
-if (!flux.length) throw new Error('aucun flux dans `apidata`')
-if (manquants.length) {
-  throw new Error(`${manquants.length} flux sans id ou idMds : source inattendue, rien n'est ecrit`)
+const streams = [...(data.radiostreams ?? []), ...(data.webradios ?? [])]
+const missing = streams.filter((f) => !f.id || !f.idMds)
+if (!streams.length) throw new Error('no streams in `apidata`')
+if (missing.length) {
+  throw new Error(`${missing.length} streams without id or idMds: unexpected source, nothing written`)
 }
 // A historical mount tied to a vanished `idMds` would be lost silently:
 // better to say so — it is the sign OUI FM removed or renumbered a webradio.
-const connus = new Set(flux.map((f) => BigInt(f.idMds)))
-for (const id of Object.keys(MOUNTS_HERITES).map(BigInt)) {
-  if (!connus.has(id)) {
-    console.warn(`avertissement: mount historique rattache a ${id}, absent d'apidata`)
+const known = new Set(streams.map((f) => BigInt(f.idMds)))
+for (const id of Object.keys(LEGACY_MOUNTS).map(BigInt)) {
+  if (!known.has(id)) {
+    console.warn(`warning: historical mount tied to ${id}, absent from apidata`)
   }
 }
 
 // The date is not re-read from the existing file: it dates the survey,
 // not the file.
-const rendu = toml(flux, new Date().toISOString().slice(0, 10))
+const rendered = toml(streams, new Date().toISOString().slice(0, 10))
 
 // Line endings, neutralized for comparison. The checkout is a Windows one
 // (the project is developed under Windows + WSL), so git hands this file back
 // with CRLF while this script composes with LF: comparing them raw reported a
 // drift on every run after a checkout or a rebase — a false alarm on the one
 // check meant to catch a real one.
-const memeFins = (t) => t.replace(/\r\n/g, '\n')
-const livre = readFileSync(CIBLE, 'utf8')
+const sameLineEndings = (t) => t.replace(/\r\n/g, '\n')
+const existing = readFileSync(TARGET, 'utf8')
 
 if (process.argv.includes('--verifier')) {
   // Comparison excluding the date line: only the entries' content counts.
-  const sansDate = (t) => memeFins(t).replace(/^# Relevé le .*$/m, '')
-  if (sansDate(livre) !== sansDate(rendu)) {
-    console.error(`${CIBLE} differe de la source (${flux.length} flux en ligne)`)
+  const withoutDate = (t) => sameLineEndings(t).replace(/^# Measured on .*$/m, '')
+  if (withoutDate(existing) !== withoutDate(rendered)) {
+    console.error(`${TARGET} differs from the source (${streams.length} streams live)`)
     process.exit(1)
   }
-  console.log(`table a jour (${flux.length} flux)`)
+  console.log(`table up to date (${streams.length} streams)`)
 } else {
   // Written back with the endings the file already uses, so a Windows checkout
   // does not show the whole file as modified.
-  writeFileSync(CIBLE, livre.includes('\r\n') ? rendu.replace(/\n/g, '\r\n') : rendu)
-  console.log(`${CIBLE} : ${flux.length} flux ecrits`)
+  writeFileSync(TARGET, existing.includes('\r\n') ? rendered.replace(/\n/g, '\r\n') : rendered)
+  console.log(`${TARGET}: ${streams.length} streams written`)
 }

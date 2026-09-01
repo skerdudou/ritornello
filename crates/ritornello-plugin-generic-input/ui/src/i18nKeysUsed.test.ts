@@ -1,88 +1,86 @@
-// Garde-fou : la migration vers la SPA a supprime les constantes
-// `PAGE_KEYS` qui garantissaient que toute cle utilisee par l'IHM existe
-// dans le catalogue anglais embarque. Sans cette garantie, une cle absente
-// s'affiche telle quelle a l'ecran au lieu d'echouer au build ou aux tests.
-// Ce test recollecte les cles reellement appelees par le code source de ce
-// plugin et verifie leur presence dans
-// `crates/ritornello-plugin-generic-input/src/locales/en.toml` + le
-// vocabulaire commun `crates/ritornello-i18n/src/locales/common_en.toml`
-// (le plugin consomme les deux, la couche commune etant fusionnee par
+// Guard rail: the migration to the SPA removed the `PAGE_KEYS` constants
+// that used to guarantee that every key used by the UI exists in the
+// embedded English catalog. Without that guarantee, a missing key shows up
+// verbatim on screen instead of failing at build or test time. This test
+// re-collects the keys actually called by this plugin's source code and
+// checks their presence in
+// `crates/ritornello-plugin-generic-input/src/locales/en.toml` + the
+// common vocabulary `crates/ritornello-i18n/src/locales/common_en.toml`
+// (the plugin consumes both, the common layer being merged by
 // `Catalog::entries`).
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ACTIONS } from './preset-toml'
 
-// Chemins resolus via `process.cwd()` (le repertoire du paquet, cf. le
-// script npm `test`) plutot que via `import.meta.url` : sous vitest en
-// environnement `jsdom`, une URL relative qui remonte hors de la racine du
-// projet vite est reecrite en `http://localhost/@fs/...` au lieu de rester
-// un `file://` — `fileURLToPath` leve alors `The URL must be of scheme
-// file`. `process.cwd()` est un chemin OS brut, insensible a cette
-// reecriture.
-const RACINE_PAQUET = process.cwd()
+// Paths resolved via `process.cwd()` (the package directory, see the npm
+// `test` script) rather than via `import.meta.url`: under vitest in a
+// `jsdom` environment, a relative URL that climbs above the vite project
+// root gets rewritten to `http://localhost/@fs/...` instead of staying a
+// `file://` one — `fileURLToPath` then throws `The URL must be of scheme
+// file`. `process.cwd()` is a raw OS path, immune to that rewrite.
+const PACKAGE_ROOT = process.cwd()
 
-// Lecteur TOML plat ecrit a la main : le format des catalogues embarques
-// est une simple suite de lignes `cle = "valeur"`, jamais de table
-// `[[...]]`. Suffisant ici, inutile d'add une dependance TOML.
-function clesToml(chemin: string): Set<string> {
-  const cles = new Set<string>()
-  for (const ligneBrute of readFileSync(chemin, 'utf8').split(/\r?\n/)) {
-    const ligne = ligneBrute.trim()
-    if (!ligne || ligne.startsWith('#')) continue
-    const i = ligne.indexOf('=')
+// Hand-written flat TOML reader: the format of the embedded catalogs is a
+// simple sequence of `key = "value"` lines, never a `[[...]]` table.
+// Sufficient here, no need to add a TOML dependency.
+function tomlKeys(path: string): Set<string> {
+  const keys = new Set<string>()
+  for (const rawLine of readFileSync(path, 'utf8').split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#')) continue
+    const i = line.indexOf('=')
     if (i === -1) continue
-    const cle = ligne.slice(0, i).trim()
-    if (/^[A-Za-z0-9_]+$/.test(cle)) cles.add(cle)
+    const key = line.slice(0, i).trim()
+    if (/^[A-Za-z0-9_]+$/.test(key)) keys.add(key)
   }
-  return cles
+  return keys
 }
 
-function fichiersSource(dir: string): string[] {
-  const resultats: string[] = []
-  for (const entree of readdirSync(dir)) {
-    const chemin = join(dir, entree)
-    if (statSync(chemin).isDirectory()) {
-      resultats.push(...fichiersSource(chemin))
-    } else if (/\.(vue|ts)$/.test(entree) && !entree.endsWith('.test.ts')) {
-      resultats.push(chemin)
+function sourceFiles(dir: string): string[] {
+  const results: string[] = []
+  for (const entry of readdirSync(dir)) {
+    const path = join(dir, entry)
+    if (statSync(path).isDirectory()) {
+      results.push(...sourceFiles(path))
+    } else if (/\.(vue|ts)$/.test(entry) && !entry.endsWith('.test.ts')) {
+      results.push(path)
     }
   }
-  return resultats
+  return results
 }
 
-// Cles appelees via `t('...')` (template) ou `t.value('...')` (script) avec
-// une cle litterale. LIMITE CONNUE, assumee : une cle construite
-// dynamiquement (variable, template literal, propriete calculee) echappe a
-// cette regex — c'est le cas des 19 cles `act_*` : `InputAdmin.vue` fait
-// `t(a.key)` en boucle sur `ACTIONS`, et `ACTIONS` construit lui-meme
-// `act_select_1`..`act_select_9` par template literal (`preset-toml.ts`).
-// Aucune de ces cles n'apparait donc jamais litteralement dans un appel
-// `t(...)` : elles sont ajoutees explicitement via l'import de `ACTIONS`
-// plutot que par la regex.
-function clesAppelsLitteraux(fichiers: string[]): Set<string> {
-  const cles = new Set<string>()
-  const motif = /\bt(?:\.value)?\(\s*['"]([A-Za-z0-9_]+)['"]/g
-  for (const fichier of fichiers) {
-    const contenu = readFileSync(fichier, 'utf8')
-    for (const m of contenu.matchAll(motif)) if (m[1]) cles.add(m[1])
+// Keys called via `t('...')` (template) or `t.value('...')` (script) with a
+// literal key. KNOWN, ACCEPTED LIMITATION: a key built dynamically
+// (variable, template literal, computed property) escapes this regex —
+// that is the case for the 19 `act_*` keys: `InputAdmin.vue` does
+// `t(a.key)` in a loop over `ACTIONS`, and `ACTIONS` itself builds
+// `act_select_1`..`act_select_9` via a template literal (`preset-toml.ts`).
+// None of these keys ever appears literally in a `t(...)` call: they are
+// added explicitly via the `ACTIONS` import rather than by the regex.
+function literalCallKeys(files: string[]): Set<string> {
+  const keys = new Set<string>()
+  const pattern = /\bt(?:\.value)?\(\s*['"]([A-Za-z0-9_]+)['"]/g
+  for (const file of files) {
+    const content = readFileSync(file, 'utf8')
+    for (const m of content.matchAll(pattern)) if (m[1]) keys.add(m[1])
   }
-  return cles
+  return keys
 }
 
-describe('cles i18n utilisees par le plugin generic-input', () => {
-  it('existent toutes dans le catalogue anglais embarque (plugin + commun)', () => {
-    const catalogue = new Set([
-      ...clesToml(resolve(RACINE_PAQUET, '../src/locales/en.toml')),
-      ...clesToml(resolve(RACINE_PAQUET, '../../ritornello-i18n/src/locales/common_en.toml')),
+describe('i18n keys used by the generic-input plugin', () => {
+  it('all exist in the embedded English catalog (plugin + common)', () => {
+    const catalog = new Set([
+      ...tomlKeys(resolve(PACKAGE_ROOT, '../src/locales/en.toml')),
+      ...tomlKeys(resolve(PACKAGE_ROOT, '../../ritornello-i18n/src/locales/common_en.toml')),
     ])
 
-    const utilisees = new Set([
-      ...clesAppelsLitteraux(fichiersSource(join(RACINE_PAQUET, 'src'))),
+    const used = new Set([
+      ...literalCallKeys(sourceFiles(join(PACKAGE_ROOT, 'src'))),
       ...ACTIONS.map((a) => a.key),
     ])
 
-    const manquantes = [...utilisees].filter((cle) => !catalogue.has(cle)).sort()
-    expect(manquantes).toEqual([])
+    const missing = [...used].filter((key) => !catalog.has(key)).sort()
+    expect(missing).toEqual([])
   })
 })

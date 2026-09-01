@@ -3,16 +3,16 @@ import { describe, expect, it } from 'vitest'
 import { readBootTheme } from './boot'
 
 describe('readBootTheme', () => {
-  it('lit le choix injecté par le cœur dans le shell', () => {
+  it('reads the choice injected by the core into the shell', () => {
     const win = { __RITORNELLO_THEME__: { theme: 'cyberpunk', mode: 'dark' } } as never
     expect(readBootTheme(win)).toEqual({ theme: 'cyberpunk', mode: 'dark' })
   })
 
-  it('retombe sur les défauts quand rien n’est injecté', () => {
+  it('falls back to the defaults when nothing is injected', () => {
     expect(readBootTheme({} as never)).toEqual({ theme: DEFAULT_PRESET, mode: DEFAULT_MODE })
   })
 
-  it('rejette un mode inconnu plutôt que de le propager', () => {
+  it('rejects an unknown mode rather than propagating it', () => {
     const win = { __RITORNELLO_THEME__: { theme: 'vercel', mode: 'system' } } as never
     expect(readBootTheme(win)).toEqual({ theme: 'vercel', mode: DEFAULT_MODE })
   })

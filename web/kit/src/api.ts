@@ -1,35 +1,34 @@
 const JSON_HEADERS = { 'content-type': 'application/json' }
 
 /**
- * Message d'une réponse en échec : le champ `error` du body JSON quand il y en
- * a un, `HTTP <code>` sinon.
+ * Message of a failed response: the `error` field of the JSON body when there
+ * is one, `HTTP <code>` otherwise.
  *
- * Partagée par `send` et `get`, et c'est le correctif d'un défaut mesuré : seul
- * `send` lisait le body, si bien qu'un 502 du cœur — qui porte pourtant sa
- * cause — s'affichait « HTTP 502 » au chargement d'une page, là où le même
- * échec sur un PUT disait ce qui n'allait pas.
+ * Shared by `send` and `get`, and it is the fix for a measured defect: only
+ * `send` read the body, so a 502 from the core — which does carry its cause —
+ * showed up as "HTTP 502" when loading a page, whereas the same failure on a
+ * PUT said what was wrong.
  */
 async function errorMessage(r: Response): Promise<string> {
   try {
     const j = (await r.json()) as { error?: string }
     if (j && typeof j.error === 'string') return j.error
   } catch {
-    // body non JSON : on retombe sur le code
+    // non-JSON body: fall back to the status code
   }
   return `HTTP ${r.status}`
 }
 
-/// Renvoie `null` si l'opération est acceptée, sinon le message d'erreur —
-/// le champ `error` du body JSON d'un 422 quand il est là, `HTTP <code>`
-/// sinon. Convention reprise telle quelle du helper `put()` des pages
-/// actuelles, pour que les vues migrées n'aient pas à changer de logique.
+/// Returns `null` if the operation is accepted, otherwise the error message —
+/// the `error` field of a 422's JSON body when it is there, `HTTP <code>`
+/// otherwise. Convention taken as is from the `put()` helper of the current
+/// pages, so that migrated views do not have to change their logic.
 async function send(method: 'PUT' | 'POST', url: string, body: unknown): Promise<string | null> {
-  // Le rejet de `fetch` lui-même (cœur en cours de redémarrage, Wi-Fi coupé)
-  // fait partie de la convention « valeur de retour », comme les statuts
-  // non-ok : la quasi-totalité des appelants ne mettent pas de `try` autour
-  // d'un `api.put`, et une exception ici devenait une *unhandled rejection*
-  // muette — l'utilisateur pressait « Lecture » ou « Enregistrer » et rien ne
-  // se passait, sans toast ni message.
+  // A rejection of `fetch` itself (core restarting, Wi-Fi down) is part of the
+  // "return value" convention, like the non-ok statuses: nearly all callers do
+  // not wrap an `api.put` in a `try`, and an exception here became a silent
+  // *unhandled rejection* — the user pressed "Play" or "Save" and nothing
+  // happened, with no toast nor message.
   let r: Response
   try {
     r = await fetch(url, { method, headers: JSON_HEADERS, body: JSON.stringify(body) })
@@ -41,9 +40,9 @@ async function send(method: 'PUT' | 'POST', url: string, body: unknown): Promise
 }
 
 export const api = {
-  // `init` optionnel : `useMetrics.ts` s'en sert pour passer un `AbortSignal`
-  // par sondage, sans quoi un changement de période ne pourrait pas annuler
-  // une requête devenue obsolète.
+  // Optional `init`: `useMetrics.ts` uses it to pass an `AbortSignal` per probe,
+  // without which a period change could not cancel a request that has become
+  // obsolete.
   async get<T>(url: string, init?: RequestInit): Promise<T> {
     const r = await fetch(url, init)
     if (!r.ok) throw new Error(await errorMessage(r))

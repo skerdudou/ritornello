@@ -23,8 +23,8 @@ use crate::status::{AppState, LogBuffer, LogBufferWriter, PluginStatus, StatusSt
 use crate::types::Event;
 use anyhow::{Context, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
-// `PluginKind` vient du protocol partagé, pas du cœur : c'est le binaire du
-// greffon qui l'announcement, et `plugins.rs` n'a plus à le connaître.
+// `PluginKind` comes from the shared protocol, not from the core: it is the
+// plugin binary that announces it, and `plugins.rs` no longer needs to know it.
 use ritornello_proto::{
     Announcement, SourcesCatalog, Enrichment, InputMessage, Known, NowPlaying, PluginKind,
 };
@@ -47,67 +47,67 @@ impl core::Source for SourceClient {
     }
 }
 
-/// Relais de l'état vers **un** afficheur, dans sa propre tâche.
+/// Relays the state to **one** display, in its own task.
 ///
-/// Une tâche par afficheur, et non une tâche qui boucle sur N clients : c'est
-/// ce qui empêche un afficheur lent — console occupée, écran bloqué en I/O — de
-/// retarder les autres. La contre-pression reste cloisonnée par socket, ce qui
-/// était l'argument retenu pour ne pas fusionner les sockets des genres.
+/// One task per display, not one task looping over N clients: that is what
+/// keeps a slow display — busy console, screen blocked in I/O — from delaying
+/// the others. Backpressure stays confined per socket, which was the argument
+/// retained for not merging the per-kind sockets.
 ///
-/// Une fonction et non deux copies : le démarrage et le câblage à chaud
-/// servent un afficheur de la même façon, et un afficheur arrivé en retard ne
-/// doit pas être servi par un relais légèrement différent.
+/// One function, not two copies: startup and hot wiring serve a display the
+/// same way, and a display that arrives late must not be served by a slightly
+/// different relay.
 ///
-/// L'état courant est envoyé **d'abord**, avant toute attente : un afficheur
-/// câblé à chaud doit montrer ce qui plays sans attendre le prochain changement
-/// d'état. Ne compter que sur `changed()` marchait par accident — l'`state_rx` de
-/// `main` n'est jamais avancé, donc le clone héritait d'une version périmée et
-/// rendait la main aussitôt. Un `borrow_and_update()` ajouté un jour dans `main`
-/// aurait laissé un afficheur tardif **noir** jusqu'au prochain changement, donc
-/// indéfiniment en veille où aucun tick n'est armé, et `publish_state` n'aurait
-/// rien réparé puisqu'il est dédupliqué.
+/// The current state is sent **first**, before any waiting: a hot-wired
+/// display must show what is playing without waiting for the next state
+/// change. Relying only on `changed()` worked by accident — `main`'s
+/// `state_rx` is never advanced, so the clone inherited a stale version and
+/// yielded immediately. A `borrow_and_update()` added one day in `main` would
+/// have left a late display **black** until the next change, hence
+/// indefinitely in standby where no tick is armed, and `publish_state` would
+/// have fixed nothing since it is deduplicated.
 ///
-/// Un échec d'envoi **sort de la boucle**. Sur un socket dont le pair est mort
-/// l'erreur est permanente (EPIPE) : sans sortie, la tâche survivait au greffon
-/// et journalisait à chaque trame — une par seconde en playback, par afficheur
-/// zombie. Deux relances à la main suffisaient à écraser en moins de quatre
-/// minutes le buffer de 500 lines qui alimente la popin d'erreurs de l'IHM, et
-/// à y noyer le vrai diagnostic. Un client d'afficheur dont l'écriture échoue
-/// est inutilisable : on le nomme une fois, et on s'en va.
+/// A failed send **exits the loop**. On a socket whose peer is dead the error
+/// is permanent (EPIPE): without the exit, the task outlived the plugin and
+/// logged on every frame — one per second during playback, per zombie
+/// display. Two manual restarts were enough to overwrite, in under four
+/// minutes, the 500-line buffer that feeds the UI's error popup, and to drown
+/// the real diagnosis in it. A display client whose write fails is unusable:
+/// name it once, and leave.
 ///
-/// **Deux** récepteurs, et deux genres de trame : l'état du player, qui change
-/// jusqu'à une fois par seconde, et le sources_catalog des sources, structurel et
-/// rare. Deux canaux séparés plutôt qu'une charge utile élargie : élargir
-/// republierait l'état à chaque changement de sources_catalog et l'inverse, ce que la
-/// déduplication par égalité ne rattraperait pas — les deux valeurs changeraient
-/// ensemble par construction.
+/// **Two** receivers, and two kinds of frame: the player state, which changes
+/// up to once per second, and the sources catalog, structural and rare. Two
+/// separate channels rather than a widened payload: widening would republish
+/// the state on every catalog change and vice versa, which deduplication by
+/// equality could not catch — the two values would change together by
+/// construction.
 ///
-/// Les deux valeurs courantes partent d'emblée, avant toute attente, pour la
-/// même raison que ci-dessus : un afficheur câblé à chaud doit connaître le
-/// sources_catalog sans attendre qu'il change, et le sources_catalog ne change presque
-/// jamais.
-/// **Les pochettes ne partent qu'aux afficheurs qui les ont demandées** dans
-/// leur announcement (`Announcement::covers`), et **seulement quand la cover
-/// change** : ni sur chaque trame d'état — il y en a une par seconde en playback
-/// —, ni vers l'afficheur de vingt colonnes, qui recevrait des mégaoctets pour
-/// les jeter. Le changement est détecté sur le `cover_href` de l'état, qui est
-/// justement l'identité de l'image (la clé du cache) et non un horodatage : une
-/// même cover qui reste à l'écran ne repart donc jamais.
+/// Both current values go out right away, before any waiting, for the same
+/// reason as above: a hot-wired display must know the sources catalog without
+/// waiting for it to change, and the catalog almost never changes.
+/// **Covers only go to the displays that asked for them** in their
+/// announcement (`Announcement::covers`), and **only when the cover
+/// changes**: neither on every state frame — there is one per second during
+/// playback — nor to the twenty-column display, which would receive megabytes
+/// only to throw them away. The change is detected on the state's
+/// `cover_href`, which is precisely the identity of the image (the cache key)
+/// and not a timestamp: a cover that stays on screen therefore never goes out
+/// again.
 ///
-/// La matérialisation des bytes — le seul moment où l'image entière existe en
-/// mémoire dans le cœur — est **derrière** ce filtre : un afficheur qui n'en
-/// veut pas ne fait pas payer la playback du fichier non plus.
-/// Par où un relais fait savoir que son pair ne répond plus, et sous quel
-/// numéro.
+/// Materializing the bytes — the only moment the whole image exists in memory
+/// inside the core — is **behind** this filter: a display that does not want
+/// covers does not pay for the file read either.
+/// How a relay reports that its peer no longer responds, and under which
+/// number.
 ///
-/// Les deux voyagent **toujours** ensemble — un notice sans son numéro de câblage
-/// ne serait pas interprétable par la boucle —, et les réunir garde la
-/// signature du relais lisible.
+/// The two **always** travel together — a notice without its wiring number
+/// would not be interpretable by the loop — and keeping them together keeps
+/// the relay's signature readable.
 #[derive(Clone)]
 struct UnreachableNotice {
-    /// Numéro du câblage qui a lancé ce relais. Voir `cablages` dans la boucle
-    /// principale : c'est ce qui distingue la fermeture d'un socket courant de
-    /// celle d'une incarnation déjà remplacée.
+    /// Number of the wiring that launched this relay. See `wirings` in the
+    /// main loop: it is what distinguishes the closing of a current socket
+    /// from that of an incarnation already replaced.
     wiring: u64,
     tx: mpsc::Sender<(String, u64)>,
 }
@@ -122,78 +122,78 @@ fn display_relay(
     notice: UnreachableNotice,
 ) {
     tokio::spawn(async move {
-        /// Nombre de tentatives accordées à un même `cover_href` avant de
-        /// l'abandonner pour de bon.
+        /// Number of attempts granted to a same `cover_href` before giving
+        /// up on it for good.
         ///
-        /// **Le compromis exact entre deux défauts symétriques.** Marquer la
-        /// tentative comme faite avant de l'avoir faite sacrifiait la cover
-        /// pour **toute la piste** sur un seul délai dépassé : un partage SMB
-        /// endormi met une poignée de secondes à répondre au premier accès et
-        /// répond ensuite, si bien que la seule tentative jamais accordée était
-        /// justement celle qui ne pouvait pas réussir. À l'inverse, retenter sans
-        /// bounded relirait le fichier **une fois par seconde** — la cadence des
-        /// trames d'état en playback — pour une image dont l'absence peut être
-        /// définitive (un 404 du Cover Art Archive, un fichier au-delà du
-        /// cap). Trois essais couvrent le réveil d'un partage sans installer
-        /// de boucle de relecture.
+        /// **The exact compromise between two symmetric defects.** Marking the
+        /// attempt as done before actually doing it sacrificed the cover for
+        /// **the whole track** on a single exceeded timeout: a sleeping SMB
+        /// share takes a handful of seconds to answer the first access and
+        /// then answers, so the only attempt ever granted was precisely the
+        /// one that could not succeed. Conversely, retrying without a bound
+        /// would re-read the file **once per second** — the cadence of state
+        /// frames during playback — for an image whose absence may be
+        /// permanent (a 404 from the Cover Art Archive, a file over the cap).
+        /// Three attempts cover the wake-up of a share without installing a
+        /// re-read loop.
         const COVER_ATTEMPTS: u8 = 3;
 
-        /// Ce que le relais retient de ses tentatives de cover.
+        /// What the relay remembers of its cover attempts.
         ///
-        /// Deux champs et non un, parce que « poussée » et « tentée sans
-        /// succès » sont deux faits différents : c'est leur confusion qui faisait
-        /// perdre la cover de toute une piste sur un unique échec.
+        /// Two fields, not one, because "pushed" and "attempted without
+        /// success" are two different facts: conflating them is what lost the
+        /// cover of a whole track on a single failure.
         #[derive(Default)]
         struct CoverTracking {
-            /// Le `cover_href` de la dernière cover **réellement écrite** sur
-            /// le socket. Une trame d'état qui répète ce href ne redéclenche
-            /// rien : c'est cette garde qui évite de pousser des mégaoctets à
-            /// chaque seconde de playback.
+            /// The `cover_href` of the last cover **actually written** to the
+            /// socket. A state frame repeating this href triggers nothing:
+            /// this guard is what avoids pushing megabytes every second of
+            /// playback.
             pushed: Option<String>,
-            /// Le `cover_href` en échec et le nombre d'essais déjà consommés.
-            /// Remis à zéro dès qu'un autre href apparaît : le budget est par
-            /// cover, pas par relais.
-            echecs: Option<(String, u8)>,
+            /// The failing `cover_href` and the number of attempts already
+            /// consumed. Reset as soon as another href appears: the budget is
+            /// per cover, not per relay.
+            failures: Option<(String, u8)>,
         }
 
-        /// Pousse la cover que `href` désigne, si elle a changé depuis le
-        /// dernier envoi **réussi**. Rend `Err` comme un envoi d'état, pour que
-        /// le contrôle d'erreur de la boucle soit le même : un socket mort doit
-        /// faire sortir, quel que soit le kind de trame qui l'a découvert.
+        /// Pushes the cover that `href` designates, if it changed since the
+        /// last **successful** send. Returns `Err` like a state send, so that
+        /// the loop's error handling is the same: a dead socket must exit the
+        /// loop, whatever the kind of frame that discovered it.
         ///
-        /// Une cover introuvable, illisible ou trop grosse n'est **pas** une
-        /// erreur d'envoi : rien ne part, la boucle continue, et l'échec est
-        /// compté à part du succès (voir `CoverTracking` et `COVER_ATTEMPTS`).
-        /// Un échec transitoire est donc réessayé à la trame d'état suivante,
-        /// jusqu'à épuisement du budget — un échec définitif ne coûte que trois
-        /// lectures par piste, pas une par seconde.
+        /// A cover that is missing, unreadable or too big is **not** a send
+        /// error: nothing goes out, the loop continues, and the failure is
+        /// counted separately from success (see `CoverTracking` and
+        /// `COVER_ATTEMPTS`). A transient failure is thus retried on the next
+        /// state frame, until the budget runs out — a permanent failure only
+        /// costs three reads per track, not one per second.
         ///
-        /// **N'encode rien elle-même** : `covers.line` construit la trame et la
-        /// rend derrière un `Arc` ; ce relais ne fait qu'écrire ce buffer
-        /// (`DisplayClient::send_cover_line`), sans recopie ni réencodage.
+        /// **Encodes nothing itself**: `covers.line` builds the frame and
+        /// returns it behind an `Arc`; this relay only writes that buffer
+        /// (`DisplayClient::send_cover_line`), with no copy or re-encoding.
         async fn push_cover(
             client: &DisplayClient,
             covers: &cover::CoverCache,
-            suivi: &mut CoverTracking,
+            tracking: &mut CoverTracking,
             href: Option<&str>,
         ) -> anyhow::Result<()> {
-            // `None` (plus rien ne plays, ou cover retirée) n'émet aucune
-            // trame : l'afficheur l'apprend par le `cover_href` absent de
-            // l'état, qu'il vient de recevoir. Inventer une trame de cover
-            // clear ferait exister une image de zéro octet dans le protocol.
-            // Les deux mémoires sont vidées : la prochaine cover, même
-            // identique à la précédente, décrit un nouveau track.
+            // `None` (nothing is playing anymore, or the cover was removed)
+            // emits no frame: the display learns it from the missing
+            // `cover_href` in the state it just received. Inventing an empty
+            // cover frame would make a zero-byte image exist in the protocol.
+            // Both memories are cleared: the next cover, even identical to
+            // the previous one, describes a new track.
             let Some(href) = href else {
-                suivi.pushed = None;
-                suivi.echecs = None;
+                tracking.pushed = None;
+                tracking.failures = None;
                 return Ok(());
             };
-            if suivi.pushed.as_deref() == Some(href) {
+            if tracking.pushed.as_deref() == Some(href) {
                 return Ok(());
             }
-            // Budget consommé pour *ce* href : ne plus rien tenter. Un href
-            // différent efface l'ardoise, ce que fait le `match` ci-dessous.
-            let essais = match &suivi.echecs {
+            // Budget consumed for *this* href: attempt nothing more. A
+            // different href wipes the slate, which the `match` below does.
+            let attempts = match &tracking.failures {
                 Some((h, n)) if h == href => {
                     if *n >= COVER_ATTEMPTS {
                         return Ok(());
@@ -203,90 +203,91 @@ fn display_relay(
                 _ => 0,
             };
             let Some(key) = href.strip_prefix(cover::HREF_PREFIX) else {
-                // Un href sans notre préfixe ne deviendra jamais valide :
-                // consommer tout le budget d'un coup plutôt que de réessayer
-                // trois fois une chaîne qui ne peut pas changer.
+                // A href without our prefix will never become valid: consume
+                // the whole budget at once rather than retrying three times a
+                // string that cannot change.
                 tracing::debug!("cover href {href} has no key, nothing pushed");
-                suivi.echecs = Some((href.to_owned(), COVER_ATTEMPTS));
+                tracking.failures = Some((href.to_owned(), COVER_ATTEMPTS));
                 return Ok(());
             };
             let Some(line) = covers.line(key, href).await else {
-                // Déjà journalisé par `bytes` avec sa raison. Compté comme un
-                // échec, donc réessayé à la trame suivante : c'est ici que se
-                // plays le partage endormi.
-                suivi.echecs = Some((href.to_owned(), essais + 1));
+                // Already logged by `bytes` with its reason. Counted as a
+                // failure, hence retried on the next frame: this is where the
+                // sleeping share scenario plays out.
+                tracking.failures = Some((href.to_owned(), attempts + 1));
                 return Ok(());
             };
             client.send_cover_line(&line).await?;
-            suivi.pushed = Some(href.to_owned());
-            suivi.echecs = None;
+            tracking.pushed = Some(href.to_owned());
+            tracking.failures = None;
             Ok(())
         }
 
-        // **Deux sorties de boucle qu'il ne faut surtout pas confondre.** Un
-        // envoi en échec veut dire que l'afficheur n'est plus joignable, et
-        // c'est ce qui doit devenir visible sur la page de statut. Un
-        // `watch::Receiver` fermé veut dire que *le cœur* s'arrête — ses
-        // émetteurs sont tombés —, ce qui ne dit rien du greffon et ne doit donc
-        // rien signaler : marquer déconnectés tous les afficheurs pendant
-        // l'extinction du cœur peindrait une panne sur un arrêt normal.
+        // **Two loop exits that must not be confused.** A failed send means
+        // the display is no longer reachable, and that is what must become
+        // visible on the status page. A closed `watch::Receiver` means *the
+        // core* is shutting down — its senders are gone — which says nothing
+        // about the plugin and must therefore report nothing: marking every
+        // display disconnected during core shutdown would paint a failure
+        // over a normal stop.
         //
-        // D'où le bloc étiqueté : les quatre chemins « pair injoignable »
-        // rendent `true`, la fin naturelle de la boucle rend `false`, et l'notice
-        // part d'un seul endroit — sous le bloc — au lieu d'être recopié quatre
-        // fois.
-        let injoignable_constate = 'vie: {
+        // Hence the labeled block: the four "peer unreachable" paths return
+        // `true`, the loop's natural end returns `false`, and the notice
+        // leaves from a single place — below the block — instead of being
+        // copied four times.
+        let unreachable_detected = 'alive: {
             let state = state_rx.borrow_and_update().clone();
             let cat = catalog_rx.borrow_and_update().clone();
             if let Err(e) = client.send(&state).await {
                 tracing::warn!("display plugin {name} relay stopped: {e}");
-                break 'vie true;
+                break 'alive true;
             }
             if let Err(e) = client.send_catalog(&cat).await {
                 tracing::warn!("display plugin {name} relay stopped: {e}");
-                break 'vie true;
+                break 'alive true;
             }
-            // La cover courante part d'emblée, comme l'état et le sources_catalog
-            // et pour la même raison : un afficheur câblé à chaud doit montrer
-            // ce qui plays sans attendre le prochain changement de piste.
-            let mut suivi_pochette = CoverTracking::default();
+            // The current cover goes out right away, like the state and the
+            // sources catalog and for the same reason: a hot-wired display
+            // must show what is playing without waiting for the next track
+            // change.
+            let mut cover_tracking = CoverTracking::default();
             if wants_covers {
                 if let Err(e) = push_cover(
                     &client,
                     &covers,
-                    &mut suivi_pochette,
+                    &mut cover_tracking,
                     state.track.cover_href.as_deref(),
                 )
                 .await
                 {
                     tracing::warn!("display plugin {name} relay stopped: {e}");
-                    break 'vie true;
+                    break 'alive true;
                 }
             }
             loop {
-                let envoi = tokio::select! {
+                let send_result = tokio::select! {
                     r = state_rx.changed() => match r {
                         Ok(()) => {
                             let e = state_rx.borrow_and_update().clone();
-                            let envoi = client.send(&e).await;
-                            // L'état d'abord, la cover ensuite : l'afficheur
-                            // connaît ainsi le `cover_href` avant de recevoir
-                            // les bytes qui s'en réclament.
-                            match (envoi, wants_covers) {
+                            let send_result = client.send(&e).await;
+                            // State first, cover second: this way the display
+                            // knows the `cover_href` before receiving the
+                            // bytes that claim it.
+                            match (send_result, wants_covers) {
                                 (Ok(()), true) => {
                                     push_cover(
                                         &client,
                                         &covers,
-                                        &mut suivi_pochette,
+                                        &mut cover_tracking,
                                         e.track.cover_href.as_deref(),
                                     )
                                     .await
                                 }
-                                (autre, _) => autre,
+                                (other, _) => other,
                             }
                         }
-                        // Le cœur s'arrête, pas le greffon : sortir sans rien
-                        // signaler.
+                        // The core is stopping, not the plugin: exit without
+                        // reporting anything.
                         Err(_) => break,
                     },
                     r = catalog_rx.changed() => match r {
@@ -297,46 +298,45 @@ fn display_relay(
                         Err(_) => break,
                     },
                 };
-                if let Err(e) = envoi {
+                if let Err(e) = send_result {
                     tracing::warn!("display plugin {name} relay stopped: {e}");
-                    break 'vie true;
+                    break 'alive true;
                 }
             }
             false
         };
-        if injoignable_constate {
-            // `let _` : la boucle du cœur a pu disparaître entre-temps, et son
-            // départ n'est pas un incident à journaliser ici.
+        if unreachable_detected {
+            // `let _`: the core loop may have vanished in the meantime, and
+            // its departure is not an incident to log here.
             let _ = notice.tx.send((name, notice.wiring)).await;
         }
     });
 }
 
-/// Ce qu'une future de supervision rend : name, génération, statut de sortie,
-/// et si la mort avait été demandée.
+/// What a supervision future returns: name, generation, exit status, and
+/// whether the death had been requested.
 ///
-/// Boxée, donc **nommée** : le démarrage et le rallumage poussent tous deux
-/// dans le même `FuturesUnordered`, et deux fonctions rendant chacune un
-/// `impl Future` rendent deux types opaques distincts, qu'aucune collection
-/// n'accepte ensemble. Une allocation par lancement de greffon, huit au
-/// démarrage.
+/// Boxed, hence **named**: startup and re-enabling both push into the same
+/// `FuturesUnordered`, and two functions each returning an `impl Future`
+/// return two distinct opaque types, which no collection accepts together.
+/// One allocation per plugin launch, eight at startup.
 type PluginExit =
     futures::future::BoxFuture<'static, (String, u64, std::io::Result<std::process::ExitStatus>, bool)>;
 
-/// Surveille un greffon jusqu'à sa mort, qu'elle soit subie ou demandée.
+/// Watches a plugin until its death, whether suffered or requested.
 ///
-/// Une fonction, et non un `async move` recopié aux deux endroits qui lancent
-/// un greffon (démarrage et rallumage) : c'est le seul endroit qui sait que
-/// `kill_rx` veut dire « terminate-le ».
+/// A function, not an `async move` copied at the two places that launch a
+/// plugin (startup and re-enabling): it is the only place that knows that
+/// `kill_rx` means "kill it".
 ///
-/// Le `select!` ne fait que **choisir** — aucun de ses bras ne touche à
-/// `child` — pour que l'emprunt mutable des futures soit rendition avant le
-/// `terminate` qui suit. Rappeler `wait()` après coup est sans risque : tokio
-/// mémorise le statut du processus déjà moissonné.
+/// The `select!` does nothing but **choose** — none of its arms touches
+/// `child` — so that the mutable borrow of the futures is released before the
+/// `terminate` that follows. Calling `wait()` again afterwards is safe: tokio
+/// remembers the status of an already reaped process.
 ///
-/// Rend `(name, génération, statut, voulue)`. La génération est ce qui permet à
-/// la boucle principale d'ignorer la mort d'une incarnation précédente,
-/// arrivée après le rallumage de la suivante.
+/// Returns `(name, generation, status, requested)`. The generation is what
+/// lets the main loop ignore the death of a previous incarnation, arriving
+/// after the next one was re-enabled.
 fn supervise(
     name: String,
     generation: u64,
@@ -346,128 +346,127 @@ fn supervise(
     use futures::FutureExt;
     async move {
         let mut child = child;
-        // `r.is_ok()` et non `_` : seul un envoi réel veut dire « demandée ».
-        // Un `kill_rx` dont l'émetteur a été abandonné rend aussi `Err`, ce
-        // qui arrive quand deux entrées de `plugins.toml` partagent le même
-        // `name` — toléré à dessein par le chargeur de manifest — et que le
-        // second `kill_triggers.insert` écrase le `kill_tx` du premier :
-        // sans ce test, la mort naturelle du premier serait prise pour une
-        // extinction demandée, `terminate` enverrait `SIGTERM` à un processus
-        // sain, et `mark_plugin_disconnected` ne serait jamais appelé.
-        let voulue = tokio::select! {
+        // `r.is_ok()` and not `_`: only an actual send means "requested". A
+        // `kill_rx` whose sender was dropped also returns `Err`, which
+        // happens when two `plugins.toml` entries share the same `name` —
+        // tolerated on purpose by the manifest loader — and the second
+        // `kill_triggers.insert` overwrites the first one's `kill_tx`:
+        // without this check, the first one's natural death would be taken
+        // for a requested shutdown, `terminate` would send `SIGTERM` to a
+        // healthy process, and `mark_plugin_disconnected` would never be
+        // called.
+        let requested = tokio::select! {
             r = kill_rx => r.is_ok(),
             _ = child.wait() => false,
         };
-        let statut = if voulue {
+        let status = if requested {
             plugins::terminate(&mut child, plugins::SHUTDOWN_GRACE).await
         } else {
             child.wait().await
         };
-        (name, generation, statut, voulue)
+        (name, generation, status, requested)
     }
     .boxed()
 }
 
-/// Les children que le câblage à chaud doit tenir pour rejouer, après le
-/// démarrage, ce que la boucle de câblage initiale fait avec ses variables
-/// locales.
-/// Combien de temps un greffon qu'on vient de lancer garde le bénéfice du
-/// doute avant d'être rapporté « figé ».
+/// The children that hot wiring must hold to replay, after startup, what the
+/// initial wiring loop does with its local variables.
+/// How long a freshly launched plugin keeps the benefit of the doubt before
+/// being reported "stalled".
 ///
-/// Strictement plus long que `register::READ_TIMEOUT` (5 s), et ce n'est pas
-/// une marge de confort : une connexion déjà acceptée qui est **en train**
-/// d'écrire sa line d'announcement dispose de ces cinq secondes, et la rapporter
-/// figée pendant ce temps serait se contredire soi-même. Dix secondes couvrent
-/// donc le chargement du binaire depuis une carte SD, la liaison de ses sockets
-/// et l'écriture de son announcement, avec de la marge.
+/// Strictly longer than `register::READ_TIMEOUT` (5 s), and this is not a
+/// comfort margin: an already accepted connection that is **in the middle
+/// of** writing its announcement line has those five seconds, and reporting
+/// it stalled during that time would be contradicting ourselves. Ten seconds
+/// therefore cover loading the binary from an SD card, binding its sockets
+/// and writing its announcement, with room to spare.
 ///
-/// Au-delà, « figé » redevient le mot juste : le greffon est lancé, vivant, et
-/// muet — un diagnostic, pas une attente.
+/// Beyond that, "stalled" becomes the right word again: the plugin is
+/// launched, alive, and silent — a diagnosis, not a wait.
 const STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// L'échéance de démarrage est passée : faut-il rétrograder ce greffon en
-/// « figé » ?
+/// The startup deadline has passed: should this plugin be downgraded to
+/// "stalled"?
 ///
-/// **Seulement si sa line dit encore « démarrage ».** Entre le lancement et
-/// l'échéance, le greffon a pu s'annoncer (sa line décrit alors ses genres),
-/// mourir (elle dit « déconnecté »), ou être éteint depuis l'IHM (elle dit
-/// « désactivé »). Dans les trois cas, écraser remplacerait une information
-/// vraie par une fausse — et la fausse serait la plus trompeuse des quatre,
-/// puisqu'elle accuse un greffon qui va bien.
+/// **Only if its line still says "starting".** Between the launch and the
+/// deadline, the plugin may have announced itself (its line then describes
+/// its kinds), died (it says "disconnected"), or been disabled from the UI
+/// (it says "disabled"). In all three cases, overwriting would replace true
+/// information with false — and the false one would be the most misleading of
+/// the four, since it accuses a plugin that is doing fine.
 ///
-/// Relire l'état plutôt que tenir un registre à purger à chaque transition :
-/// c'est la leçon de `kill_triggers`, dont trois sites de purge étaient déjà un
-/// de trop.
-fn should_downgrade(statuts: &StatusState, name: &str) -> bool {
-    statuts.plugins.iter().any(|l| l.name == name && l.starting)
+/// Re-read the state rather than keep a registry to purge on every
+/// transition: that is the lesson of `kill_triggers`, whose three purge sites
+/// were already one too many.
+fn should_downgrade(statuses: &StatusState, name: &str) -> bool {
+    statuses.plugins.iter().any(|l| l.name == name && l.starting)
 }
 
 struct HotPlugChildren {
     sockets_dir: PathBuf,
-    /// Noms du manifest dans l'order du fichier : autorité sur les names
-    /// acceptés, et priorité d'arbitrage des `metadata`.
+    /// Manifest names in file order: the authority on accepted names, and
+    /// the arbitration priority of the `metadata` plugins.
     manifest_order: Vec<String>,
     source_update_tx: mpsc::Sender<(String, SourceUpdate)>,
     cmd_tx: mpsc::Sender<InputMessage>,
     enrich_tx: mpsc::Sender<(String, Enrichment)>,
     now_playing_rx: watch::Receiver<NowPlaying>,
     state_rx: watch::Receiver<PlayerState>,
-    /// Le second récepteur de `display_relay` : un afficheur câblé à chaud
-    /// doit être servi par un relais identique à celui du démarrage.
+    /// The second receiver of `display_relay`: a hot-wired display must be
+    /// served by a relay identical to the startup one.
     catalog_rx: watch::Receiver<SourcesCatalog>,
-    /// **Le même** `Arc` que celui du cœur et de l'`AppState` HTTP (voir
-    /// `assemble_covers_and_core`) : un afficheur câblé à chaud doit read les
-    /// pochettes que le cœur a déjà récupérées, pas un cache neuf et clear.
+    /// **The same** `Arc` as the core's and the HTTP `AppState`'s (see
+    /// `assemble_covers_and_core`): a hot-wired display must read the covers
+    /// the core has already fetched, not a fresh, empty cache.
     covers: Arc<cover::CoverCache>,
     status_state: Arc<RwLock<StatusState>>,
     admin_backends: admin::AdminBackends,
-    /// **Le même** `Arc` que celui de l'`AppState` HTTP, pour la même raison que
-    /// `covers` : purger un cache neuf et clear n'invaliderait rien de ce que les
-    /// routes servent réellement.
+    /// **The same** `Arc` as the HTTP `AppState`'s, for the same reason as
+    /// `covers`: purging a fresh, empty cache would invalidate nothing of
+    /// what the routes actually serve.
     admin_assets: Arc<admin::AssetCache>,
-    /// Par où un socket qui se ferme le fait savoir à la boucle principale.
+    /// How a closing socket makes itself known to the main loop.
     ///
-    /// **C'est le seul path par lequel la mort d'un greffon non supervisé
-    /// devient visible.** Un greffon relancé à la main échappe à
-    /// `plugin_waits` — le cœur n'est pas son parent, il ne verra jamais son
-    /// code de sortie —, mais ses sockets, eux, sont bien les nôtres : leur
-    /// fermeture est un fait que le cœur observe déjà, et qu'il se contentait de
-    /// journaliser. La page continuait donc de l'afficher connecté,
-    /// indéfiniment.
+    /// **This is the only path through which the death of an unsupervised
+    /// plugin becomes visible.** A manually restarted plugin escapes
+    /// `plugin_waits` — the core is not its parent, it will never see its
+    /// exit code — but its sockets are indeed ours: their closing is a fact
+    /// the core already observes, and used to merely log. The page therefore
+    /// kept showing it connected, indefinitely.
     ///
-    /// Porte `(name, génération de câblage)` : voir `cablages` dans la boucle,
-    /// qui dit pourquoi le numéro est indispensable.
+    /// Carries `(name, wiring generation)`: see `wirings` in the loop, which
+    /// says why the number is indispensable.
     unreachable_tx: mpsc::Sender<(String, u64)>,
 }
 
-/// Câble un greffon qui s'announcement **après** le rendez-vous de démarrage.
+/// Wires a plugin that announces itself **after** the startup rendezvous.
 ///
-/// Chaque kind reprend la forme du câblage initial. Deux différences, imposées
-/// par le fait que le cœur tourne déjà : la source passe par
-/// `Core::add_source`, et l'order d'arbitrage des `metadata` est **recalculé en
-/// entier** depuis le manifest au lieu d'être complété.
+/// Each kind follows the shape of the initial wiring. Two differences,
+/// imposed by the fact that the core is already running: the source goes
+/// through `Core::add_source`, and the `metadata` arbitration order is
+/// **recomputed in full** from the manifest instead of being appended to.
 ///
-/// Une ré-announcement d'un greffon déjà câblé suit le même path : on recâble.
-/// `add_source` remplace le client, et les relais précédents sortent d'eux-mêmes
-/// à leur premier échec d'envoi, leur socket ayant disparu — c'est ce que
-/// garantit la sortie de boucle de `display_relay`, sans laquelle ils
-/// s'accumuleraient à chaque restart en journalisant à chaque trame.
+/// A re-announcement of an already wired plugin follows the same path: we
+/// rewire. `add_source` replaces the client, and the previous relays exit on
+/// their own at their first failed send, their socket having disappeared —
+/// that is what `display_relay`'s loop exit guarantees, without which they
+/// would pile up on every restart, logging on every frame.
 async fn hotplug<P: player::Player>(
     announcement: Announcement,
     children: &HotPlugChildren,
     core: &mut core::Core<P>,
     gathered: &mut register::Gathered,
     kill_triggers: &HashMap<String, tokio::sync::oneshot::Sender<()>>,
-    non_supervises: &mut HashSet<String>,
-    // Numéro de ce câblage-ci, attribué par la boucle. Recopié dans chaque
-    // tâche de socket lancée ici, pour que la fermeture d'un socket d'une
-    // incarnation précédente soit reconnue comme telle et ignorée. Un `///` est
-    // refusé sur un paramètre, d'où le commentaire ordinaire.
+    non_supervised: &mut HashSet<String>,
+    // Number of this particular wiring, assigned by the loop. Copied into
+    // every socket task launched here, so that the closing of a socket from a
+    // previous incarnation is recognized as such and ignored. A `///` is
+    // rejected on a parameter, hence the ordinary comment.
     wiring: u64,
 ) {
     let name = announcement.name.clone();
-    // Le name fait autorité côté manifest, à chaud comme au rendez-vous : une
-    // announcement qui en porte un autre est nommée puis écartée, jamais câblée.
+    // The manifest is the authority on names, hot as at the rendezvous: an
+    // announcement carrying another one is named then discarded, never wired.
     if !children.manifest_order.contains(&name) {
         tracing::warn!("late announcement from unknown plugin {name}, ignored");
         return;
@@ -477,141 +476,141 @@ async fn hotplug<P: player::Player>(
         announcement.kinds,
         announcement.admin
     );
-    // Le cœur ne tient pas le `child` de ce greffon : `plugin_waits` ne reverra
-    // ni son prochain code de sortie ni son `mark_plugin_disconnected`. Le
-    // `connected: true` qu'on va poser sera vrai à l'instant où on le pose, et
-    // ne se démentira plus jamais tout seul.
+    // The core does not hold this plugin's `child`: `plugin_waits` will see
+    // neither its next exit code nor its `mark_plugin_disconnected`. The
+    // `connected: true` we are about to set will be true the instant we set
+    // it, and will never again correct itself on its own.
     //
-    // La condition était `gathered.dead.contains(&name)`, deux fois trop
-    // étroite : `dead` n'est rempli que par le rendez-vous de démarrage, donc
-    // elle manquait les dead observées par la boucle principale **et** les
-    // processus que le cœur n'a jamais lancés. `kill_triggers` répond exactement
-    // à la question posée, puisqu'il ne signifie que « lancé par nous et pas
-    // encore moissonné » — et une announcement prouve la vie de son émetteur.
+    // The condition used to be `gathered.dead.contains(&name)`, twice too
+    // narrow: `dead` is only filled by the startup rendezvous, so it missed
+    // the deaths observed by the main loop **and** the processes the core
+    // never launched. `kill_triggers` answers exactly the question asked,
+    // since it only means "launched by us and not yet reaped" — and an
+    // announcement proves its sender is alive.
     //
-    // Le name est **retenu**, et c'est là tout l'apport : les `retain` juste
-    // au-dessus effaçaient `dead` dans la foulée du `warn`, donc la seule trace
-    // disparaissait à l'instant du recâblage. Un défaut dont le programme avait
-    // conscience et dont il détruisait la preuve.
-    if liveness(&name, kill_triggers, non_supervises) != Liveness::Supervised {
-        // Cet avertissement disait « sa prochaine sortie passera inaperçue, et
-        // il ne pourra plus être allumé ni éteint depuis l'IHM avant un
-        // redémarrage du cœur ». **Les deux moitiés sont devenues fausses** :
-        // la fermeture de ses sockets est désormais observée, ce qui rend sa
-        // mort visible sur la page *et* le fait sortir de `non_supervises`,
-        // donc redevenir gérable. Ce qui reste vrai — et ce que ce
-        // `warn!` dit maintenant — est plus étroit : tant qu'il vit, le cœur ne
-        // peut pas l'arrêter, faute de tenir son `child`.
+    // The name is **retained**, and that is the whole gain: the `retain`
+    // calls just above erased `dead` right after the `warn`, so the only
+    // trace disappeared the instant of the rewiring. A defect the program was
+    // aware of and whose evidence it destroyed.
+    if liveness(&name, kill_triggers, non_supervised) != Liveness::Supervised {
+        // This warning used to say "its next exit will go unnoticed, and it
+        // can no longer be enabled or disabled from the UI until the core
+        // restarts". **Both halves have become false**: the closing of its
+        // sockets is now observed, which makes its death visible on the page
+        // *and* takes it out of `unsupervised`, hence manageable again. What
+        // remains true — and what this `warn!` now says — is narrower: while
+        // it lives, the core cannot stop it, for lack of holding its `child`.
         tracing::warn!(
             "wiring {name}, which is alive but not supervised by the core: it cannot be stopped from the admin UI while it lives, though the core will notice when its sockets close"
         );
-        non_supervises.insert(name.clone());
+        non_supervised.insert(name.clone());
     }
 
-    // Le rassemblement et l'order d'arbitrage sont mis à jour **avant** de
-    // lancer quoi que ce soit. L'order d'abord parce que le client `metadata`
-    // lancé plus bas peut send_frame un enrichment dès sa première trame, et
-    // le cœur rejette un enrichment « from an undeclared metadata plugin » :
-    // aujourd'hui la boucle principale ne peut pas drainer `enrich_rx` pendant
-    // ce bras, mais compter là-dessus, c'est faire dépendre la correction d'une
-    // sérialisation implicite qu'un refactor — ce câblage sorti dans une tâche —
-    // ferait tomber sans bruit.
+    // The gathering and the arbitration order are updated **before**
+    // launching anything. The order first because the `metadata` client
+    // launched below can send an enrichment from its very first frame, and
+    // the core rejects an enrichment "from an undeclared metadata plugin":
+    // today the main loop cannot drain `enrich_rx` during this arm, but
+    // relying on that would make correctness depend on an implicit
+    // serialization that a refactor — this wiring moved into a task — would
+    // silently break.
     //
-    // La liste est recalculée en **entier** depuis le manifest, jamais
-    // complétée en queue : la priorité est celle de `plugins.toml`, et un
-    // greffon `metadata` tardif y prend sa place du fichier. La logique d'order
-    // reste dans `register::metadata_order`, un seul endroit.
+    // The list is recomputed **in full** from the manifest, never appended
+    // to: the priority is that of `plugins.toml`, and a late `metadata`
+    // plugin takes its file position in it. The ordering logic stays in
+    // `register::metadata_order`, a single place.
     //
-    // Les deux `retain` gardent `Gathered` cohérent : un figé qui vient de
-    // parler n'est plus figé, un mort qui revient n'est plus mort. Rien ne read
-    // ces deux listes après le démarrage — la page de statut vient de
-    // `status_state` — mais la structure est la mémoire de ce que le cœur sait
-    // des plugins, et un name n'y appartient qu'à une seule des trois
-    // collections. Deux lines pour qu'elle ne mente pas au prochain player.
+    // The two `retain` calls keep `Gathered` consistent: a stalled plugin
+    // that just spoke is no longer stalled, a dead one that comes back is no
+    // longer dead. Nothing reads these two lists after startup — the status
+    // page comes from `status_state` — but the structure is the memory of
+    // what the core knows about the plugins, and a name belongs to only one
+    // of the three collections. Two lines so it does not lie to the next
+    // reader.
     gathered.stalled.retain(|n| n != &name);
     gathered.dead.retain(|n| n != &name);
     gathered.announcements.insert(name.clone(), announcement.clone());
     core.set_metadata_order(register::metadata_order(&children.manifest_order, gathered));
 
     let prefix = children.sockets_dir.join(&name);
-    // Les lines de statut sont composées à part puis **substituées** en bloc :
-    // voir `status::replace_plugin_lines`.
+    // The status lines are composed separately then **substituted** as a
+    // block: see `status::replace_plugin_lines`.
     let mut lines: Vec<PluginStatus> = Vec::new();
 
     for kind in &announcement.kinds {
         let socket = ritornello_plugin_sdk::socket_kind(&prefix, *kind);
         match kind {
             PluginKind::Source => {
-                // `connect_with_close` et non `connect` : la tâche de
-                // playback du SDK se terminait sur EOF en journalisant, sans
-                // prévenir personne. Un `oneshot` relayé vers la boucle, parce
-                // que le SDK ne doit rien savoir de la comptabilité du cœur.
-                let (ferme_tx, ferme_rx) = tokio::sync::oneshot::channel();
-                let injoignable = children.unreachable_tx.clone();
-                let nom_ferme = name.clone();
+                // `connect_with_close` and not `connect`: the SDK's read task
+                // used to end on EOF with a log line, without telling anyone.
+                // A `oneshot` relayed to the loop, because the SDK must know
+                // nothing of the core's bookkeeping.
+                let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+                let unreachable = children.unreachable_tx.clone();
+                let closed_name = name.clone();
                 tokio::spawn(async move {
-                    // `Err` = le client a été détruit sans que le socket ferme,
-                    // ce qui n'arrive qu'au remplacement du client : rien à
-                    // signaler alors, le remplaçant parle pour lui.
-                    if ferme_rx.await.is_ok() {
-                        let _ = injoignable.send((nom_ferme, wiring)).await;
+                    // `Err` = the client was dropped without the socket
+                    // closing, which only happens when the client is
+                    // replaced: nothing to report then, the replacement
+                    // speaks for itself.
+                    if closed_rx.await.is_ok() {
+                        let _ = unreachable.send((closed_name, wiring)).await;
                     }
                 });
                 match SourceClient::connect_with_close(
                     &socket,
                     name.clone(),
                     children.source_update_tx.clone(),
-                    Some(ferme_tx),
+                    Some(closed_tx),
                 )
                     .await
                 {
                     Ok(client) => {
-                        // Cloné avant que `hotplug_source` ne le prenne :
-                        // la demande de sources_catalog ci-dessous s'adresse au même
-                        // client.
-                        let client_catalogue = client.clone();
-                        // `hotplug_source` fait les trois choses que
-                        // `add_source` seul ne fait pas : la langue courante
-                        // (sinon un `cd` relancé à la main sur un appareil en
-                        // français revient en affichant `NO DISC`), le réveil si
-                        // c'est la **première** source du cœur (sinon elle est
-                        // active et muette), et la publication de l'état.
+                        // Cloned before `hotplug_source` takes it: the
+                        // catalog request below addresses the same client.
+                        let catalog_client = client.clone();
+                        // `hotplug_source` does the three things that
+                        // `add_source` alone does not: the current locale
+                        // (otherwise a manually restarted `cd` on a device in
+                        // French comes back displaying `NO DISC`), the wake-up
+                        // if it is the core's **first** source (otherwise it
+                        // is active and silent), and publishing the state.
                         //
-                        // Premier câblage ou recâblage : c'est précisément
-                        // l'événement que cherche qui débogue un greffon qui
-                        // bat, et le booléen le sait.
+                        // First wiring or rewiring: that is precisely the
+                        // event sought by whoever is debugging a flapping
+                        // plugin, and the boolean knows it.
                         match core.hotplug_source(name.clone(), client).await {
                             Ok(true) => {
                                 tracing::info!("{name} source client replaced (plugin rewired)")
                             }
                             Ok(false) => tracing::info!("{name} source wired for the first time"),
-                            // La source **est** câblée : seul son réveil a
-                            // échoué (mpv, ou la source elle-même). La line de
-                            // statut dit donc `connected: true`, et une commande
-                            // de la télécommande repassera par le même path.
+                            // The source **is** wired: only its wake-up
+                            // failed (mpv, or the source itself). The status
+                            // line therefore says `connected: true`, and a
+                            // remote-control command will go through the same
+                            // path again.
                             Err(e) => tracing::warn!("{name} source wired, but waking it failed: {e:#}"),
                         }
-                        // Son sources_catalog, comme au démarrage et pour la même
-                        // raison : une tâche détachée, la réponse corrélée
-                        // (`Noop`) n'apprenant rien — les présélections
-                        // arrivent par le canal de mises à jour. Sans cela une
-                        // source annoncée en retard entrait dans le sources_catalog
-                        // avec une liste **définitivement clear**, personne ne
-                        // redemandant jamais ; et un greffon recâblé après que
-                        // sa configuration a changé pendant qu'il était mort
-                        // laissait le cœur sur l'ancienne liste.
+                        // Its catalog, as at startup and for the same reason:
+                        // a detached task, the correlated reply (`Noop`)
+                        // teaching nothing — the presets arrive through the
+                        // update channel. Without this, a source announced
+                        // late entered the catalog with a **permanently
+                        // empty** list, nobody ever asking again; and a
+                        // plugin rewired after its configuration changed
+                        // while it was dead left the core on the old list.
                         //
-                        // Détachée, donc : ce bras tourne dans la boucle
-                        // principale, et l'attendre y ajouterait les 5 s du
-                        // protocol des sources — la boucle ne traiterait plus
-                        // une touche de télécommande pendant ce temps.
-                        let nom_catalogue = name.clone();
+                        // Detached, then: this arm runs in the main loop, and
+                        // awaiting it would add the source protocol's 5 s to
+                        // it — the loop would stop handling a remote-control
+                        // key during that time.
+                        let catalog_name = name.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = client_catalogue
+                            if let Err(e) = catalog_client
                                 .request(ritornello_proto::SourceReq::ListPresets)
                                 .await
                             {
-                                tracing::debug!("list_presets for {nom_catalogue}: {e}");
+                                tracing::debug!("list_presets for {catalog_name}: {e}");
                             }
                         });
                         lines.push(PluginStatus::kind(&name, "source", true, announcement.admin));
@@ -627,9 +626,9 @@ async fn hotplug<P: player::Player>(
                     display_relay(
                         name.clone(),
                         client,
-                        // Le drapeau **de l'announcement de ce greffon-là**, jamais
-                        // une valeur par défaut : c'est le binaire qui a dit
-                        // s'il voulait les bytes (voir `Announcement::covers`).
+                        // The flag **from this plugin's own announcement**, never
+                        // a default value: it is the binary that said whether it
+                        // wanted the bytes (see `Announcement::covers`).
                         announcement.covers,
                         children.covers.clone(),
                         children.state_rx.clone(),
@@ -647,16 +646,16 @@ async fn hotplug<P: player::Player>(
                 let tx = children.cmd_tx.clone();
                 let socket_for_task = socket.clone();
                 let task_name = name.clone();
-                let injoignable = children.unreachable_tx.clone();
+                let unreachable = children.unreachable_tx.clone();
                 tokio::spawn(async move {
                     if let Err(e) = run_input_client(&socket_for_task, tx).await {
                         tracing::warn!("input plugin {task_name} disconnected: {e}");
                     }
-                    // `run_input_client` ne rend **jamais** `Ok` : il sort en
-                    // erreur sur EOF comme sur canal du cœur fermé. Le second
-                    // cas signale dans le clear — la boucle est partie, son
-                    // récepteur avec — donc il n'a pas besoin d'être distingué.
-                    let _ = injoignable.send((task_name, wiring)).await;
+                    // `run_input_client` **never** returns `Ok`: it exits with an
+                    // error both on EOF and on the core's channel closing. The
+                    // second case reports into the void — the loop is gone, its
+                    // receiver with it — so it does not need to be distinguished.
+                    let _ = unreachable.send((task_name, wiring)).await;
                 });
                 lines.push(PluginStatus::kind(&name, "input", true, announcement.admin));
             }
@@ -665,72 +664,72 @@ async fn hotplug<P: player::Player>(
                 let np_rx = children.now_playing_rx.clone();
                 let socket_for_task = socket.clone();
                 let task_name = name.clone();
-                let injoignable = children.unreachable_tx.clone();
+                let unreachable = children.unreachable_tx.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
                         run_metadata_client(&socket_for_task, task_name.clone(), tx, np_rx).await
                     {
                         tracing::warn!("metadata plugin {task_name} disconnected: {e}");
                     }
-                    let _ = injoignable.send((task_name, wiring)).await;
+                    let _ = unreachable.send((task_name, wiring)).await;
                 });
                 lines.push(PluginStatus::kind(&name, "metadata", true, announcement.admin));
             }
         }
     }
 
-    // L'ancien dorsal est retiré **avant** la tentative de connexion, et quoi
-    // qu'announcement le greffon. Un dorsal survivant à une ré-announcement pointerait
-    // vers un socket disparu : `/api/admin/<name>` rendrait une erreur au bout
-    // du budget de la requête, là où un 404 franc dit tout de suite qu'il n'y a
-    // rien à cette adresse.
-    // Les active partent avec le dorsal : une ré-announcement est la fin d'un
-    // processus suivie du début d'un autre, et le nouveau peut porter un `ui.js`
-    // reconstruit. Les garder servait l'ancien jusqu'au redémarrage du cœur.
+    // The old backend is removed **before** the connection attempt, whatever
+    // the plugin announces. A backend surviving a re-announcement would point
+    // at a vanished socket: `/api/admin/<name>` would render an error only
+    // after the request's timeout budget, where a plain 404 says right away
+    // that there is nothing at this address.
+    // Assets go with the backend: a re-announcement is the end of one process
+    // followed by the start of another, and the new one may carry a rebuilt
+    // `ui.js`. Keeping them served the old one until the core restarted.
     admin::forget_page(&children.admin_backends, &children.admin_assets, &name).await;
-    let mut admin_joint = false;
+    let mut admin_connected = false;
     if announcement.admin {
         let path = ritornello_plugin_sdk::admin_socket(&prefix);
         match ritornello_plugin_sdk::AdminClient::connect(&path).await {
             Ok(client) => {
                 children.admin_backends.write().await.insert(name.clone(), client);
-                admin_joint = true;
+                admin_connected = true;
             }
             Err(e) => tracing::warn!("admin plugin {name} unreachable: {e}"),
         }
     }
-    // Même règle qu'au démarrage : le drapeau suit ce qui a été effectivement
-    // **joint**, pas ce que le greffon a annoncé — une announcement `admin: true`
-    // dont le `connect` échoue ne doit pas laisser l'IHM pointer vers une page
-    // qui répond 404. Réaffirmé sur toutes les lines plutôt que corrigé dans le
-    // seul cas d'échec : une seule vérité, écrite une seule fois.
+    // Same rule as at startup: the flag follows what was actually
+    // **connected**, not what the plugin announced — an announcement with
+    // `admin: true` whose `connect` fails must not leave the UI pointing at a
+    // page that answers 404. Reasserted on every line rather than fixed only
+    // in the failure case: one truth, written once.
     for line in lines.iter_mut() {
-        line.admin = admin_joint;
+        line.admin = admin_connected;
     }
 
-    // **Remplacer, jamais ajouter** : un greffon qui se réannonce accumulerait
-    // sinon une line de plus à chaque restart. Le remplacement par une liste
-    // clear garde le greffon visible en kind inconnu, voir
-    // `status::replace_plugin_lines` : une announcement à `kinds: []` doit signaler
-    // un greffon mal compilé, pas le faire disparaître de la page.
+    // **Replace, never append**: a plugin that re-announces itself would
+    // otherwise accumulate one more line at every restart. Replacing with a
+    // fresh list keeps the plugin visible with an unknown kind, see
+    // `status::replace_plugin_lines`: an announcement with `kinds: []` must
+    // report a badly built plugin, not make it disappear from the page.
     {
-        let mut statuts = children.status_state.write().await;
-        status::replace_plugin_lines(&mut statuts, &name, lines, admin_joint);
+        let mut statuses = children.status_state.write().await;
+        status::replace_plugin_lines(&mut statuses, &name, lines, admin_connected);
     }
 }
 
-/// Construit le `Core` et l'`AppState` HTTP avec **le même** `Arc<CoverCache>`
-/// remis aux deux : c'est cette fonction qui construit ce cache, jamais
-/// `main` directement, et c'est elle — pas une relecture du code de `main` —
-/// qu'un test appelle pour vérifier le partage par `Arc::ptr_eq` (voir
-/// `core::tests::le_coeur_et_lappstate_partagent_reellement_le_meme_arc`).
-/// Une régression où `main` reconstruirait un second cache pour l'un des
-/// deux romprait cette égalité au premier appel, pas seulement à la playback
-/// du diff.
+/// Builds the `Core` and the HTTP `AppState` with **the same**
+/// `Arc<CoverCache>` handed to both: this function is what builds that cache,
+/// never `main` directly, and it is this function — not a re-reading of
+/// `main`'s code — that a test calls to check the sharing via `Arc::ptr_eq`
+/// (see `core::tests::the_core_and_the_appstate_really_share_the_same_arc`).
+/// A regression where `main` rebuilt a second cache for one of the two would
+/// break that equality on the very first call, not only when reviewing the
+/// diff.
 ///
-/// `skeleton.covers` est ignoré : il n'existe que pour éviter à l'appelant
-/// de construire l'`AppState` en deux morceaux — tous ses autres champs
-/// traversent inchangés.
+/// `skeleton.covers` is ignored: it exists only so the caller does not have
+/// to build the `AppState` in two pieces — all its other fields pass through
+/// unchanged.
 pub(crate) fn assemble_covers_and_core<P: player::Player>(
     player: P,
     wiring: core::Wiring,
@@ -739,117 +738,116 @@ pub(crate) fn assemble_covers_and_core<P: player::Player>(
     skeleton: AppState,
 ) -> (AppState, core::Core<P>) {
     let covers = Arc::new(cover::CoverCache::new());
-    let coeur = core::Core::new(player, wiring, covers.clone(), cover_tx, extraction_tx);
+    let core_engine = core::Core::new(player, wiring, covers.clone(), cover_tx, extraction_tx);
     let app_state = AppState { covers, ..skeleton };
-    (app_state, coeur)
+    (app_state, core_engine)
 }
 
-/// Éteint un greffon : on demande sa mort, puis on retire **tout** ce que le
-/// cœur tenait de lui.
+/// Turns off a plugin: we request its death, then remove **everything** the
+/// core held of it.
 ///
-/// Le décâblage est fait ici et non au retour de sa mort : la page attend une
-/// réponse, et elle doit décrire un état déjà vrai. Le processus, lui, meurt à
-/// son rythme — au pire deux secondes plus tard, `SIGKILL` en main — et sa
-/// sortie ne fera plus que produire une line de journal.
+/// The unwiring happens here, not on hearing back about its death: the page
+/// is waiting for a reply, and it must describe an already-true state. The
+/// process itself dies at its own pace — at worst two seconds later,
+/// `SIGKILL` in hand — and its exit will only produce a log line from then on.
 ///
-/// Les afficheurs et les entrées n'ont rien d'explicite à retirer : leurs
-/// relais sortent de boucle au premier échec d'envoi ou sur EOF, ce que la
-/// mort du socket provoque.
+/// Displays and inputs have nothing explicit to remove: their relays exit the
+/// loop on the first failed send or on EOF, which the socket's death causes.
 ///
-/// Pour un afficheur, cela vaut bien pour ses **deux** canaux : `display_relay`
-/// tient un récepteur d'état et un récepteur de sources_catalog, et les deux bras de
-/// son `select!` reversent leur résultat d'envoi dans le même contrôle d'erreur
-/// — quel que soit celui qui se réveille le premier après la mort du socket, la
-/// tâche sort.
+/// For a display, this holds for its **two** channels: `display_relay` holds
+/// a state receiver and a sources-catalog receiver, and both arms of its
+/// `select!` funnel their send result into the same error handling — whichever
+/// wakes up first after the socket dies, the task exits.
 ///
-/// Le canal du sources_catalog add une occasion de le remarquer plus tôt, **mais
-/// Ce que le cœur sait d'un greffon, une fois ses **deux** registres croisés.
+/// The sources-catalog channel adds a chance to notice it earlier, **but**
+/// what the core knows of a plugin, once its **two** registries are crossed.
 ///
-/// `kill_triggers` ne signifie que « lancé par nous et pas encore moissonné » —
-/// son propre commentaire le dit. Les deux gardes de la bascule s'en servaient
-/// pourtant comme oracle de vie, et manquaient donc exactement le cas pour
-/// lequel elles avaient été écrites : un greffon **vivant** que le cœur ne
-/// supervise pas. L'allumage relançait un second processus qui volait le préfixe
-/// de sockets du premier ; l'extinction décâblait tout, posait `disabled` et
-/// rendait `true`, si bien que l'IHM affichait « inactif » pendant que le
-/// processus tournait avec ses sockets.
+/// `kill_triggers` only means "launched by us and not yet reaped" — its own
+/// comment says so. Yet the toggle's two guards used it as the oracle of
+/// liveness, and therefore missed exactly the case they were written for: a
+/// **living** plugin that the core does not supervise. Turning it on relaunched
+/// a second process that stole the first one's socket prefix; turning it off
+/// unwired everything, set `disabled` and returned `true`, so the UI showed
+/// "inactive" while the process kept running with its sockets.
 ///
-/// `announcements` ne pouvait pas serve d'oracle non plus, et c'est contre
-/// l'intuition : la branche de décès de la boucle principale **ne le purge
-/// pas** (seule `hot_unplug` le fait). Un greffon planté y garde son
-/// announcement, donc s'y fier aurait fait *refuser* l'extinction d'un greffon
-/// planté — le cas le plus courant.
+/// `announcements` could not serve as the oracle either, and that is
+/// counterintuitive: the main loop's death branch **does not purge it**
+/// (only `hot_unplug` does). A crashed plugin keeps its announcement there,
+/// so relying on it would have made the shutdown of a crashed plugin get
+/// *refused* — the most common case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Liveness {
-    /// Aucun processus connu : ni lancé par le cœur, ni annoncé hors de sa
-    /// supervision.
+    /// No known process: neither launched by the core, nor announced outside
+    /// its supervision.
     Off,
-    /// Lancé par le cœur et pas encore moissonné : il tient de quoi l'arrêter.
+    /// Launched by the core and not yet reaped: it holds what it takes to
+    /// stop it.
     Supervised,
-    /// Vivant et **hors d'atteinte** : il a parlé, le cœur ne tient pas son
-    /// `child`. Relance à la main, superviseur système, ou `child.wait()` déjà
-    /// consommée par le rendez-vous de démarrage.
+    /// Alive and **out of reach**: it has spoken, the core does not hold its
+    /// `child`. Manually relaunched, a system supervisor, or `child.wait()`
+    /// already consumed by the startup rendezvous.
     ///
-    /// **Cet état n'est plus définitif.** Le cœur ne verra jamais le code de
-    /// sortie d'un tel processus, mais il voit ses sockets se fermer, et il en
-    /// déduit qu'il n'est plus joignable : le name quitte alors `non_supervises`
-    /// et redevient `Off`, donc allumable. Voir le bras `injoignable_rx` de
-    /// la boucle principale.
+    /// **This state is no longer permanent.** The core will never see such a
+    /// process's exit code, but it does see its sockets close, and infers
+    /// from that it is no longer reachable: the name then leaves
+    /// `non_supervised` and becomes `Off` again, hence turn-on-able. See the
+    /// `unreachable_rx` arm of the main loop.
     OutOfReach,
 }
 
-/// Croise les deux registres pour un name.
+/// Crosses the two registries for a name.
 ///
-/// `Supervised` l'emporte quand les deux répondent : ce que le cœur peut
-/// arrêter primerait sur ce qu'il ne peut que constater. La conjonction est
-/// **inatteignable**, mais plus pour la raison qui était écrite ici.
+/// `Supervised` wins when both answer: what the core can stop should take
+/// priority over what it can only observe. The conjunction is
+/// **unreachable**, but no longer for the reason once written here.
 ///
-/// L'ancien argument était qu'un name classé `OutOfReach` ne peut pas revenir
-/// dans `kill_triggers`, la garde d'allumage refusant de lancer un processus
-/// pour lui — donc jamais dans les deux tables. Ce n'est plus vrai : depuis que
-/// la fermeture des sockets est observée, un name **sort** de `non_supervises`
-/// quand son processus cesse d'être joignable, et il peut être rallumé ensuite.
+/// The old argument was that a name classified `OutOfReach` can never come
+/// back into `kill_triggers`, the turn-on guard refusing to launch a process
+/// for it — hence never in both tables. That is no longer true: since the
+/// closing of sockets is observed, a name **leaves** `non_supervised` once its
+/// process stops being reachable, and it can be relaunched afterwards.
 ///
-/// La conclusion tient quand même, et par un path plus court : la sortie de
-/// `non_supervises` précède toujours l'allumage qui l'inscrirait dans
-/// `kill_triggers` — c'est ce qui rend cet allumage possible. Les deux
-/// appartenances restent donc exclusives à tout instant. L'order est écrit
-/// quand même : il rend la fonction totale sans dépendre de cet argument.
+/// The conclusion still holds, though, by a shorter path: leaving
+/// `non_supervised` always precedes the turn-on that would register it in
+/// `kill_triggers` — that is what makes that turn-on possible. The two
+/// memberships therefore stay exclusive at every instant. The order is
+/// written anyway: it makes the function total without depending on that
+/// argument.
 fn liveness(
     name: &str,
     kill_triggers: &HashMap<String, tokio::sync::oneshot::Sender<()>>,
-    non_supervises: &HashSet<String>,
+    non_supervised: &HashSet<String>,
 ) -> Liveness {
     if kill_triggers.contains_key(name) {
         Liveness::Supervised
-    } else if non_supervises.contains(name) {
+    } else if non_supervised.contains(name) {
         Liveness::OutOfReach
     } else {
         Liveness::Off
     }
 }
 
-/// seulement pour un greffon qui possédait une source** : c'est son retrait qui
-/// republie le sources_catalog. Pour un greffon purement afficheur — la console, et le
-/// greffon MPD lui-même — `remove_source` rend `Ok(false)`, rien n'est republié,
-/// et en veille (où aucun tick d'état n'est armé) le relais mort reste garé
-/// jusqu'au prochain réveil. Sans conséquence : il ne consomme rien en
-/// attendant, et il sortira au premier envoi. Mais la line de statut dit
-/// « déconnecté » avant que la tâche n'ait constaté quoi que ce soit, et c'est
-/// voulu — l'accusé décrit un état déjà vrai, pas l'instant où la tâche
-/// l'apprend.
+/// only for a plugin that owned a source**: it is its removal that republishes
+/// the sources catalog. For a purely-display plugin — the console, and the
+/// MPD plugin itself — `remove_source` returns `Ok(false)`, nothing is
+/// republished, and in standby (where no state tick is armed) the dead relay
+/// stays parked until the next wake-up. Without consequence: it consumes
+/// nothing while waiting, and it will exit on the first send. But the status
+/// line says "disconnected" before the task has observed anything, and that
+/// is intentional — the acknowledgment describes an already-true state, not
+/// the instant the task learns of it.
 async fn hot_unplug<P: player::Player>(
     name: &str,
     children: &HotPlugChildren,
     core: &mut core::Core<P>,
     gathered: &mut register::Gathered,
     kill_triggers: &mut HashMap<String, tokio::sync::oneshot::Sender<()>>,
-    non_supervises: &HashSet<String>,
+    non_supervised: &HashSet<String>,
 ) -> bool {
-    // Rien pour l'arrêter : décâbler quand même et poser `disabled` rendrait
-    // « inactif » un greffon qui tourne toujours avec son port et ses sockets.
-    // Le refus est la seule réponse vraie, et le journal nomme le remède.
-    if liveness(name, kill_triggers, non_supervises) == Liveness::OutOfReach {
+    // Nothing to stop it with: unwiring anyway and setting `disabled` would
+    // show "inactive" for a plugin still running with its port and sockets.
+    // Refusing is the only true answer, and the log names the remedy.
+    if liveness(name, kill_triggers, non_supervised) == Liveness::OutOfReach {
         tracing::warn!(
             "refusing to disable {name}: it is alive but the core does not own its process, so it cannot be stopped — kill it yourself, or restart the core to let it take ownership again"
         );
@@ -857,54 +855,54 @@ async fn hot_unplug<P: player::Player>(
     }
     tracing::info!("disabling plugin {name}: killing it and unwiring everything it served");
     if let Some(tx) = kill_triggers.remove(name) {
-        // Le récepteur est dans la future de supervision : une erreur
-        // d'envoi voudrait dire qu'elle est déjà finie, donc que le processus
-        // est déjà mort. Rien à rattraper.
+        // The receiver lives in the supervision future: a send error would
+        // mean it is already finished, hence the process is already dead.
+        // Nothing to catch up on.
         let _ = tx.send(());
     }
     if let Err(e) = core.remove_source(name).await {
         tracing::warn!("unwiring source {name}: {e:#}");
     }
-    // Le name sort du rassemblement, puis l'order d'arbitrage est recalculé en
-    // **entier** depuis le manifest — le path qu'emprunte déjà toute
-    // announcement tardive, et la seule façon qu'un greffon rallumé retrouve sa
-    // priorité de fichier.
+    // The name leaves the gathering, then the arbitration order is recomputed
+    // in **full** from the manifest — the same path any late announcement
+    // already takes, and the only way a relaunched plugin regains its file
+    // priority.
     gathered.announcements.remove(name);
     gathered.stalled.retain(|n| n != name);
     gathered.dead.retain(|n| n != name);
     core.set_metadata_order(register::metadata_order(&children.manifest_order, gathered));
-    // Retiré, sinon `/plugins/<name>/` attendrait le budget de la requête pour
-    // finir en erreur, là où un 404 franc dit tout de suite qu'il n'y a rien à
-    // cette adresse.
+    // Removed, otherwise `/plugins/<name>/` would wait out the request's
+    // timeout budget before ending in error, where a plain 404 says right
+    // away that there is nothing at this address.
     admin::forget_page(&children.admin_backends, &children.admin_assets, name).await;
-    let mut statuts = children.status_state.write().await;
-    status::replace_plugin_lines(&mut statuts, name, vec![PluginStatus::disabled(name)], false);
-    statuts.active_source = core.active_source().to_string();
+    let mut statuses = children.status_state.write().await;
+    status::replace_plugin_lines(&mut statuses, name, vec![PluginStatus::disabled(name)], false);
+    statuses.active_source = core.active_source().to_string();
     true
 }
 
-/// Rallume un greffon : on restart son binaire, et c'est tout.
+/// Turns a plugin back on: we restart its binary, and that is all.
 ///
-/// Le câblage n'est **pas** fait ici : le greffon va s'annoncer sur le socket
-/// d'enregistrement, que le cœur tient ouvert pour la vie du processus, et
-/// `hotplug` fera le reste. C'est le path d'un greffon relancé à la
-/// main, déjà éprouvé.
+/// The wiring is **not** done here: the plugin will announce itself on the
+/// registration socket, which the core keeps open for the life of the
+/// process, and `hotplug` will do the rest. This is the same path a manually
+/// relaunched plugin already takes, already proven.
 ///
-/// C'est aussi ce qui redemande ses présélections à une source rallumée, et il
-/// n'y a rien à faire de plus ici : `hot_unplug` a vidé son entrée de
-/// `presets_par_source` (voir `Core::remove_source`), donc le sources_catalog la
-/// donnerait clear — mais `hotplug` détache un `ListPresets` sur **tout**
-/// câblage de source, premier ou non, et la liste revient par le canal de mises
-/// à jour. Un greffon dont la configuration a changé pendant qu'il était éteint
-/// est donc relu, jamais hérité.
+/// This is also what asks a relaunched source for its presets again, and
+/// there is nothing more to do here: `hot_unplug` emptied its entry in
+/// `presets_by_source` (see `Core::remove_source`), so the sources catalog
+/// would give it back empty — but `hotplug` detaches a `ListPresets` on
+/// **every** source wiring, first or not, and the list comes back through the
+/// update channel. A plugin whose configuration changed while it was off is
+/// therefore reread, never inherited.
 ///
-/// D'ici là, la line dit « figé » : lancé, pas encore annoncé. C'est
-/// exactement ce que le mot veut dire, et la page n'a pas besoin d'un
-/// quatrième état pour une poignée de secondes.
+/// Until then, the line says "stalled": launched, not yet announced. That is
+/// exactly what the word means, and the page does not need a fourth state for
+/// a handful of seconds.
 ///
-/// Rend `false` si le binaire n'a pas pu être lancé — le path d'`exec` a
-/// changé, le fichier n'est plus exécutable. La cause précise part au journal,
-/// que l'IHM affiche déjà dans sa popin d'erreurs.
+/// Returns `false` if the binary could not be launched — the `exec` path
+/// changed, the file is no longer executable. The precise cause goes to the
+/// log, which the UI already shows in its error popup.
 async fn relaunch(
     name: &str,
     exec: &str,
@@ -920,12 +918,12 @@ async fn relaunch(
             tracing::info!("plugin {name} re-enabled, launched again");
             let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
             kill_triggers.insert(name.to_string(), kill_tx);
-            let mut statuts = children.status_state.write().await;
-            // « Démarrage » et non « figé » : le binaire vient d'être lancé,
-            // il n'a pas encore eu le temps de lier ses sockets. C'est la
-            // boucle du cœur qui rétrograde en « figé » au bout de
-            // `STARTUP_TIMEOUT`, si rien n'est venu.
-            status::replace_plugin_lines(&mut statuts, name, vec![PluginStatus::startup(name)], false);
+            let mut statuses = children.status_state.write().await;
+            // "Starting", not "stalled": the binary was just launched, it has
+            // not yet had time to bind its sockets. It is the core loop that
+            // downgrades it to "stalled" after `STARTUP_TIMEOUT`, if nothing
+            // came in.
+            status::replace_plugin_lines(&mut statuses, name, vec![PluginStatus::startup(name)], false);
             Some(supervise(name.to_string(), generation, child, kill_rx))
         }
         Err(e) => {
@@ -935,40 +933,39 @@ async fn relaunch(
     }
 }
 
-/// Vrai pour une trame que le cœur accepte d'écrire au journal.
+/// True for a frame the core accepts to write to the log.
 ///
-/// **Elle n'écarte qu'une chose : le bavardage de `lofty` sous le niveau
-/// erreur.** `player::mpv::embedded_cover` ouvre le fichier joué avec
-/// `lofty` pour en extraire une cover, donc **à chaque changement de
-/// piste**, et `lofty` y émet un `WARN` par MP3 sans en-tête Xing —
-/// « MPEG: Using bitrate to estimate duration ». Ce n'est pas un incident :
-/// c'est la méthode d'estimation normale pour ce format, elle n'appelle aucune
-/// action, et elle se répète par piste.
+/// **It filters out only one thing: `lofty`'s chatter below error level.**
+/// `player::mpv::embedded_cover` opens the file being played with `lofty` to
+/// extract a cover, hence **on every track change**, and `lofty` emits a
+/// `WARN` there for every MP3 without a Xing header — "MPEG: Using bitrate to
+/// estimate duration". This is not an incident: it is the normal estimation
+/// method for this format, it calls for no action, and it repeats per track.
 ///
-/// Le coût est double, et c'est ce qui la rend nuisible plutôt que seulement
-/// bruyante : elle noie le journal, **et** elle chasse de vraies erreurs du
-/// buffer des « dernières erreurs », qui ne retient que les `WARN` et au-delà.
+/// The cost is twofold, and that is what makes it harmful rather than merely
+/// noisy: it drowns the log, **and** it pushes real errors out of the
+/// "recent errors" buffer, which only retains `WARN` and above.
 ///
-/// Le même filtre existe dans le greffon `files`, qui sonde les durées avec la
-/// même bibliothèque. Deux copies d'une règle de trois lines, plutôt qu'un
-/// crate partagé pour l'occasion — mais si une troisième apparaît, c'est le
-/// signe qu'il faut le crate.
+/// The same filter exists in the `files` plugin, which probes durations with
+/// the same library. Two copies of a three-line rule, rather than a shared
+/// crate for the occasion — but if a third one appears, that is the sign the
+/// crate is needed.
 ///
-/// `lofty` garde ses `ERROR` : une trame que la bibliothèque juge fautive reste
-/// une information.
+/// `lofty` keeps its `ERROR`s: a frame the library judges faulty remains
+/// information.
 fn frame_to_log(metadata: &tracing::Metadata<'_>) -> bool {
-    // `>` et non `<` : dans `tracing`, l'order des niveaux est celui de la
-    // verbosité, donc `ERROR` est le plus **petit**. « Plus verbeux qu'erreur »
-    // s'écrit bien `> Level::ERROR`.
+    // `>` and not `<`: in `tracing`, the order of levels follows verbosity,
+    // so `ERROR` is the **smallest**. "More verbose than error" is indeed
+    // written `> Level::ERROR`.
     !(metadata.target().starts_with("lofty") && *metadata.level() > tracing::Level::ERROR)
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 500 et non 50 : l'IHM a désormais une popin qui liste tout le buffer
-    // derrière un filtre, et 50 lines ne remontent pas plus loin que la carte
-    // qui en affiche déjà les dernières. 500 lines pèsent quelques dizaines de
-    // kio, relevées une fois par ouverture de popin — pas à chaque sondage.
+    // 500 and not 50: the UI now has a popup listing the whole buffer behind
+    // a filter, and 50 lines would not reach any further back than the card
+    // that already shows the latest ones. 500 lines weigh a few dozen KB,
+    // read once per popup opening — not on every poll.
     let log_buffer = Arc::new(LogBuffer::new(500));
     let log_buffer_for_writer = log_buffer.clone();
     tracing_subscriber::registry()
@@ -980,15 +977,14 @@ async fn main() -> Result<()> {
                 .with_writer(move || LogBufferWriter(log_buffer_for_writer.clone()))
                 .with_filter(LevelFilter::WARN),
         )
-        // Pose sur le registre et non sur une couche : les deux couches
-        // ci-dessus doivent l'ignorer, le terminal comme le buffer.
+        // Applied on the registry, not on a single layer: both layers above
+        // must ignore it, the terminal as much as the buffer.
         .with(tracing_subscriber::filter::filter_fn(frame_to_log))
         .init();
 
-    // Balaie les fichiers temporaires d'une exécution précédente avant que
-    // quoi que ce soit ne puisse en recréer : voir `cover::purge_temp_files`
-    // pour la raison (accumulation, pas fraîcheur — celle-ci est déjà
-    // garantie ailleurs).
+    // Sweeps the temp files from a previous run before anything can recreate
+    // them: see `cover::purge_temp_files` for the reason (accumulation, not
+    // freshness — that is already guaranteed elsewhere).
     cover::purge_temp_files();
 
     let plugins_path = PathBuf::from(env_or("RITORNELLO_PLUGINS", "/etc/ritornello/plugins.toml"));
@@ -1012,141 +1008,142 @@ async fn main() -> Result<()> {
     )));
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<InputMessage>(32);
-    // Événements de mpv : un `mpsc`, pas un `broadcast` — il n'y a qu'un
-    // consommateur (la boucle ci-dessous), et la sémantique avec perte de
-    // `broadcast` (`Lagged`) pouvait jeter un `PlaybackIdle` que mpv, qui ne
-    // signale que les transitions, n'aurait jamais réémis : stream coupé sans
-    // restart jusqu'à la prochaine action. Ici, canal plein = contre-pression
-    // sur la pompe d'événements, jamais de perte.
+    // mpv events: an `mpsc`, not a `broadcast` — there is only one consumer
+    // (the loop below), and `broadcast`'s lossy semantics (`Lagged`) could
+    // drop a `PlaybackIdle` that mpv, which only signals transitions, would
+    // never re-emit: a stream cut off with no restart until the next action.
+    // Here, a full channel means backpressure on the event pump, never a
+    // loss.
     let (ev_tx, mut ev_rx) = mpsc::channel::<Event>(64);
     let (source_update_tx, mut source_update_rx) = mpsc::channel::<(String, SourceUpdate)>(32);
-    // Ce qui plays, vers les plugins `metadata` : un `watch`, parce que seule la
-    // dernière valeur compte et qu'un plugin lent ne doit pas bloquer le cœur.
+    // What is playing, towards `metadata` plugins: a `watch`, because only
+    // the latest value matters and a slow plugin must not block the core.
     let (now_playing_tx, now_playing_rx) = watch::channel(NowPlaying {
         source: persisted.active_source.clone(),
         identity: None,
         known: Known::default(),
     });
-    // État structuré du player : vers la SPA (route SSE) et vers les plugins
-    // Display, qui composent eux-mêmes leur mise en page depuis cette même
-    // trame (un seul canal depuis la Task 4 de « afficheurs, état structuré »).
+    // Structured player state: towards the SPA (SSE route) and towards
+    // Display plugins, which compose their own layout from this same frame
+    // (a single channel since Task 4 of "displays, structured state").
     let (state_tx, state_rx) = watch::channel(PlayerState {
         source: persisted.active_source.clone(),
         ..Default::default()
     });
-    // SourcesCatalog des sources : vers les plugins Display **seulement**, sur son
-    // propre canal. Vide au départ, `Core::new` le publie dès qu'il connaît ses
-    // sources — le relais d'un afficheur envoie la valeur courante à la
-    // connexion, donc un afficheur câblé avant cette publication reçoit le
-    // sources_catalog réel au changement qui suit.
+    // Sources catalog: towards Display plugins **only**, on its own channel.
+    // Empty at first, `Core::new` publishes it as soon as it knows its
+    // sources — a display's relay sends the current value on connection, so
+    // a display wired before that publication receives the real sources
+    // catalog on the next change.
     let (sources_catalog_tx, catalog_rx) = watch::channel(SourcesCatalog::default());
     let (enrich_tx, mut enrich_rx) = mpsc::channel::<(String, Enrichment)>(32);
     let (audio_tx, mut audio_rx) = mpsc::channel::<Option<String>>(4);
     let (locale_tx, mut locale_rx) = mpsc::channel::<String>(4);
     let (theme_tx, mut theme_rx) = mpsc::channel::<theme::ThemeState>(4);
     let (settings_tx, mut settings_rx) = mpsc::channel::<state::Settings>(4);
-    let (greffon_tx, mut greffon_rx) = mpsc::channel::<status::PluginOrder>(4);
+    let (plugin_order_tx, mut plugin_order_rx) = mpsc::channel::<status::PluginOrder>(4);
 
-    // mpv. Les deux durées de buffer sont réglables sans recompiler : la bonne
-    // valeur dépend du réseau et de la charge de la machine, pas du code.
-    let audio_buffer_brut = std::env::var("RITORNELLO_AUDIO_BUFFER").ok();
-    let readahead_brut = std::env::var("RITORNELLO_NETWORK_READAHEAD").ok();
-    let audio_buffer = player::mpv::audio_buffer_setting(audio_buffer_brut.as_deref());
-    let readahead = player::mpv::readahead_setting(readahead_brut.as_deref());
+    // mpv. Both buffer durations are configurable without recompiling: the
+    // right value depends on the network and the machine's load, not on the
+    // code.
+    let audio_buffer_raw = std::env::var("RITORNELLO_AUDIO_BUFFER").ok();
+    let readahead_raw = std::env::var("RITORNELLO_NETWORK_READAHEAD").ok();
+    let audio_buffer = player::mpv::audio_buffer_setting(audio_buffer_raw.as_deref());
+    let readahead = player::mpv::readahead_setting(readahead_raw.as_deref());
     let (mpv_player, mut mpv_child) =
         player::mpv::start(&mpv_bin, &mpv_socket, &cd_dev, audio_buffer, readahead, ev_tx)
             .await
             .context("starting mpv")?;
 
-    // Répertoire neuf, puis le socket d'enregistrement lié AVANT tout
-    // lancement : un greffon qui démarre vite trouve toujours quelqu'un.
+    // Fresh directory, then the registration socket bound BEFORE any launch:
+    // a plugin that starts fast always finds someone there.
     let sockets_dir = plugins::prepare_sockets_dir(Path::new(&runtime_dir))?;
     let register_path = sockets_dir.join("register.sock");
     let register_listener = tokio::net::UnixListener::bind(&register_path)
         .with_context(|| format!("binding {}", register_path.display()))?;
 
     let mut plugin_waits: FuturesUnordered<PluginExit> = FuturesUnordered::new();
-    let mut lances: Vec<String> = Vec::new();
+    let mut launched: Vec<String> = Vec::new();
     let mut plugin_statuses = Vec::new();
-    // Déclencheurs d'extinction, un par lancement : c'est la seule prise sur
-    // un `Child` déplacé dans sa future de supervision. L'invariant visé —
-    // une entrée vit exactement le temps d'un processus lancé et non encore
-    // moissonné — est tenu par **trois** points de purge, pas un seul : le
-    // bras `plugin_waits.next()` la retire dès qu'une mort qu'il traite
-    // concerne l'incarnation courante (génération qui correspond, une mort
-    // périmée n'y touche pas, l'entrée appartenant déjà au processus
-    // relancé) ; le nettoyage juste après le rendez-vous de démarrage
-    // (`gathered.dead`) la retire pour les plugins dead *pendant* ce
-    // rendez-vous, dont `plugin_waits` ne reverra jamais la mort — voir
-    // `gather` et le commentaire de `hotplug` sur les annonces
-    // tardives ; et `hot_unplug` la retire elle-même dès l'extinction
-    // demandée depuis l'IHM, sans attendre que le processus tué soit
-    // effectivement moissonné. Envoyer malgré tout à une supervision déjà
-    // terminée échoue simplement, sans effet : c'est pour cela que le
-    // résultat de l'envoi est ignoré partout où on l'utilise.
+    // Shutdown triggers, one per launch: this is the only handle on a `Child`
+    // moved into its supervision future. The targeted invariant — an entry
+    // lives exactly as long as a launched, not-yet-reaped process — is held
+    // by **three** purge sites, not one: the `plugin_waits.next()` arm
+    // removes it as soon as a death it handles concerns the current
+    // incarnation (a matching generation; a stale death does not touch it,
+    // the entry already belonging to the relaunched process); the cleanup
+    // right after the startup rendezvous (`gathered.dead`) removes it for
+    // plugins dead *during* that rendezvous, whose death `plugin_waits` will
+    // never see again — see `gather` and `hotplug`'s comment on late
+    // announcements; and `hot_unplug` removes it itself as soon as the
+    // shutdown is requested from the UI, without waiting for the killed
+    // process to actually be reaped. Sending anyway to an already finished
+    // supervision simply fails, with no effect: that is why the send's
+    // result is ignored everywhere it is used.
     let mut kill_triggers: HashMap<String, tokio::sync::oneshot::Sender<()>> = HashMap::new();
-    // L'autre moitié de l'oracle de vie : les plugins qui se sont annoncés
-    // sans que le cœur tienne leur processus. Voir `Liveness`, qui dit pourquoi
-    // `kill_triggers` seul mentait dans les deux sens.
+    // The other half of the liveness oracle: plugins that announced
+    // themselves without the core holding their process. See `Liveness`,
+    // which says why `kill_triggers` alone used to lie both ways.
     //
-    // **Ce registre ne se purge jamais**, et c'est assumé plutôt que subi : la
-    // mort d'un processus que le cœur ne supervise pas est par définition
-    // inobservable, donc aucun site ne pourrait retirer un name sans deviner. Un
-    // greffon classé ici reste donc ingérable depuis l'IHM jusqu'au prochain
-    // démarrage du cœur — les deux gardes rendent `false` et le disent au
-    // journal. Le gel est honnête ; le faire passer pour un non-événement, non.
-    // La vraie réponse est de sortir la vivacité de `kill_triggers`
-    // (« suite documentée » du chantier plugins active/inactifs), ce qui
-    // redessine leur table et appartient à la session qui possède ce code.
-    let mut non_supervises: HashSet<String> = HashSet::new();
-    // Quand chaque greffon lancé cesse d'avoir le bénéfice du doute.
+    // **This registry never gets purged**, and that is accepted rather than
+    // suffered: the death of a process the core does not supervise is by
+    // definition unobservable, so no site could remove a name without
+    // guessing. A plugin classified here therefore stays unmanageable from
+    // the UI until the core's next startup — both guards return `false` and
+    // say so in the log. The freeze is honest; passing it off as a
+    // non-event would not be. The real answer is to pull liveness out of
+    // `kill_triggers` (the "documented follow-up" of the active/inactive
+    // plugins project), which redesigns their table and belongs to the
+    // session that owns this code.
+    let mut non_supervised: HashSet<String> = HashSet::new();
+    // When each launched plugin stops getting the benefit of the doubt.
     //
-    // Une entrée y est posée au lancement et retirée **uniquement** par le
-    // balayage d'échéance, qui décide alors en relisant la line de statut
-    // plutôt qu'en se fiant à la table. C'est délibéré, et c'est la leçon de
-    // `kill_triggers` : un registre dont la justesse dépend de trois sites de
-    // purge finit par mentir sur l'un d'eux. Ici, qu'un greffon se soit
-    // annoncé, soit mort ou ait été éteint entre-temps n'a pas besoin d'être
-    // signalé à la table — sa line le dit déjà.
-    let mut demarrages: HashMap<String, tokio::time::Instant> = HashMap::new();
-    // Génération de lancement, par name. Éteindre puis rallumer aussitôt fait
-    // arriver la mort de l'**ancien** processus après le câblage du nouveau :
-    // sans ce compteur, cette mort effacerait des lines de statut qui
-    // décrivent déjà le nouveau. Voir le bras `plugin_waits.next()`.
+    // An entry is set here at launch and removed **only** by the deadline
+    // sweep, which then decides by rereading the status line rather than
+    // trusting the table. This is deliberate, and it is the lesson of
+    // `kill_triggers`: a registry whose correctness depends on three purge
+    // sites ends up lying at one of them. Here, whether a plugin announced
+    // itself, died, or was turned off in the meantime does not need to be
+    // reported to the table — its line already says so.
+    let mut startups: HashMap<String, tokio::time::Instant> = HashMap::new();
+    // Launch generation, per name. Turning off then immediately relaunching
+    // makes the death of the **old** process arrive after the new one's
+    // wiring: without this counter, that death would erase status lines
+    // that already describe the new one. See the `plugin_waits.next()` arm.
     let mut generations: HashMap<String, u64> = HashMap::new();
-    // Génération de **câblage**, par name, et distincte de `generations` juste
-    // au-dessus — les confondre casserait l'une ou l'autre.
+    // **Wiring** generation, per name, and distinct from `generations` just
+    // above — conflating them would break one or the other.
     //
-    // `generations` compte les **lancements de processus** : le bras
-    // `plugin_waits` compare la génération que lui rend la supervision à celle
-    // de la table, et la bosseler ailleurs qu'au lancement ferait ignorer une
-    // mort réelle. `cablages` compte les **câblages de sockets**, qui arrivent
-    // en plus : un greffon relancé à la main se recâble sans que le cœur l'ait
-    // lancé.
+    // `generations` counts **process launches**: the `plugin_waits` arm
+    // compares the generation supervision hands it back to the table's, and
+    // bumping it anywhere but at launch would make a real death get ignored.
+    // `wirings` counts **socket wirings**, which happen in addition: a
+    // manually relaunched plugin rewires itself without the core having
+    // launched it.
     //
-    // Pourquoi ce numéro est indispensable. Un relais d'afficheur n'apprend la
-    // mort de son pair qu'au **prochain envoi**, qui peut n'arriver que des
-    // minutes plus tard, faute de changement d'état. Soit : le greffon meurt,
-    // l'utilisateur le restart à la main trente secondes après, il se
-    // réannonce, ses lines repassent à connecté — puis un track change, le
-    // *vieux* relais se réveille enfin, échoue et signale. Sans le numéro, ce
-    // signal marquerait déconnecté un greffon qui vient de se rebrancher, et
-    // seul un nouveau changement de piste l'aurait réparé.
-    let mut cablages: HashMap<String, u64> = HashMap::new();
-    // Les sockets qui se ferment. Voir `HotPlugChildren::unreachable_tx`.
+    // Why this number is indispensable. A display relay only learns of its
+    // peer's death on the **next send**, which may only come minutes later,
+    // for lack of a state change. So: the plugin dies, the user manually
+    // restarts it thirty seconds later, it re-announces, its lines go back
+    // to connected — then a track changes, the *old* relay finally wakes up,
+    // fails and reports. Without the number, this report would mark
+    // disconnected a plugin that just reconnected, and only a further track
+    // change would have fixed it.
+    let mut wirings: HashMap<String, u64> = HashMap::new();
+    // The sockets that are closing. See `HotPlugChildren::unreachable_tx`.
     //
-    // Borné à 16 : un envoi est une fin de tâche, jamais une cadence. Si le
-    // canal se remplissait — huit plugins mourant tous en même temps, deux
-    // fois — les émetteurs attendraient leur tour au lieu de perdre l'notice, ce
-    // qui est le bon compromis pour un message dont l'oubli laisserait une
-    // line mentir indéfiniment.
-    let (unreachable_tx, mut injoignable_rx) = mpsc::channel::<(String, u64)>(16);
+    // Bounded to 16: a send is the end of a task, never a cadence. If the
+    // channel filled up — eight plugins dying at the same time, twice over —
+    // the senders would wait their turn instead of losing the notice, which
+    // is the right trade-off for a message whose loss would leave a line
+    // lying indefinitely.
+    let (unreachable_tx, mut unreachable_rx) = mpsc::channel::<(String, u64)>(16);
 
     for p in &manifest.plugins {
         generations.insert(p.name.clone(), 0);
         if !p.enabled {
-            // Éteint : on ne lance rien, mais la line reste — sans elle, la
-            // page ne le montrerait plus et il serait irrécupérable.
+            // Off: nothing is launched, but the line stays — without it, the
+            // page would no longer show it and it would be unrecoverable.
             tracing::info!("plugin {} is disabled, not launching it", p.name);
             plugin_statuses.push(PluginStatus::disabled(&p.name));
             continue;
@@ -1163,102 +1160,103 @@ async fn main() -> Result<()> {
                 let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
                 kill_triggers.insert(p.name.clone(), kill_tx);
                 plugin_waits.push(supervise(p.name.clone(), 0, child, kill_rx));
-                lances.push(p.name.clone());
+                launched.push(p.name.clone());
             }
             Err(e) => {
-                // `{e:#}` et non `{e}` : la chaîne de contexte porte le path
-                // cherché, que le seul message d'erreur système n'indique pas.
+                // `{e:#}` and not `{e}`: the context chain carries the path
+                // that was looked for, which the bare system error message
+                // does not show.
                 tracing::warn!("failed to launch plugin {}: {e:#}", p.name);
-                // Un greffon qui n'a pas démarré n'a jamais annoncé de kind,
-                // et le manifest ne le porte plus : la page de statut affiche
-                // un kind inconnu plutôt que d'en inventer un.
+                // A plugin that failed to start never announced a kind, and
+                // the manifest no longer carries it: the status page shows
+                // an unknown kind rather than inventing one.
                 plugin_statuses.push(PluginStatus::unknown_kind(&p.name, false));
             }
         }
     }
 
-    // Le canal des annonces, **unique pour les deux étages** : le rendez-vous
-    // l'emprunte, la tâche permanente en garde l'émetteur, et la boucle de
-    // sélection en consomme le reste. Un seul canal, et une announcement ne peut plus
-    // se perdre entre les deux : ce que `gather` n'a pas eu le temps de read
-    // reste en file, et sera câblé à chaud un instant plus tard. Voir la doc de
-    // `register::gather` pour la course que cela supprime.
-    let (tardives_tx, mut tardives_rx) = mpsc::channel::<Announcement>(16);
+    // The announcements channel, **shared by both stages**: the rendezvous
+    // borrows it, the permanent task keeps its sender, and the select loop
+    // consumes the rest. A single channel, and an announcement can no longer
+    // get lost between the two: whatever `gather` did not have time to read
+    // stays queued, and will be hot-wired an instant later. See the doc of
+    // `register::gather` for the race this removes.
+    let (late_tx, mut late_rx) = mpsc::channel::<Announcement>(16);
 
-    // Une announcement par greffon lancé. Les dead précoces écourtent l'attente ;
-    // `plugin_waits` reste utilisable ensuite, seules les entrées consommées
-    // ici en sortent — et ce sont précisément celles dont on a déjà appris la
-    // mort.
+    // One announcement per launched plugin. Early deaths shorten the wait;
+    // `plugin_waits` stays usable afterwards, only the entries consumed here
+    // leave it — and those are precisely the ones whose death we already
+    // learned of.
     let mut gathered = register::gather(
         &register_listener,
-        &lances,
-        (&mut plugin_waits).map(|(name, _gen, _statut, _voulue)| name),
+        &launched,
+        (&mut plugin_waits).map(|(name, _gen, _status, _requested)| name),
         std::time::Duration::from_secs(10),
-        &tardives_tx,
-        &mut tardives_rx,
+        &late_tx,
+        &mut late_rx,
     )
     .await;
 
-    // Les dead de ce rassemblement ont été consommées directement sur
-    // `plugin_waits` par `gather` (voir sa doc, et le commentaire de
-    // `hotplug` sur les annonces tardives) : la boucle principale ne
-    // les reverra donc jamais sur son bras `plugin_waits.next()`, qui est
-    // l'un des deux autres endroits purgeant `kill_triggers` (le troisième
-    // étant `hot_unplug`). Sans ce nettoyage-ci, un greffon mort
-    // *pendant* le rendez-vous laisserait une entrée périmée, et un allumage
-    // ultérieur la prendrait pour un processus vivant sans jamais relancer le
-    // binaire.
+    // The dead plugins from this gathering were consumed directly on
+    // `plugin_waits` by `gather` (see its doc, and `hotplug`'s comment on
+    // late announcements): the main loop will therefore never see them again
+    // on its `plugin_waits.next()` arm, which is one of the two other sites
+    // purging `kill_triggers` (the third being `hot_unplug`). Without this
+    // cleanup, a plugin that died *during* the rendezvous would leave a
+    // stale entry, and a later turn-on would take it for a live process and
+    // never relaunch the binary.
     for name in &gathered.dead {
         kill_triggers.remove(name);
     }
 
-    // `gather` a pris le listener par **référence** : le cœur en garde donc la
-    // propriété, et le socket d'enregistrement ne se ferme pas avec le
-    // rendez-vous. L'échéance ci-dessus ne condamne plus personne — elle sert à
-    // ne pas bloquer le démarrage et à nommer un greffon figé. Un greffon qui
-    // s'announcement à t+12 s (démarrage à froid sur carte SD, huit binaires qui
-    // montent leur runtime en même temps) est câblé à chaud, et un greffon
-    // relancé à la main est repris.
-    tokio::spawn(register::accept_forever(register_listener, tardives_tx));
+    // `gather` took the listener by **reference**: the core therefore keeps
+    // ownership of it, and the registration socket does not close with the
+    // rendezvous. The deadline above no longer condemns anyone — it serves to
+    // avoid blocking startup and to name a stalled plugin. A plugin that
+    // announces itself at t+12s (a cold start on an SD card, eight binaries
+    // mounting their runtime at the same time) is hot-wired, and a manually
+    // relaunched plugin is picked back up.
+    tokio::spawn(register::accept_forever(register_listener, late_tx));
 
-    // Une line « kind inconnu » par greffon non annoncé, en distinguant le
-    // figé du mort : le premier tourne toujours et peut encore s'annoncer, le
-    // second n'a plus rien à dire. C'est la différence que l'opérateur doit
-    // voir avant d'aller relancer quoi que ce soit.
-    for (name, fige) in gathered
+    // One "unknown kind" line per plugin not announced, distinguishing the
+    // stalled from the dead: the former is still running and can still
+    // announce itself, the latter has nothing left to say. That is the
+    // difference the operator must see before going to relaunch anything.
+    for (name, stalled) in gathered
         .stalled
         .iter()
         .map(|n| (n, true))
         .chain(gathered.dead.iter().map(|n| (n, false)))
     {
-        plugin_statuses.push(PluginStatus::unknown_kind(name, fige));
+        plugin_statuses.push(PluginStatus::unknown_kind(name, stalled));
     }
 
-    // Plugins `metadata` annoncés, **dans l'order du manifest** : cet order
-    // est la priorité d'arbitrage, et c'est une propriété de configuration,
-    // pas d'exécution. La liste est donc reconstruite depuis le manifest et
-    // jamais depuis l'order d'arrivée des annonces, qui rendrait l'affichage
-    // non reproductible d'un démarrage à l'autre.
+    // `metadata` plugins announced, **in manifest order**: this order is the
+    // arbitration priority, and it is a configuration property, not a
+    // runtime one. The list is therefore rebuilt from the manifest and never
+    // from the order announcements arrived in, which would make the display
+    // non-reproducible from one startup to the next.
     let manifest_order: Vec<String> = manifest.plugins.iter().map(|p| p.name.clone()).collect();
     let metadata_plugins = register::metadata_order(&manifest_order, &gathered);
-    // L'order du fichier arbitre les `metadata` ; l'`exec`, lui, ne servait
-    // qu'au lancement initial. Rallumer un greffon le redemande.
+    // The file order arbitrates `metadata` plugins; the `exec`, meanwhile,
+    // only served for the initial launch. Relaunching a plugin asks for it
+    // again.
     let execs: HashMap<String, String> =
         manifest.plugins.iter().map(|p| (p.name.clone(), p.exec.clone())).collect();
 
-    // La page d'admin est **annoncée** par le binaire, plus observée par une
-    // fenêtre d'attente : le drapeau des statuts part de la line
-    // d'enregistrement. Mais l'announcement n'est qu'une déclaration de fichier —
-    // c'est une capacité **observée** que l'IHM doit voir au final : si la
-    // connexion admin échoue plus bas, le drapeau est repassé à `false` sur
-    // toutes les lines de ce name, quel que soit leur kind.
+    // The admin page is **announced** by the binary, then observed through a
+    // waiting window: the status flag starts from the registration line. But
+    // the announcement is only a file declaration — it is an **observed**
+    // capability that the UI must see in the end: if the admin connection
+    // fails below, the flag is set back to `false` on every line for this
+    // name, whatever their kind.
     let mut sources: HashMap<String, Arc<dyn core::Source>> = HashMap::new();
-    // Le name voyage avec le client : c'est lui qui nomme le greffon dans le
-    // journal quand son relais s'arrête.
-    // Le drapeau `covers` de l'announcement voyage avec le client : au moment de
-    // spawner les relais (plus bas, après `Core::new`), l'announcement n'est plus
-    // sous la main, et rien ne doit reconstruire ce drapeau autrement qu'en le
-    // recopiant depuis ce que le greffon a annoncé.
+    // The name travels with the client: it is what names the plugin in the
+    // log when its relay stops.
+    // The announcement's `covers` flag travels with the client: by the time
+    // the relays are spawned (below, after `Core::new`), the announcement is
+    // no longer at hand, and nothing must rebuild this flag other than by
+    // copying it from what the plugin announced.
     let mut display_clients: Vec<(String, Arc<DisplayClient>, bool)> = Vec::new();
     let mut admin_backends: HashMap<String, Arc<dyn admin::AdminBackend>> = HashMap::new();
 
@@ -1270,27 +1268,28 @@ async fn main() -> Result<()> {
 
         for kind in &announcement.kinds {
             let socket = ritornello_plugin_sdk::socket_kind(&prefix, *kind);
-            // L'announcement prouve que le socket est lié : un `connect` nu suffit,
-            // plus de boucle de reprise. Un échec ici est une vraie anomalie,
-            // pas une course au démarrage — et il reste cantonné à ce kind,
-            // les autres genres du même greffon continuant d'être câblés.
+            // The announcement proves the socket is bound: a bare `connect`
+            // suffices, no more retry loop. A failure here is a real
+            // anomaly, not a startup race — and it stays confined to this
+            // kind, the other kinds of the same plugin continuing to be
+            // wired.
             match kind {
                 PluginKind::Source => {
-                    // Voir le même geste dans `hotplug`, qui dit
-                    // pourquoi le SDK ne connaît pas la comptabilité du cœur.
-                    let (ferme_tx, ferme_rx) = tokio::sync::oneshot::channel();
-                    let injoignable = unreachable_tx.clone();
-                    let nom_ferme = name.clone();
+                    // Same gesture as in `hotplug`, which says why the SDK
+                    // knows nothing of the core's bookkeeping.
+                    let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+                    let unreachable = unreachable_tx.clone();
+                    let closed_name = name.clone();
                     tokio::spawn(async move {
-                        if ferme_rx.await.is_ok() {
-                            let _ = injoignable.send((nom_ferme, 0)).await;
+                        if closed_rx.await.is_ok() {
+                            let _ = unreachable.send((closed_name, 0)).await;
                         }
                     });
                     match SourceClient::connect_with_close(
                         &socket,
                         name.clone(),
                         source_update_tx.clone(),
-                        Some(ferme_tx),
+                        Some(closed_tx),
                     )
                     .await
                     {
@@ -1318,36 +1317,37 @@ async fn main() -> Result<()> {
                     let tx = cmd_tx.clone();
                     let socket_for_task = socket.clone();
                     let task_name = name.clone();
-                    let injoignable = unreachable_tx.clone();
+                    let unreachable = unreachable_tx.clone();
                     tokio::spawn(async move {
                         if let Err(e) = run_input_client(&socket_for_task, tx).await {
                             tracing::warn!("input plugin {task_name} disconnected: {e}");
                         }
-                        // `0` : c'est le câblage du rendez-vous de démarrage, et
-                        // `cablages` ne porte encore aucune entrée — sa valeur
-                        // par défaut est donc lue comme `0` du côté de la
-                        // boucle, ce qui fait de ce socket l'incarnation
-                        // courante tant que personne n'a recâblé ce name.
-                        let _ = injoignable.send((task_name, 0)).await;
+                        // `0`: this is the startup rendezvous's wiring, and
+                        // `wirings` does not carry any entry for it yet — its
+                        // default value is therefore read as `0` on the
+                        // loop's side, which makes this socket the current
+                        // incarnation as long as no one has rewired this
+                        // name.
+                        let _ = unreachable.send((task_name, 0)).await;
                     });
                     plugin_statuses.push(PluginStatus::kind(name, "input", true, announcement.admin));
                 }
                 PluginKind::Metadata => {
-                    // Relais dans les deux sens, dans sa propre tâche : sa
-                    // panne ne concerne que les métadonnées. **La playback
-                    // n'est jamais affectée** par un plugin `metadata`.
+                    // Two-way relay, in its own task: its failure concerns
+                    // only metadata. **Playback is never affected** by a
+                    // `metadata` plugin.
                     let tx = enrich_tx.clone();
                     let np_rx = now_playing_rx.clone();
                     let socket_for_task = socket.clone();
                     let task_name = name.clone();
-                    let injoignable = unreachable_tx.clone();
+                    let unreachable = unreachable_tx.clone();
                     tokio::spawn(async move {
                         if let Err(e) =
                             run_metadata_client(&socket_for_task, task_name.clone(), tx, np_rx).await
                         {
                             tracing::warn!("metadata plugin {task_name} disconnected: {e}");
                         }
-                        let _ = injoignable.send((task_name, 0)).await;
+                        let _ = unreachable.send((task_name, 0)).await;
                     });
                     plugin_statuses.push(PluginStatus::kind(name, "metadata", true, announcement.admin));
                 }
@@ -1362,46 +1362,47 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => {
                     tracing::warn!("admin plugin {name} unreachable: {e}");
-                    // Le drapeau des statuts suit ce qui a ete effectivement
-                    // joint, pas ce que le greffon a announcement : une announcement
-                    // `admin: true` suivie d'un `connect` en echec ne doit
-                    // jamais laisser l'IHM pointer vers une page qui repond
-                    // 404. On repasse ici a `false` toutes les lines de ce
-                    // name, quel que soit leur kind, poussees plus haut dans
-                    // la boucle des genres qui precede cette connexion.
-                    for statut in plugin_statuses.iter_mut().filter(|s| s.name == *name) {
-                        statut.admin = false;
+                    // The status flag follows what was actually connected,
+                    // not what the plugin announced: an announcement with
+                    // `admin: true` followed by a failing `connect` must
+                    // never leave the UI pointing at a page that answers
+                    // 404. Set back here to `false` on every line for this
+                    // name, whatever their kind, pushed earlier in the kinds
+                    // loop that precedes this connection.
+                    for status in plugin_statuses.iter_mut().filter(|s| s.name == *name) {
+                        status.admin = false;
                     }
                 }
             }
         }
     }
 
-    // Sous verrou à partir d'ici : le câblage de démarrage est fini, mais la
-    // table n'est plus figée pour autant — un greffon qui s'announcement en retard
-    // doit voir sa page d'admin apparaître sans redémarrage du cœur.
+    // Under lock from here on: startup wiring is done, but the table is not
+    // frozen for all that — a plugin that announces itself late must see its
+    // admin page appear without a core restart.
     let admin_backends: admin::AdminBackends = Arc::new(RwLock::new(admin_backends));
-    // Nommé plutôt que construit dans le littéral de l'`AppState` : la boucle
-    // principale et `hotplug` doivent purger **ce** cache-là, celui que
-    // les routes lisent, et non une copie neuve.
+    // Named rather than built inline in the `AppState` literal: the main
+    // loop and `hotplug` must purge **this** cache, the one the routes read,
+    // never a fresh copy.
     let admin_assets: Arc<admin::AssetCache> = Arc::new(Default::default());
 
-    // Démarrer **sans aucune source** est légitime depuis l'enregistrement à
-    // chaud, et c'était la dernière échéance qui condamnait : refuser de
-    // démarrer à t+10 s contredit l'idée qu'une source peut arriver à t+30 s, et
-    // supprime la page de statut précisément quand on voudrait y voir le greffon
-    // figé. Il n'y aura rien à read, mais on peut déjà voir ce qui se passe.
+    // Starting **with no source at all** is legitimate since hot
+    // registration, and that was the last deadline that used to condemn:
+    // refusing to start at t+10s contradicts the idea that a source can
+    // arrive at t+30s, and removes the status page precisely when one would
+    // want to see the stalled plugin there. There will be nothing to read,
+    // but you can already see what is happening.
     //
-    // Reste un seul refus, qui n'est pas une lenteur mais une erreur de
-    // configuration : des plugins déclarés active, et plus **aucun
-    // processus vivant** pour s'annoncer. Voir `register::startup_refused`.
-    let actifs_declares = manifest.plugins.iter().filter(|p| p.enabled).count();
-    if register::startup_refused(actifs_declares, &lances, &gathered) {
+    // One refusal remains, and it is not slowness but a configuration
+    // error: plugins declared enabled, and no **living process** left at all
+    // to announce itself. See `register::startup_refused`.
+    let declared_enabled = manifest.plugins.iter().filter(|p| p.enabled).count();
+    if register::startup_refused(declared_enabled, &launched, &gathered) {
         anyhow::bail!(
             "no plugin process alive (every enabled plugin failed to launch or exited)"
         );
     }
-    if actifs_declares == 0 {
+    if declared_enabled == 0 {
         tracing::warn!(
             "every plugin is disabled in plugins.toml: starting anyway so they can be re-enabled from the admin UI"
         );
@@ -1412,45 +1413,46 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Page de statut du cœur (plugins, source active, dernières erreurs, sortie audio).
+    // The core's status page (plugins, active source, latest errors, audio output).
     let status_state = Arc::new(RwLock::new(StatusState {
         plugins: plugin_statuses,
         active_source: persisted.active_source.clone(),
     }));
     let audio_current = Arc::new(RwLock::new(persisted.audio_device.clone()));
     let locale_current = Arc::new(RwLock::new(persisted.locale.clone()));
-    // `state.json` est relu sans garantie : `theme_put` valide le path HTTP,
-    // mais un fichier d'state corrompu ou edite a la main peut porter n'importe
-    // quoi. Un name de theme inconnu fait sortir `applyTheme` cote SPA sans
-    // poser une seule variable CSS, et `theme.css` n'a pas de valeur de repli :
-    // l'IHM s'affiche entierement non themee. `from_persisted` valide et
-    // retombe sur les defauts en journalisant un avertissement.
+    // `state.json` is reread with no guarantee: `theme_put` validates the
+    // HTTP path, but a corrupted or hand-edited state file can carry
+    // anything. An unknown theme name makes `applyTheme` on the SPA side
+    // exit without setting a single CSS variable, and `theme.css` has no
+    // fallback value: the UI displays entirely untheme. `from_persisted`
+    // validates and falls back to the defaults while logging a warning.
     let theme_current = Arc::new(RwLock::new(theme::from_persisted(
         persisted.theme.as_deref(),
         persisted.mode.as_deref(),
     )));
     let settings_current = Arc::new(RwLock::new(persisted.settings.clone()));
-    // Résultats des récupérations détachées du cœur : la tâche que
-    // `Core::start_cover_fetch` détache y dépose une clé une fois les bytes en
-    // main (ou déjà en cache), et la boucle `select!` ci-dessous les
-    // consomme pour publier l'URL locale au bon track.
-    let (cover_tx, mut pochette_rx) = mpsc::channel::<(String, bool)>(4);
-    // Résultat d'une extraction détachée de cover embarquée (voir
-    // `Core::handle_path`) : même principe que `cover_tx` ci-dessus, sur
-    // un canal séparé plutôt qu'un enrichment du même — les deux portent
-    // des charges utiles différentes, et rien ne les synchronise entre elles.
+    // Results of the core's detached fetches: the task that
+    // `Core::start_cover_fetch` detaches drops a key here once the bytes are
+    // in hand (or already cached), and the `select!` loop below consumes
+    // them to publish the local URL for the right track.
+    let (cover_tx, mut cover_rx) = mpsc::channel::<(String, bool)>(4);
+    // Result of a detached embedded-cover extraction (see
+    // `Core::handle_path`): same principle as `cover_tx` above, on a
+    // separate channel rather than an enrichment on the same one — the two
+    // carry different payloads, and nothing synchronizes them with each
+    // other.
     let (extraction_tx, mut extraction_rx) =
         mpsc::channel::<(String, Option<ritornello_proto::CoverRef>)>(4);
 
-    // Après le câblage : demander son sources_catalog à chaque source, **sans
-    // attendre**.
+    // After wiring: ask each source for its sources catalog, **without
+    // waiting**.
     //
-    // Une tâche détachée par source, et aucune n'est jointe. La réponse
-    // corrélée à `ListPresets` est un `Noop` : elle n'apprend rien au cœur, les
-    // présélections arrivant par `source_update_rx` comme `preset_count`.
-    // Attendre ces réponses mettrait donc le délai de 5 s du protocol des
-    // sources sur le path de démarrage, une fois par source injoignable — et
-    // supprimer ces fenêtres-là était tout l'objet du chantier précédent.
+    // One detached task per source, and none is joined. The reply correlated
+    // to `ListPresets` is a `Noop`: it teaches the core nothing, presets
+    // arriving through `source_update_rx` as `preset_count`. Waiting for
+    // these replies would therefore put the sources protocol's 5s delay on
+    // the startup path, once per unreachable source — and removing those
+    // windows was the whole point of the previous project.
     for (name, client) in &sources {
         let (c, n) = (client.clone(), name.clone());
         tokio::spawn(async move {
@@ -1460,26 +1462,26 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Cœur. La source active affichée est tenue à jour en direct par la boucle
-    // ci-dessous (mise à jour de status_state.active_source après chaque commande).
+    // Core. The displayed active source is kept up to date live by the loop
+    // below (updating status_state.active_source after every command).
     let mut core;
-    // Le cache de pochettes que `assemble_covers_and_core` construit, sorti du
-    // bloc ci-dessous : les relais d'afficheur (plus bas) et le câblage à chaud
-    // doivent read **le même** `Arc` que le cœur et la route HTTP, jamais un
-    // second cache — c'est là que le cœur dépose les bytes qu'il récupère.
+    // The cover cache that `assemble_covers_and_core` builds, pulled out of
+    // the block below: the display relays (further down) and the hot wiring
+    // must read **the same** `Arc` as the core and the HTTP route, never a
+    // second cache — this is where the core drops the bytes it fetches.
     let app_covers;
     {
         // Asked once, before serving: the answer gates the System tab's two
         // OS buttons, and asking per request would mean spawning `busctl`
         // twice every five seconds.
-        let sonde = system::probe_capabilities().await;
-        // `covers` ci-dessous n'est qu'un skeleton : `assemble_covers_and_core`
-        // l'écrase par le seul `Arc<CoverCache>` qu'elle construit, remis
-        // identique au `Core` qu'elle renvoie — voir sa doc. Construire
-        // l'`AppState` en un seul littéral ici, plutôt qu'en deux morceaux,
-        // évite de dupliquer sa quinzaine de champs sans rapport avec les
-        // pochettes.
-        let app_state_squelette = AppState {
+        let probe = system::probe_capabilities().await;
+        // `covers` below is only a skeleton: `assemble_covers_and_core`
+        // overwrites it with the sole `Arc<CoverCache>` it builds, handed
+        // back identical to the `Core` it returns — see its doc. Building
+        // the `AppState` as a single literal here, rather than in two
+        // pieces, avoids duplicating its fifteen-odd fields unrelated to
+        // covers.
+        let app_state_skeleton = AppState {
             status: status_state.clone(),
             logs: log_buffer.clone(),
             audio_current: audio_current.clone(),
@@ -1498,28 +1500,29 @@ async fn main() -> Result<()> {
             player: state_rx.clone(),
             sources_catalog: catalog_rx.clone(),
             system: Arc::new(system::SystemInfo {
-                can_power_off: sonde.can_power_off,
-                can_reboot: sonde.can_reboot,
-                logind_reachable: sonde.logind_reachable,
-                // Le crochet de restart tue mpv **avant** de sortir. Sans
-                // cela, mpv survivait au cœur et continuait de jouer : il est
-                // lancé en `kill_on_drop(true)`, mais `std::process::exit` ne
-                // déroule pas la pile et n'exécute donc aucun `Drop` — la
-                // garantie annoncée par `kill_on_drop` ne valait rien sur ce
-                // path.
+                can_power_off: probe.can_power_off,
+                can_reboot: probe.can_reboot,
+                logind_reachable: probe.logind_reachable,
+                // The restart hook kills mpv **before** exiting. Without
+                // this, mpv outlived the core and kept playing: it is
+                // launched with `kill_on_drop(true)`, but `std::process::exit`
+                // does not unwind the stack and therefore runs no `Drop` —
+                // the guarantee `kill_on_drop` advertises was worth nothing
+                // on this path.
                 //
-                // Le service ne le montrait pas : quand le processus principal
-                // d'une unité sort, systemd tue le reste du groupe de contrôle
-                // avant de relancer. C'est en développement, sans superviseur,
-                // que l'orphelin restait — à jouer, et à tenir le périphérique
-                // audio que le cœur relancé voulait reprendre.
+                // The service did not show it: when a unit's main process
+                // exits, systemd kills the rest of the control group before
+                // relaunching. It was in development, with no supervisor,
+                // that the orphan stuck around — still playing, and holding
+                // the audio device that the relaunched core wanted to
+                // reclaim.
                 //
-                // La mort de mpv fait aussi sortir la boucle principale (voir
-                // `mpv_child.wait()` plus bas) : les deux chemins courent,
-                // mais ils mènent au même endroit, et c'est l'`exit(0)`
-                // ci-dessous qui gagne en pratique. Le détail du signal et sa
-                // justification vivent dans `system::terminate_process`, où un
-                // test les épingle sur un vrai processus.
+                // mpv's death also makes the main loop exit (see
+                // `mpv_child.wait()` further down): both paths run, but they
+                // lead to the same place, and it is the `exit(0)` below that
+                // wins in practice. The signal's detail and its justification
+                // live in `system::terminate_process`, where a test pins them
+                // down on a real process.
                 restart: {
                     let pid = mpv_child.id();
                     Arc::new(move || {
@@ -1533,10 +1536,10 @@ async fn main() -> Result<()> {
             plugins: Arc::new(status::PluginsControl {
                 manifest: plugins_path.clone(),
                 names: manifest_order.clone(),
-                tx: greffon_tx,
+                tx: plugin_order_tx,
             }),
         };
-        let (app_state, coeur) = assemble_covers_and_core(
+        let (app_state, core_engine) = assemble_covers_and_core(
             mpv_player,
             core::Wiring {
                 sources,
@@ -1553,9 +1556,9 @@ async fn main() -> Result<()> {
             },
             cover_tx,
             extraction_tx,
-            app_state_squelette,
+            app_state_skeleton,
         );
-        core = coeur;
+        core = core_engine;
         app_covers = app_state.covers.clone();
         let app = status::router(app_state);
         let listener = tokio::net::TcpListener::bind(&http_addr).await.with_context(|| format!("bind {http_addr}"))?;
@@ -1574,27 +1577,26 @@ async fn main() -> Result<()> {
         tracing::warn!("startup wake: {e}");
     }
 
-    // Relais de l'état vers chaque afficheur connecté : le même canal qui
-    // alimente la route SSE de la SPA, chaque plugin composant lui-même sa
-    // mise en page depuis la trame reçue.
+    // Relays the state to every connected display: the same channel that
+    // feeds the SPA's SSE route, each plugin composing its own layout from
+    // the received frame.
     //
-    // **Une tâche par afficheur**, et non une tâche qui boucle sur N clients :
-    // c'est ce qui empêche un afficheur lent — console occupée, écran bloqué
-    // en I/O — de retarder les autres. La contre-pression reste cloisonnée par
-    // socket, ce qui était l'argument retenu pour ne pas fusionner les sockets
-    // des genres.
+    // **One task per display**, not one task looping over N clients: that is
+    // what keeps a slow display — busy console, screen blocked in I/O — from
+    // delaying the others. Backpressure stays confined per socket, which was
+    // the argument retained for not merging the per-kind sockets.
     //
-    // **Après `Core::new`**, et c'est voulu : c'est lui qui publie le premier
-    // sources_catalog. Spawnés avant, les relais envoyaient à chaque afficheur un
-    // `SourcesCatalog` clear suivi du vrai — sans conséquence pour un afficheur qui
-    // dessine, mais un client MPD connecté dans cette fenêtre lisait un
-    // `listplaylists` clear et pouvait le mettre en cache. L'order supprime la
-    // fenêtre au lieu de la rattraper en aval.
+    // **After `Core::new`**, and this is deliberate: it is what publishes the
+    // first sources catalog. Spawned before it, the relays used to send each
+    // display an empty `SourcesCatalog` followed by the real one — no
+    // consequence for a display that draws, but an MPD client connected in
+    // that window would read an empty `listplaylists` and could cache it.
+    // The ordering removes the window instead of catching up on it
+    // downstream.
     //
-    // Avant, cette variable était un `Option` : déclarer deux afficheurs ne
-    // produisait aucune erreur, mais le cœur ne gardait que le client du
-    // dernier déclaré et le premier attendait des lines qui n'arrivaient
-    // jamais.
+    // Before, this variable was an `Option`: declaring two displays produced
+    // no error, but the core only kept the client of the last one declared,
+    // and the first one waited for lines that never arrived.
     if display_clients.is_empty() {
         tracing::warn!("no display plugin connected, continuing without display");
     }
@@ -1610,9 +1612,9 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Tout ce qu'il faut pour câbler un greffon qui parlera plus tard : les
-    // mêmes children que la boucle de câblage de démarrage, tenus au-delà d'elle.
-    let fils_chaud = HotPlugChildren {
+    // Everything needed to wire a plugin that will speak later: the same
+    // children as the startup wiring loop, held beyond it.
+    let hot_children = HotPlugChildren {
         sockets_dir: sockets_dir.clone(),
         manifest_order,
         source_update_tx: source_update_tx.clone(),
@@ -1629,9 +1631,9 @@ async fn main() -> Result<()> {
     };
 
     let mut retry_at: Option<tokio::time::Instant> = None;
-    // Échéance du prochain rafraîchissement de position. Absolue, comme
-    // `retry_at` : voir la raison au point d'armement, dans la boucle.
-    let mut prochain_tick: Option<tokio::time::Instant> = None;
+    // Deadline of the next position refresh. Absolute, like `retry_at`: see
+    // the reason at the arming point, in the loop.
+    let mut next_tick: Option<tokio::time::Instant> = None;
 
     loop {
         let retry_sleep = async {
@@ -1640,20 +1642,20 @@ async fn main() -> Result<()> {
                 None => std::future::pending().await,
             }
         };
-        // Échéance du plus proche « fin de bénéfice du doute ». Le minimum, et
-        // recalculé à chaque tour comme les trois autres : plusieurs plugins
-        // démarrent ensemble au lancement du service, et c'est le premier
-        // arrivé à échéance qui doit réveiller la boucle.
-        let demarrage_at = demarrages.values().copied().min();
-        let demarrage_sleep = async {
-            match demarrage_at {
+        // Deadline of the nearest "end of benefit of the doubt". The
+        // minimum, and recomputed on every turn like the other three:
+        // several plugins start together when the service launches, and it
+        // is the first one to reach its deadline that must wake the loop.
+        let startup_at = startups.values().copied().min();
+        let startup_sleep = async {
+            match startup_at {
                 Some(at) => tokio::time::sleep_until(at).await,
                 None => std::future::pending().await,
             }
         };
-        // Echeance de l'overlay volume/muet, lue dans une variable locale
-        // avant le `select!` (comme `retry_at`) pour ne pas garder d'emprunt
-        // sur `core` pendant l'attente.
+        // Deadline of the volume/mute overlay, read into a local variable
+        // before the `select!` (like `retry_at`) so as not to keep a borrow
+        // on `core` during the wait.
         let overlay_at = core.overlay_deadline().map(tokio::time::Instant::from);
         let overlay_sleep = async {
             match overlay_at {
@@ -1661,32 +1663,32 @@ async fn main() -> Result<()> {
                 None => std::future::pending().await,
             }
         };
-        // Tick de position : une seconde, armé seulement quand il y a une
-        // position à publier (voir `Core::tick_position`).
+        // Position tick: one second, armed only when there is a position to
+        // publish (see `Core::tick_position`).
         //
-        // L'échéance est **absolue**, comme `retry_at` et `overlay_at`, et
-        // c'est un défaut trouvé en relecture qui l'impose. Les trois futurs
-        // d'attente sont recréés à chaque tour de boucle, donc chaque fois
-        // qu'un bras quelconque se résout — une commande, un événement mpv,
-        // un enrichment, un changement de réglage. Recréer un
-        // `sleep_until(at)` sur la même échéance ne change rien ; recréer un
-        // `sleep(1 s)` relatif restart le compte à rebours depuis zéro. Le
-        // tick n'aurait donc pas lieu une fois par seconde mais une seconde
-        // après le dernier réveil du `select!`, et sur un appareil où les
-        // événements se succèdent plus vite que cela, il serait repoussé
-        // indéfiniment — la position ne bougerait jamais, précisément quand
-        // il se passe quelque chose. Le calcul est extrait dans la fonction
-        // pure `core::next_deadline`, testée : cette boucle `select!`
-        // elle-même n'a aucun filet.
-        prochain_tick = core::next_deadline(
+        // The deadline is **absolute**, like `retry_at` and `overlay_at`,
+        // and this is a defect found in review that requires it. The three
+        // waiting futures are recreated on every loop turn, hence every time
+        // any arm resolves — a command, an mpv event, an enrichment, a
+        // setting change. Recreating a `sleep_until(at)` on the same
+        // deadline changes nothing; recreating a relative `sleep(1s)`
+        // restarts the countdown from zero. The tick would then not happen
+        // once per second but one second after the `select!`'s last
+        // wake-up, and on a device where events succeed each other faster
+        // than that, it would be pushed back indefinitely — the position
+        // would never move, precisely when something is happening. The
+        // computation is extracted into the pure, tested function
+        // `core::next_deadline`: this `select!` loop itself has no safety
+        // net.
+        next_tick = core::next_deadline(
             core.tick_position(),
-            prochain_tick.map(tokio::time::Instant::into_std),
+            next_tick.map(tokio::time::Instant::into_std),
             tokio::time::Instant::now().into_std(),
         )
         .map(tokio::time::Instant::from);
-        // Copie locale (`Instant` est `Copy`) : le futur ci-dessous n'emprunte
-        // donc ni `core` ni la variable réassignée dans le bras.
-        let position_at = prochain_tick;
+        // Local copy (`Instant` is `Copy`): the future below therefore
+        // borrows neither `core` nor the variable reassigned in the arm.
+        let position_at = next_tick;
         let position_sleep = async {
             match position_at {
                 Some(at) => tokio::time::sleep_until(at).await,
@@ -1700,13 +1702,13 @@ async fn main() -> Result<()> {
                 }
                 status_state.write().await.active_source = core.active_source().to_string();
             }
-            // Canal fermé (pompe mpv morte) : le motif `Some(..)` cesse de
-            // matcher et `tokio::select!` désactive le bras — le bras
-            // `mpv_child.wait()` prendra le relais pour sortir proprement.
+            // Closed channel (mpv pump dead): the `Some(..)` pattern stops
+            // matching and `tokio::select!` disables the arm — the
+            // `mpv_child.wait()` arm will take over to exit cleanly.
             Some(ev) = ev_rx.recv() => {
-                // C'est le cœur qui qualifie l'événement (voir `EventOutcome`) :
-                // la liste des variantes qui attestent la vivacité du stream
-                // n'existe qu'à un seul endroit.
+                // It is the core that qualifies the event (see
+                // `EventOutcome`): the list of variants that attest to the
+                // stream's liveness exists in only one place.
                 match core.handle_event(ev).await {
                     core::EventOutcome::StreamAlive => retry_at = None,
                     core::EventOutcome::RetryIn(delay) => {
@@ -1715,96 +1717,97 @@ async fn main() -> Result<()> {
                     core::EventOutcome::Nothing => {}
                 }
             }
-            // Annonce arrivée **après** le rendez-vous : greffon lent au
-            // démarrage, ou relancé à la main. Le câblage est le même, kind
-            // par kind, et une ré-announcement est traitée comme une announcement
-            // tardive — on recâble.
-            Some(announcement) = tardives_rx.recv() => {
-                // Un numéro neuf **avant** de câbler : les sockets de
-                // l'incarnation précédente, s'il en reste, deviennent périmés
-                // à cet instant précis, et leur fermeture sera ignorée.
-                let wiring = cablages.entry(announcement.name.clone()).or_insert(0);
+            // Announcement arriving **after** the rendezvous: a plugin slow
+            // to start, or manually relaunched. The wiring is the same, kind
+            // by kind, and a re-announcement is treated as a late
+            // announcement — we rewire.
+            Some(announcement) = late_rx.recv() => {
+                // A fresh number **before** wiring: the sockets of the
+                // previous incarnation, if any remain, become stale at this
+                // exact instant, and their closing will be ignored.
+                let wiring = wirings.entry(announcement.name.clone()).or_insert(0);
                 *wiring += 1;
                 let wiring = *wiring;
                 hotplug(
                     announcement,
-                    &fils_chaud,
+                    &hot_children,
                     &mut core,
                     &mut gathered,
                     &kill_triggers,
-                    &mut non_supervises,
+                    &mut non_supervised,
                     wiring,
                 )
                 .await;
                 status_state.write().await.active_source = core.active_source().to_string();
             }
-            // Un socket de greffon s'est fermé. **C'est ce qui rend visible la
-            // mort d'un greffon non supervisé**, laquelle ne produisait jusqu'ici
-            // qu'une line de journal : la page continuait de l'afficher
-            // connecté, indéfiniment.
+            // A plugin's socket has closed. **This is what makes the death
+            // of an unsupervised plugin visible**, which until now only
+            // produced a log line: the page kept showing it connected,
+            // indefinitely.
             //
-            // Ce que la fermeture prouve exactement : le pair a fermé. Soit son
-            // processus est mort, soit il a fermé son socket. Dans les deux cas
-            // il n'est plus joignable, donc « déconnecté » est honnête — mais ce
-            // n'est pas une preuve stricte de décès, et rien ici n'en déduit un
-            // code de sortie.
-            Some((name, wiring)) = injoignable_rx.recv() => {
-                if cablages.get(&name).copied().unwrap_or(0) != wiring {
-                    // Le socket d'une incarnation précédente, arrivé après le
-                    // recâblage de la suivante. Voir `cablages`.
+            // What the closing exactly proves: the peer closed. Either its
+            // process died, or it closed its socket. In both cases it is no
+            // longer reachable, so "disconnected" is honest — but this is
+            // not strict proof of death, and nothing here infers an exit
+            // code from it.
+            Some((name, wiring)) = unreachable_rx.recv() => {
+                if wirings.get(&name).copied().unwrap_or(0) != wiring {
+                    // The socket of a previous incarnation, arriving after
+                    // the next one's rewiring. See `wirings`.
                     tracing::debug!(
                         "plugin {name} socket from wiring {wiring} closed after it was rewired"
                     );
                 } else {
                     tracing::info!("plugin {name} is no longer reachable, reporting it disconnected");
-                    // **Le name sort de `non_supervises`, et c'est la moitié
-                    // utile.** Il n'y était que parce qu'un processus vivant
-                    // échappait à la supervision du cœur ; ce processus n'est
-                    // plus joignable, donc le greffon redevient gérable — un
-                    // allumage depuis l'IHM en lancera un vrai, supervisé, au
-                    // lieu d'être refusé par `hot_unplug`.
+                    // **The name leaves `non_supervised`, and that is the
+                    // useful half.** It was only there because a living
+                    // process escaped the core's supervision; that process
+                    // is no longer reachable, so the plugin becomes
+                    // manageable again — turning it on from the UI will
+                    // launch a real, supervised one, instead of being
+                    // refused by `hot_unplug`.
                     //
-                    // C'est aussi pourquoi ce registre-ci se purge alors que
-                    // `demarrages` ne se purge pas : `non_supervises` décrit une
-                    // **capacité** du cœur sur un processus, et cette capacité
-                    // vient de changer. Aucune line de statut ne porte cette
-                    // information, donc rien ne pourrait la relire.
-                    non_supervises.remove(&name);
-                    // **Décâblée si c'était une Source**, exactement comme le
-                    // fait la branche de décès supervisée. Sans cette line, ce
-                    // path serait une demi-action, et une demi-action est pire
-                    // que rien ici : la page dirait « non joint » pendant que le
-                    // cœur garderait la source câblée sur un socket fermé, donc
-                    // toujours offerte au sources_catalog et à la télécommande. Les
-                    // deux chemins de décès doivent produire le **même** état,
-                    // sous peine que le comportement dépende de qui a lancé le
-                    // processus.
+                    // This is also why this registry gets purged while
+                    // `startups` does not: `non_supervised` describes a
+                    // **capability** the core has over a process, and that
+                    // capability just changed. No status line carries this
+                    // information, so nothing could reread it.
+                    non_supervised.remove(&name);
+                    // **Unwired if it was a Source**, exactly as the
+                    // supervised death branch does. Without this line, this
+                    // path would be a half-measure, and a half-measure is
+                    // worse than nothing here: the page would say
+                    // "unreachable" while the core kept the source wired on
+                    // a closed socket, hence still offered to the sources
+                    // catalog and the remote control. The two death paths
+                    // must produce the **same** state, or behavior would
+                    // depend on who launched the process.
                     //
-                    // `forget_dead_source` et non `remove_source` : la
-                    // distinction est écrite dans sa doc, et elle vaut ici pour
-                    // la même raison — personne n'a demandé cette extinction,
-                    // donc rien ne bascule vers une autre source. La musique
-                    // continue, `active_source` garde son name, et c'est la
-                    // conjonction « source active X, greffon X non joint » qui
-                    // porte le diagnostic.
+                    // `forget_dead_source` and not `remove_source`: the
+                    // distinction is written in its doc, and it holds here
+                    // for the same reason — nobody requested this shutdown,
+                    // so nothing switches to another source. The music
+                    // continues, `active_source` keeps its name, and it is
+                    // the conjunction "active source X, plugin X
+                    // unreachable" that carries the diagnosis.
                     if !core.forget_dead_source(&name) {
                         tracing::debug!("plugin {name} was not a wired source, nothing to unwire");
                     }
-                    // Un seul verrou pour les deux écritures, comme
-                    // `hot_unplug` : la line « déconnecté » et le name de
-                    // la source active décrivent le même instant.
-                    let mut statuts = status_state.write().await;
-                    // Idempotent, et il faut qu'il le soit : pour un greffon
-                    // *supervisé*, le bras `plugin_waits` marquera aussi, dans
-                    // un order que rien ne fixe. `mark_plugin_disconnected` ne
-                    // fait que poser des booléens, et `remove` sur une clé
-                    // absente est un non-événement — vérifié, pas supposé.
-                    crate::status::mark_plugin_disconnected(&mut statuts, &name);
-                    statuts.active_source = core.active_source().to_string();
-                    // Après le verrou des statuts, et non avant : `forget_page`
-                    // prend deux autres verrous, et les imbriquer ferait dépendre
-                    // la sûreté d'un order à ne jamais inverser ailleurs.
-                    drop(statuts);
+                    // A single lock for both writes, like `hot_unplug`: the
+                    // "disconnected" line and the active source's name
+                    // describe the same instant.
+                    let mut statuses = status_state.write().await;
+                    // Idempotent, and it needs to be: for a *supervised*
+                    // plugin, the `plugin_waits` arm will also mark it, in
+                    // an order nothing fixes. `mark_plugin_disconnected`
+                    // only sets booleans, and `remove` on an absent key is a
+                    // non-event — verified, not assumed.
+                    crate::status::mark_plugin_disconnected(&mut statuses, &name);
+                    statuses.active_source = core.active_source().to_string();
+                    // After the status lock, not before: `forget_page` takes
+                    // two other locks, and nesting them would make safety
+                    // depend on an order never to reverse elsewhere.
+                    drop(statuses);
                     admin::forget_page(&admin_backends, &admin_assets, &name).await;
                 }
             }
@@ -1814,18 +1817,18 @@ async fn main() -> Result<()> {
             Some((plugin, enrichment)) = enrich_rx.recv() => {
                 core.handle_enrichment(&plugin, enrichment);
             }
-            // Une récupération détachée par `Core::start_cover_fetch` s'est
-            // terminée, avec ou sans succès : `cover_arrived` libère le
-            // marqueur en vol dans tous les cas, et ne publie l'URL locale
-            // que sur succès et si elle décrit encore ce qui plays.
-            Some((key, succes)) = pochette_rx.recv() => {
-                core.cover_arrived(key, succes).await;
+            // A detached fetch by `Core::start_cover_fetch` finished, with
+            // or without success: `cover_arrived` releases the in-flight
+            // marker in every case, and only publishes the local URL on
+            // success and if it still describes what is playing.
+            Some((key, success)) = cover_rx.recv() => {
+                core.cover_arrived(key, success).await;
             }
-            // Une extraction détachée par `Core::handle_path` s'est terminée
-            // (résultat borné par `Health::bounded`, voir `health.rs`) :
-            // `extraction_arrived` libère le marqueur en vol dans tous les
-            // cas, et ne retient le résultat que s'il décrit encore ce que
-            // mpv est en train de jouer.
+            // A detached extraction by `Core::handle_path` finished (result
+            // bounded by `Health::bounded`, see `health.rs`): `extraction_arrived`
+            // releases the in-flight marker in every case, and only keeps
+            // the result if it still describes what mpv is currently
+            // playing.
             Some((path, r)) = extraction_rx.recv() => {
                 core.extraction_arrived(path, r).await;
             }
@@ -1845,27 +1848,27 @@ async fn main() -> Result<()> {
             Some(s) = settings_rx.recv() => {
                 core.set_settings(s);
             }
-            Some(order) = greffon_rx.recv() => {
+            Some(order) = plugin_order_rx.recv() => {
                 let ok = if order.active {
-                    // Un allumage redondant (double clic, page restée ouverte)
-                    // doit être un non-événement, pas un second processus
-                    // volant le préfixe de sockets du premier : le cœur ne
-                    // peut pas compter sur l'appelant pour ne jamais renvoyer
-                    // un order déjà en vigueur.
+                    // A redundant turn-on (double click, page left open)
+                    // must be a non-event, not a second process stealing the
+                    // first one's socket prefix: the core cannot rely on the
+                    // caller to never resend an order already in effect.
                     //
-                    // Le prédicat était `kill_triggers.contains_key`, donc faux
-                    // précisément dans le cas que cette garde existe pour
-                    // couvrir. Voir `Liveness`, qui écrit pourquoi il fallait
-                    // croiser deux registres.
-                    match liveness(&order.name, &kill_triggers, &non_supervises) {
-                        // Lancé par le cœur : l'order est déjà en vigueur, et
-                        // l'accusé décrit un état vrai.
+                    // The predicate used to be `kill_triggers.contains_key`,
+                    // hence false precisely in the case this guard exists to
+                    // cover. See `Liveness`, which writes why the two
+                    // registries had to be crossed.
+                    match liveness(&order.name, &kill_triggers, &non_supervised) {
+                        // Launched by the core: the order is already in
+                        // effect, and the acknowledgment describes a true
+                        // state.
                         Liveness::Supervised => true,
-                        // Un processus tourne pour ce name et le cœur n'a aucune
-                        // prise sur lui. En lancer un second lui volerait son
-                        // préfixe de sockets — bruyant sur le greffon MPD, qui
-                        // échoue à lier son port et meurt, mais silencieux
-                        // partout ailleurs. Refuser, et nommer le remède.
+                        // A process is running for this name and the core
+                        // has no hold on it. Launching a second one would
+                        // steal its socket prefix — noisy on the MPD plugin,
+                        // which fails to bind its port and dies, but silent
+                        // everywhere else. Refuse, and name the remedy.
                         Liveness::OutOfReach => {
                             tracing::warn!(
                                 "refusing to enable {}: a process for it is already running outside the core's control — kill it yourself, or restart the core to let it take ownership again",
@@ -1883,7 +1886,7 @@ async fn main() -> Result<()> {
                                         &order.name,
                                         exec,
                                         generation,
-                                        &fils_chaud,
+                                        &hot_children,
                                         &register_path,
                                         core.current_locale().as_deref(),
                                         &mut kill_triggers,
@@ -1892,14 +1895,14 @@ async fn main() -> Result<()> {
                                     {
                                         Some(fut) => {
                                             plugin_waits.push(fut);
-                                            // Le bénéfice du doute part d'ici,
-                                            // et non du lancement du service :
-                                            // c'est le rallumage depuis l'IHM
-                                            // que ce délai couvre. Le
-                                            // rendez-vous de démarrage a sa
-                                            // propre échéance et son propre
-                                            // rapport (`stalled`).
-                                            demarrages.insert(
+                                            // The benefit of the doubt starts
+                                            // here, not from the service's
+                                            // launch: it is the turn-on from
+                                            // the UI that this delay covers.
+                                            // The startup rendezvous has its
+                                            // own deadline and its own
+                                            // report (`stalled`).
+                                            startups.insert(
                                                 order.name.clone(),
                                                 tokio::time::Instant::now() + STARTUP_TIMEOUT,
                                             );
@@ -1908,8 +1911,9 @@ async fn main() -> Result<()> {
                                         None => false,
                                     }
                                 }
-                                // Nom refusé bien avant ici par la couche HTTP :
-                                // c'est une garde, pas un cas d'usage.
+                                // A name refused well before this point by
+                                // the HTTP layer: this is a guard, not a use
+                                // case.
                                 None => false,
                             }
                         }
@@ -1917,46 +1921,47 @@ async fn main() -> Result<()> {
                 } else {
                     hot_unplug(
                         &order.name,
-                        &fils_chaud,
+                        &hot_children,
                         &mut core,
                         &mut gathered,
                         &mut kill_triggers,
-                        &non_supervises,
+                        &non_supervised,
                     )
                     .await
                 };
-                // Le demandeur attend : un accusé perdu laisserait sa requête
-                // HTTP pendre jusqu'au bout de son propre délai.
+                // The requester is waiting: a lost acknowledgment would leave
+                // its HTTP request hanging until its own timeout runs out.
                 let _ = order.ack.send(ok);
             }
-            _ = demarrage_sleep => {
-                let maintenant = tokio::time::Instant::now();
-                let echus: Vec<String> = demarrages
+            _ = startup_sleep => {
+                let now = tokio::time::Instant::now();
+                let due: Vec<String> = startups
                     .iter()
-                    .filter(|(_, at)| **at <= maintenant)
+                    .filter(|(_, at)| **at <= now)
                     .map(|(name, _)| name.clone())
                     .collect();
-                let mut statuts = fils_chaud.status_state.write().await;
-                for name in echus {
-                    // Retirée dans tous les cas : l'entrée a fait son office,
-                    // et la laisser ferait croître la table pour la vie du
-                    // processus.
-                    demarrages.remove(&name);
-                    // Mais la rétrogradation n'a lieu que si la line dit
-                    // **encore** « démarrage ». Le greffon a pu s'annoncer
-                    // entre-temps (sa line décrit alors ses genres), mourir
-                    // (elle dit « déconnecté »), ou être éteint depuis l'IHM
-                    // (elle dit « désactivé ») : dans les trois cas, écraser
-                    // serait remplacer une information vraie par une fausse.
-                    // Relire l'état plutôt que tenir un registre à purger en
-                    // trois endroits — voir le commentaire de `demarrages`.
-                    if should_downgrade(&statuts, &name) {
+                let mut statuses = hot_children.status_state.write().await;
+                for name in due {
+                    // Removed in every case: the entry has done its job, and
+                    // leaving it would grow the table for the life of the
+                    // process.
+                    startups.remove(&name);
+                    // But the downgrade only happens if the line **still**
+                    // says "starting". The plugin may have announced itself
+                    // in the meantime (its line then describes its kinds),
+                    // died (it says "disconnected"), or been turned off from
+                    // the UI (it says "disabled"): in all three cases,
+                    // overwriting would replace true information with
+                    // false. Rereading the state rather than keeping a
+                    // registry to purge in three places — see the comment on
+                    // `startups`.
+                    if should_downgrade(&statuses, &name) {
                         tracing::warn!(
                             "plugin {name} still silent {}s after launch, reporting it as stalled",
                             STARTUP_TIMEOUT.as_secs()
                         );
                         status::replace_plugin_lines(
-                            &mut statuts,
+                            &mut statuses,
                             &name,
                             vec![PluginStatus::unknown_kind(&name, true)],
                             false,
@@ -1974,95 +1979,99 @@ async fn main() -> Result<()> {
                 core.expire_overlay();
             }
             _ = position_sleep => {
-                // Réarmer d'abord, depuis maintenant : la cadence reste d'une
-                // seconde quoi qu'il arrive sur les autres bras.
-                prochain_tick =
+                // Rearm first, from now: the cadence stays at one second no
+                // matter what happens on the other arms.
+                next_tick =
                     Some(tokio::time::Instant::now() + std::time::Duration::from_secs(1));
-                // Rafraîchir puis publier : la position ayant changé, la trame
-                // franchit la déduplication et part vers la SPA comme vers les
-                // afficheurs. L'incrustation éventuellement en cours voyage
-                // dans cette même trame, intacte — c'est l'afficheur qui
-                // décide de sa place, et le cœur garde la main sur son
-                // échéance (bras `overlay_sleep`).
+                // Refresh then publish: the position having changed, the
+                // frame crosses deduplication and goes out to the SPA as
+                // well as to the displays. Any overlay currently active
+                // travels within this same frame, intact — it is the
+                // display that decides where to place it, and the core
+                // keeps control of its deadline (`overlay_sleep` arm).
                 core.refresh_position().await;
                 core.publish_state();
             }
-            // `next()` et non `select_next_some()` : `tokio::select!` ne
-            // consulte pas `is_terminated`, et re-poller un `FuturesUnordered`
-            // épuisé via `select_next_some` panique (`SelectNextSome polled
-            // after terminated`) — c'est-à-dire que la mort du **dernier**
-            // plugin tuait le cœur à l'itération suivante, l'inverse exact de
-            // la dégradation voulue. Avec `next()`, l'épuisement rend `None`,
-            // le motif ne matche pas, et le bras est simplement désactivé.
-            Some((name, generation, status, voulue)) = plugin_waits.next() => {
-                // Mort d'une incarnation périmée : le greffon a été rallumé
-                // entre-temps, et les lines de statut décrivent déjà le
-                // nouveau processus. Marquer « déconnecté » ici les
-                // effacerait au profit d'une mort qui n'a plus cours.
+            // `next()` and not `select_next_some()`: `tokio::select!` does
+            // not consult `is_terminated`, and repolling an exhausted
+            // `FuturesUnordered` via `select_next_some` panics
+            // (`SelectNextSome polled after terminated`) — meaning the death
+            // of the **last** plugin would kill the core on the next
+            // iteration, the exact opposite of the intended degradation.
+            // With `next()`, exhaustion returns `None`, the pattern does not
+            // match, and the arm is simply disabled.
+            Some((name, generation, status, requested)) = plugin_waits.next() => {
+                // Death of a stale incarnation: the plugin was relaunched
+                // in the meantime, and the status lines already describe
+                // the new process. Marking "disconnected" here would erase
+                // them in favor of a death that no longer applies.
                 if generations.get(&name).copied() != Some(generation) {
                     tracing::debug!("plugin {name} generation {generation} exited after being replaced");
                 } else {
-                    // Une entrée vit exactement le temps d'un processus lancé
-                    // et non encore moissonné : celui-ci vient de l'être. La
-                    // retirer ici, et seulement ici (jamais dans la branche
-                    // périmée ci-dessus), c'est ce qui permet à un allumage
-                    // ultérieur de distinguer un greffon vivant d'un greffon
-                    // mort — `hot_unplug` l'a déjà retirée quand
-                    // `voulue` est vrai, donc ce retrait est alors un second
-                    // passage sans effet.
+                    // An entry lives exactly as long as a launched,
+                    // not-yet-reaped process: this one just was. Removing
+                    // it here, and only here (never in the stale branch
+                    // above), is what lets a later turn-on distinguish a
+                    // living plugin from a dead one — `hot_unplug` already
+                    // removed it when `requested` is true, so this removal
+                    // is then a second, no-op pass.
                     kill_triggers.remove(&name);
-                    if voulue {
+                    if requested {
                         tracing::info!("plugin {name} stopped: disabled from the admin UI");
                     } else {
                         tracing::warn!("plugin {name} exited: {status:?}");
-                        // Décâblage de la source, mais **pas** avec la fonction
-                        // du path volontaire, et c'est le cœur de la décision.
+                        // Unwiring the source, but **not** with the
+                        // voluntary path's function, and that is the heart
+                        // of the decision.
                         //
-                        // Ce qu'il faut oublier est le même dans les deux cas :
-                        // sans éviction, un greffon mort laissait son name dans
-                        // `source_order` et ses présélections dans
-                        // `presets_par_source`, si bien qu'un client MPD gardait
-                        // une liste enregistrée pour une source qui n'existe plus
-                        // et qu'un `load` dessus **passait** le garde de
-                        // `Command::SelectSource` (qui ne consulte que
+                        // What must be forgotten is the same in both cases:
+                        // without eviction, a dead plugin left its name in
+                        // `source_order` and its presets in
+                        // `presets_by_source`, so an MPD client kept a
+                        // registered list for a source that no longer
+                        // exists, and a `load` on it **passed** the guard
+                        // of `Command::SelectSource` (which only consults
                         // `source_order`).
                         //
-                        // Ce qui diffère est la conséquence sur ce qui plays.
-                        // `remove_source` bascule vers la source suivante quand
-                        // c'était l'active : c'est juste quand **l'opérateur** a
-                        // demandé l'extinction, la bascule étant la suite de son
-                        // geste. Ici personne n'a rien demandé. Un greffon de
-                        // Source est un *contrôleur* — le stream est tenu par mpv,
-                        // enfant du cœur, que sa mort ne touche pas —, donc
-                        // basculer transformait la panne d'un contrôleur en
-                        // silence, puis affichait « cd » sur un appareil dont
-                        // l'utilisateur avait choisi la radio. La musique
-                        // continue, `active_source` garde son name, et la page de
-                        // statut porte le diagnostic complet : source active,
-                        // greffon non joint. Voir la doc d'`forget_dead_source`,
-                        // qui écrit la comparaison des deux chemins.
+                        // What differs is the consequence on what is
+                        // playing. `remove_source` switches to the next
+                        // source when it was the active one: that is fine
+                        // when **the operator** requested the shutdown, the
+                        // switch being the follow-up of their gesture. Here
+                        // nobody requested anything. A Source plugin is a
+                        // *controller* — the stream is held by mpv, a child
+                        // of the core, which its death does not touch — so
+                        // switching turned a controller's failure into
+                        // silence, then showed "cd" on a device whose user
+                        // had chosen the radio. The music continues,
+                        // `active_source` keeps its name, and the status
+                        // page carries the full diagnosis: active source,
+                        // plugin unreachable. See `forget_dead_source`'s
+                        // doc, which writes the comparison of the two
+                        // paths.
                         if !core.forget_dead_source(&name) {
                             tracing::debug!("plugin {name} was not a wired source, nothing to unwire");
                         }
-                        // Un seul verrou pour les deux écritures, comme
-                        // `hot_unplug` : la line « déconnecté » et le name
-                        // de la source active décrivent le même instant.
+                        // A single lock for both writes, like
+                        // `hot_unplug`: the "disconnected" line and the
+                        // active source's name describe the same instant.
                         //
-                        // Réaffirmé même si ce path ne change plus
-                        // `active_source` : c'est la page de statut qui doit
-                        // montrer les deux faits **ensemble** — la source active
-                        // est « radio » et le greffon « radio » n'est plus joint.
-                        // C'est cette conjonction qui est le diagnostic, et la
-                        // relire du cœur plutôt que de supposer qu'elle n'a pas
-                        // bougé garde la line juste si la décision de basculer
-                        // était un jour reprise.
-                        let mut statuts = status_state.write().await;
-                        crate::status::mark_plugin_disconnected(&mut statuts, &name);
-                        statuts.active_source = core.active_source().to_string();
-                        // Même geste que sur le path voisin : les deux dead
-                        // doivent laisser le même état, sous peine que le
-                        // comportement dépende de qui a lancé le processus.
-                        drop(statuts);
+                        // Reasserted even though this path no longer
+                        // changes `active_source`: it is the status page
+                        // that must show both facts **together** — the
+                        // active source is "radio" and the "radio" plugin
+                        // is no longer reachable. It is this conjunction
+                        // that is the diagnosis, and rereading it from the
+                        // core rather than assuming it has not moved keeps
+                        // the line correct if the switching decision were
+                        // ever revisited.
+                        let mut statuses = status_state.write().await;
+                        crate::status::mark_plugin_disconnected(&mut statuses, &name);
+                        statuses.active_source = core.active_source().to_string();
+                        // Same gesture as on the neighboring path: both
+                        // deaths must leave the same state, or behavior
+                        // would depend on who launched the process.
+                        drop(statuses);
                         admin::forget_page(&admin_backends, &admin_assets, &name).await;
                     }
                 }
@@ -2075,52 +2084,52 @@ async fn main() -> Result<()> {
 }
 
 #[cfg(test)]
-mod injoignable_tests {
-    //! Ce que le cœur signale quand un socket d'afficheur se ferme — et ce
-    //! qu'il ne signale pas.
+mod unreachable_tests {
+    //! What the core reports when a display's socket closes — and what it
+    //! does not report.
     //!
-    //! **Aucune marge de temps ici non plus, et pas même un cap.** Les deux
-    //! sens se prouvent par la fermeture des émetteurs : le relais détient le
-    //! *seul* émetteur du canal, donc `recv()` rend `Some` s'il signale et
-    //! `None` dès qu'il se terminate sans le faire. L'attente est exacte dans les
-    //! deux cas, et un relais qui se tromperait de sens ne ferait pas expirer le
-    //! test — il le ferait échouer sur la valeur.
+    //! **No time margin here either, not even a cap.** Both directions are
+    //! proven by the senders closing: the relay holds the *only* sender of
+    //! the channel, so `recv()` returns `Some` if it reports and `None` as
+    //! soon as it finishes without doing so. The wait is exact in both
+    //! cases, and a relay that got the direction wrong would not make the
+    //! test time out — it would make it fail on the value.
 
     use super::*;
     use ritornello_plugin_sdk::{bind_display, serve_display, DisplayPlugin};
 
-    /// Un afficheur qui read et jette : ce module n'éprouve pas ce qui est reçu,
-    /// seulement qui est averti de la fermeture.
-    struct Muet;
+    /// A display that reads and discards: this module does not test what is
+    /// received, only who is notified of the closing.
+    struct Mute;
 
     #[async_trait::async_trait]
-    impl DisplayPlugin for Muet {
-        async fn show(&mut self, _etat: PlayerState) -> anyhow::Result<()> {
+    impl DisplayPlugin for Mute {
+        async fn show(&mut self, _state: PlayerState) -> anyhow::Result<()> {
             Ok(())
         }
     }
 
     #[tokio::test]
-    async fn un_afficheur_qui_ne_repond_plus_est_signale_avec_sa_generation_de_cablage() {
+    async fn a_display_that_no_longer_responds_is_reported_with_its_wiring_generation() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("display.sock");
         let listener = bind_display(&socket).unwrap();
         let client = DisplayClient::connect(&socket).await.unwrap();
-        // Le pair accepte puis **disparaît**. C'est la mort qu'un greffon
-        // relancé à la main produit, et que le cœur ne voyait que passer dans
-        // son journal.
+        // The peer accepts then **vanishes**. This is the death a manually
+        // relaunched plugin produces, and that the core used to only see
+        // pass through its log.
         let (stream, _) = listener.accept().await.unwrap();
         drop(stream);
         drop(listener);
 
-        let (_etat_tx, state_rx) = watch::channel(PlayerState::default());
+        let (_state_tx, state_rx) = watch::channel(PlayerState::default());
         let (_cat_tx, catalog_rx) = watch::channel(SourcesCatalog::default());
         let (tx, mut rx) = mpsc::channel(4);
-        // Les deux `watch` restent vivants : sans cela le relais pourrait sortir
-        // par le path « le cœur s'arrête », et le test confondrait les deux
-        // sens qu'il existe précisément pour séparer.
+        // Both `watch`es stay alive: without this the relay could exit
+        // through the "the core is stopping" path, and the test would
+        // confuse the two directions it exists precisely to separate.
         display_relay(
-            "mort".into(),
+            "dead".into(),
             client,
             false,
             Arc::new(cover::CoverCache::default()),
@@ -2129,28 +2138,29 @@ mod injoignable_tests {
             UnreachableNotice { wiring: 7, tx },
         );
 
-        // Le relais écrit l'état d'emblée, avant sa boucle : cette écriture-là
-        // suffit, le pair ayant fermé. `None` ici voudrait dire qu'il s'est
-        // terminé sans rien dire — le défaut même que ce path corrige.
+        // The relay writes the state right away, before its loop: that
+        // write alone suffices, the peer having closed. `None` here would
+        // mean it finished without saying anything — the exact defect this
+        // path fixes.
         assert_eq!(
             rx.recv().await,
-            Some(("mort".to_string(), 7)),
-            "la fermeture du socket doit etre signalee, avec le numero de wiring recu"
+            Some(("dead".to_string(), 7)),
+            "the socket closing must be reported, with the wiring number received"
         );
     }
 
     #[tokio::test]
-    async fn larret_du_coeur_ne_signale_aucun_greffon_injoignable() {
-        // Le constat que ce test existe pour empêcher : marquer déconnectés tous
-        // les afficheurs pendant l'extinction du cœur, c'est-à-dire peindre une
-        // panne sur un arrêt normal. Les deux sorties de boucle du relais se
-        // ressemblent — l'une est un envoi en échec, l'autre un `watch` fermé —
-        // et rien d'autre ne les distingue.
+    async fn core_shutdown_reports_no_unreachable_plugin() {
+        // The observation this test exists to prevent: marking every display
+        // disconnected during core shutdown, i.e. painting a failure over a
+        // normal stop. The relay's two loop exits look alike — one is a
+        // failed send, the other a closed `watch` — and nothing else tells
+        // them apart.
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("display.sock");
         let listener = bind_display(&socket).unwrap();
         tokio::spawn(async move {
-            let _ = serve_display(listener, Muet).await;
+            let _ = serve_display(listener, Mute).await;
         });
         let client = DisplayClient::connect(&socket).await.unwrap();
 
@@ -2158,7 +2168,7 @@ mod injoignable_tests {
         let (cat_tx, catalog_rx) = watch::channel(SourcesCatalog::default());
         let (tx, mut rx) = mpsc::channel(4);
         display_relay(
-            "vivant".into(),
+            "alive".into(),
             client,
             false,
             Arc::new(cover::CoverCache::default()),
@@ -2167,53 +2177,52 @@ mod injoignable_tests {
             UnreachableNotice { wiring: 3, tx },
         );
 
-        // Le cœur s'arrête : ses émetteurs tombent. Le pair, lui, est toujours
-        // là et read.
+        // The core stops: its senders drop. The peer, meanwhile, is still
+        // there and reading.
         drop(state_tx);
         drop(cat_tx);
 
-        // Le relais détient le seul émetteur restant du canal. `None` prouve
-        // donc qu'il s'est terminé **sans** signaler, et l'attente est exacte :
-        // elle se résout à la seconde où sa tâche se terminate, sans qu'aucune
-        // durée soit supposée nulle part.
+        // The relay holds the only remaining sender of the channel. `None`
+        // therefore proves it finished **without** reporting, and the wait
+        // is exact: it resolves the instant its task finishes, with no
+        // duration assumed anywhere.
         assert_eq!(
             rx.recv().await,
             None,
-            "l'arret du coeur n'est pas la mort d'un greffon : rien ne doit etre signale"
+            "core shutdown is not a plugin's death: nothing should be reported"
         );
     }
 }
 
 #[cfg(test)]
-mod bascule_tests {
-    //! La bascule allumer/éteindre, et ce que le cœur sait de la vie d'un
-    //! greffon.
+mod toggle_tests {
+    //! The on/off toggle, and what the core knows of a plugin's life.
     //!
-    //! Ce qui est éprouvé ici : la classification (`liveness`), et sur le
-    //! **vrai** path le refus d'`hot_unplug` quand le processus est
-    //! hors d'atteinte. Ce refus doit arriver **avant** toute mutation, et
-    //! c'est tout le constat : décâbler puis rendre `false` laisserait un
-    //! greffon vivant, décâblé, et affiché « inactif » — le pire des trois
-    //! états. Le contrôle positif juste à côté est ce qui donne son mordant
-    //! au test du refus : sans le retour anticipé, il échoue.
+    //! What is tested here: the classification (`liveness`), and on the
+    //! **real** path `hot_unplug`'s refusal when the process is out of
+    //! reach. This refusal must happen **before** any mutation, and that is
+    //! the whole point: unwiring then returning `false` would leave a plugin
+    //! alive, unwired, and shown as "inactive" — the worst of the three
+    //! states. The positive control right next to it is what gives the
+    //! refusal test its bite: without the early return, it fails.
     //!
-    //! Ce qui **ne l'est pas**, et autant l'écrire : la garde d'*allumage* vit
-    //! dans le `select!` de `main`, hors d'atteinte d'un test. Elle consulte la
-    //! même fonction, mais son câblage n'est vérifié que par playback.
+    //! What is **not** tested, and it is worth writing down: the turn-on
+    //! guard lives in `main`'s `select!`, out of a test's reach. It consults
+    //! the same function, but its wiring is only checked through playback.
 
     use super::*;
     use crate::core::{Wiring, MetadataWiring};
     use crate::cover::CoverCache;
     use ritornello_proto::{Announcement, PluginKind};
 
-    /// Un `Player` qui ne fait rien : aucun test d'ici ne regarde le player.
-    /// `hot_unplug` ne le touche que par `remove_source`, et la carte des
-    /// sources est clear — ce qui est délibéré, faute de quoi il faudrait aussi
-    /// un bouchon de `Source` pour un path que ces tests ne visitent pas.
-    struct LecteurMuet;
+    /// A `Player` that does nothing: no test here looks at the player.
+    /// `hot_unplug` only touches it through `remove_source`, and the sources
+    /// map is empty — which is deliberate, otherwise a `Source` stub would
+    /// also be needed for a path these tests do not visit.
+    struct MutePlayer;
 
     #[async_trait::async_trait]
-    impl crate::player::Player for LecteurMuet {
+    impl crate::player::Player for MutePlayer {
         async fn play(&self, _uri: &str) -> Result<()> {
             Ok(())
         }
@@ -2255,24 +2264,25 @@ mod bascule_tests {
         }
     }
 
-    struct Banc {
+    struct Bench {
         children: HotPlugChildren,
-        core: core::Core<LecteurMuet>,
+        core: core::Core<MutePlayer>,
         gathered: register::Gathered,
         kill_triggers: HashMap<String, tokio::sync::oneshot::Sender<()>>,
-        non_supervises: HashSet<String>,
-        /// Tenu jusqu'à la fin du test : `state_path` et `locales_root` en
-        /// dépendent.
+        non_supervised: HashSet<String>,
+        /// Held until the end of the test: `state_path` and `locales_root`
+        /// depend on it.
         _dir: tempfile::TempDir,
     }
 
-    /// Un greffon `mpd` **annoncé et câblé**, dans l'état où le laisse
-    /// `hotplug` : présent dans `announcements`, une line de statut
-    /// connectée, et le manifest qui reconnaît son name.
+    /// An `mpd` plugin **announced and wired**, in the state `hotplug`
+    /// leaves it in: present in `announcements`, a connected status line,
+    /// and the manifest recognizing its name.
     ///
-    /// C'est cet état-là qui rend le test réaliste. Un `Gathered::default()`
-    /// prouverait un refus sur une forme que le producteur n'émet pas.
-    fn banc() -> Banc {
+    /// It is this state that makes the test realistic. A
+    /// `Gathered::default()` would prove a refusal on a shape the producer
+    /// never emits.
+    fn bench() -> Bench {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
 
@@ -2289,7 +2299,7 @@ mod bascule_tests {
         )));
 
         let core = core::Core::new(
-            LecteurMuet,
+            MutePlayer,
             Wiring {
                 sources: HashMap::new(),
                 persisted: Default::default(),
@@ -2320,9 +2330,9 @@ mod bascule_tests {
             catalog_rx,
             covers,
             status_state: Arc::new(RwLock::new(StatusState {
-                // Le constructeur et non un littéral : un champ ajouté à
-                // `PluginStatus` ne doit pas casser ce banc, dont le sujet
-                // n'est pas la forme de la line de statut.
+                // The constructor and not a literal: a field added to
+                // `PluginStatus` must not break this bench, whose subject
+                // is not the shape of the status line.
                 plugins: vec![PluginStatus::kind("mpd", "display", true, true)],
                 active_source: String::new(),
             })),
@@ -2341,179 +2351,180 @@ mod bascule_tests {
             },
         );
 
-        Banc {
+        Bench {
             children,
             core,
             gathered,
             kill_triggers: HashMap::new(),
-            non_supervises: HashSet::new(),
+            non_supervised: HashSet::new(),
             _dir: dir,
         }
     }
 
-    async fn line(b: &Banc) -> PluginStatus {
-        let statuts = b.children.status_state.read().await;
-        statuts.plugins.iter().find(|l| l.name == "mpd").cloned().expect("line mpd")
+    async fn line(b: &Bench) -> PluginStatus {
+        let statuses = b.children.status_state.read().await;
+        statuses.plugins.iter().find(|l| l.name == "mpd").cloned().expect("line mpd")
     }
 
-    async fn eteindre(b: &mut Banc) -> bool {
+    async fn turn_off(b: &mut Bench) -> bool {
         hot_unplug(
             "mpd",
             &b.children,
             &mut b.core,
             &mut b.gathered,
             &mut b.kill_triggers,
-            &b.non_supervises,
+            &b.non_supervised,
         )
         .await
     }
 
-    fn statuts_de(lines: Vec<PluginStatus>) -> StatusState {
+    fn statuses_of(lines: Vec<PluginStatus>) -> StatusState {
         StatusState { plugins: lines, active_source: String::new() }
     }
 
-    /// Le mot juste au bon moment : « démarrage » constate, « figé » accuse.
-    /// Les deux disent que le greffon n'a pas parlé, et les échanger ferait
-    /// accuser un binaire parfaitement sain — le défaut signalé à l'usage.
+    /// The right word at the right time: "starting" observes, "stalled"
+    /// accuses. Both say the plugin has not spoken, and swapping them would
+    /// accuse a perfectly healthy binary — the defect this reports in
+    /// practice.
     #[test]
-    fn la_ligne_de_demarrage_nest_pas_la_ligne_de_fige() {
+    fn the_startup_line_is_not_the_stalled_line() {
         let d = PluginStatus::startup("mpd");
-        assert!(d.starting, "elle doit dire « démarrage »");
-        assert!(!d.stalled, "et surtout pas « figé » en même temps");
+        assert!(d.starting, "it must say \"starting\"");
+        assert!(!d.stalled, "and definitely not \"stalled\" at the same time");
         assert!(!d.connected);
         assert!(!d.disabled);
 
         let f = PluginStatus::unknown_kind("mpd", true);
         assert!(f.stalled);
-        assert!(!f.starting, "les deux etats sont exclusifs");
+        assert!(!f.starting, "the two states are exclusive");
     }
 
-    /// La propriété qui compte de l'échéance de démarrage : elle ne remplace
-    /// **jamais** une information vraie par une accusation.
+    /// The property that matters about the startup deadline: it **never**
+    /// replaces true information with an accusation.
     #[test]
-    fn lecheance_ne_retrograde_que_ce_qui_demarre_encore() {
+    fn the_deadline_only_downgrades_what_is_still_starting() {
         assert!(
-            should_downgrade(&statuts_de(vec![PluginStatus::startup("mpd")]), "mpd"),
-            "un greffon toujours muet a l'deadline doit passer en « fige »"
+            should_downgrade(&statuses_of(vec![PluginStatus::startup("mpd")]), "mpd"),
+            "a plugin still silent at the deadline must switch to \"stalled\""
         );
         assert!(
-            !should_downgrade(&statuts_de(vec![PluginStatus::kind("mpd", "display", true, true)]), "mpd"),
-            "il s'est announcement entre-temps : sa line decrit ses genres, ne pas l'ecraser"
+            !should_downgrade(&statuses_of(vec![PluginStatus::kind("mpd", "display", true, true)]), "mpd"),
+            "it announced itself in the meantime: its line describes its kinds, do not overwrite it"
         );
         assert!(
-            !should_downgrade(&statuts_de(vec![PluginStatus::kind("mpd", "display", false, true)]), "mpd"),
-            "announcement puis mort : la line dit « deconnecte », plus vrai que « fige »"
+            !should_downgrade(&statuses_of(vec![PluginStatus::kind("mpd", "display", false, true)]), "mpd"),
+            "announced then died: the line says \"disconnected\", truer than \"stalled\""
         );
         assert!(
-            !should_downgrade(&statuts_de(vec![PluginStatus::disabled("mpd")]), "mpd"),
-            "eteint depuis l'IHM pendant son startup : « disabled » doit tenir"
+            !should_downgrade(&statuses_of(vec![PluginStatus::disabled("mpd")]), "mpd"),
+            "turned off from the UI during its startup: \"disabled\" must hold"
         );
         assert!(
-            !should_downgrade(&statuts_de(vec![PluginStatus::unknown_kind("mpd", true)]), "mpd"),
-            "deja fige : rien a faire, et surtout pas une seconde line de journal"
+            !should_downgrade(&statuses_of(vec![PluginStatus::unknown_kind("mpd", true)]), "mpd"),
+            "already stalled: nothing to do, and definitely not a second log line"
         );
         assert!(
-            !should_downgrade(&statuts_de(vec![]), "mpd"),
-            "plus aucune line pour ce name : rien a retrograder"
+            !should_downgrade(&statuses_of(vec![]), "mpd"),
+            "no line left for this name: nothing to downgrade"
         );
     }
 
     #[test]
-    fn un_greffon_lance_par_le_coeur_est_supervise() {
+    fn a_plugin_launched_by_the_core_is_supervised() {
         let mut kt = HashMap::new();
         kt.insert("mpd".to_string(), tokio::sync::oneshot::channel::<()>().0);
         assert_eq!(liveness("mpd", &kt, &HashSet::new()), Liveness::Supervised);
     }
 
     #[test]
-    fn un_greffon_annonce_hors_supervision_est_hors_datteinte() {
-        let non_supervises: HashSet<String> = ["mpd".to_string()].into_iter().collect();
+    fn a_plugin_announced_outside_supervision_is_out_of_reach() {
+        let non_supervised: HashSet<String> = ["mpd".to_string()].into_iter().collect();
         assert_eq!(
-            liveness("mpd", &HashMap::new(), &non_supervises),
+            liveness("mpd", &HashMap::new(), &non_supervised),
             Liveness::OutOfReach
         );
     }
 
     #[test]
-    fn un_nom_absent_des_deux_registres_est_eteint() {
+    fn a_name_absent_from_both_registries_is_off() {
         assert_eq!(liveness("mpd", &HashMap::new(), &HashSet::new()), Liveness::Off);
     }
 
-    /// La conjonction est inatteignable en production (voir la doc de
-    /// `liveness`), mais la fonction est totale : c'est ce que dit ce test, et
-    /// il fige l'order pour qui ajouterait un registre.
+    /// The conjunction is unreachable in production (see `liveness`'s doc),
+    /// but the function is total: that is what this test says, and it pins
+    /// the order for whoever adds a registry.
     #[test]
-    fn ce_que_le_coeur_peut_arreter_prime_sur_ce_quil_constate() {
+    fn what_the_core_can_stop_takes_priority_over_what_it_observes() {
         let mut kt = HashMap::new();
         kt.insert("mpd".to_string(), tokio::sync::oneshot::channel::<()>().0);
-        let non_supervises: HashSet<String> = ["mpd".to_string()].into_iter().collect();
-        assert_eq!(liveness("mpd", &kt, &non_supervises), Liveness::Supervised);
+        let non_supervised: HashSet<String> = ["mpd".to_string()].into_iter().collect();
+        assert_eq!(liveness("mpd", &kt, &non_supervised), Liveness::Supervised);
     }
 
-    /// Le contrôle positif : le cœur tient le déclencheur, donc il éteint pour
-    /// de bon. Sans ce test, celui du refus passerait aussi avec une fonction
-    /// qui refuse **toujours**.
+    /// The positive control: the core holds the trigger, so it really turns
+    /// off. Without this test, the refusal test would also pass with a
+    /// function that **always** refuses.
     #[tokio::test]
-    async fn un_greffon_supervise_seteint_et_lannonce_disparait() {
-        let mut b = banc();
+    async fn a_supervised_plugin_turns_off_and_its_announcement_disappears() {
+        let mut b = bench();
         b.kill_triggers.insert("mpd".to_string(), tokio::sync::oneshot::channel::<()>().0);
 
-        assert!(eteindre(&mut b).await, "l'extinction d'un greffon supervisé doit réussir");
-        assert!(!b.kill_triggers.contains_key("mpd"), "le déclencheur est consommé");
-        assert!(!b.gathered.announcements.contains_key("mpd"), "l'announcement est retirée");
-        assert!(line(&b).await.disabled, "la line de statut dit « désactivé »");
+        assert!(turn_off(&mut b).await, "turning off a supervised plugin must succeed");
+        assert!(!b.kill_triggers.contains_key("mpd"), "the trigger is consumed");
+        assert!(!b.gathered.announcements.contains_key("mpd"), "the announcement is removed");
+        assert!(line(&b).await.disabled, "the status line says \"disabled\"");
     }
 
-    /// Le constat lui-même. Un processus vivant que le cœur ne peut pas
-    /// arrêter : la bascule doit rendre `false` **et** ne rien avoir touché.
+    /// The observation itself. A living process the core cannot stop: the
+    /// toggle must return `false` **and** have touched nothing.
     ///
-    /// Les trois assertions d'immobilité ne sont pas décoratives. Un correctif
-    /// qui journaliserait puis décâblerait quand même passerait la première et
-    /// échouerait sur les suivantes — or c'est précisément la demi-mesure qui
-    /// produit l'état le plus trompeur de la page de statut.
+    /// The three stillness assertions are not decorative. A fix that logged
+    /// then unwired anyway would pass the first and fail on the following
+    /// ones — and this is exactly the half-measure that produces the status
+    /// page's most misleading state.
     #[tokio::test]
-    async fn un_greffon_hors_datteinte_nest_pas_eteint_et_rien_nest_decable() {
-        let mut b = banc();
-        b.non_supervises.insert("mpd".to_string());
+    async fn a_plugin_out_of_reach_is_not_turned_off_and_nothing_is_unwired() {
+        let mut b = bench();
+        b.non_supervised.insert("mpd".to_string());
 
         assert!(
-            !eteindre(&mut b).await,
-            "annoncer un arrêt qu'on n'a pas obtenu est le défaut à corriger"
+            !turn_off(&mut b).await,
+            "reporting a shutdown that was not obtained is the defect to fix"
         );
         assert!(
             b.gathered.announcements.contains_key("mpd"),
-            "l'announcement reste : le greffon tourne toujours"
+            "the announcement stays: the plugin is still running"
         );
         let l = line(&b).await;
-        assert!(!l.disabled, "la page ne doit pas le montrer désactivé");
-        assert!(l.connected, "il est toujours joignable, la line le dit");
+        assert!(!l.disabled, "the page must not show it disabled");
+        assert!(l.connected, "it is still reachable, the line says so");
     }
 
-    /// Éteindre un greffon déjà éteint reste un succès : le demandeur voulait
-    /// cet état, il l'obtient. Symétrique du non-événement de l'allumage, et ce
-    /// qui distingue `Off` de `OutOfReach` — sans quoi un double clic sur
-    /// « désactiver » remonterait une erreur.
+    /// Turning off an already-off plugin remains a success: the requester
+    /// wanted this state, they get it. Symmetric to the turn-on's non-event,
+    /// and what distinguishes `Off` from `OutOfReach` — without which a
+    /// double click on "disable" would surface an error.
     #[tokio::test]
-    async fn eteindre_un_greffon_deja_eteint_reussit() {
-        let mut b = banc();
-        assert!(eteindre(&mut b).await);
+    async fn turning_off_an_already_off_plugin_succeeds() {
+        let mut b = bench();
+        assert!(turn_off(&mut b).await);
         assert!(line(&b).await.disabled);
     }
 }
 
 #[cfg(test)]
-mod relais_tests {
-    //! Le relais d'afficheur, éprouvé sur le vrai path : un `DisplayClient`
-    //! du SDK d'un côté, `serve_display` de l'autre, et entre les deux
-    //! exactement la fonction que `main` appelle.
+mod relay_tests {
+    //! The display relay, tested on the real path: a SDK `DisplayClient` on
+    //! one side, `serve_display` on the other, and between the two exactly
+    //! the function `main` calls.
     //!
-    //! Aucune marge de temps nulle part. Le sens positif est prouvé en
-    //! **attendant** ce qui doit arriver (un canal, donc l'attente est exacte).
-    //! Le sens négatif — « rien n'arrive » — ne peut pas se prouver par une
-    //! attente : il l'est par une **trame témoin** envoyée après, sur le même
-    //! socket. Les trames y arrivent dans l'order et `serve_display` les traite
-    //! dans l'order, donc voir le témoin prouve que ce qui le précédait a déjà
-    //! été traité — ou n'a jamais été envoyé.
+    //! No time margin anywhere. The positive direction is proven by
+    //! **waiting** for what must arrive (a channel, so the wait is exact).
+    //! The negative direction — "nothing arrives" — cannot be proven by
+    //! waiting: it is proven by a **witness frame** sent afterwards, on the
+    //! same socket. Frames arrive there in order and `serve_display`
+    //! processes them in order, so seeing the witness proves that whatever
+    //! preceded it was already processed — or was never sent.
 
     use super::*;
     use crate::cover::{fixtures, CoverCache, CoverPayload};
@@ -2521,54 +2532,55 @@ mod relais_tests {
     use ritornello_proto::Cover;
 
     #[derive(Debug, PartialEq)]
-    enum Recu {
-        Etat(Box<PlayerState>),
+    enum Received {
+        State(Box<PlayerState>),
         SourcesCatalog(SourcesCatalog),
         CoverPayload(Cover),
     }
 
-    /// Un afficheur qui traite **tout** : c'est délibéré. Si le sens négatif
-    /// était prouvé par un afficheur incapable de recevoir une cover, il ne
-    /// prouverait rien sur le filtre du cœur — seulement sur le bouchon.
-    struct Bouchon {
-        tx: mpsc::UnboundedSender<Recu>,
+    /// A display that handles **everything**: this is deliberate. If the
+    /// negative direction were proven by a display unable to receive a
+    /// cover, it would prove nothing about the core's filter — only about
+    /// the stub.
+    struct Stub {
+        tx: mpsc::UnboundedSender<Received>,
     }
 
     #[async_trait::async_trait]
-    impl DisplayPlugin for Bouchon {
+    impl DisplayPlugin for Stub {
         async fn show(&mut self, state: PlayerState) -> Result<()> {
-            let _ = self.tx.send(Recu::Etat(Box::new(state)));
+            let _ = self.tx.send(Received::State(Box::new(state)));
             Ok(())
         }
         async fn sources_catalog(&mut self, c: SourcesCatalog) -> Result<()> {
-            let _ = self.tx.send(Recu::SourcesCatalog(c));
+            let _ = self.tx.send(Received::SourcesCatalog(c));
             Ok(())
         }
         fn wants_covers(&self) -> bool {
             true
         }
         async fn cover(&mut self, c: Cover) -> Result<()> {
-            let _ = self.tx.send(Recu::CoverPayload(c));
+            let _ = self.tx.send(Received::CoverPayload(c));
             Ok(())
         }
     }
 
-    /// En-tête JPEG minimal puis du remplissage.
-    /// **Indecodable expres** : ne convient qu'aux tests de size et de
-    /// cap, ou l'image n'est jamais decodee. Tout ce qui traverse
-    /// `CoverCache::line` doit passer par `fixtures::jpeg_decodable`, le rendition
-    /// etant active par defaut.
-    fn jpeg(remplissage: usize) -> Vec<u8> {
+    /// A minimal JPEG header followed by padding.
+    /// **Deliberately undecodable**: only fit for size and cap tests, where
+    /// the image is never decoded. Everything that goes through
+    /// `CoverCache::line` must pass through `fixtures::jpeg_decodable`, the
+    /// rendition being active by default.
+    fn jpeg(padding: usize) -> Vec<u8> {
         let mut v = vec![0xFFu8, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
-        v.resize(6 + remplissage, 0x42);
+        v.resize(6 + padding, 0x42);
         v
     }
 
-    /// Un état **tel que le cœur l'émet** : `cover_href` y est toujours de la
-    /// forme `/api/cover/{clé}`, et la clé désigne une entrée du cache. Un
-    /// `Default::default()` avec un `cover_href` inventé prouverait une
-    /// causalité dans une trame que le producteur ne peut pas produire.
-    fn etat_avec_pochette(key: &str) -> PlayerState {
+    /// A state **as the core emits it**: `cover_href` in it is always of the
+    /// form `/api/cover/{key}`, and the key designates a cache entry. A
+    /// `Default::default()` with an invented `cover_href` would prove a
+    /// causality in a frame the producer cannot produce.
+    fn state_with_cover(key: &str) -> PlayerState {
         PlayerState {
             source: "files".into(),
             track: ritornello_proto::Track {
@@ -2579,39 +2591,40 @@ mod relais_tests {
         }
     }
 
-    /// Monte un afficheur servi par le SDK, câble le relais dessus, et rend de
-    /// quoi piloter l'état et read ce que l'afficheur reçoit.
-    struct Banc {
+    /// Sets up a display served by the SDK, wires the relay onto it, and
+    /// returns what is needed to drive the state and read what the display
+    /// receives.
+    struct Bench {
         state_tx: watch::Sender<PlayerState>,
-        recus: mpsc::UnboundedReceiver<Recu>,
-        /// Le dernier état poussé. Un témoin en est dérivé, pour n'en différer
-        /// que par un champ sans rapport avec la cover (voir `temoin`).
-        dernier: PlayerState,
-        _catalogue_tx: watch::Sender<SourcesCatalog>,
+        received: mpsc::UnboundedReceiver<Received>,
+        /// The last state pushed. A witness is derived from it, to differ
+        /// from it only by a field unrelated to the cover (see `witness`).
+        last: PlayerState,
+        _catalog_tx: watch::Sender<SourcesCatalog>,
         _dir: tempfile::TempDir,
     }
 
-    async fn banc(
+    async fn bench(
         wants_covers: bool,
         covers: Arc<CoverCache>,
-        etat_initial: PlayerState,
-    ) -> Banc {
+        initial_state: PlayerState,
+    ) -> Bench {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("display.sock");
         let listener = bind_display(&socket).unwrap();
-        let (tx, recus) = mpsc::unbounded_channel();
+        let (tx, received) = mpsc::unbounded_channel();
         tokio::spawn(async move {
-            let _ = serve_display(listener, Bouchon { tx }).await;
+            let _ = serve_display(listener, Stub { tx }).await;
         });
         let client = DisplayClient::connect(&socket).await.unwrap();
-        let (state_tx, state_rx) = watch::channel(etat_initial.clone());
+        let (state_tx, state_rx) = watch::channel(initial_state.clone());
         let (sources_catalog_tx, catalog_rx) = watch::channel(SourcesCatalog::default());
-        // Le banc ne dit rien de l'notice d'injoignabilité : récepteur abandonné
-        // aussitôt, donc l'envoi de fin de relais échoue et est ignoré, comme
-        // il l'est en service quand la boucle du cœur est déjà partie. Même
-        // idiome que les canaux du banc de `hotplug`.
+        // The bench says nothing of the unreachable notice: receiver dropped
+        // right away, so the relay's end-of-life send fails and is ignored,
+        // just as it is in service when the core loop is already gone. Same
+        // idiom as `hotplug`'s bench channels.
         display_relay(
-            "banc".into(),
+            "bench".into(),
             client,
             wants_covers,
             covers,
@@ -2619,147 +2632,147 @@ mod relais_tests {
             catalog_rx,
             UnreachableNotice { wiring: 0, tx: mpsc::channel(4).0 },
         );
-        let mut b = Banc {
+        let mut b = Bench {
             state_tx,
-            recus,
-            dernier: etat_initial,
-            _catalogue_tx: sources_catalog_tx,
+            received,
+            last: initial_state,
+            _catalog_tx: sources_catalog_tx,
             _dir: dir,
         };
-        // Attendre que le relais ait consommé la valeur initiale **avant** de
-        // rendre le banc. Un `watch` ne garde que la dernière valeur : sans
-        // cette attente, un `send` du test pouvait écraser l'état initial avant
-        // le `borrow_and_update()` du relais, et l'état porteur de la cover
-        // n'aurait jamais existé pour lui. Ce n'est pas une marge de temps mais
-        // une synchronisation exacte — le sources_catalog est la **seconde** trame
-        // qu'envoie le relais, donc l'avoir vue prouve que l'état initial est
-        // passé. La cover initiale, elle, part juste après : elle reste donc
-        // à collecter, ce que fait `temoin`.
+        // Wait for the relay to have consumed the initial value **before**
+        // returning the bench. A `watch` only keeps the latest value:
+        // without this wait, a test `send` could overwrite the initial state
+        // before the relay's `borrow_and_update()`, and the state carrying
+        // the cover would never have existed for it. This is not a time
+        // margin but an exact synchronization — the sources catalog is the
+        // **second** frame the relay sends, so having seen it proves the
+        // initial state went through. The initial cover, meanwhile, leaves
+        // right after: it therefore still needs collecting, which is what
+        // `witness` does.
         loop {
-            match b.recus.recv().await.expect("le relais doit send_frame letat puis le sources_catalog") {
-                Recu::SourcesCatalog(_) => break,
-                Recu::Etat(_) => {}
-                autre => panic!("trame inattendue avant le sources_catalog : {autre:?}"),
+            match b.received.recv().await.expect("the relay must send the state then the sources catalog") {
+                Received::SourcesCatalog(_) => break,
+                Received::State(_) => {}
+                other => panic!("unexpected frame before the sources catalog: {other:?}"),
             }
         }
         b
     }
 
-    /// Clôt une collecte : envoie un état témoin et rend tout ce qui est arrivé
-    /// avant lui.
+    /// Closes a collection: sends a witness state and returns everything
+    /// that arrived before it.
     ///
-    /// Le témoin ne diffère du dernier état que par le **volume**, donc il porte
-    /// le même `cover_href`. C'est nécessaire : un témoin sans cover
-    /// réinitialiserait la garde de déduplication du relais, et la cover
-    /// repartirait à l'état suivant — ce qui masquerait exactement la propriété
-    /// que ces tests veulent voir.
-    async fn temoin(banc: &mut Banc) -> Vec<Recu> {
-        let mut t = banc.dernier.clone();
+    /// The witness differs from the last state only by its **volume**, so it
+    /// carries the same `cover_href`. This is necessary: a witness with no
+    /// cover would reset the relay's deduplication guard, and the cover
+    /// would go out again on the next state — which would mask exactly the
+    /// property these tests want to see.
+    async fn witness(bench: &mut Bench) -> Vec<Received> {
+        let mut t = bench.last.clone();
         t.volume = t.volume.wrapping_add(1);
-        banc.dernier = t.clone();
-        banc.state_tx.send(t.clone()).unwrap();
-        let mut avant = Vec::new();
+        bench.last = t.clone();
+        bench.state_tx.send(t.clone()).unwrap();
+        let mut before = Vec::new();
         loop {
-            match banc.recus.recv().await.expect("le relais doit rester vivant") {
-                Recu::Etat(e) if *e == t => return avant,
-                autre => avant.push(autre),
+            match bench.received.recv().await.expect("the relay must stay alive") {
+                Received::State(e) if *e == t => return before,
+                other => before.push(other),
             }
         }
     }
 
-    /// Provoque un changement d'état et rend **exactement** ce qu'il a
-    /// provoqué.
+    /// Triggers a state change and returns **exactly** what it triggered.
     ///
-    /// Deux synchronisations, et les deux sont nécessaires. La première attend
-    /// l'arrivée de *cet* état : un `watch` ne conserve que la dernière valeur,
-    /// donc send_frame le témoin avant d'avoir vu celui-ci pourrait l'effacer sans
-    /// qu'il ait jamais existé pour le relais. La seconde est le témoin, qui
-    /// clôt la collecte.
+    /// Two synchronizations, and both are necessary. The first waits for the
+    /// arrival of *this* state: a `watch` only keeps the latest value, so
+    /// sending the witness before having seen this one could erase it
+    /// without it ever having existed for the relay. The second is the
+    /// witness, which closes the collection.
     ///
-    /// **Une trame de cover peut arriver en retard, et il a fallu un échec
-    /// intermittent pour l'admettre.** Le raisonnement d'origine disait « la
-    /// fenêtre précédente a été close par son propre témoin, donc rien ne reste
-    /// en vol » et faisait paniquer sur toute autre trame. C'est faux : `temoin`
-    /// rend la main dès qu'il voit **sa** trame d'état, or le relais enchaîne
-    /// ensuite sur son étape cover pour ce témoin-là. Un témoin dont la
-    /// cover est en attente de réessai déclenche donc une playback qui vit
-    /// encore après son retour — et si le test a entre-temps remis le fichier en
-    /// place, ce réessai **réussit** et sa trame se présente juste avant l'état
-    /// suivant. Cadrage faux, pas anomalie.
+    /// **A cover frame can arrive late, and it took an intermittent failure
+    /// to admit it.** The original reasoning said "the previous window was
+    /// closed by its own witness, so nothing remains in flight" and panicked
+    /// on any other frame. That is false: `witness` returns control as soon
+    /// as it sees **its** state frame, yet the relay then chains into its
+    /// cover step for that witness. A witness whose cover is awaiting a
+    /// retry therefore triggers activity that is still alive after it
+    /// returns — and if the test has meanwhile put the file back in place,
+    /// that retry **succeeds** and its frame shows up just before the next
+    /// state. Wrong framing, not an anomaly.
     ///
-    /// D'où l'asymétrie assumée ci-dessous : une **cover** en avance est
-    /// versée dans la fenêtre (elle est la conséquence retardée du changement
-    /// précédent, et la compter ici est ce que les assertions veulent — le
-    /// relais dédoublonne ensuite, donc elle ne peut pas compter deux fois),
-    /// tandis qu'un **état** inattendu reste une anomalie et fait paniquer :
-    /// l'order des états, lui, n'a aucune raison de flotter.
-    async fn provoque(banc: &mut Banc, state: PlayerState) -> Vec<Recu> {
-        banc.dernier = state.clone();
-        banc.state_tx.send(state.clone()).unwrap();
-        let mut avant = Vec::new();
+    /// Hence the deliberate asymmetry below: an early **cover** is folded
+    /// into the window (it is the delayed consequence of the previous
+    /// change, and counting it here is what the assertions want — the relay
+    /// deduplicates afterwards, so it cannot count twice), while an
+    /// unexpected **state** remains an anomaly and panics: the order of
+    /// states has no reason to drift.
+    async fn trigger(bench: &mut Bench, state: PlayerState) -> Vec<Received> {
+        bench.last = state.clone();
+        bench.state_tx.send(state.clone()).unwrap();
+        let mut before = Vec::new();
         loop {
-            match banc.recus.recv().await.expect("le relais doit rester vivant") {
-                Recu::Etat(e) if *e == state => break,
-                cover @ Recu::CoverPayload(_) => avant.push(cover),
-                autre => panic!("trame inattendue avant letat envoye : {autre:?}"),
+            match bench.received.recv().await.expect("the relay must stay alive") {
+                Received::State(e) if *e == state => break,
+                cover @ Received::CoverPayload(_) => before.push(cover),
+                other => panic!("unexpected frame before the sent state: {other:?}"),
             }
         }
-        avant.extend(temoin(banc).await);
-        avant
+        before.extend(witness(bench).await);
+        before
     }
 
-    fn pochettes(recus: &[Recu]) -> Vec<&Cover> {
-        recus
+    fn covers_from(received: &[Received]) -> Vec<&Cover> {
+        received
             .iter()
             .filter_map(|r| match r {
-                Recu::CoverPayload(c) => Some(c),
+                Received::CoverPayload(c) => Some(c),
                 _ => None,
             })
             .collect()
     }
 
     #[tokio::test]
-    async fn un_afficheur_qui_na_pas_demande_les_pochettes_nen_recoit_aucune() {
-        // **La propriété qui protège la console.** Le bouchon sait recevoir une
-        // cover ; c'est le cœur qui ne doit pas la lui send_frame.
+    async fn a_display_that_did_not_ask_for_covers_receives_none() {
+        // **The property that protects the console.** The stub knows how to
+        // receive a cover; it is the core that must not send it one.
         let covers = Arc::new(CoverCache::new());
         covers
             .insert("abcd".into(), CoverPayload::Bytes(fixtures::jpeg_decodable(48, 48), "image/jpeg"))
             .await;
-        let mut b = banc(false, covers, etat_avec_pochette("abcd")).await;
+        let mut b = bench(false, covers, state_with_cover("abcd")).await;
 
-        let recus = temoin(&mut b).await;
+        let received = witness(&mut b).await;
         assert!(
-            pochettes(&recus).is_empty(),
-            "aucune cover ne doit atteindre un afficheur qui n'en a pas demande : {recus:?}"
+            covers_from(&received).is_empty(),
+            "no cover must reach a display that did not ask for any: {received:?}"
         );
     }
 
     #[tokio::test]
-    async fn un_afficheur_qui_a_demande_recoit_les_octets_et_le_href_de_letat() {
+    async fn a_display_that_asked_receives_the_bytes_and_the_state_href() {
         let image = fixtures::jpeg_decodable(48, 48);
         let covers = Arc::new(CoverCache::new());
         covers.insert("abcd".into(), CoverPayload::Bytes(image.clone(), "image/png")).await;
-        let mut b = banc(true, covers, etat_avec_pochette("abcd")).await;
+        let mut b = bench(true, covers, state_with_cover("abcd")).await;
 
-        let recus = temoin(&mut b).await;
-        let vues = pochettes(&recus);
-        assert_eq!(vues.len(), 1, "une cover, une seule : {recus:?}");
-        assert_eq!(vues[0].bytes, image);
-        assert_eq!(vues[0].mime, "image/png");
+        let received = witness(&mut b).await;
+        let seen = covers_from(&received);
+        assert_eq!(seen.len(), 1, "one cover, only one: {received:?}");
+        assert_eq!(seen[0].bytes, image);
+        assert_eq!(seen[0].mime, "image/png");
         assert_eq!(
-            vues[0].href,
+            seen[0].href,
             format!("{}abcd", cover::HREF_PREFIX),
-            "le href doit etre exactement celui de la trame d'state, sans quoi l'afficheur \
-             ne peut pas correler l'image avec ce qui plays"
+            "the href must be exactly that of the state frame, otherwise the display \
+             cannot correlate the image with what is playing"
         );
     }
 
     #[tokio::test]
-    async fn la_pochette_ne_repart_pas_tant_quelle_ne_change_pas() {
-        // Une trame d'état sort jusqu'à une fois par seconde en playback. Sans
-        // cette garde, chaque seconde de playback pousserait l'image entière —
-        // et referait la playback du fichier local qui la produit.
+    async fn the_cover_does_not_go_out_again_while_unchanged() {
+        // A state frame goes out up to once per second during playback.
+        // Without this guard, every second of playback would push the whole
+        // image — and redo the local-file read that produces it.
         let covers = Arc::new(CoverCache::new());
         covers
             .insert("abcd".into(), CoverPayload::Bytes(fixtures::jpeg_decodable(48, 48), "image/jpeg"))
@@ -2767,110 +2780,114 @@ mod relais_tests {
         covers
             .insert("efgh".into(), CoverPayload::Bytes(fixtures::jpeg_decodable(64, 64), "image/jpeg"))
             .await;
-        let mut b = banc(true, covers, etat_avec_pochette("abcd")).await;
+        let mut b = bench(true, covers, state_with_cover("abcd")).await;
 
-        // La cover initiale, qui part avec le premier état.
-        let recus = temoin(&mut b).await;
-        assert_eq!(pochettes(&recus).len(), 1, "la cover initiale : {recus:?}");
+        // The initial cover, which goes out with the first state.
+        let received = witness(&mut b).await;
+        assert_eq!(covers_from(&received).len(), 1, "the initial cover: {received:?}");
 
-        // Le même `cover_href`, mais un état différent (le volume) : la trame
-        // d'état repart, la cover non.
-        let mut encore = etat_avec_pochette("abcd");
-        encore.volume = 42;
-        let recus = provoque(&mut b, encore).await;
+        // The same `cover_href`, but a different state (the volume): the
+        // state frame goes out again, the cover does not.
+        let mut again = state_with_cover("abcd");
+        again.volume = 42;
+        let received = trigger(&mut b, again).await;
         assert!(
-            pochettes(&recus).is_empty(),
-            "une cover inchangee ne doit pas repartir avec chaque trame d'state : {recus:?}"
+            covers_from(&received).is_empty(),
+            "an unchanged cover must not go out again with every state frame: {received:?}"
         );
 
-        // Une autre clé, en revanche, est une autre image : elle doit partir.
-        let recus = provoque(&mut b, etat_avec_pochette("efgh")).await;
-        let vues = pochettes(&recus);
-        assert_eq!(vues.len(), 1, "un changement de cover doit en pousser une : {recus:?}");
-        assert_eq!(vues[0].href, format!("{}efgh", cover::HREF_PREFIX));
+        // A different key, on the other hand, is a different image: it must
+        // go out.
+        let received = trigger(&mut b, state_with_cover("efgh")).await;
+        let seen = covers_from(&received);
+        assert_eq!(seen.len(), 1, "a cover change must push one: {received:?}");
+        assert_eq!(seen[0].href, format!("{}efgh", cover::HREF_PREFIX));
     }
 
     #[tokio::test]
-    async fn une_pochette_au_dela_du_plafond_nest_pas_poussee_et_le_relais_survit() {
-        // La conséquence définie du cap, vue du relais : rien n'est poussé,
-        // et surtout la tâche continue de serve l'état — un refus de cover
-        // n'est pas un échec d'envoi, sinon l'afficheur perdrait *tout* pour le
-        // reste du processus.
+    async fn a_cover_beyond_the_cap_is_not_pushed_and_the_relay_survives() {
+        // The defined consequence of the cap, seen from the relay: nothing
+        // is pushed, and above all the task keeps serving the state — a
+        // cover refusal is not a send failure, otherwise the display would
+        // lose *everything* for the rest of the process.
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("enorme.jpg");
+        let path = dir.path().join("huge.jpg");
         std::fs::write(&path, jpeg(ritornello_proto::COVER_MAX_BYTES)).unwrap();
         let covers = Arc::new(CoverCache::new());
         covers.insert("abcd".into(), CoverPayload::File(path)).await;
-        let mut b = banc(true, covers, etat_avec_pochette("abcd")).await;
+        let mut b = bench(true, covers, state_with_cover("abcd")).await;
 
-        let recus = temoin(&mut b).await;
-        assert!(pochettes(&recus).is_empty(), "au-dela du cap, rien ne doit partir : {recus:?}");
-        // Le témoin est arrivé, donc le relais vit : c'est l'autre moitié de la
-        // propriété, et `temoin` aurait bloqué indéfiniment sinon.
+        let received = witness(&mut b).await;
+        assert!(covers_from(&received).is_empty(), "beyond the cap, nothing must go out: {received:?}");
+        // The witness arrived, so the relay is alive: that is the other half
+        // of the property, and `witness` would have blocked indefinitely
+        // otherwise.
     }
 
     #[tokio::test]
-    async fn un_href_sans_pochette_en_cache_ne_casse_pas_le_relais() {
-        // Le cache est borné (`ENTREES` entrées) : la clé publiée dans l'état
-        // peut avoir été évincée entre-temps.
+    async fn an_href_with_no_cached_cover_does_not_break_the_relay() {
+        // The cache is bounded (`ENTRIES` entries): the key published in the
+        // state may have been evicted in the meantime.
         let covers = Arc::new(CoverCache::new());
-        let mut b = banc(true, covers, etat_avec_pochette("evincee")).await;
-        let recus = temoin(&mut b).await;
-        assert!(pochettes(&recus).is_empty(), "{recus:?}");
+        let mut b = bench(true, covers, state_with_cover("evicted")).await;
+        let received = witness(&mut b).await;
+        assert!(covers_from(&received).is_empty(), "{received:?}");
     }
 
     #[tokio::test]
-    async fn un_echec_transitoire_est_reessaye_et_la_pochette_finit_par_partir() {
-        // **La propriété que le défaut cassait, et rien d'autre.** `push_cover`
-        // marquait la tentative comme faite *avant* de la faire : un seul délai
-        // dépassé sur un partage SMB endormi sacrifiait la cover pour **toute
-        // la piste**, parce que la garde de déduplication considérait ensuite
-        // l'affaire classée. Or c'est exactement le cas où un second essai
-        // réussit — un partage réveillé répond au deuxième accès.
+    async fn a_transient_failure_is_retried_and_the_cover_eventually_goes_out() {
+        // **The property the defect broke, and nothing else.** `push_cover`
+        // marked the attempt as done *before* actually making it: a single
+        // exceeded timeout on a sleeping SMB share sacrificed the cover for
+        // **the whole track**, because the deduplication guard then
+        // considered the matter settled. Yet this is exactly the case where
+        // a second attempt succeeds — a woken-up share answers on the
+        // second access.
         //
-        // L'échec est provoqué par la disparition du fichier, ce que
-        // `read_file_bounded` traite comme toute IO qui n'aboutit pas. La
-        // séquence est celle de la production : l'entrée est insérée alors que le
-        // fichier existe (`fetch` en a lu l'en-tête avant d'insérer), le
-        // partage s'absente, puis il revient.
+        // The failure is triggered by the file's disappearance, which
+        // `read_file_bounded` treats like any IO that does not complete. The
+        // sequence is the production one: the entry is inserted while the
+        // file exists (`fetch` read its header before inserting), the share
+        // goes away, then it comes back.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("folder.jpg");
         let image = fixtures::jpeg_decodable(48, 48);
         std::fs::write(&path, &image).unwrap();
         let covers = Arc::new(CoverCache::new());
         covers.insert("abcd".into(), CoverPayload::File(path.clone())).await;
-        // Le partage s'endort : le fichier n'est plus lisible.
+        // The share goes to sleep: the file is no longer readable.
         std::fs::remove_file(&path).unwrap();
 
-        let mut b = banc(true, covers, etat_avec_pochette("abcd")).await;
-        let recus = temoin(&mut b).await;
+        let mut b = bench(true, covers, state_with_cover("abcd")).await;
+        let received = witness(&mut b).await;
         assert!(
-            pochettes(&recus).is_empty(),
-            "premiere tentative : le fichier est illisible, rien ne doit partir : {recus:?}"
+            covers_from(&received).is_empty(),
+            "first attempt: the file is unreadable, nothing must go out: {received:?}"
         );
 
-        // Le partage revient. Le `cover_href` n'a **pas** changé — c'est tout
-        // l'enjeu : avec l'ancien code, la garde le tenait pour deja traite et
-        // aucune relecture n'avait plus lieu jusqu'au track suivant.
+        // The share comes back. The `cover_href` did **not** change — that
+        // is the whole point: with the old code, the guard held it as
+        // already handled and no reread ever happened until the next track.
         std::fs::write(&path, &image).unwrap();
-        let mut encore = etat_avec_pochette("abcd");
-        encore.volume = 42;
-        let recus = provoque(&mut b, encore).await;
-        let vues = pochettes(&recus);
-        assert_eq!(vues.len(), 1, "le second essai doit pousser la cover : {recus:?}");
-        assert_eq!(vues[0].bytes, image);
+        let mut again = state_with_cover("abcd");
+        again.volume = 42;
+        let received = trigger(&mut b, again).await;
+        let seen = covers_from(&received);
+        assert_eq!(seen.len(), 1, "the second attempt must push the cover: {received:?}");
+        assert_eq!(seen[0].bytes, image);
     }
 
     #[tokio::test]
-    async fn un_echec_definitif_nest_pas_reessaye_sans_fin() {
-        // L'autre moitié du compromis, et elle compte autant : une trame d'état
-        // sort jusqu'à une fois par seconde en playback, donc retenter sans bounded
-        // relirait un fichier absent une fois par seconde pour le reste de la
-        // piste. Le budget est de `COVER_ATTEMPTS` essais, et il s'épuise.
+    async fn a_permanent_failure_is_not_retried_forever() {
+        // The other half of the trade-off, and it counts just as much: a
+        // state frame goes out up to once per second during playback, so
+        // retrying without a bound would reread an absent file once per
+        // second for the rest of the track. The budget is `COVER_ATTEMPTS`
+        // attempts, and it runs out.
         //
-        // Preuve sans marge de temps : le fichier est remis en place **après**
-        // épuisement du budget, et la cover ne doit alors plus partir. Si le
-        // budget n'existait pas, elle partirait.
+        // Proof with no time margin: the file is put back **after** the
+        // budget is exhausted, and the cover must then no longer go out. If
+        // the budget did not exist, it would go out.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("folder.jpg");
         let image = fixtures::jpeg_decodable(48, 48);
@@ -2879,64 +2896,64 @@ mod relais_tests {
         covers.insert("abcd".into(), CoverPayload::File(path.clone())).await;
         std::fs::remove_file(&path).unwrap();
 
-        // Une tentative part avec l'état initial, une par témoin ci-dessous :
-        // trois essais au total, soit tout le budget.
-        let mut b = banc(true, covers, etat_avec_pochette("abcd")).await;
+        // One attempt goes out with the initial state, one per witness
+        // below: three attempts total, i.e. the whole budget.
+        let mut b = bench(true, covers, state_with_cover("abcd")).await;
         for _ in 0..3 {
-            let recus = temoin(&mut b).await;
-            assert!(pochettes(&recus).is_empty(), "rien ne doit partir tant que le fichier manque");
+            let received = witness(&mut b).await;
+            assert!(covers_from(&received).is_empty(), "nothing must go out while the file is missing");
         }
 
         std::fs::write(&path, &image).unwrap();
-        let recus = temoin(&mut b).await;
+        let received = witness(&mut b).await;
         assert!(
-            pochettes(&recus).is_empty(),
-            "le budget de cette cover est epuise : plus aucune relecture ne doit avoir lieu \
-             pour ce href, {recus:?}"
+            covers_from(&received).is_empty(),
+            "this cover's budget is exhausted: no more reread must happen \
+             for this href, {received:?}"
         );
     }
 
     #[tokio::test]
-    async fn un_afficheur_recable_recoit_limage_actuelle_et_non_celle_davant() {
-        // **Le scénario du constat le plus grave, de bout en bout.** Trois clics
-        // de l'utilisateur : désactiver l'afficheur depuis la page d'admin,
-        // remplacer la cover sur le partage, le réactiver. Le second relais
-        // repart avec sa garde de déduplication à zéro et redemande la cover
-        // courante — même clé, puisque la clé hache le *path*.
+    async fn a_rewired_display_receives_the_current_image_not_the_previous_one() {
+        // **The scenario of the most serious finding, end to end.** Three
+        // user clicks: disable the display from the admin page, replace the
+        // cover on the share, re-enable it. The second relay starts over
+        // with its deduplication guard at zero and asks again for the
+        // current cover — same key, since the key hashes the *path*.
         //
-        // Une line encodée gardée d'un appel sur l'autre servait alors l'image
-        // d'avant, et rien ne pouvait l'invalider : remplacer un fichier sur un
-        // partage ne passe par aucun code à nous, et aucun `insert` n'a lieu ici.
-        // Deux bancs successifs sur le **même** `CoverCache` reproduisent
-        // exactement le décâblage puis le recâblage.
+        // An encoded line kept from one call to the next then served the
+        // previous image, and nothing could invalidate it: replacing a file
+        // on a share goes through none of our code, and no `insert` happens
+        // here. Two successive benches on the **same** `CoverCache`
+        // reproduce exactly the unwiring then the rewiring.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("folder.jpg");
-        let avant = fixtures::jpeg_decodable(48, 48);
-        let apres = fixtures::jpeg_decodable(64, 64);
-        std::fs::write(&path, &avant).unwrap();
+        let before = fixtures::jpeg_decodable(48, 48);
+        let after = fixtures::jpeg_decodable(64, 64);
+        std::fs::write(&path, &before).unwrap();
         let covers = Arc::new(CoverCache::new());
         covers.insert("abcd".into(), CoverPayload::File(path.clone())).await;
 
-        let mut premier = banc(true, covers.clone(), etat_avec_pochette("abcd")).await;
-        let recus = temoin(&mut premier).await;
-        let vues = pochettes(&recus);
-        assert_eq!(vues.len(), 1, "la cover initiale : {recus:?}");
-        assert_eq!(vues[0].bytes, avant);
-        // L'afficheur est disabled : son relais s'en va avec son banc.
-        drop(premier);
+        let mut first = bench(true, covers.clone(), state_with_cover("abcd")).await;
+        let received = witness(&mut first).await;
+        let seen = covers_from(&received);
+        assert_eq!(seen.len(), 1, "the initial cover: {received:?}");
+        assert_eq!(seen[0].bytes, before);
+        // The display is disabled: its relay goes away with its bench.
+        drop(first);
 
-        // L'utilisateur remplace la cover qui ne lui plaisait pas.
-        std::fs::write(&path, &apres).unwrap();
+        // The user replaces the cover they did not like.
+        std::fs::write(&path, &after).unwrap();
 
-        // Puis il reactive l'afficheur : nouveau relais, meme cache, meme key.
-        let mut second = banc(true, covers, etat_avec_pochette("abcd")).await;
-        let recus = temoin(&mut second).await;
-        let vues = pochettes(&recus);
-        assert_eq!(vues.len(), 1, "l'afficheur recable doit recevoir la cover courante : {recus:?}");
+        // Then they re-enable the display: new relay, same cache, same key.
+        let mut second = bench(true, covers, state_with_cover("abcd")).await;
+        let received = witness(&mut second).await;
+        let seen = covers_from(&received);
+        assert_eq!(seen.len(), 1, "the rewired display must receive the current cover: {received:?}");
         assert_eq!(
-            vues[0].bytes, apres,
-            "et ce doit etre l'image actuelle du partage, pas celle que le cache avait encodee \
-             avant le remplacement"
+            seen[0].bytes, after,
+            "and it must be the share's current image, not the one the cache had encoded \
+             before the replacement"
         );
     }
 }

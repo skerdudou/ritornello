@@ -2,37 +2,37 @@
 import { api, Button, Card, CardContent, CardHeader, CardTitle, createT, Input, Label, toast, type Catalog } from '@ritornello/ui'
 import { computed, onMounted, ref } from 'vue'
 
-// `base` fait partie du contract des IHM de plugin, au meme titre que
-// `catalog` : le prefixe **absolu** sous lequel le coeur sert les routes de ce
-// plugin (`/plugins/musicbrainz/`), fourni par le shell. Prop **requise**,
-// sans valeur par defaut, pour la meme raison que dans `MpdAdmin.vue` : le nom
-// sous lequel ce plugin est servi vient de `plugins.toml`, donc du
-// deploiement, et un defaut serait faux — silencieusement — des qu'un
-// operateur le declare sous un autre nom.
+// `base` is part of the plugin UI contract, just like `catalog`: the
+// **absolute** prefix under which the core serves this plugin's routes
+// (`/plugins/musicbrainz/`), provided by the shell. **Required** prop, no
+// default value, for the same reason as in `MpdAdmin.vue`: the name under
+// which this plugin is served comes from `plugins.toml`, hence from the
+// deployment, and a default would be wrong — silently — as soon as an
+// operator declares it under another name.
 const props = defineProps<{ catalog: Catalog; base: string }>()
 const t = computed(() => createT(props.catalog))
 
-/** URL absolue d'une route de ce plugin, construite depuis `base`. */
-function url(chemin: string): string {
-  return `${props.base}${chemin}`
+/** Absolute URL of one of this plugin's routes, built from `base`. */
+function url(path: string): string {
+  return `${props.base}${path}`
 }
 
-// --- Le contract get_data / set_data (tache 8), recopie ici tel quel --------
+// --- The get_data / set_data contract (task 8), copied here as is ----------
 //
-// `motif` est une enumeration **etiquetee a l'exterieur** : soit l'objet
-// `{ separe: {...} }`, soit la chaine nue `"ne_pas_decouper"`. Ce n'est pas
-// un objet avec un champ `type` — le typer comme une union de ces deux formes
-// exactes evite de reconstituer une forme qui n'existe pas cote serveur.
+// `motif` is an **externally tagged** enumeration: either the object
+// `{ separe: {...} }`, or the bare string `"ne_pas_decouper"`. It is not an
+// object with a `type` field — typing it as a union of these two exact shapes
+// avoids reconstructing a shape that does not exist on the server side.
 interface SplitPattern {
   separe: {
     separateur: string
     artiste_en_premier: boolean
-    /** La forme `Artiste - Titre - Album` : le titre est le champ du milieu.
+    /** The `Artist - Title - Album` shape: the title is the middle field.
      *
-     * Optionnel parce que le champ est additif cote dorsal (`serde(default)`),
-     * donc un fichier d'etat ecrit avant lui se relit sans l'avoir. Et la page
-     * ne le **produit** jamais : ce motif ne s'obtient que par un sondage,
-     * jamais a la main — le jeu ferme de l'edition ne le propose pas. */
+     * Optional because the field is additive on the backend side
+     * (`serde(default)`), so a state file written before it reads back without
+     * it. And the page never **produces** it: this pattern is only obtained by
+     * probing, never by hand — the closed set of the editor does not offer it. */
     titre_au_milieu?: boolean
   }
 }
@@ -43,9 +43,9 @@ interface Station {
   url: string
   motif: Pattern
   origine: Origin
-  // Present et nul quand la station n'a jamais servi (pas absent) : le type
-  // porte cette possibilite explicitement plutot que de la traiter en aval
-  // comme un champ optionnel qui pourrait aussi manquer.
+  // Present and null when the station has never served (not absent): the type
+  // carries this possibility explicitly rather than handling it downstream as
+  // an optional field that could also be missing.
   dernier_usage: string | null
   titres_decoupes: number
 }
@@ -57,11 +57,11 @@ interface Data {
 const data = ref<Data>({ stations: [] })
 
 /**
- * Filtre « exceptions seulement », **actif par defaut** : une station dont le
- * format a ete confirme standard existe bien comme entree (son absence
- * confondrait « jamais sondee » et « verifiee conforme »), mais ce que
- * l'operateur vient chercher ici, ce sont les stations qui devient — ce
- * filtre les isole du bruit des stations qui marchent deja.
+ * "Exceptions only" filter, **active by default**: a station whose format has
+ * been confirmed standard does exist as an entry (its absence would confuse
+ * "never probed" with "verified compliant"), but what the operator comes here
+ * for are the stations that deviate — this filter isolates them from the
+ * noise of stations that already work.
  */
 const filterExceptions = ref(true)
 
@@ -71,8 +71,8 @@ const shownStations = computed(() =>
     : data.value.stations,
 )
 
-// Deux etats de vide distincts, jamais fusionnes : un ecran vide serait sinon
-// ambigu entre « tout va bien » et « rien n'a jamais fonctionne ».
+// Two distinct empty states, never merged: an empty screen would otherwise be
+// ambiguous between "all is well" and "nothing has ever worked".
 const nothingProbed = computed(() => data.value.stations.length === 0)
 const filterHidesAll = computed(() => !nothingProbed.value && shownStations.value.length === 0)
 
@@ -80,21 +80,20 @@ async function reload(): Promise<void> {
   try {
     data.value = await api.get<Data>(url('api/data'))
   } catch (e) {
-    // Comme `MpdAdmin.vue` : aucune cle de catalogue ne couvre cet echec de
-    // chargement, le message brut de la requete est le seul texte
-    // disponible.
+    // Like `MpdAdmin.vue`: no catalog key covers this load failure, the raw
+    // request message is the only text available.
     toast.error((e as Error).message)
   }
 }
 
 onMounted(reload)
 
-// --- Libelles ----------------------------------------------------------
+// --- Labels ---------------------------------------------------------------
 
-// Des appels litteraux (`t.value('origin_standard')`, etc.), pas une
-// indirection par table : `i18nKeysUsed.test.ts` ne collecte que les cles
-// passees en clair a `t`/`t.value`, une cle recomposee depuis une variable
-// lui echapperait silencieusement.
+// Literal calls (`t.value('origin_standard')`, etc.), not an indirection
+// through a table: `i18nKeysUsed.test.ts` only collects keys passed in plain
+// text to `t`/`t.value`, a key recomposed from a variable would silently
+// escape it.
 function originText(o: Origin): string {
   switch (o) {
     case 'standard_confirme':
@@ -108,9 +107,10 @@ function originText(o: Origin): string {
 
 function patternText(m: Pattern): string {
   if (m === 'ne_pas_decouper') return t.value('pattern_no_split')
-  // La forme `Artiste - Titre - Album` porte le meme separateur et le meme
-  // order que le standard : sans mention propre, elle s'afficherait comme lui
-  // et la page mentirait par omission sur la seule colonne qu'on vient y lire.
+  // The `Artist - Title - Album` shape carries the same separator and the
+  // same order as the standard: without its own mention, it would display
+  // like it and the page would lie by omission on the only column one comes
+  // here to read.
   const order = m.separe.titre_au_milieu
     ? t.value('pattern_title_middle')
     : m.separe.artiste_en_premier
@@ -119,24 +119,22 @@ function patternText(m: Pattern): string {
   return `"${m.separe.separateur}" (${order})`
 }
 
-// --- Edition -------------------------------------------------------------
+// --- Editing --------------------------------------------------------------
 //
-// Un jeu ferme, jamais une expression rationnelle : une regex libre ferait
-// deboguer des expressions a l'utilisateur, et une mauvaise casserait tous
-// les titres de la station. Les seuls choix sont un separateur (une chaine,
-// pas un motif), un order (deux valeurs), et « ne pas decouper », qui grise
-// les deux precedents.
+// A closed set, never a regular expression: a free regex would have the user
+// debugging expressions, and a bad one would break every title of the
+// station. The only choices are a separator (a string, not a pattern), an
+// order (two values), and "do not split", which greys out the previous two.
 
-/** URL de la station en cours d'edition, `null` si aucune. Une seule ligne a
- *  la fois : ouvrir une deuxieme edition referme implicitement la premiere
- *  (voir `openEdit`). */
+/** URL of the station being edited, `null` if none. One row at a time:
+ *  opening a second edit implicitly closes the first (see `openEdit`). */
 const rowBeingEdited = ref<string | null>(null)
 const edSeparator = ref('')
 const edOrder = ref<'artist_first' | 'title_first'>('artist_first')
 const edDoNotSplit = ref(false)
-/** La forme `Artiste - Titre - Album`, **conservee et non offerte** : aucun
- * champ du formulaire ne la pose, mais l'edition d'une entree qui la porte doit
- * la rejouer a l'identique. Voir `openEdit`. */
+/** The `Artist - Title - Album` shape, **preserved but not offered**: no form
+ * field sets it, but editing an entry that carries it must replay it
+ * identically. See `openEdit`. */
 const edTitleInMiddle = ref(false)
 
 function openEdit(s: Station): void {
@@ -149,11 +147,11 @@ function openEdit(s: Station): void {
     edDoNotSplit.value = false
     edSeparator.value = s.motif.separe.separateur
     edOrder.value = s.motif.separe.artiste_en_premier ? 'artist_first' : 'title_first'
-    // Conserve, et non offert : le formulaire ne propose pas cette forme — elle
-    // ne s'obtient que par un sondage — mais il doit la **rejouer** telle
-    // quelle. Sans cette ligne, ouvrir l'edition d'une station en
-    // « Artiste - Titre - Album » puis enregistrer sans rien changer degradait
-    // son motif, et l'entree devenant manuelle, plus rien ne la reparait.
+    // Preserved, not offered: the form does not propose this shape — it is
+    // only obtained by probing — but it must **replay** it as is. Without this
+    // line, opening the edit of a station in "Artist - Title - Album" then
+    // saving without changing anything degraded its pattern, and as the entry
+    // became manual, nothing repaired it anymore.
     edTitleInMiddle.value = s.motif.separe.titre_au_milieu === true
   }
 }
@@ -163,19 +161,19 @@ function cancelEdit(): void {
 }
 
 /**
- * Erreur de validation du separateur, ou `null` s'il est valide — recalculee
- * a chaque frappe. Reprend **les memes cles de catalogue** que celles que le
- * dorsal renvoie pour ces deux refus precis (`separator_empty`,
- * `separator_no_space`), pour que le retour immediat cote page dise
- * exactement ce que dirait un refus serveur. Elle ne s'applique pas quand
- * « ne pas decouper » est coche : le separateur est alors hors-jeu.
+ * Validation error of the separator, or `null` if it is valid — recomputed on
+ * every keystroke. Reuses **the same catalog keys** as those the backend
+ * returns for these two precise refusals (`separator_empty`,
+ * `separator_no_space`), so that the immediate page-side feedback says
+ * exactly what a server refusal would say. It does not apply when "do not
+ * split" is checked: the separator is then out of play.
  */
 const separatorError = computed(() => {
   if (edDoNotSplit.value) return null
-  // `trim()` et non la seule vacuite : un separateur qui n'est que des espaces
-  // passait les deux controles (`' '` commence *et* finit par une espace, la
-  // meme) et aurait decoupe sur chaque espace du titre annonce. Meme predicat
-  // que le dorsal, qui reste l'autorite.
+  // `trim()` and not mere emptiness: a separator that is only spaces passed
+  // both checks (`' '` starts *and* ends with a space, the same one) and would
+  // have split on every space of the announced title. Same predicate as the
+  // backend, which remains the authority.
   if (!edSeparator.value.trim()) return t.value('separator_empty')
   if (!(edSeparator.value.startsWith(' ') && edSeparator.value.endsWith(' '))) {
     return t.value('separator_no_space')
@@ -195,11 +193,11 @@ function buildPattern(): Pattern {
 }
 
 /**
- * Poste l'action `pose`. La page valide le separateur pour un retour
- * immediat (`separatorError`), **mais** le dorsal reste l'autorite : cette
- * meme saisie peut encore etre refusee la-bas (fichier d'etat inscriptible,
- * course avec un autre client admin), auquel cas son message — deja une
- * phrase traduite, jamais une cle — est affiche tel quel, sans retraduction.
+ * Posts the `pose` action. The page validates the separator for immediate
+ * feedback (`separatorError`), **but** the backend remains the authority: this
+ * same input may still be refused there (state file not writable, race with
+ * another admin client), in which case its message — already a translated
+ * sentence, never a key — is displayed as is, without retranslation.
  */
 async function saveEdit(): Promise<void> {
   if (separatorError.value) return
@@ -220,8 +218,8 @@ async function remove(s: Station): Promise<void> {
     toast.error(err)
     return
   }
-  // La ligne supprimee pouvait etre en cours d'edition : sans cette garde, le
-  // formulaire resterait ouvert sur une station qui n'existe plus.
+  // The removed row could be the one being edited: without this guard, the
+  // form would stay open on a station that no longer exists.
   if (rowBeingEdited.value === s.url) rowBeingEdited.value = null
   await reload()
 }
@@ -258,9 +256,8 @@ async function clear(): Promise<void> {
         {{ t('empty_filtered') }}
       </p>
 
-      <!-- Conteneur de defilement propre a la table : l'URL d'un flux est
-           longue, et cette page ne doit pas faire defiler la page entiere
-           pour l'accommoder. -->
+      <!-- Scroll container specific to the table: a stream URL is long, and
+           this page must not scroll the whole page to accommodate it. -->
       <div v-if="!nothingProbed && !filterHidesAll" class="overflow-x-auto">
         <table class="w-full text-sm">
           <thead class="text-muted-foreground">
@@ -275,9 +272,9 @@ async function clear(): Promise<void> {
           </thead>
           <tbody>
             <tr v-for="s in shownStations" :key="s.url" data-station-ligne class="border-t border-border align-top">
-              <!-- `max-w-0` force la colonne a respecter la largeur du
-                   `<table>` plutot que de s'etendre a la longueur de l'URL :
-                   c'est ce qui permet a `truncate` de s'appliquer. -->
+              <!-- `max-w-0` forces the column to respect the width of the
+                   `<table>` rather than stretching to the length of the URL:
+                   that is what lets `truncate` apply. -->
               <td class="max-w-0 truncate py-2 pr-2" :title="s.url">{{ s.url }}</td>
 
               <td class="py-2 pr-2">

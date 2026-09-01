@@ -6,13 +6,13 @@ import { RouterLink } from 'vue-router'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlugins } from '../composables/usePlugins'
 
-// La partie variable de la navigation, rangee dans une list : sur phone
-// la barre basse a quatre onglets fixes, et c'est ici qu'atterrit « Greffons ».
-// Meme source et meme order que les links du haut (`usePlugins().admins`, donc
-// `/api/status`, donc plugins.toml) — aucune priorite deduite ailleurs.
+// The variable part of the navigation, laid out as a list: on a phone the
+// bottom bar has four fixed tabs, and this is where "Plugins" lands.
+// Same source and same order as the top links (`usePlugins().admins`, hence
+// `/api/status`, hence plugins.toml) — no priority inferred elsewhere.
 const { t } = useCatalog()
 const { admins, state } = usePlugins()
-const connected = (nom: string) => state.value.plugins.some((p) => p.name === nom && p.connected)
+const connected = (name: string) => state.value.plugins.some((p) => p.name === name && p.connected)
 const list = computed(() => admins.value)
 </script>
 
@@ -24,10 +24,10 @@ const list = computed(() => admins.value)
         <li v-for="name in list" :key="name">
           <RouterLink :to="`/plugins/${name}/`" class="flex min-h-14 items-center gap-3 py-2 hover:text-foreground">
             <span class="flex-1 font-medium first-letter:uppercase">{{ name }}</span>
-            <!-- Meme mot, meme color que le badge d'state de ConfigView : la
-                 cle `plugin_disconnected` n'existe step dans le catalogue, et
-                 `unavailable` est deja celle qui designe un greffon injoignable
-                 la-bas — step de doublon terminologique entre les deux pages. -->
+            <!-- Same word, same color as the state badge of ConfigView: the
+                 key `plugin_disconnected` does not exist in the catalog, and
+                 `unavailable` is already the one that designates an unreachable
+                 plugin over there — no terminological duplicate between the two pages. -->
             <Badge v-if="!connected(name)" variant="destructive">{{ t('unavailable') }}</Badge>
             <ChevronRightIcon class="size-4 text-muted-foreground" />
           </RouterLink>

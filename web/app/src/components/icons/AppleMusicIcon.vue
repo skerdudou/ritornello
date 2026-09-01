@@ -1,11 +1,10 @@
 <!--
-  Logo Apple Music officiel (tracé Simple Icons, licence CC0). Meme
-  exception assumee qu'YoutubeIcon.vue : `fill="#FA243C"` en dur, la
-  color de la marque, plutot que `currentColor` — voir docs/interface.md,
-  § Player card.
-  Taille intrinseque 20 px, `viewBox="0 0 24 24"` — meme repere logique que
-  ses deux voisines ; la classe du point d'appel (`size-5`) pilote la
-  taille reelle, l'attribut n'est qu'un repli avant la feuille de style.
+  Official Apple Music logo (Simple Icons path, CC0 licence). Same deliberate
+  exception as YoutubeIcon.vue: hard-coded `fill="#FA243C"`, the brand's
+  colour, rather than `currentColor` — see docs/interface.md, § Player card.
+  Intrinsic size 20 px, `viewBox="0 0 24 24"` — same logical frame as its two
+  neighbours; the call site's class (`size-5`) drives the real size, the
+  attribute is only a fallback before the stylesheet.
 -->
 <template>
   <svg width="20" height="20" viewBox="0 0 24 24" fill="#FA243C" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">

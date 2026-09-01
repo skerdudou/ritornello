@@ -1,84 +1,83 @@
-//! Lecture de la durée d'un fichier audio, par son en-tête.
+//! Reading the duration of an audio file, from its header.
 //!
-//! **En-tête seulement, in_dir le processus** — pas de `ffprobe` ni de mpv.
-//! Mesuré sur soixante fichiers : 0,33 ms par fichier ici, contre 42 ms avec un
-//! `ffprobe` par fichier. Sur une liste de deux mille pistes, cela fait moins
-//! d'une seconde au lieu de plus d'une minute et de deux mille lancements de
-//! processus — qui pèseraient lourd sur un Raspberry Pi pendant que la musique
-//! plays.
+//! **Header only, in-process** — no `ffprobe` nor mpv. Measured on sixty files:
+//! 0.33 ms per file here, against 42 ms with one `ffprobe` per file. On a
+//! playlist of two thousand tracks, that makes less than a second instead of
+//! more than a minute and two thousand process launches — which would weigh
+//! heavily on a Raspberry Pi while the music plays.
 //!
-//! Une durée absente n'est jamais une erreur : la liste s'affiche avec un tiret,
-//! comme avant. Un fichier illisible, tronqué ou d'un format que la caisse ne
-//! connaît pas ne doit pas interrompre le sondage des suivants.
+//! A missing duration is never an error: the playlist shows with a dash, as
+//! before. An unreadable, truncated file, or one of a format the crate does not
+//! know, must not interrupt the probing of the next ones.
 
 use std::path::Path;
 
-/// Durée du fichier en secondes, ou `None` si on ne sait pas la read.
+/// Duration of the file in seconds, or `None` if we cannot read it.
 ///
-/// Arrondie à la seconde : c'est la résolution qu'affiche la page, et la seule
-/// que le `#EXTINF` d'un m3u sait porter. Une durée nulle est rendue `None` —
-/// « 0:00 » affirmerait une piste clear là où le tiret dit qu'on ne sait pas.
+/// Rounded to the second: that is the resolution the page shows, and the only
+/// one the `#EXTINF` of an m3u can carry. A zero duration is rendered `None` —
+/// "0:00" would assert an empty track where the dash says we do not know.
 pub fn probe(path: &Path) -> Option<u32> {
-    let fichier = lofty::probe::Probe::open(path).ok()?.read().ok()?;
-    let secondes = lofty::file::AudioFile::properties(&fichier).duration().as_secs();
-    let secondes = u32::try_from(secondes).ok()?;
-    (secondes > 0).then_some(secondes)
+    let file = lofty::probe::Probe::open(path).ok()?.read().ok()?;
+    let seconds = lofty::file::AudioFile::properties(&file).duration().as_secs();
+    let seconds = u32::try_from(seconds).ok()?;
+    (seconds > 0).then_some(seconds)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Fabrique un mp3 réel avec ffmpeg, ou rend `None` s'il est absent.
+    /// Makes a real mp3 with ffmpeg, or returns `None` if it is absent.
     ///
-    /// Pas de fichier binaire versionné in_dir le dépôt : la durée dépend de
-    /// l'encodage, et un octet mal recopié rendrait le test faux sans qu'on
-    /// comprenne pourquoi. Le test se saute là où ffmpeg manque plutôt que
-    /// d'échouer — c'est un outil de développement, pas une dépendance du
+    /// No binary file versioned in the repository: the duration depends on the
+    /// encoding, and one badly copied byte would make the test wrong without
+    /// anyone understanding why. The test skips itself where ffmpeg is missing
+    /// rather than failing — it is a development tool, not a dependency of the
     /// plugin.
-    fn mp3_de(secondes: u32, dir: &Path) -> Option<std::path::PathBuf> {
-        let sortie = dir.join(format!("{secondes}s.mp3"));
+    fn mp3_of(seconds: u32, dir: &Path) -> Option<std::path::PathBuf> {
+        let output = dir.join(format!("{seconds}s.mp3"));
         let ok = std::process::Command::new("ffmpeg")
             .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i"])
-            .arg(format!("sine=frequency=440:duration={secondes}"))
-            .arg(&sortie)
+            .arg(format!("sine=frequency=440:duration={seconds}"))
+            .arg(&output)
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
-        ok.then_some(sortie)
+        ok.then_some(output)
     }
 
     #[test]
-    fn la_duree_dun_mp3_se_lit_dans_son_en_tete() {
+    fn the_duration_of_an_mp3_is_read_from_its_header() {
         let dir = tempfile::tempdir().unwrap();
-        let Some(f) = mp3_de(3, dir.path()) else {
-            eprintln!("ffmpeg absent : test saute");
+        let Some(f) = mp3_of(3, dir.path()) else {
+            eprintln!("ffmpeg absent: test skipped");
             return;
         };
-        // Tolérance d'une seconde : un encodeur ajuste la longueur au cadre près.
-        let d = probe(&f).expect("une duration attendue");
-        assert!((2..=4).contains(&d), "duration lue {d}");
+        // One-second tolerance: an encoder adjusts the length to the frame.
+        let d = probe(&f).expect("a duration expected");
+        assert!((2..=4).contains(&d), "duration read {d}");
     }
 
     #[test]
-    fn un_fichier_illisible_ne_fait_pas_echouer_le_sondage() {
-        // Le sondage parcourt des milliers de fichiers venus d'un partage : un
-        // seul tronqué ne doit pas interrompre les suivants, ni remonter comme
-        // une erreur à l'écran.
+    fn an_unreadable_file_does_not_make_the_probing_fail() {
+        // The probing walks thousands of files coming from a share: a single
+        // truncated one must not interrupt the next ones, nor surface as an
+        // error on screen.
         let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("tronque.mp3");
-        std::fs::write(&f, b"ce n'est pas du mp3").unwrap();
+        let f = dir.path().join("truncated.mp3");
+        std::fs::write(&f, b"this is not mp3").unwrap();
         assert_eq!(probe(&f), None);
         assert_eq!(probe(&dir.path().join("absent.mp3")), None);
     }
 
     #[test]
-    fn une_duree_nulle_est_rendue_inconnue() {
-        // « 0:00 » affirmerait une piste clear ; `None` fait afficher un tiret,
-        // qui dit qu'on ne sait pas. La page s'appuie déjà sur cette
-        // distinction (voir `formaterDuree`).
+    fn a_zero_duration_is_rendered_unknown() {
+        // "0:00" would assert an empty track; `None` makes a dash show, which
+        // says we do not know. The page already relies on this distinction
+        // (see `formatDuration`).
         let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("clear.flac");
+        let f = dir.path().join("empty.flac");
         std::fs::write(&f, b"").unwrap();
         assert_eq!(probe(&f), None);
     }

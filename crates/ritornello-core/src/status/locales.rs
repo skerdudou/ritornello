@@ -1,10 +1,10 @@
-//! Langues : les packs disponibles sur disque, la selection courante (GET/PUT /api/locale) et le sources_catalog a plat servi a la SPA.
+//! Languages: the packs available on disk, the current selection (GET/PUT /api/locale) and the flattened catalog served to the SPA.
 
 use super::*;
 
-/// Noms de langues disponibles à partir des names de fichiers d'un répertoire
-/// `core/` : `en` (toujours) + chaque `<lang>.toml`. Fonction pure, testable,
-/// séparée de l'accès disque (comme `audio_output::parse_device_list`).
+/// Names of the available languages, from the file names of a `core/`
+/// directory: `en` (always) + each `<lang>.toml`. Pure function, testable,
+/// separated from disk access (like `audio_output::parse_device_list`).
 pub fn parse_available_locales(filenames: &[String]) -> Vec<String> {
     let mut out = vec!["en".to_string()];
     for f in filenames {
@@ -17,7 +17,7 @@ pub fn parse_available_locales(filenames: &[String]) -> Vec<String> {
     out
 }
 
-/// Langues du cœur = `en` + les packs `<root>/core/*.toml` présents.
+/// Core languages = `en` + the `<root>/core/*.toml` packs present.
 pub fn list_locales(root: &std::path::Path) -> Vec<String> {
     let names: Vec<String> = std::fs::read_dir(root.join("core"))
         .map(|rd| {
@@ -44,14 +44,14 @@ pub(super) struct LocaleRequest {
     locale: String,
 }
 
-/// Forme d'un code de langue acceptable : ce que produisent les names de
-/// fichiers `<lang>.toml` des packs (`fr`, `en`, `pt-BR`…).
+/// Shape of an acceptable language code: what the `<lang>.toml` file names of
+/// the packs produce (`fr`, `en`, `pt-BR`…).
 ///
-/// La valeur finit dans des chemins de fichiers (`<root>/<composant>/<lang>.toml`
-/// via `Catalog::load`), dans `state.json` et en variable d'environnement des
-/// plugins : même rigueur que pour le thème et la sortie audio, qui sont
-/// validés — une chaîne arbitraire ouvrait une traversée de path
-/// (`{"locale":"../../nimporte/quoi"}`) sur une API non authentifiée.
+/// The value ends up in file paths (`<root>/<component>/<lang>.toml` via
+/// `Catalog::load`), in `state.json` and in an environment variable of the
+/// plugins: same rigor as for the theme and the audio output, which are
+/// validated — an arbitrary string opened a path traversal
+/// (`{"locale":"../../whatever"}`) on an unauthenticated API.
 pub(super) fn valid_locale(locale: &str) -> bool {
     !locale.is_empty()
         && locale.len() <= 16
@@ -69,7 +69,7 @@ pub(super) async fn locale_put(State(state): State<AppState>, Json(req): Json<Lo
     StatusCode::NO_CONTENT
 }
 
-/// SourcesCatalog du cœur dans la langue courante, à plat, pour le `t()` de la SPA.
+/// The core catalog in the current language, flattened, for the SPA's `t()`.
 pub(super) async fn i18n_json(State(state): State<AppState>) -> Json<serde_json::Value> {
     let cat = state.catalog.read().await;
     Json(serde_json::json!(cat.entries()))
@@ -85,13 +85,13 @@ mod tests {
     use tower::util::ServiceExt;
 
     #[test]
-    fn parse_available_locales_prefixe_en_et_deduplique() {
+    fn parse_available_locales_prefixes_en_and_deduplicates() {
         let names = vec!["fr.toml".to_string(), "en.toml".to_string(), "README.md".to_string()];
         assert_eq!(parse_available_locales(&names), vec!["en".to_string(), "fr".to_string()]);
     }
 
     #[tokio::test]
-    async fn get_locale_liste_en_et_les_packs_core() {
+    async fn get_locale_lists_en_and_the_core_packs() {
         let (state, _rx, _dir) = app_state_fr();
         let app = router(state);
         let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
@@ -105,7 +105,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_locale_notifie_et_met_a_jour_la_selection() {
+    async fn put_locale_notifies_and_updates_the_selection() {
         let (state, mut locale_rx, _dir) = app_state_fr();
         let locale_current = state.locale_current.clone();
         let app = router(state);
@@ -124,11 +124,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_locale_refuse_une_valeur_qui_nest_pas_un_code_de_langue() {
-        // Régression (revue 2026-07-27) : la valeur finit dans des chemins de
-        // fichiers, dans state.json et en variable d'environnement des
-        // plugins ; `../../x` doit être refusé **avant** toute mise à jour,
-        // comme le thème et la sortie audio le font déjà pour leurs champs.
+    async fn put_locale_refuses_a_value_that_is_not_a_language_code() {
+        // Regression (review 2026-07-27): the value ends up in file paths, in
+        // state.json and in an environment variable of the plugins; `../../x`
+        // must be refused **before** any update, as the theme and the audio
+        // output already do for their fields.
         let (state, mut locale_rx, _dir) = app_state_fr();
         let locale_current = state.locale_current.clone();
         let app = router(state);
@@ -136,41 +136,41 @@ mod tests {
             .oneshot(
                 Request::put("/api/locale")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"locale":"../../var/lib/quelconque"}"#))
+                    .body(Body::from(r#"{"locale":"../../var/lib/whatever"}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        // Ni notifiée, ni retenue comme sélection courante.
+        // Neither notified nor kept as the current selection.
         assert!(locale_rx.try_recv().is_err());
         assert_eq!(locale_current.read().await.as_deref(), Some("fr"));
     }
 
     #[test]
-    fn locale_valide_accepte_les_codes_et_refuse_le_reste() {
+    fn valid_locale_accepts_codes_and_refuses_the_rest() {
         for ok in ["en", "fr", "pt-BR", "zh_Hant", "fr-CA"] {
-            assert!(valid_locale(ok), "{ok} devrait passer");
+            assert!(valid_locale(ok), "{ok} should pass");
         }
         for ko in ["", "..", "../fr", "fr/..", "fr toml", "a".repeat(17).as_str()] {
-            assert!(!valid_locale(ko), "{ko:?} devrait être refusé");
+            assert!(!valid_locale(ko), "{ko:?} should be refused");
         }
     }
 
     #[tokio::test]
-    async fn api_i18n_renvoie_le_catalogue_a_plat() {
+    async fn api_i18n_returns_the_flattened_catalog() {
         let app = router(tests_support::app_state());
         let resp = app.oneshot(Request::get("/api/i18n").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        // L'anglais embarque du coeur porte ces cles (src/locales/en.toml).
+        // The core's embedded English carries these keys (src/locales/en.toml).
         assert!(v["remote_title"].is_string());
         assert!(v["audio_output"].is_string());
     }
 
     #[tokio::test]
-    async fn api_i18n_suit_la_langue_courante() {
+    async fn api_i18n_follows_the_current_language() {
         let (state, _rx, _dir) = tests_support::app_state_fr();
         let app = router(state);
         let resp = app.oneshot(Request::get("/api/i18n").body(Body::empty()).unwrap()).await.unwrap();

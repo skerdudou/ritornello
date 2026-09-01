@@ -1,106 +1,103 @@
-//! État partagé entre la moitié `display` (qui reçoit les trames du cœur) et
-//! les sessions clientes MPD (qui répondent aux commands de playback).
+//! State shared between the `display` half (which receives the core's frames)
+//! and the MPD client sessions (which answer playback commands).
 //!
-//! Le point délicat de tout le greffon vit ici, et il n'est pas dans le
-//! protocol : **le réveil manqué**. Un client qui envoie `idle` juste après
-//! un changement doit repartir immédiatement, pas wait le changement
-//! suivant. Un `Notify` seul perdrait ce réveil — la notification est émise
-//! pendant que la session read encore ses versions et compose sa requête, donc
-//! avant qu'elle ne s'inscrive, et elle resterait muette jusqu'au changement
-//! d'après. D'où la conception retenue : un compteur monotone par
-//! sous-système, que la session mémorise **à la connection** et fait vivre de
-//! commande en commande, et une comparaison **préalable** dans `wait`.
-//! C'est cette comparaison qui interdit le réveil manqué ; le `Notify` ne sert
-//! qu'à ne pas sonder.
+//! The delicate point of the whole plugin lives here, and it is not in the
+//! protocol: **the missed wakeup**. A client that sends `idle` right after a
+//! change must return immediately, not wait for the next change. A `Notify`
+//! alone would lose that wakeup — the notification is emitted while the
+//! session is still reading its versions and composing its request, hence
+//! before it registers, and it would stay silent until the following change.
+//! Hence the chosen design: a monotonic counter per subsystem, which the
+//! session memorises **at connection time** and carries from command to
+//! command, and a **preliminary** comparison in `wait`. That comparison is
+//! what forbids the missed wakeup; the `Notify` only serves to avoid polling.
 //!
-//! La référence est portée par la connection et non relue à chaque `idle`, et
-//! c'est la moitié du dispositif qui manquait : la relire ferait avaler tout ce
-//! qui a bougé entre la réponse précédente d'un client et sa line `idle` —
-//! c'est-à-dire pendant la seule fenêtre où il n'écoute pas. Voir `versions` et
-//! `wait`.
+//! The reference is carried by the connection and not re-read at each `idle`,
+//! and that is the half of the mechanism that was missing: re-reading it would
+//! swallow everything that moved between a client's previous response and its
+//! `idle` line — that is, during the only window where it is not listening.
+//! See `versions` and `wait`.
 
 use ritornello_proto::{SourcesCatalog, Command, Cover, Playback, PlayerState, Preset, SourceCatalog};
 use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
 
-/// Nombre de sous-systèmes, donc size du tableau de compteurs. Une constante
-/// et non un `Subsystem::len()` : c'est la bounded du tableau, elle doit être connue
-/// à la compilation.
+/// Number of subsystems, hence the size of the counter array. A constant and
+/// not a `Subsystem::len()`: it is the bound of the array, it must be known at
+/// compile time.
 const SUBSYSTEM_COUNT: usize = 4;
 
-/// Les sous-systèmes que `idle` sait nommer, dans l'order où ils indexent le
-/// tableau de compteurs.
+/// The subsystems that `idle` knows how to name, in the order in which they
+/// index the counter array.
 ///
-/// Un `enum #[repr(usize)]` servant d'index dans un `[u64; 4]`, et non une
-/// table associative : les quatre subsystems sont connus à la compilation, et
-/// `versions[sujet as usize]` ne peut pas échouer — pas d'`unwrap` sur un
-/// `get`, pas de sujet qu'on aurait oublié d'insérer à la construction.
+/// An `enum #[repr(usize)]` used as an index into a `[u64; 4]`, and not an
+/// associative table: the four subsystems are known at compile time, and
+/// `versions[subsystem as usize]` cannot fail — no `unwrap` on a `get`, no
+/// subsystem one would have forgotten to insert at construction.
 ///
-/// Les valeurs explicites ne sont pas décoratives : elles sont l'index, donc
-/// **ne pas réordonner** sans réordonner ce que les tests comparent.
+/// The explicit values are not decorative: they are the index, so **do not
+/// reorder** without reordering what the tests compare.
 #[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Subsystem {
-    /// Lecture, pause, arrêt, changement de présélection, position.
+    /// Play, pause, stop, preset change, position.
     Player = 0,
-    /// Volume ou sourdine.
+    /// Volume or mute.
     Mixer = 1,
-    /// La file d'attente change. Comme la file d'attente MPD *est* la liste des
-    /// présélections de la source active, cela veut dire : changement de
-    /// source.
+    /// The queue changes. Since the MPD queue *is* the preset list of the
+    /// active source, this means: source change.
     Playlist = 2,
-    /// Le sources_catalog des sources ou de leurs présélections change.
+    /// The catalog of sources or of their presets changes.
     ///
-    /// Son unique déclencheur est `apply_catalog`, et c'est tout le sens
-    /// des deux canaux : une trame d'état, même changeant tout le remainder, ne le
-    /// bouge jamais — sinon un client abonné aux seules listes enregistrées
-    /// serait réveillé à chaque seconde de playback.
+    /// Its only trigger is `apply_catalog`, and that is the whole point of the
+    /// two channels: a state frame, even one changing everything else, never
+    /// moves it — otherwise a client subscribed to stored playlists alone
+    /// would be woken at every second of playback.
     StoredPlaylist = 3,
 }
 
-/// La cover courante, telle que le greffon la tient entre deux pistes.
+/// The current cover, as the plugin holds it between two tracks.
 ///
-/// **Les bytes sont derrière un `Arc`, et c'est structurel** : `Snapshot`
-/// est cloné à *chaque* commande de *chaque* session (voir `read`), et une
-/// cover pèse jusqu'à `ritornello_proto::COVER_MAX_BYTES` — **20 Mio**. Un
-/// `Vec<u8>` nu ferait donc recopier vingt mébioctets pour répondre `ping`.
-/// L'`Arc` rend le clone à un incrément de compteur.
+/// **The bytes are behind an `Arc`, and that is structural**: `Snapshot` is
+/// cloned at *every* command of *every* session (see `read`), and a cover
+/// weighs up to `ritornello_proto::COVER_MAX_BYTES` — **20 MiB**. A bare
+/// `Vec<u8>` would therefore copy twenty mebibytes to answer `ping`. The `Arc`
+/// turns the clone into a counter increment.
 ///
-/// **Ce que l'`Arc` ne garantit pas**, et il faut l'écrire ici parce que ce
-/// paragraphe l'a promis à tort : l'image n'existe une seule fois dans le
-/// processus que **par génération**. Une session qui répond `albumart` tient
-/// son propre clone de l'`Arc` — dans son `Snapshot` *et* dans la réponse
-/// binaire — pendant tout son `write_all`, donc un client qui demande une
-/// chunk puis cesse de read **épingle cette génération**. Une cover
-/// poussée pendant ce temps est une génération de plus, qu'une autre session
-/// peut épingler à son tour. Le produit s'écrit donc en clair :
-/// `MAX_SESSIONS × COVER_MAX_BYTES` = 16 × 20 Mio = **320 Mio**, auxquels
-/// s'add la génération que l'état tient lui-même, soit **340 Mio** sur un
-/// appareil d'un gibioctet partagé. Voir `commands::MAX_CHUNK` pour ce qui
-/// bounded le remainder, et pour ce qui n'est délibérément **pas** mitigé.
+/// **What the `Arc` does not guarantee**, and it has to be written here
+/// because this paragraph wrongly promised it: the image exists only once in
+/// the process **per generation**. A session answering `albumart` holds its
+/// own clone of the `Arc` — in its `Snapshot` *and* in the binary response —
+/// for the whole of its `write_all`, so a client that requests a chunk and
+/// then stops reading **pins that generation**. A cover pushed meanwhile is
+/// one more generation, which another session can pin in turn. The product is
+/// thus written plainly: `MAX_SESSIONS × COVER_MAX_BYTES` = 16 × 20 MiB =
+/// **320 MiB**, to which is added the generation the state itself holds, i.e.
+/// **340 MiB** on a shared one-gibibyte device. See `commands::MAX_CHUNK` for
+/// what bounds the rest, and for what is deliberately **not** mitigated.
 ///
-/// `Arc<Vec<u8>>` et non `Arc<[u8]>` : la conversion depuis le `Vec<u8>` de la
-/// trame est alors un déplacement, là où `Arc<[u8]>::from` réallouerait et
-/// recopierait les 20 Mio une fois de plus par piste.
+/// `Arc<Vec<u8>>` and not `Arc<[u8]>`: the conversion from the frame's
+/// `Vec<u8>` is then a move, where `Arc<[u8]>::from` would reallocate and copy
+/// the 20 MiB once more per track.
 #[derive(Clone, PartialEq)]
 pub struct HeldCover {
-    /// Exactement le `cover_href` que la trame d'état publie pour la même
-    /// image. C'est **la** corrélation entre l'image et ce qui plays : le cœur
-    /// envoie l'état d'abord et la cover ensuite, donc il existe une
-    /// fenêtre où l'état désigne déjà la piste suivante et où la cover
-    /// tenue est encore celle de la précédente. Comparer ce champ à
-    /// `state.track.cover_href` est ce qui interdit de serve l'une pour
-    /// l'autre (voir le bras `albumart` de `commands.rs`).
+    /// Exactly the `cover_href` that the state frame publishes for the same
+    /// image. It is **the** correlation between the image and what is playing:
+    /// the core sends the state first and the cover next, so there is a window
+    /// where the state already names the next track while the held cover is
+    /// still the previous one's. Comparing this field to
+    /// `state.track.cover_href` is what forbids serving one for the other (see
+    /// the `albumart` arm of `commands.rs`).
     pub href: String,
-    /// Type MIME reconnu aux bytes d'en-tête par le cœur, jamais à une
-    /// extension. C'est le `type:` que `readpicture` publie.
+    /// MIME type recognised by the core from the header bytes, never from an
+    /// extension. It is the `type:` that `readpicture` publishes.
     pub mime: String,
     pub bytes: Arc<Vec<u8>>,
 }
 
-/// `Debug` écrit à la main : le dérivé imprimerait les vingt mébioctets de
-/// l'image, et `Snapshot` est `Debug` — donc le moindre `assert_eq!` d'un
-/// test raté vomirait l'image entière dans la sortie.
+/// Hand-written `Debug`: the derived one would print the twenty mebibytes of
+/// the image, and `Snapshot` is `Debug` — so the slightest `assert_eq!` of a
+/// failed test would spew the whole image into the output.
 impl std::fmt::Debug for HeldCover {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HeldCover")
@@ -117,24 +114,24 @@ impl From<Cover> for HeldCover {
     }
 }
 
-/// Une cover **telle que le cœur en push_cover une**, pour les tests des trois
-/// modules qui en ont besoin (celui-ci, `commands`, `session`).
+/// A cover **as the core pushes one**, for the tests of the three modules that
+/// need it (this one, `commands`, `session`).
 ///
-/// Le réalisme de cette fixe n'est pas une politesse : une cover bâtie d'un
-/// `Default::default()` prouverait une causalité à l'intérieur d'une trame que
-/// le producteur ne peut pas émettre. Trois traits sont donc empruntés au vrai
-/// producteur :
+/// The realism of this fixture is not a courtesy: a cover built from a
+/// `Default::default()` would prove a causality inside a frame that the
+/// producer cannot emit. Three traits are therefore borrowed from the real
+/// producer:
 ///
-/// * le `href` est de la forme `/api/cover/{clé}` que `cover::HREF_PREFIX`
-///   fabrique, et l'appelant le repasse dans `state.track.cover_href` — c'est
-///   la seule corrélation qui existe entre l'image et ce qui plays ;
-/// * les bytes **commencent par un vrai en-tête JPEG**, parce que le cœur
-///   reconnaît le MIME aux bytes d'en-tête et refuse tout ce qu'il ne
-///   reconnaît pas : une image dont l'en-tête serait faux ne serait jamais
-///   poussée, donc un test qui en emploierait une testerait l'impossible ;
-/// * la suite est du **bruit** d'un générateur congruentiel et non un motif
-///   régulier : c'est ce qui rend visible une chunk sautée, dupliquée ou
-///   décalée d'un octet, qu'un remplissage constant masquerait entièrement.
+/// * the `href` has the `/api/cover/{key}` shape that `cover::HREF_PREFIX`
+///   builds, and the caller passes it back in `state.track.cover_href` — it is
+///   the only correlation that exists between the image and what is playing;
+/// * the bytes **start with a real JPEG header**, because the core recognises
+///   the MIME from the header bytes and refuses anything it does not
+///   recognise: an image whose header were wrong would never be pushed, so a
+///   test using one would test the impossible;
+/// * the rest is **noise** from a linear congruential generator and not a
+///   regular pattern: that is what makes a skipped, duplicated or
+///   one-byte-shifted chunk visible, which a constant fill would hide entirely.
 #[cfg(test)]
 pub(crate) fn test_cover(href: &str, size: usize) -> Cover {
     let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xE0];
@@ -147,335 +144,327 @@ pub(crate) fn test_cover(href: &str, size: usize) -> Cover {
     Cover { href: href.to_string(), mime: "image/jpeg".to_string(), bytes }
 }
 
-/// Copie cohérente de tout ce qu'une session cliente a besoin de read pour
-/// composer une réponse : l'état poussé par le cœur, ce que le greffon croit
-/// de la playback, et les compteurs.
+/// Consistent copy of everything a client session needs to read to compose a
+/// response: the state pushed by the core, what the plugin believes about
+/// playback, and the counters.
 ///
-/// Un seul instantané rendition d'un coup, et non quatre accesseurs : une réponse
-/// `status` publie l'état *et* la version de file, et les read par deux prises
-/// de verrou successives les laisserait se contredire au milieu d'une réponse.
+/// A single snapshot returned at once, and not four accessors: a `status`
+/// response publishes the state *and* the queue version, and reading them
+/// through two successive lock acquisitions would let them contradict each
+/// other in the middle of a response.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Snapshot {
-    /// La dernière trame reçue du cœur, **éventuellement recouverte d'un
-    /// calque optimiste** : `acknowledge_optimistic` y pose le volume qu'une session
-    /// vient de demander, avant que le cœur ne l'ait confirmé (voir là-bas).
-    /// Ne pas read ce champ comme le verbatim de ce que le cœur a envoyé — la
-    /// trame suivante rétablit la vérité de toute façon, et la comparaison
-    /// d'`apply_state` réveille `Mixer` si elle la contredit.
+    /// The last frame received from the core, **possibly overlaid with an
+    /// optimistic layer**: `acknowledge_optimistic` sets there the volume a
+    /// session has just requested, before the core has confirmed it (see over
+    /// there). Do not read this field as the verbatim of what the core sent —
+    /// the next frame restores the truth anyway, and the comparison in
+    /// `apply_state` wakes `Mixer` if it contradicts it.
     pub state: PlayerState,
-    /// Ce que le greffon **croit** de la playback, y compris une bascule qu'il
-    /// vient d'émettre et que la trame n'a pas encore confirmée : c'est la
-    /// course de `pause`, où un client qui envoie `pause` puis `status` dans
-    /// la même foulée lirait sinon l'état d'avant sa propre commande et
-    /// afficherait un bouton qui n'a pas bougé.
+    /// What the plugin **believes** about playback, including a toggle it has
+    /// just emitted and that the frame has not confirmed yet: this is the
+    /// `pause` race, where a client sending `pause` then `status` in the same
+    /// breath would otherwise read the state from before its own command and
+    /// show a button that did not move.
     pub optimistic_playback: Playback,
-    /// Compteur de version de la file d'attente, celui que `status` publie
-    /// sous `playlist`.
+    /// Version counter of the queue, the one `status` publishes under
+    /// `playlist`.
     ///
-    /// **Monotone**, jamais remis à zéro : un client compare la version qu'il
-    /// détient à celle-ci pour savoir s'il a manqué quelque chose, et une
-    /// pushback à zéro lui ferait croire qu'il n'a rien manqué alors que tout a
-    /// changé.
+    /// **Monotonic**, never reset to zero: a client compares the version it
+    /// holds to this one to know whether it missed something, and a reset to
+    /// zero would make it believe it missed nothing while everything changed.
     pub queue_version: u32,
-    /// Un compteur par sujet, du même usage mais pour `idle` : une session
-    /// endormie a mémorisé ce tableau, le compare à celui-ci, et repart
-    /// aussitôt si quelque chose a bougé pendant qu'elle s'installait.
+    /// One counter per subsystem, same use but for `idle`: a sleeping session
+    /// has memorised this array, compares it to this one, and returns at once
+    /// if something moved while it was settling in.
     pub versions: [u64; SUBSYSTEM_COUNT],
-    /// Le dernier sources_catalog reçu du cœur : **toutes** les sources déclarées,
-    /// dans l'order de bascule de `SourceCycle`, et les présélections nommées
-    /// de chacune quand elle sait les énumérer.
+    /// The last catalog received from the core: **all** declared sources, in
+    /// the cycling order of `SourceCycle`, and the named presets of each one
+    /// when it knows how to enumerate them.
     ///
-    /// Il décrit toutes les sources et non la seule active, et c'est
-    /// indispensable : `listplaylistinfo "radio"` s'interroge pendant que le cd
-    /// plays. Il arrive par un canal distinct des trames d'état (voir
-    /// `apply_catalog`), donc il survit à n'importe quel nombre de trames
-    /// sans être renvoyé.
+    /// It describes all sources and not only the active one, and that is
+    /// indispensable: `listplaylistinfo "radio"` is asked while the cd is
+    /// playing. It arrives through a channel distinct from the state frames
+    /// (see `apply_catalog`), so it survives any number of frames without
+    /// being resent.
     ///
-    /// Vide avant la première trame de sources_catalog : un client verra alors une
-    /// liste de listes enregistrées clear, et la file d'attente retombe sur la
-    /// synthèse depuis `preset_count`. C'est bien la vérité de cet instant —
-    /// le greffon ne sait encore rien du sources_catalog.
+    /// Empty before the first catalog frame: a client will then see an empty
+    /// list of stored playlists, and the queue falls back on the synthesis
+    /// from `preset_count`. That is indeed the truth of that instant — the
+    /// plugin knows nothing of the catalog yet.
     pub sources_catalog: SourcesCatalog,
-    /// La dernière cover reçue du cœur, ou `None` tant qu'aucune n'est
-    /// arrivée — ce qui est le cas ordinaire d'un stream sans image, et non une
-    /// anomalie.
+    /// The last cover received from the core, or `None` as long as none has
+    /// arrived — which is the ordinary case of a stream without an image, not
+    /// an anomaly.
     ///
-    /// **Une seule**, jamais un cache par piste : l'appareil ne sait publier
-    /// que la cover de ce qui plays (voir `DisplayPlugin::cover`), et
-    /// mémoriser les précédentes ferait tenir plusieurs mébioctets pour serve
-    /// des URI que plus rien ne plays — exactement ce que le bras `albumart`
-    /// refuse de faire.
+    /// **A single one**, never a per-track cache: the device only knows how to
+    /// publish the cover of what is playing (see `DisplayPlugin::cover`), and
+    /// memorising the previous ones would hold several mebibytes to serve URIs
+    /// that nothing plays any more — exactly what the `albumart` arm refuses
+    /// to do.
     ///
-    /// **Et elle est relâchée, pas seulement remplacée** : `apply_state`
-    /// la remet à `None` dès qu'une trame d'état announcement `cover_href: None`.
-    /// Sans cela le greffon retenait jusqu'à `COVER_MAX_BYTES` **pour la vie
-    /// du processus**, longtemps après l'arrêt de la playback, pour des bytes
-    /// que plus aucune commande ne pouvait serve. Voir la garde sur place.
+    /// **And it is released, not merely replaced**: `apply_state` resets it to
+    /// `None` as soon as a state frame announces `cover_href: None`. Without
+    /// that the plugin kept up to `COVER_MAX_BYTES` **for the life of the
+    /// process**, long after playback stopped, for bytes that no command could
+    /// serve any more. See the guard on site.
     pub cover: Option<HeldCover>,
 }
 
 impl Snapshot {
-    /// Les présélections nommées de cette source, telles que le sources_catalog les
-    /// donne — ou `None` si le sources_catalog ne connaît pas ce name.
+    /// The named presets of this source, as the catalog gives them — or `None`
+    /// if the catalog does not know this name.
     ///
-    /// La distinction compte pour `listplaylistinfo` et `load` : un name absent
-    /// du sources_catalog est un `ACK 50` (« cette liste n'existe pas »), alors qu'un
-    /// name connu dont la liste est **clear** est une source qui ne sait pas
-    /// énumérer — une réponse clear et bien formée, pas une erreur.
+    /// The distinction matters for `listplaylistinfo` and `load`: a name absent
+    /// from the catalog is an `ACK 50` ("this playlist does not exist"),
+    /// whereas a known name whose list is **empty** is a source that cannot
+    /// enumerate — an empty, well-formed response, not an error.
     pub fn source_catalog(&self, name: &str) -> Option<&SourceCatalog> {
         self.sources_catalog.sources.iter().find(|s| s.name == name)
     }
 
-    /// Les présélections de la source **active**, ou une chunk clear. C'est
-    /// d'elles que la file d'attente MPD est faite.
+    /// The presets of the **active** source, or an empty slice. The MPD queue
+    /// is made of them.
     pub fn active_presets(&self) -> &[Preset] {
         self.source_catalog(&self.state.source).map_or(&[], |s| s.presets.as_slice())
     }
-    /// Ce qu'il faut publier comme état de playback : l'optimiste, pas le brut
-    /// de la trame.
+    /// What must be published as playback state: the optimistic one, not the
+    /// raw one from the frame.
     ///
-    /// Appelé par le `status` de `commands.rs` depuis la Task 6. L'écrire ici
-    /// plutôt qu'à chaque site de réponse évite que l'un d'eux ait à se
-    /// souvenir *lequel* des deux champs fait foi — et un test de ce module-là
-    /// échoue si `status` read `state.playback`.
+    /// Called by the `status` of `commands.rs` since Task 6. Writing it here
+    /// rather than at each response site spares each of them from remembering
+    /// *which* of the two fields is authoritative — and a test of that module
+    /// fails if `status` reads `state.playback`.
     pub fn playback(&self) -> Playback {
         self.optimistic_playback
     }
 }
 
-/// Ce que toutes les sessions clientes partagent : l'instantané current et le
-/// réveil des `idle` en attente.
+/// What all client sessions share: the current snapshot and the wakeup of the
+/// pending `idle`s.
 ///
-/// Le verrou est un `tokio::sync::RwLock` et non un `Mutex` : les sessions ne
-/// font presque que read, et l'une qui compose un `listplaylistinfo` de 51
-/// lines ne doit pas retarder les autres. Les seuls écrivains sont la moitié
-/// `display` (une trame) et une session qui vient d'émettre une commande.
+/// The lock is a `tokio::sync::RwLock` and not a `Mutex`: the sessions almost
+/// only read, and one composing a 51-line `listplaylistinfo` must not delay
+/// the others. The only writers are the `display` half (a frame) and a session
+/// that has just emitted a command.
 #[derive(Default)]
 pub struct SharedState {
     inner: RwLock<Snapshot>,
-    /// Réveille les `idle` en attente. `notify_waiters` et non `notify_one` :
-    /// un changement concerne **tous** les dormeurs, et un permis mémorisé
-    /// pour un seul d'entre eux serait pire qu'inutile ici — la comparaison
-    /// des compteurs plays déjà le rôle de la mémoire.
+    /// Wakes the pending `idle`s. `notify_waiters` and not `notify_one`: a
+    /// change concerns **all** sleepers, and a permit stored for a single one
+    /// of them would be worse than useless here — the counter comparison
+    /// already plays the role of the memory.
     wakeup: Notify,
 }
 
-/// Avance normale de l'horloge de position entre deux trames, en seconds,
-/// au-delà de laquelle un changement est un **déplacement** et non le temps qui
-/// passe.
+/// Normal advance of the position clock between two frames, in seconds,
+/// beyond which a change is a **seek** and not time passing.
 ///
-/// Cinq et non une, alors que le cœur émet une trame par seconde : les trames
-/// voyagent par un `watch`, qui **coalesce**. Un relais momentanément en retard
-/// — un Pi occupé, une cover en cours de playback sur un partage — ne reçoit
-/// que la dernière valeur, et voit donc l'horloge sauter de deux, trois ou
-/// quatre seconds sans que personne n'ait rien déplacé. La marge couvre ce
-/// retard. Le prix est un déplacement de moins de cinq seconds qui ne réveille
-/// pas les dormeurs ; ils le liront à leur prochain `status`, où `elapsed` est
-/// toujours juste.
+/// Five and not one, although the core emits one frame per second: the frames
+/// travel through a `watch`, which **coalesces**. A relay momentarily behind —
+/// a busy Pi, a cover being read from a share — only receives the last value,
+/// and thus sees the clock jump by two, three or four seconds without anyone
+/// having seeked. The margin covers that lag. The price is a seek of less than
+/// five seconds that does not wake the sleepers; they will read it at their
+/// next `status`, where `elapsed` is always right.
 const NORMAL_SEEK_S: u32 = 5;
 
-/// Ce changement de position est-il un événement, ou seulement le temps qui
-/// passe ?
+/// Is this position change an event, or merely time passing?
 ///
-/// **C'est le correctif du défaut le plus coûteux de ce greffon.** Le cœur
-/// push_cover une trame d'état **par seconde** en playback, et son seul champ qui
-/// bouge est alors `position_s`. Le comparer comme les autres marquait donc
-/// `Player` une fois par seconde, et `idle player` — sur lequel tout client MPD
-/// se met en attente — se réveillait au même rythme. M.A.L.P. redemandait alors
-/// `status`, `currentsong` **et la cover** chaque seconde, ce qui explique
-/// l'instabilité observée et l'image qui disparaît : un `albumart` relancé sans
-/// cesse au milieu de son propre transfert par tranches. Le vrai MPD n'émet
-/// jamais `player` pour l'écoulement du temps ; `elapsed` se read dans `status`,
-/// que le client interroge quand il veut.
+/// **This is the fix for the costliest defect of this plugin.** The core
+/// pushes a state frame **per second** during playback, and its only moving
+/// field is then `position_s`. Comparing it like the others therefore marked
+/// `Player` once per second, and `idle player` — on which every MPD client
+/// waits — woke at the same pace. M.A.L.P. then re-requested `status`,
+/// `currentsong` **and the cover** every second, which explains the observed
+/// instability and the vanishing image: an `albumart` restarted endlessly in
+/// the middle of its own chunked transfer. Real MPD never emits `player` for
+/// the passing of time; `elapsed` is read in `status`, which the client
+/// queries when it wants.
 ///
-/// Ce qui remainder un événement :
-/// - l'apparition ou la disparition de la position (une piste qui commence, un
-///   stream sans position) ;
-/// - un recul, toujours — c'est un retour en arrière demandé, ou une nouvelle
-///   piste qui repart de zéro ;
-/// - une avance supérieure à `NORMAL_SEEK_S`, c'est-à-dire un déplacement et
-///   non l'horloge.
-fn position_jump(avant: Option<u32>, apres: Option<u32>) -> bool {
-    match (avant, apres) {
+/// What remains an event:
+/// - the appearance or disappearance of the position (a track that starts, a
+///   stream without position);
+/// - a move backwards, always — it is a requested rewind, or a new track
+///   starting from zero;
+/// - an advance greater than `NORMAL_SEEK_S`, i.e. a seek and not the clock.
+fn position_jump(before: Option<u32>, after: Option<u32>) -> bool {
+    match (before, after) {
         (Some(a), Some(b)) => b < a || b - a > NORMAL_SEEK_S,
-        // L'un des deux est absent : présence et absence sont deux états
-        // différents de la playback, et leur bascule est un événement.
+        // One of the two is absent: presence and absence are two different
+        // playback states, and toggling between them is an event.
         (a, b) => a != b,
     }
 }
 
-/// Marque un sujet comme ayant bougé, sans doublon.
+/// Marks a subsystem as having moved, without duplicates.
 ///
-/// Le dédoublonnage n'est pas cosmétique : une liste de commands MPD peut
-/// contenir deux `pause`, et incrémenter deux fois le compteur pour un seul
-/// passage sous le verrou ferait publier deux changements là où il n'y en a
-/// qu'un.
-fn mark(moved: &mut Vec<Subsystem>, sujet: Subsystem) {
-    if !moved.contains(&sujet) {
-        moved.push(sujet);
+/// The deduplication is not cosmetic: an MPD command list may contain two
+/// `pause`, and incrementing the counter twice for a single pass under the
+/// lock would publish two changes where there is only one.
+fn mark(moved: &mut Vec<Subsystem>, subsystem: Subsystem) {
+    if !moved.contains(&subsystem) {
+        moved.push(subsystem);
     }
 }
 
-/// Ce qu'un `idle` a appris : les subsystems à annoncer, et les compteurs de
-/// l'instant où ils ont été constatés.
+/// What an `idle` learned: the subsystems to announce, and the counters of the
+/// instant they were observed.
 ///
-/// Une structure et non un `(Vec, [u64; 4])` nu : les deux champs se
-/// confondraient à l'usage, et c'est le second qui porte la subtilité — il
-/// n'est pas « les compteurs courants » mais « ceux qui ont décidé ce réveil ».
+/// A struct and not a bare `(Vec, [u64; 4])`: the two fields would get mixed
+/// up in use, and the second one carries the subtlety — it is not "the current
+/// counters" but "the ones that decided this wakeup".
 #[derive(Debug, PartialEq)]
 pub struct Wakeup {
-    /// Les subsystems qui ont bougé, dans l'order où le client les a demandés.
+    /// The subsystems that moved, in the order the client requested them.
     pub moved: Vec<Subsystem>,
-    /// Tous les compteurs, lus dans la même prise de verrou que `moved`.
+    /// All counters, read under the same lock acquisition as `moved`.
     ///
-    /// L'appelant n'en retient que les entrées des subsystems qu'il **announcement** :
-    /// c'est l'équivalent exact du « n'effacer que les drapeaux rapportés » de
-    /// MPD.
+    /// The caller only keeps the entries of the subsystems it **announces**:
+    /// it is the exact equivalent of MPD's "only clear the reported flags".
     pub versions: [u64; SUBSYSTEM_COUNT],
 }
 
 impl SharedState {
-    /// Copie de l'instantané current. Une copie et non une garde : aucune
-    /// session ne doit retenir le verrou au-delà de l'instant de la playback,
-    /// même si elle compose ensuite une réponse longue.
+    /// Copy of the current snapshot. A copy and not a guard: no session must
+    /// hold the lock beyond the instant of the read, even if it then composes
+    /// a long response.
     ///
-    /// Chaque session cliente l'invoque une fois par commande, pour répondre
-    /// depuis la copie plutôt que sous le verrou. Les compteurs qu'un `idle`
-    /// mémorise sont dans cette même copie : c'est ce qui les rend cohérents
-    /// avec l'état publié dans la même réponse.
+    /// Every client session invokes it once per command, to answer from the
+    /// copy rather than under the lock. The counters an `idle` memorises are
+    /// in that same copy: that is what makes them consistent with the state
+    /// published in the same response.
     pub async fn read(&self) -> Snapshot {
         self.inner.read().await.clone()
     }
 
-    /// Copie du tableau de compteurs, à mémoriser **une fois par connection** et
-    /// à faire vivre de commande en commande jusqu'à `wait`.
+    /// Copy of the counter array, to be memorised **once per connection** and
+    /// carried from command to command until `wait`.
     ///
-    /// C'est la moitié utile du dispositif anti-réveil-manqué, et son appelant
-    /// de production est `session::serve`, **au moment de la bannière** : les
-    /// compteurs qu'un `idle` compare sont ceux de la dernière fois que ce
-    /// client a été *informé* d'un changement, jamais ceux de l'instant où il
-    /// a écrit sa line `idle`.
+    /// It is the useful half of the anti-missed-wakeup mechanism, and its
+    /// production caller is `session::serve`, **at banner time**: the counters
+    /// an `idle` compares are those of the last time this client was
+    /// *informed* of a change, never those of the instant it wrote its `idle`
+    /// line.
     ///
-    /// **Ce qu'il ne faut surtout pas refaire** — c'était l'état de ce code, et
-    /// c'était un défaut : read les compteurs dans l'`Snapshot` de la
-    /// commande `idle` elle-même. Cette playback-là est bien cohérente avec
-    /// l'état publié dans la même réponse, mais elle **avale** tout ce qui a
-    /// bougé entre la réponse précédente et la line `idle`, c'est-à-dire
-    /// exactement la fenêtre pendant laquelle un client MPD n'écoute pas. Le
-    /// vrai MPD accumule ses drapeaux **par connection** depuis la connection, et
-    /// un événement survenu entre deux commands y est rapporté à l'`idle`
-    /// suivant. Pour `stored_playlist`, l'avaler n'est pas transitoire : rien
-    /// ne le rejouera avant le prochain changement de sources_catalog, donc
-    /// `listplaylists` remainder périmé, potentiellement pour toujours.
+    /// **What must above all not be redone** — this was the state of this
+    /// code, and it was a defect: reading the counters in the `Snapshot` of
+    /// the `idle` command itself. That read is indeed consistent with the
+    /// state published in the same response, but it **swallows** everything
+    /// that moved between the previous response and the `idle` line, i.e.
+    /// exactly the window during which an MPD client is not listening. Real
+    /// MPD accumulates its flags **per connection** since the connection, and
+    /// an event that occurred between two commands is reported to the next
+    /// `idle`. For `stored_playlist`, swallowing it is not transient: nothing
+    /// will replay it before the next catalog change, so `listplaylists` stays
+    /// stale, potentially forever.
     ///
-    /// Le sens de l'erreur acceptable est l'autre : un réveil superflu coûte au
-    /// client une interrogation redondante, un réveil manquant lui coûte la
-    /// justesse de son écran (le même arbitrage que `acknowledge_optimistic` et
-    /// `apply_cover` énoncent chacun de leur côté).
+    /// The acceptable direction of error is the other one: a superfluous
+    /// wakeup costs the client a redundant query, a missing wakeup costs it
+    /// the correctness of its screen (the same trade-off that
+    /// `acknowledge_optimistic` and `apply_cover` each state on their side).
     pub async fn versions(&self) -> [u64; SUBSYSTEM_COUNT] {
         self.inner.read().await.versions
     }
 
-    /// Applique une trame du cœur : elle fait autorité sur tout.
+    /// Applies a frame from the core: it is authoritative on everything.
     ///
-    /// (voir aussi `position_jump`, qui décide ce que l'horloge de position
-    /// vaut comme événement)
+    /// (see also `position_jump`, which decides what the position clock is
+    /// worth as an event)
     ///
-    /// Les subsystems qui bougent sont décidés **par comparaison champ par champ**
-    /// avec l'état précédent, et pas par le seul fait qu'une trame soit
-    /// arrivée : le cœur déduplique déjà, mais une reconnexion de la moitié
-    /// `display` renvoie l'état current, et cela ne doit pas passer pour un
-    /// changement — sinon chaque redémarrage du greffon réveillerait tous les
-    /// clients pour rien.
+    /// The moving subsystems are decided **by field-by-field comparison** with
+    /// the previous state, and not by the mere fact that a frame arrived: the
+    /// core already deduplicates, but a reconnection of the `display` half
+    /// resends the current state, and that must not pass for a change —
+    /// otherwise every restart of the plugin would wake all clients for
+    /// nothing.
     pub async fn apply_state(&self, state: PlayerState) {
         let mut moved = Vec::new();
         {
             let mut inst = self.inner.write().await;
-            let avant = &inst.state;
+            let before = &inst.state;
 
-            if state.volume != avant.volume || state.muted != avant.muted {
+            if state.volume != before.volume || state.muted != before.muted {
                 mark(&mut moved, Subsystem::Mixer);
             }
-            if state.source != avant.source {
-                // Deux subsystems pour un seul champ : la file d'attente *est* la
-                // liste des présélections de la source active, donc changer de
-                // source change la file (`playlist`) ; et ce qui plays change
-                // avec elle (`player`). Un client qui n'écoute que `player`
-                // doit apprendre qu'on a changé de source.
+            if state.source != before.source {
+                // Two subsystems for a single field: the queue *is* the preset
+                // list of the active source, so changing source changes the
+                // queue (`playlist`); and what is playing changes with it
+                // (`player`). A client listening to `player` only must learn
+                // that the source changed.
                 mark(&mut moved, Subsystem::Playlist);
                 mark(&mut moved, Subsystem::Player);
             }
-            if state.preset_count != avant.preset_count {
-                // `preset_count` est ce dont la file d'attente MPD est faite
-                // **à défaut de liste nommée** : pour une source qui ne sait
-                // pas énumérer (le cd, les fichiers), c'est tout ce que le
-                // greffon sait de la file. Un disque inséré passe de
-                // `None`/`Some(0)` à
-                // `Some(12)` sans changer de name de source, et sans cette
-                // comparaison aucun client n'apprendrait qu'il y a douze
-                // pistes à jouer — l'action la plus ordinaire qui soit.
+            if state.preset_count != before.preset_count {
+                // `preset_count` is what the MPD queue is made of **in the
+                // absence of a named list**: for a source that cannot
+                // enumerate (the cd, the files), it is all the plugin knows
+                // about the queue. An inserted disc goes from `None`/`Some(0)`
+                // to `Some(12)` without changing source name, and without this
+                // comparison no client would learn there are twelve tracks to
+                // play — the most ordinary action there is.
                 //
-                // `Playlist` seul, et **pas** `Player` : c'est la file qui a
-                // changé, pas ce qui plays. (`source` bouge les deux parce
-                // qu'elle change les deux ; `preset_count` seul ne touche pas
-                // au track current.)
+                // `Playlist` alone, and **not** `Player`: it is the queue that
+                // changed, not what is playing. (`source` moves both because
+                // it changes both; `preset_count` alone does not touch the
+                // current track.)
                 mark(&mut moved, Subsystem::Playlist);
             }
-            if state.playback != avant.playback
-                || state.preset != avant.preset
-                || position_jump(avant.position_s, state.position_s)
-                || state.track != avant.track
+            if state.playback != before.playback
+                || state.preset != before.preset
+                || position_jump(before.position_s, state.position_s)
+                || state.track != before.track
             {
                 mark(&mut moved, Subsystem::Player);
             }
 
-            // La trame écrase l'optimisme, y compris quand elle le contredit :
-            // l'optimisme n'est qu'un pont jeté entre la commande émise et sa
-            // confirmation, et le laisser survivre à une trame ferait mentir
-            // `status` indéfiniment si le cœur avait refusé la bascule.
+            // The frame overwrites the optimism, including when it contradicts
+            // it: the optimism is only a bridge between the emitted command
+            // and its confirmation, and letting it outlive a frame would make
+            // `status` lie indefinitely had the core refused the toggle.
             inst.optimistic_playback = state.playback;
             inst.state = state;
 
-            // **La cover est relâchée ici, et c'est le seul endroit qui
-            // puisse le faire.** `cover_href: None` est le signal du cœur que
-            // plus rien de ce qui plays n'a d'illustration ; or `cover`
-            // n'était jamais remis à `None`, donc le greffon gardait jusqu'à
-            // `COVER_MAX_BYTES` — 20 Mio — pour la vie du processus, y compris
-            // longtemps après l'arrêt de la playback, sur un appareil d'un
-            // gibioctet partagé avec mpv.
+            // **The cover is released here, and this is the only place that
+            // can do it.** `cover_href: None` is the core's signal that nothing
+            // playing has an illustration any more; yet `cover` was never
+            // reset to `None`, so the plugin kept up to `COVER_MAX_BYTES` —
+            // 20 MiB — for the life of the process, including long after
+            // playback stopped, on a one-gibibyte device shared with mpv.
             //
-            // Ces bytes-là n'étaient d'ailleurs plus servables : le bras
-            // `albumart` exige que le `href` tenu soit celui que la trame
-            // announcement (voir `commands::cover`), donc `cover_href: None`
-            // les avait déjà rendus inatteignables. Les libérer ne retire
-            // aucune réponse à personne.
+            // Those bytes were no longer servable anyway: the `albumart` arm
+            // requires the held `href` to be the one the frame announces (see
+            // `commands::cover`), so `cover_href: None` had already made them
+            // unreachable. Freeing them takes no response away from anyone.
             //
-            // **Pourquoi ce critère et pas « le `href` tenu diffère de celui
-            // qu'announcement la trame »**, qui libérerait un peu plus tôt : le cœur
-            // envoie l'état *avant* les bytes, donc il existe une fenêtre
-            // normale où la trame announcement déjà la clé suivante alors que la
-            // cover tenue est encore la précédente. Le critère strict y
-            // détruirait une image que la trame d'après aurait légitimée, si
-            // l'order des deux canaux s'inversait un jour. `None` est le seul
-            // signal qui ne dépende pas de cet order.
+            // **Why this criterion and not "the held `href` differs from the
+            // one the frame announces"**, which would free a little earlier:
+            // the core sends the state *before* the bytes, so there is a
+            // normal window where the frame already announces the next key
+            // while the held cover is still the previous one. The strict
+            // criterion would destroy there an image that the next frame
+            // would have legitimised, should the order of the two channels
+            // ever invert. `None` is the only signal that does not depend on
+            // that order.
             if inst.state.track.cover_href.is_none() {
-                // Sans réveil propre : la trame qui fait passer `cover_href` à
-                // `None` change `track`, donc elle a déjà marqué `Player`
-                // ci-dessus. Et dans le cas dégénéré où `track` serait
-                // identique (une trame répétée après que la cover a cessé
-                // d'être servable), il n'y a rien à annoncer — `albumart`
-                // refusait déjà.
+                // No wakeup of its own: the frame that turns `cover_href` to
+                // `None` changes `track`, so it already marked `Player` above.
+                // And in the degenerate case where `track` were identical (a
+                // repeated frame after the cover stopped being servable),
+                // there is nothing to announce — `albumart` was already
+                // refusing.
                 inst.cover = None;
             }
 
-            for sujet in &moved {
-                inst.versions[*sujet as usize] += 1;
+            for subsystem in &moved {
+                inst.versions[*subsystem as usize] += 1;
             }
             if moved.contains(&Subsystem::Playlist) {
-                // Exactement quand `Playlist` bouge : les deux compteurs
-                // disent la même chose à deux publics (`idle` et le champ
-                // `playlist` de `status`), et les désynchroniser ferait
-                // répondre `plchanges` à côté du réveil qui vient de partir.
+                // Exactly when `Playlist` moves: the two counters say the same
+                // thing to two audiences (`idle` and the `playlist` field of
+                // `status`), and desynchronising them would make `plchanges`
+                // answer beside the wakeup that just left.
                 inst.queue_version += 1;
             }
         }
@@ -485,27 +474,26 @@ impl SharedState {
         }
     }
 
-    /// Applique un sources_catalog reçu du cœur : la liste des sources et leurs
-    /// présélections nommées.
+    /// Applies a catalog received from the core: the list of sources and
+    /// their named presets.
     ///
-    /// **Deux subsystems, et pas toujours les deux.**
-    /// - `StoredPlaylist` bouge dès que le sources_catalog diffère du précédent :
-    ///   c'est le sous-système que MPD réserve aux listes enregistrées, et
-    ///   chaque source *est* une liste enregistrée ici.
-    /// - `Playlist` (et avec lui `queue_version`) ne bouge que si les
-    ///   présélections de la source **active** ont changé — la file d'attente
-    ///   vient de là et de nulle part ailleurs. Renommer une station d'une
-    ///   source qui ne plays pas change les listes enregistrées sans toucher à
-    ///   la file : réveiller `Playlist` ferait retélécharger 51 lines à tous
-    ///   les clients pour rien, et un `plchanges` répondrait une file
-    ///   identique sous une version neuve.
+    /// **Two subsystems, and not always both.**
+    /// - `StoredPlaylist` moves as soon as the catalog differs from the
+    ///   previous one: it is the subsystem MPD reserves for stored playlists,
+    ///   and each source *is* a stored playlist here.
+    /// - `Playlist` (and with it `queue_version`) only moves if the presets of
+    ///   the **active** source changed — the queue comes from there and from
+    ///   nowhere else. Renaming a station of a source that is not playing
+    ///   changes the stored playlists without touching the queue: waking
+    ///   `Playlist` would make every client re-download 51 lines for nothing,
+    ///   and a `plchanges` would answer an identical queue under a new
+    ///   version.
     ///
-    /// Comparaison et non affectation sèche, exactement comme `apply_state`
-    /// et pour la même raison : le cœur envoie la valeur courante **à la
-    /// connection**, donc une reconnexion de la moitié `display` repasse ici
-    /// avec un sources_catalog identique, et cela ne doit pas passer pour un
-    /// changement — sinon chaque redémarrage du greffon réveillerait tous les
-    /// clients.
+    /// Comparison and not blind assignment, exactly like `apply_state` and for
+    /// the same reason: the core sends the current value **at connection
+    /// time**, so a reconnection of the `display` half comes through here
+    /// again with an identical catalog, and that must not pass for a change —
+    /// otherwise every restart of the plugin would wake all clients.
     pub async fn apply_catalog(&self, sources_catalog: SourcesCatalog) {
         let mut moved = Vec::new();
         {
@@ -513,29 +501,28 @@ impl SharedState {
             if inst.sources_catalog == sources_catalog {
                 return;
             }
-            // Tout changement réel du sources_catalog bouge `StoredPlaylist` : on est
-            // passé la déduplication ci-dessus, donc le sources_catalog diffère
-            // vraiment. C'est ce qui réveille un client endormi sur
-            // `idle stored_playlist` — le seul sous-système que rien
-            // n'incrémentait avant cette tâche.
+            // Any real change of the catalog moves `StoredPlaylist`: we got
+            // past the deduplication above, so the catalog really differs.
+            // This is what wakes a client asleep on `idle stored_playlist` —
+            // the only subsystem that nothing incremented before this task.
             mark(&mut moved, Subsystem::StoredPlaylist);
-            // Lu avant l'écrasement, sur le name de source de l'instantané
-            // current : c'est la source active telle que la dernière trame
-            // d'état l'a dite, la seule autorité sur ce qui plays.
-            let presets_avant = inst.active_presets().to_vec();
+            // Read before the overwrite, on the source name of the current
+            // snapshot: it is the active source as the last state frame said
+            // it, the only authority on what is playing.
+            let presets_before = inst.active_presets().to_vec();
             inst.sources_catalog = sources_catalog;
-            if inst.active_presets() != presets_avant.as_slice() {
+            if inst.active_presets() != presets_before.as_slice() {
                 mark(&mut moved, Subsystem::Playlist);
             }
 
-            for sujet in &moved {
-                inst.versions[*sujet as usize] += 1;
+            for subsystem in &moved {
+                inst.versions[*subsystem as usize] += 1;
             }
             if moved.contains(&Subsystem::Playlist) {
-                // Le même appariement que dans `apply_state` : les deux
-                // compteurs disent la même chose à deux publics (`idle` et le
-                // champ `playlist` de `status`), et les désynchroniser ferait
-                // répondre `plchanges` à côté du réveil qui vient de partir.
+                // The same pairing as in `apply_state`: the two counters say
+                // the same thing to two audiences (`idle` and the `playlist`
+                // field of `status`), and desynchronising them would make
+                // `plchanges` answer beside the wakeup that just left.
                 inst.queue_version += 1;
             }
         }
@@ -545,39 +532,38 @@ impl SharedState {
         }
     }
 
-    /// Applique une cover reçue du cœur : les bytes que `albumart` et
-    /// `readpicture` serviront.
+    /// Applies a cover received from the core: the bytes that `albumart` and
+    /// `readpicture` will serve.
     ///
-    /// **Le sujet déplacé est `Player`, et c'est le seul choix disponible.**
-    /// Le protocol MPD n'a pas de sous-système pour les pochettes : la liste
-    /// des names que `idle` accepte est fixée par MPD et un `changed: cover`
-    /// ne serait compris par aucun client. Restait à choisir parmi les quatre
-    /// que ce greffon émet, et `Player` est celui que les clients relient
-    /// réellement à l'illustration : un client MPD redemande `currentsong`
-    /// **puis** l'image au réveil de `player`, parce que la cover est un
-    /// fait sur le track current. `Mixer` (le volume) et `Playlist` (la
-    /// file) ne provoquent aucun rafraîchissement d'image chez les clients
-    /// connus, et `StoredPlaylist` est réservé aux listes enregistrées.
+    /// **The moved subsystem is `Player`, and it is the only available
+    /// choice.** The MPD protocol has no subsystem for covers: the list of
+    /// names `idle` accepts is fixed by MPD and a `changed: cover` would be
+    /// understood by no client. That left choosing among the four this plugin
+    /// emits, and `Player` is the one clients really tie to the artwork: an
+    /// MPD client re-requests `currentsong` **then** the image on a `player`
+    /// wakeup, because the cover is a fact about the current track. `Mixer`
+    /// (the volume) and `Playlist` (the queue) trigger no image refresh in the
+    /// known clients, and `StoredPlaylist` is reserved for stored playlists.
     ///
-    /// Ce réveil n'est pas décoratif, c'est lui qui rend la fonction utile :
-    /// le cœur envoie **l'état d'abord, la cover ensuite** (voir
-    /// `display_relay`). Un client réveillé par la seule trame d'état
-    /// demande donc son image pendant que le greffon tient encore celle de la
-    /// piste précédente — donc reçoit un refus — et sans ce second réveil il
-    /// n'apprendrait jamais que l'image est arrivée. Le prix est un
-    /// `changed: player` de plus par changement de piste, la même dissymétrie
-    /// assumée que `PlayPause` dans `acknowledge_optimistic` : un réveil superflu
-    /// coûte au client une interrogation redondante, un réveil manquant lui
-    /// coûte une cover clear jusqu'à la piste suivante.
+    /// This wakeup is not decorative, it is what makes the function useful:
+    /// the core sends **the state first, the cover next** (see
+    /// `display_relay`). A client woken by the state frame alone therefore
+    /// requests its image while the plugin still holds the previous track's —
+    /// hence receives a refusal — and without this second wakeup it would
+    /// never learn that the image arrived. The price is one more
+    /// `changed: player` per track change, the same accepted asymmetry as
+    /// `PlayPause` in `acknowledge_optimistic`: a superfluous wakeup costs the
+    /// client a redundant query, a missing wakeup costs it an empty cover
+    /// until the next track.
     ///
-    /// Comparaison et non affectation sèche, comme les deux fonctions
-    /// ci-dessus : le cœur ne push_cover déjà que sur changement, mais il push_cover
-    /// aussi la cover courante **au câblage**, donc une reconnexion de la
-    /// moitié `display` repasse ici avec la même image et cela ne doit
-    /// réveiller personne. La comparaison porte sur les bytes et pas
-    /// seulement sur le `href` : l'égalité de deux `Arc` de même contenu est
-    /// tranchée sans copie, et se fier au seul `href` ferait taire une image
-    /// réellement différente publiée sous la même clé.
+    /// Comparison and not blind assignment, like the two functions above: the
+    /// core already pushes only on change, but it also pushes the current
+    /// cover **at wiring time**, so a reconnection of the `display` half comes
+    /// through here again with the same image and that must wake nobody. The
+    /// comparison is on the bytes and not only on the `href`: equality of two
+    /// `Arc`s with the same content is settled without a copy, and trusting
+    /// the `href` alone would silence a really different image published
+    /// under the same key.
     pub async fn apply_cover(&self, cover: Cover) {
         {
             let mut inst = self.inner.write().await;
@@ -592,62 +578,62 @@ impl SharedState {
         self.wakeup.notify_waiters();
     }
 
-    /// Acte ce que le greffon vient d'émettre, avant que le cœur ne le
-    /// confirme.
+    /// Acknowledges what the plugin has just emitted, before the core confirms
+    /// it.
     ///
-    /// **Trois commands seulement**, et c'est délibéré : `PlayPause` (bascule
-    /// `Playing`↔`Paused`), `SetVolume` (pose le volume) et `Mute` (bascule la
-    /// sourdine). Tout le remainder est ignoré, parce que deviner l'effet d'un
-    /// `Select` sur la position, le track ou la présélection serait faux plus
-    /// souvent que juste — c'est la source active qui décide, et elle seule. Un
-    /// `status` légèrement en retard est bénin ; un `status` qui invente un
-    /// track ne l'est pas.
+    /// **Three commands only**, and that is deliberate: `PlayPause` (toggles
+    /// `Playing`↔`Paused`), `SetVolume` (sets the volume) and `Mute` (toggles
+    /// the mute). Everything else is ignored, because guessing the effect of a
+    /// `Select` on the position, the track or the preset would be wrong more
+    /// often than right — the active source decides, and it alone. A slightly
+    /// late `status` is benign; a `status` that invents a track is not.
     ///
-    /// **`Mute` a rejoint la liste avec le `setvol` qui démute** (voir
-    /// `commands::setvol`), et sans elle ce démutage aurait été invisible :
-    /// `status` publie `volume: 0` dès que `state.muted` est vrai, donc acter le
-    /// seul `SetVolume(40)` aurait laissé un client read `volume: 0` juste
-    /// après avoir remonté son curseur — son curseur retombant à zéro,
-    /// c'est-à-dire le défaut exact que le calque optimiste existe pour
-    /// éviter. Le cœur, lui, honore `Mute` sans condition (`self.muted =
-    /// !self.muted`), donc la bascule actée ici n'invente rien.
+    /// **`Mute` joined the list along with the unmuting `setvol`** (see
+    /// `commands::setvol`), and without it that unmute would have been
+    /// invisible: `status` publishes `volume: 0` as soon as `state.muted` is
+    /// true, so acknowledging `SetVolume(40)` alone would have left a client
+    /// reading `volume: 0` right after raising its slider — its slider falling
+    /// back to zero, i.e. the exact defect the optimistic layer exists to
+    /// avoid. The core, for its part, honours `Mute` unconditionally
+    /// (`self.muted = !self.muted`), so the toggle acknowledged here invents
+    /// nothing.
     ///
-    /// Le volume, lui, est posé dans `state` faute d'un champ optimiste à part.
-    /// C'est voulu et sans risque : la trame suivante l'écrase de toute façon,
-    /// et si le cœur avait borné ou refusé la valeur, la comparaison
-    /// d'`apply_state` verra la différence et réveillera `Mixer`. Le seul
-    /// effet de bord est que la trame *confirmante* ne rebouge rien — d'où
-    /// l'incrément fait ici même.
+    /// The volume, for its part, is set in `state` for lack of a separate
+    /// optimistic field. That is intended and risk-free: the next frame
+    /// overwrites it anyway, and had the core clamped or refused the value,
+    /// the comparison in `apply_state` will see the difference and wake
+    /// `Mixer`. The only side effect is that the *confirming* frame moves
+    /// nothing again — hence the increment done right here.
     ///
-    /// **L'asymétrie avec `PlayPause` est voulue**, et il faut l'écrire parce
-    /// qu'elle se read comme un oubli : la bascule ne touche pas
-    /// `state.playback`, donc la trame confirmante rebouge `Player` une seconde
-    /// fois — un `changed: player` redondant. C'est le choix conservateur.
-    /// `SetVolume` porte une valeur absolue que le cœur honore presque
-    /// toujours au bit près : sans l'incrément fait ici, la trame confirmante
-    /// serait identique et *personne* ne serait réveillé — il n'y avait donc
-    /// pas le choix. `PlayPause` ne porte aucune valeur : c'est le greffon qui
-    /// calcule la bascule, et la source active peut très bien finish ailleurs
-    /// (un direct qu'on ne met pas en pause). Laisser `state.playback` intact
-    /// garde la trame comme seule autorité sur ce champ, et le prix est un
-    /// réveil de trop. Ce prix est le bon sens de la dissymétrie : un réveil
-    /// superflu coûte au client une interrogation `status` redondante, un
-    /// réveil manquant lui coûte la justesse de son écran.
+    /// **The asymmetry with `PlayPause` is intended**, and it has to be
+    /// written down because it reads like an oversight: the toggle does not
+    /// touch `state.playback`, so the confirming frame moves `Player` a second
+    /// time — a redundant `changed: player`. That is the conservative choice.
+    /// `SetVolume` carries an absolute value that the core honours almost
+    /// always to the bit: without the increment done here, the confirming
+    /// frame would be identical and *nobody* would be woken — so there was no
+    /// choice. `PlayPause` carries no value: the plugin computes the toggle,
+    /// and the active source may well end up elsewhere (a live stream that
+    /// cannot be paused). Leaving `state.playback` untouched keeps the frame
+    /// as the sole authority on that field, and the price is one wakeup too
+    /// many. That price is the right direction of the asymmetry: a
+    /// superfluous wakeup costs the client a redundant `status` query, a
+    /// missing wakeup costs it the correctness of its screen.
     ///
-    /// Appelée par la session **après** avoir poussé les commands sur le
-    /// canal, jamais avant : acter une bascule qu'on n'a pas émise ferait
-    /// mentir `status` jusqu'à la trame suivante.
+    /// Called by the session **after** pushing the commands on the channel,
+    /// never before: acknowledging a toggle that was not emitted would make
+    /// `status` lie until the next frame.
     pub async fn acknowledge_optimistic(&self, commands: &[Command]) {
         let mut moved = Vec::new();
         {
             let mut inst = self.inner.write().await;
-            for commande in commands {
-                match commande {
+            for command in commands {
+                match command {
                     Command::PlayPause => match inst.optimistic_playback {
-                        // Sans effet à l'arrêt : `PlayPause` y démarre une
-                        // playback dont le greffon ne sait ni quoi ni où, donc
-                        // il attend la trame plutôt que d'annoncer `Playing`
-                        // sur un track clear.
+                        // No effect when stopped: `PlayPause` there starts a
+                        // playback of which the plugin knows neither what nor
+                        // where, so it waits for the frame rather than
+                        // announcing `Playing` on an empty track.
                         Playback::Stopped => {}
                         Playback::Playing => {
                             inst.optimistic_playback = Playback::Paused;
@@ -658,22 +644,22 @@ impl SharedState {
                             mark(&mut moved, Subsystem::Player);
                         }
                     },
-                    Command::SetVolume(niveau) => {
-                        let niveau = *niveau;
-                        // Comparaison et non affectation seche : un `setvol`
-                        // qui repose le volume current (M.A.L.P. en envoie a
-                        // chaque relachement de curseur) ne doit pas reveiller
-                        // tous les autres clients pour rien.
-                        if inst.state.volume != niveau {
-                            inst.state.volume = niveau;
+                    Command::SetVolume(level) => {
+                        let level = *level;
+                        // Comparison and not blind assignment: a `setvol` that
+                        // re-sets the current volume (M.A.L.P. sends one at
+                        // every slider release) must not wake all the other
+                        // clients for nothing.
+                        if inst.state.volume != level {
+                            inst.state.volume = level;
                             mark(&mut moved, Subsystem::Mixer);
                         }
                     }
-                    // Bascule et non affectation, parce que la commande est une
-                    // bascule : le cœur fait `muted = !muted` sans condition
-                    // (voir `Command::Mute` dans le cœur), donc l'actée ici est
-                    // exacte et non devinée. Pas de comparaison à faire — une
-                    // bascule change toujours quelque chose.
+                    // Toggle and not assignment, because the command is a
+                    // toggle: the core does `muted = !muted` unconditionally
+                    // (see `Command::Mute` in the core), so the acknowledgement
+                    // here is exact and not guessed. No comparison to make — a
+                    // toggle always changes something.
                     Command::Mute => {
                         inst.state.muted = !inst.state.muted;
                         mark(&mut moved, Subsystem::Mixer);
@@ -681,11 +667,11 @@ impl SharedState {
                     _ => {}
                 }
             }
-            for sujet in &moved {
-                inst.versions[*sujet as usize] += 1;
+            for subsystem in &moved {
+                inst.versions[*subsystem as usize] += 1;
             }
-            // Pas de `queue_version` ici : aucune des deux commands actées ne
-            // touche la file d'attente.
+            // No `queue_version` here: none of the acknowledged commands
+            // touches the queue.
         }
         if !moved.is_empty() {
             tracing::trace!("mpd optimistic update moved subsystems {moved:?}");
@@ -693,62 +679,62 @@ impl SharedState {
         }
     }
 
-    /// Attend qu'un des `subsystems` demandés bouge par rapport aux compteurs
-    /// `seen`, et rend ceux qui ont bougé — dans l'order où ils ont été
-    /// demandés — **avec les compteurs de l'instant qui a décidé**.
+    /// Waits until one of the requested `subsystems` moves relative to the
+    /// `seen` counters, and returns those that moved — in the order they were
+    /// requested — **with the counters of the instant that decided**.
     ///
-    /// **Compare d'abord, attend ensuite.** Si quelque chose a bougé depuis
-    /// que l'appelant a lu `seen`, la fonction rend la main sans jamais
-    /// toucher au `Notify` : c'est là et nulle part ailleurs que le réveil
-    /// manqué est interdit. Et `seen` n'est **pas** un instantané pris au
-    /// moment de la commande `idle` : c'est la référence que la connection
-    /// porte depuis sa bannière (voir `versions`), donc un changement survenu
-    /// entre deux commands de ce client est encore devant elle et sort ici.
+    /// **Compare first, wait next.** If something moved since the caller read
+    /// `seen`, the function returns without ever touching the `Notify`: it is
+    /// there and nowhere else that the missed wakeup is forbidden. And `seen`
+    /// is **not** a snapshot taken at the time of the `idle` command: it is
+    /// the reference the connection carries since its banner (see `versions`),
+    /// so a change that occurred between two commands of this client is still
+    /// ahead of it and comes out here.
     ///
-    /// `Wakeup::versions` est ce qui permet à l'appelant d'avancer sa référence
-    /// **sujet par sujet** : le vrai MPD n'efface que les drapeaux qu'il vient
-    /// de rapporter, et tout avancer d'un coup perdrait le changement d'un
-    /// sujet non demandé — la même erreur que celle-ci répare, d'un cran plus
-    /// loin.
+    /// `Wakeup::versions` is what lets the caller advance its reference
+    /// **subsystem by subsystem**: real MPD only clears the flags it has just
+    /// reported, and advancing everything at once would lose the change of a
+    /// subsystem not requested — the same error this one fixes, one notch
+    /// further.
     ///
-    /// L'inscription au réveil est faite *sous le verrou de playback*, avant la
-    /// comparaison. Sans cela le trou se rouvrirait d'un cran plus loin : un
-    /// `notify_waiters` émis entre la comparaison et le premier sondage du
-    /// `Notified` ne trouverait aucun inscrit, et le dormeur attendrait le
-    /// changement d'après. Un écrivain a besoin du verrou en écriture, donc
-    /// tant que la garde en playback est tenue, aucun changement ne peut se
-    /// glisser entre l'inscription et la comparaison.
+    /// The wakeup registration is done *under the read lock*, before the
+    /// comparison. Without that the hole would reopen one notch further: a
+    /// `notify_waiters` emitted between the comparison and the first poll of
+    /// the `Notified` would find no registrant, and the sleeper would wait for
+    /// the following change. A writer needs the write lock, so as long as the
+    /// read guard is held, no change can slip between the registration and
+    /// the comparison.
     ///
-    /// La boucle n'est pas de la prudence en trop : `notify_waiters` réveille
-    /// tous les dormeurs, y compris ceux dont aucun sujet demandé n'a bougé,
-    /// et ceux-là doivent se rendormir.
+    /// The loop is not excess caution: `notify_waiters` wakes all sleepers,
+    /// including those none of whose requested subsystems moved, and those
+    /// must go back to sleep.
     ///
-    /// Appelée par la session pour tenir un `idle`. Une liste de subsystems clear
-    /// n'en sort jamais, et c'est le contrat : voir `Outcome::Wait`.
+    /// Called by the session to hold an `idle`. An empty subsystem list never
+    /// comes out of it, and that is the contract: see `Outcome::Wait`.
     pub async fn wait(&self, subsystems: &[Subsystem], seen: [u64; SUBSYSTEM_COUNT]) -> Wakeup {
         loop {
-            let notifie = self.wakeup.notified();
-            tokio::pin!(notifie);
+            let notified = self.wakeup.notified();
+            tokio::pin!(notified);
             let (moved, versions) = {
                 let inst = self.inner.read().await;
-                // `enable` inscrit le futur maintenant plutôt qu'au premier
-                // sondage : voir le raisonnement sur le verrou ci-dessus.
-                let _ = notifie.as_mut().enable();
+                // `enable` registers the future now rather than at the first
+                // poll: see the reasoning about the lock above.
+                let _ = notified.as_mut().enable();
                 let moved = subsystems
                     .iter()
                     .copied()
-                    .filter(|sujet| inst.versions[*sujet as usize] != seen[*sujet as usize])
+                    .filter(|subsystem| inst.versions[*subsystem as usize] != seen[*subsystem as usize])
                     .collect::<Vec<_>>();
-                // Les compteurs de **cette** playback, et non d'une seconde
-                // prise de verrou après coup : entre les deux, un sujet
-                // rapporté pourrait rebouger, et l'appelant avancerait sa
-                // référence au-delà d'un changement jamais annoncé.
+                // The counters of **this** read, and not of a second lock
+                // acquisition afterwards: between the two, a reported
+                // subsystem could move again, and the caller would advance its
+                // reference past a change never announced.
                 (moved, inst.versions)
             };
             if !moved.is_empty() {
                 return Wakeup { moved, versions };
             }
-            notifie.await;
+            notified.await;
         }
     }
 }
@@ -757,10 +743,10 @@ impl SharedState {
 mod tests {
     use super::*;
 
-    /// Un sources_catalog tel que le cœur en émet : chaque source déclarée est
-    /// nommée, et ses présélections sont celles qu'elle sait énumérer (vides
-    /// pour le cd, qui remainder au corps par défaut de `list_presets`).
-    fn catalogue_de(sources: &[(&str, &[(u8, &str)])]) -> SourcesCatalog {
+    /// A catalog as the core emits one: every declared source is named, and
+    /// its presets are those it knows how to enumerate (empty for the cd,
+    /// which stays on the default body of `list_presets`).
+    fn catalog_of(sources: &[(&str, &[(u8, &str)])]) -> SourcesCatalog {
         SourcesCatalog {
             sources: sources
                 .iter()
@@ -775,57 +761,57 @@ mod tests {
         }
     }
 
-    /// Le plus petit sources_catalog que le cœur puisse émettre : une source nommée,
-    /// avec une présélection.
-    fn catalogue_a_une_source() -> SourcesCatalog {
-        catalogue_de(&[("radio", &[(1, "FIP")])])
+    /// The smallest catalog the core can emit: one named source, with one
+    /// preset.
+    fn single_source_catalog() -> SourcesCatalog {
+        catalog_of(&[("radio", &[(1, "FIP")])])
     }
 
     #[tokio::test]
-    async fn lire_rend_letat_par_defaut_avant_toute_application() {
-        let partage = SharedState::default();
-        assert_eq!(partage.read().await, Snapshot::default());
+    async fn read_returns_the_default_state_before_anything_is_applied() {
+        let shared = SharedState::default();
+        assert_eq!(shared.read().await, Snapshot::default());
     }
 
     #[tokio::test]
-    async fn appliquer_etat_remplace_ce_que_lire_rend_ensuite() {
-        let partage = SharedState::default();
-        let nouvel_etat = PlayerState { volume: 42, source: "radio".into(), ..Default::default() };
+    async fn apply_state_replaces_what_read_returns_next() {
+        let shared = SharedState::default();
+        let new_state = PlayerState { volume: 42, source: "radio".into(), ..Default::default() };
 
-        partage.apply_state(nouvel_etat.clone()).await;
+        shared.apply_state(new_state.clone()).await;
 
-        assert_eq!(partage.read().await.state, nouvel_etat);
+        assert_eq!(shared.read().await.state, new_state);
     }
 
     #[tokio::test]
-    async fn une_trame_qui_change_le_volume_reveille_mixer_et_pas_playlist() {
+    async fn a_frame_changing_the_volume_wakes_mixer_and_not_playlist() {
         let e = SharedState::default();
-        let avant = e.versions().await;
+        let before = e.versions().await;
         e.apply_state(PlayerState { volume: 40, ..Default::default() }).await;
-        let apres = e.versions().await;
-        assert_ne!(avant[Subsystem::Mixer as usize], apres[Subsystem::Mixer as usize]);
-        assert_eq!(avant[Subsystem::Playlist as usize], apres[Subsystem::Playlist as usize]);
-        assert_eq!(avant[Subsystem::Player as usize], apres[Subsystem::Player as usize], "le volume n'est pas du player");
+        let after = e.versions().await;
+        assert_ne!(before[Subsystem::Mixer as usize], after[Subsystem::Mixer as usize]);
+        assert_eq!(before[Subsystem::Playlist as usize], after[Subsystem::Playlist as usize]);
+        assert_eq!(before[Subsystem::Player as usize], after[Subsystem::Player as usize], "the volume is not player's business");
     }
 
     #[tokio::test]
-    async fn une_trame_qui_change_la_sourdine_reveille_mixer() {
-        // `muted` compte autant que `volume` : les clients MPD coupent le son
-        // en posant `setvol 0`, mais la sourdine peut aussi venir de la
-        // telecommande, et le client doit l'apprendre.
+    async fn a_frame_changing_the_mute_wakes_mixer() {
+        // `muted` counts as much as `volume`: MPD clients cut the sound by
+        // sending `setvol 0`, but the mute can also come from the remote
+        // control, and the client must learn it.
         let e = SharedState::default();
-        let avant = e.versions().await;
+        let before = e.versions().await;
         e.apply_state(PlayerState { muted: true, ..Default::default() }).await;
-        let apres = e.versions().await;
-        assert_ne!(avant[Subsystem::Mixer as usize], apres[Subsystem::Mixer as usize]);
+        let after = e.versions().await;
+        assert_ne!(before[Subsystem::Mixer as usize], after[Subsystem::Mixer as usize]);
     }
 
     #[tokio::test]
-    async fn une_trame_identique_ne_reveille_personne() {
-        // Le coeur deduplique deja, mais une reconnexion renvoie l'state
-        // current : il ne doit pas passer pour un changement.
+    async fn an_identical_frame_wakes_nobody() {
+        // The core already deduplicates, but a reconnection resends the
+        // current state: it must not pass for a change.
         let e = SharedState::default();
-        let trame = PlayerState {
+        let frame = PlayerState {
             volume: 40,
             source: "radio".into(),
             playback: Playback::Playing,
@@ -834,145 +820,142 @@ mod tests {
             position_s: Some(12),
             ..Default::default()
         };
-        e.apply_state(trame.clone()).await;
-        let avant = e.versions().await;
+        e.apply_state(frame.clone()).await;
+        let before = e.versions().await;
         let queue_version = e.read().await.queue_version;
 
-        e.apply_state(trame).await;
+        e.apply_state(frame).await;
 
-        assert_eq!(avant, e.versions().await);
-        assert_eq!(queue_version, e.read().await.queue_version, "la file n'a pas bouge non plus");
+        assert_eq!(before, e.versions().await);
+        assert_eq!(queue_version, e.read().await.queue_version, "the queue did not move either");
     }
 
     #[tokio::test]
-    async fn un_changement_de_source_reveille_playlist_et_player() {
-        // La file d'attente EST la liste des preselections de la source
-        // active : changer de source change la file, et change aussi ce qui
-        // plays.
+    async fn a_source_change_wakes_playlist_and_player() {
+        // The queue IS the preset list of the active source: changing source
+        // changes the queue, and also changes what is playing.
         let e = SharedState::default();
         e.apply_state(PlayerState { source: "radio".into(), ..Default::default() }).await;
-        let avant = e.versions().await;
+        let before = e.versions().await;
 
         e.apply_state(PlayerState { source: "cd".into(), ..Default::default() }).await;
 
-        let apres = e.versions().await;
-        assert_ne!(avant[Subsystem::Playlist as usize], apres[Subsystem::Playlist as usize]);
-        assert_ne!(avant[Subsystem::Player as usize], apres[Subsystem::Player as usize]);
-        assert_eq!(avant[Subsystem::Mixer as usize], apres[Subsystem::Mixer as usize], "le volume n'a pas bouge");
+        let after = e.versions().await;
+        assert_ne!(before[Subsystem::Playlist as usize], after[Subsystem::Playlist as usize]);
+        assert_ne!(before[Subsystem::Player as usize], after[Subsystem::Player as usize]);
+        assert_eq!(before[Subsystem::Mixer as usize], after[Subsystem::Mixer as usize], "the volume did not move");
     }
 
     #[tokio::test]
-    async fn un_disque_insere_change_la_file_dattente() {
-        // `preset_count` est la longueur de la file MPD (`playlistlength`) :
-        // un disque insert fait passer le player CD de « rien a numeroter » a
-        // douze pistes, sans changer de name de source. Sans wakeup de
-        // `Playlist` ni avance de `queue_version`, un client remainder sur une file
-        // clear et l'action la plus ordinaire du monde ne se voit pas depuis le
-        // telephone. Et `Player` ne doit pas bouger : la file a change, pas ce
-        // qui plays.
+    async fn an_inserted_disc_changes_the_queue() {
+        // `preset_count` is the length of the MPD queue (`playlistlength`): an
+        // inserted disc takes the CD player from "nothing to number" to twelve
+        // tracks, without changing source name. Without a `Playlist` wakeup
+        // nor a `queue_version` advance, a client stays on an empty queue and
+        // the most ordinary action in the world is not seen from the phone.
+        // And `Player` must not move: the queue changed, not what is playing.
         let e = SharedState::default();
         e.apply_state(PlayerState { source: "cd".into(), preset_count: Some(0), ..Default::default() })
             .await;
-        let avant = e.versions().await;
+        let before = e.versions().await;
         let queue_version = e.read().await.queue_version;
 
         e.apply_state(PlayerState { source: "cd".into(), preset_count: Some(12), ..Default::default() })
             .await;
 
-        let apres = e.versions().await;
-        assert_ne!(avant[Subsystem::Playlist as usize], apres[Subsystem::Playlist as usize], "la file a change");
+        let after = e.versions().await;
+        assert_ne!(before[Subsystem::Playlist as usize], after[Subsystem::Playlist as usize], "the queue changed");
         assert!(
             e.read().await.queue_version > queue_version,
-            "queue_version doit avancer avec la file, sinon plchanges mentira"
+            "queue_version must advance with the queue, otherwise plchanges will lie"
         );
-        assert_eq!(avant[Subsystem::Player as usize], apres[Subsystem::Player as usize], "ce qui plays n'a pas change");
-        assert_eq!(avant[Subsystem::Mixer as usize], apres[Subsystem::Mixer as usize]);
+        assert_eq!(before[Subsystem::Player as usize], after[Subsystem::Player as usize], "what is playing did not change");
+        assert_eq!(before[Subsystem::Mixer as usize], after[Subsystem::Mixer as usize]);
     }
 
     #[tokio::test]
-    async fn chaque_transition_de_preset_count_bouge_la_file() {
-        // Les trois transitions que le type `Option<u8>` rend distinctes, a
-        // source constante. Celle qui porte tout le poids de ce test est
-        // **`None` -> `Some(0)`** : c'est la seule que perdrait une
-        // comparaison ecrite sur `unwrap_or(0)`, et les deux valeurs ne
-        // decrivent pas la meme file. `None` veut dire « la source n'a rien
-        // declare » — le consommateur retombe sur la grille historique 1-9,
-        // donc neuf entries ; `Some(0)` veut dire « rien a numeroter » — un
-        // player CD sans disque, donc zero entree. Les confondre ferait
-        // rater l'insertion d'un disque dans une source qui ne declarait rien
-        // auparavant.
+    async fn every_preset_count_transition_moves_the_queue() {
+        // The three transitions that the `Option<u8>` type makes distinct, at
+        // constant source. The one carrying all the weight of this test is
+        // **`None` -> `Some(0)`**: it is the only one a comparison written on
+        // `unwrap_or(0)` would lose, and the two values do not describe the
+        // same queue. `None` means "the source declared nothing" — the
+        // consumer falls back on the historical 1-9 grid, hence nine entries;
+        // `Some(0)` means "nothing to number" — a CD player without a disc,
+        // hence zero entries. Confusing them would miss the insertion of a
+        // disc in a source that declared nothing before.
         //
-        // Les deux autres lines couvrent les deux sens du mouvement, mais il
-        // faut savoir ce qu'elles valent comme preuve : elles passeraient
-        // aussi sous `unwrap_or(0)` (0 != 12, puis 12 != 0). Seule la premiere
-        // separe les deux implementations.
+        // The other two rows cover both directions of the move, but one must
+        // know what they are worth as proof: they would also pass under
+        // `unwrap_or(0)` (0 != 12, then 12 != 0). Only the first one separates
+        // the two implementations.
         let transitions: [(&str, Option<u8>, Option<u8>); 3] = [
-            ("rien declare -> zero piste", None, Some(0)),
-            ("zero piste -> douze pistes", Some(0), Some(12)),
-            ("douze pistes -> rien declare", Some(12), None),
+            ("nothing declared -> zero tracks", None, Some(0)),
+            ("zero tracks -> twelve tracks", Some(0), Some(12)),
+            ("twelve tracks -> nothing declared", Some(12), None),
         ];
-        for (name, depart, arrivee) in transitions {
+        for (name, from, to) in transitions {
             let e = SharedState::default();
-            e.apply_state(PlayerState { source: "cd".into(), preset_count: depart, ..Default::default() })
+            e.apply_state(PlayerState { source: "cd".into(), preset_count: from, ..Default::default() })
                 .await;
-            let avant = e.versions().await;
+            let before = e.versions().await;
             let queue_version = e.read().await.queue_version;
 
-            e.apply_state(PlayerState { source: "cd".into(), preset_count: arrivee, ..Default::default() })
+            e.apply_state(PlayerState { source: "cd".into(), preset_count: to, ..Default::default() })
                 .await;
 
-            let apres = e.versions().await;
+            let after = e.versions().await;
             assert_ne!(
-                avant[Subsystem::Playlist as usize],
-                apres[Subsystem::Playlist as usize],
-                "{name} : la file doit bouger"
+                before[Subsystem::Playlist as usize],
+                after[Subsystem::Playlist as usize],
+                "{name}: the queue must move"
             );
             assert!(
                 e.read().await.queue_version > queue_version,
-                "{name} : queue_version doit avancer avec la file"
+                "{name}: queue_version must advance with the queue"
             );
             assert_eq!(
-                avant[Subsystem::Player as usize],
-                apres[Subsystem::Player as usize],
-                "{name} : ce qui plays n'a pas change"
+                before[Subsystem::Player as usize],
+                after[Subsystem::Player as usize],
+                "{name}: what is playing did not change"
             );
         }
     }
 
     #[tokio::test]
-    async fn le_morceau_la_position_et_la_preselection_reveillent_player_seul() {
-        // Les trois champs que le brief nomme sous `player`, chacun teste
-        // separement : oublier l'un des trois laisserait un client muet
-        // pendant tout un track.
+    async fn the_track_the_position_and_the_preset_wake_player_alone() {
+        // The three fields the brief names under `player`, each tested
+        // separately: forgetting one of the three would leave a client silent
+        // for a whole track.
         let base = PlayerState { source: "radio".into(), ..Default::default() };
-        let variantes: [(&str, PlayerState); 3] = [
+        let variants: [(&str, PlayerState); 3] = [
             ("playback", PlayerState { playback: Playback::Playing, ..base.clone() }),
             ("position", PlayerState { position_s: Some(7), ..base.clone() }),
-            ("preselection", PlayerState { preset: Some(4), ..base.clone() }),
+            ("preset", PlayerState { preset: Some(4), ..base.clone() }),
         ];
-        for (name, trame) in variantes {
+        for (name, frame) in variants {
             let e = SharedState::default();
             e.apply_state(base.clone()).await;
-            let avant = e.versions().await;
+            let before = e.versions().await;
 
-            e.apply_state(trame).await;
+            e.apply_state(frame).await;
 
-            let apres = e.versions().await;
-            assert_ne!(avant[Subsystem::Player as usize], apres[Subsystem::Player as usize], "{name} devrait bouger player");
-            assert_eq!(avant[Subsystem::Playlist as usize], apres[Subsystem::Playlist as usize], "{name} ne touche pas la file");
-            assert_eq!(avant[Subsystem::Mixer as usize], apres[Subsystem::Mixer as usize], "{name} ne touche pas le mixer");
+            let after = e.versions().await;
+            assert_ne!(before[Subsystem::Player as usize], after[Subsystem::Player as usize], "{name} should move player");
+            assert_eq!(before[Subsystem::Playlist as usize], after[Subsystem::Playlist as usize], "{name} does not touch the queue");
+            assert_eq!(before[Subsystem::Mixer as usize], after[Subsystem::Mixer as usize], "{name} does not touch the mixer");
         }
     }
 
     #[tokio::test]
-    async fn lhorloge_de_position_ne_reveille_personne() {
-        // **La régression la plus coûteuse de ce greffon.** Le cœur push_cover une
-        // trame par seconde en playback, et son seul champ qui bouge est alors
-        // `position_s` : mark `Player` pour cela réveillait tous les
-        // clients endormis sur `idle player` une fois par seconde. M.A.L.P.
-        // redemandait `status`, `currentsong` et la **cover** au même
-        // rythme, ce qui hachait le transfert par tranches de l'image — d'où
-        // l'instabilité et la cover qui disparaît.
+    async fn the_position_clock_wakes_nobody() {
+        // **The costliest regression of this plugin.** The core pushes one
+        // frame per second during playback, and its only moving field is then
+        // `position_s`: marking `Player` for that woke every client asleep on
+        // `idle player` once per second. M.A.L.P. re-requested `status`,
+        // `currentsong` and the **cover** at the same pace, which chopped up
+        // the chunked transfer of the image — hence the instability and the
+        // vanishing cover.
         let base = PlayerState {
             source: "files".into(),
             playback: Playback::Playing,
@@ -981,92 +964,92 @@ mod tests {
         };
         let e = SharedState::default();
         e.apply_state(base.clone()).await;
-        let avant = e.versions().await;
+        let before = e.versions().await;
 
-        // Quatre seconds d'horloge, une par trame : rien ne doit bouger.
+        // Four seconds of clock, one per frame: nothing must move.
         for s in 31..=34 {
             e.apply_state(PlayerState { position_s: Some(s), ..base.clone() }).await;
         }
 
         assert_eq!(
-            avant[Subsystem::Player as usize],
+            before[Subsystem::Player as usize],
             e.versions().await[Subsystem::Player as usize],
-            "le temps qui passe n'est pas un evenement MPD"
+            "time passing is not an MPD event"
         );
     }
 
     #[tokio::test]
-    async fn un_deplacement_reveille_player() {
-        // Le pendant du test ci-dessus : la tolérance ne doit pas avaler un
-        // vrai déplacement, sinon la barre de progress du client resterait
-        // à l'ancienne position jusqu'à ce qu'il redemande `status` de
-        // lui-même. Les deux sens comptent — un recul est toujours un
-        // événement, une avance seulement au-delà de la tolérance.
+    async fn a_seek_wakes_player() {
+        // The counterpart of the test above: the tolerance must not swallow a
+        // real seek, otherwise the client's progress bar would stay at the old
+        // position until it re-requests `status` on its own. Both directions
+        // count — a move backwards is always an event, an advance only beyond
+        // the tolerance.
         let base = PlayerState {
             source: "files".into(),
             playback: Playback::Playing,
             position_s: Some(30),
             ..Default::default()
         };
-        for (name, position) in [("avance", 90u32), ("recul", 5)] {
+        for (name, position) in [("forward", 90u32), ("backward", 5)] {
             let e = SharedState::default();
             e.apply_state(base.clone()).await;
-            let avant = e.versions().await;
+            let before = e.versions().await;
 
             e.apply_state(PlayerState { position_s: Some(position), ..base.clone() }).await;
 
             assert_ne!(
-                avant[Subsystem::Player as usize],
+                before[Subsystem::Player as usize],
                 e.versions().await[Subsystem::Player as usize],
-                "{name} : un deplacement doit reveiller player"
+                "{name}: a seek must wake player"
             );
         }
     }
 
     #[tokio::test]
-    async fn lapparition_et_la_disparition_de_la_position_reveillent_player() {
-        // Une piste qui commence, un stream qui n'a plus de position : deux états
-        // différents de la playback, pas l'horloge qui avance.
-        let sans = PlayerState { source: "radio".into(), ..Default::default() };
-        let avec = PlayerState { position_s: Some(1), ..sans.clone() };
-        for (name, depart, arrivee) in
-            [("apparition", sans.clone(), avec.clone()), ("disparition", avec, sans)]
+    async fn the_appearance_and_disappearance_of_the_position_wake_player() {
+        // A track that starts, a stream that no longer has a position: two
+        // different playback states, not the clock advancing.
+        let without = PlayerState { source: "radio".into(), ..Default::default() };
+        let with = PlayerState { position_s: Some(1), ..without.clone() };
+        for (name, from, to) in
+            [("appearance", without.clone(), with.clone()), ("disappearance", with, without)]
         {
             let e = SharedState::default();
-            e.apply_state(depart).await;
-            let avant = e.versions().await;
+            e.apply_state(from).await;
+            let before = e.versions().await;
 
-            e.apply_state(arrivee).await;
+            e.apply_state(to).await;
 
             assert_ne!(
-                avant[Subsystem::Player as usize],
+                before[Subsystem::Player as usize],
                 e.versions().await[Subsystem::Player as usize],
-                "{name} : doit reveiller player"
+                "{name}: must wake player"
             );
         }
     }
 
     #[tokio::test]
-    async fn le_titre_du_morceau_reveille_player() {
-        // Un stream radio ne change ni de source ni de preselection quand le
-        // track change : c'est le seul signal que le client recevra.
+    async fn the_track_title_wakes_player() {
+        // A radio stream changes neither source nor preset when the track
+        // changes: it is the only signal the client will receive.
         let e = SharedState::default();
         e.apply_state(PlayerState { source: "radio".into(), ..Default::default() }).await;
-        let avant = e.versions().await;
+        let before = e.versions().await;
 
-        let mut trame = PlayerState { source: "radio".into(), ..Default::default() };
-        trame.track.title = Some("Sonate".into());
-        e.apply_state(trame).await;
+        let mut frame = PlayerState { source: "radio".into(), ..Default::default() };
+        frame.track.title = Some("Sonate".into());
+        e.apply_state(frame).await;
 
-        assert_ne!(avant[Subsystem::Player as usize], e.versions().await[Subsystem::Player as usize]);
+        assert_ne!(before[Subsystem::Player as usize], e.versions().await[Subsystem::Player as usize]);
     }
 
     #[tokio::test]
-    async fn aucune_trame_ne_bouge_stored_playlist() {
-        // Le seul declencheur de ce sujet est `apply_catalog`. Une trame
-        // qui change tout le remainder ne doit pas l'incrementer au passage.
+    async fn no_frame_moves_stored_playlist() {
+        // The only trigger of this subsystem is `apply_catalog`. A frame that
+        // changes everything else must not increment it on the way.
         let e = SharedState::default();
-        let avant = e.versions().await;
+        let before = e.versions().await;
 
         e.apply_state(PlayerState {
             volume: 30,
@@ -1080,143 +1063,143 @@ mod tests {
         .await;
 
         assert_eq!(
-            avant[Subsystem::StoredPlaylist as usize],
+            before[Subsystem::StoredPlaylist as usize],
             e.versions().await[Subsystem::StoredPlaylist as usize]
         );
     }
 
     #[tokio::test]
-    async fn un_catalogue_neuf_reveille_stored_playlist() {
+    async fn a_new_catalog_wakes_stored_playlist() {
         let e = SharedState::default();
-        let avant = e.versions().await;
+        let before = e.versions().await;
 
-        e.apply_catalog(catalogue_a_une_source()).await;
+        e.apply_catalog(single_source_catalog()).await;
 
-        let apres = e.versions().await;
-        assert_ne!(avant[Subsystem::StoredPlaylist as usize], apres[Subsystem::StoredPlaylist as usize]);
+        let after = e.versions().await;
+        assert_ne!(before[Subsystem::StoredPlaylist as usize], after[Subsystem::StoredPlaylist as usize]);
         assert_eq!(
             e.read().await.sources_catalog,
-            catalogue_a_une_source(),
-            "le sources_catalog doit aussi etre memorise, pas seulement compte"
+            single_source_catalog(),
+            "the catalog must also be memorised, not only counted"
         );
     }
 
     #[tokio::test]
-    async fn un_catalogue_identique_ne_reveille_personne() {
-        // Le coeur envoie la valeur courante **a la connection** : une
-        // reconnexion de la moitie `display` repasse ici avec le meme
-        // sources_catalog, et ne doit pas passer pour un changement — sinon chaque
-        // redemarrage du greffon reveille tous les clients.
+    async fn an_identical_catalog_wakes_nobody() {
+        // The core sends the current value **at connection time**: a
+        // reconnection of the `display` half comes through here again with
+        // the same catalog, and must not pass for a change — otherwise every
+        // restart of the plugin wakes all clients.
         let e = SharedState::default();
-        e.apply_catalog(catalogue_a_une_source()).await;
-        let avant = e.versions().await;
+        e.apply_catalog(single_source_catalog()).await;
+        let before = e.versions().await;
         let queue_version = e.read().await.queue_version;
 
-        e.apply_catalog(catalogue_a_une_source()).await;
+        e.apply_catalog(single_source_catalog()).await;
 
-        assert_eq!(avant, e.versions().await);
+        assert_eq!(before, e.versions().await);
         assert_eq!(queue_version, e.read().await.queue_version);
     }
 
     #[tokio::test]
-    async fn un_catalogue_qui_touche_la_source_active_bouge_aussi_la_file() {
-        // La file d'attente MPD *est* la liste des preselections de la source
-        // active : renommer une station de la radio pendant qu'elle plays
-        // change la file, donc `Playlist` et `queue_version` avec elle.
+    async fn a_catalog_touching_the_active_source_also_moves_the_queue() {
+        // The MPD queue *is* the preset list of the active source: renaming a
+        // radio station while it is playing changes the queue, hence
+        // `Playlist` and `queue_version` with it.
         let e = SharedState::default();
         e.apply_state(PlayerState { source: "radio".into(), ..Default::default() }).await;
-        e.apply_catalog(catalogue_de(&[("radio", &[(1, "FIP")]), ("cd", &[])])).await;
-        let avant = e.versions().await;
+        e.apply_catalog(catalog_of(&[("radio", &[(1, "FIP")]), ("cd", &[])])).await;
+        let before = e.versions().await;
         let queue_version = e.read().await.queue_version;
 
-        e.apply_catalog(catalogue_de(&[("radio", &[(1, "FIP Rock")]), ("cd", &[])])).await;
+        e.apply_catalog(catalog_of(&[("radio", &[(1, "FIP Rock")]), ("cd", &[])])).await;
 
-        let apres = e.versions().await;
-        assert_ne!(avant[Subsystem::StoredPlaylist as usize], apres[Subsystem::StoredPlaylist as usize]);
-        assert_ne!(avant[Subsystem::Playlist as usize], apres[Subsystem::Playlist as usize]);
+        let after = e.versions().await;
+        assert_ne!(before[Subsystem::StoredPlaylist as usize], after[Subsystem::StoredPlaylist as usize]);
+        assert_ne!(before[Subsystem::Playlist as usize], after[Subsystem::Playlist as usize]);
         assert!(
             e.read().await.queue_version > queue_version,
-            "queue_version doit avancer avec la file, sinon plchanges mentira"
+            "queue_version must advance with the queue, otherwise plchanges will lie"
         );
     }
 
     #[tokio::test]
-    async fn un_catalogue_qui_ne_touche_quune_source_inactive_laisse_la_file_tranquille() {
-        // Le pendant, et celui qui a une valeur : la radio se renomme une
-        // station pendant que le cd plays. Les listes enregistrees ont change,
-        // la file d'attente non — reveiller `Playlist` ferait retelecharger la
-        // file a tous les clients, et `plchanges` rendrait une file identique
-        // sous une version neuve.
+    async fn a_catalog_touching_only_an_inactive_source_leaves_the_queue_alone() {
+        // The counterpart, and the one with value: the radio renames a station
+        // while the cd is playing. The stored playlists changed, the queue did
+        // not — waking `Playlist` would make every client re-download the
+        // queue, and `plchanges` would return an identical queue under a new
+        // version.
         let e = SharedState::default();
         e.apply_state(PlayerState { source: "cd".into(), ..Default::default() }).await;
-        e.apply_catalog(catalogue_de(&[("radio", &[(1, "FIP")]), ("cd", &[])])).await;
-        let avant = e.versions().await;
+        e.apply_catalog(catalog_of(&[("radio", &[(1, "FIP")]), ("cd", &[])])).await;
+        let before = e.versions().await;
         let queue_version = e.read().await.queue_version;
 
-        e.apply_catalog(catalogue_de(&[("radio", &[(1, "FIP"), (5, "Nova")]), ("cd", &[])]))
+        e.apply_catalog(catalog_of(&[("radio", &[(1, "FIP"), (5, "Nova")]), ("cd", &[])]))
             .await;
 
-        let apres = e.versions().await;
+        let after = e.versions().await;
         assert_ne!(
-            avant[Subsystem::StoredPlaylist as usize],
-            apres[Subsystem::StoredPlaylist as usize],
-            "les listes enregistrees ont bel et bien change"
+            before[Subsystem::StoredPlaylist as usize],
+            after[Subsystem::StoredPlaylist as usize],
+            "the stored playlists did change"
         );
         assert_eq!(
-            avant[Subsystem::Playlist as usize],
-            apres[Subsystem::Playlist as usize],
-            "la file d'attente vient de la source active, et elle n'a pas bouge"
+            before[Subsystem::Playlist as usize],
+            after[Subsystem::Playlist as usize],
+            "the queue comes from the active source, and it did not move"
         );
         assert_eq!(queue_version, e.read().await.queue_version);
         assert_eq!(
-            avant[Subsystem::Player as usize],
-            apres[Subsystem::Player as usize],
-            "un sources_catalog ne dit rien de ce qui plays"
+            before[Subsystem::Player as usize],
+            after[Subsystem::Player as usize],
+            "a catalog says nothing about what is playing"
         );
     }
 
     #[tokio::test]
-    async fn le_catalogue_ne_voyage_pas_avec_chaque_trame_detat() {
-        // Non-regression du choix des deux canaux : dix trames d'state, un seul
-        // sources_catalog. Les trames sont toutes differentes (le volume monte),
-        // donc chacune reveille bel et bien quelque chose — ce test ne peut
-        // pas passer parce qu'il n'y aurait rien eu a appliquer.
+    async fn the_catalog_does_not_travel_with_every_state_frame() {
+        // Non-regression of the two-channel choice: ten state frames, a single
+        // catalog. The frames are all different (the volume rises), so each
+        // one does wake something — this test cannot pass merely because there
+        // was nothing to apply.
         let e = SharedState::default();
-        e.apply_catalog(catalogue_a_une_source()).await;
-        let apres_catalogue = e.versions().await;
+        e.apply_catalog(single_source_catalog()).await;
+        let after_catalog = e.versions().await;
         for v in 1..=10u8 {
             e.apply_state(PlayerState { volume: v, ..Default::default() }).await;
         }
-        let apres = e.versions().await;
-        assert_eq!(apres[Subsystem::StoredPlaylist as usize], apres_catalogue[Subsystem::StoredPlaylist as usize]);
+        let after = e.versions().await;
+        assert_eq!(after[Subsystem::StoredPlaylist as usize], after_catalog[Subsystem::StoredPlaylist as usize]);
         assert_eq!(
-            apres[Subsystem::Mixer as usize],
-            apres_catalogue[Subsystem::Mixer as usize] + 10,
-            "les dix trames doivent avoir compte pour dix, sinon ce test ne prouve rien"
+            after[Subsystem::Mixer as usize],
+            after_catalog[Subsystem::Mixer as usize] + 10,
+            "the ten frames must have counted for ten, otherwise this test proves nothing"
         );
-        assert_eq!(e.read().await.sources_catalog, catalogue_a_une_source(), "et le sources_catalog survit aux trames");
+        assert_eq!(e.read().await.sources_catalog, single_source_catalog(), "and the catalog survives the frames");
     }
 
     #[tokio::test]
-    async fn catalogue_source_distingue_le_nom_inconnu_de_la_liste_vide() {
-        // La distinction sur laquelle reposent `listplaylistinfo` et `load` :
-        // un name absent du sources_catalog est un `ACK 50`, un name connu sans
-        // preselection est une reponse clear et bien formee.
+    async fn source_catalog_distinguishes_an_unknown_name_from_an_empty_list() {
+        // The distinction `listplaylistinfo` and `load` rest on: a name absent
+        // from the catalog is an `ACK 50`, a known name without presets is an
+        // empty, well-formed response.
         let e = SharedState::default();
-        e.apply_catalog(catalogue_de(&[("radio", &[(1, "FIP")]), ("cd", &[])])).await;
+        e.apply_catalog(catalog_of(&[("radio", &[(1, "FIP")]), ("cd", &[])])).await;
         let inst = e.read().await;
 
-        assert!(inst.source_catalog("nawak").is_none());
+        assert!(inst.source_catalog("whatever").is_none());
         assert_eq!(inst.source_catalog("cd").map(|s| s.presets.len()), Some(0));
         assert_eq!(inst.source_catalog("radio").map(|s| s.presets.len()), Some(1));
     }
 
     #[tokio::test]
-    async fn les_presets_actifs_suivent_la_source_que_la_trame_designe() {
-        // `active_presets` read le name de source de la derniere trame : c'est
-        // elle et non le sources_catalog qui dit ce qui plays.
+    async fn active_presets_follow_the_source_the_frame_names() {
+        // `active_presets` reads the source name of the last frame: it is the
+        // frame and not the catalog that says what is playing.
         let e = SharedState::default();
-        e.apply_catalog(catalogue_de(&[("radio", &[(1, "FIP")]), ("cd", &[])])).await;
+        e.apply_catalog(catalog_of(&[("radio", &[(1, "FIP")]), ("cd", &[])])).await;
 
         e.apply_state(PlayerState { source: "cd".into(), ..Default::default() }).await;
         assert!(e.read().await.active_presets().is_empty());
@@ -1226,13 +1209,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn un_catalogue_reveille_un_dormeur_inscrit_sur_les_listes_enregistrees() {
-        // La contrepartie utile : un client qui dort sur `stored_playlist`
-        // doit repartir quand le sources_catalog arrive, et c'est le seul evenement
-        // qui le reveillera jamais.
+    async fn a_catalog_wakes_a_sleeper_registered_on_stored_playlists() {
+        // The useful counterpart: a client sleeping on `stored_playlist` must
+        // return when the catalog arrives, and it is the only event that will
+        // ever wake it.
         let e = std::sync::Arc::new(SharedState::default());
         let seen = e.versions().await;
-        let dormeur = {
+        let sleeper = {
             let e = e.clone();
             tokio::spawn(async move { e.wait(&[Subsystem::StoredPlaylist], seen).await })
         };
@@ -1240,74 +1223,74 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        e.apply_catalog(catalogue_a_une_source()).await;
+        e.apply_catalog(single_source_catalog()).await;
 
-        assert_eq!(dormeur.await.unwrap().moved, vec![Subsystem::StoredPlaylist]);
+        assert_eq!(sleeper.await.unwrap().moved, vec![Subsystem::StoredPlaylist]);
     }
 
     #[tokio::test]
-    async fn la_version_de_file_est_monotone() {
-        // Jamais pushback a zero : un client qui compare croirait n'avoir rien
-        // manque. Le troisieme tour revient a "radio", la valeur initiale, et
-        // c'est justement le cas qu'une implementation derivee de l'state (et
-        // non d'un compteur) raterait.
+    async fn the_queue_version_is_monotonic() {
+        // Never reset to zero: a comparing client would believe it missed
+        // nothing. The third round comes back to "radio", the initial value,
+        // and that is precisely the case an implementation derived from the
+        // state (and not from a counter) would miss.
         let e = SharedState::default();
-        let mut precedente = e.read().await.queue_version;
+        let mut previous = e.read().await.queue_version;
         for source in ["radio", "cd", "radio"] {
             e.apply_state(PlayerState { source: source.into(), ..Default::default() }).await;
             let v = e.read().await.queue_version;
-            assert!(v > precedente, "{v} devrait depasser {precedente}");
-            precedente = v;
+            assert!(v > previous, "{v} should exceed {previous}");
+            previous = v;
         }
     }
 
     #[tokio::test]
-    async fn la_version_de_file_ne_bouge_que_quand_la_file_bouge() {
-        // Le pendant du test precedent : monotone ne veut pas dire "qui monte
-        // a chaque trame". Un `plchanges` rendrait sinon toute la file a
-        // chaque seconde de playback.
+    async fn the_queue_version_only_moves_when_the_queue_moves() {
+        // The counterpart of the previous test: monotonic does not mean "rising
+        // at every frame". A `plchanges` would otherwise return the whole
+        // queue at every second of playback.
         let e = SharedState::default();
         e.apply_state(PlayerState { source: "radio".into(), ..Default::default() }).await;
-        let avant = e.read().await.queue_version;
+        let before = e.read().await.queue_version;
 
         e.apply_state(PlayerState { source: "radio".into(), volume: 50, position_s: Some(9), ..Default::default() })
             .await;
 
-        assert_eq!(avant, e.read().await.queue_version);
+        assert_eq!(before, e.read().await.queue_version);
     }
 
     #[tokio::test]
-    async fn un_changement_survenu_avant_lattente_ne_se_perd_pas() {
-        // LE test qui compte : la session read les versions, un changement
-        // arrive, *ensuite* elle s'endort. Elle doit repartir aussitot. Avec
-        // un `Notify` seul, ce wakeup serait perdu et le client resterait muet
-        // jusqu'au changement suivant.
+    async fn a_change_that_occurred_before_the_wait_is_not_lost() {
+        // THE test that matters: the session reads the versions, a change
+        // arrives, *then* it goes to sleep. It must return at once. With a
+        // `Notify` alone, that wakeup would be lost and the client would stay
+        // silent until the next change.
         let e = SharedState::default();
         let seen = e.versions().await;
         e.apply_state(PlayerState { volume: 40, ..Default::default() }).await;
-        // Pas de `timeout` ici : si l'attente bloque, le test pend et l'echec
-        // est franc. Une marge d'horloge serait un flake en puissance.
+        // No `timeout` here: if the wait blocks, the test hangs and the failure
+        // is frank. A clock margin would be a flake in waiting.
         let changes = e.wait(&[Subsystem::Mixer], seen).await;
         assert_eq!(changes.moved, vec![Subsystem::Mixer]);
-        // Et le réveil rend les compteurs qui l'ont décidé : c'est ce que la
-        // session retiendra comme nouvelle référence de sa connection.
+        // And the wakeup returns the counters that decided it: this is what
+        // the session will keep as the new reference of its connection.
         assert_eq!(changes.versions, e.versions().await);
     }
 
     #[tokio::test]
-    async fn lattente_ne_rend_que_les_sujets_demandes() {
+    async fn the_wait_only_returns_the_requested_subsystems() {
         let e = SharedState::default();
         let seen = e.versions().await;
         e.apply_state(PlayerState { volume: 40, source: "cd".into(), ..Default::default() }).await;
         let changes = e.wait(&[Subsystem::Mixer], seen).await;
-        assert_eq!(changes.moved, vec![Subsystem::Mixer], "playlist a change mais n'etait pas demande");
+        assert_eq!(changes.moved, vec![Subsystem::Mixer], "playlist changed but was not requested");
     }
 
     #[tokio::test]
-    async fn lattente_rend_les_sujets_dans_lordre_demande() {
-        // L'order est celui de la demande et non celui de l'enum : c'est ce
-        // que la session ecrira en lines `changed:`, et un order stable est
-        // ce qui rend cette sortie testable a la Task 8.
+    async fn the_wait_returns_the_subsystems_in_the_requested_order() {
+        // The order is that of the request and not that of the enum: it is
+        // what the session will write as `changed:` lines, and a stable order
+        // is what makes that output testable at Task 8.
         let e = SharedState::default();
         let seen = e.versions().await;
         e.apply_state(PlayerState { volume: 40, source: "cd".into(), ..Default::default() }).await;
@@ -1318,20 +1301,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn une_trame_arrivee_pendant_lattente_reveille_le_dormeur() {
-        // L'autre moitie du dispositif : quand la comparaison prealable ne
-        // trouve rien, c'est le `Notify` qui doit rendre la main. Le dormeur
-        // est lance dans une tache et les `yield_now` lui laissent atteindre
-        // son point d'attente (ordonnanceur mono-tache de `#[tokio::test]`,
-        // donc la tache en file passe avant celle qui cede).
+    async fn a_frame_arriving_during_the_wait_wakes_the_sleeper() {
+        // The other half of the mechanism: when the preliminary comparison
+        // finds nothing, the `Notify` must be what returns. The sleeper is
+        // launched in a task and the `yield_now`s let it reach its wait point
+        // (single-threaded scheduler of `#[tokio::test]`, so the queued task
+        // runs before the one that yields).
         //
-        // Aucune horloge : si la notification n'arrive pas, le `await` du
-        // handle pend et l'echec est franc. Un `timeout` "assez long" serait
-        // un flake en puissance — c'est exactement la famille de tests que le
-        // chantier precedent a du supprimer.
+        // No clock: if the notification does not arrive, the `await` on the
+        // handle hangs and the failure is frank. A "long enough" `timeout`
+        // would be a flake in waiting — exactly the family of tests the
+        // previous effort had to delete.
         let e = std::sync::Arc::new(SharedState::default());
         let seen = e.versions().await;
-        let dormeur = {
+        let sleeper = {
             let e = e.clone();
             tokio::spawn(async move { e.wait(&[Subsystem::Player], seen).await })
         };
@@ -1341,19 +1324,19 @@ mod tests {
 
         e.apply_state(PlayerState { playback: Playback::Playing, ..Default::default() }).await;
 
-        assert_eq!(dormeur.await.unwrap().moved, vec![Subsystem::Player]);
+        assert_eq!(sleeper.await.unwrap().moved, vec![Subsystem::Player]);
     }
 
     #[tokio::test]
-    async fn un_dormeur_ne_repart_pas_sur_un_sujet_qui_nest_pas_le_sien() {
-        // `notify_waiters` reveille tout le monde, donc un dormeur inscrit sur
-        // `Mixer` seul est bel et bien reveille par une trame `player` — et
-        // doit se rendormir. Sans la boucle de `wait`, il rendrait une
-        // liste clear et la session ecrirait un `OK` sans `changed:`, ce
-        // qu'aucun client MPD ne sait interpreter.
+    async fn a_sleeper_does_not_return_on_a_subsystem_that_is_not_its_own() {
+        // `notify_waiters` wakes everyone, so a sleeper registered on `Mixer`
+        // alone is indeed woken by a `player` frame — and must go back to
+        // sleep. Without the loop in `wait`, it would return an empty list and
+        // the session would write an `OK` without `changed:`, which no MPD
+        // client knows how to interpret.
         let e = std::sync::Arc::new(SharedState::default());
         let seen = e.versions().await;
-        let dormeur = {
+        let sleeper = {
             let e = e.clone();
             tokio::spawn(async move { e.wait(&[Subsystem::Mixer], seen).await })
         };
@@ -1361,35 +1344,35 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        // Ne bouge que `player` : le dormeur est reveille pour rien.
+        // Only `player` moves: the sleeper is woken for nothing.
         e.apply_state(PlayerState { playback: Playback::Playing, ..Default::default() }).await;
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }
-        assert!(!dormeur.is_finished(), "un wakeup sur un autre sujet ne doit pas terminer l'attente");
+        assert!(!sleeper.is_finished(), "a wakeup on another subsystem must not end the wait");
 
-        // Puis ce qu'il attendait vraiment.
+        // Then what it was really waiting for.
         e.apply_state(PlayerState { playback: Playback::Playing, volume: 22, ..Default::default() }).await;
-        assert_eq!(dormeur.await.unwrap().moved, vec![Subsystem::Mixer]);
+        assert_eq!(sleeper.await.unwrap().moved, vec![Subsystem::Mixer]);
     }
 
     #[tokio::test]
-    async fn letat_optimiste_devance_la_trame_puis_lui_cede() {
-        // La course de `pause` : le greffon acte la bascule des qu'il l'emet,
-        // et la trame suivante fait autorite.
+    async fn the_optimistic_state_precedes_the_frame_then_yields_to_it() {
+        // The `pause` race: the plugin acknowledges the toggle as soon as it
+        // emits it, and the next frame is authoritative.
         let e = SharedState::default();
         e.apply_state(PlayerState { playback: Playback::Playing, ..Default::default() }).await;
         e.acknowledge_optimistic(&[Command::PlayPause]).await;
-        assert_eq!(e.read().await.playback(), Playback::Paused, "acte avant la trame");
+        assert_eq!(e.read().await.playback(), Playback::Paused, "acknowledged before the frame");
         e.apply_state(PlayerState { playback: Playback::Playing, ..Default::default() }).await;
-        assert_eq!(e.read().await.playback(), Playback::Playing, "la trame fait autorite");
+        assert_eq!(e.read().await.playback(), Playback::Playing, "the frame is authoritative");
     }
 
     #[tokio::test]
-    async fn la_bascule_optimiste_repart_de_la_valeur_optimiste() {
-        // Deux `pause` d'affilee reviennent a l'state de depart : la bascule
-        // read `optimistic_playback` et non la trame, sinon la seconde
-        // rebasculerait depuis `Playing` et rendrait encore `Paused`.
+    async fn the_optimistic_toggle_starts_from_the_optimistic_value() {
+        // Two `pause` in a row come back to the starting state: the toggle
+        // reads `optimistic_playback` and not the frame, otherwise the second
+        // one would toggle again from `Playing` and still return `Paused`.
         let e = SharedState::default();
         e.apply_state(PlayerState { playback: Playback::Playing, ..Default::default() }).await;
 
@@ -1400,57 +1383,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn la_bascule_optimiste_est_sans_effet_a_larret() {
-        // `PlayPause` a l'arret demarre une playback dont le greffon ne sait
-        // ni quoi ni ou : il attend la trame plutot que d'annoncer `Playing`
-        // sur un track clear.
+    async fn the_optimistic_toggle_has_no_effect_when_stopped() {
+        // `PlayPause` when stopped starts a playback of which the plugin knows
+        // neither what nor where: it waits for the frame rather than
+        // announcing `Playing` on an empty track.
         let e = SharedState::default();
-        let avant = e.versions().await;
+        let before = e.versions().await;
 
         e.acknowledge_optimistic(&[Command::PlayPause]).await;
 
         assert_eq!(e.read().await.playback(), Playback::Stopped);
-        assert_eq!(avant, e.versions().await, "rien a annoncer, donc aucun wakeup");
+        assert_eq!(before, e.versions().await, "nothing to announce, hence no wakeup");
     }
 
     #[tokio::test]
-    async fn acter_un_volume_le_publie_aussitot_et_reveille_mixer() {
-        // Un client qui envoie `setvol 70` puis `status` dans la meme foulee
-        // doit read 70, et les autres clients doivent etre reveilles : la
-        // trame confirmante, elle, sera identique et ne bougera rien.
+    async fn acknowledging_a_volume_publishes_it_at_once_and_wakes_mixer() {
+        // A client sending `setvol 70` then `status` in the same breath must
+        // read 70, and the other clients must be woken: the confirming frame,
+        // for its part, will be identical and move nothing.
         let e = SharedState::default();
-        let avant = e.versions().await;
+        let before = e.versions().await;
 
         e.acknowledge_optimistic(&[Command::SetVolume(70)]).await;
 
         assert_eq!(e.read().await.state.volume, 70);
-        assert_ne!(avant[Subsystem::Mixer as usize], e.versions().await[Subsystem::Mixer as usize]);
+        assert_ne!(before[Subsystem::Mixer as usize], e.versions().await[Subsystem::Mixer as usize]);
     }
 
     #[tokio::test]
-    async fn acter_le_volume_deja_en_place_ne_reveille_personne() {
+    async fn acknowledging_the_volume_already_in_place_wakes_nobody() {
         let e = SharedState::default();
         e.apply_state(PlayerState { volume: 70, ..Default::default() }).await;
-        let avant = e.versions().await;
+        let before = e.versions().await;
 
         e.acknowledge_optimistic(&[Command::SetVolume(70)]).await;
 
-        assert_eq!(avant, e.versions().await);
+        assert_eq!(before, e.versions().await);
     }
 
     #[tokio::test]
-    async fn acter_ignore_les_commandes_dont_leffet_ne_se_devine_pas() {
-        // Deviner ce qu'un `Select` fait a la position, au track ou a la
-        // preselection serait faux plus souvent que juste : c'est la source
-        // active qui decide.
+    async fn acknowledging_ignores_commands_whose_effect_cannot_be_guessed() {
+        // Guessing what a `Select` does to the position, the track or the
+        // preset would be wrong more often than right: the active source
+        // decides.
         let e = SharedState::default();
         e.apply_state(PlayerState { playback: Playback::Playing, volume: 30, ..Default::default() }).await;
-        let avant_instantane = e.read().await;
+        let snapshot_before = e.read().await;
 
-        // `Mute` n'est **plus** de la liste : elle s'acte depuis que `setvol`
-        // démute (voir `commands::setvol`), et son test propre est juste en
-        // dessous. `VolumeUp`/`VolumeDown` y restent : elles ne portent pas de
-        // valeur et c'est le cœur qui décide du pas.
+        // `Mute` is **no longer** in the list: it is acknowledged since
+        // `setvol` unmutes (see `commands::setvol`), and its own test is right
+        // below. `VolumeUp`/`VolumeDown` stay here: they carry no value and
+        // the core decides the step.
         e.acknowledge_optimistic(&[
             Command::Select(4),
             Command::Next,
@@ -1462,173 +1445,171 @@ mod tests {
         ])
         .await;
 
-        assert_eq!(avant_instantane, e.read().await, "aucune de ces commands ne s'acte");
+        assert_eq!(snapshot_before, e.read().await, "none of these commands is acknowledged");
     }
 
     #[tokio::test]
-    async fn une_liste_de_deux_bascules_ne_compte_quun_changement() {
-        // Le dedoublonnage de `mark` : deux `pause` dans une meme liste de
-        // commands MPD passent sous le verrou une seule fois, et un seul
-        // changement est publie — l'state final, lui, est bien celui des deux
-        // bascules.
+    async fn a_list_of_two_toggles_counts_as_a_single_change() {
+        // The deduplication of `mark`: two `pause` in a single MPD command
+        // list pass under the lock once, and a single change is published —
+        // the final state, for its part, is indeed that of the two toggles.
         let e = SharedState::default();
         e.apply_state(PlayerState { playback: Playback::Playing, ..Default::default() }).await;
-        let avant = e.versions().await;
+        let before = e.versions().await;
 
         e.acknowledge_optimistic(&[Command::PlayPause, Command::PlayPause]).await;
 
         assert_eq!(
-            avant[Subsystem::Player as usize] + 1,
+            before[Subsystem::Player as usize] + 1,
             e.versions().await[Subsystem::Player as usize],
-            "un seul incrément pour une seule prise de verrou"
+            "a single increment for a single lock acquisition"
         );
         assert_eq!(e.read().await.playback(), Playback::Playing);
     }
 
     #[tokio::test]
-    async fn acter_mute_bascule_la_sourdine_et_reveille_mixer() {
-        // Sans cet actage, le `setvol` qui démute serait invisible : `status`
-        // publie `volume: 0` tant que `state.muted` est vrai, donc un client qui
-        // remonte son curseur le verrait retomber à zéro jusqu'à la trame
-        // suivante — le défaut exact que le calque optimiste existe pour
-        // éviter.
+    async fn acknowledging_mute_toggles_the_mute_and_wakes_mixer() {
+        // Without this acknowledgement, the unmuting `setvol` would be
+        // invisible: `status` publishes `volume: 0` as long as `state.muted`
+        // is true, so a client raising its slider would see it fall back to
+        // zero until the next frame — the exact defect the optimistic layer
+        // exists to avoid.
         let e = SharedState::default();
         e.apply_state(PlayerState { volume: 40, muted: true, ..Default::default() }).await;
-        let avant = e.versions().await;
+        let before = e.versions().await;
 
         e.acknowledge_optimistic(&[Command::SetVolume(40), Command::Mute]).await;
 
         let inst = e.read().await;
-        assert!(!inst.state.muted, "la sourdine doit etre levee");
+        assert!(!inst.state.muted, "the mute must be lifted");
         assert_eq!(inst.state.volume, 40);
-        assert_ne!(avant[Subsystem::Mixer as usize], e.versions().await[Subsystem::Mixer as usize]);
+        assert_ne!(before[Subsystem::Mixer as usize], e.versions().await[Subsystem::Mixer as usize]);
     }
 
     #[tokio::test]
-    async fn acter_mute_est_bien_une_bascule_dans_les_deux_sens() {
-        // Une bascule et non une pose : l'acter comme « muet = vrai » ferait
-        // qu'un `Mute` émis depuis un appareil déjà muet publierait une
-        // sourdine que le cœur vient au contraire de lever.
+    async fn acknowledging_mute_is_indeed_a_toggle_in_both_directions() {
+        // A toggle and not a set: acknowledging it as "muted = true" would
+        // make a `Mute` emitted from an already muted device publish a mute
+        // that the core has, on the contrary, just lifted.
         let e = SharedState::default();
         e.acknowledge_optimistic(&[Command::Mute]).await;
-        assert!(e.read().await.state.muted, "faux -> vrai");
+        assert!(e.read().await.state.muted, "false -> true");
         e.acknowledge_optimistic(&[Command::Mute]).await;
-        assert!(!e.read().await.state.muted, "vrai -> faux");
+        assert!(!e.read().await.state.muted, "true -> false");
     }
 
     #[test]
-    fn les_sujets_indexent_le_tableau_sans_trou() {
-        // La conception repose sur `sujet as usize` : si un jour une variante
-        // recevait une valeur hors bounds ou en double, l'indexation
-        // paniquerait ou deux subsystems partageraient un compteur.
+    fn the_subsystems_index_the_array_without_gaps() {
+        // The design rests on `subsystem as usize`: should a variant one day
+        // receive an out-of-bounds or duplicate value, the indexing would
+        // panic or two subsystems would share a counter.
         let indices = [
             Subsystem::Player as usize,
             Subsystem::Mixer as usize,
             Subsystem::Playlist as usize,
             Subsystem::StoredPlaylist as usize,
         ];
-        let mut vus = [false; SUBSYSTEM_COUNT];
+        let mut seen = [false; SUBSYSTEM_COUNT];
         for i in indices {
-            assert!(i < SUBSYSTEM_COUNT, "{i} sort du tableau de compteurs");
-            assert!(!vus[i], "deux subsystems partagent l'index {i}");
-            vus[i] = true;
+            assert!(i < SUBSYSTEM_COUNT, "{i} falls outside the counter array");
+            assert!(!seen[i], "two subsystems share index {i}");
+            seen[i] = true;
         }
-        assert!(vus.iter().all(|v| *v), "un index du tableau n'a pas de sujet");
+        assert!(seen.iter().all(|v| *v), "an index of the array has no subsystem");
     }
 
     // ------------------------------------------------------------------
-    // Les pochettes
+    // Covers
     // ------------------------------------------------------------------
 
-    /// Le `href` que le cœur publie, dans les deux endroits qui doivent
-    /// coïncider : la trame d'état et la trame de cover.
+    /// The `href` the core publishes, in the two places that must coincide:
+    /// the state frame and the cover frame.
     const HREF: &str = "/api/cover/1a2b3c";
 
     #[tokio::test]
-    async fn une_pochette_recue_est_tenue_et_reveille_player() {
+    async fn a_received_cover_is_held_and_wakes_player() {
         let e = SharedState::default();
-        let avant = e.versions().await;
+        let before = e.versions().await;
 
         e.apply_cover(test_cover(HREF, 4096)).await;
 
         let inst = e.read().await;
-        let tenue = inst.cover.expect("la cover doit etre tenue");
-        assert_eq!(tenue.href, HREF);
-        assert_eq!(tenue.mime, "image/jpeg");
-        // Les bytes au bit près : c'est ce que `albumart` servira.
-        assert_eq!(*tenue.bytes, test_cover(HREF, 4096).bytes);
+        let held = inst.cover.expect("the cover must be held");
+        assert_eq!(held.href, HREF);
+        assert_eq!(held.mime, "image/jpeg");
+        // The bytes to the bit: this is what `albumart` will serve.
+        assert_eq!(*held.bytes, test_cover(HREF, 4096).bytes);
         assert_ne!(
-            avant[Subsystem::Player as usize],
+            before[Subsystem::Player as usize],
             e.versions().await[Subsystem::Player as usize],
-            "une cover est un fait sur le track current"
+            "a cover is a fact about the current track"
         );
     }
 
     #[tokio::test]
-    async fn une_pochette_ne_reveille_que_player() {
-        // Le pendant du test précédent : `Mixer` n'a rien à voir avec une
-        // image, et réveiller `Playlist` ferait retélécharger la file entière
-        // à tous les clients à chaque changement de piste. `StoredPlaylist`
-        // est réservé aux listes enregistrées.
+    async fn a_cover_wakes_only_player() {
+        // The counterpart of the previous test: `Mixer` has nothing to do with
+        // an image, and waking `Playlist` would make every client re-download
+        // the whole queue at every track change. `StoredPlaylist` is reserved
+        // for stored playlists.
         let e = SharedState::default();
-        let avant = e.versions().await;
-        let file_avant = e.read().await.queue_version;
+        let before = e.versions().await;
+        let queue_before = e.read().await.queue_version;
 
         e.apply_cover(test_cover(HREF, 4096)).await;
 
-        let apres = e.versions().await;
-        for sujet in [Subsystem::Mixer, Subsystem::Playlist, Subsystem::StoredPlaylist] {
+        let after = e.versions().await;
+        for subsystem in [Subsystem::Mixer, Subsystem::Playlist, Subsystem::StoredPlaylist] {
             assert_eq!(
-                avant[sujet as usize], apres[sujet as usize],
-                "{sujet:?} n'a rien a apprendre d'une cover"
+                before[subsystem as usize], after[subsystem as usize],
+                "{subsystem:?} has nothing to learn from a cover"
             );
         }
-        // Et la version de file d'attente non plus : la file n'a pas changé,
-        // et l'incrémenter ferait répondre `plchanges` pour rien.
-        assert_eq!(file_avant, e.read().await.queue_version);
+        // And neither does the queue version: the queue did not change, and
+        // incrementing it would make `plchanges` answer for nothing.
+        assert_eq!(queue_before, e.read().await.queue_version);
     }
 
     #[tokio::test]
-    async fn la_meme_pochette_deux_fois_ne_reveille_personne() {
-        // Le cœur push_cover la cover courante **au câblage**, donc une
-        // reconnexion de la moitié `display` repasse ici avec la même image.
-        // Sans la comparaison, chaque redémarrage du greffon réveillerait tous
-        // les clients — et leur ferait retélécharger jusqu'à vingt mébioctets.
+    async fn the_same_cover_twice_wakes_nobody() {
+        // The core pushes the current cover **at wiring time**, so a
+        // reconnection of the `display` half comes through here again with
+        // the same image. Without the comparison, every restart of the plugin
+        // would wake all clients — and make them re-download up to twenty
+        // mebibytes.
         let e = SharedState::default();
         e.apply_cover(test_cover(HREF, 4096)).await;
-        let avant = e.versions().await;
+        let before = e.versions().await;
 
         e.apply_cover(test_cover(HREF, 4096)).await;
 
-        assert_eq!(avant, e.versions().await);
+        assert_eq!(before, e.versions().await);
     }
 
     #[tokio::test]
-    async fn des_octets_differents_sous_le_meme_href_sont_un_changement() {
-        // La comparaison porte sur les bytes et pas seulement sur le `href` :
-        // se fier à la seule clé ferait taire une image réellement nouvelle
-        // publiée sous une clé recyclée, et le client garderait l'ancienne
-        // pour toujours.
+    async fn different_bytes_under_the_same_href_are_a_change() {
+        // The comparison is on the bytes and not only on the `href`: trusting
+        // the key alone would silence a really new image published under a
+        // recycled key, and the client would keep the old one forever.
         let e = SharedState::default();
         e.apply_cover(test_cover(HREF, 4096)).await;
-        let avant = e.versions().await;
+        let before = e.versions().await;
 
         e.apply_cover(test_cover(HREF, 8192)).await;
 
-        assert_ne!(avant[Subsystem::Player as usize], e.versions().await[Subsystem::Player as usize]);
+        assert_ne!(before[Subsystem::Player as usize], e.versions().await[Subsystem::Player as usize]);
         assert_eq!(e.read().await.cover.unwrap().bytes.len(), 8192);
     }
 
-    /// Une trame d'état **telle que le cœur l'émet quand une cover existe** :
-    /// elle announcement le `href` de l'image tenue.
+    /// A state frame **as the core emits it when a cover exists**: it
+    /// announces the `href` of the held image.
     ///
-    /// Le réalisme n'est pas une politesse. Ce test employait une trame
-    /// `Default` — donc sans `cover_href` — pour prouver qu'une trame d'état ne
-    /// jette pas la cover : une trame que le producteur n'émet **jamais** en
-    /// même temps qu'une cover, et qui prouvait donc une causalité
-    /// impossible. Elle masquait au passage que rien ne relâchait jamais
-    /// l'image.
-    fn trame_qui_annonce(href: &str) -> PlayerState {
+    /// The realism is not a courtesy. This test used a `Default` frame — hence
+    /// without `cover_href` — to prove that a state frame does not throw the
+    /// cover away: a frame the producer **never** emits at the same time as a
+    /// cover, and which therefore proved an impossible causality. It hid, on
+    /// the way, that nothing ever released the image.
+    fn frame_announcing(href: &str) -> PlayerState {
         PlayerState {
             source: "radio".into(),
             preset: Some(2),
@@ -1643,16 +1624,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn une_trame_detat_ne_jette_pas_la_pochette_quelle_annonce() {
-        // Les deux canaux écrivent dans le même instantané et chacun ne doit
-        // toucher que le sien — la même propriété que pour le sources_catalog. Une
-        // trame d'état arrive **chaque seconde** de playback : si elle remettait
-        // la cover à `None`, `albumart` ne répondrait qu'entre deux trames,
-        // c'est-à-dire jamais.
+    async fn a_state_frame_does_not_throw_away_the_cover_it_announces() {
+        // The two channels write into the same snapshot and each must touch
+        // only its own — the same property as for the catalog. A state frame
+        // arrives **every second** of playback: if it reset the cover to
+        // `None`, `albumart` would only answer between two frames, i.e. never.
         let e = SharedState::default();
         e.apply_cover(test_cover(HREF, 4096)).await;
 
-        e.apply_state(PlayerState { volume: 17, ..trame_qui_annonce(HREF) }).await;
+        e.apply_state(PlayerState { volume: 17, ..frame_announcing(HREF) }).await;
 
         let inst = e.read().await;
         assert_eq!(inst.cover.map(|p| p.bytes.len()), Some(4096));
@@ -1660,60 +1640,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn une_trame_sans_pochette_relache_les_octets_tenus() {
-        // Le pendant, et il manquait entièrement : `cover` n'était jamais
-        // remis à `None`, donc le greffon retenait jusqu'à 20 Mio pour la vie du
-        // processus — y compris longtemps après l'arrêt de la playback. Le
-        // signal est le `cover_href` de la trame d'état : `None` veut dire que
-        // plus rien de ce qui plays n'a d'image, et c'est exactement la condition
-        // sous laquelle `albumart` refusait déjà de serve ces bytes.
+    async fn a_frame_without_a_cover_releases_the_held_bytes() {
+        // The counterpart, and it was entirely missing: `cover` was never
+        // reset to `None`, so the plugin kept up to 20 MiB for the life of the
+        // process — including long after playback stopped. The signal is the
+        // `cover_href` of the state frame: `None` means nothing playing has an
+        // image any more, and that is exactly the condition under which
+        // `albumart` was already refusing to serve those bytes.
         let e = SharedState::default();
-        e.apply_state(trame_qui_annonce(HREF)).await;
+        e.apply_state(frame_announcing(HREF)).await;
         e.apply_cover(test_cover(HREF, 4096)).await;
-        assert!(e.read().await.cover.is_some(), "la cover doit d'abord etre tenue");
+        assert!(e.read().await.cover.is_some(), "the cover must first be held");
 
-        // La piste suivante n'a pas d'illustration : le cœur l'announcement ainsi, et
-        // n'enverra aucune trame de cover pour elle.
+        // The next track has no artwork: the core announces it so, and will
+        // send no cover frame for it.
         e.apply_state(PlayerState {
             track: ritornello_proto::Track { title: Some("Blue in Green".into()), ..Default::default() },
-            ..trame_qui_annonce(HREF)
+            ..frame_announcing(HREF)
         })
         .await;
 
-        assert!(e.read().await.cover.is_none(), "les bytes doivent etre relaches");
+        assert!(e.read().await.cover.is_none(), "the bytes must be released");
     }
 
     #[tokio::test]
-    async fn une_trame_qui_annonce_une_autre_cle_garde_la_pochette_tenue() {
-        // La fenêtre normale du cœur : il envoie l'état **avant** les bytes,
-        // donc la trame announcement déjà la clé suivante quand la cover tenue est
-        // encore la précédente. Le relâchement ne doit pas s'y déclencher —
-        // sinon une inversion d'order des deux canaux détruirait une image que
-        // la trame d'après aurait légitimée. `albumart` refuse pendant cette
-        // fenêtre (le `href` ne correspond pas), et c'est tout ce qu'il faut.
+    async fn a_frame_announcing_another_key_keeps_the_held_cover() {
+        // The core's normal window: it sends the state **before** the bytes,
+        // so the frame already announces the next key while the held cover is
+        // still the previous one. The release must not trigger there —
+        // otherwise an inversion of the two channels' order would destroy an
+        // image that the next frame would have legitimised. `albumart` refuses
+        // during that window (the `href` does not match), and that is all
+        // that is needed.
         let e = SharedState::default();
-        e.apply_state(trame_qui_annonce(HREF)).await;
+        e.apply_state(frame_announcing(HREF)).await;
         e.apply_cover(test_cover(HREF, 4096)).await;
 
-        e.apply_state(trame_qui_annonce("/api/cover/999999")).await;
+        e.apply_state(frame_announcing("/api/cover/999999")).await;
 
-        assert!(e.read().await.cover.is_some(), "la fenetre state/cover n'est pas un relachement");
+        assert!(e.read().await.cover.is_some(), "the state/cover window is not a release");
     }
 
     #[tokio::test]
-    async fn un_dormeur_sur_player_est_reveille_par_une_pochette() {
-        // Le bout en bout du réveil, dans ce module : `wait` ne sonde pas,
-        // donc c'est bien le `notify_waiters` d'`apply_cover` qui rend
-        // la main. Sans horloge : si l'implémentation ne réveillait pas, ce
-        // test **pendrait** — le mode d'échec voulu.
+    async fn a_sleeper_on_player_is_woken_by_a_cover() {
+        // The end-to-end of the wakeup, within this module: `wait` does not
+        // poll, so it is indeed the `notify_waiters` of `apply_cover` that
+        // returns. No clock: if the implementation did not wake, this test
+        // **would hang** — the intended failure mode.
         let e = Arc::new(SharedState::default());
         let seen = e.versions().await;
-        let dormeur = e.clone();
-        let attente = tokio::spawn(async move { dormeur.wait(&[Subsystem::Player], seen).await });
-        // La comparaison préalable d'`wait` interdit le réveil manqué : que
-        // la cover arrive avant ou après l'inscription du dormeur, il
-        // repart. Aucune synchronisation n'est donc nécessaire ici.
+        let sleeper = e.clone();
+        let waiting = tokio::spawn(async move { sleeper.wait(&[Subsystem::Player], seen).await });
+        // The preliminary comparison in `wait` forbids the missed wakeup:
+        // whether the cover arrives before or after the sleeper registers, it
+        // returns. No synchronisation is therefore needed here.
         e.apply_cover(test_cover(HREF, 4096)).await;
-        assert_eq!(attente.await.unwrap().moved, vec![Subsystem::Player]);
+        assert_eq!(waiting.await.unwrap().moved, vec![Subsystem::Player]);
     }
 }

@@ -18,7 +18,7 @@
 // The mounts of those 13 are NOT derivable from their slug — `francemusique_
 // classique_easy` is served as `francemusiqueeasyclassique`, and
 // `francemusique_evenementielle` ("Films") as `francemusiquelabo`, i.e. "la
-// B.O.". They are listed in MOUNTS_HORS_DOC below and each one is verified
+// B.O.". They are listed in MOUNTS_OUTSIDE_DOC below and each one is verified
 // against icecast.radiofrance.fr on every run: a mount that stopped answering
 // is reported rather than written out.
 //
@@ -33,33 +33,34 @@
 //        nonzero if the bundled table differs from the sources — useful in
 //        review)
 //
-// Note: the generated file's header (`entete` below) stays in French on
-// purpose — it is committed as src/stations.toml and locked by the --verifier
-// comparison.
+// Note: the generated file's header (`header` below) is committed as
+// src/stations.toml and locked by the --verifier comparison. The README
+// markers below (`START`/`END`) must keep the exact text already committed
+// in README.md, which this script does not otherwise translate.
 import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const UA = 'Mozilla/5.0 (X11; Linux x86_64) Chrome/120'
 const DOC = 'https://developers.radiofrance.fr/doc/tutorial-by-example'
-const DOC_MARQUES = `${DOC}/list-brands`
-const DOC_LOCALES = `${DOC}/list-locals-and-webradios`
+const DOC_BRANDS = `${DOC}/list-brands`
+const DOC_LOCALS = `${DOC}/list-locals-and-webradios`
 const SITE_FIP = 'https://www.radiofrance.fr/fip'
 const SITE_FM = 'https://www.radiofrance.fr/francemusique'
-const RACINE = join(dirname(fileURLToPath(import.meta.url)), '..')
-const CIBLE = join(RACINE, 'src', 'stations.toml')
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+const TARGET = join(ROOT, 'src', 'stations.toml')
 // The plugin's README lists the same stations. Regenerating it from the same
 // run is what stops the two from drifting: a list kept by hand would be right
 // on the day it was written and quietly wrong afterwards.
-const LISEZMOI = join(RACINE, 'README.md')
-const DEBUT = '<!-- stations:auto:début — généré par scripts/fetch-stations.mjs, ne pas éditer à la main -->'
-const FIN = '<!-- stations:auto:fin -->'
+const README = join(ROOT, 'README.md')
+const START = '<!-- stations:auto:début — généré par scripts/fetch-stations.mjs, ne pas éditer à la main -->'
+const END = '<!-- stations:auto:fin -->'
 
 // The 13 stations absent from the documentation: their mount, keyed by the
 // brand slug the site's cards carry. Collected by hand and re-verified against
-// icecast.radiofrance.fr at every run (see verifieMounts). None of them can be
+// icecast.radiofrance.fr at every run (see checkMounts). None of them can be
 // derived from the slug, which is exactly why they are written down.
-const MOUNTS_HORS_DOC = {
+const MOUNTS_OUTSIDE_DOC = {
   fip_sacre_francais: 'fipsacrefrancais',
   fip_cultes: 'fipcultes',
   francemusique_classique_easy: 'francemusiqueeasyclassique',
@@ -83,34 +84,34 @@ const MOUNTS_HORS_DOC = {
 // while `webrf_mouv_player` answers "La Playlist" / "SOOLKING - Bye Bye (feat.
 // TAYC)", which was what actually aired.
 //
-//  - MORCEAU (`webrf_fip_player`): the answer is the SONG object — title and
+//  - TRACK (`webrf_fip_player`): the answer is the SONG object — title and
 //    artist already separated, and the window is the song's. Only the stations
 //    below answer this way: FIP, its webradios, and France Musique's.
-//  - EMISSION (`webrf_mouv_player`): the answer is the PROGRAMME object, with
+//  - SHOW (`webrf_mouv_player`): the answer is the PROGRAMME object, with
 //    what is playing inside it as a single "ARTIST - Title" string. It is the
 //    only profile that surfaces the current song on Mouv', France Musique and
 //    the 45 local stations; on purely spoken stations it returns the same
 //    programme/detail pair as the brand's own profile (checked on France
 //    Inter, franceinfo and France Culture). Its name is incidental — it is a
 //    server-side profile, not a Mouv' endpoint.
-const MORCEAU = 'webrf_fip_player'
-const EMISSION = 'webrf_mouv_player'
+const TRACK = 'webrf_fip_player'
+const SHOW = 'webrf_mouv_player'
 
 // Commentary attached to a station in the generated file, where the pairing
 // deserves an explanation the reader would otherwise have to rediscover.
 const NOTES = {
   407: [
-    '# Mount « labo » = « la B.O. » (bandes originales), la webradio des musiques de',
-    '# films — que le site appelle « Films » et dont le slug de marque est',
-    '# `francemusique_evenementielle`. C’est la seule entrée dont le rapprochement',
-    '# repose sur l’élimination : après attribution des dix autres webradios France',
-    '# Musique, il restait exactement un mount et exactement une station.',
+    '# Mount "labo" = "la B.O." (original soundtracks), the webradio for film',
+    '# music — which the site calls "Films" and whose brand slug is',
+    '# `francemusique_evenementielle`. This is the only entry whose matching',
+    '# rests on elimination: after assigning the ten other France Musique',
+    '# webradios, exactly one mount and exactly one station remained.',
   ],
 }
 
-const texte = (u) =>
+const text = (u) =>
   fetch(u, { headers: { 'user-agent': UA } }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status} sur ${u}`)
+    if (!r.ok) throw new Error(`HTTP ${r.status} on ${u}`)
     return r.text()
   })
 
@@ -123,10 +124,10 @@ const texte = (u) =>
  * after a checkout or a rebase — a false alarm on the one check meant to
  * catch a real one.
  */
-const memeFins = (t) => t.replace(/\r\n/g, '\n')
+const sameLineEndings = (t) => t.replace(/\r\n/g, '\n')
 
-/** Rewrites `rendu` with the line endings the file on disk already uses. */
-const commeSurDisque = (rendu, actuel) => (actuel.includes('\r\n') ? rendu.replace(/\n/g, '\r\n') : rendu)
+/** Rewrites `rendered` with the line endings the file on disk already uses. */
+const asOnDisk = (rendered, current) => (current.includes('\r\n') ? rendered.replace(/\n/g, '\r\n') : rendered)
 
 /**
  * Strips the HTML while preserving the spaces INSIDE the JSON string literals
@@ -135,7 +136,7 @@ const commeSurDisque = (rendu, actuel) => (actuel.includes('\r\n') ? rendu.repla
  * exactly. Collapsing all whitespace instead would turn "France Bleu Alsace"
  * into "FranceBleuAlsace".
  */
-function jsonDeLaPage(html) {
+function jsonFromPage(html) {
   return html
     .replace(/<[^>]+>/g, '\n')
     .replace(/&quot;/g, '"')
@@ -150,12 +151,12 @@ function jsonDeLaPage(html) {
 }
 
 /** Every {id, title, playerUrl, liveStream} object of a documentation page. */
-function stationsDoc(plat) {
+function stationsFromDoc(flat) {
   const out = []
-  for (const m of plat.matchAll(/\{"id":"([A-Z_0-9]+)","title":"([^"]*)"[^{}]*?\}/g)) {
-    const bloc = m[0]
-    const id = /id_station=(\d+)/.exec(bloc)?.[1]
-    const mount = /icecast\.radiofrance\.fr\/([a-z0-9]+)-(?:midfi|lofi|hifi)/.exec(bloc)?.[1]
+  for (const m of flat.matchAll(/\{"id":"([A-Z_0-9]+)","title":"([^"]*)"[^{}]*?\}/g)) {
+    const block = m[0]
+    const id = /id_station=(\d+)/.exec(block)?.[1]
+    const mount = /icecast\.radiofrance\.fr\/([a-z0-9]+)-(?:midfi|lofi|hifi)/.exec(block)?.[1]
     // FIP à Bordeaux/Nantes/Strasbourg are listed with playerUrl and liveStream
     // both null: they no longer broadcast, so there is nothing to recognize.
     if (!id || !mount) continue
@@ -169,23 +170,23 @@ function stationsDoc(plat) {
  * same card. The regex is "tempered" — no other data-brand may come between the
  * two — without which a card would borrow the next one's identifier.
  */
-function cartesDuSite(html) {
+function cardsFromSite(html) {
   const re =
     /data-brand="([a-z_0-9]+)"((?:(?!data-brand=)[\s\S]){0,4000}?)id="cardtitle-(\d+)"((?:(?!data-brand=)[\s\S]){0,1200}?)aria-label="([^"]*)"/g
-  const vues = new Map()
-  for (const m of html.matchAll(re)) if (!vues.has(m[1])) vues.set(m[1], { id: Number(m[3]), label: m[5].trim() })
-  return vues
+  const seen = new Map()
+  for (const m of html.matchAll(re)) if (!seen.has(m[1])) seen.set(m[1], { id: Number(m[3]), label: m[5].trim() })
+  return seen
 }
 
 /** Human-readable label for a station taken from a site card. */
-function libelle(slug, court) {
-  const marque = slug.startsWith('fip_') ? 'FIP' : slug.startsWith('francemusique_') ? 'France Musique' : ''
-  return marque ? `${marque} ${court}` : court
+function label(slug, short) {
+  const brand = slug.startsWith('fip_') ? 'FIP' : slug.startsWith('francemusique_') ? 'France Musique' : ''
+  return brand ? `${brand} ${short}` : short
 }
 
 /** Checks that a mount still answers, so a stale one is reported, not written. */
-async function verifieMounts(mounts) {
-  const morts = []
+async function checkMounts(mounts) {
+  const dead = []
   for (const m of mounts) {
     try {
       const c = new AbortController()
@@ -196,62 +197,63 @@ async function verifieMounts(mounts) {
       })
       clearTimeout(t)
       r.body?.cancel()
-      if (r.status !== 200) morts.push(`${m} (HTTP ${r.status})`)
+      if (r.status !== 200) dead.push(`${m} (HTTP ${r.status})`)
     } catch (e) {
-      morts.push(`${m} (${e.message})`)
+      dead.push(`${m} (${e.message})`)
     }
   }
-  return morts
+  return dead
 }
 
-function toml(groupes, date, total) {
-  const entete = [
-    '# Stations Radio France : correspondance entre le mount de diffusion (présent',
-    '# dans l’URL du flux audio) et l’identifiant attendu par le point d’entrée du',
-    '# direct.',
+function toml(groups, date, total) {
+  const header = [
+    '# Radio France stations: mapping between the broadcast mount (present in the',
+    '# audio stream\'s URL) and the identifier expected by the live entry point.',
     '#',
-    '# RELEVÉ, PAS DEVINÉ. Source principale : la documentation publique de l’Open',
-    '# API de Radio France (https://developers.radiofrance.fr/doc/tutorial-by-example',
-    '# /list-brands et /list-locals-and-webradios), dont les réponses d’exemple',
-    '# donnent pour chaque station son `liveStream` (donc son mount Icecast) et son',
-    '# `playerUrl`, qui porte `id_station=<n>`. Les deux champs viennent de la même',
-    '# réponse : la correspondance est écrite par Radio France, pas reconstituée.',
+    '# MEASURED, NOT GUESSED. Primary source: Radio France\'s public Open API',
+    '# documentation (https://developers.radiofrance.fr/doc/tutorial-by-example',
+    '# /list-brands and /list-locals-and-webradios), whose sample responses give',
+    '# each station\'s `liveStream` (hence its Icecast mount) and its',
+    '# `playerUrl`, which carries `id_station=<n>`. Both fields come from the',
+    '# same response: the mapping is written by Radio France, not reconstructed.',
     '#',
-    '# Les 13 stations absentes de cette documentation — les webradios France',
-    '# Musique, plus FIP Sacré français et FIP Cultes — sont relevées des cartes de',
-    '# https://www.radiofrance.fr/francemusique et /fip, où le slug de marque et',
-    '# l’identifiant se lisent sur la même carte. Leur mount est vérifié station par',
-    '# station contre icecast.radiofrance.fr. `scripts/fetch-stations.mjs` régénère',
-    '# ce fichier depuis ces mêmes sources.',
+    '# The 13 stations absent from that documentation — the France Musique',
+    '# webradios, plus FIP Sacré français and FIP Cultes — are gathered from the',
+    '# cards at https://www.radiofrance.fr/francemusique and /fip, where the',
+    '# brand slug and the identifier are read off the same card. Their mount is',
+    '# checked station by station against icecast.radiofrance.fr.',
+    '# `scripts/fetch-stations.mjs` regenerates this file from those same',
+    '# sources.',
     '#',
-    '# Chaque mount est cherché comme **jeton** de l’URL du flux : bordé de part et',
-    '# d’autre par un caractère non alphanumérique. C’est ce qui permet une seule',
-    '# entrée par station là où la même station se diffuse sous plusieurs formes',
-    '# (`icecast.radiofrance.fr/<mount>-midfi.mp3`, le nom historique',
-    '# `direct.fipradio.fr/live/<mount>-midfi.mp3`, le HLS',
-    '# `stream.radiofrance.fr/<mount>/<mount>.m3u8`, et les qualités `-lofi`,',
-    '# `-hifi.aac`) — et ce qui empêche `fip` de capturer `fipgroove`.',
+    '# Each mount is looked up as a **token** of the stream URL: bordered on',
+    '# both sides by a non-alphanumeric character. That is what allows a single',
+    '# entry per station where the same station is broadcast in several forms',
+    '# (`icecast.radiofrance.fr/<mount>-midfi.mp3`, the historical name',
+    '# `direct.fipradio.fr/live/<mount>-midfi.mp3`, the HLS',
+    '# `stream.radiofrance.fr/<mount>/<mount>.m3u8`, and the `-lofi`,',
+    '# `-hifi.aac` qualities) — and what stops `fip` from capturing `fipgroove`.',
     '#',
-    '# `rules` est le **profil de rendu** demandé au serveur, et son choix n’est pas',
-    '# cosmétique : c’est lui qui décide si le plugin dit quelque chose. Mesuré au',
-    '# même instant sur Mouv’, `webrf_fip_player` répond « Le direct » / « Mouv’ »',
-    '# (le slogan) quand `webrf_mouv_player` répond « La Playlist » / « SOOLKING -',
-    '# Bye Bye (feat. TAYC) », qui était bien ce qui passait à l’antenne.',
-    '#   - `webrf_fip_player` : la réponse est l’objet MORCEAU, titre et artiste',
-    '#     déjà séparés, bornes du morceau. Seules FIP, ses webradios et celles de',
-    '#     France Musique répondent ainsi.',
-    '#   - `webrf_mouv_player` : la réponse est l’objet ÉMISSION, avec ce qui s’y',
-    '#     joue en une seule chaîne « ARTISTE - Titre ». Seul profil qui sorte le',
-    '#     morceau sur Mouv’, France Musique et les 45 locales ; sur les stations',
-    '#     parlées il rend la même paire que le profil propre à la marque (vérifié',
-    '#     sur France Inter, franceinfo et France Culture). Son nom est fortuit :',
-    '#     c’est un profil du serveur, pas un point d’entrée de Mouv’.',
+    '# `rules` is the **rendering profile** requested from the server, and its',
+    '# choice is not cosmetic: it is what decides whether the plugin says',
+    '# anything at all. Measured at the same instant on Mouv\', `webrf_fip_player`',
+    '# answers "Le direct" / "Mouv\'" (the slogan) while `webrf_mouv_player`',
+    '# answers "La Playlist" / "SOOLKING - Bye Bye (feat. TAYC)", which was',
+    '# indeed what was on air.',
+    '#   - `webrf_fip_player`: the response is the TRACK object, title and',
+    '#     artist already separated, track boundaries. Only FIP, its webradios',
+    '#     and France Musique\'s answer this way.',
+    '#   - `webrf_mouv_player`: the response is the SHOW object, with whatever',
+    '#     is playing in a single "ARTIST - Title" string. The only profile that',
+    '#     yields the track on Mouv\', France Musique and the 45 local stations;',
+    '#     on the talk stations it renders the same pair as the brand\'s own',
+    '#     profile (checked on France Inter, franceinfo and France Culture). Its',
+    '#     name is incidental: it is a server profile, not a Mouv\' endpoint.',
     '#',
-    `# Relevé le ${date}. ${total} stations.`,
+    `# Measured on ${date}. ${total} stations.`,
     '',
   ]
-  const corps = groupes.flatMap(({ titre, stations }) => [
-    `# --- ${titre} ${'-'.repeat(Math.max(1, 76 - titre.length))}`,
+  const body = groups.flatMap(({ title, stations }) => [
+    `# --- ${title} ${'-'.repeat(Math.max(1, 76 - title.length))}`,
     '',
     ...stations.flatMap((s) => [
       ...(NOTES[s.id] ?? []),
@@ -263,111 +265,111 @@ function toml(groupes, date, total) {
       '',
     ]),
   ])
-  return [...entete, ...corps].join('\n')
+  return [...header, ...body].join('\n')
 }
 
-// ---------------------------------------------------------------- collecte
+// ---------------------------------------------------------------- collection
 
-const [platMarques, platLocales, htmlFip, htmlFm] = await Promise.all([
-  texte(DOC_MARQUES).then(jsonDeLaPage),
-  texte(DOC_LOCALES).then(jsonDeLaPage),
-  texte(SITE_FIP),
-  texte(SITE_FM),
+const [flatBrands, flatLocals, htmlFip, htmlFm] = await Promise.all([
+  text(DOC_BRANDS).then(jsonFromPage),
+  text(DOC_LOCALS).then(jsonFromPage),
+  text(SITE_FIP),
+  text(SITE_FM),
 ])
 
-const marques = stationsDoc(platMarques)
-const docLocales = stationsDoc(platLocales)
-if (!marques.length || !docLocales.length) {
-  throw new Error('la documentation a change de forme : aucune station extraite, rien n’est ecrit')
+const brands = stationsFromDoc(flatBrands)
+const docLocals = stationsFromDoc(flatLocals)
+if (!brands.length || !docLocals.length) {
+  throw new Error('documentation changed shape: no station extracted, nothing written')
 }
 // The locals page carries both the "ici" network and FIP's webradios; the FIP
 // ones are told apart by their mount, not by their position on the page.
-const locales = docLocales.filter((s) => s.mount.startsWith('fb'))
-const webradiosFipDoc = docLocales.filter((s) => !s.mount.startsWith('fb'))
+const locals = docLocals.filter((s) => s.mount.startsWith('fb'))
+const webradiosFipDoc = docLocals.filter((s) => !s.mount.startsWith('fb'))
 
-const cartes = new Map([...cartesDuSite(htmlFip), ...cartesDuSite(htmlFm)])
-const horsDoc = []
-for (const [slug, mount] of Object.entries(MOUNTS_HORS_DOC)) {
-  const carte = cartes.get(slug)
-  if (!carte) {
-    throw new Error(`carte introuvable pour ${slug} : le site a change de forme, rien n’est ecrit`)
+const cards = new Map([...cardsFromSite(htmlFip), ...cardsFromSite(htmlFm)])
+const outsideDoc = []
+for (const [slug, mount] of Object.entries(MOUNTS_OUTSIDE_DOC)) {
+  const card = cards.get(slug)
+  if (!card) {
+    throw new Error(`card not found for ${slug}: the site changed shape, nothing written`)
   }
-  horsDoc.push({ id: carte.id, mount, label: libelle(slug, carte.label), source: slug })
+  outsideDoc.push({ id: card.id, mount, label: label(slug, card.label), source: slug })
 }
 
-const morts = await verifieMounts(horsDoc.map((s) => s.mount))
-if (morts.length) {
-  throw new Error(`mount(s) hors documentation sans reponse : ${morts.join(', ')} — rien n’est ecrit`)
+const dead = await checkMounts(outsideDoc.map((s) => s.mount))
+if (dead.length) {
+  throw new Error(`mount(s) outside the documentation with no response: ${dead.join(', ')} — nothing written`)
 }
 
-const parId = (a, b) => a.id - b.id
-const webradiosFip = [...webradiosFipDoc, ...horsDoc.filter((s) => s.source.startsWith('fip_'))].sort(parId)
-const webradiosFm = horsDoc.filter((s) => s.source.startsWith('francemusique_')).sort(parId)
+const byId = (a, b) => a.id - b.id
+const webradiosFip = [...webradiosFipDoc, ...outsideDoc.filter((s) => s.source.startsWith('fip_'))].sort(byId)
+const webradiosFm = outsideDoc.filter((s) => s.source.startsWith('francemusique_')).sort(byId)
 // FIP itself answers with the song object; the other five national brands do
 // not, so they take the programme profile like the local stations.
-const profil = (s, defaut) => ({ ...s, rules: s.mount === 'fip' ? MORCEAU : defaut })
-const groupes = [
-  { titre: 'Les six marques nationales', stations: marques.sort(parId).map((s) => profil(s, EMISSION)) },
-  { titre: 'Webradios FIP', stations: webradiosFip.map((s) => profil(s, MORCEAU)) },
-  { titre: 'Webradios France Musique', stations: webradiosFm.map((s) => profil(s, MORCEAU)) },
-  { titre: `Les ${locales.length} locales ici (ex-France Bleu)`, stations: locales.sort(parId).map((s) => profil(s, EMISSION)) },
+const withProfile = (s, fallback) => ({ ...s, rules: s.mount === 'fip' ? TRACK : fallback })
+const groups = [
+  { title: 'The six national brands', stations: brands.sort(byId).map((s) => withProfile(s, SHOW)) },
+  { title: 'Webradios FIP', stations: webradiosFip.map((s) => withProfile(s, TRACK)) },
+  { title: 'Webradios France Musique', stations: webradiosFm.map((s) => withProfile(s, TRACK)) },
+  { title: `The ${locals.length} "ici" locals (formerly France Bleu)`, stations: locals.sort(byId).map((s) => withProfile(s, SHOW)) },
 ]
 
-const total = groupes.reduce((n, g) => n + g.stations.length, 0)
+const total = groups.reduce((n, g) => n + g.stations.length, 0)
 // A duplicated identifier or mount would make one station shadow another, and
 // the shadowed one would simply never be recognized — silently.
-for (const champ of ['id', 'mount']) {
-  const vus = new Set()
-  for (const g of groupes) {
+for (const field of ['id', 'mount']) {
+  const seen = new Set()
+  for (const g of groups) {
     for (const s of g.stations) {
-      if (vus.has(s[champ])) throw new Error(`${champ} ${s[champ]} en double (${s.label}) : rien n’est ecrit`)
-      vus.add(s[champ])
+      if (seen.has(s[field])) throw new Error(`duplicate ${field} ${s[field]} (${s.label}): nothing written`)
+      seen.add(s[field])
     }
   }
 }
 
 /** The station table of the README, between its two markers. */
-function markdown(groupes) {
-  const lignes = ['', '| Station | Mount | Id | Profile |', '|---|---|---|---|']
-  for (const { titre, stations } of groupes) {
-    lignes.push(`| **${titre}** | | | |`)
-    for (const s of stations) lignes.push(`| ${s.label} | \`${s.mount}\` | ${s.id} | \`${s.rules}\` |`)
+function markdown(groups) {
+  const lines = ['', '| Station | Mount | Id | Profile |', '|---|---|---|---|']
+  for (const { title, stations } of groups) {
+    lines.push(`| **${title}** | | | |`)
+    for (const s of stations) lines.push(`| ${s.label} | \`${s.mount}\` | ${s.id} | \`${s.rules}\` |`)
   }
-  lignes.push('')
-  return lignes.join('\n')
+  lines.push('')
+  return lines.join('\n')
 }
 
 /** Replaces the marked section of the README, leaving the prose untouched. */
-function lisezmoiRendu(actuel, groupes) {
-  const i = actuel.indexOf(DEBUT)
-  const j = actuel.indexOf(FIN)
+function renderedReadme(current, groups) {
+  const i = current.indexOf(START)
+  const j = current.indexOf(END)
   if (i < 0 || j < 0 || j < i) {
-    throw new Error(`marqueurs introuvables dans ${LISEZMOI} : rien n’est ecrit`)
+    throw new Error(`markers not found in ${README}: nothing written`)
   }
-  return actuel.slice(0, i + DEBUT.length) + markdown(groupes) + actuel.slice(j)
+  return current.slice(0, i + START.length) + markdown(groups) + current.slice(j)
 }
 
 // The date is not re-read from the existing file: it dates the survey, not the
 // file.
-const rendu = toml(groupes, new Date().toISOString().slice(0, 10), total)
-const tomlActuel = readFileSync(CIBLE, 'utf8')
-const lisezmoiActuel = readFileSync(LISEZMOI, 'utf8')
-const lisezmoi = lisezmoiRendu(memeFins(lisezmoiActuel), groupes)
+const rendered = toml(groups, new Date().toISOString().slice(0, 10), total)
+const currentToml = readFileSync(TARGET, 'utf8')
+const currentReadme = readFileSync(README, 'utf8')
+const readme = renderedReadme(sameLineEndings(currentReadme), groups)
 
 if (process.argv.includes('--verifier')) {
   // Comparison excluding the date line: only the entries' content counts.
-  const sansDate = (t) => memeFins(t).replace(/^# Relevé le .*$/m, '')
-  const ecarts = []
-  if (sansDate(tomlActuel) !== sansDate(rendu)) ecarts.push(CIBLE)
-  if (memeFins(lisezmoiActuel) !== lisezmoi) ecarts.push(LISEZMOI)
-  if (ecarts.length) {
-    console.error(`differe des sources (${total} stations en ligne) : ${ecarts.join(', ')}`)
+  const withoutDate = (t) => sameLineEndings(t).replace(/^# Measured on .*$/m, '')
+  const diffs = []
+  if (withoutDate(currentToml) !== withoutDate(rendered)) diffs.push(TARGET)
+  if (sameLineEndings(currentReadme) !== readme) diffs.push(README)
+  if (diffs.length) {
+    console.error(`differs from the sources (${total} stations live): ${diffs.join(', ')}`)
     process.exit(1)
   }
-  console.log(`table et README a jour (${total} stations)`)
+  console.log(`table and README up to date (${total} stations)`)
 } else {
-  writeFileSync(CIBLE, commeSurDisque(rendu, tomlActuel))
-  writeFileSync(LISEZMOI, commeSurDisque(lisezmoi, lisezmoiActuel))
-  console.log(`${CIBLE} : ${total} stations ecrites`)
-  console.log(`${LISEZMOI} : tableau mis a jour`)
+  writeFileSync(TARGET, asOnDisk(rendered, currentToml))
+  writeFileSync(README, asOnDisk(readme, currentReadme))
+  console.log(`${TARGET}: ${total} stations written`)
+  console.log(`${README}: table updated`)
 }

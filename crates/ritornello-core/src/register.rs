@@ -1,11 +1,11 @@
-//! Rassemblement des annonces des plugins.
+//! Gathering of the plugins' announcements.
 //!
-//! Le cœur lie un socket avant tout lancement, puis attend une announcement par
-//! greffon lancé. Comme le greffon lie ses propres sockets **avant** de
-//! s'annoncer, la line reçue est une barrière de disponibilité : le cœur
-//! peut se connecter derrière sans retenter. C'est ce qui remplace les deux
-//! attentes devinées d'avant — la fenêtre de 2 s de la page d'admin et les
-//! 10 s de reprises de connexion.
+//! The core binds a socket before launching anything, then waits for one
+//! announcement per launched plugin. Since the plugin binds its own sockets
+//! **before** announcing itself, the received line is an availability barrier:
+//! the core can connect behind it without retrying. This is what replaces the
+//! two guessed waits of before — the 2 s window of the admin page and the
+//! 10 s of connection retries.
 
 use futures::{Stream, StreamExt};
 use ritornello_proto::{Announcement, PluginKind};
@@ -14,48 +14,47 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::UnixListener;
 
-/// Ce que le rassemblement a appris.
+/// What the gathering learned.
 ///
-/// Les deux listes de silent sont **séparées** parce que le cœur en fait deux
-/// choses différentes : un figé garde une chance de parler — le socket
-/// d'enregistrement reste ouvert pour toute la vie du processus — tandis qu'un
-/// mort n'en a plus aucune. Les confondre, c'était rapporter la même line de
-/// statut pour deux pannes qui ne se réparent pas de la même façon.
+/// The two lists of silent plugins are **separate** because the core does two
+/// different things with them: a stalled one keeps a chance to speak — the
+/// register socket stays open for the whole life of the process — whereas a
+/// dead one has none left. Confusing them meant reporting the same status line
+/// for two failures that are not fixed the same way.
 #[derive(Debug, Default)]
 pub struct Gathered {
-    /// Annoncés, par name.
+    /// Announced, by name.
     pub announcements: HashMap<String, Announcement>,
-    /// Lancés, jamais annoncés, et dont la mort n'a **pas** été observée :
-    /// vivants et silent à l'échéance. Nommés, pour que le journal désigne un
-    /// coupable au lieu de laisser déduire.
+    /// Launched, never announced, and whose death was **not** observed: alive
+    /// and silent at the deadline. Named, so that the log points at a culprit
+    /// instead of leaving it to be deduced.
     pub stalled: Vec<String>,
-    /// Lancés et dead sans laisser d'announcement exploitable : soit dead avant
-    /// de parler, soit dead pendant le rassemblement après avoir parlé (leur
-    /// announcement est alors retirée, voir la branche des décès).
+    /// Launched and dead without leaving a usable announcement: either dead
+    /// before speaking, or dead during the gathering after having spoken (their
+    /// announcement is then withdrawn, see the deaths branch).
     pub dead: Vec<String>,
 }
 
-/// Temps laissé à une connexion pour écrire sa line d'announcement.
+/// Time given to a connection to write its announcement line.
 ///
-/// Une announcement est écrite dans la foulée du `connect` par le SDK : quelques
-/// secondes couvrent un appareil chargé avec une marge large, et ce qui n'a
-/// rien dit passé ce délai n'est pas un greffon lent mais un greffon fautif.
+/// An announcement is written right after the `connect` by the SDK: a few
+/// seconds cover a loaded device with a wide margin, and whatever has said
+/// nothing after that timeout is not a slow plugin but a faulty one.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Lit **une** line d'announcement sur une connexion acceptée, la déchiffre, et la
-/// push_cover dans le canal des annonces.
+/// Reads **one** announcement line on an accepted connection, decodes it, and
+/// pushes it into the announcements channel.
 ///
-/// Une tâche par connexion : une connexion muette ne doit retarder ni le
-/// rendez-vous ni les annonces tardives.
+/// One task per connection: a silent connection must delay neither the
+/// rendezvous nor the late announcements.
 ///
-/// La playback est **bornée** dans le temps. Sans cela, chaque connexion muette
-/// immobilisait une tâche et un descripteur pour la vie du processus : un
-/// greffon avec un bug de reconnexion, qui frappe le socket une fois par
-/// seconde sans jamais écrire, finissait par épuiser les descripteurs — et le
-/// cœur, à qui l'`accept` échoue alors en permanence, ne pouvait plus câbler
-/// **aucune** announcement sur un appareil qu'on ne redémarre jamais. Le
-/// rassemblement avait le même player mais son échéance le bornait ; la boucle
-/// permanente, elle, n'en a aucune.
+/// The read is **bounded** in time. Without that, every silent connection
+/// pinned a task and a descriptor for the life of the process: a plugin with a
+/// reconnection bug, hitting the socket once per second without ever writing,
+/// ended up exhausting the descriptors — and the core, whose `accept` then
+/// failed permanently, could no longer wire **any** announcement on a device
+/// that is never rebooted. The gathering had the same reader but its deadline
+/// bounded it; the permanent loop has none.
 async fn read_announcement(
     stream: tokio::net::UnixStream,
     tx: tokio::sync::mpsc::Sender<Announcement>,
@@ -73,8 +72,8 @@ async fn read_announcement(
             tracing::warn!("a plugin connected to the register socket and said nothing")
         }
         Ok(Err(e)) => tracing::warn!("reading an announcement failed: {e}"),
-        // La connexion est lâchée en sortant : la tâche et le descripteur sont
-        // rendus, c'est tout l'objet du délai.
+        // The connection is dropped on the way out: the task and the descriptor
+        // are given back, which is the whole point of the timeout.
         Err(_) => tracing::warn!(
             "a plugin held the register socket open for {}s without announcing, dropping it",
             timeout.as_secs()
@@ -82,22 +81,23 @@ async fn read_announcement(
     }
 }
 
-/// Attend une announcement par greffon lancé.
+/// Waits for one announcement per launched plugin.
 ///
-/// Rend la main dès que chaque attendu est soit annoncé, soit mort — donc en
-/// pratique bien avant `deadline`. Un délai ne se paie plus qu'à l'échec.
+/// Returns as soon as every expected plugin is either announced or dead — so
+/// in practice well before `deadline`. A delay is only paid on failure.
 ///
-/// `announcements_tx` / `announcements_rx` sont le **canal unique des deux étages** :
-/// celui que `accept_forever` alimentera ensuite, et que la boucle principale
-/// consomme. Le rassemblement n'a pas son propre canal, et c'est ce qui rend
-/// une announcement inperdable : quand une announcement et l'échéance sont prêtes au même
-/// instant, `tokio::select!` tire au hasard, et le tirage ne décide plus que du
-/// path. Ce que `gather` ne consomme pas — l'announcement prête à l'échéance, et
-/// celle des connexions déjà acceptées dont la tâche de playback n'a pas encore
-/// abouti — **reste en file** pour le câblage à chaud. Avec un canal propre au
-/// rassemblement, détruit à son retour, elle partait avec le récepteur : le
-/// greffon, qui n'announcement qu'une fois, se croyait enregistré et attendait le
-/// prochain redémarrage du service, sans une line de journal.
+/// `announcements_tx` / `announcements_rx` are the **single channel of both
+/// stages**: the one `accept_forever` will feed afterwards, and the one the
+/// main loop consumes. The gathering has no channel of its own, and that is
+/// what makes an announcement unlosable: when an announcement and the deadline
+/// are ready at the same instant, `tokio::select!` picks at random, and the
+/// draw now only decides the path. What `gather` does not consume — the
+/// announcement ready at the deadline, and those of already accepted
+/// connections whose read task has not completed yet — **stays queued** for
+/// hot wiring. With a channel private to the gathering, destroyed on its
+/// return, it left with the receiver: the plugin, which announces only once,
+/// believed itself registered and waited for the next service restart, without
+/// a single log line.
 pub async fn gather<S>(
     listener: &UnixListener,
     expected: &[String],
@@ -109,37 +109,37 @@ pub async fn gather<S>(
 where
     S: Stream<Item = String> + Unpin,
 {
-    // `restants` = ceux qu'on attend encore. Une mort précoce en sort (cesser
-    // d'attendre) mais reste un muet : les deux listes de silent sont donc
-    // calculées à la fin depuis `expected`, et non reprises de `restants` —
-    // sinon un greffon mort avant de s'annoncer disparaissait du rapport,
-    // exactement le diagnostic que ce rassemblement existe pour nommer.
-    let mut restants: Vec<String> = expected.to_vec();
+    // `remaining` = those still awaited. An early death leaves it (stop
+    // waiting) but remains a silent one: the two lists of silent plugins are
+    // therefore computed at the end from `expected`, and not taken from
+    // `remaining` — otherwise a plugin dead before announcing vanished from the
+    // report, exactly the diagnosis this gathering exists to name.
+    let mut remaining: Vec<String> = expected.to_vec();
     let mut announcements: HashMap<String, Announcement> = HashMap::new();
-    // Les dead **observées**. C'est ce qui sépare un muet vivant d'un muet
-    // mort : sans cette trace, l'échéance ne pourrait que déduire, et un
-    // greffon simplement lent serait rapporté comme un greffon perdu.
-    let mut deces_vus: Vec<String> = Vec::new();
+    // The **observed** deaths. This is what separates a living silent plugin
+    // from a dead one: without this trace, the deadline could only deduce, and
+    // a merely slow plugin would be reported as a lost one.
+    let mut deaths_seen: Vec<String> = Vec::new();
     let mut deaths = deaths.fuse();
-    let fin = tokio::time::sleep(deadline);
-    tokio::pin!(fin);
+    let end = tokio::time::sleep(deadline);
+    tokio::pin!(end);
 
-    // **Une tâche de playback par connexion**, et non une playback en line dans
-    // la branche `accept` : un greffon qui se connecte puis n'écrit rien ne
-    // doit pas retarder l'announcement des autres. Un blocage de tête sur le
-    // rendez-vous serait le défaut même que le protocol refuse ailleurs.
+    // **One read task per connection**, and not an inline read in the `accept`
+    // branch: a plugin that connects then writes nothing must not delay the
+    // announcement of the others. Head-of-line blocking on the rendezvous would
+    // be the very defect the protocol refuses elsewhere.
     //
-    // C'est la même tâche que celle d'`accept_forever`, vers le même canal :
-    // une connexion acceptée ici mais lue après le retour de `gather` n'est pas
-    // perdue pour autant, son announcement attend simplement dans la file.
+    // It is the same task as `accept_forever`'s, towards the same channel: a
+    // connection accepted here but read after `gather` returns is not lost for
+    // that, its announcement simply waits in the queue.
     //
-    // L'émetteur d'origine vit chez l'appelant, au-delà de cette fonction :
-    // `recv()` ne rend donc jamais `None`, et sa branche du `select!` ne se
-    // désarme pas.
-    while !restants.is_empty() {
+    // The original sender lives with the caller, beyond this function:
+    // `recv()` therefore never returns `None`, and its `select!` branch never
+    // disarms.
+    while !remaining.is_empty() {
         tokio::select! {
-            accepte = listener.accept() => {
-                match accepte {
+            accepted = listener.accept() => {
+                match accepted {
                     Ok((stream, _)) => {
                         tokio::spawn(read_announcement(stream, announcements_tx.clone(), READ_TIMEOUT));
                     }
@@ -147,11 +147,11 @@ where
                 }
             }
             Some(announcement) = announcements_rx.recv() => {
-                // Le name fait autorité côté manifest : une announcement qui en
-                // porte un autre vient d'un binaire mal lancé, ou d'un
-                // greffon qui invente son identité. Elle est nommée puis
-                // écartée, jamais câblée.
-                if !restants.contains(&announcement.name) {
+                // The manifest's name is authoritative: an announcement
+                // carrying another one comes from a badly launched binary, or
+                // from a plugin inventing its identity. It is named then
+                // discarded, never wired.
+                if !remaining.contains(&announcement.name) {
                     if announcements.contains_key(&announcement.name) {
                         tracing::warn!("duplicate announcement for {}, ignored", announcement.name);
                     } else {
@@ -159,114 +159,111 @@ where
                     }
                     continue;
                 }
-                restants.retain(|n| n != &announcement.name);
+                remaining.retain(|n| n != &announcement.name);
                 tracing::info!("{} announced {:?} (admin: {})", announcement.name, announcement.kinds, announcement.admin);
                 announcements.insert(announcement.name.clone(), announcement);
             }
-            Some(mort) = deaths.next() => {
-                // La mort est **observée** ici, et nulle part ailleurs : c'est
-                // cette liste qui permettra plus bas de nommer un muet vivant
-                // (figé) plutôt que de le confondre avec un muet mort.
-                if !deces_vus.contains(&mort) {
-                    deces_vus.push(mort.clone());
+            Some(death) = deaths.next() => {
+                // The death is **observed** here, and nowhere else: this list
+                // is what will allow, below, naming a living silent plugin
+                // (stalled) rather than confusing it with a dead one.
+                if !deaths_seen.contains(&death) {
+                    deaths_seen.push(death.clone());
                 }
-                // Le processus est parti avant de s'annoncer : cesser de
-                // l'attendre. C'est ce qui rend un plantage au démarrage plus
-                // rapide à diagnostiquer qu'avant, où il consommait les 10 s
-                // de reprises à clear.
-                if restants.contains(&mort) {
-                    tracing::warn!("plugin {mort} exited before announcing");
-                    restants.retain(|n| n != &mort);
-                } else if announcements.remove(&mort).is_some() {
-                    // Mort **après** s'être annoncé, pendant qu'on attendait
-                    // encore quelqu'un d'autre. Sa future a quitté
-                    // `plugin_waits` en étant consommée ici : la boucle de
-                    // sélection de `main` ne la reverra jamais, ni son code de
-                    // sortie, ni son `mark_plugin_disconnected`. Sans ce
-                    // retrait, il serait câblé puis affiché « connecté » à
-                    // demeure — la perte silencieuse même que ce rendez-vous
-                    // existe pour supprimer, et d'autant plus pour les genres
-                    // `input` et `metadata` dont le statut est posé à vrai
-                    // sans attendre la tâche.
+                // The process left before announcing itself: stop waiting for
+                // it. This is what makes a startup crash faster to diagnose
+                // than before, when it burned the 10 s of retries for nothing.
+                if remaining.contains(&death) {
+                    tracing::warn!("plugin {death} exited before announcing");
+                    remaining.retain(|n| n != &death);
+                } else if announcements.remove(&death).is_some() {
+                    // Dead **after** announcing itself, while someone else was
+                    // still awaited. Its future left `plugin_waits` by being
+                    // consumed here: `main`'s selection loop will never see it
+                    // again, nor its exit code, nor its
+                    // `mark_plugin_disconnected`. Without this withdrawal, it
+                    // would be wired then displayed "connected" for good — the
+                    // very silent loss this rendezvous exists to remove, and
+                    // all the more for the `input` and `metadata` kinds whose
+                    // status is set to true without waiting for the task.
                     //
-                    // Le retirer des annonces suffit : les silent étant calculés
-                    // à la fin par différence, il retombe tout seul dans
-                    // `dead` — sa mort vient d'être observée — et `main` lui
-                    // pose un `connected: false` comme aux autres.
+                    // Removing it from the announcements is enough: the silent
+                    // ones being computed at the end by difference, it falls
+                    // back on its own into `dead` — its death has just been
+                    // observed — and `main` sets it `connected: false` like the
+                    // others.
                     //
-                    // Journal distinct de celui d'au-dessus : « mort avant de
-                    // s'annoncer » et « mort pendant le rassemblement » ne
-                    // sont pas la même panne.
-                    tracing::warn!("plugin {mort} exited during registration");
+                    // Log line distinct from the one above: "dead before
+                    // announcing" and "dead during the gathering" are not the
+                    // same failure.
+                    tracing::warn!("plugin {death} exited during registration");
                 }
             }
-            () = &mut fin => {
-                tracing::warn!("register deadline reached, still waiting for: {}", restants.join(", "));
+            () = &mut end => {
+                tracing::warn!("register deadline reached, still waiting for: {}", remaining.join(", "));
                 break;
             }
         }
     }
 
-    // Dans l'order de `expected`, donc dans l'order du manifest : le journal
-    // désigne les coupables dans l'order où l'opérateur les a déclarés
-    // (`partition` conserve l'order de la source).
+    // In the order of `expected`, hence in the manifest's order: the log names
+    // the culprits in the order the operator declared them (`partition`
+    // preserves the source order).
     //
-    // La partition se fait sur la mort **observée**, jamais sur l'échéance : un
-    // greffon dont personne n'a vu le processus sortir est présumé vivant, donc
-    // figé, donc encore câblable à chaud.
+    // The partition is made on the **observed** death, never on the deadline:
+    // a plugin whose process nobody saw exit is presumed alive, hence
+    // stalled, hence still hot-wirable.
     let (dead, stalled): (Vec<String>, Vec<String>) = expected
         .iter()
         .filter(|name| !announcements.contains_key(*name))
         .cloned()
-        .partition(|name| deces_vus.contains(name));
+        .partition(|name| deaths_seen.contains(name));
 
     Gathered { announcements, stalled, dead }
 }
 
-/// Continue d'accepter sur le socket d'enregistrement **pour toute la vie du
-/// processus**, et push_cover chaque announcement lisible dans `tx`.
+/// Keeps accepting on the register socket **for the whole life of the
+/// process**, and pushes every readable announcement into `tx`.
 ///
-/// C'est ce qui retire à l'échéance de `gather` son pouvoir de condamner : elle
-/// ne sert plus qu'à ne pas bloquer le démarrage et à nommer un greffon figé.
-/// Le cœur possède ce socket, il peut donc écouter aussi longtemps qu'il vit —
-/// un greffon qui s'announcement à t+12 s, ou qu'on restart à la main un mois plus
-/// tard, est câblé à chaud au lieu d'être perdu jusqu'au prochain redémarrage
-/// du service.
+/// This is what strips `gather`'s deadline of its power to condemn: it now
+/// only serves to avoid blocking startup and to name a stalled plugin. The
+/// core owns this socket, so it can listen as long as it lives — a plugin that
+/// announces itself at t+12 s, or that is restarted by hand a month later, is
+/// hot-wired instead of being lost until the next service restart.
 ///
-/// Ne rend la main que si `tx` est fermé, c'est-à-dire si la boucle principale
-/// est morte : plus personne pour câbler quoi que ce soit.
+/// Only returns if `tx` is closed, that is if the main loop is dead: nobody
+/// left to wire anything.
 pub async fn accept_forever(listener: UnixListener, tx: tokio::sync::mpsc::Sender<Announcement>) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                // **Une tâche de playback par connexion**, comme dans `gather` :
-                // une connexion muette ne doit pas plus bloquer les annonces
-                // tardives qu'elle ne bloquait les initiales. Le blocage de
-                // tête a déjà été corrigé une fois sur ce socket, il n'est pas
-                // réintroduit ici.
+                // **One read task per connection**, as in `gather`: a silent
+                // connection must not block the late announcements any more
+                // than it blocked the initial ones. Head-of-line blocking was
+                // already fixed once on this socket, it is not reintroduced
+                // here.
                 tokio::spawn(read_announcement(stream, tx.clone(), READ_TIMEOUT));
             }
             Err(e) => {
                 tracing::warn!("register socket accept failed: {e}");
-                // Cette boucle-ci n'est bornée par aucune échéance,
-                // contrairement à celle de `gather` : une erreur durable — plus
-                // un descripteur libre — la ferait tourner à clear et à pleine
-                // charge sur un appareil qui n'a qu'un petit processeur. Un
-                // souffle avant de réessayer.
+                // This loop is bounded by no deadline, unlike `gather`'s: a
+                // lasting error — no free descriptor left — would make it spin
+                // for nothing at full load on a device that only has a small
+                // processor. A breath before retrying.
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
 }
 
-/// Les plugins `metadata`, **dans l'order du manifest**.
+/// The `metadata` plugins, **in the manifest's order**.
 ///
-/// L'order du fichier est la priorité d'arbitrage : entre deux plugins qui
-/// répondent pour le même track, le premier déclaré gagne. Avant, la liste
-/// était bâtie depuis le manifest avant tout lancement, donc l'order était
-/// acquis par construction ; il est maintenant reconstruit ici, et un tri par
-/// order d'arrivée des annonces rendrait l'affichage non reproductible d'un
-/// démarrage à l'autre. Ne jamais trier cette liste autrement.
+/// The file's order is the arbitration priority: between two plugins that
+/// answer for the same track, the first declared wins. Before, the list was
+/// built from the manifest before any launch, so the order was acquired by
+/// construction; it is now rebuilt here, and a sort by arrival order of the
+/// announcements would make the display non-reproducible from one startup to
+/// the next. Never sort this list any other way.
 pub fn metadata_order(manifest: &[String], g: &Gathered) -> Vec<String> {
     manifest
         .iter()
@@ -279,40 +276,40 @@ pub fn metadata_order(manifest: &[String], g: &Gathered) -> Vec<String> {
         .collect()
 }
 
-/// Reste-t-il, à l'échéance, un processus de greffon **vivant** — donc
-/// susceptible de s'annoncer plus tard ?
+/// Is there still, at the deadline, a **living** plugin process — hence one
+/// that may announce itself later?
 ///
-/// C'est la seule condition qui empêche encore le cœur de démarrer. Un greffon
-/// lent n'est plus une erreur : le socket d'enregistrement reste ouvert, une
-/// announcement à t+30 s est câblée à chaud, et la page de statut doit précisément
-/// être **là** pour montrer ce greffon figé. Refuser de démarrer à t+10 s la
-/// supprimait au moment où on voulait la consulter, et systemd rebouclait sans
-/// rien réparer.
+/// This is the only condition that still prevents the core from starting. A
+/// slow plugin is no longer an error: the register socket stays open, an
+/// announcement at t+30 s is hot-wired, and the status page must precisely be
+/// **there** to show that stalled plugin. Refusing to start at t+10 s removed
+/// it at the moment one wanted to consult it, and systemd looped without
+/// fixing anything.
 ///
-/// Mais si plus rien ne tourne — `plugins.toml` clear, exécutables introuvables,
-/// ou tous dead avant l'échéance — personne ne s'annoncera jamais. C'est une
-/// erreur de configuration, pas une lenteur, et démarrer silencieusement un
-/// appareil qui ne jouera jamais rien n'aide personne.
+/// But if nothing runs anymore — empty `plugins.toml`, executables not found,
+/// or all dead before the deadline — nobody will ever announce. That is a
+/// configuration error, not slowness, and silently starting a device that will
+/// never play anything helps nobody.
 ///
-/// Déduit de `lances` et de `dead` plutôt que de `announcements` et `stalled` :
-/// on ne suppose pas que les trois collections partitionnent `lances`, on
-/// n'exclut que ce dont la mort a été **observée**.
-pub fn a_live_plugin(lances: &[String], g: &Gathered) -> bool {
-    lances.iter().any(|name| !g.dead.contains(name))
+/// Deduced from `launched` and `dead` rather than from `announcements` and
+/// `stalled`: we do not assume the three collections partition `launched`, we
+/// only exclude what was **observed** dying.
+pub fn a_live_plugin(launched: &[String], g: &Gathered) -> bool {
+    launched.iter().any(|name| !g.dead.contains(name))
 }
 
-/// Le démarrage doit-il être refusé ?
+/// Must startup be refused?
 ///
-/// `a_live_plugin` ne suffit plus depuis qu'un greffon peut être éteint :
-/// tout éteindre ne lance aucun processus, et le refus mettrait alors le cœur
-/// en boucle de redémarrage systemd — **IHM comprise**, donc sans plus aucun
-/// moyen de rallumer quoi que ce soit. Tout éteint est une configuration, pas
-/// une panne.
+/// `a_live_plugin` is no longer enough since a plugin can be switched off:
+/// switching everything off launches no process, and the refusal would then
+/// put the core in a systemd restart loop — **UI included**, hence with no
+/// means left to switch anything back on. Everything off is a configuration,
+/// not a failure.
 ///
-/// Le refus ne reste que pour ce qu'il visait : des plugins déclarés active,
-/// et plus un seul processus vivant pour s'annoncer.
-pub fn startup_refused(actifs_declares: usize, lances: &[String], g: &Gathered) -> bool {
-    actifs_declares > 0 && !a_live_plugin(lances, g)
+/// The refusal only remains for what it targeted: plugins declared active,
+/// and not a single living process left to announce itself.
+pub fn startup_refused(declared_active: usize, launched: &[String], g: &Gathered) -> bool {
+    declared_active > 0 && !a_live_plugin(launched, g)
 }
 
 #[cfg(test)]
@@ -322,22 +319,22 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
 
-    /// Écrit une announcement sur le socket d'enregistrement, comme le ferait un
-    /// greffon, puis ferme.
+    /// Writes an announcement on the register socket, as a plugin would, then
+    /// closes.
     async fn announcement(register: &std::path::Path, line: &str) {
         let mut s = UnixStream::connect(register).await.unwrap();
         s.write_all(format!("{line}\n").as_bytes()).await.unwrap();
         s.shutdown().await.unwrap();
     }
 
-    fn aucun_mort() -> impl futures::Stream<Item = String> + Unpin {
+    fn no_deaths() -> impl futures::Stream<Item = String> + Unpin {
         futures::stream::pending()
     }
 
-    /// Le canal unique des deux étages, monté comme dans `main` : `gather`
-    /// l'emprunte, `accept_forever` en garde l'émetteur, et la boucle
-    /// principale consomme ce que le rassemblement a laissé.
-    fn canal() -> (
+    /// The single channel of both stages, set up as in `main`: `gather`
+    /// borrows it, `accept_forever` keeps its sender, and the main loop
+    /// consumes what the gathering left behind.
+    fn channel() -> (
         tokio::sync::mpsc::Sender<Announcement>,
         tokio::sync::mpsc::Receiver<Announcement>,
     ) {
@@ -345,7 +342,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rassemble_toutes_les_annonces_et_rend_la_main_aussitot() {
+    async fn gathers_every_announcement_and_returns_at_once() {
         let dir = tempfile::tempdir().unwrap();
         let register = dir.path().join("register.sock");
         let listener = UnixListener::bind(&register).unwrap();
@@ -355,18 +352,18 @@ mod tests {
             announcement(&r, r#"{"name":"console","kinds":["display"]}"#).await;
         });
 
-        let debut = std::time::Instant::now();
-        let (tx, mut rx) = canal();
+        let start = std::time::Instant::now();
+        let (tx, mut rx) = channel();
         let g = gather(
             &listener,
             &["radio".to_string(), "console".to_string()],
-            aucun_mort(),
-            // Une heure : l'deadline est hors de portee, donc le seul moyen
-            // pour cette fonction de rendre la main est d'avoir gathered tout
-            // le monde. La marge d'horloge ci-dessous n'a plus alors qu'a
-            // distinguer « rendition aussitot » de « a attendu une heure », au lieu
-            // d'arbitrer entre 2 s et 10 s — un rapport que la charge de la
-            // machine pouvait franchir, et le seul maillon fragile de ce test.
+            no_deaths(),
+            // One hour: the deadline is out of reach, so the only way for this
+            // function to return is to have gathered everyone. The clock
+            // margin below then only has to tell "returned at once" from
+            // "waited an hour", instead of arbitrating between 2 s and 10 s —
+            // a ratio the machine's load could cross, and the only fragile
+            // link of this test.
             Duration::from_secs(3600),
             &tx,
             &mut rx,
@@ -379,13 +376,13 @@ mod tests {
         assert!(g.announcements["radio"].admin);
         assert_eq!(g.announcements["console"].kinds, vec![PluginKind::Display]);
         assert!(
-            debut.elapsed() < Duration::from_secs(60),
-            "la boucle doit rendre la main des que tout le monde est la, pas a l'deadline"
+            start.elapsed() < Duration::from_secs(60),
+            "the loop must return as soon as everyone is there, not at the deadline"
         );
     }
 
     #[tokio::test]
-    async fn un_greffon_muet_est_nomme_a_lecheance() {
+    async fn a_silent_plugin_is_named_at_the_deadline() {
         let dir = tempfile::tempdir().unwrap();
         let register = dir.path().join("register.sock");
         let listener = UnixListener::bind(&register).unwrap();
@@ -394,11 +391,11 @@ mod tests {
             announcement(&r, r#"{"name":"radio","kinds":["source"]}"#).await;
         });
 
-        let (tx, mut rx) = canal();
+        let (tx, mut rx) = channel();
         let g = gather(
             &listener,
-            &["radio".to_string(), "muet".to_string()],
-            aucun_mort(),
+            &["radio".to_string(), "silent".to_string()],
+            no_deaths(),
             Duration::from_millis(300),
             &tx,
             &mut rx,
@@ -406,16 +403,16 @@ mod tests {
         .await;
 
         assert_eq!(g.announcements.len(), 1);
-        // Vivant, muet : figé, et non mort — personne n'a vu son processus
-        // sortir.
-        assert_eq!(g.stalled, vec!["muet".to_string()]);
+        // Alive, silent: stalled, and not dead — nobody saw its process
+        // exit.
+        assert_eq!(g.stalled, vec!["silent".to_string()]);
         assert!(g.dead.is_empty());
     }
 
     #[tokio::test]
-    async fn une_mort_precoce_ecourte_lattente() {
-        // Aujourd'hui un greffon qui plante fait tourner 10 s de reprises a
-        // clear. Ici, `child.wait()` doit trancher tout de suite.
+    async fn an_early_death_shortens_the_wait() {
+        // Today a crashing plugin burns 10 s of retries for nothing. Here,
+        // `child.wait()` must settle it right away.
         let dir = tempfile::tempdir().unwrap();
         let register = dir.path().join("register.sock");
         let listener = UnixListener::bind(&register).unwrap();
@@ -424,72 +421,72 @@ mod tests {
             announcement(&r, r#"{"name":"radio","kinds":["source"]}"#).await;
         });
 
-        let debut = std::time::Instant::now();
-        let (tx, mut rx) = canal();
+        let start = std::time::Instant::now();
+        let (tx, mut rx) = channel();
         let g = gather(
             &listener,
-            &["radio".to_string(), "plante".to_string()],
-            Box::pin(futures::stream::iter(vec!["plante".to_string()])),
-            // Une heure, hors de portee : rendre la main prouve que la mort
-            // observee a ecourte l'attente, sans faire dependre le test d'un
-            // rapport entre deux durees que la charge machine pouvait franchir.
+            &["radio".to_string(), "crashed".to_string()],
+            Box::pin(futures::stream::iter(vec!["crashed".to_string()])),
+            // One hour, out of reach: returning proves that the observed death
+            // shortened the wait, without making the test depend on a ratio
+            // between two durations that the machine's load could cross.
             Duration::from_secs(3600),
             &tx,
             &mut rx,
         )
         .await;
 
-        // Un mort, pas un figé : sa sortie a été observée.
-        assert_eq!(g.dead, vec!["plante".to_string()]);
+        // A dead one, not a stalled one: its exit was observed.
+        assert_eq!(g.dead, vec!["crashed".to_string()]);
         assert!(g.stalled.is_empty());
         assert!(
-            debut.elapsed() < Duration::from_secs(60),
-            "la mort du processus doit ecourter l'attente, pas la subir"
+            start.elapsed() < Duration::from_secs(60),
+            "the process death must shorten the wait, not endure it"
         );
     }
 
     #[tokio::test]
-    async fn a_lecheance_un_vivant_muet_est_fige_et_un_mort_ne_lest_pas() {
-        // Les deux silent dans le même rassemblement : c'est la seule façon de
-        // vérifier que la partition les sépare, et non qu'une des deux listes
-        // ramasse tout. `plante` meurt sous nos yeux, `dort` ne dit rien mais
-        // personne n'a vu son processus sortir — il pourra donc encore
-        // s'annoncer, et le cœur le câblera à chaud.
+    async fn at_the_deadline_a_living_silent_one_is_stalled_and_a_dead_one_is_not() {
+        // Both silent ones in the same gathering: it is the only way to check
+        // that the partition separates them, and not that one of the two lists
+        // collects everything. `crashed` dies before our eyes, `sleeping` says
+        // nothing but nobody saw its process exit — so it may still announce
+        // itself, and the core will hot-wire it.
         let dir = tempfile::tempdir().unwrap();
         let register = dir.path().join("register.sock");
         let listener = UnixListener::bind(&register).unwrap();
 
-        let (tx, mut rx) = canal();
+        let (tx, mut rx) = channel();
         let g = gather(
             &listener,
-            &["plante".to_string(), "dort".to_string()],
-            Box::pin(futures::stream::iter(vec!["plante".to_string()])),
+            &["crashed".to_string(), "sleeping".to_string()],
+            Box::pin(futures::stream::iter(vec!["crashed".to_string()])),
             Duration::from_millis(300),
             &tx,
             &mut rx,
         )
         .await;
 
-        assert_eq!(g.dead, vec!["plante".to_string()]);
-        assert_eq!(g.stalled, vec!["dort".to_string()]);
+        assert_eq!(g.dead, vec!["crashed".to_string()]);
+        assert_eq!(g.stalled, vec!["sleeping".to_string()]);
     }
 
     #[tokio::test]
-    async fn un_nom_inconnu_est_ignore_sans_bloquer_les_autres() {
+    async fn an_unknown_name_is_ignored_without_blocking_the_others() {
         let dir = tempfile::tempdir().unwrap();
         let register = dir.path().join("register.sock");
         let listener = UnixListener::bind(&register).unwrap();
         let r = register.clone();
         tokio::spawn(async move {
-            announcement(&r, r#"{"name":"intrus","kinds":["source"]}"#).await;
+            announcement(&r, r#"{"name":"intruder","kinds":["source"]}"#).await;
             announcement(&r, r#"{"name":"radio","kinds":["source"]}"#).await;
         });
 
-        let (tx, mut rx) = canal();
+        let (tx, mut rx) = channel();
         let g = gather(
             &listener,
             &["radio".to_string()],
-            aucun_mort(),
+            no_deaths(),
             Duration::from_secs(5),
             &tx,
             &mut rx,
@@ -498,17 +495,17 @@ mod tests {
 
         assert_eq!(g.announcements.len(), 1);
         assert!(g.announcements.contains_key("radio"));
-        assert!(!g.announcements.contains_key("intrus"));
+        assert!(!g.announcements.contains_key("intruder"));
     }
 
     #[tokio::test]
-    async fn une_mort_apres_annonce_retire_le_greffon_du_rassemblement() {
-        // Fenetre reelle : un greffon rapide s'announcement puis meurt pendant que
-        // le coeur attend encore un muet. Sa future a quitte `plugin_waits` en
-        // etant consommee par le rassemblement, donc la boucle de selection de
-        // `main` ne la reverra jamais — ni son code de sortie, ni son
-        // `mark_plugin_disconnected`. S'il restait dans les annonces il serait
-        // cable, puis affiche « connecte » a demeure.
+    async fn a_death_after_announcing_removes_the_plugin_from_the_gathering() {
+        // Real window: a fast plugin announces itself then dies while the core
+        // is still waiting for a silent one. Its future left `plugin_waits` by
+        // being consumed by the gathering, so `main`'s selection loop will
+        // never see it again — neither its exit code nor its
+        // `mark_plugin_disconnected`. If it stayed in the announcements it
+        // would be wired, then displayed "connected" for good.
         let dir = tempfile::tempdir().unwrap();
         let register = dir.path().join("register.sock");
         let listener = UnixListener::bind(&register).unwrap();
@@ -517,19 +514,19 @@ mod tests {
             announcement(&r, r#"{"name":"radio","kinds":["source"]}"#).await;
         });
 
-        // La mort n'arrive qu'APRES l'announcement : c'est tout l'objet du test. Un
-        // stream immediat emprunterait l'autre branche (« mort avant de
-        // s'annoncer »), deja couverte par
-        // `une_mort_precoce_ecourte_lattente`.
+        // The death only arrives AFTER the announcement: that is the whole
+        // point of the test. An immediate stream would take the other branch
+        // ("dead before announcing"), already covered by
+        // `an_early_death_shortens_the_wait`.
         let dead = Box::pin(futures::stream::once(async {
             tokio::time::sleep(Duration::from_millis(300)).await;
             "radio".to_string()
         }));
 
-        let (tx, mut rx) = canal();
+        let (tx, mut rx) = channel();
         let g = gather(
             &listener,
-            &["radio".to_string(), "muet".to_string()],
+            &["radio".to_string(), "silent".to_string()],
             dead,
             Duration::from_millis(800),
             &tx,
@@ -539,27 +536,27 @@ mod tests {
 
         assert!(
             !g.announcements.contains_key("radio"),
-            "un greffon mort pendant le rassemblement ne doit pas rester cablable"
+            "a plugin dead during the gathering must not remain wirable"
         );
         assert_eq!(g.dead, vec!["radio".to_string()]);
-        assert_eq!(g.stalled, vec!["muet".to_string()]);
+        assert_eq!(g.stalled, vec!["silent".to_string()]);
     }
 
     #[tokio::test]
-    async fn une_annonce_illisible_ne_compte_pas() {
+    async fn an_unreadable_announcement_does_not_count() {
         let dir = tempfile::tempdir().unwrap();
         let register = dir.path().join("register.sock");
         let listener = UnixListener::bind(&register).unwrap();
         let r = register.clone();
         tokio::spawn(async move {
-            announcement(&r, "ceci n'est pas du json").await;
+            announcement(&r, "this is not json").await;
         });
 
-        let (tx, mut rx) = canal();
+        let (tx, mut rx) = channel();
         let g = gather(
             &listener,
             &["radio".to_string()],
-            aucun_mort(),
+            no_deaths(),
             Duration::from_millis(300),
             &tx,
             &mut rx,
@@ -567,27 +564,27 @@ mod tests {
         .await;
 
         assert!(g.announcements.is_empty());
-        // Le processus est toujours là : illisible ne veut pas dire mort.
+        // The process is still there: unreadable does not mean dead.
         assert_eq!(g.stalled, vec!["radio".to_string()]);
         assert!(g.dead.is_empty());
     }
 
     #[tokio::test]
-    async fn une_connexion_muette_ne_retarde_pas_les_autres() {
-        // Blocage de tete : si la line etait lue dans la branche `accept`, un
-        // greffon connecte et silencieux gelerait l'announcement de TOUS les autres
-        // jusqu'a l'deadline. C'est le defaut que la tache de playback par
-        // connexion existe pour empecher.
+    async fn a_silent_connection_does_not_delay_the_others() {
+        // Head-of-line blocking: if the line were read in the `accept` branch,
+        // a connected and silent plugin would freeze the announcement of ALL
+        // the others until the deadline. That is the defect the read task per
+        // connection exists to prevent.
         let dir = tempfile::tempdir().unwrap();
         let register = dir.path().join("register.sock");
         let listener = UnixListener::bind(&register).unwrap();
 
         let r = register.clone();
         tokio::spawn(async move {
-            // Se connecte, se tait, et garde la connexion ouverte.
-            let muet = UnixStream::connect(&r).await.unwrap();
+            // Connects, stays silent, and keeps the connection open.
+            let silent = UnixStream::connect(&r).await.unwrap();
             tokio::time::sleep(Duration::from_secs(30)).await;
-            drop(muet);
+            drop(silent);
         });
         let r2 = register.clone();
         tokio::spawn(async move {
@@ -595,16 +592,16 @@ mod tests {
             announcement(&r2, r#"{"name":"radio","kinds":["source"]}"#).await;
         });
 
-        let debut = std::time::Instant::now();
-        let (tx, mut rx) = canal();
+        let start = std::time::Instant::now();
+        let (tx, mut rx) = channel();
         let g = gather(
             &listener,
             &["radio".to_string()],
-            aucun_mort(),
-            // Une heure, hors de portee : si la connexion muette bloquait la
-            // file, l'announcement n'arriverait jamais et la marge ci-dessous
-            // sanctionnerait franchement, au lieu de dependre d'un rapport
-            // entre 5 s et 30 s que la charge machine pouvait franchir.
+            no_deaths(),
+            // One hour, out of reach: if the silent connection blocked the
+            // queue, the announcement would never arrive and the margin below
+            // would fail loudly, instead of depending on a ratio between 5 s
+            // and 30 s that the machine's load could cross.
             Duration::from_secs(3600),
             &tx,
             &mut rx,
@@ -614,29 +611,29 @@ mod tests {
         assert_eq!(
             g.announcements.len(),
             1,
-            "l'announcement doit passer malgre la connexion muette"
+            "the announcement must get through despite the silent connection"
         );
         assert!(
-            debut.elapsed() < Duration::from_secs(60),
-            "une connexion muette ne doit pas retarder le rassemblement"
+            start.elapsed() < Duration::from_secs(60),
+            "a silent connection must not delay the gathering"
         );
     }
 
     #[tokio::test]
-    async fn une_annonce_arrivee_apres_le_rassemblement_atteint_la_boucle() {
-        // Le cas qui motive tout ce chantier : le greffon parle **après** le
-        // retour de `gather`. Avant, le socket cessait d'être lu et l'announcement
-        // était perdue jusqu'au prochain redémarrage du service.
+    async fn an_announcement_arriving_after_the_gathering_reaches_the_loop() {
+        // The case motivating this whole work: the plugin speaks **after**
+        // `gather` returns. Before, the socket stopped being read and the
+        // announcement was lost until the next service restart.
         let dir = tempfile::tempdir().unwrap();
         let register = dir.path().join("register.sock");
         let listener = UnixListener::bind(&register).unwrap();
 
-        // Le rendez-vous se terminate sur un figé, sans que personne n'ait parlé.
-        let (tx, mut rx) = canal();
+        // The rendezvous ends on a stalled one, without anybody having spoken.
+        let (tx, mut rx) = channel();
         let g = gather(
             &listener,
             &["radio".to_string()],
-            aucun_mort(),
+            no_deaths(),
             Duration::from_millis(200),
             &tx,
             &mut rx,
@@ -644,61 +641,62 @@ mod tests {
         .await;
         assert_eq!(g.stalled, vec!["radio".to_string()]);
 
-        // Le socket, lui, reste lu : `gather` l'a pris par référence, le voici
-        // confié à la tâche qui vivra autant que le processus. Le canal, lui,
-        // est celui du rassemblement : un seul canal pour les deux étages.
+        // The socket, though, keeps being read: `gather` took it by reference,
+        // here it is handed to the task that will live as long as the process.
+        // The channel is the gathering's: a single channel for both stages.
         tokio::spawn(accept_forever(listener, tx));
 
         announcement(&register, r#"{"name":"radio","kinds":["source"],"admin":true}"#).await;
-        let recue = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        let received = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
-            .expect("l'announcement tardive doit atteindre la boucle principale")
+            .expect("the late announcement must reach the main loop")
             .unwrap();
-        assert_eq!(recue.name, "radio");
-        assert_eq!(recue.kinds, vec![PluginKind::Source]);
-        assert!(recue.admin);
+        assert_eq!(received.name, "radio");
+        assert_eq!(received.kinds, vec![PluginKind::Source]);
+        assert!(received.admin);
     }
 
     #[tokio::test]
-    async fn une_annonce_prete_a_lecheance_nest_jamais_perdue() {
-        // Épreuve du canal unique. Quand une announcement et l'échéance sont prêtes
-        // au même instant, `tokio::select!` tire au hasard : une fois sur deux
-        // l'échéance gagne. Avec un canal propre au rassemblement, détruit à
-        // son retour, l'announcement partait alors avec le récepteur — et le SDK
-        // n'annonçant qu'une seule fois, le greffon se croyait enregistré et
-        // attendait le prochain redémarrage du service sans laisser de trace.
+    async fn an_announcement_ready_at_the_deadline_is_never_lost() {
+        // Trial of the single channel. When an announcement and the deadline
+        // are ready at the same instant, `tokio::select!` picks at random: one
+        // time out of two the deadline wins. With a channel private to the
+        // gathering, destroyed on its return, the announcement then left with
+        // the receiver — and the SDK announcing only once, the plugin believed
+        // itself registered and waited for the next service restart without
+        // leaving a trace.
         //
-        // Ici les deux étages partagent un seul canal : le tirage ne décide
-        // plus que du path. Ou `gather` la consomme, ou elle **reste en
-        // file** pour le câblage à chaud, et la boucle principale la câble un
-        // instant plus tard. Le test affirme cette issue, pas un path.
+        // Here both stages share a single channel: the draw now only decides
+        // the path. Either `gather` consumes it, or it **stays queued** for
+        // hot wiring, and the main loop wires it an instant later. The test
+        // asserts this outcome, not a path.
         //
-        // Clock **simulée** : c'est ce qui rend la course reproductible. Avec
-        // l'horloge réelle, les deux minuteurs n'expirent jamais sur le même
-        // cran et le rendez-vous gagne toujours ; le test passerait alors aussi
-        // bien avec le défaut qu'il est censé interdire. Sous l'horloge
-        // simulée, c'est l'échéance qui gagne — c'est-à-dire exactement le
-        // path sur lequel l'ancien montage perdait l'announcement.
+        // **Simulated** clock: that is what makes the race reproducible. With
+        // the real clock, the two timers never expire on the same tick and the
+        // rendezvous always wins; the test would then pass just as well with
+        // the defect it is meant to forbid. Under the simulated clock, the
+        // deadline wins — that is exactly the path on which the old setup lost
+        // the announcement.
         //
-        // 200 tours et non un seul : l'order de réveil de deux minuteurs
-        // expirés au même instant n'est garanti par rien, et le jour où il
-        // change le test doit continuer de vérifier l'issue sur les deux
-        // chemins plutôt que de tomber sur un order devenu faux.
+        // 200 rounds rather than one: the wake-up order of two timers expired
+        // at the same instant is guaranteed by nothing, and the day it changes
+        // the test must keep checking the outcome on both paths rather than
+        // fall on an order that became wrong.
         tokio::time::pause();
 
-        let mut par_gather = 0usize;
-        let mut restees_en_file = 0usize;
+        let mut via_gather = 0usize;
+        let mut left_in_queue = 0usize;
         for _ in 0..200 {
             let dir = tempfile::tempdir().unwrap();
             let register = dir.path().join("register.sock");
             let listener = UnixListener::bind(&register).unwrap();
-            let (tx, mut rx) = canal();
-            // Le greffon se connecte tout de suite — `gather` accepte, et sa
-            // tâche de playback attend — mais n'écrit sa line qu'à l'instant
-            // **exact** de l'échéance. La tâche dépose donc l'announcement sur le
-            // même cran d'horloge que l'expiration du rendez-vous, et les deux
-            // bras du `select!` sont prêts au même sondage. C'est le path
-            // complet, socket compris, et non un dépôt direct dans le canal.
+            let (tx, mut rx) = channel();
+            // The plugin connects right away — `gather` accepts, and its read
+            // task waits — but only writes its line at the **exact** instant
+            // of the deadline. The task therefore deposits the announcement on
+            // the same clock tick as the rendezvous's expiry, and both arms of
+            // the `select!` are ready at the same poll. This is the full path,
+            // socket included, and not a direct deposit into the channel.
             let r = register.clone();
             tokio::spawn(async move {
                 let mut s = UnixStream::connect(&r).await.unwrap();
@@ -710,7 +708,7 @@ mod tests {
             let g = gather(
                 &listener,
                 &["radio".to_string()],
-                aucun_mort(),
+                no_deaths(),
                 Duration::from_millis(100),
                 &tx,
                 &mut rx,
@@ -718,100 +716,99 @@ mod tests {
             .await;
 
             if g.announcements.contains_key("radio") {
-                par_gather += 1;
+                via_gather += 1;
             } else {
-                // L'échéance a gagné le tirage. L'announcement n'est pas perdue pour
-                // autant : elle est dans la file — ou elle y arrive à l'instant
-                // suivant, l'émetteur de la tâche de playback étant toujours
-                // vivant — et c'est la boucle principale qui la câblera à
-                // chaud. C'est très exactement ce que l'ancien montage rendait
-                // impossible : son récepteur mourait avec `gather`.
-                let recue = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                // The deadline won the draw. The announcement is not lost for
+                // that: it is in the queue — or arrives there the next instant,
+                // the read task's sender being still alive — and the main loop
+                // is the one that will hot-wire it. This is precisely what the
+                // old setup made impossible: its receiver died with `gather`.
+                let received = tokio::time::timeout(Duration::from_secs(1), rx.recv())
                     .await
-                    .expect("l'announcement doit rester cablable apres le rendez-vous")
-                    .expect("le canal des deux etages ne se ferme pas");
-                assert_eq!(recue.name, "radio");
-                restees_en_file += 1;
+                    .expect("the announcement must remain wirable after the rendezvous")
+                    .expect("the channel of both stages does not close");
+                assert_eq!(received.name, "radio");
+                left_in_queue += 1;
             }
         }
-        // Le path qui perdait l'announcement doit avoir été emprunté, sinon ce test
-        // ne prouve rien : c'est lui l'épreuve. S'il cesse de se produire — un
-        // order de réveil qui change — mieux vaut un échec bruyant qu'un test
-        // qui passe sans plus rien vérifier.
+        // The path that lost the announcement must have been taken, otherwise
+        // this test proves nothing: it is the trial. If it stops happening — a
+        // wake-up order that changes — better a loud failure than a test that
+        // passes without checking anything anymore.
         assert!(
-            restees_en_file > 0,
-            "l'deadline n'a jamais gagne le tirage ({par_gather} par gather) : le path qui perdait l'announcement n'est plus reproduit"
+            left_in_queue > 0,
+            "the deadline never won the draw ({via_gather} via gather): the path that lost the announcement is no longer reproduced"
         );
     }
 
     #[tokio::test]
-    async fn une_connexion_muette_est_lachee_au_bout_du_delai() {
-        // Sans délai de playback, chaque connexion muette immobilisait une tâche
-        // et un descripteur pour la vie du processus. Un greffon avec un bug de
-        // reconnexion, frappant le socket une fois par seconde sans écrire,
-        // finissait par épuiser les descripteurs : plus aucune announcement câblable
-        // sur un appareil qu'on ne redémarre jamais.
+    async fn a_silent_connection_is_dropped_after_the_timeout() {
+        // Without a read timeout, every silent connection pinned a task and a
+        // descriptor for the life of the process. A plugin with a reconnection
+        // bug, hitting the socket once per second without writing, ended up
+        // exhausting the descriptors: no wirable announcement left on a device
+        // that is never rebooted.
         let (a, mut b) = tokio::net::UnixStream::pair().unwrap();
-        let (tx, mut rx) = canal();
+        let (tx, mut rx) = channel();
         tokio::spawn(read_announcement(a, tx, Duration::from_millis(100)));
 
-        // La connexion lâchée par la tâche se voit de l'autre bout : une
-        // playback à zéro octet, c'est-à-dire une fin de fichier.
+        // The connection dropped by the task is visible from the other end: a
+        // zero-byte read, that is an end of file.
         let mut buffer = [0u8; 1];
-        let lu = tokio::time::timeout(Duration::from_secs(2), b.read(&mut buffer))
+        let read = tokio::time::timeout(Duration::from_secs(2), b.read(&mut buffer))
             .await
-            .expect("une connexion muette doit etre lachee, pas tenue pour la vie du processus")
+            .expect("a silent connection must be dropped, not held for the life of the process")
             .unwrap();
-        assert_eq!(lu, 0, "fin de fichier : le coeur a rendition son descripteur");
-        assert!(rx.try_recv().is_err(), "rien a cabler depuis une connexion muette");
+        assert_eq!(read, 0, "end of file: the core gave its descriptor back");
+        assert!(rx.try_recv().is_err(), "nothing to wire from a silent connection");
     }
 
     #[tokio::test]
-    async fn une_connexion_muette_ne_bloque_pas_les_annonces_tardives() {
-        // Même blocage de tête que sur le rendez-vous, même correctif : sans la
-        // tâche de playback par connexion, la connexion silencieuse ci-dessous
-        // retiendrait toutes les annonces suivantes pour toujours — et cette
-        // boucle n'a plus d'échéance pour la débloquer.
+    async fn a_silent_connection_does_not_block_late_announcements() {
+        // Same head-of-line blocking as on the rendezvous, same fix: without
+        // the read task per connection, the silent connection below would hold
+        // back every following announcement forever — and this loop no longer
+        // has a deadline to unblock it.
         let dir = tempfile::tempdir().unwrap();
         let register = dir.path().join("register.sock");
         let listener = UnixListener::bind(&register).unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Announcement>(4);
         tokio::spawn(accept_forever(listener, tx));
 
-        let muet = UnixStream::connect(&register).await.unwrap();
+        let silent = UnixStream::connect(&register).await.unwrap();
         announcement(&register, r#"{"name":"radio","kinds":["source"]}"#).await;
 
-        let recue = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        let received = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
-            .expect("une connexion muette ne doit pas retenir les annonces")
+            .expect("a silent connection must not hold back the announcements")
             .unwrap();
-        assert_eq!(recue.name, "radio");
-        drop(muet);
+        assert_eq!(received.name, "radio");
+        drop(silent);
     }
 
     #[tokio::test]
-    async fn une_annonce_tardive_illisible_ne_ferme_pas_le_socket() {
-        // Un binaire fautif ne doit pas priver les autres du câblage à chaud.
+    async fn an_unreadable_late_announcement_does_not_close_the_socket() {
+        // A faulty binary must not deprive the others of hot wiring.
         let dir = tempfile::tempdir().unwrap();
         let register = dir.path().join("register.sock");
         let listener = UnixListener::bind(&register).unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Announcement>(4);
         tokio::spawn(accept_forever(listener, tx));
 
-        announcement(&register, "ceci n'est pas du json").await;
+        announcement(&register, "this is not json").await;
         announcement(&register, r#"{"name":"radio","kinds":["source"]}"#).await;
 
-        let recue = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        let received = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
-            .expect("le socket doit continuer d'accepter apres une line illisible")
+            .expect("the socket must keep accepting after an unreadable line")
             .unwrap();
-        assert_eq!(recue.name, "radio", "seule l'announcement lisible doit remonter");
+        assert_eq!(received.name, "radio", "only the readable announcement must come through");
     }
 
     #[tokio::test]
-    async fn lordre_des_metadata_suit_le_manifeste_pas_les_arrivees() {
-        // La garantie etait acquise par construction (liste batie avant tout
-        // lancement) ; elle est desormais maintenue par le code, donc testee.
+    async fn metadata_order_follows_the_manifest_not_the_arrivals() {
+        // The guarantee was acquired by construction (list built before any
+        // launch); it is now maintained by code, hence tested.
         let mut announcements = HashMap::new();
         for name in ["musicbrainz", "ouifm-metas", "radiofrance-metas"] {
             announcements.insert(
@@ -835,8 +832,8 @@ mod tests {
         );
         let g = Gathered { announcements, ..Default::default() };
 
-        // Ordre du manifest, deliberement different de l'order alphabetique
-        // et de tout order d'arrivee plausible.
+        // Manifest order, deliberately different from alphabetical order and
+        // from any plausible arrival order.
         let manifest = vec![
             "radio".to_string(),
             "ouifm-metas".to_string(),
@@ -854,50 +851,51 @@ mod tests {
     }
 
     #[test]
-    fn aucun_greffon_lance_ne_laisse_personne_de_vivant() {
-        // `plugins.toml` clear, ou tous les executables introuvables : personne
-        // ne s'annoncera jamais. C'est une erreur de configuration, et le coeur
-        // refuse encore de demarrer dans ce seul cas.
+    fn no_launched_plugin_leaves_nobody_alive() {
+        // Empty `plugins.toml`, or every executable not found: nobody will
+        // ever announce. That is a configuration error, and the core still
+        // refuses to start in this sole case.
         assert!(!a_live_plugin(&[], &Gathered::default()));
     }
 
     #[test]
-    fn tous_les_greffons_morts_ne_laissent_personne_de_vivant() {
-        // Lances, puis dead avant l'deadline : plus rien ne tourne, donc plus
-        // rien ne peut s'annoncer a chaud. Meme refus.
-        let lances = vec!["radio".to_string(), "console".to_string()];
-        let g = Gathered { dead: lances.clone(), ..Default::default() };
-        assert!(!a_live_plugin(&lances, &g));
+    fn all_plugins_dead_leave_nobody_alive() {
+        // Launched, then dead before the deadline: nothing runs anymore, so
+        // nothing can hot-announce itself. Same refusal.
+        let launched = vec!["radio".to_string(), "console".to_string()];
+        let g = Gathered { dead: launched.clone(), ..Default::default() };
+        assert!(!a_live_plugin(&launched, &g));
     }
 
     #[test]
-    fn un_greffon_fige_reste_un_processus_vivant() {
-        // Le cas qui justifie tout le chantier : `files` tourne, il n'a rien dit
-        // a l'deadline, il peut encore parler. Le coeur doit demarrer pour que la
-        // page de statut le montre fige — un refus la supprimerait precisement
-        // quand on veut la consulter.
-        let lances = vec!["radio".to_string(), "files".to_string()];
+    fn a_stalled_plugin_remains_a_living_process() {
+        // The case justifying the whole work: `files` runs, it said nothing at
+        // the deadline, it can still speak. The core must start so that the
+        // status page shows it stalled — a refusal would remove it precisely
+        // when one wants to consult it.
+        let launched = vec!["radio".to_string(), "files".to_string()];
         let g = Gathered {
             dead: vec!["radio".to_string()],
             stalled: vec!["files".to_string()],
             ..Default::default()
         };
-        assert!(a_live_plugin(&lances, &g));
+        assert!(a_live_plugin(&launched, &g));
     }
 
     #[test]
-    fn tout_eteindre_nest_pas_une_panne() {
+    fn switching_everything_off_is_not_a_failure() {
         let g = Gathered::default();
-        // Aucun greffon active déclaré : rien n'a été lancé, et c'est voulu. Le
-        // cœur doit démarrer — sans son IHM, plus personne ne pourrait rallumer.
+        // No active plugin declared: nothing was launched, and that is
+        // intended. The core must start — without its UI, nobody could switch
+        // anything back on.
         assert!(!startup_refused(0, &[], &g));
-        // Des plugins active déclarés, mais plus aucun processus vivant : c'est
-        // l'erreur de configuration que le refus existe pour signaler.
+        // Active plugins declared, but no living process left: that is the
+        // configuration error the refusal exists to report.
         assert!(startup_refused(2, &[], &g));
     }
 
     #[test]
-    fn un_seul_vivant_suffit_a_demarrer() {
+    fn a_single_living_one_is_enough_to_start() {
         let mut g = Gathered::default();
         g.dead.push("cd".into());
         assert!(!startup_refused(2, &["radio".into(), "cd".into()], &g));

@@ -2,7 +2,7 @@ import { UI_CONTRACT } from '@ritornello/ui'
 import InputAdmin from './InputAdmin.vue'
 import './ui.css'
 
-// Version du contract contre laquelle ce module est compile. Le shell la
-// compare a la sienne avant de monter le composant.
+// Contract version this module was compiled against. The shell compares it
+// to its own before mounting the component.
 export const contract = UI_CONTRACT
 export default InputAdmin

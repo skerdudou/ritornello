@@ -2,30 +2,30 @@ import vue from '@vitejs/plugin-vue'
 import { fileURLToPath } from 'node:url'
 import { defineConfig, type Plugin } from 'vitest/config'
 
-// `@ritornello/ui` est **externe** en production (fourni par l'import map du
-// shell) : jamais transforme. Sous Vitest il ne l'est pas : le barrel du kit
-// est reellement transforme, et ses imports internes (`@/lib/utils`, etc.)
-// se resolvent alors avec l'alias '@', qui designe `web/kit/src` dans
-// l'atelier du kit. Ce module-ci n'a pas de '@' a lui (voir src/index.ts et
-// src/RadioAdmin.vue) : il ne fallait donc pas d'alias global -- juste
-// rediriger `@/...` vers `web/kit/src` pour les seuls fichiers importes
-// depuis le kit. Meme approche que `web/app/vitest.config.ts` (qui doit en
-// plus arbitrer entre deux ateliers), simplifiee ici a un seul.
+// `@ritornello/ui` is **external** in production (provided by the shell's
+// import map): never transformed. Under Vitest it is not external: the kit's
+// barrel is really transformed, and its internal imports (`@/lib/utils`,
+// etc.) then resolve through the '@' alias, which designates `web/kit/src` in
+// the kit's workshop. This module has no '@' of its own (see src/index.ts and
+// src/FilesAdmin.vue): so no global alias was needed -- just redirect `@/...`
+// to `web/kit/src` for the files imported from the kit only. Same approach as
+// `web/app/vitest.config.ts` (which must additionally arbitrate between two
+// workshops), simplified here to a single one.
 const kitSrc = fileURLToPath(new URL('../../../web/kit/src', import.meta.url))
-const kitSrcPrefixe = `${kitSrc.replaceAll('\\', '/').replace(/\/$/, '')}/`
+const kitSrcPrefix = `${kitSrc.replaceAll('\\', '/').replace(/\/$/, '')}/`
 
 function kitAlias(): Plugin {
   return {
     name: 'ritornello-kit-alias',
     resolveId(source, importer) {
       if (!source.startsWith('@/') || !importer) return null
-      const importeurNormalise = importer.replaceAll('\\', '/')
-      // `node_modules` (y compris nos propres paquets, symlinkes par npm
-      // workspaces) n'est jamais concerne : seuls les fichiers sources du
-      // kit y ont droit. Sans ce garde, un import '@/...' venu d'ailleurs
-      // (par ex. une autre dependance) se verrait revendique a tort.
-      if (importeurNormalise.includes('/node_modules/')) return null
-      if (!importeurNormalise.startsWith(kitSrcPrefixe)) return null
+      const normalizedImporter = importer.replaceAll('\\', '/')
+      // `node_modules` (including our own packages, symlinked by npm
+      // workspaces) is never concerned: only the kit's source files are
+      // entitled to it. Without this guard, an '@/...' import coming from
+      // elsewhere (e.g. another dependency) would be wrongly claimed.
+      if (normalizedImporter.includes('/node_modules/')) return null
+      if (!normalizedImporter.startsWith(kitSrcPrefix)) return null
       return this.resolve(source.replace('@/', `${kitSrc}/`), importer, { skipSelf: true })
     },
   }

@@ -1,18 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 /**
- * `usePlugins` partage un état de **module** : chaque test repart d'un module
- * frais, comme `useCatalog.test.ts`, pour ne step hériter du timer ni de
- * l'état du test précédent.
+ * `usePlugins` shares **module** state: each test starts over from a fresh
+ * module, like `useCatalog.test.ts`, so as not to inherit the timer nor the
+ * state of the previous test.
  *
- * Minuteurs factices partout : la surveillance de la fenêtre « figé » est une
- * loop de 1,5 s sur 20 tours. L'éprouver en temps réel prendrait 30 s et
- * ferait de la suite un flake sous load — la classe de défaut la plus
- * coûteuse de ce dépôt.
+ * Fake timers everywhere: the watch of the "stalled" window is a 1.5 s loop
+ * over 20 turns. Testing it in real time would take 30 s and would make the
+ * suite a flake under load — the most expensive class of defect in this
+ * repository.
  */
 
-/** Une ligne de statut, avec les défauts d'un greffon annoncé et joignable. */
-function ligne(over: Record<string, unknown> = {}) {
+/** A status row, with the defaults of an announced and reachable plugin. */
+function row(over: Record<string, unknown> = {}) {
   return {
     name: 'mpd',
     kind: 'display',
@@ -24,7 +24,7 @@ function ligne(over: Record<string, unknown> = {}) {
   }
 }
 
-function reponse(plugins: unknown[]) {
+function response(plugins: unknown[]) {
   return new Response(JSON.stringify({ plugins, active_source: 'radio' }), { status: 200 })
 }
 
@@ -36,25 +36,25 @@ describe('usePlugins', () => {
   })
 
   afterEach(async () => {
-    // Desarmer **avant** de rendre les vrais minuteurs, puis laisser retomber
-    // ce qui est en vol : sans cela un `reload()` non resolu franchissait la
-    // frontiere du test et consommait un `mockResolvedValueOnce` du suivant,
-    // qui echouait alors sur une sequence de reponses decalee d'un cran. Le
-    // `fetch` bouchonne est global, c'est par la que la fuite passait.
+    // Disarm **before** restoring the real timers, then let what is in flight
+    // settle: without this an unresolved `reload()` crossed the boundary of
+    // the test and consumed a `mockResolvedValueOnce` of the next one, which
+    // then failed on a sequence of responses shifted by one. The stubbed
+    // `fetch` is global, that is where the leak went through.
     const { stopped } = await import('./usePlugins')
     stopped()
     vi.useRealTimers()
     await new Promise((r) => setTimeout(r, 0))
   })
 
-  it('dédoublonne les pages d’admin d’un greffon multi-genres', async () => {
-    // `mpd` s'annonce en `input` **et** en `display`, donc pousse deux lignes
-    // portant le même `admin: true`. Sans le `Set`, la nav afficherait deux
-    // links identiques.
+  it('deduplicates the admin pages of a multi-kind plugin', async () => {
+    // `mpd` announces itself as `input` **and** as `display`, so pushes two
+    // rows carrying the same `admin: true`. Without the `Set`, the nav would
+    // display two identical links.
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
-        reponse([ligne({ kind: 'input' }), ligne({ kind: 'display' }), ligne({ name: 'radio' })]),
+        response([row({ kind: 'input' }), row({ kind: 'display' }), row({ name: 'radio' })]),
       ),
     )
     const { usePlugins } = await import('./usePlugins')
@@ -63,21 +63,21 @@ describe('usePlugins', () => {
     expect(admins.value).toEqual(['mpd', 'radio'])
   })
 
-  it('un greffon éteint disparaît du menu sans rechargement de la page', async () => {
-    // Le défaut d'origine : la nav lisait `/api/status` une seule fois au
-    // montage, donc l'entrée survivait à l'extinction et menait à une page
-    // d'admin que le cœur avait retirée.
+  it('a disabled plugin disappears from the menu without reloading the page', async () => {
+    // The original defect: the nav read `/api/status` once only at mount, so
+    // the entry survived the disabling and led to an admin page the core had
+    // removed.
     //
-    // Le cœur remplace **toutes** les lignes d'un greffon éteint par une seule
-    // `disabled()`, qui porte `admin: false` — c'est cela que la seconde
-    // réponse imite, et c'est pour cela que le filtre sur `admin` suffit.
+    // The core replaces **all** the rows of a disabled plugin by a single
+    // `disabled()`, which carries `admin: false` — that is what the second
+    // response mimics, and that is why the filter on `admin` is enough.
     vi.stubGlobal(
       'fetch',
       vi
         .fn()
-        .mockResolvedValueOnce(reponse([ligne()]))
+        .mockResolvedValueOnce(response([row()]))
         .mockResolvedValueOnce(
-          reponse([ligne({ kind: 'unknown', connected: false, admin: false, disabled: true })]),
+          response([row({ kind: 'unknown', connected: false, admin: false, disabled: true })]),
         ),
     )
     const { usePlugins } = await import('./usePlugins')
@@ -88,17 +88,17 @@ describe('usePlugins', () => {
     expect(admins.value).toEqual([])
   })
 
-  it('relit tant qu’un greffon est figé, et cesse dès qu’il s’annonce', async () => {
-    // Le rallumage : le cœur pose une ligne « figé » (lancé, step encore
-    // annoncé), puis la remplace quelques secondes plus tard. Sans cette
-    // relecture, la page restait sur « figé » et l'entrée de menu ne revenait
-    // jamais — le F5 signalé à l'usage.
+  it('re-reads as long as a plugin is stalled, and stops as soon as it announces itself', async () => {
+    // Re-enabling: the core sets a "stalled" row (launched, not announced
+    // yet), then replaces it a few seconds later. Without this re-read, the
+    // page stayed on "stalled" and the menu entry never came back — the F5
+    // reported in use.
     const spy = vi
       .fn()
       .mockResolvedValueOnce(
-        reponse([ligne({ kind: 'unknown', connected: false, admin: false, stalled: true })]),
+        response([row({ kind: 'unknown', connected: false, admin: false, stalled: true })]),
       )
-      .mockResolvedValue(reponse([ligne()]))
+      .mockResolvedValue(response([row()]))
     vi.stubGlobal('fetch', spy)
     const { usePlugins } = await import('./usePlugins')
     const { admins, refresh } = usePlugins()
@@ -111,25 +111,25 @@ describe('usePlugins', () => {
     expect(spy).toHaveBeenCalledTimes(2)
     expect(admins.value).toEqual(['mpd'])
 
-    // Et la loop s'arrête : plus rien n'est figé. C'est l'assertion qui
-    // distingue « ça a marché » de « ça sonde la page pour toujours ».
+    // And the loop stops: nothing is stalled any more. This is the assertion
+    // that distinguishes "it worked" from "it probes the page forever".
     await vi.advanceTimersByTimeAsync(60_000)
     expect(spy).toHaveBeenCalledTimes(2)
   })
 
-  it('watch aussi un greffon en « démarrage », step seulement un « figé »', async () => {
-    // Le piège de cette relecture, et la raison d’être de ce test : depuis
-    // qu’un greffon fraîchement rallumé est rapporté « démarrage » et non plus
-    // « figé », ne surveiller que `stalled` aurait désarmé le sondage pendant
-    // exactement la fenêtre pour laquelle il existe. Le rallumage serait
-    // redevenu invisible sans F5 — le défaut d’origine, réintroduit par une
-    // amélioration d’à côté.
+  it('also watches a "starting" plugin, not only a "stalled" one', async () => {
+    // The trap of this re-read, and the reason this test exists: since a
+    // freshly re-enabled plugin is reported "starting" and no longer
+    // "stalled", watching only `stalled` would have disarmed the probing
+    // during exactly the window it exists for. Re-enabling would have become
+    // invisible without F5 again — the original defect, reintroduced by a
+    // neighbouring improvement.
     const spy = vi
       .fn()
       .mockResolvedValueOnce(
-        reponse([ligne({ kind: 'unknown', connected: false, admin: false, starting: true })]),
+        response([row({ kind: 'unknown', connected: false, admin: false, starting: true })]),
       )
-      .mockResolvedValue(reponse([ligne()]))
+      .mockResolvedValue(response([row()]))
     vi.stubGlobal('fetch', spy)
     const { usePlugins } = await import('./usePlugins')
     const { admins, refresh } = usePlugins()
@@ -143,15 +143,14 @@ describe('usePlugins', () => {
     expect(admins.value).toEqual(['mpd'])
   })
 
-  it('un greffon qui n’annonce jamais cesse d’être sondé au bout de 30 s', async () => {
-    // `Gathered::figes` du cœur : lancé, vivant, mute. C'est un greffon fautif,
-    // step un greffon lent, et la ligne « figé » devient alors un diagnostic à
-    // laisser affiché — step une raison de probe jusqu'à la fermeture de
-    // l'onglet.
+  it('a plugin that never announces itself stops being probed after 30 s', async () => {
+    // `Gathered::figes` of the core: launched, alive, silent. This is a faulty
+    // plugin, not a slow one, and the "stalled" row then becomes a diagnosis
+    // to leave displayed — not a reason to probe until the tab is closed.
     const spy = vi
       .fn()
       .mockResolvedValue(
-        reponse([ligne({ kind: 'unknown', connected: false, admin: false, stalled: true })]),
+        response([row({ kind: 'unknown', connected: false, admin: false, stalled: true })]),
       )
     vi.stubGlobal('fetch', spy)
     const { usePlugins } = await import('./usePlugins')
@@ -159,19 +158,19 @@ describe('usePlugins', () => {
 
     await refresh()
     await vi.advanceTimersByTimeAsync(600_000)
-    // 1 lecture immédiate + 20 tours de loop, et step un de plus malgré les
-    // dix minutes écoulées.
+    // 1 immediate read + 20 turns of the loop, and not one more despite the
+    // ten minutes elapsed.
     expect(spy).toHaveBeenCalledTimes(21)
   })
 
-  it('une seconde bascule redonne sa chance à la surveillance épuisée', async () => {
-    // Le compteur repart à plein sur un appel venu de l'extérieur : sans cela,
-    // un premier rallumage raté condamnerait tous les suivants jusqu'au
-    // rechargement de la page.
+  it('a second toggle gives the exhausted watch another chance', async () => {
+    // The counter starts over at full on a call coming from outside: without
+    // this, a first failed re-enabling would doom all the following ones
+    // until the page is reloaded.
     const spy = vi
       .fn()
       .mockResolvedValue(
-        reponse([ligne({ kind: 'unknown', connected: false, admin: false, stalled: true })]),
+        response([row({ kind: 'unknown', connected: false, admin: false, stalled: true })]),
       )
     vi.stubGlobal('fetch', spy)
     const { usePlugins } = await import('./usePlugins')
@@ -186,14 +185,14 @@ describe('usePlugins', () => {
     expect(spy).toHaveBeenCalledTimes(42)
   })
 
-  it('un /api/status injoignable garde l’état précédent au lieu de vider le menu', async () => {
-    // Même règle que `useCatalog` : une coupure passagère ne doit step faire
-    // disparaître la navigation. `unavailable` la nomme, parce qu'une nav sans
-    // aucun plugin admin est le symptôme le plus difficile à attribuer — la
-    // page a l'air normale par ailleurs.
+  it('an unreachable /api/status keeps the previous state instead of emptying the menu', async () => {
+    // Same rule as `useCatalog`: a transient outage must not make the
+    // navigation disappear. `unavailable` names it, because a nav without any
+    // admin plugin is the hardest symptom to attribute — the page looks
+    // normal otherwise.
     const spy = vi
       .fn()
-      .mockResolvedValueOnce(reponse([ligne()]))
+      .mockResolvedValueOnce(response([row()]))
       .mockRejectedValueOnce(new TypeError('Failed to fetch'))
     vi.stubGlobal('fetch', spy)
     const { usePlugins } = await import('./usePlugins')

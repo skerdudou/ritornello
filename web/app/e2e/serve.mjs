@@ -104,10 +104,10 @@ const tracks = ['01', '02', '03']
     tracks
       .map(
         (n) =>
-          // 30 s et non 1 s : avec des tracks d'une seconde, la list
-          // s'epuisait avant que le journey ait fini de l'observe, et l'state
-          // « list terminee » se confondait avec « selection en echec ». Une
-          // duration realiste est ce qui rend la lecture observable.
+          // 30 s and not 1 s: with one-second tracks, the playlist ran out
+          // before the journey had finished observing it, and the "playlist
+          // finished" state got confused with "selection failed". A
+          // realistic duration is what makes playback observable.
           `ffmpeg -loglevel error -y -f lavfi -i 'sine=frequency=440:duration=30' ` +
           `'${mediaRoot}/Album/${n}.mp3' || exit 1`,
       )

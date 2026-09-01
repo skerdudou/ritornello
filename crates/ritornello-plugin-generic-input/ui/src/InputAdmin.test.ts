@@ -3,7 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import InputAdmin from './InputAdmin.vue'
 
-const CATALOGUE = {
+const CATALOG = {
   device_label: 'Périphérique', btn_refresh: 'Rafraîchir', col_action: 'Action', col_code: 'Code',
   btn_learn: 'Apprendre', btn_clear: 'Effacer', btn_save: 'Enregistrer', btn_cancel: 'Annuler',
   btn_load_preset: 'Charger', btn_import: 'Importer', btn_export: 'Exporter',
@@ -20,14 +20,14 @@ const CATALOGUE = {
 }
 
 const DATA = {
-  devices: ['mce', 'clavier'],
+  devices: ['mce', 'keyboard'],
   bindings: { devices: [{ name: 'mce', bindings: [{ code: 9, cmd: 'Mute' }] }] },
   presets: ['mce', 'keyboard'],
   learning: null as { captured: number | null } | null,
 }
 
-// Prefixe absolu que le shell passe par la prop `base` (requise) : c'est le
-// contract, cette vue ne connait pas le nom sous lequel elle est servie.
+// Absolute prefix the shell passes via the (required) `base` prop: that's
+// the contract, this view does not know the name under which it is served.
 const BASE = '/plugins/generic-input/'
 
 const PROBE_MS = 300
@@ -42,71 +42,71 @@ function stub(data: () => unknown) {
   return spy
 }
 
-// La popin d'apprentissage part dans un portail vers `document.body` (comme
-// tout `Dialog` du kit) : `wrapper.find()` ne la voit jamais. D'ou le
-// `attachTo` sur tous les montages, la recherche dans le document, et le
-// nettoyage de `document.body` entre les tests (un portail survit au
-// demontage de son wrapper).
-function monterVue(base = BASE) {
-  return mount(InputAdmin, { props: { catalog: CATALOGUE, base }, attachTo: document.body })
+// The learning popup is teleported to a portal on `document.body` (like
+// every kit `Dialog`): `wrapper.find()` never sees it. Hence the
+// `attachTo` on every mount, the lookup in the document, and the cleanup
+// of `document.body` between tests (a portal survives its wrapper's
+// unmount).
+function mountView(base = BASE) {
+  return mount(InputAdmin, { props: { catalog: CATALOG, base }, attachTo: document.body })
 }
 
-const dansPopin = (selecteur: string) => document.body.querySelector(selecteur)
-const popin = () => dansPopin('[data-dlg-learn]')
+const inPopup = (selector: string) => document.body.querySelector(selector)
+const popup = () => inPopup('[data-dlg-learn]')
 
-/** Les `op` des PUT emis, dans l'order. */
+/** The `op`s of the emitted PUTs, in order. */
 const ops = (spy: ReturnType<typeof stub>) =>
   spy.mock.calls
     .filter((c) => (c[1] as RequestInit)?.method === 'PUT')
     .map((c) => JSON.parse(String((c[1] as RequestInit).body)).op)
 
-async function monter(data: () => unknown = () => DATA) {
+async function mountLoaded(data: () => unknown = () => DATA) {
   const spy = stub(data)
-  const w = monterVue()
+  const w = mountView()
   await flushPromises()
   return { w, spy }
 }
 
-async function cocherAjouter() {
-  const boite = dansPopin('[data-learn-append]') as HTMLInputElement
-  boite.checked = true
-  boite.dispatchEvent(new Event('change'))
+async function checkAppend() {
+  const checkbox = inPopup('[data-learn-append]') as HTMLInputElement
+  checkbox.checked = true
+  checkbox.dispatchEvent(new Event('change'))
   await flushPromises()
 }
 
-// La ligne d'une action, reperee par le libelle de sa **premiere** cellule :
-// un `r.text().includes(libelle)` matcherait aussi une ligne dont le message
-// de conflit nomme cette action.
-const ligneAction = (w: ReturnType<typeof monterVue>, libelle: string) =>
-  w.findAll('[data-action-row]').find((r) => r.findAll('td')[0]!.text() === libelle)!
+// The row of an action, identified by the label of its **first** cell: a
+// `r.text().includes(label)` would also match a row whose conflict message
+// names this action.
+const actionRow = (w: ReturnType<typeof mountView>, label: string) =>
+  w.findAll('[data-action-row]').find((r) => r.findAll('td')[0]!.text() === label)!
 
-// Scenario complet d'apprentissage sous faux timers : ouverture de la popin
-// sur la ligne portant `libelle`, case « add » cochee ou non, puis code
-// capte par le serveur au sondage suivant.
-async function apprendreEtCapter(libelle: string, code: number, add = false) {
+// Full learning scenario under fake timers: opens the popup on the row
+// carrying `label`, "add" checkbox checked or not, then a code captured by
+// the server on the next probe.
+async function learnAndCapture(label: string, code: number, add = false) {
   vi.useFakeTimers()
   let captured: number | null = null
   const spy = stub(() => ({ ...DATA, learning: { captured } }))
-  const w = monterVue()
+  const w = mountView()
   await vi.advanceTimersByTimeAsync(0)
-  // `ligneAction` et non un `text().includes` : des que le code capte cree un
-  // conflit, le message de la ligne fautive nomme l'autre action, et une
-  // recherche sur tout le texte de la ligne renverrait la mauvaise.
-  const ligne = () => ligneAction(w, libelle)
-  await ligne().find('[data-learn]').trigger('click')
+  // `actionRow`, not a `text().includes`: as soon as the captured code
+  // creates a conflict, the faulty row's message names the other action,
+  // and a search over the whole row text would return the wrong one.
+  const row = () => actionRow(w, label)
+  await row().find('[data-learn]').trigger('click')
   await vi.advanceTimersByTimeAsync(0)
-  if (add) await cocherAjouter()
+  if (add) await checkAppend()
   captured = code
   await vi.advanceTimersByTimeAsync(PROBE_MS)
-  return { w, spy, ligne, valeur: () => (ligne().find('input').element as HTMLInputElement).value }
+  return { w, spy, row, value: () => (row().find('input').element as HTMLInputElement).value }
 }
 
-// Table saine chargee (« Muet » porte le code 9), puis ce meme 9 saisi a la
-// main dans « Veille » : deux lignes en conflit, exactement ce que le serveur
-// refuserait a l'enregistrement (`duplicate_code`).
-async function conflitEntreDeuxLignes() {
-  const { w, spy } = await monter()
-  await ligneAction(w, 'Veille').find('input').setValue('9')
+// Healthy table loaded ("Muet" carries code 9), then this same 9 typed by
+// hand into "Veille": two rows in conflict, exactly what the server would
+// reject at save time (`duplicate_code`).
+async function conflictBetweenTwoRows() {
+  const { w, spy } = await mountLoaded()
+  await actionRow(w, 'Veille').find('input').setValue('9')
   return { w, spy }
 }
 
@@ -117,297 +117,295 @@ describe('InputAdmin', () => {
   })
   afterEach(() => vi.useRealTimers())
 
-  it('liste les périphériques, les presets et les 23 actions', async () => {
-    const { w } = await monter()
+  it('lists the devices, the presets and the 23 actions', async () => {
+    const { w } = await mountLoaded()
     expect(w.findAll('[data-action-row]')).toHaveLength(23)
     expect(w.find('[data-device-select]').exists()).toBe(true)
   })
 
-  it('préremplit les codes du périphérique sélectionné', async () => {
-    const { w } = await monter()
-    const muet = w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
-    expect((muet.find('input').element as HTMLInputElement).value).toBe('9')
+  it('prefills the codes of the selected device', async () => {
+    const { w } = await mountLoaded()
+    const muteRow = w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
+    expect((muteRow.find('input').element as HTMLInputElement).value).toBe('9')
   })
 
-  it('efface un code sans toucher au serveur', async () => {
-    const { w, spy } = await monter()
-    const muet = w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
-    await muet.find('[data-clear]').trigger('click')
-    expect((muet.find('input').element as HTMLInputElement).value).toBe('')
+  it('clears a code without touching the server', async () => {
+    const { w, spy } = await mountLoaded()
+    const muteRow = w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
+    await muteRow.find('[data-clear]').trigger('click')
+    expect((muteRow.find('input').element as HTMLInputElement).value).toBe('')
     expect(spy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'PUT')).toBe(false)
   })
 
-  it('enregistre la table complète du périphérique courant', async () => {
-    const { w, spy } = await monter()
+  it('saves the current devices complete table', async () => {
+    const { w, spy } = await mountLoaded()
     await w.find('[data-save]').trigger('click')
     await flushPromises()
     const put = spy.mock.calls.find((c) => (c[1] as RequestInit)?.method === 'PUT')!
-    const corps = JSON.parse(String((put[1] as RequestInit).body))
-    expect(corps.op).toBe('save')
-    expect(corps.bindings.devices.find((d: { name: string }) => d.name === 'mce').bindings).toEqual([
+    const body = JSON.parse(String((put[1] as RequestInit).body))
+    expect(body.op).toBe('save')
+    expect(body.bindings.devices.find((d: { name: string }) => d.name === 'mce').bindings).toEqual([
       { code: 9, cmd: 'Mute' },
     ])
   })
 
-  it('apprentissage : sonde toutes les 300 ms puis remplit le code capturé', async () => {
+  it('learning: probes every 300 ms then fills in the captured code', async () => {
     vi.useFakeTimers()
     let captured: number | null = null
     const spy = stub(() => ({ ...DATA, learning: { captured } }))
-    const w = monterVue()
+    const w = mountView()
     await vi.advanceTimersByTimeAsync(0)
-    const muet = w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
-    await muet.find('[data-learn]').trigger('click')
+    const muteRow = w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
+    await muteRow.find('[data-learn]').trigger('click')
     await vi.advanceTimersByTimeAsync(0)
-    // La consigne « appuyez sur une touche » et l'annulation vivent desormais
-    // dans la popin, pas dans le bandeau du bas.
-    expect(popin()!.textContent).toContain('Appuyez sur une touche')
-    expect(dansPopin('[data-learn-cancel]')).not.toBeNull()
+    // The "press a key" instruction and the cancellation now live in the
+    // popup, not in the bottom bar.
+    expect(popup()!.textContent).toContain('Appuyez sur une touche')
+    expect(inPopup('[data-learn-cancel]')).not.toBeNull()
     expect(
       JSON.parse(String((spy.mock.calls.find((c) => (c[1] as RequestInit)?.method === 'PUT')![1] as RequestInit).body)),
     ).toEqual({ op: 'learn', device: 'mce' })
     captured = 42
     await vi.advanceTimersByTimeAsync(PROBE_MS)
-    expect((muet.find('input').element as HTMLInputElement).value).toBe('42')
-    // Le sondage s'arrete, `cancel_learn` est emis, et la popin se referme.
+    expect((muteRow.find('input').element as HTMLInputElement).value).toBe('42')
+    // Probing stops, `cancel_learn` is emitted, and the popup closes.
     expect(ops(spy)).toContain('cancel_learn')
-    expect(popin()).toBeNull()
+    expect(popup()).toBeNull()
   })
 
-  it('apprentissage : la popin s’ouvre et son title nomme l’action apprise', async () => {
+  it('learning: the popup opens and its title names the learned action', async () => {
     vi.useFakeTimers()
     stub(() => ({ ...DATA, learning: { captured: null } }))
-    const w = monterVue()
+    const w = mountView()
     await vi.advanceTimersByTimeAsync(0)
-    const muet = w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
-    await muet.find('[data-learn]').trigger('click')
+    const muteRow = w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
+    await muteRow.find('[data-learn]').trigger('click')
     await vi.advanceTimersByTimeAsync(0)
-    const contenu = popin()!.textContent!
-    expect(contenu).toContain('Apprentissage d’une touche')
-    // Le libelle traduit de **cette** ligne, pas d'une autre.
-    expect(contenu).toContain('Muet')
-    expect(contenu).not.toContain('Veille')
-    // Et le peripherique courant, nomme par la description.
-    expect(contenu).toContain('mce')
+    const content = popup()!.textContent!
+    expect(content).toContain('Apprentissage d’une touche')
+    // The translated label of **this** row, not another.
+    expect(content).toContain('Muet')
+    expect(content).not.toContain('Veille')
+    // And the current device, named by the description.
+    expect(content).toContain('mce')
   })
 
-  it('apprentissage : le compte à rebours part de 30 s et décroît', async () => {
-    // Sans lui, la popin se referme d'elle-même au bout de 30 s sans que rien
-    // n'ait laissé prévoir l'échéance : on croit l'appareil muet alors qu'on a
-    // simplement mis trop de temps à trouver la touche.
+  it('learning: the countdown starts at 30 s and decreases', async () => {
+    // Without it, the popup would close itself after 30 s with nothing
+    // having warned of the deadline: the user would think the device is
+    // silent when they simply took too long to find the key.
     vi.useFakeTimers()
     stub(() => ({ ...DATA, learning: { captured: null } }))
-    const w = monterVue()
+    const w = mountView()
     await vi.advanceTimersByTimeAsync(0)
-    const muet = w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
-    await muet.find('[data-learn]').trigger('click')
+    const muteRow = w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
+    await muteRow.find('[data-learn]').trigger('click')
     await vi.advanceTimersByTimeAsync(0)
-    // Pose des l'ouverture, sans attendre le premier tour de sondage.
-    expect(popin()!.querySelector('[data-learn-countdown]')!.textContent).toContain('30')
-    // Dix tours entiers, et non « 3 000 ms » : le chiffre ne se rafraichit
-    // qu'au rythme du sondage, donc une avance qui tombe entre deux tours
-    // laisserait la valeur du tour precedent.
+    // Set right at opening, without waiting for the first probing round.
+    expect(popup()!.querySelector('[data-learn-countdown]')!.textContent).toContain('30')
+    // Ten full rounds, not "3,000 ms": the figure only refreshes at the
+    // probing's pace, so an advance that falls between two rounds would
+    // leave the previous round's value.
     await vi.advanceTimersByTimeAsync(PROBE_MS * 10)
-    expect(popin()!.querySelector('[data-learn-countdown]')!.textContent).toContain('27')
+    expect(popup()!.querySelector('[data-learn-countdown]')!.textContent).toContain('27')
   })
 
-  it('apprentissage : case décochée, le code capturé remplace le champ', async () => {
-    // « Muet » porte deja le code 9 : sans la case cochee, le code capture
-    // prend sa place au lieu de s'y add.
-    const { valeur } = await apprendreEtCapter('Muet', 42)
-    expect(valeur()).toBe('42')
-    expect(popin()).toBeNull()
+  it('learning: box unchecked, the captured code replaces the field', async () => {
+    // "Muet" already carries code 9: without the box checked, the captured
+    // code takes its place instead of being added to it.
+    const { value } = await learnAndCapture('Muet', 42)
+    expect(value()).toBe('42')
+    expect(popup()).toBeNull()
   })
 
-  it('apprentissage : case cochée, le code capturé s’ajoute au champ', async () => {
-    const { valeur } = await apprendreEtCapter('Muet', 42, true)
-    expect(valeur()).toBe('9, 42')
-    expect(popin()).toBeNull()
+  it('learning: box checked, the captured code is appended to the field', async () => {
+    const { value } = await learnAndCapture('Muet', 42, true)
+    expect(value()).toBe('9, 42')
+    expect(popup()).toBeNull()
   })
 
-  it('apprentissage : case cochée, un code déjà présent laisse le champ intact', async () => {
-    // Pas de « 9, 9 » : le serveur refuserait la table entiere
-    // (`duplicate_code`), et l'utilisateur n'a rien demande de plus.
-    const { valeur } = await apprendreEtCapter('Muet', 9, true)
-    expect(valeur()).toBe('9')
+  it('learning: box checked, a code already present leaves the field intact', async () => {
+    // No "9, 9": the server would reject the whole table (`duplicate_code`),
+    // and the user hasn't asked for anything more.
+    const { value } = await learnAndCapture('Muet', 9, true)
+    expect(value()).toBe('9')
   })
 
-  it('apprentissage : case cochée sur une ligne sans code, le champ vaut le code seul', async () => {
-    // « Veille » ne porte aucun code : l'ajout doit donner « 42 » et non
-    // « , 42 ». Cas specifie par `applyCode` (`!champ.trim()`) mais que les
-    // autres tests, tous sur « Muet » (deja pourvu du code 9), ne couvraient
-    // pas.
-    const { valeur } = await apprendreEtCapter('Veille', 42, true)
-    expect(valeur()).toBe('42')
+  it('learning: box checked on a row with no code, the field holds just the code', async () => {
+    // "Veille" carries no code: appending must give "42" and not ", 42".
+    // A case specified by `applyCode` (`!field.trim()`) but that the other
+    // tests, all on "Muet" (already carrying code 9), did not cover.
+    const { value } = await learnAndCapture('Veille', 42, true)
+    expect(value()).toBe('42')
   })
 
-  it('apprentissage : la case « add » revient décochée à chaque ouverture', async () => {
-    const { ligne } = await apprendreEtCapter('Muet', 42, true)
-    expect(popin()).toBeNull()
-    await ligne().find('[data-learn]').trigger('click')
+  it('learning: the "add" box comes back unchecked on every opening', async () => {
+    const { row } = await learnAndCapture('Muet', 42, true)
+    expect(popup()).toBeNull()
+    await row().find('[data-learn]').trigger('click')
     await vi.advanceTimersByTimeAsync(0)
-    expect((dansPopin('[data-learn-append]') as HTMLInputElement).checked).toBe(false)
+    expect((inPopup('[data-learn-append]') as HTMLInputElement).checked).toBe(false)
   })
 
-  it('apprentissage : le bouton « Annuler » de la popin annule la session serveur', async () => {
+  it('learning: the popups "Cancel" button cancels the server session', async () => {
     vi.useFakeTimers()
     const spy = stub(() => ({ ...DATA, learning: { captured: null } }))
-    const w = monterVue()
+    const w = mountView()
     await vi.advanceTimersByTimeAsync(0)
-    const muet = w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
-    await muet.find('[data-learn]').trigger('click')
+    const muteRow = w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
+    await muteRow.find('[data-learn]').trigger('click')
     await vi.advanceTimersByTimeAsync(0)
     expect(ops(spy)).not.toContain('cancel_learn')
-    ;(dansPopin('[data-learn-cancel]') as HTMLButtonElement).click()
+    ;(inPopup('[data-learn-cancel]') as HTMLButtonElement).click()
     await vi.advanceTimersByTimeAsync(0)
     expect(ops(spy)).toContain('cancel_learn')
-    expect(popin()).toBeNull()
+    expect(popup()).toBeNull()
   })
 
-  it('apprentissage : une annulation en échec réseau referme quand même la popin', async () => {
-    // L'annulation est desormais le geste courant (bouton, croix, Échap,
-    // voile) et son PUT `cancel_learn` peut echouer. La popin doit se refermer
-    // et le sondage mourir malgre tout : `stopLearn` fait les deux
-    // avant tout `await`.
+  it('learning: a cancellation failing over the network still closes the popup', async () => {
+    // Cancellation is now the standard gesture (button, close icon,
+    // Escape, overlay) and its `cancel_learn` PUT can fail. The popup must
+    // still close and probing must still die: `stopLearn` does both
+    // before any `await`.
     vi.useFakeTimers()
     const spy = vi.fn(async (_u: string, init?: RequestInit) => {
       if (init?.method === 'PUT') {
-        if (JSON.parse(String(init.body)).op === 'cancel_learn') throw new Error('réseau coupé')
+        if (JSON.parse(String(init.body)).op === 'cancel_learn') throw new Error('network cut off')
         return new Response(null, { status: 204 })
       }
       return new Response(JSON.stringify({ ...DATA, learning: { captured: null } }), { status: 200 })
     })
     vi.stubGlobal('fetch', spy)
-    const w = monterVue()
+    const w = mountView()
     await vi.advanceTimersByTimeAsync(0)
-    await ligneAction(w, 'Muet').find('[data-learn]').trigger('click')
+    await actionRow(w, 'Muet').find('[data-learn]').trigger('click')
     await vi.advanceTimersByTimeAsync(0)
-    ;(dansPopin('[data-learn-cancel]') as HTMLButtonElement).click()
+    ;(inPopup('[data-learn-cancel]') as HTMLButtonElement).click()
     await vi.advanceTimersByTimeAsync(0)
-    // La popin se referme quand meme : elle ne depend pas de l'aller-retour.
-    expect(popin()).toBeNull()
-    // Et le sondage est bien mort : plus une seule requete, GET compris, dans
-    // la seconde qui suit -- un intervalle survivant sonderait toutes les
-    // 300 ms. `ops` ne garde que les PUT, il ne verrait pas ces GET : d'ou le
-    // comptage brut des appels, en plus de l'absence de second `cancel_learn`.
-    const appels = spy.mock.calls.length
+    // The popup closes anyway: it does not depend on the round trip.
+    expect(popup()).toBeNull()
+    // And probing is indeed dead: not a single request, GETs included, in
+    // the following second -- a surviving interval would probe every
+    // 300 ms. `ops` only keeps the PUTs, it would not see these GETs:
+    // hence the raw call count, on top of the absence of a second
+    // `cancel_learn`.
+    const calls = spy.mock.calls.length
     await vi.advanceTimersByTimeAsync(1_000)
-    expect(spy.mock.calls.length).toBe(appels)
+    expect(spy.mock.calls.length).toBe(calls)
     expect(ops(spy)).toEqual(['learn', 'cancel_learn'])
   })
 
-  it('apprentissage : deux déclenchements concurrents sur deux lignes ne créent jamais deux minuteurs', async () => {
-    // Mutation testee explicitement (voir rapport, section « Round de
-    // correction 1 ») : avec le garde d'origine (fonde uniquement sur
-    // `timer`, affecte seulement apres le `await` du PUT `learn`), ce test
-    // echoue -- deux PUT `learn` partent, et l'intervalle orphelin peut
-    // ecrire le code capture dans la mauvaise ligne.
+  it('learning: two concurrent triggers on two rows never create two timers', async () => {
+    // Mutation explicitly tested (see report, "Fix round 1" section): with
+    // the original guard (based solely on `timer`, assigned only after the
+    // `learn` PUT's `await`), this test fails -- two `learn` PUTs go out,
+    // and the orphaned interval can write the captured code into the
+    // wrong row.
     vi.useFakeTimers()
-    let debloquerLearn: () => void = () => {}
-    const learnEnCours = new Promise<void>((r) => (debloquerLearn = r))
+    let unblockLearn: () => void = () => {}
+    const learnInProgress = new Promise<void>((r) => (unblockLearn = r))
     let captured: number | null = null
     const spy = vi.fn(async (_u: string, init?: RequestInit) => {
       if (init?.method === 'PUT') {
-        const corps = JSON.parse(String(init.body))
-        if (corps.op === 'learn') await learnEnCours
+        const body = JSON.parse(String(init.body))
+        if (body.op === 'learn') await learnInProgress
         return new Response(null, { status: 204 })
       }
       return new Response(JSON.stringify({ ...DATA, learning: { captured } }), { status: 200 })
     })
     vi.stubGlobal('fetch', spy)
-    const w = monterVue()
+    const w = mountView()
     await vi.advanceTimersByTimeAsync(0)
-    const muet = w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
-    const veille = w.findAll('[data-action-row]').find((r) => r.text().includes('Veille'))!
+    const muteRow = w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
+    const standbyRow = w.findAll('[data-action-row]').find((r) => r.text().includes('Veille'))!
 
-    // Deux declenchements sur deux lignes differentes avant que le premier
-    // PUT `learn` ne fasse son aller-retour (double-clic, ou clic sur une
-    // autre action -- plausible sur un Pi 2 ou l'aller-retour n'est pas
-    // instantane).
-    await muet.find('[data-learn]').trigger('click')
+    // Two triggers on two different rows before the first `learn` PUT
+    // makes its round trip (double-click, or click on another action --
+    // plausible on a Pi 2 where the round trip is not instantaneous).
+    await muteRow.find('[data-learn]').trigger('click')
     await vi.advanceTimersByTimeAsync(0)
-    await veille.find('[data-learn]').trigger('click')
+    await standbyRow.find('[data-learn]').trigger('click')
     await vi.advanceTimersByTimeAsync(0)
 
-    // Un seul PUT `learn` a du partir : le garde synchrone doit arreter le
-    // second declenchement avant tout appel reseau.
-    const putsLearn = spy.mock.calls.filter(
+    // Only one `learn` PUT should have gone out: the synchronous guard
+    // must stop the second trigger before any network call.
+    const learnPuts = spy.mock.calls.filter(
       (c) => (c[1] as RequestInit)?.method === 'PUT' && JSON.parse(String((c[1] as RequestInit).body)).op === 'learn',
     )
-    expect(putsLearn).toHaveLength(1)
+    expect(learnPuts).toHaveLength(1)
 
     captured = 42
-    debloquerLearn()
+    unblockLearn()
     await vi.advanceTimersByTimeAsync(300)
 
-    // Seule la ligne dont le PUT `learn` est reellement parti (« Muet »)
-    // recoit le code capture ; « Veille » -- dont le declenchement a ete
-    // refuse par le garde -- reste vide.
-    expect((muet.find('input').element as HTMLInputElement).value).toBe('42')
-    expect((veille.find('input').element as HTMLInputElement).value).toBe('')
+    // Only the row whose `learn` PUT actually went out ("Muet") receives
+    // the captured code; "Veille" -- whose trigger was rejected by the
+    // guard -- stays empty.
+    expect((muteRow.find('input').element as HTMLInputElement).value).toBe('42')
+    expect((standbyRow.find('input').element as HTMLInputElement).value).toBe('')
   })
 
-  it('adresse ses requêtes sous le préfixe absolu reçu par la prop `base`', async () => {
-    // IMPORTANT 6 de la revue finale. Cette vue appelait `api.get('./api/data')`
-    // en relatif, donc resolu contre l'URL du navigateur et non contre quoi que
-    // ce soit que le contract garantisse : sur `/plugins/generic-input` (sans
-    // slash final, forme que le routeur du shell acceptait aussi),
-    // `./api/data` resolvait vers `/plugins/api/data` — que le coeur interprete
-    // comme le plugin « api » : 404, table vide et tous les boutons en echec.
+  it('addresses its requests under the absolute prefix received via the `base` prop', async () => {
+    // IMPORTANT 6 from the final review. This view used to call
+    // `api.get('./api/data')` relatively, so resolved against the browser's
+    // URL and not against anything the contract guarantees: on
+    // `/plugins/generic-input` (without a trailing slash, a form the
+    // shell's router also accepted), `./api/data` resolved to
+    // `/plugins/api/data` — which the core interprets as the "api" plugin:
+    // 404, empty table and every button failing.
     const spy = stub(() => DATA)
-    // Volontairement un prefixe qui n'est **pas** `/plugins/generic-input/` :
-    // le nom sous lequel un plugin est servi vient de `plugins.toml`, donc du
-    // deploiement. Ce test echouerait si la vue reconstruisait son propre nom
-    // au lieu d'honorer le prefixe recu.
-    const w = monterVue('/plugins/telecommande/')
+    // Deliberately a prefix that is **not** `/plugins/generic-input/`: the
+    // name under which a plugin is served comes from `plugins.toml`, i.e.
+    // from deployment. This test would fail if the view rebuilt its own
+    // name instead of honoring the received prefix.
+    const w = mountView('/plugins/remote/')
     await flushPromises()
     await w.find('[data-save]').trigger('click')
     await flushPromises()
     expect(spy.mock.calls.length).toBeGreaterThan(1)
-    for (const appel of spy.mock.calls) {
-      expect(appel[0]).toBe('/plugins/telecommande/api/data')
+    for (const call of spy.mock.calls) {
+      expect(call[0]).toBe('/plugins/remote/api/data')
     }
   })
 
-  it('apprentissage : changer de périphérique annule la session en cours', async () => {
-    // IMPORTANT 2 de la revue finale. L'ancien gestionnaire annulait
-    // l'apprentissage au changement de peripherique
-    // (`$('dev').onchange = async () => { if (timer) await stopLearn(''); … }`) ;
-    // le `watch(device, fillCodes)` avait perdu cette annulation.
+  it('learning: changing device cancels the ongoing session', async () => {
+    // IMPORTANT 2 from the final review. The old handler used to cancel
+    // learning on a device change
+    // (`$('dev').onchange = async () => { if (timer) await stopLearn(''); … }`);
+    // `watch(device, fillCodes)` had lost this cancellation.
     //
-    // Sans elle, l'intervalle continue de sonder alors que la session
-    // d'apprentissage du serveur est encore armee sur le peripherique
-    // **precedent**, `fillCodes()` a entre-temps repeuple la table depuis
-    // les bindings du **nouveau** peripherique, et la fermeture ecrit le code
-    // capture dans la ligne du nouveau peripherique -- que « Enregistrer »
-    // persiste ensuite. Meme classe de defaut que la course corrigee en
-    // Task 12, dont la correction n'avait pas envisage le changement de
-    // peripherique.
+    // Without it, the interval keeps probing while the server's learning
+    // session is still armed on the **previous** device, `fillCodes()` has
+    // in the meantime repopulated the table from the **new** device's
+    // bindings, and the closure writes the captured code into the new
+    // device's row -- which "Save" then persists. Same class of bug as the
+    // race fixed in Task 12, whose fix had not considered a device change.
     vi.useFakeTimers()
     let captured: number | null = null
     const spy = stub(() => ({ ...DATA, learning: { captured } }))
-    const w = monterVue()
+    const w = mountView()
     await vi.advanceTimersByTimeAsync(0)
 
-    const muet = w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
-    await muet.find('[data-learn]').trigger('click')
+    const muteRow = w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
+    await muteRow.find('[data-learn]').trigger('click')
     await vi.advanceTimersByTimeAsync(0)
-    expect(popin()!.textContent).toContain('Appuyez sur une touche')
+    expect(popup()!.textContent).toContain('Appuyez sur une touche')
 
     expect(ops(spy)).not.toContain('cancel_learn')
 
-    // Changement de peripherique : « mce » -> « clavier ».
-    await w.findAllComponents(Select)[0]!.vm.$emit('update:modelValue', 'clavier')
+    // Device change: "mce" -> "keyboard".
+    await w.findAllComponents(Select)[0]!.vm.$emit('update:modelValue', 'keyboard')
     await vi.advanceTimersByTimeAsync(0)
 
-    // 1. La session serveur est explicitement annulee.
+    // 1. The server session is explicitly cancelled.
     expect(ops(spy)).toContain('cancel_learn')
-    // 2. L'IHM n'est plus en etat « appuyez sur une touche » pour un
-    //    peripherique que personne n'apprend : la popin, qui porte cette
-    //    phrase et l'annulation, a disparu.
-    expect(popin()).toBeNull()
+    // 2. The UI is no longer in the "press a key" state for a device
+    //    nobody is learning anymore: the popup, which carries this
+    //    sentence and the cancellation, has disappeared.
+    expect(popup()).toBeNull()
 
-    // 3. Le code que le peripherique precedent aurait fini par capturer ne
-    //    doit atterrir dans aucune ligne de la table du nouveau peripherique.
+    // 3. The code the previous device would eventually have captured must
+    //    not land in any row of the new device's table.
     captured = 42
     await vi.advanceTimersByTimeAsync(1_000)
     const codes = w
@@ -416,120 +414,120 @@ describe('InputAdmin', () => {
     expect(codes.every((v) => v === '')).toBe(true)
   })
 
-  it('apprentissage : la table est repeuplée même si l’annulation réseau échoue', async () => {
-    // Correction repliee (revue finale) : `watch(device, …)` faisait
-    // `await stopLearn('')` sans filet. Si `fetch` rejette
-    // (reseau coupe), la rejection non rattrapee sautait `fillCodes()`,
-    // et les codes du peripherique **precedent** restaient affiches sous le
-    // nouveau -- exactement la classe de defaut que ce watcher venait
-    // corriger, dans la branche d'echec reseau.
+  it('learning: the table is repopulated even if the network cancellation fails', async () => {
+    // Fix folded in (final review): `watch(device, …)` used to do
+    // `await stopLearn('')` with no safety net. If `fetch` rejects
+    // (network cut off), the uncaught rejection would skip `fillCodes()`,
+    // and the **previous** device's codes would stay displayed under the
+    // new one -- exactly the class of bug this watcher was meant to fix,
+    // in the network-failure branch.
     vi.useFakeTimers()
     const bindings = {
       devices: [
         { name: 'mce', bindings: [{ code: 9, cmd: 'Mute' }] },
-        { name: 'clavier', bindings: [{ code: 5, cmd: 'Mute' }] },
+        { name: 'keyboard', bindings: [{ code: 5, cmd: 'Mute' }] },
       ],
     }
     const spy = vi.fn(async (_u: string, init?: RequestInit) => {
       if (init?.method === 'PUT') {
-        const corps = JSON.parse(String(init.body))
-        if (corps.op === 'cancel_learn') throw new Error('réseau coupé')
+        const body = JSON.parse(String(init.body))
+        if (body.op === 'cancel_learn') throw new Error('network cut off')
         return new Response(null, { status: 204 })
       }
       return new Response(JSON.stringify({ ...DATA, bindings, learning: null }), { status: 200 })
     })
     vi.stubGlobal('fetch', spy)
-    const w = monterVue()
+    const w = mountView()
     await vi.advanceTimersByTimeAsync(0)
 
-    const muet = () => w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
-    expect((muet().find('input').element as HTMLInputElement).value).toBe('9')
+    const muteRow = () => w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
+    expect((muteRow().find('input').element as HTMLInputElement).value).toBe('9')
 
-    await muet().find('[data-learn]').trigger('click')
+    await muteRow().find('[data-learn]').trigger('click')
     await vi.advanceTimersByTimeAsync(0)
-    expect(popin()!.textContent).toContain('Appuyez sur une touche')
+    expect(popup()!.textContent).toContain('Appuyez sur une touche')
 
-    // Changement de peripherique : l'annulation (`cancel_learn`) echoue
-    // reseau. Sans le correctif, la ligne « Muet » resterait a « 9 »
-    // (bindings de « mce ») au lieu d'etre repeuplee pour « clavier ».
-    await w.findAllComponents(Select)[0]!.vm.$emit('update:modelValue', 'clavier')
+    // Device change: the cancellation (`cancel_learn`) fails over the
+    // network. Without the fix, the "Muet" row would stay at "9" (the
+    // "mce" bindings) instead of being repopulated for "keyboard".
+    await w.findAllComponents(Select)[0]!.vm.$emit('update:modelValue', 'keyboard')
     await vi.advanceTimersByTimeAsync(0)
 
-    expect((muet().find('input').element as HTMLInputElement).value).toBe('5')
+    expect((muteRow().find('input').element as HTMLInputElement).value).toBe('5')
   })
 
-  it('apprentissage : abandonne après 30 s avec le message de délai, pas avant', async () => {
+  it('learning: gives up after 30 s with the timeout message, not before', async () => {
     vi.useFakeTimers()
     const spy = stub(() => ({ ...DATA, learning: { captured: null } }))
-    const w = monterVue()
+    const w = mountView()
     await vi.advanceTimersByTimeAsync(0)
-    const muet = w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
-    await muet.find('[data-learn]').trigger('click')
+    const muteRow = w.findAll('[data-action-row]').find((r) => r.text().includes('Muet'))!
+    await muteRow.find('[data-learn]').trigger('click')
     await vi.advanceTimersByTimeAsync(0)
-    // A 29 s, le plafond de 30 s n'est pas encore atteint : la popin est
-    // toujours ouverte et rien n'a ete annule. Sans cette assertion prise
-    // avant l'echeance, le test ne distinguerait pas 30 s d'un delai plus
-    // court -- les 10 s d'origine le font echouer ici, ce qui est le but.
+    // At 29 s, the 30 s cap is not yet reached: the popup is still open and
+    // nothing has been cancelled. Without this assertion taken before the
+    // deadline, the test would not distinguish 30 s from a shorter
+    // timeout -- the original 10 s make it fail here, which is the point.
     await vi.advanceTimersByTimeAsync(29_000)
-    expect(popin()).not.toBeNull()
+    expect(popup()).not.toBeNull()
     expect(ops(spy)).not.toContain('cancel_learn')
     expect(w.text()).not.toContain('Délai dépassé')
-    // A 31 s, l'echeance est franchie : la popin se referme et le message de
-    // delai s'affiche dans le bandeau du bas, desormais visible.
+    // At 31 s, the deadline is crossed: the popup closes and the timeout
+    // message displays in the bottom bar, now visible.
     await vi.advanceTimersByTimeAsync(2_000)
-    expect(popin()).toBeNull()
+    expect(popup()).toBeNull()
     expect(ops(spy)).toContain('cancel_learn')
     expect(w.text()).toContain('Délai dépassé')
   })
 
-  it('sans périphérique, prévient et n’émet aucune opération (save)', async () => {
-    const { w, spy } = await monter(() => ({ ...DATA, devices: [] }))
+  it('with no device, warns and emits no operation (save)', async () => {
+    const { w, spy } = await mountLoaded(() => ({ ...DATA, devices: [] }))
     expect(w.text()).toContain('Aucun périphérique')
     await w.find('[data-save]').trigger('click')
     await flushPromises()
     expect(spy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'PUT')).toBe(false)
   })
 
-  it('sans périphérique, prévient et n’émet aucune opération (learn)', async () => {
-    const { w, spy } = await monter(() => ({ ...DATA, devices: [] }))
-    const uneLigne = w.findAll('[data-action-row]')[0]!
-    await uneLigne.find('[data-learn]').trigger('click')
+  it('with no device, warns and emits no operation (learn)', async () => {
+    const { w, spy } = await mountLoaded(() => ({ ...DATA, devices: [] }))
+    const oneRow = w.findAll('[data-action-row]')[0]!
+    await oneRow.find('[data-learn]').trigger('click')
     await flushPromises()
     expect(spy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'PUT')).toBe(false)
     expect(w.text()).toContain('Aucun périphérique')
   })
 
-  it('sans périphérique, prévient et n’émet aucune opération (load_preset)', async () => {
-    const { w, spy } = await monter(() => ({ ...DATA, devices: [] }))
-    const bouton = w.findAll('button').find((b) => b.text() === CATALOGUE.btn_load_preset)!
-    await bouton.trigger('click')
+  it('with no device, warns and emits no operation (load_preset)', async () => {
+    const { w, spy } = await mountLoaded(() => ({ ...DATA, devices: [] }))
+    const button = w.findAll('button').find((b) => b.text() === CATALOG.btn_load_preset)!
+    await button.trigger('click')
     await flushPromises()
     expect(spy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'PUT')).toBe(false)
     expect(w.text()).toContain('Aucun périphérique')
   })
 
-  it('sans périphérique, prévient et n’émet aucune opération (import)', async () => {
-    const { w, spy } = await monter(() => ({ ...DATA, devices: [] }))
-    const fichier = new File(['[[bindings]]\ncode = 1\ncmd = "Mute"\n'], 'p.toml')
+  it('with no device, warns and emits no operation (import)', async () => {
+    const { w, spy } = await mountLoaded(() => ({ ...DATA, devices: [] }))
+    const file = new File(['[[bindings]]\ncode = 1\ncmd = "Mute"\n'], 'p.toml')
     const input = w.find('[data-import]').element as HTMLInputElement
-    Object.defineProperty(input, 'files', { value: [fichier] })
+    Object.defineProperty(input, 'files', { value: [file] })
     await w.find('[data-import]').trigger('change')
     await flushPromises()
     expect(spy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'PUT')).toBe(false)
     expect(w.text()).toContain('Aucun périphérique')
   })
 
-  it('sans périphérique, prévient et n’émet aucune opération (export)', async () => {
-    const { w, spy } = await monter(() => ({ ...DATA, devices: [] }))
-    const bouton = w.findAll('button').find((b) => b.text() === CATALOGUE.btn_export)!
-    await bouton.trigger('click')
+  it('with no device, warns and emits no operation (export)', async () => {
+    const { w, spy } = await mountLoaded(() => ({ ...DATA, devices: [] }))
+    const button = w.findAll('button').find((b) => b.text() === CATALOG.btn_export)!
+    await button.trigger('click')
     await flushPromises()
     expect(spy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'PUT')).toBe(false)
     expect(w.text()).toContain('Aucun périphérique')
   })
 
-  it('rafraîchir envoie `rescan` puis recharge', async () => {
-    const { w, spy } = await monter()
+  it('refresh sends `rescan` then reloads', async () => {
+    const { w, spy } = await mountLoaded()
     await w.find('[data-refresh]').trigger('click')
     await flushPromises()
     const ops = spy.mock.calls
@@ -538,22 +536,22 @@ describe('InputAdmin', () => {
     expect(ops).toEqual(['rescan'])
   })
 
-  it('revalide le preset sélectionné quand il disparaît de la nouvelle liste', async () => {
+  it('revalidates the selected preset when it disappears from the new list', async () => {
     let presets = ['mce', 'keyboard']
-    const { w } = await monter(() => ({ ...DATA, presets }))
+    const { w } = await mountLoaded(() => ({ ...DATA, presets }))
     const presetSelect = w.findAllComponents(Select)[1]!
     expect(presetSelect.props('modelValue')).toBe('mce')
-    presets = ['keyboard'] // « mce » disparait de la liste servie
+    presets = ['keyboard'] // "mce" disappears from the served list
     await w.find('[data-refresh]').trigger('click')
     await flushPromises()
     expect(presetSelect.props('modelValue')).toBe('keyboard')
   })
 
-  it('importe un fichier `.toml` en le confiant au serveur', async () => {
-    const { w, spy } = await monter()
-    const fichier = new File(['[[bindings]]\ncode = 1\ncmd = "Mute"\n'], 'p.toml')
+  it('imports a `.toml` file by handing it to the server', async () => {
+    const { w, spy } = await mountLoaded()
+    const file = new File(['[[bindings]]\ncode = 1\ncmd = "Mute"\n'], 'p.toml')
     const input = w.find('[data-import]').element as HTMLInputElement
-    Object.defineProperty(input, 'files', { value: [fichier] })
+    Object.defineProperty(input, 'files', { value: [file] })
     await w.find('[data-import]').trigger('change')
     await vi.waitFor(() =>
       expect(
@@ -566,80 +564,81 @@ describe('InputAdmin', () => {
     )
   })
 
-  it('validation : un code déjà porté par une autre action met les deux lignes en erreur', async () => {
-    const { w } = await conflitEntreDeuxLignes()
-    // L'anneau et la bordure rouges viennent de l'`Input` du kit, qui porte
-    // deja `aria-invalid:border-destructive` : l'attribut est tout le signal.
-    expect(ligneAction(w, 'Muet').find('input').attributes('aria-invalid')).toBe('true')
-    expect(ligneAction(w, 'Veille').find('input').attributes('aria-invalid')).toBe('true')
-    // Chaque ligne nomme l'**autre** action, par son libelle traduit et jamais
-    // par sa cle i18n.
-    const muet = ligneAction(w, 'Muet').find('[data-conflict]').text()
-    const veille = ligneAction(w, 'Veille').find('[data-conflict]').text()
-    expect(muet).toContain('Veille')
-    expect(muet).not.toContain('act_power')
-    expect(veille).toContain('Muet')
-    expect(veille).not.toContain('act_mute')
+  it('validation: a code already carried by another action puts both rows in error', async () => {
+    const { w } = await conflictBetweenTwoRows()
+    // The red ring and border come from the kit's `Input`, which already
+    // carries `aria-invalid:border-destructive`: the attribute is the
+    // whole signal.
+    expect(actionRow(w, 'Muet').find('input').attributes('aria-invalid')).toBe('true')
+    expect(actionRow(w, 'Veille').find('input').attributes('aria-invalid')).toBe('true')
+    // Each row names the **other** action, by its translated label and
+    // never by its i18n key.
+    const muteText = actionRow(w, 'Muet').find('[data-conflict]').text()
+    const standbyText = actionRow(w, 'Veille').find('[data-conflict]').text()
+    expect(muteText).toContain('Veille')
+    expect(muteText).not.toContain('act_power')
+    expect(standbyText).toContain('Muet')
+    expect(standbyText).not.toContain('act_mute')
   })
 
-  it('validation : le message de conflit nomme le code fautif', async () => {
-    const { w } = await conflitEntreDeuxLignes()
-    expect(ligneAction(w, 'Veille').find('[data-conflict]').text()).toBe('le code 9 est déjà affecté à Muet')
+  it('validation: the conflict message names the faulty code', async () => {
+    const { w } = await conflictBetweenTwoRows()
+    expect(actionRow(w, 'Veille').find('[data-conflict]').text()).toBe('le code 9 est déjà affecté à Muet')
   })
 
-  it('validation : un doublon interne au champ est signalé sans nommer d’action', async () => {
-    const { w } = await monter()
-    await ligneAction(w, 'Muet').find('input').setValue('9, 9')
-    const message = ligneAction(w, 'Muet').find('[data-conflict]')
+  it('validation: a duplicate internal to the field is reported without naming an action', async () => {
+    const { w } = await mountLoaded()
+    await actionRow(w, 'Muet').find('input').setValue('9, 9')
+    const message = actionRow(w, 'Muet').find('[data-conflict]')
     expect(message.exists()).toBe(true)
     expect(message.text()).toBe('le code 9 est saisi deux fois')
-    // Aucune autre action n'est en cause : le message ne doit citer personne.
+    // No other action is at fault: the message must name no one.
     expect(message.text()).not.toContain('Muet')
   })
 
-  it('validation : tant qu’un conflit existe, « Enregistrer » est désactivé et n’émet rien', async () => {
-    const { w, spy } = await conflitEntreDeuxLignes()
+  it('validation: as long as a conflict exists, "Save" is disabled and emits nothing', async () => {
+    const { w, spy } = await conflictBetweenTwoRows()
     const save = w.find('[data-save]')
     expect(save.attributes('disabled')).toBeDefined()
-    // Un bouton grise sans phrase n'explique rien.
-    expect(w.find('[data-save-blocked]').text()).toBe(CATALOGUE.save_conflicts)
+    // A greyed-out button with no sentence explains nothing.
+    expect(w.find('[data-save-blocked]').text()).toBe(CATALOG.save_conflicts)
     await save.trigger('click')
     await flushPromises()
     expect(ops(spy)).toEqual([])
   })
 
-  it('validation : effacer le code fautif retire l’erreur et réactive « Enregistrer »', async () => {
-    const { w } = await conflitEntreDeuxLignes()
-    // Le conflit existe **avant** l'effacement : sans cette assertion, le test
-    // passerait tout aussi bien si `[data-conflict]` n'etait jamais rendu.
+  it('validation: clearing the faulty code removes the error and re-enables "Save"', async () => {
+    const { w } = await conflictBetweenTwoRows()
+    // The conflict exists **before** clearing: without this assertion, the
+    // test would pass just as well if `[data-conflict]` were never rendered.
     expect(w.findAll('[data-conflict]')).toHaveLength(2)
-    await ligneAction(w, 'Veille').find('[data-clear]').trigger('click')
+    await actionRow(w, 'Veille').find('[data-clear]').trigger('click')
     expect(w.findAll('[data-conflict]')).toHaveLength(0)
     expect(w.find('[data-save]').attributes('disabled')).toBeUndefined()
     expect(w.find('[data-save-blocked]').exists()).toBe(false)
   })
 
-  it('validation : un code arrivé par apprentissage allume la validation comme une frappe', async () => {
-    // La couture entre la popin et la validation a chaud : `applyCode`
-    // ecrit dans le meme `codes`, donc le `computed` doit recalculer. Rien ne
-    // le tenait -- tous les tests de conflit passaient par `setValue`, tous
-    // ceux d'apprentissage par un code libre. « Muet » porte deja 9 : le
-    // capturer sur « Veille » doit mettre les deux lignes en erreur.
-    const { w, ligne } = await apprendreEtCapter('Veille', 9)
+  it('validation: a code arriving via learning triggers live validation like a keystroke', async () => {
+    // The seam between the popup and live validation: `applyCode` writes
+    // into the same `codes`, so the `computed` must recompute. Nothing was
+    // holding this -- all the conflict tests went through `setValue`, all
+    // the learning tests through a free code. "Muet" already carries 9:
+    // capturing it on "Veille" must put both rows in error.
+    const { w, row } = await learnAndCapture('Veille', 9)
     expect(w.findAll('[data-conflict]')).toHaveLength(2)
-    // La ligne apprise nomme l'autre action, et l'autre la nomme en retour.
-    // `ligne()` vient du scenario : c'est aussi ce qui tient sa recherche de
-    // ligne sur la premiere cellule -- un `text().includes('Veille')` ramenerait
-    // ici la ligne « Muet », dont le message de conflit nomme « Veille ».
-    expect(ligne().find('[data-conflict]').text()).toContain('Muet')
-    expect(ligneAction(w, 'Muet').find('[data-conflict]').text()).toContain('Veille')
+    // The learned row names the other action, and the other names it back.
+    // `row()` comes from the scenario: it is also what keeps its row
+    // lookup on the first cell -- a `text().includes('Veille')` would
+    // return the "Muet" row here, whose conflict message names "Veille".
+    expect(row().find('[data-conflict]').text()).toContain('Muet')
+    expect(actionRow(w, 'Muet').find('[data-conflict]').text()).toContain('Veille')
     expect(w.find('[data-save]').attributes('disabled')).toBeDefined()
   })
 
-  it('validation : une table saine chargée du serveur n’affiche aucun conflit', async () => {
-    // Garde contre un faux positif au montage : les 22 champs vides ne sont
-    // pas 22 fois le meme code.
-    const { w } = await monter()
+  it('validation: a healthy table loaded from the server shows no conflict', async () => {
+    // Guard against a false positive on mount: the 22 empty fields are not
+    // 22 times the same code.
+    const { w } = await mountLoaded()
     expect(w.findAll('[data-conflict]')).toHaveLength(0)
     expect(w.find('[data-save]').attributes('disabled')).toBeUndefined()
   })

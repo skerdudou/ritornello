@@ -1,79 +1,79 @@
 import type { DateFormat } from '../types'
 
 /**
- * Lignes de log retenues par une requête de filtre : sous-chaîne,
- * insensible à la casse, order d'entrée préservé.
+ * Log lines retained by a filter query: substring, case-insensitive, input
+ * order preserved.
  *
- * L'order est un contract, step un hasard : `/api/logs` rend les lignes les plus
- * récentes en premier, et un filtre qui retrierait renverserait cette
- * chronologie sans que l'appelant l'ait demandé.
+ * The order is a contract, not an accident: `/api/logs` returns the most
+ * recent lines first, and a filter that re-sorted would reverse that
+ * chronology without the caller having asked for it.
  *
- * Une requête vide — ou faite d'espaces seuls, ce qu'un champ de saisie produit
- * en permanence — rend la list entière plutôt qu'aucune ligne : un champ qu'on
- * vient de vider doit rendre ce qu'on voyait avant d'y taper.
+ * An empty query — or one made of spaces only, which an input field produces
+ * all the time — returns the whole list rather than no line: a field one has
+ * just cleared must return what was visible before typing into it.
  */
-export function filterLines(lignes: string[], requete: string): string[] {
-  const q = requete.trim().toLowerCase()
-  if (!q) return lignes
-  return lignes.filter((l) => l.toLowerCase().includes(q))
+export function filterLines(lines: string[], query: string): string[] {
+  const q = query.trim().toLowerCase()
+  if (!q) return lines
+  return lines.filter((l) => l.toLowerCase().includes(q))
 }
 
 
 const twoDigits = (n: number) => String(n).padStart(2, '0')
 
 /**
- * Une date écrite comme l'appareil est réglé pour l'écrire.
+ * A date written the way the device is set to write it.
  *
- * Un choix fermé et non `Intl` : le rendu d'`Intl` dépend de la locale du
- * browser *et* du moteur, donc il ne se teste step de façon stable et il
- * contredirait le réglage — c'est précisément ce réglage-là qui décide, step la
- * machine de qui regarde.
+ * A closed choice and not `Intl`: the rendering of `Intl` depends on the
+ * browser's locale *and* on the engine, so it cannot be tested stably and it
+ * would contradict the setting — it is precisely that setting that decides,
+ * not the machine of whoever is looking.
  */
 export function formatDate(d: Date, format: DateFormat): string {
-  const annee = d.getFullYear()
-  const mois = twoDigits(d.getMonth() + 1)
-  const jour = twoDigits(d.getDate())
-  if (format === 'year_month_day') return `${annee}-${mois}-${jour}`
-  if (format === 'month_day_year') return `${mois}/${jour}/${annee}`
-  return `${jour}/${mois}/${annee}`
+  const year = d.getFullYear()
+  const month = twoDigits(d.getMonth() + 1)
+  const day = twoDigits(d.getDate())
+  if (format === 'year_month_day') return `${year}-${month}-${day}`
+  if (format === 'month_day_year') return `${month}/${day}/${year}`
+  return `${day}/${month}/${year}`
 }
 
 /**
- * Une heure de log : avec les secondes, contrairement à l'clock de
- * veille. Deux lignes émises dans la même minute sont banales dans un log,
- * et l'order y est l'information principale.
+ * A log time: with seconds, unlike the standby clock. Two lines emitted in
+ * the same minute are commonplace in a log, and the order is the main
+ * information there.
  *
- * Sur 12 h, minuit s'écrit `12:00:00 AM` et midi `12:00:00 PM` — la même
- * convention que l'afficheur console, et pour la même raison : `0:00 AM`
- * n'existe nulle part.
+ * On 12 h, midnight is written `12:00:00 AM` and noon `12:00:00 PM` — the
+ * same convention as the console display, and for the same reason: `0:00 AM`
+ * exists nowhere.
  */
-export function formatTime(d: Date, sur24h: boolean): string {
+export function formatTime(d: Date, on24h: boolean): string {
   const minutes = twoDigits(d.getMinutes())
-  const secondes = twoDigits(d.getSeconds())
-  if (sur24h) return `${twoDigits(d.getHours())}:${minutes}:${secondes}`
+  const seconds = twoDigits(d.getSeconds())
+  if (on24h) return `${twoDigits(d.getHours())}:${minutes}:${seconds}`
   const h = d.getHours()
-  const suffixe = h < 12 ? 'AM' : 'PM'
-  return `${h % 12 === 0 ? 12 : h % 12}:${minutes}:${secondes} ${suffixe}`
+  const suffix = h < 12 ? 'AM' : 'PM'
+  return `${h % 12 === 0 ? 12 : h % 12}:${minutes}:${seconds} ${suffix}`
 }
 
 /**
- * Réécrit l'horodatage en tête d'une ligne de log dans le format réglé, et
- * **dans le fuseau du browser**.
+ * Rewrites the timestamp at the head of a log line in the configured format,
+ * and **in the browser's time zone**.
  *
- * Le cœur journalise en UTC (`2026-08-28T12:18:32.016060Z`), ce qui est le bon
- * choix pour un fichier mais se lit mal quand on cherche « ce qui s'est passé
- * il y a cinq minutes ». Le fuseau vient du browser et non d'un réglage :
- * c'est celui de qui regarde, ce qui reste juste pour un téléphone qui voyage,
- * là où un réglage de plus pourrait contredire l'appareil.
+ * The core logs in UTC (`2026-08-28T12:18:32.016060Z`), which is the right
+ * choice for a file but reads poorly when looking for "what happened five
+ * minutes ago". The time zone comes from the browser and not from a setting:
+ * it is that of whoever is looking, which stays right for a travelling phone,
+ * where one more setting could contradict the device.
  *
- * Une ligne sans horodatage reconnaissable est rendue **telle quelle** : le
- * tampon du cœur ne contient aujourd'hui que ses propres lignes, mais une
- * ligne qu'on ne sait step lire doit rester lisible plutôt que d'être tronquée.
+ * A line without a recognizable timestamp is rendered **as is**: the core's
+ * buffer today only holds its own lines, but a line we cannot read must stay
+ * readable rather than be truncated.
  */
-export function lineDate(ligne: string, format: DateFormat, sur24h: boolean): string {
-  const trouve = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s+/.exec(ligne)
-  if (!trouve) return ligne
-  const d = new Date(trouve[1]!)
-  if (Number.isNaN(d.getTime())) return ligne
-  return `${formatDate(d, format)} ${formatTime(d, sur24h)} ${ligne.slice(trouve[0].length)}`
+export function lineDate(line: string, format: DateFormat, on24h: boolean): string {
+  const found = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s+/.exec(line)
+  if (!found) return line
+  const d = new Date(found[1]!)
+  if (Number.isNaN(d.getTime())) return line
+  return `${formatDate(d, format)} ${formatTime(d, on24h)} ${line.slice(found[0].length)}`
 }

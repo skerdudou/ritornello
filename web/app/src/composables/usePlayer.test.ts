@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import type { PlayerPayload } from '../types'
 import { formatDuration, formatPosition, nothingToShow, usePlayer } from './usePlayer'
 
-/** Etat complet, dont chaque test retire ce qu'il veut eprouver. */
-function state(partiel: Partial<PlayerPayload> = {}): PlayerPayload {
+/** Complete state, from which each test removes what it wants to test. */
+function state(partial: Partial<PlayerPayload> = {}): PlayerPayload {
   return {
     source: 'radio',
     volume: 60,
@@ -24,36 +24,36 @@ function state(partiel: Partial<PlayerPayload> = {}): PlayerPayload {
     position_s: null,
     seekable: false,
     can_eject: false,
-    ...partiel,
+    ...partial,
   }
 }
 
-/** Faux `EventSource` : retient les instances et permet de pousser des trames. */
-class FauxEventSource {
-  static instances: FauxEventSource[] = []
+/** Fake `EventSource`: keeps the instances and allows pushing frames. */
+class FakeEventSource {
+  static instances: FakeEventSource[] = []
   onmessage: ((e: MessageEvent) => void) | null = null
-  fermee = false
+  closed = false
   constructor(public url: string) {
-    FauxEventSource.instances.push(this)
+    FakeEventSource.instances.push(this)
   }
   close() {
-    this.fermee = true
+    this.closed = true
   }
-  pousse(data: unknown) {
+  push(data: unknown) {
     this.onmessage?.({ data: typeof data === 'string' ? data : JSON.stringify(data) } as MessageEvent)
   }
 }
 
 describe('formatDuration', () => {
-  it('formate en minutes et secondes', () => {
+  it('formats as minutes and seconds', () => {
     expect(formatDuration(214)).toBe('3:34')
     expect(formatDuration(60)).toBe('1:00')
     expect(formatDuration(9)).toBe('0:09')
     expect(formatDuration(3600)).toBe('60:00')
   })
 
-  it('traite comme inconnue toute valeur inexploitable', () => {
-    // Ces valeurs viennent d'un tiers : mieux vaut ne rien afficher que « -1:59 ».
+  it('treats any unusable value as unknown', () => {
+    // These values come from a third party: better to display nothing than "-1:59".
     expect(formatDuration(null)).toBeNull()
     expect(formatDuration(undefined)).toBeNull()
     expect(formatDuration(0)).toBeNull()
@@ -64,18 +64,18 @@ describe('formatDuration', () => {
 })
 
 describe('formatPosition', () => {
-  // `formatDuration` refuse les valeurs <= 0, ce qui est juste pour une duration
-  // et faux pour une position : `0:00` est un instant parfaitement legitime.
-  // Deux fonctions plutot qu'un assouplissement de la premiere, qui ferait
-  // reapparaitre des « 0:00 » la ou le refus servait.
-  it('accepte zero', () => {
+  // `formatDuration` refuses values <= 0, which is right for a duration and
+  // wrong for a position: `0:00` is a perfectly legitimate instant. Two
+  // functions rather than a relaxation of the first one, which would bring
+  // back "0:00" where the refusal was useful.
+  it('accepts zero', () => {
     expect(formatPosition(0)).toBe('0:00')
   })
-  it('formate minutes et secondes', () => {
+  it('formats minutes and seconds', () => {
     expect(formatPosition(87)).toBe('1:27')
     expect(formatPosition(3725)).toBe('62:05')
   })
-  it('rend null sur une absence', () => {
+  it('returns null on an absence', () => {
     expect(formatPosition(null)).toBeNull()
     expect(formatPosition(undefined)).toBeNull()
     expect(formatPosition(-1)).toBeNull()
@@ -85,71 +85,71 @@ describe('formatPosition', () => {
 })
 
 describe('nothingToShow', () => {
-  it('accepte toute information partielle', () => {
-    // Decision du proprietaire : on displayed tout ce qui est disponible.
+  it('accepts any partial information', () => {
+    // Owner's decision: we display everything that is available.
     expect(nothingToShow(state())).toBe(false)
     expect(nothingToShow(state({ artist: null }))).toBe(false)
     expect(nothingToShow(state({ title: null }))).toBe(false)
     expect(nothingToShow(state({ artist: null, title: null, album: 'Kind of Blue' }))).toBe(false)
   })
 
-  it('ne retient ni un state absent, ni une duration seule', () => {
+  it('retains neither an absent state nor a duration alone', () => {
     expect(nothingToShow(null)).toBe(true)
     expect(nothingToShow(state({ artist: null, title: null, album: null }))).toBe(true)
-    // « 3:34 » sans titre ni artiste n'informe personne.
+    // "3:34" without title nor artist informs nobody.
     expect(nothingToShow(state({ artist: null, title: null, album: null, duration_s: 214 }))).toBe(true)
   })
 })
 
 describe('usePlayer', () => {
-  it('ouvre le flux pousse et applique chaque trame', () => {
-    FauxEventSource.instances = []
-    vi.stubGlobal('EventSource', FauxEventSource)
-    const { state: courant, ouvre, ferme } = usePlayer()
+  it('opens the pushed stream and applies each frame', () => {
+    FakeEventSource.instances = []
+    vi.stubGlobal('EventSource', FakeEventSource)
+    const { state: current, ouvre, ferme } = usePlayer()
     ouvre()
-    const flux = FauxEventSource.instances[0]!
-    expect(flux.url).toBe('/api/player')
-    expect(courant.value).toBeNull()
+    const stream = FakeEventSource.instances[0]!
+    expect(stream.url).toBe('/api/player')
+    expect(current.value).toBeNull()
 
-    flux.pousse(state({ title: 'premier' }))
-    expect(courant.value?.title).toBe('premier')
-    flux.pousse(state({ title: 'second' }))
-    expect(courant.value?.title).toBe('second')
+    stream.push(state({ title: 'first' }))
+    expect(current.value?.title).toBe('first')
+    stream.push(state({ title: 'second' }))
+    expect(current.value?.title).toBe('second')
 
     ferme()
-    expect(flux.fermee).toBe(true)
+    expect(stream.closed).toBe(true)
   })
 
-  it('garde l affichage precedent sur une trame illisible', () => {
-    // Vider l'ecran parce qu'une trame est corrompue serait plus trompeur que
-    // de laisser le morceau precedent une seconde de trop.
-    FauxEventSource.instances = []
-    vi.stubGlobal('EventSource', FauxEventSource)
-    const { state: courant, ouvre } = usePlayer()
+  it('keeps the previous display on an unreadable frame', () => {
+    // Emptying the screen because a frame is corrupt would be more misleading
+    // than leaving the previous track one second too long.
+    FakeEventSource.instances = []
+    vi.stubGlobal('EventSource', FakeEventSource)
+    const { state: current, ouvre } = usePlayer()
     ouvre()
-    const flux = FauxEventSource.instances[0]!
-    flux.pousse(state({ title: 'connu' }))
-    flux.pousse('step du json')
-    expect(courant.value?.title).toBe('connu')
+    const stream = FakeEventSource.instances[0]!
+    stream.push(state({ title: 'known' }))
+    stream.push('not json')
+    expect(current.value?.title).toBe('known')
   })
 
-  it('ferme le flux precedent plutot que d en accumuler', () => {
-    FauxEventSource.instances = []
-    vi.stubGlobal('EventSource', FauxEventSource)
+  it('closes the previous stream rather than accumulating them', () => {
+    FakeEventSource.instances = []
+    vi.stubGlobal('EventSource', FakeEventSource)
     const { ouvre } = usePlayer()
     ouvre()
     ouvre()
-    expect(FauxEventSource.instances).toHaveLength(2)
-    expect(FauxEventSource.instances[0]!.fermee).toBe(true)
+    expect(FakeEventSource.instances).toHaveLength(2)
+    expect(FakeEventSource.instances[0]!.closed).toBe(true)
   })
 
-  it('sans EventSource, previent et laisse le reste de la page vivre', () => {
+  it('without EventSource, warns and lets the rest of the page live', () => {
     vi.stubGlobal('EventSource', undefined)
-    const avertit = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const { state: courant, ouvre } = usePlayer()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { state: current, ouvre } = usePlayer()
     expect(() => ouvre()).not.toThrow()
-    expect(courant.value).toBeNull()
-    expect(avertit).toHaveBeenCalled()
-    avertit.mockRestore()
+    expect(current.value).toBeNull()
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
   })
 })

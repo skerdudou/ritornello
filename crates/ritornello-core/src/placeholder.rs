@@ -1,49 +1,48 @@
-// Page servie quand l'IHM n'a pas été construite.
+// Page served when the UI has not been built.
 //
-// Ce fichier est inclus **textuellement** par `build.rs` (`include!`) autant
-// qu'il est compilé comme module du crate : c'est ce qui permet de tester la
-// fabrication du bouchon par `cargo test`, alors que Cargo n'exécute jamais
-// les tests d'un script de build. Il ne doit donc dépendre d'**aucune**
-// crate externe.
+// This file is included **textually** by `build.rs` (`include!`) as well as
+// compiled as a module of the crate: this is what allows testing the
+// fabrication of the placeholder with `cargo test`, whereas Cargo never runs
+// the tests of a build script. It must therefore depend on **no** external
+// crate.
 //
-// Remarque : ce commentaire de module est volontairement un commentaire
-// ordinaire (`//`) et non une doc interne (`//!`). Une doc interne provoque
-// `E0753 : expected outer doc comment` une fois ce fichier inclus tel quel
-// par `build.rs` via `include!` — la restriction du compilateur porte sur la
-// position dans le stream de tokens du fichier hôte, pas sur le fichier source
-// tel qu'on le read ici.
+// Note: this module comment is deliberately an ordinary comment (`//`) and
+// not an inner doc comment (`//!`). An inner doc comment triggers
+// `E0753: expected outer doc comment` once this file is included as is by
+// `build.rs` via `include!` — the compiler's restriction concerns the position
+// in the host file's token stream, not the source file as read here.
 
-/// Marqueur reconnaissable dans la page de bouchon.
+/// Recognizable marker in the placeholder page.
 pub const MARKER: &str = "ritornello-ihm-non-construite";
 
-/// HTML minimal, sans dépendance, qui explique quoi lancer. Mieux qu'une
-/// erreur de macro `include_str!` sur un clone frais : `cargo build` et
-/// `cargo test` restent verts sans Node installé, et le message est explicite.
-pub fn placeholder_html(commande: &str) -> String {
+/// Minimal, dependency-free HTML that explains what to run. Better than an
+/// `include_str!` macro error on a fresh clone: `cargo build` and `cargo test`
+/// stay green without Node installed, and the message is explicit.
+pub fn placeholder_html(command: &str) -> String {
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <title>ritornello</title></head><body id=\"{MARKER}\">\
          <h1>ritornello</h1>\
-         <p>Web interface not built. Run:</p><pre>{commande}</pre>\
+         <p>Web interface not built. Run:</p><pre>{command}</pre>\
          </body></html>"
     )
 }
 
-/// Vrai si `contenu` est la page de bouchon plutôt qu'un vrai livrable.
+/// True if `content` is the placeholder page rather than a real deliverable.
 ///
-/// Fonction **pure** du contenu, donc testable ici comme le reste de ce
-/// fichier, alors que Cargo n'exécute jamais les tests d'un script de build.
+/// A **pure** function of the content, hence testable here like the rest of
+/// this file, whereas Cargo never runs the tests of a build script.
 ///
-/// Elle existe pour `build.rs` : `cargo::warning` n'était émis qu'à la
-/// **création** du bouchon. Séquence réaliste : clone frais → `cargo build` nu
-/// (bouchon créé, avertissement affiché une fois) → `cross build --release
-/// --target armv7…`. Les scripts de build sont rejoués par cible, mais
-/// `index.html` existe désormais — c'est le bouchon — donc la fonction
-/// retournait tôt et **aucun avertissement** n'était émis : le binaire de
-/// release embarquait une page « Web interface not built » en silence.
-#[allow(dead_code)] // consommee par build.rs (via `include!`) et par les tests
-pub fn is_placeholder(contenu: &str) -> bool {
-    contenu.contains(MARKER)
+/// It exists for `build.rs`: `cargo::warning` was only emitted at the
+/// **creation** of the placeholder. Realistic sequence: fresh clone → bare
+/// `cargo build` (placeholder created, warning shown once) → `cross build
+/// --release --target armv7…`. Build scripts are replayed per target, but
+/// `index.html` now exists — it is the placeholder — so the function returned
+/// early and **no warning** was emitted: the release binary silently embedded
+/// a "Web interface not built" page.
+#[allow(dead_code)] // consumed by build.rs (via `include!`) and by the tests
+pub fn is_placeholder(content: &str) -> bool {
+    content.contains(MARKER)
 }
 
 #[cfg(test)]
@@ -51,23 +50,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn le_bouchon_est_un_html_qui_invite_a_construire_lihm() {
+    fn the_placeholder_is_an_html_page_inviting_to_build_the_ui() {
         let html = placeholder_html("npm run build --workspaces");
         assert!(html.starts_with("<!doctype html>"));
         assert!(html.contains("npm run build --workspaces"));
-        // Pas de faux positif : le bouchon doit se reconnaitre a coup sur.
+        // No false positive: the placeholder must be recognized for sure.
         assert!(html.contains(MARKER));
     }
 
     #[test]
-    fn est_un_bouchon_reconnait_le_bouchon_et_pas_un_vrai_livrable() {
+    fn is_placeholder_recognizes_the_placeholder_and_not_a_real_deliverable() {
         assert!(is_placeholder(&placeholder_html("npm ci && npm run build --workspaces")));
-        // Forme d'un `index.html` reellement produit par Vite (import map,
-        // point de montage) : aucun marqueur, donc aucun avertissement.
-        let vrai = "<!doctype html><html><head><script type=\"importmap\">\
+        // Shape of an `index.html` actually produced by Vite (import map,
+        // mount point): no marker, hence no warning.
+        let real = "<!doctype html><html><head><script type=\"importmap\">\
                     {\"imports\":{\"vue\":\"/assets/vue.js\"}}</script></head>\
                     <body><div id=\"app\"></div></body></html>";
-        assert!(!is_placeholder(vrai));
+        assert!(!is_placeholder(real));
         assert!(!is_placeholder(""));
     }
 }

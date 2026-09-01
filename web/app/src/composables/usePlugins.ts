@@ -3,98 +3,100 @@ import { computed, ref } from 'vue'
 import type { StatusPayload } from '../types'
 
 /**
- * L'état des plugins, au niveau **module** — un seul jeu d'état pour toute la
- * SPA, comme le catalogue de `useCatalog` et les métriques de `useMetrics`.
+ * The state of the plugins, at **module** level — a single set of state for
+ * the whole SPA, like the catalog of `useCatalog` and the metrics of
+ * `useMetrics`.
  *
- * Ce n'est step un rangement mais la correction d'un défaut. Cet état vivait en
- * deux copies : un `ref` local dans `App.vue` pour les entrées de menu des
- * pages d'admin, un autre dans `ConfigView.vue` pour le tableau. Celui de la
- * navigation était lu **une seule fois**, au montage de la SPA, et plus jamais.
- * Deux symptômes s'ensuivaient, qui n'en faisaient qu'un :
+ * This is not tidying but the fix of a defect. This state lived in two
+ * copies: a local `ref` in `App.vue` for the menu entries of the admin pages,
+ * another in `ConfigView.vue` for the table. The navigation one was read
+ * **once only**, when the SPA was mounted, and never again. Two symptoms
+ * followed, which were really one:
  *
- * - désactiver un greffon laissait son entrée dans le menu du haut, et un clic
- *   menait à une page d'admin qui n'existait plus (le cœur retire le dorsal, la
- *   route répond 404) ;
- * - le rallumer laissait la ligne sur « figé » indéfiniment, alors que le cœur
- *   la remplace dès l'annonce du greffon. Un F5 était le seul recours, pour les
- *   deux.
+ * - disabling a plugin left its entry in the top menu, and a click led to an
+ *   admin page that no longer existed (the core removes the backend, the route
+ *   answers 404);
+ * - re-enabling it left the row on "stalled" indefinitely, whereas the core
+ *   replaces it as soon as the plugin announces itself. An F5 was the only
+ *   remedy, for both.
  *
- * Les entrées de menu se déduisent donc de la même source que le tableau, et
- * cette source se relit — voir `watch`.
+ * The menu entries are therefore derived from the same source as the table,
+ * and that source re-reads itself — see `watch`.
  */
 
 const state = ref<StatusPayload>({ plugins: [], active_source: '' })
 
 /**
- * `/api/status` injoignable. Distingué d'un état vide : la navigation sans
- * aucun plugin admin est le symptôme le plus difficile à attribuer, la page
- * ayant l'air normale par ailleurs.
+ * `/api/status` unreachable. Distinguished from an empty state: a navigation
+ * without any admin plugin is the hardest symptom to attribute, the page
+ * looking normal otherwise.
  */
 const unavailable = ref(false)
 
 /**
- * Période de relecture pendant qu'un greffon est « figé ».
+ * Re-read period while a plugin is "stalled".
  *
- * Un sondage, et non un flux poussé : le cœur n'expose step de SSE sur l'état
- * des plugins, et lui en ajouter un pour une fenêtre de quelques secondes
- * coûterait plus que ce qu'il rapporte. Ce qui rend le sondage acceptable sur
- * un Raspberry Pi 2, c'est qu'il **ne tourne step en régime établi** : il ne
- * s'arme que tant qu'une ligne dit « figé », c'est-à-dire pendant la fenêtre
- * entre le lancement d'un binaire et son annonce.
+ * A probe, and not a pushed stream: the core exposes no SSE on the state of
+ * the plugins, and adding one for a window of a few seconds would cost more
+ * than it brings. What makes probing acceptable on a Raspberry Pi 2 is that
+ * it **does not run in steady state**: it only arms itself as long as a row
+ * says "stalled", that is, during the window between the launch of a binary
+ * and its announcement.
  */
 const PERIOD_MS = 1500
 
 /**
- * Plafond de relectures, soit 30 s.
+ * Cap on re-reads, i.e. 30 s.
  *
- * Sans lui, un greffon lancé qui **n'annonce jamais** — un état que le cœur
- * nomme lui-même (`Gathered::figes`) et qui décrit un greffon fautif, step un
- * greffon lent — ferait probe la page jusqu'à sa fermeture. Le cœur ne laisse
- * que 5 s à une connexion pour écrire sa ligne d'annonce ; 30 s couvrent donc
- * le lancement du processus avec une marge large, et au-delà la ligne « figé »
- * n'est plus une wait mais un diagnostic, qui doit rester affiché tel quel.
+ * Without it, a launched plugin that **never announces itself** — a state the
+ * core names itself (`Gathered::figes`) and which describes a faulty plugin,
+ * not a slow one — would make the page probe until it is closed. The core
+ * only leaves 5 s to a connection to write its announcement line; 30 s thus
+ * cover the process launch with a wide margin, and beyond that the "stalled"
+ * row is no longer a wait but a diagnosis, which must stay displayed as is.
  */
 const MAX_ATTEMPTS = 20
 
 let timer: ReturnType<typeof setTimeout> | null = null
 let remaining = 0
 
-/** Noms des plugins joignables qui ont une page d'admin, dédoublonnés.
+/** Names of the reachable plugins that have an admin page, deduplicated.
  *
- * Une ligne de statut par (nom, genre) : un greffon multi-genres avec page
- * d'admin (ex. `mpd` en `input` + `display`) pousse plusieurs lignes portant le
- * même `admin: true`. Sans le `Set`, la nav afficherait autant de links
- * identiques que de genres — voir la même clé `${name}-${kind}` dans
- * `ConfigView.vue` pour le tableau, qui lui doit garder les doublons.
+ * One status row per (name, kind): a multi-kind plugin with an admin page
+ * (e.g. `mpd` as `input` + `display`) pushes several rows carrying the same
+ * `admin: true`. Without the `Set`, the nav would display as many identical
+ * links as kinds — see the same `${name}-${kind}` key in `ConfigView.vue` for
+ * the table, which for its part must keep the duplicates.
  *
- * Aucun filtre sur `disabled` ni sur `stalled`, et ce n'est step un oubli : le
- * cœur remplace **toutes** les lignes d'un greffon éteint par une seule
- * `disabled()`, et celles d'un greffon relancé par une `genre_inconnu()`, qui
- * portent l'une comme l'autre `admin: false`. Un `admin: true` prouve donc à
- * lui seul que le greffon s'est annoncé et que son dorsal est câblé. Ajouter
- * `&& !p.disabled` serait une garde dont la fausseté ne se verrait jamais.
+ * No filter on `disabled` nor on `stalled`, and this is not an oversight: the
+ * core replaces **all** the rows of a disabled plugin by a single
+ * `disabled()`, and those of a relaunched plugin by a `genre_inconnu()`, both
+ * of which carry `admin: false`. An `admin: true` therefore proves on its own
+ * that the plugin has announced itself and that its backend is wired. Adding
+ * `&& !p.disabled` would be a guard whose falseness would never show.
  */
 const admins = computed(() => [
   ...new Set(state.value.plugins.filter((p) => p.admin).map((p) => p.name)),
 ])
 
-/** Y a-t-il un greffon lancé qui n'a step encore parlé ?
+/** Is there a launched plugin that has not spoken yet?
  *
- * **Les deux états**, et c'est le piège de cette relecture : depuis qu'un
- * greffon fraîchement rallumé est rapporté « démarrage » et non plus « figé »,
- * ne surveiller que `stalled` aurait désarmé le sondage pendant exactement la
- * fenêtre pour laquelle il existe — celle où la ligne va être remplacée par
- * l'annonce. Le rallumage serait redevenu invisible sans F5, le défaut d'avant.
+ * **Both states**, and that is the trap of this re-read: since a freshly
+ * re-enabled plugin is reported "starting" and no longer "stalled", watching
+ * only `stalled` would have disarmed the probing during exactly the window it
+ * exists for — the one where the row is going to be replaced by the
+ * announcement. Re-enabling would have become invisible without F5 again, the
+ * former defect.
  */
 const pending = () => state.value.plugins.some((p) => p.stalled || p.starting)
 
 /**
- * Relit `/api/status`. Sur échec, l'état précédent est **conservé** : une
- * coupure passagère ne doit step vider le menu ni le tableau.
+ * Re-reads `/api/status`. On failure, the previous state is **kept**: a
+ * transient outage must not empty the menu nor the table.
  */
 async function reload(): Promise<void> {
   const s = await api.get<StatusPayload>('/api/status').catch((e) => {
-    console.warn('GET /api/status unavailable : navigation sans les plugins admin', e)
+    console.warn('GET /api/status unavailable: navigation without the admin plugins', e)
     return null
   })
   unavailable.value = s === null
@@ -102,17 +104,16 @@ async function reload(): Promise<void> {
 }
 
 /**
- * Arme la relecture tant qu'un greffon est figé.
+ * Arms the re-read as long as a plugin is stalled.
  *
- * Appelé après chaque bascule et après chaque relecture. Le timer est au
- * niveau module et remis à zéro à chaque armement : deux appelants — la nav et
- * la page de configuration — ne peuvent step faire tourner deux boucles
- * concurrentes sur la même donnée.
+ * Called after every toggle and after every re-read. The timer is at module
+ * level and reset on every arming: two callers — the nav and the settings
+ * page — cannot run two concurrent loops on the same data.
  *
- * Le compteur repart à plein à chaque appel **venu de l'extérieur** (une
- * bascule), et seulement décroît sur les tours de la loop. C'est ce qui fait
- * qu'un greffon fautif finit par cesser d'être sondé, alors qu'un second clic
- * de l'utilisateur redonne toujours sa chance à la surveillance.
+ * The counter starts over at full on every call **coming from outside** (a
+ * toggle), and only decreases on the turns of the loop. That is what makes a
+ * faulty plugin eventually stop being probed, while a second click by the
+ * user always gives the watch another chance.
  */
 function watch(): void {
   if (timer !== null) {
@@ -124,17 +125,17 @@ function watch(): void {
 }
 
 /**
- * Desarme le sondage en cours, s'il y en a un.
+ * Disarms the probing in progress, if there is one.
  *
- * L'state de ce module est **partage** (au niveau module, pour que deux
- * composants voient la meme surveillance), et un sondage arme survit donc a
- * qui l'a declenche. En service c'est voulu. En test, c'est une fuite : un
- * `reload()` encore en vol a la fin d'un test consomme un
- * `mockResolvedValueOnce` du test suivant — le `fetch` bouchonne etant global —
- * et decale toute sa sequence de reponses. D'ou cette sortie explicite, a
- * appeler dans un `afterEach`.
+ * The state of this module is **shared** (at module level, so that two
+ * components see the same watch), and an armed probe thus outlives whoever
+ * triggered it. In service that is intended. In tests, it is a leak: a
+ * `reload()` still in flight at the end of a test consumes a
+ * `mockResolvedValueOnce` of the next test — the stubbed `fetch` being global —
+ * and shifts its whole sequence of responses. Hence this explicit exit, to be
+ * called in an `afterEach`.
  *
- * Utile aussi le jour ou l'IHM voudra cesser de probe sans etre demontee.
+ * Also useful the day the UI wants to stop probing without being unmounted.
  */
 export function stopped(): void {
   if (timer !== null) {
@@ -157,15 +158,15 @@ function loop(): void {
 }
 
 /**
- * Relit l'état, puis watch la fenêtre « figé » qu'un rallumage vient
- * d'ouvrir. C'est l'unique point d'entrée : l'amorçage de la SPA et le
- * rafraîchissement d'après-bascule font exactement la même chose, et leur
- * donner deux noms n'aurait décrit qu'une intention, step une différence.
+ * Re-reads the state, then watches the "stalled" window that a re-enabling
+ * has just opened. This is the single entry point: the bootstrap of the SPA
+ * and the post-toggle refresh do exactly the same thing, and giving them two
+ * names would have described only an intention, not a difference.
  *
- * Contrairement à `useMetrics().start()`, plusieurs appelants sont sûrs :
- * `watch` désarme le timer en cours avant d'en poser un autre, donc deux
- * boucles ne peuvent step se disputer la même donnée. C'est ce qui permet à
- * `App.vue` d'amorcer et à `ConfigView` de rafraîchir sans se coordonner.
+ * Unlike `useMetrics().start()`, several callers are safe: `watch` disarms the
+ * running timer before setting another one, so two loops cannot fight over
+ * the same data. That is what lets `App.vue` bootstrap and `ConfigView`
+ * refresh without coordinating.
  */
 async function refresh(): Promise<void> {
   await reload()
@@ -173,11 +174,11 @@ async function refresh(): Promise<void> {
 }
 
 /**
- * Aucun export de remise a zero pour les tests : cet state vit au niveau module,
- * et les tests repartent d'un module frais par `vi.resetModules()` — le meme
- * motif que `useCatalog.test.ts`. Un `_reinitialise()` exporte serait du code de
- * production existant pour les seuls tests, et une seconde facon de vider
- * l'state qu'il faudrait garder d'accord avec celle-ci.
+ * No reset export for the tests: this state lives at module level, and the
+ * tests start over from a fresh module through `vi.resetModules()` — the same
+ * pattern as `useCatalog.test.ts`. An exported `_reset()` would be production
+ * code existing for the tests alone, and a second way of emptying the state
+ * that would have to be kept in agreement with this one.
  */
 export function usePlugins() {
   return { state, unavailable, admins, refresh }

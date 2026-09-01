@@ -7,7 +7,7 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-/// Opérations portées par `SetData`, discriminées par le champ `op`.
+/// Operations carried by `SetData`, discriminated by the `op` field.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Op {
@@ -49,7 +49,7 @@ impl AdminPlugin for GenericInputAdmin {
     }
 
     async fn get_data(&self) -> serde_json::Value {
-        // Aucune garde de verrou ne traverse un `.await` (il n'y en a aucun).
+        // No lock guard crosses an `.await` (there is none).
         let devices = self.hub.device_names();
         let bindings = self.hub.bindings.read().unwrap().clone();
         let learning = self.hub.learn.read().unwrap().snapshot();
@@ -74,8 +74,8 @@ impl AdminPlugin for GenericInputAdmin {
             Op::Save { bindings } => {
                 bindings.validate().map_err(|e| e.message(&self.catalog.read().unwrap()))?;
                 bindings.save(&self.bindings_path).map_err(|e| {
-                    // Même partage qu'en radio : le détail I/O va au journal,
-                    // pas dans le corps de la réponse.
+                    // Same split as in radio: the I/O detail goes to the log,
+                    // not into the response body.
                     tracing::warn!("failed to save bindings: {e}");
                     self.catalog.read().unwrap().get("save_failed").to_string()
                 })?;
@@ -91,34 +91,32 @@ impl AdminPlugin for GenericInputAdmin {
                 Ok(())
             }
             Op::LoadPreset { device, preset } => {
-                // Rien n'est persisté : l'utilisateur enregistre ensuite.
-                // Même validation sur copie qu'`ImportPreset` : le répertoire
-                // des presets est configurable et ouvert à l'opérateur, donc
-                // « fichiers livrés, réputés valides » ne tient pas. Sans
-                // cela, un preset invalide devenait active en mémoire et
-                // c'est le « Enregistrer » suivant qui échouait — sur une
-                // table que l'IHM elle-même avait produite.
+                // Nothing is persisted: the user saves afterwards.
+                // Same validation on a copy as `ImportPreset`: the presets
+                // directory is configurable and open to the operator, so
+                // "shipped files, deemed valid" does not hold. Without this, an
+                // invalid preset became active in memory and it was the next
+                // "Save" that failed — on a table the UI itself had produced.
                 let bindings = presets::load(&self.presets_root, &preset)
                     .map_err(|e| e.message(&self.catalog.read().unwrap()))?;
-                let mut candidat = self.hub.bindings.read().unwrap().clone();
-                candidat.replace_device(&device, bindings);
-                candidat.validate().map_err(|e| e.message(&self.catalog.read().unwrap()))?;
-                *self.hub.bindings.write().unwrap() = candidat;
+                let mut candidate = self.hub.bindings.read().unwrap().clone();
+                candidate.replace_device(&device, bindings);
+                candidate.validate().map_err(|e| e.message(&self.catalog.read().unwrap()))?;
+                *self.hub.bindings.write().unwrap() = candidate;
                 Ok(())
             }
             Op::ImportPreset { device, content } => {
-                // Contrairement à `load_preset` (fichiers livrés, réputés
-                // valides), un fichier téléversé par l'utilisateur peut porter
-                // des bindings invalides : on valide sur une copie avant de
-                // toucher la table partagée, et rien n'est persisté ici non
-                // plus — seul « Enregistrer » écrit sur disque.
+                // Unlike `load_preset` (shipped files, deemed valid), a file
+                // uploaded by the user may carry invalid bindings: we validate
+                // on a copy before touching the shared table, and nothing is
+                // persisted here either — only "Save" writes to disk.
                 let bindings = presets::parse_preset(&content).map_err(|e| {
                     self.catalog.read().unwrap().get("bad_request").replace("{detail}", &e)
                 })?;
-                let mut candidat = self.hub.bindings.read().unwrap().clone();
-                candidat.replace_device(&device, bindings);
-                candidat.validate().map_err(|e| e.message(&self.catalog.read().unwrap()))?;
-                *self.hub.bindings.write().unwrap() = candidat;
+                let mut candidate = self.hub.bindings.read().unwrap().clone();
+                candidate.replace_device(&device, bindings);
+                candidate.validate().map_err(|e| e.message(&self.catalog.read().unwrap()))?;
+                *self.hub.bindings.write().unwrap() = candidate;
                 Ok(())
             }
             Op::Rescan => {
@@ -187,44 +185,44 @@ mod tests {
     }
 
     #[test]
-    fn asset_expose_ui_js_et_ui_css_et_rien_dautre() {
+    fn asset_exposes_ui_js_and_ui_css_and_nothing_else() {
         let f = fixture();
-        let (mime, corps) = f.admin.asset("ui.js").unwrap();
+        let (mime, body) = f.admin.asset("ui.js").unwrap();
         assert_eq!(mime, "text/javascript");
-        assert!(!corps.is_empty());
+        assert!(!body.is_empty());
         assert_eq!(f.admin.asset("ui.css").unwrap().0, "text/css");
-        // Un path inconnu n'est pas une erreur : c'est un 404 cote coeur.
+        // An unknown path is not an error: it is a 404 on the core side.
         assert!(f.admin.asset("../../../etc/passwd").is_none());
         assert!(f.admin.asset("index.html").is_none());
     }
 
     #[test]
-    fn catalog_expose_les_cles_du_composant() {
+    fn catalog_exposes_the_component_keys() {
         let f = fixture();
         let v = f.admin.catalog();
-        assert!(v["btn_save"].is_string(), "le sources_catalog doit porter les cles du plugin");
+        assert!(v["btn_save"].is_string(), "the catalog must carry the plugin's keys");
     }
 
-    /// Pack français livré dans le dépôt.
+    /// French pack shipped in the repository.
     fn fr_pack() -> String {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../deploy/locales/generic-input/fr.toml");
-        std::fs::read_to_string(p).expect("pack fr livre")
+        std::fs::read_to_string(p).expect("shipped fr pack")
     }
 
     #[test]
-    fn parite_des_cles_entre_len_embarque_et_le_pack_fr() {
+    fn key_parity_between_the_embedded_en_and_the_fr_pack() {
         let en = ritornello_i18n::try_parse(crate::GENERIC_INPUT_EN).unwrap();
         let fr = ritornello_i18n::try_parse(&fr_pack()).unwrap();
-        let mut cles_en: Vec<&String> = en.keys().collect();
-        let mut cles_fr: Vec<&String> = fr.keys().collect();
-        cles_en.sort();
-        cles_fr.sort();
-        assert_eq!(cles_en, cles_fr, "jeux de cles en/fr divergents");
+        let mut en_keys: Vec<&String> = en.keys().collect();
+        let mut fr_keys: Vec<&String> = fr.keys().collect();
+        en_keys.sort();
+        fr_keys.sort();
+        assert_eq!(en_keys, fr_keys, "en/fr key sets diverge");
     }
 
     #[tokio::test]
-    async fn get_data_renvoie_devices_bindings_presets_learning() {
+    async fn get_data_returns_devices_bindings_presets_learning() {
         let f = fixture();
         let v = f.admin.get_data().await;
         assert_eq!(v["devices"], serde_json::json!(["eHome"]));
@@ -236,7 +234,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_valide_persiste_et_remplace_la_table() {
+    async fn valid_save_persists_and_replaces_the_table() {
         let mut f = fixture();
         let op = serde_json::json!({
             "op": "save",
@@ -256,15 +254,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn un_echec_decriture_renvoie_une_phrase_de_catalogue_pas_le_detail_io() {
-        // Même régression qu'en radio : `Bindings::save(...).map_err(|e|
-        // e.to_string())` mettait le détail I/O brut dans le corps de la
-        // réponse. `bindings_path` vise ici un fichier ordinaire comme s'il
-        // s'agissait d'un répertoire parent, pour faire échouer
-        // `create_dir_all` sans toucher au disque réel.
+    async fn a_write_failure_returns_a_catalog_sentence_not_the_io_detail() {
+        // Same regression as in radio: `Bindings::save(...).map_err(|e|
+        // e.to_string())` put the raw I/O detail in the response body.
+        // `bindings_path` here targets an ordinary file as if it were a parent
+        // directory, to make `create_dir_all` fail without touching the real
+        // disk.
         let mut f = fixture();
         let obstacle = f.admin.presets_root.parent().unwrap().join("obstacle");
-        std::fs::write(&obstacle, b"pas un repertoire").unwrap();
+        std::fs::write(&obstacle, b"not a directory").unwrap();
         f.admin.bindings_path = obstacle.join("input-bindings.toml");
         let op = serde_json::json!({
             "op": "save",
@@ -277,7 +275,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_invalide_renvoie_une_erreur_traduite_et_ne_persiste_pas() {
+    async fn invalid_save_returns_a_translated_error_and_does_not_persist() {
         let mut f = fixture();
         let op = serde_json::json!({
             "op": "save",
@@ -289,9 +287,9 @@ mod tests {
             ]}
         });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert!(err.contains("code 1"), "message inattendu: {err}");
+        assert!(err.contains("code 1"), "unexpected message: {err}");
         assert!(!f.admin.bindings_path.exists());
-        // la table partagée est intacte
+        // the shared table is intact
         assert_eq!(
             f.admin.hub.bindings.read().unwrap().resolve("eHome", 2),
             Some(Command::Select(1))
@@ -299,7 +297,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn learn_puis_cancel_learn() {
+    async fn learn_then_cancel_learn() {
         let mut f = fixture();
         assert!(f
             .admin
@@ -316,52 +314,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_preset_remplace_en_memoire_sans_persister() {
+    async fn load_preset_replaces_in_memory_without_persisting() {
         let mut f = fixture();
         let op = serde_json::json!({ "op": "load_preset", "device": "eHome", "preset": "mce" });
         assert!(f.admin.set_data(op).await.is_ok());
         let b = f.admin.hub.bindings.read().unwrap();
         assert_eq!(b.resolve("eHome", 115), Some(Command::VolumeUp));
-        // les anciens bindings du périphérique ont été remplacés
+        // the device's old bindings have been replaced
         assert_eq!(b.resolve("eHome", 2), None);
         drop(b);
-        // rien sur le disque
+        // nothing on disk
         assert!(!f.admin.bindings_path.exists());
     }
 
     #[tokio::test]
-    async fn load_preset_inconnu_renvoie_une_erreur() {
+    async fn load_unknown_preset_returns_an_error() {
         let mut f = fixture();
         let op = serde_json::json!({ "op": "load_preset", "device": "eHome", "preset": "zzz" });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert!(err.contains("zzz"), "message inattendu: {err}");
+        assert!(err.contains("zzz"), "unexpected message: {err}");
     }
 
     #[tokio::test]
-    async fn import_preset_remplace_en_memoire_sans_persister() {
+    async fn import_preset_replaces_in_memory_without_persisting() {
         let mut f = fixture();
         let content = "[[bindings]]\ncode = 3\ncmd = \"Mute\"\n";
         let op = serde_json::json!({ "op": "import_preset", "device": "eHome", "content": content });
         assert!(f.admin.set_data(op).await.is_ok());
         let b = f.admin.hub.bindings.read().unwrap();
         assert_eq!(b.resolve("eHome", 3), Some(Command::Mute));
-        // les anciens bindings du périphérique ont été remplacés
+        // the device's old bindings have been replaced
         assert_eq!(b.resolve("eHome", 2), None);
         drop(b);
-        // rien sur le disque
+        // nothing on disk
         assert!(!f.admin.bindings_path.exists());
     }
 
     #[tokio::test]
-    async fn import_preset_toml_invalide_renvoie_une_erreur_traduite_et_ne_change_rien() {
+    async fn import_preset_invalid_toml_returns_a_translated_error_and_changes_nothing() {
         let mut f = fixture();
         let op = serde_json::json!({
             "op": "import_preset",
             "device": "eHome",
-            "content": "ceci n'est pas = du toml [",
+            "content": "this is not = toml [",
         });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert!(err.starts_with("invalid request:"), "message inattendu: {err}");
+        assert!(err.starts_with("invalid request:"), "unexpected message: {err}");
         assert!(!f.admin.bindings_path.exists());
         assert_eq!(
             f.admin.hub.bindings.read().unwrap().resolve("eHome", 2),
@@ -370,14 +368,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_preset_bindings_invalides_renvoie_une_erreur_et_ne_change_rien() {
+    async fn import_preset_invalid_bindings_returns_an_error_and_changes_nothing() {
         let mut f = fixture();
         let content = "[[bindings]]\ncode = 2\ncmd = \"Mute\"\n\n[[bindings]]\ncode = 2\ncmd = \"Stop\"\n";
         let op = serde_json::json!({ "op": "import_preset", "device": "eHome", "content": content });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert!(err.contains("code 2"), "message inattendu: {err}");
+        assert!(err.contains("code 2"), "unexpected message: {err}");
         assert!(!f.admin.bindings_path.exists());
-        // la table partagée est intacte (ancien binding du périphérique)
+        // the shared table is intact (the device's old binding)
         assert_eq!(
             f.admin.hub.bindings.read().unwrap().resolve("eHome", 2),
             Some(Command::Select(1))
@@ -385,17 +383,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rescan_sans_peripherique_reussit() {
+    async fn rescan_without_a_device_succeeds() {
         let mut f = fixture();
         assert!(f.admin.set_data(serde_json::json!({ "op": "rescan" })).await.is_ok());
     }
 
     #[tokio::test]
-    async fn op_inconnue_renvoie_une_erreur() {
+    async fn unknown_op_returns_an_error() {
         let mut f = fixture();
-        let err = f.admin.set_data(serde_json::json!({ "op": "detruire" })).await.unwrap_err();
-        assert!(err.starts_with("invalid request:"), "message inattendu: {err}");
-        let err2 = f.admin.set_data(serde_json::json!({ "rien": 1 })).await.unwrap_err();
-        assert!(err2.starts_with("invalid request:"), "message inattendu: {err2}");
+        let err = f.admin.set_data(serde_json::json!({ "op": "destroy" })).await.unwrap_err();
+        assert!(err.starts_with("invalid request:"), "unexpected message: {err}");
+        let err2 = f.admin.set_data(serde_json::json!({ "nothing": 1 })).await.unwrap_err();
+        assert!(err2.starts_with("invalid request:"), "unexpected message: {err2}");
     }
 }

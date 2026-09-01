@@ -1,19 +1,19 @@
-//! Plugin `metadata` : titres des stations Radio France, depuis leur direct.
+//! `metadata` plugin: titles of the Radio France stations, from their live feed.
 //!
-//! Pourquoi ce plugin existe : les stream de Radio France n'émettent **aucune**
-//! métadonnée ICY — pas de `icy-metaint` du tout, mesuré sur FIP comme sur ses
-//! webradios. Là où OUI FM announcement au moins un text de remplissage, une
-//! station Radio France configurée sur l'appareil n'affiche aujourd'hui rien.
-//! Radio France expose en revanche le direct de chaque station, sans
-//! authentification, avec titre et artiste **déjà séparés**.
+//! Why this plugin exists: the Radio France streams emit **no** ICY metadata
+//! at all — no `icy-metaint` whatsoever, measured on FIP as well as on its
+//! webradios. Where OUI FM announces at least a filler text, a Radio France
+//! station configured on the device currently displays nothing. Radio France
+//! does, however, expose the live feed of each station, without
+//! authentication, with title and artist **already split**.
 //!
-//! Ce point d'entrée est **privé et non documenté** (seule la liste des
-//! stations l'est) : il peut changer, exiger une authentification ou disparaître
-//! sans préavis. D'où trois règles tenues ici : l'interrogation vit dans son
-//! propre processus et ne retarde jamais la playback, son échec est silencieux à
-//! l'écran, et le rythme est celui que le serveur announcement lui-même, avec un
-//! recul progressif en cas d'échec — un appareil sans surveillance ne doit pas
-//! marteler le serveur d'un tiers. Rien n'est mis en cache sur disque.
+//! This endpoint is **private and undocumented** (only the station list is
+//! documented): it can change, require authentication or disappear without
+//! notice. Hence three rules held here: the polling lives in its own process
+//! and never delays playback, its failure is silent on screen, and the rhythm
+//! is the one the server announces itself, with a progressive backoff on
+//! failure — an unattended device must not hammer a third party's server.
+//! Nothing is cached on disk.
 
 mod live;
 mod table;
@@ -31,10 +31,10 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-/// URL d'une identité de stream, si c'en est une.
+/// URL of a stream identity, if it is one.
 ///
-/// Fonction pure : point d'entrée de données venues d'un autre processus, donc
-/// l'endroit où une forme inattendue doit être écartée sans bruit.
+/// Pure function: entry point for data coming from another process, hence the
+/// place where an unexpected shape must be discarded without noise.
 fn stream_url(identity: &Value) -> Option<&str> {
     if identity.get("kind").and_then(Value::as_str)? != "stream" {
         return None;
@@ -45,15 +45,14 @@ fn stream_url(identity: &Value) -> Option<&str> {
 
 struct RadioFranceMetas {
     table: Table,
-    /// Identité courante, réémise en écho dans chaque enrichment.
+    /// Current identity, echoed back in every enrichment.
     identity: Option<Value>,
-    /// Station suivie : son identifiant, et la tâche qui l'query.
+    /// Tracked station: its identifier, and the task that queries it.
     ///
-    /// L'interrogation vit dans une tâche et non dans le futur de
-    /// `next_enrichment` : ce futur est abandonné dès qu'un `NowPlaying`
-    /// arrive, ce qui remettrait le cycle à zéro à chaque changement d'état du
-    /// cœur — et surtout ferait perdre le « dernier vu » qui évite de réémettre
-    /// le même track à chaque interrogation.
+    /// The polling lives in a task and not in the `next_enrichment` future:
+    /// that future is dropped as soon as a `NowPlaying` arrives, which would
+    /// reset the cycle at every core state change — and above all would lose
+    /// the "last seen" that avoids re-emitting the same track on every query.
     tracked: Option<(u32, tokio::task::JoinHandle<()>)>,
     metas_tx: mpsc::Sender<(u32, Meta)>,
     metas_rx: mpsc::Receiver<(u32, Meta)>,
@@ -65,82 +64,83 @@ impl RadioFranceMetas {
         Self { table, identity: None, tracked: None, metas_tx, metas_rx }
     }
 
-    /// Arrête le tracked en cours, s'il y en a un.
+    /// Stops the current tracking, if there is one.
     fn stop(&mut self) {
-        if let Some((id, tache)) = self.tracked.take() {
+        if let Some((id, task)) = self.tracked.take() {
             tracing::debug!("stopped following station {id}");
-            tache.abort();
+            task.abort();
         }
     }
 
-    /// Suit cette station, sauf si c'est déjà celle qu'on follows — auquel cas la
-    /// tâche en place est conservée. C'est le cas de tous les changements de
-    /// track sur une même station : la relancer perdrait son « dernier vu »,
-    /// donc ferait réémettre le track en cours, et solliciterait un tiers
-    /// hors du rythme qu'il a lui-même annoncé.
-    fn follows(&mut self, id: u32, profil: String) {
-        if self.tracked.as_ref().is_some_and(|(en_cours, _)| *en_cours == id) {
+    /// Follows this station, unless it is already the one being followed — in
+    /// which case the running task is kept. That is the case of every track
+    /// change on the same station: restarting it would lose its "last seen",
+    /// hence re-emit the current track, and would query a third party outside
+    /// the rhythm it announced itself.
+    fn follows(&mut self, id: u32, profile: String) {
+        if self.tracked.as_ref().is_some_and(|(current, _)| *current == id) {
             return;
         }
         self.stop();
         let tx = self.metas_tx.clone();
-        let tache = tokio::spawn(live::follows(id, profil, tx));
-        self.tracked = Some((id, tache));
+        let task = tokio::spawn(live::follows(id, profile, tx));
+        self.tracked = Some((id, task));
     }
 }
 
 #[async_trait::async_trait]
 impl MetadataPlugin for RadioFranceMetas {
     async fn now_playing(&mut self, np: NowPlaying) {
-        // Reconnaissance puis mutation : les valeurs sont copiées avant de
-        // toucher à `self`, la table étant empruntée à `self`.
-        let reconnue = np
+        // Recognition then mutation: the values are copied before touching
+        // `self`, the table being borrowed from `self`.
+        let recognized = np
             .identity
             .as_ref()
             .and_then(stream_url)
             .and_then(|url| self.table.station_for(url))
             .map(|s| (s.id, s.label.clone(), s.rules.clone()));
-        match reconnue {
-            Some((id, label, profil)) => {
-                tracing::debug!("station recognized: {label} (id {id}, profile {profil})");
+        match recognized {
+            Some((id, label, profile)) => {
+                tracing::debug!("station recognized: {label} (id {id}, profile {profile})");
                 self.identity = np.identity;
-                self.follows(id, profil);
+                self.follows(id, profile);
             }
             None => {
-                // Arrêt, disque, ou station inconnue de la table : on se tait,
-                // et surtout on arrête la tâche — une interrogation laissée en
-                // route continuerait de solliciter un tiers pour une station
-                // qui ne plays plus.
+                // Stop, disc, or station unknown to the table: we stay quiet,
+                // and above all we stop the task — a query left running would
+                // keep hitting a third party for a station that no longer
+                // plays.
                 self.identity = None;
                 self.stop();
             }
         }
     }
 
-    // `..Default::default()` derrière un littéral pourtant complet : clippy le
-    // dit sans effet (`needless_update`), et il a raison **aujourd'hui**. Ce
-    // n'est pas de la redondance mais de la compatibilité ascendante — un
-    // littéral qui se terminate ainsi survit à l'ajout d'un champ dans la
-    // structure, celui qui les énumère tous casse. Le dépôt a payé cette
-    // leçon : un champ ajouté à une structure publique a cassé 44 littéraux
-    // ailleurs, qu'un `cargo test -p` ne compile jamais. Quand clippy et la
-    // compatibilité ascendante se contredisent ici, c'est la seconde qui
-    // gagne, et la règle qui reçoit un `allow`.
+    // `..Default::default()` behind a literal that is nevertheless complete:
+    // clippy calls it a no-op (`needless_update`), and it is right **today**.
+    // This is not redundancy but forward compatibility — a literal ending
+    // like this survives the addition of a field to the struct, one that
+    // enumerates them all breaks. The repo paid for that lesson: a field
+    // added to a public struct broke 44 literals elsewhere, none of which
+    // `cargo test -p` ever compiles. When clippy and forward compatibility
+    // contradict each other here, the latter wins, and the lint gets an
+    // `allow`.
     #[allow(clippy::needless_update)]
     async fn next_enrichment(&mut self) -> Enrichment {
         loop {
-            // `recv` est annulable sans perte : si un `NowPlaying` arrive
-            // d'abord, le runner abandonne ce futur sans qu'aucun relevé reçu
-            // ne soit perdu. Tout ce qui follows sa résolution est synchrone,
-            // donc hors d'atteinte d'une annulation.
+            // `recv` is cancellable without loss: if a `NowPlaying` arrives
+            // first, the runner drops this future without any received
+            // reading being lost. Everything that follows its resolution is
+            // synchronous, hence out of reach of a cancellation.
             let Some((id, meta)) = self.metas_rx.recv().await else {
-                // Impossible en pratique (le plugin garde un Sender).
+                // Impossible in practice (the plugin keeps a Sender).
                 std::future::pending().await
             };
-            // Relevé d'une station qu'on ne follows plus : il attendait en file au
-            // moment du changement. Même principe que la péremption côté cœur.
-            let suit_toujours = self.tracked.as_ref().is_some_and(|(en_cours, _)| *en_cours == id);
-            if !suit_toujours {
+            // Reading from a station we no longer follow: it was waiting in
+            // the queue at the moment of the change. Same principle as the
+            // staleness rule on the core side.
+            let still_followed = self.tracked.as_ref().is_some_and(|(current, _)| *current == id);
+            if !still_followed {
                 continue;
             }
             if let Some(identity) = &self.identity {
@@ -148,29 +148,30 @@ impl MetadataPlugin for RadioFranceMetas {
                     identity: identity.clone(),
                     artist: meta.artist,
                     title: meta.title,
-                    // Absent le plus souvent : le direct n'en donne pas, il se
-                    // read dans la grille, qui a fréquemment un track de
-                    // retard (voir `live::album_dans_grille`).
+                    // Absent most of the time: the live feed does not give
+                    // it, it is read from the schedule, which is frequently
+                    // one track behind (see `live::supplement_in_schedule`).
                     album: meta.album,
                     year: meta.year,
                     links: meta.links,
                     duration_s: meta.duration_s,
                     cover: meta.cover.as_deref().map(|u| CoverRef::Url { url: live::cover_url(u) }),
-                    // Ce greffon read le stream officiel de la station : il sait mieux que
-                    // l'ICY, par construction. Il écrase, donc `fill_only` reste faux.
+                    // This plugin reads the station's official feed: it knows
+                    // better than ICY, by construction. It overwrites, so
+                    // `fill_only` stays false.
                     fill_only: false,
-                    // L'écoulé est calculé **ici**, au moment d'émettre : c'est
-                    // le seul instant où il est exact, et le cœur l'ancre à sa
-                    // réception. Une horloge décalée ou un `startTime` dans le
-                    // futur donnerait un écoulé négatif : `checked_sub` le
-                    // ramène à « je ne sais pas » plutôt qu'à zéro, qui
-                    // prétendrait savoir.
-                    position_s: meta.start_time.and_then(|debut| {
-                        let maintenant = std::time::SystemTime::now()
+                    // The elapsed time is computed **here**, at emission time:
+                    // it is the only instant where it is exact, and the core
+                    // anchors it at reception. A skewed clock or a
+                    // `startTime` in the future would give a negative elapsed
+                    // time: `checked_sub` turns it into "I don't know" rather
+                    // than zero, which would claim to know.
+                    position_s: meta.start_time.and_then(|start| {
+                        let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .ok()?
                             .as_secs();
-                        maintenant.checked_sub(debut).and_then(|e| u32::try_from(e).ok())
+                        now.checked_sub(start).and_then(|e| u32::try_from(e).ok())
                     }),
                     ..Default::default()
                 };
@@ -196,32 +197,32 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// URL de stream réelle de FIP Groove, telle qu'un annuaire la publie.
+    /// Real stream URL of FIP Groove, as a directory publishes it.
     const URL: &str = "https://icecast.radiofrance.fr/fipgroove-midfi.mp3";
-    /// Identifiant de station correspondant, relevé de la documentation.
+    /// Matching station identifier, collected from the documentation.
     const ID: u32 = 66;
 
-    fn identite_flux(url: &str) -> Value {
+    fn stream_identity(url: &str) -> Value {
         json!({ "kind": "stream", "url": url })
     }
 
-    /// Plugin dont le tracked est déjà déclaré : aucune tâche réseau n'est lancée
-    /// dans les tests. **Aucun test ne touche le réseau.**
-    fn plugin_suivant(id: u32) -> RadioFranceMetas {
+    /// Plugin whose tracking is already declared: no network task is spawned
+    /// in the tests. **No test touches the network.**
+    fn following_plugin(id: u32) -> RadioFranceMetas {
         let mut p = RadioFranceMetas::new(Table::embedded());
-        // Une tâche inerte tient la place de l'interrogation HTTP.
-        let tache = tokio::spawn(std::future::pending::<()>());
-        p.tracked = Some((id, tache));
+        // An inert task stands in for the HTTP polling.
+        let task = tokio::spawn(std::future::pending::<()>());
+        p.tracked = Some((id, task));
         p
     }
 
     #[test]
-    fn reconnait_une_identite_de_flux() {
-        assert_eq!(stream_url(&identite_flux(URL)), Some(URL));
+    fn recognizes_a_stream_identity() {
+        assert_eq!(stream_url(&stream_identity(URL)), Some(URL));
     }
 
     #[test]
-    fn ignore_ce_qui_nest_pas_un_flux() {
+    fn ignores_what_is_not_a_stream() {
         assert!(stream_url(&json!({"kind": "disc", "toc": "3 1 2 3"})).is_none());
         assert!(stream_url(&json!({"kind": "stream"})).is_none());
         assert!(stream_url(&json!({"kind": "stream", "url": "  "})).is_none());
@@ -229,9 +230,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn un_releve_devient_un_enrichissement_avec_echo_de_lidentite() {
-        let mut p = plugin_suivant(ID);
-        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)), ..Default::default() }).await;
+    async fn a_reading_becomes_an_enrichment_echoing_the_identity() {
+        let mut p = following_plugin(ID);
+        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(stream_identity(URL)), ..Default::default() }).await;
         p.metas_tx
             .send((
                 ID,
@@ -239,9 +240,9 @@ mod tests {
                     artist: Some("Etta James".into()),
                     title: Some("Fire".into()),
                     album: Some("At Last!".into()),
-                    // Valeurs non-defaut : ce test verifie que le relais porte
-                    // bien tout le supplement de la grille jusqu'a
-                    // l'enrichment, pas seulement l'album.
+                    // Non-default values: this test checks that the relay
+                    // carries the whole schedule supplement all the way to
+                    // the enrichment, not just the album.
                     year: Some(1960),
                     links: vec![ritornello_proto::Link::Youtube {
                         url: "https://www.youtube.com/watch?v=zIqlKJj9IlY".into(),
@@ -254,20 +255,20 @@ mod tests {
             .await
             .unwrap();
         let e = p.next_enrichment().await;
-        assert_eq!(e.identity, identite_flux(URL), "l'identity doit etre reemise en echo");
+        assert_eq!(e.identity, stream_identity(URL), "the identity must be echoed back");
         assert_eq!(e.artist.as_deref(), Some("Etta James"));
         assert_eq!(e.title.as_deref(), Some("Fire"));
         assert_eq!(e.duration_s, Some(197));
-        // L'album ne vient pas du direct mais de la grille, et il traverse
-        // jusqu'à l'enrichment — c'est ce que le cœur place dans
-        // `track.album`, dont un afficheur peut faire une line.
+        // The album does not come from the live feed but from the schedule,
+        // and it travels all the way to the enrichment — that is what the
+        // core places in `track.album`, which a display can turn into a line.
         assert_eq!(e.album.as_deref(), Some("At Last!"));
     }
 
     #[tokio::test]
-    async fn la_pochette_devient_une_url_composee_et_ecrase() {
-        let mut p = plugin_suivant(ID);
-        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)), ..Default::default() }).await;
+    async fn the_cover_becomes_a_composed_url_and_overwrites() {
+        let mut p = following_plugin(ID);
+        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(stream_identity(URL)), ..Default::default() }).await;
         p.metas_tx
             .send((ID, Meta { title: Some("Fire".into()), cover: Some("uuid-test".into()), ..Default::default() }))
             .await
@@ -279,15 +280,15 @@ mod tests {
                 url: "https://api.radiofrance.fr/v1/services/embed/image/uuid-test?preset=400x400".into()
             })
         );
-        assert!(!e.fill_only, "ce greffon sait mieux que l'ICY, il doit ecraser");
+        assert!(!e.fill_only, "this plugin knows better than ICY, it must overwrite");
     }
 
     #[tokio::test]
-    async fn un_morceau_sans_album_reste_un_enrichissement_valable() {
-        // Cas le plus courant : la grille a un track de retard. L'absence
-        // d'album ne doit rien retenir du reste.
-        let mut p = plugin_suivant(ID);
-        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)), ..Default::default() }).await;
+    async fn a_track_without_album_is_still_a_valid_enrichment() {
+        // The most common case: the schedule is one track behind. The missing
+        // album must hold back nothing else.
+        let mut p = following_plugin(ID);
+        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(stream_identity(URL)), ..Default::default() }).await;
         p.metas_tx
             .send((ID, Meta { title: Some("Fire".into()), ..Default::default() }))
             .await
@@ -298,75 +299,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn une_station_inconnue_de_la_table_ferme_le_suivi() {
-        let mut p = plugin_suivant(ID);
+    async fn a_station_unknown_to_the_table_closes_the_tracking() {
+        let mut p = following_plugin(ID);
         p.now_playing(NowPlaying {
             source: "radio".into(),
-            identity: Some(identite_flux("https://ouifm3.ice.infomaniak.ch/ouifm3.mp3")),
+            identity: Some(stream_identity("https://ouifm3.ice.infomaniak.ch/ouifm3.mp3")),
             ..Default::default()
         })
         .await;
-        assert!(p.tracked.is_none(), "une interrogation laissee en route solliciterait un tiers pour rien");
+        assert!(p.tracked.is_none(), "a query left running would hit a third party for nothing");
         assert!(p.identity.is_none());
     }
 
     #[tokio::test]
-    async fn larret_de_la_lecture_ferme_le_suivi() {
-        let mut p = plugin_suivant(ID);
+    async fn stopping_playback_closes_the_tracking() {
+        let mut p = following_plugin(ID);
         p.now_playing(NowPlaying { source: "radio".into(), identity: None, ..Default::default() }).await;
         assert!(p.tracked.is_none());
     }
 
     #[tokio::test]
-    async fn une_identite_de_disque_ferme_le_suivi() {
-        let mut p = plugin_suivant(ID);
+    async fn a_disc_identity_closes_the_tracking() {
+        let mut p = following_plugin(ID);
         p.now_playing(NowPlaying {
             source: "cd".into(),
             identity: Some(json!({"kind": "disc", "toc": "3 150 22767 41887 63000", "track": 0})),
             ..Default::default()
         })
         .await;
-        assert!(p.tracked.is_none(), "ce plugin ne traite pas les disques");
+        assert!(p.tracked.is_none(), "this plugin does not handle discs");
     }
 
     #[tokio::test]
-    async fn rester_sur_la_meme_station_conserve_la_tache() {
-        // Un changement de track donne une nouvelle identité mais la même
-        // station : relancer la tâche perdrait son « dernier vu » et ferait
-        // réémettre le track en cours.
+    async fn staying_on_the_same_station_keeps_the_task() {
+        // A track change gives a new identity but the same station:
+        // restarting the task would lose its "last seen" and re-emit the
+        // current track.
         //
-        // Ce test prouve **aussi** la correspondance de bout en bout, depuis la
-        // table embarquée : le tracked en place porte l'identifiant de FIP Groove,
-        // et si l'URL réelle ne se résolvait pas exactement sur lui, `follows`
-        // abandonnerait cette tâche pour en lancer une autre — ce que
-        // l'assertion ci-dessous refuse. Aucune requête n'est émise, pour cette
-        // raison même.
-        let mut p = plugin_suivant(ID);
-        let avant = p.tracked.as_ref().map(|(id, t)| (*id, t.id()));
-        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)), ..Default::default() }).await;
-        let apres = p.tracked.as_ref().map(|(id, t)| (*id, t.id()));
-        assert_eq!(avant, apres, "la meme tache doit continuer");
+        // This test **also** proves the end-to-end mapping, from the embedded
+        // table: the tracking in place carries the FIP Groove identifier, and
+        // if the real URL did not resolve exactly onto it, `follows` would
+        // drop this task to spawn another — which the assertion below
+        // refuses. No request is emitted, for that very reason.
+        let mut p = following_plugin(ID);
+        let before = p.tracked.as_ref().map(|(id, t)| (*id, t.id()));
+        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(stream_identity(URL)), ..Default::default() }).await;
+        let after = p.tracked.as_ref().map(|(id, t)| (*id, t.id()));
+        assert_eq!(before, after, "the same task must carry on");
     }
 
     #[tokio::test]
-    async fn un_releve_dune_station_quon_ne_suit_plus_est_ecarte() {
-        let mut p = plugin_suivant(ID);
-        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)), ..Default::default() }).await;
-        // Relevé en file au moment du changement de station.
+    async fn a_reading_from_a_station_no_longer_followed_is_discarded() {
+        let mut p = following_plugin(ID);
+        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(stream_identity(URL)), ..Default::default() }).await;
+        // Reading queued at the moment of the station change.
         p.metas_tx
             .send((99, Meta { title: Some("ancien".into()), ..Default::default() }))
             .await
             .unwrap();
         let r = tokio::time::timeout(std::time::Duration::from_millis(200), p.next_enrichment()).await;
-        assert!(r.is_err(), "un releve hors sujet ne doit produire aucun enrichment");
+        assert!(r.is_err(), "an off-topic reading must produce no enrichment");
     }
 
     #[tokio::test]
-    async fn une_table_vide_ne_suit_jamais_rien() {
-        // Cas dégénéré, atteignable si la table embarquée devenait clear : le
-        // plugin doit rester muet, jamais deviner un identifiant.
+    async fn an_empty_table_never_follows_anything() {
+        // Degenerate case, reachable if the embedded table became empty: the
+        // plugin must stay silent, never guess an identifier.
         let mut p = RadioFranceMetas::new(Table::default());
-        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(identite_flux(URL)), ..Default::default() }).await;
+        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(stream_identity(URL)), ..Default::default() }).await;
         assert!(p.tracked.is_none());
     }
 }

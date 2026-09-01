@@ -1,18 +1,17 @@
 <!--
-  Logo YouTube officiel (tracé Simple Icons, licence CC0) — plus une
-  simplification maison : décision du propriétaire, une marque garde SA
-  color dans toutes les palettes, claire comme sombre. C'est la seule
-  exception assumée à la règle « aucune color en dur » de l'IHM (voir
-  docs/interface.md, § Player card) : `fill="#FF0000"` plutôt que
-  `currentColor`, donc `class="size-5"` ne pilote plus que la taille, step
-  la teinte.
-  Le triangle « play » est en creux dans le tracé lui-meme (deux
-  sous-chemins de sens oppose, `fill-rule` par defaut) : rien a decouper
-  ici, c'est le rendu officiel de la marque.
-  Taille intrinseque 20 px, `viewBox="0 0 24 24"` — le meme repere logique
-  que ses deux voisines (Deezer, Apple Music) pour un rendu a la meme
-  echelle visuelle ; la classe du point d'appel (`size-5`) pilote la
-  taille reelle, l'attribut n'est qu'un repli avant la feuille de style.
+  Official YouTube logo (Simple Icons path, CC0 licence) — no longer a
+  hand-made simplification: the owner's decision, a brand keeps ITS colour in
+  every palette, light as well as dark. This is the only deliberate exception
+  to the UI's "no hard-coded colour" rule (see docs/interface.md, § Player
+  card): `fill="#FF0000"` rather than `currentColor`, so `class="size-5"` now
+  only drives the size, not the hue.
+  The "play" triangle is cut out within the path itself (two sub-paths of
+  opposite direction, default `fill-rule`): nothing to carve out here, it is
+  the brand's official rendering.
+  Intrinsic size 20 px, `viewBox="0 0 24 24"` — the same logical frame as its
+  two neighbours (Deezer, Apple Music) for a rendering at the same visual
+  scale; the call site's class (`size-5`) drives the real size, the attribute
+  is only a fallback before the stylesheet.
 -->
 <template>
   <svg width="20" height="20" viewBox="0 0 24 24" fill="#FF0000" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">

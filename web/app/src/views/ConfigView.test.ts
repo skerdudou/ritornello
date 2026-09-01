@@ -3,17 +3,17 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
-// Meme approche que `useTheme.test.ts` : on garde le vrai module (composants,
-// `api`, ...) et on remplace uniquement les deux entries de `toast` que cette
-// vue utilise, pour pouvoir les observe sans afficher de notification.
-// `api.put` est enveloppe (step remplace) : la bascule doit vraiment passer par
-// le `fetch` espionne plus bas, tout en restant observable par les tests.
+// Same approach as `useTheme.test.ts`: we keep the real module (components,
+// `api`, ...) and replace only the two `toast` entries this view uses, so we
+// can observe them without showing any notification.
+// `api.put` is wrapped (not replaced): the toggle must really go through the
+// spied `fetch` below, while staying observable by the tests.
 vi.mock('@ritornello/ui', async () => {
-  const reel = await vi.importActual<typeof import('@ritornello/ui')>('@ritornello/ui')
+  const actual = await vi.importActual<typeof import('@ritornello/ui')>('@ritornello/ui')
   return {
-    ...reel,
-    api: { ...reel.api, put: vi.fn(reel.api.put) },
-    toast: { ...reel.toast, error: vi.fn(), success: vi.fn() },
+    ...actual,
+    api: { ...actual.api, put: vi.fn(actual.api.put) },
+    toast: { ...actual.toast, error: vi.fn(), success: vi.fn() },
   }
 })
 
@@ -32,7 +32,7 @@ const CATALOGUE = {
   clock_title: 'Date et heure', clock_date_label: 'Date', clock_hours_label: 'Heures',
   clock_24h: '24 h (13:05)', clock_12h: '12 h (1:05 PM)',
   clock_date_dmy: '31/12/2026', clock_date_ymd: '2026-12-31', clock_date_mdy: '12/31/2026',
-  clock_hint: "Sert à l'clock de veille des afficheurs.",
+  clock_hint: "Sert à l'horloge de veille des afficheurs.",
   startup_previous: 'état précédent',
   volume_hold_title: 'Volume maintenu',
   volume_hold_initial: 'Délai initial (ms)', volume_hold_interval: 'Intervalle de répétition (ms)',
@@ -56,8 +56,8 @@ const CATALOGUE = {
   toc_label: 'sections',
 }
 
-/** Charges utiles servies par le faux `fetch`, surchargeables par test. */
-function charges() {
+/** Payloads served by the fake `fetch`, overridable per test. */
+function payloads() {
   return {
     '/api/status': {
       plugins: [
@@ -85,41 +85,41 @@ function charges() {
   }
 }
 
-type Charges = ReturnType<typeof charges>
+type Payloads = ReturnType<typeof payloads>
 
-// jsdom n'implemente step IntersectionObserver : la vue en a besoin pour le
-// scrollspy, on la remplace par une fausse classe qui capture le callback
-// pour que les tests puissent simuler des entries/sorties de viewport.
+// jsdom does not implement IntersectionObserver: the view needs it for the
+// scrollspy, so we replace it with a fake class that captures the callback,
+// letting the tests simulate sections entering/leaving the viewport.
 type IOCallback = (entries: Array<{ target: Element; isIntersecting: boolean }>) => void
 let ioCallback: IOCallback | null = null
-class FauxIO {
+class FakeIO {
   constructor(cb: IOCallback) { ioCallback = cb }
   observe() {}
   disconnect() {}
 }
 
 /**
- * Monte ConfigView avec un routeur en memoire (RouterLink est importe
- * directement par le SFC : il lui faut un vrai routeur, ce qui permet en outre
- * d'observe le `href` reellement resolu) et un `fetch` espionne.
+ * Mounts ConfigView with an in-memory router (RouterLink is imported directly
+ * by the SFC: it needs a real router, which additionally lets us observe the
+ * `href` actually resolved) and a spied `fetch`.
  */
-async function monter(surcharges: Partial<Charges> = {}, erreurPut?: string) {
-  const table = { ...charges(), ...surcharges }
-  const puts: Array<{ url: string; corps: unknown }> = []
+async function mountView(overrides: Partial<Payloads> = {}, putError?: string) {
+  const table = { ...payloads(), ...overrides }
+  const puts: Array<{ url: string; body: unknown }> = []
   const spy = vi.fn(async (url: string, init?: RequestInit) => {
     if (init?.method === 'PUT') {
-      puts.push({ url, corps: JSON.parse(String(init.body)) })
-      if (erreurPut) {
-        return new Response(JSON.stringify({ error: erreurPut }), { status: 422 })
+      puts.push({ url, body: JSON.parse(String(init.body)) })
+      if (putError) {
+        return new Response(JSON.stringify({ error: putError }), { status: 422 })
       }
       return new Response(null, { status: 204 })
     }
     const data = (table as Record<string, unknown>)[url]
-    if (data === undefined) return new Response('inconnu', { status: 404 })
+    if (data === undefined) return new Response('unknown', { status: 404 })
     return new Response(JSON.stringify(data), { status: 200 })
   })
   vi.stubGlobal('fetch', spy)
-  vi.stubGlobal('IntersectionObserver', FauxIO)
+  vi.stubGlobal('IntersectionObserver', FakeIO)
 
   const router = createRouter({
     history: createMemoryHistory(),
@@ -133,11 +133,11 @@ async function monter(surcharges: Partial<Charges> = {}, erreurPut?: string) {
   await router.isReady()
 
   const ConfigView = (await import('./ConfigView.vue')).default
-  // Attache au vrai document (et non a un noeud detache, defaut de `mount`) :
-  // le sommaire retrouve ses sections via `document.getElementById`, qui ne
-  // voit rien hors de l'arbre du document. On repart d'un corps vide a chaque
-  // montage pour eviter que les id des sections (uniques par load utile,
-  // mais reutilises entre tests) ne pointent vers le montage precedent.
+  // Attached to the real document (not to a detached node, `mount`'s default):
+  // the table of contents finds its sections through `document.getElementById`,
+  // which sees nothing outside the document tree. We start from an empty body
+  // on every mount so that the section ids (unique per payload, but reused
+  // between tests) do not point at the previous mount.
   document.body.innerHTML = ''
   const w = mount(ConfigView, { global: { plugins: [router] }, attachTo: document.body })
   await flushPromises()
@@ -145,59 +145,58 @@ async function monter(surcharges: Partial<Charges> = {}, erreurPut?: string) {
 }
 
 /**
- * Sucre pour les tests de bascule : ils ne surchargent que `/api/status`,
- * contrairement a `monter` qui attend une load par URL. Reprend le meme
- * montage plutot que d'en inventer un second.
+ * Sugar for the toggle tests: they only override `/api/status`, unlike
+ * `mountView` which expects one payload per URL. Reuses the same mount rather
+ * than inventing a second one.
  */
-async function monterAvecStatut(statut: unknown) {
-  const { w } = await monter({ '/api/status': statut })
+async function mountWithStatus(status: unknown) {
+  const { w } = await mountView({ '/api/status': status })
   return w
 }
 
-function reinitialiser() {
+function resetMocks() {
   vi.unstubAllGlobals()
   vi.mocked(toast.error).mockClear()
   vi.mocked(toast.success).mockClear()
   vi.mocked(api.put).mockClear()
 }
 
-// La plus grande surface migree du chantier n'avait aucun test unitaire :
-// quatre tests Rust couvraient l'ancienne page rendue cote serveur et ont ete
-// supprimes avec elle (IMPORTANT 7 de la revue finale). Rien n'exercait plus
-// les colonnes de la table des plugins, les libelles connected/unavailable, la
-// forme de l'URL du lien d'admin, le PUT audio, le PUT de langue suivi du
-// rechargement des catalogues, ni le rendu des journaux — et le defaut de la
-// sortie audio vide (IMPORTANT 3) est precisement celui qu'un tel test aurait
-// attrape.
-describe('ConfigView — table des plugins', () => {
-  beforeEach(reinitialiser)
+// The largest surface migrated in this project had no unit test at all: four
+// Rust tests covered the old server-rendered page and were deleted along with
+// it (IMPORTANT 7 of the final review). Nothing exercised the columns of the
+// plugin table any more, the connected/unavailable labels, the shape of the
+// admin link URL, the audio PUT, the language PUT followed by the catalog
+// reload, nor the rendering of the logs — and the empty audio output defect
+// (IMPORTANT 3) is precisely the one such a test would have caught.
+describe('ConfigView — plugin table', () => {
+  beforeEach(resetMocks)
 
-  it('rend une ligne par plugin avec ses cinq colonnes', async () => {
-    const { w } = await monter()
-    const lignes = w.findAll('[data-plugin-row]')
-    expect(lignes).toHaveLength(2)
-    expect(lignes[0]!.find('[data-plugin-name]').text()).toBe('radio')
-    expect(lignes[0]!.find('[data-plugin-kind]').text()).toBe('source')
-    expect(lignes[1]!.find('[data-plugin-name]').text()).toBe('cd')
-    expect(lignes[1]!.find('[data-plugin-kind]').text()).toBe('source')
-    // Les cinq en-tetes sont traduits depuis le catalogue du coeur.
-    const entetes = w.findAll('th').map((h) => h.text())
-    expect(entetes).toEqual(['Plugin', 'Genre', 'État', 'Admin', 'Actif'])
+  it('renders one row per plugin with its five columns', async () => {
+    const { w } = await mountView()
+    const rows = w.findAll('[data-plugin-row]')
+    expect(rows).toHaveLength(2)
+    expect(rows[0]!.find('[data-plugin-name]').text()).toBe('radio')
+    expect(rows[0]!.find('[data-plugin-kind]').text()).toBe('source')
+    expect(rows[1]!.find('[data-plugin-name]').text()).toBe('cd')
+    expect(rows[1]!.find('[data-plugin-kind]').text()).toBe('source')
+    // The five headers are translated from the core catalog.
+    const headers = w.findAll('th').map((h) => h.text())
+    expect(headers).toEqual(['Plugin', 'Genre', 'État', 'Admin', 'Actif'])
   })
 
-  it('distingue l’état connecté de l’état unavailable', async () => {
-    const { w } = await monter()
-    const lignes = w.findAll('[data-plugin-row]')
-    expect(lignes[0]!.find('[data-plugin-state]').text()).toBe('connecté')
-    expect(lignes[1]!.find('[data-plugin-state]').text()).toBe('unavailable')
+  it('distinguishes the connected state from the unavailable state', async () => {
+    const { w } = await mountView()
+    const rows = w.findAll('[data-plugin-row]')
+    expect(rows[0]!.find('[data-plugin-state]').text()).toBe('connecté')
+    expect(rows[1]!.find('[data-plugin-state]').text()).toBe('unavailable')
   })
 
-  it('distingue l’état figé (processus vivant, mute à l’échéance) des deux autres', async () => {
-    // Trois situations que le cœur distingue desormais (voir /api/status) :
-    // annonce+cable, mort avant de s'annoncer, et vivant mais mute a
-    // l'echeance (peut encore s'annoncer plus tard, sans redemarrage). L'IHM
-    // ne doit plus les confondre.
-    const { w } = await monter({
+  it('distinguishes the stalled state (process alive, silent at the deadline) from the other two', async () => {
+    // Three situations the core now distinguishes (see /api/status):
+    // announced+wired, dead before announcing itself, and alive but silent at
+    // the deadline (may still announce itself later, without a restart). The
+    // UI must no longer confuse them.
+    const { w } = await mountView({
       '/api/status': {
         plugins: [
           { name: 'radio', kind: 'source', connected: true, admin: true },
@@ -207,25 +206,25 @@ describe('ConfigView — table des plugins', () => {
         active_source: 'radio',
       },
     })
-    const lignes = w.findAll('[data-plugin-row]')
-    const textes = lignes.map((l) => l.find('[data-plugin-state]').text())
-    expect(textes).toEqual(['connecté', 'unavailable', 'figé'])
-    // Trois libellés distincts...
-    expect(new Set(textes).size).toBe(3)
-    // ...portés par trois styles de badge distincts : un simple changement de
-    // text sur la color « destructive » laisserait un greffon figé habillé
-    // comme un greffon mort.
-    const classes = lignes.map(
+    const rows = w.findAll('[data-plugin-row]')
+    const texts = rows.map((l) => l.find('[data-plugin-state]').text())
+    expect(texts).toEqual(['connecté', 'unavailable', 'figé'])
+    // Three distinct labels...
+    expect(new Set(texts).size).toBe(3)
+    // ...carried by three distinct badge styles: a mere change of text on the
+    // "destructive" color would leave a stalled plugin dressed like a dead
+    // plugin.
+    const classes = rows.map(
       (l) => l.find('[data-plugin-state] [data-slot="badge"]').classes().join(' '),
     )
     expect(new Set(classes).size).toBe(3)
   })
 
-  it('un greffon occupé (joint, mais sa page ne répond step) se lit occupé, step connecté', async () => {
-    // `busy` vient d'un ping de la page d'admin qui expire : le greffon vit,
-    // il est cablé, mais un `set_data` long (partage réseau) tient son verrou.
-    // « connecté » serait vrai et inutile : c'est justement ce qui ne dit rien.
-    const { w } = await monter({
+  it('a busy plugin (reachable, but its page does not answer) reads busy, not connected', async () => {
+    // `busy` comes from a ping of the admin page that times out: the plugin is
+    // alive, it is wired, but a long `set_data` (network share) holds its lock.
+    // "connected" would be true and useless: it is precisely what says nothing.
+    const { w } = await mountView({
       '/api/status': {
         plugins: [
           { name: 'files', kind: 'source', connected: true, admin: true, busy: true },
@@ -234,40 +233,40 @@ describe('ConfigView — table des plugins', () => {
         active_source: 'radio',
       },
     })
-    const lignes = w.findAll('[data-plugin-row]')
-    const textes = lignes.map((l) => l.find('[data-plugin-state]').text())
-    expect(textes).toEqual(['occupé', 'connecté'])
-    const classes = lignes.map(
+    const rows = w.findAll('[data-plugin-row]')
+    const texts = rows.map((l) => l.find('[data-plugin-state]').text())
+    expect(texts).toEqual(['occupé', 'connecté'])
+    const classes = rows.map(
       (l) => l.find('[data-plugin-state] [data-slot="badge"]').classes().join(' '),
     )
     expect(classes[0]!).not.toBe(classes[1]!)
   })
 
-  it('ne rend le lien d’admin que pour les plugins admin, sur /plugins/<nom>/', async () => {
-    const { w } = await monter()
-    const lignes = w.findAll('[data-plugin-row]')
-    const lien = lignes[0]!.find('[data-admin-link]')
-    expect(lien.exists()).toBe(true)
-    // La forme canonique avec slash final : c'est l'URL history, epinglee
-    // aussi cote coeur (`serves_shell("/plugins/radio/")`) et desormais la
-    // seule que le routeur laisse vivre.
-    expect(lien.attributes('href')).toBe('/plugins/radio/')
-    expect(lien.text()).toBe('admin')
-    // « cd » n'est step admin : step de lien, un tiret a la place.
-    expect(lignes[1]!.find('[data-admin-link]').exists()).toBe(false)
-    expect(lignes[1]!.text()).toContain('-')
+  it('renders the admin link only for admin plugins, at /plugins/<name>/', async () => {
+    const { w } = await mountView()
+    const rows = w.findAll('[data-plugin-row]')
+    const link = rows[0]!.find('[data-admin-link]')
+    expect(link.exists()).toBe(true)
+    // The canonical form with a trailing slash: it is the history URL, pinned
+    // on the core side too (`serves_shell("/plugins/radio/")`) and now the only
+    // one the router lets live.
+    expect(link.attributes('href')).toBe('/plugins/radio/')
+    expect(link.text()).toBe('admin')
+    // "cd" is not admin: no link, a dash in its place.
+    expect(rows[1]!.find('[data-admin-link]').exists()).toBe(false)
+    expect(rows[1]!.text()).toContain('-')
   })
 
-  it('une table de plugins vide ne casse step le rendu', async () => {
-    const { w } = await monter({ '/api/status': { plugins: [], active_source: '' } })
+  it('an empty plugin table does not break the rendering', async () => {
+    const { w } = await mountView({ '/api/status': { plugins: [], active_source: '' } })
     expect(w.findAll('[data-plugin-row]')).toHaveLength(0)
     expect(w.text()).toContain('Plugins')
   })
 
-  it('regroupe les genres d un meme greffon sur une seule ligne', async () => {
-    // Le tableau doit montrer l'unité qu'on manipule : la bascule porte sur le
-    // greffon, step sur un de ses genres.
-    const wrapper = await monterAvecStatut({
+  it('groups the kinds of a same plugin on a single row', async () => {
+    // The table must show the unit being manipulated: the toggle applies to
+    // the plugin, not to one of its kinds.
+    const wrapper = await mountWithStatus({
       plugins: [
         { name: 'files', kind: 'source', connected: true, admin: true },
         { name: 'files', kind: 'metadata', connected: true, admin: true },
@@ -275,13 +274,13 @@ describe('ConfigView — table des plugins', () => {
       ],
       active_source: 'files',
     })
-    const lignes = wrapper.findAll('[data-plugin-row]')
-    expect(lignes).toHaveLength(2)
-    expect(lignes[0]!.find('[data-plugin-kind]').text()).toBe('source, metadata')
+    const rows = wrapper.findAll('[data-plugin-row]')
+    expect(rows).toHaveLength(2)
+    expect(rows[0]!.find('[data-plugin-kind]').text()).toBe('source, metadata')
   })
 
-  it('bascule un greffon et recharge', async () => {
-    const wrapper = await monterAvecStatut({
+  it('toggles a plugin and reloads', async () => {
+    const wrapper = await mountWithStatus({
       plugins: [{ name: 'cd', kind: 'source', connected: true, admin: false }],
       active_source: 'cd',
     })
@@ -290,25 +289,24 @@ describe('ConfigView — table des plugins', () => {
     expect(api.put).toHaveBeenCalledWith('/api/plugins/cd/enabled', { enabled: false })
   })
 
-  it('dit pourquoi quand le coeur refuse', async () => {
-    vi.mocked(api.put).mockResolvedValueOnce('plugins.toml est en lecture seule')
-    const wrapper = await monterAvecStatut({
+  it('says why when the core refuses', async () => {
+    vi.mocked(api.put).mockResolvedValueOnce('plugins.toml is read-only')
+    const wrapper = await mountWithStatus({
       plugins: [{ name: 'cd', kind: 'source', connected: true, admin: false }],
       active_source: 'cd',
     })
     await wrapper.find('[data-plugin-toggle]').trigger('click')
     await flushPromises()
-    expect(toast.error).toHaveBeenCalledWith('plugins.toml est en lecture seule')
+    expect(toast.error).toHaveBeenCalledWith('plugins.toml is read-only')
   })
 
-  // Aujourd'hui, `replace_plugin_lines` cote coeur (status.rs) remplace toutes
-  // les lignes d'un nom d'un bloc : soit des genres reels, soit un unique
-  // « unknown » synthetique — jamais un melange. Ce garde-fou n'en depend step :
-  // il verifie l'affichage pour un jeu de lignes que le serveur ne produit step
-  // encore, dans les deux ordres, pour prouver que le regroupement ne se fie
-  // step a l'order d'arrivee.
-  it('n displayed jamais unknown a cote d un vrai genre : reel puis unknown', async () => {
-    const wrapper = await monterAvecStatut({
+  // Today, `replace_plugin_lines` on the core side (status.rs) replaces all the
+  // lines of a name as one block: either real kinds, or a single synthetic
+  // "unknown" — never a mix. This guard does not depend on it: it checks the
+  // display for a set of lines the server does not produce yet, in both
+  // orders, to prove that the grouping does not rely on arrival order.
+  it('never shows unknown next to a real kind: real then unknown', async () => {
+    const wrapper = await mountWithStatus({
       plugins: [
         { name: 'x', kind: 'source', connected: true, admin: false },
         { name: 'x', kind: 'unknown', connected: true, admin: false },
@@ -318,8 +316,8 @@ describe('ConfigView — table des plugins', () => {
     expect(wrapper.find('[data-plugin-kind]').text()).toBe('source')
   })
 
-  it('n displayed jamais unknown a cote d un vrai genre : unknown puis reel', async () => {
-    const wrapper = await monterAvecStatut({
+  it('never shows unknown next to a real kind: unknown then real', async () => {
+    const wrapper = await mountWithStatus({
       plugins: [
         { name: 'x', kind: 'unknown', connected: true, admin: false },
         { name: 'x', kind: 'source', connected: true, admin: false },
@@ -329,11 +327,10 @@ describe('ConfigView — table des plugins', () => {
     expect(wrapper.find('[data-plugin-kind]').text()).toBe('source')
   })
 
-  it('un greffon a moitie connected ne se lit step comme connected', async () => {
-    // Seul le test de regroupement existant connected les deux genres : sans
-    // celui-ci, une regression qui ferait un OU au lieu d'un ET passerait
-    // inapercue.
-    const wrapper = await monterAvecStatut({
+  it('a half-connected plugin does not read as connected', async () => {
+    // The existing grouping test alone connects both kinds: without this one,
+    // a regression doing an OR instead of an AND would go unnoticed.
+    const wrapper = await mountWithStatus({
       plugins: [
         { name: 'files', kind: 'source', connected: true, admin: false },
         { name: 'files', kind: 'metadata', connected: false, admin: false },
@@ -343,8 +340,8 @@ describe('ConfigView — table des plugins', () => {
     expect(wrapper.find('[data-plugin-state]').text()).toBe('unavailable')
   })
 
-  it('encode le nom du greffon dans l URL de la bascule', async () => {
-    const wrapper = await monterAvecStatut({
+  it('encodes the plugin name in the toggle URL', async () => {
+    const wrapper = await mountWithStatus({
       plugins: [{ name: 'my plugin', kind: 'source', connected: true, admin: false }],
       active_source: 'my plugin',
     })
@@ -353,108 +350,108 @@ describe('ConfigView — table des plugins', () => {
     expect(api.put).toHaveBeenCalledWith('/api/plugins/my%20plugin/enabled', { enabled: false })
   })
 
-  // Fix 4 de la revue finale : désactiver la source active peut coûter
-  // jusqu'à 15 s si l'entrante ou la sortante ne répond step. Sans marqueur en
-  // vol, l'interrupteur restait cliquable — et cliquable deux fois — pendant
-  // toute cette fenêtre.
-  it('disabled l interrupteur tant que la bascule est en vol, le rend ensuite', async () => {
-    let resoudre: (v: string | null) => void = () => {}
-    const enVol = new Promise<string | null>((r) => { resoudre = r })
-    vi.mocked(api.put).mockReturnValueOnce(enVol)
-    const wrapper = await monterAvecStatut({
+  // Fix 4 of the final review: disabling the active source can cost up to 15 s
+  // if the incoming or the outgoing one does not answer. Without an in-flight
+  // marker, the switch stayed clickable — and clickable twice — during that
+  // whole window.
+  it('disables the switch while the toggle is in flight, re-enables it afterwards', async () => {
+    let resolve: (v: string | null) => void = () => {}
+    const inFlight = new Promise<string | null>((r) => { resolve = r })
+    vi.mocked(api.put).mockReturnValueOnce(inFlight)
+    const wrapper = await mountWithStatus({
       plugins: [{ name: 'cd', kind: 'source', connected: true, admin: false }],
       active_source: 'cd',
     })
 
     await wrapper.find('[data-plugin-toggle]').trigger('click')
     expect(wrapper.find('[data-plugin-toggle]').attributes('disabled')).toBeDefined()
-    // Toujours en vol : un second clic ne doit step doubler l'appel.
+    // Still in flight: a second click must not double the call.
     await wrapper.find('[data-plugin-toggle]').trigger('click')
     expect(api.put).toHaveBeenCalledTimes(1)
 
-    resoudre(null)
+    resolve(null)
     await flushPromises()
     expect(wrapper.find('[data-plugin-toggle]').attributes('disabled')).toBeUndefined()
   })
 })
 
-describe('ConfigView — langue', () => {
-  beforeEach(reinitialiser)
+describe('ConfigView — language', () => {
+  beforeEach(resetMocks)
 
-  it('envoie le PUT de langue puis recharge le catalogue', async () => {
-    // Le changement de langue recharge les catalogues au lieu de reload la
-    // page entiere comme le faisait l'ancienne IHM : c'est `loadAll()` (et
-    // son `reload()`) qui remplace `location.reload()`. Le test verifie donc
-    // qu'un second `GET /api/i18n` suit bien le PUT.
-    const { w, spy, puts } = await monter()
-    const avant = spy.mock.calls.filter((c) => c[0] === '/api/i18n').length
-    expect(avant).toBeGreaterThan(0) // load au montage
+  it('sends the language PUT then reloads the catalog', async () => {
+    // Changing the language reloads the catalogs instead of reloading the whole
+    // page as the old UI did: it is `loadAll()` (and its `reload()`) that
+    // replaces `location.reload()`. So the test checks that a second
+    // `GET /api/i18n` does follow the PUT.
+    const { w, spy, puts } = await mountView()
+    const before = spy.mock.calls.filter((c) => c[0] === '/api/i18n').length
+    expect(before).toBeGreaterThan(0) // loaded at mount
 
     await w.findAllComponents(Select)[1]!.vm.$emit('update:modelValue', 'en')
     await w.find('[data-lang-change]').trigger('click')
     await flushPromises()
 
-    expect(puts).toEqual([{ url: '/api/locale', corps: { locale: 'en' } }])
-    // Le catalogue a ete relu apres le PUT — sans quoi l'IHM resterait
-    // displayed dans l'ancienne langue jusqu'au prochain rechargement manuel.
-    expect(spy.mock.calls.filter((c) => c[0] === '/api/i18n').length).toBeGreaterThan(avant)
+    expect(puts).toEqual([{ url: '/api/locale', body: { locale: 'en' } }])
+    // The catalog was re-read after the PUT — otherwise the UI would stay
+    // displayed in the old language until the next manual reload.
+    expect(spy.mock.calls.filter((c) => c[0] === '/api/i18n').length).toBeGreaterThan(before)
   })
 
-  it('displayed le nom de la langue et non son code', async () => {
-    // « français » se lit, « fr » se devine. Le code reste la valeur envoyée au
-    // cœur (verifié par le test du PUT ci-dessus).
-    const { w } = await monter()
-    const textes = w.findAllComponents(SelectItem).map((i) => i.text())
-    expect(textes).toContain('Français')
-    expect(textes).toContain('English')
-    expect(textes).not.toContain('fr')
+  it('shows the name of the language and not its code', async () => {
+    // "français" is read, "fr" is guessed. The code remains the value sent to
+    // the core (checked by the PUT test above).
+    const { w } = await mountView()
+    const texts = w.findAllComponents(SelectItem).map((i) => i.text())
+    expect(texts).toContain('Français')
+    expect(texts).toContain('English')
+    expect(texts).not.toContain('fr')
   })
 
-  it('un PUT de langue en échec est signalé et ne recharge rien', async () => {
-    const { w, spy } = await monter({}, 'langue inconnue')
-    const avant = spy.mock.calls.filter((c) => c[0] === '/api/i18n').length
+  it('a failed language PUT is reported and reloads nothing', async () => {
+    const { w, spy } = await mountView({}, 'unknown language')
+    const before = spy.mock.calls.filter((c) => c[0] === '/api/i18n').length
     await w.find('[data-lang-change]').trigger('click')
     await flushPromises()
-    expect(toast.error).toHaveBeenCalledWith('langue inconnue')
-    // Aucun rechargement : la langue n'a step change cote serveur, relire les
-    // catalogues ne ferait que masquer l'echec derriere une IHM inchangee.
-    expect(spy.mock.calls.filter((c) => c[0] === '/api/i18n').length).toBe(avant)
+    expect(toast.error).toHaveBeenCalledWith('unknown language')
+    // No reload: the language did not change on the server side, re-reading
+    // the catalogs would only hide the failure behind an unchanged UI.
+    expect(spy.mock.calls.filter((c) => c[0] === '/api/i18n').length).toBe(before)
   })
 })
 
-describe('ConfigView — journaux', () => {
-  beforeEach(reinitialiser)
+describe('ConfigView — logs', () => {
+  beforeEach(resetMocks)
 
-  it('ne porte plus la carte des dernières erreurs', async () => {
-    // Déplacée vers l'onglet Système, où la page se rafraîchit : une list
-    // d'erreurs figée au milieu de réglages ne se relit jamais. Vérifié ici, et
-    // step seulement dans SystemView, pour qu'un retour en arrière se voie.
-    const { w } = await monter({
+  it('no longer carries the recent errors card', async () => {
+    // Moved to the System tab, where the page refreshes itself: a frozen list
+    // of errors in the middle of settings is never re-read. Checked here, and
+    // not only in SystemView, so that a rollback would be visible.
+    const { w } = await mountView({
       '/api/logs': { lines: ['WARN plugin radio unavailable'] },
     })
     expect(w.findAll('[data-log-line]')).toHaveLength(0)
     expect(w.text()).not.toContain('Dernières erreurs')
-    // Le sommaire n'a plus d'entrée qui pointe dans le vide.
+    // The table of contents no longer has an entry pointing at nothing.
     expect(w.findAll('[data-toc-link]').map((l) => l.text())).not.toContain('Dernières erreurs')
   })
 })
 
-describe('ConfigView — sortie audio', () => {
-  beforeEach(reinitialiser)
+describe('ConfigView — audio output', () => {
+  beforeEach(resetMocks)
 
-  it('envoie le PUT du périphérique choisi, inchangé', async () => {
-    const { w, puts } = await monter()
+  it('sends the PUT of the chosen device, unchanged', async () => {
+    const { w, puts } = await mountView()
     expect(w.findAllComponents(Select)[0]!.props('modelValue')).toBe('hw:CARD=HDMI')
     await w.find('[data-audio-change]').trigger('click')
     await flushPromises()
-    expect(puts).toEqual([{ url: '/api/audio-output', corps: { device: 'hw:CARD=HDMI' } }])
+    expect(puts).toEqual([{ url: '/api/audio-output', body: { device: 'hw:CARD=HDMI' } }])
     expect(toast.success).toHaveBeenCalledWith('OK')
   })
 
-  it('sans choix enregistré, l’entrée par défaut est sélectionnée et « Changer » envoie null', async () => {
-    // Fini le repli sur le premier périphérique : `current: null` est un état
-    // légitime (« suis le défaut système »), l'entrée synthétique le porte.
-    const { w, puts } = await monter({
+  it('without a saved choice, the default entry is selected and "Change" sends null', async () => {
+    // No more fallback to the first device: `current: null` is a legitimate
+    // state ("follow the system default"), the synthetic entry carries it.
+    const { w, puts } = await mountView({
       '/api/audio-output': {
         devices: [{ name: 'hw:CARD=Headphones', description: '' }],
         current: null,
@@ -463,62 +460,62 @@ describe('ConfigView — sortie audio', () => {
     expect(w.findAllComponents(Select)[0]!.props('modelValue')).toBe('__system_default__')
     await w.find('[data-audio-change]').trigger('click')
     await flushPromises()
-    expect(puts).toEqual([{ url: '/api/audio-output', corps: { device: null } }])
+    expect(puts).toEqual([{ url: '/api/audio-output', body: { device: null } }])
   })
 
-  it('l’entrée par défaut est la première de la list', async () => {
-    const { w } = await monter()
-    const premier = w.findAllComponents(SelectItem)[0]!
-    expect(premier.attributes('data-audio-default')).toBeDefined()
-    expect(premier.text()).toBe('Par défaut (système)')
+  it('the default entry is the first of the list', async () => {
+    const { w } = await mountView()
+    const first = w.findAllComponents(SelectItem)[0]!
+    expect(first.attributes('data-audio-default')).toBeDefined()
+    expect(first.text()).toBe('Par défaut (système)')
   })
 
-  it('displayed la description en principal et le nom technique en secondaire', async () => {
-    const { w } = await monter()
+  it('shows the description as primary and the technical name as secondary', async () => {
+    const { w } = await mountView()
     const items = w.findAllComponents(SelectItem)
-    const avecDescription = items.find((i) => i.text().includes('bcm2835 Headphones'))!
-    expect(avecDescription.text()).toContain('hw:CARD=Headphones')
-    // Sans description : le nom seul, step de ligne secondaire vide.
-    const sansDescription = items.find((i) => i.props('value') === 'hw:CARD=HDMI')!
-    expect(sansDescription.text()).toBe('hw:CARD=HDMI')
+    const withDescription = items.find((i) => i.text().includes('bcm2835 Headphones'))!
+    expect(withDescription.text()).toContain('hw:CARD=Headphones')
+    // Without a description: the name alone, no empty secondary line.
+    const withoutDescription = items.find((i) => i.props('value') === 'hw:CARD=HDMI')!
+    expect(withoutDescription.text()).toBe('hw:CARD=HDMI')
   })
 
-  it('un périphérique choisi mais absent de la list reste visible', async () => {
-    // Carte débranchée : la sélection courante est rajoutée en fin de list
-    // (nom seul) plutôt que de laisser un déclencheur vide.
-    const { w } = await monter({
+  it('a chosen device missing from the list stays visible', async () => {
+    // Unplugged card: the current selection is appended at the end of the list
+    // (name alone) rather than leaving an empty trigger.
+    const { w } = await mountView({
       '/api/audio-output': {
         devices: [{ name: 'hw:CARD=Headphones', description: '' }],
         current: 'hw:CARD=USB',
       },
     })
     expect(w.findAllComponents(Select)[0]!.props('modelValue')).toBe('hw:CARD=USB')
-    const valeurs = w.findAllComponents(SelectItem).map((i) => i.props('value'))
-    expect(valeurs).toContain('hw:CARD=USB')
+    const values = w.findAllComponents(SelectItem).map((i) => i.props('value'))
+    expect(values).toContain('hw:CARD=USB')
   })
 
-  it('aucun périphérique listé : l’entrée par défaut reste utilisable', async () => {
-    const { w, puts } = await monter({ '/api/audio-output': { devices: [], current: null } })
+  it('no device listed: the default entry remains usable', async () => {
+    const { w, puts } = await mountView({ '/api/audio-output': { devices: [], current: null } })
     expect(w.findAllComponents(Select)[0]!.props('modelValue')).toBe('__system_default__')
     await w.find('[data-audio-change]').trigger('click')
     await flushPromises()
-    expect(puts).toEqual([{ url: '/api/audio-output', corps: { device: null } }])
+    expect(puts).toEqual([{ url: '/api/audio-output', body: { device: null } }])
   })
 
-  it('un /api/audio-output injoignable désactive « Changer »', async () => {
-    // Sans cela, le sélecteur displayed « Par défaut (système) » comme si
-    // c'était l'état réel, et « Changer » enverrait device: null — une
-    // réinitialisation silencieuse.
-    const { w } = await monter({ '/api/audio-output': undefined })
+  it('an unreachable /api/audio-output disables "Change"', async () => {
+    // Without this, the selector would show "Par défaut (système)" as if it
+    // were the real state, and "Change" would send device: null — a silent
+    // reset.
+    const { w } = await mountView({ '/api/audio-output': undefined })
     expect(w.find('[data-audio-change]').attributes('disabled')).toBeDefined()
   })
 })
 
-describe('ConfigView — réglages', () => {
-  beforeEach(reinitialiser)
+describe('ConfigView — settings', () => {
+  beforeEach(resetMocks)
 
-  it('displayed les réglages lus depuis /api/settings', async () => {
-    const { w } = await monter({
+  it('shows the settings read from /api/settings', async () => {
+    const { w } = await mountView({
       '/api/settings': {
         volume_repeat_initial_ms: 800, volume_repeat_interval_ms: 250, startup_power: 'standby',
         overlay_ms: 5000, tens_window_ms: 5000,
@@ -526,32 +523,32 @@ describe('ConfigView — réglages', () => {
     })
     expect((w.find('[data-hold-initial]').element as HTMLInputElement).value).toBe('800')
     expect((w.find('[data-hold-interval]').element as HTMLInputElement).value).toBe('250')
-    // Le sélecteur de démarrage reflète la veille.
-    const demarrage = w.findAllComponents(Select).find((s) => s.props('modelValue') === 'standby')
-    expect(demarrage).toBeDefined()
+    // The startup selector reflects standby.
+    const startup = w.findAllComponents(Select).find((s) => s.props('modelValue') === 'standby')
+    expect(startup).toBeDefined()
   })
 
-  it('propose « état précédent » à côté de « allumé » et « veille »', async () => {
-    // Les trois valeurs du fil, step seulement les libellés : c'est `value`
-    // que le PUT envoie au cœur.
-    const { w } = await monter()
-    const demarrage = w
+  it('offers "previous state" next to "on" and "standby"', async () => {
+    // The three wire values, not only the labels: it is `value` that the PUT
+    // sends to the core.
+    const { w } = await mountView()
+    const startup = w
       .findAllComponents(SelectItem)
       .filter((i) => ['on', 'standby', 'previous'].includes(String(i.props('value'))))
-    expect(demarrage.map((i) => String(i.props('value')))).toEqual(['on', 'standby', 'previous'])
-    expect(demarrage.map((i) => i.text())).toEqual(['allumé', 'veille', 'état précédent'])
+    expect(startup.map((i) => String(i.props('value')))).toEqual(['on', 'standby', 'previous'])
+    expect(startup.map((i) => i.text())).toEqual(['allumé', 'veille', 'état précédent'])
   })
 
-  it('enregistre « état précédent » par un PUT du bloc complet', async () => {
-    const { w, puts } = await monter()
-    const demarrage = w.findAllComponents(Select).find((s) => s.props('modelValue') === 'on')!
-    await demarrage.vm.$emit('update:modelValue', 'previous')
+  it('saves "previous state" through a PUT of the whole block', async () => {
+    const { w, puts } = await mountView()
+    const startup = w.findAllComponents(Select).find((s) => s.props('modelValue') === 'on')!
+    await startup.vm.$emit('update:modelValue', 'previous')
     await w.find('[data-startup-change]').trigger('click')
     await flushPromises()
     expect(puts).toEqual([
       {
         url: '/api/settings',
-        corps: {
+        body: {
           volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'previous',
           overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
@@ -561,16 +558,16 @@ describe('ConfigView — réglages', () => {
     ])
   })
 
-  it('enregistre le démarrage en veille par un PUT du bloc complet', async () => {
-    const { w, puts } = await monter()
-    const demarrage = w.findAllComponents(Select).find((s) => s.props('modelValue') === 'on')!
-    await demarrage.vm.$emit('update:modelValue', 'standby')
+  it('saves startup in standby through a PUT of the whole block', async () => {
+    const { w, puts } = await mountView()
+    const startup = w.findAllComponents(Select).find((s) => s.props('modelValue') === 'on')!
+    await startup.vm.$emit('update:modelValue', 'standby')
     await w.find('[data-startup-change]').trigger('click')
     await flushPromises()
     expect(puts).toEqual([
       {
         url: '/api/settings',
-        corps: {
+        body: {
           volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'standby',
           overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
@@ -581,8 +578,8 @@ describe('ConfigView — réglages', () => {
     expect(toast.success).toHaveBeenCalledWith('OK')
   })
 
-  it('enregistre les délais du volume maintenu en nombres', async () => {
-    const { w, puts } = await monter()
+  it('saves the volume-hold delays as numbers', async () => {
+    const { w, puts } = await mountView()
     await w.find('[data-hold-initial]').setValue('1500')
     await w.find('[data-hold-interval]').setValue('300')
     await w.find('[data-hold-change]').trigger('click')
@@ -590,7 +587,7 @@ describe('ConfigView — réglages', () => {
     expect(puts).toEqual([
       {
         url: '/api/settings',
-        corps: {
+        body: {
           volume_repeat_initial_ms: 1500, volume_repeat_interval_ms: 300, startup_power: 'on',
           overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
@@ -600,27 +597,27 @@ describe('ConfigView — réglages', () => {
     ])
   })
 
-  it('un PUT de réglages refusé est signalé par un toast', async () => {
-    const { w } = await monter({}, 'délai initial hors bornes (200-5000 ms)')
+  it('a refused settings PUT is reported by a toast', async () => {
+    const { w } = await mountView({}, 'initial delay out of bounds (200-5000 ms)')
     await w.find('[data-hold-change]').trigger('click')
     await flushPromises()
-    expect(toast.error).toHaveBeenCalledWith('délai initial hors bornes (200-5000 ms)')
+    expect(toast.error).toHaveBeenCalledWith('initial delay out of bounds (200-5000 ms)')
   })
 
-  it('un /api/settings injoignable laisse les valeurs par défaut', async () => {
-    const { w } = await monter({ '/api/settings': undefined })
-    // Même valeur que le `Default` de `Settings` côté cœur (state.rs) : les
-    // deux replis doivent rester alignés, sinon la page displayed brièvement
-    // autre chose que ce que l'appareil applique.
+  it('an unreachable /api/settings leaves the default values', async () => {
+    const { w } = await mountView({ '/api/settings': undefined })
+    // Same value as the `Default` of `Settings` on the core side (state.rs): the
+    // two fallbacks must stay aligned, otherwise the page briefly shows
+    // something other than what the device applies.
     expect((w.find('[data-hold-initial]').element as HTMLInputElement).value).toBe('800')
   })
 })
 
-describe('ConfigView — incrustations', () => {
-  beforeEach(reinitialiser)
+describe('ConfigView — overlays', () => {
+  beforeEach(resetMocks)
 
-  it('displayed les deux durées lues depuis /api/settings', async () => {
-    const { w } = await monter({
+  it('shows the two durations read from /api/settings', async () => {
+    const { w } = await mountView({
       '/api/settings': {
         volume_repeat_initial_ms: 800, volume_repeat_interval_ms: 250, startup_power: 'on',
         overlay_ms: 3000, tens_window_ms: 9000,
@@ -630,8 +627,8 @@ describe('ConfigView — incrustations', () => {
     expect((w.find('[data-tens-window-ms]').element as HTMLInputElement).value).toBe('9000')
   })
 
-  it('enregistre les deux durées en nombres, au bloc complet', async () => {
-    const { w, puts } = await monter()
+  it('saves the two durations as numbers, as a whole block', async () => {
+    const { w, puts } = await mountView()
     await w.find('[data-overlay-ms]').setValue('2000')
     await w.find('[data-tens-window-ms]').setValue('7000')
     await w.find('[data-overlays-change]').trigger('click')
@@ -639,7 +636,7 @@ describe('ConfigView — incrustations', () => {
     expect(puts).toEqual([
       {
         url: '/api/settings',
-        corps: {
+        body: {
           volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'on',
           overlay_ms: 2000, tens_window_ms: 7000, seek_step_s: 10,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
@@ -650,34 +647,34 @@ describe('ConfigView — incrustations', () => {
     expect(toast.success).toHaveBeenCalledWith('OK')
   })
 
-  it('un PUT hors bornes est signalé par un toast', async () => {
-    const { w } = await monter({}, 'incrustation hors bornes (1000-15000 ms)')
+  it('an out-of-bounds PUT is reported by a toast', async () => {
+    const { w } = await mountView({}, 'overlay out of bounds (1000-15000 ms)')
     await w.find('[data-overlays-change]').trigger('click')
     await flushPromises()
-    expect(toast.error).toHaveBeenCalledWith('incrustation hors bornes (1000-15000 ms)')
+    expect(toast.error).toHaveBeenCalledWith('overlay out of bounds (1000-15000 ms)')
   })
 })
 
-describe('ConfigView — deplacement', () => {
-  beforeEach(reinitialiser)
+describe('ConfigView — seek', () => {
+  beforeEach(resetMocks)
 
-  it('envoie le step de deplacement', async () => {
-    const { w, puts } = await monter()
+  it('sends the seek step', async () => {
+    const { w, puts } = await mountView()
     await w.find('[data-seek-step-s]').setValue('30')
     await w.find('[data-seek-change]').trigger('click')
     await flushPromises()
-    const corpsEnvoye = puts[0]!.corps as { seek_step_s: number }
-    expect(corpsEnvoye.seek_step_s).toBe(30)
+    const sentBody = puts[0]!.body as { seek_step_s: number }
+    expect(sentBody.seek_step_s).toBe(30)
   })
 })
 
-describe('ConfigView — state d un greffon qui demarre', () => {
-  beforeEach(reinitialiser)
+describe('ConfigView — state of a starting plugin', () => {
+  beforeEach(resetMocks)
 
-  it('dit « demarrage » et non « fige » pour un greffon qu on vient de rallumer', async () => {
-    // Le defaut signale a l usage : « fige » veut dire fautif, et l afficher
-    // pendant un demarrage normal accuse un binaire parfaitement sain.
-    const { w } = await monter({
+  it('says "starting" and not "stalled" for a plugin that was just re-enabled', async () => {
+    // The defect reported in use: "stalled" means faulty, and showing it during
+    // a normal startup accuses a perfectly healthy binary.
+    const { w } = await mountView({
       '/api/status': {
         plugins: [{ name: 'mpd', kind: 'unknown', connected: false, admin: false, starting: true }],
         active_source: 'radio',
@@ -686,9 +683,9 @@ describe('ConfigView — state d un greffon qui demarre', () => {
     expect(w.find('[data-plugin-state]').text()).toBe('démarrage')
   })
 
-  it('dit « fige » quand le delai est passe', async () => {
-    // Le controle : sans lui, « toujours demarrage » passerait aussi.
-    const { w } = await monter({
+  it('says "stalled" once the delay has passed', async () => {
+    // The control: without it, "always starting" would pass too.
+    const { w } = await mountView({
       '/api/status': {
         plugins: [{ name: 'mpd', kind: 'unknown', connected: false, admin: false, stalled: true }],
         active_source: 'radio',
@@ -698,15 +695,15 @@ describe('ConfigView — state d un greffon qui demarre', () => {
   })
 })
 
-describe('ConfigView — pochettes', () => {
-  beforeEach(reinitialiser)
+describe('ConfigView — covers', () => {
+  beforeEach(resetMocks)
 
-  it('le plafond de la source n’est jamais grisé, l’interrupteur ne le touche step', async () => {
-    // La disposition porte une distinction réelle : ce plafond s'applique que le
-    // réencodage soit actif ou non, et c'est la seule garde qui subsiste quand
-    // il est décoché. Le griser avec les autres serait le mensonge le plus
-    // coûteux de cette carte.
-    const { w } = await monter()
+  it('the source cap is never greyed out, the switch does not touch it', async () => {
+    // The layout carries a real distinction: this cap applies whether the
+    // re-encoding is active or not, and it is the only guard left when the
+    // switch is unchecked. Greying it out with the others would be the most
+    // costly lie of this card.
+    const { w } = await mountView()
     expect(w.find('[data-cover-source-max]').attributes('disabled')).toBeUndefined()
 
     await w.find('[data-cover-rendition]').trigger('click')
@@ -714,8 +711,8 @@ describe('ConfigView — pochettes', () => {
     expect(w.find('[data-cover-source-max]').attributes('disabled')).toBeUndefined()
   })
 
-  it('décocher l’interrupteur grise les quatre réglages du rendu', async () => {
-    const { w } = await monter()
+  it('unchecking the switch greys out the four rendition settings', async () => {
+    const { w } = await mountView()
     const fields = [
       '[data-cover-max-edge]',
       '[data-cover-jpeg-quality]',
@@ -729,35 +726,34 @@ describe('ConfigView — pochettes', () => {
     for (const c of fields) {
       expect(w.find(c).attributes('disabled')).toBeDefined()
     }
-    // Le groupe entier est annoncé inactif, une fois, plutôt que champ par
-    // champ : c'est ce qu'un player d'écran doit entendre.
+    // The whole group is announced inactive, once, rather than field by field:
+    // that is what a screen reader must hear.
     expect(w.find('[data-cover-rendition-group]').attributes('aria-disabled')).toBe('true')
   })
 
-  it('un réglage grisé garde sa valeur et repart dans le PUT', async () => {
-    // **Grisés, step vidés.** Sans cette propriété, décocher puis enregistrer
-    // ferait retomber les quatre fields sur les défauts du cœur (la structure
-    // est `serde(default)`), c'est-à-dire perdre en silence un réglage encore
-    // affiché à l'écran — et recocher l'interrupteur ne retrouverait step ce
-    // qu'on y avait posé.
-    const { w, puts } = await monter()
+  it('a greyed-out setting keeps its value and goes back in the PUT', async () => {
+    // **Greyed out, not emptied.** Without this property, unchecking then
+    // saving would drop the four fields back to the core defaults (the struct
+    // is `serde(default)`), i.e. silently lose a setting still shown on
+    // screen — and re-checking the switch would not find what had been set.
+    const { w, puts } = await mountView()
     await w.find('[data-cover-max-edge]').setValue('800')
     await w.find('[data-cover-rendition]').trigger('click')
     await flushPromises()
 
     await w.find('[data-cover-change]').trigger('click')
     await flushPromises()
-    const corps = puts[0]!.corps as { cover_rendition: boolean; cover_max_edge_px: number }
-    expect(corps.cover_rendition).toBe(false)
-    expect(corps.cover_max_edge_px).toBe(800)
+    const body = puts[0]!.body as { cover_rendition: boolean; cover_max_edge_px: number }
+    expect(body.cover_rendition).toBe(false)
+    expect(body.cover_max_edge_px).toBe(800)
   })
 
-  it('envoie les six réglages en nombres, jamais en chaînes', async () => {
-    // Le champ `<input type="number">` de Vue rend des **chaînes** : sans les
-    // `Number(...)` d'`saveSettings`, le cœur recevrait `"800"` et
-    // refuserait le bloc entier avec un message parlant d'un champ que
-    // l'utilisateur n'a step touché.
-    const { w, puts } = await monter()
+  it('sends the six settings as numbers, never as strings', async () => {
+    // Vue's `<input type="number">` yields **strings**: without the
+    // `Number(...)` calls in `saveSettings`, the core would receive `"800"` and
+    // refuse the whole block with a message about a field the user never
+    // touched.
+    const { w, puts } = await mountView()
     await w.find('[data-cover-source-max]').setValue('12')
     await w.find('[data-cover-max-edge]').setValue('800')
     await w.find('[data-cover-jpeg-quality]').setValue('70')
@@ -765,7 +761,7 @@ describe('ConfigView — pochettes', () => {
     await w.find('[data-cover-max-pixels]').setValue('24')
     await w.find('[data-cover-change]').trigger('click')
     await flushPromises()
-    expect(puts[0]!.corps).toMatchObject({
+    expect(puts[0]!.body).toMatchObject({
       cover_source_max_mio: 12,
       cover_max_edge_px: 800,
       cover_jpeg_quality: 70,
@@ -775,42 +771,42 @@ describe('ConfigView — pochettes', () => {
   })
 })
 
-describe('ConfigView — sommaire', () => {
-  beforeEach(reinitialiser)
+describe('ConfigView — table of contents', () => {
+  beforeEach(resetMocks)
 
-  it('list une entrée par section, avec le libellé de sa carte', async () => {
-    const { w } = await monter()
+  it('lists one entry per section, with the label of its card', async () => {
+    const { w } = await mountView()
     const links = w.findAll('[data-toc-link]')
-    // Plus de « Dernières erreurs » : la carte est passée sur l'onglet Système,
-    // et le sommaire ne doit step garder une entrée qui pointe dans le vide.
+    // No more "Dernières erreurs": the card moved to the System tab, and the
+    // table of contents must not keep an entry pointing at nothing.
     expect(links.map((l) => l.text())).toEqual([
       'Plugins', 'Sortie audio', 'Langue', 'Démarrage', 'Date et heure', 'Volume maintenu',
       'Incrustations', 'Déplacement', "Pochettes d'album",
     ])
-    // Masqué sur petit écran : la colonne suit la largeur du shell, il n'y a
-    // step la place en mobile.
+    // Hidden on small screens: the column follows the shell width, there is no
+    // room for it on mobile.
     expect(w.find('[data-toc]').classes()).toContain('hidden')
   })
 
-  it('un clic fait défiler en douceur vers la section et la marque active', async () => {
-    const { w } = await monter()
+  it('a click smoothly scrolls to the section and marks it active', async () => {
+    const { w } = await mountView()
     const scrollIntoView = vi.fn()
-    const cible = w.find('#audio')
-    expect(cible.exists()).toBe(true)
-    cible.element.scrollIntoView = scrollIntoView
+    const target = w.find('#audio')
+    expect(target.exists()).toBe(true)
+    target.element.scrollIntoView = scrollIntoView
     await w.findAll('[data-toc-link]')[1]!.trigger('click')
     expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth' })
     expect(w.findAll('[data-toc-link]')[1]!.attributes('aria-current')).toBe('true')
   })
 
-  it('le défilement met à jour la section active (scrollspy)', async () => {
-    const { w } = await monter()
+  it('scrolling updates the active section (scrollspy)', async () => {
+    const { w } = await mountView()
     expect(ioCallback).not.toBeNull()
     ioCallback!([{ target: w.find('#language').element, isIntersecting: true }])
     ioCallback!([{ target: w.find('#plugins').element, isIntersecting: false }])
     await w.vm.$nextTick()
-    const actifs = w.findAll('[data-toc-link][aria-current="true"]')
-    expect(actifs).toHaveLength(1)
-    expect(actifs[0]!.text()).toBe('Langue')
+    const activeLinks = w.findAll('[data-toc-link][aria-current="true"]')
+    expect(activeLinks).toHaveLength(1)
+    expect(activeLinks[0]!.text()).toBe('Langue')
   })
 })

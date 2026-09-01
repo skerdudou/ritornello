@@ -10,29 +10,29 @@ import {
   type BindingTable, type Conflict,
 } from './preset-toml'
 
-// `base` fait partie du contract des IHM de plugin, au meme title que
-// `catalog` : le prefixe **absolu** sous lequel le coeur sert les routes de ce
-// plugin (`/plugins/generic-input/`), fourni par le shell.
+// `base` is part of the plugin UI contract, same as `catalog`: the
+// **absolute** prefix under which the core serves this plugin's routes
+// (`/plugins/generic-input/`), provided by the shell.
 //
-// Auparavant, cette vue appelait `api.get('./api/data')` en relatif — donc
-// resolu contre l'URL du navigateur, et non contre quoi que ce soit que le
-// contract garantisse. Sur `/plugins/generic-input` (sans slash final, forme que
-// le routeur du shell acceptait aussi), `./api/data` resolvait vers
-// `/plugins/api/data`, que le coeur interprete comme le plugin « api » : 404,
-// table vide, erreur de chargement et tous les boutons en echec.
+// This view used to call `api.get('./api/data')` relatively — so resolved
+// against the browser's URL, not against anything the contract guarantees.
+// On `/plugins/generic-input` (without a trailing slash, a form the shell's
+// router also accepted), `./api/data` resolved to `/plugins/api/data`,
+// which the core interprets as the "api" plugin: 404, empty table, load
+// error and every button failing.
 //
-// Prop **requise**, sans valeur par defaut : le nom sous lequel ce plugin est
-// servi vient de `plugins.toml`, donc du deploiement, et non de ce fichier. Un
-// defaut `/plugins/generic-input/` serait faux des que l'operateur declare ce
-// plugin sous un autre nom, et le serait *silencieusement*. Mieux vaut que le
-// shell soit tenu de fournir le prefixe — ce qu'un test de `PluginView`
-// verifie.
+// **Required** prop, with no default value: the name under which this
+// plugin is served comes from `plugins.toml`, i.e. from deployment, not
+// from this file. A default of `/plugins/generic-input/` would be wrong as
+// soon as the operator declares this plugin under another name, and would
+// be wrong *silently*. Better for the shell to be required to provide the
+// prefix — which a `PluginView` test checks.
 const props = defineProps<{ catalog: Catalog; base: string }>()
 const t = computed(() => createT(props.catalog))
 
-/** URL absolue d'une route de ce plugin, construite depuis `base`. */
-function url(chemin: string): string {
-  return `${props.base}${chemin}`
+/** Absolute URL of a route of this plugin, built from `base`. */
+function url(path: string): string {
+  return `${props.base}${path}`
 }
 
 const PROBE_MS = 300
@@ -50,37 +50,38 @@ const device = ref('')
 const preset = ref('')
 const codes = ref<string[]>(ACTIONS.map(() => ''))
 const message = ref('')
-// Ligne (index dans `ACTIONS`) dont on apprend la touche, `null` sinon :
-// seule source de verite de l'etat « apprentissage en cours », elle pilote
-// l'ouverture de la popin. Ce n'est pas une cible d'ecriture : la destination
-// du code capture est la fermeture `i` d'`learn`.
+// Row (index into `ACTIONS`) whose key is being learned, `null` otherwise:
+// the sole source of truth for the "learning in progress" state, it drives
+// the opening of the popup. It is not a write target: the destination of
+// the captured code is `i`, captured by `learn`'s closure.
 const learnedRow = ref<number | null>(null)
 /**
- * Secondes restantes avant l'abandon, pour la popin.
+ * Seconds remaining before abandonment, for the popup.
  *
- * Calculees ici et non dans la popin : l'echeance vit avec le sondage, et un
- * second minuteur cote popin deriverait du premier -- il afficherait un
- * chiffre que rien ne garantit. Zero vaut « pas d'apprentissage en cours ».
+ * Computed here and not in the popup: the deadline lives with the probing,
+ * and a second timer on the popup side would drift from the first -- it
+ * would display a figure nothing guarantees. Zero means "no learning in
+ * progress".
  */
 const secondsLeft = ref(0)
-// Case « add aux codes existants » de la popin, remise a faux a chaque
-// ouverture : le geste courant reste le remplacement.
+// "Add to existing codes" checkbox of the popup, reset to false on every
+// opening: the default gesture stays replacement.
 const add = ref(false)
-/** Libelle traduit de l'action apprise, pour le title de la popin. */
+/** Translated label of the learned action, for the popup's title. */
 const learnedActionLabel = computed(() => {
   const i = learnedRow.value
-  const cle = i === null ? undefined : ACTIONS[i]?.key
-  return cle ? t.value(cle) : ''
+  const key = i === null ? undefined : ACTIONS[i]?.key
+  return key ? t.value(key) : ''
 })
 let timer: ReturnType<typeof setInterval> | null = null
-// Garde synchrone contre la course decrite en revue (round 1) : `timer` n'est
-// affecte qu'apres le `await` du PUT `learn`, donc un second declenchement
-// (double-clic, ou clic sur une autre ligne) pendant que ce PUT est en vol
-// verrait `timer` toujours nul et passerait lui aussi le garde fonde sur
-// `timer` seul -- les deux `setInterval` en resultant, le second ecrasant la
-// reference au premier qui devient orphelin (jamais `clearInterval`e) et
-// peut ecrire un code capture dans la mauvaise action. Ce drapeau est pose
-// avant tout `await`, donc effectif immediatement.
+// Synchronous guard against the race described in review (round 1): `timer`
+// is only assigned after the `learn` PUT's `await`, so a second trigger
+// (double-click, or click on another row) while this PUT is in flight would
+// see `timer` still null and would also pass the guard based on `timer`
+// alone -- resulting in two `setInterval`s, the second overwriting the
+// reference to the first, which becomes orphaned (never `clearInterval`d)
+// and can write a captured code into the wrong action. This flag is set
+// before any `await`, so it takes effect immediately.
 let learnInFlight = false
 
 function fillCodes() {
@@ -91,9 +92,9 @@ async function reload() {
   try {
     data.value = await api.get<Data>(url('api/data'))
     if (!data.value.devices.includes(device.value)) device.value = data.value.devices[0] ?? ''
-    // Meme traitement que `device` : un preset selectionne qui disparaitrait
-    // de la liste (ex. suppression du fichier livre) laisserait sinon le
-    // `Select` pointer sur une valeur sans `SelectItem` correspondant.
+    // Same handling as `device`: a selected preset that disappears from the
+    // list (e.g. the shipped file being removed) would otherwise leave the
+    // `Select` pointing at a value with no matching `SelectItem`.
     if (!data.value.presets.includes(preset.value)) preset.value = data.value.presets[0] ?? ''
     fillCodes()
     message.value = device.value ? '' : t.value('no_device')
@@ -105,35 +106,33 @@ async function reload() {
 onMounted(reload)
 onUnmounted(() => stopTimer())
 
-// Changer de peripherique annule l'apprentissage en cours **avant** de
-// repeupler la table, comme le faisait l'ancien gestionnaire
+// Changing device cancels the ongoing learning session **before**
+// repopulating the table, like the old handler used to
 // (`$('dev').onchange = async () => { if (timer) await stopLearn(''); … }`).
 //
-// Sans cette annulation, l'intervalle continue de sonder alors que la session
-// d'apprentissage du serveur est encore armee sur le peripherique
-// **precedent** ; `fillCodes()` a entre-temps repeuple la table depuis les
-// bindings du **nouveau** peripherique, donc la fermeture ecrit le code
-// capture dans la ligne du nouveau peripherique, et « Enregistrer » le
-// persiste — une touche attribuee au mauvais peripherique. L'IHM restait en
-// outre en etat « appuyez sur une touche » pour un peripherique que personne
-// n'apprend.
+// Without this cancellation, the interval keeps probing while the server's
+// learning session is still armed on the **previous** device;
+// `fillCodes()` has in the meantime repopulated the table from the
+// **new** device's bindings, so the closure writes the captured code into
+// the new device's row, and "Save" persists it — a key assigned to the
+// wrong device. The UI would also stay in the "press a key" state for a
+// device nobody is learning anymore.
 //
-// `stopLearn` appelle `stopTimer()` de facon synchrone avant tout
-// `await` : l'intervalle est donc mort avant que le PUT `cancel_learn` ne
-// parte, et aucun sondage ne peut s'intercaler pendant l'aller-retour.
+// `stopLearn` calls `stopTimer()` synchronously before any `await`: the
+// interval is therefore dead before the `cancel_learn` PUT leaves, and no
+// probe can slip in during the round trip.
 //
-// `stopLearn` fait un `await fetch` (PUT `cancel_learn`) qui peut
-// rejeter (reseau coupe) : sans `try`/`finally`, la rejection non rattrapee
-// sauterait `fillCodes()`, et les codes du peripherique **precedent**
-// resteraient affiches sous le nouveau -- exactement la classe de defaut que
-// ce watcher vient corriger, dans la branche d'echec reseau.
+// `stopLearn` does an `await fetch` (PUT `cancel_learn`) that can reject
+// (network cut off): without `try`/`finally`, the uncaught rejection would
+// skip `fillCodes()`, and the **previous** device's codes would stay
+// displayed under the new one -- exactly the class of bug this watcher
+// fixes, in the network-failure branch.
 watch(device, async () => {
   try {
     if (timer) await stopLearn('')
   } catch {
-    // Best-effort : une annulation reseau en echec ne doit pas empecher de
-    // repeupler la table pour le nouveau peripherique (voir commentaire
-    // ci-dessus).
+    // Best-effort: a failed network cancellation must not prevent
+    // repopulating the table for the new device (see comment above).
   } finally {
     fillCodes()
   }
@@ -142,65 +141,64 @@ watch(device, async () => {
 function stopTimer() {
   if (timer) clearInterval(timer)
   timer = null
-  // Remis a zero avec le minuteur qui l'alimente : sans cela le dernier
-  // chiffre affiche resterait fige derriere le voile, et reapparaitrait tel
-  // quel a l'ouverture suivante avant le premier tour de sondage.
+  // Reset to zero along with the timer that feeds it: otherwise the last
+  // displayed figure would stay frozen behind the overlay, and would
+  // reappear as-is on the next opening, before the first probing round.
   secondsLeft.value = 0
 }
 
-async function stopLearn(texte: string) {
+async function stopLearn(text: string) {
   stopTimer()
-  // Avant tout `await`, comme `stopTimer()` : la popin se referme des le
-  // geste (annulation, capture, changement de peripherique) et non a la fin
-  // de l'aller-retour reseau -- qui peut d'ailleurs echouer.
+  // Before any `await`, like `stopTimer()`: the popup closes right at the
+  // gesture (cancellation, capture, device change), not at the end of the
+  // network round trip -- which can moreover fail.
   learnedRow.value = null
   await api.put(url('api/data'), { op: 'cancel_learn' })
-  message.value = texte
+  message.value = text
 }
 
 /**
- * Annulation demandee par la popin — bouton, croix du kit, Échap, clic sur le
- * voile : quatre gestes, un seul chemin, et une fonction nommee plutot qu'un
- * appel asynchrone ecrit dans le gabarit.
+ * Cancellation requested by the popup — button, kit close icon, Escape,
+ * click on the overlay: four gestures, a single path, and a named function
+ * rather than an async call written into the template.
  *
- * La promesse est explicitement abandonnee (`void`) et son echec avale. Rien
- * de ce que voit l'utilisateur n'en depend : `stopLearn` arrete le
- * minuteur et referme la popin **avant** tout `await`. Une panne reseau ne
- * rejette d'ailleurs pas ici -- `api.put` la convertit en valeur de retour
- * (voir `web/kit/src/api.ts`, precisement pour qu'aucun appelant n'ait besoin
- * d'un `try`) ; le `catch` est une ceinture pour le jour ou
- * `stopLearn` gagnerait une etape qui leve, la promesse d'un
- * gestionnaire de gabarit n'ayant nulle part ou etre attendue.
+ * The promise is explicitly abandoned (`void`) and its failure swallowed.
+ * Nothing the user sees depends on it: `stopLearn` stops the timer and
+ * closes the popup **before** any `await`. A network failure does not even
+ * reject here -- `api.put` converts it into a return value (see
+ * `web/kit/src/api.ts`, precisely so that no caller needs a `try`); the
+ * `catch` is a belt-and-braces for the day `stopLearn` gains a step that
+ * throws, since a template handler's promise has nowhere to be awaited.
  */
 function cancelLearn() {
   void stopLearn('').catch(() => {})
 }
 
-/** Champ mis a jour pour un code capte : ajout en fin de liste ou remplacement. */
-function applyCode(champ: string, code: number, ajout: boolean): string {
-  if (!ajout || !champ.trim()) return String(code)
-  // Comparaison sur les codes analyses, pas sur le texte : `' 9 '` porte bien
-  // le code 9. Un `9, 9` serait de toute facon refuse a l'enregistrement
-  // (`duplicate_code`), et l'utilisateur n'a rien demande de plus.
-  if (parseField(champ).includes(code)) return champ
-  // Le champ est conserve tel qu'il est ecrit, espaces compris : l'utilisateur
-  // a tape ce qu'il a tape.
-  return `${champ}, ${code}`
+/** Field updated for a captured code: appended to the list, or replaced. */
+function applyCode(field: string, code: number, append: boolean): string {
+  if (!append || !field.trim()) return String(code)
+  // Comparison on parsed codes, not on the text: `' 9 '` does carry code 9.
+  // A `9, 9` would be rejected at save time anyway (`duplicate_code`), and
+  // the user hasn't asked for anything more.
+  if (parseField(field).includes(code)) return field
+  // The field is kept exactly as written, spaces included: the user typed
+  // what they typed.
+  return `${field}, ${code}`
 }
 
-// Apprentissage : le plugin capture la prochaine touche du peripherique, la
-// vue sonde `GetData` jusqu'a la voir arriver. Meme mecanique que l'ancienne
-// page — sondage court, annulation explicite — mais 30 s de delai au lieu de
-// 10 : le temps de trouver la bonne touche sur une telecommande inconnue.
+// Learning: the plugin captures the device's next key, the view probes
+// `GetData` until it sees it arrive. Same mechanics as the old page —
+// short probing, explicit cancellation — but a 30 s timeout instead of
+// 10: the time to find the right key on an unfamiliar remote.
 async function learn(i: number) {
   if (!device.value) {
     message.value = t.value('no_device')
     return
   }
-  // Renonce silencieusement si un declenchement precedent est deja en vol :
-  // le premier va de toute facon aboutir a une session d'apprentissage
-  // valide, et laisser le second continuer produirait un deuxieme
-  // `setInterval` concurrent (voir le commentaire sur `learnInFlight`).
+  // Silently give up if a previous trigger is already in flight: the first
+  // one will succeed at establishing a valid learning session anyway, and
+  // letting the second one proceed would produce a second concurrent
+  // `setInterval` (see the comment on `learnInFlight`).
   if (learnInFlight) return
   learnInFlight = true
   try {
@@ -210,44 +208,44 @@ async function learn(i: number) {
       message.value = err
       return
     }
-    // Ceinture et bretelles : au cas ou un minuteur aurait ete (re)installe
-    // entre le debut de cette fonction et ici, on ne remplace jamais `timer`
-    // sans avoir explicitement arrete l'ancien.
+    // Belt and braces: in case a timer got (re)installed between the start
+    // of this function and here, `timer` is never replaced without having
+    // explicitly stopped the old one.
     stopTimer()
-    // La consigne « appuyez sur une touche » est portee par la popin, qui
-    // nomme l'action et le peripherique : rien a ecrire dans le bandeau du
-    // bas, que le voile recouvre de toute facon.
+    // The "press a key" instruction is carried by the popup, which names
+    // the action and the device: nothing to write in the bottom bar, which
+    // the overlay covers anyway.
     learnedRow.value = i
-    // ... mais il faut l'effacer : sans cela, le « Delai depasse » de la
-    // session precedente y traine encore derriere le voile pendant qu'une
-    // popin fraiche attend un appui.
+    // ... but it must be cleared: otherwise the previous session's "Timed
+    // out" would still linger there behind the overlay while a fresh popup
+    // waits for a press.
     message.value = ''
     add.value = false
-    const echeance = Date.now() + TIMEOUT_MS
-    // Pose des maintenant, avant le premier tour du minuteur : sans cela la
-    // popin s'ouvrirait sur un compte a rebours vide le temps d'un tour.
+    const deadline = Date.now() + TIMEOUT_MS
+    // Set right now, before the timer's first tick: otherwise the popup
+    // would open on an empty countdown for the duration of one tick.
     secondsLeft.value = Math.ceil(TIMEOUT_MS / 1000)
-    // Garde de recouvrement : sur une machine lente, un GET qui depasse
-    // l'intervalle empilerait des requetes dans la file serielle du plugin —
-    // le meme risque que celui documente pour la recherche radio.
-    let sondeEnVol = false
+    // Overlap guard: on a slow machine, a GET that exceeds the interval
+    // would stack requests in the plugin's serial queue — the same risk
+    // documented for the radio search.
+    let probeInFlight = false
     timer = setInterval(async () => {
-      if (sondeEnVol) return
-      sondeEnVol = true
+      if (probeInFlight) return
+      probeInFlight = true
       try {
-        if (Date.now() > echeance) {
+        if (Date.now() > deadline) {
           await stopLearn(t.value('learn_timeout'))
           return
         }
-        // Arrondi au superieur : a 29,4 s restantes on affiche « 30 », jamais
-        // un « 0 » trompeur sur la derniere fraction de seconde -- l'abandon,
-        // lui, est decide par la comparaison ci-dessus, pas par ce chiffre.
-        secondsLeft.value = Math.ceil((echeance - Date.now()) / 1000)
+        // Rounded up: at 29.4 s remaining we display "30", never a
+        // misleading "0" on the last fraction of a second -- abandonment
+        // itself is decided by the comparison above, not by this figure.
+        secondsLeft.value = Math.ceil((deadline - Date.now()) / 1000)
         let d: Data
         try {
           d = await api.get<Data>(url('api/data'))
         } catch {
-          return // une lecture ratee ne doit pas interrompre le sondage
+          return // a failed read must not interrupt probing
         }
         const c = d.learning?.captured
         if (c !== null && c !== undefined) {
@@ -255,7 +253,7 @@ async function learn(i: number) {
           await stopLearn('')
         }
       } finally {
-        sondeEnVol = false
+        probeInFlight = false
       }
     }, PROBE_MS)
   } finally {
@@ -263,25 +261,25 @@ async function learn(i: number) {
   }
 }
 
-// Validation a chaud des doubles affectations : recalculee a chaque frappe,
-// `codes` etant un `ref` de tableau lie par `v-model` — un code arrive par
-// apprentissage y passe donc aussi, `applyCode` ecrivant dans ce meme
-// tableau.
+// Live validation of duplicate assignments: recomputed on every keystroke,
+// `codes` being an array `ref` bound by `v-model` — a code arriving via
+// learning also flows through it, since `applyCode` writes into this same
+// array.
 const conflictsByAction = computed(() => conflicts(codes.value))
 const hasConflicts = computed(() => conflictsByAction.value.some((c) => c !== null))
 
-/** Phrase affichee sous un champ fautif. */
+/** Sentence displayed below a faulty field. */
 function conflictText(c: Conflict): string {
-  if (c.autres.length) {
-    // Les libelles **traduits** des autres actions, jamais leurs cles i18n.
-    return t.value('conflict_code', { code: c.code, action: c.autres.map((k) => t.value(k)).join(', ') })
+  if (c.others.length) {
+    // The **translated** labels of the other actions, never their i18n keys.
+    return t.value('conflict_code', { code: c.code, action: c.others.map((k) => t.value(k)).join(', ') })
   }
   return t.value('conflict_dup', { code: c.code })
 }
 
-// Pas de garde sur `hasConflicts` ici : le bouton desactive est la seule voie
-// d'appel, et redire la regle dans la fonction creerait deux verites a
-// maintenir. Le serveur refuserait de toute facon la table entiere
+// No guard on `hasConflicts` here: the disabled button is the only call
+// path, and restating the rule in the function would create two truths to
+// maintain. The server would reject the whole table anyway
 // (`duplicate_code`).
 async function save() {
   if (!device.value) {
@@ -320,37 +318,37 @@ async function loadPreset() {
   await reload()
 }
 
-// Lecture d'un fichier en texte via `FileReader` plutot que `Blob.text()` :
-// ce dernier n'est pas implemente par jsdom (environnement des tests), alors
-// que `FileReader` y fonctionne, comme dans tout navigateur reel.
-function readTextFile(fichier: File): Promise<string> {
+// Reads a file as text via `FileReader` rather than `Blob.text()`: the
+// latter is not implemented by jsdom (the tests' environment), while
+// `FileReader` works there, as in any real browser.
+function readTextFile(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
-    const player = new FileReader()
-    player.onload = () => resolve(String(player.result ?? ''))
-    player.onerror = () => reject(player.error ?? new Error('lecture du fichier impossible'))
-    player.readAsText(fichier)
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result ?? ''))
+    reader.onerror = () => reject(reader.error ?? new Error('unable to read file'))
+    reader.readAsText(file)
   })
 }
 
-// Import : le fichier est lu en texte cote navigateur, puis parse et valide
-// cote serveur (`import_preset`) — exactement comme `load_preset` mais sans
-// passer par /etc/ritornello/input-presets. Rien n'est persiste avant un
-// « Enregistrer » explicite.
+// Import: the file is read as text on the browser side, then parsed and
+// validated on the server side (`import_preset`) — exactly like
+// `load_preset` but without going through /etc/ritornello/input-presets.
+// Nothing is persisted before an explicit "Save".
 async function import_(e: Event) {
   const input = e.target as HTMLInputElement
-  const fichier = input.files?.[0]
-  input.value = '' // permet de reimporter le meme fichier ensuite
-  if (!fichier) return
+  const file = input.files?.[0]
+  input.value = '' // allows re-importing the same file afterwards
+  if (!file) return
   if (!device.value) {
     message.value = t.value('no_device')
     return
   }
   try {
-    const contenu = await readTextFile(fichier)
+    const content = await readTextFile(file)
     const err = await api.put(url('api/data'), {
       op: 'import_preset',
       device: device.value,
-      content: contenu,
+      content,
     })
     if (err) {
       message.value = err
@@ -383,8 +381,9 @@ function export_() {
 <template>
   <div class="space-y-4">
     <div class="flex flex-wrap items-center gap-2">
-      <!-- Le <label> voisin n'est pas associe au declencheur (pas de for/id a
-           travers le composant Select) : l'aria-label donne le nom accessible. -->
+      <!-- The neighboring <label> is not associated with the trigger (no
+           for/id through the Select component): the aria-label provides the
+           accessible name. -->
       <label class="text-sm text-muted-foreground">{{ t('device_label') }}</label>
       <Select v-model="device">
         <SelectTrigger data-device-select class="min-w-64" :aria-label="t('device_label')"><SelectValue /></SelectTrigger>
@@ -407,9 +406,9 @@ function export_() {
         <tr v-for="(a, i) in ACTIONS" :key="a.key" data-action-row class="border-t border-border">
           <td class="py-1">{{ t(a.key) }}</td>
           <td class="py-1 pr-2">
-            <!-- Aucune classe rouge a add : l'`Input` du kit porte deja
-                 `aria-invalid:border-destructive` et l'anneau rouge. Poser
-                 l'attribut est tout le signal. -->
+            <!-- No red class to add: the kit's `Input` already carries
+                 `aria-invalid:border-destructive` and the red ring. Setting
+                 the attribute is the whole signal. -->
             <Input v-model="codes[i]" inputmode="numeric" :aria-invalid="!!conflictsByAction[i]" />
             <p v-if="conflictsByAction[i]" data-conflict class="mt-1 text-xs text-destructive">
               {{ conflictText(conflictsByAction[i]!) }}
@@ -443,17 +442,16 @@ function export_() {
       <span class="text-sm text-muted-foreground">{{ message }}</span>
     </div>
 
-    <!-- L'annulation vit desormais dans la popin : un bouton laisse dans la
-         barre ci-dessus se retrouverait derriere le voile, donc
-         inatteignable. -->
+    <!-- Cancellation now lives in the popup: a button left in the bar above
+         would end up behind the overlay, hence unreachable. -->
     <LearnDialog
-      :ouvert="learnedRow !== null"
+      :open="learnedRow !== null"
       :t="t"
       :action="learnedActionLabel"
       :device="device"
-      :secondes="secondsLeft"
+      :seconds="secondsLeft"
       v-model:add="add"
-      @annuler="cancelLearn"
+      @cancel="cancelLearn"
     />
   </div>
 </template>

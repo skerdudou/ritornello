@@ -11,10 +11,10 @@ import { usePlugins } from '../composables/usePlugins'
 import type { AudioPayload, LocalePayload, SettingsPayload } from '../types'
 
 const { t, reload } = useCatalog()
-// L'état des plugins vient du module, step d'un `ref` local : la navigation du
-// haut lit le **même** objet, donc une bascule faite ici met son menu à jour
-// sans rechargement. Voir `usePlugins`.
-const { state: status, refresh: rafraichirGreffons } = usePlugins()
+// The plugin state comes from the module, not from a local `ref`: the top
+// navigation reads the **same** object, so a toggle made here updates its menu
+// without a reload. See `usePlugins`.
+const { state: status, refresh: refreshPlugins } = usePlugins()
 const audio = ref<AudioPayload>({ devices: [], current: null })
 const locale = ref<LocalePayload>({ locales: [], current: null })
 const device = ref('')
@@ -39,68 +39,67 @@ const settings = ref<SettingsPayload>({
 })
 
 /**
- * Plafond d'une pochette **reseau** en memoire, en mebioctets.
+ * Cap of a **network** cover in memory, in mebibytes.
  *
- * C'est `cover::PLAFOND_RESEAU` cote coeur : un telechargement est coupe la,
- * quoi que dise le plafond de la source. Recopie ici parce que la page ne le
- * recoit step — et une divergence ne rendrait que l'estimation legerement
- * fausse, jamais le reglage incorrect.
+ * This is `cover::PLAFOND_RESEAU` on the core side: a download is cut there,
+ * whatever the source cap says. Copied here because the page does not receive
+ * it — and a divergence would only make the estimate slightly wrong, never the
+ * setting incorrect.
  */
 const NETWORK_CAP_MIO = 2
 
 /**
- * Ce qu'une entree du cache peut couter au maximum.
+ * What one cache entry can cost at most.
  *
- * Le plus petit des deux plafonds : au-dessous de 2 Mio, c'est le plafond de la
- * source qui mord en premier — et il est reglable juste en dessous, donc les
- * deux fields se repondent.
+ * The smaller of the two caps: below 2 MiB, it is the source cap that bites
+ * first — and it is adjustable right below, so the two fields answer each
+ * other.
  */
 const capPerCover = computed(() =>
   Math.min(NETWORK_CAP_MIO, Number(settings.value.cover_source_max_mio) || NETWORK_CAP_MIO),
 )
 
 /**
- * L'estimation haute, en mebioctets : toutes les entries pleines de pochettes
- * **reseau** au plafond.
+ * The high estimate, in mebibytes: every entry full of **network** covers at
+ * the cap.
  *
- * Le pire cas absolu, et il est tres au-dessus du reel : une pochette locale ne
- * garde qu'un chemin, et une pochette de 500 px pese une centaine de
- * kibioctets. C'est justement ce qu'on veut afficher a cote d'un champ qu'on
- * augmente — le majorant, step la moyenne.
+ * The absolute worst case, and it is far above reality: a local cover only
+ * keeps a path, and a 500 px cover weighs about a hundred kibibytes. That is
+ * precisely what we want to show next to a field being increased — the upper
+ * bound, not the average.
  */
 const ramMaxCache = computed(
   () => (Number(settings.value.cover_cache_entries) || 0) * capPerCover.value,
 )
 
 /**
- * Valeur de vue pour « Par défaut (système) » : jamais envoyée telle quelle
- * (« Changer » la traduit en `device: null`), et impossible à confondre avec
- * un nom de PCM ALSA.
+ * View value for "Default (system)": never sent as is ("Change" translates it
+ * into `device: null`), and impossible to confuse with an ALSA PCM name.
  */
 const SYSTEM_DEFAULT = '__system_default__'
 
-// La sélection courante peut nommer un périphérique disparu (carte
-// débranchée) : on la garde visible en fin de list plutôt que de laisser
-// le déclencheur vide.
+// The current selection may name a device that disappeared (unplugged card):
+// we keep it visible at the end of the list rather than leaving the trigger
+// empty.
 const devices = computed(() => {
   const list = [...audio.value.devices]
-  const courant = audio.value.current
-  if (courant && !list.some((d) => d.name === courant)) {
-    list.push({ name: courant, description: '' })
+  const current = audio.value.current
+  if (current && !list.some((d) => d.name === current)) {
+    list.push({ name: current, description: '' })
   }
   return list
 })
 
 async function loadAll() {
-  // Necessaire ici, step redondant : c'est ce qui recharge le catalogue apres
-  // un changement de langue reussi (voir `changeLanguage` plus bas), a la
-  // place de l'ancien `location.reload()`.
+  // Needed here, not redundant: this is what reloads the catalog after a
+  // successful language change (see `changeLanguage` below), in place of the
+  // old `location.reload()`.
   await reload()
-  // Relit l'état des plugins **et** arme la surveillance de la fenêtre « figé »
-  // qu'un rallumage vient d'ouvrir : le cœur remplace la ligne dès que le
-  // greffon s'annonce, quelques secondes plus tard, et sans cette relecture la
-  // ligne restait sur « figé » jusqu'au prochain F5.
-  await rafraichirGreffons()
+  // Re-reads the plugin state **and** arms the watch over the "stalled" window
+  // that a re-enable has just opened: the core replaces the line as soon as the
+  // plugin announces itself, a few seconds later, and without this re-read the
+  // line stayed on "stalled" until the next F5.
+  await refreshPlugins()
   audioUnavailable.value = false
   audio.value = await api.get<AudioPayload>('/api/audio-output').catch(() => {
     audioUnavailable.value = true
@@ -108,9 +107,9 @@ async function loadAll() {
   })
   locale.value = await api.get<LocalePayload>('/api/locale').catch(() => locale.value)
   settings.value = await api.get<SettingsPayload>('/api/settings').catch(() => settings.value)
-  // `current: null` = aucun choix enregistré : c'est l'entrée « Par défaut
-  // (système) » qui le porte — plus de repli sur le premier périphérique
-  // (c'était `null`, le PCM qui jette le son, en tête de `aplay -L`).
+  // `current: null` = no saved choice: the "Default (system)" entry carries it
+  // — no more fallback to the first device (it was `null`, the PCM that
+  // discards the sound, at the top of `aplay -L`).
   device.value = audio.value.current ?? SYSTEM_DEFAULT
   lang.value = locale.value.current ?? 'en'
 }
@@ -128,12 +127,12 @@ interface PluginRow {
   admin: boolean
 }
 
-/** Accumulateur intermediaire : les genres bruts, avant qu'on decide ce qui
- * doit rester dans `kinds`. Un tableau plutot qu'une chaine construite au fil
- * de l'eau, pour que ce choix ne depende step de l'order d'arrivee. */
-interface PluginAccordion {
+/** Intermediate accumulator: the raw kinds, before we decide what must stay in
+ * `kinds`. An array rather than a string built along the way, so that this
+ * choice does not depend on arrival order. */
+interface PluginAccumulator {
   name: string
-  kindsRecus: string[]
+  receivedKinds: string[]
   connected: boolean
   stalled: boolean
   starting: boolean
@@ -143,21 +142,21 @@ interface PluginAccordion {
 }
 
 /**
- * Une ligne par greffon, ses genres joints. Le tableau montrait un couple
- * (nom, genre) par ligne ; la bascule porte sur le nom, et trois interrupteurs
- * qui font tous la même chose ne veulent rien dire.
+ * One row per plugin, its kinds joined. The table used to show one
+ * (name, kind) pair per row; the toggle applies to the name, and three switches
+ * that all do the same thing mean nothing.
  *
- * Un greffon n'est « connecté » que si **tous** ses genres le sont : une
- * moitié injoignable est un problème, et l'agrégat ne doit step la cacher.
+ * A plugin is "connected" only if **all** its kinds are: an unreachable half is
+ * a problem, and the aggregate must not hide it.
  */
 const plugins = computed<PluginRow[]>(() => {
-  const parNom = new Map<string, PluginAccordion>()
+  const byName = new Map<string, PluginAccumulator>()
   for (const p of status.value.plugins) {
-    const acc = parNom.get(p.name)
+    const acc = byName.get(p.name)
     if (!acc) {
-      parNom.set(p.name, {
+      byName.set(p.name, {
         name: p.name,
-        kindsRecus: [p.kind],
+        receivedKinds: [p.kind],
         connected: p.connected,
         stalled: !!p.stalled,
         starting: !!p.starting,
@@ -167,7 +166,7 @@ const plugins = computed<PluginRow[]>(() => {
       })
       continue
     }
-    acc.kindsRecus.push(p.kind)
+    acc.receivedKinds.push(p.kind)
     acc.connected = acc.connected && p.connected
     acc.stalled = acc.stalled || !!p.stalled
     acc.starting = acc.starting || !!p.starting
@@ -175,14 +174,14 @@ const plugins = computed<PluginRow[]>(() => {
     acc.busy = acc.busy || !!p.busy
     acc.admin = acc.admin || p.admin
   }
-  return [...parNom.values()].map((acc) => {
-    // « unknown » n'est jamais affiché à côté d'un vrai genre : on ne le
-    // garde que quand c'est la seule information reçue pour ce nom. Ça tient
-    // par construction, sur l'ensemble complet des genres reçus — step en
-    // regardant seulement ce que l'accumulateur contenait à un instant donné,
-    // ce qui dépendrait de l'order d'arrivée des lignes.
-    const reels = acc.kindsRecus.filter((k) => k !== 'unknown')
-    const kinds = (reels.length > 0 ? reels : acc.kindsRecus).join(', ')
+  return [...byName.values()].map((acc) => {
+    // "unknown" is never shown next to a real kind: we only keep it when it is
+    // the only information received for this name. This holds by construction,
+    // over the complete set of received kinds — not by looking only at what the
+    // accumulator held at a given instant, which would depend on the arrival
+    // order of the lines.
+    const realKinds = acc.receivedKinds.filter((k) => k !== 'unknown')
+    const kinds = (realKinds.length > 0 ? realKinds : acc.receivedKinds).join(', ')
     return {
       name: acc.name,
       kinds,
@@ -196,32 +195,32 @@ const plugins = computed<PluginRow[]>(() => {
   })
 })
 
-// Noms des plugins dont la bascule est en vol : désactiver l'unique source
-// peut coûter jusqu'à 15 s (stop + Deactivate + Activate, chacun capé à 5 s)
-// quand l'entrante ou la sortante ne répond step — justement le cas
-// d'école qui pousse à désactiver un greffon (un `files` coincé sur un
-// partage mort). Sans ce marqueur, l'interrupteur restait cliquable et la
-// ligne semblait inerte pendant toute cette fenêtre.
+// Names of the plugins whose toggle is in flight: disabling the only source
+// can cost up to 15 s (stop + Deactivate + Activate, each capped at 5 s) when
+// the incoming or the outgoing one does not answer — precisely the textbook
+// case that pushes one to disable a plugin (a `files` stuck on a dead share).
+// Without this marker, the switch stayed clickable and the row looked inert
+// during that whole window.
 const inProgress = ref<Set<string>>(new Set())
 
-async function togglePlugin(ligne: PluginRow) {
-  if (inProgress.value.has(ligne.name)) return
-  inProgress.value.add(ligne.name)
+async function togglePlugin(row: PluginRow) {
+  if (inProgress.value.has(row.name)) return
+  inProgress.value.add(row.name)
   try {
-    const actif = ligne.disabled
-    const err = await api.put(`/api/plugins/${encodeURIComponent(ligne.name)}/enabled`, {
-      enabled: actif,
+    const enable = row.disabled
+    const err = await api.put(`/api/plugins/${encodeURIComponent(row.name)}/enabled`, {
+      enabled: enable,
     })
     if (err) {
       toast.error(err)
     } else {
-      toast.success(t.value(actif ? 'plugin_enabled' : 'plugin_disabled', { name: ligne.name }))
+      toast.success(t.value(enable ? 'plugin_enabled' : 'plugin_disabled', { name: row.name }))
     }
-    // Rechargement dans les deux cas : un refus a pu laisser l'état d'avant, et
-    // un succès change les lignes de plusieurs genres à la fois.
+    // Reload in both cases: a refusal may have left the previous state, and a
+    // success changes the lines of several kinds at once.
     await loadAll()
   } finally {
-    inProgress.value.delete(ligne.name)
+    inProgress.value.delete(row.name)
   }
 }
 
@@ -240,12 +239,11 @@ async function saveSettings() {
     overlay_ms: Number(settings.value.overlay_ms),
     tens_window_ms: Number(settings.value.tens_window_ms),
     seek_step_s: Number(settings.value.seek_step_s),
-    // Les quatre réglages du rendu sont envoyés **même quand l'interrupteur est
-    // décoché**, et c'est délibéré : l'IHM les grise sans les vider, donc
-    // recocher l'interrupteur retrouve les valeurs qu'on y avait posées. Les
-    // omettre les ferait retomber sur les défauts du cœur (la structure est
-    // `serde(default)`), c'est-à-dire perdre en silence un réglage visible à
-    // l'écran.
+    // The four rendition settings are sent **even when the switch is
+    // unchecked**, and that is deliberate: the UI greys them out without
+    // emptying them, so re-checking the switch finds the values that had been
+    // set. Omitting them would drop them back to the core defaults (the struct
+    // is `serde(default)`), i.e. silently lose a setting visible on screen.
     cover_source_max_mio: Number(settings.value.cover_source_max_mio),
     cover_max_edge_px: Number(settings.value.cover_max_edge_px),
     cover_jpeg_quality: Number(settings.value.cover_jpeg_quality),
@@ -255,8 +253,8 @@ async function saveSettings() {
   toast[err ? 'error' : 'success'](err ?? t.value('ok'))
 }
 
-// Le changement de langue recharge les catalogues au lieu de reload la
-// page entiere comme le faisait l'ancienne IHM.
+// Changing the language reloads the catalogs instead of reloading the whole
+// page as the old UI did.
 async function changeLanguage() {
   const err = await api.put('/api/locale', { locale: lang.value })
   if (err) {
@@ -267,9 +265,9 @@ async function changeLanguage() {
 }
 
 /**
- * Le sommaire : une entrée par carte, dans l'order du gabarit. C'est une
- * donnée (comme REMOTE_ROWS pour la télécommande) : la vue la parcourt pour
- * le nav ET pour l'observation du défilement.
+ * The table of contents: one entry per card, in template order. It is data
+ * (like REMOTE_ROWS for the remote control): the view walks it for the nav AND
+ * for the scroll observation.
  */
 const SECTIONS = [
   { id: 'plugins', key: 'plugins_title' },
@@ -284,32 +282,32 @@ const SECTIONS = [
 ] as const
 
 const active = ref<string>(SECTIONS[0].id)
-// Visibilité par section, tenue à jour par l'observateur : la section active
-// est la première visible dans l'order du sommaire (step la dernière entrée
-// reçue, qui dépend de l'order d'arrivée des callbacks).
+// Visibility per section, kept up to date by the observer: the active section
+// is the first visible one in table-of-contents order (not the last entry
+// received, which depends on the arrival order of the callbacks).
 const visible = new Set<string>()
-let observe: IntersectionObserver | null = null
+let observer: IntersectionObserver | null = null
 
 onMounted(() => {
-  observe = new IntersectionObserver(
+  observer = new IntersectionObserver(
     (entries) => {
       for (const e of entries) {
         if (e.isIntersecting) visible.add(e.target.id)
         else visible.delete(e.target.id)
       }
-      const premiere = SECTIONS.find((s) => visible.has(s.id))
-      if (premiere) active.value = premiere.id
+      const first = SECTIONS.find((s) => visible.has(s.id))
+      if (first) active.value = first.id
     },
-    // La bande d'observation est le haut de l'écran : la section « active »
-    // est celle qu'on est en train de lire, step celle qui pointe en bas.
+    // The observation band is the top of the screen: the "active" section is
+    // the one being read, not the one peeking in at the bottom.
     { rootMargin: '0px 0px -60% 0px' },
   )
   for (const s of SECTIONS) {
     const el = document.getElementById(s.id)
-    if (el) observe.observe(el)
+    if (el) observer.observe(el)
   }
 })
-onUnmounted(() => observe?.disconnect())
+onUnmounted(() => observer?.disconnect())
 
 function goTo(id: string) {
   active.value = id
@@ -354,13 +352,13 @@ function goTo(id: string) {
                                   : 'destructive'
                       "
                     >
-                      <!-- « Occupé » passe **avant** « connecté » : un greffon
-                           occupé est joint, et c'est justement pour ça que
-                           « connecté » ne dit rien d'utile. « Démarrage » passe
-                           **avant** « figé » : les deux disent que le greffon
-                           n'a step parlé, et seul le temps écoulé les distingue.
-                           Afficher « figé » pendant un démarrage normal accusait
-                           à tort un binaire parfaitement sain. -->
+                      <!-- "Busy" comes **before** "connected": a busy plugin is
+                           reachable, and that is precisely why "connected" says
+                           nothing useful. "Starting" comes **before** "stalled":
+                           both say the plugin has not spoken yet, and only the
+                           elapsed time tells them apart. Showing "stalled"
+                           during a normal startup wrongly accused a perfectly
+                           healthy binary. -->
                       {{
                         p.disabled
                           ? t('disabled')
@@ -383,9 +381,8 @@ function goTo(id: string) {
                     <span v-else>-</span>
                   </td>
                   <td>
-                    <!-- Pas de confirmation : l'action est réversible depuis
-                         cette même ligne, et la notification dit ce qui s'est
-                         passé. -->
+                    <!-- No confirmation: the action is reversible from this
+                         same row, and the notification says what happened. -->
                     <Switch
                       data-plugin-toggle
                       :model-value="!p.disabled"
@@ -405,17 +402,17 @@ function goTo(id: string) {
         <Card>
           <CardHeader><CardTitle>{{ t('audio_output') }}</CardTitle></CardHeader>
           <CardContent class="flex flex-wrap items-center gap-2">
-            <!-- Le titre de la carte n'est step associé au déclencheur : sans
-                 aria-label, le sélecteur n'a aucun nom accessible. -->
+            <!-- The card title is not associated with the trigger: without an
+                 aria-label, the selector has no accessible name at all. -->
             <Select v-model="device">
               <SelectTrigger class="min-w-64" :aria-label="t('audio_output')"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem :value="SYSTEM_DEFAULT" data-audio-default>
                   {{ t('audio_default_device') }}
                 </SelectItem>
-                <!-- Description lisible en principal, nom technique en
-                     secondaire — même motif que « Français » affiché / `fr`
-                     envoyé pour les languages. -->
+                <!-- Readable description as primary, technical name as
+                     secondary — same pattern as "Français" shown / `fr` sent
+                     for the languages. -->
                 <SelectItem v-for="d in devices" :key="d.name" :value="d.name">
                   <div class="flex flex-col items-start">
                     <span>{{ d.description || d.name }}</span>
@@ -436,8 +433,8 @@ function goTo(id: string) {
             <Select v-model="lang">
               <SelectTrigger class="min-w-32" :aria-label="t('language')"><SelectValue /></SelectTrigger>
               <SelectContent>
-                <!-- Nom de la langue et non son code : « français » se lit, « fr »
-                     se devine. Le code reste la valeur envoyée au cœur. -->
+                <!-- Name of the language and not its code: "français" is read,
+                     "fr" is guessed. The code remains the value sent to the core. -->
                 <SelectItem v-for="l in locale.locales" :key="l" :value="l">
                   {{ languageName(l) }}
                 </SelectItem>
@@ -465,11 +462,11 @@ function goTo(id: string) {
         </Card>
       </section>
 
-      <!-- Date et heure. Deux settings separes, a la demande du proprietaire :
-           l'order d'une date et le format 12/24 h ne varient step ensemble d'un
-           country a l'autre. Aucun reglage de fuseau — l'afficheur tourne sur
-           l'appareil, la page formate dans le fuseau du browser, et un
-           troisieme reglage ne pourrait que contredire l'un des deux. -->
+      <!-- Date and time. Two separate settings, at the owner's request: the
+           order of a date and the 12/24 h format do not vary together from one
+           country to another. No time zone setting — the display runs on the
+           device, the page formats in the browser's time zone, and a third
+           setting could only contradict one of the two. -->
       <section id="clock" class="scroll-mt-6">
         <Card>
           <CardHeader><CardTitle>{{ t('clock_title') }}</CardTitle></CardHeader>
@@ -487,9 +484,9 @@ function goTo(id: string) {
             </label>
             <label class="grid gap-1 text-sm">
               {{ t('clock_hours_label') }}
-              <!-- Un booleen rendu par deux choix nommes plutot qu'une case a
-                   cocher : « 24 h » n'est step l'absence de « 12 h », et une
-                   case intitulee « 24 h » se lirait mal decochee. -->
+              <!-- A boolean rendered as two named choices rather than a
+                   checkbox: "24 h" is not the absence of "12 h", and a checkbox
+                   labelled "24 h" would read badly when unchecked. -->
               <Select :model-value="settings.clock_24h ? '24' : '12'"
                       @update:model-value="(v) => (settings.clock_24h = v === '24')">
                 <SelectTrigger class="min-w-36" data-clock-hours-select :aria-label="t('clock_hours_label')"><SelectValue /></SelectTrigger>
@@ -557,22 +554,22 @@ function goTo(id: string) {
         </Card>
       </section>
 
-      <!-- Pochettes. Une seule carte, deux étages qu'il ne faut step confondre,
-           et la mise en page porte cette distinction : le plafond de la source
-           vient **en premier** et n'est jamais grisé, parce qu'il s'applique
-           quoi que dise l'interrupteur — c'est la seule garde qui subsiste
-           quand le réencodage est décoché. L'interrupteur vient ensuite, et
-           grise les quatre réglages qui ne décrivent que la vignette.
+      <!-- Covers. A single card, two tiers that must not be confused, and the
+           layout carries that distinction: the source cap comes **first** and
+           is never greyed out, because it applies whatever the switch says —
+           it is the only guard left when re-encoding is unchecked. The switch
+           comes next, and greys out the four settings that only describe the
+           thumbnail.
 
-           Grisés, step vidés : les valeurs restent lisibles et repartent dans le
-           PUT (voir `saveSettings`), donc recocher l'interrupteur
-           retrouve ce qu'on avait posé. -->
+           Greyed out, not emptied: the values stay readable and go back in the
+           PUT (see `saveSettings`), so re-checking the switch finds what had
+           been set. -->
       <section id="covers" class="scroll-mt-6">
         <Card>
           <CardHeader><CardTitle>{{ t('cover_card_title') }}</CardTitle></CardHeader>
           <CardContent class="space-y-4">
-            <!-- Hors de l'encart grise du reencodage, comme le plafond de la
-                 source : cette borne s'applique quoi qu'il arrive. -->
+            <!-- Outside the greyed-out re-encoding box, like the source cap:
+                 this bound applies whatever happens. -->
             <label class="grid gap-1 text-sm">
               {{ t('cover_cache_entries_label') }}
               <Input type="number" min="2" max="100" step="1" class="w-28" data-cover-cache-entries
@@ -603,9 +600,9 @@ function goTo(id: string) {
               </label>
             </div>
 
-            <!-- `aria-disabled` en plus du `disabled` de chaque champ : le
-                 groupe entier est inactif, et un player d'écran doit pouvoir
-                 l'annoncer une fois plutôt que champ par champ. -->
+            <!-- `aria-disabled` on top of each field's `disabled`: the whole
+                 group is inactive, and a screen reader must be able to announce
+                 it once rather than field by field. -->
             <div
               data-cover-rendition-group
               :aria-disabled="!settings.cover_rendition"

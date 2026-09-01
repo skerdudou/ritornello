@@ -1,56 +1,58 @@
-//! Line d'announcement d'un greffon, écrite sur le socket d'enregistrement du
-//! cœur juste après que le greffon a lié ses propres sockets.
+//! A plugin's announcement line, written on the core's registration socket
+//! right after the plugin has bound its own sockets.
 //!
-//! L'order compte et il est structurel : les sockets sont liés par le
-//! constructeur du SDK, l'announcement n'est écrite que par `Runtime::run`. Quand
-//! le cœur read cette line, il sait donc à la fois quels genres existent et
-//! que les sockets correspondants acceptent déjà une connexion.
+//! The order matters and it is structural: the sockets are bound by the SDK
+//! constructor, the announcement is only written by `Runtime::run`. So when
+//! the core reads this line, it knows both which kinds exist and that the
+//! corresponding sockets already accept a connection.
 
 use serde::{Deserialize, Serialize};
 
-/// Ce qu'un greffon sait faire. Le kind est une propriété du **binaire**,
-/// annoncée par lui, et non une line de configuration que l'opérateur
-/// devait connaître (voir le même arbitrage rendition pour la page d'admin).
+/// What a plugin can do. The kind is a property of the **binary**, announced
+/// by it, and not a configuration line the operator would have to know (see
+/// the same trade-off made for the admin page).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginKind {
     Source,
     Display,
     Input,
-    /// Enrichit ce que plays la Source active sans que celle-ci le sache.
+    /// Enriches what the active Source plays without the Source knowing.
     ///
-    /// **L'order compte** entre deux plugins `metadata` qui répondent pour le
-    /// même track : le premier de `plugins.toml` gagne. Cet order vient
-    /// désormais du manifest seul, l'announcement ne le porte pas — voir
+    /// **Order matters** between two `metadata` plugins that answer for the
+    /// same track: the first one in `plugins.toml` wins. That order now comes
+    /// from the manifest alone, the announcement does not carry it — see
     /// `ritornello-core::register`.
     Metadata,
 }
 
-/// Une announcement, une line de JSON, un greffon.
+/// One announcement, one line of JSON, one plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Announcement {
-    /// Repris tel quel de `--name`. Sert à corréler N annonces arrivant sur
-    /// un socket unique ; l'autorité sur le name reste au manifest.
+    /// Taken verbatim from `--name`. Used to correlate N announcements
+    /// arriving on a single socket; the authority on the name stays with the
+    /// manifest.
     pub name: String,
     pub kinds: Vec<PluginKind>,
-    /// `false` par défaut : un greffon sans page d'admin peut omettre le champ.
+    /// `false` by default: a plugin without an admin page may omit the field.
     #[serde(default)]
     pub admin: bool,
-    /// Cet afficheur veut-il recevoir les bytes des pochettes ?
+    /// Does this display want to receive the cover bytes?
     ///
-    /// Même idiome que `admin` juste au-dessus, et pour la même raison :
-    /// `false` par défaut, donc l'announcement la plus courante reste la plus courte
-    /// à écrire, et un cœur d'avant ce champ relit sans rien y voir de nouveau.
+    /// Same idiom as `admin` just above, and for the same reason: `false` by
+    /// default, so the most common announcement stays the shortest to write,
+    /// and a core predating this field reads it back without seeing anything
+    /// new.
     ///
-    /// **Opt-in, et non un défaut** : une cover pèse jusqu'à
-    /// `display::COVER_MAX_BYTES`, et un afficheur de vingt colonnes n'en a que
-    /// faire. Le cœur ne push_cover les bytes qu'aux afficheurs qui ont demandé,
-    /// plutôt que de les send_frame à tous en laissant chacun les jeter.
+    /// **Opt-in, not a default**: a cover weighs up to
+    /// `display::COVER_MAX_BYTES`, and a twenty-column display has no use for
+    /// it. The core only pushes the bytes to the displays that asked for them,
+    /// rather than sending them to all and letting each one throw them away.
     ///
-    /// Le drapeau est **dérivé** de ce que le greffon a enregistré, jamais
-    /// demandé à l'appelant : voir `Runtime::display` dans le SDK, qui read
-    /// `DisplayPlugin::wants_covers`. C'est l'invariant du protocol
-    /// d'enregistrement — l'announcement ne peut pas mentir.
+    /// The flag is **derived** from what the plugin registered, never asked of
+    /// the caller: see `Runtime::display` in the SDK, which reads
+    /// `DisplayPlugin::wants_covers`. That is the invariant of the
+    /// registration protocol — the announcement cannot lie.
     #[serde(default)]
     pub covers: bool,
 }
@@ -60,7 +62,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn les_genres_se_serialisent_en_minuscules() {
+    fn kinds_serialize_in_lowercase() {
         let a = Announcement {
             name: "mpd".into(),
             kinds: vec![PluginKind::Input, PluginKind::Display],
@@ -76,9 +78,9 @@ mod tests {
     }
 
     #[test]
-    fn admin_absent_vaut_faux() {
-        // Un greffon sans page peut omettre le champ : l'announcement la plus
-        // courante doit rester la plus courte à écrire.
+    fn absent_admin_means_false() {
+        // A plugin without a page may omit the field: the most common
+        // announcement must stay the shortest to write.
         let a: Announcement =
             serde_json::from_str(r#"{"name":"cd","kinds":["source"]}"#).unwrap();
         assert!(!a.admin);
@@ -86,33 +88,33 @@ mod tests {
     }
 
     #[test]
-    fn covers_absent_vaut_faux() {
-        // Le même idiome qu'`admin`, et la même conséquence : une announcement
-        // écrite avant ce champ — celle de la console, celle d'un greffon
-        // externe — se relit sans erreur et **sans** demander de pochettes.
-        // C'est ce qui protège l'afficheur de vingt colonnes.
+    fn absent_covers_means_false() {
+        // The same idiom as `admin`, and the same consequence: an announcement
+        // written before this field — the console's, an external plugin's —
+        // reads back without error and **without** asking for covers. That is
+        // what protects the twenty-column display.
         let a: Announcement =
             serde_json::from_str(r#"{"name":"console","kinds":["display"],"admin":false}"#).unwrap();
-        assert!(!a.covers, "l'absence du champ ne doit jamais valoir un opt-in");
+        assert!(!a.covers, "an absent field must never count as an opt-in");
     }
 
     #[test]
-    fn un_genre_inconnu_est_une_erreur_pas_un_silence() {
-        // Une faute de frappe dans un binaire de greffon doit être rapportée,
-        // pas absorbée en kind par défaut.
+    fn an_unknown_kind_is_an_error_not_a_silence() {
+        // A typo in a plugin binary must be reported, not absorbed into a
+        // default kind.
         assert!(serde_json::from_str::<Announcement>(r#"{"name":"x","kinds":["sourec"]}"#).is_err());
     }
 
     #[test]
-    fn plusieurs_genres_survivent_a_l_aller_retour() {
+    fn several_kinds_survive_the_roundtrip() {
         let a = Announcement {
             name: "double".into(),
             kinds: vec![PluginKind::Source, PluginKind::Metadata],
             admin: false,
             covers: false,
         };
-        let retour: Announcement =
+        let back: Announcement =
             serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
-        assert_eq!(retour, a);
+        assert_eq!(back, a);
     }
 }

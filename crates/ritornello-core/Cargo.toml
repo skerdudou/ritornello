@@ -14,9 +14,9 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-# `toml` sait lire, pas réécrire sans tout aplatir : `plugins.toml` est fait
-# de commentaires (à quoi sert chaque greffon), et `deploy.sh` y ajoute des
-# blocs commentés. `toml_edit` préserve mise en forme et commentaires.
+# `toml` can read, but cannot rewrite without flattening everything:
+# `plugins.toml` is made of comments (what each plugin is for), and `deploy.sh`
+# adds commented blocks to it. `toml_edit` preserves formatting and comments.
 toml_edit = "0.22"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
@@ -31,35 +31,34 @@ rust-embed = { version = "8", features = ["debug-embed"] }
 # statvfs, for the root filesystem usage shown on the System tab. Already
 # in Cargo.lock (tokio depends on it), so this adds no compilation.
 libc = "0.2"
-# Le cœur va chercher les pochettes lui-même : le navigateur ne contacte
-# jamais l'extérieur. `rustls` comme les greffons, pas d'OpenSSL sur le Pi.
-# `chunk()` (le plafond appliqué en streaming) ne dépend pas de la fonctionnalité
-# `stream` : elle ne gate que `bytes_stream()`, qu'on n'utilise pas.
+# The core fetches the covers itself: the browser never contacts the outside.
+# `rustls` like the plugins, no OpenSSL on the Pi.
+# `chunk()` (the cap applied while streaming) does not depend on the `stream`
+# feature: that one only gates `bytes_stream()`, which we do not use.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-# Sert la pochette locale en flux plutôt qu'en un seul `Vec` : déjà dans le
-# graphe (reqwest en dépend), donc aucune nouvelle dépendance compilée.
+# Serves the local cover as a stream rather than as a single `Vec`: already in
+# the graph (reqwest depends on it), so no new compiled dependency.
 tokio-util = { version = "0.7", features = ["io"] }
-# Même version que le greffon `files`, pour ne pas dupliquer une branche dans
-# Cargo.lock. Sert à extraire la pochette embarquée dans le fichier joué.
+# Same version as the `files` plugin, so as not to duplicate a branch in
+# Cargo.lock. Used to extract the cover embedded in the file being played.
 lofty = "0.25.1"
-# Réencodage des pochettes avant de les pousser sur un socket : un `folder.jpg`
-# de 20 Mio devient une vignette de quelques dizaines de kilooctets, ce qui
-# divise d'autant le pic mémoire d'une publication (voir `cover::rendu`).
+# Re-encoding of covers before pushing them onto a socket: a 20 MiB
+# `folder.jpg` becomes a thumbnail of a few tens of kilobytes, which divides
+# the memory peak of a publication by as much (see `cover::Rendition`).
 #
-# `default-features = false` et trois formats seulement, choisis sur ce qu'on
-# rencontre vraiment dans une pochette d'album. Le défaut de cette crate active
-# une douzaine de décodeurs (TIFF, TGA, DDS, EXR, farbfeld…) dont aucun
-# n'apparaît sur un NAS de musique, et chacun est du code qui compile et qui
-# analyse une entrée venue du réseau — la surface d'attaque autant que le temps
-# de compilation.
+# `default-features = false` and only three formats, chosen from what one
+# really encounters in an album cover. This crate's default enables a dozen
+# decoders (TIFF, TGA, DDS, EXR, farbfeld…) none of which shows up on a music
+# NAS, and each is code that compiles and parses input coming from the network
+# — attack surface as much as compile time.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 
 [dev-dependencies]
 tempfile = "3"
-# Horloge simulee : sans elle, la course entre une annonce prete et l'echeance
-# du rendez-vous ne se reproduit pas dans un test (voir
-# `register::tests::une_annonce_prete_a_lecheance_nest_jamais_perdue`), et le
-# test passerait aussi bien avec le defaut qu'il est cense interdire.
+# Simulated clock: without it, the race between a ready announcement and the
+# rendezvous deadline does not reproduce in a test (see
+# `register::tests::a_ready_announcement_at_the_deadline_is_never_lost`), and
+# the test would pass just as well with the defect it is supposed to forbid.
 tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"

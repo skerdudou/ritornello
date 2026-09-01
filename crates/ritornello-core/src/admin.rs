@@ -5,16 +5,16 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
-/// Abstraction des opérations d'admin dont les routes du cœur ont besoin.
-/// Implémentée par `AdminClient` (IPC réel) ; un faux l'implémente en test.
+/// Abstraction of the admin operations the core's routes need.
+/// Implemented by `AdminClient` (real IPC); a fake implements it in tests.
 #[async_trait::async_trait]
 pub trait AdminBackend: Send + Sync {
     async fn asset(&self, path: &str) -> Result<Option<(String, String)>>;
     async fn catalog(&self) -> Result<serde_json::Value>;
     async fn get_data(&self) -> Result<serde_json::Value>;
     async fn set_data(&self, data: serde_json::Value) -> Result<Result<(), String>>;
-    /// Sonde à 500 ms, sans verrou côté greffon : `Err(Timeout)` = occupé,
-    /// `Err(Closed)` = mort.
+    /// Probe at 500 ms, without a lock on the plugin side: `Err(Timeout)` =
+    /// busy, `Err(Closed)` = dead.
     async fn ping(&self) -> Result<()>;
 }
 
@@ -37,55 +37,54 @@ impl AdminBackend for ritornello_plugin_sdk::AdminClient {
     }
 }
 
-/// Pages d'admin joignables, par name de greffon.
+/// Reachable admin pages, by plugin name.
 ///
-/// Sous verrou, et non plus figée au démarrage : un greffon peut s'annoncer
-/// **après** le rassemblement (voir `register`), et sa page doit alors
-/// apparaître sans redémarrer le cœur. Le `RwLock` est celui de tokio, comme le
-/// reste de l'état partagé avec le routeur.
+/// Under a lock, and no longer frozen at startup: a plugin may announce itself
+/// **after** the rendezvous (see `register`), and its page must then appear
+/// without restarting the core. The `RwLock` is tokio's, like the rest of the
+/// state shared with the router.
 ///
-/// Les routes ne gardent jamais le verrou pendant un aller-retour IPC : elles
-/// clonent l'`Arc` du dorsal et relâchent aussitôt.
+/// The routes never hold the lock across an IPC round trip: they clone the
+/// backend's `Arc` and release at once.
 pub type AdminBackends =
     std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, std::sync::Arc<dyn AdminBackend>>>>;
 
-/// Actifs d'IHM déjà récupérés, par `(plugin, path)` → `(mime, corps, etag)`.
-/// Un bundle est immuable pour la durée de vie du processus du plugin : on ne
-/// le relit pas par IPC à chaque rechargement de page.
+/// UI assets already fetched, by `(plugin, path)` → `(mime, body, etag)`. A
+/// bundle is immutable for the lifetime of the plugin's process: it is not
+/// re-read over IPC at every page reload.
 ///
-/// **« Pour la durée de vie du processus du plugin » est un invariant, pas une
-/// remarque**, et il n'était tenu par personne : rien ne purgeait ce cache quand
-/// ce processus s'arrêtait. Un greffon relancé à la main avec son `ui.js`
-/// reconstruit servait donc l'ancien jusqu'au redémarrage du cœur — ce qui pique
-/// surtout en développement, là où c'est justement le geste courant.
-/// `forget_page` est ce qui le tient désormais.
+/// **"For the lifetime of the plugin's process" is an invariant, not a
+/// remark**, and nobody upheld it: nothing purged this cache when that process
+/// stopped. A plugin relaunched by hand with its rebuilt `ui.js` therefore
+/// served the old one until the core restarted — which stings mostly in
+/// development, precisely where that is the common gesture. `forget_page` is
+/// what upholds it now.
 pub type AssetCache = tokio::sync::RwLock<
     std::collections::HashMap<(String, String), (String, String, String)>,
 >;
 
-/// Oublie tout ce que le cœur garde de la page d'admin de `name` : son dorsal et
-/// ses active mis en cache.
+/// Forgets everything the core keeps of the admin page of `name`: its backend
+/// and its cached assets.
 ///
-/// **Un seul point de purge, appelé partout où le processus du greffon
-/// s'arrête** — mort observée par la supervision, mort déduite de la fermeture
-/// des sockets, extinction demandée, et ré-announcement (qui est la fin d'un
-/// processus suivie du début d'un autre). C'est délibérément une fonction et non
-/// deux lines recopiées : les deux registres doivent tomber *ensemble*, et un
-/// invariant dont la justesse dépend de quatre sites de purge finit par mentir
-/// sur l'un d'eux.
+/// **A single purge point, called everywhere the plugin's process stops** —
+/// death observed by supervision, death inferred from the sockets closing,
+/// requested shutdown, and re-announcement (which is the end of one process
+/// followed by the start of another). It is deliberately a function and not
+/// two copied lines: both registries must fall *together*, and an invariant
+/// whose correctness depends on four purge sites ends up lying at one of them.
 ///
-/// Ce que le retrait du dorsal achète : `/api/admin/<name>` répond un 404 franc
-/// — « plugin inconnu » — au lieu d'un aller-retour IPC sur un socket fermé.
-/// L'échec y était rapide (écrire sur un socket dont le pair a fermé rend
-/// `EPIPE` tout de suite), donc le gain n'est pas de la latence sauf dans une
-/// course étroite : si l'écriture entre dans le buffer avant que la fermeture
-/// soit traitée, la réponse n'arrive jamais et le budget de la requête s'écoule
-/// en entier. Le vrai gain est de dire la vérité.
-pub async fn forget_page(backends: &AdminBackends, active: &AssetCache, name: &str) {
+/// What removing the backend buys: `/api/admin/<name>` answers a frank 404 —
+/// "unknown plugin" — instead of an IPC round trip on a closed socket. The
+/// failure there was fast (writing to a socket whose peer closed returns
+/// `EPIPE` right away), so the gain is not latency except in a narrow race: if
+/// the write enters the buffer before the close is processed, the answer never
+/// arrives and the request's whole budget elapses. The real gain is telling the
+/// truth.
+pub async fn forget_page(backends: &AdminBackends, assets: &AssetCache, name: &str) {
     backends.write().await.remove(name);
-    // `retain` et non `remove` : la clé porte le path de l'active, donc un
-    // greffon en a autant d'entrées qu'il a servi de fichiers.
-    active.write().await.retain(|(greffon, _), _| greffon != name);
+    // `retain` and not `remove`: the key carries the asset path, so a plugin
+    // has as many entries as files it served.
+    assets.write().await.retain(|(plugin, _), _| plugin != name);
 }
 
 fn etag_of(body: &str) -> String {
@@ -95,24 +94,22 @@ fn etag_of(body: &str) -> String {
     format!("\"{:x}\"", h.finish())
 }
 
-/// Réponse à une panne du dialogue d'admin avec un plugin.
+/// Response to a failure of the admin dialog with a plugin.
 ///
-/// En un seul endroit parce que les quatre routes d'admin faisaient la même
-/// chose de la même façon fautive : journaliser la cause, puis renvoyer un 502
-/// dont le corps était le texte brut « plugin injoignable ». Le client web ne
-/// read que `{"error": …}` ; un corps en texte brut le faisait retomber sur
-/// « HTTP 502 », un code nu à l'écran pour une panne dont la cause était connue
-/// une line plus haut.
-async fn plugin_refusal(st: &AppState, name: &str, contexte: &str, e: &anyhow::Error) -> Response {
-    // Le journal garde la cause **entière** et en anglais : c'est elle qui sert
-    // au diagnostic à distance, et elle est souvent plus précise que la phrase
-    // affichée.
-    tracing::warn!("plugin {name} admin unreachable ({contexte}): {e}");
-    // Le code HTTP suit la cause, comme le message : 504 quand c'est le temps
-    // qui a manqué, 502 quand c'est le greffon.
+/// In a single place because the four admin routes did the same thing in the
+/// same faulty way: log the cause, then return a 502 whose body was the raw
+/// text "plugin unreachable". The web client only reads `{"error": …}`; a raw
+/// text body made it fall back on "HTTP 502", a bare code on screen for a
+/// failure whose cause was known one line above.
+async fn plugin_refusal(st: &AppState, name: &str, context: &str, e: &anyhow::Error) -> Response {
+    // The log keeps the **whole** cause, in English: it is what serves remote
+    // diagnosis, and it is often more precise than the displayed sentence.
+    tracing::warn!("plugin {name} admin unreachable ({context}): {e}");
+    // The HTTP code follows the cause, like the message: 504 when time ran
+    // out, 502 when the plugin did.
     let (code, key) = match e.downcast_ref::<ritornello_plugin_sdk::AdminIpcError>() {
-        // Vivant mais trop lent : dire « injoignable » enverrait redémarrer un
-        // processus qui tourne, au lieu de regarder le réseau.
+        // Alive but too slow: saying "unreachable" would send one to restart a
+        // running process, instead of looking at the network.
         Some(ritornello_plugin_sdk::AdminIpcError::Timeout) => (StatusCode::GATEWAY_TIMEOUT, "plugin_timeout"),
         _ => (StatusCode::BAD_GATEWAY, "plugin_unreachable"),
     };
@@ -120,33 +117,32 @@ async fn plugin_refusal(st: &AppState, name: &str, contexte: &str, e: &anyhow::E
     (code, Json(serde_json::json!({ "error": msg }))).into_response()
 }
 
-/// `ui.js` ou `ui.css` d'un plugin. Le name du fichier vient du path de la
-/// route, jamais d'une liste en dur : le cœur ne sait pas ce qu'un plugin
-/// expose.
+/// `ui.js` or `ui.css` of a plugin. The file name comes from the route path,
+/// never from a hard-coded list: the core does not know what a plugin exposes.
 pub async fn admin_asset(
     State(st): State<AppState>,
-    Path((name, fichier)): Path<(String, String)>,
+    Path((name, file)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    // Cloné puis verrou relâché : la suite fait des allers-retours IPC, et
-    // les tenir sous un verrou de playback retarderait l'insertion d'un greffon
-    // qui s'announcement en retard.
+    // Cloned then lock released: what follows makes IPC round trips, and
+    // holding them under a read lock would delay the insertion of a plugin
+    // announcing itself late.
     let Some(backend) = st.admin_backends.read().await.get(&name).cloned() else {
-        return (StatusCode::NOT_FOUND, "plugin inconnu").into_response();
+        return (StatusCode::NOT_FOUND, "unknown plugin").into_response();
     };
-    let key = (name.clone(), fichier.clone());
-    let en_cache = st.admin_assets.read().await.get(&key).cloned();
-    let (mime, body, etag) = match en_cache {
+    let key = (name.clone(), file.clone());
+    let cached = st.admin_assets.read().await.get(&key).cloned();
+    let (mime, body, etag) = match cached {
         Some(v) => v,
-        None => match backend.asset(&fichier).await {
+        None => match backend.asset(&file).await {
             Ok(Some((mime, body))) => {
                 let etag = etag_of(&body);
                 let v = (mime, body, etag);
                 st.admin_assets.write().await.insert(key, v.clone());
                 v
             }
-            Ok(None) => return (StatusCode::NOT_FOUND, "active inconnu").into_response(),
-            Err(e) => return plugin_refusal(&st, &name, &format!("asset {fichier}"), &e).await,
+            Ok(None) => return (StatusCode::NOT_FOUND, "unknown asset").into_response(),
+            Err(e) => return plugin_refusal(&st, &name, &format!("asset {file}"), &e).await,
         },
     };
     if headers
@@ -168,12 +164,12 @@ pub async fn admin_asset(
 }
 
 pub async fn admin_i18n(State(st): State<AppState>, Path(name): Path<String>) -> Response {
-    // Le verrou est relâché **avant** l'aller-retour IPC : un temporaire dans
-    // le scrutin d'un `match` vivrait jusqu'à la fin du match, donc pendant
-    // l'appel au greffon.
+    // The lock is released **before** the IPC round trip: a temporary in the
+    // scrutinee of a `match` would live until the end of the match, hence
+    // during the call to the plugin.
     let backend = st.admin_backends.read().await.get(&name).cloned();
     match backend {
-        None => (StatusCode::NOT_FOUND, "plugin inconnu").into_response(),
+        None => (StatusCode::NOT_FOUND, "unknown plugin").into_response(),
         Some(backend) => match backend.catalog().await {
             Ok(v) => Json(v).into_response(),
             Err(e) => plugin_refusal(&st, &name, "catalog", &e).await,
@@ -182,12 +178,12 @@ pub async fn admin_i18n(State(st): State<AppState>, Path(name): Path<String>) ->
 }
 
 pub async fn admin_get_data(State(st): State<AppState>, Path(name): Path<String>) -> Response {
-    // Le verrou est relâché **avant** l'aller-retour IPC : un temporaire dans
-    // le scrutin d'un `match` vivrait jusqu'à la fin du match, donc pendant
-    // l'appel au greffon.
+    // The lock is released **before** the IPC round trip: a temporary in the
+    // scrutinee of a `match` would live until the end of the match, hence
+    // during the call to the plugin.
     let backend = st.admin_backends.read().await.get(&name).cloned();
     match backend {
-        None => (StatusCode::NOT_FOUND, "plugin inconnu").into_response(),
+        None => (StatusCode::NOT_FOUND, "unknown plugin").into_response(),
         Some(backend) => match backend.get_data().await {
             Ok(value) => Json(value).into_response(),
             Err(e) => plugin_refusal(&st, &name, "get_data", &e).await,
@@ -200,12 +196,12 @@ pub async fn admin_put_data(
     Path(name): Path<String>,
     Json(data): Json<serde_json::Value>,
 ) -> Response {
-    // Le verrou est relâché **avant** l'aller-retour IPC : un temporaire dans
-    // le scrutin d'un `match` vivrait jusqu'à la fin du match, donc pendant
-    // l'appel au greffon.
+    // The lock is released **before** the IPC round trip: a temporary in the
+    // scrutinee of a `match` would live until the end of the match, hence
+    // during the call to the plugin.
     let backend = st.admin_backends.read().await.get(&name).cloned();
     match backend {
-        None => (StatusCode::NOT_FOUND, "plugin inconnu").into_response(),
+        None => (StatusCode::NOT_FOUND, "unknown plugin").into_response(),
         Some(backend) => match backend.set_data(data).await {
             Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
             Ok(Err(msg)) => (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg }))).into_response(),
@@ -229,40 +225,40 @@ mod tests {
     struct Fake {
         reject: bool,
         down: bool,
-        /// Le plugin répond, mais au-delà du cap de 5 s. Distinct de `down`
-        /// justement parce que le message rendition doit l'être aussi.
-        lent: bool,
-        appels_asset: Arc<std::sync::atomic::AtomicUsize>,
+        /// The plugin answers, but beyond the 5 s cap. Distinct from `down`
+        /// precisely because the returned message must be too.
+        slow: bool,
+        asset_calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     #[async_trait::async_trait]
     impl AdminBackend for Fake {
         async fn asset(&self, path: &str) -> Result<Option<(String, String)>> {
-            if self.lent { return Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
+            if self.slow { return Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
             if self.down { anyhow::bail!("down") }
-            self.appels_asset.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.asset_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(match path {
                 "ui.js" => Some(("text/javascript".to_string(), "export const contract = 1".to_string())),
                 _ => None,
             })
         }
         async fn catalog(&self) -> Result<serde_json::Value> {
-            if self.lent { return Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
+            if self.slow { return Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
             if self.down { anyhow::bail!("down") }
             Ok(serde_json::json!({ "btn_save": "Enregistrer" }))
         }
         async fn get_data(&self) -> Result<serde_json::Value> {
-            if self.lent { return Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
+            if self.slow { return Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
             if self.down { anyhow::bail!("down") }
             Ok(serde_json::json!({ "stations": [] }))
         }
         async fn set_data(&self, _data: serde_json::Value) -> Result<Result<(), String>> {
-            if self.lent { return Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
+            if self.slow { return Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
             if self.down { anyhow::bail!("down") }
-            Ok(if self.reject { Err("présélection en double".into()) } else { Ok(()) })
+            Ok(if self.reject { Err("duplicate preset".into()) } else { Ok(()) })
         }
         async fn ping(&self) -> Result<()> {
-            if self.lent { return Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
+            if self.slow { return Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
             if self.down { anyhow::bail!("down") }
             Ok(())
         }
@@ -308,7 +304,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ui_js_est_servi_avec_son_type_et_un_etag() {
+    async fn ui_js_is_served_with_its_type_and_an_etag() {
         let app = router(state_with(Fake::default()));
         let resp = app.oneshot(Request::get("/plugins/radio/ui.js").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -319,11 +315,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ui_js_est_mis_en_cache_apres_le_premier_acces() {
-        // Un bundle est immuable pour la duration de vie du processus du plugin :
-        // le relire par IPC a chaque rechargement de page serait du gaspillage.
+    async fn ui_js_is_cached_after_the_first_access() {
+        // A bundle is immutable for the lifetime of the plugin's process:
+        // re-reading it over IPC at every page reload would be waste.
         let fake = Fake::default();
-        let appels = fake.appels_asset.clone();
+        let calls = fake.asset_calls.clone();
         let state = state_with(fake);
         let app = router(state);
         for _ in 0..3 {
@@ -334,16 +330,16 @@ mod tests {
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
         }
-        assert_eq!(appels.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn oublie_page_rend_le_404_franc_et_fait_relire_lui_apres_une_re_annonce() {
-        // Trois propriétés d'un coup, et toutes par le **comportement observé**
-        // plutôt que par le contenu d'une table : ce qui compte n'est pas qu'une
-        // clé ait disparu, c'est ce que la route répond ensuite.
+    async fn forget_page_gives_a_frank_404_and_re_reads_after_a_re_announcement() {
+        // Three properties at once, and all through **observed behavior**
+        // rather than the content of a table: what matters is not that a key
+        // disappeared, it is what the route answers next.
         let fake = Fake::default();
-        let appels = fake.appels_asset.clone();
+        let calls = fake.asset_calls.clone();
         let state = state_with(fake);
         let app = router(state.clone());
 
@@ -355,47 +351,48 @@ mod tests {
 
         assert_eq!(get(app.clone()).await.status(), StatusCode::OK);
         assert_eq!(get(app.clone()).await.status(), StatusCode::OK);
-        assert_eq!(appels.load(std::sync::atomic::Ordering::SeqCst), 1, "mis en cache");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "cached");
 
-        // 1. Purger un **autre** greffon n'emporte rien ici. La clé du cache
-        //    porte `(greffon, path)`, donc la purge passe par un `retain` : se
-        //    tromper de moitié de clé aurait vidé le cache entier.
+        // 1. Purging **another** plugin takes nothing away here. The cache key
+        //    carries `(plugin, path)`, so the purge goes through a `retain`:
+        //    getting the wrong half of the key would have emptied the whole
+        //    cache.
         forget_page(&state.admin_backends, &state.admin_assets, "autre").await;
         assert_eq!(get(app.clone()).await.status(), StatusCode::OK);
-        assert_eq!(appels.load(std::sync::atomic::Ordering::SeqCst), 1, "toujours en cache");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "still cached");
 
-        // 2. Une fois le greffon oublié, la route dit franchement qu'il n'y a
-        //    rien là — c'est la moitié du correctif qui retire la page morte du
-        //    menu au lieu de rendre une erreur d'IPC.
+        // 2. Once the plugin is forgotten, the route says frankly that there is
+        //    nothing there — that is the half of the fix that removes the dead
+        //    page from the menu instead of returning an IPC error.
         forget_page(&state.admin_backends, &state.admin_assets, "radio").await;
         assert_eq!(get(app.clone()).await.status(), StatusCode::NOT_FOUND);
 
-        // 3. Et une ré-announcement relit vraiment : c'est la séquence de
-        //    `hotplug` — oublier, puis recâbler. Sans la purge des
-        //    active, le greffon relancé avec un `ui.js` reconstruit servait
-        //    encore l'ancien jusqu'au redémarrage du cœur.
+        // 3. And a re-announcement really re-reads: that is the `hotplug`
+        //    sequence — forget, then rewire. Without the asset purge, the
+        //    plugin relaunched with a rebuilt `ui.js` still served the old one
+        //    until the core restarted.
         state
             .admin_backends
             .write()
             .await
-            .insert("radio".into(), Arc::new(Fake { appels_asset: appels.clone(), ..Default::default() }));
+            .insert("radio".into(), Arc::new(Fake { asset_calls: calls.clone(), ..Default::default() }));
         assert_eq!(get(app.clone()).await.status(), StatusCode::OK);
         assert_eq!(
-            appels.load(std::sync::atomic::Ordering::SeqCst),
+            calls.load(std::sync::atomic::Ordering::SeqCst),
             2,
-            "le nouveau processus doit etre relu, pas servi depuis le cache de l'ancien"
+            "the new process must be re-read, not served from the old one's cache"
         );
     }
 
     #[tokio::test]
-    async fn if_none_match_repond_304() {
+    async fn if_none_match_answers_304() {
         let app = router(state_with(Fake::default()));
-        let premier = app
+        let first = app
             .clone()
             .oneshot(Request::get("/plugins/radio/ui.js").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        let etag = premier.headers()["etag"].to_str().unwrap().to_string();
+        let etag = first.headers()["etag"].to_str().unwrap().to_string();
         let second = app
             .oneshot(
                 Request::get("/plugins/radio/ui.js")
@@ -409,14 +406,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn un_actif_inconnu_du_plugin_repond_404() {
+    async fn an_asset_unknown_to_the_plugin_answers_404() {
         let app = router(state_with(Fake::default()));
         let resp = app.oneshot(Request::get("/plugins/radio/ui.css").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
-    async fn le_catalogue_du_plugin_est_servi_a_plat() {
+    async fn the_plugin_catalog_is_served_flat() {
         let app = router(state_with(Fake::default()));
         let resp = app
             .oneshot(Request::get("/plugins/radio/api/i18n").body(Body::empty()).unwrap())
@@ -429,19 +426,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ui_js_dun_plugin_inconnu_repond_404() {
+    async fn ui_js_of_an_unknown_plugin_answers_404() {
         let app = router(state_with(Fake::default()));
         let resp = app.oneshot(Request::get("/plugins/inconnu/ui.js").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
-    async fn la_page_dadmin_reste_servie_par_la_spa() {
-        // Point de vigilance : la nouvelle route `/plugins/:name/:fichier` ne
-        // doit pas capter `/plugins/<name>/` (segment final clear), qui doit
-        // continuer de tomber sur le repli et serve le shell — c'est l'URL
-        // historique, presente dans le README et dans les liens de la page de
-        // statut.
+    async fn the_admin_page_remains_served_by_the_spa() {
+        // Point of vigilance: the new `/plugins/:name/:file` route must not
+        // capture `/plugins/<name>/` (empty final segment), which must keep
+        // falling onto the fallback and serve the shell — it is the historical
+        // URL, present in the README and in the status page's links.
         let app = router(state_with(Fake::default()));
         let resp = app.oneshot(Request::get("/plugins/radio/").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -450,7 +446,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_data_relaie_le_json() {
+    async fn get_data_relays_the_json() {
         let app = router(state_with(Fake::default()));
         let resp = app.oneshot(Request::get("/plugins/radio/api/data").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -460,7 +456,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_data_valide_renvoie_204() {
+    async fn valid_put_data_returns_204() {
         let app = router(state_with(Fake::default()));
         let resp = app
             .oneshot(
@@ -475,7 +471,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_data_invalide_renvoie_422_avec_message() {
+    async fn invalid_put_data_returns_422_with_a_message() {
         let app = router(state_with(Fake { reject: true, ..Default::default() }));
         let resp = app
             .oneshot(
@@ -489,25 +485,25 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["error"], "présélection en double");
+        assert_eq!(v["error"], "duplicate preset");
     }
 
-    // Depuis la Task 10, un name de plugin inconnu sur la route d'*active*
-    // (`/plugins/<name>/ui.js`) 404 (voir `ui_js_dun_plugin_inconnu_repond_404`),
-    // et `/plugins/<name>/` (segment final clear, URL historique) tombe sur le
-    // repli SPA (voir `la_page_dadmin_reste_servie_par_la_spa`), qui rend
-    // toujours le shell quel que soit le name. Les *données*
-    // (`api/data`) restent strictes : un name de plugin inconnu y 404 toujours,
-    // pour ne jamais masquer une faute de frappe derrière une réponse 200.
+    // Since Task 10, an unknown plugin name on the *asset* route
+    // (`/plugins/<name>/ui.js`) 404s (see `ui_js_of_an_unknown_plugin_answers_404`),
+    // and `/plugins/<name>/` (empty final segment, historical URL) falls onto
+    // the SPA fallback (see `the_admin_page_remains_served_by_the_spa`), which
+    // always returns the shell whatever the name. The *data* (`api/data`)
+    // stays strict: an unknown plugin name still 404s there, so as never to
+    // mask a typo behind a 200 response.
     #[tokio::test]
-    async fn plugin_inconnu_sert_le_shell() {
+    async fn unknown_plugin_serves_the_shell() {
         let app = router(state_with(Fake::default()));
         let resp = app.oneshot(Request::get("/plugins/inconnu/").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
-    async fn plugin_inconnu_sur_lapi_de_donnees_repond_404() {
+    async fn unknown_plugin_on_the_data_api_answers_404() {
         let app = router(state_with(Fake::default()));
         let resp = app
             .oneshot(Request::get("/plugins/inconnu/api/data").body(Body::empty()).unwrap())
@@ -517,32 +513,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn un_plugin_injoignable_dit_pourquoi_au_lieu_dun_code_nu() {
-        // Symptôme signalé : l'écran affichait « HTTP 502 ». Le client web ne
-        // sait read que `{"error": …}` ; un corps en texte brut le faisait
-        // retomber sur le code, alors que la cause était connue.
+    async fn an_unreachable_plugin_says_why_instead_of_a_bare_code() {
+        // Reported symptom: the screen showed "HTTP 502". The web client only
+        // knows how to read `{"error": …}`; a raw text body made it fall back
+        // on the code, while the cause was known.
         let app = router(state_with(Fake { down: true, ..Default::default() }));
         let resp = app
             .oneshot(Request::get("/plugins/radio/api/data").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
-        let corps = resp.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&corps).expect("corps JSON");
-        let msg = json["error"].as_str().expect("champ error");
-        // Une phrase, pas une clé de sources_catalog : le repli clé par clé de
-        // `Catalog::get` est silencieux, et une clé nue s'afficherait telle
-        // quelle.
-        assert!(msg.contains(' '), "key brute renvoyee a l'ecran : {msg}");
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("JSON body");
+        let msg = json["error"].as_str().expect("error field");
+        // A sentence, not a catalog key: the key-by-key fallback of
+        // `Catalog::get` is silent, and a bare key would be displayed as is.
+        assert!(msg.contains(' '), "raw key returned to the screen: {msg}");
     }
 
     #[tokio::test]
-    async fn un_plugin_trop_lent_ne_se_dit_pas_injoignable() {
-        // Deux pannes distinctes, deux conduites à tenir : un plugin mort
-        // appelle un redémarrage, un plugin trop lent envoie regarder le
-        // réseau. Le cœur les aplatissait en un seul message.
-        let lent = router(state_with(Fake { lent: true, ..Default::default() }));
-        let r1 = lent
+    async fn a_too_slow_plugin_is_not_called_unreachable() {
+        // Two distinct failures, two courses of action: a dead plugin calls
+        // for a restart, a too slow plugin sends one to look at the network.
+        // The core flattened them into a single message.
+        let slow = router(state_with(Fake { slow: true, ..Default::default() }));
+        let r1 = slow
             .oneshot(Request::get("/plugins/radio/api/data").body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -553,8 +548,8 @@ mod tests {
             .unwrap()
             .to_string();
 
-        let mort = router(state_with(Fake { down: true, ..Default::default() }));
-        let r2 = mort
+        let dead = router(state_with(Fake { down: true, ..Default::default() }));
+        let r2 = dead
             .oneshot(Request::get("/plugins/radio/api/data").body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -564,17 +559,17 @@ mod tests {
             .unwrap()
             .to_string();
 
-        assert_ne!(m1, m2, "le timeout depasse et la panne rendent le meme message");
-        assert!(m1.contains(' ') && m2.contains(' '), "key brute : {m1} / {m2}");
+        assert_ne!(m1, m2, "the exceeded timeout and the failure give the same message");
+        assert!(m1.contains(' ') && m2.contains(' '), "raw key: {m1} / {m2}");
     }
 
     #[tokio::test]
-    async fn un_plugin_trop_lent_rend_504_et_un_plugin_mort_502() {
-        let lent = router(state_with(Fake { lent: true, ..Default::default() }));
-        let r1 = lent.oneshot(Request::get("/plugins/radio/api/data").body(Body::empty()).unwrap()).await.unwrap();
+    async fn a_too_slow_plugin_gives_504_and_a_dead_plugin_502() {
+        let slow = router(state_with(Fake { slow: true, ..Default::default() }));
+        let r1 = slow.oneshot(Request::get("/plugins/radio/api/data").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(r1.status(), StatusCode::GATEWAY_TIMEOUT);
-        let mort = router(state_with(Fake { down: true, ..Default::default() }));
-        let r2 = mort.oneshot(Request::get("/plugins/radio/api/data").body(Body::empty()).unwrap()).await.unwrap();
+        let dead = router(state_with(Fake { down: true, ..Default::default() }));
+        let r2 = dead.oneshot(Request::get("/plugins/radio/api/data").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(r2.status(), StatusCode::BAD_GATEWAY);
     }
 }

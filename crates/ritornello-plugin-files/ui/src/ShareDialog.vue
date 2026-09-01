@@ -13,24 +13,24 @@ import FolderPicker from './FolderPicker.vue'
 import type { Data, Send, T } from './data'
 
 /**
- * Assistant « partage réseau ».
+ * "Network share" wizard.
  *
- * Trois temps : hôte, puis partages, puis dossiers. Le mode manual n'est pas un
- * repli honteux : il sert quand `smbclient` manque, et sans lui ce chantier
- * retirerait une capacité qui existe aujourd'hui.
+ * Three stages: host, then shares, then folders. Manual mode is not a
+ * shameful fallback: it is there for when `smbclient` is missing, and
+ * without it this effort would remove a capability that exists today.
  */
 const props = defineProps<{
   data: Data
   t: T
   send: Send
-  fige: boolean
-  ouvert: boolean
+  frozen: boolean
+  open: boolean
   /**
-   * Dernier refus du plugin, tel que la page l'a reçu.
+   * Last refusal from the plugin, as the page received it.
    *
-   * Il arrive ici parce qu'un refus né dans la popin doit s'y afficher : le
-   * bandeau de la page principale est derrière le voile gris de la boîte de
-   * dialogue, donc à peu près invisible au moment où il compte le plus.
+   * It lands here because a refusal born inside the dialog must display
+   * there: the main page's banner is behind the dialog's grey veil, hence
+   * about invisible right when it matters most.
    */
   message: string
 }>()
@@ -41,13 +41,13 @@ const user = ref('')
 const password = ref('')
 const domain = ref('')
 /**
- * Le mode manual est **imposé** quand l'assistant ne peut pas fonctionner.
+ * Manual mode is **forced** when the wizard cannot work.
  *
- * Sans `smbclient` il n'y a rien à parcourir : offrir une bascule vers un
- * assistant inerte, et un bouton « Se connect » grisé, donnait deux
- * commandes à comprendre pour un choix qui n'existe pas. La raison reste
- * affichée (`smb_unavailable`) : c'est elle qui explique pourquoi les champs
- * remplacent l'assistant.
+ * Without `smbclient` there is nothing to browse: offering a toggle to a
+ * dead wizard, and a greyed-out "Connect" button, gave two things to
+ * understand for a choice that does not exist. The reason stays displayed
+ * (`smb_unavailable`): it is what explains why the fields replace the
+ * wizard.
  */
 const manualForced = computed(() => !props.data.canBrowseSmb)
 const manualChosen = ref(false)
@@ -60,23 +60,23 @@ const inTree = computed(() => ex.value.kind === 'smb' && ex.value.share !== '')
 const shareList = computed(() => ex.value.shares.length > 0 && !inTree.value)
 
 /**
- * Adresse complète du dossier parcouru.
+ * Full address of the folder being browsed.
  *
- * `exploration.path` est relatif au partage : affiché seul, il faisait
- * « disparaître » le partage dès qu'on entrait dedans, sans qu'aucun repère ne
- * dise dans lequel on se trouvait.
+ * `exploration.path` is relative to the share: displayed alone, it made the
+ * share "vanish" as soon as it was entered, with no landmark saying which
+ * one was being browsed.
  */
 const fullPath = computed(() =>
   [`//${ex.value.host}/${ex.value.share}`, ex.value.path].filter(Boolean).join('/'),
 )
 
-// Le `Dialog` reste **monté** quand il est fermé : sans cette remise à zéro, la
-// input d'une ouverture précédente réapparaîtrait à la suivante — mot de passe
-// compris, ce qui n'a rien à faire en mémoire une fois la popin refermée.
+// The `Dialog` stays **mounted** when closed: without this reset, the input
+// of a previous opening would reappear at the next one — password included,
+// which has no business staying in memory once the dialog is closed again.
 watch(
-  () => props.ouvert,
-  (ouvert) => {
-    if (!ouvert) return
+  () => props.open,
+  (open) => {
+    if (!open) return
     host.value = ''
     user.value = ''
     password.value = ''
@@ -97,30 +97,30 @@ function connect(): void {
   })
 }
 
-function chooseShare(nom: string): void {
-  void props.send({ op: 'smb_browse', share: nom, path: '' })
+function chooseShare(name: string): void {
+  void props.send({ op: 'smb_browse', share: name, path: '' })
 }
 
-function descend(nom: string): void {
-  const suite = ex.value.path ? `${ex.value.path}/${nom}` : nom
-  void props.send({ op: 'smb_browse', share: ex.value.share, path: suite })
+function descend(name: string): void {
+  const next = ex.value.path ? `${ex.value.path}/${name}` : name
+  void props.send({ op: 'smb_browse', share: ex.value.share, path: next })
 }
 
 /**
- * Revient à la liste des partages, sans se reconnecter.
+ * Returns to the share list, without reconnecting.
  *
- * Correctif d'un défaut signalé : au sommet d'un partage, goUp ne faisait
- * rien du tout, et il n'existait aucun moyen d'en essayer un autre sans close
- * la popin. L'opération est distincte de `smb_connect` parce qu'elle ne doit
- * **pas** relancer un appel réseau : les partages sont déjà connus.
+ * Fix for a reported defect: at the top of a share, goUp did nothing at
+ * all, and there was no way to try another one without closing the dialog.
+ * The operation is distinct from `smb_connect` because it must **not**
+ * trigger a new network call: the shares are already known.
  */
 function toShares(): void {
   void props.send({ op: 'smb_shares' })
 }
 
 function goUp(): void {
-  // Au sommet du partage, goUp ramène à la liste des partages plutôt que de
-  // ne rien faire.
+  // At the top of the share, goUp returns to the share list rather than
+  // doing nothing.
   if (!ex.value.path) {
     toShares()
     return
@@ -133,10 +133,11 @@ function goUp(): void {
 }
 
 async function choose(): Promise<void> {
-  // En mode manual, tout vient des champs ; en mode assistant, tout vient de
-  // ce qu'on a parcouru — et le mot de passe reste vide, parce qu'il vit déjà
-  // dans la session du plugin et que la page ne l'a jamais reçu en retour.
-  const charge = manual.value
+  // In manual mode, everything comes from the fields; in wizard mode,
+  // everything comes from what has been browsed — and the password stays
+  // empty, because it already lives in the plugin's session and the page
+  // never received it back.
+  const payload = manual.value
     ? {
         host: host.value.trim(),
         share: manualShare.value.trim(),
@@ -153,7 +154,7 @@ async function choose(): Promise<void> {
         domain: '',
         password: '',
       }
-  const ok = await props.send({ op: 'add_source', kind: 'smb', path: null, writable: false, ...charge })
+  const ok = await props.send({ op: 'add_source', kind: 'smb', path: null, writable: false, ...payload })
   if (ok) close()
 }
 
@@ -164,19 +165,18 @@ function close(): void {
 </script>
 
 <template>
-  <Dialog :open="ouvert" @update:open="(v: boolean) => !v && close()">
-    <DialogContent class="sm:max-w-2xl" data-dlg-partage>
+  <Dialog :open="open" @update:open="(v: boolean) => !v && close()">
+    <DialogContent class="sm:max-w-2xl" data-share-dialog>
       <DialogHeader>
         <DialogTitle>{{ t('dlg_share_title') }}</DialogTitle>
-        <!-- Pas décorative : reka-ui la rattache par `aria-describedby`, et son
-             absence laisse un player d'écran annoncer une boîte de dialogue
-             dont il ne sait rien dire. -->
+        <!-- Not decorative: reka-ui ties it in via `aria-describedby`, and
+             its absence leaves a screen reader announcing a dialog it can
+             say nothing about. -->
         <DialogDescription>{{ t('dlg_share_desc') }}</DialogDescription>
       </DialogHeader>
 
-      <!-- Grisé, jamais planté : c'est la convention de l'onglet Système. Le
-           bouton qui ne peut pas marcher dit pourquoi, au lieu d'échouer au
-           clic. -->
+      <!-- Greyed out, never broken: that is the System tab's convention. A
+           button that cannot work says why, instead of failing on click. -->
       <p
         v-if="!data.canBrowseSmb"
         class="text-sm text-muted-foreground"
@@ -205,9 +205,9 @@ function close(): void {
           class="w-40"
           :placeholder="t('ph_share')"
         />
-        <!-- Plus large que le champ « partage » : son marqueur « (optionnel) »
-             est ce qui distingue les deux cases, prises pour deux dossiers à
-             fournir tant qu'il manquait. Tronqué, il ne dirait plus rien. -->
+        <!-- Wider than the "share" field: its "(optional)" marker is what
+             tells the two boxes apart, mistaken for two folders to supply
+             as long as it was missing. Truncated, it would say nothing more. -->
         <Input
           v-model="manualSubpath"
           data-manual-subpath
@@ -217,12 +217,12 @@ function close(): void {
       </div>
 
       <template v-else>
-        <p v-if="ex.error" class="min-w-0 break-words text-sm text-destructive" data-partage-erreur>{{ ex.error }}</p>
+        <p v-if="ex.error" class="min-w-0 break-words text-sm text-destructive" data-share-error>{{ ex.error }}</p>
 
-        <!-- `min-w-0` pour la même raison que dans l'assistant local : un enfant
-             de grille ne rétrécit pas sous la largeur de son contenu sans
-             autorisation, et un nom de partage long pousserait la popin hors de
-             son propre fond. -->
+        <!-- `min-w-0` for the same reason as in the local wizard: a grid
+             child does not shrink below its content's width without
+             permission, and a long share name would push the dialog past
+             its own background. -->
         <div v-if="shareList" class="min-w-0 space-y-1">
           <p class="text-sm text-muted-foreground">{{ t('shares_label') }}</p>
           <button
@@ -231,7 +231,7 @@ function close(): void {
             type="button"
             data-share
             class="block w-full truncate rounded px-2 py-1 text-left text-sm hover:bg-accent"
-            :disabled="fige || ex.busy"
+            :disabled="frozen || ex.busy"
             :title="s"
             @click="chooseShare(s)"
           >
@@ -240,13 +240,13 @@ function close(): void {
         </div>
 
         <template v-else-if="inTree">
-          <!-- Retour explicite à la liste des partages : sans lui, on restait
-               enfermé dans le premier partage choisi. -->
+          <!-- Explicit return to the share list: without it, one stayed
+               locked into the first share chosen. -->
           <button
             type="button"
-            data-aux-partages
+            data-to-shares
             class="self-start rounded px-2 py-1 text-left text-sm text-muted-foreground hover:bg-accent"
-            :disabled="fige"
+            :disabled="frozen"
             @click="toShares"
           >
             ← {{ t('shares_label') }}
@@ -254,7 +254,7 @@ function close(): void {
           <FolderPicker
             :exploration="ex"
             :t="t"
-            :fige="fige"
+            :frozen="frozen"
             :path="fullPath"
             @descend="descend"
             @goUp="goUp"
@@ -262,26 +262,26 @@ function close(): void {
         </template>
       </template>
 
-      <!-- Le refus s'affiche **ici** et pas seulement sur la page : derrière le
-           voile gris de la boîte de dialogue, le bandeau de la page est à peu
-           près invisible au moment précis où il compte. -->
+      <!-- The refusal displays **here** and not only on the page: behind
+           the dialog's grey veil, the page's banner is about invisible at
+           the precise moment it matters. -->
       <p v-if="message" class="min-w-0 break-words text-sm text-destructive" data-dlg-message>{{ message }}</p>
 
       <div class="flex flex-wrap justify-end gap-2">
         <Button v-if="!manualForced" variant="ghost" data-manual @click="manualChosen = !manualChosen">
           {{ manual ? t('btn_assistant') : t('btn_manual') }}
         </Button>
-        <Button variant="ghost" data-annuler @click="close">{{ t('btn_cancel') }}</Button>
+        <Button variant="ghost" data-cancel @click="close">{{ t('btn_cancel') }}</Button>
         <Button
           v-if="!manual"
           variant="secondary"
           data-connect
-          :disabled="fige || ex.busy"
+          :disabled="frozen || ex.busy"
           @click="connect"
         >
           {{ ex.busy ? t('connecting') : t('btn_connect') }}
         </Button>
-        <Button data-choose :disabled="fige || (!manual && !inTree)" @click="choose">
+        <Button data-choose :disabled="frozen || (!manual && !inTree)" @click="choose">
           {{ t('btn_choose_folder') }}
         </Button>
       </div>

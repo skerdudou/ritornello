@@ -1,24 +1,23 @@
-//! Les plugins vus de la page de statut : une line par (name, kind), l'order du fichier plugins.toml, l'interrupteur active/inactif, et ce qu'une deconnexion ou une reannonce change.
+//! The plugins as seen from the status page: one line per (name, kind), the order of the plugins.toml file, the enabled/disabled switch, and what a disconnection or a re-announcement changes.
 
 use super::*;
 
-/// Une line de la page de statut : un couple (name, kind).
+/// One line of the status page: a (name, kind) pair.
 ///
-/// `stalled` distingue **trois** états là où deux ne suffisaient pas :
+/// `stalled` distinguishes **three** states where two were not enough:
 ///
-/// - `connected: true` — annoncé et câblé ;
-/// - `connected: false` seul — processus mort avant de s'annoncer ;
-/// - `connected: false` + `stalled: true` — processus **vivant**, muet à
-///   l'échéance du rendez-vous.
+/// - `connected: true` — announced and wired;
+/// - `connected: false` alone — process dead before announcing itself;
+/// - `connected: false` + `stalled: true` — process **alive**, silent at the
+///   rendezvous deadline.
 ///
-/// Un greffon figé n'est pas un greffon mort : il tourne, il n'a rien dit, et
-/// il peut encore parler — le socket d'enregistrement reste ouvert pour lui et
-/// le cœur le câblera à chaud. C'est cette différence que l'opérateur doit
-/// voir.
+/// A stalled plugin is not a dead plugin: it runs, it has said nothing, and it
+/// may still speak — the registration socket stays open for it and the core
+/// will hotplug it. That difference is what the operator must see.
 ///
-/// Le champ est additif, avec l'idiome déjà employé pour `InputMessage.held` :
-/// absent du JSON quand il est faux, donc aucune trame existante ne change et
-/// une trame ancienne se relit sans erreur.
+/// The field is additive, with the idiom already used for `InputMessage.held`:
+/// absent from the JSON when false, so no existing frame changes and an old
+/// frame reads back without error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginStatus {
     pub name: String,
@@ -27,44 +26,44 @@ pub struct PluginStatus {
     pub admin: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stalled: bool,
-    /// Lancé à l'instant, pas encore annoncé, et **dans le délai normal**.
+    /// Launched just now, not yet announced, and **within the normal delay**.
     ///
-    /// Exclusif avec `stalled`, et les deux disent la même chose du greffon —
-    /// il n'a pas parlé. Ils ne diffèrent que par le temps écoulé, et cette
-    /// différence est tout : « figé » accuse un greffon fautif, alors qu'un
-    /// binaire qui met deux secondes à lier ses sockets sur une carte SD est
-    /// parfaitement sain. Afficher « figé » pendant un démarrage normal était
-    /// donc une accusation à tort, signalée à l'usage.
+    /// Exclusive with `stalled`, and both say the same thing about the plugin —
+    /// it has not spoken. They differ only by the elapsed time, and that
+    /// difference is everything: "stalled" accuses a faulty plugin, whereas a
+    /// binary that takes two seconds to bind its sockets on an SD card is
+    /// perfectly healthy. Showing "stalled" during a normal startup was
+    /// therefore a wrongful accusation, reported in use.
     ///
-    /// La bascule vers `stalled` est faite par la boucle du cœur au bout de
-    /// `STARTUP_TIMEOUT` (voir `main.rs`), et seulement si la line dit encore
-    /// « démarrage » à cet instant.
+    /// The switch to `stalled` is made by the core loop after `STARTUP_TIMEOUT`
+    /// (see `main.rs`), and only if the line still says "starting" at that
+    /// instant.
     ///
-    /// Additif comme les deux autres : absent du JSON quand il est faux.
+    /// Additive like the other two: absent from the JSON when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub starting: bool,
-    /// Greffon éteint depuis l'IHM : aucun processus, aucun câblage, et le
-    /// manifest porte `enabled = false`. La line reste affichée — sans elle,
-    /// on ne pourrait plus le rallumer.
+    /// Plugin switched off from the UI: no process, no wiring, and the manifest
+    /// carries `enabled = false`. The line stays displayed — without it, it
+    /// could no longer be switched back on.
     ///
-    /// Additif comme `stalled` : absent du JSON quand il est faux, donc aucune
-    /// trame existante ne change.
+    /// Additive like `stalled`: absent from the JSON when false, so no existing
+    /// frame changes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
-    /// Greffon joint dont la page d'admin ne répond pas au `Ping` : un
-    /// `set_data` long tient son verrou (le plus souvent un partage réseau).
-    /// Calculé au moment de `/api/status`, jamais stocké : c'est un état qui
-    /// change à la seconde. Additif comme `stalled` et `disabled`.
+    /// Reachable plugin whose admin page does not answer the `Ping`: a long
+    /// `set_data` holds its lock (most often a network share). Computed at
+    /// `/api/status` time, never stored: it is a state that changes by the
+    /// second. Additive like `stalled` and `disabled`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub busy: bool,
 }
 
 impl PluginStatus {
-    /// Line d'un kind annoncé, joint (`connected: true`) ou non.
+    /// Line of an announced kind, reachable (`connected: true`) or not.
     ///
-    /// `stalled` n'a pas de sens ici : le greffon a parlé. Pas de `Default`
-    /// dérivé sur cette structure pour la même raison — un statut sans name ni
-    /// kind ne veut rien dire.
+    /// `stalled` has no meaning here: the plugin has spoken. No derived
+    /// `Default` on this struct for the same reason — a status without name or
+    /// kind means nothing.
     pub fn kind(name: &str, kind: &str, connected: bool, admin: bool) -> Self {
         Self {
             name: name.to_string(),
@@ -78,11 +77,11 @@ impl PluginStatus {
         }
     }
 
-    /// Line d'un greffon qui n'a annoncé **aucun** kind : jamais lancé, mort
-    /// avant l'announcement, ou vivant et muet (`stalled`).
+    /// Line of a plugin that announced **no** kind: never launched, dead before
+    /// the announcement, or alive and silent (`stalled`).
     ///
-    /// Le kind est rapporté « unknown » plutôt qu'inventé : le manifest ne le
-    /// porte plus, c'est le binaire qui l'announcement.
+    /// The kind is reported as "unknown" rather than invented: the manifest no
+    /// longer carries it, the binary is what announces it.
     pub fn unknown_kind(name: &str, stalled: bool) -> Self {
         Self {
             name: name.to_string(),
@@ -96,11 +95,11 @@ impl PluginStatus {
         }
     }
 
-    /// Line d'un greffon qu'on vient de lancer : il n'a pas parlé, et c'est
+    /// Line of a plugin that was just launched: it has not spoken, and that is
     /// normal.
     ///
-    /// Distincte de `unknown_kind(name, true)`, qui accuse. Voir la doc du
-    /// champ `starting`.
+    /// Distinct from `unknown_kind(name, true)`, which accuses. See the doc of
+    /// the `starting` field.
     pub fn startup(name: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -114,8 +113,8 @@ impl PluginStatus {
         }
     }
 
-    /// Line d'un greffon éteint. Ni kind ni page d'admin : il n'a rien
-    /// annoncé et n'annoncera rien tant qu'il ne sera pas rallumé.
+    /// Line of a switched-off plugin. Neither kind nor admin page: it announced
+    /// nothing and will announce nothing until it is switched back on.
     pub fn disabled(name: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -130,30 +129,29 @@ impl PluginStatus {
     }
 }
 
-/// Ordre d'allumage ou d'extinction, de la couche HTTP vers la boucle du cœur.
+/// Switch-on or switch-off order, from the HTTP layer to the core loop.
 ///
-/// L'accusé est un `oneshot` et non un simple envoi : la page attend une
-/// réponse qui décrive un état déjà vrai, sinon elle se rafraîchirait sur un
-/// état intermédiaire. `bool` et non `Result` : la seule chose que le cœur
-/// puisse rater est le lancement d'un binaire, dont la cause exacte part au
-/// journal — que l'IHM montre déjà — pendant que l'écran reçoit un message du
-/// sources_catalog.
+/// The acknowledgement is a `oneshot` and not a mere send: the page waits for
+/// a response describing a state that is already true, otherwise it would
+/// refresh on an intermediate state. `bool` and not `Result`: the only thing
+/// the core can fail at is launching a binary, whose exact cause goes to the
+/// log — which the UI already shows — while the screen receives a message from
+/// the catalog.
 pub struct PluginOrder {
     pub name: String,
     pub active: bool,
     pub ack: tokio::sync::oneshot::Sender<bool>,
 }
 
-/// Ce que la couche HTTP doit connaître des plugins pour les basculer.
+/// What the HTTP layer must know about the plugins to toggle them.
 ///
-/// Un seul champ d'`AppState` plutôt que trois, pour la raison déjà retenue
-/// pour `system` : chaque constructeur de test grossirait sinon de trois
-/// lines.
+/// A single `AppState` field rather than three, for the reason already retained
+/// for `system`: every test constructor would otherwise grow by three lines.
 pub struct PluginsControl {
-    /// Chemin de `plugins.toml` : c'est là qu'est écrit le choix.
+    /// Path of `plugins.toml`: that is where the choice is written.
     pub manifest: std::path::PathBuf,
-    /// Noms déclarés, dans l'order du fichier. Autorité sur ce qui peut être
-    /// basculé : un name absent est refusé **avant** toute écriture.
+    /// Declared names, in file order. Authority on what may be toggled: an
+    /// absent name is refused **before** any write.
     pub names: Vec<String>,
     pub tx: mpsc::Sender<PluginOrder>,
 }
@@ -163,13 +161,13 @@ pub(super) struct PluginEnabledReq {
     enabled: bool,
 }
 
-/// Bascule un greffon, **persistance d'abord**.
+/// Toggles a plugin, **persistence first**.
 ///
-/// L'order des trois étapes est le fond de l'affaire : un name refusé
-/// n'écrit rien, une écriture qui échoue ne tue aucun processus, et le cœur
-/// n'est prévenu que d'un choix déjà sur le disque. Un greffon éteint dont
-/// l'extinction n'aurait pas été écrite reviendrait au prochain démarrage —
-/// un mensonge silencieux, pire qu'un refus franc.
+/// The order of the three steps is the heart of the matter: a refused name
+/// writes nothing, a failed write kills no process, and the core is only told
+/// of a choice already on disk. A switched-off plugin whose switch-off had not
+/// been written would come back at the next boot — a silent lie, worse than a
+/// frank refusal.
 pub(super) async fn plugin_enabled_put(
     State(state): State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
@@ -193,8 +191,8 @@ pub(super) async fn plugin_enabled_put(
     }
     match ack_rx.await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        // Le cœur a refusé (binaire introuvable au rallumage) ou n'a pas
-        // répondu. La cause exacte est au journal, que l'IHM montre déjà.
+        // The core refused (binary not found on switch-on) or did not answer.
+        // The exact cause is in the log, which the UI already shows.
         _ => {
             let msg = state.catalog.read().await.get("plugin_action_failed").replace("{name}", &name);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": msg })))
@@ -203,29 +201,29 @@ pub(super) async fn plugin_enabled_put(
     }
 }
 
-/// Marque le plugin `name` comme déconnecté dans l'état de statut : un plugin
-/// dont le processus s'est terminé n'est plus joignable (supervision, page de
-/// statut vivante). No-op si le name est inconnu.
-/// Les drapeaux `stalled` **et** `starting` sont retirés au passage, pour la
-/// même raison : tous deux décrivent un processus *vivant* — « figé » veut dire
-/// vivant et muet, « démarrage » veut dire vivant et pas encore annoncé. Un
-/// processus dont on vient de voir la sortie n'est plus vivant, et laisser l'un
-/// ou l'autre raconterait un état qui n'existe pas.
+/// Marks the plugin `name` as disconnected in the status state: a plugin whose
+/// process has exited is no longer reachable (supervision, live status page).
+/// No-op if the name is unknown.
+/// The `stalled` **and** `starting` flags are removed on the way, for the same
+/// reason: both describe a *living* process — "stalled" means alive and
+/// silent, "starting" means alive and not yet announced. A process whose exit
+/// was just seen is no longer alive, and leaving either one would tell of a
+/// state that does not exist.
 ///
-/// **`admin` tombe aussi**, et c'est ce qui retire l'entrée du menu du haut.
-/// L'IHM construit ce menu par `plugins.filter(p => p.admin)` **sans regarder
-/// `connected`** : une line restée à `admin: true` continuait donc d'offrir la
-/// page d'un greffon mort, et le clic rendait une erreur au lieu de rien. C'est
-/// le même symptôme que pour un greffon éteint, réglé de son côté parce que
-/// `disabled` pose le drapeau à faux par construction. Corollaire utile : le
-/// sondage `Ping` de `/api/status` ne filtre que sur `admin`, donc il cesse du
-/// même coup d'interroger un dorsal mort à chaque rafraîchissement.
+/// **`admin` drops too**, and that is what removes the entry from the top
+/// menu. The UI builds that menu with `plugins.filter(p => p.admin)` **without
+/// looking at `connected`**: a line left at `admin: true` therefore kept
+/// offering the page of a dead plugin, and the click returned an error instead
+/// of nothing. It is the same symptom as for a switched-off plugin, settled on
+/// its side because `disabled` sets the flag to false by construction. Useful
+/// corollary: the `Ping` probe of `/api/status` filters only on `admin`, so it
+/// stops querying a dead backend on every refresh at the same time.
 ///
-/// `starting` en particulier avait une conséquence visible : `main::should_downgrade`
-/// ne consulte que ce drapeau, si bien qu'un greffon mort **pendant** ses dix
-/// secondes de grâce gardait sa line « démarrage » jusqu'à l'échéance, puis se
-/// faisait rétrograder en « figé » — c'est-à-dire annoncer vivant mais muet un
-/// processus dont la sortie avait été moissonnée dix secondes plus tôt.
+/// `starting` in particular had a visible consequence: `main::should_downgrade`
+/// consults only that flag, so a plugin that died **during** its ten seconds of
+/// grace kept its "starting" line until the deadline, then got downgraded to
+/// "stalled" — that is, announcing as alive but silent a process whose exit had
+/// been reaped ten seconds earlier.
 pub fn mark_plugin_disconnected(state: &mut StatusState, name: &str) {
     for p in &mut state.plugins {
         if p.name == name {
@@ -237,30 +235,28 @@ pub fn mark_plugin_disconnected(state: &mut StatusState, name: &str) {
     }
 }
 
-/// Remplace **toutes** les lines du greffon `name` par `lines`.
+/// Replaces **all** the lines of plugin `name` with `lines`.
 ///
-/// Employé au câblage à chaud. Le remplacement n'est pas un détail : un greffon
-/// relancé à la main se réannonce, et une insertion en plus des lines
-/// existantes lui ferait accumuler des doublons dans la page de statut à chaque
-/// restart — jusqu'à une page illisible sur un appareil qu'on ne redémarre
-/// jamais.
+/// Used at hotplug. The replacement is not a detail: a plugin restarted by
+/// hand re-announces itself, and an insertion on top of the existing lines
+/// would make it accumulate duplicates in the status page at every restart —
+/// up to an unreadable page on a device that is never rebooted.
 ///
-/// Les nouvelles lines sont posées là où étaient les anciennes, pour que
-/// l'order affiché ne saute pas d'un recâblage à l'autre.
+/// The new lines are placed where the old ones were, so that the displayed
+/// order does not jump from one rewiring to the next.
 ///
-/// Une liste **clear** ne fait pas disparaître le greffon : elle le laisse
-/// visible en kind inconnu, non joint. Une announcement à `kinds: []` vient d'un
-/// binaire mal compilé, et retirer ses lines sans en insérer aucune le rendrait
-/// invisible juste après qu'il a parlé — l'inverse exact de ce que le câblage à
-/// chaud existe pour donner à voir. `stalled` reste faux : il vient de parler,
-/// il n'est pas muet.
+/// An **empty** list does not make the plugin disappear: it leaves it visible
+/// as unknown kind, not reachable. An announcement with `kinds: []` comes from
+/// a badly compiled binary, and removing its lines without inserting any would
+/// make it invisible right after it spoke — the exact opposite of what hotplug
+/// exists to show. `stalled` stays false: it has just spoken, it is not silent.
 ///
-/// `admin` ne sert **que** dans ce cas de repli, et il y est indispensable :
-/// `PluginStatus::unknown_kind` met le drapeau à faux par construction, si bien
-/// qu'un greffon annonçant `kinds: []` **et** `admin: true` — un binaire mal
-/// compilé, mais dont la page d'admin est bel et bien jointe — voyait son dorsal
-/// câblé sans rien dans l'IHM pour y mener. Les lines non vides portent déjà
-/// leur propre drapeau, l'appelant l'ayant posé kind par kind.
+/// `admin` is used **only** in that fallback case, and it is indispensable
+/// there: `PluginStatus::unknown_kind` sets the flag to false by construction,
+/// so a plugin announcing `kinds: []` **and** `admin: true` — a badly compiled
+/// binary, but whose admin page is indeed reachable — saw its backend wired
+/// with nothing in the UI leading to it. The non-empty lines already carry
+/// their own flag, the caller having set it kind by kind.
 pub fn replace_plugin_lines(
     state: &mut StatusState,
     name: &str,
@@ -290,9 +286,9 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::util::ServiceExt;
 
-    /// Rig avec un vrai `plugins.toml` temporaire et l'oreille du cœur
-    /// conservée : les deux choses que la route touche.
-    fn app_state_avec_greffons(
+    /// Rig with a real temporary `plugins.toml` and the core's ear kept: the
+    /// two things the route touches.
+    fn app_state_with_plugins(
     ) -> (AppState, tempfile::TempDir, tokio::sync::mpsc::Receiver<PluginOrder>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("plugins.toml");
@@ -315,11 +311,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn eteindre_persiste_puis_previent_le_coeur() {
-        let (state, dir, mut rx) = app_state_avec_greffons();
+    async fn switching_off_persists_then_tells_the_core() {
+        let (state, dir, mut rx) = app_state_with_plugins();
         let app = router(state.clone());
-        // Le cœur : il accuse réception, comme la boucle principale.
-        let coeur = tokio::spawn(async move {
+        // The core: it acknowledges receipt, like the main loop.
+        let core = tokio::spawn(async move {
             let order = rx.recv().await.unwrap();
             assert_eq!(order.name, "cd");
             assert!(!order.active);
@@ -337,19 +333,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        coeur.await.unwrap();
-        let apres = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
-        assert!(apres.contains("enabled = false"), "{apres}");
+        core.await.unwrap();
+        let after = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
+        assert!(after.contains("enabled = false"), "{after}");
     }
 
     #[tokio::test]
-    async fn un_refus_explicite_du_coeur_renvoie_500_avec_un_message_du_catalogue() {
-        // Rallumage sans binaire au path `exec` : le cœur répond `false`,
-        // pas un canal fermé. Le seul branchement d'`ack_rx` qui restait non
-        // couvert.
-        let (state, _dir, mut rx) = app_state_avec_greffons();
+    async fn an_explicit_refusal_from_the_core_returns_500_with_a_catalog_message() {
+        // Switch-on without a binary at the `exec` path: the core answers
+        // `false`, not a closed channel. The only branch of `ack_rx` that
+        // remained uncovered.
+        let (state, _dir, mut rx) = app_state_with_plugins();
         let app = router(state);
-        let coeur = tokio::spawn(async move {
+        let core = tokio::spawn(async move {
             let order = rx.recv().await.unwrap();
             let _ = order.ack.send(false);
         });
@@ -365,22 +361,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        coeur.await.unwrap();
+        core.await.unwrap();
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        // Un message du sources_catalog, jamais une clé brute.
+        // A catalog message, never a raw key.
         assert!(v["error"].as_str().unwrap().contains("radio"));
     }
 
     #[tokio::test]
-    async fn un_nom_non_declare_est_refuse_sans_rien_ecrire() {
-        let (state, dir, _rx) = app_state_avec_greffons();
-        let avant = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
+    async fn an_undeclared_name_is_refused_without_writing_anything() {
+        let (state, dir, _rx) = app_state_with_plugins();
+        let before = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
         let app = router(state);
 
         let resp = app
             .oneshot(
-                Request::put("/api/plugins/jamais-vu/enabled")
+                Request::put("/api/plugins/never-seen/enabled")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"enabled":false}"#))
                     .unwrap(),
@@ -391,15 +387,15 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        // Un message, jamais une clé de sources_catalog.
-        assert!(v["error"].as_str().unwrap().contains("jamais-vu"));
-        assert_eq!(std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap(), avant);
+        // A message, never a catalog key.
+        assert!(v["error"].as_str().unwrap().contains("never-seen"));
+        assert_eq!(std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap(), before);
     }
 
     #[tokio::test]
-    async fn une_persistance_impossible_ne_touche_pas_au_runtime() {
-        let (mut state, dir, mut rx) = app_state_avec_greffons();
-        // Manifeste introuvable : l'écriture échouera.
+    async fn an_impossible_persistence_does_not_touch_the_runtime() {
+        let (mut state, dir, mut rx) = app_state_with_plugins();
+        // Manifest not found: the write will fail.
         state.plugins = Arc::new(PluginsControl {
             manifest: dir.path().join("absent.toml"),
             names: vec!["radio".into()],
@@ -418,34 +414,34 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        // Rien n'a été demandé au cœur : un greffon tué dont l'extinction n'est
-        // pas persistée reviendrait au prochain démarrage.
+        // Nothing was asked of the core: a killed plugin whose switch-off is
+        // not persisted would come back at the next boot.
         assert!(rx.try_recv().is_err());
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        // Un message du sources_catalog, jamais une clé brute : sans cette
-        // assertion, une faute de frappe dans `plugin_persist_failed`
-        // laisserait passer la suite verte avec une clé crue à l'écran.
+        // A catalog message, never a raw key: without this assertion, a typo
+        // in `plugin_persist_failed` would let the suite stay green with a raw
+        // key on screen.
         assert!(v["error"].as_str().unwrap().contains("radio"));
     }
 
-    /// Aucune clé de refus ne peut atteindre l'écran telle quelle.
+    /// No refusal key can reach the screen as is.
     ///
-    /// Les tests de `message()` résolvent contre un sources_catalog **ad hoc**, ce qui
-    /// prouve l'interpolation mais pas que la clé écrite dans le code existe
-    /// vraiment : `Catalog::get` rend la clé quand il ne la trouve pas, donc une
-    /// faute de frappe produirait un toast affichant
-    /// « settings_initial_delay_out_of_range » sans qu'aucun test ne s'en
-    /// plaigne. Le test de parité entre catalogues ne le voit pas non plus : il
-    /// compare les deux fichiers entre eux, pas au code qui les appelle.
+    /// The `message()` tests resolve against an **ad hoc** catalog, which
+    /// proves the interpolation but not that the key written in the code really
+    /// exists: `Catalog::get` returns the key when it does not find it, so a
+    /// typo would produce a toast displaying
+    /// "settings_initial_delay_out_of_range" without any test complaining. The
+    /// parity test between catalogs does not see it either: it compares the two
+    /// files with each other, not with the code that calls them.
     ///
-    /// Celui-ci résout donc chaque variante contre le **sources_catalog anglais
-    /// réellement embarqué**, et refuse un message égal à sa propre clé.
+    /// This one therefore resolves each variant against the **English catalog
+    /// actually embedded**, and refuses a message equal to its own key.
     #[test]
-    fn chaque_refus_resout_contre_le_catalogue_embarque() {
-        let catalog = Catalog::load("core", "en", std::path::Path::new("/inexistant"), crate::i18n::EN);
-        // Une clé absente se reconnaît à ce que le message **est** la clé : pas
-        // d'espace, et le préfixe qu'on lui a donné.
+    fn every_refusal_resolves_against_the_embedded_catalog() {
+        let catalog = Catalog::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+        // A missing key is recognized by the message **being** the key: no
+        // space, and the prefix it was given.
         let messages = [
             AudioOutputError::EmptyName.message(&catalog),
             SettingsError::InitialDelay { min: 200, max: 5000 }.message(&catalog),
@@ -457,24 +453,24 @@ mod tests {
         for m in &messages {
             assert!(
                 m.contains(' '),
-                "message réduit à une clé brute, donc absente du sources_catalog embarqué : {m:?}"
+                "message reduced to a raw key, hence missing from the embedded catalog: {m:?}"
             );
         }
-        // Et les bornes arrivent bien interpolées, pas en jetons.
-        let bounded = SettingsError::InitialDelay { min: 200, max: 5000 }.message(&catalog);
-        assert!(bounded.contains("200") && bounded.contains("5000"), "bornes non interpolées : {bounded:?}");
-        assert!(!bounded.contains("{min}") && !bounded.contains("{max}"), "jeton laissé tel quel : {bounded:?}");
+        // And the bounds do arrive interpolated, not as tokens.
+        let bound = SettingsError::InitialDelay { min: 200, max: 5000 }.message(&catalog);
+        assert!(bound.contains("200") && bound.contains("5000"), "bounds not interpolated: {bound:?}");
+        assert!(!bound.contains("{min}") && !bound.contains("{max}"), "token left as is: {bound:?}");
     }
 
     #[test]
-    fn busy_est_additif_absent_quand_faux() {
+    fn busy_is_additive_absent_when_false() {
         let l = PluginStatus::kind("radio", "source", true, true);
         let json = serde_json::to_string(&l).unwrap();
         assert!(!json.contains("busy"), "{json}");
     }
 
     #[test]
-    fn mark_plugin_disconnected_bascule_connected() {
+    fn mark_plugin_disconnected_toggles_connected() {
         let mut st = StatusState {
             plugins: vec![
                 PluginStatus::kind("radio", "source", true, true),
@@ -485,18 +481,17 @@ mod tests {
         mark_plugin_disconnected(&mut st, "cd");
         assert!(!st.plugins.iter().find(|p| p.name == "cd").unwrap().connected);
         assert!(st.plugins.iter().find(|p| p.name == "radio").unwrap().connected);
-        // Nom inconnu : no-op, ne panique pas.
-        mark_plugin_disconnected(&mut st, "inconnu");
+        // Unknown name: no-op, does not panic.
+        mark_plugin_disconnected(&mut st, "unknown");
     }
 
     #[test]
-    fn mark_plugin_disconnected_bascule_toutes_les_lignes_dun_greffon_a_plusieurs_genres() {
-        // Un greffon peut annoncer plusieurs genres (par exemple input et
-        // display) : la page de statut porte alors une line par (name, kind)
-        // pour ce même name. `admin` est un drapeau booléen porté par chaque
-        // line de kind, jamais un kind en soi. `mark_plugin_disconnected`
-        // boucle déjà sur toutes les lines de même name, mais rien ne le
-        // prouvait jusqu'ici.
+    fn mark_plugin_disconnected_toggles_all_the_lines_of_a_multi_kind_plugin() {
+        // A plugin may announce several kinds (for example input and display):
+        // the status page then carries one line per (name, kind) for that same
+        // name. `admin` is a boolean flag carried by each kind line, never a
+        // kind in itself. `mark_plugin_disconnected` already loops over all the
+        // lines of the same name, but nothing proved it until now.
         let mut st = StatusState {
             plugins: vec![
                 PluginStatus::kind("files", "input", true, true),
@@ -508,19 +503,19 @@ mod tests {
         mark_plugin_disconnected(&mut st, "files");
         assert!(
             st.plugins.iter().filter(|p| p.name == "files").all(|p| !p.connected),
-            "les deux lines de files doivent basculer"
+            "both lines of files must toggle"
         );
         assert!(
             st.plugins.iter().find(|p| p.name == "radio").unwrap().connected,
-            "les lines d'un autre greffon ne doivent pas etre touchees"
+            "the lines of another plugin must not be touched"
         );
     }
 
     #[test]
-    fn mark_plugin_disconnected_efface_le_drapeau_fige() {
-        // Un greffon figé qui meurt plus tard : `plugin_waits` le voit, et ses
-        // lines doivent cesser d'annoncer « vivant mais muet ». Les deux
-        // drapeaux ensemble décriraient un état qui n'existe pas.
+    fn mark_plugin_disconnected_clears_the_stalled_flag() {
+        // A stalled plugin that dies later: `plugin_waits` sees it, and its
+        // lines must stop announcing "alive but silent". Both flags together
+        // would describe a state that does not exist.
         let mut st = StatusState {
             plugins: vec![PluginStatus::unknown_kind("files", true)],
             active_source: "radio".into(),
@@ -528,17 +523,17 @@ mod tests {
         mark_plugin_disconnected(&mut st, "files");
         let line = &st.plugins[0];
         assert!(!line.connected);
-        assert!(!line.stalled, "un processus dont on a vu la sortie n'est plus fige");
+        assert!(!line.stalled, "a process whose exit was seen is no longer stalled");
     }
 
     #[test]
-    fn mark_plugin_disconnected_efface_le_drapeau_demarrage() {
-        // Un greffon qui meurt **pendant** ses dix secondes de grâce. Sans cet
-        // effacement, sa line restait « démarrage » jusqu'à l'échéance, et
-        // comme `main::should_downgrade` ne consulte que ce drapeau, le balayage
-        // la rétrogradait ensuite en « figé » : vivant mais muet, pour un
-        // processus dont la sortie avait été moissonnée. Les deux drapeaux
-        // décrivent un vivant, et c'est pourquoi les deux tombent ici.
+    fn mark_plugin_disconnected_clears_the_starting_flag() {
+        // A plugin that dies **during** its ten seconds of grace. Without this
+        // clearing, its line stayed "starting" until the deadline, and since
+        // `main::should_downgrade` consults only that flag, the sweep then
+        // downgraded it to "stalled": alive but silent, for a process whose
+        // exit had been reaped. Both flags describe a living process, and that
+        // is why both drop here.
         let mut st = StatusState {
             plugins: vec![PluginStatus::startup("cd")],
             active_source: "radio".into(),
@@ -546,16 +541,17 @@ mod tests {
         mark_plugin_disconnected(&mut st, "cd");
         let line = &st.plugins[0];
         assert!(!line.connected);
-        assert!(!line.starting, "un processus dont on a vu la sortie ne demarre plus");
-        assert!(!line.stalled, "et il n'est pas fige non plus");
+        assert!(!line.starting, "a process whose exit was seen is no longer starting");
+        assert!(!line.stalled, "and it is not stalled either");
     }
 
     #[test]
-    fn mark_plugin_disconnected_retire_la_page_dadmin_du_menu() {
-        // Le menu du haut de l'IHM est `plugins.filter(p => p.admin)`, sans
-        // regard sur `connected` : sans cet effacement, l'entrée d'un greffon
-        // mort restait offerte et le clic rendait une erreur au lieu de rien.
-        // Exactement la plainte déjà traitée pour le cas « éteint ».
+    fn mark_plugin_disconnected_removes_the_admin_page_from_the_menu() {
+        // The top menu of the UI is `plugins.filter(p => p.admin)`, with no
+        // regard for `connected`: without this clearing, the entry of a dead
+        // plugin stayed on offer and the click returned an error instead of
+        // nothing. Exactly the complaint already handled for the "switched off"
+        // case.
         let mut st = StatusState {
             plugins: vec![
                 PluginStatus::kind("files", "input", true, true),
@@ -567,27 +563,27 @@ mod tests {
         mark_plugin_disconnected(&mut st, "files");
         assert!(
             st.plugins.iter().filter(|p| p.name == "files").all(|p| !p.admin),
-            "toutes les lines du greffon mort doivent cesser d'annoncer une page"
+            "all the lines of the dead plugin must stop announcing a page"
         );
         assert!(
             st.plugins.iter().find(|p| p.name == "radio").unwrap().admin,
-            "la page d'un autre greffon ne doit pas etre touchee"
+            "the page of another plugin must not be touched"
         );
     }
 
     #[test]
-    fn une_ligne_desactivee_ne_promet_rien() {
+    fn a_disabled_line_promises_nothing() {
         let l = PluginStatus::disabled("cd");
         assert!(l.disabled);
-        assert!(!l.connected, "aucun processus : rien n'est joint");
-        assert!(!l.stalled, "il ne se tait pas, il n'existe pas");
-        assert!(!l.admin, "pas de page d'admin à atteindre");
+        assert!(!l.connected, "no process: nothing is reachable");
+        assert!(!l.stalled, "it is not silent, it does not exist");
+        assert!(!l.admin, "no admin page to reach");
         assert_eq!(l.kind, "unknown");
     }
 
     #[test]
-    fn disabled_est_omis_quand_il_est_faux() {
-        // Idiome de `stalled` : aucune trame existante ne change de forme.
+    fn disabled_is_omitted_when_false() {
+        // `stalled` idiom: no existing frame changes shape.
         let json = serde_json::to_string(&PluginStatus::kind("radio", "source", true, false)).unwrap();
         assert!(!json.contains("disabled"), "{json}");
         let json = serde_json::to_string(&PluginStatus::disabled("cd")).unwrap();
@@ -595,10 +591,10 @@ mod tests {
     }
 
     #[test]
-    fn une_reannonce_remplace_les_lignes_du_greffon_au_lieu_den_ajouter() {
-        // Un greffon relancé à la main se réannonce, et le cœur le recâble. S'il
-        // accumulait une line de plus à chaque fois, la page de statut d'un
-        // appareil qu'on ne redémarre jamais finirait illisible.
+    fn a_re_announcement_replaces_the_plugin_lines_instead_of_adding_some() {
+        // A plugin restarted by hand re-announces itself, and the core rewires
+        // it. If it accumulated one more line every time, the status page of a
+        // device that is never rebooted would end up unreadable.
         let mut st = StatusState {
             plugins: vec![
                 PluginStatus::unknown_kind("files", true),
@@ -606,7 +602,7 @@ mod tests {
             ],
             active_source: "radio".into(),
         };
-        // Première announcement : le figé devient deux lines de kind.
+        // First announcement: the stalled one becomes two kind lines.
         replace_plugin_lines(
             &mut st,
             "files",
@@ -616,7 +612,7 @@ mod tests {
             ],
             true,
         );
-        // Ré-announcement, cette fois sans le kind `input`.
+        // Re-announcement, this time without the `input` kind.
         replace_plugin_lines(
             &mut st,
             "files",
@@ -627,21 +623,21 @@ mod tests {
         assert_eq!(
             st.plugins.iter().filter(|p| p.name == "files").count(),
             1,
-            "les lines ne doivent pas s'accumuler d'une reannonce a l'autre"
+            "lines must not accumulate from one re-announcement to the next"
         );
-        assert_eq!(st.plugins.len(), 2, "les autres plugins restent intacts");
+        assert_eq!(st.plugins.len(), 2, "the other plugins stay intact");
         assert!(st.plugins.iter().any(|p| p.name == "radio"));
-        // La place du greffon dans la liste ne saute pas d'un recablage à
-        // l'autre : `files` était premier, il le reste.
+        // The plugin's place in the list does not jump from one rewiring to
+        // the next: `files` was first, it stays first.
         assert_eq!(st.plugins[0].name, "files");
     }
 
     #[test]
-    fn une_annonce_sans_aucun_genre_laisse_le_greffon_visible() {
-        // `kinds: []` : greffon mal compilé, ou binaire qui se trompe. Retirer
-        // ses lines sans en insérer aucune le faisait **disparaître** de la
-        // page juste après qu'il a parlé — un greffon fautif devenu invisible,
-        // l'inverse de ce que ce câblage existe pour donner à voir.
+    fn an_announcement_with_no_kind_leaves_the_plugin_visible() {
+        // `kinds: []`: badly compiled plugin, or binary that is mistaken.
+        // Removing its lines without inserting any made it **disappear** from
+        // the page right after it spoke — a faulty plugin turned invisible, the
+        // opposite of what this wiring exists to show.
         let mut st = StatusState {
             plugins: vec![
                 PluginStatus::kind("files", "source", true, false),
@@ -651,49 +647,49 @@ mod tests {
         };
         replace_plugin_lines(&mut st, "files", vec![], false);
 
-        assert_eq!(st.plugins.len(), 2, "le greffon reste dans la page");
+        assert_eq!(st.plugins.len(), 2, "the plugin stays in the page");
         let line = st.plugins.iter().find(|p| p.name == "files").unwrap();
         assert_eq!(line.kind, "unknown");
         assert!(!line.connected);
-        assert!(!line.stalled, "il vient de parler : il n'est pas muet");
-        assert_eq!(st.plugins[0].name, "files", "et il garde sa place");
+        assert!(!line.stalled, "it has just spoken: it is not silent");
+        assert_eq!(st.plugins[0].name, "files", "and it keeps its place");
     }
 
     #[test]
-    fn une_annonce_sans_genre_garde_son_drapeau_admin() {
-        // `kinds: []` **et** `admin: true` : le binaire est mal compilé mais sa
-        // page d'admin est jointe, donc le dorsal est câblé. La line de repli
-        // vient de `unknown_kind`, dont `admin` est faux par construction : sans
-        // le drapeau porté jusqu'ici, l'IHM n'affichait aucun lien vers une page
-        // qui existe — l'inverse exact de ce que la règle « le drapeau suit ce
-        // qui a été joint » cherchait.
+    fn an_announcement_with_no_kind_keeps_its_admin_flag() {
+        // `kinds: []` **and** `admin: true`: the binary is badly compiled but
+        // its admin page is reachable, so the backend is wired. The fallback
+        // line comes from `unknown_kind`, whose `admin` is false by
+        // construction: without the flag carried up to here, the UI displayed
+        // no link to a page that exists — the exact opposite of what the rule
+        // "the flag follows what was reached" was after.
         let mut st = StatusState { plugins: vec![], active_source: String::new() };
         replace_plugin_lines(&mut st, "files", vec![], true);
 
         let line = &st.plugins[0];
         assert_eq!(line.kind, "unknown");
-        assert!(!line.connected, "aucun kind n'a ete joint");
-        assert!(line.admin, "la page d'admin est jointe : le lien doit apparaitre");
+        assert!(!line.connected, "no kind was reached");
+        assert!(line.admin, "the admin page is reachable: the link must appear");
     }
 
     #[test]
-    fn le_drapeau_fige_est_absent_du_json_quand_il_est_faux() {
-        // Champ additif : la trame d'un greffon câblé ne change pas d'un octet,
-        // et une trame ancienne se relit sans erreur.
-        let cable = PluginStatus::kind("radio", "source", true, true);
+    fn the_stalled_flag_is_absent_from_the_json_when_false() {
+        // Additive field: the frame of a wired plugin does not change by one
+        // byte, and an old frame reads back without error.
+        let wired = PluginStatus::kind("radio", "source", true, true);
         assert_eq!(
-            serde_json::to_string(&cable).unwrap(),
+            serde_json::to_string(&wired).unwrap(),
             r#"{"name":"radio","kind":"source","connected":true,"admin":true}"#
         );
-        let fige = PluginStatus::unknown_kind("files", true);
+        let stalled = PluginStatus::unknown_kind("files", true);
         assert_eq!(
-            serde_json::to_string(&fige).unwrap(),
+            serde_json::to_string(&stalled).unwrap(),
             r#"{"name":"files","kind":"unknown","connected":false,"admin":false,"stalled":true}"#
         );
-        let ancien: PluginStatus = serde_json::from_str(
+        let old: PluginStatus = serde_json::from_str(
             r#"{"name":"radio","kind":"source","connected":false,"admin":false}"#,
         )
         .unwrap();
-        assert!(!ancien.stalled);
+        assert!(!old.stalled);
     }
 }

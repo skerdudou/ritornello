@@ -1,33 +1,34 @@
-//! Disjoncteur des chemins média : bounded tout appel système qui peut ne pas
-//! revenir, et retient les points de montage qui ne répondent plus.
+//! Circuit breaker for media paths: bounds every system call that may never
+//! return, and remembers the mount points that have stopped answering.
 //!
-//! # Pourquoi cette bounded existe
+//! # Why this bound exists
 //!
-//! La moitié Admin sert ses requêtes **en série** et le cœur les abandonne au
-//! bout de cinq secondes. Un seul appel système qui n'aboutit pas y coince donc
-//! le plugin entier, page comprise. Mesuré le 2026-08-17 sur l'appareil : un
-//! montage cifs bloqué a fait expirer jusqu'à `ui.js`, qui n'est pourtant qu'un
-//! `include_str!` sans verrou ni entrée-sortie — la boucle était déjà retenue
-//! par la requête d'avant.
+//! The Admin half serves its requests **serially** and the core gives up on
+//! them after five seconds. A single system call that never completes therefore
+//! wedges the whole plugin, page included. Measured on 2026-08-17 on the device:
+//! a blocked cifs mount made even `ui.js` time out, although it is nothing but
+//! an `include_str!` with no lock and no I/O — the loop was already held up by
+//! the previous request.
 //!
-//! # Pourquoi ce n'est pas réglable au montage
+//! # Why it cannot be tuned at mount time
 //!
-//! `mount.cifs` reçoit déjà `soft` (voir `mount_options`, où un test l'épingle).
-//! `soft` bounded les tentatives d'une opération sur une session **établie**, pas
-//! la reconnexion, qui peut durer des minutes. Aucun réglage cifs ne ramène le
-//! pire cas sous les cinq secondes du cœur : la bounded doit vivre côté appelant.
+//! `mount.cifs` already receives `soft` (see `mount_options`, where a test pins
+//! it). `soft` bounds the retries of an operation on an **established** session,
+//! not the reconnection, which can last minutes. No cifs setting brings the
+//! worst case under the core's five seconds: the bound has to live on the
+//! caller's side.
 //!
-//! # Pourquoi un fil abandonné, et pourquoi un seul
+//! # Why an abandoned thread, and why only one
 //!
-//! Un appel système en sommeil non interruptible ne se tue pas — même
-//! `SIGKILL` ne le réveille pas. Le délai écoulé, le fil de `spawn_blocking`
-//! est donc **perdu** jusqu'à ce que le noyau rende la main. C'est pourquoi le
-//! point de montage est marqué : les appels suivants rendent la main aussitôt,
-//! sans en consommer un second. Au plus un fil abandonné par point de montage.
+//! A system call in uninterruptible sleep cannot be killed — even `SIGKILL`
+//! does not wake it. Once the timeout has elapsed, the `spawn_blocking` thread
+//! is therefore **lost** until the kernel hands control back. That is why the
+//! mount point gets marked: subsequent calls return immediately, without
+//! consuming a second thread. At most one abandoned thread per mount point.
 //!
-//! Ce fil abandonné est aussi le **seul détecteur de reprise** : quand le noyau
-//! le libère enfin, il efface la marque. Sonder à nouveau pour savoir si le
-//! montage répond coûterait un fil de plus à chaque essai.
+//! That abandoned thread is also the **only recovery detector**: when the
+//! kernel finally releases it, it clears the mark. Probing again to find out
+//! whether the mount answers would cost one more thread per attempt.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -36,20 +37,20 @@ use std::time::Duration;
 
 use crate::volumes;
 
-/// Délai accordé à un appel système sur un path média.
+/// Time granted to a system call on a media path.
 ///
-/// Bien en dessous des cinq secondes du cœur : il faut qu'un `get_data` qui
-/// tombe sur un montage muet reste rendition in_dir le délai, avec de la marge pour
-/// le reste de la réponse.
+/// Well under the core's five seconds: a `get_data` that hits a silent mount
+/// must be handed back within the timeout, with margin left for the rest of
+/// the response.
 pub const TIMEOUT: Duration = Duration::from_millis(1500);
 
-/// Suit la réactivité des points de montage traversés par les chemins média.
+/// Tracks the responsiveness of the mount points traversed by media paths.
 pub struct Health {
-    /// Points de montage dont une sonde n'est jamais revenue.
+    /// Mount points for which a probe never came back.
     unreachable: Arc<Mutex<HashSet<PathBuf>>>,
     timeout: Duration,
-    /// Fournisseur de `/proc/mounts`, injectable pour les tests — même procédé
-    /// que `volumes::read_proc_mounts`, qu'il appelle par défaut.
+    /// Provider of `/proc/mounts`, injectable for tests — same approach as
+    /// `volumes::read_proc_mounts`, which it calls by default.
     mounts: Box<dyn Fn() -> String + Send + Sync>,
 }
 
@@ -68,14 +69,14 @@ impl Health {
         }
     }
 
-    /// Variante de test : délai court, `/proc/mounts` figé, et une liste de
-    /// points de montage déjà tenus pour silent.
+    /// Test variant: short timeout, frozen `/proc/mounts`, and a list of mount
+    /// points already considered silent.
     ///
-    /// Publique, et non derrière `#[cfg(test)]` : les tests de la moitié Admin
-    /// vivent in_dir le binaire, qui consomme cette bibliothèque compilée **sans**
-    /// `cfg(test)`. Un raccourci caché là y serait invisible, et la moitié Admin
-    /// est justement celle qu'il faut pouvoir mettre face à un montage muet sans
-    /// en avoir un sous la main.
+    /// Public, and not behind `#[cfg(test)]`: the Admin half's tests live in
+    /// the binary, which consumes this library compiled **without**
+    /// `cfg(test)`. A shortcut hidden there would be invisible to them, and the
+    /// Admin half is precisely the one that must be put in front of a silent
+    /// mount without having one at hand.
     pub fn for_test(timeout: Duration, mounts: String, silent: Vec<PathBuf>) -> Self {
         Self {
             unreachable: Arc::new(Mutex::new(silent.into_iter().collect())),
@@ -84,39 +85,39 @@ impl Health {
         }
     }
 
-    /// Point de montage propriétaire de `path`, la clé du disjoncteur.
+    /// Mount point owning `path`, the circuit breaker's key.
     ///
-    /// Le blocage est une propriété du **montage**, pas de la racine déclarée :
-    /// deux racines sur le même partage tombent ensemble, et un path choisi
-    /// in_dir l'assistant est couvert sans être déclaré nulle part.
+    /// Blocking is a property of the **mount**, not of the declared root: two
+    /// roots on the same share go down together, and a path picked in the
+    /// wizard is covered without being declared anywhere.
     fn key(mounts: &str, path: &Path) -> PathBuf {
         volumes::owner(mounts, path)
             .map(|v| v.path)
-            // Aucun montage propriétaire : le path lui-même fait une clé
-            // honnête, faute de mieux à quoi rattacher la panne.
+            // No owning mount: the path itself makes an honest key, for want
+            // of anything better to attach the failure to.
             .unwrap_or_else(|| path.to_path_buf())
     }
 
-    /// Vrai si une sonde sur ce point de montage n'est jamais revenue.
+    /// True if a probe on this mount point never came back.
     pub fn unreachable(&self, path: &Path) -> bool {
         let key = Self::key(&(self.mounts)(), path);
         self.unreachable.lock().unwrap().contains(&key)
     }
 
-    /// Points de montage actuellement silent, pour que la page le dise.
+    /// Mount points currently silent, so the page can say so.
     pub fn silent(&self) -> Vec<PathBuf> {
         let mut v: Vec<PathBuf> = self.unreachable.lock().unwrap().iter().cloned().collect();
         v.sort();
         v
     }
 
-    /// Exécute `f` hors du fil asynchrone, sous délai, au compte du point de
-    /// montage propriétaire de `path`.
+    /// Runs `f` off the async thread, under a timeout, charged to the mount
+    /// point owning `path`.
     ///
-    /// Rend `None` sans **rien exécuter** si ce point de montage est déjà connu
-    /// muet, `None` aussi si le délai s'écoule ou si `f` panique. Un `None` ne
-    /// dit donc jamais « absent » : il dit « on ne sait pas », ce que
-    /// l'appelant doit reporter tel quel plutôt que de le traduire en fait.
+    /// Returns `None` without **running anything** if that mount point is
+    /// already known to be silent, `None` as well if the timeout elapses or if
+    /// `f` panics. A `None` therefore never means "absent": it means "unknown",
+    /// which the caller must report as such rather than turn into a fact.
     pub async fn bounded<T, F>(&self, path: &Path, f: F) -> Option<T>
     where
         F: FnOnce() -> T + Send + 'static,
@@ -126,12 +127,12 @@ impl Health {
         if self.unreachable.lock().unwrap().contains(&key) {
             return None;
         }
-        // `spawn_blocking` et non le fil courant : même borné, l'appel doit
-        // sortir du fil asynchrone, sinon il retient les autres tâches du
-        // runtime pendant tout le délai.
+        // `spawn_blocking` and not the current thread: even bounded, the call
+        // must leave the async thread, otherwise it holds up the runtime's
+        // other tasks for the whole timeout.
         let mut task = tokio::task::spawn_blocking(f);
-        // `&mut task` : le `JoinHandle` reste à nous après l'expiration, ce qui
-        // permet de le confier au surveillant ci-dessous.
+        // `&mut task`: the `JoinHandle` stays ours after expiry, which lets us
+        // hand it over to the watcher below.
         match tokio::time::timeout(self.timeout, &mut task).await {
             Ok(Ok(v)) => Some(v),
             Ok(Err(e)) => {
@@ -148,9 +149,9 @@ impl Health {
                 self.unreachable.lock().unwrap().insert(key.clone());
                 let unreachable = Arc::clone(&self.unreachable);
                 tokio::spawn(async move {
-                    // Attend le fil perdu. Cette tâche peut ne jamais finir ;
-                    // elle ne coûte qu'une tâche, là où re-probe coûterait un
-                    // fil du pool à chaque tentative.
+                    // Waits for the lost thread. This task may never finish;
+                    // it costs only one task, where reprobing would cost a
+                    // pool thread per attempt.
                     let _ = task.await;
                     tracing::info!("{} answers again", key.display());
                     unreachable.lock().unwrap().remove(&key);
@@ -160,42 +161,42 @@ impl Health {
         }
     }
 
-    /// Groupe les indices de `chemins` par point de montage propriétaire.
+    /// Groups the indices of `paths` by owning mount point.
     ///
-    /// Grouper avant d'agir est ce qui rend la bounded tenable : un seul délai
-    /// couvre toutes les pistes d'un même partage. Sans ça, une liste de deux
-    /// mille pistes sur un partage muet coûterait deux mille délais.
+    /// Grouping before acting is what makes the bound affordable: a single
+    /// timeout covers every track of a given share. Without it, a playlist of
+    /// two thousand tracks on a silent share would cost two thousand timeouts.
     ///
-    /// Le résultat est trié par point de montage : à charge utile égale, la page
-    /// doit recevoir la même chose d'un sondage à l'autre.
-    pub fn group(&self, chemins: &[PathBuf]) -> Vec<(PathBuf, Vec<usize>)> {
+    /// The result is sorted by mount point: for the same payload, the page
+    /// must receive the same thing from one poll to the next.
+    pub fn group(&self, paths: &[PathBuf]) -> Vec<(PathBuf, Vec<usize>)> {
         let mounts = (self.mounts)();
-        let mut groupes: HashMap<PathBuf, Vec<usize>> = HashMap::new();
-        for (i, c) in chemins.iter().enumerate() {
-            groupes.entry(Self::key(&mounts, c)).or_default().push(i);
+        let mut groups: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+        for (i, c) in paths.iter().enumerate() {
+            groups.entry(Self::key(&mounts, c)).or_default().push(i);
         }
-        let mut v: Vec<(PathBuf, Vec<usize>)> = groupes.into_iter().collect();
+        let mut v: Vec<(PathBuf, Vec<usize>)> = groups.into_iter().collect();
         v.sort_by(|a, b| a.0.cmp(&b.0));
         v
     }
 
-    /// Dit, pour chaque path, s'il manque — `None` quand son point de montage
-    /// ne répond pas.
+    /// Says, for each path, whether it is missing — `None` when its mount
+    /// point does not answer.
     ///
-    /// `None` et non `true` : afficher « introuvable » pour un partage endormi
-    /// accuserait les fichiers d'une panne qui est celle du montage, et
-    /// enverrait chercher le défaut au mauvais endroit.
+    /// `None` and not `true`: showing "not found" for a sleeping share would
+    /// blame the files for a failure that belongs to the mount, and send
+    /// people looking for the fault in the wrong place.
     ///
-    /// Les chemins sont groupés par point de montage : un seul délai couvre
-    /// toutes les pistes d'un même partage, au lieu d'un par piste.
-    pub async fn missing(&self, chemins: &[PathBuf]) -> Vec<Option<bool>> {
-        let mut out = vec![None; chemins.len()];
-        for (_, indices) in self.group(chemins) {
-            let lot: Vec<PathBuf> = indices.iter().map(|&i| chemins[i].clone()).collect();
-            let repere = lot[0].clone();
-            let mesure =
-                self.bounded(&repere, move || lot.iter().map(|p| !p.is_file()).collect::<Vec<_>>());
-            if let Some(v) = mesure.await {
+    /// Paths are grouped by mount point: a single timeout covers every track
+    /// of a given share, instead of one per track.
+    pub async fn missing(&self, paths: &[PathBuf]) -> Vec<Option<bool>> {
+        let mut out = vec![None; paths.len()];
+        for (_, indices) in self.group(paths) {
+            let batch: Vec<PathBuf> = indices.iter().map(|&i| paths[i].clone()).collect();
+            let anchor = batch[0].clone();
+            let measure =
+                self.bounded(&anchor, move || batch.iter().map(|p| !p.is_file()).collect::<Vec<_>>());
+            if let Some(v) = measure.await {
                 for (n, &i) in indices.iter().enumerate() {
                     out[i] = v.get(n).copied();
                 }
@@ -210,8 +211,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// Deux montages distincts, pour que le disjoncteur de l'un n'ouvre pas
-    /// l'autre.
+    /// Two distinct mounts, so that one's circuit breaker does not open the
+    /// other's.
     const MOUNTS: &str = "/dev/root / ext4 rw 0 0\n\
                           //192.168.1.15/musique /mnt/ritornello/nas cifs ro,soft 0 0\n";
 
@@ -220,115 +221,115 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn un_appel_qui_repond_rend_sa_valeur() {
+    async fn a_call_that_answers_returns_its_value() {
         let s = health();
         assert_eq!(s.bounded(Path::new("/mnt/ritornello/nas/a.mp3"), || 7).await, Some(7));
-        assert!(s.silent().is_empty(), "un appel rendition ne doit marquer personne");
+        assert!(s.silent().is_empty(), "a call that returned must not mark anyone");
     }
 
-    /// L'appel ne revient **jamais** de lui-même : il bloque sur un canal que
-    /// le test ne libère qu'à la fin.
+    /// The call **never** returns on its own: it blocks on a channel that the
+    /// test only releases at the end.
     ///
-    /// La propriété gardée est la même qu'avant — la bounded vaut son prix
-    /// seulement si elle rend la main *avant* la fin de l'appel — mais elle
-    /// était prouvée par une marge d'horloge murale : 300 ms mesurées contre un
-    /// délai de 50 ms et un appel de 400 ms. Une hypothèse d'exécution rapide,
-    /// donc un flake dès que les autres binaires de test chargent la machine.
+    /// The property guarded is the same as before — the bound is only worth
+    /// its price if it hands control back *before* the call ends — but it used
+    /// to be proven by a wall-clock margin: 300 ms measured against a 50 ms
+    /// timeout and a 400 ms call. A fast-execution assumption, hence a flake as
+    /// soon as the other test binaries load the machine.
     ///
-    /// Un appel qui ne finit pas tant qu'on ne l'y autorise pas rend le `None`
-    /// vrai **par construction** : aucune charge ne peut faire gagner la course
-    /// à l'appel, là où un `sleep` de 400 ms pouvait la gagner. Le `timeout` du
-    /// test ne garde plus que la régression franche — une bounded qui attendrait
-    /// l'appel au lieu de le borner ferait pendre ce test, et cette line le
-    /// sanctionne avec un message plutôt qu'en expirant sans rien dire.
+    /// A call that does not finish until allowed to makes the `None` true **by
+    /// construction**: no load can let the call win the race, where a 400 ms
+    /// `sleep` could. The test's `timeout` now only guards the blatant
+    /// regression — a bound that waited for the call instead of bounding it
+    /// would hang this test, and this line punishes that with a message rather
+    /// than by timing out silently.
     ///
-    /// À ne pas remplacer par `tokio::time::pause()` : mesuré, l'horloge
-    /// virtuelle n'avance pas tant qu'une tâche de `spawn_blocking` est en vol,
-    /// donc l'appel gagnait et l'assertion s'inversait en `Some(7)`.
+    /// Not to be replaced by `tokio::time::pause()`: measured, the virtual
+    /// clock does not advance while a `spawn_blocking` task is in flight, so
+    /// the call won and the assertion flipped to `Some(7)`.
     #[tokio::test]
-    async fn un_appel_qui_ne_revient_pas_rend_la_main_et_marque_son_montage() {
+    async fn a_call_that_never_returns_hands_back_control_and_marks_its_mount() {
         let s = health();
-        let (liberation, attente) = std::sync::mpsc::channel::<()>();
+        let (release, wait) = std::sync::mpsc::channel::<()>();
         let r = tokio::time::timeout(
             Duration::from_secs(10),
             s.bounded(Path::new("/mnt/ritornello/nas/a.mp3"), move || {
-                let _ = attente.recv();
+                let _ = wait.recv();
                 7
             }),
         )
         .await
-        .expect("la bounded doit rendre la main a son timeout, pas attendre l'appel");
+        .expect("the bound must hand back control at its timeout, not wait for the call");
         assert_eq!(r, None);
         assert_eq!(s.silent(), vec![PathBuf::from("/mnt/ritornello/nas")]);
-        // Libère le fil bloquant, sinon l'arrêt du runtime l'attendrait.
-        let _ = liberation.send(());
+        // Release the blocking thread, otherwise the runtime shutdown would wait for it.
+        let _ = release.send(());
     }
 
     #[tokio::test]
-    async fn un_montage_marque_ne_consomme_plus_de_fil() {
+    async fn a_marked_mount_consumes_no_more_threads() {
         let s = health();
         s.bounded(Path::new("/mnt/ritornello/nas/a.mp3"), || {
             std::thread::sleep(Duration::from_millis(400));
         })
         .await;
 
-        // C'est *l'exécution* qu'on interdit, pas seulement le résultat : chaque
-        // appel qui s'exécuterait perdrait un fil du pool de plus, et le pool
-        // est fini. Le drapeau prouve que la fermeture n'a pas tourné.
-        static TOURNE: AtomicBool = AtomicBool::new(false);
-        TOURNE.store(false, Ordering::SeqCst);
+        // It is the *execution* that is forbidden, not only the result: every
+        // call that ran would lose one more pool thread, and the pool is
+        // finite. The flag proves the closure did not run.
+        static RAN: AtomicBool = AtomicBool::new(false);
+        RAN.store(false, Ordering::SeqCst);
         let r = s
             .bounded(Path::new("/mnt/ritornello/nas/autre/b.mp3"), || {
-                TOURNE.store(true, Ordering::SeqCst)
+                RAN.store(true, Ordering::SeqCst)
             })
             .await;
         assert_eq!(r, None);
-        assert!(!TOURNE.load(Ordering::SeqCst), "le second appel n'aurait pas dû s'exécuter");
+        assert!(!RAN.load(Ordering::SeqCst), "the second call should not have run");
     }
 
     #[tokio::test]
-    async fn un_montage_marque_n_ouvre_pas_les_autres() {
+    async fn a_marked_mount_does_not_open_the_others() {
         let s = health();
         s.bounded(Path::new("/mnt/ritornello/nas/a.mp3"), || {
             std::thread::sleep(Duration::from_millis(400));
         })
         .await;
-        // `/` est un autre montage : le NAS endormi ne doit pas rendre les
-        // sources locales inutilisables, ce qui serait guérir en amputant.
+        // `/` is another mount: the sleeping NAS must not make the local
+        // sources unusable, which would be curing by amputation.
         assert_eq!(s.bounded(Path::new("/home/pi/musique/a.mp3"), || 7).await, Some(7));
     }
 
     #[tokio::test]
-    async fn la_marque_s_efface_quand_le_montage_repond_a_nouveau() {
+    async fn the_mark_clears_when_the_mount_answers_again() {
         let s = health();
         s.bounded(Path::new("/mnt/ritornello/nas/a.mp3"), || {
             std::thread::sleep(Duration::from_millis(150));
         })
         .await;
-        assert!(!s.silent().is_empty(), "le montage doit d'abord être marqué");
+        assert!(!s.silent().is_empty(), "the mount must be marked first");
 
-        // Le fil abandonné finit par revenir ; c'est lui, et lui seul, qui
-        // rouvre le disjoncteur.
+        // The abandoned thread eventually comes back; it, and it alone,
+        // closes the circuit breaker again.
         for _ in 0..100 {
             if s.silent().is_empty() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(s.silent().is_empty(), "la marque devait s'effacer d'elle-même");
+        assert!(s.silent().is_empty(), "the mark should have cleared by itself");
         assert_eq!(s.bounded(Path::new("/mnt/ritornello/nas/a.mp3"), || 7).await, Some(7));
     }
 
     #[tokio::test]
-    async fn manquants_distingue_absent_de_indetermine() {
+    async fn missing_distinguishes_absent_from_undetermined() {
         let dir = tempfile::tempdir().unwrap();
         let present = dir.path().join("present.mp3");
         std::fs::write(&present, b"x").unwrap();
         let absent = dir.path().join("absent.mp3");
 
-        // Le montage du dossier temporaire est décrit comme `/`, celui du NAS
-        // reste à part : la réponse doit être connue pour les deux premiers et
-        // indéterminée pour le troisième.
+        // The temporary directory's mount is described as `/`, the NAS one
+        // stays separate: the answer must be known for the first two and
+        // undetermined for the third.
         let s = Health::for_test(
             Duration::from_millis(50),
             MOUNTS.to_string(),

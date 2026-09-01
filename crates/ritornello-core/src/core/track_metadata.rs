@@ -1,18 +1,18 @@
-//! Metadata du track : identity declaree par la source, titres ICY, tags de fichier, enrichments des plugins, pochettes et leur extraction.
+//! Track metadata: identity declared by the source, ICY titles, file tags, plugin enrichments, covers and their extraction.
 
 use super::*;
 
 impl<P: Player> Core<P> {
-    /// Applique la sélection qu'une trame déclare : le numéro de présélection et
-    /// son name lisible. Convention « absent = garder la valeur courante », à
-    /// l'inverse de `status`.
+    /// Applies the selection a frame declares: the preset number and its
+    /// readable name. Convention "absent = keep the current value", the
+    /// opposite of `status`.
     ///
-    /// Appelée par `apply_declared_facts` seule, qui la relaie aux deux
-    /// sorties de `handle_source_update` : la trame qui recompose la vue
-    /// l'applique **après** l'identité (`set_identity(None)` efface la sélection,
-    /// une déclaration explicite doit gagner), celle qui ne fait qu'annoncer un
-    /// fait l'applique avant de rendre la main. Deux copies de ces quatre lines
-    /// divergeraient.
+    /// Called by `apply_declared_facts` alone, which relays it to the two
+    /// exits of `handle_source_update`: the frame that recomposes the view
+    /// applies it **after** the identity (`set_identity(None)` clears the
+    /// selection, an explicit declaration must win), the one that merely
+    /// announces a fact applies it before returning. Two copies of these
+    /// four lines would diverge.
     pub(super) fn apply_selection(&mut self, preset: Option<u8>, name: Option<String>) {
         if let Some(p) = preset {
             self.preset = Some(p);
@@ -22,49 +22,49 @@ impl<P: Player> Core<P> {
         }
     }
 
-    /// Applique la cover qu'une trame de Source déclare.
+    /// Applies the cover a Source frame declares.
     ///
-    /// La cover suit la même convention que `preset`/`preset_count` :
-    /// absente = rien de neuf, jamais « plus de cover » — une Source n'en
-    /// répète pas la déclaration sur chaque trame de statut qui suit (voir
-    /// `SourceUpdate::cover`). C'est pourquoi `set_source_cover` ne doit être
-    /// appelée que lorsque le champ vaut `Some`.
+    /// The cover follows the same convention as `preset`/`preset_count`:
+    /// absent = nothing new, never "no more cover" — a Source does not
+    /// repeat the declaration on every status frame that follows (see
+    /// `SourceUpdate::cover`). That is why `set_source_cover` must only be
+    /// called when the field is `Some`.
     ///
-    /// **Appelée par `apply_declared_facts`**, exactement comme
-    /// `apply_selection` et pour la même raison — c'est elle qui la relaie aux
-    /// deux sorties de `handle_source_update`. Sur le path qui recompose
-    /// la vue, l'appel vient **après** l'identité : `set_identity` remet à zéro
-    /// tout ce que `Metadata` retenait, cover de la Source comprise, donc
-    /// une trame qui porterait à la fois une nouvelle identité et sa cover
-    /// doit laisser l'identité parler d'abord — sans quoi la cover tout juste
-    /// déclarée serait effacée dans la foulée par ce reset. C'est exactement le
-    /// piège que le commentaire d'`apply_selection`, plus haut, signale déjà
-    /// pour la sélection.
+    /// **Called by `apply_declared_facts`**, exactly like `apply_selection`
+    /// and for the same reason — it is the one that relays it to the two
+    /// exits of `handle_source_update`. On the path that recomposes the
+    /// view, the call comes **after** the identity: `set_identity` resets
+    /// everything `Metadata` was holding, the Source's cover included, so a
+    /// frame that carried both a new identity and its cover must let the
+    /// identity speak first — otherwise the freshly declared cover would be
+    /// erased right away by that reset. This is exactly the trap that the
+    /// comment on `apply_selection`, above, already points out for the
+    /// selection.
     ///
-    /// Sur le path du retour anticipé, il n'y a par construction ni identité ni
-    /// statut, donc l'order n'y a pas de sens. **C'est celui-là qui compte** : une
-    /// cover de Source arrive seule, en notification spontanée, donc elle passe
-    /// par là presque toujours — le path qui recompose la vue ne sert qu'à la
-    /// trame qui porterait une cover *en même temps* qu'une identité ou un
-    /// statut. Sans l'appel du retour anticipé, la cover n'est pas « appliquée
-    /// plus tard » : elle est perdue en silence, et c'est le défaut réel que la
-    /// fusion du chantier des pochettes avait introduit.
+    /// On the early-return path there is, by construction, neither identity
+    /// nor status, so ordering has no meaning there. **That is the path that
+    /// matters**: a Source cover arrives alone, as a spontaneous
+    /// notification, so it goes through there almost always — the path that
+    /// recomposes the view only serves a frame that would carry a cover *at
+    /// the same time* as an identity or a status. Without the early-return
+    /// call, the cover is not "applied later": it is lost silently, and that
+    /// is the actual defect the covers worksite merge had introduced.
     ///
-    /// Appelée depuis `handle_source_update` et non depuis la boucle `select!`
-    /// de `main` : la garde de tête (`standby || name != self.active_source`)
-    /// doit s'appliquer à la cover comme à tout le reste de la trame. Une
-    /// source non active pourrait sinon faire apparaître sa cover sur le
-    /// track que plays la source **active**.
+    /// Called from `handle_source_update` and not from `main`'s `select!`
+    /// loop: the head guard (`standby || name != self.active_source`) must
+    /// apply to the cover like to everything else in the frame. An inactive
+    /// source could otherwise make its cover appear on the track the
+    /// **active** source is playing.
     ///
-    /// `validated` ici, comme `Enrichment::cleaned` le fait sur l'autre canal :
-    /// une cover entre dans le cœur par deux portes, et la couche
-    /// `ritornello-proto` — celle qui possède la validation de forme — ne
-    /// gardait que l'une des deux. Rien n'était exploitable, les contrôles
-    /// propres du cœur couvrant ce path, mais une règle de forme appliquée à
-    /// une porte sur deux finit par diverger. Une référence refusée vaut « rien
-    /// de neuf », jamais « plus de cover » : c'est la convention du champ
-    /// (voir `SourceUpdate::cover`), et effacer sur une trame mal formée
-    /// retirerait l'image valide qu'une trame précédente avait déclarée.
+    /// `validated` here, just as `Enrichment::cleaned` does on the other
+    /// channel: a cover enters the core through two doors, and the
+    /// `ritornello-proto` layer — the one that owns shape validation — only
+    /// guarded one of the two. Nothing was exploitable, the core's own
+    /// checks covering this path, but a shape rule applied to one door out
+    /// of two ends up diverging. A refused reference means "nothing new",
+    /// never "no more cover": that is the field's convention (see
+    /// `SourceUpdate::cover`), and erasing on a malformed frame would remove
+    /// the valid image a previous frame had declared.
     pub(super) fn apply_source_cover(
         &mut self,
         cover: Option<ritornello_proto::CoverRef>,
@@ -75,17 +75,17 @@ impl<P: Player> Core<P> {
         }
     }
 
-    /// Change ce qui plays : remet l'ardoise des métadonnées à zéro, prévient les
-    /// plugins `metadata`, et rafraîchit affichage et état diffusé.
+    /// Changes what is playing: wipes the metadata slate clean, notifies the
+    /// `metadata` plugins, and refreshes the display and the broadcast state.
     ///
-    /// `None` = plus rien ne plays. Le cœur ne regarde jamais **dans** l'identité :
-    /// il la compare par égalité et la relaie telle quelle.
+    /// `None` = nothing is playing anymore. The core never looks **inside**
+    /// the identity: it compares it by equality and relays it as-is.
     pub(super) fn set_identity(&mut self, identity: Option<serde_json::Value>) {
-        // « Plus rien ne plays » emporte la sélection courante avec lui : la
-        // touche mise en évidence désigne **ce qui plays**, pas la dernière
-        // pression. Fait avant le garde d'égalité : une identité déjà à
-        // `None` (arrêt répété, bascule de source après un stop) doit quand
-        // même laisser la sélection effacée.
+        // "Nothing is playing anymore" takes the current selection with it:
+        // the highlighted key designates **what is playing**, not the last
+        // press. Done before the equality guard: an identity already at
+        // `None` (repeated stop, source switch after a stop) must still
+        // leave the selection cleared.
         if identity.is_none() {
             self.preset = None;
             self.preset_name = None;
@@ -93,75 +93,74 @@ impl<P: Player> Core<P> {
         if !self.metadata.set_identity(identity) {
             return;
         }
-        // Le track a changé : l'ancre du précédent ne doit pas continuer
-        // d'avancer sous le titre du suivant. La dernière position publiée
-        // doit disparaître avec elle, sans quoi la trame émise dans la
-        // foulée porterait la position de l'ancien track sous le titre du
-        // nouveau, jusqu'au prochain tick (jusqu'à une seconde).
+        // The track changed: the previous track's anchor must not keep
+        // advancing under the next one's title. The last published position
+        // must disappear with it, otherwise the frame emitted right away
+        // would carry the old track's position under the new one's title,
+        // until the next tick (up to one second).
         self.position_anchor = None;
         self.position_s = None;
         let np = NowPlaying {
             source: self.active_source.clone(),
             identity: self.metadata.identity().cloned(),
-            // Toujours clear à cet instant précis (le reset ci-dessus vient
-            // d'effacer tout ce que `Metadata` savait), mais lu depuis
-            // `known()` plutôt qu'un `Known::default()` figé : la valeur
-            // reste correcte si le reset venait un jour à changer, et
-            // `publish_state` republie ce même champ dès qu'il cesse d'être
-            // clear.
+            // Always empty at this precise instant (the reset above just
+            // erased everything `Metadata` knew), but read from `known()`
+            // rather than a frozen `Known::default()`: the value stays
+            // correct if the reset were ever to change, and `publish_state`
+            // republishes this same field as soon as it stops being empty.
             known: self.metadata.known(),
         };
-        // Échec impossible en pratique : un `watch::Sender::send` n'échoue que
-        // quand plus aucun récepteur ne vit, et `main` garde le sien pour
-        // alimenter les connexions de plugins `metadata` à venir. De toute
-        // façon sans conséquence sur la playback : un `warn` suffirait à noyer
-        // les logs si aucun plugin metadata n'était déclaré.
+        // Failure impossible in practice: a `watch::Sender::send` only fails
+        // when no receiver is alive anymore, and `main` keeps its own to
+        // feed upcoming `metadata` plugin connections. Without consequence
+        // for playback anyway: a `warn` would be enough to drown the logs
+        // if no metadata plugin were declared.
         let _ = self.now_playing_tx.send(np);
-        // L'ardoise a changé, donc l'affichage doit suivre — comme le font
-        // `handle_icy_title` et `handle_enrichment`. Sans ce rafraîchissement,
-        // `Command::Stop` laissait le titre du track arrêté **figé sur
-        // l'afficheur** jusqu'à la prochaine action de l'utilisateur, alors que
-        // la SPA, elle, se vidait correctement. `player_state` read
-        // `self.metadata.state()` à chaque appel, donc ce seul `publish_state`
-        // suffit : plus besoin du second appel conditionnel à l'incrustation
-        // qu'exigeait l'ancien canal de vues composées.
+        // The slate changed, so the display must follow — as
+        // `handle_icy_title` and `handle_enrichment` do. Without this
+        // refresh, `Command::Stop` left the stopped track's title **frozen
+        // on the physical display** until the user's next action, while the
+        // SPA, for its part, emptied itself correctly. `player_state` reads
+        // `self.metadata.state()` on every call, so this single
+        // `publish_state` is enough: no more need for the second conditional
+        // call to the overlay that the old composed-views channel required.
         self.publish_state();
     }
 
-    /// Titre annoncé par le stream lui-même (en-tête ICY vu par mpv).
-    pub(super) fn handle_icy_title(&mut self, titre: String) {
-        // Deux gardes, et **aucune** ne consulte l'identité : cette couche doit
-        // fonctionner sans plugin `metadata` et même face à une Source qui ne
-        // déclare aucune identité, sinon la seule couche qui marche toute seule
-        // se taisait en silence.
+    /// Title announced by the stream itself (ICY header seen by mpv).
+    pub(super) fn handle_icy_title(&mut self, title: String) {
+        // Two guards, and **neither** consults the identity: this layer must
+        // work without any `metadata` plugin and even against a Source that
+        // declares no identity, otherwise the only layer that works on its
+        // own went quiet, silently.
         //
-        // En veille, rien ne doit atteindre l'affichage — même garde que
-        // `handle_source_update`. Le path est réel : `Command::Power` attend
-        // la réponse de la Source à `Deactivate` (jusqu'à 5 s) pendant que mpv
-        // plays encore, et un titre émis dans cet intervalle arrive après que la
-        // vue de veille a été poussée.
+        // In standby, nothing must reach the display — same guard as
+        // `handle_source_update`. The path is real: `Command::Power` waits
+        // for the Source's reply to `Deactivate` (up to 5 s) while mpv is
+        // still playing, and a title emitted in that window arrives after
+        // the standby view has been pushed.
         //
-        // `expecting_stream` est ce que le cœur sait **de lui-même** de la
-        // playback : mis à vrai sur chaque `Play` qu'il applique, à faux sur
-        // `Stop`. C'est ce qui empêche un titre en retard de s'afficher, et d'y
-        // rester, après un arrêt.
+        // `expecting_stream` is what the core knows **on its own** about
+        // playback: set to true on every `Play` it applies, to false on
+        // `Stop`. It is what prevents a late title from showing up, and
+        // staying there, after a stop.
         if self.standby || !self.expecting_stream {
             return;
         }
-        if !self.metadata.set_icy(titre) {
+        if !self.metadata.set_icy(title) {
             return;
         }
         self.publish_state();
     }
 
-    /// Tags portés par le fichier joué, tels que mpv les expose.
+    /// Tags carried by the played file, as mpv exposes them.
     ///
-    /// Mêmes gardes que l'ICY, à une différence près qui est tout l'objet du
-    /// champ `playback` : la garde « ça plays » ne peut pas être
-    /// `expecting_stream`, qui vaut **faux** précisément pendant la playback
-    /// d'un contenu fini — donc pendant la seule playback où des tags de
-    /// fichier existent. S'en serve aurait produit une couche qui ne
-    /// s'affiche jamais, sans rien dans les logs.
+    /// Same guards as ICY, with one difference which is the whole point of
+    /// the `playback` field: the "something is playing" guard cannot be
+    /// `expecting_stream`, which is **false** precisely during playback of
+    /// finite content — hence during the only kind of playback where file
+    /// tags exist. Using it would have produced a layer that never shows
+    /// up, with nothing in the logs.
     pub(super) fn handle_file_tags(&mut self, track: ritornello_proto::Track) {
         if self.standby || !self.playback {
             return;
@@ -172,34 +171,34 @@ impl<P: Player> Core<P> {
         self.publish_state();
     }
 
-    /// Chemin du fichier que mpv a réellement ouvert (propriété `path`), pour
-    /// en tirer la cover embarquée. N'arme **qu'**une extraction détachée :
-    /// voir `extraction_arrived` pour la suite, à l'arrivée du résultat.
+    /// Path of the file mpv actually opened (`path` property), to pull the
+    /// embedded cover out of it. Only arms a **detached** extraction: see
+    /// `extraction_arrived` for the follow-up, when the result arrives.
     ///
-    /// Même garde « ça plays » que les tags (`playback`, pas `expecting_stream`,
-    /// pour la même raison) : `path` est republié aussi bien pour un stream que
-    /// pour un fichier.
+    /// Same "something is playing" guard as the tags (`playback`, not
+    /// `expecting_stream`, for the same reason): `path` is republished for a
+    /// stream just as for a file.
     ///
-    /// **Le cœur complète, il n'écrase pas** : si une cover est déjà tenue
-    /// — le `folder.jpg` d'une Source, notamment — l'extraction n'est même
-    /// pas lancée, ce qui économise une playback de fichier pour rien et
-    /// préserve la préséance voulue par `Metadata::selected_cover`.
+    /// **The core completes, it does not overwrite**: if a cover is already
+    /// held — a Source's `folder.jpg`, notably — the extraction is not even
+    /// launched, which saves a pointless file read and preserves the
+    /// precedence `Metadata::selected_cover` intends.
     ///
-    /// **Toujours détachée, jamais exécutée sur ce fil.** `mpv::
-    /// embedded_cover` ouvre et parcourt le fichier avec `lofty`, un
-    /// appel strictement bloquant, potentiellement sur un partage réseau qui
-    /// peut ne jamais répondre. L'exécuter ici figerait la boucle du cœur
-    /// entière — mpv, les commands, l'HTTP — le temps du blocage, pas
-    /// seulement cette extraction. Ce projet a déjà vécu cet incident sur un
-    /// montage cifs muet (voir `health.rs`), d'où `Health::bounded` : `spawn_blocking`
-    /// pour sortir du fil asynchrone, sous délai, avec un disjoncteur par
-    /// point de montage pour ne pas perdre un fil du pool à chaque nouvelle
-    /// piste tant que le partage reste muet.
+    /// **Always detached, never run on this thread.** `mpv::
+    /// embedded_cover` opens and walks the file with `lofty`, a strictly
+    /// blocking call, potentially on a network share that may never answer.
+    /// Running it here would freeze the entire core loop — mpv, commands,
+    /// HTTP — for the duration of the block, not just this extraction. This
+    /// project already lived through that incident on a silent cifs mount
+    /// (see `health.rs`), hence `Health::bounded`: `spawn_blocking` to get
+    /// off the async thread, under a deadline, with a circuit breaker per
+    /// mount point so as not to lose a pool thread on every new track as
+    /// long as the share stays silent.
     pub(super) fn handle_path(&mut self, path: String) {
-        // Retenu avant toute garde ci-dessous : c'est ce qu'`extraction_arrived`
-        // compare à l'arrivée pour rejeter une réponse tardive sur une piste
-        // déjà remplacée, y compris quand `standby`/`playback` ont changé
-        // entre-temps.
+        // Retained before every guard below: it is what `extraction_arrived`
+        // compares on arrival to reject a late reply for a track already
+        // replaced, including when `standby`/`playback` changed in the
+        // meantime.
         self.current_path = Some(path.clone());
         if self.standby || !self.playback {
             return;
@@ -207,10 +206,9 @@ impl<P: Player> Core<P> {
         if self.metadata.known().cover {
             return;
         }
-        // Un stream n'a pas de tags, et `lofty` n'a rien à ouvrir sur une URL :
-        // autant ne pas payer l'aller-retour tâche + canal pour un cas qui ne
-        // peut jamais aboutir (`embedded_cover` le refuserait de toute
-        // façon).
+        // A stream has no tags, and `lofty` has nothing to open on a URL:
+        // no point paying the task + channel round trip for a case that can
+        // never succeed (`embedded_cover` would refuse it anyway).
         if path.contains("://") {
             return;
         }
@@ -221,26 +219,26 @@ impl<P: Player> Core<P> {
         let tx = self.extraction_tx.clone();
         let health = self.health.clone();
         tokio::spawn(async move {
-            let a_lire = path.clone();
-            // **Les deux `None` sont distingues, et le `.flatten()` d'avant les
-            // confondait.** « Ce fichier n'a pas de cover embarquee » et « le
-            // partage n'a pas repondu dans le timeout » donnent le meme ecran —
-            // aucune image — et donnaient la meme trace : aucune. C'est
-            // exactement ce qui manquait pour repondre a « pourquoi ce n'est pas
-            // push_cover ».
+            let to_read = path.clone();
+            // **The two `None`s are distinguished, and the previous
+            // `.flatten()` conflated them.** "This file has no embedded
+            // cover" and "the share did not answer within the timeout" give
+            // the same screen — no image — and used to give the same trace:
+            // none. That is exactly what was missing to answer "why was the
+            // cover not pushed".
             let r = match health
-                .bounded(std::path::Path::new(&path), move || mpv::embedded_cover(&a_lire))
+                .bounded(std::path::Path::new(&path), move || mpv::embedded_cover(&to_read))
                 .await
             {
-                // Le disjoncteur a rendition la main : incident reel (partage muet),
-                // donc `warn` — il a sa place dans la carte des dernieres
-                // erreurs.
+                // The circuit breaker handed back control: a real incident
+                // (silent share), hence `warn` — it belongs in the map of
+                // recent errors.
                 None => {
                     tracing::warn!("embedded cover: {path} did not answer in time");
                     None
                 }
-                // Reponse effective : ce fichier ne porte pas d'image. Cas
-                // ordinaire, donc `info`.
+                // Actual answer: this file carries no image. Ordinary case,
+                // hence `info`.
                 Some(None) => {
                     tracing::info!("no embedded cover in {path}");
                     None
@@ -251,25 +249,26 @@ impl<P: Player> Core<P> {
         });
     }
 
-    /// Une extraction détachée de cover embarquée (`handle_path`) s'est
-    /// terminée. Symétrique de `cover_arrived` : la vérification de
-    /// péremption se fait ici, à l'arrivée, pas au lancement.
+    /// A detached embedded-cover extraction (`handle_path`) has finished.
+    /// Symmetric with `cover_arrived`: the staleness check happens here, on
+    /// arrival, not at launch.
     pub async fn extraction_arrived(&mut self, path: String, r: Option<ritornello_proto::CoverRef>) {
-        // Libéré quelle que soit l'issue et avant toute vérification
-        // ci-dessous — même raison que `cover_in_flight` dans
-        // `cover_arrived` : sans cela, cette même piste rejouée plus tard
-        // resterait bloquée pour le reste du processus.
+        // Released whatever the outcome and before any check below — same
+        // reason as `cover_in_flight` in `cover_arrived`: without this,
+        // this same track played again later would stay blocked for the
+        // rest of the process.
         if self.extraction_in_flight.as_deref() == Some(path.as_str()) {
             self.extraction_in_flight = None;
         }
-        // mpv est déjà passé à un autre fichier : cette réponse décrit une
-        // piste qui n'est plus jouée, et ne doit pas s'installer sur la
-        // suivante.
+        // mpv already moved on to another file: this reply describes a
+        // track that is no longer playing, and must not settle on the next
+        // one.
         if self.current_path.as_deref() != Some(path.as_str()) {
             return;
         }
-        // Une autre voie a fourni une cover pendant que celle-ci était en
-        // vol (la Source, ou un greffon) : le cœur complète, il n'écrase pas.
+        // Another channel provided a cover while this one was in flight
+        // (the Source, or a plugin): the core completes, it does not
+        // overwrite.
         if self.metadata.known().cover {
             return;
         }
@@ -280,17 +279,17 @@ impl<P: Player> Core<P> {
         self.publish_state();
     }
 
-    /// Enrichissement remonté par un plugin `metadata`. Rien ne se passe s'il
-    /// est périmé, clear, ou émis par un plugin non déclaré (voir
+    /// Enrichment reported by a `metadata` plugin. Nothing happens if it is
+    /// stale, empty, or emitted by an undeclared plugin (see
     /// `Metadata::add`).
     pub fn handle_enrichment(&mut self, plugin: &str, e: Enrichment) {
         if !self.metadata.add(plugin, e) {
             return;
         }
-        // On journalise **le winner**, pas celui qui vient de répondre : un
-        // plugin moins prioritaire peut être retenu en réserve sans rien
-        // afficher, et un journal qui le nommerait mentirait dans le seul cas
-        // où on le consulte — celui d'un affichage douteux à attribuer.
+        // We log **the winner**, not the one that just answered: a
+        // lower-priority plugin can be held in reserve without displaying
+        // anything, and a log naming it would lie in the only case where it
+        // gets consulted — attributing a dubious display.
         match self.metadata.winner() {
             Some(winner) if winner != plugin => {
                 tracing::debug!("metadata displayed: {winner} (response from {plugin} held in reserve)");
@@ -298,73 +297,73 @@ impl<P: Player> Core<P> {
             Some(winner) => tracing::debug!("metadata displayed: {winner}"),
             None => {}
         }
-        // Poser l'ancre à la réception : c'est le seul instant où l'écoulé
-        // annoncé est exact.
+        // Set the anchor on reception: it is the only instant when the
+        // announced elapsed time is exact.
         //
-        // **Seulement quand c'est le winner qui vient de parler**, et c'est un
-        // défaut trouvé en relecture. Un plugin retenu en réserve peut répondre
-        // à tout moment (un titre corrigé, une cover) sans rien apprendre de
-        // neuf sur l'avancement : réancrer alors relirait la position
-        // **inchangée** du winner en la datant de maintenant, et la barre
-        // reculerait d'un coup de tout ce qu'elle avait avancé. Le `match`
-        // ci-dessus distingue déjà les deux cas pour le journal.
+        // **Only when the winner is the one that just spoke**, and that is a
+        // defect found in review. A plugin held in reserve can answer at any
+        // time (a corrected title, a cover) without learning anything new
+        // about progress: re-anchoring then would re-read the winner's
+        // **unchanged** position while dating it to now, and the bar would
+        // jump back by everything it had advanced. The `match` above already
+        // distinguishes the two cases for the log.
         //
-        // Un winner qui réémet à l'identique n'arrive jamais ici : `add`
-        // déduplique et rend `false`. Et un plugin plus prioritaire qui répond
-        // pour la première fois **devient** le winner, donc son announcement ancre
-        // bien, ce qui est voulu.
+        // A winner re-emitting identically never gets here: `add`
+        // deduplicates and returns `false`. And a higher-priority plugin
+        // answering for the first time **becomes** the winner, so its
+        // announcement does anchor, which is intended.
         if self.metadata.winner() == Some(plugin) {
             self.position_anchor = self.metadata.position_s().map(|p| (p, Instant::now()));
         }
-        // L'enrichment qui vient d'être retenu peut avoir changé la
-        // cover que `selected_cover` désigne (un greffon qui écrase
-        // répondant après un `fill_only`, par exemple) : `add` a déjà
-        // invalidé la clé publiée dans ce cas, à `start_cover_fetch` de relancer
-        // la récupération pour la nouvelle cible.
+        // The enrichment just retained may have changed the cover that
+        // `selected_cover` designates (an overwriting plugin answering after
+        // a `fill_only`, for instance): `add` already invalidated the
+        // published key in that case, it is up to `start_cover_fetch` to
+        // relaunch the fetch for the new target.
         self.start_cover_fetch();
         self.publish_state();
     }
 
-    /// Retient la cover qu'une Source vient de déclarer sur son propre
-    /// canal (voir `SourceMessage::cover`, Task 2).
-    pub fn set_source_cover(&mut self, c: Option<ritornello_proto::CoverRef>, origine: &str) {
-        if self.metadata.set_cover_source(c, origine) {
+    /// Retains the cover a Source just declared on its own channel (see
+    /// `SourceMessage::cover`, Task 2).
+    pub fn set_source_cover(&mut self, c: Option<ritornello_proto::CoverRef>, origin: &str) {
+        if self.metadata.set_cover_source(c, origin) {
             self.start_cover_fetch();
             self.publish_state();
         }
     }
 
-    /// Détache la récupération de la cover retenue, si elle n'est pas déjà
-    /// en cache ni en vol.
+    /// Detaches the fetch of the retained cover, if it is neither already
+    /// cached nor in flight.
     ///
-    /// Détachée, parce qu'un téléchargement de dix secondes ne doit pas
-    /// retenir la boucle qui répond aux commands. Et **abandonnée si
-    /// l'identité change** : c'est `cover_arrived` qui vérifie, à
-    /// l'arrivée, que la clé décrit encore ce qui plays — même garde-fou que
-    /// l'écho d'identité du texte (`Metadata::add`), pour la même
-    /// raison : une réponse tardive sur le track précédent ne doit jamais
-    /// s'installer sur le suivant.
+    /// Detached, because a ten-second download must not hold up the loop
+    /// that answers commands. And **abandoned if the identity changes**: it
+    /// is `cover_arrived` that checks, on arrival, that the key still
+    /// describes what is playing — same safeguard as the identity echo of
+    /// the text (`Metadata::add`), for the same reason: a late reply for
+    /// the previous track must never settle on the next one.
     pub fn start_cover_fetch(&mut self) {
         let Some((r, _)) = self.metadata.selected_cover() else {
-            // Plus rien à montrer (identité changée, cover retirée) :
-            // effacer l'URL publiée plutôt que de laisser pointer une image
-            // qui ne correspond plus à ce qui plays.
+            // Nothing left to show (identity changed, cover removed): clear
+            // the published URL rather than leaving it pointing at an image
+            // that no longer matches what is playing.
             self.metadata.set_cover_href(None);
             return;
         };
         let key = crate::cover::key(&r);
         if self.metadata.published_cover() == Some(key.as_str()) {
-            // Déjà publiée sous cette même clé : rien à refaire. Sans cette
-            // garde, un enrichment retenu qui republie à l'identique (une
-            // station qui reconfirme ses métadonnées toutes les trente
-            // secondes, par exemple) relancerait une tâche, un `contains` et
-            // un aller-retour de canal pour un travail déjà fait — et
-            // réarmerait `cover_in_flight` sans nécessité.
+            // Already published under this same key: nothing to redo.
+            // Without this guard, a retained enrichment republishing
+            // identically (a station reconfirming its metadata every thirty
+            // seconds, for instance) would relaunch a task, a `contains` and
+            // a channel round trip for work already done — and would rearm
+            // `cover_in_flight` needlessly.
             return;
         }
         if self.cover_in_flight.as_deref() == Some(key.as_str()) {
-            // Déjà en vol pour cette même cible : une seconde requête
-            // n'apprendrait rien de plus tôt, et doublerait le trafic réseau.
+            // Already in flight for this same target: a second request
+            // would not learn anything sooner, and would double the network
+            // traffic.
             return;
         }
         let covers = self.covers.clone();
@@ -375,32 +374,34 @@ impl<P: Player> Core<P> {
                 let _ = tx.send((key, true)).await;
                 return;
             }
-            // Chronometre : c'est **l'etape que le owner soupconne** —
-            // le fournisseur de l'image qui met du temps a repondre. Sans
-            // mesure, le timeout entre l'announcement d'un track et l'apparition de
-            // sa cover n'etait attribuable a aucune etape en particulier.
-            let debut = std::time::Instant::now();
+            // Stopwatch: this is **the step the owner suspects** — the
+            // image provider taking a long time to answer. Without a
+            // measurement, the delay between a track's announcement and the
+            // appearance of its cover could not be attributed to any
+            // particular step.
+            let started = std::time::Instant::now();
             match crate::cover::fetch(&r).await {
                 Some(p) => {
-                    tracing::info!("cover {key} fetched in {:?}", debut.elapsed());
+                    tracing::info!("cover {key} fetched in {:?}", started.elapsed());
                     covers.insert(key.clone(), p).await;
                     let _ = tx.send((key, true)).await;
                 }
-                // Échec silencieux : l'appareil n'affiche pas d'image, et
-                // c'est tout. Un 404 du Cover Art Archive est le cas courant.
-                // Rapporté quand même (`false`) : c'est ce qui libère
-                // `cover_in_flight`, sans quoi cette clé resterait bloquée
-                // pour le reste du processus — y compris si le même dossier
-                // (donc la même clé) redevient la cible plus tard.
+                // Silent failure: the device shows no image, and that is
+                // all. A 404 from the Cover Art Archive is the common case.
+                // Reported anyway (`false`): it is what releases
+                // `cover_in_flight`, without which this key would stay
+                // blocked for the rest of the process — including if the
+                // same folder (hence the same key) becomes the target again
+                // later.
                 None => {
-                    // `info` et non `debug` : c'est l'autre moitie du
-                    // diagnostic. « Aucune cover trouvee » et « cover
-                    // trouvee puis impossible a serve » (voir le `warn` de
-                    // `cover_get`) donnent le meme ecran — un ♫ — et rien ne
-                    // permettait de les distinguer apres coup. Un 404 du Cover
-                    // Art Archive reste un cas ordinaire, d'ou `info` plutot
-                    // que `warn` : il n'a rien a faire dans la carte des
-                    // dernieres erreurs.
+                    // `info` and not `debug`: it is the other half of the
+                    // diagnosis. "No cover found" and "cover found but then
+                    // impossible to serve" (see the `warn` in `cover_get`)
+                    // give the same screen — a ♫ — and nothing allowed
+                    // telling them apart after the fact. A 404 from the
+                    // Cover Art Archive remains an ordinary case, hence
+                    // `info` rather than `warn`: it has no place in the map
+                    // of recent errors.
                     tracing::info!("no cover found for {key}");
                     let _ = tx.send((key, false)).await;
                 }
@@ -408,86 +409,85 @@ impl<P: Player> Core<P> {
         });
     }
 
-    /// Une récupération détachée s'est terminée (`succes`), qu'elle ait
-    /// abouti ou non. Publie l'URL locale, **si elle décrit encore ce qui
-    /// plays** : la vérification se fait ici, à l'arrivée, pas au lancement —
-    /// c'est ce qui empêche la cover d'un track déjà remplacé de
-    /// s'installer sur le suivant.
-    pub async fn cover_arrived(&mut self, key: String, succes: bool) {
-        // Le marqueur se libère dès que cette clé revient, **quelle que soit
-        // l'issue** — échec réseau, cover qui n'est plus retenue, ou
-        // succès — et **avant** toute vérification de péremption ci-dessous.
-        // Sans cela, un échec ou un track déjà remplacé laissait cette clé
-        // bloquée pour le reste du processus : `start_cover_fetch` refusait
-        // ensuite de relancer une récupération pour cette même clé, même
-        // quand elle redevenait la cible (le même dossier d'album, donc la
-        // même clé, est rejoué plus tard) et même si les bytes finissaient
-        // par être en cache.
+    /// A detached fetch has finished (`success`), whether it succeeded or
+    /// not. Publishes the local URL, **if it still describes what is
+    /// playing**: the check happens here, on arrival, not at launch — that
+    /// is what prevents the cover of an already-replaced track from
+    /// settling on the next one.
+    pub async fn cover_arrived(&mut self, key: String, success: bool) {
+        // The marker is released as soon as this key comes back, **whatever
+        // the outcome** — network failure, cover no longer retained, or
+        // success — and **before** any staleness check below. Without this,
+        // a failure or an already-replaced track left this key blocked for
+        // the rest of the process: `start_cover_fetch` then refused to
+        // relaunch a fetch for this same key, even when it became the
+        // target again (the same album folder, hence the same key, is
+        // played again later) and even if the bytes ended up cached.
         if self.cover_in_flight.as_deref() == Some(key.as_str()) {
             self.cover_in_flight = None;
         }
-        // Le contrôle de péremption vaut pour les **deux** issues, et c'est
-        // délibéré : un échec qui arrive après un changement de track décrit
-        // une référence que ce qui plays maintenant ne vise pas. L'inscrire au
-        // registre des échecs du track courant y noircirait une clé jamais
-        // essayée pour lui — et si un contributeur proposait cette même image
-        // ici, elle serait écartée sans qu'on l'ait tentée une seule fois.
-        // L'échec vaut pour le track où il a eu lieu, comme tout le reste de
-        // cet état (voir `Metadata::failed_covers`).
+        // The staleness check holds for **both** outcomes, and that is
+        // deliberate: a failure arriving after a track change describes a
+        // reference that what is playing now does not target. Recording it
+        // in the current track's failure registry would blacken a key never
+        // tried for it — and if a contributor proposed this same image
+        // here, it would be discarded without having been attempted a
+        // single time. The failure holds for the track where it happened,
+        // like all the rest of this state (see `Metadata::failed_covers`).
         let Some((r, _)) = self.metadata.selected_cover() else {
-            // Plus rien ne plays, ou plus aucune cover retenue : la
-            // réponse arrive trop tard pour avoir un sens.
+            // Nothing is playing anymore, or no cover retained anymore: the
+            // reply arrives too late to be meaningful.
             return;
         };
         if crate::cover::key(&r) != key {
-            // La cover du track précédent (ou d'une référence
-            // remplacée depuis) : sans cette vérification, elle s'installerait
-            // sur le track courant.
+            // The previous track's cover (or a reference replaced since):
+            // without this check, it would settle on the current track.
             return;
         }
-        if !succes {
-            // L'échec est **retenu**, et c'est ce qui débloque les
-            // contributeurs situés en dessous. Une référence retenue n'est
-            // qu'une promesse : sans cette note, `selected_cover` continuait de
-            // préférer une URL morte, `known.cover` restait vrai, et
-            // `musicbrainz` — muet parce qu'il croit une cover tenue —
-            // n'avait aucune chance de compenser. C'est exactement le cas que
-            // la conception anticipe : « un motif qui casse rend un silence ».
+        if !success {
+            // The failure is **recorded**, and that is what unblocks the
+            // contributors located below. A retained reference is only a
+            // promise: without this note, `selected_cover` kept preferring
+            // a dead URL, `known.cover` stayed true, and `musicbrainz` —
+            // silent because it believes a cover is held — had no chance to
+            // compensate. This is exactly the case the design anticipates:
+            // "a pattern that breaks yields silence".
             //
-            // Relancer et republier seulement si la référence retenue a
-            // réellement changé : c'est ce qui donne sa chance au contributeur
-            // du dessous, et ce qui évite de republier pour rien.
+            // Relaunch and republish only if the retained reference has
+            // actually changed: that is what gives the contributor below
+            // its chance, and what avoids republishing for nothing.
             if self.metadata.mark_cover_failed(key) {
                 self.start_cover_fetch();
                 self.publish_state();
             }
             return;
         }
-        // Recontrôlé plutôt que fait confiance à `succes` seul : le cache est
-        // borné (`ENTREES` entrées, éviction FIFO) et cette clé a pu être
-        // évincée entre le dépôt et la consommation de ce message par la
-        // boucle de `main` — un cas d'autant plus réel que le canal est
-        // volontairement étroit (capacité 4).
+        // Re-checked rather than trusting `success` alone: the cache is
+        // bounded (`cover_cache_entries` entries, FIFO eviction) and this
+        // key may have been evicted between the deposit and the consumption
+        // of this message by `main`'s loop — a case all the more real since
+        // the channel is deliberately narrow (capacity 4).
         if !self.covers.contains(&key).await {
-            // Evincee entre le depot et la consommation de ce message : le
-            // cache ne garde que `ENTREES` entries. Silencieux jusqu'ici, alors
-            // que c'est une cover **perdue apres avoir ete recuperee** — le
-            // pire des cas, et le plus difficile a attribuer sans trace.
+            // Evicted between the deposit and the consumption of this
+            // message: the cache only keeps `cover_cache_entries` entries.
+            // Silent until now, even though it is a cover **lost after
+            // having been fetched** — the worst case, and the hardest to
+            // attribute without a trace.
             tracing::warn!("cover {key} evicted before it could be published");
             return;
         }
-        // La trace positive, qui ferme la chronologie : c'est elle qui dit
-        // *quand* l'image est enfin arrivee, la ou le owner ne pouvait
-        // qu'observer « beaucoup plus tard ».
+        // The positive trace, which closes the timeline: it is the one that
+        // says *when* the image finally arrived, where the owner could only
+        // observe "much later".
         tracing::info!("cover {key} published");
         self.metadata.set_cover_href(Some(key));
         self.publish_state();
     }
 
-    /// Le cache que la tâche détachée de `start_cover_fetch` remplit — **le
-    /// même** que celui de l'`AppState` HTTP, voir la doc du champ `covers`.
-    /// Réservé aux tests : c'est ce qui leur permet de prouver le partage
-    /// sans passer par `main.rs`, qui n'est pas testable en tant que tel.
+    /// The cache the detached task of `start_cover_fetch` fills — **the
+    /// same one** as the HTTP `AppState`'s, see the `covers` field doc.
+    /// Test-only: it is what lets tests prove the sharing without going
+    /// through `main.rs`, which is not testable as such.
     #[cfg(test)]
     pub(crate) fn app_covers(&self) -> &Arc<crate::cover::CoverCache> {
         &self.covers
@@ -500,22 +500,23 @@ mod tests {
     use crate::core::test_support::*;
 
     #[tokio::test]
-    async fn un_metadata_tardif_prend_sa_place_du_manifeste_dans_larbitrage() {
-        // L'invariant le plus facile à casser du câblage à chaud : la priorité
-        // est celle de `plugins.toml`, jamais celle d'arrivée des annonces.
-        // Seul `musicbrainz` s'est annoncé à temps ; `ouifm` arrive après le
-        // démarrage alors que le manifest le déclare **avant** lui. Un ajout en
-        // queue le ferait perdre l'arbitrage, et la priorité dépendrait de la
-        // chronologie du démarrage.
+    async fn a_late_metadata_plugin_takes_its_manifest_place_in_arbitration() {
+        // The easiest invariant to break in hot wiring: the priority is the
+        // one from `plugins.toml`, never the arrival order of announcements.
+        // Only `musicbrainz` announced itself in time; `ouifm` arrives after
+        // startup even though the manifest declares it **before** it.
+        // Appending it at the tail would make it lose the arbitration, and
+        // the priority would depend on the startup chronology.
         let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec!["musicbrainz".into()]);
-        let id = serde_json::json!({"url": "un"});
+        let id = serde_json::json!({"url": "one"});
         core.handle_source_update("radio", plays(id.clone()));
-        core.handle_enrichment("musicbrainz", enrichment(id.clone(), "Base", "En line"));
+        core.handle_enrichment("musicbrainz", enrichment(id.clone(), "Base", "Online"));
         assert_eq!(state_rx.borrow().track.artist.as_deref(), Some("Base"));
 
-        // Ce que fait `main` à la réception d'une announcement tardive : recalculer la
-        // liste **complète** depuis le manifest, puis la remettre au cœur. La
-        // logique d'order reste dans `register::metadata_order`, un seul endroit.
+        // What `main` does when a late announcement is received: recompute
+        // the **complete** list from the manifest, then hand it back to the
+        // core. The ordering logic stays in `register::metadata_order`, a
+        // single place.
         let manifest = vec!["ouifm".to_string(), "musicbrainz".to_string()];
         let mut gathered = crate::register::Gathered::default();
         for name in ["musicbrainz", "ouifm"] {
@@ -535,19 +536,19 @@ mod tests {
         assert_eq!(
             core.metadata.winner(),
             Some("ouifm"),
-            "le tardif est declare avant dans le manifest : il doit gagner"
+            "the latecomer is declared earlier in the manifest: it must win"
         );
         assert_eq!(state_rx.borrow().track.artist.as_deref(), Some("Station"));
     }
 
     #[tokio::test]
-    async fn la_selection_declaree_est_diffusee_puis_oubliee_quand_rien_ne_joue() {
-        // La touche numérotée mise en évidence sur la télécommande de l'IHM désigne
-        // **ce qui plays** : elle suit la déclaration de la Source, et
-        // disparaît à l'arrêt plutôt que de rester sur la dernière pression.
-        // Le name de présélection suit exactement la même règle : c'est le
-        // point du cahier des charges qui compte (le cycle de vie de
-        // `preset_name` est celui de `preset`, verrouillé ici).
+    async fn the_declared_selection_is_broadcast_then_forgotten_when_nothing_plays() {
+        // The numbered key highlighted on the web UI's remote designates
+        // **what is playing**: it follows the Source's declaration, and
+        // disappears on stop rather than staying on the last press.
+        // The preset name follows exactly the same rule: that is the point
+        // of the spec that matters (the lifecycle of `preset_name` is that
+        // of `preset`, locked in here).
         let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
         let mut update = plays(serde_json::json!({"kind": "stream", "url": "http://inter"}));
         update.preset = Some(2);
@@ -561,11 +562,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changer_de_source_oublie_la_selection_de_lancienne() {
-        // La présélection 2 de la radio ne veut rien dire pour le cd : la
-        // laisser en évidence après la bascule désignerait une touche au
-        // hasard. Même chose pour son name : "France Inter" affiché après un
-        // passage au cd serait un name de station attribué à un disque.
+    async fn switching_source_forgets_the_previous_ones_selection() {
+        // The radio's preset 2 means nothing to the cd: leaving it
+        // highlighted after the switch would designate a random key. Same
+        // for its name: "France Inter" displayed after switching to the cd
+        // would be a station name attributed to a disc.
         let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
         let mut update = plays(serde_json::json!({"kind": "stream", "url": "http://inter"}));
         update.preset = Some(2);
@@ -579,8 +580,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lidentite_declaree_par_la_source_est_annoncee_aux_plugins() {
-        let (mut core, np_rx, _etat_rx, _d) = setup_metadata(vec!["ouifm".into()]);
+    async fn the_identity_declared_by_the_source_is_announced_to_plugins() {
+        let (mut core, np_rx, _state_rx, _d) = setup_metadata(vec!["ouifm".into()]);
         let id = serde_json::json!({"kind": "stream", "url": "http://ouifm"});
         core.handle_source_update("radio", plays(id.clone()));
         let np = np_rx.borrow().clone();
@@ -589,22 +590,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn une_identite_dune_source_inactive_est_ignoree() {
-        // Le cd peut rapporter l'insertion d'un disque pendant que la radio
-        // plays : annoncer cette identité ferait travailler les plugins sur un
-        // track qui ne sort d'aucun haut-parleur.
-        let (mut core, np_rx, _etat_rx, _d) = setup_metadata(vec![]);
+    async fn an_identity_from_an_inactive_source_is_ignored() {
+        // The cd can report the insertion of a disc while the radio is
+        // playing: announcing that identity would make the plugins work on
+        // a track that comes out of no speaker.
+        let (mut core, np_rx, _state_rx, _d) = setup_metadata(vec![]);
         core.handle_source_update("cd", plays(serde_json::json!({"kind": "disc"})));
         assert_eq!(np_rx.borrow().identity, None);
     }
 
     #[tokio::test]
-    async fn licy_est_diffuse_a_la_spa() {
+    async fn icy_is_broadcast_to_the_spa() {
         let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
-        // `resume` met la radio en playback : sans quoi le cœur écarte à raison
-        // tout titre ICY, rien ne jouant.
+        // `resume` puts the radio in playback: without it the core rightly
+        // discards any ICY title, nothing playing.
         core.resume().await.unwrap();
-        core.handle_source_update("radio", plays(serde_json::json!({"url": "un"})));
+        core.handle_source_update("radio", plays(serde_json::json!({"url": "one"})));
         assert_eq!(state_rx.borrow().track.title, None);
 
         core.handle_event(Event::IcyTitle("Mandrillus Sphynx - Bikwix".into())).await;
@@ -614,16 +615,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn un_enrichissement_de_plugin_ecrase_licy() {
+    async fn a_plugin_enrichment_overrides_icy() {
         let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec!["ouifm".into()]);
         core.resume().await.unwrap();
-        let id = serde_json::json!({"url": "un"});
+        let id = serde_json::json!({"url": "one"});
         core.handle_source_update("radio", plays(id.clone()));
-        // Texte de remplissage réellement émis par OUI FM sur son stream principal.
+        // Filler text actually emitted by OUI FM on its main stream.
         core.handle_event(Event::IcyTitle("Now Playing info goes here".into())).await;
-        // Sans ce contrôle, la suite du test passerait aussi bien si l'ICY
-        // n'était jamais entré : ce n'est pas « l'enrichment gagne » qu'on
-        // vérifierait, mais « l'ICY est absent ».
+        // Without this check, the rest of the test would pass just as well
+        // if the ICY had never entered: we would not be verifying "the
+        // enrichment wins" but "the ICY is absent".
         assert_eq!(state_rx.borrow().track.title.as_deref(), Some("Now Playing info goes here"));
         core.handle_enrichment("ouifm", enrichment(id, "Shaka Ponk", "Wanna Get Free"));
         let state = state_rx.borrow().clone();
@@ -633,101 +634,104 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn un_enrichissement_perime_ne_touche_pas_laffichage() {
+    async fn a_stale_enrichment_does_not_touch_the_display() {
         let (mut core, _np_rx, mut state_rx, _d) = setup_metadata(vec!["ouifm".into()]);
-        core.handle_source_update("radio", plays(serde_json::json!({"url": "deux"})));
+        core.handle_source_update("radio", plays(serde_json::json!({"url": "two"})));
         state_rx.borrow_and_update();
         core.handle_enrichment(
             "ouifm",
-            enrichment(serde_json::json!({"url": "un"}), "Ancien", "Track"),
+            enrichment(serde_json::json!({"url": "one"}), "Old", "Track"),
         );
-        assert!(!state_rx.has_changed().unwrap(), "la reponse en retard ne doit rien publier");
+        assert!(!state_rx.has_changed().unwrap(), "the late reply must publish nothing");
         assert!(core.player_state().track.is_empty());
     }
 
     #[tokio::test]
-    async fn changer_de_morceau_efface_immediatement_le_precedent() {
-        // Le track précédent ne doit pas rester à l'écran pendant qu'on
-        // attend le suivant : c'est un comportement, pas un détail.
+    async fn changing_track_immediately_clears_the_previous_one() {
+        // The previous track must not stay on screen while waiting for the
+        // next one: it is a behavior, not a detail.
         let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec!["ouifm".into()]);
-        let id = serde_json::json!({"url": "un"});
+        let id = serde_json::json!({"url": "one"});
         core.handle_source_update("radio", plays(id.clone()));
         core.handle_enrichment("ouifm", enrichment(id, "Miles Davis", "So What"));
         assert_eq!(state_rx.borrow().track.title.as_deref(), Some("So What"));
 
-        core.handle_source_update("radio", plays(serde_json::json!({"url": "deux"})));
-        assert!(state_rx.borrow().track.is_empty(), "l'ardoise doit etre nette aussitot");
+        core.handle_source_update("radio", plays(serde_json::json!({"url": "two"})));
+        assert!(state_rx.borrow().track.is_empty(), "the slate must be clean right away");
     }
 
     #[tokio::test]
-    async fn larret_demande_par_la_telecommande_efface_le_titre_de_lafficheur() {
-        // Défaut trouvé en revue : `set_identity` ne rafraîchissait pas
-        // l'affichage. La SPA se vidait (canal d'état), mais l'afficheur
-        // physique gardait le titre du track arrêté jusqu'à la prochaine
-        // action de l'utilisateur — toute la nuit sur un appareil qu'on arrête
-        // le soir. L'ancien test n'assertionnait que le canal `now_playing` :
-        // il passait aussi bien contre le code faux.
+    async fn a_stop_requested_from_the_remote_clears_the_display_title() {
+        // Defect found in review: `set_identity` did not refresh the
+        // display. The SPA emptied itself (state channel), but the physical
+        // display kept the stopped track's title until the user's next
+        // action — all night long on a device turned off in the evening.
+        // The old test only asserted the `now_playing` channel: it passed
+        // just as well against the wrong code.
         let (mut core, np_rx, state_rx, _d) = setup_metadata(vec!["ouifm".into()]);
-        let id = serde_json::json!({"url": "un"});
+        let id = serde_json::json!({"url": "one"});
         core.handle_source_update("radio", plays(id.clone()));
         core.handle_enrichment("ouifm", enrichment(id, "Miles Davis", "So What"));
         assert_eq!(state_rx.borrow().track.title.as_deref(), Some("So What"));
 
         core.handle_command(Command::Stop).await.unwrap();
-        assert_eq!(np_rx.borrow().identity, None, "les plugins doivent cesser leur travail");
-        assert!(state_rx.borrow().track.is_empty(), "le titre ne doit pas rester affiche");
+        assert_eq!(np_rx.borrow().identity, None, "the plugins must stop their work");
+        assert!(state_rx.borrow().track.is_empty(), "the title must not stay displayed");
     }
 
     #[tokio::test]
-    async fn un_titre_icy_arrivant_en_veille_natteint_pas_letat_publie() {
-        // Chemin réel : `Command::Power` attend la réponse de la Source à
-        // `Deactivate` (jusqu'à 5 s) pendant que mpv plays encore. Un titre émis
-        // dans cet intervalle arrive après que l'état de veille a été publié —
-        // et rien ne se produisant plus en veille, il y resterait des semaines.
+    async fn an_icy_title_arriving_in_standby_does_not_reach_the_published_state() {
+        // Real path: `Command::Power` waits for the Source's reply to
+        // `Deactivate` (up to 5 s) while mpv is still playing. A title
+        // emitted in that window arrives after the standby state has been
+        // published — and since nothing happens anymore in standby, it
+        // would stay there for weeks.
         let (mut core, _np_rx, mut state_rx, _d) = setup_metadata(vec![]);
         core.resume().await.unwrap();
-        core.handle_source_update("radio", plays(serde_json::json!({"url": "un"})));
+        core.handle_source_update("radio", plays(serde_json::json!({"url": "one"})));
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(state_rx.borrow_and_update().status.as_deref(), Some("STANDBY"));
 
         core.handle_event(Event::IcyTitle("Mandrillus Sphynx - Bikwix".into())).await;
         let state = state_rx.borrow().clone();
         assert_eq!(state.status.as_deref(), Some("STANDBY"));
-        assert!(state.track.is_empty(), "aucun titre ne doit se coller sur l'state de veille");
+        assert!(state.track.is_empty(), "no title must stick onto the standby state");
     }
 
     #[tokio::test]
-    async fn la_veille_bloque_licy_meme_avec_une_identite_vivante() {
-        // Deux gardes couvrent ce path, et celle-ci n'est pas redondante : la
-        // mise en veille efface normalement l'identité, mais `Command::Power`
-        // peut rendre la main sur l'erreur de `player.stop()` **avant** de le
-        // faire, laissant la veille active avec une identité vivante. L'état est
-        // donc posé directement ici pour éprouver la garde de veille seule.
+    async fn standby_blocks_icy_even_with_a_live_identity() {
+        // Two guards cover this path, and this one is not redundant:
+        // entering standby normally clears the identity, but
+        // `Command::Power` can return on the error of `player.stop()`
+        // **before** doing so, leaving standby active with a live identity.
+        // The state is therefore set directly here to exercise the standby
+        // guard alone.
         let (mut core, _np_rx, mut state_rx, _d) = setup_metadata(vec![]);
-        core.resume().await.unwrap(); // pose `expecting_stream` (la radio plays)
-        core.handle_source_update("radio", plays(serde_json::json!({"url": "un"})));
+        core.resume().await.unwrap(); // sets `expecting_stream` (the radio is playing)
+        core.handle_source_update("radio", plays(serde_json::json!({"url": "one"})));
         state_rx.borrow_and_update();
-        // Veille posée directement : c'est l'état atteint quand `Command::Power`
-        // rend la main sur l'erreur de `player.stop()`, donc avec une playback
-        // encore attendue. La garde de veille est alors la seule à agir.
+        // Standby set directly: it is the state reached when
+        // `Command::Power` returns on the error of `player.stop()`, hence
+        // with playback still expected. The standby guard is then the only
+        // one acting.
         core.standby = true;
-        assert!(core.expecting_stream, "sans quoi ce test n'eprouverait pas la garde de veille");
+        assert!(core.expecting_stream, "otherwise this test would not exercise the standby guard");
 
         core.handle_event(Event::IcyTitle("Mandrillus Sphynx - Bikwix".into())).await;
-        assert!(!state_rx.has_changed().unwrap(), "rien ne doit atteindre l'state publie en veille");
+        assert!(!state_rx.has_changed().unwrap(), "nothing must reach the published state in standby");
         assert_eq!(state_rx.borrow().track.title, None);
     }
 
     #[tokio::test]
-    async fn licy_saffiche_meme_si_la_source_ne_declare_aucune_identite() {
-        // Régression rencontrée en essai réel : la couche ICY était
-        // conditionnée à la déclaration d'identité de la Source, donc muette
-        // face à un plugin qui ne la déclare pas — et muette **en silence**,
-        // sans une line de journal. C'est pourtant la seule couche censée
-        // fonctionner sans aucun plugin `metadata`.
+    async fn icy_shows_even_if_the_source_declares_no_identity() {
+        // Regression met in a real-world trial: the ICY layer was
+        // conditioned on the Source's identity declaration, hence mute
+        // against a plugin that does not declare one — and mute
+        // **silently**, without a single log line. Yet it is the only layer
+        // supposed to work without any `metadata` plugin.
         let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
         core.resume().await.unwrap();
-        // Aucune identité n'est jamais déclarée : seul le name de présélection arrive.
+        // No identity is ever declared: only the preset name arrives.
         core.handle_source_update("radio", update_with_name(Some("FIP")));
         core.handle_event(Event::IcyTitle("Made Up - TAHITI 80".into())).await;
         assert_eq!(state_rx.borrow().track.title.as_deref(), Some("Made Up - TAHITI 80"));
@@ -735,33 +739,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn un_titre_icy_arrivant_apres_un_arret_est_ignore() {
+    async fn an_icy_title_arriving_after_a_stop_is_ignored() {
         let (mut core, _np_rx, mut state_rx, _d) = setup_metadata(vec![]);
         core.resume().await.unwrap();
-        core.handle_source_update("radio", plays(serde_json::json!({"url": "un"})));
+        core.handle_source_update("radio", plays(serde_json::json!({"url": "one"})));
         core.handle_command(Command::Stop).await.unwrap();
         state_rx.borrow_and_update();
 
-        core.handle_event(Event::IcyTitle("un titre en retard".into())).await;
-        assert!(!state_rx.has_changed().unwrap(), "rien ne doit etre publie");
-        assert_eq!(state_rx.borrow().track.title, None, "la SPA ne doit pas annoncer de track");
+        core.handle_event(Event::IcyTitle("a late title".into())).await;
+        assert!(!state_rx.has_changed().unwrap(), "nothing must be published");
+        assert_eq!(state_rx.borrow().track.title, None, "the SPA must not announce any track");
     }
 
     #[tokio::test]
-    async fn la_mise_en_veille_oublie_lidentite() {
-        let (mut core, np_rx, _etat_rx, _d) = setup_metadata(vec!["ouifm".into()]);
+    async fn entering_standby_forgets_the_identity() {
+        let (mut core, np_rx, _state_rx, _d) = setup_metadata(vec!["ouifm".into()]);
         core.resume().await.unwrap();
-        core.handle_source_update("radio", plays(serde_json::json!({"url": "un"})));
+        core.handle_source_update("radio", plays(serde_json::json!({"url": "one"})));
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(np_rx.borrow().identity, None);
     }
 
     #[tokio::test]
-    async fn la_mise_en_veille_oublie_la_selection_et_son_nom() {
-        // Le point du cahier des charges qui compte : `preset_name` vit et
-        // meurt avec `preset`, et le seul endroit qui les efface est
-        // `set_identity(None)` — que `Command::Power` atteint en entrant en
-        // veille, comme `Stop` et `SourceCycle` déjà couverts plus haut.
+    async fn entering_standby_forgets_the_selection_and_its_name() {
+        // The point of the spec that matters: `preset_name` lives and dies
+        // with `preset`, and the only place that clears them is
+        // `set_identity(None)` — which `Command::Power` reaches when
+        // entering standby, like `Stop` and `SourceCycle` already covered
+        // above.
         let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
         let mut update = plays(serde_json::json!({"kind": "stream", "url": "http://inter"}));
         update.preset = Some(2);
@@ -769,29 +774,29 @@ mod tests {
         core.handle_source_update("radio", update);
         assert_eq!(state_rx.borrow().preset, Some(2));
         assert_eq!(state_rx.borrow().preset_name.as_deref(), Some("France Inter"));
-        core.handle_command(Command::Power).await.unwrap(); // entre en veille
+        core.handle_command(Command::Power).await.unwrap(); // enters standby
         assert_eq!(state_rx.borrow().preset, None);
         assert_eq!(state_rx.borrow().preset_name, None);
     }
 
     #[tokio::test]
-    async fn changer_de_source_oublie_lidentite_precedente() {
-        let (mut core, np_rx, _etat_rx, _d) = setup_metadata(vec!["ouifm".into()]);
-        core.handle_source_update("radio", plays(serde_json::json!({"url": "un"})));
+    async fn switching_source_forgets_the_previous_identity() {
+        let (mut core, np_rx, _state_rx, _d) = setup_metadata(vec!["ouifm".into()]);
+        core.handle_source_update("radio", plays(serde_json::json!({"url": "one"})));
         core.handle_command(Command::SourceCycle).await.unwrap();
         let np = np_rx.borrow().clone();
         assert_eq!(np.identity, None);
-        assert_eq!(np.source, "cd", "l'announcement porte la nouvelle source active");
+        assert_eq!(np.source, "cd", "the announcement carries the new active source");
     }
 
     #[tokio::test]
-    async fn un_plugin_metadata_declare_mais_muet_neclipse_pas_licy() {
-        // Un plugin déclaré qui ne répond jamais (processus mort, socket muette)
-        // ne doit pas priver l'appareil de la couche de base : le titre annoncé
-        // par le stream doit continuer de s'afficher, attribué à `icy`.
-        let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec!["mort".into()]);
+    async fn a_declared_but_silent_metadata_plugin_does_not_eclipse_icy() {
+        // A declared plugin that never answers (dead process, silent socket)
+        // must not deprive the device of the base layer: the title announced
+        // by the stream must keep showing, attributed to `icy`.
+        let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec!["dead".into()]);
         core.resume().await.unwrap();
-        core.handle_source_update("radio", plays(serde_json::json!({"url": "un"})));
+        core.handle_source_update("radio", plays(serde_json::json!({"url": "one"})));
         core.handle_event(Event::IcyTitle("Mandrillus Sphynx - Bikwix".into())).await;
         let state = state_rx.borrow().clone();
         assert_eq!(state.track.title.as_deref(), Some("Mandrillus Sphynx - Bikwix"));
@@ -799,63 +804,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn une_pochette_de_source_mal_formee_ne_touche_pas_a_celle_qui_tient() {
-        // `CoverRef::validated` est la règle de forme de `ritornello-proto`, et
-        // elle ne s'appliquait qu'à un des deux canaux d'entrée (celui des
-        // plugins). Une référence refusée vaut « rien de neuf » — jamais
-        // « plus de cover » : c'est la convention du champ, et effacer sur
-        // une trame mal formée retirerait l'image valide déjà déclarée.
-        let (mut core, _np_rx, _etat_rx, tmp) = test_core();
+    async fn a_malformed_source_cover_does_not_touch_the_one_that_holds() {
+        // `CoverRef::validated` is `ritornello-proto`'s shape rule, and it
+        // only applied to one of the two input channels (the plugins' one).
+        // A refused reference means "nothing new" — never "no more cover":
+        // that is the field's convention, and erasing on a malformed frame
+        // would remove the valid image already declared.
+        let (mut core, _np_rx, _state_rx, tmp) = test_core();
         let image = tmp.path().join("folder.jpg");
         std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
-        let bonne = ritornello_proto::CoverRef::Path { path: image.to_string_lossy().into_owned() };
+        let good = ritornello_proto::CoverRef::Path { path: image.to_string_lossy().into_owned() };
         let id = serde_json::json!({"kind": "file", "path": "/a.flac"});
 
         let mut update = plays(id);
-        update.cover = Some(bonne.clone());
+        update.cover = Some(good.clone());
         core.handle_source_update("radio", update.clone());
         assert!(core.metadata.known().cover);
 
-        // Chemin relatif : refusé par la forme. Rien ne doit bouger.
+        // Relative path: refused by the shape rule. Nothing must move.
         update.identity = None;
-        update.cover = Some(ritornello_proto::CoverRef::Path { path: "relatif/folder.jpg".into() });
+        update.cover = Some(ritornello_proto::CoverRef::Path { path: "relative/folder.jpg".into() });
         core.handle_source_update("radio", update.clone());
         assert_eq!(
             core.metadata.selected_cover().map(|(r, _)| r),
-            Some(bonne),
-            "une reference mal formee ne doit ni s'installer ni effacer celle qui tient"
+            Some(good),
+            "a malformed reference must neither settle nor erase the one that holds"
         );
 
-        // Et une URL en clair vers une IP littérale non plus, l'autre moitié
-        // de ce que `validated` refuse.
+        // And neither does a plain-text URL to a literal IP, the other half
+        // of what `validated` refuses.
         update.cover =
             Some(ritornello_proto::CoverRef::Url { url: "http://192.168.1.1/a.jpg".into() });
         core.handle_source_update("radio", update);
         assert_eq!(core.metadata.selected_cover().map(|(_, o)| o), Some("radio".to_string()));
     }
 
-    /// Un contributeur qui vient de se câbler à chaud, ou qui répond
-    /// lentement, doit voir ce qui est déjà connu — sinon il ne peut ni
-    /// compléter ce qui manque, ni s'abstenir sur ce qui est déjà rempli.
+    /// A contributor that just got hot-wired, or that answers slowly, must
+    /// see what is already known — otherwise it can neither complete what
+    /// is missing, nor abstain on what is already filled.
     #[tokio::test]
-    async fn le_now_playing_emis_porte_letat_partiel() {
-        let (mut core, mut np_rx, _etat_rx, _tmp) = test_core();
+    async fn the_emitted_now_playing_carries_the_partial_state() {
+        let (mut core, mut np_rx, _state_rx, _tmp) = test_core();
         core.set_identity(Some(serde_json::json!({"kind": "stream", "url": "u"})));
-        // `handle_icy_title` exige un stream effectivement attendu (voir sa
-        // garde) : sans cette line, le titre serait ignoré en silence et ce
-        // test n'éprouverait rien.
+        // `handle_icy_title` requires a stream actually expected (see its
+        // guard): without this line, the title would be silently ignored
+        // and this test would prove nothing.
         core.expecting_stream = true;
         core.handle_icy_title("OUI FM".into());
         core.publish_state();
-        // Un contributeur doit voir ce qui est deja connu, sinon il ne peut ni
-        // completer ni s'abstenir.
+        // A contributor must see what is already known, otherwise it can
+        // neither complete nor abstain.
         let np = np_rx.borrow_and_update().clone();
         assert_eq!(np.known.title.as_deref(), Some("OUI FM"));
         assert!(!np.known.cover);
     }
 
     #[tokio::test]
-    async fn une_pochette_arrivee_devient_une_url_locale_dans_letat() {
+    async fn an_arrived_cover_becomes_a_local_url_in_the_state() {
         let (mut core, _np_rx, mut state_rx, tmp) = test_core();
         let image = tmp.path().join("folder.jpg");
         std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
@@ -863,10 +868,10 @@ mod tests {
 
         core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
         core.set_source_cover(Some(r.clone()), "files");
-        // La recuperation est detachee : on l'attend explicitement dans le test
-        // plutot que de dormir, pour ne pas fabriquer un flake.
+        // The fetch is detached: the test waits for it explicitly rather
+        // than sleeping, so as not to manufacture a flake.
         let key = crate::cover::key(&r);
-        let p = crate::cover::fetch(&r).await.expect("l'image de test doit etre lisible");
+        let p = crate::cover::fetch(&r).await.expect("the test image must be readable");
         core.app_covers().insert(key.clone(), p).await;
         core.cover_arrived(key.clone(), true).await;
 
@@ -876,97 +881,97 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn une_recuperation_echouee_libere_les_contributeurs_du_dessous() {
-        // La jonction que la revue a trouvée : `known.cover` était vrai dès
-        // qu'une référence était *retenue*, et `selected_cover` continuait de
-        // préférer cette référence après l'échec de sa récupération. Un motif
-        // d'URL de station qui a rouillé faisait donc taire `musicbrainz`
-        // définitivement — cas que la conception anticipe explicitement.
-        let (mut core, mut np_rx, _etat_rx, _tmp) = setup_metadata(vec![
+    async fn a_failed_fetch_frees_the_contributors_below() {
+        // The junction the review found: `known.cover` was true as soon as
+        // a reference was *retained*, and `selected_cover` kept preferring
+        // that reference after its fetch failed. A station URL pattern that
+        // rusted therefore silenced `musicbrainz` for good — a case the
+        // design explicitly anticipates.
+        let (mut core, mut np_rx, _state_rx, _tmp) = setup_metadata(vec![
             "radiofrance".into(),
             "musicbrainz".into(),
         ]);
         let id = serde_json::json!({"url": "https://fip"});
         core.handle_source_update("radio", plays(id.clone()));
-        let morte =
-            ritornello_proto::CoverRef::Url { url: "https://api.radiofrance.fr/rouille".into() };
+        let dead =
+            ritornello_proto::CoverRef::Url { url: "https://api.radiofrance.fr/rusted".into() };
         core.handle_enrichment(
             "radiofrance",
             Enrichment {
                 identity: id,
                 artist: Some("Miles Davis".into()),
                 title: Some("So What".into()),
-                cover: Some(morte.clone()),
+                cover: Some(dead.clone()),
                 ..Default::default()
             },
         );
-        assert!(np_rx.borrow_and_update().known.cover, "une reference est tenue, on ne sait pas encore");
+        assert!(np_rx.borrow_and_update().known.cover, "a reference is held, we do not know yet");
 
-        // Ce que la tâche détachée rapporte quand la récupération n'a rien
-        // rendition : `succes == false`.
-        core.cover_arrived(crate::cover::key(&morte), false).await;
+        // What the detached task reports when the fetch yielded nothing:
+        // `success == false`.
+        core.cover_arrived(crate::cover::key(&dead), false).await;
         let np = np_rx.borrow_and_update().clone();
-        assert!(!np.known.cover, "une promesse non tenue doit rendre la parole aux autres");
-        // Et le texte que ce même greffon fournit n'a pas bougé : c'est bien
-        // ce qui permet à `musicbrainz` de chercher sur cet artiste et cet
-        // album, comme la documentation le promet.
+        assert!(!np.known.cover, "an unkept promise must give the floor back to the others");
+        // And the text this same plugin provides has not moved: that is
+        // precisely what lets `musicbrainz` search on this artist and this
+        // album, as the documentation promises.
         assert_eq!(np.known.title.as_deref(), Some("So What"));
         assert_eq!(np.known.artist.as_deref(), Some("Miles Davis"));
     }
 
     #[tokio::test]
-    async fn un_echec_arrive_apres_un_changement_de_morceau_nest_pas_inscrit() {
-        // Le registre des échecs vaut pour le track où ils ont eu lieu. Un
-        // échec en retard, arrivé après le changement d'identité, ne doit donc
-        // pas y entrer : il y noircirait une clé jamais essayée pour le
-        // track courant, et écarterait cette image alors qu'elle pourrait
-        // parfaitement répondre.
-        let (mut core, _np_rx, _etat_rx, _tmp) = setup_metadata(vec!["musicbrainz".into()]);
-        let une = serde_json::json!({"url": "un"});
-        core.handle_source_update("radio", plays(une.clone()));
+    async fn a_failure_arriving_after_a_track_change_is_not_recorded() {
+        // The failure registry holds for the track where the failures
+        // happened. A late failure, arrived after the identity change, must
+        // therefore not enter it: it would blacken a key never tried for
+        // the current track, and discard that image even though it could
+        // perfectly well answer.
+        let (mut core, _np_rx, _state_rx, _tmp) = setup_metadata(vec!["musicbrainz".into()]);
+        let first = serde_json::json!({"url": "one"});
+        core.handle_source_update("radio", plays(first.clone()));
         let image = ritornello_proto::CoverRef::Url {
             url: "https://coverartarchive.org/release/x/front-500".into(),
         };
         core.handle_enrichment(
             "musicbrainz",
             Enrichment {
-                identity: une,
+                identity: first,
                 title: Some("T".into()),
                 cover: Some(image.clone()),
                 ..Default::default()
             },
         );
 
-        // Track suivant, puis l'échec du précédent qui arrive enfin.
-        let deux = serde_json::json!({"url": "deux"});
-        core.handle_source_update("radio", plays(deux.clone()));
+        // Next track, then the previous one's failure finally arrives.
+        let second = serde_json::json!({"url": "two"});
+        core.handle_source_update("radio", plays(second.clone()));
         core.cover_arrived(crate::cover::key(&image), false).await;
 
-        // Le même greffon propose la même image pour ce track-ci : jamais
-        // essayée ici, elle doit être retenue.
+        // The same plugin proposes the same image for this track: never
+        // tried here, it must be retained.
         core.handle_enrichment(
             "musicbrainz",
-            Enrichment { identity: deux, title: Some("T2".into()), cover: Some(image), ..Default::default() },
+            Enrichment { identity: second, title: Some("T2".into()), cover: Some(image), ..Default::default() },
         );
         assert!(
             core.metadata.known().cover,
-            "un echec perime ne doit pas condamner la reference du track suivant"
+            "a stale failure must not condemn the next track's reference"
         );
     }
 
-    /// Le risque signalé par la revue de la tâche 3 : deux `Arc<CoverCache>`
-    /// distincts compileraient et laisseraient passer tous les autres tests
-    /// de ce module, mais la cover que le cœur vient de déposer ne serait
-    /// jamais lisible par la vraie route HTTP. Ce test passe donc par
-    /// `status::router` et une vraie requête, avec exactement le même `Arc`
-    /// que celui exposé par `app_covers()`.
+    /// The risk flagged by task 3's review: two distinct `Arc<CoverCache>`
+    /// would compile and let every other test in this module through, but
+    /// the cover the core just deposited would never be readable by the
+    /// real HTTP route. This test therefore goes through `status::router`
+    /// and a real request, with exactly the same `Arc` as the one exposed
+    /// by `app_covers()`.
     #[tokio::test]
-    async fn la_route_http_sert_ce_que_le_coeur_vient_de_deposer() {
+    async fn the_http_route_serves_what_the_core_just_deposited() {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
 
-        let (mut core, _np_rx, _etat_rx, tmp) = test_core();
+        let (mut core, _np_rx, _state_rx, tmp) = test_core();
         let image = tmp.path().join("folder.jpg");
         std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
         let r = ritornello_proto::CoverRef::Path { path: image.to_string_lossy().into_owned() };
@@ -974,12 +979,13 @@ mod tests {
 
         core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
         core.set_source_cover(Some(r.clone()), "files");
-        let p = crate::cover::fetch(&r).await.expect("l'image de test doit etre lisible");
+        let p = crate::cover::fetch(&r).await.expect("the test image must be readable");
         core.app_covers().insert(key.clone(), p).await;
         core.cover_arrived(key.clone(), true).await;
 
-        // Le seul champ qui compte pour cette preuve : le reste de l'`AppState`
-        // vient du montage de test générique, jamais consulté par cette route.
+        // The only field that matters for this proof: the rest of the
+        // `AppState` comes from the generic test rig, never consulted by
+        // this route.
         let app = crate::status::router(crate::status::AppState {
             covers: core.app_covers().clone(),
             ..crate::status::tests_support::app_state()
@@ -991,105 +997,109 @@ mod tests {
         assert_eq!(
             resp.status(),
             StatusCode::OK,
-            "la route doit read dans le meme cache que celui rempli par le coeur"
+            "the route must read from the same cache the core filled"
         );
     }
 
-    /// La cover d'un track déjà remplacé ne doit jamais s'installer sur
-    /// le suivant : la vérification de péremption se fait à l'arrivée, pas au
-    /// lancement — même garde-fou que l'écho d'identité des enrichments.
+    /// The cover of an already-replaced track must never settle onto the
+    /// next one: the staleness check happens on arrival, not at launch —
+    /// same safeguard as the enrichments' identity echo.
     #[tokio::test]
-    async fn une_pochette_perimee_ne_s_installe_pas_sur_le_morceau_suivant() {
+    async fn a_stale_cover_does_not_settle_onto_the_next_track() {
         let (mut core, _np_rx, mut state_rx, tmp) = test_core();
-        let ancienne = tmp.path().join("ancienne.jpg");
-        std::fs::write(&ancienne, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
-        let r_ancienne = ritornello_proto::CoverRef::Path { path: ancienne.to_string_lossy().into_owned() };
-        let cle_ancienne = crate::cover::key(&r_ancienne);
+        let old = tmp.path().join("old.jpg");
+        std::fs::write(&old, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
+        let r_old = ritornello_proto::CoverRef::Path { path: old.to_string_lossy().into_owned() };
+        let key_old = crate::cover::key(&r_old);
 
         core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
-        core.set_source_cover(Some(r_ancienne.clone()), "files");
+        core.set_source_cover(Some(r_old.clone()), "files");
 
-        // Le track change avant que la récupération de l'ancienne cover
-        // n'ait eu le temps d'arriver, et le nouveau déclare sa **propre**
-        // cover (une référence différente) : la cible que `selected_cover`
-        // désigne change avec l'identité, sans jamais redevenir `None` — c'est
-        // le comparaison de clé de `cover_arrived`, pas seulement l'absence
-        // de cible, qui doit rejeter la réponse tardive.
-        let nouvelle = tmp.path().join("nouvelle.jpg");
-        std::fs::write(&nouvelle, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
-        let r_nouvelle = ritornello_proto::CoverRef::Path { path: nouvelle.to_string_lossy().into_owned() };
+        // The track changes before the old cover's retrieval has had time
+        // to arrive, and the new one declares its **own** cover (a
+        // different reference): the target `selected_cover` designates
+        // changes with identity, without ever becoming `None` again — it
+        // is `cover_arrived`'s key comparison, not merely the absence of a
+        // target, that must reject the late reply.
+        let new = tmp.path().join("new.jpg");
+        std::fs::write(&new, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
+        let r_new = ritornello_proto::CoverRef::Path { path: new.to_string_lossy().into_owned() };
         core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/b.flac"})));
-        core.set_source_cover(Some(r_nouvelle), "files");
+        core.set_source_cover(Some(r_new), "files");
         state_rx.borrow_and_update();
 
-        // La réponse tardive de l'ANCIENNE cover arrive quand même.
-        let p = crate::cover::fetch(&r_ancienne).await.expect("l'image de test doit etre lisible");
-        core.app_covers().insert(cle_ancienne.clone(), p).await;
-        core.cover_arrived(cle_ancienne, true).await;
+        // The OLD cover's late reply arrives anyway.
+        let p = crate::cover::fetch(&r_old).await.expect("the test image must be readable");
+        core.app_covers().insert(key_old.clone(), p).await;
+        core.cover_arrived(key_old, true).await;
 
         assert!(
             !state_rx.has_changed().unwrap_or(false),
-            "la cover perimee ne doit rien publier sur le track suivant"
+            "a stale cover must publish nothing about the next track"
         );
         assert_eq!(
             core.player_state().track.cover_href, None,
-            "la cover du track precedent ne doit pas s'installer sur le suivant"
+            "the previous track's cover must not settle onto the next one"
         );
     }
 
-    /// Repro exacte du défaut critique relevé en revue (tâche 5) : le
-    /// marqueur en vol doit se libérer même quand l'arrivée ne publie rien
-    /// (track déjà remplacé), sans quoi revenir plus tard sur le même
-    /// dossier — donc la même clé, un `folder.jpg` est partagé par toutes
-    /// les pistes d'un album — ne relançait plus jamais rien : `start_cover_fetch`
-    /// voyait la clé perpétuellement « en vol » et abandonnait en silence.
+    /// Exact repro of the critical defect found in review (task 5): the
+    /// in-flight marker must be released even when the arrival publishes
+    /// nothing (track already replaced), otherwise coming back later to the
+    /// same folder — hence the same key, a `folder.jpg` is shared by every
+    /// track of an album — would never relaunch anything again:
+    /// `start_cover_fetch` would see the key perpetually "in flight" and
+    /// abandon silently.
     #[tokio::test]
-    async fn le_marqueur_en_vol_se_libere_meme_quand_larrivee_ne_publie_rien() {
+    async fn the_in_flight_marker_is_released_even_when_the_arrival_publishes_nothing() {
         let (mut core, _np_rx, mut state_rx, tmp) = test_core();
         let image = tmp.path().join("folder.jpg");
         std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
         let r = ritornello_proto::CoverRef::Path { path: image.to_string_lossy().into_owned() };
         let key = crate::cover::key(&r);
 
-        // 1. Un track d'album déclare la cover K : `start_cover_fetch` arme
-        // le marqueur. La vraie tâche détachée tourne aussi en tâche de fond,
-        // mais rien ci-dessous n'attend son issue — comme les autres tests de
-        // ce module, celui-ci simule lui-même l'arrivée plutôt que de dormir.
+        // 1. An album track declares cover K: `start_cover_fetch` arms the
+        // marker. The real detached task also runs in the background, but
+        // nothing below waits for its outcome — like the other tests in
+        // this module, this one simulates the arrival itself rather than
+        // sleeping.
         core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
         core.set_source_cover(Some(r.clone()), "files");
         assert_eq!(core.cover_in_flight.as_deref(), Some(key.as_str()));
 
-        // 2. Le track change avant que la réponse n'arrive : plus rien
-        // n'est retenu, mais le marqueur, lui, ne bouge pas tout seul — c'est
-        // `cover_arrived` qui a la charge de le libérer, à l'arrivée.
+        // 2. The track changes before the response arrives: nothing is
+        // retained anymore, but the marker does not move on its own —
+        // `cover_arrived` is responsible for releasing it, on arrival.
         core.set_identity(Some(serde_json::json!({"kind": "stream", "url": "u"})));
         assert_eq!(core.cover_in_flight.as_deref(), Some(key.as_str()));
-        // Le changement d'identité publie déjà de son côté (titre effacé) :
-        // on consomme cette trame pour que l'assertion suivante ne juge que
-        // ce que `cover_arrived` publie, ou non, par elle-même.
+        // The identity change already publishes on its own side (title
+        // cleared): this frame is consumed so the next assertion only
+        // judges what `cover_arrived` publishes, or not, by itself.
         state_rx.borrow_and_update();
 
-        // 3. La réponse arrive quand même, en succès (les bytes sont bien en
-        // main, seulement plus rien à montrer avec). Avant le correctif,
-        // cette méthode retournait ici sans jamais toucher au marqueur.
+        // 3. The response arrives anyway, successfully (the bytes are
+        // indeed in hand, just nothing left to show with them). Before the
+        // fix, this method returned here without ever touching the
+        // marker.
         core.cover_arrived(key.clone(), true).await;
-        assert_eq!(core.cover_in_flight, None, "le marqueur doit se liberer meme sans rien publier");
+        assert_eq!(core.cover_in_flight, None, "the marker must be released even when nothing is published");
         assert!(
             !state_rx.has_changed().unwrap_or(false),
-            "rien n'est retenu : cette arrivee ne doit rien publier"
+            "nothing is retained: this arrival must publish nothing"
         );
 
-        // 4. Le même dossier — donc la même clé — redevient la cible. Sans le
-        // correctif, `start_cover_fetch` restait bloquée à jamais sur cette clé
-        // et cet album n'affichait plus jamais de cover avant redémarrage.
+        // 4. The same folder — hence the same key — becomes the target
+        // again. Without the fix, `start_cover_fetch` stayed stuck forever
+        // on this key and this album never showed a cover again before a
+        // restart.
         core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
         core.set_source_cover(Some(r.clone()), "files");
         assert_eq!(
             core.cover_in_flight.as_deref(),
             Some(key.as_str()),
-            "une nouvelle recuperation doit pouvoir repartir pour la meme key"
+            "a new retrieval must be able to restart for the same key"
         );
-        let p = crate::cover::fetch(&r).await.expect("l'image de test doit etre lisible");
+        let p = crate::cover::fetch(&r).await.expect("the test image must be readable");
         core.app_covers().insert(key.clone(), p).await;
         core.cover_arrived(key.clone(), true).await;
 
@@ -1097,25 +1107,24 @@ mod tests {
         assert_eq!(
             state.track.cover_href.as_deref(),
             Some(&format!("/api/cover/{key}")[..]),
-            "revenir sur la meme key doit a nouveau pouvoir publier une cover"
+            "coming back to the same key must be able to publish a cover again"
         );
     }
 
-    /// Une trame de couverture n'est traitée que si elle vient de la Source
-    /// **active** — même garde que le reste de la trame (identité, statut,
-    /// présélection). Régression relevée en revue : le câblage précédent
-    /// appelait `set_source_cover` en dehors de `handle_source_update`,
-    /// sans repasser par sa garde de tête, si bien qu'une Source inactive
-    /// pouvait faire apparaître sa cover sur le track que plays la
-    /// Source active.
+    /// A cover frame is only processed if it comes from the **active**
+    /// Source — the same guard as the rest of the frame (identity, status,
+    /// preset). Regression found in review: the previous wiring called
+    /// `set_source_cover` outside `handle_source_update`, without going
+    /// back through its head guard, so an inactive Source could make its
+    /// cover appear on the track the active Source is playing.
     #[tokio::test]
-    async fn une_pochette_dune_source_inactive_nest_pas_retenue() {
+    async fn a_cover_from_an_inactive_source_is_not_retained() {
         let (mut core, _np_rx, state_rx, tmp) = test_core();
         let image = tmp.path().join("folder.jpg");
         std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
         let r = ritornello_proto::CoverRef::Path { path: image.to_string_lossy().into_owned() };
 
-        // `cd` n'est pas la source active (`radio` l'est, par défaut).
+        // `cd` is not the active source (`radio` is, by default).
         core.handle_source_update(
             "cd",
             SourceUpdate {
@@ -1130,27 +1139,27 @@ mod tests {
                 cover: Some(r),
             },
         );
-        assert_eq!(core.cover_in_flight, None, "une source inactive ne doit declencher aucune recuperation");
+        assert_eq!(core.cover_in_flight, None, "an inactive source must trigger no retrieval");
         assert!(!state_rx.has_changed().unwrap_or(false));
     }
 
-    /// Le path annoncé par mpv (`Event::Path`) arme une extraction
-    /// **détachée** : `handle_event` rend la main aussitôt, sans que rien ne
-    /// soit encore connu — la suite (`set_cover_tags` → `true`,
-    /// `start_cover_fetch`, `publish_state`) n'a lieu qu'à l'arrivée du résultat
-    /// sur le canal.
+    /// The path announced by mpv (`Event::Path`) arms a **detached**
+    /// extraction: `handle_event` returns immediately, with nothing known
+    /// yet — the follow-up (`set_cover_tags` → `true`, `start_cover_fetch`,
+    /// `publish_state`) only happens once the result arrives on the
+    /// channel.
     ///
-    /// Le vrai canal est vidé ici, plutôt que rejoué à la main comme le fait
-    /// `cover_arrived` ailleurs dans ce fichier : relire les tags une
-    /// seconde fois pour reconstituer le `CoverRef` attendu écrirait en
-    /// concurrence avec la tâche détachée sur le **même** fichier temporaire
-    /// (défaut trouvé à l'usage, voir `test_core_with_extraction`). La
-    /// tâche détachée doit rester l'unique écrivaine.
+    /// The real channel is drained here, rather than replayed by hand as
+    /// `cover_arrived` does elsewhere in this file: re-reading the tags a
+    /// second time to reconstruct the expected `CoverRef` would write
+    /// concurrently with the detached task on the **same** temp file
+    /// (defect found in practice, see `test_core_with_extraction`). The
+    /// detached task must remain the sole writer.
     #[tokio::test]
-    async fn le_chemin_mpv_declenche_lextraction_et_larmement_de_la_recuperation() {
+    async fn the_mpv_path_triggers_extraction_and_arms_the_retrieval() {
         let (mut core, mut state_rx, mut extraction_rx, tmp) = test_core_with_extraction();
         let Some(f) = test_mp3_with_cover(tmp.path()) else {
-            eprintln!("ffmpeg absent : test saute");
+            eprintln!("ffmpeg missing: skipping test");
             return;
         };
         let path = f.to_string_lossy().into_owned();
@@ -1162,48 +1171,48 @@ mod tests {
         assert_eq!(
             core.handle_event(Event::Path(path.clone())).await,
             EventOutcome::Nothing,
-            "un path ne prouve rien de la liveness du stream"
+            "a path proves nothing about the stream's liveness"
         );
 
-        // C'est ICI, et seulement ici, que se vérifie que l'extraction est
-        // réellement détachée (ruling 1 de la revue de cette tâche) — sur un
-        // vrai mp3 à cover embarquée, pas sur un path inexistant qui
-        // échouerait de toute façon aussi vite en synchrone qu'en détaché et
-        // ne prouverait donc rien. `#[tokio::test]` tourne sur un runtime
-        // **mono-fil** (`current_thread`), et le bras `Event::Path` de
-        // `handle_event` ne contains aucun `.await` avant de rendre la main :
-        // si `handle_path` exécutait encore `embedded_cover` en
-        // synchrone (régression qui supprimerait le `tokio::spawn` ou l'appel
-        // à `Health::bounded`), `known().cover` serait déjà vrai à cet instant
-        // précis, dans le même sondage (poll) que l'`.await` ci-dessus — il
-        // n'existe aucun univers d'exécution, rapide ou lent, où une
-        // extraction synchrone laisserait cette assertion passer. Ne pas
-        // affaiblir ni retirer cette line sans la remplacer par une preuve
-        // équivalente.
-        assert!(!core.metadata.known().cover, "l'extraction doit etre detachee, jamais synchrone");
+        // It is HERE, and only here, that the extraction is verified to be
+        // truly detached (ruling 1 of this task's review) — on a real mp3
+        // with an embedded cover, not on a nonexistent path that would
+        // fail just as fast synchronously or detached and would therefore
+        // prove nothing. `#[tokio::test]` runs on a **single-threaded**
+        // runtime (`current_thread`), and `handle_event`'s `Event::Path`
+        // arm contains no `.await` before returning: if `handle_path` were
+        // still running `embedded_cover` synchronously (a regression that
+        // would remove the `tokio::spawn` or the call to
+        // `Health::bounded`), `known().cover` would already be true at
+        // this exact instant, in the same poll as the `.await` above —
+        // there exists no execution universe, fast or slow, in which a
+        // synchronous extraction would let this assertion pass. Do not
+        // weaken or remove this line without replacing it with an
+        // equivalent proof.
+        assert!(!core.metadata.known().cover, "the extraction must be detached, never synchronous");
         assert!(!state_rx.has_changed().unwrap_or(false));
 
-        // Attend le vrai résultat sur le vrai canal — pas d'horloge ici,
-        // c'est un rendez-vous asynchrone réel sur la tâche que `handle_path`
-        // a détachée.
-        let (chemin_recu, r) =
-            extraction_rx.recv().await.expect("le canal d'extraction doit livrer un resultat");
-        assert_eq!(chemin_recu, path);
-        let r = r.expect("l'extraction a du reussir sur ce fichier de test");
-        core.extraction_arrived(chemin_recu, Some(r.clone())).await;
+        // Waits for the real result on the real channel — no clock here,
+        // this is a real async rendezvous on the task `handle_path`
+        // detached.
+        let (received_path, r) =
+            extraction_rx.recv().await.expect("the extraction channel must deliver a result");
+        assert_eq!(received_path, path);
+        let r = r.expect("the extraction must have succeeded on this test file");
+        core.extraction_arrived(received_path, Some(r.clone())).await;
 
         assert!(core.metadata.known().cover);
-        let (retenue, origine) = core.metadata.selected_cover().expect("une cover doit etre retenue");
-        assert_eq!(origine, crate::metadata::ORIGIN_TAGS);
-        assert_eq!(retenue, r);
-        assert!(state_rx.has_changed().unwrap(), "set_cover_tags a renvoye vrai : une trame doit sortir");
+        let (retained, origin) = core.metadata.selected_cover().expect("a cover must be retained");
+        assert_eq!(origin, crate::metadata::ORIGIN_TAGS);
+        assert_eq!(retained, r);
+        assert!(state_rx.has_changed().unwrap(), "set_cover_tags returned true: a frame must come out");
 
-        // Rejoue la fin de la récupération détachée à la main, comme les
-        // autres tests de ce module : la clé armée par `start_cover_fetch` doit
-        // être celle du fichier temporaire écrit par l'extraction.
+        // Replays the end of the detached retrieval by hand, like the
+        // other tests in this module: the key `start_cover_fetch` arms
+        // must be the one for the temp file the extraction wrote.
         let key = crate::cover::key(&r);
         assert_eq!(core.cover_in_flight.as_deref(), Some(key.as_str()));
-        let p = crate::cover::fetch(&r).await.expect("le fichier temporaire doit etre lisible");
+        let p = crate::cover::fetch(&r).await.expect("the temp file must be readable");
         core.app_covers().insert(key.clone(), p).await;
         core.cover_arrived(key.clone(), true).await;
 
@@ -1212,14 +1221,15 @@ mod tests {
         assert_eq!(state.track.cover_origin.as_deref(), Some(crate::metadata::ORIGIN_TAGS));
     }
 
-    /// Le cœur complète, il n'écrase pas : une cover déjà tenue (ici celle
-    /// d'une Source, la plus prioritaire) empêche l'extraction, même quand
-    /// mpv announcement un fichier qui, lui, porte une cover embarquée valide.
+    /// The core completes, it does not overwrite: a cover already held
+    /// (here a Source's, the highest priority) prevents the extraction,
+    /// even when mpv announces a file that itself carries a valid embedded
+    /// cover.
     #[tokio::test]
-    async fn une_pochette_deja_connue_empeche_toute_extraction() {
+    async fn a_cover_already_known_prevents_any_extraction() {
         let (mut core, _np_rx, mut state_rx, tmp) = test_core();
         let Some(f) = test_mp3_with_cover(tmp.path()) else {
-            eprintln!("ffmpeg absent : test saute");
+            eprintln!("ffmpeg missing: skipping test");
             return;
         };
         let folder = tmp.path().join("folder.jpg");
@@ -1235,57 +1245,58 @@ mod tests {
 
         assert!(
             !state_rx.has_changed().unwrap(),
-            "aucune extraction tentee, donc aucune trame supplementaire"
+            "no extraction attempted, hence no extra frame"
         );
-        let (retenue, origine) = core.metadata.selected_cover().unwrap();
-        assert_eq!(origine, "files", "le folder.jpg de la Source garde la preseance");
-        assert_eq!(retenue, r);
+        let (retained, origin) = core.metadata.selected_cover().unwrap();
+        assert_eq!(origin, "files", "the Source's folder.jpg keeps precedence");
+        assert_eq!(retained, r);
     }
 
     #[tokio::test]
-    async fn une_pochette_seule_est_retenue_et_nefface_pas_le_statut() {
-        // **Le défaut que la fusion du chantier des pochettes a produit : chaque
-        // cover de Source perdue en silence.** Une cover arrive
-        // volontairement seule, en notification spontanée, sans identité ni
-        // statut (voir `SourceMessage::cover`) : c'est sa forme normale. Elle
-        // prend donc le retour anticipé — et l'application posée par la fusion
-        // vivait tout en bas de `handle_source_update`, après ce `return`. Elle
-        // n'était jamais atteinte.
+    async fn a_cover_alone_is_retained_and_does_not_clear_the_status() {
+        // **The defect the cover-art project's merge produced: every
+        // Source cover lost silently.** A cover deliberately arrives
+        // alone, as a spontaneous notification, with neither identity nor
+        // status (see `SourceMessage::cover`): that is its normal shape.
+        // It therefore takes the early return — and the application the
+        // merge added lived at the very bottom of `handle_source_update`,
+        // after that `return`. It was never reached.
         //
-        // Ce qui est épinglé ici est donc **l'application sur le path du
-        // retour anticipé**, et non le fait que `cover` figure dans
-        // `porte_un_fait` : ce prédicat est une tautologie, `serve_source`
-        // estampillant `can_eject` sur chaque trame (voir le corps de
-        // `handle_source_update`). La trame passait déjà le garde avant qu'on y
-        // add `cover`.
+        // What is pinned down here is therefore **the application on the
+        // early-return path**, not the fact that `cover` is part of
+        // `carries_a_fact`: that predicate is a tautology, `serve_source`
+        // stamping `can_eject` on every frame (see the body of
+        // `handle_source_update`). The frame already passed the guard
+        // before `cover` was added to it.
         //
-        // La trame est donc construite par `sdk_frame()` et non `bare_update()` :
-        // avec `can_eject: None`, elle décrirait une forme que le SDK ne peut pas
-        // émettre, et l'assertion sur le statut y attesterait un mode de
-        // défaillance qui n'existe pas. Cette assertion reste, en second rang :
-        // elle vaudra si l'estampille devient un jour conditionnelle.
-        let (mut core, _np_rx, _etat_rx, tmp) = test_core();
+        // The frame is therefore built with `sdk_frame()` and not
+        // `bare_update()`: with `can_eject: None`, it would describe a
+        // shape the SDK cannot emit, and the status assertion would attest
+        // a failure mode that does not exist. This assertion stays, as a
+        // second line of defense: it will hold if the stamping ever
+        // becomes conditional.
+        let (mut core, _np_rx, _state_rx, tmp) = test_core();
         let mut permanent = sdk_frame();
-        permanent.status = Some("EN DIRECT".into());
+        permanent.status = Some("LIVE".into());
         core.handle_source_update("radio", permanent);
 
         let image = tmp.path().join("folder.jpg");
         std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
-        let mut pochette_seule = sdk_frame();
-        pochette_seule.cover = Some(ritornello_proto::CoverRef::Path {
+        let mut cover_alone = sdk_frame();
+        cover_alone.cover = Some(ritornello_proto::CoverRef::Path {
             path: image.to_string_lossy().into_owned(),
         });
-        core.handle_source_update("radio", pochette_seule);
+        core.handle_source_update("radio", cover_alone);
 
         assert!(
             core.metadata.selected_cover().is_some(),
-            "la cover doit etre retenue : le retour anticipe est le seul path \
-             par lequel une cover de Source atteint le coeur"
+            "the cover must be retained: the early return is the only path \
+             by which a Source cover reaches the core"
         );
         assert_eq!(
             core.player_state().status.as_deref(),
-            Some("EN DIRECT"),
-            "et le statut memorise doit survivre"
+            Some("LIVE"),
+            "and the remembered status must survive"
         );
     }
 }

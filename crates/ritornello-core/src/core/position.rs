@@ -1,36 +1,36 @@
-//! Position de playback : la progress que mpv rapporte, l'ancre qu'un plugin pose, et ce qui les perime.
+//! Playback position: the progress mpv reports, the anchor a plugin sets, and what makes them stale.
 
 use super::*;
 
 impl<P: Player> Core<P> {
-    /// Relit où on en est, auprès du fournisseur qui a le droit de parler.
+    /// Re-reads where we are, from the provider that has the right to speak.
     ///
-    /// Deux fournisseurs, jamais en concurrence : mpv pour un contenu fini,
-    /// un plugin `metadata` pour un stream. Le `time-pos` d'un stream compte
-    /// depuis le début de la connexion et n'a aucun rapport avec le track —
-    /// il est lu et jeté, jamais publié.
+    /// Two providers, never competing: mpv for finite content, a `metadata`
+    /// plugin for a stream. The `time-pos` of a stream counts from the start
+    /// of the connection and has nothing to do with the track — it is read
+    /// and discarded, never published.
     ///
-    /// Ne publie rien : l'appelant décide (le tick publie, `handle_command`
-    /// publie déjà en sortie).
+    /// Publishes nothing: the caller decides (the tick publishes,
+    /// `handle_command` already publishes on exit).
     pub async fn refresh_position(&mut self) {
         if self.standby || !self.playback {
             self.forget_position();
             return;
         }
         if self.expecting_stream {
-            // Flux : le `time-pos` de mpv compte depuis le début de la
-            // connexion, sans rapport avec le track. La position vient donc
-            // d'un plugin `metadata`, ancrée à sa réception et avancée ici.
+            // Stream: mpv's `time-pos` counts from the start of the
+            // connection, unrelated to the track. The position therefore
+            // comes from a `metadata` plugin, anchored at its reception and
+            // advanced here.
             self.measured_duration_s = None;
-            self.position_s = self.position_anchor.map(|(depart, pose)| {
-                let ecoule = pose.elapsed().as_secs();
-                let brute = depart.saturating_add(u32::try_from(ecoule).unwrap_or(u32::MAX));
-                // Plafonnée par la durée annoncée : un track qui finit avant
-                // que la station ne l'announcement ne doit pas afficher
-                // « 4:31 / 4:14 ».
+            self.position_s = self.position_anchor.map(|(start, set_at)| {
+                let elapsed = set_at.elapsed().as_secs();
+                let raw = start.saturating_add(u32::try_from(elapsed).unwrap_or(u32::MAX));
+                // Capped by the announced duration: a track that ends before
+                // the station announces it must not display "4:31 / 4:14".
                 match self.metadata.duration_s() {
-                    Some(duration) => brute.min(duration),
-                    None => brute,
+                    Some(duration) => raw.min(duration),
+                    None => raw,
                 }
             });
             return;
@@ -41,8 +41,8 @@ impl<P: Player> Core<P> {
                 self.measured_duration_s = p.duration_s.filter(|d| *d > 0.0).map(|s| s as u32);
             }
             Err(e) => {
-                // Une position illisible n'arrête pas la musique : on cesse
-                // simplement d'en annoncer une.
+                // An unreadable position does not stop the music: we simply
+                // stop announcing one.
                 tracing::debug!("playback progress unavailable: {e}");
                 self.position_s = None;
                 self.measured_duration_s = None;
@@ -50,7 +50,7 @@ impl<P: Player> Core<P> {
         }
     }
 
-    /// Plus rien ne plays : plus rien à situer.
+    /// Nothing plays anymore: nothing left to locate.
     pub(super) fn forget_position(&mut self) {
         self.position_s = None;
         self.measured_duration_s = None;
@@ -64,87 +64,87 @@ mod tests {
     use crate::core::test_support::*;
 
     #[tokio::test]
-    async fn la_position_de_mpv_est_publiee_sur_un_contenu_fini() {
-        // La source active de `setup()` est `radio` (`PersistedState::default`) :
-        // `SourceCycle` bascule vers `cd`, qui répond `play("cdda://").finite()` —
-        // un contenu fini.
+    async fn mpv_position_is_published_on_finite_content() {
+        // The active source of `setup()` is `radio` (`PersistedState::default`):
+        // `SourceCycle` switches to `cd`, which answers `play("cdda://").finite()` —
+        // finite content.
         let (mut core, _, _, _, _dir) = setup();
         core.handle_command(Command::SourceCycle).await.unwrap();
         core.set_progress(Some(87.4), Some(254.0));
         core.refresh_position().await;
         let state = core.player_state();
-        assert_eq!(state.position_s, Some(87), "tronquée, jamais arrondie au-dessus");
+        assert_eq!(state.position_s, Some(87), "truncated, never rounded up");
         assert_eq!(state.track.duration_s, Some(254));
-        assert!(state.seekable, "un disque se parcourt");
-        // 87.6 et non 87.4 : au-dessus de la demi-seconde, une troncature et un
-        // arrondi ne donnent plus le même entier, et le test distingue enfin
-        // les deux implémentations.
+        assert!(state.seekable, "a disc can be seeked");
+        // 87.6 rather than 87.4: above the half second, a truncation and a
+        // rounding no longer give the same integer, and the test finally
+        // tells the two implementations apart.
         core.set_progress(Some(87.6), Some(254.0));
         core.refresh_position().await;
         assert_eq!(core.player_state().position_s, Some(87));
     }
 
-    /// Sur un stream, `time-pos` compte depuis le début de la connexion et n'a
-    /// aucun rapport avec le track : il est lu et jeté. Sans cette garde, la
-    /// radio afficherait un compteur d'écoute croissant à la place de la
-    /// position dans le track.
+    /// On a stream, `time-pos` counts from the start of the connection and
+    /// has nothing to do with the track: it is read and discarded. Without
+    /// this guard, the radio would display a growing listening counter in
+    /// place of the position within the track.
     #[tokio::test]
-    async fn la_position_de_mpv_est_ecartee_sur_un_flux() {
+    async fn mpv_position_is_discarded_on_a_stream() {
         let (mut core, _, _, _, _dir) = setup();
-        // La source active est déjà `radio` : `PlayPause` sans rien qui plays
-        // lui redemande d'activer, et la factice répond `play("http://fip")`
-        // sans `finite`.
+        // The active source is already `radio`: `PlayPause` with nothing
+        // playing asks it to activate again, and the fake answers
+        // `play("http://fip")` without `finite`.
         core.handle_command(Command::PlayPause).await.unwrap();
         core.set_progress(Some(1234.0), Some(0.0));
         core.refresh_position().await;
         let state = core.player_state();
         assert_eq!(state.position_s, None);
-        assert!(!state.seekable, "un direct ne se rembobine pas");
+        assert!(!state.seekable, "a live stream cannot be rewound");
     }
 
-    /// Régression : `refresh_position` n'effaçait que `measured_duration_s`
-    /// dans la branche stream, laissant `position_s` figé sur la dernière
-    /// valeur mesurée pour un disque. `playback` repasse à `true` aussitôt
-    /// qu'à `false` lors d'un `SourceCycle` (le cœur réactive la nouvelle
-    /// source dans la foulée), donc le garde-fou `!self.playback` ne se
-    /// déclenche jamais entre les deux et la position du disque survivait,
-    /// affichée indéfiniment sous le stream qui a pris sa place.
+    /// Regression: `refresh_position` only cleared `measured_duration_s` in
+    /// the stream branch, leaving `position_s` frozen on the last value
+    /// measured for a disc. `playback` goes back to `true` as soon as it
+    /// went to `false` during a `SourceCycle` (the core reactivates the new
+    /// source right away), so the `!self.playback` guard never fires
+    /// between the two and the disc position survived, displayed
+    /// indefinitely under the stream that took its place.
     #[tokio::test]
-    async fn une_position_de_disque_ne_survit_pas_au_passage_a_un_flux() {
+    async fn a_disc_position_does_not_survive_the_switch_to_a_stream() {
         let (mut core, _, _, _, _dir) = setup();
-        // Fait jouer le cd, mesure une position.
+        // Plays the cd, measures a position.
         core.handle_command(Command::SourceCycle).await.unwrap();
         core.set_progress(Some(87.0), Some(254.0));
         core.refresh_position().await;
         assert_eq!(core.player_state().position_s, Some(87));
-        // Retour vers la radio : un stream, sans rapport avec la position du disque.
+        // Back to the radio: a stream, unrelated to the disc position.
         core.handle_command(Command::SourceCycle).await.unwrap();
         core.refresh_position().await;
-        assert_eq!(core.player_state().position_s, None, "la position du disque ne doit pas survivre au stream");
+        assert_eq!(core.player_state().position_s, None, "the disc position must not survive the stream");
     }
 
     #[tokio::test]
-    async fn l_arret_oublie_la_position() {
+    async fn stop_forgets_the_position() {
         let (mut core, _, _, _, _dir) = setup();
-        // Bascule vers `cd`, contenu fini : voir le test ci-dessus.
+        // Switch to `cd`, finite content: see the test above.
         core.handle_command(Command::SourceCycle).await.unwrap();
         core.set_progress(Some(87.0), Some(254.0));
         core.refresh_position().await;
         assert_eq!(core.player_state().position_s, Some(87));
         core.handle_command(Command::Stop).await.unwrap();
         let state = core.player_state();
-        assert_eq!(state.position_s, None, "plus rien ne plays, plus rien à situer");
+        assert_eq!(state.position_s, None, "nothing plays anymore, nothing left to locate");
         assert_eq!(state.track.duration_s, None);
         assert!(!state.seekable);
     }
 
-    /// La durée mesurée par mpv l'emporte sur celle qu'un plugin announcement : le
-    /// disque réel prime sur ce qu'une base en line en dit.
+    /// The duration measured by mpv wins over the one a plugin announces:
+    /// the real disc prevails over what an online database says about it.
     #[tokio::test]
-    async fn la_duree_de_mpv_l_emporte_sur_celle_d_un_plugin() {
-        let (mut core, _np_rx, _etat_rx, _dir) = setup_metadata(vec!["musicbrainz".into()]);
-        // Bascule vers `cd`, contenu fini : sans quoi `refresh_position`
-        // écarterait la mesure de mpv comme s'il s'agissait d'un stream.
+    async fn mpv_duration_wins_over_a_plugin_s() {
+        let (mut core, _np_rx, _state_rx, _dir) = setup_metadata(vec!["musicbrainz".into()]);
+        // Switch to `cd`, finite content: otherwise `refresh_position`
+        // would discard mpv's measurement as if it were a stream.
         core.handle_command(Command::SourceCycle).await.unwrap();
         let id = serde_json::json!({"disc": "abc", "track": 2});
         core.handle_source_update("cd", plays(id.clone()));
@@ -162,14 +162,14 @@ mod tests {
         assert_eq!(core.player_state().track.duration_s, Some(545));
     }
 
-    /// Entre deux interrogations du direct — plusieurs dizaines de secondes
-    /// chez Radio France — c'est le cœur qui fait avancer la barre, depuis
-    /// l'ancre posée à la réception.
+    /// Between two polls of the live stream — several tens of seconds at
+    /// Radio France — it is the core that advances the bar, from the anchor
+    /// set at reception.
     #[tokio::test]
-    async fn l_ancre_d_un_enrichissement_avance_toute_seule() {
-        let (mut core, _np_rx, _etat_rx, _dir) = setup_metadata(vec!["radiofrance".into()]);
-        // Un **stream** : c'est le seul contexte où l'ancre parle (sur un
-        // contenu fini, mpv a la parole). `radio` est déjà la source active.
+    async fn an_enrichment_anchor_advances_on_its_own() {
+        let (mut core, _np_rx, _state_rx, _dir) = setup_metadata(vec!["radiofrance".into()]);
+        // A **stream**: the only context where the anchor speaks (on finite
+        // content, mpv has the floor). `radio` is already the active source.
         core.handle_command(Command::PlayPause).await.unwrap();
         let id = serde_json::json!({"url": "http://fip"});
         core.handle_source_update("radio", plays(id.clone()));
@@ -190,12 +190,12 @@ mod tests {
         assert_eq!(core.player_state().position_s, Some(90));
     }
 
-    /// Un track qui finit avant que la station ne l'announcement ne doit pas
-    /// afficher « 4:31 / 4:14 ».
+    /// A track that ends before the station announces it must not display
+    /// "4:31 / 4:14".
     #[tokio::test]
-    async fn la_position_annoncee_est_plafonnee_par_la_duree() {
-        let (mut core, _np_rx, _etat_rx, _dir) = setup_metadata(vec!["radiofrance".into()]);
-        // Flux : `radio` est déjà la source active de ce montage.
+    async fn the_announced_position_is_capped_by_the_duration() {
+        let (mut core, _np_rx, _state_rx, _dir) = setup_metadata(vec!["radiofrance".into()]);
+        // Stream: `radio` is already the active source of this rig.
         core.handle_command(Command::PlayPause).await.unwrap();
         let id = serde_json::json!({"url": "http://fip"});
         core.handle_source_update("radio", plays(id.clone()));
@@ -214,39 +214,39 @@ mod tests {
         assert_eq!(core.player_state().position_s, Some(100));
     }
 
-    /// L'ancre du track précédent ne doit pas continuer d'avancer sous le
-    /// titre du suivant.
+    /// The anchor of the previous track must not keep advancing under the
+    /// title of the next one.
     #[tokio::test]
-    async fn un_changement_d_identite_efface_l_ancre() {
-        let (mut core, _np_rx, _etat_rx, _dir) = setup_metadata(vec!["radiofrance".into()]);
-        // Flux : `radio` est déjà la source active de ce montage.
+    async fn an_identity_change_clears_the_anchor() {
+        let (mut core, _np_rx, _state_rx, _dir) = setup_metadata(vec!["radiofrance".into()]);
+        // Stream: `radio` is already the active source of this rig.
         core.handle_command(Command::PlayPause).await.unwrap();
-        let un = serde_json::json!({"url": "un"});
-        core.handle_source_update("radio", plays(un.clone()));
+        let first = serde_json::json!({"url": "un"});
+        core.handle_source_update("radio", plays(first.clone()));
         core.handle_enrichment(
             "radiofrance",
-            Enrichment { identity: un, title: Some("A".into()), position_s: Some(50), ..Default::default() },
+            Enrichment { identity: first, title: Some("A".into()), position_s: Some(50), ..Default::default() },
         );
         core.refresh_position().await;
         assert_eq!(core.player_state().position_s, Some(50));
         core.handle_source_update("radio", plays(serde_json::json!({"url": "deux"})));
-        // Avant meme le rafraichissement : la position du track precedent
-        // ne doit pas survivre sous le titre du suivant (defaut corrige).
-        assert_eq!(core.player_state().position_s, None, "position perimee sous le titre suivant");
+        // Even before the refresh: the position of the previous track must
+        // not survive under the title of the next one (fixed defect).
+        assert_eq!(core.player_state().position_s, None, "stale position under the next title");
         core.refresh_position().await;
         assert_eq!(core.player_state().position_s, None);
     }
 
-    /// Régression : un plugin retenu en réserve qui répond (titre corrigé,
-    /// cover trouvée plus tard) ne doit pas réancrer la position sur la
-    /// valeur — inchangée — du winner, faute de quoi la barre reculerait
-    /// brutalement de tout ce qu'elle avait avancé depuis la précédente
-    /// announcement du winner.
+    /// Regression: a plugin held in reserve that answers (corrected title,
+    /// cover found later) must not re-anchor the position on the —
+    /// unchanged — value of the winner, otherwise the bar would brutally
+    /// move back by everything it had advanced since the winner's previous
+    /// announcement.
     #[tokio::test]
-    async fn un_plugin_en_reserve_ne_fait_pas_reculer_la_position() {
-        let (mut core, _np_rx, _etat_rx, _dir) =
+    async fn a_plugin_in_reserve_does_not_move_the_position_back() {
+        let (mut core, _np_rx, _state_rx, _dir) =
             setup_metadata(vec!["radiofrance".into(), "ouifm".into()]);
-        // Flux : `radio` est déjà la source active de ce montage.
+        // Stream: `radio` is already the active source of this rig.
         core.handle_command(Command::PlayPause).await.unwrap();
         let id = serde_json::json!({"url": "http://fip"});
         core.handle_source_update("radio", plays(id.clone()));
@@ -262,17 +262,17 @@ mod tests {
         core.advance_anchor_for_test(std::time::Duration::from_secs(30));
         core.refresh_position().await;
         assert_eq!(core.player_state().position_s, Some(117));
-        // `ouifm` répond, mais n'est pas le winner : rien de neuf sur
-        // l'avancement.
+        // `ouifm` answers, but is not the winner: nothing new on the
+        // progress.
         core.handle_enrichment(
             "ouifm",
-            Enrichment { identity: id, title: Some("Autre titre".into()), ..Default::default() },
+            Enrichment { identity: id, title: Some("Other title".into()), ..Default::default() },
         );
         core.refresh_position().await;
         assert_eq!(
             core.player_state().position_s,
             Some(117),
-            "un plugin en reserve ne doit pas faire reculer la position"
+            "a plugin in reserve must not move the position back"
         );
     }
 }

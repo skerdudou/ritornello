@@ -1,15 +1,15 @@
 <!--
-  Logo Deezer : ses barres d'egaliseur, tracé maison — Simple Icons ne
-  distribue plus ce logo (retiré à la demande de la marque), donc step de
-  tracé officiel disponible ici. Meme exception assumee qu'YoutubeIcon.vue
-  et AppleMusicIcon.vue : `fill="#A238FF"` en dur (violet Deezer) plutot
-  que `currentColor` — voir docs/interface.md, § Player card.
-  `viewBox` porte de 15x15 a 24x24 (memes proportions, x1.6) pour partager
-  le meme repere logique que les deux traces Simple Icons voisins.
-  Rempli plutot qu'au trait — des barres de 3 px de large au contour
-  seraient illisibles a cette taille.
-  Taille intrinseque 20 px : la classe du point d'appel (`size-5`) pilote
-  le rendu reel, l'attribut n'est qu'un repli avant la feuille de style.
+  Deezer logo: its equaliser bars, hand-drawn path — Simple Icons no longer
+  distributes this logo (removed at the brand's request), so no official path
+  is available here. Same deliberate exception as YoutubeIcon.vue and
+  AppleMusicIcon.vue: hard-coded `fill="#A238FF"` (Deezer purple) rather than
+  `currentColor` — see docs/interface.md, § Player card.
+  `viewBox` scaled from 15x15 to 24x24 (same proportions, x1.6) to share the
+  same logical frame as the two neighbouring Simple Icons paths.
+  Filled rather than stroked — 3 px wide bars drawn as outlines would be
+  unreadable at this size.
+  Intrinsic size 20 px: the call site's class (`size-5`) drives the real
+  rendering, the attribute is only a fallback before the stylesheet.
 -->
 <template>
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">

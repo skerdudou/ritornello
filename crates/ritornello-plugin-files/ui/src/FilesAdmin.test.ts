@@ -3,15 +3,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import FilesAdmin from './FilesAdmin.vue'
 import { BASE, CATALOG, mountAdmin, server } from './harness'
 
-describe('FilesAdmin, la page', () => {
+describe('FilesAdmin, the page', () => {
   beforeEach(() => vi.unstubAllGlobals())
   afterEach(() => vi.useRealTimers())
 
-  it('sonde pendant le relevé des durées, et l’annonce', async () => {
-    // Les durées arrivent par lots, en tâche de fond : sans ce sondage la
-    // colonne resterait à « — » jusqu'au prochain geste de l'utilisateur. Et le
-    // dire compte — sur un partage lent, une liste qui change sous les yeux sans
-    // explication inquiète.
+  it('probes during the duration survey, and announces it', async () => {
+    // Durations arrive in batches, in the background: without this probe the
+    // column would stay at "—" until the user's next gesture. And saying it
+    // matters — on a slow share, a list that changes before one's eyes without
+    // explanation is worrying.
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const s = server({
       playlist: [{ path: '/m/1.mp3', name: '01' }],
@@ -19,7 +19,7 @@ describe('FilesAdmin, la page', () => {
     })
     const w = mount(FilesAdmin, { props: { catalog: CATALOG, base: BASE } })
     await flushPromises()
-    expect(w.find('[data-durations]').text()).toBe('Lecture des durées (10 sur 40)')
+    expect(w.find('[data-durations]').text()).toBe('Reading lengths (10 of 40)')
     const gets = () => s.spy.mock.calls.filter((c) => (c[1] as RequestInit)?.method !== 'PUT').length
     expect(gets()).toBe(1)
 
@@ -27,7 +27,7 @@ describe('FilesAdmin, la page', () => {
     await flushPromises()
     expect(gets()).toBe(2)
 
-    // Relevé terminé : le sondage s'arrête et l'annonce disparaît.
+    // Survey finished: the probe stops and the announcement disappears.
     s.data.durations = { running: false, done: 40, total: 40 }
     vi.advanceTimersByTime(1000)
     await flushPromises()
@@ -37,28 +37,28 @@ describe('FilesAdmin, la page', () => {
     expect(gets()).toBe(3)
   })
 
-  it('relit l’état quand le player change, pour que la piste surlignée suive', async () => {
-    // Défaut signalé : le surlignage vient d'`index`, que seul `api/data`
-    // porte — et le sondage s'arrête dès qu'aucun travail n'est en cours. La
-    // piste changeant d'elle-même à chaque fin de morceau, le surlignage restait
-    // figé sur celle du début.
+  it('re-reads the state when the player changes, so that the highlighted track follows', async () => {
+    // Reported defect: the highlight comes from `index`, which only `api/data`
+    // carries — and the probe stops as soon as no work is in progress. Since
+    // the track changes by itself at every end of track, the highlight stayed
+    // frozen on the one from the start.
     //
-    // Un flux poussé plutôt qu'un sondage permanent : le cœur annonce déjà
-    // chaque changement. jsdom n'a pas d'`EventSource`, on le simule donc — sans
-    // quoi ce path ne serait éprouvé nulle part.
-    const flux: { onmessage: (() => void) | null } = { onmessage: null }
+    // A pushed stream rather than a permanent probe: the core already announces
+    // every change. jsdom has no `EventSource`, so it is simulated — otherwise
+    // this path would be exercised nowhere.
+    const stream: { onmessage: (() => void) | null } = { onmessage: null }
     vi.stubGlobal(
       'EventSource',
       class {
         onmessage: (() => void) | null = null
         constructor() {
           // eslint-disable-next-line @typescript-eslint/no-this-alias
-          const soi = this
-          Object.defineProperty(flux, 'onmessage', {
+          const self = this
+          Object.defineProperty(stream, 'onmessage', {
             configurable: true,
-            get: () => soi.onmessage,
+            get: () => self.onmessage,
             set: (v) => {
-              soi.onmessage = v
+              self.onmessage = v
             },
           })
         }
@@ -68,20 +68,20 @@ describe('FilesAdmin, la page', () => {
     const s = server({ playlist: [{ path: '/m/1.mp3', name: '01' }], index: 0 })
     mount(FilesAdmin, { props: { catalog: CATALOG, base: BASE } })
     await flushPromises()
-    const avant = s.urls().length
+    const before = s.urls().length
 
     s.data.index = 1
-    flux.onmessage?.()
+    stream.onmessage?.()
     await flushPromises()
-    expect(s.urls().length).toBe(avant + 1)
+    expect(s.urls().length).toBe(before + 1)
   })
 
-  it('adresse toutes ses requêtes sous le préfixe absolu reçu par `base`', async () => {
-    // Régression encodée : un `./api/data` relatif se résout contre l'URL du
-    // navigateur, pas contre le préfixe du plugin. Sur `/plugins/files` (sans
-    // slash final, forme que le routeur du shell accepte aussi) il désignerait
-    // `/plugins/api/data` — que le cœur interprète comme un plugin nommé
-    // « api » : 404, page vide, tous les boutons en échec.
+  it('addresses all its requests under the absolute prefix received through `base`', async () => {
+    // Encoded regression: a relative `./api/data` resolves against the browser
+    // URL, not against the plugin prefix. On `/plugins/files` (without trailing
+    // slash, a form the shell router also accepts) it would designate
+    // `/plugins/api/data` — which the core interprets as a plugin named "api":
+    // 404, empty page, every button failing.
     const { w, s } = await mountAdmin({ saved: [{ name: 'Jazz', where: 'internal' }] })
     await w.find('[data-load-playlist]').trigger('click')
     await flushPromises()
@@ -89,49 +89,50 @@ describe('FilesAdmin, la page', () => {
     for (const u of s.urls()) expect(u).toBe(`${BASE}api/data`)
   })
 
-  it('affiche un refus du server verbatim, sans le reformuler', async () => {
-    // Les refus sont produits par les catalogues i18n du **server** : ils sont
-    // déjà traduits, et leur substituer un message maison ferait perdre le
-    // détail (nom de root, plafond dépassé) qui les rend actionnables.
+  it('displays a server refusal verbatim, without rewording it', async () => {
+    // Refusals are produced by the **server's** i18n catalogs: they are already
+    // translated, and substituting a home-made message for them would lose the
+    // detail (root name, exceeded cap) that makes them actionable.
     const { w, s } = await mountAdmin({ playlist: [{ path: 'a.mp3', name: 'A' }] })
-    s.refus = 'invalid root name "Mon NAS" : lettres minuscules, chiffres et tirets seulement'
+    s.refusal = 'invalid root name "My NAS": lowercase letters, digits and dashes only'
     await w.find('[data-clear]').trigger('click')
     await flushPromises()
-    expect(w.find('[data-message]').text()).toBe(s.refus)
+    expect(w.find('[data-message]').text()).toBe(s.refusal)
   })
 
-  it('affiche la sortie de systemctl telle quelle, sauts de ligne compris', async () => {
-    // L'échec de `{"op":"mount"}` porte la sortie brute de `systemctl` : c'est
-    // elle qui est actionnable. La replier dans un paragraphe la rendrait
-    // illisible, et la reformuler la détruirait — d'où le rendu dans un `pre`.
-    const sortie =
+  it('displays the systemctl output as is, line breaks included', async () => {
+    // The failure of `{"op":"mount"}` carries the raw output of `systemctl`:
+    // that is what is actionable. Folding it into a paragraph would make it
+    // unreadable, and rewording it would destroy it — hence the render in a
+    // `pre`.
+    const output =
       'Job for ritornello-media-mount.service failed.\n' +
       'See "systemctl status ritornello-media-mount.service" and "journalctl -xeu ...".'
-    // Le réessai n'existe que si un montage a déjà échoué : le montage suit
-    // désormais la déclaration, il n'y a plus de bouton « Monter » permanent à
-    // aller search.
+    // The retry only exists if a mount has already failed: the mount now
+    // follows the declaration, there is no permanent "Mount" button to go
+    // looking for anymore.
     const { w, s } = await mountAdmin({
       roots: [{ name: 'nas', kind: 'smb', host: 'h', share: 's', mounted: false }],
-      mount_error: sortie,
+      mount_error: output,
     })
-    s.refus = sortie
+    s.refusal = output
     await w.find('[data-retry-mount]').trigger('click')
     await flushPromises()
     const pre = w.find('[data-message]')
     expect(pre.element.tagName).toBe('PRE')
-    expect(pre.element.textContent).toBe(sortie)
+    expect(pre.element.textContent).toBe(output)
   })
 
-  it('sonde pendant un balayage et cesse dès qu’il se termine', async () => {
-    // Le protocole d'admin ne pousse **rien** : ni canal d'événements ni
-    // websocket derrière le socket d'admin. Sans ce sondage, un `add_dir` —
-    // asynchrone côté plugin — n'afficherait jamais son avancement, et la liste
-    // n'apparaîtrait qu'au prochain reloading manual de la page.
+  it('probes during a scan and stops as soon as it finishes', async () => {
+    // The admin protocol pushes **nothing**: neither an event channel nor a
+    // websocket behind the admin socket. Without this probe, an `add_dir` —
+    // asynchronous on the plugin side — would never display its progress, and
+    // the list would only appear at the next manual reload of the page.
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const s = server({ scan: { running: true, found: 12, dir: 'Albums/Jazz' } })
     const w = mount(FilesAdmin, { props: { catalog: CATALOG, base: BASE } })
     await flushPromises()
-    expect(w.find('[data-scan]').text()).toBe('Balayage de Albums/Jazz — 12 tracks trouvées')
+    expect(w.find('[data-scan]').text()).toBe('Scanning Albums/Jazz — 12 tracks found so far')
     const gets = () => s.spy.mock.calls.filter((c) => (c[1] as RequestInit)?.method !== 'PUT').length
     expect(gets()).toBe(1)
 
@@ -141,8 +142,8 @@ describe('FilesAdmin, la page', () => {
     expect(gets()).toBe(2)
     expect(w.find('[data-scan]').text()).toContain('300')
 
-    // Fin du balayage : le sondage doit s'arrêter de lui-même, sinon la page
-    // martèle le plugin une fois par seconde jusqu'à sa fermeture.
+    // End of the scan: the probe must stop by itself, otherwise the page
+    // hammers the plugin once per second until it is closed.
     s.data.scan = { running: false, found: 300, dir: '' }
     vi.advanceTimersByTime(1000)
     await flushPromises()
@@ -154,12 +155,12 @@ describe('FilesAdmin, la page', () => {
     expect(gets()).toBe(3)
   })
 
-  it('sonde aussi pendant une connexion à un partage', async () => {
-    // Régression trouvée par le journey de bout en bout, et par lui seul : la
-    // connexion SMB est asynchrone côté plugin — un NAS éteint dépasserait le
-    // plafond de 5 s du cœur — mais le sondage ne surveillait que le balayage.
-    // La popin restait donc bloquée sur « Connexion… » indéfiniment, alors que
-    // le plugin avait répondu depuis longtemps : plus personne ne le relisait.
+  it('also probes during a connection to a share', async () => {
+    // Regression found by the end-to-end journey, and by it alone: the SMB
+    // connection is asynchronous on the plugin side — a powered-off NAS would
+    // exceed the core's 5 s cap — but the probe only watched the scan. So the
+    // dialog stayed stuck on "Connecting…" indefinitely, while the plugin had
+    // answered long ago: nobody was reading it back anymore.
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const s = server({ explore: { open: true, kind: 'smb', busy: true, host: 'nas' } })
     mount(FilesAdmin, { props: { catalog: CATALOG, base: BASE } })
@@ -171,7 +172,7 @@ describe('FilesAdmin, la page', () => {
     await flushPromises()
     expect(gets()).toBe(2)
 
-    // Connexion terminée : le sondage s'arrête, comme après un balayage.
+    // Connection finished: the probe stops, as after a scan.
     s.data.explore = { open: true, kind: 'smb', busy: false, host: 'nas', shares: ['music'] }
     vi.advanceTimersByTime(1000)
     await flushPromises()
@@ -181,55 +182,55 @@ describe('FilesAdmin, la page', () => {
     expect(gets()).toBe(3)
   })
 
-  it('montre l’incident du dernier balayage, qui survit à sa fin', async () => {
-    // Régression encodée : `add_dir` rend la main **avant** la fin de la marche
-    // récursive, donc son accusé de réception ne dit rien de son issue. Si la
-    // page n'affichait pas `scan.error`, un ajout parti en échec passerait pour
-    // un ajout qui n'a simplement rien trouvé.
-    const refus = 'this folder holds more than 10000 tracks: narrow it down'
-    const { w } = await mountAdmin({ scan: { running: false, found: 0, dir: '', error: refus } })
-    expect(w.find('[data-scan-error]').element.textContent).toBe(refus)
+  it('shows the incident of the last scan, which survives its end', async () => {
+    // Encoded regression: `add_dir` returns **before** the end of the recursive
+    // walk, so its acknowledgement says nothing about its outcome. If the page
+    // did not display `scan.error`, an addition that failed would pass for an
+    // addition that simply found nothing.
+    const refusal = 'this folder holds more than 10000 tracks: narrow it down'
+    const { w } = await mountAdmin({ scan: { running: false, found: 0, dir: '', error: refusal } })
+    expect(w.find('[data-scan-error]').element.textContent).toBe(refusal)
     expect(w.find('[data-scan]').exists()).toBe(false)
   })
 
-  it('n’émet plus rien après démontage, même en plein balayage', async () => {
-    // Sans `onUnmounted`, la timer survit au composant : le shell change de
-    // page et un `reload()` continue de tourner chaque seconde contre un
-    // composant mort.
+  it('emits nothing more after unmounting, even in the middle of a scan', async () => {
+    // Without `onUnmounted`, the timer survives the component: the shell
+    // changes page and a `reload()` keeps running every second against a dead
+    // component.
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const s = server({ scan: { running: true, found: 1, dir: 'a' } })
     const w = mount(FilesAdmin, { props: { catalog: CATALOG, base: BASE } })
     await flushPromises()
-    const avant = s.spy.mock.calls.length
+    const before = s.spy.mock.calls.length
     w.unmount()
     vi.advanceTimersByTime(5000)
     await flushPromises()
-    expect(s.spy.mock.calls.length).toBe(avant)
+    expect(s.spy.mock.calls.length).toBe(before)
   })
 
-  it('premier chargement en échec : la page est inerte et n’écrit rien', async () => {
-    // Régression encodée, du même order que celle de la page radio : après un
-    // GET en échec, `roots` est vide alors que `media-roots.toml` ne l'est pas.
-    // Un « Enregistrer les racines » enverrait `{op:'save_roots', roots: []}`,
-    // qui écrase le fichier — tous les partages déclarés disparaissent, sans
-    // confirmation ni retour arrière.
+  it('first load failed: the page is inert and writes nothing', async () => {
+    // Encoded regression, of the same order as the radio page's: after a
+    // failed GET, `roots` is empty while `media-roots.toml` is not. A "Save
+    // roots" would send `{op:'save_roots', roots: []}`, which overwrites the
+    // file — every declared share disappears, without confirmation or way
+    // back.
     const spy = vi.fn(async (_url: string, init?: RequestInit) => {
       if (init?.method === 'PUT') return new Response(null, { status: 204 })
-      return new Response('indisponible', { status: 503 })
+      return new Response('unavailable', { status: 503 })
     })
     vi.stubGlobal('fetch', spy)
     const w = mount(FilesAdmin, { props: { catalog: CATALOG, base: BASE } })
     await flushPromises()
-    expect(w.find('[data-message]').text()).toContain('Erreur : ')
-    // Les volets ne sont même pas montés : il n'y a rien de vrai à montrer.
-    expect(w.find('[data-volet-sources]').exists()).toBe(false)
+    expect(w.find('[data-message]').text()).toContain('Error: ')
+    // The panes are not even mounted: there is nothing true to show.
+    expect(w.find('[data-sources-pane]').exists()).toBe(false)
     expect(spy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'PUT')).toBe(false)
   })
 
-  it('l’échec d’un sondage ne rend pas inerte une page déjà chargée', async () => {
-    // La garde ne vise que le premier chargement : plus tard, les données sont
-    // là et ne mentent pas. Geler la page parce qu'un rafraîchissement d'une
-    // seconde a échoué serait une perte de confort sans gain de sûreté.
+  it('the failure of a probe does not make an already loaded page inert', async () => {
+    // The guard only targets the first load: later, the data is there and does
+    // not lie. Freezing the page because a one-second refresh failed would be a
+    // loss of comfort without safety gain.
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const s = server({
       scan: { running: true, found: 1, dir: 'a' },
@@ -237,20 +238,20 @@ describe('FilesAdmin, la page', () => {
     })
     const w = mount(FilesAdmin, { props: { catalog: CATALOG, base: BASE } })
     await flushPromises()
-    s.spy.mockImplementationOnce(async () => new Response('indisponible', { status: 503 }))
+    s.spy.mockImplementationOnce(async () => new Response('unavailable', { status: 503 }))
     vi.advanceTimersByTime(1000)
     await flushPromises()
-    expect(w.find('[data-message]').text()).toContain('Erreur : ')
+    expect(w.find('[data-message]').text()).toContain('Error: ')
     expect((w.find('[data-clear]').element as HTMLButtonElement).disabled).toBe(false)
   })
 
-  it('vol unique : deux opérations lancées coup sur coup n’en émettent qu’une', async () => {
-    // Le SDK sert les requêtes d'admin strictement en série et le cœur
-    // abandonne au bout de 5 s : la seconde, mise en file derrière la première,
-    // dépasserait le plafond et recevrait la phrase traduite du catalogue du
-    // cœur (`plugin_timeout`) pour une action pourtant légitime.
-    let debloquer: () => void = () => {}
-    const inProgress = new Promise<void>((r) => (debloquer = r))
+  it('single flight: two operations launched back to back emit only one', async () => {
+    // The SDK serves admin requests strictly serially and the core gives up
+    // after 5 s: the second, queued behind the first, would exceed the cap and
+    // receive the translated sentence from the core's catalog
+    // (`plugin_timeout`) for a perfectly legitimate action.
+    let release: () => void = () => {}
+    const inProgress = new Promise<void>((r) => (release = r))
     const s = server({ playlist: [{ path: 'a.mp3', name: 'A' }] })
     const w = mount(FilesAdmin, { props: { catalog: CATALOG, base: BASE } })
     await flushPromises()
@@ -260,51 +261,51 @@ describe('FilesAdmin, la page', () => {
     })
     await w.find('[data-clear]').trigger('click')
     await w.find('[data-clear]').trigger('click')
-    expect(s.putsDe('clear')).toHaveLength(1)
-    debloquer()
+    expect(s.putsOf('clear')).toHaveLength(1)
+    release()
     await flushPromises()
-    // L'état est rétabli : une nouvelle opération redevient possible.
+    // The state is restored: a new operation becomes possible again.
     await w.find('[data-clear]').trigger('click')
     await flushPromises()
-    expect(s.putsDe('clear')).toHaveLength(2)
+    expect(s.putsOf('clear')).toHaveLength(2)
   })
 
-  it('présente la liste en cours avant les deux autres volets', async () => {
-    // L'order est celui de l'usage : on regarde ce qui joue, puis on complète.
-    // Déclarer une source est rare, parcourir vient après avoir vu la liste.
+  it('presents the current playlist before the two other panes', async () => {
+    // The order is that of usage: one looks at what is playing, then completes.
+    // Declaring a source is rare, browsing comes after having seen the list.
     const { w } = await mountAdmin({ roots: [{ name: 'nas', kind: 'local', path: '/m' }] })
     const order = w
-      .findAll('[data-volet-liste],[data-volet-parcourir],[data-volet-sources]')
-      .map((s) => Object.keys(s.attributes()).find((a) => a.startsWith('data-volet')))
-    expect(order).toEqual(['data-volet-liste', 'data-volet-parcourir', 'data-volet-sources'])
+      .findAll('[data-playlist-pane],[data-browse-pane],[data-sources-pane]')
+      .map((s) => Object.keys(s.attributes()).find((a) => a.endsWith('-pane')))
+    expect(order).toEqual(['data-playlist-pane', 'data-browse-pane', 'data-sources-pane'])
   })
 
-  it('range les trois volets dans des onglets, la liste ouverte en premier', async () => {
-    // Les trois volets bout à bout faisaient une page qu'il fallait parcourir
-    // longuement pour atteindre la déclaration d'une source, alors qu'on n'y
-    // touche presque jamais.
+  it('arranges the three panes in tabs, the playlist open first', async () => {
+    // The three panes end to end made a page one had to scroll through at
+    // length to reach the declaration of a source, although it is almost never
+    // touched.
     const { w } = await mountAdmin({ roots: [{ name: 'nas', kind: 'local', path: '/m' }] })
-    const onglets = w.findAll('[data-onglet]')
-    expect(onglets.map((o) => o.text())).toEqual(['Liste en cours', 'Parcourir', 'Sources'])
-    expect(onglets[0]!.attributes('data-state')).toBe('active')
-    expect(onglets[1]!.attributes('data-state')).toBe('inactive')
+    const tabs = w.findAll('[data-tab]')
+    expect(tabs.map((o) => o.text())).toEqual(['Current queue', 'Browse', 'Sources'])
+    expect(tabs[0]!.attributes('data-state')).toBe('active')
+    expect(tabs[1]!.attributes('data-state')).toBe('inactive')
   })
 
-  it('change d’onglet sans démonter les autres volets', async () => {
-    // `force-mount` sur les panneaux, et c'est ce que ce test protège : sans
-    // lui, revenir sur Parcourir après un détour par la liste rouvrirait la
-    // root de la source, perdant le dossier où l'on se trouvait — et
-    // relancerait un `browse` à chaque va-et-vient.
+  it('switches tab without unmounting the other panes', async () => {
+    // `force-mount` on the panels, and that is what this test protects: without
+    // it, coming back to Browse after a detour through the playlist would
+    // reopen the root of the source, losing the folder we were in — and would
+    // relaunch a `browse` at every back and forth.
     const { w, s } = await mountAdmin({ roots: [{ name: 'nas', kind: 'local', path: '/m' }] })
-    const browseAvant = s.putsDe('browse').length
-    const parcourir = w.findAll('[data-onglet]')[1]!
-    ;(parcourir.element as HTMLElement).focus()
-    await parcourir.trigger('click')
+    const browseBefore = s.putsOf('browse').length
+    const browseTab = w.findAll('[data-tab]')[1]!
+    ;(browseTab.element as HTMLElement).focus()
+    await browseTab.trigger('click')
     await flushPromises()
-    expect(parcourir.attributes('data-state')).toBe('active')
-    // Le volet Liste est toujours monté, simplement masqué.
-    expect(w.find('[data-volet-liste]').exists()).toBe(true)
-    // Et aucun journey de plus n'a été demandé au changement d'onglet.
-    expect(s.putsDe('browse').length).toBe(browseAvant)
+    expect(browseTab.attributes('data-state')).toBe('active')
+    // The Playlist pane is still mounted, simply hidden.
+    expect(w.find('[data-playlist-pane]').exists()).toBe(true)
+    // And no further browse was requested on tab change.
+    expect(s.putsOf('browse').length).toBe(browseBefore)
   })
 })

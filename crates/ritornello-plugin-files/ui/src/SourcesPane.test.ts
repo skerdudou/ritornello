@@ -26,66 +26,66 @@ const NAS = {
   mounted: true,
 }
 
-describe('volet des sources', () => {
+describe('sources pane', () => {
   beforeEach(() => vi.unstubAllGlobals())
   afterEach(cleanupPopovers)
 
-  it('sans source, invite à en ajouter une plutôt que de laisser un vide', async () => {
+  it('with no source, invites adding one rather than leaving an empty space', async () => {
     const { w } = await mountAdmin()
     expect(w.find('[data-no-sources]').exists()).toBe(true)
     expect(w.findAll('[data-source-row]')).toHaveLength(0)
   })
 
-  it('affiche la cible d’une source et l’état observé de son montage', async () => {
+  it('displays a source target and the observed state of its mount', async () => {
     const { w } = await mountAdmin({ roots: [NAS] })
     expect(w.find('[data-source-target]').text()).toBe('//192.168.1.15/music/Yann Tiersen')
-    expect(w.find('[data-source-mounted]').text()).toBe('monté')
-    expect(w.find('[data-source-kind]').text()).toBe('partage réseau')
+    expect(w.find('[data-source-mounted]').text()).toBe('mounted')
+    expect(w.find('[data-source-kind]').text()).toBe('network share')
   })
 
-  it('ajoute toute une source à la liste en un clic', async () => {
-    // La demande explicite : depuis les sources déclarées, « tout ajouter »
-    // doit être à portée immédiate. Le path vide désigne la source entière.
+  it('adds a whole source to the queue in one click', async () => {
+    // The explicit requirement: from the declared sources, "add all" must
+    // be immediately at hand. The empty path designates the whole source.
     const { w, s } = await mountAdmin({ roots: [USB] })
     await w.find('[data-add-all]').trigger('click')
     await flushPromises()
-    expect(s.putsDe('add_dir')[0]).toEqual({ op: 'add_dir', root: 'usb', path: '' })
+    expect(s.putsOf('add_dir')[0]).toEqual({ op: 'add_dir', root: 'usb', path: '' })
   })
 
-  it('retire une source en la nommant', async () => {
+  it('removes a source by naming it', async () => {
     const { w, s } = await mountAdmin({ roots: [USB] })
     await w.find('[data-remove-source]').trigger('click')
     await flushPromises()
-    expect(s.putsDe('remove_source')[0]).toEqual({ op: 'remove_source', name: 'usb' })
+    expect(s.putsOf('remove_source')[0]).toEqual({ op: 'remove_source', name: 'usb' })
   })
 
-  it('bascule l’inscriptibilité sans repasser par une redéclaration', async () => {
-    // Opération à part, et c'est le point : sans elle, changer d'avis
-    // imposerait de remove puis redéclarer la source, donc de resaisir le mot
-    // de passe que la page ne connaît pas.
+  it('toggles writability without going through a redeclaration', async () => {
+    // A separate operation, and that is the point: without it, changing
+    // one's mind would require removing then redeclaring the source, hence
+    // retyping the password that the page does not know.
     const { w, s } = await mountAdmin({ roots: [NAS] })
-    const cocher = w.find('[data-writable]')
-    await cocher.setValue(true)
+    const checkbox = w.find('[data-writable]')
+    await checkbox.setValue(true)
     await flushPromises()
-    expect(s.putsDe('set_writable')[0]).toEqual({
+    expect(s.putsOf('set_writable')[0]).toEqual({
       op: 'set_writable',
       name: 'musique',
       writable: true,
     })
   })
 
-  it('n’offre l’inscriptibilité que sur un partage', async () => {
-    // Un dossier de l'appareil est inscriptible ou non selon le système de
-    // fichiers ; l'interrupteur ne pilote que les options de montage cifs, il
-    // ne voudrait rien dire ici.
+  it('only offers writability on a share', async () => {
+    // A device folder is writable or not depending on the filesystem; the
+    // switch only drives the cifs mount options, it would mean nothing
+    // here.
     const { w } = await mountAdmin({ roots: [USB] })
     expect(w.find('[data-writable]').exists()).toBe(false)
     expect(w.find('[data-source-mounted]').exists()).toBe(false)
   })
 
-  it('montre un échec de montage et permet de le réessayer', async () => {
-    // Le montage suit la déclaration : sans ce rapport, une source resterait
-    // « non montée » sans que rien ne dise pourquoi.
+  it('shows a mount failure and allows retrying it', async () => {
+    // Mounting follows the declaration: without this report, a source
+    // would stay "not mounted" with nothing saying why.
     const { w, s } = await mountAdmin({
       roots: [{ ...NAS, mounted: false }],
       mount_error: 'Interactive authentication required.',
@@ -93,77 +93,79 @@ describe('volet des sources', () => {
     expect(w.find('[data-mount-error]').text()).toContain('Interactive authentication required.')
     await w.find('[data-retry-mount]').trigger('click')
     await flushPromises()
-    expect(s.putsDe('mount')).toHaveLength(1)
+    expect(s.putsOf('mount')).toHaveLength(1)
   })
 
-  it('ne montre aucun bandeau de montage quand tout va bien', async () => {
+  it('shows no mount banner when everything is fine', async () => {
     const { w } = await mountAdmin({ roots: [NAS] })
     expect(w.find('[data-mount-error]').exists()).toBe(false)
     expect(w.find('[data-retry-mount]').exists()).toBe(false)
     expect(w.find('[data-unresponsive]').exists()).toBe(false)
   })
 
-  it('distingue un montage muet d’un échec de montage', async () => {
-    // Deux pannes différentes, deux messages différents. Un partage qui ne
-    // répond plus **est** monté : le confondre avec un échec de montage
-    // enverrait réessayer un montage qui a réussi. C'est aussi ce bloc qui donne
-    // la cause des états « indéterminé » de la liste.
+  it('tells a silent mount apart from a mount failure', async () => {
+    // Two different failures, two different messages. A share that no
+    // longer responds **is** mounted: confusing it with a mount failure
+    // would send the user retrying a mount that succeeded. This is also the
+    // block that gives the cause of the "unclear" states of the queue.
     const { w } = await mountAdmin({
       roots: [NAS],
       mount_error: null,
       unresponsive: ['/mnt/ritornello/musique'],
     })
-    const bloc = w.find('[data-unresponsive]')
-    expect(bloc.exists()).toBe(true)
-    expect(bloc.text()).toContain('/mnt/ritornello/musique')
-    // Le réessai de montage n'a rien à faire là : la root est montée.
+    const block = w.find('[data-unresponsive]')
+    expect(block.exists()).toBe(true)
+    expect(block.text()).toContain('/mnt/ritornello/musique')
+    // The mount retry has no business being there: the root is mounted.
     expect(w.find('[data-mount-error]').exists()).toBe(false)
   })
 
-  it('offre le réessai sur une source non montée, même sans erreur mémorisée', async () => {
-    // Défaut signalé : au redémarrage de l'application, `mount_error` repart
-    // vide — il décrit la *dernière tentative*, et il n'y en a pas eu. On
-    // retrouvait donc « non monté » sans plus rien pour y remédier. Le réessai
-    // suit l'état **observé** dans /proc/mounts, qui lui survit au redémarrage.
+  it('offers the retry on an unmounted source, even without a remembered error', async () => {
+    // Reported defect: on the application's restart, `mount_error` resets
+    // empty — it describes the *last attempt*, and there was none. So
+    // "not mounted" was found again with nothing left to fix it. The retry
+    // follows the state **observed** in /proc/mounts, which survives a
+    // restart.
     const { w, s } = await mountAdmin({ roots: [{ ...NAS, mounted: false }], mount_error: null })
     expect(w.find('[data-mount-error]').exists()).toBe(false)
     await w.find('[data-retry-mount]').trigger('click')
     await flushPromises()
-    expect(s.putsDe('mount')).toHaveLength(1)
+    expect(s.putsOf('mount')).toHaveLength(1)
   })
 
-  it('n’offre pas de réessai sur un dossier de l’appareil', async () => {
-    // Il n'y a rien à mount : `mount::state` rend toujours « monté » pour une
-    // root locale, et proposer un réessai laisserait croire à un problème.
+  it('offers no retry on a device folder', async () => {
+    // There is nothing to mount: `mount::state` always renders "mounted"
+    // for a local root, and offering a retry would suggest a problem.
     const { w } = await mountAdmin({ roots: [{ ...USB, mounted: false }] })
     expect(w.find('[data-retry-mount]').exists()).toBe(false)
   })
 
-  it('ouvre l’assistant de l’appareil en prévenant le plugin', async () => {
-    // L'ouverture passe par le plugin et pas seulement par un booléen local :
-    // c'est lui qui porte l'état de l'assistant, et une popin qui s'afficherait
-    // sans le prévenir hériterait de celui de la précédente.
+  it('opens the device wizard while notifying the plugin', async () => {
+    // Opening goes through the plugin, not only through a local boolean: it
+    // is the plugin that carries the wizard's state, and a dialog
+    // displaying without notifying it would inherit the previous one's
+    // state.
     const { w, s } = await mountAdmin({ volumes: [{ path: '/media/usb', fstype: 'vfat' }] })
     await w.find('[data-add-device]').trigger('click')
     await flushPromises()
-    expect(s.putsDe('explore_open')[0]).toEqual({ op: 'explore_open', kind: 'local' })
-    // Le contenu de la popin vit dans un portail : `w.find` ne l'y verrait
-    // jamais, quel que soit l'état du composant.
-    expect(inPopover('[data-dlg-appareil]')).not.toBeNull()
+    expect(s.putsOf('explore_open')[0]).toEqual({ op: 'explore_open', kind: 'local' })
+    // The dialog's content lives in a portal: `w.find` would never see it
+    // there, whatever the component's state.
+    expect(inPopover('[data-device-dialog]')).not.toBeNull()
   })
 
-  it('ouvre l’assistant réseau en prévenant le plugin', async () => {
+  it('opens the network wizard while notifying the plugin', async () => {
     const { w, s } = await mountAdmin({ can_browse_smb: true })
     await w.find('[data-add-share]').trigger('click')
     await flushPromises()
-    expect(s.putsDe('explore_open')[0]).toEqual({ op: 'explore_open', kind: 'smb' })
-    expect(inPopover('[data-dlg-partage]')).not.toBeNull()
+    expect(s.putsOf('explore_open')[0]).toEqual({ op: 'explore_open', kind: 'smb' })
+    expect(inPopover('[data-share-dialog]')).not.toBeNull()
   })
 
-  it('les deux popins restent fermées tant qu’on ne les ouvre pas', async () => {
+  it('both dialogs stay closed as long as they are not opened', async () => {
     const { w } = await mountAdmin({ roots: [USB] })
-    expect(w.find('[data-volet-sources]').exists()).toBe(true)
-    expect(inPopover('[data-dlg-appareil]')).toBeNull()
-    expect(inPopover('[data-dlg-partage]')).toBeNull()
+    expect(w.find('[data-sources-pane]').exists()).toBe(true)
+    expect(inPopover('[data-device-dialog]')).toBeNull()
+    expect(inPopover('[data-share-dialog]')).toBeNull()
   })
 })

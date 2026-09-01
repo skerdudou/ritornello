@@ -3,28 +3,28 @@ import { ref } from 'vue'
 import { readBootTheme } from '../boot'
 import type { ThemePayload } from '../types'
 
-// État au niveau du module : le thème est unique pour la page, un singleton
-// est plus simple qu'un `provide`/`inject` traversé par tous les composants.
+// Module-level state: the theme is unique for the page, a singleton is simpler
+// than a `provide`/`inject` threaded through every component.
 const theme = ref(DEFAULT_PRESET)
 const mode = ref<Mode>(DEFAULT_MODE)
 
 /**
- * Appelée par `main.ts` **avant** le montage : le premier rendu est déjà dans
- * les bonnes couleurs (aucun clignotement).
+ * Called by `main.ts` **before** mounting: the first render is already in the
+ * right colours (no flicker).
  */
 export function initTheme(): void {
-  const choix = readBootTheme()
-  theme.value = choix.theme
-  mode.value = choix.mode
-  applyTheme(choix.theme, choix.mode)
+  const choice = readBootTheme()
+  theme.value = choice.theme
+  mode.value = choice.mode
+  applyTheme(choice.theme, choice.mode)
 }
 
 export function useTheme() {
   /**
-   * Applique **d'abord**, persiste ensuite : le réglage est un choix
-   * d'apparence, l'utilisateur doit le voir immédiatement. Si la persistance
-   * échoue, on le signale sans revenir en arrière — annuler silencieusement
-   * donnerait une IHM qui semble ignorer les clics.
+   * Apply **first**, persist afterwards: the setting is an appearance choice,
+   * the user must see it immediately. If persistence fails, we report it
+   * without rolling back — cancelling silently would give a UI that seems to
+   * ignore clicks.
    */
   async function set(next: Partial<ThemePayload>): Promise<void> {
     const t = next.theme ?? theme.value
@@ -45,8 +45,8 @@ export function useTheme() {
 }
 
 /**
- * Filtre par libellé **ou** identifiant, insensible à la casse. Trié par
- * libellé pour que la grille de la popin soit stable et parcourable.
+ * Filter by label **or** identifier, case-insensitive. Sorted by label so
+ * that the grid of the popover is stable and browsable.
  */
 export function filterPresets(query: string): Array<{ id: string; label: string }> {
   const q = query.trim().toLowerCase()

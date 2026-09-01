@@ -1,49 +1,50 @@
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
-/// Ce qu'un disc reconnu learn : l'artist, l'album, et les titres dans
-/// l'order des pistes.
+/// What a recognized disc tells us: the artist, the album, and the titles in
+/// track order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscInfo {
     pub artist: String,
     pub album: String,
     pub tracks: Vec<String>,
-    /// Année de sortie du disc.
+    /// Release year of the disc.
     ///
-    /// Celle de la **première parution de l'album**
-    /// (`release-group.first-release-date`), et non celle du pressage reconnu
-    /// (`release.date`) qui ne sert que de repli : un repressage de 1987
-    /// affichait 1987 pour un disc de 1959, alors que c'est l'année du disc
-    /// qu'un auditeur search.
+    /// The year of the **album's first release**
+    /// (`release-group.first-release-date`), not that of the recognized
+    /// pressing (`release.date`), which only serves as a fallback: a 1987
+    /// repress displayed 1987 for a 1959 disc, whereas it is the disc's year
+    /// a listener is looking for.
     ///
-    /// Mesuré : ce champ vaut tantôt `"1987"`, tantôt `"2017-06-23"`, d'où le
-    /// passage par `valid_year` qui ne retient que la tête numérique.
+    /// Measured: this field is sometimes `"1987"`, sometimes `"2017-06-23"`,
+    /// hence the pass through `valid_year`, which only keeps the numeric head.
     pub year: Option<u16>,
-    /// URL de la cover, **déjà résolue** : celle du pressage reconnu quand
-    /// il announcement une face avant, celle de l'album (`release-group`) sinon.
+    /// Cover URL, **already resolved**: that of the recognized pressing when
+    /// it announces a front cover, that of the album (`release-group`)
+    /// otherwise.
     ///
-    /// Une URL et non un MBID, parce que la réponse porte de quoi choisir
-    /// entre deux niveaux et que ce choix se fait ici, une fois, à l'endroit
-    /// qui voit le `cover-art-archive`. Un MBID obligerait l'appelant à
-    /// redécider — et il n'aurait plus l'information pour le faire.
+    /// A URL and not an MBID, because the response carries what is needed to
+    /// choose between two levels, and that choice is made here, once, at the
+    /// place that sees the `cover-art-archive`. An MBID would force the caller
+    /// to decide again — and it would no longer have the information to do so.
     ///
-    /// `None` veut dire **« ne demande pas d'image »**, pas « disc
-    /// inconnu » : le cas ne reste que si la réponse nie la face avant *et*
-    /// ne porte aucun release-group.
+    /// `None` means **"do not ask for an image"**, not "unknown disc": that
+    /// case only remains if the response denies the front cover *and* carries
+    /// no release-group.
     pub cover_url: Option<String>,
 }
 
-/// Met la TOC brute (`NTRACKS OFF1 … OFFN LEADOUT`, telle que le plugin cd la
-/// place dans l'identité) au format attendu par MusicBrainz :
+/// Puts the raw TOC (`NTRACKS OFF1 … OFFN LEADOUT`, as the cd plugin places
+/// it in the identity) into the format MusicBrainz expects:
 /// `1+NTRACKS+LEADOUT+OFF1+…+OFFN`.
 ///
-/// Cette conversion vit ici, avec le seul code qui connaît MusicBrainz : le
-/// plugin cd décrit un disc, il n'a pas à connaître le format de requête d'un
-/// fournisseur de métadonnées particulier.
+/// This conversion lives here, with the only code that knows MusicBrainz: the
+/// cd plugin describes a disc, it has no business knowing the request format
+/// of one particular metadata provider.
 ///
-/// La validation est refaite intégralement, sans supposer que l'émetteur a bien
-/// travaillé : l'identité arrive d'un autre processus, dans un JSON opaque que
-/// le cœur ne relit pas.
+/// Validation is redone in full, without assuming the emitter did its job:
+/// the identity comes from another process, in an opaque JSON the core does
+/// not re-read.
 pub fn mb_toc_param(raw: &str) -> Result<String> {
     let nums: Vec<u64> = raw
         .split_whitespace()
@@ -62,32 +63,32 @@ pub fn mb_toc_param(raw: &str) -> Result<String> {
     Ok(format!("1+{}+{}+{}", ntracks, leadout, offsets.join("+")))
 }
 
-/// Ce que le bloc `cover-art-archive` d'une release dit de sa face avant.
+/// What the `cover-art-archive` block of a release says about its front cover.
 ///
-/// Trois états et non un booléen : l'absence du bloc (« cette réponse ne dit
-/// rien ») ne doit pas être confondue avec `Absent` (« l'archive affirme
-/// qu'il n'y en a pas »). Confondre les deux ferait taire la cover sur
-/// toute réponse qui ne porterait pas ce bloc, ce qui serait une régression
-/// silencieuse pour un gain nul.
+/// Three states and not a boolean: the absence of the block ("this response
+/// says nothing") must not be confused with `Absent` ("the archive asserts
+/// there is none"). Confusing the two would silence the cover on every
+/// response that does not carry the block, which would be a silent regression
+/// for zero gain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FrontCover {
-    /// L'archive announcement une face avant typée : `/front-500` la sert.
+    /// The archive announces a typed front cover: `/front-500` serves it.
     Present,
-    /// Aucune face avant typée pour ce pressage. Mesuré le 2026-08-26 sur
-    /// `82ebb36b-0a0f-3608-9c7d-743d9003fbf8` : quatre images (un dos, un
-    /// livret, une rondelle, et une sans aucun type) pour un `front: false`,
-    /// et `/front-500` y rend bien 404 — l'endpoint suit le **typage**, pas la
-    /// présence d'images. Le repli est la cover de l'album, jamais une
-    /// image devinée : voir [`caa_group_url`].
+    /// No typed front cover for this pressing. Measured on 2026-08-26 on
+    /// `82ebb36b-0a0f-3608-9c7d-743d9003fbf8`: four images (a back, a
+    /// booklet, a disc face, and one with no type at all) for a `front: false`,
+    /// and `/front-500` does return 404 there — the endpoint follows the
+    /// **typing**, not the presence of images. The fallback is the album's
+    /// cover, never a guessed image: see [`caa_group_url`].
     Absent,
-    /// Le bloc n'est pas dans la réponse : on ne sait pas.
+    /// The block is not in the response: we do not know.
     Unknown,
 }
 
-/// Lit le bloc `cover-art-archive` d'une release.
+/// Reads the `cover-art-archive` block of a release.
 ///
-/// `darkened` vaut `Absent` : l'archive masque alors les images pour reason
-/// légale, et les demander ne rend rien.
+/// `darkened` counts as `Absent`: the archive is then hiding the images for
+/// legal reasons, and asking for them returns nothing.
 fn front_cover(release: &Value) -> FrontCover {
     let Some(caa) = release.get("cover-art-archive").and_then(Value::as_object) else {
         return FrontCover::Unknown;
@@ -95,29 +96,29 @@ fn front_cover(release: &Value) -> FrontCover {
     let Some(front) = caa.get("front").and_then(Value::as_bool) else {
         return FrontCover::Unknown;
     };
-    let assombrie = caa.get("darkened").and_then(Value::as_bool).unwrap_or(false);
-    if front && !assombrie {
+    let darkened = caa.get("darkened").and_then(Value::as_bool).unwrap_or(false);
+    if front && !darkened {
         FrontCover::Present
     } else {
         FrontCover::Absent
     }
 }
 
-/// Préférence entre deux candidates, du meilleur au pire. Plus petit = mieux.
+/// Preference between two candidates, from best to worst. Smaller = better.
 fn rank(face: FrontCover) -> u8 {
     match face {
         FrontCover::Present => 0,
-        // Avant `Absent` : sans le bloc, on ne sait pas, et l'optimisme est
-        // le comportement historique — au pire un 404 que le cœur avale.
+        // Before `Absent`: without the block we do not know, and optimism is
+        // the historical behavior — at worst a 404 the core swallows.
         FrontCover::Unknown => 1,
-        // Départagée en dernier, mais pas perdue pour autant : elle se rabat
-        // sur la cover de l'album (voir `extract`).
+        // Ranked last, but not lost for all that: it falls back on the
+        // album's cover (see `extract`).
         FrontCover::Absent => 2,
     }
 }
 
-/// Extrait artist / album / titres d'une release **dont le nombre de pistes
-/// correspond**. `None` si elle ne correspond pas.
+/// Extracts artist / album / titles from a release **whose track count
+/// matches**. `None` if it does not match.
 fn extract(release: &Value, ntracks: usize) -> Option<DiscInfo> {
     let media = release.get("media").and_then(Value::as_array)?;
     for m in media {
@@ -132,9 +133,9 @@ fn extract(release: &Value, ntracks: usize) -> Option<DiscInfo> {
         if titles.len() != ntracks {
             continue;
         }
-        // Le choix du niveau se fait ici, une seule fois, à l'endroit qui voit
-        // le `cover-art-archive` : ce pressage-ci s'il a une face avant,
-        // l'album sinon.
+        // The level is chosen here, once, at the place that sees the
+        // `cover-art-archive`: this very pressing if it has a front cover,
+        // the album otherwise.
         let cover_url = match front_cover(release) {
             FrontCover::Present | FrontCover::Unknown => {
                 release.get("id").and_then(Value::as_str).map(url_caa)
@@ -151,23 +152,23 @@ fn extract(release: &Value, ntracks: usize) -> Option<DiscInfo> {
                 .to_string(),
             album: release.get("title").and_then(Value::as_str).unwrap_or("?").to_string(),
             tracks: titles,
-            // La première parution de l'**album** d'abord, la date de ce
-            // pressage-ci en repli. Mesuré le 2026-08-27 sur la release
-            // e32a3f0b-1c19-3170-bb1c-650893774744 : `date` = "1987",
-            // `release-group.first-release-date` = "1959-08-17" — un
-            // repressage de 1987 affichait donc 1987 pour un disc de 1959,
-            // et c'est l'année du disc qu'un auditeur search. Le lookup
-            // demande déjà `inc=…+release-groups` (c'est ce même bloc qui sert
-            // à `caa_group_url`), le champ ne coûte donc aucune requête ; il
-            // reste optionnel côté MusicBrainz, d'où le repli.
+            // The **album's** first release first, the date of this very
+            // pressing as fallback. Measured on 2026-08-27 on release
+            // e32a3f0b-1c19-3170-bb1c-650893774744: `date` = "1987",
+            // `release-group.first-release-date` = "1959-08-17" — a 1987
+            // repress therefore displayed 1987 for a 1959 disc, and it is the
+            // disc's year a listener is looking for. The lookup already asks
+            // for `inc=…+release-groups` (the same block that serves
+            // `caa_group_url`), so the field costs no extra request; it
+            // remains optional on the MusicBrainz side, hence the fallback.
             //
-            // Le `and_then(as_str).filter(…)` vient **avant** le repli, et
-            // c'est tout l'intérêt : « présent mais clear » n'est pas « présent
-            // et lisible ». Un `first-release-date` à `""` (ou à `null`)
-            // passait le `or_else` puisque la clé existait, puis échouait sur
-            // `valid_year` — et l'année du pressage était perdue alors
-            // qu'elle était là, juste à côté. Un champ illisible doit ramener
-            // au même cas que le champ absent.
+            // The `and_then(as_str).filter(…)` comes **before** the fallback,
+            // and that is the whole point: "present but empty" is not
+            // "present and readable". A `first-release-date` of `""` (or
+            // `null`) passed the `or_else` since the key existed, then failed
+            // on `valid_year` — and the pressing's year was lost even though
+            // it was right there, next to it. An unreadable field must lead
+            // back to the same case as an absent field.
             year: release
                 .pointer("/release-group/first-release-date")
                 .and_then(Value::as_str)
@@ -180,58 +181,56 @@ fn extract(release: &Value, ntracks: usize) -> Option<DiscInfo> {
     None
 }
 
-/// Cherche dans les releases un media dont le nombre de pistes correspond au
-/// disc inséré, et en extrait artist / album / titres.
+/// Searches the releases for a medium whose track count matches the inserted
+/// disc, and extracts artist / album / titles from it.
 ///
-/// **Le nombre de pistes reste le seul filtre** ; entre les candidates qui le
-/// passent, la présence d'une face avant départage. Mesuré le 2026-08-26 sur
-/// le lookup que ce module construit : 25 releases rendues, 10 avec une face
-/// avant, et la **première** — celle que retenait la version précédente — n'en
-/// avait aucune. Le disc partait donc sans image alors qu'une candidate
-/// recevable en portait une.
+/// **The track count remains the only filter**; among the candidates that
+/// pass it, the presence of a front cover breaks the tie. Measured on
+/// 2026-08-26 on the lookup this module builds: 25 releases returned, 10 with
+/// a front cover, and the **first** one — the one the previous version kept —
+/// had none. The disc therefore left without an image while an acceptable
+/// candidate carried one.
 ///
-/// Le texte vient toujours de la release retenue. L'image aussi, **sauf** si
-/// cette release n'a pas de face avant : elle vient alors de l'album, donc
-/// possiblement d'un autre pressage (voir [`caa_group_url`]). Le compromis est
-/// assumé dans ce sens-là seulement — la bonne cover d'une autre édition
-/// vaut mieux que pas de cover, alors que l'inverse (des titres empruntés à
-/// un autre pressage) afficherait des faux.
+/// The text always comes from the chosen release. So does the image,
+/// **unless** that release has no front cover: it then comes from the album,
+/// hence possibly from another pressing (see [`caa_group_url`]). The
+/// compromise is accepted in that direction only — the right cover from
+/// another edition beats no cover, whereas the reverse (titles borrowed from
+/// another pressing) would display falsehoods.
 pub fn parse_lookup(json: &str, ntracks: usize) -> Option<DiscInfo> {
     let v: Value = serde_json::from_str(json).ok()?;
     let releases = v.get("releases")?.as_array()?;
-    let mut meilleure: Option<(u8, DiscInfo)> = None;
+    let mut best: Option<(u8, DiscInfo)> = None;
     for release in releases {
         let Some(info) = extract(release, ntracks) else { continue };
         let r = rank(front_cover(release));
         if r == 0 {
             return Some(info);
         }
-        if meilleure.as_ref().is_none_or(|(vu, _)| r < *vu) {
-            meilleure = Some((r, info));
+        if best.as_ref().is_none_or(|(seen, _)| r < *seen) {
+            best = Some((r, info));
         }
     }
-    meilleure.map(|(_, info)| info)
+    best.map(|(_, info)| info)
 }
 
-/// Intervalle minimal entre deux requêtes vers MusicBrainz.
+/// Minimum interval between two requests to MusicBrainz.
 ///
-/// Le service demande une requête par seconde et par client, et ne l'apply
-/// pas mollement. 1100 ms plutôt que 1000 pour ne pas jouer sur la bounded : la
-/// marge coûte cent millisecondes sur des tâches détachées que personne
-/// n'wait.
+/// The service asks for one request per second per client, and does not
+/// enforce it softly. 1100 ms rather than 1000 so as not to play on the edge:
+/// the margin costs a hundred milliseconds on detached tasks nobody waits for.
 pub const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1100);
 
-/// Sérialise les requêtes et espace la suivante d'`MIN_INTERVAL`.
+/// Serializes requests and spaces the next one by `MIN_INTERVAL`.
 ///
-/// Le verrou est **tenu pendant l'attente**, et c'est le mécanisme même : deux
-/// tâches détachées parties en même temps se retrouvent en file au lieu de
-/// mitrailler. Sans lui, le sondage de quatre candidates émettait quatre
-/// requêtes dans la même milliseconde, ce que MusicBrainz refuse par des 503 —
-/// donc un sondage qui échouait pour une reason qui n'a rien à voir avec le
-/// découpage.
+/// The lock is **held during the wait**, and that is the very mechanism: two
+/// detached tasks started at the same time end up queued instead of
+/// machine-gunning. Without it, probing four candidates emitted four requests
+/// in the same millisecond, which MusicBrainz refuses with 503s — so a probe
+/// that failed for a reason that had nothing to do with the split.
 ///
-/// Une structure plutôt qu'un statique nu : c'est ce qui permet à un test
-/// d'avoir sa propre instance. Le statique est la couche d'à côté.
+/// A struct rather than a bare static: this is what lets a test have its own
+/// instance. The static is the layer next door.
 pub struct Throttler(tokio::sync::Mutex<Option<tokio::time::Instant>>);
 
 impl Throttler {
@@ -240,96 +239,95 @@ impl Throttler {
     }
 
     pub async fn wait(&self) {
-        let mut garde = self.0.lock().await;
-        if let Some(precedente) = *garde {
-            let ecoule = precedente.elapsed();
-            if ecoule < MIN_INTERVAL {
-                tokio::time::sleep(MIN_INTERVAL - ecoule).await;
+        let mut guard = self.0.lock().await;
+        if let Some(previous) = *guard {
+            let elapsed = previous.elapsed();
+            if elapsed < MIN_INTERVAL {
+                tokio::time::sleep(MIN_INTERVAL - elapsed).await;
             }
         }
-        *garde = Some(tokio::time::Instant::now());
+        *guard = Some(tokio::time::Instant::now());
     }
 }
 
-/// L'étrangleur du processus. Tous les chemins du greffon passent par lui —
-/// disc, release, enregistrement — parce que le débit est compté par client
-/// et non par fonctionnalité.
+/// The process's throttler. Every path of the plugin goes through it — disc,
+/// release, recording — because the rate is counted per client, not per
+/// feature.
 fn throttler() -> &'static Throttler {
     static E: std::sync::OnceLock<Throttler> = std::sync::OnceLock::new();
     E.get_or_init(Throttler::new)
 }
 
-/// Requête GET commune aux deux endpoints MusicBrainz utilisés ici (lookup par
-/// TOC, recherche par artist/album). `Ok(None)` = hors line ou réponse en
-/// échec : les deux appelants traitent ça comme un silence, jamais une erreur
-/// à faire remonter.
-/// Nombre total de tentatives pour une requête.
+/// GET request common to the two MusicBrainz endpoints used here (lookup by
+/// TOC, search by artist/album). `Ok(None)` = offline or failed response: both
+/// callers treat that as silence, never as an error to propagate.
+/// Total number of attempts for one request.
 ///
-/// Trois, décidé avec le propriétaire. MusicBrainz rend des 503 sous sa propre
-/// load même quand on respecte sa cadence — mesuré huit fois en une séance de
-/// travail le 2026-08-27. Une tentative unique transformait chacun de ces
-/// hoquets en « cet album n'a pas de cover », mémorisé jusqu'au redémarrage
-/// du greffon.
+/// Three, decided with the owner. MusicBrainz returns 503s under its own load
+/// even when its cadence is respected — measured eight times in one working
+/// session on 2026-08-27. A single attempt turned each of those hiccups into
+/// "this album has no cover", remembered until the plugin restarted.
 const ATTEMPTS: u32 = 3;
 
-/// Attente avant la deuxième tentative, doublée avant la troisième.
+/// Wait before the second attempt, doubled before the third.
 ///
-/// Même pattern que le recul progressif des plugins Radio France et OUI FM.
-/// Borné à trois essais parce qu'un appareil qui tourne des mois sans
-/// surveillance ne doit pas insister indéfiniment chez un tiers : au-delà, la
-/// prochaine trame relancera de toute façon la recherche, l'échec n'étant plus
-/// mémorisé.
+/// Same pattern as the progressive backoff of the Radio France and OUI FM
+/// plugins. Bounded to three tries because a device that runs for months
+/// unattended must not insist indefinitely on a third party: beyond that, the
+/// next frame will relaunch the search anyway, the failure no longer being
+/// remembered.
 const BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Plafond appliqué à un `Retry-After` reçu du service.
+/// Cap applied to a `Retry-After` received from the service.
 ///
-/// Le service peut demander une attente arbitrairement longue ; la tenir
-/// bloquerait une tâche pour rien, alors que la reprise différée du greffon
-/// (voir `COVER_RETRIES_S` côté `main.rs`) couvre déjà les pannes longues.
-/// Dix secondes bornent l'attente sans trahir l'intention du service.
+/// The service may ask for an arbitrarily long wait; honoring it would block
+/// a task for nothing, whereas the plugin's deferred retry (see
+/// `COVER_RETRIES_S` on the `main.rs` side) already covers long outages. Ten
+/// seconds bound the wait without betraying the service's intent.
 const RETRY_AFTER_MAX: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// L'attente que le service demande explicitement, telle qu'un en-tête
-/// `Retry-After` la porte.
+/// The wait the service explicitly asks for, as carried by a `Retry-After`
+/// header.
 ///
-/// **MusicBrainz envoie `Retry-After` sur ses 503**, et l'ignorer était une
-/// impolitesse doublée d'une inefficacité : notre recul fixe (2 s puis 4 s) peut
-/// retomber en plein dans la fenêtre où il refuse encore. Seule la forme en
-/// secondes est lue — la forme date HTTP existe dans la norme mais aucun service
-/// utilisé ici ne l'emploie, et la deviner mal vaudrait moins que l'ignorer.
+/// **MusicBrainz sends `Retry-After` on its 503s**, and ignoring it was
+/// rudeness compounded by inefficiency: our fixed backoff (2 s then 4 s) can
+/// land right inside the window where it still refuses. Only the
+/// seconds form is read — the HTTP-date form exists in the standard but no
+/// service used here employs it, and guessing it wrong would be worth less
+/// than ignoring it.
 ///
-/// Prend la **valeur brute** et non la réponse : la règle est alors une
-/// fonction pure, qui s'éprouve sans monter de serveur ni fabriquer une
-/// `reqwest::Response` — donc sans dépendance de test de plus.
+/// Takes the **raw value** and not the response: the rule is then a pure
+/// function, testable without standing up a server or fabricating a
+/// `reqwest::Response` — hence without one more test dependency.
 fn requested_wait(raw: Option<&str>) -> Option<std::time::Duration> {
-    let secondes: u64 = raw?.trim().parse().ok()?;
-    Some(std::time::Duration::from_secs(secondes).min(RETRY_AFTER_MAX))
+    let seconds: u64 = raw?.trim().parse().ok()?;
+    Some(std::time::Duration::from_secs(seconds).min(RETRY_AFTER_MAX))
 }
 
-/// Ce qu'une tentative ratée demande d'attendre avant la suivante, en plus de
-/// son message.
+/// What a failed attempt asks to wait before the next one, in addition to its
+/// message.
 struct Failure {
     reason: anyhow::Error,
-    /// L'attente demandée par le service, si elle l'a été.
+    /// The wait requested by the service, if it requested one.
     requested: Option<std::time::Duration>,
 }
 
-/// Une tentative : la requête, son statut, son corps.
+/// One attempt: the request, its status, its body.
 async fn attempt(client: &reqwest::Client, url: &str) -> Result<String, Failure> {
     let resp = client
         .get(url)
         .send()
         .await
         .map_err(|e| Failure { reason: anyhow::Error::new(e).context("unreachable"), requested: None })?;
-    let statut = resp.status();
-    if !statut.is_success() {
-        // **Le statut est nommé.** Sans cette line un 503 ne laissait aucune
-        // trace : ni dans `/api/logs`, ni ailleurs. C'est ce silence qui a
-        // rendition la panne indiagnostiquable après coup.
+    let status = resp.status();
+    if !status.is_success() {
+        // **The status is named.** Without this line a 503 left no trace:
+        // neither in `/api/logs` nor anywhere else. That silence is what made
+        // the outage undiagnosable after the fact.
         let requested = requested_wait(
             resp.headers().get(reqwest::header::RETRY_AFTER).and_then(|v| v.to_str().ok()),
         );
-        return Err(Failure { reason: anyhow::anyhow!("HTTP {statut}"), requested });
+        return Err(Failure { reason: anyhow::anyhow!("HTTP {status}"), requested });
     }
     resp.text()
         .await
@@ -339,16 +337,16 @@ async fn attempt(client: &reqwest::Client, url: &str) -> Result<String, Failure>
         })
 }
 
-/// Requête GET commune aux points d'entrée MusicBrainz utilisés ici, avec un
-/// nombre borné de tentatives.
+/// GET request common to the MusicBrainz entry points used here, with a
+/// bounded number of attempts.
 ///
-/// **`Err` veut dire « pas de réponse », jamais « rien trouvé ».** La
-/// distinction est le cœur de ce module : une version antérieure rendait
-/// `Ok(None)` dans les deux cas, et l'appelant, ne pouvant les séparer,
-/// mémorisait une panne passagère comme une absence définitive.
+/// **`Err` means "no response", never "nothing found".** The distinction is
+/// the heart of this module: an earlier version returned `Ok(None)` in both
+/// cases, and the caller, unable to tell them apart, remembered a transient
+/// outage as a definitive absence.
 async fn request_text(url: &str) -> Result<String> {
-    // Version tirée du Cargo.toml, comme l'annuaire du plugin radio : un
-    // user-agent figé mentirait à la première montée de version.
+    // Version pulled from Cargo.toml, like the radio plugin's directory: a
+    // frozen user-agent would lie at the first version bump.
     let client = reqwest::Client::builder()
         .user_agent(concat!(
             "ritornello/",
@@ -357,106 +355,106 @@ async fn request_text(url: &str) -> Result<String> {
         ))
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
-    let mut recul = BACKOFF_BASE;
-    let mut derniere = None;
-    for tentative in 1..=ATTEMPTS {
-        // Dans la boucle : une nouvelle tentative est une nouvelle requête, et
-        // doit donc être espacée comme les autres. L'étrangleur reste le seul
-        // garant de la cadence promise au service.
+    let mut backoff = BACKOFF_BASE;
+    let mut last = None;
+    for attempt_no in 1..=ATTEMPTS {
+        // Inside the loop: a new attempt is a new request, and must therefore
+        // be spaced like the others. The throttler remains the sole guarantor
+        // of the cadence promised to the service.
         throttler().wait().await;
         match attempt(&client, url).await {
-            Ok(corps) => {
-                if tentative > 1 {
-                    tracing::info!("MusicBrainz answered on attempt {tentative}");
+            Ok(body) => {
+                if attempt_no > 1 {
+                    tracing::info!("MusicBrainz answered on attempt {attempt_no}");
                 }
-                return Ok(corps);
+                return Ok(body);
             }
-            Err(echec) => {
+            Err(failure) => {
                 tracing::info!(
-                    "MusicBrainz attempt {tentative}/{ATTEMPTS}: {}",
-                    echec.reason
+                    "MusicBrainz attempt {attempt_no}/{ATTEMPTS}: {}",
+                    failure.reason
                 );
-                if tentative < ATTEMPTS {
-                    // **L'attente demandée l'emporte sur la nôtre quand elle
-                    // est plus longue.** Reculer moins que ce que le service
-                    // réclame le fait refuser à nouveau : c'est une requête
-                    // perdue pour nous et une load inutile pour lui. Plus
-                    // courte, elle ne dispense pas de notre propre recul
-                    // progressif.
+                if attempt_no < ATTEMPTS {
+                    // **The requested wait wins over ours when it is longer.**
+                    // Backing off less than the service demands makes it
+                    // refuse again: a request lost for us and useless load for
+                    // it. When shorter, it does not exempt us from our own
+                    // progressive backoff.
                     //
-                    // Le recul vit **dans ce bras** et non après le `match` :
-                    // le succès rend la main plus haut, donc il n'y a jamais
-                    // d'attente à faire sur ce path-là.
-                    let attente = echec.requested.map_or(recul, |d| d.max(recul));
-                    tokio::time::sleep(attente).await;
-                    recul *= 2;
+                    // The backoff lives **in this arm** and not after the
+                    // `match`: success returns higher up, so there is never a
+                    // wait to perform on that path.
+                    let delay = failure.requested.map_or(backoff, |d| d.max(backoff));
+                    tokio::time::sleep(delay).await;
+                    backoff *= 2;
                 }
-                derniere = Some(echec.reason);
+                last = Some(failure.reason);
             }
         }
     }
-    Err(derniere.expect("la boucle tourne au moins une fois, donc une erreur a ete retenue"))
+    Err(last.expect("the loop runs at least once, so an error was retained"))
 }
 
-/// Lookup TOC « fuzzy » MusicBrainz. `Ok(None)` = pas trouvé ou hors line :
-/// le plugin se tait alors, et l'affichage garde ce que la Source montrait.
+/// MusicBrainz "fuzzy" TOC lookup. `Ok(None)` = not found or offline: the
+/// plugin then stays silent, and the display keeps what the Source showed.
 pub async fn lookup(toc: &str, ntracks: usize) -> Result<Option<DiscInfo>> {
     let body = request_text(&url_lookup(toc)).await?;
     Ok(parse_lookup(&body, ntracks))
 }
 
-/// URL du lookup par TOC. Fonction à part, et testée : les `inc` décident de
-/// ce que la réponse portera, donc de ce que l'analyse pourra en tirer, et un
-/// `inc` perdu se traduirait par une perte de fonction silencieuse.
+/// URL of the lookup by TOC. A separate function, and tested: the `inc`s
+/// decide what the response will carry, hence what the parsing will be able
+/// to draw from it, and a lost `inc` would translate into a silent loss of
+/// function.
 ///
-/// `release-groups` sert au repli de cover quand la release n'a pas de face
-/// avant typée (voir [`parse_lookup`]). Mesuré le 2026-08-26 : il est rendition sur
-/// les 25 releases de la réponse sans aller-retour de plus — c'est ce qui rend
-/// ce repli gratuit côté MusicBrainz.
+/// `release-groups` serves the cover fallback when the release has no typed
+/// front cover (see [`parse_lookup`]). Measured on 2026-08-26: it is returned
+/// on the 25 releases of the response with no extra round trip — this is what
+/// makes the fallback free on the MusicBrainz side.
 ///
-/// La TOC n'est pas échappée : elle est validée chiffre par chiffre en amont
-/// (`mb_toc_param`), donc ne contains que des nombres et des `+`.
+/// The TOC is not escaped: it is validated digit by digit upstream
+/// (`mb_toc_param`), so it only contains numbers and `+`.
 fn url_lookup(toc: &str) -> String {
     format!(
         "https://musicbrainz.org/ws/2/discid/-?toc={toc}&fmt=json&inc=recordings+artist-credits+release-groups"
     )
 }
 
-/// URL de la face avant d'une release.
+/// URL of a release's front cover.
 ///
-/// `front-500` et non `front` : mesure du 2026-08-24, 75 249 bytes contre
-/// 2 670 705 pour l'original — le cœur plafonne son téléchargement à 2 Mio, un
-/// `front` nu serait donc refusé en silence. Un 404 est le cas courant —
-/// beaucoup de releases n'ont pas d'image — et le cœur le traite en silence.
+/// `front-500` and not `front`: measured on 2026-08-24, 75,249 bytes versus
+/// 2,670,705 for the original — the core caps its download at 2 MiB, so a
+/// bare `front` would be refused silently. A 404 is the common case — many
+/// releases have no image — and the core handles it silently.
 pub fn url_caa(mbid: &str) -> String {
     format!("https://coverartarchive.org/release/{mbid}/front-500")
 }
 
-/// URL de la face avant d'un **release-group** : la cover de l'album, prise
-/// sur l'un de ses pressages.
+/// URL of the front cover of a **release-group**: the album's cover, taken
+/// from one of its pressings.
 ///
-/// C'est le repli quand le pressage reconnu n'a pas de face avant typée. Deux
-/// projets de référence font exactement cela, et ce n'est pas une coïncidence :
-/// Picard — le tagueur de l'équipe MusicBrainz — en fait une option depuis sa
-/// 1.3, et `beets` interroge les deux niveaux en marquant le second comme
-/// repli. Aucun des deux ne devine sur une image non typée.
+/// This is the fallback when the recognized pressing has no typed front
+/// cover. Two reference projects do exactly this, and it is no coincidence:
+/// Picard — the MusicBrainz team's tagger — has offered it as an option since
+/// its 1.3, and `beets` queries both levels, marking the second as a fallback.
+/// Neither of them guesses from an untyped image.
 ///
-/// Mesuré le 2026-08-26 : sur le pressage 1997 de *Kind of Blue*, dont la
-/// réponse announcement `front: false`, cette URL rend 200 et un JPEG de 50 220
-/// bytes — une vraie face avant, là où l'URL de la release rend 404.
+/// Measured on 2026-08-26: on the 1997 pressing of *Kind of Blue*, whose
+/// response announces `front: false`, this URL returns 200 and a JPEG of
+/// 50,220 bytes — a real front cover, where the release URL returns 404.
 ///
-/// L'image peut venir d'un **autre pressage** que celui reconnu. C'est assumé :
-/// pour un appareil d'écoute, c'est la cover de l'album, et mieux vaut la
-/// bonne cover d'une autre édition que pas de cover du tout.
+/// The image may come from **another pressing** than the recognized one. This
+/// is accepted: for a listening device, it is the album's cover, and the right
+/// cover from another edition beats no cover at all.
 pub fn caa_group_url(rgid: &str) -> String {
     format!("https://coverartarchive.org/release-group/{rgid}/front-500")
 }
 
-/// Échappe une valeur pour la **phrase Lucene** qui l'accueille.
+/// Escapes a value for the **Lucene phrase** that hosts it.
 ///
-/// Dans une phrase entre guillemets, seuls le guillemet et l'antislash sont
-/// significatifs pour l'analyseur : un guillemet non échappé referme la phrase
-/// et ce qui suit devient de la syntaxe.
+/// Inside a quoted phrase, only the double quote and the backslash are
+/// significant to the analyzer: an unescaped quote closes the phrase and what
+/// follows becomes syntax.
 fn escape_lucene(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -468,12 +466,11 @@ fn escape_lucene(s: &str) -> String {
     out
 }
 
-/// Pourcent-encode une valeur : tout ce qui n'est pas « non réservé » au sens
-/// de la RFC 3986 y passe.
+/// Percent-encodes a value: everything that is not "unreserved" in the sense
+/// of RFC 3986 goes through it.
 ///
-/// Octet par octet et non caractère par caractère : c'est la forme d'un
-/// pourcent-encodage correct pour de l'UTF-8, et les titres d'album en sont
-/// pleins.
+/// Byte by byte and not character by character: that is the form of a correct
+/// percent-encoding for UTF-8, and album titles are full of it.
 fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for o in s.as_bytes() {
@@ -486,53 +483,51 @@ fn percent_encode(s: &str) -> String {
     out
 }
 
-/// Requête de recherche d'une release par artist et album.
+/// Search request for a release by artist and album.
 ///
-/// Les deux valeurs viennent d'**étiquettes de fichier arbitraires**, donc
-/// d'une entrée qu'on ne choisit pas : elles sont échappées pour les deux
-/// langages superposés qu'elles traversent, Lucene à l'intérieur des
-/// guillemets puis l'URL par-dessus. Une version antérieure ne traitait que
-/// l'espace et le guillemet, au pattern que le reste n'apparaît pas dans des
-/// métadonnées musicales — c'est faux, et l'échec était silencieux : un album
-/// contenant `#` tronquait la requête au fragment, un `&` y injectait un
-/// paramètre. L'hôte, lui, ne peut pas changer (il est en dur ci-dessous),
-/// donc le pire cas reste une recherche fausse ou clear, jamais une requête
-/// ailleurs.
+/// Both values come from **arbitrary file tags**, hence from input we do not
+/// choose: they are escaped for the two stacked languages they cross, Lucene
+/// inside the quotes then the URL on top. An earlier version only handled the
+/// space and the double quote, on the grounds that the rest does not appear in
+/// music metadata — that is false, and the failure was silent: an album
+/// containing `#` truncated the request at the fragment, an `&` injected a
+/// parameter into it. The host, for its part, cannot change (it is hard-coded
+/// below), so the worst case remains a wrong or empty search, never a request
+/// elsewhere.
 pub fn request_release(artist: &str, album: &str) -> String {
-    let echappe = |s: &str| percent_encode(&escape_lucene(s));
+    let escape = |s: &str| percent_encode(&escape_lucene(s));
     format!(
         "https://musicbrainz.org/ws/2/release/?query=artist:%22{}%22%20AND%20release:%22{}%22&fmt=json&limit=1",
-        echappe(artist),
-        echappe(album)
+        escape(artist),
+        escape(album)
     )
 }
 
-/// Score minimal d'une recherche de release pour être crue.
+/// Minimum score of a release search to be believed.
 ///
-/// La recherche MusicBrainz rend presque toujours **quelque chose** de
-/// plausible : sans seuil, `premier_release_id` croyait le premier résultat
-/// quel qu'il soit, et un album mal orthographié dans les étiquettes d'un
-/// fichier recevait une cover fausse avec aplomb. 85 plutôt que 90 pour la
-/// release, parce que la requête contraint deux champs (artist et album) dont
-/// l'un vient d'étiquettes arbitraires : un peu plus de tolérance qu'un title
-/// d'enregistrement, que la station écrit d'une seule main.
+/// The MusicBrainz search almost always returns **something** plausible:
+/// without a threshold, `first_cover` believed the first result whatever it
+/// was, and an album misspelled in a file's tags confidently received a wrong
+/// cover. 85 rather than 90 for the release, because the query constrains two
+/// fields (artist and album) one of which comes from arbitrary tags: a bit
+/// more tolerance than for a recording title, which the station writes with a
+/// single hand.
 pub const RELEASE_THRESHOLD: u64 = 85;
 
-/// URL de cover pour une release issue d'une **recherche**.
+/// Cover URL for a release coming from a **search**.
 ///
-/// Le niveau album, pas le pressage — et c'est un choix, pas un raccourci. Une
-/// réponse de recherche ne porte **jamais** de bloc `cover-art-archive`
-/// (mesuré le 2026-08-26 sur les deux recherches : release et enregistrement),
-/// donc l'arbitrage de [`parse_lookup`] est impossible ici. Il est aussi
-/// inutile : ces chemins cherchent par texte, ils n'ont jamais visé une
-/// édition précise. Or l'endpoint du release-group répond dès qu'**un**
-/// pressage du groupe a une face avant, et le pressage tiré par la recherche
-/// est lui-même dans ce groupe : le niveau album est donc strictement plus
-/// disponible, jamais moins.
+/// The album level, not the pressing — and that is a choice, not a shortcut.
+/// A search response **never** carries a `cover-art-archive` block (measured
+/// on 2026-08-26 on both searches: release and recording), so the arbitration
+/// of [`parse_lookup`] is impossible here. It is also pointless: these paths
+/// search by text, they never aimed at a precise edition. Now the
+/// release-group endpoint answers as soon as **one** pressing of the group has
+/// a front cover, and the pressing pulled by the search is itself in that
+/// group: the album level is therefore strictly more available, never less.
 ///
-/// Le repli sur le pressage ne sert qu'à une réponse sans release-group.
-/// Mesuré, elles n'existent pas (5/5 et 2/2), mais compter là-dessus serait
-/// supposer un schéma plutôt que le read.
+/// The fallback on the pressing only serves a response without a
+/// release-group. Measured, those do not exist (5/5 and 2/2), but counting on
+/// that would be assuming a schema rather than reading it.
 fn release_cover(release: &Value) -> Option<String> {
     release
         .pointer("/release-group/id")
@@ -541,17 +536,17 @@ fn release_cover(release: &Value) -> Option<String> {
         .or_else(|| release.get("id").and_then(Value::as_str).map(url_caa))
 }
 
-/// Pochette du premier résultat, **s'il est assez sûr**. `None` = rien trouvé,
-/// réponse illisible, ou meilleur résultat trop incertain.
+/// Cover of the first result, **if it is confident enough**. `None` = nothing
+/// found, unreadable response, or best result too uncertain.
 pub fn first_cover(json: &str) -> Option<String> {
     let v: Value = serde_json::from_str(json).ok()?;
-    let premiere = v.get("releases")?.as_array()?.first()?;
-    // Score absent = refus, et un `warn` plutôt qu'un `debug` : c'est un champ
-    // que l'API rend toujours, donc son absence est un changement de schéma.
-    // Refuser garde la correction (pas de cover fausse) et le niveau de
-    // journal rend la panne diagnosticable, là où supposer « assez sûr »
-    // restaurerait le défaut sans une line.
-    let Some(score) = premiere.get("score").and_then(Value::as_u64) else {
+    let first = v.get("releases")?.as_array()?.first()?;
+    // Absent score = refusal, and a `warn` rather than a `debug`: this is a
+    // field the API always returns, so its absence is a schema change.
+    // Refusing keeps correctness (no wrong cover) and the log level makes the
+    // failure diagnosable, where assuming "confident enough" would restore
+    // the defect without a single line.
+    let Some(score) = first.get("score").and_then(Value::as_u64) else {
         tracing::warn!("release search: no score field, refusing rather than guessing");
         return None;
     };
@@ -559,81 +554,81 @@ pub fn first_cover(json: &str) -> Option<String> {
         tracing::debug!("release search: best match scored {score}, under the {RELEASE_THRESHOLD} needed");
         return None;
     }
-    release_cover(premiere)
+    release_cover(first)
 }
 
-/// Recherche une release par artist et album, et rend l'URL de sa cover.
+/// Searches for a release by artist and album, and returns its cover URL.
 ///
-/// C'est le path générique (fichier sans cover, stream radio dont les
-/// métadonnées textuelles suffisent) : contrairement au path disc, il ne
-/// tient pas de TOC et doit deviner la release à partir d'un texte. `Ok(None)`
-/// = rien trouvé ou hors line, exactement comme [`lookup`] : le plugin se
-/// tait, il ne sait rien de plus que ce qu'on lui a donné.
+/// This is the generic path (file without cover, radio stream whose textual
+/// metadata is enough): unlike the disc path, it holds no TOC and must guess
+/// the release from text. `Ok(None)` = nothing found or offline, exactly like
+/// [`lookup`]: the plugin stays silent, it knows nothing more than what it was
+/// given.
 pub async fn search_release(artist: &str, album: &str) -> Result<Option<String>> {
     let url = request_release(artist, album);
     let body = request_text(&url).await?;
     Ok(first_cover(&body))
 }
 
-/// Score minimal d'une recherche d'enregistrement pour être crue.
+/// Minimum score of a recording search to be believed.
 ///
-/// Plus haut que `RELEASE_THRESHOLD` : ici les deux champs contraints viennent de
-/// la **même** chaîne écrite d'une seule main par la station, donc un vrai
-/// pair obtient un score franc. Et la validation sert à *choisir* entre deux
-/// découpages : plus le seuil est haut, moins l'order inverse a de chances de
-/// se glisser au-dessus.
+/// Higher than `RELEASE_THRESHOLD`: here both constrained fields come from the
+/// **same** string written with a single hand by the station, so a true pair
+/// gets a clear-cut score. And the validation serves to *choose* between two
+/// splits: the higher the threshold, the less chance the reverse order has of
+/// sneaking above.
 pub const RECORDING_THRESHOLD: u64 = 90;
 
-/// Ce qu'un enregistrement rendition par la recherche learn.
+/// What a recording returned by the search tells us.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recording {
     pub score: u64,
-    /// Le title **tel que MusicBrainz l'écrit**. C'est lui qu'on compare au
-    /// candidat après normalisation, et cette comparaison porte la validation :
-    /// le score seul est trop généreux.
+    /// The title **as MusicBrainz writes it**. This is what is compared to the
+    /// candidate after normalization, and that comparison carries the
+    /// validation: the score alone is too generous.
     pub title: String,
-    /// URL de la cover, tirée de la première release s'il y en a une.
+    /// Cover URL, taken from the first release if there is one.
     ///
-    /// Pas de choix « intelligent » entre original, compilation et remaster :
-    /// MusicBrainz ne les classe pas par pertinence, et ce serait une
-    /// heuristique de plus pour un carré de 500 pixels.
+    /// No "smart" choice between original, compilation and remaster:
+    /// MusicBrainz does not rank them by relevance, and it would be one more
+    /// heuristic for a 500-pixel square.
     ///
-    /// Une URL et non un MBID, pour la même reason que `DiscInfo::cover_url` :
-    /// le niveau à viser (album ou pressage) se décide ici, où l'on voit la
-    /// réponse, et jamais chez l'appelant. C'est ce qui empêche un troisième
-    /// path de refabriquer une URL en aveugle — le défaut que ce module a
-    /// porté sur ses trois chemins à la fois.
+    /// A URL and not an MBID, for the same reason as `DiscInfo::cover_url`:
+    /// the level to aim at (album or pressing) is decided here, where the
+    /// response is visible, and never at the caller. This is what prevents a
+    /// third path from rebuilding a URL blindly — the defect this module
+    /// carried on all three of its paths at once.
     pub cover_url: Option<String>,
 }
 
-/// Requête de recherche d'un enregistrement par artist et title.
+/// Search request for a recording by artist and title.
 ///
-/// Les deux valeurs viennent d'une **station**, donc d'une entrée qu'on ne
-/// choisit pas : échappées pour les deux langages superposés qu'elles
-/// traversent, Lucene puis l'URL. Voir la doc de `request_release`, qui écrit
-/// ce qu'une version antérieure y avait manqué.
+/// Both values come from a **station**, hence from input we do not choose:
+/// escaped for the two stacked languages they cross, Lucene then the URL. See
+/// the doc of `request_release`, which spells out what an earlier version had
+/// missed there.
 pub fn request_recording(artist: &str, title: &str) -> String {
-    let echappe = |s: &str| percent_encode(&escape_lucene(s));
+    let escape = |s: &str| percent_encode(&escape_lucene(s));
     format!(
         "https://musicbrainz.org/ws/2/recording/?query=artist:%22{}%22%20AND%20recording:%22{}%22&fmt=json&limit=1",
-        echappe(artist),
-        echappe(title)
+        escape(artist),
+        escape(title)
     )
 }
 
-/// Premier enregistrement de la réponse. `None` = rien, illisible, ou sans
-/// score — voir `premier_release_id` pour le raisonnement sur le score absent.
+/// First recording of the response. `None` = nothing, unreadable, or without
+/// a score — see `first_cover` for the reasoning about the absent score.
 pub fn first_recording(json: &str) -> Option<Recording> {
     let v: Value = serde_json::from_str(json).ok()?;
-    let premier = v.get("recordings")?.as_array()?.first()?;
-    let Some(score) = premier.get("score").and_then(Value::as_u64) else {
+    let first = v.get("recordings")?.as_array()?.first()?;
+    let Some(score) = first.get("score").and_then(Value::as_u64) else {
         tracing::warn!("recording search: no score field, refusing rather than guessing");
         return None;
     };
     Some(Recording {
         score,
-        title: premier.get("title")?.as_str()?.to_string(),
-        cover_url: premier
+        title: first.get("title")?.as_str()?.to_string(),
+        cover_url: first
             .get("releases")
             .and_then(Value::as_array)
             .and_then(|r| r.first())
@@ -641,36 +636,35 @@ pub fn first_recording(json: &str) -> Option<Recording> {
     })
 }
 
-/// Forme comparable d'un title : minuscules, diacritiques retirés, et tout ce
-/// qui n'est ni lettre ni chiffre ramené à un espace unique.
+/// Comparable form of a title: lowercase, diacritics removed, and everything
+/// that is neither letter nor digit collapsed to a single space.
 ///
-/// **Pas** une normalisation Unicode complète, et c'est assumé : une crate de
-/// décomposition pour une soixantaine de caractères latins ne se justifie pas
-/// dans ce dépôt, et un title en écriture non latine n'a pas de diacritique à
-/// retirer — il traverse cette fonction inchangé, ce qui est exactement le
-/// comportement voulu.
+/// **Not** a full Unicode normalization, and that is accepted: a decomposition
+/// crate for some sixty Latin characters is not justified in this repository,
+/// and a title in a non-Latin script has no diacritic to remove — it goes
+/// through this function unchanged, which is exactly the intended behavior.
 pub fn normalize(s: &str) -> String {
-    let mut mots: Vec<String> = Vec::new();
-    let mut courant = String::new();
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
     for c in s.chars() {
         let c = without_diacritics(c).to_lowercase().next().unwrap_or(c);
         if c.is_alphanumeric() {
-            courant.push(c);
-        } else if !courant.is_empty() {
-            mots.push(std::mem::take(&mut courant));
+            current.push(c);
+        } else if !current.is_empty() {
+            words.push(std::mem::take(&mut current));
         }
     }
-    if !courant.is_empty() {
-        mots.push(courant);
+    if !current.is_empty() {
+        words.push(current);
     }
-    mots.join(" ")
+    words.join(" ")
 }
 
-/// Le caractère latin de base d'un caractère accentué, sinon lui-même.
+/// The base Latin character of an accented character, otherwise itself.
 ///
-/// Table plutôt qu'algorithme : elle couvre le français, l'espagnol,
-/// l'allemand et le portugais, ce qui est le parc réel d'un appareil de salon
-/// européen. Ce qui n'y figure pas passe inchangé.
+/// A table rather than an algorithm: it covers French, Spanish, German and
+/// Portuguese, which is the actual fleet of a European living-room device.
+/// Whatever is not in it passes through unchanged.
 fn without_diacritics(c: char) -> char {
     match c {
         'à' | 'â' | 'ä' | 'á' | 'ã' | 'å' => 'a',
@@ -688,12 +682,12 @@ fn without_diacritics(c: char) -> char {
         'Ù' | 'Û' | 'Ü' | 'Ú' => 'U',
         'Ç' => 'C',
         'Ñ' => 'N',
-        autre => autre,
+        other => other,
     }
 }
 
-/// Cherche un enregistrement, et rend ce qu'on en sait. `Ok(None)` = rien
-/// trouvé ou hors line, comme partout dans ce module.
+/// Searches for a recording, and returns what is known about it. `Ok(None)` =
+/// nothing found or offline, as everywhere in this module.
 pub async fn search_recording(artist: &str, title: &str) -> Result<Option<Recording>> {
     let url = request_recording(artist, title);
     let body = request_text(&url).await?;
@@ -705,21 +699,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lattente_demandee_par_le_service_est_lue_et_plafonnee() {
-        // **Mesure du 2026-08-28 sur l'appareil** : six 503 sur neuf requetes
-        // en une minute, cadence pourtant conforme (1,1 s entre requetes).
-        // MusicBrainz envoie `Retry-After` sur ses 503, et reculer moins que ce
-        // qu'il reclame le fait refuser a nouveau — une requete perdue pour
-        // nous, une load inutile pour lui.
+    fn the_wait_requested_by_the_service_is_read_and_capped() {
+        // **Measured on 2026-08-28 on the device**: six 503s out of nine
+        // requests in one minute, cadence nonetheless compliant (1.1 s between
+        // requests). MusicBrainz sends `Retry-After` on its 503s, and backing
+        // off less than it demands makes it refuse again — a request lost for
+        // us, useless load for it.
         assert_eq!(requested_wait(Some("3")), Some(std::time::Duration::from_secs(3)));
         assert_eq!(requested_wait(Some("  3  ")), Some(std::time::Duration::from_secs(3)));
-        // Plafonnee : une attente arbitrairement longue immobiliserait une
-        // tache pour rien, la reprise differee du greffon couvrant deja les
-        // pannes qui durent.
+        // Capped: an arbitrarily long wait would pin a task for nothing, the
+        // plugin's deferred retry already covering outages that last.
         assert_eq!(requested_wait(Some("600")), Some(RETRY_AFTER_MAX));
-        // Absent, ou dans la forme date HTTP que la norme autorise et
-        // qu'aucun service utilise ici n'emploie : rien, et le recul propre du
-        // greffon s'apply.
+        // Absent, or in the HTTP-date form the standard allows and no service
+        // used here employs: nothing, and the plugin's own backoff applies.
         assert_eq!(requested_wait(None), None);
         assert_eq!(requested_wait(Some("Wed, 21 Oct 2026 07:28:00 GMT")), None);
         assert_eq!(requested_wait(Some("")), None);
@@ -727,45 +719,44 @@ mod tests {
 
     const FIXTURE: &str = include_str!("../tests/fixtures/mb_discid.json");
 
-    // Le champ "id" de cette fixture a ete add a la main pour cette tache,
-    // pas capture avec le reste de la reponse : c'est un MBID validated, mais
-    // emprunte a une autre mesure (la release de Kind of Blue mesuree le
-    // 2026-08-24 pour l'URL front-500, cf. url_caa ci-dessous), donc ce n'est
-    // presque certainement pas la release contre laquelle cette fixture a ete
-    // capturee a l'origin. Sans consequence pour le test qui l'utilise
-    // (parse_lookup_retient_le_release_id) : il ne verifie que la forme du
-    // champ (36 caracteres), jamais sa valeur. Quiconque voudrait tirer une
-    // conclusion plus forte de cette fixture (ex. verifier que le MBID
-    // correspond bien a cet enregistrement precis) doit d'abord la
-    // recapturer.
+    // The "id" field of this fixture was added by hand for this task, not
+    // captured with the rest of the response: it is a valid MBID, but borrowed
+    // from another measurement (the Kind of Blue release measured on
+    // 2026-08-24 for the front-500 URL, cf. url_caa below), so it is almost
+    // certainly not the release this fixture was originally captured against.
+    // Of no consequence for the test that uses it
+    // (parse_lookup_keeps_the_mbid_for_the_cover): it only checks the shape of
+    // the field (36 characters), never its value. Whoever wants to draw a
+    // stronger conclusion from this fixture (e.g. check that the MBID does
+    // match this precise recording) must recapture it first.
 
     #[test]
-    fn parse_extrait_artiste_album_pistes() {
+    fn parse_extracts_artist_album_tracks() {
         let info = parse_lookup(FIXTURE, 3).unwrap();
         assert_eq!(info.artist, "Miles Davis");
         assert_eq!(info.album, "Kind of Blue");
         assert_eq!(info.tracks, vec!["So What", "Freddie Freeloader", "Blue in Green"]);
     }
 
-    /// Une release minimale, tout juste assez pour que `extract` la retienne :
-    /// un media d'une track titree. `date` est ajoutee par l'appelant, sous la
-    /// forme qu'on veut eprouver.
-    fn release_minimale(date: Option<&str>) -> String {
-        let champ_date = date.map(|d| format!(r#""date":"{d}","#)).unwrap_or_default();
+    /// A minimal release, just enough for `extract` to keep it: one medium
+    /// with one titled track. `date` is added by the caller, in the form to
+    /// be tested.
+    fn minimal_release(date: Option<&str>) -> String {
+        let date_field = date.map(|d| format!(r#""date":"{d}","#)).unwrap_or_default();
         format!(
-            r#"{{"releases":[{{"title":"Kind of Blue",{champ_date}"artist-credit":[{{"name":"Miles Davis"}}],"media":[{{"tracks":[{{"title":"So What"}}]}}]}}]}}"#
+            r#"{{"releases":[{{"title":"Kind of Blue",{date_field}"artist-credit":[{{"name":"Miles Davis"}}],"media":[{{"tracks":[{{"title":"So What"}}]}}]}}]}}"#
         )
     }
 
     #[test]
-    fn lannee_vient_de_la_premiere_parution_de_lalbum_pas_du_pressage() {
-        // Mesure du 2026-08-27 sur la release e32a3f0b-1c19-3170-bb1c-650893774744
-        // (Kind of Blue) : `date` = "1987", `release-group.first-release-date`
-        // = "1959-08-17". C'est l'annee du **disc** qu'un auditeur search,
-        // pas celle du repressage qu'il a sous la main. Le lookup demande deja
-        // `inc=...+release-groups`, le champ est donc la sans requete de plus
-        // (mesure : present sur les 25 release-groups de la reponse au toc des
-        // fixtures).
+    fn the_year_comes_from_the_albums_first_release_not_the_pressing() {
+        // Measured on 2026-08-27 on release e32a3f0b-1c19-3170-bb1c-650893774744
+        // (Kind of Blue): `date` = "1987", `release-group.first-release-date`
+        // = "1959-08-17". It is the **disc's** year a listener is looking for,
+        // not that of the repress they hold in their hands. The lookup already
+        // asks for `inc=...+release-groups`, so the field is there with no
+        // extra request (measured: present on the 25 release-groups of the
+        // response to the fixtures' toc).
         let json = format!(
             r#"{{"releases":[{{"title":"Kind of Blue","date":"1987","release-group":{{"id":"{}","first-release-date":"1959-08-17"}},"artist-credit":[{{"name":"Miles Davis"}}],"media":[{{"tracks":[{{"title":"So What"}}]}}]}}]}}"#,
             "0b1b0b1b-0b1b-0b1b-0b1b-0b1b0b1b0b1b"
@@ -774,198 +765,198 @@ mod tests {
     }
 
     #[test]
-    fn une_premiere_parution_vide_laisse_la_date_du_pressage_prendre_le_relais() {
-        // Le champ present mais **clear**, ce qui n'est pas le champ absent : un
-        // `or_else` pose apres le seul `pointer` laissait passer la chaine
-        // clear, qui echouait ensuite sur `valid_year`. L'annee du pressage
-        // etait donc perdue alors qu'elle etait la, juste a cote.
+    fn an_empty_first_release_lets_the_pressing_date_take_over() {
+        // The field present but **empty**, which is not the field absent: an
+        // `or_else` placed after the sole `pointer` let the empty string
+        // through, which then failed on `valid_year`. The pressing's year was
+        // therefore lost even though it was right there, next to it.
         let json = r#"{"releases":[{"title":"Kind of Blue","date":"1987","release-group":{"id":"0b1b0b1b-0b1b-0b1b-0b1b-0b1b0b1b0b1b","first-release-date":""},"artist-credit":[{"name":"Miles Davis"}],"media":[{"tracks":[{"title":"So What"}]}]}]}"#;
         assert_eq!(parse_lookup(json, 1).unwrap().year, Some(1987));
     }
 
     #[test]
-    fn une_premiere_parution_qui_nest_pas_une_chaine_ne_masque_pas_le_pressage() {
-        // Meme famille : `null` (ou n'importe quelle autre forme) au lieu d'une
-        // date. C'est le `and_then(as_str)` place **avant** le repli qui la
-        // ramene au meme cas que l'absence.
+    fn a_first_release_that_is_not_a_string_does_not_mask_the_pressing() {
+        // Same family: `null` (or any other form) instead of a date. It is the
+        // `and_then(as_str)` placed **before** the fallback that brings it
+        // back to the same case as absence.
         let json = r#"{"releases":[{"title":"Kind of Blue","date":"1987","release-group":{"first-release-date":null},"artist-credit":[{"name":"Miles Davis"}],"media":[{"tracks":[{"title":"So What"}]}]}]}"#;
         assert_eq!(parse_lookup(json, 1).unwrap().year, Some(1987));
     }
 
     #[test]
-    fn faute_de_premiere_parution_la_date_du_pressage_prend_le_relais() {
-        // Un `release-group` present mais sans `first-release-date` (le champ
-        // est optionnel cote MusicBrainz) : mieux vaut l'annee du pressage que
-        // pas d'annee du tout.
+    fn without_a_first_release_the_pressing_date_takes_over() {
+        // A `release-group` present but without `first-release-date` (the
+        // field is optional on the MusicBrainz side): the pressing's year
+        // beats no year at all.
         let json = r#"{"releases":[{"title":"Kind of Blue","date":"1987","release-group":{"id":"0b1b0b1b-0b1b-0b1b-0b1b-0b1b0b1b0b1b"},"artist-credit":[{"name":"Miles Davis"}],"media":[{"tracks":[{"title":"So What"}]}]}]}"#;
         assert_eq!(parse_lookup(json, 1).unwrap().year, Some(1987));
     }
 
     #[test]
-    fn lannee_vient_de_la_date_de_la_release() {
-        // Aucune fixture mesuree ne porte `date` : sans ce test, read l'annee
-        // depuis la mauvaise key (ou ne pas la read du tout) ne reveillait
-        // rien. JSON minimal ecrit a la main, donc, plutot qu'une fixture
-        // mesuree qu'il faudrait maquiller.
-        let info = parse_lookup(&release_minimale(Some("1959-08-17")), 1).unwrap();
+    fn the_year_comes_from_the_release_date() {
+        // No measured fixture carries `date`: without this test, reading the
+        // year from the wrong key (or not reading it at all) woke nothing up.
+        // Hence a minimal hand-written JSON, rather than a measured fixture
+        // that would have to be doctored.
+        let info = parse_lookup(&minimal_release(Some("1959-08-17")), 1).unwrap();
         assert_eq!(info.year, Some(1959));
-        // La forme courte est tout aussi courante dans MusicBrainz.
-        let info = parse_lookup(&release_minimale(Some("1959")), 1).unwrap();
+        // The short form is just as common in MusicBrainz.
+        let info = parse_lookup(&minimal_release(Some("1959")), 1).unwrap();
         assert_eq!(info.year, Some(1959));
     }
 
     #[test]
-    fn sans_date_la_release_ne_promet_aucune_annee() {
-        // Le controle : beaucoup de releases n'ont pas de `date`, et le reste du
-        // depouillement doit aboutir quand meme — une annee inconnue n'est pas
-        // un echec de reconnaissance du disc.
-        let info = parse_lookup(&release_minimale(None), 1).unwrap();
+    fn without_a_date_the_release_promises_no_year() {
+        // The control: many releases have no `date`, and the rest of the
+        // parsing must succeed anyway — an unknown year is not a disc
+        // recognition failure.
+        let info = parse_lookup(&minimal_release(None), 1).unwrap();
         assert_eq!(info.year, None);
         assert_eq!(info.album, "Kind of Blue");
     }
 
     #[test]
-    fn parse_rejette_si_nb_pistes_incoherent() {
+    fn parse_rejects_if_track_count_inconsistent() {
         assert!(parse_lookup(FIXTURE, 12).is_none());
     }
 
     #[test]
-    fn parse_rejette_json_vide_ou_invalide() {
+    fn parse_rejects_empty_or_invalid_json() {
         assert!(parse_lookup("{}", 3).is_none());
-        assert!(parse_lookup("pas du json", 3).is_none());
+        assert!(parse_lookup("not json", 3).is_none());
         assert!(parse_lookup("{\"releases\":[]}", 3).is_none());
     }
 
     #[test]
-    fn toc_musicbrainz_bien_forme() {
-        // 3 pistes, offsets 150/22767/41887, leadout 63000
+    fn musicbrainz_toc_well_formed() {
+        // 3 tracks, offsets 150/22767/41887, leadout 63000
         assert_eq!(mb_toc_param("3 150 22767 41887 63000\n").unwrap(), "1+3+63000+150+22767+41887");
     }
 
     #[test]
-    fn toc_invalide_rejetee_sans_appel_reseau() {
-        // L'identité vient d'un autre processus : une TOC douteuse doit être
-        // refusée ici, pas envoyée à un service tiers.
+    fn invalid_toc_rejected_without_network_call() {
+        // The identity comes from another process: a dubious TOC must be
+        // refused here, not sent to a third-party service.
         assert!(mb_toc_param("").is_err());
         assert!(mb_toc_param("3 150 22767").is_err());
         assert!(mb_toc_param("abc def").is_err());
     }
 
     #[test]
-    fn l_url_du_cover_art_archive_demande_une_taille_bornee() {
-        // `front` nu rend un PNG de 2 670 705 bytes ; `front-500`, 75 249.
+    fn the_cover_art_archive_url_asks_for_a_bounded_size() {
+        // A bare `front` returns a PNG of 2,670,705 bytes; `front-500`, 75,249.
         assert_eq!(
             url_caa("e32a3f0b-1c19-3170-bb1c-650893774744"),
             "https://coverartarchive.org/release/e32a3f0b-1c19-3170-bb1c-650893774744/front-500"
         );
     }
 
-    /// Reduction d'une capture reelle du lookup que ce module construit
-    /// (2026-08-26, 25 releases rendues). Trois candidates conservees, dans un
-    /// order qui reproduit exactement le piege : d'abord une a 3 pistes **sans**
-    /// face avant — celle que retenait la version precedente — puis un leurre
-    /// qui a une face avant mais 11 pistes, puis la bonne. Chaque release est
-    /// reduite aux champs que l'analyse read, plus son bloc `cover-art-archive`
-    /// recopie tel quel.
-    const FIXTURE_POCHETTES: &str = include_str!("../tests/fixtures/mb_discid_pochettes.json");
+    /// Reduction of a real capture of the lookup this module builds
+    /// (2026-08-26, 25 releases returned). Three candidates kept, in an order
+    /// that reproduces the trap exactly: first one with 3 tracks **without** a
+    /// front cover — the one the previous version kept — then a decoy that has
+    /// a front cover but 11 tracks, then the right one. Each release is
+    /// reduced to the fields the parsing reads, plus its `cover-art-archive`
+    /// block copied verbatim.
+    const COVERS_FIXTURE: &str = include_str!("../tests/fixtures/mb_discid_pochettes.json");
 
     #[test]
-    fn la_face_avant_departage_les_candidates_recevables() {
-        let info = parse_lookup(FIXTURE_POCHETTES, 3).unwrap();
-        // Pas la premiere qui colle (Hellfire, `front: false`) : celle qui a
-        // une image. Sans ce tri, le disc partait sans cover alors qu'une
-        // candidate recevable en portait une.
+    fn the_front_cover_breaks_the_tie_between_acceptable_candidates() {
+        let info = parse_lookup(COVERS_FIXTURE, 3).unwrap();
+        // Not the first that fits (Hellfire, `front: false`): the one that
+        // has an image. Without this sort, the disc left without a cover while
+        // an acceptable candidate carried one.
         assert_eq!(info.album, "Kiss You Off");
         assert_eq!(info.artist, "Scissor Sisters");
-        // Face avant annoncee : l'URL vise le pressage, pas l'album.
+        // Front cover announced: the URL aims at the pressing, not the album.
         assert_eq!(
             info.cover_url.as_deref(),
             Some("https://coverartarchive.org/release/2de62a1b-0401-4569-bfe4-7bac2a61dea2/front-500")
         );
-        // Le texte suit l'image : les deux viennent de la meme release, sans
-        // quoi la cover affichee ne correspondrait pas aux titres.
+        // The text follows the image: both come from the same release, without
+        // which the displayed cover would not match the titles.
         assert_eq!(info.tracks[0], "Kiss You Off");
     }
 
     #[test]
-    fn le_nombre_de_pistes_reste_le_filtre_et_une_image_ne_le_contourne_pas() {
-        // Le leurre de la fixture (« Connectivity! ») a bien une face avant,
-        // mais 11 pistes. La preferer serait annoncer un autre disc.
-        let info = parse_lookup(FIXTURE_POCHETTES, 11).unwrap();
+    fn the_track_count_remains_the_filter_and_an_image_does_not_bypass_it() {
+        // The fixture's decoy ("Connectivity!") does have a front cover, but
+        // 11 tracks. Preferring it would mean announcing another disc.
+        let info = parse_lookup(COVERS_FIXTURE, 11).unwrap();
         assert_eq!(info.album, "Connectivity!");
-        // Et pour 3 pistes, il ne doit jamais sortir.
-        assert_eq!(parse_lookup(FIXTURE_POCHETTES, 3).unwrap().album, "Kiss You Off");
-        // Un nombre de pistes qu'aucune candidate ne porte : rien.
-        assert!(parse_lookup(FIXTURE_POCHETTES, 7).is_none());
+        // And for 3 tracks, it must never come out.
+        assert_eq!(parse_lookup(COVERS_FIXTURE, 3).unwrap().album, "Kiss You Off");
+        // A track count no candidate carries: nothing.
+        assert!(parse_lookup(COVERS_FIXTURE, 7).is_none());
     }
 
     #[test]
-    fn sans_face_avant_la_pochette_de_lalbum_prend_le_relais() {
-        // Mesure du 2026-08-26 : `/front-500` sur une release dont la reponse
-        // dit `front: false` rend 404, meme avec quatre images — l'endpoint
-        // suit le typage. Le repli est celui de Picard et de beets : la
-        // cover du release-group, qui est une vraie face avant typee.
-        let sans = r#"{"releases":[
-            {"id":"11111111-1111-1111-1111-111111111111","title":"Sans image","artist-credit":[{"name":"A"}],
+    fn without_a_front_cover_the_albums_cover_takes_over() {
+        // Measured on 2026-08-26: `/front-500` on a release whose response
+        // says `front: false` returns 404, even with four images — the
+        // endpoint follows the typing. The fallback is Picard's and beets':
+        // the release-group's cover, which is a real typed front cover.
+        let without = r#"{"releases":[
+            {"id":"11111111-1111-1111-1111-111111111111","title":"No image","artist-credit":[{"name":"A"}],
              "cover-art-archive":{"front":false,"count":4,"darkened":false},
              "release-group":{"id":"33333333-3333-3333-3333-333333333333"},
              "media":[{"tracks":[{"title":"un"}]}]}]}"#;
-        let info = parse_lookup(sans, 1).unwrap();
-        assert_eq!(info.album, "Sans image", "le texte vient toujours du pressage");
+        let info = parse_lookup(without, 1).unwrap();
+        assert_eq!(info.album, "No image", "the text always comes from the pressing");
         assert_eq!(
             info.cover_url.as_deref(),
             Some("https://coverartarchive.org/release-group/33333333-3333-3333-3333-333333333333/front-500"),
-            "l'image, elle, vient de l'album"
+            "the image, on the other hand, comes from the album"
         );
     }
 
     #[test]
-    fn sans_face_avant_ni_release_group_rien_nest_promis() {
-        // Le seul cas qui reste muet. Annoncer l'URL du pressage ferait faire
-        // au coeur une requete dont on sait deja qu'elle rendra 404.
-        let rien = r#"{"releases":[
-            {"id":"11111111-1111-1111-1111-111111111111","title":"Sans image","artist-credit":[{"name":"A"}],
+    fn without_a_front_cover_or_a_release_group_nothing_is_promised() {
+        // The only case that stays silent. Announcing the pressing's URL would
+        // make the core issue a request already known to return 404.
+        let nothing = r#"{"releases":[
+            {"id":"11111111-1111-1111-1111-111111111111","title":"No image","artist-credit":[{"name":"A"}],
              "cover-art-archive":{"front":false,"count":0,"darkened":false},
              "media":[{"tracks":[{"title":"un"}]}]}]}"#;
-        let info = parse_lookup(rien, 1).unwrap();
-        assert_eq!(info.album, "Sans image", "le texte reste utile");
-        assert_eq!(info.cover_url, None, "rien a demander a l'archive");
+        let info = parse_lookup(nothing, 1).unwrap();
+        assert_eq!(info.album, "No image", "the text remains useful");
+        assert_eq!(info.cover_url, None, "nothing to ask the archive for");
     }
 
     #[test]
-    fn une_release_assombrie_se_rabat_comme_une_release_sans_face_avant() {
-        // `darkened` : l'archive masque les images pour reason legale. Le
-        // `front: true` qui l'accompagne ne veut alors plus rien dire, et
-        // demander le pressage ne rendrait rien.
-        let sombre = r#"{"releases":[
-            {"id":"22222222-2222-2222-2222-222222222222","title":"Masquee","artist-credit":[{"name":"A"}],
+    fn a_darkened_release_falls_back_like_a_release_without_a_front_cover() {
+        // `darkened`: the archive hides the images for legal reasons. The
+        // `front: true` that comes with it then no longer means anything, and
+        // asking for the pressing would return nothing.
+        let dark = r#"{"releases":[
+            {"id":"22222222-2222-2222-2222-222222222222","title":"Hidden","artist-credit":[{"name":"A"}],
              "cover-art-archive":{"front":true,"count":4,"darkened":true},
              "release-group":{"id":"44444444-4444-4444-4444-444444444444"},
              "media":[{"tracks":[{"title":"un"}]}]}]}"#;
         assert_eq!(
-            parse_lookup(sombre, 1).unwrap().cover_url.as_deref(),
+            parse_lookup(dark, 1).unwrap().cover_url.as_deref(),
             Some("https://coverartarchive.org/release-group/44444444-4444-4444-4444-444444444444/front-500")
         );
     }
 
     #[test]
-    fn un_bloc_absent_ne_vaut_pas_absence_de_pochette() {
-        // Garde-fou contre une regression silencieuse : traiter « la reponse
-        // ne dit rien » comme « pas d'image » ferait taire la cover sur
-        // toute reponse ne portant pas ce bloc, pour un gain nul. La fixture
-        // historique n'en a pas, et son URL doit continuer de viser le
-        // pressage — le comportement d'avant ce chantier.
-        assert!(!FIXTURE.contains("cover-art-archive"), "prealable du test");
+    fn an_absent_block_does_not_mean_absence_of_cover() {
+        // Guard against a silent regression: treating "the response says
+        // nothing" as "no image" would silence the cover on every response not
+        // carrying this block, for zero gain. The historical fixture has none,
+        // and its URL must keep aiming at the pressing — the behavior from
+        // before this work.
+        assert!(!FIXTURE.contains("cover-art-archive"), "test precondition");
         let url = parse_lookup(FIXTURE, 3).unwrap().cover_url.unwrap();
         assert!(url.starts_with("https://coverartarchive.org/release/"), "{url}");
     }
 
     #[test]
-    fn une_face_avant_du_pressage_lemporte_sur_la_pochette_de_lalbum() {
-        // Les deux candidates collent au nombre de pistes. La premiere n'a pas
-        // de face avant mais a un album ; la seconde en a une. C'est la
-        // seconde qu'il faut, parce que son image est celle de ce pressage-ci.
-        let deux = r#"{"releases":[
+    fn a_pressings_front_cover_wins_over_the_albums_cover() {
+        // Both candidates fit the track count. The first has no front cover
+        // but has an album; the second has one. The second is the one wanted,
+        // because its image is that of this very pressing.
+        let two = r#"{"releases":[
             {"id":"11111111-1111-1111-1111-111111111111","title":"Sans","artist-credit":[{"name":"A"}],
              "cover-art-archive":{"front":false,"count":0,"darkened":false},
              "release-group":{"id":"33333333-3333-3333-3333-333333333333"},
@@ -974,7 +965,7 @@ mod tests {
              "cover-art-archive":{"front":true,"count":1,"darkened":false},
              "release-group":{"id":"44444444-4444-4444-4444-444444444444"},
              "media":[{"tracks":[{"title":"un"}]}]}]}"#;
-        let info = parse_lookup(deux, 1).unwrap();
+        let info = parse_lookup(two, 1).unwrap();
         assert_eq!(info.album, "Avec");
         assert_eq!(
             info.cover_url.as_deref(),
@@ -983,10 +974,10 @@ mod tests {
     }
 
     #[test]
-    fn lurl_de_lalbum_suit_le_motif_mesure() {
-        // Mesure du 2026-08-26 : 200 et un JPEG de 50 220 bytes sur le
-        // release-group de « Kind of Blue », la ou l'URL du pressage 1997 rend
-        // 404.
+    fn the_album_url_follows_the_measured_pattern() {
+        // Measured on 2026-08-26: 200 and a JPEG of 50,220 bytes on the
+        // release-group of "Kind of Blue", where the URL of the 1997 pressing
+        // returns 404.
         assert_eq!(
             caa_group_url("8e8a594f-2175-38c7-a871-abb68ec363e7"),
             "https://coverartarchive.org/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7/front-500"
@@ -994,29 +985,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_lookup_retient_le_mbid_pour_la_pochette() {
-        // Le MBID est la clé de l'image, et il était jeté. La fixture réelle
-        // du répertoire tests/fixtures est `mb_discid.json` (3 pistes).
-        let url = parse_lookup(FIXTURE, 3).unwrap().cover_url.expect("une URL de cover");
+    fn parse_lookup_keeps_the_mbid_for_the_cover() {
+        // The MBID is the key to the image, and it was being thrown away. The
+        // real fixture in the tests/fixtures directory is `mb_discid.json`
+        // (3 tracks).
+        let url = parse_lookup(FIXTURE, 3).unwrap().cover_url.expect("a cover URL");
         let mbid = url
             .strip_prefix("https://coverartarchive.org/release/")
             .and_then(|r| r.strip_suffix("/front-500"))
             .unwrap_or("");
-        assert_eq!(mbid.len(), 36, "un MBID fait 36 caracteres, obtenu {url:?}");
+        assert_eq!(mbid.len(), 36, "an MBID is 36 characters long, got {url:?}");
     }
 
     #[test]
-    fn le_lookup_demande_le_release_group() {
-        // Sans `release-groups` dans le `inc`, le repli de cover n'a aucun
-        // identifiant a viser et disparait en silence. Mesure du 2026-08-26 :
-        // ce parametre est rendition sur les 25 releases sans aller-retour de plus.
+    fn the_lookup_asks_for_the_release_group() {
+        // Without `release-groups` in the `inc`, the cover fallback has no
+        // identifier to aim at and vanishes silently. Measured on 2026-08-26:
+        // this parameter is returned on the 25 releases with no extra round
+        // trip.
         let url = url_lookup("1+3+63000+150+22767+41887");
         assert!(url.contains("inc=recordings+artist-credits+release-groups"), "{url}");
     }
 
     #[test]
-    fn la_requete_de_release_echappe_les_guillemets() {
-        // Mesure du 2026-08-24 : cette requête rend « Kind of Blue » au score 100.
+    fn the_release_request_escapes_quotes() {
+        // Measured on 2026-08-24: this request returns "Kind of Blue" at score 100.
         let q = request_release("Miles Davis", "Kind of Blue");
         assert!(q.contains("artist:%22Miles%20Davis%22"), "{q}");
         assert!(q.contains("release:%22Kind%20of%20Blue%22"), "{q}");
@@ -1025,68 +1018,68 @@ mod tests {
     }
 
     #[test]
-    fn la_requete_de_release_survit_a_des_etiquettes_hostiles() {
-        // Ces valeurs viennent d'etiquettes de fichier arbitraires. Avec
-        // l'echappement minimal d'origin, le `#` tronquait la requete au
-        // fragment et le `&` y injectait un parametre — une recherche fausse
-        // ou clear, en silence.
+    fn the_release_request_survives_hostile_tags() {
+        // These values come from arbitrary file tags. With the original
+        // minimal escaping, the `#` truncated the request at the fragment and
+        // the `&` injected a parameter into it — a wrong or empty search,
+        // silently.
         let q = request_release("AC/DC & Co", "Drum #1 = 100%");
         let params: Vec<&str> = q.split('&').collect();
-        assert_eq!(params.len(), 3, "aucun parametre injecte : query, fmt, limit — {q}");
+        assert_eq!(params.len(), 3, "no injected parameter: query, fmt, limit — {q}");
         assert!(q.contains("fmt=json"), "{q}");
         assert!(q.contains("limit=1"), "{q}");
-        assert!(!q.contains('#'), "un fragment tronquerait tout ce qui suit — {q}");
+        assert!(!q.contains('#'), "a fragment would truncate everything that follows — {q}");
         assert!(q.contains("artist:%22AC%2FDC%20%26%20Co%22"), "{q}");
         assert!(q.contains("release:%22Drum%20%231%20%3D%20100%25%22"), "{q}");
 
-        // Etage Lucene : un guillemet non echappe refermerait la phrase, et ce
-        // qui suit deviendrait de la syntaxe.
+        // Lucene stage: an unescaped quote would close the phrase, and what
+        // follows would become syntax.
         let q = request_release("Say \"Yes\"", "a\\b");
         assert!(q.contains("artist:%22Say%20%5C%22Yes%5C%22%22"), "{q}");
         assert!(q.contains("release:%22a%5C%5Cb%22"), "{q}");
     }
 
     #[test]
-    fn le_pourcent_encodage_traite_l_utf8_octet_par_octet() {
-        // Un caractere non ASCII fait plusieurs bytes, et chacun doit etre
-        // encode : « é » vaut %C3%A9, jamais un seul %E9.
+    fn percent_encoding_handles_utf8_byte_by_byte() {
+        // A non-ASCII character spans several bytes, and each must be
+        // encoded: "é" is %C3%A9, never a single %E9.
         assert_eq!(percent_encode("Café"), "Caf%C3%A9");
-        assert_eq!(percent_encode("a-b_c.d~e"), "a-b_c.d~e", "les non reserves passent tels quels");
+        assert_eq!(percent_encode("a-b_c.d~e"), "a-b_c.d~e", "unreserved characters pass through as is");
     }
 
     #[test]
-    fn la_pochette_vient_du_premier_resultat() {
+    fn the_cover_comes_from_the_first_result() {
         let json = r#"{"count":135,"releases":[
             {"id":"e32a3f0b-1c19-3170-bb1c-650893774744","score":100,
              "release-group":{"id":"8e8a594f-2175-38c7-a871-abb68ec363e7"}},
-            {"id":"autre"}]}"#;
+            {"id":"other"}]}"#;
         assert_eq!(
             first_cover(json).as_deref(),
             Some("https://coverartarchive.org/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7/front-500")
         );
         assert_eq!(first_cover(r#"{"releases":[]}"#), None);
-        assert_eq!(first_cover("pas du json"), None);
+        assert_eq!(first_cover("not json"), None);
     }
 
     #[test]
-    fn une_recherche_vise_lalbum_et_non_le_pressage() {
-        // Mesure du 2026-08-26 : une reponse de recherche ne porte JAMAIS de
-        // bloc `cover-art-archive` (verifie sur les deux recherches), donc
-        // l'arbitrage de `parse_lookup` est impossible ici. Il est aussi
-        // inutile : on a search par texte, aucun pressage precis n'etait vise,
-        // et l'endpoint du groupe repond des qu'un seul de ses pressages a une
-        // face avant.
+    fn a_search_aims_at_the_album_not_the_pressing() {
+        // Measured on 2026-08-26: a search response NEVER carries a
+        // `cover-art-archive` block (checked on both searches), so the
+        // arbitration of `parse_lookup` is impossible here. It is also
+        // pointless: the search was by text, no precise pressing was aimed
+        // at, and the group endpoint answers as soon as a single one of its
+        // pressings has a front cover.
         let json = r#"{"releases":[{"id":"11111111-1111-1111-1111-111111111111","score":100,
             "release-group":{"id":"22222222-2222-2222-2222-222222222222"}}]}"#;
         let url = first_cover(json).unwrap();
         assert!(url.contains("/release-group/22222222"), "{url}");
-        assert!(!url.contains("/release/11111111"), "le pressage ne doit pas etre vise — {url}");
+        assert!(!url.contains("/release/11111111"), "the pressing must not be aimed at — {url}");
     }
 
     #[test]
-    fn sans_release_group_la_recherche_se_rabat_sur_le_pressage() {
-        // Mesure : 5/5 et 2/2 des reponses en portent un. Mais s'en remettre a
-        // ca serait supposer un schema plutot que le read.
+    fn without_a_release_group_the_search_falls_back_on_the_pressing() {
+        // Measured: 5/5 and 2/2 of the responses carry one. But relying on
+        // that would be assuming a schema rather than reading it.
         let json = r#"{"releases":[{"id":"11111111-1111-1111-1111-111111111111","score":100}]}"#;
         assert_eq!(
             first_cover(json).as_deref(),
@@ -1094,11 +1087,11 @@ mod tests {
         );
     }
 
-    /// Réponse de recherche de release **telle que MusicBrainz l'émet** : le
-    /// champ `score` est toujours présent, et c'est lui qu'on ignorait. Le
-    /// `release-group` y est aussi — mesuré présent sur 5 résultats sur 5,
-    /// sans aucun `inc`.
-    fn reponse_release(score: u64) -> String {
+    /// Release search response **as MusicBrainz emits it**: the `score` field
+    /// is always present, and it is what was being ignored. The
+    /// `release-group` is there too — measured present on 5 results out of 5,
+    /// without any `inc`.
+    fn release_response(score: u64) -> String {
         format!(
             r#"{{"created":"2026-08-26T12:00:00.000Z","count":1,"offset":0,
             "releases":[{{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","score":{score},
@@ -1108,61 +1101,60 @@ mod tests {
     }
 
     #[test]
-    fn une_release_assez_sure_est_retenue() {
+    fn a_confident_enough_release_is_kept() {
         assert_eq!(
-            first_cover(&reponse_release(RELEASE_THRESHOLD)).as_deref(),
+            first_cover(&release_response(RELEASE_THRESHOLD)).as_deref(),
             Some("https://coverartarchive.org/release-group/ffffffff-eeee-dddd-cccc-bbbbbbbbbbbb/front-500"),
-            "le seuil pile doit passer"
+            "exactly the threshold must pass"
         );
     }
 
     #[test]
-    fn une_release_trop_incertaine_est_refusee() {
-        // Le defaut latent : aujourd'hui un album mal orthographie recoit une
-        // cover fausse avec aplomb, parce que la recherche rend toujours
-        // quelque chose de plausible.
-        assert_eq!(first_cover(&reponse_release(RELEASE_THRESHOLD - 1)), None);
+    fn a_too_uncertain_release_is_refused() {
+        // The latent defect: today a misspelled album confidently receives a
+        // wrong cover, because the search always returns something plausible.
+        assert_eq!(first_cover(&release_response(RELEASE_THRESHOLD - 1)), None);
     }
 
     #[test]
-    fn un_score_absent_est_refuse_et_non_suppose_bon() {
-        // Un score manquant veut dire « je ne sais pas ». Le supposer bon
-        // reviendrait au defaut d'avant, en silence ; le supposer mauvais coupe
-        // la fonctionnalite, mais visiblement (voir le `warn`).
-        let sans = r#"{"releases":[{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","title":"X"}]}"#;
-        assert_eq!(first_cover(sans), None);
+    fn an_absent_score_is_refused_and_not_assumed_good() {
+        // A missing score means "I don't know". Assuming it good would bring
+        // back the previous defect, silently; assuming it bad cuts the
+        // feature, but visibly (see the `warn`).
+        let without = r#"{"releases":[{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","title":"X"}]}"#;
+        assert_eq!(first_cover(without), None);
     }
 
     #[test]
-    fn une_reponse_sans_release_reste_none() {
+    fn a_response_without_release_stays_none() {
         assert_eq!(first_cover(r#"{"releases":[]}"#), None);
-        assert_eq!(first_cover("pas du json"), None);
+        assert_eq!(first_cover("not json"), None);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn letrangleur_espace_deux_requetes_consecutives() {
-        // Clock virtuelle : `sleep` avance le temps sans attendre, donc ce test
-        // dure une microseconde tout en éprouvant un intervalle de 1,1 s.
-        // L'étrangleur est **construit ici** et non pris d'un statique : deux
-        // tests qui partageraient l'instance se pollueraient l'un l'autre.
+    async fn the_throttler_spaces_two_consecutive_requests() {
+        // Virtual clock: `sleep` advances time without waiting, so this test
+        // lasts a microsecond while testing a 1.1 s interval.
+        // The throttler is **built here** and not taken from a static: two
+        // tests sharing the instance would pollute each other.
         let e = Throttler::new();
-        let depart = tokio::time::Instant::now();
+        let start = tokio::time::Instant::now();
         e.wait().await;
-        assert_eq!(depart.elapsed(), std::time::Duration::ZERO, "la premiere ne doit pas attendre");
+        assert_eq!(start.elapsed(), std::time::Duration::ZERO, "the first must not wait");
         e.wait().await;
         assert!(
-            depart.elapsed() >= MIN_INTERVAL,
-            "la seconde doit etre espacee de {MIN_INTERVAL:?}, mesure {:?}",
-            depart.elapsed()
+            start.elapsed() >= MIN_INTERVAL,
+            "the second must be spaced by {MIN_INTERVAL:?}, measured {:?}",
+            start.elapsed()
         );
     }
 
-    /// Réponse de recherche d'enregistrement **telle que MusicBrainz l'émet** :
-    /// `score`, `title`, et les releases dont sortira la cover.
-    fn reponse_recording(score: u64, title: &str, avec_release: bool) -> String {
-        let releases = if avec_release {
-            // Le `release-group` imbrique est mesure present sur 2 releases
-            // sur 2 dans une reponse reelle, sans aucun `inc`.
+    /// Recording search response **as MusicBrainz emits it**: `score`,
+    /// `title`, and the releases the cover will come from.
+    fn recording_response(score: u64, title: &str, with_release: bool) -> String {
+        let releases = if with_release {
+            // The nested `release-group` is measured present on 2 releases
+            // out of 2 in a real response, without any `inc`.
             r#","releases":[{"id":"11111111-2222-3333-4444-555555555555","title":"Kind of Blue",
               "release-group":{"id":"66666666-7777-8888-9999-aaaaaaaaaaaa"}}]"#
         } else {
@@ -1176,33 +1168,34 @@ mod tests {
     }
 
     #[test]
-    fn la_requete_dun_enregistrement_echappe_les_deux_langages() {
-        // Lucene à l'intérieur des guillemets, puis l'URL par-dessus : la même
-        // exigence que `request_release`, pour la même reason — ces valeurs
-        // viennent d'une station, donc d'une entrée qu'on ne choisit pas.
+    fn the_recording_request_escapes_both_languages() {
+        // Lucene inside the quotes, then the URL on top: the same requirement
+        // as `request_release`, for the same reason — these values come from
+        // a station, hence from input we do not choose.
         let url = request_recording(r#"AC"DC"#, "Back in Black & Co");
         assert!(url.starts_with("https://musicbrainz.org/ws/2/recording/?query="), "{url}");
-        // Deux esperluettes structurelles seulement (avant fmt, avant limit) :
-        // le brief attendait `== 1`, mais l'URL porte toujours `&fmt=json&limit=1`
-        // en plus de `?query=`, donc deux '&' littéraux au minimum, jamais un
-        // seul — voir le rapport de tâche pour le détail. Celle du title est
-        // percent-encodée (%26) et ne s'add donc pas au compte.
+        // Only two structural ampersands (before fmt, before limit): the brief
+        // expected `== 1`, but the URL always carries `&fmt=json&limit=1` in
+        // addition to `?query=`, hence two literal '&' at minimum, never a
+        // single one — see the task report for details. The one from the
+        // title is percent-encoded (%26) and therefore does not add to the
+        // count.
         assert_eq!(
             url.matches('&').count(),
             2,
-            "seuls fmt et limit doivent introduire un & ; rien depuis le title : {url}"
+            "only fmt and limit may introduce an &; none from the title: {url}"
         );
-        assert!(url.contains("%5C%22"), "le guillemet doit etre echappe deux fois : {url}");
+        assert!(url.contains("%5C%22"), "the quote must be escaped twice: {url}");
     }
 
     #[test]
-    fn un_enregistrement_est_lu_avec_son_score_et_sa_release() {
-        let e = first_recording(&reponse_recording(100, "So What", true)).unwrap();
+    fn a_recording_is_read_with_its_score_and_its_release() {
+        let e = first_recording(&recording_response(100, "So What", true)).unwrap();
         assert_eq!(e.score, 100);
         assert_eq!(e.title, "So What");
-        // L'album, pas le pressage : une recherche ne porte pas de bloc
-        // `cover-art-archive`, et le niveau groupe est strictement plus
-        // disponible (voir `release_cover`).
+        // The album, not the pressing: a search carries no `cover-art-archive`
+        // block, and the group level is strictly more available (see
+        // `release_cover`).
         assert_eq!(
             e.cover_url.as_deref(),
             Some("https://coverartarchive.org/release-group/66666666-7777-8888-9999-aaaaaaaaaaaa/front-500")
@@ -1210,33 +1203,34 @@ mod tests {
     }
 
     #[test]
-    fn un_enregistrement_sans_release_reste_exploitable() {
-        // Le découpage est acquis même sans image : le pair artist/title vaut
-        // par lui-même, et le cœur traite déjà une cover absente en silence.
-        let e = first_recording(&reponse_recording(100, "So What", false)).unwrap();
+    fn a_recording_without_release_remains_usable() {
+        // The split is secured even without an image: the artist/title pair
+        // stands on its own, and the core already handles an absent cover
+        // silently.
+        let e = first_recording(&recording_response(100, "So What", false)).unwrap();
         assert_eq!(e.cover_url, None);
         assert_eq!(e.title, "So What");
     }
 
     #[test]
-    fn une_reponse_illisible_ou_vide_rend_none() {
+    fn an_unreadable_or_empty_response_returns_none() {
         assert!(first_recording(r#"{"recordings":[]}"#).is_none());
-        assert!(first_recording("pas du json").is_none());
-        // Score absent : refus, comme pour la release.
+        assert!(first_recording("not json").is_none());
+        // Absent score: refusal, as for the release.
         assert!(first_recording(r#"{"recordings":[{"id":"x","title":"y"}]}"#).is_none());
     }
 
     #[test]
-    fn la_normalisation_rend_comparables_deux_ecritures_du_meme_titre() {
+    fn normalization_makes_two_spellings_of_the_same_title_comparable() {
         assert_eq!(normalize("So What"), normalize("so  what"));
         assert_eq!(normalize("Où es-tu ?"), normalize("ou es tu"));
         assert_eq!(normalize("Café/Crème"), normalize("cafe creme"));
     }
 
     #[test]
-    fn la_normalisation_ne_confond_pas_deux_titres_differents() {
-        // Le contrôle : une normalisation trop agressive accepterait n'importe
-        // quoi, et la validation ne validerait plus rien.
+    fn normalization_does_not_confuse_two_different_titles() {
+        // The control: an overly aggressive normalization would accept
+        // anything, and the validation would no longer validate anything.
         assert_ne!(normalize("So What"), normalize("So What Else"));
         assert_ne!(normalize("Naima"), normalize("Nauma"));
     }

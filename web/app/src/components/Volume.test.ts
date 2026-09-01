@@ -13,8 +13,8 @@ describe('Volume', () => {
     Element.prototype.setPointerCapture ??= () => {}
     Element.prototype.releasePointerCapture ??= () => {}
     Element.prototype.hasPointerCapture ??= () => true
-    // jsdom ne fournit step ResizeObserver ; reka-ui l'utilise pour mesurer la
-    // piste du curseur au montage (voir ProgressBar.test.ts).
+    // jsdom does not provide ResizeObserver; reka-ui uses it to measure the
+    // slider track at mount time (see ProgressBar.test.ts).
     globalThis.ResizeObserver ??= class {
       observe() {}
       unobserve() {}
@@ -22,45 +22,45 @@ describe('Volume', () => {
     }
   })
 
-  it('displayed la valeur et une poignée à cette valeur', async () => {
+  it('shows the value and a handle at that value', async () => {
     const w = mounted()
-    // reka-ui resout aria-valuenow un tick apres le montage sous jsdom.
+    // reka-ui resolves aria-valuenow one tick after mounting under jsdom.
     await flushPromises()
     expect(w.get('[data-volume]').text()).toBe('60 %')
     expect(w.get('[role="slider"]').attributes('aria-valuenow')).toBe('60')
   })
 
-  it('n’displayed rien avant la première trame', () => {
+  it('shows nothing before the first frame', () => {
     const w = mounted({ volume: null })
     expect(w.get('[data-volume]').text()).toBe('')
   })
 
-  it('valide un réglage absolu au relâchement, une seule fois', async () => {
+  it('commits an absolute setting on release, once only', async () => {
     const w = mounted()
-    const poignee = w.get('[role="slider"]')
-    ;(poignee.element as HTMLElement).focus()
-    await poignee.trigger('keydown', { key: 'ArrowRight' })
+    const handle = w.get('[role="slider"]')
+    ;(handle.element as HTMLElement).focus()
+    await handle.trigger('keydown', { key: 'ArrowRight' })
     expect(w.emitted('set')).toEqual([[61]])
     expect(w.get('[data-volume]').text()).toBe('61 %')
   })
 
-  it('le haut-parleur est la bascule Muet, et dit son état', async () => {
-    // Demandé à l'usage sur l'ancienne page : on lisait « Volume : 60 % » sans
-    // comprendre pourquoi rien ne sortait. Ici le mute barre la valeur et
-    // change l'icône, au seul endroit où l'on cherche le son.
+  it('the speaker is the Mute toggle, and tells its state', async () => {
+    // Requested from use on the old page: one read "Volume: 60 %" without
+    // understanding why nothing came out. Here mute strikes the value through
+    // and changes the icon, at the one place where one looks for the sound.
     const w = mounted({ muted: true })
-    const bouton = w.get('[data-remote-command="Mute"]')
-    expect(bouton.attributes('aria-pressed')).toBe('true')
-    expect(bouton.attributes('data-actif')).toBe('true')
+    const button = w.get('[data-remote-command="Mute"]')
+    expect(button.attributes('aria-pressed')).toBe('true')
+    expect(button.attributes('data-actif')).toBe('true')
     expect(w.get('[data-volume]').classes()).toContain('line-through')
-    await bouton.trigger('click')
+    await button.trigger('click')
     expect(w.emitted('mute')).toHaveLength(1)
   })
 
-  it('le geste suit le doigt localement et ne valide qu au relachement', async () => {
-    // Un seul `set` par geste : pendant le glisser, seul l'affichage bouge.
-    // Emission directe sur le composant (comme dans ProgressBar.test.ts)
-    // plutot que de vrais pointerdown/move/up, sous jsdom sans mise en page reelle.
+  it('the gesture follows the finger locally and only commits on release', async () => {
+    // A single `set` per gesture: during the drag, only the display moves.
+    // Direct emission on the component (as in ProgressBar.test.ts) rather
+    // than real pointerdown/move/up, under jsdom without real layout.
     const w = mounted()
     const slider = w.getComponent(Slider)
     await slider.vm.$emit('update:modelValue', [25])
@@ -70,39 +70,40 @@ describe('Volume', () => {
     expect(w.emitted('set')).toEqual([[25]])
   })
 
-  it('la valeur target tient jusqu a la trame qui la rejoint', async () => {
-    // Sans cela, la trame suivante (volume d'avant le reglage) ramenait la
-    // poignee en arriere un instant — le meme defaut que sur ProgressBar.
+  it('the target value holds until the frame that reaches it', async () => {
+    // Without this, the next frame (volume from before the adjustment)
+    // brought the handle back for an instant — the same defect as on
+    // ProgressBar.
     const w = mounted()
     const slider = w.getComponent(Slider)
     await slider.vm.$emit('valueCommit', [25])
     expect(w.emitted('set')).toEqual([[25]])
-    await w.setProps({ volume: 60 }) // la trame d'avant le reglage
+    await w.setProps({ volume: 60 }) // the frame from before the adjustment
     expect(w.get('[data-volume]').text()).toBe('25 %')
-    await w.setProps({ volume: 25 }) // la trame qui confirme
+    await w.setProps({ volume: 25 }) // the confirming frame
     expect(w.get('[data-volume]').text()).toBe('25 %')
   })
 
-  it('un volume change ailleurs (telecommande infrarouge) relache la valeur target', async () => {
-    // La page valide 40, puis quelqu'un d'autre (telecommande IR) touche
-    // encore au volume : 41, 42, 43... La trame ne retombe jamais sur la
-    // valeur target (25 ici), donc l'egalite stricte seule laisserait
-    // l'affichage fige — mais toute trame differente de la precedente prouve
-    // que l'appareil a parle et doit relacher la target.
+  it('a volume changed elsewhere (infrared remote) releases the target value', async () => {
+    // The page commits 40, then someone else (IR remote) touches the volume
+    // again: 41, 42, 43... The frame never falls back on the target value (25
+    // here), so strict equality alone would leave the display frozen — but any
+    // frame different from the previous one proves the device has spoken and
+    // must release the target.
     const w = mounted()
     const slider = w.getComponent(Slider)
     await slider.vm.$emit('valueCommit', [25])
     expect(w.emitted('set')).toEqual([[25]])
-    // Trame en vol, encore la valeur d'avant le reglage : ne relache rien.
+    // In-flight frame, still the value from before the adjustment: releases nothing.
     await w.setProps({ volume: 60 })
     expect(w.get('[data-volume]').text()).toBe('25 %')
-    // L'appareil parle enfin, mais step avec la valeur target : il faut quand
-    // meme relacher, sinon la page resterait figee sur "25 %" pour toujours.
+    // The device finally speaks, but not with the target value: it must
+    // release anyway, otherwise the page would stay frozen on "25 %" forever.
     await w.setProps({ volume: 61 })
     expect(w.get('[data-volume]').text()).toBe('61 %')
   })
 
-  it('en veille, curseur et bascule sont grisés', () => {
+  it('in standby, slider and toggle are greyed out', () => {
     const w = mounted({ disabled: true })
     expect(w.get('[data-remote-command="Mute"]').attributes('disabled')).toBeDefined()
     expect(w.get('[data-slot="slider"]').attributes('data-disabled')).toBeDefined()

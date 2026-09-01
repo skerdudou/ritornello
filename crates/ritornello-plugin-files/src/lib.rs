@@ -1,13 +1,13 @@
-//! Ce que le plugin et le binaire racine de montage ont en commun.
+//! What the plugin and the root mount binary have in common.
 //!
-//! Deux `[[bin]]` d'un même crate ne partagent pas leurs modules : cette
-//! bibliothèque est ce qui garantit que le côté privilégié et le côté qui écrit
-//! la configuration lisent exactement la même grammaire.
+//! Two `[[bin]]` of the same crate do not share their modules: this library is
+//! what guarantees that the privileged side and the side that writes the
+//! configuration read exactly the same grammar.
 //!
-//! Les modules propres au plugin (`admin`, `mount`, `state`, `store`) restent
-//! déclarés in_dir `main.rs` : le binaire de montage n'en a que faire, et les y
-//! placer lui imposerait des dépendances qu'un `oneshot` lancé par systemd n'a
-//! aucune raison de tirer.
+//! The modules specific to the plugin (`admin`, `mount`, `state`, `store`) stay
+//! declared in `main.rs`: the mount binary has no use for them, and placing them
+//! here would impose dependencies that a `oneshot` launched by systemd has no
+//! reason to pull in.
 
 pub mod duration;
 pub mod explore;
@@ -22,37 +22,37 @@ pub mod smb;
 pub mod store;
 pub mod volumes;
 
-// Uniquement compilé sous `cargo test` : rien de ce module ne sert au runtime
-// in_dir ce crate. Il est employé par `build.rs` (compilation séparée, via
-// `include!`) et par ses propres tests. Le compiler en continu déclencherait un
-// `dead_code` que `-D warnings` refuserait.
+// Only compiled under `cargo test`: nothing in this module is used at runtime
+// in this crate. It is used by `build.rs` (separate compilation, via
+// `include!`) and by its own tests. Compiling it continuously would trigger a
+// `dead_code` that `-D warnings` would refuse.
 #[cfg(test)]
 mod placeholder;
 
-/// SourcesCatalog anglais embarqué, replié sur quand la locale demandée manque.
+/// Embedded English catalog, fallen back on when the requested locale is missing.
 pub const FILES_EN: &str = include_str!("locales/en.toml");
 
 #[cfg(test)]
 mod tests {
-    /// Le pack français **livré**, lu depuis `deploy/`, et non une copie de
-    /// test : c'est bien ce fichier-là qui partira sur l'appareil.
+    /// The **shipped** French pack, read from `deploy/`, and not a test copy:
+    /// this very file is the one that will go onto the device.
     fn fr_pack() -> String {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../deploy/locales/files/fr.toml");
-        std::fs::read_to_string(p).expect("pack fr livre")
+        std::fs::read_to_string(p).expect("shipped fr pack")
     }
 
     #[test]
-    fn parite_des_cles_entre_len_embarque_et_le_pack_fr() {
-        // Une clé présente d'un seul côté afficherait l'anglais au milieu du
-        // français, sans prévenir : `Catalog::load` se fold silencieusement
-        // sur l'embarqué clé par clé.
+    fn key_parity_between_embedded_en_and_the_fr_pack() {
+        // A key present on one side only would show English in the middle of
+        // French, without warning: `Catalog::load` silently falls back on the
+        // embedded one key by key.
         let en = ritornello_i18n::try_parse(crate::FILES_EN).unwrap();
         let fr = ritornello_i18n::try_parse(&fr_pack()).unwrap();
-        let mut cles_en: Vec<&String> = en.keys().collect();
-        let mut cles_fr: Vec<&String> = fr.keys().collect();
-        cles_en.sort();
-        cles_fr.sort();
-        assert_eq!(cles_en, cles_fr, "jeux de cles en/fr divergents");
+        let mut en_keys: Vec<&String> = en.keys().collect();
+        let mut fr_keys: Vec<&String> = fr.keys().collect();
+        en_keys.sort();
+        fr_keys.sort();
+        assert_eq!(en_keys, fr_keys, "en/fr key sets diverge");
     }
 }

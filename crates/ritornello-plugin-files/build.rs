@@ -1,34 +1,34 @@
-// Garantit l'existence de `ui/dist/{ui.js,ui.css}` embarques par
-// `include_str!`. Le build npm n'est **jamais** invoque ici (voir
-// `deploy/build.sh`) : la cross-compilation tourne in_dir une image sans Node.
+// Guarantees the existence of `ui/dist/{ui.js,ui.css}` embedded by
+// `include_str!`. The npm build is **never** invoked here (see
+// `deploy/build.sh`): cross-compilation runs in an image without Node.
 include!("src/placeholder.rs");
 
-// Ecrit `path` avec `contenu` s'il est absent ; s'il est deja la, le relit
-// et re-emet l'avertissement tant qu'il s'agit du bouchon.
+// Writes `path` with `content` if it is absent; if it is already there, rereads
+// it and re-emits the warning as long as it is still the placeholder.
 //
-// C'est le point corrige : `cargo::warning` n'etait emis qu'a la **creation**
-// du bouchon. Clone frais -> `cargo build` nu (bouchon cree, avertissement
-// affiche une fois) -> `cross build --release --target armv7...` : les scripts
-// de build sont rejoues par cible, mais `ui/dist/ui.js` existe desormais
-// (c'est le bouchon), donc plus **aucun** avertissement -- et le binaire de
-// release embarquait le bouchon en silence. L'avertissement nomme le fichier :
-// deux active de bouchon donnent deux lines distinctes et exploitables.
-fn ensure(path: &std::path::Path, contenu: impl FnOnce() -> String) {
-    let avertir = || {
+// This is the point that was fixed: `cargo::warning` used to be emitted only at
+// the placeholder's **creation**. Fresh clone -> bare `cargo build` (placeholder
+// created, warning shown once) -> `cross build --release --target armv7...`:
+// build scripts are replayed per target, but `ui/dist/ui.js` now exists
+// (it's the placeholder), so no warning shows **at all** anymore -- and the
+// release binary silently embedded the placeholder. The warning names the
+// file: two placeholder activations give two distinct, actionable lines.
+fn ensure(path: &std::path::Path, content: impl FnOnce() -> String) {
+    let warn = || {
         println!(
-            "cargo::warning=IHM du plugin non construite : bouchon embarque ({})",
+            "cargo::warning=plugin UI not built: embedding the placeholder instead ({})",
             path.display()
         );
     };
     match std::fs::read_to_string(path) {
-        Ok(deja) => {
-            if is_placeholder(&deja) {
-                avertir();
+        Ok(existing) => {
+            if is_placeholder(&existing) {
+                warn();
             }
         }
         Err(_) => {
-            avertir();
-            std::fs::write(path, contenu()).unwrap();
+            warn();
+            std::fs::write(path, content()).unwrap();
         }
     }
 }
@@ -37,7 +37,7 @@ fn main() {
     println!("cargo::rerun-if-changed=ui/dist");
     println!("cargo::rerun-if-changed=src/placeholder.rs");
     let dist = std::path::Path::new("ui/dist");
-    std::fs::create_dir_all(dist).expect("creation de ui/dist");
+    std::fs::create_dir_all(dist).expect("creating ui/dist");
     ensure(&dist.join("ui.js"), || {
         ui_placeholder_js("npm ci && npm run build --workspaces")
     });

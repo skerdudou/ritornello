@@ -1,7 +1,7 @@
-// Même montage direct que `DeviceDialog`, et pour la même raison :
-// `SourcesPane`, qui ouvrira cette popin, n'existe pas encore. Le contenu part
-// dans un portail vers `document.body` — `wrapper.find()` ne le voit jamais, et
-// sans `attachTo` il n'est même pas rendu.
+// Same direct mounting as `DeviceDialog`, and for the same reason:
+// `SourcesPane`, which will open this dialog, does not exist yet. The
+// content goes into a portal to `document.body` — `wrapper.find()` never
+// sees it, and without `attachTo` it is not even rendered.
 import { flushPromises, mount } from '@vue/test-utils'
 import { createT } from '@ritornello/ui'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -22,28 +22,28 @@ const t = createT(CATALOG)
 
 afterEach(cleanupPopovers)
 
-/** L'état initial se déclare en forme **server** (`snake_case`). */
-async function mountDialog(partiel: ServerState = {}, message = '') {
-  const data = normalizeData(state({ can_browse_smb: true, ...partiel }))
+/** The initial state is declared in **server** shape (`snake_case`). */
+async function mountDialog(partial: ServerState = {}, message = '') {
+  const data = normalizeData(state({ can_browse_smb: true, ...partial }))
   const send = vi.fn<Send>().mockResolvedValue(data)
   const w = mount(ShareDialog, {
-    props: { data, t, send, fige: false, ouvert: true, message },
+    props: { data, t, send, frozen: false, open: true, message },
     attachTo: document.body,
   })
-  // Le portail n'est peuplé qu'au cycle suivant le montage.
+  // The portal is only populated on the cycle following the mount.
   await flushPromises()
   return { w, send }
 }
 
-/** Assistant connecté à un hôte, dans l'un ou l'autre de ses deux temps. */
-function connecte(surcharges: Record<string, unknown>) {
+/** Wizard connected to a host, in either of its two stages. */
+function connected(overrides: Record<string, unknown>) {
   return {
-    explore: { ...EXPLORE_CLOSED, open: true, kind: 'smb' as const, host: 'nas', ...surcharges },
+    explore: { ...EXPLORE_CLOSED, open: true, kind: 'smb' as const, host: 'nas', ...overrides },
   }
 }
 
 describe('ShareDialog', () => {
-  it('se connect envoie l’hôte et les identifiants une seule fois', async () => {
+  it('connecting sends the host and the credentials only once', async () => {
     const { send } = await mountDialog()
     await typeInPopover('[data-host]', '192.168.1.20')
     await typeInPopover('[data-user]', 'steven')
@@ -59,19 +59,20 @@ describe('ShareDialog', () => {
     expect(send).toHaveBeenCalledTimes(1)
   })
 
-  it('choose un partage demande sa root', async () => {
-    const { send } = await mountDialog(connecte({ shares: ['musique'] }))
+  it('choosing a share requests its root', async () => {
+    const { send } = await mountDialog(connected({ shares: ['musique'] }))
     await clickPopover('[data-share]')
     expect(send).toHaveBeenCalledWith({ op: 'smb_browse', share: 'musique', path: '' })
   })
 
-  it('descend garde le partage et compose un path relatif', async () => {
-    // Relatif au partage, et non absolu : c'est ce que `smbclient -D` attend,
-    // et une barre oblique de tête le ferait repartir de la root du partage.
+  it('descending keeps the share and composes a relative path', async () => {
+    // Relative to the share, not absolute: that is what `smbclient -D`
+    // expects, and a leading slash would make it start over from the
+    // share's root.
     const { send } = await mountDialog(
-      connecte({ share: 'musique', path: 'Ma Musique', dirs: ['Jazz'] }),
+      connected({ share: 'musique', path: 'Ma Musique', dirs: ['Jazz'] }),
     )
-    await clickPopover('[data-choix-dossier]')
+    await clickPopover('[data-picker-folder]')
     expect(send).toHaveBeenCalledWith({
       op: 'smb_browse',
       share: 'musique',
@@ -79,11 +80,11 @@ describe('ShareDialog', () => {
     })
   })
 
-  it('confirmer déclare la source sans réclamer le mot de passe', async () => {
-    // Il vient de servir à se connect : le faire retaper serait absurde, et
-    // la page ne l'a de toute façon jamais reçu en retour.
+  it('confirming declares the source without asking for the password again', async () => {
+    // It was just used to connect: retyping it would be absurd, and the
+    // page never received it back anyway.
     const { send } = await mountDialog(
-      connecte({ share: 'musique', path: 'Ma Musique', shares: ['musique'], dirs: [] }),
+      connected({ share: 'musique', path: 'Ma Musique', shares: ['musique'], dirs: [] }),
     )
     await clickPopover('[data-choose]')
     expect(send).toHaveBeenCalledWith({
@@ -100,10 +101,10 @@ describe('ShareDialog', () => {
     })
   })
 
-  it('sans smbclient la popin est d’emblée en input manuelle', async () => {
-    // Plus de bouton grisé à comprendre : il n'y a rien à parcourir, donc rien
-    // à toggle. La raison reste nommée, elle explique pourquoi les champs
-    // remplacent l'assistant.
+  it('without smbclient the dialog is straight away in manual input', async () => {
+    // No more greyed-out button to understand: there is nothing to browse,
+    // hence nothing to toggle. The reason stays named, it explains why the
+    // fields replace the wizard.
     const { send } = await mountDialog({ can_browse_smb: false })
     expect((inPopover('[data-smb-unavailable]')?.textContent ?? '').length).toBeGreaterThan(0)
     expect(inPopover('[data-manual-share]')).not.toBeNull()
@@ -112,7 +113,7 @@ describe('ShareDialog', () => {
     expect(send).not.toHaveBeenCalled()
   })
 
-  it('avec smbclient la bascule manuelle reste offerte, et l’assistant est le défaut', async () => {
+  it('with smbclient the manual toggle stays offered, and the wizard is the default', async () => {
     await mountDialog({ can_browse_smb: true })
     expect(inPopover('[data-manual-share]')).toBeNull()
     expect(inPopover('[data-manual]')).not.toBeNull()
@@ -120,14 +121,15 @@ describe('ShareDialog', () => {
     expect(inPopover('[data-manual-share]')).not.toBeNull()
   })
 
-  it('le champ domaine dit qu’il est optionnel', async () => {
-    // Signalé à l'usage : « domaine » seul ne dit pas à quoi il sert, et se lit
-    // comme un champ à remplir. Il ne sert qu'à un compte de domaine Windows.
+  it('the domain field says it is optional', async () => {
+    // Reported from use: "domain" alone does not say what it is for, and
+    // reads like a field to fill in. It is only used for a Windows domain
+    // account.
     await mountDialog({ can_browse_smb: true })
-    expect(inPopover('[data-domain]')?.getAttribute('placeholder')).toContain('optionnel')
+    expect(inPopover('[data-domain]')?.getAttribute('placeholder')).toContain('optional')
   })
 
-  it('la input manuelle déclare la source directement', async () => {
+  it('the manual input declares the source directly', async () => {
     const { send } = await mountDialog({ can_browse_smb: false })
     await typeInPopover('[data-host]', 'nas')
     await typeInPopover('[data-manual-share]', 'musique')
@@ -149,10 +151,10 @@ describe('ShareDialog', () => {
     })
   })
 
-  it('un sous-path manual laissé vide part à null, jamais à la chaîne vide', async () => {
-    // Côté plugin c'est une `Option<String>` : `Some("")` n'est pas « pas de
-    // sous-path » mais un sous-path vide, que la validation refuse — le
-    // partage serait alors indéclarable sans qu'aucun champ n'ait l'air fautif.
+  it('an empty manual subpath is sent as null, never as an empty string', async () => {
+    // On the plugin side this is an `Option<String>`: `Some("")` is not "no
+    // subpath" but an empty subpath, which validation refuses — the share
+    // would then be undeclarable with no field looking at fault.
     const { send } = await mountDialog({ can_browse_smb: false })
     await typeInPopover('[data-host]', 'nas')
     await typeInPopover('[data-manual-share]', 'musique')
@@ -160,18 +162,18 @@ describe('ShareDialog', () => {
     expect(send.mock.calls[0]?.[0]).toMatchObject({ subpath: null })
   })
 
-  it('un refus s’affiche au lieu d’une liste de partages vide', async () => {
-    // Une popin muette après un clic sur « Se connect » se lit comme une
-    // connexion qui n'a jamais eu lieu.
-    await mountDialog(connecte({ error: 'hôte injoignable' }))
-    expect(inPopover('[data-partage-erreur]')?.textContent ?? '').toContain('hôte injoignable')
+  it('a refusal displays instead of an empty share list', async () => {
+    // A silent dialog after clicking "Connect" reads like a connection that
+    // never happened.
+    await mountDialog(connected({ error: 'host unreachable' }))
+    expect(inPopover('[data-share-error]')?.textContent ?? '').toContain('host unreachable')
     expect(inPopover('[data-share]')).toBeNull()
   })
 
-  it('le partage reste visible dans le path quand on descend dedans', async () => {
-    // Défaut signalé : `explore.path` est relatif au partage, donc le partage
-    // choisi n'apparaissait nulle part — il semblait « mangé » dès qu'on y
-    // entrait, et rien ne disait dans lequel on se trouvait.
+  it('the share stays visible in the path when descending into it', async () => {
+    // Reported defect: `explore.path` is relative to the share, so the
+    // chosen share appeared nowhere — it seemed "eaten" as soon as it was
+    // entered, with nothing saying which one was being browsed.
     await mountDialog({
       explore: {
         ...EXPLORE_CLOSED,
@@ -183,53 +185,54 @@ describe('ShareDialog', () => {
         shares: ['music'],
       },
     })
-    expect(inPopover('[data-choix-path]')?.getAttribute('title')).toBe(
+    expect(inPopover('[data-picker-path]')?.getAttribute('title')).toBe(
       '//192.168.1.15/music/Yann Tiersen',
     )
   })
 
-  it('au sommet d’un partage, goUp ramène à la liste des partages', async () => {
-    // Défaut signalé : là, goUp ne faisait rien du tout, et il fallait
-    // refermer la popin pour essayer un autre partage.
-    const { send } = await mountDialog(connecte({ share: 'music', path: '' }))
-    await clickPopover('[data-choix-goUp]')
+  it('at the top of a share, goUp returns to the share list', async () => {
+    // Reported defect: there, goUp did nothing at all, and closing the
+    // dialog was needed to try another share.
+    const { send } = await mountDialog(connected({ share: 'music', path: '' }))
+    await clickPopover('[data-picker-go-up]')
     expect(send).toHaveBeenCalledWith({ op: 'smb_shares' })
   })
 
-  it('un bouton explicite ramène aussi à la liste des partages', async () => {
-    const { send } = await mountDialog(connecte({ share: 'music', path: 'Yann Tiersen' }))
-    await clickPopover('[data-aux-partages]')
+  it('an explicit button also returns to the share list', async () => {
+    const { send } = await mountDialog(connected({ share: 'music', path: 'Yann Tiersen' }))
+    await clickPopover('[data-to-shares]')
     expect(send).toHaveBeenCalledWith({ op: 'smb_shares' })
   })
 
-  it('revenir aux partages ne relance aucun appel réseau', async () => {
-    // `smb_shares` et non `smb_connect` : les partages sont déjà connus, et
-    // refaire l'appel ferait attendre — voire échouer — un simple retour.
-    const { send } = await mountDialog(connecte({ share: 'music', path: 'Yann Tiersen' }))
-    await clickPopover('[data-aux-partages]')
+  it('returning to the shares triggers no network call', async () => {
+    // `smb_shares` and not `smb_connect`: the shares are already known, and
+    // redoing the call would make a simple return wait — or even fail.
+    const { send } = await mountDialog(connected({ share: 'music', path: 'Yann Tiersen' }))
+    await clickPopover('[data-to-shares]')
     expect(send.mock.calls.some((c) => (c[0] as { op: string }).op === 'smb_connect')).toBe(false)
   })
 
-  it('rouvrir la popin ne garde rien de la input précédente', async () => {
-    // Le `Dialog` reste monté quand il est fermé : sans remise à zéro, l'hôte et
-    // le mot de passe de la fois précédente réapparaissaient — un secret qui n'a
-    // rien à faire en mémoire une fois la popin refermée.
+  it('reopening the dialog keeps nothing from the previous input', async () => {
+    // The `Dialog` stays mounted when closed: without this reset, the host
+    // and the password from the previous time would reappear — a secret
+    // that has no business staying in memory once the dialog is closed
+    // again.
     const { w } = await mountDialog()
     await typeInPopover('[data-host]', '192.168.1.15')
     await typeInPopover('[data-password]', 'secret-du-nas')
-    await w.setProps({ ouvert: false })
-    await w.setProps({ ouvert: true })
+    await w.setProps({ open: false })
+    await w.setProps({ open: true })
     expect((inPopover('[data-host]') as HTMLInputElement).value).toBe('')
     expect((inPopover('[data-password]') as HTMLInputElement).value).toBe('')
   })
 
-  it('affiche le refus du plugin dans la popin, pas seulement sur la page', async () => {
-    // Même défaut que pour l'assistant local : le bandeau de la page vit
-    // derrière le voile gris de la boîte de dialogue, donc illisible au moment
-    // où il compte. Ce path-ci porte les refus de `add_source` — un doublon,
-    // par exemple — que `explore.error` ne transporte pas.
-    const refus = 'Ce dossier est déjà déclaré comme source.'
-    await mountDialog(connecte({}), refus)
-    expect(inPopover('[data-dlg-message]')?.textContent).toContain(refus)
+  it('displays the plugin refusal in the dialog, not only on the page', async () => {
+    // Same defect as for the local wizard: the page's banner lives behind
+    // the dialog's grey veil, hence unreadable when it matters. This path
+    // carries `add_source` refusals — a duplicate, for instance — which
+    // `explore.error` does not carry.
+    const refusal = 'This folder is already declared as a source.'
+    await mountDialog(connected({}), refusal)
+    expect(inPopover('[data-dlg-message]')?.textContent).toContain(refusal)
   })
 })

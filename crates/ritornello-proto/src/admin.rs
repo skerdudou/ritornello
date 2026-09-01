@@ -3,27 +3,26 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "req", content = "arg")]
 pub enum AdminReq {
-    /// Actif d'IHM du plugin (`"ui.js"`, `"ui.css"`). Le path est **opaque**
-    /// pour le cœur : c'est le plugin qui décide ce qu'il expose.
+    /// A UI asset of the plugin (`"ui.js"`, `"ui.css"`). The path is **opaque**
+    /// to the core: the plugin decides what it exposes.
     GetAsset(String),
-    /// SourcesCatalog i18n du plugin dans la langue courante, à plat.
+    /// The plugin's i18n catalog in the current language, flattened.
     GetCatalog,
     GetData,
     SetData(serde_json::Value),
-    /// Sonde de vivacité : le greffon répond `Pong` sans toucher à son état ni
-    /// prendre de verrou. Sert au cœur à distinguer « occupé » (un `set_data`
-    /// long tient le verrou) de « mort » (socket fermée).
+    /// Liveness probe: the plugin answers `Pong` without touching its state or
+    /// taking any lock. Lets the core tell "busy" (a long `set_data` holds the
+    /// lock) from "dead" (socket closed).
     Ping,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminRequest {
     pub id: u64,
-    /// Budget accordé par le cœur, en millisecondes, **décidé par la nature de
-    /// la requête** : un active en mémoire n'a pas le budget d'un montage
-    /// réseau. Le serveur l'applique lui-même et répond `Expired` à
-    /// l'échéance ; absent = pas de cap côté serveur, le client garde le
-    /// sien.
+    /// Budget granted by the core, in milliseconds, **decided by the nature of
+    /// the request**: an in-memory asset does not get the budget of a network
+    /// mount. The server enforces it itself and answers `Expired` at the
+    /// deadline; absent = no cap on the server side, the client keeps its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_ms: Option<u64>,
     #[serde(flatten)]
@@ -33,15 +32,17 @@ pub struct AdminRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum AdminResult {
-    /// `body: None` = path inconnu du plugin (le cœur répond 404). Le `mime`
-    /// est fourni par le plugin : le cœur ne déduit rien d'une extension.
+    /// `body: None` = path unknown to the plugin (the core answers 404). The
+    /// `mime` is supplied by the plugin: the core infers nothing from an
+    /// extension.
     Asset { mime: String, body: Option<String> },
     Catalog(serde_json::Value),
     Data(serde_json::Value),
     Set { ok: bool, error: Option<String> },
     Pong,
-    /// Le greffon **vit** mais n'a pas tenu le budget (traitement ou attente du
-    /// verrou). Distinct d'une absence de réponse : ici c'est lui qui le dit.
+    /// The plugin **is alive** but did not meet the budget (processing or
+    /// waiting for the lock). Distinct from no answer at all: here it is the
+    /// plugin that says so.
     Expired,
 }
 
@@ -74,11 +75,11 @@ mod tests {
     }
 
     #[test]
-    fn resultat_asset_roundtrip_present_et_absent() {
+    fn asset_result_roundtrip_present_and_absent() {
         for r in [
             AdminResult::Asset { mime: "text/javascript".into(), body: Some("export default 1".into()) },
-            // `None` est la reponse normale a un path inconnu : le coeur la
-            // traduit en 404 sans avoir a interpreter le path.
+            // `None` is the normal answer to an unknown path: the core turns it
+            // into a 404 without having to interpret the path.
             AdminResult::Asset { mime: "text/plain".into(), body: None },
         ] {
             let json = serde_json::to_string(&AdminResponse { id: 3, result: r.clone() }).unwrap();
@@ -88,7 +89,7 @@ mod tests {
     }
 
     #[test]
-    fn resultat_catalog_roundtrip() {
+    fn catalog_result_roundtrip() {
         let r = AdminResult::Catalog(serde_json::json!({ "btn_save": "Enregistrer" }));
         let json = serde_json::to_string(&AdminResponse { id: 4, result: r.clone() }).unwrap();
         let back: AdminResponse = serde_json::from_str(&json).unwrap();
@@ -96,7 +97,7 @@ mod tests {
     }
 
     #[test]
-    fn request_setdata_porte_le_json_opaque() {
+    fn request_setdata_carries_the_opaque_json() {
         let r = AdminRequest { id: 2, deadline_ms: None, req: AdminReq::SetData(serde_json::json!({"stations": []})) };
         let json = serde_json::to_string(&r).unwrap();
         let back: AdminRequest = serde_json::from_str(&json).unwrap();
@@ -114,15 +115,15 @@ mod tests {
     }
 
     #[test]
-    fn une_requete_sans_deadline_se_lit_encore() {
-        // Les trames écrites avant ce champ : aucun `deadline_ms`.
+    fn a_request_without_deadline_still_parses() {
+        // Frames written before this field existed: no `deadline_ms`.
         let back: AdminRequest = serde_json::from_str(r#"{"id":1,"req":"GetCatalog"}"#).unwrap();
         assert_eq!(back.deadline_ms, None);
         assert_eq!(back.req, AdminReq::GetCatalog);
     }
 
     #[test]
-    fn la_deadline_circule_quand_elle_est_la() {
+    fn the_deadline_travels_when_present() {
         let r = AdminRequest { id: 7, deadline_ms: Some(1000), req: AdminReq::GetAsset("ui.js".into()) };
         let json = serde_json::to_string(&r).unwrap();
         assert_eq!(json, r#"{"id":7,"deadline_ms":1000,"req":"GetAsset","arg":"ui.js"}"#);
@@ -131,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn ping_pong_et_expired_font_l_aller_retour() {
+    fn ping_pong_and_expired_roundtrip() {
         let r = AdminRequest { id: 9, deadline_ms: Some(500), req: AdminReq::Ping };
         let json = serde_json::to_string(&r).unwrap();
         assert_eq!(json, r#"{"id":9,"deadline_ms":500,"req":"Ping"}"#);

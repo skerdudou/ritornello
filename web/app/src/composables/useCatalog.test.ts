@@ -1,18 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-// `useCatalog` partage un état de module (le catalogue) : chaque test repart
-// d'un module frais pour ne step hériter de celui du test précédent.
+// `useCatalog` shares module state (the catalog): each test starts over from
+// a fresh module so as not to inherit the one of the previous test.
 describe('useCatalog', () => {
   beforeEach(() => {
     vi.resetModules()
     vi.unstubAllGlobals()
   })
 
-  it('un échec transitoire garde le catalogue précédent, sans retomber sur les clés brutes', async () => {
-    // Régression (revue 2026-07-27) : `.catch(() => ({}))` écrasait le
-    // catalogue partagé par toutes les vues — un GET /api/i18n raté après un
-    // changement de langue affichait `remote_title`, `status_title`… partout,
-    // jusqu'à un rechargement manuel.
+  it('a transient failure keeps the previous catalog, without falling back to raw keys', async () => {
+    // Regression (review 2026-07-27): `.catch(() => ({}))` overwrote the
+    // catalog shared by all the views — a failed GET /api/i18n after a
+    // language change displayed `remote_title`, `status_title`... everywhere,
+    // until a manual reload.
     const spy = vi
       .fn()
       .mockResolvedValueOnce(

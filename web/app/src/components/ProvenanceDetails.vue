@@ -14,35 +14,34 @@ import { useCatalog } from '../composables/useCatalog'
 import type { PlayerPayload } from '../types'
 
 /**
- * Le detail de provenance des metadonnees, derriere un `(?)`.
+ * The metadata provenance detail, behind a `(?)`.
  *
- * **Ce qu'il remplace, et pourquoi.** La carte portait deux badges — qui a
- * fourni le text, qui a fourni la pochette — sur la ligne la plus chargee de
- * l'ecran. Deux mots pour une information que personne ne lit en regardant sa
- * musique, et qui ne repondait meme step a la question qu'on se pose vraiment
- * devant un titre faux : *quel* champ vient de *qui*. Le text displayed est
- * compose de plusieurs mains — le gagnant de l'arbitrage, les `fill_only` qui
- * comblent ses trous, l'annee et les links qui se prennent chez n'importe quel
- * contributeur, la pochette qui vient souvent d'ailleurs — et `origin` ne
- * nommait que la premiere.
+ * **What it replaces, and why.** The card carried two badges — who provided
+ * the text, who provided the cover — on the busiest line of the screen. Two
+ * words for a piece of information nobody reads while looking at their music,
+ * and which did not even answer the question one really asks in front of a
+ * wrong title: *which* field comes from *whom*. The displayed text is composed
+ * by several hands — the winner of the arbitration, the `fill_only` that fill
+ * its gaps, the year and the links taken from any contributor, the cover that
+ * often comes from elsewhere — and `origin` only named the first one.
  *
- * Le detail vit donc dans une popin, ou il y a la place de le dire en toutes
- * lettres, et la ligne des badges rend son espace au reste.
+ * So the detail lives in a popin, where there is room to spell it out, and
+ * the badges line gives its space back to the rest.
  */
 const { t } = useCatalog()
 const props = defineProps<{ state: PlayerPayload | null }>()
 
 /**
- * Les fields, dans l'order ou l'ecran les montre.
+ * The fields, in the order the screen shows them.
  *
- * Un order fixe et non celui de la carte : la carte est triee par nom de champ
- * (c'est un `BTreeMap` cote coeur, pour que la trame soit stable), ce qui
- * donnerait « album, artiste, duration, titre » — l'order alphabetique d'un
- * dictionnaire, step celui d'une carte de player.
+ * A fixed order and not the map's: the map is sorted by field name (it is a
+ * `BTreeMap` core side, so that the frame is stable), which would give
+ * "album, artist, duration, title" — the alphabetical order of a dictionary,
+ * not that of a player card.
  */
 const ORDER = ['title', 'artist', 'album', 'year', 'duration', 'cover', 'links'] as const
 
-/** Le label de chaque champ, par cle de catalogue. */
+/** The label of each field, by catalog key. */
 const LABEL: Record<string, string> = {
   title: 'provenance_field_title',
   artist: 'provenance_field_artist',
@@ -54,26 +53,26 @@ const LABEL: Record<string, string> = {
 }
 
 const fields = computed(() => {
-  const fournis = props.state?.provenance?.fields ?? {}
-  const retravailles = props.state?.provenance?.derived ?? {}
-  return ORDER.filter((c) => fournis[c]).map((c) => ({
-    champ: c,
-    par: fournis[c]!,
-    // Le greffon qui a retravaille ce champ sans en etre la source — le
-    // decoupage d'un en-tete ICY, typiquement. Affiche **a cote** de la
-    // source, jamais a sa place : c'est tout l'objet de la distinction.
-    retravaillePar: retravailles[c],
+  const provided = props.state?.provenance?.fields ?? {}
+  const derived = props.state?.provenance?.derived ?? {}
+  return ORDER.filter((c) => provided[c]).map((c) => ({
+    field: c,
+    by: provided[c]!,
+    // The plugin that reworked this field without being its source — the
+    // splitting of an ICY header, typically. Shown **next to** the source,
+    // never in its place: that is the whole point of the distinction.
+    derivedBy: derived[c],
   }))
 })
 
 const misses = computed(() => props.state?.provenance?.misses ?? [])
 
 /**
- * Le bouton n'existe que s'il y a quelque chose a dire.
+ * The button only exists if there is something to say.
  *
- * Un `(?)` qui ouvre une popin vide serait pire que step de bouton : il promet
- * une explication et n'en donne aucune. C'est le cas ordinaire avant qu'un
- * morceau ne soit identifie.
+ * A `(?)` opening an empty popin would be worse than no button: it promises an
+ * explanation and gives none. This is the ordinary case before a track gets
+ * identified.
  */
 const hasSomethingToSay = computed(() => fields.value.length > 0 || misses.value.length > 0)
 </script>
@@ -81,10 +80,10 @@ const hasSomethingToSay = computed(() => fields.value.length > 0 || misses.value
 <template>
   <Dialog v-if="hasSomethingToSay">
     <DialogTrigger as-child>
-      <!-- `size-11` : la cible tactile de 44 px recommandee, sur une ligne ou
-           le curseur de la barre de progression deborde deja (voir
-           PlayerCard.vue). `relative z-10` pour la meme raison que les links de
-           plateforme voisins — passer devant ce debordement rend le tap. -->
+      <!-- `size-11`: the recommended 44 px touch target, on a line where the
+           progress bar's slider already overflows (see PlayerCard.vue).
+           `relative z-10` for the same reason as the neighbouring platform
+           links — getting in front of that overflow gives the tap back. -->
       <Button
         variant="ghost"
         class="relative z-10 size-11 shrink-0 rounded-full text-muted-foreground"
@@ -105,28 +104,26 @@ const hasSomethingToSay = computed(() => fields.value.length > 0 || misses.value
         <DialogDescription>{{ t('provenance_hint') }}</DialogDescription>
       </DialogHeader>
 
-      <!-- Une list de definitions et non un tableau : deux colonnes dont
-           l'une tient en un mot, sur une popin qui doit rester lisible au
-           phone. -->
+      <!-- A definition list and not a table: two columns, one of which fits in
+           a single word, on a popin that must stay readable on the phone. -->
       <dl v-if="fields.length" class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-        <template v-for="c in fields" :key="c.champ">
-          <dt class="text-muted-foreground">{{ t(LABEL[c.champ]!) }}</dt>
-          <dd class="font-medium" :data-provenance-champ="c.champ">
-            {{ c.par }}
+        <template v-for="c in fields" :key="c.field">
+          <dt class="text-muted-foreground">{{ t(LABEL[c.field]!) }}</dt>
+          <dd class="font-medium" :data-provenance-champ="c.field">
+            {{ c.by }}
             <span
-              v-if="c.retravaillePar"
+              v-if="c.derivedBy"
               class="font-normal text-muted-foreground"
-              :data-provenance-derive="c.champ"
-            >{{ t('provenance_derived_by', { par: c.retravaillePar }) }}</span>
+              :data-provenance-derive="c.field"
+            >{{ t('provenance_derived_by', { par: c.derivedBy }) }}</span>
           </dd>
         </template>
       </dl>
 
-      <!-- Ceux qui ont cherche sans rien trouver. Une section a part, et step
-           une ligne « — » dans la list ci-dessus : « musicbrainz n'a step
-           d'album pour ce morceau » n'est step « musicbrainz n'a jamais ete
-           interroge », et c'est precisement la distinction qu'on vient
-           d'ajouter au protocole. -->
+      <!-- Those who searched without finding anything. A separate section, and
+           not a "—" line in the list above: "musicbrainz has no album for this
+           track" is not "musicbrainz was never queried", and that is precisely
+           the distinction just added to the protocol. -->
       <div v-if="misses.length" class="space-y-1" data-provenance-misses>
         <p class="text-sm text-muted-foreground">{{ t('provenance_misses') }}</p>
         <div class="flex flex-wrap gap-1.5">

@@ -1,27 +1,26 @@
-//! Les racines : les répertoires où le plugin a le droit de regarder.
+//! The roots: the directories the plugin is allowed to look into.
 //!
-//! Un disque USB, un dossier de l'appareil et un partage SMB sont la même chose
-//! pour tout le reste du plugin ; le montage n'est qu'un détail du kind `Smb`.
-//! C'est ce qui rend le parcours des fichiers locaux quasi gratuit.
+//! A USB disk, a folder on the device and an SMB share are the same thing for
+//! the rest of the plugin; the mount is merely a detail of the `Smb` kind.
+//! That is what makes browsing local files nearly free.
 //!
-//! La validation de ce module est **lue par un binaire racine**. Elle est donc
-//! stricte, et refuse par principe tout ce dont elle ne sait pas prouver
-//! l'innocuité.
+//! This module's validation is **read by a root binary**. It is therefore
+//! strict, and refuses on principle anything it cannot prove harmless.
 
 use ritornello_i18n::Catalog;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Racine des points de montage. Constante, **jamais lue depuis la
-/// configuration** : un point de montage libre serait un path à valider, et
-/// c'est root qui l'emploierait.
+/// Root of the mount points. Constant, **never read from the configuration**:
+/// a free mount point would be a path to validate, and root is who would use
+/// it.
 pub const MOUNT_ROOT: &str = "/mnt/ritornello";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Root {
     pub name: String,
     pub kind: RootKind,
-    /// Genre `Local` uniquement : path absolu du répertoire.
+    /// `Local` kind only: absolute path of the directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(default)]
@@ -34,8 +33,8 @@ pub struct Root {
     pub user: String,
     #[serde(default)]
     pub domain: String,
-    /// Retire `ro` des options de montage. Faux par défaut : enregistrer une
-    /// liste sur le partage est un choix explicite, pas un état de fait.
+    /// Removes `ro` from the mount options. False by default: saving a
+    /// playlist onto the share is an explicit choice, not a given.
     #[serde(default)]
     pub writable: bool,
 }
@@ -53,9 +52,9 @@ pub struct Roots {
     pub root: Vec<Root>,
 }
 
-/// Erreur de validation typée : le texte utilisateur est produit à la frontière
-/// via `message(&Catalog)`. `Display` fournit une version anglaise pour les
-/// logs internes, hors périmètre i18n.
+/// Typed validation error: the user-facing text is produced at the boundary
+/// via `message(&Catalog)`. `Display` provides an English version for internal
+/// logs, outside the i18n scope.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RootError {
     BadName { name: String },
@@ -66,47 +65,47 @@ pub enum RootError {
     RelativeLocalPath { path: String },
 }
 
-/// Grammaire d'un name de racine : il devient un **composant de path** et un
-/// **name de fichier d'identifiants**. Tout ce qui sort de cet alphabet ouvrirait
-/// une traversée de répertoire du côté privilégié.
+/// Grammar of a root name: it becomes a **path component** and a
+/// **credentials file name**. Anything outside this alphabet would open a
+/// directory traversal on the privileged side.
 fn valid_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 32 {
         return false;
     }
     let mut chars = name.chars();
-    let premier = chars.next().unwrap_or(' ');
-    if !premier.is_ascii_lowercase() && !premier.is_ascii_digit() {
+    let first = chars.next().unwrap_or(' ');
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
         return false;
     }
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-/// Un champ qui atterrit in_dir une line d'options `mount.cifs`.
+/// A field that lands in a `mount.cifs` options line.
 ///
-/// **La virgule est l'injection à craindre** : les options de `mount.cifs` sont
-/// séparées par des virgules, si bien qu'un hôte « nas,uid=0 » ajouterait une
-/// option à la line exécutée par root. L'espace casse l'analyse, `..` remonte
-/// l'arborescence, et l'octet nul tronque une chaîne C.
-pub fn field_on(valeur: &str) -> bool {
-    !valeur.is_empty()
-        && !valeur.contains(',')
-        && !valeur.chars().any(char::is_whitespace)
-        && !valeur.contains("..")
-        && !valeur.contains('\0')
+/// **The comma is the injection to fear**: `mount.cifs` options are separated
+/// by commas, so a host "nas,uid=0" would add an option to the line executed
+/// by root. A space breaks the parsing, `..` climbs the tree, and the null
+/// byte truncates a C string.
+pub fn field_on(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains(',')
+        && !value.chars().any(char::is_whitespace)
+        && !value.contains("..")
+        && !value.contains('\0')
 }
 
-/// Grammaire d'un **sous-path** parcouru sous un point de montage.
+/// Grammar of a **subpath** browsed under a mount point.
 ///
-/// Distincte de `field_on`, et c'est délibéré. `field_on` refuse la virgule
-/// et l'espace parce que ses valeurs atterrissent in_dir la line d'options de
-/// `mount.cifs`, qui les sépare par des virgules. **Un sous-path n'y entre
-/// jamais** : `mount_command` ne pose que l'hôte, le partage et
-/// `mount_point()`, lequel ignore le sous-path.
+/// Distinct from `field_on`, and deliberately so. `field_on` refuses the comma
+/// and the space because its values land in the `mount.cifs` options line,
+/// which separates them with commas. **A subpath never gets there**:
+/// `mount_command` only sets the host, the share and `mount_point()`, which
+/// ignores the subpath.
 ///
-/// Leur appliquer la même règle rendait « Ma Musique » indéclarable pour une
-/// raison qui ne la concerne pas. Le défaut se voyait peu tant qu'on saisissait
-/// le sous-path à la main ; il deviendrait constant avec un assistant qui
-/// propose de choisir n'importe quel dossier d'un NAS.
+/// Applying the same rule to both made "Ma Musique" undeclarable for a reason
+/// that has nothing to do with it. The defect was rarely seen as long as the
+/// subpath was typed by hand; it would become constant with a wizard that
+/// offers to pick any folder of a NAS.
 fn subpath_on(s: &str) -> bool {
     !s.is_empty()
         && !s.starts_with('/')
@@ -163,8 +162,8 @@ impl Roots {
 }
 
 impl Root {
-    /// Répertoire réellement parcouru. Pour un partage, le point de montage
-    /// **imposé**, éventuellement suivi du sous-path déclaré.
+    /// Directory actually browsed. For a share, the **imposed** mount point,
+    /// possibly followed by the declared subpath.
     pub fn base_dir(&self) -> PathBuf {
         match self.kind {
             RootKind::Local => PathBuf::from(self.path.clone().unwrap_or_default()),
@@ -178,20 +177,20 @@ impl Root {
         }
     }
 
-    /// Point de montage, **sans** le sous-path : c'est le partage entier qui
-    /// est monté, le sous-path n'étant qu'un endroit où regarder dedans.
+    /// Mount point, **without** the subpath: the whole share is what gets
+    /// mounted, the subpath being merely a place to look inside it.
     pub fn mount_point(&self) -> PathBuf {
         PathBuf::from(MOUNT_ROOT).join(&self.name)
     }
 
-    /// File d'identifiants consommé par `mount.cifs`.
+    /// Credentials file consumed by `mount.cifs`.
     pub fn credentials_path(&self, dir: &Path) -> PathBuf {
         dir.join(format!("{}.cred", self.name))
     }
 }
 
 impl RootError {
-    /// Message localisé remonté à l'utilisateur (corps du refus côté admin).
+    /// Localized message surfaced to the user (body of the admin-side refusal).
     pub fn message(&self, catalog: &Catalog) -> String {
         match self {
             RootError::BadName { name } => catalog.get("bad_root_name").replace("{name}", name),
@@ -225,71 +224,71 @@ impl std::fmt::Display for RootError {
 
 impl std::error::Error for RootError {}
 
-/// Replie un libellé quelconque en un name de racine conforme à `valid_name`.
+/// Folds an arbitrary label into a root name conforming to `valid_name`.
 ///
-/// L'utilisateur ne saisit plus ce name : les assistants le dérivent du name du
-/// partage ou du dernier segment du path choisi. Comme il devient **un
-/// composant du path de montage et un name de fichier d'identifiants**, la
-/// dérivation doit produire du valide par construction — un refus après
-/// dérivation serait un défaut que rien in_dir l'IHM ne permettrait de corriger.
+/// The user no longer types this name: the wizards derive it from the share
+/// name or from the last segment of the chosen path. Since it becomes **a
+/// component of the mount path and a credentials file name**, the derivation
+/// must produce something valid by construction — a refusal after derivation
+/// would be a defect that nothing in the UI would allow to fix.
 ///
-/// `pris` porte les names déjà employés : sans dédoublonnage, une deuxième
-/// source écraserait le fichier d'identifiants de la première et se disputerait
-/// son point de montage.
-pub fn derive_name(indice: &str, pris: &[&str]) -> String {
-    let base = fold(indice);
-    if !pris.contains(&base.as_str()) {
+/// `taken` carries the names already in use: without deduplication, a second
+/// source would overwrite the first one's credentials file and fight over its
+/// mount point.
+pub fn derive_name(hint: &str, taken: &[&str]) -> String {
+    let base = fold(hint);
+    if !taken.contains(&base.as_str()) {
         return base;
     }
     for n in 2..1000 {
-        let suffixe = format!("-{n}");
-        // Tronquer **avant** de concaténer : add le suffixe à un name déjà
-        // long produirait un name refusé, donc une source impossible à déclarer
-        // une deuxième fois.
-        let tete: String = base.chars().take(32 - suffixe.len()).collect();
-        let candidat = format!("{}{suffixe}", tete.trim_end_matches('-'));
-        if !pris.contains(&candidat.as_str()) {
-            return candidat;
+        let suffix = format!("-{n}");
+        // Truncate **before** concatenating: adding the suffix to an already
+        // long name would produce a refused name, hence a source impossible
+        // to declare a second time.
+        let head: String = base.chars().take(32 - suffix.len()).collect();
+        let candidate = format!("{}{suffix}", head.trim_end_matches('-'));
+        if !taken.contains(&candidate.as_str()) {
+            return candidate;
         }
     }
     base
 }
 
-/// Le repliage lui-même : minuscules ASCII, tiret pour tout le reste.
+/// The folding itself: ASCII lowercase, a dash for everything else.
 ///
-/// Le premier caractère est alphanumérique **par construction** — on ne push_cover
-/// jamais de tiret sur une chaîne clear — ce qui satisfait la première règle de
-/// `valid_name` sans avoir à la vérifier après coup.
-fn fold(indice: &str) -> String {
+/// The first character is alphanumeric **by construction** — we never push a
+/// dash onto an empty string — which satisfies the first rule of `valid_name`
+/// without having to check it afterwards.
+fn fold(hint: &str) -> String {
     let mut out = String::new();
-    let mut tiret = false;
-    for c in indice.chars() {
+    let mut dash = false;
+    for c in hint.chars() {
         let c = without_accents(c);
         if c.is_ascii_alphanumeric() {
             out.push(c.to_ascii_lowercase());
-            tiret = false;
-        } else if !out.is_empty() && !tiret {
+            dash = false;
+        } else if !out.is_empty() && !dash {
             out.push('-');
-            tiret = true;
+            dash = true;
         }
     }
-    let tronque: String = out.chars().take(32).collect();
-    let net = tronque.trim_end_matches('-').to_string();
-    // Un indice entièrement non-ASCII ne laisse rien : mieux vaut un name
-    // générique qu'une source impossible à déclarer.
-    if net.is_empty() {
+    let truncated: String = out.chars().take(32).collect();
+    let clean = truncated.trim_end_matches('-').to_string();
+    // A hint that is entirely non-ASCII leaves nothing: better a generic name
+    // than a source impossible to declare.
+    if clean.is_empty() {
         "source".to_string()
     } else {
-        net
+        clean
     }
 }
 
-/// Replie les accents latins courants.
+/// Folds the common Latin accents.
 ///
-/// Une table plutôt qu'une caisse de normalisation Unicode : quinze lines
-/// couvrent le français, l'espagnol et l'allemand, et tout le reste tombe de
-/// toute façon sur le tiret. « Été » qui deviendrait « t » serait un name exact
-/// mais illisible in_dir les logs et sous `/mnt/ritornello`.
+/// A table rather than a Unicode normalization crate: fifteen lines cover
+/// French, Spanish and German, and everything else falls onto the dash anyway.
+/// "Été" turning into "t" would be an exact name but an unreadable one in the
+/// logs and under `/mnt/ritornello`.
 fn without_accents(c: char) -> char {
     match c {
         'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' => 'a',
@@ -316,7 +315,7 @@ fn without_accents(c: char) -> char {
 mod tests {
     use super::*;
 
-    fn racine_smb() -> Root {
+    fn smb_root() -> Root {
         Root {
             name: "nas".into(),
             kind: RootKind::Smb,
@@ -330,7 +329,7 @@ mod tests {
         }
     }
 
-    fn racine_locale() -> Root {
+    fn local_root() -> Root {
         Root {
             name: "usb".into(),
             kind: RootKind::Local,
@@ -344,87 +343,87 @@ mod tests {
         }
     }
 
-    fn roots_avec(root: Root) -> Roots {
+    fn roots_with(root: Root) -> Roots {
         Roots { root: vec![root] }
     }
 
     #[test]
-    fn un_nom_de_racine_hors_grammaire_est_refuse() {
-        // Le name devient un composant de path (/mnt/ritornello/<name>) ET un
-        // name de fichier d'identifiants. Tout ce qui n'est pas [a-z0-9-]
-        // ouvrirait une traversée de répertoire du côté privilégié.
-        for mauvais in ["../evasion", "Nas", "nas/musique", "", "nas musique", "-nas", "nas.."] {
-            let r = roots_avec(Root { name: mauvais.into(), ..racine_smb() });
+    fn a_root_name_outside_the_grammar_is_refused() {
+        // The name becomes a path component (/mnt/ritornello/<name>) AND a
+        // credentials file name. Anything that is not [a-z0-9-] would open a
+        // directory traversal on the privileged side.
+        for bad in ["../evasion", "Nas", "nas/musique", "", "nas musique", "-nas", "nas.."] {
+            let r = roots_with(Root { name: bad.into(), ..smb_root() });
             assert!(
                 matches!(r.validate(), Err(RootError::BadName { .. })),
-                "accepte a tort : {mauvais:?}"
+                "wrongly accepted: {bad:?}"
             );
         }
     }
 
     #[test]
-    fn une_virgule_dans_l_hote_ou_le_partage_est_refusee() {
-        // LA faille à ne pas manquer : les options de mount.cifs sont séparées
-        // par des virgules. Un hôte « nas,uid=0 » injecterait une option in_dir
-        // la line de montage exécutée par root.
-        let r = roots_avec(Root { host: "nas,uid=0".into(), ..racine_smb() });
+    fn a_comma_in_the_host_or_the_share_is_refused() {
+        // THE hole not to miss: mount.cifs options are separated by commas. A
+        // host "nas,uid=0" would inject an option into the mount line executed
+        // by root.
+        let r = roots_with(Root { host: "nas,uid=0".into(), ..smb_root() });
         assert!(matches!(r.validate(), Err(RootError::BadHost { .. })));
-        let r = roots_avec(Root { share: "musique,rw".into(), ..racine_smb() });
+        let r = roots_with(Root { share: "musique,rw".into(), ..smb_root() });
         assert!(matches!(r.validate(), Err(RootError::BadShare { .. })));
     }
 
     #[test]
-    fn un_sous_chemin_qui_remonte_ou_qui_est_absolu_est_refuse() {
-        let r = roots_avec(Root { subpath: Some("../../etc".into()), ..racine_smb() });
+    fn a_subpath_that_climbs_or_is_absolute_is_refused() {
+        let r = roots_with(Root { subpath: Some("../../etc".into()), ..smb_root() });
         assert!(matches!(r.validate(), Err(RootError::BadSubpath { .. })));
-        let r = roots_avec(Root { subpath: Some("/etc".into()), ..racine_smb() });
+        let r = roots_with(Root { subpath: Some("/etc".into()), ..smb_root() });
         assert!(matches!(r.validate(), Err(RootError::BadSubpath { .. })));
     }
 
     #[test]
-    fn un_sous_chemin_a_espaces_est_accepte() {
-        // Le défaut corrigé. `field_on` refuse l'espace parce que ses valeurs
-        // atterrissent in_dir la line d'options de mount.cifs, séparée par des
-        // virgules. Un sous-path n'y entre JAMAIS : `mount_command` ne pose que
-        // l'hôte, le partage et `mount_point()`, qui l'ignore. Lui appliquer la
-        // même règle rendait « Ma Musique » indéclarable pour une raison qui ne le
-        // concerne pas — et l'assistant propose désormais n'importe quel dossier.
-        let r = roots_avec(Root { subpath: Some("Ma Musique/Jazz, live".into()), ..racine_smb() });
+    fn a_subpath_with_spaces_is_accepted() {
+        // The defect that was fixed. `field_on` refuses the space because its
+        // values land in the mount.cifs options line, which is comma-separated.
+        // A subpath NEVER gets there: `mount_command` only sets the host, the
+        // share and `mount_point()`, which ignores it. Applying the same rule
+        // to it made "Ma Musique" undeclarable for a reason that has nothing
+        // to do with it — and the wizard now offers any folder.
+        let r = roots_with(Root { subpath: Some("Ma Musique/Jazz, live".into()), ..smb_root() });
         assert!(r.validate().is_ok(), "{:?}", r.validate());
     }
 
     #[test]
-    fn un_sous_chemin_qui_remonte_reste_refuse() {
-        for mauvais in ["../../etc", "/etc", "a/../../b", "a//b", "a/./b", "a\0b", ""] {
-            let r = roots_avec(Root { subpath: Some(mauvais.into()), ..racine_smb() });
+    fn a_subpath_that_climbs_stays_refused() {
+        for bad in ["../../etc", "/etc", "a/../../b", "a//b", "a/./b", "a\0b", ""] {
+            let r = roots_with(Root { subpath: Some(bad.into()), ..smb_root() });
             assert!(
                 matches!(r.validate(), Err(RootError::BadSubpath { .. })),
-                "accepte a tort : {mauvais:?}"
+                "wrongly accepted: {bad:?}"
             );
         }
     }
 
     #[test]
-    fn un_nom_derive_est_toujours_accepte_par_la_grammaire() {
-        // L'invariant qui compte : ce name devient un composant du path de
-        // montage ET un name de fichier d'identifiants. La dérivation doit produire
-        // du valide par construction, jamais par chance — l'utilisateur ne voit
-        // plus ce name et n'aurait aucun moyen de corriger un refus.
-        let hostiles = [
+    fn a_derived_name_is_always_accepted_by_the_grammar() {
+        // The invariant that matters: this name becomes a component of the
+        // mount path AND a credentials file name. The derivation must produce
+        // something valid by construction, never by luck — the user no longer
+        // sees this name and would have no way to fix a refusal.
+        let hostile = [
             "../etc", "Ma Musique", "Éric's Jazz!", "///", "", "$$$", "3615",
             "CamelCase", "a b c d e f g h i j k l m n o p q r s t u v w x y z 0 1 2 3",
             "日本語", "-début-tiret-", "fin-tiret---",
         ];
-        for h in hostiles {
+        for h in hostile {
             let n = derive_name(h, &[]);
-            assert!(valid_name(&n), "indice {h:?} a donne un name refuse : {n:?}");
+            assert!(valid_name(&n), "hint {h:?} produced a refused name: {n:?}");
         }
     }
 
     #[test]
-    fn deux_indices_identiques_donnent_deux_noms_distincts() {
-        // Sans dédoublonnage, la deuxième source écraserait le fichier
-        // d'identifiants de la première et se disputerait son point de montage.
+    fn two_identical_hints_yield_two_distinct_names() {
+        // Without deduplication, the second source would overwrite the first
+        // one's credentials file and fight over its mount point.
         let a = derive_name("Musique", &[]);
         let b = derive_name("Musique", &[a.as_str()]);
         let c = derive_name("Musique", &[a.as_str(), b.as_str()]);
@@ -435,10 +434,10 @@ mod tests {
     }
 
     #[test]
-    fn un_indice_tres_long_reste_dedoublonnable() {
-        // Le suffixe doit rentrer in_dir les 32 caractères : le concaténer sans
-        // tronquer d'abord produirait un name refusé, donc une source impossible à
-        // déclarer une deuxième fois.
+    fn a_very_long_hint_remains_deduplicable() {
+        // The suffix must fit within the 32 characters: concatenating it
+        // without truncating first would produce a refused name, hence a
+        // source impossible to declare a second time.
         let long = "a".repeat(60);
         let a = derive_name(&long, &[]);
         let b = derive_name(&long, &[a.as_str()]);
@@ -447,43 +446,43 @@ mod tests {
     }
 
     #[test]
-    fn les_accents_se_replient_au_lieu_de_disparaitre() {
-        // « Été » qui deviendrait « t » serait un name exact mais illisible in_dir les
-        // logs et in_dir /mnt/ritornello.
+    fn accents_fold_instead_of_disappearing() {
+        // "Été" turning into "t" would be an exact name but an unreadable one
+        // in the logs and in /mnt/ritornello.
         assert_eq!(derive_name("Été à Nîmes", &[]), "ete-a-nimes");
     }
 
     #[test]
-    fn deux_racines_de_meme_nom_sont_refusees() {
-        // Elles se disputeraient le même point de montage et le même fichier
-        // d'identifiants.
-        let r = Roots { root: vec![racine_smb(), racine_smb()] };
+    fn two_roots_with_the_same_name_are_refused() {
+        // They would fight over the same mount point and the same credentials
+        // file.
+        let r = Roots { root: vec![smb_root(), smb_root()] };
         assert!(matches!(r.validate(), Err(RootError::DuplicateName { .. })));
     }
 
     #[test]
-    fn une_racine_locale_veut_un_chemin_absolu() {
-        let r = roots_avec(Root { path: Some("media/usb".into()), ..racine_locale() });
+    fn a_local_root_wants_an_absolute_path() {
+        let r = roots_with(Root { path: Some("media/usb".into()), ..local_root() });
         assert!(matches!(r.validate(), Err(RootError::RelativeLocalPath { .. })));
-        assert!(roots_avec(racine_locale()).validate().is_ok());
+        assert!(roots_with(local_root()).validate().is_ok());
     }
 
     #[test]
-    fn une_racine_valide_passe_et_ses_repertoires_sont_imposes() {
-        let r = roots_avec(racine_smb());
+    fn a_valid_root_passes_and_its_directories_are_imposed() {
+        let r = roots_with(smb_root());
         assert!(r.validate().is_ok());
-        // Le point de montage n'est JAMAIS lu depuis la configuration, et le
-        // sous-path n'y entre pas : c'est le partage entier qui est monté.
+        // The mount point is NEVER read from the configuration, and the
+        // subpath does not enter it: the whole share is what gets mounted.
         assert_eq!(r.root[0].mount_point(), PathBuf::from("/mnt/ritornello/nas"));
         assert_eq!(r.root[0].base_dir(), PathBuf::from("/mnt/ritornello/nas/Albums"));
     }
 
     #[test]
-    fn chaque_refus_resout_contre_le_catalogue_embarque() {
-        // `Catalog::get` rend la clé quand il ne la trouve pas : sans ce test,
-        // une faute de frappe afficherait « bad_share » à l'écran sans que rien
-        // ne bronche. On résout donc contre le sources_catalog réellement embarqué,
-        // et on refuse un message réduit à sa propre clé.
+    fn every_refusal_resolves_against_the_embedded_catalog() {
+        // `Catalog::get` returns the key when it cannot find it: without this
+        // test, a typo would display "bad_share" on screen without anything
+        // complaining. So we resolve against the catalog actually embedded,
+        // and refuse a message reduced to its own key.
         let catalog =
             Catalog::load("files", "en", Path::new("/inexistant"), crate::FILES_EN);
         let messages = [
@@ -495,16 +494,16 @@ mod tests {
             RootError::RelativeLocalPath { path: "media/usb".into() }.message(&catalog),
         ];
         for m in &messages {
-            assert!(m.contains(' '), "message reduit a une key brute : {m:?}");
+            assert!(m.contains(' '), "message reduced to a raw key: {m:?}");
         }
-        // Et l'interpolation aboutit : pas de jeton laissé tel quel.
-        let bounded = RootError::BadHost { host: "nas,uid=0".into() }.message(&catalog);
-        assert!(bounded.contains("nas,uid=0"), "le refus doit nommer ce qui cloche : {bounded:?}");
-        assert!(!bounded.contains("{host}"), "jeton laisse tel quel : {bounded:?}");
+        // And the interpolation goes through: no placeholder left as is.
+        let host_message = RootError::BadHost { host: "nas,uid=0".into() }.message(&catalog);
+        assert!(host_message.contains("nas,uid=0"), "the refusal must name what is wrong: {host_message:?}");
+        assert!(!host_message.contains("{host}"), "placeholder left as is: {host_message:?}");
     }
 
     #[test]
-    fn une_table_se_relit_depuis_le_toml() {
+    fn a_table_reads_back_from_toml() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("media-roots.toml");
         std::fs::write(
@@ -529,8 +528,8 @@ path = "/media/usb"
         assert_eq!(roots.root.len(), 2);
         assert_eq!(roots.by_name("nas").unwrap().kind, RootKind::Smb);
         assert_eq!(roots.by_name("usb").unwrap().base_dir(), PathBuf::from("/media/usb"));
-        // Le défaut de `writable` compte : un partage n'est pas inscriptible
-        // sans qu'on l'ait demandé.
+        // The `writable` default matters: a share is not writable unless asked
+        // for.
         assert!(!roots.by_name("nas").unwrap().writable);
     }
 }

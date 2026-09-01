@@ -6,8 +6,8 @@ use axum::routing::get;
 use axum::Router;
 use rust_embed::RustEmbed;
 
-/// Le `dist/` produit par `npm run build --workspaces`, embarqué à la
-/// compilation. `build.rs` garantit qu'il existe (bouchon à défaut).
+/// The `dist/` produced by `npm run build --workspaces`, embedded at compile
+/// time. `build.rs` guarantees it exists (placeholder otherwise).
 #[derive(RustEmbed)]
 #[folder = "../../web/app/dist/"]
 struct Dist;
@@ -25,10 +25,10 @@ pub fn mime_for(path: &str) -> &'static str {
     }
 }
 
-/// Les chunks de l'app portent un hash dans leur name : ils sont immuables.
-/// `vue.js` et `ui-kit.js` gardent au contraire un **name stable** — c'est le
-/// contrat que les modules de plugin importent — donc ils doivent être
-/// revalidés (l'`ETag` s'en charge).
+/// The app's chunks carry a hash in their name: they are immutable. `vue.js`
+/// and `ui-kit.js` on the contrary keep a **stable name** — that is the
+/// contract the plugin modules import — so they must be revalidated (the
+/// `ETag` takes care of it).
 pub fn cache_control(path: &str) -> &'static str {
     let name = path.rsplit('/').next().unwrap_or(path);
     if name.starts_with("app-") {
@@ -38,32 +38,32 @@ pub fn cache_control(path: &str) -> &'static str {
     }
 }
 
-/// Le repli ne sert le shell **que** hors des espaces de données. Sans cette
-/// restriction, une faute de frappe sur une route d'API répondrait 200 avec du
-/// HTML — un piège à débogage coûteux.
+/// The fallback serves the shell **only** outside the data namespaces. Without
+/// this restriction, a typo on an API route would answer 200 with HTML — a
+/// costly debugging trap.
 pub fn serves_shell(path: &str) -> bool {
     if path.starts_with("/api/") || path.starts_with("/assets/") {
         return false;
     }
-    if let Some(reste) = path.strip_prefix("/plugins/") {
-        if let Some((_, apres)) = reste.split_once('/') {
-            if apres.starts_with("api/") || apres.starts_with("ui.") {
+    if let Some(rest) = path.strip_prefix("/plugins/") {
+        if let Some((_, after)) = rest.split_once('/') {
+            if after.starts_with("api/") || after.starts_with("ui.") {
                 return false;
             }
-            // Chemin d'active profond (`/plugins/radio/assets/chunk.js`) : les
-            // active d'un plugin ne sont servis que sur **un seul** segment
-            // (`/plugins/<name>/<fichier>`), donc un path à plusieurs segments
-            // ne correspond à aucune route et tombait ici — le repli renvoyait
-            // alors **le shell HTML en 200**, si bien qu'un `import()`
-            // dynamique recevait du HTML : mode d'échec très déroutant, rien ne
-            // signalant l'erreur. Il obtient maintenant un 404 propre.
+            // Deep asset path (`/plugins/radio/assets/chunk.js`): a plugin's
+            // assets are only served on **a single** segment
+            // (`/plugins/<name>/<file>`), so a multi-segment path matches no
+            // route and fell through here — the fallback then returned **the
+            // HTML shell with a 200**, so that a dynamic `import()` received
+            // HTML: a very confusing failure mode, nothing flagging the error.
+            // It now gets a clean 404.
             //
-            // Le test `serves_shell("/plugins/<name>/")` reste vert : `apres`
-            // vaut alors la chaîne clear, qui ne contains pas de `/`. C'est
-            // aussi pourquoi cette condition est préférée à un wildcard
-            // `/plugins/:name/*fichier` dans le routeur, dont le reste clear ne
-            // matche pas de façon fiable — et cette URL est un invariant.
-            if apres.contains('/') {
+            // The `serves_shell("/plugins/<name>/")` test stays green: `after`
+            // is then the empty string, which contains no `/`. That is also why
+            // this condition is preferred to a `/plugins/:name/*file` wildcard
+            // in the router, whose empty remainder does not match reliably —
+            // and this URL is an invariant.
+            if after.contains('/') {
                 return false;
             }
         }
@@ -72,17 +72,17 @@ pub fn serves_shell(path: &str) -> bool {
 }
 
 pub fn inject_theme(html: &str, theme: &str, mode: &str) -> String {
-    // Le `Display` de `serde_json::Value` n'échappe pas `/` : une valeur
-    // (par ex. `theme`) contenant `</script>` fermerait prématurément la
-    // balise et permettrait d'injecter du HTML arbitraire dans le shell.
-    // `theme::validate` interdit déjà ces caractères sur le path HTTP, mais
-    // `main.rs` relit `theme`/`mode` depuis `state.json` sans revalider — un
-    // fichier d'état corrompu ou édité à la main reste donc un vecteur.
-    // On échappe donc chaque signe « inférieur » de la valeur sérialisée par
-    // son équivalent JSON en notation `\u`+code-point (voir `replace`
-    // ci-dessous) : ça reste du JSON strictement équivalent — le navigateur
-    // le redécode à l'identique — mais la sous-chaîne `</script>` ne peut
-    // plus apparaître littéralement dans le document produit.
+    // The `Display` of `serde_json::Value` does not escape `/`: a value (e.g.
+    // `theme`) containing `</script>` would close the tag prematurely and allow
+    // injecting arbitrary HTML into the shell.
+    // `theme::validate` already forbids these characters on the HTTP path, but
+    // `main.rs` re-reads `theme`/`mode` from `state.json` without revalidating
+    // — a corrupted or hand-edited state file therefore remains a vector.
+    // So we escape every "less-than" sign of the serialized value with its JSON
+    // equivalent in `\u`+code-point notation (see `replace` below): it remains
+    // strictly equivalent JSON — the browser decodes it back identically — but
+    // the `</script>` substring can no longer appear literally in the produced
+    // document.
     let payload =
         serde_json::json!({ "theme": theme, "mode": mode }).to_string().replace('<', "\\u003c");
     let script = format!("<script>window.__RITORNELLO_THEME__={payload};</script>");
@@ -92,7 +92,7 @@ pub fn inject_theme(html: &str, theme: &str, mode: &str) -> String {
     }
 }
 
-/// Le shell embarqué, ou le bouchon si `build.rs` n'a trouvé aucun livrable.
+/// The embedded shell, or the placeholder if `build.rs` found no deliverable.
 pub fn shell_html() -> String {
     match Dist::get("index.html") {
         Some(f) => String::from_utf8_lossy(&f.data).into_owned(),
@@ -108,7 +108,7 @@ fn etag_of(hash: &[u8]) -> String {
 async fn asset(headers: HeaderMap, uri: Uri) -> Response {
     let path = uri.path().trim_start_matches("/assets/");
     let Some(f) = Dist::get(&format!("assets/{path}")) else {
-        return (StatusCode::NOT_FOUND, "active inconnu").into_response();
+        return (StatusCode::NOT_FOUND, "unknown asset").into_response();
     };
     let etag = etag_of(&f.metadata.sha256_hash());
     if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) == Some(etag.as_str()) {
@@ -125,10 +125,10 @@ async fn asset(headers: HeaderMap, uri: Uri) -> Response {
         .into_response()
 }
 
-/// Repli du routeur : sert le shell pour les chemins de la SPA, 404 sinon.
+/// Router fallback: serves the shell for SPA paths, 404 otherwise.
 pub async fn shell(State(state): State<AppState>, uri: Uri) -> Response {
     if !serves_shell(uri.path()) {
-        return (StatusCode::NOT_FOUND, "inconnu").into_response();
+        return (StatusCode::NOT_FOUND, "not found").into_response();
     }
     let t = state.theme_current.read().await.clone();
     (
@@ -151,7 +151,7 @@ mod tests {
     use tower::util::ServiceExt;
 
     #[test]
-    fn inject_theme_pose_le_choix_avant_la_fermeture_du_head() {
+    fn inject_theme_puts_the_choice_before_the_head_closes() {
         let html = "<!doctype html><html><head><title>x</title></head><body></body></html>";
         let out = inject_theme(html, "cyberpunk", "dark");
         assert!(out.contains(r#"window.__RITORNELLO_THEME__={"mode":"dark","theme":"cyberpunk"}"#));
@@ -159,66 +159,66 @@ mod tests {
     }
 
     #[test]
-    fn inject_theme_survit_a_un_html_sans_head() {
+    fn inject_theme_survives_an_html_without_head() {
         let out = inject_theme("<div>x</div>", "vercel", "light");
         assert!(out.contains("__RITORNELLO_THEME__"));
     }
 
     #[test]
-    fn inject_theme_echappe_les_fermetures_de_script_dans_les_valeurs() {
-        // `theme::validate` empêche ce cas sur le path HTTP normal, mais
-        // `main.rs` relit `theme`/`mode` depuis `state.json` sans revalider :
-        // un fichier d'état corrompu ou édité à la main reste un vecteur.
-        // `inject_theme` doit rester sûre même en recevant une valeur hostile.
-        let nom_hostile = "</script><script>alert(1)</script>";
-        let out = inject_theme("<div>x</div>", nom_hostile, "dark");
-        // La seule fermeture de balise `<script>` du document doit être
-        // celle qui ferme réellement le script injecté : aucune fermeture
-        // prématurée venue de la valeur ne doit apparaître littéralement.
+    fn inject_theme_escapes_script_closings_in_values() {
+        // `theme::validate` prevents this case on the normal HTTP path, but
+        // `main.rs` re-reads `theme`/`mode` from `state.json` without
+        // revalidating: a corrupted or hand-edited state file remains a vector.
+        // `inject_theme` must stay safe even when receiving a hostile value.
+        let hostile_name = "</script><script>alert(1)</script>";
+        let out = inject_theme("<div>x</div>", hostile_name, "dark");
+        // The only `<script>` closing tag in the document must be the one that
+        // actually closes the injected script: no premature closing coming from
+        // the value may appear literally.
         assert_eq!(out.matches("</script>").count(), 1);
-        // Le JSON reste analysable malgré l'échappement, et le navigateur y
-        // retrouverait la valeur d'origine, caractère pour caractère.
-        let debut = out.find('{').unwrap();
-        let fin = out.find(";</script>").unwrap();
-        let v: serde_json::Value = serde_json::from_str(&out[debut..fin]).unwrap();
-        assert_eq!(v["theme"], nom_hostile);
+        // The JSON remains parseable despite the escaping, and the browser
+        // would recover the original value in it, character for character.
+        let start = out.find('{').unwrap();
+        let end = out.find(";</script>").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out[start..end]).unwrap();
+        assert_eq!(v["theme"], hostile_name);
     }
 
     #[test]
-    fn le_repli_ne_sert_le_shell_que_hors_des_espaces_de_donnees() {
-        // Les URL historiques et les routes du routeur Vue : shell.
+    fn the_fallback_serves_the_shell_only_outside_the_data_namespaces() {
+        // The historical URLs and the Vue router's routes: shell.
         assert!(serves_shell("/"));
         assert!(serves_shell("/status"));
         assert!(serves_shell("/config"));
         assert!(serves_shell("/plugins/radio/"));
         assert!(serves_shell("/plugins/"));
-        // Les espaces de donnees : jamais de shell, sinon une faute de frappe
-        // sur une route d'API repondrait 200 avec du HTML — piege a debogage.
+        // The data namespaces: never the shell, otherwise a typo on an API
+        // route would answer 200 with HTML — a debugging trap.
         assert!(!serves_shell("/api/statuss"));
         assert!(!serves_shell("/api/theme"));
         assert!(!serves_shell("/assets/inconnu.js"));
         assert!(!serves_shell("/plugins/radio/api/data"));
         assert!(!serves_shell("/plugins/radio/ui.js"));
         assert!(!serves_shell("/plugins/radio/ui.css"));
-        // Chemin d'active profond : les active d'un plugin ne sont servis que
-        // sur un seul segment, donc `/plugins/radio/assets/chunk.js` ne matche
-        // aucune route. Il tombait sur le repli, qui repondait 200 avec le
-        // shell HTML — un `import()` dynamique recevait du HTML, mode d'echec
-        // tres deroutant. Desormais un 404 propre.
+        // Deep asset path: a plugin's assets are only served on a single
+        // segment, so `/plugins/radio/assets/chunk.js` matches no route. It
+        // fell onto the fallback, which answered 200 with the HTML shell — a
+        // dynamic `import()` received HTML, a very confusing failure mode. Now
+        // a clean 404.
         assert!(!serves_shell("/plugins/radio/assets/chunk.js"));
         assert!(!serves_shell("/plugins/radio/a/b/c.js"));
-        // ... sans toucher a l'URL historique, qui doit continuer de serve le
-        // shell : le reste apres le name du plugin est clear, donc sans `/`.
+        // ... without touching the historical URL, which must keep serving the
+        // shell: the remainder after the plugin name is empty, hence without `/`.
         assert!(serves_shell("/plugins/radio/"));
         assert!(serves_shell("/plugins/generic-input/"));
-        // Un active plat reste possible : c'est le contrat des IHM de plugin.
+        // A flat asset remains possible: it is the contract of plugin UIs.
         assert!(serves_shell("/plugins/radio/quelconque"));
     }
 
     #[tokio::test]
-    async fn un_chemin_dactif_profond_de_plugin_repond_404_et_non_le_shell() {
-        // Bout en bout a travers le routeur : c'est la reponse HTTP reelle qui
-        // compte, un `import()` dynamique ne devant jamais recevoir du HTML.
+    async fn a_deep_plugin_asset_path_answers_404_and_not_the_shell() {
+        // End to end through the router: it is the real HTTP response that
+        // counts, a dynamic `import()` must never receive HTML.
         let app = crate::status::router(crate::status::tests_support::app_state());
         let resp = app
             .oneshot(Request::get("/plugins/radio/assets/chunk.js").body(Body::empty()).unwrap())
@@ -228,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn mime_et_cache_selon_le_nom_du_fichier() {
+    fn mime_and_cache_according_to_the_file_name() {
         assert_eq!(mime_for("app-abc.js"), "text/javascript; charset=utf-8");
         assert_eq!(mime_for("app-abc.mjs"), "text/javascript; charset=utf-8");
         assert_eq!(mime_for("app-abc.css"), "text/css; charset=utf-8");
@@ -237,14 +237,14 @@ mod tests {
         assert_eq!(mime_for("police.woff2"), "font/woff2");
         assert_eq!(mime_for("favicon.png"), "image/png");
         assert_eq!(mime_for("inconnu.bin"), "application/octet-stream");
-        // Nom hashe : immuable. Noms stables du contrat : a revalider.
+        // Hashed name: immutable. Stable names of the contract: to revalidate.
         assert!(cache_control("app-abc123.js").contains("immutable"));
         assert!(!cache_control("vue.js").contains("immutable"));
         assert!(!cache_control("ui-kit.js").contains("immutable"));
     }
 
     #[tokio::test]
-    async fn la_racine_sert_le_shell_avec_le_theme_injecte() {
+    async fn the_root_serves_the_shell_with_the_theme_injected() {
         let app = crate::status::router(crate::status::tests_support::app_state());
         let resp = app.oneshot(Request::get("/").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -257,7 +257,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn un_chemin_inconnu_hors_api_sert_le_shell() {
+    async fn an_unknown_path_outside_the_api_serves_the_shell() {
         let app = crate::status::router(crate::status::tests_support::app_state());
         let resp =
             app.oneshot(Request::get("/plugins/quelconque/").body(Body::empty()).unwrap()).await.unwrap();
@@ -265,23 +265,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn une_route_dapi_inconnue_repond_404_et_non_le_shell() {
+    async fn an_unknown_api_route_answers_404_and_not_the_shell() {
         let app = crate::status::router(crate::status::tests_support::app_state());
         let resp = app.oneshot(Request::get("/api/statuss").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
-    async fn le_contenu_embarque_est_servable() {
-        // Vrai `dist/` ou bouchon : l'un des deux est necessairement present,
-        // `build.rs` le garantit.
+    async fn the_embedded_content_is_servable() {
+        // Real `dist/` or placeholder: one of the two is necessarily present,
+        // `build.rs` guarantees it.
         let html = shell_html();
         assert!(!html.is_empty());
         assert!(html.contains("<!doctype html>") || html.contains("<!DOCTYPE html>"));
     }
 
     #[tokio::test]
-    async fn un_actif_absent_repond_404() {
+    async fn a_missing_asset_answers_404() {
         let app = crate::status::router(crate::status::tests_support::app_state());
         let resp = app
             .oneshot(Request::get("/assets/nexiste-pas.js").body(Body::empty()).unwrap())

@@ -22,11 +22,11 @@ export { Badge } from './components/ui/badge'
 export { Switch } from './components/ui/switch'
 export { ScrollArea } from './components/ui/scroll-area'
 export { Slider } from './components/ui/slider'
-// `CardAction` est ce qui fait passer `CardHeader` en deux colonnes : sa classe
-// `has-data-[slot=card-action]:grid-cols-[1fr_auto]` ne s'active qu'en presence
-// d'un enfant portant ce slot. Sans lui, une action placee dans l'en-tete se
-// retrouve sur la deuxieme ligne de la grille, sous le titre — et aucune classe
-// utilitaire ajoutee a la main ne corrige proprement cela.
+// `CardAction` is what switches `CardHeader` to two columns: its class
+// `has-data-[slot=card-action]:grid-cols-[1fr_auto]` only activates in the
+// presence of a child carrying that slot. Without it, an action placed in the
+// header ends up on the second row of the grid, under the title — and no
+// hand-added utility class fixes that cleanly.
 export {
   Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle,
 } from './components/ui/card'
@@ -39,10 +39,10 @@ export {
 export {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from './components/ui/table'
-// Les onglets ne montent que le panneau actif : `TabsContent` demonte les
-// autres. Une page qui y range des volets sondant le serveur cesse donc de
-// sonder ce qu'on ne regarde pas -- c'est voulu, mais un volet qui doit
-// survivre a l'onglet cache appartient a la page, pas au panneau.
+// Tabs only mount the active panel: `TabsContent` unmounts the others. A page
+// that puts server-polling panes in them therefore stops polling what is not
+// being looked at -- this is intended, but a pane that must survive the hidden
+// tab belongs to the page, not to the panel.
 export {
   Tabs, TabsContent, TabsList, TabsTrigger,
 } from './components/ui/tabs'

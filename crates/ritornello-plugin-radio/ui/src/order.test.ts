@@ -2,24 +2,24 @@ import { describe, expect, it } from 'vitest'
 import { move } from './order'
 
 describe('move', () => {
-  it('deplace vers le bas et vers le haut', () => {
+  it('moves down and up', () => {
     expect(move(['A', 'B', 'C'], 0, 2)).toEqual(['B', 'C', 'A'])
     expect(move(['A', 'B', 'C'], 2, 0)).toEqual(['C', 'A', 'B'])
     expect(move(['A', 'B', 'C'], 1, 2)).toEqual(['A', 'C', 'B'])
   })
 
-  it('ne modifie pas la liste d origine', () => {
-    // La liste est une `ref` Vue : la muter en place contournerait la
-    // reactivite sur certains chemins et rendrait le test des composants
-    // dependant de l'order des assertions.
-    const origine = ['A', 'B', 'C']
-    move(origine, 0, 2)
-    expect(origine).toEqual(['A', 'B', 'C'])
+  it('does not modify the original list', () => {
+    // The list is a Vue `ref`: mutating it in place would bypass
+    // reactivity on some code paths and would make component tests
+    // dependent on assertion order.
+    const original = ['A', 'B', 'C']
+    move(original, 0, 2)
+    expect(original).toEqual(['A', 'B', 'C'])
   })
 
-  it('rend la liste inchangee sur un deplacement impossible', () => {
-    // Les indices viennent d'evenements de glisser-drop du navigateur : une
-    // cible peut disparaitre entre le `dragstart` et le `drop`.
+  it('leaves the list unchanged on an impossible move', () => {
+    // The indices come from the browser's drag-and-drop events: a target
+    // can disappear between `dragstart` and `drop`.
     expect(move(['A', 'B'], 0, 0)).toEqual(['A', 'B'])
     expect(move(['A', 'B'], -1, 1)).toEqual(['A', 'B'])
     expect(move(['A', 'B'], 0, 5)).toEqual(['A', 'B'])

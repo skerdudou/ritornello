@@ -8,47 +8,47 @@ const route = useRoute()
 const name = ref('')
 const catalog = ref<Catalog>({})
 /**
- * Cause d'un refus du cœur, telle qu'il la porte désormais.
+ * Cause of a refusal by the core, as it now carries it.
  *
- * Le module d'IHM est chargé par `import()`, dont l'échec ne livre aucun corps
- * exploitable : cet appel-ci est le **seul** qui puisse dire pourquoi un plugin
- * ne répond step. Au premier chargement d'une page dont le plugin est mort,
- * l'écran n'affichait qu'« IHM du plugin unavailable » — la cause partait dans
- * un `console.warn`, au moment précis où elle count.
+ * The UI module is loaded with `import()`, whose failure delivers no usable
+ * body: this call is the **only** one that can say why a plugin does not
+ * answer. On the first load of a page whose plugin is dead, the screen only
+ * showed "plugin UI unavailable" — the cause went into a `console.warn`, at
+ * the very moment it mattered.
  *
- * Vide quand tout va bien, ou quand l'échec n'a step de cause à donner.
+ * Empty when all is well, or when the failure has no cause to give.
  */
 const cause = ref('')
 
-// Compteur de génération : le `watch` est asynchrone, et une navigation
-// rapide radio → generic-input avec un GET lent laissait le catalogue du
-// premier plugin s'installer **après** celui du second — l'admin affichée
-// tournait alors avec le catalogue d'un autre plugin. `PluginView` a la même
-// garde pour le module ; celle-ci protège le catalogue.
+// Generation counter: the `watch` is asynchronous, and a fast navigation
+// radio → generic-input with a slow GET let the catalog of the first plugin
+// settle **after** that of the second — the displayed admin then ran with the
+// catalog of another plugin. `PluginView` has the same guard for the module;
+// this one protects the catalog.
 let generation = 0
 
 watch(
   () => route.params.name,
-  async (valeur) => {
-    name.value = String(valeur ?? '')
+  async (value) => {
+    name.value = String(value ?? '')
     if (!name.value) return
-    const generationLocale = ++generation
-    // Un catalogue injoignable ne doit step empecher l'IHM de s'afficher :
-    // `t()` retombe alors sur les cles, ce qui reste lisible. Le log garde
-    // la trace, et la cause est **rendue a l'ecran** par `PluginView` : elle
-    // vient du corps du refus du coeur (`api.get` en extrait le champ `error`),
-    // et c'est le seul canal qui la porte.
-    let motif = ''
-    const load = await api.get<Catalog>(`/plugins/${name.value}/api/i18n`).catch((e: unknown) => {
-      console.warn(`plugin ${name.value}: catalogue i18n unavailable`, e)
-      motif = e instanceof Error ? e.message : String(e)
+    const localGeneration = ++generation
+    // An unreachable catalog must not prevent the UI from showing: `t()` then
+    // falls back on the keys, which stays readable. The log keeps the trace,
+    // and the cause is **rendered on screen** by `PluginView`: it comes from
+    // the body of the core's refusal (`api.get` extracts its `error` field),
+    // and that is the only channel carrying it.
+    let reason = ''
+    const loaded = await api.get<Catalog>(`/plugins/${name.value}/api/i18n`).catch((e: unknown) => {
+      console.warn(`plugin ${name.value}: i18n catalog unavailable`, e)
+      reason = e instanceof Error ? e.message : String(e)
       return {}
     })
-    // Sous la meme garde de generation que le catalogue : une cause en retard
-    // ne doit step s'afficher sous l'admin d'un autre plugin.
-    if (generationLocale === generation) {
-      catalog.value = load
-      cause.value = motif
+    // Under the same generation guard as the catalog: a late cause must not
+    // show up under the admin of another plugin.
+    if (localGeneration === generation) {
+      catalog.value = loaded
+      cause.value = reason
     }
   },
   { immediate: true },

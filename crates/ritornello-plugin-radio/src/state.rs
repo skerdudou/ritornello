@@ -5,12 +5,12 @@ use std::path::Path;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginState {
     pub preset: u8,
-    /// Dernier pays choisi dans la page d'admin : code ISO, ou chaîne clear pour
-    /// « tous les pays ».
+    /// Last country chosen in the admin page: ISO code, or the empty string
+    /// for "all countries".
     ///
-    /// Persisté côté plugin et non côté navigateur : le choix suit l'appareil,
-    /// pas le poste qui s'y connecte. `#[serde(default)]` fait qu'un fichier
-    /// écrit par une version antérieure se relit sans erreur.
+    /// Persisted on the plugin side and not in the browser: the choice follows
+    /// the device, not the workstation connecting to it. `#[serde(default)]`
+    /// makes a file written by an earlier version load without error.
     #[serde(default)]
     pub country: String,
 }
@@ -32,11 +32,11 @@ pub fn save(path: &Path, state: &PluginState) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // Nom temporaire propre à ce processus **et** à cet appel : les deux
-    // moitiés du plugin écrivent le même fichier, et un `.tmp` partagé
-    // permettait à deux écritures simultanées de se voler le fichier sous le
-    // pied (`rename` en ENOENT), en plus de la perte de préférence décrite
-    // sur `update`.
+    // Temporary name unique to this process **and** to this call: both halves
+    // of the plugin write the same file, and a shared `.tmp` let two
+    // simultaneous writes steal the file from under each other (`rename`
+    // failing with ENOENT), on top of the lost preference described on
+    // `update`.
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -47,20 +47,19 @@ pub fn save(path: &Path, state: &PluginState) -> Result<()> {
     Ok(())
 }
 
-/// Modifie l'état persisté **sans écraser ce qu'on ne touche pas**.
+/// Modifies the persisted state **without overwriting what is left untouched**.
 ///
-/// Les deux moitiés du plugin écrivent dans le même fichier : la Source pour la
-/// présélection, l'Admin pour le pays. Un `save` construit de toutes pièces par
-/// l'une effacerait donc le champ de l'autre — c'est arrivé par construction
-/// lors de l'ajout du pays, d'où cette playback-modification-écriture.
+/// Both halves of the plugin write to the same file: the Source for the
+/// preset, the Admin for the country. A `save` built from scratch by one would
+/// therefore erase the other's field — it happened by construction when the
+/// country was added, hence this read-modify-write.
 ///
-/// Reste une fenêtre de course : deux lectures-modifications simultanées
-/// peuvent se perdre l'une l'autre. Conséquence maximale, une préférence
-/// oubliée jusqu'au prochain changement ; un verrou ne se justifierait pas
-/// pour cela.
-pub fn update(path: &Path, modifie: impl FnOnce(&mut PluginState)) -> Result<()> {
+/// A race window remains: two simultaneous read-modify cycles can lose each
+/// other's changes. Worst consequence, a preference forgotten until the next
+/// change; a lock would not be justified for that.
+pub fn update(path: &Path, modify: impl FnOnce(&mut PluginState)) -> Result<()> {
     let mut state = load(path);
-    modifie(&mut state);
+    modify(&mut state);
     save(path, &state)
 }
 
@@ -69,11 +68,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defauts_dun_fichier_absent() {
+    fn defaults_of_an_absent_file() {
         let dir = tempfile::tempdir().unwrap();
         let state = load(&dir.path().join("absent.json"));
         assert_eq!(state.preset, 1);
-        assert_eq!(state.country, "", "aucun pays impose par defaut");
+        assert_eq!(state.country, "", "no country is imposed by default");
     }
 
     #[test]
@@ -87,9 +86,9 @@ mod tests {
     }
 
     #[test]
-    fn un_fichier_dune_version_anterieure_se_relit() {
-        // Sans `#[serde(default)]` sur `country`, une mise a jour de l'appareil
-        // ferait echouer la playback et repartir sur la preselection 1.
+    fn a_file_from_an_earlier_version_loads_again() {
+        // Without `#[serde(default)]` on `country`, a device update would make
+        // the read fail and start over on preset 1.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         std::fs::write(&path, r#"{"preset":7}"#).unwrap();
@@ -99,15 +98,15 @@ mod tests {
     }
 
     #[test]
-    fn update_ne_detruit_pas_le_champ_quon_ne_touche_pas() {
-        // Les deux halves du plugin ecrivent dans ce fichier : c'est
-        // exactement le defaut que `update` existe pour eviter.
+    fn update_does_not_destroy_the_field_left_untouched() {
+        // Both halves of the plugin write to this file: this is exactly the
+        // defect `update` exists to avoid.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         update(&path, |s| s.country = "DE".into()).unwrap();
         update(&path, |s| s.preset = 4).unwrap();
         let state = load(&path);
         assert_eq!(state.preset, 4);
-        assert_eq!(state.country, "DE", "le pays doit survivre a une ecriture de preselection");
+        assert_eq!(state.country, "DE", "the country must survive a preset write");
     }
 }

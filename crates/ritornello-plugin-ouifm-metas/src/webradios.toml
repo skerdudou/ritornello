@@ -1,22 +1,23 @@
-# Webradios OUI FM : correspondance entre l’identifiant de flux (présent dans
-# l’URL du flux audio) et l’identifiant attendu par le flux de métadonnées.
+# OUI FM webradios: mapping between the stream identifier (present in the
+# audio stream's URL) and the identifier expected by the metadata stream.
 #
-# RELEVÉ, PAS DEVINÉ. Source : la variable JavaScript `apidata` de
-# https://www.ouifm.fr/player, dont les champs `id` (identifiant de flux) et
-# `idMds` (identifiant de métadonnées) sont repris ici tels quels.
-# `scripts/fetch-webradios.mjs` régénère ce fichier depuis cette même source.
+# MEASURED, NOT GUESSED. Source: the `apidata` JavaScript variable from
+# https://www.ouifm.fr/player, whose `id` (stream identifier) and
+# `idMds` (metadata identifier) fields are carried over here verbatim.
+# `scripts/fetch-webradios.mjs` regenerates this file from that same source.
 #
-# Vérifié à la main sur `?id=` du flux de métadonnées : l’identifiant `metas`
-# renvoie artiste et titre, l’identifiant de flux renvoie une trame vide.
+# Checked by hand against `?id=` on the metadata stream: the `metas`
+# identifier returns artist and title, the stream identifier returns an
+# empty frame.
 #
-# Chaque entrée de `urls` est cherchée comme sous-chaîne de l’URL du flux :
-# l’URL de diffusion porte un jeton signé et un format variables, mais
-# toujours l’identifiant de flux. Les fragments `ouifmN.` reconnaissent les
-# mounts Icecast historiques (diffusion Infomaniak), qui sont les URL
-# publiées de longue date — donc celles qu’un annuaire référence et qu’un
-# utilisateur copie. Voir `scripts/fetch-webradios.mjs` pour leur relevé.
+# Each `urls` entry is looked up as a substring of the stream URL: the
+# broadcast URL carries a signed token and a variable format, but always
+# the stream identifier. The `ouifmN.` fragments recognize the historical
+# Icecast mounts (Infomaniak broadcast), which are the long-published
+# URLs — hence the ones a directory references and a user copies. See
+# `scripts/fetch-webradios.mjs` for how they were measured.
 #
-# Relevé le 2026-07-27. 21 flux.
+# Measured on 2026-07-27. 21 streams.
 
 [[webradio]]
 label = "Oüi FM"

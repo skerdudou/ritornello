@@ -1,4 +1,4 @@
-//! SourcesCatalog anglais embarqué du cœur, base du repli `own → common → clé`.
+//! Embedded English catalog of the core, base of the `own → common → key` fallback.
 
-/// Anglais embarqué du cœur (base toujours présente).
+/// Embedded English of the core (always-present base).
 pub const EN: &str = include_str!("locales/en.toml");

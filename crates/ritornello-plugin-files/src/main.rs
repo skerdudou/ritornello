@@ -1,13 +1,13 @@
-//! Source `files` : read des fichiers audio depuis une racine locale ou un
-//! partage réseau monté.
+//! Source `files`: plays audio files from a local root or a mounted network
+//! share.
 //!
-//! mpv tient la liste de playback : le plugin lui donne un m3u généré et pilote
-//! l'index. L'avance automatique passe donc par `playlist-pos`, exactement
-//! comme pour un disque, et le plugin n'a rien à cadencer lui-même.
+//! mpv holds the playback list: the plugin hands it a generated m3u and drives
+//! the index. Automatic advance therefore goes through `playlist-pos`, exactly
+//! as for a disc, and the plugin has nothing to pace itself.
 //!
-//! Deux moitiés indépendantes, sur le plan du plugin radio : la Source et la
-//! page d'admin, chacune in_dir sa tâche, partageant la table des racines et la
-//! liste en cours. Une panne de la page ne doit jamais couper l'audio.
+//! Two independent halves, on the model of the radio plugin: the Source and the
+//! admin page, each in its own task, sharing the roots table and the current
+//! playlist. A failure of the page must never cut the audio.
 
 mod admin;
 mod cover;
@@ -30,106 +30,103 @@ fn env_or(key: &str, default: &str) -> String {
 }
 
 struct FilesSource {
-    /// Partagée avec la moitié Admin, qui la modifie depuis la page.
+    /// Shared with the Admin half, which modifies it from the page.
     playlist: Arc<AsyncRwLock<Playlist>>,
-    /// La page a modifié la liste depuis qu'on l'a confiée à mpv.
+    /// The page has modified the playlist since we handed it to mpv.
     ///
-    /// mpv plays une **copie**, écrite au dernier `Play`. Toute modification l'en
-    /// écarte, et la moitié Admin ne peut rien lui dire : les notifications du
-    /// SDK sont volontairement sans action. Ce drapeau est donc le seul canal, et
-    /// on s'en sert au prochain order reçu — c'est là qu'on peut légitimement
-    /// rendre à mpv une liste neuve.
+    /// mpv plays a **copy**, written at the last `Play`. Any modification
+    /// drifts away from it, and the Admin half has no way to tell mpv: the
+    /// SDK's notifications deliberately carry no action. This flag is therefore
+    /// the only channel, and it is used at the next command received — that is
+    /// where a fresh playlist can legitimately be handed back to mpv.
     playlist_changed: Arc<std::sync::atomic::AtomicBool>,
-    /// Joue-t-on en ce moment. Lu par la page (voir `plays` côté Admin).
+    /// Are we playing right now. Read by the page (see `plays` on the Admin side).
     plays: Arc<std::sync::atomic::AtomicBool>,
     state_path: PathBuf,
-    /// Le m3u **généré** que mpv reçoit. Découplé de toute liste utilisateur.
+    /// The **generated** m3u that mpv receives. Decoupled from any user playlist.
     mpv_playlist_path: PathBuf,
     catalog: Arc<RwLock<Catalog>>,
     locales_root: PathBuf,
-    /// Compte de présélections annoncé par la moitié Admin après chaque
-    /// modification de la liste.
+    /// Preset count announced by the Admin half after every modification of
+    /// the playlist.
     ///
-    /// `main()` construit toujours ce champ à `Some` : la page d'admin est
-    /// enregistrée sans condition auprès de `Runtime`. `None` n'apparaît que
-    /// in_dir les tests, qui construisent `FilesSource` directement sans passer
-    /// par `Runtime` et donc sans moitié Admin pour émettre sur ce canal ;
-    /// `poll_notification` reste alors en attente pour toujours plutôt que de
-    /// rendre `None`, qui est **terminal** pour le SDK.
+    /// `main()` always builds this field as `Some`: the admin page is
+    /// registered unconditionally with `Runtime`. `None` only appears in the
+    /// tests, which build `FilesSource` directly without going through
+    /// `Runtime`, hence without an Admin half to emit on this channel;
+    /// `poll_notification` then stays pending forever rather than returning
+    /// `None`, which is **terminal** for the SDK.
     preset_count_rx: Option<tokio::sync::watch::Receiver<u8>>,
-    /// Résultat en vol de la recherche de cover pour la piste armée.
+    /// In-flight result of the cover lookup for the armed track.
     ///
-    /// **Portée par une tâche `tokio::spawn` indépendante**, lancée par
-    /// `arm_cover` — et non par un appel direct à `health.bounded(...).await`
-    /// ici.
-    /// Une première version faisait cet appel directement in_dir
-    /// `poll_notification`, qui est le futur que le `select!` du SDK annule
-    /// dès qu'une requête du cœur arrive pendant l'attente — un événement
-    /// courant, pas un cas limite. Une annulation avant l'expiration du délai
-    /// de `health` fait sauter son bras `Err` : rien n'est marqué muet, la
-    /// tâche `spawn_blocking` interne est simplement détachée (Tokio n'annule
-    /// rien à la destruction), et comme la piste armée n'est délibérément pas
-    /// oubliée sur annulation, l'appel suivant relançait une **deuxième**
-    /// sonde sur le même partage bloqué — un fil `spawn_blocking` de plus à
-    /// chaque cycle, là où `health.rs` promet au plus un fil abandonné par
-    /// point de montage. En sortant la sonde de cette boucle annulable, elle
-    /// va toujours à son terme une seule fois, et la comptabilité de `health`
-    /// reste exacte.
+    /// **Carried by an independent `tokio::spawn` task**, launched by
+    /// `arm_cover` — and not by a direct call to `health.bounded(...).await`
+    /// here.
+    /// A first version made that call directly in `poll_notification`, which
+    /// is the future that the SDK's `select!` cancels as soon as a request
+    /// from the core arrives during the wait — a common event, not an edge
+    /// case. A cancellation before `health`'s timeout expires skips its `Err`
+    /// arm: nothing is marked silent, the inner `spawn_blocking` task is
+    /// simply detached (Tokio cancels nothing on drop), and since the armed
+    /// track is deliberately not forgotten on cancellation, the next call
+    /// relaunched a **second** probe on the same stuck share — one more
+    /// `spawn_blocking` thread per cycle, where `health.rs` promises at most
+    /// one abandoned thread per mount point. By taking the probe out of this
+    /// cancellable loop, it always runs to completion exactly once, and
+    /// `health`'s bookkeeping stays exact.
     ///
-    /// `oneshot::Receiver::await` est documenté cancel-safe : si
-    /// `poll_notification` est annulé pendant l'attente, ce récepteur — gardé
-    /// ici et non in_dir une variable locale du futur — n'a rien perdu, et le
-    /// prochain appel reprend l'attente sur la même tâche en vol plutôt que
-    /// d'en relancer une autre.
+    /// `oneshot::Receiver::await` is documented cancel-safe: if
+    /// `poll_notification` is cancelled during the wait, this receiver — kept
+    /// here and not in a local variable of the future — has lost nothing, and
+    /// the next call resumes waiting on the same in-flight task rather than
+    /// launching another one.
     ///
-    /// Un nouveau `Play` pendant qu'une sonde est en vol remplace ce champ par
-    /// un récepteur neuf : l'ancien est abandonné, et le résultat de l'ancienne
-    /// tâche — quand elle finira par arriver — tombera in_dir un `send` sans
-    /// personne à l'écoute. C'est délibéré : une cover de la piste
-    /// précédente ne doit jamais s'annoncer pour la piste qui vient de
-    /// démarrer.
+    /// A new `Play` while a probe is in flight replaces this field with a
+    /// fresh receiver: the old one is dropped, and the result of the old task
+    /// — when it eventually arrives — will land in a `send` with nobody
+    /// listening. This is deliberate: a cover of the previous track must
+    /// never announce itself for the track that has just started.
     cover_in_flight: Option<tokio::sync::oneshot::Receiver<Option<ritornello_proto::CoverRef>>>,
-    /// Pochette mémorisée **par répertoire** : le répertoire sondé, et ce
-    /// qu'on y a trouvé (`None` en second = sondé, rien de sûr).
+    /// Cover remembered **per directory**: the probed directory, and what was
+    /// found there (`None` in second position = probed, nothing certain).
     ///
-    /// Le répertoire et non le fichier, parce que c'est la granularité de la
-    /// chose cherchée : un `folder.jpg` appartient à l'album, pas à la piste.
-    /// C'est ce qui permet de réannoncer la cover à **chaque** déclaration
-    /// d'identité — l'avance automatique de mpv comprise, qui passe par
-    /// `player_track`/`resync` et non par `play()` — sans repayer un
-    /// `readdir` sur un partage SMB à chaque piste. Sans cette réannonce, un
-    /// album ripé montrait sa cover sur la piste 1 et le repli ♫ sur les
-    /// suivantes : le cœur efface `cover_source` à tout changement d'identité
-    /// (voir `Metadata::set_identity`), et seul `play()` réarmait la
-    /// sonde.
+    /// The directory and not the file, because that is the granularity of the
+    /// thing being looked for: a `folder.jpg` belongs to the album, not to the
+    /// track. This is what allows the cover to be re-announced at **every**
+    /// identity declaration — mpv's automatic advance included, which goes
+    /// through `player_track`/`resync` and not through `play()` — without
+    /// paying a `readdir` on an SMB share again at every track. Without this
+    /// re-announcement, a ripped album showed its cover on track 1 and the ♫
+    /// fallback on the following ones: the core clears `cover_source` on
+    /// every identity change (see `Metadata::set_identity`), and only `play()`
+    /// re-armed the probe.
     ///
-    /// Partagée avec la tâche de sonde, qui l'écrit en fin de course, d'où
-    /// l'`Arc<Mutex<…>>`. Un seul répertoire mémorisé : on n'en écoute qu'un à
-    /// la fois, et revenir en arrière in_dir la liste ne coûte qu'un `readdir`.
-    // Type volontairement laissé tel que le chantier des pochettes l'a écrit.
-    // `clippy::type_complexity` le refuse, et un alias nommé aurait été le
-    // correctif que la règle suggère — mais le nommer obligeait à en documenter
-    // le sens, donc à interpréter la sémantique du double `Option` d'un autre
-    // chantier depuis un commit de fusion qu'il n'a pas relu. Une affirmation
-    // erronée posée à côté du code d'autrui est pire qu'une règle tue : la
-    // règle, elle, est honnête sur ce qu'elle est, alors que le commentaire se
-    // read comme du savoir. La doc du champ ci-dessus est la leur, et elle
-    // suffit.
+    /// Shared with the probe task, which writes it when it finishes, hence the
+    /// `Arc<Mutex<…>>`. A single directory remembered: only one is listened to
+    /// at a time, and going back in the playlist costs only one `readdir`.
+    // Type deliberately left as the covers project wrote it.
+    // `clippy::type_complexity` rejects it, and a named alias would have been
+    // the fix the rule suggests — but naming it required documenting its
+    // meaning, hence interpreting the semantics of another project's double
+    // `Option` from a merge commit it did not review. A wrong statement placed
+    // next to someone else's code is worse than a silenced rule: the rule, at
+    // least, is honest about what it is, whereas the comment reads as
+    // knowledge. The field doc above is theirs, and it is enough.
     #[allow(clippy::type_complexity)]
     cover_by_dir: Arc<Mutex<Option<(PathBuf, Option<ritornello_proto::CoverRef>)>>>,
-    /// Disjoncteur des chemins média, partagé avec la moitié Admin.
+    /// Circuit breaker for media paths, shared with the Admin half.
     ///
-    /// Le `read_dir` de la recherche de cover porte sur un partage qui peut
-    /// rester muet indéfiniment (voir `health`) : sans cette bounded, un NAS
-    /// endormi figerait la tâche de sonde ci-dessus indéfiniment.
+    /// The `read_dir` of the cover lookup targets a share that may stay silent
+    /// indefinitely (see `health`): without this bound, a sleeping NAS would
+    /// freeze the probe task above indefinitely.
     health: Arc<ritornello_plugin_files::health::Health>,
 }
 
 impl FilesSource {
-    /// Identité de ce qui plays : le fichier, désigné par son path absolu.
+    /// Identity of what is playing: the file, designated by its absolute path.
     ///
-    /// Opaque pour le cœur, qui ne fait que la comparer et la relayer. C'est
-    /// aussi ce qu'un plugin `metadata` lirait pour reconnaître un track.
+    /// Opaque to the core, which only compares and relays it. It is also what
+    /// a `metadata` plugin would read to recognise a track.
     fn identity(path: &Path) -> serde_json::Value {
         serde_json::json!({ "kind": "file", "path": path.to_string_lossy() })
     }
@@ -138,116 +135,117 @@ impl FilesSource {
         self.catalog.read().unwrap().get(key).to_string()
     }
 
-    /// Statut permanent de la source.
+    /// Permanent status of the source.
     ///
-    /// **Redéclaré à chaque trame utile** : `status` a la convention inverse de
-    /// `preset`, l'absence voulant dire « pas de status » et non « garde le
-    /// précédent ». Une Source qui l'omettrait verrait son affichage s'effacer
-    /// tout seul à la trame suivante.
+    /// **Redeclared on every meaningful frame**: `status` has the opposite
+    /// convention to `preset`, absence meaning "no status" and not "keep the
+    /// previous one". A Source that omitted it would see its display erase
+    /// itself at the next frame.
     fn status(&self) -> String {
         self.phrase("status_files")
     }
 
     async fn persist(&self) {
         let index = self.playlist.read().await.index;
-        // `update` et non `save` : la moitié Admin écrit la liste in_dir ce même
-        // fichier, et un `save` reconstruit ici l'effacerait. L'échec est
-        // journalisé et non propagé — un `/var/lib` en playback seule doit
-        // coûter la reprise après redémarrage, pas la playback en cours.
+        // `update` and not `save`: the Admin half writes the playlist into this
+        // same file, and a `save` rebuilt here would erase it. The failure is
+        // logged and not propagated — a read-only `/var/lib` must cost the
+        // resume after reboot, not the playback in progress.
         if let Err(e) = state::update(&self.state_path, |s| s.index = index) {
             tracing::warn!("persisting the current track: {e}");
         }
     }
 
-    /// Arme l'announcement de la cover du répertoire de `fichier`.
+    /// Arms the announcement of the cover of `file`'s directory.
     ///
-    /// À appeler depuis **tout** path qui déclare une identité : le cœur
-    /// remet sa cover à zéro à chaque changement d'identité, donc une
-    /// identité déclarée sans réannonce est une cover perdue.
+    /// To be called from **every** path that declares an identity: the core
+    /// resets its cover on every identity change, so an identity declared
+    /// without re-announcement is a lost cover.
     ///
-    /// Deux cas, et c'est là tout l'intérêt de la mémorisation :
-    /// - le répertoire est celui qu'on a déjà sondé — cas de l'immense
-    ///   majorité des changements de piste, un album étant un répertoire — et
-    ///   la réponse part **tout de suite**, sans aucun accès disque ;
-    /// - le répertoire change : on sonde, une fois.
+    /// Two cases, and that is the whole point of remembering:
+    /// - the directory is the one already probed — the case of the vast
+    ///   majority of track changes, an album being a directory — and the
+    ///   answer leaves **immediately**, without any disk access;
+    /// - the directory changes: we probe, once.
     ///
-    /// La sonde reste portée par une tâche `tokio::spawn` indépendante avec un
-    /// `oneshot`, et ce n'est pas un détail de style (voir la doc de
-    /// `cover_in_flight`) : le `select!` du SDK annule `poll_notification` dès
-    /// qu'une requête du cœur arrive, et un appel à `health.bounded(...)` fait
-    /// depuis ce futur perdrait la comptabilité du disjoncteur. Le path
-    /// mémorisé passe par le même `oneshot`, déjà rempli : rien de neuf à
-    /// cancel, et surtout **aucun path par lequel `poll_notification`
-    /// pourrait rendre `None`**, qui est terminal pour le SDK — un `Err` du
-    /// récepteur comme un `Ok(None)` retombent all deux in_dir la suite de la
-    /// fonction.
-    fn arm_cover(&mut self, fichier: &Path) {
-        // Un récepteur neuf remplace celui d'une sonde encore en vol : c'est
-        // ce qui écarte la cover d'une piste déjà quittée (voir la doc de
+    /// The probe remains carried by an independent `tokio::spawn` task with a
+    /// `oneshot`, and this is not a matter of style (see the doc of
+    /// `cover_in_flight`): the SDK's `select!` cancels `poll_notification` as
+    /// soon as a request from the core arrives, and a call to
+    /// `health.bounded(...)` made from that future would lose the circuit
+    /// breaker's bookkeeping. The remembered path goes through the same
+    /// `oneshot`, already filled: nothing new to cancel, and above all **no
+    /// path by which `poll_notification` could return `None`**, which is
+    /// terminal for the SDK — an `Err` from the receiver as well as an
+    /// `Ok(None)` both fall through to the rest of the function.
+    fn arm_cover(&mut self, file: &Path) {
+        // A fresh receiver replaces the one of a probe still in flight: this is
+        // what discards the cover of a track already left (see the doc of
         // `cover_in_flight`).
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.cover_in_flight = Some(rx);
-        let Some(repertoire) = fichier.parent().map(Path::to_path_buf) else {
+        let Some(dir) = file.parent().map(Path::to_path_buf) else {
             let _ = tx.send(None);
             return;
         };
-        if let Some((connu, trouvee)) = &*self.cover_by_dir.lock().unwrap() {
-            if connu == &repertoire {
-                // En `debug` et non en `info` : `arm_cover` est appelee
-                // deux fois par piste (la playback, puis le recalage), donc
-                // cette line sortait deux fois **par piste** pour un fait qui
-                // ne change pas de tout l'album. Le releve frais ci-dessous,
-                // lui, reste en `info` : une fois par repertoire, c'est la
-                // reponse utile a « pourquoi pas de cover ».
-                if trouvee.is_none() {
-                    tracing::debug!("no cover file in {} (remembered)", repertoire.display());
+        if let Some((known, found)) = &*self.cover_by_dir.lock().unwrap() {
+            if known == &dir {
+                // `debug` and not `info`: `arm_cover` is called twice per
+                // track (the playback, then the resync), so this line came
+                // out twice **per track** for a fact that does not change for
+                // the whole album. The fresh lookup below, on the other hand,
+                // stays at `info`: once per directory, it is the useful
+                // answer to "why no cover".
+                if found.is_none() {
+                    tracing::debug!("no cover file in {} (remembered)", dir.display());
                 }
-                let _ = tx.send(trouvee.clone());
+                let _ = tx.send(found.clone());
                 return;
             }
         }
         let health = self.health.clone();
-        let memoire = self.cover_by_dir.clone();
-        let path = fichier.to_path_buf();
+        let memory = self.cover_by_dir.clone();
+        let path = file.to_path_buf();
         tokio::spawn(async move {
-            let a_chercher = path.clone();
-            match health.bounded(&path, move || cover::search(&a_chercher)).await {
-                Some(trouve) => {
-                    match &trouve {
-                        Some(_) => tracing::info!("cover file found in {}", repertoire.display()),
-                        None => tracing::info!("no cover file in {}", repertoire.display()),
+            let to_search = path.clone();
+            match health.bounded(&path, move || cover::search(&to_search)).await {
+                Some(found) => {
+                    match &found {
+                        Some(_) => tracing::info!("cover file found in {}", dir.display()),
+                        None => tracing::info!("no cover file in {}", dir.display()),
                     }
-                    // Mémorisé y compris quand rien n'a été trouvé : c'est ce
-                    // qui évite de re-probe un répertoire sans image à
-                    // chaque piste.
-                    *memoire.lock().unwrap() = Some((repertoire, trouve.clone()));
-                    let _ = tx.send(trouve);
+                    // Remembered even when nothing was found: this is what
+                    // avoids re-probing a directory without an image at every
+                    // track.
+                    *memory.lock().unwrap() = Some((dir, found.clone()));
+                    let _ = tx.send(found);
                 }
-                // Le disjoncteur n'a pas su (partage muet, délai écoulé) :
-                // **rien n'est mémorisé**. Retenir « pas de cover » ici
-                // condamnerait ce répertoire pour toute la session sur la
-                // seule foi d'un NAS momentanément endormi, alors que `health`
-                // rend justement la main dès qu'il répond de nouveau.
+                // The circuit breaker could not tell (silent share, timeout
+                // elapsed): **nothing is remembered**. Retaining "no cover"
+                // here would condemn this directory for the whole session on
+                // the sole word of a momentarily sleeping NAS, whereas `health`
+                // precisely hands control back as soon as it answers again.
                 None => {
-                    // Incident reel — c'est le partage muet que `health` existe
-                    // pour borner — donc `warn`, et non le silence d'avant.
-                    tracing::warn!("cover lookup in {} gave up: share not answering", repertoire.display());
+                    // A real incident — it is the silent share that `health`
+                    // exists to bound — hence `warn`, and not the previous
+                    // silence.
+                    tracing::warn!("cover lookup in {} gave up: share not answering", dir.display());
                     let _ = tx.send(None);
                 }
             }
-            // Ignoré si personne n'écoute plus (piste déjà changée depuis) :
-            // c'est le mécanisme même qui écarte un résultat périmé.
+            // Ignored if nobody is listening any more (track changed since):
+            // this is the very mechanism that discards a stale result.
         });
     }
 
-    /// Lance la liste à l'index courant, après avoir réécrit le m3u de mpv.
+    /// Starts the playlist at the current index, after rewriting mpv's m3u.
     async fn play(&mut self) -> SourceOutcome {
-        // On rend à mpv la liste telle qu'elle est maintenant : l'écart est
-        // refermé, quelle qu'en fût la cause.
+        // We hand mpv the playlist as it is now: the drift is closed, whatever
+        // its cause was.
         self.playlist_changed.store(false, std::sync::atomic::Ordering::Relaxed);
-        let liste = self.playlist.read().await;
-        let count = liste.preset_count();
-        let Some(entry) = liste.current().cloned() else {
+        let playlist = self.playlist.read().await;
+        let count = playlist.preset_count();
+        let Some(entry) = playlist.current().cloned() else {
             self.plays.store(false, std::sync::atomic::Ordering::Relaxed);
             return SourceOutcome::new(SourceAction::Noop)
                 .status(self.phrase("no_playlist"))
@@ -255,112 +253,114 @@ impl FilesSource {
                 .plays_nothing();
         };
         self.plays.store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Err(e) = liste.write_for_mpv(&self.mpv_playlist_path) {
+        if let Err(e) = playlist.write_for_mpv(&self.mpv_playlist_path) {
             tracing::warn!("writing the mpv playlist: {e}");
         }
-        let index = liste.index;
-        let preset = liste.preset();
-        drop(liste);
-        // Armée ici, lue plus tard par `poll_notification`. Un `Play` réel
-        // seulement — la liste clear est sortie plus haut par le `return`, donc
-        // on ne sonde jamais pour rien.
+        let index = playlist.index;
+        let preset = playlist.preset();
+        drop(playlist);
+        // Armed here, read later by `poll_notification`. On a real `Play`
+        // only — the empty playlist left above through the `return`, so we
+        // never probe for nothing.
         self.arm_cover(&entry.path);
 
         let action = SourceAction::play(self.mpv_playlist_path.to_string_lossy().to_string())
-            // Sans cette déclaration, le cœur chargerait le m3u comme un média
-            // unique : mpv ne le déplierait qu'après coup, l'index de départ
-            // arriverait hors bornes, et toute sélection de piste rejouerait la
-            // première en perdant l'affichage. Mesuré, et corrigé ici.
+            // Without this declaration, the core would load the m3u as a
+            // single media: mpv would only expand it afterwards, the starting
+            // index would arrive out of bounds, and every track selection
+            // would replay the first one while losing the display. Measured,
+            // and fixed here.
             .playlist()
             .starting_at(index as i64)
-            // Une liste de fichiers a une fin normale : sans cette
-            // déclaration, l'inactivité de mpv en fin de liste passerait pour
-            // une coupure de stream et la restart rejouerait la liste en boucle.
+            // A list of files has a normal end: without this declaration,
+            // mpv's inactivity at the end of the list would pass for a stream
+            // cut and the restart would replay the list in a loop.
             .finite();
-        let mut issue = SourceOutcome::new(action)
+        let mut outcome = SourceOutcome::new(action)
             .plays(Self::identity(&entry.path))
             .preset_name(entry.display_name())
             .preset_count(count)
             .status(self.status());
         if let Some(n) = preset {
-            issue = issue.preset(n);
+            outcome = outcome.preset(n);
         }
-        issue
+        outcome
     }
 
-    /// Si la page a modifié la liste, la rend à mpv en se décalant de `pas`.
+    /// If the page has modified the playlist, hands it back to mpv shifted by
+    /// `step`.
     ///
-    /// `None` quand rien n'a changé : l'appelant délègue alors à mpv, comme
-    /// avant. Sans ce recalage, suivant/précédent marchaient in_dir la liste que
-    /// mpv tenait au dernier `Play` — les pistes ajoutées depuis étaient hors
-    /// d'atteinte, et celles retirées revenaient.
+    /// `None` when nothing has changed: the caller then delegates to mpv, as
+    /// before. Without this resync, next/previous walked the playlist that mpv
+    /// held at the last `Play` — tracks added since were out of reach, and
+    /// those removed came back.
     ///
-    /// Le décalage part de **notre** index, que la moitié Admin maintient à jour
-    /// au fil de ses modifications ; celui de mpv, lui, désigne une position in_dir
-    /// une liste périmée.
-    async fn reload_if_changed(&mut self, pas: i64) -> Option<SourceOutcome> {
+    /// The shift starts from **our** index, which the Admin half keeps up to
+    /// date as it modifies the playlist; mpv's, on the other hand, designates a
+    /// position in a stale list.
+    async fn reload_if_changed(&mut self, step: i64) -> Option<SourceOutcome> {
         if !self.playlist_changed.load(std::sync::atomic::Ordering::Relaxed) {
             return None;
         }
         {
-            let mut liste = self.playlist.write().await;
-            if liste.entries.is_empty() {
-                // Rien à play : `play()` le dira, et il n'y a pas d'index à
-                // déplacer.
-                drop(liste);
+            let mut playlist = self.playlist.write().await;
+            if playlist.entries.is_empty() {
+                // Nothing to play: `play()` will say so, and there is no index
+                // to move.
+                drop(playlist);
                 return Some(self.play().await);
             }
-            let n = liste.entries.len() as i64;
-            // Boucle sur les bornes, comme le fait mpv d'un bout à l'autre de sa
-            // propre liste : l'utilisateur ne doit pas se retrouver bloqué parce
-            // qu'une modification l'a laissé sur la dernière piste.
-            liste.index = (((liste.index as i64 + pas) % n + n) % n) as usize;
+            let n = playlist.entries.len() as i64;
+            // Wrap around at the bounds, as mpv does from one end of its own
+            // list to the other: the user must not end up stuck because a
+            // modification left them on the last track.
+            playlist.index = (((playlist.index as i64 + step) % n + n) % n) as usize;
         }
         Some(self.play().await)
     }
 
-    /// Trame qui ne fait que redire où on en est, sans rien relancer.
+    /// Frame that only restates where we are, without relaunching anything.
     ///
-    /// « Sans rien relancer » côté audio ; côté cover, au contraire, elle
-    /// **réannonce**. Cette trame déclare une identité, et le cœur efface ce
-    /// qu'il tenait à chaque changement d'identité : c'est le path de
-    /// l'avance automatique de mpv, donc de toutes les pistes d'un album sauf
-    /// celle que l'utilisateur a lancée lui-même. La sonde n'est repayée que
-    /// si le répertoire change (voir `arm_cover`).
+    /// "Without relaunching anything" on the audio side; on the cover side, on
+    /// the contrary, it **re-announces**. This frame declares an identity, and
+    /// the core clears what it held on every identity change: this is the
+    /// path of mpv's automatic advance, hence of every track of an album
+    /// except the one the user launched themselves. The probe is only paid
+    /// again if the directory changes (see `arm_cover`).
     async fn resync(&mut self) -> SourceOutcome {
-        let liste = self.playlist.read().await;
-        let mut issue = SourceOutcome::new(SourceAction::Noop)
-            .preset_count(liste.preset_count())
+        let playlist = self.playlist.read().await;
+        let mut outcome = SourceOutcome::new(SourceAction::Noop)
+            .preset_count(playlist.preset_count())
             .status(self.status());
-        let mut fichier = None;
-        if let Some(entry) = liste.current() {
-            issue = issue.plays(Self::identity(&entry.path)).preset_name(entry.display_name());
-            fichier = Some(entry.path.clone());
+        let mut file = None;
+        if let Some(entry) = playlist.current() {
+            outcome = outcome.plays(Self::identity(&entry.path)).preset_name(entry.display_name());
+            file = Some(entry.path.clone());
         }
-        if let Some(n) = liste.preset() {
-            issue = issue.preset(n);
+        if let Some(n) = playlist.preset() {
+            outcome = outcome.preset(n);
         }
-        drop(liste);
-        if let Some(fichier) = fichier {
-            self.arm_cover(&fichier);
+        drop(playlist);
+        if let Some(file) = file {
+            self.arm_cover(&file);
         }
-        issue
+        outcome
     }
 }
 
 #[async_trait::async_trait]
 impl SourcePlugin for FilesSource {
     async fn activate(&mut self) -> SourceOutcome {
-        // L'index est conservé : reprendre après un arrêt rend la piste qu'on
-        // écoutait, et non la première.
+        // The index is kept: resuming after a stop returns the track we were
+        // listening to, and not the first one.
         //
-        // Une version antérieure repartait du début quand la liste s'était
-        // terminée, en se fiant au `playlist-pos = -1` de mpv. Mesuré : ce -1
-        // arrive **aussi de façon transitoire à chaque rechargement de liste**,
-        // donc à chaque changement de piste. La reprise retombait alors sur la
-        // piste 1. Le signal n'étant pas fiable, la distinction est abandonnée
-        // plutôt que devinée — au prix d'un détail : après une liste allée à son
-        // terme, la touche Lecture rejoue la dernière piste.
+        // An earlier version restarted from the beginning when the playlist had
+        // ended, trusting mpv's `playlist-pos = -1`. Measured: this -1
+        // **also arrives transiently at every playlist reload**, hence at
+        // every track change. The resume then fell back on track 1. The signal
+        // being unreliable, the distinction is abandoned rather than guessed —
+        // at the cost of one detail: after a playlist that ran to its end, the
+        // Play key replays the last track.
         self.play().await
     }
 
@@ -374,64 +374,64 @@ impl SourcePlugin for FilesSource {
             self.persist().await;
             return self.play().await;
         }
-        // Rien n'a été lancé : la piste précédente plays toujours. Message
-        // éphémère, et surtout **aucune déclaration d'identité** — un
-        // `plays_nothing()` ici ferait cesser les plugins `metadata` et
-        // viderait le titre affiché alors que le son continue.
-        let compte = self.playlist.read().await.preset_count();
+        // Nothing was launched: the previous track is still playing. Transient
+        // message, and above all **no identity declaration** — a
+        // `plays_nothing()` here would make the `metadata` plugins stop and
+        // would blank the displayed title while the sound goes on.
+        let count = self.playlist.read().await.preset_count();
         SourceOutcome::new(SourceAction::Noop)
             .status(self.phrase("empty_track"))
             .transient()
-            .preset_count(compte)
+            .preset_count(count)
     }
 
     async fn next(&mut self) -> SourceOutcome {
-        // La liste a changé sous mpv : lui rendre la nouvelle, positionnée sur
-        // la piste qui suit. C'est le moment légitime pour le faire — un order
-        // explicite de l'utilisateur, qui s'attend à un changement de piste.
-        if let Some(issue) = self.reload_if_changed(1).await {
-            return issue;
+        // The playlist changed under mpv: hand it the new one, positioned on
+        // the following track. This is the legitimate moment to do it — an
+        // explicit command from the user, who expects a track change.
+        if let Some(outcome) = self.reload_if_changed(1).await {
+            return outcome;
         }
-        // Sinon mpv walk_dir in_dir sa propre liste ; c'est lui qui nous dira où il
-        // est arrivé, par `player_track`. Rien à recaler ici, sous peine de le
-        // faire deux fois et de se contredire.
+        // Otherwise mpv walks its own list; it is mpv that will tell us where
+        // it landed, through `player_track`. Nothing to resync here, on pain
+        // of doing it twice and contradicting ourselves.
         SourceOutcome::new(SourceAction::PlayerNext).status(self.status())
     }
 
     async fn prev(&mut self) -> SourceOutcome {
-        if let Some(issue) = self.reload_if_changed(-1).await {
-            return issue;
+        if let Some(outcome) = self.reload_if_changed(-1).await {
+            return outcome;
         }
         SourceOutcome::new(SourceAction::PlayerPrev).status(self.status())
     }
 
     async fn eject(&mut self) -> SourceOutcome {
-        // Rien à éjecter : pas de support amovible ici.
+        // Nothing to eject: no removable media here.
         SourceOutcome::new(SourceAction::Noop).status(self.status())
     }
 
     async fn player_track(&mut self, n: i64) -> SourceOutcome {
-        // mpv vient de passer à la piste suivante **de lui-même**. Si la liste a
-        // changé depuis qu'il l'a reçue, c'est le meilleur moment pour lui rendre
-        // la nouvelle : il démarre un fichier de toute façon, donc rien n'est
-        // interrompu — là où attendre un order explicite laissait la playback
-        // enchaîner in_dir l'ancienne liste, et c'est exactement ce que l'usage a
-        // montré comme « les modifications ne font rien ».
+        // mpv has just moved to the next track **on its own**. If the playlist
+        // changed since it received it, this is the best moment to hand it the
+        // new one: it is starting a file anyway, so nothing is interrupted —
+        // whereas waiting for an explicit command let playback chain on in the
+        // old list, and that is exactly what usage showed as "the
+        // modifications do nothing".
         //
-        // Seulement pour un index valide : à `-1` la liste est terminée, et
-        // recharger la relancerait au lieu de la laisser finir.
+        // Only for a valid index: at `-1` the playlist has ended, and reloading
+        // would restart it instead of letting it finish.
         if n >= 0 {
-            // Le décalage part de **notre** index — la piste qui vient de
-            // s'achever — donc « la suivante » se read in_dir la liste à jour.
-            if let Some(issue) = self.reload_if_changed(1).await {
-                return issue;
+            // The shift starts from **our** index — the track that has just
+            // ended — so "the next one" is read in the up-to-date playlist.
+            if let Some(outcome) = self.reload_if_changed(1).await {
+                return outcome;
             }
         }
         if !self.playlist.write().await.set_index(n) {
-            // mpv dit `-1` en fin de liste — **et aussi transitoirement à chaque
-            // rechargement de liste**, donc à chaque changement de piste : c'est
-            // mesuré, et c'est pourquoi on n'en tire aucune conclusion. Ne rien
-            // déclarer ; l'arrêt éventuel sera annoncé par `stop()`.
+            // mpv says `-1` at the end of the list — **and also transiently at
+            // every playlist reload**, hence at every track change: this is
+            // measured, and that is why no conclusion is drawn from it.
+            // Declare nothing; the eventual stop will be announced by `stop()`.
             return SourceOutcome::new(SourceAction::Noop);
         }
         self.persist().await;
@@ -439,39 +439,39 @@ impl SourcePlugin for FilesSource {
     }
 
     async fn stop(&mut self) -> SourceOutcome {
-        // Le cœur a arrêté de sa propre initiative, ou la liste s'est terminée.
-        // Le dire, sinon la dernière piste et ses métadonnées resteraient
-        // affichées indéfiniment.
+        // The core stopped on its own initiative, or the playlist ended. Say
+        // so, otherwise the last track and its metadata would stay displayed
+        // indefinitely.
         //
-        // Et **dire lequel des trois**, ce qui n'était pas le cas : cette trame
-        // écrasait le « AUCUNE LISTE » que `play()` venait d'afficher. Sans
-        // piste, mpv reste inactif, le cœur envoie donc `stop()` aussitôt, et
-        // l'utilisateur ne voyait qu'un status générique sans jamais apprendre
-        // que sa liste était clear.
+        // And **say which of the three**, which was not the case: this frame
+        // overwrote the "NO PLAYLIST" that `play()` had just displayed. Without
+        // a track, mpv stays idle, the core therefore sends `stop()` at once,
+        // and the user only saw a generic status without ever learning that
+        // their playlist was empty.
         self.plays.store(false, std::sync::atomic::Ordering::Relaxed);
-        let liste = self.playlist.read().await;
-        if liste.entries.is_empty() {
+        let playlist = self.playlist.read().await;
+        if playlist.entries.is_empty() {
             return SourceOutcome::new(SourceAction::Noop)
                 .plays_nothing()
                 .status(self.phrase("no_playlist"))
                 .preset_count(0);
         }
-        // **Arrêté, mais une piste armée.** L'ancienne trame n'annonçait qu'un
-        // status : l'afficheur perdait numéro et name, et ne montrait plus que
-        // « FILES » sans qu'on sache où on en était. Déclarer la piste courante
-        // sans identité de playback dit exactement l'état réel — rien ne plays, et
-        // voilà ce qui repartira.
-        let mut issue = SourceOutcome::new(SourceAction::Noop)
+        // **Stopped, but a track armed.** The old frame only announced a
+        // status: the display lost number and name, and showed nothing more
+        // than "FILES" without any way to know where we were. Declaring the
+        // current track without a playback identity says exactly the real
+        // state — nothing is playing, and here is what will restart.
+        let mut outcome = SourceOutcome::new(SourceAction::Noop)
             .plays_nothing()
             .status(self.status())
-            .preset_count(liste.preset_count());
-        if let Some(entry) = liste.current() {
-            issue = issue.preset_name(entry.display_name());
+            .preset_count(playlist.preset_count());
+        if let Some(entry) = playlist.current() {
+            outcome = outcome.preset_name(entry.display_name());
         }
-        if let Some(n) = liste.preset() {
-            issue = issue.preset(n);
+        if let Some(n) = playlist.preset() {
+            outcome = outcome.preset(n);
         }
-        issue
+        outcome
     }
 
     async fn set_locale(&mut self, locale: String) {
@@ -479,139 +479,137 @@ impl SourcePlugin for FilesSource {
             Catalog::load("files", &locale, &self.locales_root, FILES_EN);
     }
 
-    /// Les présélections nommées, pour la grille de la page d'accueil et pour
-    /// le sources_catalog que le cœur tient à l'usage des afficheurs.
+    /// The named presets, for the home page grid and for the sources_catalog
+    /// that the core keeps for the displays.
     ///
-    /// Sans cette surcharge, le corps par défaut du trait rendait une liste
-    /// clear : la source ne déclarait qu'un `preset_count`, et les tuiles de la
-    /// grille ne portaient qu'un numéro là où la radio affiche « 1 · FIP ».
-    /// C'est la même voie que la radio emprunte, et le sources_catalog distingue déjà
-    /// « je n'ai que des numéros » (liste clear) de « voici mes names ».
+    /// Without this override, the trait's default body returned an empty
+    /// list: the source only declared a `preset_count`, and the grid tiles
+    /// carried only a number where the radio shows "1 · FIP". It is the same
+    /// route the radio takes, and the sources_catalog already distinguishes
+    /// "I only have numbers" (empty list) from "here are my names".
     async fn list_presets(&mut self) -> Vec<Preset> {
         self.playlist.read().await.presets()
     }
 
     async fn poll_notification(&mut self) -> Option<Notification> {
-        // Une sonde est en vol : attendre son résultat, sans jamais la
-        // relancer depuis ce futur (voir la doc du champ — c'est `play()`
-        // qui la lance, sur une tâche que cette annulation-ci ne touche pas).
+        // A probe is in flight: wait for its result, without ever relaunching
+        // it from this future (see the field doc — it is `play()` that
+        // launches it, on a task that this cancellation does not touch).
         //
-        // `rx.await` et non `rx.try_recv()` : c'est justement l'attente
-        // elle-même qui doit survivre à l'annulation de `poll_notification`,
-        // pas la contourner. `oneshot::Receiver` documente son `.await` comme
-        // cancel-safe, et le récepteur vit in_dir `self` — pas in_dir une
-        // variable locale de ce futur — donc rien n'est perdu si ce tour est
-        // interrompu : le prochain reprend l'attente sur la même tâche.
+        // `rx.await` and not `rx.try_recv()`: it is precisely the wait itself
+        // that must survive the cancellation of `poll_notification`, not be
+        // worked around. `oneshot::Receiver` documents its `.await` as
+        // cancel-safe, and the receiver lives in `self` — not in a local
+        // variable of this future — so nothing is lost if this round is
+        // interrupted: the next one resumes waiting on the same task.
         if let Some(rx) = &mut self.cover_in_flight {
-            let resultat = rx.await;
-            // Vidé seulement après que la sonde a répondu — c'est ce qui rend
-            // vraie la garantie ci-dessus : tant qu'aucune réponse n'est
-            // arrivée, le champ reste en place pour le prochain tour.
+            let result = rx.await;
+            // Cleared only after the probe has answered — this is what makes
+            // the guarantee above true: as long as no answer has arrived, the
+            // field stays in place for the next round.
             self.cover_in_flight = None;
-            // Deux échecs distincts se rejoignent ici sans faire de
-            // différence : `Err` (la tâche a disparu sans répondre, par
-            // exemple si elle a paniqué) et un `Ok(None)` (le disjoncteur a
-            // dit « on ne sait pas », ou la recherche elle-même a dit « rien
-            // de sûr »). Dans all les cas, il n'y a rien à annoncer —
-            // surtout pas une notification clear, et surtout pas `None`, qui
-            // est terminal pour le SDK (voir le commentaire sur
-            // `preset_count_rx` juste en dessous). On tombe simplement in_dir
-            // la suite de la fonction, qui attend le prochain événement.
-            if let Ok(Some(cover)) = resultat {
+            // Two distinct failures meet here without any difference: `Err`
+            // (the task vanished without answering, for instance if it
+            // panicked) and an `Ok(None)` (the circuit breaker said "we don't
+            // know", or the lookup itself said "nothing certain"). In every
+            // case, there is nothing to announce — above all not an empty
+            // notification, and above all not `None`, which is terminal for
+            // the SDK (see the comment on `preset_count_rx` just below). We
+            // simply fall through to the rest of the function, which waits for
+            // the next event.
+            if let Ok(Some(cover)) = result {
                 return Some(Notification::new().cover(cover));
             }
         }
         let Some(rx) = &mut self.preset_count_rx else {
-            // N'arrive qu'en test (voir le commentaire sur le champ) : `main()`
-            // construit toujours ce récepteur. Jamais `None` ici, qui serait
-            // terminal pour le SDK.
+            // Only happens in tests (see the comment on the field): `main()`
+            // always builds this receiver. Never `None` here, which would be
+            // terminal for the SDK.
             return std::future::pending().await;
         };
         match rx.changed().await {
             Ok(()) => {
                 let n = *rx.borrow_and_update();
-                // Le compte, **et le numéro et le name de la piste courante**.
+                // The count, **and the number and name of the current track**.
                 //
-                // Le numéro seul ne suffisait pas : réordonner la liste change la
-                // position de ce qu'on écoute, et le compteur de l'afficheur
-                // restait sur l'ancienne — la page du plugin était juste, le
-                // player non. C'est le pendant exact du correctif de la radio,
-                // où la présélection est aussi une position.
+                // The number alone was not enough: reordering the playlist
+                // changes the position of what we are listening to, and the
+                // display's counter stayed on the old one — the plugin page
+                // was right, the player was not. It is the exact counterpart
+                // of the radio's fix, where the preset is also a position.
                 //
-                // Toujours **aucune identité et aucune action** : la piste en
-                // cours ne doit être ni interrompue ni redéclarée, seulement
-                // renumérotée.
+                // Still **no identity and no action**: the current track must
+                // be neither interrupted nor redeclared, only renumbered.
                 //
-                // Attention : le cœur **ne fusionne pas** `status`, contrairement
-                // à ce que cette place affirmait. `preset`, `preset_name` et
-                // `preset_count` sont bien conservés quand ils sont absents —
-                // c'est ce qui rend cet notice partiel légitime — mais `status`,
-                // lui, est *remplacé* par ce que porte la trame, absence
-                // comprise (`Core::handle_source_update` : `if !update.transient
-                // { self.source_status = update.status.clone(); }`). C'est la
-                // seule convention qui permette d'effacer un status.
+                // Caution: the core **does not merge** `status`, contrary to
+                // what this place claimed. `preset`, `preset_name` and
+                // `preset_count` are indeed kept when absent — this is what
+                // makes this partial notice legitimate — but `status` is
+                // *replaced* by what the frame carries, absence included
+                // (`Core::handle_source_update`: `if !update.transient
+                // { self.source_status = update.status.clone(); }`). It is the
+                // only convention that allows a status to be erased.
                 //
-                // Cet notice n'en déclare donc aucun **et n'en efface aucun** : le
-                // cœur rend la main avant ce traitement pour une trame qui ne
-                // déclare ni identité ni status. Sans ce garde — et c'était le
-                // cas en service — enregistrer une liste depuis cette page
-                // blanchissait le status de la source sur la console et la SPA
-                // jusqu'à la commande suivante.
-                let liste = self.playlist.read().await;
+                // This notice therefore declares none **and erases none**: the
+                // core returns early, before that processing, for a frame that
+                // declares neither identity nor status. Without that guard —
+                // and this was the case in service — saving a playlist from
+                // this page blanked the source's status on the console and the
+                // SPA until the next command.
+                let playlist = self.playlist.read().await;
                 let mut notice = Notification::new().preset_count(n);
-                // Les **names**, republiés avec le compte. Le canal se réveille à
-                // chaque modification de la liste (`watch::send` signale même à
-                // valeur égale), donc un simple réordonnancement — qui ne change
-                // pas le compte — renomme quand même les tuiles. Sans cela, la
-                // grille aurait gardé les titres d'avant sous les nouveaux
-                // numéros, ce qui est pire qu'aucun titre.
+                // The **names**, republished with the count. The channel wakes
+                // up on every modification of the playlist (`watch::send`
+                // signals even with an equal value), so a mere reordering —
+                // which does not change the count — still renames the tiles.
+                // Without this, the grid would have kept the previous titles
+                // under the new numbers, which is worse than no title.
                 //
-                // Rien n'est publié pour une liste clear : c'est l'absence qui
-                // dit « je n'ai que des numéros » (voir `SourceOutcome::presets`),
-                // et une liste clear y serait indistinguable d'un effacement
-                // volontaire du sources_catalog.
-                let presets = liste.presets();
+                // Nothing is published for an empty playlist: absence is what
+                // says "I only have numbers" (see `SourceOutcome::presets`),
+                // and an empty list would be indistinguishable there from a
+                // deliberate erasure of the sources_catalog.
+                let presets = playlist.presets();
                 if !presets.is_empty() {
                     notice = notice.presets(presets);
                 }
-                if let Some(entry) = liste.current() {
+                if let Some(entry) = playlist.current() {
                     notice = notice.preset_name(entry.display_name());
                 }
-                if let Some(p) = liste.preset() {
+                if let Some(p) = playlist.preset() {
                     notice = notice.preset(p);
                 }
                 Some(notice)
             }
-            // L'émetteur a disparu (moitié Admin terminée) : plus rien à
-            // annoncer, mais la Source continue de play.
+            // The sender is gone (Admin half terminated): nothing more to
+            // announce, but the Source keeps playing.
             Err(_) => std::future::pending().await,
         }
     }
 }
 
-/// Vrai pour une trame que ce greffon accepte d'écrire au journal.
+/// True for a frame that this plugin agrees to write to the log.
 ///
-/// **Elle n'écarte qu'une chose : le bavardage de `lofty` sous le niveau
-/// erreur.** Le relevé des durées ouvre l'en-tête de chaque fichier de la
-/// liste, et `lofty` y émet un `WARN` par MP3 sans en-tête Xing —
-/// « MPEG: Using bitrate to estimate duration ». Ce n'est pas un incident :
-/// c'est la méthode d'estimation normale pour ce format, elle n'appelle
-/// aucune action, et elle se répète par piste. Signalée par le propriétaire
-/// comme polluant son journal, et le coût est réel : le cœur ne retient que
-/// les lines `WARN` et au-delà pour la carte « dernières erreurs », donc ce
-/// bruit-là chasse de vraies erreurs du buffer.
+/// **It discards only one thing: `lofty`'s chatter below the error level.**
+/// The durations survey opens the header of every file of the playlist, and
+/// `lofty` emits a `WARN` there for every MP3 without a Xing header —
+/// "MPEG: Using bitrate to estimate duration". This is not an incident: it is
+/// the normal estimation method for that format, it calls for no action, and
+/// it repeats per track. Reported by the owner as polluting his log, and the
+/// cost is real: the core only retains the `WARN` and above lines for the
+/// "last errors" card, so that noise pushes real errors out of the buffer.
 ///
-/// `lofty` garde ses `ERROR` : une trame que la bibliothèque juge fautive
-/// reste une information.
+/// `lofty` keeps its `ERROR`s: a frame that the library deems faulty remains
+/// information.
 ///
-/// Un `filter_fn` et non un `EnvFilter` : ce dernier vit derrière la fonction
-/// optionnelle `env-filter` de `tracing-subscriber`, qui tire `regex` — une
-/// dépendance de plus à compiler et à embarquer sur un Pi, pour une seule
-/// règle connue à l'avance.
+/// A `filter_fn` and not an `EnvFilter`: the latter lives behind the optional
+/// `env-filter` feature of `tracing-subscriber`, which pulls in `regex` — one
+/// more dependency to compile and to ship on a Pi, for a single rule known in
+/// advance.
 fn frame_to_log(metadata: &tracing::Metadata<'_>) -> bool {
-    // `>` et non `<` : in_dir `tracing`, l'order des niveaux est celui de la
-    // verbosité, donc `ERROR` est le plus **petit**. « Plus verbeux qu'erreur »
-    // s'écrit bien `> Level::ERROR`.
+    // `>` and not `<`: in `tracing`, the order of the levels is that of
+    // verbosity, so `ERROR` is the **smallest**. "More verbose than error" is
+    // indeed written `> Level::ERROR`.
     !(metadata.target().starts_with("lofty") && *metadata.level() > tracing::Level::ERROR)
 }
 
@@ -638,33 +636,33 @@ async fn main() -> Result<()> {
     ));
     let playlists_dir =
         PathBuf::from(env_or("RITORNELLO_FILES_PLAYLISTS", "/var/lib/ritornello/playlists"));
-    // Répertoire de travail transitoire, où l'assistant réseau pose son fichier
-    // d'authentification le temps d'un appel à `smbclient`.
+    // Transient working directory, where the network wizard drops its
+    // authentication file for the duration of an `smbclient` call.
     //
-    // Le **répertoire d'exécution**, et surtout pas celui des identifiants
-    // persistés : celui-là vit sous `/etc` et n'est inscriptible qu'en
-    // production. Le confondre faisait échouer l'assistant en développement
-    // avec un « Permission denied » qui semblait accuser SMB.
+    // The **runtime directory**, and above all not the persisted credentials
+    // one: that one lives under `/etc` and is only writable in production.
+    // Confusing the two made the wizard fail in development with a
+    // "Permission denied" that seemed to blame SMB.
     //
-    // Même défaut et même variable que le cœur (`RITORNELLO_RUNTIME_DIR`), pour
-    // que `docs/development.md` reste vrai d'un binaire à l'autre.
+    // Same default and same variable as the core (`RITORNELLO_RUNTIME_DIR`), so
+    // that `docs/development.md` stays true from one binary to the other.
     let runtime_dir = PathBuf::from(env_or("RITORNELLO_RUNTIME_DIR", "/run/ritornello"));
     let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
 
     let state = state::load(&state_path);
     let entries: Vec<Entry> = state.playlist.iter().map(Entry::from).collect();
-    // Les pistes absentes sont **conservées** : un partage momentanément
-    // unreachable (NAS endormi, montage pas encore fait au boot) effacerait
-    // sinon la liste de l'utilisateur.
+    // Missing tracks are **kept**: a momentarily unreachable share (sleeping
+    // NAS, mount not yet done at boot) would otherwise erase the user's
+    // playlist.
     //
-    // Et surtout : elles ne sont **pas comptées ici**. Ce compte se faisait par
-    // un `is_file` sur chaque piste, avant que les deux moitiés ne soient
-    // lancées — donc avant que la socket d'admin n'existe. Le 2026-08-17, un
-    // montage cifs bloqué in_dir le noyau y a retenu le démarrage, et la page de
-    // gestion a purement disparu de l'IHM : le cœur ne voit un plugin d'admin
-    // que s'il a lié sa socket. Rien qui touche un path média n'a le droit de
-    // s'exécuter avant. La page rend la même information, sous disjoncteur,
-    // par le champ `missing` de `get_data`.
+    // And above all: they are **not counted here**. This count used to be done
+    // by an `is_file` on every track, before the two halves were launched —
+    // hence before the admin socket existed. On 2026-08-17, a cifs mount stuck
+    // in the kernel held up the start there, and the management page simply
+    // vanished from the UI: the core only sees an admin plugin once it has
+    // bound its socket. Nothing that touches a media path may run before that.
+    // The page returns the same information, under the circuit breaker,
+    // through the `missing` field of `get_data`.
     let index = if state.index < entries.len() { state.index } else { 0 };
 
     let roots = Roots::load(&roots_path).unwrap_or_else(|e| {
@@ -677,19 +675,19 @@ async fn main() -> Result<()> {
     let (preset_count_tx, preset_count_rx) =
         tokio::sync::watch::channel(playlist.read().await.preset_count());
 
-    // Deux drapeaux partagés entre les deux moitiés : la page modifie la liste,
-    // la Source la plays, et rien d'autre ne les relie — les notifications du SDK
-    // sont volontairement sans action.
+    // Two flags shared between the two halves: the page modifies the playlist,
+    // the Source plays it, and nothing else links them — the SDK's
+    // notifications deliberately carry no action.
     let playlist_changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let plays = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    // Créé ici, sans rien probe : le disjoncteur n'apprend qu'en servant les
-    // requêtes. Sonder au démarrage remettrait un accès disque avant la
-    // liaison de la socket, ce qui est précisément le défaut qu'il corrige.
+    // Created here, without probing anything: the circuit breaker only learns
+    // by serving requests. Probing at startup would put a disk access back
+    // before the socket is bound, which is precisely the defect it fixes.
     //
-    // Partagé avec la Source : la recherche de cover fait un `read_dir` sur
-    // le même partage que la moitié Admin, et doit tomber sous le même
-    // disjoncteur plutôt que d'en inventer un second.
+    // Shared with the Source: the cover lookup does a `read_dir` on the same
+    // share as the Admin half, and must fall under the same circuit breaker
+    // rather than inventing a second one.
     let health = Arc::new(ritornello_plugin_files::health::Health::new());
 
     let source = FilesSource {
@@ -706,11 +704,11 @@ async fn main() -> Result<()> {
         health: health.clone(),
     };
 
-    // Sonde au démarrage plutôt qu'à l'usage : la page doit pouvoir griser
-    // l'assistant réseau dès son ouverture, comme l'onglet Système grise le
-    // redémarrage sur `can_reboot`. La sonde est refaite à chaque tentative de
-    // connexion, pour qu'installer le paquet sans redémarrer donne un résultat
-    // juste.
+    // Probed at startup rather than on use: the page must be able to grey out
+    // the network wizard as soon as it opens, like the System tab greys out
+    // the reboot on `can_reboot`. The probe is redone at every connection
+    // attempt, so that installing the package without rebooting gives a
+    // correct result.
     let smb_ok = Arc::new(std::sync::atomic::AtomicBool::new(
         ritornello_plugin_files::smb::available().await,
     ));
@@ -753,16 +751,16 @@ mod tests {
     use super::*;
     use ritornello_proto::IdentityUpdate;
 
-    /// Fabrique une `Metadata` de test pour un couple (cible, niveau).
+    /// Builds a test `Metadata` for a (target, level) pair.
     ///
-    /// `tracing::Metadata::new` demande des `&'static str` : les cibles
-    /// testées sont donc des littéraux, ce qui suffit — la règle ne porte que
-    /// sur un préfixe connu à l'avance.
-    fn trame(cible: &'static str, niveau: tracing::Level) -> tracing::Metadata<'static> {
+    /// `tracing::Metadata::new` requires `&'static str`: the tested targets
+    /// are therefore literals, which is enough — the rule only bears on a
+    /// prefix known in advance.
+    fn frame(target: &'static str, level: tracing::Level) -> tracing::Metadata<'static> {
         tracing::Metadata::new(
-            "trame",
-            cible,
-            niveau,
+            "frame",
+            target,
+            level,
             None,
             None,
             None,
@@ -771,46 +769,46 @@ mod tests {
         )
     }
 
-    /// Un site d'appel factice, exigé par `FieldSet::new`. Il n'est jamais
-    /// enregistré ni consulté : seul son identité sert de clé.
+    /// A dummy callsite, required by `FieldSet::new`. It is never registered
+    /// nor consulted: only its identity serves as a key.
     struct Callsite;
     impl tracing::callsite::Callsite for Callsite {
         fn set_interest(&self, _: tracing::subscriber::Interest) {}
         fn metadata(&self) -> &tracing::Metadata<'_> {
-            unreachable!("ce site d'appel n'est jamais consulte")
+            unreachable!("this callsite is never consulted")
         }
     }
     static CALLSITE: Callsite = Callsite;
 
     #[test]
-    fn le_bavardage_de_lofty_est_ecarte_du_journal_mais_pas_ses_erreurs() {
-        // Le symptôme rapporté : « MPEG: Using bitrate to estimate duration »,
-        // un WARN par MP3 sans en-tête Xing, qui chasse de vraies erreurs du
-        // buffer des « dernières erreurs » du cœur.
-        assert!(!frame_to_log(&trame("lofty::mpeg::properties", tracing::Level::WARN)));
-        assert!(!frame_to_log(&trame("lofty", tracing::Level::INFO)));
-        // Ce que la règle ne doit surtout pas emporter :
-        assert!(frame_to_log(&trame("lofty::mpeg", tracing::Level::ERROR)));
-        assert!(frame_to_log(&trame("ritornello_plugin_files", tracing::Level::WARN)));
-        // Et pas de correspondance par simple sous-chaîne : une cible qui
-        // commence par le même phrase sans être `lofty` reste journalisée.
-        assert!(frame_to_log(&trame("mon_crate::lofty_helper", tracing::Level::WARN)));
+    fn lofty_chatter_is_kept_out_of_the_log_but_not_its_errors() {
+        // The reported symptom: "MPEG: Using bitrate to estimate duration", a
+        // WARN per MP3 without a Xing header, which pushes real errors out of
+        // the core's "last errors" buffer.
+        assert!(!frame_to_log(&frame("lofty::mpeg::properties", tracing::Level::WARN)));
+        assert!(!frame_to_log(&frame("lofty", tracing::Level::INFO)));
+        // What the rule must above all not take away:
+        assert!(frame_to_log(&frame("lofty::mpeg", tracing::Level::ERROR)));
+        assert!(frame_to_log(&frame("ritornello_plugin_files", tracing::Level::WARN)));
+        // And no matching by mere substring: a target that starts with the
+        // same phrase without being `lofty` stays logged.
+        assert!(frame_to_log(&frame("my_crate::lofty_helper", tracing::Level::WARN)));
     }
 
-    fn source_de_test(playlist: Playlist) -> FilesSource {
+    fn test_source(playlist: Playlist) -> FilesSource {
         let dir = tempfile::tempdir().unwrap();
-        let racine = dir.path().to_path_buf();
-        // Le tempdir est volontairement fuité : la Source vit le temps du test,
-        // et le laisser tomber effacerait les chemins qu'elle écrit.
+        let root = dir.path().to_path_buf();
+        // The tempdir is deliberately leaked: the Source lives for the duration
+        // of the test, and dropping it would erase the paths it writes.
         std::mem::forget(dir);
         FilesSource {
             playlist: Arc::new(AsyncRwLock::new(playlist)),
             playlist_changed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             plays: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            state_path: racine.join("plugin-files.json"),
-            mpv_playlist_path: racine.join("plugin-files.m3u"),
-            catalog: Arc::new(RwLock::new(Catalog::load("files", "en", &racine, FILES_EN))),
-            locales_root: racine,
+            state_path: root.join("plugin-files.json"),
+            mpv_playlist_path: root.join("plugin-files.m3u"),
+            catalog: Arc::new(RwLock::new(Catalog::load("files", "en", &root, FILES_EN))),
+            locales_root: root,
             preset_count_rx: None,
             cover_in_flight: None,
             cover_by_dir: Arc::new(Mutex::new(None)),
@@ -818,7 +816,7 @@ mod tests {
         }
     }
 
-    fn liste_de(n: usize) -> Playlist {
+    fn playlist_of(n: usize) -> Playlist {
         Playlist {
             entries: (1..=n)
                 .map(|i| Entry {
@@ -832,55 +830,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn activer_une_liste_vide_ne_lance_rien_et_le_dit() {
-        let mut s = source_de_test(Playlist::default());
+    async fn activating_an_empty_playlist_launches_nothing_and_says_so() {
+        let mut s = test_source(Playlist::default());
         let out = s.activate().await;
         assert!(matches!(out.action, SourceAction::Noop));
         assert_eq!(out.preset_count, Some(0));
-        assert!(out.status.is_some(), "le status doit dire pourquoi rien ne plays");
+        assert!(out.status.is_some(), "the status must say why nothing is playing");
         assert_eq!(out.identity, Some(IdentityUpdate::Nothing));
     }
 
     #[tokio::test]
-    async fn activer_reprend_a_la_piste_memorisee() {
-        // La reprise après redémarrage : sans `start`, la playback repartirait à
-        // la première piste à chaque démarrage de l'appareil.
-        let mut p = liste_de(5);
+    async fn activating_resumes_at_the_remembered_track() {
+        // Resuming after a reboot: without `start`, playback would restart at
+        // the first track every time the device boots.
+        let mut p = playlist_of(5);
         p.index = 3;
-        let mut s = source_de_test(p);
+        let mut s = test_source(p);
         let out = s.activate().await;
         match out.action {
             SourceAction::Play { start, finite, .. } => {
                 assert_eq!(start, Some(3));
-                assert!(finite, "une liste de fichiers a une fin normale");
+                assert!(finite, "a list of files has a normal end");
             }
-            autre => panic!("attendu un Play, obtenu {autre:?}"),
+            other => panic!("expected a Play, got {other:?}"),
         }
         assert_eq!(out.preset, Some(4));
         assert_eq!(out.preset_count, Some(5));
-        assert!(out.preset_name.is_some(), "l'ecran ne doit jamais etre muet");
+        assert!(out.preset_name.is_some(), "the screen must never be blank");
     }
 
     #[tokio::test]
-    async fn une_piste_inexistante_donne_un_message_ephemere_sans_couper_la_lecture() {
-        // Même règle que la présélection clear de la radio : rien n'a été lancé,
-        // donc la piste précédente plays toujours et doit reparaître à l'écran.
-        // Surtout : aucune déclaration d'identité, sans quoi les métadonnées du
-        // track en cours seraient effacées.
-        let mut s = source_de_test(liste_de(3));
+    async fn a_nonexistent_track_gives_a_transient_message_without_cutting_playback() {
+        // Same rule as the radio's empty preset: nothing was launched, so the
+        // previous track is still playing and must reappear on screen. Above
+        // all: no identity declaration, otherwise the metadata of the current
+        // track would be erased.
+        let mut s = test_source(playlist_of(3));
         let out = s.select(9).await;
         assert!(matches!(out.action, SourceAction::Noop));
-        assert!(out.transient, "le message doit s'effacer de lui-meme");
-        assert!(out.identity.is_none(), "declarer un arret serait faux");
+        assert!(out.transient, "the message must fade by itself");
+        assert!(out.identity.is_none(), "declaring a stop would be wrong");
         assert_eq!(out.preset_count, Some(3));
     }
 
     #[tokio::test]
-    async fn le_statut_est_redeclare_a_chaque_trame() {
-        // PIÈGE : `status` a la convention INVERSE de `preset`. Absent veut dire
-        // « pas de status », et non « garde le précédent » : une Source qui
-        // l'omettrait verrait son affichage s'effacer tout seul.
-        let mut s = source_de_test(liste_de(3));
+    async fn the_status_is_redeclared_on_every_frame() {
+        // TRAP: `status` has the OPPOSITE convention to `preset`. Absent means
+        // "no status", and not "keep the previous one": a Source that omitted
+        // it would see its display erase itself.
+        let mut s = test_source(playlist_of(3));
         for (name, out) in [
             ("activate", s.activate().await),
             ("select", s.select(2).await),
@@ -888,15 +886,15 @@ mod tests {
             ("prev", s.prev().await),
             ("stop", s.stop().await),
         ] {
-            assert!(out.status.is_some(), "status omis sur {name} : l'ecran s'effacerait");
+            assert!(out.status.is_some(), "status omitted on {name}: the screen would go blank");
         }
     }
 
     #[tokio::test]
-    async fn l_avance_automatique_recale_index_identite_et_nom() {
-        // Chemin réel : mpv passe à la piste suivante seul, le cœur relaie
-        // `PlayerTrack(n)`, et seule la Source sait ce que « piste n » désigne.
-        let mut s = source_de_test(liste_de(5));
+    async fn automatic_advance_resyncs_index_identity_and_name() {
+        // Real path: mpv moves to the next track by itself, the core relays
+        // `PlayerTrack(n)`, and only the Source knows what "track n" means.
+        let mut s = test_source(playlist_of(5));
         let out = s.player_track(2).await;
         assert_eq!(out.preset, Some(3));
         assert!(out.preset_name.is_some());
@@ -909,106 +907,109 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn un_index_negatif_est_ecarte_sans_rien_declarer() {
-        // mpv dit -1 en fin de liste. Le cœur le transmet tel quel ; la Source
-        // l'écarte, et surtout ne déclare rien — l'arrêt viendra de `stop()`.
-        let mut s = source_de_test(liste_de(3));
+    async fn a_negative_index_is_discarded_without_declaring_anything() {
+        // mpv says -1 at the end of the list. The core passes it on as is; the
+        // Source discards it, and above all declares nothing — the stop will
+        // come from `stop()`.
+        let mut s = test_source(playlist_of(3));
         let out = s.player_track(-1).await;
         assert!(matches!(out.action, SourceAction::Noop));
         assert!(out.identity.is_none());
     }
 
     #[tokio::test]
-    async fn la_fin_de_liste_declare_que_plus_rien_ne_joue() {
-        let mut s = source_de_test(liste_de(3));
+    async fn the_end_of_the_playlist_declares_that_nothing_plays_any_more() {
+        let mut s = test_source(playlist_of(3));
         let out = s.stop().await;
         assert_eq!(out.identity, Some(IdentityUpdate::Nothing));
     }
 
     #[tokio::test]
-    async fn next_et_prev_delegent_a_mpv_sans_recaler_deux_fois() {
-        // Recaler ici en plus de `player_track` ferait deux corrections pour un
-        // seul changement, et la seconde pourrait contredire la première.
-        let mut s = source_de_test(liste_de(3));
+    async fn next_and_prev_delegate_to_mpv_without_resyncing_twice() {
+        // Resyncing here on top of `player_track` would make two corrections
+        // for a single change, and the second could contradict the first.
+        let mut s = test_source(playlist_of(3));
         assert_eq!(s.next().await.action, SourceAction::PlayerNext);
         assert_eq!(s.prev().await.action, SourceAction::PlayerPrev);
-        assert_eq!(s.playlist.read().await.index, 0, "l'index ne doit pas avoir bouge de lui-meme");
+        assert_eq!(s.playlist.read().await.index, 0, "the index must not have moved by itself");
     }
 
     #[tokio::test]
-    async fn selectionner_persiste_la_piste() {
-        let mut s = source_de_test(liste_de(4));
+    async fn selecting_persists_the_track() {
+        let mut s = test_source(playlist_of(4));
         s.select(3).await;
         assert_eq!(state::load(&s.state_path).index, 2);
     }
 
     #[tokio::test]
-    async fn la_moitie_admin_annonce_le_compte_sans_deranger_la_lecture() {
-        // Modifier la liste depuis la page doit mettre à jour la grille de la
-        // télécommande web tout de suite, sans attendre qu'une piste soit jouée.
+    async fn the_admin_half_announces_the_count_without_disturbing_playback() {
+        // Modifying the playlist from the page must update the web remote's
+        // grid right away, without waiting for a track to be played.
         //
-        // **Et renuméroter ce qui plays**, ce qui manquait : réordonner la liste
-        // change la position de la piste écoutée, et le compteur de l'afficheur
-        // restait sur l'ancienne — la page du plugin était juste, le player non.
+        // **And renumber what is playing**, which was missing: reordering the
+        // playlist changes the position of the track being listened to, and
+        // the display's counter stayed on the old one — the plugin page was
+        // right, the player was not.
         //
-        // Ce qui reste garanti, et c'est l'essentiel : ni identité, ni status, ni
-        // action. La piste en cours n'est ni interrompue ni redéclarée, seulement
-        // renumérotée. Le cœur conserve bien `preset`, `preset_name` et
-        // `preset_count` absents — mais **pas** `status`, qu'il remplace, absence
-        // comprise (voir le commentaire de `poll_notification`) : c'est son retour
-        // anticipé, pour une trame qui ne déclare ni identité ni status, qui rend
-        // cet notice inoffensif.
+        // What remains guaranteed, and it is the essential part: no identity,
+        // no status, no action. The current track is neither interrupted nor
+        // redeclared, only renumbered. The core does keep `preset`,
+        // `preset_name` and `preset_count` when absent — but **not** `status`,
+        // which it replaces, absence included (see the comment in
+        // `poll_notification`): it is its early return, for a frame that
+        // declares neither identity nor status, that makes this notice
+        // harmless.
         let (tx, rx) = tokio::sync::watch::channel(0u8);
-        let mut s = source_de_test(liste_de(3));
+        let mut s = test_source(playlist_of(3));
         s.preset_count_rx = Some(rx);
         s.select(2).await;
         tx.send(7).unwrap();
-        let n = s.poll_notification().await.expect("une notification attendue");
+        let n = s.poll_notification().await.expect("a notification expected");
         assert_eq!(n.preset_count, Some(7));
-        assert_eq!(n.preset, Some(2), "le numero doit suivre la piste ecoutee");
-        assert!(n.preset_name.is_some(), "et le name avec");
-        assert!(n.identity.is_none(), "ce qui plays ne doit pas etre redeclare");
-        assert!(n.status.is_none(), "ni le status touche");
-        // Les names voyagent avec le compte : sans eux, la grille garderait les
-        // titres d'avant sous les nouveaux numeros — pire qu'aucun titre.
+        assert_eq!(n.preset, Some(2), "the number must follow the track being listened to");
+        assert!(n.preset_name.is_some(), "and the name with it");
+        assert!(n.identity.is_none(), "what is playing must not be redeclared");
+        assert!(n.status.is_none(), "nor the status touched");
+        // The names travel with the count: without them, the grid would keep
+        // the previous titles under the new numbers — worse than no title.
         assert_eq!(
             n.presets.as_deref().map(|p| p.len()),
             Some(3),
-            "les preselections nommees doivent accompagner le compte"
+            "the named presets must accompany the count"
         );
     }
 
     #[tokio::test]
-    async fn la_source_enumere_ses_preselections_nommees() {
-        // Sans cette surcharge, le corps par defaut de `list_presets` rend une
-        // liste clear et les tuiles de la grille n'ont qu'un numero — le defaut
-        // signale par le owner. Le sources_catalog distingue « je n'ai que des
-        // numeros » (liste clear) de « voici mes names », et cette source sait
-        // nommer.
-        let mut s = source_de_test(liste_de(2));
+    async fn the_source_enumerates_its_named_presets() {
+        // Without this override, the default body of `list_presets` returns an
+        // empty list and the grid tiles only have a number — the defect
+        // reported by the owner. The sources_catalog distinguishes "I only
+        // have numbers" (empty list) from "here are my names", and this source
+        // knows how to name.
+        let mut s = test_source(playlist_of(2));
         let presets = s.list_presets().await;
         assert_eq!(presets.len(), 2);
         assert_eq!(presets[0].index, 1);
-        assert!(!presets[0].name.is_empty(), "chaque tuile doit porter un titre");
+        assert!(!presets[0].name.is_empty(), "every tile must carry a title");
     }
 
     #[tokio::test]
-    async fn la_pochette_posee_a_cote_est_annoncee_apres_un_play() {
-        // Le cas nominal : un CD rippé pose son `cover.jpg` à côté des pistes.
-        // La recherche doit se faire après le `Play`, in_dir la notification
-        // spontanée — pas in_dir la réponse à `activate()`, qui ne déclare
-        // jamais de cover (voir `serve_source`).
+    async fn the_cover_placed_alongside_is_announced_after_a_play() {
+        // The nominal case: a ripped CD puts its `cover.jpg` next to the
+        // tracks. The lookup must happen after the `Play`, in the spontaneous
+        // notification — not in the answer to `activate()`, which never
+        // declares a cover (see `serve_source`).
         let dir = tempfile::tempdir().unwrap();
-        let piste = dir.path().join("01 - piste.flac");
-        std::fs::write(&piste, b"x").unwrap();
+        let track = dir.path().join("01 - piste.flac");
+        std::fs::write(&track, b"x").unwrap();
         std::fs::write(dir.path().join("cover.jpg"), b"x").unwrap();
-        let mut s = source_de_test(Playlist {
-            entries: vec![Entry { path: piste, title: None, duration_s: None }],
+        let mut s = test_source(Playlist {
+            entries: vec![Entry { path: track, title: None, duration_s: None }],
             index: 0,
         });
         let out = s.activate().await;
-        assert!(out.identity.is_some(), "la piste doit etre declaree comme telle");
-        let n = s.poll_notification().await.expect("une notification attendue");
+        assert!(out.identity.is_some(), "the track must be declared as such");
+        let n = s.poll_notification().await.expect("a notification expected");
         assert_eq!(
             n.cover,
             Some(ritornello_proto::CoverRef::Path {
@@ -1018,14 +1019,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn l_avance_automatique_reannonce_la_pochette_sans_re_sonder() {
-        // Le cas d'usage phare de toute cette couche, et il etait faux : sur un
-        // album ripe, seule la piste que l'utilisateur lance passe par
-        // `play()`. Les suivantes arrivent par `player_track`, qui repond par
-        // `resync()` — une **nouvelle identity**, donc un `cover_source` remis
-        // a zero cote coeur (voir `Metadata::set_identity`) — sans jamais
-        // rearmer la sonde. Resultat : cover sur la piste 1, repli ♫ sur
-        // les pistes 2..N.
+    async fn automatic_advance_reannounces_the_cover_without_reprobing() {
+        // The flagship use case of this whole layer, and it was wrong: on a
+        // ripped album, only the track the user launches goes through
+        // `play()`. The following ones arrive through `player_track`, which
+        // answers with `resync()` — a **new identity**, hence a `cover_source`
+        // reset on the core side (see `Metadata::set_identity`) — without ever
+        // re-arming the probe. Result: cover on track 1, ♫ fallback on tracks
+        // 2..N.
         let dir = tempfile::tempdir().unwrap();
         let cover = dir.path().join("cover.jpg");
         std::fs::write(&cover, b"x").unwrap();
@@ -1036,133 +1037,133 @@ mod tests {
                 Entry { path: p, title: None, duration_s: None }
             })
             .collect();
-        let mut s = source_de_test(Playlist { entries, index: 0 });
-        let attendue = Some(ritornello_proto::CoverRef::Path {
+        let mut s = test_source(Playlist { entries, index: 0 });
+        let expected = Some(ritornello_proto::CoverRef::Path {
             path: cover.to_string_lossy().into_owned(),
         });
 
         s.activate().await;
-        assert_eq!(s.poll_notification().await.unwrap().cover, attendue, "piste 1");
+        assert_eq!(s.poll_notification().await.unwrap().cover, expected, "track 1");
 
-        // mpv avance de lui-meme. La cover doit repartir avec la nouvelle
+        // mpv advances by itself. The cover must go out again with the new
         // identity.
         let out = s.player_track(1).await;
-        assert!(out.identity.is_some(), "une nouvelle identity est bien declaree");
-        assert_eq!(s.poll_notification().await.unwrap().cover, attendue, "piste 2");
+        assert!(out.identity.is_some(), "a new identity is indeed declared");
+        assert_eq!(s.poll_notification().await.unwrap().cover, expected, "track 2");
 
-        // Et **sans repayer le `readdir`** : le repertoire n'a pas change. La
-        // preuve se fait en retirant l'image du disque — une sonde reelle ne
-        // trouverait plus rien, la valeur memorisee est pourtant reannoncee.
-        // C'est ce qui evite un aller-retour SMB a chaque changement de piste.
+        // And **without paying the `readdir` again**: the directory has not
+        // changed. The proof is made by removing the image from disk — a real
+        // probe would find nothing any more, yet the remembered value is
+        // re-announced. This is what avoids an SMB round trip at every track
+        // change.
         std::fs::remove_file(&cover).unwrap();
         s.player_track(2).await;
         assert_eq!(
             s.poll_notification().await.unwrap().cover,
-            attendue,
-            "piste 3 : la valeur doit venir de la memoire, pas d'une nouvelle sonde"
+            expected,
+            "track 3: the value must come from memory, not from a new probe"
         );
     }
 
     #[tokio::test]
-    async fn changer_de_repertoire_resonde() {
-        // Le pendant du test ci-dessus : la memorisation est par repertoire,
-        // donc passer a un album voisin doit bien probe de nouveau — sans
-        // quoi le second album afficherait la cover du premier.
+    async fn changing_directory_reprobes() {
+        // The counterpart of the test above: remembering is per directory, so
+        // moving to a neighbouring album must indeed probe again — otherwise
+        // the second album would show the first one's cover.
         let dir = tempfile::tempdir().unwrap();
-        let un = dir.path().join("album-un");
-        let deux = dir.path().join("album-deux");
-        std::fs::create_dir_all(&un).unwrap();
-        std::fs::create_dir_all(&deux).unwrap();
-        std::fs::write(un.join("cover.jpg"), b"x").unwrap();
-        std::fs::write(deux.join("folder.png"), b"x").unwrap();
+        let first = dir.path().join("album-un");
+        let second = dir.path().join("album-deux");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("cover.jpg"), b"x").unwrap();
+        std::fs::write(second.join("folder.png"), b"x").unwrap();
         let entries = vec![
-            Entry { path: un.join("01.flac"), title: None, duration_s: None },
-            Entry { path: deux.join("01.flac"), title: None, duration_s: None },
+            Entry { path: first.join("01.flac"), title: None, duration_s: None },
+            Entry { path: second.join("01.flac"), title: None, duration_s: None },
         ];
-        let mut s = source_de_test(Playlist { entries, index: 0 });
+        let mut s = test_source(Playlist { entries, index: 0 });
         s.activate().await;
         assert_eq!(
             s.poll_notification().await.unwrap().cover,
             Some(ritornello_proto::CoverRef::Path {
-                path: un.join("cover.jpg").to_string_lossy().into_owned()
+                path: first.join("cover.jpg").to_string_lossy().into_owned()
             })
         );
         s.player_track(1).await;
         assert_eq!(
             s.poll_notification().await.unwrap().cover,
             Some(ritornello_proto::CoverRef::Path {
-                path: deux.join("folder.png").to_string_lossy().into_owned()
+                path: second.join("folder.png").to_string_lossy().into_owned()
             }),
-            "un repertoire different doit etre sonde"
+            "a different directory must be probed"
         );
     }
 
     #[tokio::test]
-    async fn l_absence_de_pochette_ne_bloque_pas_les_autres_notifications() {
-        // Défendu par la revue : `poll_notification` ne doit jamais rendre
-        // `None` (terminal pour le SDK) ni une notification clear quand il n'y
-        // a rien à côté du fichier. La preuve : le mécanisme du compte de
-        // présélections, sans rapport, continue de fonctionner juste après.
+    async fn the_absence_of_a_cover_does_not_block_the_other_notifications() {
+        // Defended by the review: `poll_notification` must never return `None`
+        // (terminal for the SDK) nor an empty notification when there is
+        // nothing next to the file. The proof: the unrelated preset count
+        // mechanism keeps working right after.
         let dir = tempfile::tempdir().unwrap();
-        let piste = dir.path().join("01 - piste.flac");
-        std::fs::write(&piste, b"x").unwrap(); // pas d'image a cote
+        let track = dir.path().join("01 - piste.flac");
+        std::fs::write(&track, b"x").unwrap(); // no image alongside
         let (tx, rx) = tokio::sync::watch::channel(0u8);
-        let mut s = source_de_test(Playlist {
-            entries: vec![Entry { path: piste, title: None, duration_s: None }],
+        let mut s = test_source(Playlist {
+            entries: vec![Entry { path: track, title: None, duration_s: None }],
             index: 0,
         });
         s.preset_count_rx = Some(rx);
         s.activate().await;
         tx.send(3).unwrap();
-        let n = s.poll_notification().await.expect("une notification attendue, pas None");
+        let n = s.poll_notification().await.expect("a notification expected, not None");
         assert_eq!(n.preset_count, Some(3));
-        assert!(n.cover.is_none(), "aucune cover a cote, rien a annoncer");
+        assert!(n.cover.is_none(), "no cover alongside, nothing to announce");
     }
 
     #[tokio::test]
-    async fn annuler_puis_repoller_ne_relance_pas_une_seconde_sonde() {
-        // Défendu par la revue : un appel direct à `health.bounded(...).await`
-        // depuis `poll_notification` se ferait cancel par le `select!` du SDK
-        // dès qu'une requête du cœur arrive — un événement courant, pas un cas
-        // limite — perdant la comptabilité de `health` et relançant une sonde
-        // de plus sur le même partage à chaque tour. La correction : la sonde
-        // vit sur une tâche indépendante (`play()` la lance), et
-        // `poll_notification` ne fait qu'attendre son résultat sur un
-        // `oneshot::Receiver`, cancel-safe par construction.
+    async fn cancelling_then_repolling_does_not_launch_a_second_probe() {
+        // Defended by the review: a direct call to `health.bounded(...).await`
+        // from `poll_notification` would get cancelled by the SDK's `select!`
+        // as soon as a request from the core arrives — a common event, not an
+        // edge case — losing `health`'s bookkeeping and launching one more
+        // probe on the same share at every round. The fix: the probe lives on
+        // an independent task (`play()` launches it), and `poll_notification`
+        // only waits for its result on a `oneshot::Receiver`, cancel-safe by
+        // construction.
         //
-        // Compter les sondes réellement lancées demanderait d'instrumenter
-        // `cover::search` ou de forcer un vrai délai de `health` — ce qui
-        // retombe sur une hypothèse de timing que ce crate vient justement
-        // d'expulser de ses tests (voir l'historique). À la place, ce test
-        // vérifie directement la propriété qui rend la seconde sonde
-        // impossible : le récepteur unique posé ici survit intact à
-        // l'annulation d'un premier tour de `poll_notification`, et le second
-        // tour read sa réponse sur ce même canal — sans qu'aucun code de
-        // `poll_notification` n'ait besoin d'en open un autre (il n'y a tout
-        // simplement aucun `tokio::spawn` in_dir cette méthode).
+        // Counting the probes actually launched would require instrumenting
+        // `cover::search` or forcing a real `health` timeout — which falls
+        // back on a timing assumption that this crate has just expelled from
+        // its tests (see the history). Instead, this test directly checks the
+        // property that makes the second probe impossible: the single receiver
+        // placed here survives intact the cancellation of a first round of
+        // `poll_notification`, and the second round reads its answer on that
+        // same channel — without any code of `poll_notification` needing to
+        // open another one (there is simply no `tokio::spawn` in that method).
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let mut s = source_de_test(Playlist::default());
+        let mut s = test_source(Playlist::default());
         s.cover_in_flight = Some(rx);
 
-        // Premier tour : rien n'a encore été envoyé, `poll_notification` doit
-        // rester en attente. `yield_now()` bounded l'observation à un seul
-        // passage du planificateur — une propriété déterministe du runtime,
-        // pas une horloge murale, donc aucune place pour un flake ici.
+        // First round: nothing has been sent yet, `poll_notification` must stay
+        // pending. `yield_now()` bounds the observation to a single pass of the
+        // scheduler — a deterministic property of the runtime, not a wall
+        // clock, so no room for a flake here.
         tokio::select! {
-            _ = s.poll_notification() => panic!("ne doit pas resoudre avant que quelque chose soit envoye"),
+            _ = s.poll_notification() => panic!("must not resolve before something is sent"),
             _ = tokio::task::yield_now() => {}
         }
 
-        // Le futur précédent a été abandonné (l'équivalent exact de
-        // l'annulation par le `select!` du SDK). Le champ doit avoir survécu
-        // intact, toujours branché sur cet unique récepteur : si
-        // `poll_notification` en avait ouvert un second, ce `send` — le seul
-        // émetteur qui existe in_dir ce test — n'aurait personne côté second
-        // canal fictif à convaincre, et l'assertion suivante échouerait en
-        // rendant `None` plutôt que la cover.
+        // The previous future has been dropped (the exact equivalent of the
+        // cancellation by the SDK's `select!`). The field must have survived
+        // intact, still connected to this single receiver: if
+        // `poll_notification` had opened a second one, this `send` — the only
+        // sender that exists in this test — would have nobody to convince on
+        // the fictitious second channel, and the next assertion would fail by
+        // returning `None` rather than the cover.
         tx.send(Some(ritornello_proto::CoverRef::Path { path: "/nas/Album/cover.jpg".into() }))
             .unwrap();
-        let n = s.poll_notification().await.expect("une notification attendue, pas None");
+        let n = s.poll_notification().await.expect("a notification expected, not None");
         assert_eq!(
             n.cover,
             Some(ritornello_proto::CoverRef::Path { path: "/nas/Album/cover.jpg".into() })
@@ -1170,190 +1171,191 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn le_statut_suit_le_catalogue_apres_set_locale() {
+    async fn the_status_follows_the_catalog_after_set_locale() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("files")).unwrap();
         std::fs::write(dir.path().join("files/fr.toml"), "status_files = \"FICHIERS\"\n").unwrap();
-        let mut s = source_de_test(liste_de(2));
+        let mut s = test_source(playlist_of(2));
         s.locales_root = dir.path().to_path_buf();
         s.set_locale("fr".into()).await;
         assert_eq!(s.activate().await.status.as_deref(), Some("FICHIERS"));
     }
 
     #[tokio::test]
-    async fn un_arret_sur_liste_vide_dit_que_la_liste_est_vide() {
-        // Défaut signalé, et il était mesquin : `play()` affichait bien
-        // « AUCUNE LISTE », mais sans piste mpv reste inactif, le cœur envoyait
-        // donc `stop()` aussitôt — et cette trame écrasait le message par un
-        // status générique. L'utilisateur ne pouvait pas apprendre que sa liste
-        // était clear.
-        let mut s = source_de_test(Playlist::default());
+    async fn a_stop_on_an_empty_playlist_says_the_playlist_is_empty() {
+        // Reported defect, and a petty one: `play()` did display "NO PLAYLIST",
+        // but without a track mpv stays idle, so the core sent `stop()` at
+        // once — and that frame overwrote the message with a generic status.
+        // The user could not learn that their playlist was empty.
+        let mut s = test_source(Playlist::default());
         assert_eq!(s.activate().await.status.as_deref(), Some("NO PLAYLIST"));
         assert_eq!(s.stop().await.status.as_deref(), Some("NO PLAYLIST"));
     }
 
     #[tokio::test]
-    async fn un_arret_sur_une_liste_pleine_reste_un_arret_ordinaire() {
-        // Garde-fou : « aucune liste » doit rester réservé au cas où il n'y a
-        // vraiment rien à play.
-        let mut s = source_de_test(liste_de(3));
+    async fn a_stop_on_a_full_playlist_stays_an_ordinary_stop() {
+        // Guard rail: "no playlist" must stay reserved for the case where
+        // there is really nothing to play.
+        let mut s = test_source(playlist_of(3));
         s.activate().await;
         assert_eq!(s.stop().await.status.as_deref(), Some("FILES"));
     }
 
     #[tokio::test]
-    async fn un_arret_annonce_la_piste_armee_et_non_un_statut_nu() {
-        // Défaut signalé : l'afficheur se retrouvait « perdu » — le status deux
-        // fois, sans numéro ni name — après un arrêt. Il doit dire l'état réel :
-        // rien ne plays, et voilà ce qui repartira.
-        let mut s = source_de_test(liste_de(3));
+    async fn a_stop_announces_the_armed_track_and_not_a_bare_status() {
+        // Reported defect: the display ended up "lost" — the status twice,
+        // without number or name — after a stop. It must say the real state:
+        // nothing is playing, and here is what will restart.
+        let mut s = test_source(playlist_of(3));
         s.select(2).await;
-        let issue = s.stop().await;
-        assert_eq!(issue.preset, Some(2), "la piste armee reste designee");
-        assert!(issue.preset_name.is_some(), "et nommee");
-        assert_eq!(issue.preset_count, Some(3));
-        // Mais rien ne plays : c'est ce que `plays_nothing` déclare, et c'est ce
-        // qui fait disparaître le bloc « en cours de playback » de l'afficheur.
-        assert!(issue.identity.is_some(), "l'arret doit etre declare, pas tu");
+        let outcome = s.stop().await;
+        assert_eq!(outcome.preset, Some(2), "the armed track stays designated");
+        assert!(outcome.preset_name.is_some(), "and named");
+        assert_eq!(outcome.preset_count, Some(3));
+        // But nothing is playing: that is what `plays_nothing` declares, and
+        // that is what makes the "now playing" block disappear from the
+        // display.
+        assert!(outcome.identity.is_some(), "the stop must be declared, not silenced");
     }
 
     #[tokio::test]
-    async fn un_arret_sur_liste_vide_ne_designe_aucune_piste() {
-        // Rien à armer : annoncer un numéro désignerait une piste qui n'existe
-        // pas.
-        let mut s = source_de_test(Playlist::default());
-        let issue = s.stop().await;
-        assert_eq!(issue.status.as_deref(), Some("NO PLAYLIST"));
-        assert!(issue.preset.is_none());
-        assert_eq!(issue.preset_count, Some(0));
+    async fn a_stop_on_an_empty_playlist_designates_no_track() {
+        // Nothing to arm: announcing a number would designate a track that
+        // does not exist.
+        let mut s = test_source(Playlist::default());
+        let outcome = s.stop().await;
+        assert_eq!(outcome.status.as_deref(), Some("NO PLAYLIST"));
+        assert!(outcome.preset.is_none());
+        assert_eq!(outcome.preset_count, Some(0));
     }
 
     #[tokio::test]
-    async fn un_playlist_pos_negatif_ne_deplace_pas_l_index() {
-        // mpv announcement `-1` en fin de liste **et transitoirement à chaque
-        // rechargement**, donc à chaque changement de piste : c'est mesuré. En
-        // tirer une conclusion — « la liste est terminée, repartons du début » —
-        // faisait retomber toute reprise sur la piste 1.
-        let mut s = source_de_test(liste_de(4));
+    async fn a_negative_playlist_pos_does_not_move_the_index() {
+        // mpv announces `-1` at the end of the list **and transiently at every
+        // reload**, hence at every track change: this is measured. Drawing a
+        // conclusion from it — "the playlist has ended, let's restart from the
+        // beginning" — made every resume fall back on track 1.
+        let mut s = test_source(playlist_of(4));
         s.select(3).await;
         s.player_track(-1).await;
-        assert_eq!(s.activate().await.preset, Some(3), "le -1 ne doit rien conclure");
+        assert_eq!(s.activate().await.preset, Some(3), "the -1 must conclude nothing");
     }
 
     #[tokio::test]
-    async fn une_liste_est_declaree_comme_telle_au_coeur() {
-        // Le défaut central : sans `playlist`, le cœur chargeait le m3u par
-        // `loadfile`, que mpv ne déplie qu'après coup — l'index de départ
-        // arrivait hors bornes et toute sélection rejouait la première piste.
-        let mut s = source_de_test(liste_de(3));
+    async fn a_playlist_is_declared_as_such_to_the_core() {
+        // The central defect: without `playlist`, the core loaded the m3u
+        // through `loadfile`, which mpv only expands afterwards — the starting
+        // index arrived out of bounds and every selection replayed the first
+        // track.
+        let mut s = test_source(playlist_of(3));
         match s.select(2).await.action {
             SourceAction::Play { playlist, start, finite, .. } => {
-                assert!(playlist, "un m3u doit etre charge comme une liste");
-                assert_eq!(start, Some(1), "piste 2 = index 1");
-                assert!(finite, "une liste de fichiers a une fin normale");
+                assert!(playlist, "an m3u must be loaded as a playlist");
+                assert_eq!(start, Some(1), "track 2 = index 1");
+                assert!(finite, "a list of files has a normal end");
             }
-            autre => panic!("attendu un Play, recu {autre:?}"),
+            other => panic!("expected a Play, received {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn reprendre_apres_un_arret_rend_la_piste_ecoutee() {
-        // La touche Lecture après un Stop redemande `activate()`. Elle doit
-        // rendre la piste qu'on écoutait — l'index vit in_dir le plugin et aucun
-        // arrêt ne le déplace — et non repartir de la première.
-        let mut s = source_de_test(liste_de(4));
+    async fn resuming_after_a_stop_returns_the_track_being_listened_to() {
+        // The Play key after a Stop asks for `activate()` again. It must
+        // return the track we were listening to — the index lives in the
+        // plugin and no stop moves it — and not restart from the first one.
+        let mut s = test_source(playlist_of(4));
         s.select(3).await;
         s.stop().await;
-        assert_eq!(s.activate().await.preset, Some(3), "la piste ecoutee, pas la premiere");
+        assert_eq!(s.activate().await.preset, Some(3), "the track being listened to, not the first");
     }
 
     #[tokio::test]
-    async fn suivant_delegue_a_mpv_quand_la_liste_na_pas_bouge() {
-        // Le cas ordinaire : mpv tient la même liste que nous, il sait avancer
-        // seul. Recharger ici couperait le son pour rien.
-        let mut s = source_de_test(liste_de(3));
+    async fn next_delegates_to_mpv_when_the_playlist_has_not_moved() {
+        // The ordinary case: mpv holds the same list as we do, it knows how to
+        // advance by itself. Reloading here would cut the sound for nothing.
+        let mut s = test_source(playlist_of(3));
         assert_eq!(s.next().await.action, SourceAction::PlayerNext);
     }
 
     #[tokio::test]
-    async fn suivant_rend_la_liste_a_jour_quand_la_page_l_a_modifiee() {
-        // Défaut de conception signalé : mpv plays une **copie** de la liste,
-        // écrite au dernier `Play`. Une piste ajoutée depuis lui était hors
-        // d'atteinte, une piste retirée revenait. La moitié Admin ne pouvant rien
-        // lui dire, on saisit le premier order explicite pour lui rendre la liste
-        // neuve — un moment où l'utilisateur attend de toute façon un changement.
-        let mut s = source_de_test(liste_de(4));
+    async fn next_hands_back_the_up_to_date_playlist_when_the_page_modified_it() {
+        // Reported design defect: mpv plays a **copy** of the playlist,
+        // written at the last `Play`. A track added since was out of its
+        // reach, a track removed came back. The Admin half having no way to
+        // tell mpv, we seize the first explicit command to hand it the fresh
+        // playlist — a moment when the user expects a change anyway.
+        let mut s = test_source(playlist_of(4));
         s.select(2).await;
         s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
-        let issue = s.next().await;
-        assert!(matches!(issue.action, SourceAction::Play { .. }), "{:?}", issue.action);
-        assert_eq!(issue.preset, Some(3), "la piste qui suit, in_dir la nouvelle liste");
-        // L'écart est refermé : l'order suivant redélègue à mpv.
+        let outcome = s.next().await;
+        assert!(matches!(outcome.action, SourceAction::Play { .. }), "{:?}", outcome.action);
+        assert_eq!(outcome.preset, Some(3), "the following track, in the new playlist");
+        // The drift is closed: the next command delegates to mpv again.
         assert_eq!(s.next().await.action, SourceAction::PlayerNext);
     }
 
     #[tokio::test]
-    async fn precedent_boucle_plutot_que_de_bloquer_apres_une_modification() {
-        // Sans bouclage, une modification qui laisse l'auditeur sur la première
-        // piste rendrait « précédent » inopérant, alors que mpv boucle d'un bout
-        // à l'autre de sa propre liste.
-        let mut s = source_de_test(liste_de(3));
+    async fn prev_wraps_around_rather_than_blocking_after_a_modification() {
+        // Without wrapping, a modification that leaves the listener on the
+        // first track would make "previous" inoperative, whereas mpv wraps
+        // from one end of its own list to the other.
+        let mut s = test_source(playlist_of(3));
         s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(s.prev().await.preset, Some(3), "on revient a la derniere piste");
+        assert_eq!(s.prev().await.preset, Some(3), "we come back to the last track");
     }
 
     #[tokio::test]
-    async fn le_changement_de_piste_automatique_rend_la_liste_a_jour() {
-        // Le défaut signalé à l'usage : ne resynchroniser qu'au prochain order
-        // explicite ne suffisait pas. Si l'on modifie la liste et qu'on laisse
-        // simplement la piste s'achever, mpv enchaînait in_dir l'ancienne — donc
-        // « les modifications de playlist, rien ».
+    async fn the_automatic_track_change_hands_back_the_up_to_date_playlist() {
+        // The defect reported in use: resyncing only at the next explicit
+        // command was not enough. If you modify the playlist and simply let
+        // the track end, mpv chained on in the old one — hence "playlist
+        // modifications, nothing".
         //
-        // Le changement automatique est au contraire le meilleur moment : mpv
-        // démarre un fichier de toute façon, rien n'est interrompu.
-        let mut s = source_de_test(liste_de(4));
+        // The automatic change is on the contrary the best moment: mpv starts
+        // a file anyway, nothing is interrupted.
+        let mut s = test_source(playlist_of(4));
         s.select(2).await;
         s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
-        let issue = s.player_track(2).await;
-        assert!(matches!(issue.action, SourceAction::Play { .. }), "{:?}", issue.action);
-        assert_eq!(issue.preset, Some(3), "la piste qui suit, in_dir la liste a jour");
+        let outcome = s.player_track(2).await;
+        assert!(matches!(outcome.action, SourceAction::Play { .. }), "{:?}", outcome.action);
+        assert_eq!(outcome.preset, Some(3), "the following track, in the up-to-date playlist");
     }
 
     #[tokio::test]
-    async fn un_changement_de_piste_sans_modification_ne_recharge_rien() {
-        // Le cas ordinaire, et de loin le plus fréquent : recharger ici
-        // couperait le son à chaque changement de piste.
-        let mut s = source_de_test(liste_de(4));
+    async fn a_track_change_without_modification_reloads_nothing() {
+        // The ordinary case, and by far the most frequent: reloading here would
+        // cut the sound at every track change.
+        let mut s = test_source(playlist_of(4));
         s.select(1).await;
-        let issue = s.player_track(1).await;
-        assert!(matches!(issue.action, SourceAction::Noop), "{:?}", issue.action);
-        assert_eq!(issue.preset, Some(2), "on ne fait que redire ou mpv en est");
+        let outcome = s.player_track(1).await;
+        assert!(matches!(outcome.action, SourceAction::Noop), "{:?}", outcome.action);
+        assert_eq!(outcome.preset, Some(2), "we only restate where mpv is");
     }
 
     #[tokio::test]
-    async fn la_fin_de_liste_ne_relance_pas_une_liste_modifiee() {
-        // À `-1` la liste est terminée. Recharger là relancerait la playback au
-        // lieu de la laisser finir — une liste qui boucle sans qu'on l'ait
-        // demandé.
-        let mut s = source_de_test(liste_de(3));
+    async fn the_end_of_the_playlist_does_not_relaunch_a_modified_playlist() {
+        // At `-1` the playlist has ended. Reloading there would relaunch
+        // playback instead of letting it finish — a playlist that loops
+        // without being asked to.
+        let mut s = test_source(playlist_of(3));
         s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
-        let issue = s.player_track(-1).await;
-        assert!(matches!(issue.action, SourceAction::Noop), "{:?}", issue.action);
+        let outcome = s.player_track(-1).await;
+        assert!(matches!(outcome.action, SourceAction::Noop), "{:?}", outcome.action);
     }
 
     #[tokio::test]
-    async fn suivant_sur_une_liste_videe_ne_joue_rien() {
-        // Vider pendant la playback : l'arrêt est demandé par la page, mais si un
-        // order arrive quand même, il ne doit pas chercher une piste inexistante.
-        let mut s = source_de_test(Playlist::default());
+    async fn next_on_a_cleared_playlist_plays_nothing() {
+        // Clearing during playback: the stop is requested by the page, but if a
+        // command arrives anyway, it must not look for a nonexistent track.
+        let mut s = test_source(Playlist::default());
         s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
-        let issue = s.next().await;
-        assert_eq!(issue.status.as_deref(), Some("NO PLAYLIST"));
-        assert!(matches!(issue.action, SourceAction::Noop));
+        let outcome = s.next().await;
+        assert_eq!(outcome.status.as_deref(), Some("NO PLAYLIST"));
+        assert!(matches!(outcome.action, SourceAction::Noop));
     }
 
     #[test]
-    fn en_embarque_files_est_non_vide() {
+    fn embedded_en_files_is_not_empty() {
         assert!(!ritornello_i18n::try_parse(FILES_EN).unwrap().is_empty());
     }
 }

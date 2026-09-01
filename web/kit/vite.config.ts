@@ -2,19 +2,18 @@ import vue from '@vitejs/plugin-vue'
 import { fileURLToPath, URL } from 'node:url'
 import { defineConfig } from 'vite'
 
-// Build en bibliotheque ESM. `vue` est **externe** : il est fourni par
-// l'import map du shell, pour qu'une seule instance serve le shell et tous
-// les modules de plugin. Le nom de sortie est **stable** (pas de hash) :
-// c'est l'URL que l'import map designe et contre laquelle les plugins sont
-// compiles.
+// ESM library build. `vue` is **external**: it is provided by the shell's
+// import map, so that a single instance serves the shell and every plugin
+// module. The output name is **stable** (no hash): it is the URL the
+// import map points to and against which plugins are compiled.
 export default defineConfig({
   plugins: [vue()],
   resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
-  // Le mode `build.lib` ne substitue pas `process.env.NODE_ENV` (il suppose
-  // un bundler en aval). Sans ce `define`, `ui-kit.js` garde une reference a
-  // `process.env.NODE_ENV` dans le `setup()` de `DialogContent` (reka-ui) :
-  // le fichier se charge (pas de reference au niveau module), mais la
-  // premiere popin montee leve une `ReferenceError` a l'execution.
+  // `build.lib` mode does not substitute `process.env.NODE_ENV` (it assumes
+  // a downstream bundler). Without this `define`, `ui-kit.js` keeps a
+  // reference to `process.env.NODE_ENV` in `DialogContent`'s `setup()`
+  // (reka-ui): the file loads fine (no module-level reference), but the
+  // first mounted dialog throws a `ReferenceError` at runtime.
   define: { 'process.env.NODE_ENV': JSON.stringify('production') },
   build: {
     lib: { entry: 'src/index.ts', formats: ['es'], fileName: () => 'ui-kit.js' },

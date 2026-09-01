@@ -9,14 +9,14 @@ const state = (e: Partial<PlayerPayload>): PlayerPayload => ({
   duration_s: null, origin: null, cover_href: null, cover_origin: null, position_s: null,
   seekable: false, can_eject: false, ...e,
 })
-const NOMS: Record<number, string> = { 1: 'FIP', 2: 'France Inter' }
-const mounted = (e: Partial<PlayerPayload>, nameOf = (n: number) => NOMS[n] ?? null) => {
+const NAMES: Record<number, string> = { 1: 'FIP', 2: 'France Inter' }
+const mounted = (e: Partial<PlayerPayload>, nameOf = (n: number) => NAMES[n] ?? null) => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
   return mount(PresetGrid, { props: { state: state(e), nameOf } })
 }
 
 describe('PresetGrid', () => {
-  it('nomme les tuiles que la source nomme, numéro seul sinon', () => {
+  it('names the tiles the source names, bare number otherwise', () => {
     const w = mounted({ preset_count: 3, preset: 1 })
     expect(w.get('[data-preset-button="1"] [data-preset-name]').text()).toBe('FIP')
     expect(w.get('[data-preset-button="2"] [data-preset-name]').text()).toBe('France Inter')
@@ -24,21 +24,21 @@ describe('PresetGrid', () => {
     expect(w.get('[data-preset-button="3"]').text()).toBe('3')
   })
 
-  it('met en évidence la tuile qui joue', () => {
+  it('highlights the playing tile', () => {
     const w = mounted({ preset_count: 3, preset: 2 })
     expect(w.get('[data-preset-button="2"]').attributes('aria-current')).toBe('true')
     expect(w.findAll('[data-preset-active]')).toHaveLength(1)
   })
 
-  it('émet le numéro choisi', async () => {
+  it('emits the chosen number', async () => {
     const w = mounted({ preset_count: 3 })
     await w.get('[data-preset-button="3"]').trigger('click')
     expect(w.emitted('choose')).toEqual([[3]])
   })
 
-  it('annonce le count et la fenêtre affichée', () => {
-    // Une page couvre 10k+1..10k+10 : la présélection 11 est donc la première
-    // de la page 1, qui va de 11 à 12 sur douze stations.
+  it('announces the count and the displayed window', () => {
+    // A page covers 10k+1..10k+10: preset 11 is therefore the first of page 1,
+    // which spans 11 to 12 on twelve stations.
     const w = mounted({ preset_count: 12, preset: 11 })
     expect(w.get('[data-preset-count]').text()).toContain('12')
     expect(w.get('[data-preset-window]').text()).toBe('11–12')
@@ -46,12 +46,11 @@ describe('PresetGrid', () => {
     expect(w.get('[data-preset-next]').attributes('disabled')).toBeDefined()
   })
 
-  it('la première page tient dix tuiles, la seconde commence à 11', async () => {
-    // **La demande du propriétaire** : des pages de dix qui commencent à 1, 11,
-    // 21. La grille valait auparavant 1-9 puis 10-19, parce que la touche 0 de
-    // la télécommande ne valait rien seule ; elle vaut dix depuis (voir
-    // `Command::Select` côté cœur), et les deux doivent nommer les mêmes
-    // groupes.
+  it('the first page holds ten tiles, the second starts at 11', async () => {
+    // **The owner's request**: pages of ten starting at 1, 11, 21. The grid
+    // used to be 1-9 then 10-19, because key 0 on the remote was worth nothing
+    // on its own; it has been worth ten since (see `Command::Select` core
+    // side), and both must name the same groups.
     const w = mounted({ preset_count: 23 })
     expect(w.findAll('[data-preset-button]').map((b) => b.attributes('data-preset-button')))
       .toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'])
@@ -61,28 +60,28 @@ describe('PresetGrid', () => {
     expect(w.get('[data-preset-window]').text()).toBe('11–20')
     await w.get('[data-preset-next]').trigger('click')
     expect(w.get('[data-preset-window]').text()).toBe('21–23')
-    // Et c'est la dernière : 23 stations tiennent en trois pages.
+    // And it is the last one: 23 stations fit in three pages.
     expect(w.get('[data-preset-next]').attributes('disabled')).toBeDefined()
   })
 
-  it('la page suit la présélection qui joue, dixième compris', async () => {
-    // Le piège de la nouvelle borne : 10 appartient à la page 0, step à la 1.
+  it('the page follows the playing preset, tenth included', async () => {
+    // The trap of the new bound: 10 belongs to page 0, not to page 1.
     const w = mounted({ preset_count: 23, preset: 10 })
     expect(w.get('[data-preset-window]').text()).toBe('1–10')
     await w.setProps({ state: state({ preset_count: 23, preset: 11 }) })
     expect(w.get('[data-preset-window]').text()).toBe('11–20')
   })
 
-  it('un count pile sur une dizaine ne fabrique step de page vide', () => {
-    // Vingt stations : deux pages, step trois. Une troisième nommerait 21-30,
-    // où il n'y a rien — c'est la meme borne que le rebouclage du `+10`.
+  it('a count landing exactly on a decade does not fabricate an empty page', () => {
+    // Twenty stations: two pages, not three. A third would name 21-30, where
+    // there is nothing — same bound as the wrap-around of the `+10`.
     const w = mounted({ preset_count: 20 })
     expect(w.get('[data-preset-window]').text()).toBe('1–10')
     expect(w.get('[data-preset-prev]').attributes('disabled')).toBeDefined()
     expect(w.get('[data-preset-next]').attributes('disabled')).toBeUndefined()
   })
 
-  it('sans count déclaré, 1-10 nus et step de flèches', () => {
+  it('without a declared count, bare 1-10 and no arrows', () => {
     const w = mounted({}, () => null)
     expect(w.findAll('[data-preset-button]')).toHaveLength(10)
     expect(w.find('[data-preset-prev]').exists()).toBe(false)

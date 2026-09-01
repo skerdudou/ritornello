@@ -4,23 +4,23 @@ import App from './App.vue'
 import { resetMetrics } from './composables/useMetrics'
 import { router } from './router'
 
-// Le marqueur visuel de la page courante : c'est la classe que
-// `exact-active-class` ajoute au seul lien exact. L'épingler telle quelle est
-// volontaire — c'est le mécanisme du soulignement, et l'échanger contre autre
-// chose doit faire échouer ce test plutôt que passer inaperçu.
-const SOULIGNE = 'after:scale-x-100'
+// The visual marker of the current page: the class `exact-active-class` adds
+// to the single exact link. Pinning it verbatim is deliberate — it is the
+// underline mechanism, and swapping it for something else must make this test
+// fail rather than go unnoticed.
+const UNDERLINED = 'after:scale-x-100'
 
-const CATALOGUE = { config_title: 'Configuration', system_title: 'Système' }
+const CATALOG = { config_title: 'Configuration', system_title: 'Système' }
 
-/** `/api/i18n` d'un côté, `/api/status` de l'autre — la nav ne lit rien d'autre.
- *  `/api/system` s'y ajoute depuis que la root amorce le sondage des
- *  métriques : la load servie importe peu (aucun jiffy, aucune mémoire, donc
- *  aucun échantillon poussé), seule count l'existence de l'appel. */
+/** `/api/i18n` on one side, `/api/status` on the other — the nav reads nothing
+ *  else. `/api/system` joins them since the root starts the metrics probing:
+ *  the served payload matters little (no jiffy, no memory, hence no sample
+ *  pushed), only the existence of the call counts. */
 function stub(plugins = [{ name: 'radio', admin: true }]) {
   const f = vi.fn().mockImplementation((url: string) =>
     Promise.resolve({
       ok: true,
-      json: async () => (String(url).includes('/api/i18n') ? CATALOGUE : { plugins }),
+      json: async () => (String(url).includes('/api/i18n') ? CATALOG : { plugins }),
     } as Response),
   )
   vi.stubGlobal('fetch', f)
@@ -28,68 +28,68 @@ function stub(plugins = [{ name: 'radio', admin: true }]) {
 }
 
 /**
- * Monte le shell sur `chemin`. `RouterView` est bouché : seule la nav est en
- * cause ici, et monter les vues réelles ferait ouvrir à `HomeView` son flux
- * `EventSource` que jsdom n'implémente step.
+ * Mounts the shell on `path`. `RouterView` is stubbed: only the nav is under
+ * test here, and mounting the real views would make `HomeView` open its
+ * `EventSource` stream, which jsdom does not implement.
  */
-async function monter(chemin: string) {
+async function mountAt(path: string) {
   stub()
-  await router.push(chemin)
+  await router.push(path)
   await router.isReady()
   const w = mount(App, { global: { plugins: [router], stubs: { RouterView: true } } })
   await flushPromises()
   return w
 }
 
-describe('navigation du shell', () => {
+describe('shell navigation', () => {
   afterEach(() => {
     resetMetrics()
     vi.unstubAllGlobals()
   })
 
-  it('ne souligne que le lien de la page courante', async () => {
-    const w = await monter('/system')
-    expect(w.get('a[href="/system"]').classes()).toContain(SOULIGNE)
-    expect(w.get('a[href="/config"]').classes()).not.toContain(SOULIGNE)
-    // Le lien de l'accueil est celui qui rendrait `active-class` inutilisable :
-    // la correspondance inclusive du routeur le tient pour actif sur toutes les
-    // pages, `/` étant un préfixe de tout. D'où `exact-active-class`.
-    expect(w.get('a[href="/"]').classes()).not.toContain(SOULIGNE)
+  it('underlines only the link of the current page', async () => {
+    const w = await mountAt('/system')
+    expect(w.get('a[href="/system"]').classes()).toContain(UNDERLINED)
+    expect(w.get('a[href="/config"]').classes()).not.toContain(UNDERLINED)
+    // The home link is the one that would make `active-class` unusable: the
+    // router's inclusive matching holds it active on every page, `/` being a
+    // prefix of everything. Hence `exact-active-class`.
+    expect(w.get('a[href="/"]').classes()).not.toContain(UNDERLINED)
     w.unmount()
   })
 
-  it('souligne la marque sur l accueil', async () => {
-    // Sans elle, l'accueil serait la seule page sans rien de souligné : c'est
-    // le lien de l'accueil autant que la marque.
-    const w = await monter('/')
-    expect(w.get('a[href="/"]').classes()).toContain(SOULIGNE)
-    expect(w.get('a[href="/system"]').classes()).not.toContain(SOULIGNE)
+  it('underlines the brand on the home page', async () => {
+    // Without it, home would be the only page with nothing underlined: it is
+    // the home link as much as the brand.
+    const w = await mountAt('/')
+    expect(w.get('a[href="/"]').classes()).toContain(UNDERLINED)
+    expect(w.get('a[href="/system"]').classes()).not.toContain(UNDERLINED)
     w.unmount()
   })
 
-  it('souligne le lien d un plugin admin sur sa page', async () => {
-    const w = await monter('/plugins/radio/')
-    expect(w.get('a[href="/plugins/radio/"]').classes()).toContain(SOULIGNE)
-    expect(w.get('a[href="/"]').classes()).not.toContain(SOULIGNE)
+  it('underlines the link of an admin plugin on its page', async () => {
+    const w = await mountAt('/plugins/radio/')
+    expect(w.get('a[href="/plugins/radio/"]').classes()).toContain(UNDERLINED)
+    expect(w.get('a[href="/"]').classes()).not.toContain(UNDERLINED)
     w.unmount()
   })
 
-  it('marque la page courante pour les lecteurs d écran, step seulement à l œil', async () => {
-    // `aria-current="page"` vient de `RouterLink` lui-même : le soulignement
-    // double cette sémantique, il ne la remplace step. Le test la fixe pour que
-    // personne ne « simplifie » la nav en links nus plus tard.
-    const w = await monter('/config')
+  it('marks the current page for screen readers, not only for the eye', async () => {
+    // `aria-current="page"` comes from `RouterLink` itself: the underline
+    // duplicates that semantics, it does not replace it. The test pins it so
+    // that nobody "simplifies" the nav into bare links later.
+    const w = await mountAt('/config')
     expect(w.get('a[href="/config"]').attributes('aria-current')).toBe('page')
     expect(w.get('a[href="/system"]').attributes('aria-current')).toBeUndefined()
     w.unmount()
   })
 
-  it('ne produit qu un seul lien pour un greffon annoncé sur plusieurs genres', async () => {
-    // Le cœur pousse une ligne de statut par (nom, genre) : un greffon
-    // `mpd` en `input` + `display` avec page d'admin donne deux lignes de
-    // même nom, toutes deux `admin: true`. La nav ne doit en tirer qu'un
-    // lien, sous peine de deux `RouterLink` sur la même clé (avertissement
-    // Vue de clés dupliquées).
+  it('produces a single link for a plugin announced under several kinds', async () => {
+    // The core pushes one status line per (name, kind): an `mpd` plugin as
+    // `input` + `display` with an admin page yields two lines with the same
+    // name, both `admin: true`. The nav must derive only one link from them,
+    // on pain of two `RouterLink`s on the same key (Vue duplicate-keys
+    // warning).
     stub([
       { name: 'mpd', admin: true },
       { name: 'mpd', admin: true },
@@ -98,18 +98,18 @@ describe('navigation du shell', () => {
     await router.isReady()
     const w = mount(App, { global: { plugins: [router], stubs: { RouterView: true } } })
     await flushPromises()
-    // Scopé à la nav du haut : la barre basse pointe elle aussi sur
-    // `/plugins/mpd/` quand il n'y a qu'un seul greffon admin (voir
-    // `BottomNav.test.ts`), ce qui est un second lien légitime et non un
-    // doublon du même `v-for`.
+    // Scoped to the top nav: the bottom bar also points at `/plugins/mpd/`
+    // when there is a single admin plugin (see `BottomNav.test.ts`), which is
+    // a legitimate second link and not a duplicate from the same `v-for`.
     expect(w.get('[data-nav-haut]').findAll('a[href="/plugins/mpd/"]')).toHaveLength(1)
     w.unmount()
   })
 
-  it('amorce le sondage des métriques au montage de la SPA', async () => {
-    // L'history doit exister avant la première visite de l'onglet système :
-    // la vue l'displayed, elle ne le collecte plus. `RouterView` est bouché ici,
-    // donc `SystemView` n'est jamais monté — c'est bien la root qui amorce.
+  it('starts the metrics probing when the SPA mounts', async () => {
+    // The history must exist before the first visit to the system tab: the
+    // view displays it, it no longer collects it. `RouterView` is stubbed
+    // here, so `SystemView` is never mounted — it really is the root that
+    // starts it.
     const f = stub()
     await router.push('/')
     await router.isReady()
@@ -119,8 +119,8 @@ describe('navigation du shell', () => {
     w.unmount()
   })
 
-  it('la nav du haut est masquée sous md, la barre basse rendue', async () => {
-    const w = await monter('/') // l'aide de montage existante du fichier
+  it('hides the top nav below md and renders the bottom bar', async () => {
+    const w = await mountAt('/') // the file's existing mount helper
     expect(w.get('[data-nav-haut]').classes()).toContain('hidden')
     expect(w.get('[data-nav-haut]').classes()).toContain('md:flex')
     expect(w.find('[data-nav-basse]').exists()).toBe(true)

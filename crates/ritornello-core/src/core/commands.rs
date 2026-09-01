@@ -1,4 +1,4 @@
-//! Commandes de la telecommande et de l'IHM : machine playback/veille, volume, dizaines, deplacement dans la piste, entree tenue, startup.
+//! Remote and UI commands: playback/standby state machine, volume, tens, seeking within the track, held input, startup.
 
 use super::*;
 
@@ -7,21 +7,21 @@ impl<P: Player> Core<P> {
         if self.standby && cmd != Command::Power {
             return Ok(());
         }
-        let issue = self.apply_command(cmd).await;
-        // Publication à la sortie de **toute** commande, plutôt qu'un appel dans
-        // chacune : volume, muet, veille et source active y changent, et une
-        // branche oubliée laisserait l'IHM afficher un état périmé sans que rien
-        // ne le signale. Le canal déduplique, donc publier pour rien ne coûte
-        // aucune trame. Publié même en cas d'erreur : l'état partiel atteint est
-        // ce que l'IHM doit montrer.
+        let outcome = self.apply_command(cmd).await;
+        // Publication on the way out of **every** command, rather than a call
+        // in each one: volume, mute, standby and active source all change
+        // here, and a forgotten branch would leave the UI showing a stale
+        // state without anything flagging it. The channel deduplicates, so
+        // publishing for nothing costs no frame. Published even on error: the
+        // partial state reached is what the UI must show.
         self.publish_state();
-        issue
+        outcome
     }
 
-    /// Volume absolu, la seule voie pour un réglage qui ne vient d'aucune touche :
-    /// le `setvol` de MPD. Mêmes effets de bord que le pas relatif — mpv, disque,
-    /// incrustation — parce qu'un volume changé depuis le réseau doit s'annoncer à
-    /// l'écran comme celui changé depuis la télécommande.
+    /// Absolute volume, the only way in for a setting that comes from no key:
+    /// MPD's `setvol`. Same side effects as the relative step — mpv, disk,
+    /// overlay — because a volume changed from the network must announce
+    /// itself on screen like one changed from the remote.
     pub(super) async fn set_volume(&mut self, v: u8) -> Result<()> {
         self.volume = v.min(100);
         self.player.set_volume(self.volume).await?;
@@ -58,26 +58,26 @@ impl<P: Player> Core<P> {
         if Instant::now() < deadline {
             return Ok(());
         }
-        let issue = self.step_volume(up).await;
+        let outcome = self.step_volume(up).await;
         self.volume_deadline =
             Some(Instant::now() + Duration::from_millis(self.settings.volume_repeat_interval_ms.into()));
         // Same publication contract as `handle_command`: the UI must see the
         // new volume even if mpv errored mid-way.
         self.publish_state();
-        issue
+        outcome
     }
 
     /// New settings from `PUT /api/settings` (via the `select!` loop of main).
     /// No bounds check here: the HTTP layer validates, and tests rely on tiny
     /// timings.
     pub fn set_settings(&mut self, s: crate::state::Settings) {
-        // Poussé dans le cache de pochettes, qui est le seul autre porteur de
-        // ces réglages. Ici et non dans un bras du `select!` : `set_settings`
-        // est le point de passage **unique** de tout changement de réglages —
-        // la route HTTP comme le chargement au démarrage —, donc le seul
-        // endroit où la propagation ne peut pas être oubliée par un futur
-        // appelant. Synchrone parce que `CoverCache` garde ces réglages sous un
-        // verrou `std::sync` exprès pour ça.
+        // Pushed into the cover cache, which is the only other holder of
+        // these settings. Here and not in an arm of the `select!`:
+        // `set_settings` is the **single** passage point of every settings
+        // change — the HTTP route as well as loading at startup —, hence the
+        // only place where propagation cannot be forgotten by a future
+        // caller. Synchronous because `CoverCache` keeps these settings under
+        // a `std::sync` lock precisely for this.
         self.covers.set_cover_settings(crate::cover::CoverSettings::from(&s));
         self.settings = s;
         self.persist();
@@ -94,17 +94,17 @@ impl<P: Player> Core<P> {
     /// later switch to `Previous` would then resurrect a standby the device
     /// left behind long ago.
     pub async fn startup(&mut self) -> Result<()> {
-        let en_veille = match self.settings.startup_power {
+        let in_standby = match self.settings.startup_power {
             StartupPower::On => false,
             StartupPower::Standby => true,
             StartupPower::Previous => self.persisted_standby,
         };
-        if en_veille {
+        if in_standby {
             return self.start_in_standby().await;
         }
-        // `resume` est aussi la moitie « reveil » de `Command::Power`, ou le
-        // drapeau est deja baisse ; ici c'est cette methode qui le baisse,
-        // pour que le fichier decrive un appareil reveille.
+        // `resume` is also the "wake" half of `Command::Power`, where the
+        // flag is already lowered; here it is this method that lowers it,
+        // so that the file describes an awake device.
         self.standby = false;
         self.persist();
         self.resume().await
@@ -161,7 +161,7 @@ impl<P: Player> Core<P> {
                 // **Key 0 is worth ten, so each decade covers 1..10, 11..20,
                 // 21..30 — never 1..9 then 10..19.** The owner asked for pages
                 // of ten starting at 1, and the physical remote has to name the
-                // very same groups as the web grid (see `GrillePresets.vue`),
+                // very same groups as the web grid (see `PresetGrid.vue`),
                 // so the change belongs here and not only in the page.
                 //
                 // What it buys beyond the pages: preset 10 used to need `+10`
@@ -181,15 +181,14 @@ impl<P: Player> Core<P> {
                     self.apply(action).await?;
                 }
             }
-            // `Next`/`Prev` portent maintenant les deux sémantiques : la
-            // source active décide (préselection pour la radio, piste pour
-            // le cd — voir `SourcePlugin::next`/`prev` de chaque plugin).
-            // Remettre `retry_count` à 0 ici est correct pour un changement
-            // de préselection (nouveau stream radio, un retry sur l'ancien
-            // n'aurait plus de sens) et inoffensif pour un changement de
-            // piste cd (`retry_count` ne concerne que la restart d'un stream
-            // réseau attendu, pas la playback cd) : rien à distinguer entre
-            // les deux sources sur ce point.
+            // `Next`/`Prev` now carry both semantics: the active source
+            // decides (preset for the radio, track for the cd — see
+            // `SourcePlugin::next`/`prev` of each plugin). Resetting
+            // `retry_count` to 0 here is correct for a preset change (new
+            // radio stream, a retry on the old one would make no sense) and
+            // harmless for a cd track change (`retry_count` only concerns the
+            // restart of an expected network stream, not cd playback):
+            // nothing to distinguish between the two sources on this point.
             Command::Next => {
                 self.retry_count = 0;
                 if let Some(action) = self.active_request(SourceReq::Next).await? {
@@ -214,8 +213,8 @@ impl<P: Player> Core<P> {
                 );
             }
             Command::SetVolume(v) => {
-                // Pas de `volume_deadline` a rearmer : ce n'est pas une touche,
-                // rien ne peut etre maintenu.
+                // No `volume_deadline` to re-arm: this is not a key, nothing
+                // can be held.
                 self.set_volume(v).await?;
             }
             Command::Mute => {
@@ -225,29 +224,29 @@ impl<P: Player> Core<P> {
             }
             Command::PlayPause => {
                 if self.playback {
-                    // Basculer la croyance **après** que mpv a accepté, jamais
-                    // avant. Le `?` propage un échec de `toggle_pause` et laisse
-                    // `paused` intact : c'est cette valeur-là que
-                    // `PlayerState.playback` publie, et à laquelle le greffon
-                    // MPD compare ses `pause 0`/`pause 1` — un cœur qui se croit
-                    // en pause devant un mpv qui plays fait répondre « paused » à
-                    // un client dont la musique continue, et le `pause 0`
-                    // suivant est alors jugé sans effet et ignoré.
+                    // Flip the belief **after** mpv has accepted, never
+                    // before. The `?` propagates a `toggle_pause` failure and
+                    // leaves `paused` intact: that is the very value
+                    // `PlayerState.playback` publishes, and the one the MPD
+                    // plugin compares its `pause 0`/`pause 1` against — a core
+                    // that believes itself paused in front of an mpv that
+                    // plays answers "paused" to a client whose music goes on,
+                    // and the following `pause 0` is then judged a no-op and
+                    // ignored.
                     self.player.toggle_pause().await?;
                     self.paused = !self.paused;
                 } else {
-                    // Rien n'est chargé : `stop` **clear la liste de mpv**, si
-                    // bien que « basculer la pause » n'a plus rien à reprendre.
-                    // La touche Lecture ne faisait donc rien du tout après un
-                    // Stop, sur toutes les sources — mesuré sur la radio comme
-                    // sur les fichiers. On redemande à la source active de
-                    // jouer, ce qui est exactement ce que la touche promet.
+                    // Nothing is loaded: `stop` **clears mpv's playlist**, so
+                    // "toggle pause" has nothing left to resume. The Play key
+                    // therefore did nothing at all after a Stop, on every
+                    // source — measured on the radio as well as on files. We
+                    // ask the active source to play again, which is exactly
+                    // what the key promises.
                     //
-                    // `playback` et non `expecting_stream` : la première dit
-                    // « quelque chose plays, de quelque nature », la seconde ne
-                    // vaut que pour les stream relançables. Une pause, elle, ne
-                    // touche ni l'une ni l'autre — la reprise reste donc un
-                    // simple basculement, sans rechargement.
+                    // `playback` and not `expecting_stream`: the first says
+                    // "something plays, of whatever nature", the second only
+                    // holds for restartable streams. A pause touches neither —
+                    // so resuming stays a simple toggle, without reloading.
                     if let Some(action) = self.active_request(SourceReq::Activate).await? {
                         self.apply(action).await?;
                     }
@@ -257,59 +256,58 @@ impl<P: Player> Core<P> {
                 self.expecting_stream = false;
                 self.playback = false;
                 self.player.stop().await?;
-                // Oublier l'identité **avant** de prévenir la Source : cet
-                // appel efface le titre de l'afficheur, et une Source
-                // injoignable ferait attendre jusqu'à 5 s (timeout de
-                // `SourceClient::request`) avec le track arrêté encore à
-                // l'écran.
+                // Forget the identity **before** notifying the Source: this
+                // call clears the display's title, and an unreachable Source
+                // would make us wait up to 5 s (timeout of
+                // `SourceClient::request`) with the stopped track still on
+                // screen.
                 self.set_identity(None);
-                // La Source n'a pas été consultée pour cet arrêt : le lui dire,
-                // sinon celle qui tient un état de playback propre (le cd) le
-                // garderait faux et annoncerait plus tard des métadonnées pour
-                // un track à l'arrêt. Au mieux : une Source muette n'empêche
-                // rien.
+                // The Source was not consulted for this stop: tell it,
+                // otherwise one that keeps its own playback state (the cd)
+                // would keep it wrong and later announce metadata for a
+                // stopped track. Best effort: a silent Source prevents
+                // nothing.
                 if let Err(e) = self.active_request(SourceReq::Stop).await {
                     tracing::debug!("stop notification to source: {e}");
                 }
             }
             Command::Power => {
                 self.standby = !self.standby;
-                // Persister **avant** de prevenir la Source, pour la meme
-                // raison qu'au `SourceCycle` plus bas : une Source
-                // injoignable fait attendre jusqu'a 5 s, et `StartupPower::
-                // Previous` doit retrouver la veille voulue meme si le
-                // courant est coupe pendant cette attente.
+                // Persist **before** notifying the Source, for the same
+                // reason as at `SourceCycle` below: an unreachable Source
+                // makes us wait up to 5 s, and `StartupPower::Previous` must
+                // find the intended standby even if the power is cut during
+                // that wait.
                 self.persist();
                 if self.standby {
                     let _ = self.active_request(SourceReq::Deactivate).await;
                     self.player.stop().await?;
                     self.expecting_stream = false;
                     self.playback = false;
-                    // Même raison qu'au-dessus : la réponse de la Source à
-                    // `Deactivate` est ignorée, et la vue de veille qui suit
-                    // passerait outre le garde-fou de `handle_source_update`.
+                    // Same reason as above: the Source's answer to
+                    // `Deactivate` is ignored, and the standby view that
+                    // follows would bypass the guard of `handle_source_update`.
                     self.set_identity(None);
-                    // Le compte de présélections et le statut n'ont de sens que
-                    // pour la Source active : la veille les oublie tous les
-                    // deux, et la prochaine Source (activate/wake) les
-                    // redéclarera si elle en a. Sans cet effacement, le statut
-                    // de l'ancienne source (« PAS DE DISQUE ») survivait à la
-                    // veille en mémoire, prêt à réapparaître au réveil avant
-                    // que la Source n'ait reparlé.
+                    // The preset count and the status only make sense for the
+                    // active Source: standby forgets both, and the next Source
+                    // (activate/wake) will redeclare them if it has any.
+                    // Without this clearing, the old source's status
+                    // ("NO DISC") survived standby in memory, ready to
+                    // reappear on wake before the Source had spoken again.
                     self.preset_count = None;
                     self.source_status = None;
-                    // Même sort pour la capacité d'éjection : en veille aucune
-                    // commande ne passe de toute façon (`handle_command`), et
-                    // la Source la redéclarera au réveil.
+                    // Same fate for the eject capability: in standby no
+                    // command gets through anyway (`handle_command`), and the
+                    // Source will redeclare it on wake.
                     self.can_eject = false;
-                    // L'incrustation volume/muet ne survit pas à la mise en
-                    // veille : elle garde la priorité dans `player_state`, et
-                    // « VOLUME 65 % » restait à l'écran jusqu'à 2 s après
-                    // l'extinction avant que le mot de veille n'apparaisse.
+                    // The volume/mute overlay does not survive entering
+                    // standby: it keeps priority in `player_state`, and
+                    // "VOLUME 65 %" stayed on screen for up to 2 s after
+                    // power-off before the standby word appeared.
                     self.overlay = None;
-                    // `standby_status` n'est pas résolu ici : il l'est déjà,
-                    // depuis la construction et chaque `set_locale` (voir sa
-                    // doc) — plus jamais au moment de poser la veille.
+                    // `standby_status` is not resolved here: it already is,
+                    // since construction and every `set_locale` (see its
+                    // doc) — never again at the moment standby is entered.
                     // A held key must re-press after standby: stale deadlines don't survive it.
                     self.volume_deadline = None;
                 } else {
@@ -317,37 +315,37 @@ impl<P: Player> Core<P> {
                 }
             }
             Command::SourceCycle => {
-                // La source active peut ne plus être dans l'order : c'est l'état
-                // que laisse `forget_dead_source` — le greffon a disparu, la
-                // musique continue, et son name reste affiché. Dans ce cas, la
-                // touche Source doit repartir de la **première** source
-                // disponible. Un `position().unwrap_or(0)` suivi du `+ 1`
-                // sautait la première pour aller à la seconde, ce qui rendait
-                // une source inatteignable au clavier tant qu'on n'avait pas
-                // fait un tour complet.
-                let suivante = match self.source_order.iter().position(|n| n == &self.active_source) {
+                // The active source may no longer be in the order: that is
+                // the state `forget_dead_source` leaves — the plugin is gone,
+                // the music goes on, and its name stays displayed. In that
+                // case the Source key must start again from the **first**
+                // available source. A `position().unwrap_or(0)` followed by
+                // the `+ 1` skipped the first to go to the second, which made
+                // one source unreachable from the keyboard until a full
+                // round had been made.
+                let next = match self.source_order.iter().position(|n| n == &self.active_source) {
                     Some(idx) => self.source_order.get((idx + 1) % self.source_order.len()).cloned(),
                     None => self.source_order.first().cloned(),
                 };
-                self.cycle_source(suivante).await?;
+                self.cycle_source(next).await?;
             }
             Command::SelectSource(name) => {
-                // Inconnue : ignorée en silence, comme une touche non liée. Le
-                // greffon MPD a déjà répondu `ACK 50` de son côté — il ne
-                // propose que des names reçus du sources_catalog, donc arriver ici
-                // veut dire que la source a disparu entre-temps (un greffon
-                // qu'on vient d'éteindre depuis l'IHM, par exemple).
+                // Unknown: silently ignored, like an unbound key. The MPD
+                // plugin has already answered `ACK 50` on its side — it only
+                // offers names received from the sources_catalog, so getting
+                // here means the source disappeared in the meantime (a plugin
+                // just switched off from the UI, for instance).
                 if !self.source_order.iter().any(|n| n == &name) {
                     tracing::debug!("unknown source {name} ignored");
                     return Ok(());
                 }
-                // Déjà active : ne rien faire. Un `load` redondant ne doit pas
-                // couper ce qui plays, et c'est exactement ce qu'un client
-                // envoie en rouvrant son écran.
+                // Already active: do nothing. A redundant `load` must not cut
+                // what plays, and that is exactly what a client sends when
+                // reopening its screen.
                 if name != self.active_source {
-                    // `Some(name)` : `cycle_source` admet `None` — « plus
-                    // aucune source » — mais ce path-ci désigne toujours un
-                    // name, le garde ci-dessus l'ayant vérifié dans l'order.
+                    // `Some(name)`: `cycle_source` accepts `None` — "no
+                    // source at all" — but this path always designates a
+                    // name, the guard above having checked it in the order.
                     self.cycle_source(Some(name)).await?;
                 }
             }
@@ -379,13 +377,12 @@ impl<P: Player> Core<P> {
                 }
             }
             Command::SeekForward | Command::SeekBackward => {
-                // Ignorée en silence sur un contenu non parcourable : la
-                // touche se comporte comme une touche non liée, ce que la
-                // télécommande sait déjà faire. Un message n'apprendrait rien
-                // à qui vient d'appuyer.
+                // Silently ignored on non-seekable content: the key behaves
+                // like an unbound key, which the remote already knows how to
+                // do. A message would teach nothing to whoever just pressed.
                 if self.playback && !self.expecting_stream {
-                    let pas = i64::from(self.settings.seek_step_s);
-                    let delta = if cmd == Command::SeekForward { pas } else { -pas };
+                    let step = i64::from(self.settings.seek_step_s);
+                    let delta = if cmd == Command::SeekForward { step } else { -step };
                     self.player.seek_relative(delta).await?;
                     self.refresh_position().await;
                 }
@@ -407,24 +404,24 @@ mod tests {
     use crate::core::test_support::*;
 
     #[tokio::test]
-    async fn standby_bloque_tout_sauf_power() {
+    async fn standby_blocks_everything_but_power() {
         let (mut core, player_calls, _sc, _rx, _d) = setup();
         core.resume().await.unwrap();
         core.handle_command(Command::Power).await.unwrap();
         assert!(player_calls.lock().unwrap().contains(&"stop".to_string()));
         core.handle_command(Command::Select(3)).await.unwrap();
-        // aucun nouvel appel "play" apres la veille tant qu'on n'a pas fait Power a nouveau
+        // no new "play" call after standby until Power is pressed again
         assert_eq!(player_calls.lock().unwrap().iter().filter(|c| c.starts_with("play")).count(), 1);
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(player_calls.lock().unwrap().iter().filter(|c| c.starts_with("play")).count(), 2);
     }
 
     #[tokio::test]
-    async fn les_commandes_sans_aucune_source_ne_font_rien_et_ne_paniquent_pas() {
-        // Les treize requêtes à la source active passaient par le même
-        // `panic!` : la moindre touche de télécommande sur un appareil sans
-        // source arrêtait le cœur. Sans source, une commande **ne fait rien**,
-        // et le journal le dit en `debug` — ce n'est pas une anomalie.
+    async fn commands_without_any_source_do_nothing_and_do_not_panic() {
+        // The thirteen requests to the active source went through the same
+        // `panic!`: the slightest remote key on a device without a source
+        // stopped the core. Without a source, a command **does nothing**, and
+        // the log says so at `debug` — this is not an anomaly.
         let (mut core, _rx, dir) = setup_without_source();
         for cmd in [
             Command::Select(1),
@@ -434,28 +431,28 @@ mod tests {
             Command::Stop,
             Command::PlayPause,
             Command::SourceCycle,
-            // Veille, puis réveil : le second repasse par `resume`.
+            // Standby, then wake: the second goes through `resume` again.
             Command::Power,
             Command::Power,
         ] {
-            let libelle = format!("{cmd:?}");
-            core.handle_command(cmd).await.unwrap_or_else(|e| panic!("{libelle}: {e}"));
+            let label = format!("{cmd:?}");
+            core.handle_command(cmd).await.unwrap_or_else(|e| panic!("{label}: {e}"));
         }
-        // Les deux événements du player qui notifient la source, et la restart
-        // de stream : mêmes appels, même table clear.
+        // The two player events that notify the source, and the stream
+        // restart: same calls, same cleared table.
         core.handle_event(Event::TrackChanged(2)).await;
         core.handle_event(Event::PlaybackIdle).await;
         core.retry_stream().await.unwrap();
-        assert_eq!(core.active_source(), "", "aucune commande n'a pu designer une source");
+        assert_eq!(core.active_source(), "", "no command could have designated a source");
         drop(dir);
     }
 
     #[tokio::test]
-    async fn la_touche_lecture_relance_quand_rien_ne_joue() {
-        // Défaut signalé, et il touchait **toutes** les sources : `stop` clear la
-        // liste de mpv, donc « basculer la pause » n'avait plus rien à reprendre
-        // et la touche Lecture ne faisait rien du tout. Mesuré sur la radio comme
-        // sur les fichiers avant correction.
+    async fn the_play_key_restarts_when_nothing_plays() {
+        // Reported defect, and it affected **all** sources: `stop` clears
+        // mpv's playlist, so "toggle pause" had nothing left to resume and
+        // the Play key did nothing at all. Measured on the radio as well as
+        // on files before the fix.
         let (mut core, player_calls, _sc, _rx, _d) = setup();
         core.apply(SourceAction::play("http://fip")).await.unwrap();
         core.handle_command(Command::Stop).await.unwrap();
@@ -465,32 +462,33 @@ mod tests {
         assert_eq!(
             *player_calls.lock().unwrap(),
             vec!["play http://fip".to_string()],
-            "la source active doit etre redemandee, pas une pause dans le clear"
+            "the active source must be asked again, not a pause into the void"
         );
     }
 
     #[tokio::test]
-    async fn la_touche_lecture_bascule_la_pause_quand_ca_joue() {
-        // Garde-fou du test précédent : une pause doit rester une pause, et non
-        // devenir un rechargement qui repartirait du début de la piste.
+    async fn the_play_key_toggles_pause_when_playing() {
+        // Guard of the previous test: a pause must stay a pause, and not
+        // become a reload that would start again from the beginning of the
+        // track.
         let (mut core, player_calls, _sc, _rx, _d) = setup();
         core.apply(SourceAction::play("http://fip")).await.unwrap();
         player_calls.lock().unwrap().clear();
 
         core.handle_command(Command::PlayPause).await.unwrap();
         assert_eq!(*player_calls.lock().unwrap(), vec!["pause".to_string()]);
-        // Et une deuxième fois : mettre en pause ne fait pas « cesser de
-        // jouer », donc la reprise reste un simple basculement.
+        // And a second time: pausing does not "stop playing", so resuming
+        // stays a simple toggle.
         core.handle_command(Command::PlayPause).await.unwrap();
         assert_eq!(*player_calls.lock().unwrap(), vec!["pause".to_string(), "pause".to_string()]);
     }
 
     #[tokio::test]
-    async fn la_pause_et_la_reprise_se_lisent_dans_letat_publie() {
-        // Le champ le plus lu de la commande `status` de MPD : sans lui, aucun
-        // client ne peut afficher le bon bouton.
+    async fn pause_and_resume_are_readable_in_the_published_state() {
+        // The most read field of MPD's `status` command: without it, no
+        // client can show the right button.
         let (mut core, _pc, _sc, _rx, _d) = setup();
-        core.handle_command(Command::PlayPause).await.unwrap(); // demarre la playback
+        core.handle_command(Command::PlayPause).await.unwrap(); // starts playback
         assert_eq!(core.player_state().playback, Playback::Playing);
         core.handle_command(Command::PlayPause).await.unwrap();
         assert_eq!(core.player_state().playback, Playback::Paused);
@@ -501,139 +499,141 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn un_echec_de_mpv_ne_change_pas_la_croyance_du_coeur_sur_la_pause() {
-        // `paused` était basculé **avant** `toggle_pause`, donc un échec de mpv
-        // laissait le cœur croire l'inverse de la vérité. Ce n'est pas cosmétique
-        // : c'est cette valeur que `PlayerState.playback` publie, et à laquelle le
-        // greffon MPD compare ses `pause 0`/`pause 1`. Un cœur qui se croit en
-        // pause devant un mpv qui plays répond « paused » à un client dont la
-        // musique continue, puis juge le `pause 0` suivant sans effet.
+    async fn an_mpv_failure_does_not_change_the_core_belief_about_pause() {
+        // `paused` was flipped **before** `toggle_pause`, so an mpv failure
+        // left the core believing the opposite of the truth. This is not
+        // cosmetic: it is the value `PlayerState.playback` publishes, and the
+        // one the MPD plugin compares its `pause 0`/`pause 1` against. A core
+        // that believes itself paused in front of an mpv that plays answers
+        // "paused" to a client whose music goes on, then judges the following
+        // `pause 0` a no-op.
         let (mut core, _pc, _sc, _rx, _d) = setup();
-        core.handle_command(Command::PlayPause).await.unwrap(); // demarre la playback
+        core.handle_command(Command::PlayPause).await.unwrap(); // starts playback
         assert_eq!(core.player_state().playback, Playback::Playing);
 
-        core.player.pause_echoue.store(true, std::sync::atomic::Ordering::SeqCst);
+        core.player.pause_fails.store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(
             core.handle_command(Command::PlayPause).await.is_err(),
-            "l'echec de mpv doit remonter, il ne doit pas etre avale"
+            "the mpv failure must propagate, it must not be swallowed"
         );
         assert_eq!(
             core.player_state().playback,
             Playback::Playing,
-            "mpv a refuse : le coeur doit continuer de dire ce qui est vrai"
+            "mpv refused: the core must keep saying what is true"
         );
 
-        // Et la reprise du dialogue remet la bascule en marche : le drapeau n'a
-        // pas ete abime, il n'a simplement pas bouge.
-        core.player.pause_echoue.store(false, std::sync::atomic::Ordering::SeqCst);
+        // And resuming the dialogue puts the toggle back to work: the flag
+        // was not damaged, it simply did not move.
+        core.player.pause_fails.store(false, std::sync::atomic::Ordering::SeqCst);
         core.handle_command(Command::PlayPause).await.unwrap();
         assert_eq!(core.player_state().playback, Playback::Paused);
     }
 
     #[tokio::test]
-    async fn une_pause_ne_survit_pas_a_un_nouveau_play() {
-        // Le seul effacement de `paused` est celui du `Play` applique : si on
-        // l'oubliait, une pause d'hier rendrait une playback neuve « en pause ».
+    async fn a_pause_does_not_survive_a_new_play() {
+        // The only clearing of `paused` is the one of the applied `Play`: if
+        // it were forgotten, yesterday's pause would make a fresh playback
+        // "paused".
         let (mut core, _pc, _sc, _rx, _d) = setup();
-        core.handle_command(Command::PlayPause).await.unwrap(); // demarre la playback (radio, http://fip)
-        core.handle_command(Command::PlayPause).await.unwrap(); // met en pause
+        core.handle_command(Command::PlayPause).await.unwrap(); // starts playback (radio, http://fip)
+        core.handle_command(Command::PlayPause).await.unwrap(); // pauses
         assert_eq!(core.player_state().playback, Playback::Paused);
-        // Selectionne une autre preselection radio (`http://inter`) : un nouveau
-        // `Play` est applique, et `paused` doit retomber par ce seul path.
+        // Selects another radio preset (`http://inter`): a new `Play` is
+        // applied, and `paused` must fall back through this path alone.
         core.handle_command(Command::Select(3)).await.unwrap();
         assert_eq!(core.player_state().playback, Playback::Playing);
     }
 
     #[tokio::test]
-    async fn la_veille_dit_larret_meme_si_la_pause_etait_posee() {
-        // Ce test isole seulement l'oubli du drapeau `paused` : `Command::Power`
-        // pose `standby = true` et `playback = false` dans le meme pas, donc il
-        // ne peut pas distinguer laquelle des deux conditions fait le travail.
-        // Ce qu'il prouve : un `paused` pose plus tot ne doit pas fuiter dans
-        // l'state rapporte pendant la veille.
+    async fn standby_says_stopped_even_if_pause_was_set() {
+        // This test isolates only the forgetting of the `paused` flag:
+        // `Command::Power` sets `standby = true` and `playback = false` in the
+        // same step, so it cannot tell which of the two conditions does the
+        // work. What it proves: a `paused` set earlier must not leak into the
+        // state reported during standby.
         let (mut core, _pc, _sc, _rx, _d) = setup();
-        core.handle_command(Command::PlayPause).await.unwrap(); // demarre la playback
-        core.handle_command(Command::PlayPause).await.unwrap(); // met en pause
+        core.handle_command(Command::PlayPause).await.unwrap(); // starts playback
+        core.handle_command(Command::PlayPause).await.unwrap(); // pauses
         assert_eq!(core.player_state().playback, Playback::Paused);
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(core.player_state().playback, Playback::Stopped);
     }
 
     #[tokio::test]
-    async fn le_volume_absolu_remplace_le_volume_et_le_borne() {
+    async fn absolute_volume_replaces_the_volume_and_bounds_it() {
         let (mut core, _pc, _sc, _rx, _d) = setup();
         core.handle_command(Command::SetVolume(40)).await.unwrap();
         assert_eq!(core.player_state().volume, 40);
         core.handle_command(Command::SetVolume(200)).await.unwrap();
-        assert_eq!(core.player_state().volume, 100, "bounded haute");
+        assert_eq!(core.player_state().volume, 100, "upper bound");
         core.handle_command(Command::SetVolume(0)).await.unwrap();
         assert_eq!(core.player_state().volume, 0);
     }
 
     #[tokio::test]
-    async fn le_volume_absolu_ecrit_une_incrustation_comme_le_pas_relatif() {
-        // Un volume change depuis le reseau doit s'annoncer a l'ecran comme celui
-        // change depuis la telecommande.
+    async fn absolute_volume_writes_an_overlay_like_the_relative_step() {
+        // A volume changed from the network must announce itself on screen
+        // like one changed from the remote.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         core.handle_command(Command::SetVolume(40)).await.unwrap();
         assert!(core.player_state().overlay.is_some());
     }
 
     #[tokio::test]
-    async fn volume_maintenu_est_ignore_avant_le_delai_initial() {
-        // Échéance **pilotée**, jamais attendue. La version precedente reposait
-        // sur le fait que deux lines consecutives s'executent en moins des
-        // 30 ms du timeout initial : sous charge -- un `cargo test --workspace`
-        // qui compile encore pendant qu'il teste -- l'ordonnancement depassait
-        // cette marge et le test tombait, une fois sur quelques dizaines. Ce
-        // qu'il verifie ne depend plus de la vitesse de la machine.
+    async fn held_volume_is_ignored_before_the_initial_delay() {
+        // **Driven** deadline, never waited on. The previous version relied
+        // on two consecutive lines executing in less than the 30 ms of the
+        // initial timeout: under load -- a `cargo test --workspace` still
+        // compiling while it tests -- scheduling exceeded that margin and the
+        // test fell, once every few dozen runs. What it verifies no longer
+        // depends on the machine's speed.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         core.set_settings(quick_settings());
         core.resume().await.unwrap();
-        core.handle_command(Command::VolumeUp).await.unwrap(); // 60 -> 65, arme l'deadline
-        // Repoussee loin : la repetition n'a aucune raison d'avoir lieu, quelle
-        // que soit la lenteur de ce qui precede.
+        core.handle_command(Command::VolumeUp).await.unwrap(); // 60 -> 65, arms the deadline
+        // Pushed far away: the repeat has no reason to happen, however slow
+        // what precedes may be.
         core.volume_deadline = Some(Instant::now() + Duration::from_secs(60));
         core.handle_input(InputMessage { cmd: Command::VolumeUp, held: true }).await.unwrap();
-        assert_eq!(core.player_state().volume, 65, "une repetition avant le timeout initial ne fait rien");
+        assert_eq!(core.player_state().volume, 65, "a repeat before the initial timeout does nothing");
     }
 
     #[tokio::test]
-    async fn volume_maintenu_repete_apres_le_delai_puis_a_lintervalle() {
+    async fn held_volume_repeats_after_the_delay_then_at_the_interval() {
         let (mut core, _pc, _sc, _rx, _d) = setup();
         core.set_settings(quick_settings());
         core.resume().await.unwrap();
         core.handle_command(Command::VolumeUp).await.unwrap(); // 65
 
-        // Échéance atteinte : la premiere repetition passe. `Instant::now()` est
-        // deja dans le passe quand `handle_input` le relit -- le temps ne
-        // recule pas, donc ce declenchement est certain.
-        let posee = Instant::now();
-        core.volume_deadline = Some(posee);
+        // Deadline reached: the first repeat goes through. `Instant::now()`
+        // is already in the past when `handle_input` reads it again -- time
+        // does not go backwards, so this trigger is certain.
+        let set = Instant::now();
+        core.volume_deadline = Some(set);
         core.handle_input(InputMessage { cmd: Command::VolumeUp, held: true }).await.unwrap();
-        assert_eq!(core.player_state().volume, 70, "premiere repetition apres le timeout initial");
+        assert_eq!(core.player_state().volume, 70, "first repeat after the initial timeout");
 
-        // Elle a rearme l'deadline pour l'intervalle suivant. Compare a celle
-        // qu'on avait **posee**, et non a `Instant::now()` : la nouvelle vaut
-        // « instant de la repetition + intervalle », donc elle est posterieure a
-        // `posee` quoi qu'il arrive. La comparer au present reintroduirait la
-        // course que ce test existe pour supprimer.
-        let rearmee = core.volume_deadline.expect("l'intervalle doit etre rearme");
-        assert!(rearmee > posee, "l'deadline n'a pas ete rearmee apres la repetition");
+        // It re-armed the deadline for the next interval. Compared to the one
+        // we **set**, and not to `Instant::now()`: the new one is "instant of
+        // the repeat + interval", so it is later than `set` whatever happens.
+        // Comparing it to the present would reintroduce the race this test
+        // exists to remove.
+        let rearmed = core.volume_deadline.expect("the interval must be re-armed");
+        assert!(rearmed > set, "the deadline was not re-armed after the repeat");
 
-        // Une deadline dans le futur bloque la repetition suivante.
+        // A deadline in the future blocks the next repeat.
         core.volume_deadline = Some(Instant::now() + Duration::from_secs(60));
         core.handle_input(InputMessage { cmd: Command::VolumeUp, held: true }).await.unwrap();
         assert_eq!(core.player_state().volume, 70);
 
-        // Intervalle ecoule : une repetition de plus, et une seule.
+        // Interval elapsed: one more repeat, and only one.
         core.volume_deadline = Some(Instant::now());
         core.handle_input(InputMessage { cmd: Command::VolumeUp, held: true }).await.unwrap();
-        assert_eq!(core.player_state().volume, 75, "puis une par intervalle");
+        assert_eq!(core.player_state().volume, 75, "then one per interval");
     }
 
     #[tokio::test]
-    async fn volume_maintenu_sans_pression_initiale_ne_fait_rien() {
+    async fn held_volume_without_an_initial_press_does_nothing() {
         // A held event with no prior press (core restarted mid-hold): no
         // deadline is armed, nothing moves.
         let (mut core, _pc, _sc, _rx, _d) = setup();
@@ -644,32 +644,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn held_sur_une_commande_non_volume_est_ignore() {
+    async fn held_on_a_non_volume_command_is_ignored() {
         let (mut core, _pc, source_calls, _rx, _d) = setup();
         core.resume().await.unwrap();
         source_calls.lock().unwrap().clear();
         core.handle_input(InputMessage { cmd: Command::Next, held: true }).await.unwrap();
-        assert!(source_calls.lock().unwrap().is_empty(), "un Next maintenu ne doit pas atteindre la source");
+        assert!(source_calls.lock().unwrap().is_empty(), "a held Next must not reach the source");
     }
 
     #[tokio::test]
-    async fn volume_maintenu_est_bloque_en_veille() {
+    async fn held_volume_is_blocked_in_standby() {
         let (mut core, _pc, _sc, _rx, _d) = setup();
         core.set_settings(quick_settings());
         core.resume().await.unwrap();
         core.handle_command(Command::VolumeUp).await.unwrap(); // 65, arms the deadline
         core.handle_command(Command::Power).await.unwrap();    // standby
-        // Aucun sommeil : la veille court-circuite `handle_input` **avant** de
-        // regarder l'deadline, donc attendre qu'elle expire ne prouvait rien.
-        // L'deadline est posee au passe pour que le test echoue si ce
-        // court-circuit disparaissait.
+        // No sleep: standby short-circuits `handle_input` **before** looking
+        // at the deadline, so waiting for it to expire proved nothing. The
+        // deadline is set in the past so the test fails if that
+        // short-circuit disappeared.
         core.volume_deadline = Some(Instant::now());
         core.handle_input(InputMessage { cmd: Command::VolumeUp, held: true }).await.unwrap();
         assert_eq!(core.player_state().volume, 65);
     }
 
     #[tokio::test]
-    async fn handle_input_non_held_equivaut_a_handle_command() {
+    async fn non_held_handle_input_is_equivalent_to_handle_command() {
         let (mut core, _pc, source_calls, _rx, _d) = setup();
         core.resume().await.unwrap();
         core.handle_input(InputMessage::from(Command::Select(3))).await.unwrap();
@@ -677,9 +677,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plus10_saffiche_et_repousse_son_echeance() {
-        // Chaque appui montre le cumul (+10, +20) dans l'incrustation, avec la
-        // même échéance que le volume.
+    async fn plus10_is_shown_and_pushes_its_deadline_back() {
+        // Each press shows the total (+10, +20) in the overlay, with the same
+        // deadline as the volume.
         let (mut core, _pc, _sc, mut state_rx, _d) = setup();
         core.handle_command(Command::Plus10).await.unwrap();
         assert!(core.overlay_deadline().is_some());
@@ -688,7 +688,7 @@ mod tests {
                 assert_eq!(offset, 10);
                 assert_eq!(text, "PRESET +10");
             }
-            autre => panic!("attendu une incrustation Tens, obtenu {autre:?}"),
+            other => panic!("expected a Tens overlay, got {other:?}"),
         };
         core.handle_command(Command::Plus10).await.unwrap();
         match state_rx.borrow_and_update().overlay.clone() {
@@ -696,14 +696,14 @@ mod tests {
                 assert_eq!(offset, 20);
                 assert_eq!(text, "PRESET +20");
             }
-            autre => panic!("attendu une incrustation Tens, obtenu {autre:?}"),
+            other => panic!("expected a Tens overlay, got {other:?}"),
         };
     }
 
     #[tokio::test]
-    async fn le_decalage_est_consomme_par_la_touche_chiffre() {
-        // +10 puis 4 = présélection 14 ; le décalage ne survit pas à sa
-        // consommation.
+    async fn the_offset_is_consumed_by_the_digit_key() {
+        // +10 then 4 = preset 14; the offset does not survive its
+        // consumption.
         let (mut core, _pc, source_calls, _rx, _d) = setup();
         core.handle_source_update("radio", update_with_count(Some(23)));
         core.handle_command(Command::Plus10).await.unwrap();
@@ -714,11 +714,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn la_touche_zero_seule_vaut_dix() {
-        // **Le changement demandé par le propriétaire** : les dizaines couvrent
-        // 1..10, 11..20, 21..30. La touche 0 nomme donc le dixième de sa
-        // dizaine, et seule elle vaut 10. Auparavant elle ne faisait *rien* —
-        // une touche inerte tant qu'on n'avait pas appuyé sur `+10` d'abord.
+    async fn the_zero_key_alone_is_worth_ten() {
+        // **The change asked for by the owner**: decades cover 1..10, 11..20,
+        // 21..30. The 0 key therefore names the tenth of its decade, and
+        // alone it is worth 10. Previously it did *nothing* — an inert key
+        // until `+10` had been pressed first.
         let (mut core, _pc, source_calls, _rx, _d) = setup();
         core.handle_source_update("radio", update_with_count(Some(23)));
         core.handle_command(Command::Select(0)).await.unwrap();
@@ -726,9 +726,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zero_atteint_le_haut_de_sa_dizaine() {
-        // 20 stations : `+10` puis 0 = 20, la dizaine courante étant 11..20.
-        // Un `+10` de plus rebouclerait — voir le test suivant.
+    async fn zero_reaches_the_top_of_its_decade() {
+        // 20 stations: `+10` then 0 = 20, the current decade being 11..20.
+        // One more `+10` would wrap — see the next test.
         let (mut core, _pc, source_calls, _rx, _d) = setup();
         core.handle_source_update("radio", update_with_count(Some(20)));
         core.handle_command(Command::Plus10).await.unwrap();
@@ -737,10 +737,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plus10_reboucle_apres_la_derniere_dizaine() {
-        // 23 stations : dizaines 1..10, 11..20, 21..23 — décalages utiles 10 et
-        // 20. Le troisième appui revient à zéro et éteint l'incrustation, comme
-        // la fenêtre web.
+    async fn plus10_wraps_after_the_last_decade() {
+        // 23 stations: decades 1..10, 11..20, 21..23 — useful offsets 10 and
+        // 20. The third press goes back to zero and turns the overlay off,
+        // like the web window.
         let (mut core, _pc, source_calls, _rx, _d) = setup();
         core.handle_source_update("radio", update_with_count(Some(23)));
         for _ in 0..3 {
@@ -752,23 +752,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn la_derniere_dizaine_utile_ne_depasse_pas_le_compte() {
-        // Le pendant de la bounded : pour un compte pile sur une dizaine (20), le
-        // décalage 20 nommerait 21..30, où il n'y a rien. Il doit reboucler, et
-        // c'est ce que l'ancienne bounded `(count / 10) * 10` laissait passer —
-        // elle avait besoin de ce décalage-là quand une dizaine valait 10..19.
+    async fn the_last_useful_decade_does_not_exceed_the_count() {
+        // The counterpart of the bound: for a count exactly on a decade (20),
+        // offset 20 would name 21..30, where there is nothing. It must wrap,
+        // and that is what the old bound `(count / 10) * 10` let through —
+        // it needed that offset when a decade was worth 10..19.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         core.handle_source_update("radio", update_with_count(Some(20)));
         core.handle_command(Command::Plus10).await.unwrap();
         core.handle_command(Command::Plus10).await.unwrap();
         assert!(
             core.overlay_deadline().is_none(),
-            "le second +10 doit reboucler a zero sur 20 stations"
+            "the second +10 must wrap to zero on 20 stations"
         );
     }
 
     #[tokio::test]
-    async fn une_autre_commande_abandonne_le_decalage() {
+    async fn another_command_abandons_the_offset() {
         let (mut core, _pc, source_calls, _rx, _d) = setup();
         core.handle_command(Command::Plus10).await.unwrap();
         core.handle_command(Command::VolumeUp).await.unwrap();
@@ -777,24 +777,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abandonner_le_decalage_efface_aussi_son_incrustation() {
-        // `VolumeUp` masque le défaut (il écrit son propre overlay juste
-        // après) : `PlayPause` n'écrit aucun overlay, donc rien ne doit
-        // effacer le `+NN` à sa place si ce n'est le garde d'abandon
-        // lui-même. Sans le correctif, l'incrustation restait à l'écran
-        // jusqu'à son échéance alors que le décalage était déjà abandonné.
+    async fn abandoning_the_offset_also_clears_its_overlay() {
+        // `VolumeUp` hides the defect (it writes its own overlay right
+        // after): `PlayPause` writes no overlay, so nothing must clear the
+        // `+NN` in its place other than the abandon guard itself. Without
+        // the fix, the overlay stayed on screen until its deadline while the
+        // offset was already abandoned.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         core.handle_command(Command::Plus10).await.unwrap();
-        assert!(core.overlay_deadline().is_some(), "l'incrustation +10 doit être affichée");
+        assert!(core.overlay_deadline().is_some(), "the +10 overlay must be displayed");
         core.handle_command(Command::PlayPause).await.unwrap();
         assert!(
             core.overlay_deadline().is_none(),
-            "l'incrustation +NN doit disparaître avec le décalage abandonné"
+            "the +NN overlay must disappear with the abandoned offset"
         );
     }
 
     #[tokio::test]
-    async fn lecheance_de_lincrustation_oublie_le_decalage() {
+    async fn the_overlay_deadline_forgets_the_offset() {
         let (mut core, _pc, source_calls, _rx, _d) = setup();
         core.handle_command(Command::Plus10).await.unwrap();
         core.expire_overlay();
@@ -803,9 +803,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sans_compte_connu_le_decalage_sature_sans_reboucler() {
-        // Pas de compte déclaré : on ne sait pas où est la fin, donc pas de
-        // rebouclage — saturation à 240.
+    async fn without_a_known_count_the_offset_saturates_without_wrapping() {
+        // No declared count: we do not know where the end is, so no wrap —
+        // saturation at 240.
         let (mut core, _pc, source_calls, _rx, _d) = setup();
         for _ in 0..30 {
             core.handle_command(Command::Plus10).await.unwrap();
@@ -815,7 +815,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_settings_persiste() {
+    async fn set_settings_persists() {
         let (mut core, _pc, _sc, _rx, dir) = setup();
         core.set_settings(crate::state::Settings {
             volume_repeat_initial_ms: 800,
@@ -829,26 +829,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn les_touches_de_deplacement_agissent_sur_un_contenu_fini() {
+    async fn the_seek_keys_act_on_finite_content() {
         let (mut core, calls, _, _, _dir) = setup();
-        // Contenu fini : bascule de `radio` (source active par défaut) vers `cd`.
+        // Finite content: switch from `radio` (default active source) to `cd`.
         core.handle_command(Command::SourceCycle).await.unwrap();
         core.handle_command(Command::SeekForward).await.unwrap();
         core.handle_command(Command::SeekBackward).await.unwrap();
         core.handle_command(Command::SeekTo(198)).await.unwrap();
-        let journal = calls.lock().unwrap().clone();
-        assert!(journal.contains(&"seek_relative 10".to_string()), "{journal:?}");
-        assert!(journal.contains(&"seek_relative -10".to_string()), "{journal:?}");
-        assert!(journal.contains(&"seek_absolute 198".to_string()), "{journal:?}");
+        let log = calls.lock().unwrap().clone();
+        assert!(log.contains(&"seek_relative 10".to_string()), "{log:?}");
+        assert!(log.contains(&"seek_relative -10".to_string()), "{log:?}");
+        assert!(log.contains(&"seek_absolute 198".to_string()), "{log:?}");
     }
 
-    /// Sur un direct, la touche ne fait rien — comme une touche non liée. Pas
-    /// de message, pas de trame : le contenu n'est pas parcourable, et le dire
-    /// n'apprendrait rien à qui vient d'appuyer.
+    /// On a live stream, the key does nothing — like an unbound key. No
+    /// message, no frame: the content is not seekable, and saying so would
+    /// teach nothing to whoever just pressed.
     #[tokio::test]
-    async fn les_touches_de_deplacement_sont_ignorees_sur_un_flux() {
+    async fn the_seek_keys_are_ignored_on_a_stream() {
         let (mut core, calls, _, _, _dir) = setup();
-        // Flux : `radio` est déjà la source active, `PlayPause` la fait jouer.
+        // Stream: `radio` is already the active source, `PlayPause` makes it play.
         core.handle_command(Command::PlayPause).await.unwrap();
         calls.lock().unwrap().clear();
         core.handle_command(Command::SeekForward).await.unwrap();
@@ -861,52 +861,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn le_pas_de_deplacement_suit_le_reglage() {
+    async fn the_seek_step_follows_the_setting() {
         let (mut core, calls, _, _, _dir) = setup();
-        // `set_settings` existe déjà (elle sert la route `PUT /api/settings`).
+        // `set_settings` already exists (it serves the `PUT /api/settings` route).
         core.set_settings(crate::state::Settings { seek_step_s: 30, ..Default::default() });
-        // Contenu fini : bascule de `radio` vers `cd`.
+        // Finite content: switch from `radio` to `cd`.
         core.handle_command(Command::SourceCycle).await.unwrap();
         core.handle_command(Command::SeekForward).await.unwrap();
         assert!(calls.lock().unwrap().contains(&"seek_relative 30".to_string()));
     }
 
     #[tokio::test]
-    async fn un_message_ephemere_desarme_un_decalage_en_cours() {
-        // Le message éphémère d'une source (« présélection clear ») emprunte
-        // le même emplacement d'overlay que le cumul +NN et le lui vole :
-        // sans désarmer le décalage ici, l'appui suivant sur un chiffre
-        // composerait encore l'ancien décalage alors que l'écran ne montre
-        // plus +NN mais le message de la source.
+    async fn an_ephemeral_message_disarms_a_pending_offset() {
+        // A source's ephemeral message ("empty preset") borrows the same
+        // overlay slot as the +NN total and steals it: without disarming the
+        // offset here, the next digit press would still compose the old
+        // offset while the screen no longer shows +NN but the source's
+        // message.
         let (mut core, _pc, source_calls, mut state_rx, _d) = setup();
         core.handle_command(Command::Plus10).await.unwrap();
         assert!(matches!(state_rx.borrow_and_update().overlay, Some(Overlay::Tens { .. })));
 
-        let mut ephemere = bare_update();
-        ephemere.transient = true;
-        ephemere.status = Some("empty preset".into());
-        core.handle_source_update("radio", ephemere);
+        let mut ephemeral = bare_update();
+        ephemeral.transient = true;
+        ephemeral.status = Some("empty preset".into());
+        core.handle_source_update("radio", ephemeral);
 
         core.handle_command(Command::Select(3)).await.unwrap();
         assert!(
             source_calls.lock().unwrap().iter().any(|c| c.contains("Select(3)")),
-            "sans décalage armé, Select(3) doit demander la présélection 3"
+            "with no armed offset, Select(3) must ask for preset 3"
         );
         assert!(
             !source_calls.lock().unwrap().iter().any(|c| c.contains("Select(13)")),
-            "le décalage abandonné par le message éphémère ne doit pas être appliqué"
+            "the offset abandoned by the ephemeral message must not be applied"
         );
     }
 
     #[tokio::test]
-    async fn demarrage_en_veille_applique_le_volume_sans_reveiller_la_source() {
+    async fn startup_in_standby_applies_the_volume_without_waking_the_source() {
         let (mut core, player_calls, source_calls, mut state_rx, _d) = setup();
         core.start_in_standby().await.unwrap();
         // mpv is configured (volume applied) so waking later starts right...
         // (FakePlayer::set_volume records "vol {v}", see FakePlayer above.)
         assert!(player_calls.lock().unwrap().iter().any(|c| c.starts_with("vol ")));
         // ...but the source was NOT woken, and the display shows standby.
-        assert!(!source_calls.lock().unwrap().iter().any(|c| c.contains("Wake")), "pas de Wake en veille");
+        assert!(!source_calls.lock().unwrap().iter().any(|c| c.contains("Wake")), "no Wake in standby");
         assert_eq!(state_rx.borrow_and_update().status.as_deref(), Some("STANDBY"));
         assert!(core.player_state().standby);
         // Power then wakes normally.
@@ -915,12 +915,12 @@ mod tests {
         assert!(source_calls.lock().unwrap().iter().any(|c| c.contains("Wake")));
     }
 
-    /// Les trois valeurs de `startup_power`, sur le seul critere observable :
-    /// la source est-elle reveillee ? `Previous` est teste dans ses deux sens,
-    /// sinon un `Previous` traite comme `On` passerait la moitie du test.
+    /// The three values of `startup_power`, on the only observable criterion:
+    /// is the source woken? `Previous` is tested in both directions,
+    /// otherwise a `Previous` treated as `On` would pass half the test.
     #[tokio::test]
-    async fn le_demarrage_suit_le_reglage_de_mise_sous_tension() {
-        async fn reveille(startup_power: StartupPower, persisted_standby: bool) -> bool {
+    async fn startup_follows_the_power_on_setting() {
+        async fn wakes(startup_power: StartupPower, persisted_standby: bool) -> bool {
             let persisted = PersistedState {
                 standby: persisted_standby,
                 settings: crate::state::Settings { startup_power, ..Default::default() },
@@ -928,23 +928,23 @@ mod tests {
             };
             let (mut core, _pc, source_calls, _rx, _d) = setup_persisted(persisted);
             core.startup().await.unwrap();
-            // Le verrou est relache par cette liaison, pas garde jusqu'a la
-            // fin du bloc : sinon `source_calls` est libere avant lui.
-            let a_reveille = source_calls.lock().unwrap().iter().any(|c| c.contains("Wake"));
-            a_reveille
+            // The lock is released by this binding, not held until the end
+            // of the block: otherwise `source_calls` is freed before it.
+            let woke = source_calls.lock().unwrap().iter().any(|c| c.contains("Wake"));
+            woke
         }
 
-        assert!(reveille(StartupPower::On, true).await, "« allume » ignore la veille sur disque");
-        assert!(!reveille(StartupPower::Standby, false).await, "« veille » ne reveille jamais");
-        assert!(reveille(StartupPower::Previous, false).await, "etait allume : on relaunch");
-        assert!(!reveille(StartupPower::Previous, true).await, "etait en veille : on y reste");
+        assert!(wakes(StartupPower::On, true).await, "\"on\" ignores the standby on disk");
+        assert!(!wakes(StartupPower::Standby, false).await, "\"standby\" never wakes");
+        assert!(wakes(StartupPower::Previous, false).await, "was on: we relaunch");
+        assert!(!wakes(StartupPower::Previous, true).await, "was in standby: we stay there");
     }
 
     #[tokio::test]
-    async fn larret_est_notifie_a_la_source_active() {
-        // `Command::Stop` est la seule commande qui change l'état de playback
-        // sans consulter la Source : sans cette notification, une Source qui
-        // tient un état de playback propre (le cd) le garderait faux.
+    async fn stop_is_notified_to_the_active_source() {
+        // `Command::Stop` is the only command that changes the playback state
+        // without consulting the Source: without this notification, a Source
+        // that keeps its own playback state (the cd) would keep it wrong.
         let (mut core, _pc, source_calls, _rx, _d) = setup();
         core.resume().await.unwrap();
         core.handle_command(Command::Stop).await.unwrap();

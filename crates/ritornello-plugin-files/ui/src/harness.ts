@@ -1,125 +1,126 @@
-// Harnais partagé des tests de ce module.
+// Shared harness of this module's tests.
 //
-// Il vit dans `src/` et non dans un `*.test.ts` pour être importable par
-// plusieurs fichiers de test ; il n'est atteignable depuis aucun import de
-// `src/index.ts`, donc il n'entre jamais dans le paquet construit.
+// It lives in `src/` and not in a `*.test.ts` so that several test files can
+// import it; it is reachable from no import of `src/index.ts`, so it never
+// enters the built package.
 
 import { flushPromises, mount } from '@vue/test-utils'
 import { vi } from 'vitest'
 import FilesAdmin from './FilesAdmin.vue'
 
 /**
- * Préfixe volontairement différent de `/plugins/files/` : le nom sous lequel un
- * plugin est servi vient de `plugins.toml`, donc du déploiement. Un module qui
- * reconstruirait son propre nom passerait un test posé sur le nom attendu.
+ * Prefix deliberately different from `/plugins/files/`: the name under which a
+ * plugin is served comes from `plugins.toml`, hence from the deployment. A
+ * module that rebuilt its own name would pass a test written against the
+ * expected name.
  */
 export const BASE = '/plugins/mediatheque/'
 
 /**
- * Catalogue de test. Les valeurs sont en français et **distinctes** les unes
- * des autres : un test qui cherche « Monter » dans le texte de la page ne doit
- * pas pouvoir réussir grâce à un autre libellé.
+ * Test catalog. The values are made up and **distinct** from one another: a
+ * test that looks for "Mount" in the page text must not be able to succeed
+ * thanks to another label.
  */
 export const CATALOG: Record<string, string> = {
-  load_error_1: 'Erreur : ',
+  load_error_1: 'Error: ',
   load_error_2: '',
-  scan_progress: 'Balayage de {dir} — {found} tracks trouvées',
+  scan_progress: 'Scanning {dir} — {found} tracks found so far',
 
   ph_host: 'server',
-  ph_share: 'partage',
-  ph_subpath: 'sous-dossier',
-  ph_user: 'utilisateur',
-  ph_password: 'mot de passe',
-  ph_domain: 'domaine Windows (optionnel)',
-  kind_local: 'dossier local',
-  kind_smb: 'partage réseau',
-  mounted_yes: 'monté',
-  mounted_no: 'non monté',
-  writable_label: 'autoriser écriture',
-  btn_add_share: 'Déclarer un partage',
+  ph_share: 'share name',
+  ph_subpath: 'subfolder',
+  ph_user: 'username',
+  ph_password: 'passphrase',
+  ph_domain: 'Windows domain (optional)',
+  kind_local: 'local folder',
+  kind_smb: 'network share',
+  mounted_yes: 'mounted',
+  mounted_no: 'not mounted',
+  writable_label: 'allow writes',
+  btn_add_share: 'Declare a share',
 
   sources_title: 'Sources',
-  no_sources: 'Aucune source déclarée',
-  btn_add_device: 'Ajouter un dossier de l’appareil',
-  btn_add_to_playlist: 'Ajouter à la liste',
-  btn_load_m3u: 'Charger cette liste',
-  btn_remove_source: 'Retirer cette source',
-  btn_retry_mount: 'Réessayer le montage',
-  mount_error_title: 'Le dernier montage a échoué :',
-  unresponsive_title: 'Ces points de montage ne répondent pas :',
-  unresponsive_hint: 'Informations incomplètes jusqu’à leur retour.',
-  missing_unknown: 'indéterminé',
+  no_sources: 'No source declared',
+  btn_add_device: 'Add a device folder',
+  btn_add_to_playlist: 'Add to the queue',
+  btn_load_m3u: 'Load this playlist',
+  btn_remove_source: 'Remove this source',
+  btn_retry_mount: 'Retry the mount',
+  mount_error_title: 'The last mount attempt failed:',
+  unresponsive_title: 'These mount points are not responding:',
+  unresponsive_hint: 'Information stays incomplete until they respond again.',
+  missing_unknown: 'unclear',
 
-  dlg_device_title: 'Choisir un dossier de l’appareil',
-  dlg_device_desc: 'Choisissez un volume puis descendez.',
+  dlg_device_title: 'Pick a device folder',
+  dlg_device_desc: 'Choose a volume then browse down.',
   volumes_label: 'Volume',
-  no_volumes: 'Aucun volume exploitable',
-  audio_here: '{count} fichiers audio ici',
-  btn_choose_folder: 'Choisir ce dossier',
-  btn_up: 'Remonter d’un niveau',
-  ph_manual_path: 'ou saisir un path absolu',
-  btn_go: 'Ouvrir',
-  btn_cancel: 'Annuler',
+  no_volumes: 'No usable volume',
+  audio_here: '{count} audio files here',
+  btn_choose_folder: 'Choose this folder',
+  btn_up: 'Go up one level',
+  ph_manual_path: 'or type an absolute path',
+  btn_go: 'Open',
+  btn_cancel: 'Cancel',
 
-  dlg_share_title: 'Choisir un partage réseau',
-  dlg_share_desc: 'Indiquez une adresse puis connectez-vous.',
-  btn_connect: 'Se connect',
-  connecting: 'Connexion en cours',
-  shares_label: 'Partage',
-  btn_manual: 'Saisir à la main',
-  btn_assistant: 'Revenir à l’assistant',
-  smb_unavailable: 'Le paquet smbclient manque pour parcourir un partage.',
+  dlg_share_title: 'Pick a network share',
+  dlg_share_desc: 'Enter an address then connect.',
+  btn_connect: 'Connect',
+  connecting: 'Connecting',
+  shares_label: 'Share',
+  btn_manual: 'Type it by hand',
+  btn_assistant: 'Back to the wizard',
+  smb_unavailable: 'The smbclient package is missing to browse a share.',
 
-  browse_title: 'Parcourir',
+  browse_title: 'Browse',
   root_label: 'Root',
   search_placeholder: 'search',
-  btn_search: 'Chercher',
-  no_results: 'Aucun résultat',
-  search_truncated: 'Seuls les {count} premiers sont affichés : affinez la recherche.',
+  btn_search: 'Search',
+  no_results: 'No result',
+  search_truncated: 'Only the first {count} are shown: narrow your search.',
   search_gave_up:
-    'la recherche s’est arrêtée avant d’avoir parcouru tout ce dossier : ouvrez un sous-dossier et cherchez-y.',
-  empty_folder: 'Dossier vide',
-  btn_add_current_folder: 'Ajouter ce dossier',
-  search_scope: 'La recherche porte sur {path}',
+    'the search stopped before covering this whole folder: open a subfolder and search there instead.',
+  empty_folder: 'Empty folder',
+  btn_add_current_folder: 'Add this folder',
+  search_scope: 'Searching within {path}',
 
-  playlist_title: 'Liste en cours',
-  col_num: 'N°',
+  playlist_title: 'Current queue',
+  col_num: 'No.',
   col_track: 'Track',
-  col_duration: 'Durée',
-  empty_playlist: 'Liste vide',
-  missing_badge: 'introuvable',
-  reorder_hint: 'Glisser pour réordonner',
-  duration_progress: 'Lecture des durées ({done} sur {total})',
-  btn_move_up: 'Monter la piste',
-  btn_move_down: 'Descendre la piste',
-  btn_remove_track: 'Retirer la piste',
-  btn_clear: 'Vider la liste',
-  page_range: '{from}–{to} sur {total}',
-  unresolved_title: '{count} entrées non retrouvées',
-  ph_playlist_name: 'nom de la liste',
+  col_duration: 'Length',
+  empty_playlist: 'Empty queue',
+  missing_badge: 'not found',
+  reorder_hint: 'Drag to reorder',
+  duration_progress: 'Reading lengths ({done} of {total})',
+  btn_move_up: 'Move track up',
+  btn_move_down: 'Move track down',
+  btn_remove_track: 'Remove track',
+  btn_clear: 'Clear the queue',
+  page_range: '{from}–{to} of {total}',
+  unresolved_title: '{count} entries could not be found',
+  ph_playlist_name: 'playlist name',
   dest_label: 'Destination',
-  dest_internal: 'stockage interne',
-  btn_save_playlist: 'Enregistrer la liste',
-  no_saved: 'Aucune liste enregistrée',
-  load_playlist_label: 'Liste à load',
-  btn_load_playlist: 'Charger',
+  dest_internal: 'internal storage',
+  btn_save_playlist: 'Save the queue',
+  no_saved: 'No saved playlist',
+  load_playlist_label: 'Playlist to load',
+  btn_load_playlist: 'Load',
 }
 
-/** Contenu du champ `browse`, où le plugin range journey **et** recherche. */
+/** Content of the `browse` field, where the plugin stores browse **and** search. */
 export interface Navigate {
   root: string
   path: string
-  /** Vide pour un journey, le motif pour une recherche. */
+  /** Empty for a browse, the pattern for a search. */
   query?: string
-  /** Noms nus, pas des chemins : c'est ce que `scan::list_dir` rend. */
+  /** Bare names, not paths: this is what `scan::list_dir` returns. */
   dirs: string[]
   files: string[]
-  /** Fichiers `.m3u`/`.m3u8` du niveau : ils se chargent, ils ne s'ajoutent pas. */
+  /** `.m3u`/`.m3u8` files of the level: they load, they are not added. */
   playlists?: string[]
-  /** Chemins relatifs à la root, rendus par `search`. */
+  /** Paths relative to the root, returned by `search`. */
   results: string[]
   truncated?: boolean
-  /** Le journey a été interrompu avant d'avoir tout vu, distinct de `truncated`. */
+  /** The walk was interrupted before it had seen everything, distinct from `truncated`. */
   gave_up?: boolean
 }
 
@@ -141,10 +142,10 @@ export interface ServerState {
 }
 
 /**
- * Champ `explore` du plugin : l'assistant en cours.
+ * The plugin's `explore` field: the wizard in progress.
  *
- * Emplacement distinct de `browse`, comme côté plugin : la popin et le volet
- * Parcourir sont deux curseurs indépendants.
+ * A location distinct from `browse`, as on the plugin side: the dialog and the
+ * Browse pane are two independent cursors.
  */
 export interface Explore {
   open?: boolean
@@ -159,7 +160,7 @@ export interface Explore {
   error?: string | null
 }
 
-/** Assistant fermé : l'état de repos, celui d'une page qui vient de load. */
+/** Wizard closed: the resting state, that of a page that has just loaded. */
 export const EXPLORE_CLOSED: Explore = {
   open: false,
   kind: null,
@@ -173,7 +174,7 @@ export const EXPLORE_CLOSED: Explore = {
   error: null,
 }
 
-export function state(partiel: ServerState = {}): Required<ServerState> {
+export function state(partial: ServerState = {}): Required<ServerState> {
   return {
     roots: [],
     playlist: [],
@@ -183,53 +184,53 @@ export function state(partiel: ServerState = {}): Required<ServerState> {
     unresolved: [],
     browse: { root: '', path: '', query: '', dirs: [], files: [], results: [] },
     volumes: [],
-    // Faux par défaut, comme le plugin quand `smbclient` manque : c'est l'état
-    // qu'un test doit déclarer explicitement pour offrir l'assistant réseau.
+    // False by default, like the plugin when `smbclient` is missing: this is
+    // the state a test must declare explicitly to offer the network wizard.
     can_browse_smb: false,
     playing: false,
     durations: { running: false, done: 0, total: 0 },
     explore: EXPLORE_CLOSED,
     mount_error: null,
     unresponsive: [],
-    ...partiel,
+    ...partial,
   }
 }
 
 export interface Server {
   spy: ReturnType<typeof vi.fn>
-  /** État rendu par le prochain GET. Modifiable par un test entre deux appels. */
+  /** State returned by the next GET. Modifiable by a test between two calls. */
   data: Required<ServerState>
-  /** Quand il est non nul, tout PUT est refusé avec cette phrase, telle quelle. */
-  refus: string | null
-  /** Appelé avant la réponse à un PUT accepté ; sert à faire évoluer `data`. */
-  surPut: (charge: Record<string, unknown>) => void
-  /** Corps des PUT émis, dans l'order. */
+  /** When non-null, every PUT is refused with this sentence, as is. */
+  refusal: string | null
+  /** Called before the response to an accepted PUT; used to evolve `data`. */
+  onPut: (payload: Record<string, unknown>) => void
+  /** Bodies of the emitted PUTs, in order. */
   puts: () => Record<string, unknown>[]
-  /** Corps des PUT portant cette opération. */
-  putsDe: (op: string) => Record<string, unknown>[]
-  /** URL de toutes les requêtes émises, GET comme PUT. */
+  /** Bodies of the PUTs carrying this operation. */
+  putsOf: (op: string) => Record<string, unknown>[]
+  /** URL of every emitted request, GET as well as PUT. */
   urls: () => string[]
 }
 
-/** Simulacre du plugin : un GET rend `data`, un PUT rend 204 ou un refus 422. */
+/** Stand-in for the plugin: a GET returns `data`, a PUT returns 204 or a 422 refusal. */
 export function server(initial: ServerState = {}): Server {
   const s: Server = {
     spy: vi.fn(),
     data: state(initial),
-    refus: null,
-    surPut: () => {},
+    refusal: null,
+    onPut: () => {},
     puts: () => s.spy.mock.calls
       .filter((c) => (c[1] as RequestInit)?.method === 'PUT')
       .map((c) => JSON.parse(String((c[1] as RequestInit).body)) as Record<string, unknown>),
-    putsDe: (op) => s.puts().filter((b) => b.op === op),
+    putsOf: (op) => s.puts().filter((b) => b.op === op),
     urls: () => s.spy.mock.calls.map((c) => String(c[0])),
   }
   s.spy.mockImplementation(async (_url: string, init?: RequestInit) => {
     if (init?.method === 'PUT' || init?.method === 'POST') {
-      if (s.refus !== null) {
-        return new Response(JSON.stringify({ error: s.refus }), { status: 422 })
+      if (s.refusal !== null) {
+        return new Response(JSON.stringify({ error: s.refusal }), { status: 422 })
       }
-      s.surPut(JSON.parse(String(init.body)) as Record<string, unknown>)
+      s.onPut(JSON.parse(String(init.body)) as Record<string, unknown>)
       return new Response(null, { status: 204 })
     }
     return new Response(JSON.stringify(s.data), { status: 200 })
@@ -239,13 +240,13 @@ export function server(initial: ServerState = {}): Server {
 }
 
 /**
- * Monte la page sur un server simulé et attend son premier chargement.
+ * Mounts the page on a simulated server and waits for its first load.
  *
- * `attachTo: document.body` n'est pas décoratif : le `Dialog` du kit rend son
- * contenu à travers un `DialogPortal`, donc **hors** de l'arbre du composant.
- * Sans rattachement, la popin n'est pas rendue du tout ; avec, elle atterrit
- * dans `document.body` — et reste invisible à `wrapper.find()`. Voir
- * `inPopover` ci-dessous, qui est le seul moyen correct de l'atteindre.
+ * `attachTo: document.body` is not decorative: the kit's `Dialog` renders its
+ * content through a `DialogPortal`, hence **outside** the component tree.
+ * Without attaching, the dialog is not rendered at all; with it, it lands in
+ * `document.body` — and stays invisible to `wrapper.find()`. See `inPopover`
+ * below, which is the only correct way to reach it.
  */
 export async function mountAdmin(initial: ServerState = {}) {
   const s = server(initial)
@@ -258,41 +259,41 @@ export async function mountAdmin(initial: ServerState = {}) {
 }
 
 /**
- * Un élément de la popin ouverte.
+ * An element of the open dialog.
  *
- * `wrapper.find()` ne le trouvera **jamais** : le contenu d'un `Dialog` vit
- * dans un portail vers `document.body`, en dehors de l'arbre monté. Mesuré sur
- * ce dépôt — un test qui interroge le wrapper échoue avec « élément absent »
- * alors que la popin est bien à l'écran, ce qui envoie search un défaut là
- * où il n'y en a pas.
+ * `wrapper.find()` will **never** find it: the content of a `Dialog` lives in a
+ * portal to `document.body`, outside the mounted tree. Measured on this repo —
+ * a test that queries the wrapper fails with "element absent" while the dialog
+ * is indeed on screen, which sends one looking for a defect where there is
+ * none.
  */
-export function inPopover(selecteur: string): HTMLElement | null {
-  return document.querySelector<HTMLElement>(selecteur)
+export function inPopover(selector: string): HTMLElement | null {
+  return document.querySelector<HTMLElement>(selector)
 }
 
-/** Clique dans la popin, puis laisse Vue et les promesses se dérouler. */
-export async function clickPopover(selecteur: string): Promise<void> {
-  const el = inPopover(selecteur)
-  if (!el) throw new Error(`aucun élément « ${selecteur} » dans la popin`)
+/** Clicks inside the dialog, then lets Vue and the promises unfold. */
+export async function clickPopover(selector: string): Promise<void> {
+  const el = inPopover(selector)
+  if (!el) throw new Error(`no element "${selector}" in the dialog`)
   el.click()
   await flushPromises()
 }
 
-/** Saisit dans un champ de la popin, en notifiant Vue du changement. */
-export async function typeInPopover(selecteur: string, valeur: string): Promise<void> {
-  const el = inPopover(selecteur) as HTMLInputElement | null
-  if (!el) throw new Error(`aucun champ « ${selecteur} » dans la popin`)
-  el.value = valeur
+/** Types into a field of the dialog, notifying Vue of the change. */
+export async function typeInPopover(selector: string, value: string): Promise<void> {
+  const el = inPopover(selector) as HTMLInputElement | null
+  if (!el) throw new Error(`no field "${selector}" in the dialog`)
+  el.value = value
   el.dispatchEvent(new Event('input', { bubbles: true }))
   await flushPromises()
 }
 
 /**
- * Vide `document.body` entre deux tests.
+ * Empties `document.body` between two tests.
  *
- * Les portails n'y sont pas nettoyés par le démontage du wrapper : sans cet
- * appel, la popin d'un test précédent resterait dans le document et le test
- * suivant interrogerait le mauvais panneau.
+ * The portals are not cleaned up there by unmounting the wrapper: without this
+ * call, the dialog of a previous test would remain in the document and the next
+ * test would query the wrong panel.
  */
 export function cleanupPopovers(): void {
   document.body.innerHTML = ''

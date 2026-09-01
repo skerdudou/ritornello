@@ -1,146 +1,146 @@
-// La popin d'apprentissage part dans un portail vers `document.body` (comme
-// tout `Dialog` du kit) : `wrapper.find()` ne la voit jamais, il faut monter
-// avec `attachTo: document.body` et chercher dans le document. Les portails
-// ne sont pas nettoyés par le démontage du wrapper, d'où le `beforeEach`.
+// The learning popup is teleported to a portal on `document.body` (like
+// every kit `Dialog`): `wrapper.find()` never sees it, it must be mounted
+// with `attachTo: document.body` and looked up in the document. Portals are
+// not cleaned up by the wrapper's unmount, hence the `beforeEach`.
 import { createT, Dialog } from '@ritornello/ui'
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it } from 'vitest'
 import LearnDialog from './LearnDialog.vue'
 
-const CATALOGUE: Record<string, string> = {
-  dlg_learn_title: 'Apprentissage d’une touche',
-  dlg_learn_desc: 'Appuyez sur une touche du périphérique « {device} »…',
-  learn_append_label: 'Ajouter aux codes existants au lieu de les remplacer',
-  learn_countdown: 'Il reste {s} s',
-  btn_cancel: 'Annuler',
+const CATALOG: Record<string, string> = {
+  dlg_learn_title: 'Key learning',
+  dlg_learn_desc: 'Press a key on the device “{device}”…',
+  learn_append_label: 'Add to the existing codes instead of replacing them',
+  learn_countdown: '{s} s left',
+  btn_cancel: 'Cancel',
 }
-// Le vrai traducteur du kit, et non un bouchon qui rendrait la valeur brute :
-// c'est lui qui interpole les jetons `{nom}`, et la popin doit lui passer ses
-// paramètres plutôt que de substituer elle-même.
-const t = createT(CATALOGUE)
+// The kit's real translator, not a stub that would render the raw value:
+// it is the one that interpolates the `{name}` tokens, and the popup must
+// pass it its parameters rather than substituting them itself.
+const t = createT(CATALOG)
 
 interface Props {
-  ouvert: boolean
+  open: boolean
   t: typeof t
   action: string
   device: string
   add: boolean
-  secondes: number
+  seconds: number
 }
 
 beforeEach(() => {
   document.body.innerHTML = ''
 })
 
-function monter(props: Partial<Props> = {}) {
+function mountDialog(props: Partial<Props> = {}) {
   return mount(LearnDialog, {
     props: {
-      ouvert: true,
+      open: true,
       t,
       action: 'Muet',
       device: 'mce',
       add: false,
-      secondes: 30,
+      seconds: 30,
       ...props,
     },
     attachTo: document.body,
   })
 }
 
-function dansPopin(selecteur: string) {
-  return document.body.querySelector(selecteur)
+function inPopup(selector: string) {
+  return document.body.querySelector(selector)
 }
 
 describe('LearnDialog', () => {
-  it('fermée, elle ne pose rien dans le document', async () => {
-    monter({ ouvert: false })
+  it('closed, it puts nothing in the document', async () => {
+    mountDialog({ open: false })
     await flushPromises()
-    expect(dansPopin('[data-dlg-learn]')).toBeNull()
+    expect(inPopup('[data-dlg-learn]')).toBeNull()
   })
 
-  it('ouverte, le title porte l’action et la description nomme le périphérique', async () => {
-    monter({ action: 'Muet', device: 'mce' })
+  it('open, the title carries the action and the description names the device', async () => {
+    mountDialog({ action: 'Muet', device: 'mce' })
     await flushPromises()
-    const popin = dansPopin('[data-dlg-learn]')
-    expect(popin).not.toBeNull()
-    expect(popin!.textContent).toContain('Muet')
-    expect(popin!.textContent).toContain('mce')
-    // Le jeton n'a pas fuité tel quel : la description l'a bien remplacé.
-    expect(popin!.textContent).not.toContain('{device}')
+    const popup = inPopup('[data-dlg-learn]')
+    expect(popup).not.toBeNull()
+    expect(popup!.textContent).toContain('Muet')
+    expect(popup!.textContent).toContain('mce')
+    // The token has not leaked as-is: the description did replace it.
+    expect(popup!.textContent).not.toContain('{device}')
   })
 
-  it('sans action à nommer, le title ne traîne pas de tiret', async () => {
-    // La page vide `action` dès le geste de fermeture, alors que reka-ui garde
-    // le contenu monté le temps du fondu de sortie : pendant ces 200 ms, le
-    // title ne doit pas se lire « Apprentissage d’une touche — ».
-    monter({ action: '' })
+  it('with no action to name, the title carries no trailing dash', async () => {
+    // The page clears `action` as soon as the closing gesture happens, while
+    // reka-ui keeps the content mounted for the duration of the exit fade:
+    // during those 200 ms, the title must not read "Key learning —".
+    mountDialog({ action: '' })
     await flushPromises()
-    expect(dansPopin('[data-slot="dialog-title"]')!.textContent).toBe('Apprentissage d’une touche')
+    expect(inPopup('[data-slot="dialog-title"]')!.textContent).toBe('Key learning')
   })
 
-  it('le bouton Annuler émet un et un seul « annuler »', async () => {
-    const w = monter()
+  it('the Cancel button emits exactly one "cancel"', async () => {
+    const w = mountDialog()
     await flushPromises()
-    ;(dansPopin('[data-learn-cancel]') as HTMLButtonElement).click()
+    ;(inPopup('[data-learn-cancel]') as HTMLButtonElement).click()
     await flushPromises()
-    expect(w.emitted('annuler')).toHaveLength(1)
+    expect(w.emitted('cancel')).toHaveLength(1)
   })
 
-  it('la fermeture par `update:open` émet un et un seul « annuler »', async () => {
-    // Échap, le clic sur le voile et la croix du kit passent tous par ce seul
-    // chemin ; `[data-learn-cancel]`, qui émet `annuler` en direct, ne
-    // l'exerce jamais.
-    const w = monter()
+  it('closing via `update:open` emits exactly one "cancel"', async () => {
+    // Escape, the click on the overlay and the kit's close icon all go
+    // through this single path; `[data-learn-cancel]`, which emits `cancel`
+    // directly, never exercises it.
+    const w = mountDialog()
     await flushPromises()
     w.findComponent(Dialog).vm.$emit('update:open', false)
     await flushPromises()
-    expect(w.emitted('annuler')).toHaveLength(1)
+    expect(w.emitted('cancel')).toHaveLength(1)
   })
 
-  it('la croix posée par `DialogContent` annule elle aussi', async () => {
-    // Le kit rend une `DialogClose` dès que `showCloseButton` n'est pas nié —
-    // et il vaut `true` par défaut. Troisième déclencheur d'annulation, celui
-    // qu'aucune ligne du template de cette popin ne laisse voir.
-    const w = monter()
+  it('the close icon placed by `DialogContent` also cancels', async () => {
+    // The kit renders a `DialogClose` as soon as `showCloseButton` is not
+    // negated — and it defaults to `true`. Third cancellation trigger, the
+    // one no line of this popup's template makes visible.
+    const w = mountDialog()
     await flushPromises()
-    const croix = dansPopin('[data-slot="dialog-close"]') as HTMLButtonElement | null
-    expect(croix).not.toBeNull()
-    croix!.click()
+    const closeIcon = inPopup('[data-slot="dialog-close"]') as HTMLButtonElement | null
+    expect(closeIcon).not.toBeNull()
+    closeIcon!.click()
     await flushPromises()
-    expect(w.emitted('annuler')).toHaveLength(1)
+    expect(w.emitted('cancel')).toHaveLength(1)
   })
 
-  it('cocher la case émet update:add à true, sans état propre', async () => {
-    const w = monter({ add: false })
+  it('checking the box emits update:add with true, with no state of its own', async () => {
+    const w = mountDialog({ add: false })
     await flushPromises()
-    const case_ = dansPopin('[data-learn-append]') as HTMLInputElement
-    expect(case_.checked).toBe(false)
-    case_.checked = true
-    case_.dispatchEvent(new Event('change'))
+    const checkbox = inPopup('[data-learn-append]') as HTMLInputElement
+    expect(checkbox.checked).toBe(false)
+    checkbox.checked = true
+    checkbox.dispatchEvent(new Event('change'))
     await flushPromises()
     expect(w.emitted('update:add')).toEqual([[true]])
   })
 
-  it('add: true affiche la case cochée', async () => {
-    monter({ add: true })
+  it('add: true shows the box checked', async () => {
+    mountDialog({ add: true })
     await flushPromises()
-    expect((dansPopin('[data-learn-append]') as HTMLInputElement).checked).toBe(true)
+    expect((inPopup('[data-learn-append]') as HTMLInputElement).checked).toBe(true)
   })
 
-  it('affiche le temps qu’il reste pour appuyer', async () => {
-    // Sans compte à rebours, la popin se referme d'elle-même au bout de 30 s
-    // sans que rien n'ait laissé prévoir l'échéance : on croit l'appareil muet
-    // alors qu'on a simplement mis trop de temps à trouver la touche.
-    monter({ secondes: 27 })
+  it('shows the time left to press', async () => {
+    // Without a countdown, the popup would close itself after 30 s with
+    // nothing having warned of the deadline: the user would think the
+    // device is silent when they simply took too long to find the key.
+    mountDialog({ seconds: 27 })
     await flushPromises()
-    expect(dansPopin('[data-learn-countdown]')?.textContent).toContain('27')
+    expect(inPopup('[data-learn-countdown]')?.textContent).toContain('27')
   })
 
-  it('ne montre pas de compte à rebours une fois l’échéance atteinte', async () => {
-    // À zéro la page a déjà arrêté l'apprentissage : afficher « il reste 0 s »
-    // pendant la fermeture donnerait un décompte qui ment.
-    monter({ secondes: 0 })
+  it('shows no countdown once the deadline is reached', async () => {
+    // At zero the page has already stopped learning: displaying "0 s left"
+    // during the close would be a countdown that lies.
+    mountDialog({ seconds: 0 })
     await flushPromises()
-    expect(dansPopin('[data-learn-countdown]')).toBeNull()
+    expect(inPopup('[data-learn-countdown]')).toBeNull()
   })
 })

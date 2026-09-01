@@ -1,52 +1,52 @@
-//! La cover posée à côté des fichiers : `folder.jpg` et ses cousins.
+//! The cover lying next to the files: `folder.jpg` and its cousins.
 //!
-//! C'est le greffon qui fait ce travail, et non le cœur : c'est lui qui a monté
-//! le partage et qui connaît la racine de la source déclarée. Et un
-//! `folder.jpg` n'a rien à extraire — le path suffit, donc rien ne transite
-//! en bytes sur le canal.
+//! It is the plugin that does this work, and not the core: it is the one that
+//! mounted the share and that knows the root of the declared source. And a
+//! `folder.jpg` has nothing to extract — the path is enough, so no bytes travel
+//! over the channel.
 
 use ritornello_proto::CoverRef;
 use std::path::{Path, PathBuf};
 
-/// Par order de préférence. `cover` d'abord : c'est le name le plus explicite.
+/// By order of preference. `cover` first: it is the most explicit name.
 const PREFERENCES: [&str; 5] = ["cover", "folder", "front", "albumart", "album"];
 
-/// Extensions reconnues.
+/// Recognized extensions.
 const EXTENSIONS: [&str; 4] = ["jpg", "jpeg", "png", "webp"];
 
-/// Sous-répertoires d'artwork visités, sur **un seul** niveau.
+/// Artwork subdirectories visited, on **one single** level.
 const SUBDIRECTORIES: [&str; 4] = ["artwork", "scans", "covers", "art"];
 
-/// Ce qui n'est pas la face avant.
+/// What is not the front face.
 ///
-/// Ne s'applique **qu'à la règle de l'image unique**, la seule qui devine : les
-/// playlists de préférence ne retiennent qu'un name qu'elles connaissent, donc un
-/// répertoire portant `front.jpg` et `back.jpg` est réglé par la préférence.
+/// Applies **only to the single-image rule**, the only one that guesses: the
+/// preference lists only retain a name they know, so a directory carrying
+/// `front.jpg` and `back.jpg` is settled by the preference.
 const EXCLUDED: [&str; 8] =
     ["back", "verso", "inlay", "cd", "disc", "disque", "booklet", "matrix"];
 
-/// Cherche la cover du fichier joué. `None` = rien de sûr, on se tait.
-pub fn search(fichier: &Path) -> Option<CoverRef> {
-    let repertoire = fichier.parent()?;
-    if let Some(p) = by_preference(repertoire) {
+/// Searches for the cover of the played file. `None` = nothing certain, we stay silent.
+pub fn search(file: &Path) -> Option<CoverRef> {
+    let directory = file.parent()?;
+    if let Some(p) = by_preference(directory) {
         return Some(path(p));
     }
-    for sous in SUBDIRECTORIES {
-        let Some(candidat) = subdirectory(repertoire, sous) else { continue };
-        if let Some(p) = by_preference(&candidat) {
+    for sub in SUBDIRECTORIES {
+        let Some(candidate) = subdirectory(directory, sub) else { continue };
+        if let Some(p) = by_preference(&candidate) {
             return Some(path(p));
         }
     }
-    single_image(repertoire).map(path)
+    single_image(directory).map(path)
 }
 
 fn path(p: PathBuf) -> CoverRef {
     CoverRef::Path { path: p.to_string_lossy().into_owned() }
 }
 
-/// Le sous-répertoire d'artwork, quel que soit sa casse.
-fn subdirectory(repertoire: &Path, name: &str) -> Option<PathBuf> {
-    std::fs::read_dir(repertoire)
+/// The artwork subdirectory, whatever its case.
+fn subdirectory(directory: &Path, name: &str) -> Option<PathBuf> {
+    std::fs::read_dir(directory)
         .ok()?
         .flatten()
         .find(|e| {
@@ -56,30 +56,30 @@ fn subdirectory(repertoire: &Path, name: &str) -> Option<PathBuf> {
         .map(|e| e.path())
 }
 
-/// Le premier name de la liste de préférence présent in_dir le répertoire.
-fn by_preference(repertoire: &Path) -> Option<PathBuf> {
-    let images = images_of(repertoire);
-    PREFERENCES.iter().find_map(|prefere| {
+/// The first name of the preference list present in the directory.
+fn by_preference(directory: &Path) -> Option<PathBuf> {
+    let images = images_of(directory);
+    PREFERENCES.iter().find_map(|preferred| {
         images
             .iter()
             .find(|p| {
-                p.file_stem().is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case(prefere))
+                p.file_stem().is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case(preferred))
             })
             .cloned()
     })
 }
 
-/// L'unique image du répertoire, si elle est unique **et** si son name ne dit
-/// pas qu'elle est autre chose que la face avant.
-fn single_image(repertoire: &Path) -> Option<PathBuf> {
-    let images = images_of(repertoire);
-    let [seule] = images.as_slice() else { return None };
-    let tige = seule.file_stem()?.to_string_lossy().to_ascii_lowercase();
-    EXCLUDED.iter().all(|exclu| !tige.contains(exclu)).then(|| seule.clone())
+/// The single image of the directory, if it is unique **and** if its name does
+/// not say it is something other than the front face.
+fn single_image(directory: &Path) -> Option<PathBuf> {
+    let images = images_of(directory);
+    let [only] = images.as_slice() else { return None };
+    let stem = only.file_stem()?.to_string_lossy().to_ascii_lowercase();
+    EXCLUDED.iter().all(|excluded| !stem.contains(excluded)).then(|| only.clone())
 }
 
-fn images_of(repertoire: &Path) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = std::fs::read_dir(repertoire)
+fn images_of(directory: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(directory)
         .into_iter()
         .flatten()
         .flatten()
@@ -91,7 +91,7 @@ fn images_of(repertoire: &Path) -> Vec<PathBuf> {
                 })
         })
         .collect();
-    // `read_dir` ne garantit aucun order : trier rend le choix reproductible.
+    // `read_dir` guarantees no order: sorting makes the choice reproducible.
     v.sort();
     v
 }
@@ -100,8 +100,8 @@ fn images_of(repertoire: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
-    /// Fabrique un repertoire avec les fichiers nommes, et rend son path.
-    fn arbre(names: &[&str]) -> tempfile::TempDir {
+    /// Makes a directory with the named files, and returns its path.
+    fn tree(names: &[&str]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         for name in names {
             let path = dir.path().join(name);
@@ -111,7 +111,7 @@ mod tests {
         dir
     }
 
-    fn trouve(dir: &tempfile::TempDir) -> Option<String> {
+    fn found(dir: &tempfile::TempDir) -> Option<String> {
         match search(&dir.path().join("01 - piste.flac")) {
             Some(ritornello_proto::CoverRef::Path { path }) => {
                 Some(std::path::Path::new(&path).file_name().unwrap().to_string_lossy().into_owned())
@@ -121,60 +121,60 @@ mod tests {
     }
 
     #[test]
-    fn l_ordre_de_preference_gagne_sur_l_ordre_alphabetique() {
-        let dir = arbre(&["01 - piste.flac", "albumart.png", "cover.jpg", "front.jpg"]);
-        assert_eq!(trouve(&dir).as_deref(), Some("cover.jpg"));
+    fn the_preference_order_wins_over_the_alphabetical_order() {
+        let dir = tree(&["01 - piste.flac", "albumart.png", "cover.jpg", "front.jpg"]);
+        assert_eq!(found(&dir).as_deref(), Some("cover.jpg"));
     }
 
     #[test]
-    fn la_casse_ne_compte_pas() {
-        let dir = arbre(&["01 - piste.flac", "Folder.JPG"]);
-        assert_eq!(trouve(&dir).as_deref(), Some("Folder.JPG"));
+    fn case_does_not_matter() {
+        let dir = tree(&["01 - piste.flac", "Folder.JPG"]);
+        assert_eq!(found(&dir).as_deref(), Some("Folder.JPG"));
     }
 
     #[test]
-    fn une_image_unique_sans_nom_reconnaissable_est_prise() {
-        let dir = arbre(&["01 - piste.flac", "scan001.png"]);
-        assert_eq!(trouve(&dir).as_deref(), Some("scan001.png"));
+    fn a_single_image_without_a_recognizable_name_is_taken() {
+        let dir = tree(&["01 - piste.flac", "scan001.png"]);
+        assert_eq!(found(&dir).as_deref(), Some("scan001.png"));
     }
 
     #[test]
-    fn une_image_unique_nommee_comme_un_dos_est_ecartee() {
-        // Sans cette exclusion, on afficherait le dos du boitier. Et se taire
-        // laisse le relai generique prendre la main.
-        for dos in ["back.jpg", "Scan_verso.png", "inlay.jpg", "booklet.png", "cd.jpg"] {
-            let dir = arbre(&["01 - piste.flac", dos]);
-            assert_eq!(trouve(&dir), None, "{dos} ne devrait pas etre retenu");
+    fn a_single_image_named_like_a_back_is_set_aside() {
+        // Without this exclusion, we would show the back of the case. And
+        // staying silent lets the generic relay take over.
+        for back in ["back.jpg", "Scan_verso.png", "inlay.jpg", "booklet.png", "cd.jpg"] {
+            let dir = tree(&["01 - piste.flac", back]);
+            assert_eq!(found(&dir), None, "{back} should not be retained");
         }
     }
 
     #[test]
-    fn deux_images_sans_nom_reconnaissable_ne_tranchent_rien() {
-        let dir = arbre(&["01 - piste.flac", "scan001.png", "scan002.png"]);
-        assert_eq!(trouve(&dir), None);
+    fn two_images_without_a_recognizable_name_settle_nothing() {
+        let dir = tree(&["01 - piste.flac", "scan001.png", "scan002.png"]);
+        assert_eq!(found(&dir), None);
     }
 
     #[test]
-    fn l_exclusion_ne_s_applique_pas_a_la_liste_de_preference() {
-        // `cd` est un pattern d'exclusion, mais un fichier nomme `cover.jpg` est
-        // retenu sans discussion : l'exclusion ne concerne que la regle qui
-        // devine.
-        let dir = arbre(&["01 - piste.flac", "cover.jpg", "back.jpg"]);
-        assert_eq!(trouve(&dir).as_deref(), Some("cover.jpg"));
+    fn the_exclusion_does_not_apply_to_the_preference_list() {
+        // `cd` is an exclusion pattern, but a file named `cover.jpg` is
+        // retained without discussion: the exclusion only concerns the rule
+        // that guesses.
+        let dir = tree(&["01 - piste.flac", "cover.jpg", "back.jpg"]);
+        assert_eq!(found(&dir).as_deref(), Some("cover.jpg"));
     }
 
     #[test]
-    fn un_sous_repertoire_d_artwork_est_visite_sur_un_seul_niveau() {
-        let dir = arbre(&["01 - piste.flac", "Artwork/front.jpg"]);
-        assert_eq!(trouve(&dir).as_deref(), Some("front.jpg"));
-        // Deux niveaux : on ne parcourt pas un NAS pour trouver une image.
-        let profond = arbre(&["01 - piste.flac", "Artwork/haute-def/front.jpg"]);
-        assert_eq!(trouve(&profond), None);
+    fn an_artwork_subdirectory_is_visited_on_a_single_level() {
+        let dir = tree(&["01 - piste.flac", "Artwork/front.jpg"]);
+        assert_eq!(found(&dir).as_deref(), Some("front.jpg"));
+        // Two levels: we do not walk a NAS to find an image.
+        let deep = tree(&["01 - piste.flac", "Artwork/haute-def/front.jpg"]);
+        assert_eq!(found(&deep), None);
     }
 
     #[test]
-    fn le_repertoire_passe_devant_le_sous_repertoire() {
-        let dir = arbre(&["01 - piste.flac", "folder.jpg", "Artwork/cover.jpg"]);
-        assert_eq!(trouve(&dir).as_deref(), Some("folder.jpg"));
+    fn the_directory_comes_before_the_subdirectory() {
+        let dir = tree(&["01 - piste.flac", "folder.jpg", "Artwork/cover.jpg"]);
+        assert_eq!(found(&dir).as_deref(), Some("folder.jpg"));
     }
 }

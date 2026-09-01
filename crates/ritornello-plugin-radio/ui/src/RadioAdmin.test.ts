@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import CountryPicker from './CountryPicker.vue'
 import RadioAdmin from './RadioAdmin.vue'
 
-const CATALOGUE = {
+const CATALOG = {
   btn_add: 'Ajouter', btn_save: 'Enregistrer', btn_search: 'Chercher',
   btn_add_result: '+', saved: 'Enregistré', save_error: 'Échec : ',
   limit_reached: '99 maximum', empty_query: 'Saisir un terme',
@@ -17,21 +17,21 @@ const CATALOGUE = {
   load_error_1: 'Erreur : ', load_error_2: '',
 }
 
-// Prefixe absolu que le shell passe par la prop `base` (requise) : c'est le
-// contract, cette vue ne connait pas le nom sous lequel elle est servie.
+// Absolute prefix the shell passes via the (required) `base` prop: that's
+// the contract, this view does not know the name under which it is served.
 const BASE = '/plugins/radio/'
 
-function reponses(data: unknown) {
+function responses(data: unknown) {
   return vi.fn(async (url: string, init?: RequestInit) => {
     if (init?.method === 'PUT') return new Response(null, { status: 204 })
     return new Response(JSON.stringify(data), { status: 200 })
   })
 }
 
-async function monter(data: unknown = { stations: [], search: [] }) {
-  const spy = reponses(data)
+async function mountLoaded(data: unknown = { stations: [], search: [] }) {
+  const spy = responses(data)
   vi.stubGlobal('fetch', spy)
-  const w = mount(RadioAdmin, { props: { catalog: CATALOGUE, base: BASE } })
+  const w = mount(RadioAdmin, { props: { catalog: CATALOG, base: BASE } })
   await flushPromises()
   return { w, spy }
 }
@@ -39,20 +39,20 @@ async function monter(data: unknown = { stations: [], search: [] }) {
 describe('RadioAdmin', () => {
   beforeEach(() => vi.unstubAllGlobals())
 
-  it('charge les stations triées par présélection', async () => {
-    const { w } = await monter({
+  it('loads stations sorted by preset', async () => {
+    const { w } = await mountLoaded({
       stations: [
         { preset: 2, name: 'B', url: 'http://b' },
         { preset: 1, name: 'A', url: 'http://a' },
       ],
       search: [],
     })
-    const noms = w.findAll('[data-station-name]').map((i) => (i.element as HTMLInputElement).value)
-    expect(noms).toEqual(['A', 'B'])
+    const names = w.findAll('[data-station-name]').map((i) => (i.element as HTMLInputElement).value)
+    expect(names).toEqual(['A', 'B'])
   })
 
-  it('numérote par position et renumérote après suppression', async () => {
-    const { w } = await monter({
+  it('numbers by position and renumbers after removal', async () => {
+    const { w } = await mountLoaded({
       stations: [
         { preset: 1, name: 'A', url: 'http://a' },
         { preset: 2, name: 'B', url: 'http://b' },
@@ -66,35 +66,35 @@ describe('RadioAdmin', () => {
       .toEqual(['B', 'C'])
   })
 
-  it('accepte une dixième station : la borne suit désormais le serveur (1..=99)', async () => {
+  it('accepts a tenth station: the bound now follows the server (1..=99)', async () => {
     const stations = Array.from({ length: 9 }, (_, i) => ({
       preset: i + 1, name: `S${i}`, url: `http://s${i}`,
     }))
-    const { w } = await monter({ stations, search: [] })
+    const { w } = await mountLoaded({ stations, search: [] })
     await w.find('[data-add]').trigger('click')
     expect(w.findAll('[data-station-num]')).toHaveLength(10)
   })
 
-  it('refuse une centième station avec un message', async () => {
+  it('rejects a hundredth station with a message', async () => {
     const stations = Array.from({ length: 99 }, (_, i) => ({
       preset: i + 1, name: `S${i}`, url: `http://s${i}`,
     }))
-    const { w } = await monter({ stations, search: [] })
+    const { w } = await mountLoaded({ stations, search: [] })
     await w.find('[data-add]').trigger('click')
     expect(w.findAll('[data-station-num]')).toHaveLength(99)
     expect(w.text()).toContain('99 maximum')
   })
 
-  it('envoie la présélection déduite de la position à l’enregistrement', async () => {
-    const { w, spy } = await monter({
+  it('sends the preset derived from position on save', async () => {
+    const { w, spy } = await mountLoaded({
       stations: [{ preset: 1, name: 'A', url: 'http://a' }],
       search: [],
     })
     await w.find('[data-add]').trigger('click')
     await w.find('[data-save]').trigger('click')
     await flushPromises()
-    const appel = spy.mock.calls.find((c) => (c[1] as RequestInit)?.method === 'PUT')
-    expect(JSON.parse(String((appel![1] as RequestInit).body))).toEqual({
+    const call = spy.mock.calls.find((c) => (c[1] as RequestInit)?.method === 'PUT')
+    expect(JSON.parse(String((call![1] as RequestInit).body))).toEqual({
       op: 'save',
       stations: [
         { preset: 1, name: 'A', url: 'http://a' },
@@ -103,8 +103,8 @@ describe('RadioAdmin', () => {
     })
   })
 
-  it('recherche dans l’annuaire puis relit les résultats', async () => {
-    const { w, spy } = await monter({
+  it('searches the directory then rereads the results', async () => {
+    const { w, spy } = await mountLoaded({
       stations: [],
       country: 'FR',
       search: [{ name: 'FIP', url: 'http://fip', codec: 'MP3', bitrate: 128, country: 'FR' }],
@@ -120,20 +120,20 @@ describe('RadioAdmin', () => {
     expect(w.text()).toContain('128')
   })
 
-  it('reprend le country mémorisé par le plugin et l’affiche traduit', async () => {
-    // Defaut corrige : le label venait du composant `Select`, qui capture le
-    // texte de l'element selectionne au premier rendu — or `PluginView` monte
-    // l'IHM avec un catalogue **vide**, donc la page affichait la cle de
-    // traduction elle-meme (« country_fr »). Le label est desormais rendu
-    // depuis le code, par `Intl.DisplayNames`.
-    const { w } = await monter({ stations: [], search: [], country: 'DE' })
+  it('picks up the country remembered by the plugin and shows it translated', async () => {
+    // Fixed bug: the label used to come from the `Select` component, which
+    // captures the selected element's text on first render — but
+    // `PluginView` mounts the UI with an **empty** catalog, so the page
+    // displayed the translation key itself ("country_fr"). The label is
+    // now rendered from code, via `Intl.DisplayNames`.
+    const { w } = await mountLoaded({ stations: [], search: [], country: 'DE' })
     expect(w.find('[data-country-open]').text()).toBe('Germany')
   })
 
-  it('affiche « tous les country » quand aucun country n’est mémorisé', async () => {
-    // Chaine vide = choix legitime, et non absence de valeur : c'est ce que le
-    // plugin attend dans `country`.
-    const { w, spy } = await monter({ stations: [], search: [], country: '' })
+  it('shows "all countries" when no country is remembered', async () => {
+    // Empty string = legitimate choice, not absence of value: that's what
+    // the plugin expects in `country`.
+    const { w, spy } = await mountLoaded({ stations: [], search: [], country: '' })
     expect(w.find('[data-country-open]').text()).toBe('Tous')
     await w.find('[data-query]').setValue('fip')
     await w.find('[data-search]').trigger('click')
@@ -144,52 +144,52 @@ describe('RadioAdmin', () => {
     })
   })
 
-  it('ne demande la liste des country qu’à l’ouverture du sélecteur, et une seule fois', async () => {
-    // Simulacre fidèle au plugin : `get_data` ne rend la liste **qu'après**
-    // l'opération `countries`. Un simulacre qui la rendrait dès le montage
-    // masquerait la récupération ; un simulacre qui la rendrait toujours vide
-    // ferait croire à une redemande à chaque ouverture.
-    let recuperee = false
+  it('only requests the country list when the picker opens, and only once', async () => {
+    // A mock faithful to the plugin: `get_data` only renders the list
+    // **after** the `countries` operation. A mock that rendered it right
+    // from mounting would mask the fetch; a mock that always rendered it
+    // empty would give the illusion of a re-fetch on every opening.
+    let fetched = false
     const spy = vi.fn(async (_url: string, init?: RequestInit) => {
       if (init?.method === 'PUT') {
-        if (JSON.parse(String(init.body)).op === 'countries') recuperee = true
+        if (JSON.parse(String(init.body)).op === 'countries') fetched = true
         return new Response(null, { status: 204 })
       }
-      const corps = {
+      const body = {
         stations: [],
         search: [],
-        countries: recuperee ? [{ code: 'BE', stations: 300 }] : [],
+        countries: fetched ? [{ code: 'BE', stations: 300 }] : [],
       }
-      return new Response(JSON.stringify(corps), { status: 200 })
+      return new Response(JSON.stringify(body), { status: 200 })
     })
     vi.stubGlobal('fetch', spy)
-    const w = mount(RadioAdmin, { props: { catalog: CATALOGUE, base: BASE } })
+    const w = mount(RadioAdmin, { props: { catalog: CATALOG, base: BASE } })
     await flushPromises()
 
     const puts = () =>
       spy.mock.calls
         .filter((c) => (c[1] as RequestInit)?.method === 'PUT')
         .map((c) => JSON.parse(String((c[1] as RequestInit).body)).op)
-    // Au chargement de la page, aucun appel : rien ne le justifie tant que
-    // l'utilisateur ne cherche pas à changer de country.
+    // On page load, no call: nothing justifies it as long as the user
+    // isn't trying to change country.
     expect(puts()).toEqual([])
 
-    // `update:open` plutôt qu'un vrai clic : le contenu d'un Dialog reka n'est
-    // monté que lorsqu'il est ouvert, et c'est l'état qui déclenche la
-    // récupération, pas le geste.
+    // `update:open` rather than a real click: a reka Dialog's content is
+    // only mounted once it is open, and it's the state that triggers the
+    // fetch, not the gesture.
     await w.findComponent(Dialog).vm.$emit('update:open', true)
     await flushPromises()
     expect(puts()).toEqual(['countries'])
 
-    // Refermer puis rouvrir ne redemande rien : la liste est mémorisée.
+    // Closing then reopening requests nothing again: the list is remembered.
     await w.findComponent(Dialog).vm.$emit('update:open', false)
     await w.findComponent(Dialog).vm.$emit('update:open', true)
     await flushPromises()
     expect(puts()).toEqual(['countries'])
   })
 
-  it('le country choisi dans le sélecteur part dans la recherche', async () => {
-    const { w, spy } = await monter({
+  it('the country chosen in the picker goes into the search', async () => {
+    const { w, spy } = await mountLoaded({
       stations: [],
       search: [],
       country: '',
@@ -211,8 +211,8 @@ describe('RadioAdmin', () => {
     expect(put).toEqual({ op: 'search', query: 'rock', country: 'BE' })
   })
 
-  it('glisser une station la déplace, et la présélection suit la position', async () => {
-    const { w, spy } = await monter({
+  it('dragging a station moves it, and the preset follows the position', async () => {
+    const { w, spy } = await mountLoaded({
       stations: [
         { preset: 1, name: 'A', url: 'http://a' },
         { preset: 2, name: 'B', url: 'http://b' },
@@ -220,13 +220,13 @@ describe('RadioAdmin', () => {
       ],
       search: [],
     })
-    const lignes = () => w.findAll('[data-station-row]')
-    await lignes()[0]!.trigger('dragstart')
-    await lignes()[2]!.trigger('drop')
-    const noms = w.findAll('[data-station-name]').map((i) => (i.element as HTMLInputElement).value)
-    expect(noms).toEqual(['B', 'C', 'A'])
+    const rows = () => w.findAll('[data-station-row]')
+    await rows()[0]!.trigger('dragstart')
+    await rows()[2]!.trigger('drop')
+    const names = w.findAll('[data-station-name]').map((i) => (i.element as HTMLInputElement).value)
+    expect(names).toEqual(['B', 'C', 'A'])
 
-    // La présélection **est** la position : c'est ce que l'enregistrement envoie.
+    // The preset **is** the position: that's what save sends.
     await w.find('[data-save]').trigger('click')
     await flushPromises()
     const put = spy.mock.calls
@@ -240,29 +240,29 @@ describe('RadioAdmin', () => {
     ])
   })
 
-  it('les boutons monter/descendre déplacent aussi, et sont bornés', async () => {
-    // Le glisser-déposer n'est ni au clavier ni fiable au doigt : ces boutons
-    // sont le chemin accessible, pas un ornement.
-    const { w } = await monter({
+  it('the up/down buttons also move, and are bounded', async () => {
+    // Drag-and-drop is neither keyboard-accessible nor reliable with a
+    // finger: these buttons are the accessible path, not an ornament.
+    const { w } = await mountLoaded({
       stations: [
         { preset: 1, name: 'A', url: 'http://a' },
         { preset: 2, name: 'B', url: 'http://b' },
       ],
       search: [],
     })
-    const noms = () =>
+    const names = () =>
       w.findAll('[data-station-name]').map((i) => (i.element as HTMLInputElement).value)
     await w.findAll('[data-station-down]')[0]!.trigger('click')
-    expect(noms()).toEqual(['B', 'A'])
+    expect(names()).toEqual(['B', 'A'])
     await w.findAll('[data-station-up]')[1]!.trigger('click')
-    expect(noms()).toEqual(['A', 'B'])
-    // Aux extrémités, les boutons sont désactivés.
+    expect(names()).toEqual(['A', 'B'])
+    // At the extremities, the buttons are disabled.
     expect(w.findAll('[data-station-up]')[0]!.attributes('disabled')).toBeDefined()
     expect(w.findAll('[data-station-down]')[1]!.attributes('disabled')).toBeDefined()
   })
 
-  it('une requête vide n’émet rien et affiche le message dédié', async () => {
-    const { w, spy } = await monter()
+  it('an empty query emits nothing and shows the dedicated message', async () => {
+    const { w, spy } = await mountLoaded()
     await w.find('[data-query]').setValue('   ')
     await w.find('[data-search]').trigger('click')
     await flushPromises()
@@ -270,43 +270,43 @@ describe('RadioAdmin', () => {
     expect(w.text()).toContain('Saisir un terme')
   })
 
-  it('vol unique : un second déclenchement pendant une recherche n’émet rien', async () => {
-    // Le SDK sert les requetes d'admin strictement en serie : une seconde
-    // recherche mise en file derriere la premiere depasserait le plafond de
-    // 5 s du coeur, qui repondrait par la phrase traduite de son catalogue
-    // (`plugin_timeout`) plutot qu'un code nu.
-    let debloquer: () => void = () => {}
-    const enCours = new Promise<void>((r) => (debloquer = r))
+  it('single flight: a second trigger during a search emits nothing', async () => {
+    // The SDK serves admin requests strictly in series: a second search
+    // queued behind the first would exceed the core's 5 s cap, which
+    // would answer with the translated sentence from its catalog
+    // (`plugin_timeout`) rather than a bare code.
+    let unblock: () => void = () => {}
+    const inProgress = new Promise<void>((r) => (unblock = r))
     const spy = vi.fn(async (_url: string, init?: RequestInit) => {
       if (init?.method === 'PUT') {
-        await enCours
+        await inProgress
         return new Response(null, { status: 204 })
       }
       return new Response(JSON.stringify({ stations: [], search: [] }), { status: 200 })
     })
     vi.stubGlobal('fetch', spy)
-    const w = mount(RadioAdmin, { props: { catalog: CATALOGUE, base: BASE } })
+    const w = mount(RadioAdmin, { props: { catalog: CATALOG, base: BASE } })
     await flushPromises()
     await w.find('[data-query]').setValue('fip')
     await w.find('[data-search]').trigger('click')
     await w.find('[data-search]').trigger('click')
     await w.find('[data-query]').trigger('keydown', { key: 'Enter' })
     expect(spy.mock.calls.filter((c) => (c[1] as RequestInit)?.method === 'PUT')).toHaveLength(1)
-    debloquer()
+    unblock()
     await flushPromises()
-    // L'etat est rétabli : une nouvelle recherche redevient possible.
+    // The state is restored: a new search becomes possible again.
     await w.find('[data-search]').trigger('click')
     await flushPromises()
     expect(spy.mock.calls.filter((c) => (c[1] as RequestInit)?.method === 'PUT')).toHaveLength(2)
   })
 
-  it('vol unique : l’état est rétabli même après une erreur', async () => {
+  it('single flight: the state is restored even after an error', async () => {
     const spy = vi.fn(async (_url: string, init?: RequestInit) => {
       if (init?.method === 'PUT') return new Response(JSON.stringify({ error: 'annuaire muet' }), { status: 422 })
       return new Response(JSON.stringify({ stations: [], search: [] }), { status: 200 })
     })
     vi.stubGlobal('fetch', spy)
-    const w = mount(RadioAdmin, { props: { catalog: CATALOGUE, base: BASE } })
+    const w = mount(RadioAdmin, { props: { catalog: CATALOG, base: BASE } })
     await flushPromises()
     await w.find('[data-query]').setValue('fip')
     await w.find('[data-search]').trigger('click')
@@ -317,107 +317,107 @@ describe('RadioAdmin', () => {
     expect(spy.mock.calls.filter((c) => (c[1] as RequestInit)?.method === 'PUT')).toHaveLength(2)
   })
 
-  it('adresse ses requêtes sous le préfixe absolu reçu par la prop `base`', async () => {
-    // IMPORTANT 6 de la revue finale. Cette vue appelait `api.get('./api/data')`
-    // en relatif, donc resolu contre l'URL du navigateur et non contre quoi que
-    // ce soit que le contract garantisse : sur `/plugins/radio` (sans slash
-    // final, forme que le routeur du shell acceptait aussi), `./api/data`
-    // resolvait vers `/plugins/api/data` — que le coeur interprete comme le
-    // plugin « api » : 404, table vide et tous les boutons en echec.
-    const spy = reponses({ stations: [{ preset: 1, name: 'A', url: 'http://a' }], search: [] })
+  it('addresses its requests under the absolute prefix received via the `base` prop', async () => {
+    // IMPORTANT 6 from the final review. This view used to call
+    // `api.get('./api/data')` relatively, so resolved against the browser's
+    // URL and not against anything the contract guarantees: on
+    // `/plugins/radio` (without a trailing slash, a form the shell's
+    // router also accepted), `./api/data` resolved to `/plugins/api/data`
+    // — which the core interprets as the "api" plugin: 404, empty table
+    // and every button failing.
+    const spy = responses({ stations: [{ preset: 1, name: 'A', url: 'http://a' }], search: [] })
     vi.stubGlobal('fetch', spy)
-    // Volontairement un prefixe qui n'est **pas** `/plugins/radio/` : le nom
-    // sous lequel un plugin est servi vient de `plugins.toml`, donc du
-    // deploiement. Ce test echouerait si la vue reconstruisait son propre nom
-    // au lieu d'honorer le prefixe recu.
+    // Deliberately a prefix that is **not** `/plugins/radio/`: the name
+    // under which a plugin is served comes from `plugins.toml`, i.e. from
+    // deployment. This test would fail if the view rebuilt its own name
+    // instead of honoring the received prefix.
     const w = mount(RadioAdmin, {
-      props: { catalog: CATALOGUE, base: '/plugins/tuner/' },
+      props: { catalog: CATALOG, base: '/plugins/tuner/' },
     })
     await flushPromises()
     await w.find('[data-save]').trigger('click')
     await flushPromises()
-    // Toutes les requetes, GET comme PUT, partent sur l'URL absolue.
+    // Every request, GET as well as PUT, goes out on the absolute URL.
     expect(spy.mock.calls.length).toBeGreaterThan(1)
-    for (const appel of spy.mock.calls) {
-      expect(appel[0]).toBe('/plugins/tuner/api/data')
+    for (const call of spy.mock.calls) {
+      expect(call[0]).toBe('/plugins/tuner/api/data')
     }
   })
 
-  // --- Garde de chargement en echec (CRITICAL 1 de la revue finale) ---
+  // --- Failed-load guard (CRITICAL 1 from the final review) ---
   //
-  // L'ancienne page terminait son `catch` de chargement par
+  // The old page used to end its load `catch` with
   // `document.querySelectorAll('button').forEach(b => b.disabled = true)`.
-  // Sans ce garde, un GET en echec laisse `stations` vide et « Enregistrer »
-  // actif : le PUT `{op:'save', stations: []}` est accepte par
-  // `Stations::validate` (qui itere sur un vecteur vide) et **ecrase
-  // stations.toml** — toutes les preselections perdues, sans confirmation.
-  // Atteignable : le plugin sert les requetes d'admin strictement en serie
-  // avec un budget annuaire de 4 s contre le plafond de 5 s du coeur, donc un
-  // chargement concurrent d'une recherche peut faire echouer le GET alors
-  // qu'un PUT ulterieur reussira (un redemarrage du plugin entre les deux
-  // produit le meme effet).
-  function chargementEnEchec() {
+  // Without this guard, a failed GET leaves `stations` empty and "Save"
+  // active: the PUT `{op:'save', stations: []}` is accepted by
+  // `Stations::validate` (which iterates over an empty vector) and
+  // **overwrites stations.toml** — every preset lost, with no
+  // confirmation. Reachable: the plugin serves admin requests strictly in
+  // series with a 4 s directory budget against the core's 5 s cap, so a
+  // concurrent load during a search can make the GET fail while a later
+  // PUT succeeds (a plugin restart between the two produces the same
+  // effect).
+  function failedLoad() {
     const spy = vi.fn(async (_url: string, init?: RequestInit) => {
       if (init?.method === 'PUT') return new Response(null, { status: 204 })
-      // Le GET initial echoue : `api.get` leve sur un statut non-ok.
-      return new Response('indisponible', { status: 503 })
+      // The initial GET fails: `api.get` throws on a non-ok status.
+      return new Response('unavailable', { status: 503 })
     })
     vi.stubGlobal('fetch', spy)
     return spy
   }
 
-  it('chargement en échec : les trois boutons d’action sont désactivés', async () => {
-    const spy = chargementEnEchec()
-    const w = mount(RadioAdmin, { props: { catalog: CATALOGUE, base: BASE } })
+  it('failed load: the three action buttons are disabled', async () => {
+    const spy = failedLoad()
+    const w = mount(RadioAdmin, { props: { catalog: CATALOG, base: BASE } })
     await flushPromises()
     expect(w.text()).toContain('Erreur : ')
-    for (const marqueur of ['[data-add]', '[data-save]', '[data-search]']) {
-      expect((w.find(marqueur).element as HTMLButtonElement).disabled, marqueur).toBe(true)
+    for (const marker of ['[data-add]', '[data-save]', '[data-search]']) {
+      expect((w.find(marker).element as HTMLButtonElement).disabled, marker).toBe(true)
     }
-    // Rien n'est parti : le chargement a echoue, aucune ecriture ne doit
-    // avoir eu lieu du seul fait du montage.
+    // Nothing went out: the load failed, no write should have happened
+    // from mounting alone.
     expect(spy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'PUT')).toBe(false)
   })
 
-  it('chargement en échec : un clic sur « Enregistrer » n’émet aucune requête', async () => {
-    const spy = chargementEnEchec()
-    const w = mount(RadioAdmin, { props: { catalog: CATALOGUE, base: BASE } })
+  it('failed load: a click on "Save" emits no request', async () => {
+    const spy = failedLoad()
+    const w = mount(RadioAdmin, { props: { catalog: CATALOG, base: BASE } })
     await flushPromises()
-    // `dispatchEvent` plutot que le `trigger()` de VTU : ce dernier renonce
-    // de lui-meme sur un element `disabled`, ce qui ferait passer ce test
-    // sans qu'aucune garde ne soit exercee dans le code de la vue. On
-    // dispatche donc le clic directement, ce qui appelle bien le gestionnaire
-    // `@click` : c'est le **retour anticipe** d'`save()` qui est
-    // teste ici, pas l'etat visuel du bouton (ceinture et bretelles : la
-    // protection ne doit pas reposer sur le seul attribut `disabled`).
+    // `dispatchEvent` rather than VTU's `trigger()`: the latter gives up
+    // on its own on a `disabled` element, which would make this test pass
+    // without exercising any guard in the view's code. We dispatch the
+    // click directly instead, which does call the `@click` handler: it is
+    // `save()`'s **early return** that is tested here, not the button's
+    // visual state (belt and braces: the protection must not rest on the
+    // `disabled` attribute alone).
     w.find('[data-save]').element.dispatchEvent(new Event('click'))
     await flushPromises()
     expect(spy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'PUT')).toBe(false)
   })
 
-  it('chargement en échec : la touche Entrée dans la recherche n’émet aucune requête et garde le message d’erreur', async () => {
-    // Correction repliee (revue finale) : `:disabled` sur le bouton
-    // « Chercher » ne protege pas `@keydown.enter="search"`, qui
-    // atteignait encore `search()`. Une recherche reussie y ferait
-    // `message.value = ''`, effacant le message d'erreur de chargement
-    // alors que `loadFailed` reste vrai -- la page paraitrait saine
-    // alors qu'elle est inerte. `search()` doit donc porter le meme
-    // retour anticipe qu'`save()`.
-    const spy = chargementEnEchec()
-    const w = mount(RadioAdmin, { props: { catalog: CATALOGUE, base: BASE } })
+  it('failed load: the Enter key in search emits no request and keeps the error message', async () => {
+    // Fix folded in (final review): `:disabled` on the "Chercher" button
+    // does not protect `@keydown.enter="search"`, which still reached
+    // `search()`. A successful search there would do `message.value = ''`,
+    // erasing the load error message while `loadFailed` stays true -- the
+    // page would look healthy while it is inert. `search()` must therefore
+    // carry the same early return as `save()`.
+    const spy = failedLoad()
+    const w = mount(RadioAdmin, { props: { catalog: CATALOG, base: BASE } })
     await flushPromises()
     expect(w.text()).toContain('Erreur : ')
     await w.find('[data-query]').setValue('fip')
     await w.find('[data-query]').trigger('keydown', { key: 'Enter' })
     await flushPromises()
     expect(spy.mock.calls.some((c) => (c[1] as RequestInit)?.method === 'PUT')).toBe(false)
-    // Le message d'erreur de chargement subsiste : il n'a pas ete efface
-    // par un `search()` qui aurait quand meme tourne.
+    // The load error message remains: it was not erased by a `search()`
+    // that would have run anyway.
     expect(w.text()).toContain('Erreur : ')
   })
 
-  it('ajoute un résultat de recherche dans la table en cours d’édition', async () => {
-    const { w } = await monter({
+  it('adds a search result to the table being edited', async () => {
+    const { w } = await mountLoaded({
       stations: [],
       search: [{ name: 'FIP', url: 'http://fip', codec: 'MP3', bitrate: 128, country: 'FR' }],
     })

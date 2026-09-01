@@ -2,118 +2,118 @@ import { flushPromises } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mountAdmin } from './harness'
 
-const TROIS = [
+const THREE = [
   { path: 'Albums/Jazz/01.mp3', name: 'Track 1', duration_s: 245, missing: false },
   { path: 'Albums/Jazz/02.mp3', name: 'Track 2', duration_s: 0, missing: true },
   { path: 'Albums/Jazz/03.mp3', name: 'Track 3', duration_s: 3725, missing: false },
 ]
 
 /**
- * Simulacre du flux poussé du cœur : jsdom n'a pas d'`EventSource`.
+ * Stand-in for the core's pushed stream: jsdom has no `EventSource`.
  *
- * À installer **avant** le montage — la page s'y abonne dans `onMounted`, et un
- * simulacre posé après ne serait jamais vu.
+ * Must be installed **before** mounting — the page subscribes to it in
+ * `onMounted`, and a stand-in put in place afterwards would never be seen.
  */
-function pousseurDeLecteur() {
-  const relais: { send: ((e: MessageEvent) => void) | null } = { send: null }
+function playerStream() {
+  const relay: { send: ((e: MessageEvent) => void) | null } = { send: null }
   vi.stubGlobal(
     'EventSource',
     class {
       set onmessage(f: (e: MessageEvent) => void) {
-        relais.send = f
+        relay.send = f
       }
       close(): void {}
     },
   )
   return {
-    pousse: (state: unknown) => {
-      relais.send?.({ data: JSON.stringify(state) } as MessageEvent)
+    push: (state: unknown) => {
+      relay.send?.({ data: JSON.stringify(state) } as MessageEvent)
     },
   }
 }
 
-describe('volet de la liste en cours', () => {
+describe('current queue pane', () => {
   beforeEach(() => vi.unstubAllGlobals())
 
-  it('marque une piste introuvable sans jamais la masquer', async () => {
-    // Régression encodée : une liste qui rétrécit toute seule est un défaut
-    // qu'on met des mois à attribuer. Un partage démonté, lui, se diagnostique
-    // en une seconde tant que les tracks restent affichées, signalées.
-    const { w } = await mountAdmin({ playlist: TROIS })
+  it('flags a missing track without ever hiding it', async () => {
+    // Encoded regression: a list that shrinks on its own is a defect that
+    // takes months to attribute. An unmounted share, on the other hand, is
+    // diagnosed in one second as long as the tracks stay displayed, flagged.
+    const { w } = await mountAdmin({ playlist: THREE })
     expect(w.findAll('[data-track-row]')).toHaveLength(3)
     expect(w.findAll('[data-track-missing]')).toHaveLength(1)
     expect(w.findAll('[data-track-name]')[1]!.text()).toBe('Track 2')
-    // Le path complet est dans l'infobulle : c'est lui qui dit *quel*
-    // fichier manque, le nom ne suffit pas à le retrouver sur le partage.
+    // The full path is in the tooltip: it is what says *which* file is
+    // missing, the name alone is not enough to find it back on the share.
     expect(w.findAll('[data-track-missing]')[0]!.attributes('title')).toBe('Albums/Jazz/02.mp3')
   })
 
-  it('n’accuse pas une piste dont le montage ne répondait pas', async () => {
-    // `missing: null` veut dire « on ne sait pas » : le plugin n'a pas pu
-    // regarder, son disjoncteur ayant coupé sur un partage muet. Afficher
-    // « introuvable » accuserait le fichier d'une panne qui est celle du
-    // montage — et enverrait l'utilisateur search un fichier qui est là.
+  it('does not blame a track whose mount was not responding', async () => {
+    // `missing: null` means "unknown": the plugin could not check, its
+    // circuit breaker having tripped on a silent share. Displaying "missing"
+    // would blame the file for a failure that is the mount's — and would
+    // send the user searching for a file that is right there.
     const { w } = await mountAdmin({
-      playlist: [{ path: '/mnt/ritornello/nas/a.mp3', name: 'Sur le NAS', duration_s: 0, missing: null }],
+      playlist: [{ path: '/mnt/ritornello/nas/a.mp3', name: 'On the NAS', duration_s: 0, missing: null }],
       unresponsive: ['/mnt/ritornello/nas'],
     })
     expect(w.findAll('[data-track-missing]')).toHaveLength(0)
-    const inconnu = w.findAll('[data-track-unknown]')
-    expect(inconnu).toHaveLength(1)
-    expect(inconnu[0]!.attributes('title')).toBe('/mnt/ritornello/nas/a.mp3')
-    // La piste reste là, comme une piste introuvable : ce sont les listes qui
-    // rétrécissent en silence qui coûtent des mois à diagnostiquer.
+    const unknown = w.findAll('[data-track-unknown]')
+    expect(unknown).toHaveLength(1)
+    expect(unknown[0]!.attributes('title')).toBe('/mnt/ritornello/nas/a.mp3')
+    // The track stays there, like a missing track: it is lists that shrink
+    // silently that cost months to diagnose.
     expect(w.findAll('[data-track-row]')).toHaveLength(1)
   })
 
-  it('rend les durées, tiret compris pour une durée inconnue', async () => {
-    const { w } = await mountAdmin({ playlist: TROIS })
-    const texte = w.find('[data-volet-liste]').text()
-    expect(texte).toContain('4:05')
-    expect(texte).toContain('1:02:05')
-    expect(texte).toContain('—')
+  it('renders durations, including a dash for an unknown one', async () => {
+    const { w } = await mountAdmin({ playlist: THREE })
+    const text = w.find('[data-playlist-pane]').text()
+    expect(text).toContain('4:05')
+    expect(text).toContain('1:02:05')
+    expect(text).toContain('—')
   })
 
-  it('réordonne, retire et vide par indices absolus', async () => {
-    const { w, s } = await mountAdmin({ playlist: TROIS })
+  it('reorders, removes and clears using absolute indices', async () => {
+    const { w, s } = await mountAdmin({ playlist: THREE })
     await w.findAll('[data-track-down]')[0]!.trigger('click')
     await flushPromises()
-    expect(s.putsDe('move')).toEqual([{ op: 'move', from: 0, to: 1 }])
+    expect(s.putsOf('move')).toEqual([{ op: 'move', from: 0, to: 1 }])
 
     await w.findAll('[data-track-remove]')[2]!.trigger('click')
     await flushPromises()
-    expect(s.putsDe('remove')).toEqual([{ op: 'remove', index: 2 }])
+    expect(s.putsOf('remove')).toEqual([{ op: 'remove', index: 2 }])
 
     await w.find('[data-clear]').trigger('click')
     await flushPromises()
-    expect(s.putsDe('clear')).toEqual([{ op: 'clear' }])
+    expect(s.putsOf('clear')).toEqual([{ op: 'clear' }])
   })
 
-  it('borne les flèches aux extrémités de la liste', async () => {
-    const { w } = await mountAdmin({ playlist: TROIS })
+  it('bounds the arrows at the ends of the list', async () => {
+    const { w } = await mountAdmin({ playlist: THREE })
     expect((w.findAll('[data-track-up]')[0]!.element as HTMLButtonElement).disabled).toBe(true)
     expect((w.findAll('[data-track-down]')[2]!.element as HTMLButtonElement).disabled).toBe(true)
   })
 
-  it('clear pendant la lecture demande aussi l’arrêt au cœur', async () => {
-    // Défaut de conception signalé : la moitié Admin ne peut rien demander à
-    // mpv — les notifications du SDK sont sans action — donc clear laissait la
-    // musique continuer sur une liste désormais vide. C'est la page qui demande
-    // l'arrêt, par la voie de la télécommande : un geste de l'utilisateur.
-    const { w, s } = await mountAdmin({ playlist: TROIS, playing: true })
+  it('clearing during playback also asks the core to stop', async () => {
+    // Reported design defect: the Admin half cannot ask mpv anything — SDK
+    // notifications carry no action — so clearing left the music playing on
+    // a now-empty list. It is the page that requests the stop, through the
+    // same channel as the remote: a user gesture.
+    const { w, s } = await mountAdmin({ playlist: THREE, playing: true })
     await w.find('[data-clear]').trigger('click')
     await flushPromises()
-    expect(s.putsDe('clear')).toHaveLength(1)
+    expect(s.putsOf('clear')).toHaveLength(1)
     expect(s.urls()).toContain('/api/command')
   })
 
-  it('demande l’arrêt même si la page croyait à tort que rien ne jouait', async () => {
-    // Fragilité mesurée : la page ne sonde pas en continu, donc `playing` peut
-    // être périmé. Le lire avant le vidage faisait taire la demande d'arrêt sans
-    // que rien ne le signale. On lit donc l'état **rendu par le vidage**, qui ne
-    // touche pas à `playing`.
-    const { w, s } = await mountAdmin({ playlist: TROIS, playing: false })
-    s.surPut = () => {
+  it('requests the stop even when the page wrongly believed nothing was playing', async () => {
+    // Measured fragility: the page does not poll continuously, so `playing`
+    // can be stale. Reading it before clearing silenced the stop request
+    // without anything signalling it. So the state read is the one
+    // **rendered by the clearing**, which does not touch `playing`.
+    const { w, s } = await mountAdmin({ playlist: THREE, playing: false })
+    s.onPut = () => {
       s.data.playing = true
     }
     await w.find('[data-clear]').trigger('click')
@@ -121,18 +121,19 @@ describe('volet de la liste en cours', () => {
     expect(s.urls()).toContain('/api/command')
   })
 
-  it('demande l’arrêt quand le cœur joue cette source, même si le plugin l’ignore', async () => {
-    // Défaut signalé : au démarrage, le drapeau du plugin reste à faux — mpv
-    // passe brièvement inactif avant de load le premier fichier, et le cœur
-    // envoie alors un `stop()` qui l'efface. La source active, elle, vient du
-    // **cœur** par le flux poussé, et ne peut donc pas dériver.
+  it('requests the stop when the core is playing this source, even if the plugin does not know it', async () => {
+    // Reported defect: at startup, the plugin's flag stays false — mpv
+    // briefly goes idle before loading the first file, and the core then
+    // sends a `stop()` that clears it. The active source, on the other hand,
+    // comes from the **core** via the pushed stream, and therefore cannot
+    // drift.
     //
-    // Le nom attendu est celui de `BASE` (`mediatheque`), et non « files » :
-    // c'est le déploiement qui nomme un plugin, et la page le déduit de son
-    // préfixe au lieu de l'écrire en dur.
-    const flux = pousseurDeLecteur()
-    const { w, s } = await mountAdmin({ playlist: TROIS, playing: false })
-    flux.pousse({ source: 'mediatheque' })
+    // The expected name is that of `BASE` (`mediatheque`), not "files": it
+    // is the deployment that names a plugin, and the page derives it from
+    // its own prefix instead of hardcoding it.
+    const stream = playerStream()
+    const { w, s } = await mountAdmin({ playlist: THREE, playing: false })
+    stream.push({ source: 'mediatheque' })
     await flushPromises()
 
     await w.find('[data-clear]').trigger('click')
@@ -140,12 +141,12 @@ describe('volet de la liste en cours', () => {
     expect(s.urls()).toContain('/api/command')
   })
 
-  it('ne coupe rien quand le cœur joue une autre source', async () => {
-    // Garde-fou : clear une liste de fichiers pendant que la radio joue ne doit
-    // surtout pas la faire taire.
-    const flux = pousseurDeLecteur()
-    const { w, s } = await mountAdmin({ playlist: TROIS, playing: false })
-    flux.pousse({ source: 'radio' })
+  it('cuts nothing when the core is playing another source', async () => {
+    // Guard rail: clearing a files list while the radio is playing must not
+    // silence it.
+    const stream = playerStream()
+    const { w, s } = await mountAdmin({ playlist: THREE, playing: false })
+    stream.push({ source: 'radio' })
     await flushPromises()
 
     await w.find('[data-clear]').trigger('click')
@@ -153,133 +154,134 @@ describe('volet de la liste en cours', () => {
     expect(s.urls()).not.toContain('/api/command')
   })
 
-  it('clear une liste à l’arrêt ne coupe pas la source qui joue', async () => {
-    // Sans cette condition, clear une liste de fichiers inactive couperait la
-    // radio — le `Stop` du cœur s'applique à la source active, pas à la nôtre.
-    const { w, s } = await mountAdmin({ playlist: TROIS, playing: false })
+  it('clearing an idle list does not cut the source that is playing', async () => {
+    // Without this condition, clearing an inactive files list would cut the
+    // radio — the core's `Stop` applies to the active source, not to ours.
+    const { w, s } = await mountAdmin({ playlist: THREE, playing: false })
     await w.find('[data-clear]').trigger('click')
     await flushPromises()
-    expect(s.putsDe('clear')).toHaveLength(1)
+    expect(s.putsOf('clear')).toHaveLength(1)
     expect(s.urls()).not.toContain('/api/command')
   })
 
-  it('réordonne au glisser-déposer, comme la grille des stations', async () => {
-    const { w, s } = await mountAdmin({ playlist: TROIS })
-    const lignes = w.findAll('[data-track-row]')
-    await lignes[2]!.trigger('dragstart')
-    await lignes[0]!.trigger('drop')
+  it('reorders via drag-and-drop, like the station grid', async () => {
+    const { w, s } = await mountAdmin({ playlist: THREE })
+    const rows = w.findAll('[data-track-row]')
+    await rows[2]!.trigger('dragstart')
+    await rows[0]!.trigger('drop')
     await flushPromises()
-    expect(s.putsDe('move')).toEqual([{ op: 'move', from: 2, to: 0 }])
+    expect(s.putsOf('move')).toEqual([{ op: 'move', from: 2, to: 0 }])
   })
 
-  it('déposer une piste sur elle-même ne demande rien', async () => {
-    // Sinon le moindre clic un peu appuyé sur une ligne déclencherait un
-    // déplacement sans effet, et une relecture complète de l'état avec.
-    const { w, s } = await mountAdmin({ playlist: TROIS })
-    const lignes = w.findAll('[data-track-row]')
-    await lignes[1]!.trigger('dragstart')
-    await lignes[1]!.trigger('drop')
+  it('dropping a track onto itself requests nothing', async () => {
+    // Otherwise the slightest heavy-handed click on a row would trigger a
+    // no-op move, and a full state re-read along with it.
+    const { w, s } = await mountAdmin({ playlist: THREE })
+    const rows = w.findAll('[data-track-row]')
+    await rows[1]!.trigger('dragstart')
+    await rows[1]!.trigger('drop')
     await flushPromises()
-    expect(s.putsDe('move')).toEqual([])
+    expect(s.putsOf('move')).toEqual([])
   })
 
-  it('déposer sans avoir rien pris ne demande rien', async () => {
-    const { w, s } = await mountAdmin({ playlist: TROIS })
+  it('dropping without having picked anything up requests nothing', async () => {
+    const { w, s } = await mountAdmin({ playlist: THREE })
     await w.findAll('[data-track-row]')[0]!.trigger('drop')
     await flushPromises()
-    expect(s.putsDe('move')).toEqual([])
+    expect(s.putsOf('move')).toEqual([])
   })
 
-  it('les rangs envoyés au plugin sont absolus, pas ceux de la page', async () => {
-    // Au-delà de deux cents tracks la liste est paginée : confondre le rang
-    // affiché avec l'index réel déplacerait une tout autre piste.
-    const longue = Array.from({ length: 250 }, (_, i) => ({
+  it('the ranks sent to the plugin are absolute, not the pages own', async () => {
+    // Beyond two hundred tracks the list is paginated: confusing the
+    // displayed rank with the real index would move an entirely different
+    // track.
+    const long = Array.from({ length: 250 }, (_, i) => ({
       path: `/m/${i}.mp3`,
       name: `${i}`,
       duration_s: 0,
       missing: false,
     }))
-    const { w, s } = await mountAdmin({ playlist: longue })
+    const { w, s } = await mountAdmin({ playlist: long })
     await w.find('[data-page-next]').trigger('click')
     await flushPromises()
-    const lignes = w.findAll('[data-track-row]')
-    await lignes[1]!.trigger('dragstart')
-    await lignes[0]!.trigger('drop')
+    const rows = w.findAll('[data-track-row]')
+    await rows[1]!.trigger('dragstart')
+    await rows[0]!.trigger('drop')
     await flushPromises()
-    expect(s.putsDe('move')).toEqual([{ op: 'move', from: 101, to: 100 }])
+    expect(s.putsOf('move')).toEqual([{ op: 'move', from: 101, to: 100 }])
   })
 
-  it('affiche ce qu’un m3u chargé n’a pas su retrouver', async () => {
-    // Sans cet encart, la liste chargée est simplement plus courte que le
-    // fichier, sans que rien ne le dise.
+  it('displays what a loaded m3u could not resolve', async () => {
+    // Without this box, the loaded list is simply shorter than the file,
+    // with nothing saying so.
     const { w } = await mountAdmin({
-      playlist: TROIS,
-      unresolved: ['Albums/Rock/perdu.mp3', 'Albums/Rock/aussi.mp3'],
+      playlist: THREE,
+      unresolved: ['Albums/Rock/lost.mp3', 'Albums/Rock/also.mp3'],
     })
-    const encart = w.find('[data-unresolved]')
-    expect(encart.text()).toContain('2 entrées non retrouvées')
-    expect(encart.findAll('[data-unresolved-row]').map((r) => r.text())).toEqual([
-      'Albums/Rock/perdu.mp3',
-      'Albums/Rock/aussi.mp3',
+    const box = w.find('[data-unresolved]')
+    expect(box.text()).toContain('2 entries could not be found')
+    expect(box.findAll('[data-unresolved-row]').map((r) => r.text())).toEqual([
+      'Albums/Rock/lost.mp3',
+      'Albums/Rock/also.mp3',
     ])
   })
 
-  it('n’affiche pas d’encart quand tout a été résolu', async () => {
-    const { w } = await mountAdmin({ playlist: TROIS })
+  it('shows no box when everything was resolved', async () => {
+    const { w } = await mountAdmin({ playlist: THREE })
     expect(w.find('[data-unresolved]').exists()).toBe(false)
   })
 
-  it('pagine au-delà de deux cents tracks, sans en perdre aucune', async () => {
-    // Rendre plusieurs milliers de lignes d'un coup fige l'onglet plusieurs
-    // secondes sur le navigateur d'un Raspberry Pi.
-    const longue = Array.from({ length: 250 }, (_, i) => ({
+  it('paginates beyond two hundred tracks, without losing any', async () => {
+    // Rendering several thousand rows at once freezes the tab for several
+    // seconds on a Raspberry Pi's browser.
+    const long = Array.from({ length: 250 }, (_, i) => ({
       path: `p/${i}.mp3`,
       name: `Track ${i}`,
       duration_s: 100,
       missing: false,
     }))
-    const { w } = await mountAdmin({ playlist: longue })
+    const { w } = await mountAdmin({ playlist: long })
     expect(w.findAll('[data-track-row]')).toHaveLength(100)
-    expect(w.find('[data-page-label]').text()).toBe('1–100 sur 250')
+    expect(w.find('[data-page-label]').text()).toBe('1–100 of 250')
     expect(w.findAll('[data-track-num]')[0]!.text()).toBe('1')
 
     await w.find('[data-page-next]').trigger('click')
     await w.find('[data-page-next]').trigger('click')
-    // Dernière page : les cinquante restantes, numérotées depuis leur vrai rang.
+    // Last page: the remaining fifty, numbered from their real rank.
     expect(w.findAll('[data-track-row]')).toHaveLength(50)
-    expect(w.find('[data-page-label]').text()).toBe('201–250 sur 250')
+    expect(w.find('[data-page-label]').text()).toBe('201–250 of 250')
     expect(w.findAll('[data-track-num]')[0]!.text()).toBe('201')
     expect((w.find('[data-page-next]').element as HTMLButtonElement).disabled).toBe(true)
   })
 
-  it('ouvre la liste paginée sur la page de la piste en cours', async () => {
-    // Arriver sur la page 1 d'une liste de mille titres alors que le player en
-    // est au 350e n'aide personne.
-    const longue = Array.from({ length: 1000 }, (_, i) => ({
+  it('opens the paginated list on the page of the current track', async () => {
+    // Landing on page 1 of a thousand-title list while the player is at the
+    // 350th helps no one.
+    const long = Array.from({ length: 1000 }, (_, i) => ({
       path: `p/${i}.mp3`,
       name: `Track ${i}`,
       duration_s: 100,
       missing: false,
     }))
-    const { w } = await mountAdmin({ playlist: longue, index: 349 })
-    expect(w.find('[data-page-label]').text()).toBe('301–400 sur 1000')
+    const { w } = await mountAdmin({ playlist: long, index: 349 })
+    expect(w.find('[data-page-label]').text()).toBe('301–400 of 1000')
   })
 
-  it('ne pagine pas une liste courte', async () => {
-    const { w } = await mountAdmin({ playlist: TROIS })
+  it('does not paginate a short list', async () => {
+    const { w } = await mountAdmin({ playlist: THREE })
     expect(w.find('[data-page-label]').exists()).toBe(false)
   })
 
-  it('enregistre la liste sous un nom et une destination', async () => {
+  it('saves the list under a name and a destination', async () => {
     const { w, s } = await mountAdmin({
-      playlist: TROIS,
+      playlist: THREE,
       roots: [
         { name: 'nas', kind: 'smb', host: 'h', share: 's', writable: true },
-        { name: 'lecture-seule', kind: 'smb', host: 'h', share: 's', writable: false },
+        { name: 'read-only', kind: 'smb', host: 'h', share: 's', writable: false },
       ],
     })
-    // Seules les racines **inscriptibles** sont proposées : offrir un partage
-    // monté en lecture seule ne produirait qu'un refus du plugin.
+    // Only the **writable** roots are offered: offering a share mounted
+    // read-only would only produce a refusal from the plugin.
     const options = w.findAll('[data-playlist-where] option').map((o) => o.attributes('value'))
     expect(options).toEqual(['internal', 'nas'])
 
@@ -287,22 +289,22 @@ describe('volet de la liste en cours', () => {
     await w.find('[data-playlist-where]').setValue('nas')
     await w.find('[data-save-playlist]').trigger('click')
     await flushPromises()
-    expect(s.putsDe('save_playlist')).toEqual([
+    expect(s.putsOf('save_playlist')).toEqual([
       { op: 'save_playlist', name: 'Jazz', where: 'nas' },
     ])
   })
 
-  it('n’enregistre rien sans nom de liste', async () => {
-    const { w, s } = await mountAdmin({ playlist: TROIS })
+  it('saves nothing without a list name', async () => {
+    const { w, s } = await mountAdmin({ playlist: THREE })
     await w.find('[data-playlist-name]').setValue('   ')
     await w.find('[data-save-playlist]').trigger('click')
     await flushPromises()
-    expect(s.putsDe('save_playlist')).toHaveLength(0)
+    expect(s.putsOf('save_playlist')).toHaveLength(0)
   })
 
-  it('charge une liste enregistrée depuis son emplacement d’origine', async () => {
-    // Le couple nom + emplacement est ce qui identifie une liste : deux
-    // « Jazz » peuvent coexister, l'un interne, l'autre sur le partage.
+  it('loads a saved list from its original location', async () => {
+    // The name + location pair is what identifies a list: two "Jazz" lists
+    // can coexist, one internal, the other on the share.
     const { w, s } = await mountAdmin({
       saved: [
         { name: 'Jazz', where: 'internal' },
@@ -310,20 +312,20 @@ describe('volet de la liste en cours', () => {
       ],
     })
     expect(w.findAll('[data-saved-pick] option').map((o) => o.text().trim())).toEqual([
-      'Jazz — stockage interne',
+      'Jazz — internal storage',
       'Jazz — nas',
     ])
     await w.find('[data-saved-pick]').setValue('1')
     await w.find('[data-load-playlist]').trigger('click')
     await flushPromises()
-    expect(s.putsDe('load_playlist')).toEqual([
+    expect(s.putsOf('load_playlist')).toEqual([
       { op: 'load_playlist', name: 'Jazz', where: 'nas' },
     ])
   })
 
-  it('sans liste enregistrée, le volet le dit', async () => {
+  it('says so when there is no saved list', async () => {
     const { w } = await mountAdmin()
-    expect(w.find('[data-no-saved]').text()).toBe('Aucune liste enregistrée')
-    expect(w.find('[data-empty-playlist]').text()).toBe('Liste vide')
+    expect(w.find('[data-no-saved]').text()).toBe('No saved playlist')
+    expect(w.find('[data-empty-playlist]').text()).toBe('Empty queue')
   })
 })

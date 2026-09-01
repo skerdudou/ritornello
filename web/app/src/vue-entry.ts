@@ -1,6 +1,6 @@
-// Reexport de Vue, bati a part sous un nom stable (`assets/vue.js`) pour
-// etre la cible de l'import map. Tous les bundles (shell, kit, modules de
-// plugin) marquent `vue` comme externe et le resolvent ici : une seule
-// instance de Vue vit dans la page, donc une seule reactivite et un seul
-// arbre de `provide`/`inject`.
+// Vue re-export, built separately under a stable name (`assets/vue.js`) to
+// be the import map's target. Every bundle (shell, kit, plugin modules)
+// marks `vue` as external and resolves it here: a single Vue instance
+// lives in the page, hence a single reactivity system and a single
+// `provide`/`inject` tree.
 export * from 'vue'

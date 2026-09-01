@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { countryName, displayableCountries, ALL_COUNTRIES } from './country'
 
-const LISTE = [
+const LIST = [
   { code: 'DE', stations: 6081 },
   { code: 'FR', stations: 2746 },
   { code: 'BE', stations: 300 },
@@ -9,57 +9,59 @@ const LISTE = [
 ]
 
 describe('countryName', () => {
-  it('rend le nom du country dans la langue demandee', () => {
-    // C'est ce qui remplace une table de 241 country a traduire dans chaque pack.
+  it('renders the countrys name in the requested language', () => {
+    // This is what replaces a 241-country table to translate in every pack.
     expect(countryName('FR', 'fr')).toBe('France')
     expect(countryName('DE', 'fr')).toBe('Allemagne')
     expect(countryName('DE', 'en')).toBe('Germany')
-    // La casse et les blancs de l'annuaire ne doivent pas gener.
+    // Case and whitespace from the directory must not get in the way.
     expect(countryName(' be ', 'fr')).toBe('Belgique')
   })
 
-  it('retombe sur le code plutot que de disparaitre', () => {
-    // Un code inconnu du moteur doit rester selectionnable : l'annuaire en
-    // renvoie ce qu'il veut, et une entree sans label serait pire qu'un code.
+  it('falls back to the code rather than disappearing', () => {
+    // A code unknown to the engine must stay selectable: the directory
+    // returns whatever it wants, and an entry with no label would be
+    // worse than a code.
     //
-    // `QQ` et non `ZZ` : ce dernier est un code ISO **valide** (« region
-    // inconnue »), que le moteur traduit — il ne sonde donc pas le repli.
+    // `QQ` and not `ZZ`: the latter is a **valid** ISO code ("unknown
+    // region"), which the engine translates — so it does not exercise the
+    // fallback.
     expect(countryName('QQ', 'fr')).toBe('QQ')
     expect(countryName('', 'fr')).toBe('')
   })
 })
 
 describe('displayableCountries', () => {
-  it('trie par nom lisible et non par code', () => {
-    // « Allemagne » se cherche a la lettre A, pas a DE.
-    const noms = displayableCountries(LISTE, '', 'fr').map((p) => p.nom)
-    expect(noms).toEqual(['Allemagne', 'Belgique', 'États-Unis', 'France'])
+  it('sorts by readable name, not by code', () => {
+    // "Allemagne" is searched under the letter A, not DE.
+    const names = displayableCountries(LIST, '', 'fr').map((p) => p.name)
+    expect(names).toEqual(['Allemagne', 'Belgique', 'États-Unis', 'France'])
   })
 
-  it('filter sur le nom, sans se soucier des accents ni de la casse', () => {
-    expect(displayableCountries(LISTE, 'etats', 'fr').map((p) => p.code)).toEqual(['US'])
-    expect(displayableCountries(LISTE, 'ALLEM', 'fr').map((p) => p.code)).toEqual(['DE'])
-    expect(displayableCountries(LISTE, 'gi', 'fr').map((p) => p.code)).toEqual(['BE'])
+  it('filters on the name, regardless of accents or case', () => {
+    expect(displayableCountries(LIST, 'etats', 'fr').map((p) => p.code)).toEqual(['US'])
+    expect(displayableCountries(LIST, 'ALLEM', 'fr').map((p) => p.code)).toEqual(['DE'])
+    expect(displayableCountries(LIST, 'gi', 'fr').map((p) => p.code)).toEqual(['BE'])
   })
 
-  it('filter aussi sur le code, qu on tape quand on le connait', () => {
-    expect(displayableCountries(LISTE, 'fr', 'fr').map((p) => p.code)).toEqual(['FR'])
-    expect(displayableCountries(LISTE, 'us', 'fr').map((p) => p.code)).toEqual(['US'])
+  it('also filters on the code, which is what one types when they know it', () => {
+    expect(displayableCountries(LIST, 'fr', 'fr').map((p) => p.code)).toEqual(['FR'])
+    expect(displayableCountries(LIST, 'us', 'fr').map((p) => p.code)).toEqual(['US'])
   })
 
-  it('conserve le nombre de stations, qui aide a choisir', () => {
-    const fr = displayableCountries(LISTE, 'france', 'fr')[0]
+  it('keeps the station count, which helps choose', () => {
+    const fr = displayableCountries(LIST, 'france', 'fr')[0]
     expect(fr?.stations).toBe(2746)
   })
 
-  it('rend une liste vide quand rien ne correspond', () => {
-    expect(displayableCountries(LISTE, 'zzzz', 'fr')).toEqual([])
+  it('renders an empty list when nothing matches', () => {
+    expect(displayableCountries(LIST, 'zzzz', 'fr')).toEqual([])
     expect(displayableCountries([], '', 'fr')).toEqual([])
   })
 
-  it('« tous les country » est la chaine vide attendue par le plugin', () => {
-    // Le contract serveur est `country: ''` ; toute sentinelle interne finirait
-    // par fuir dans la requete.
+  it('"all countries" is the empty string the plugin expects', () => {
+    // The server contract is `country: ''`; any internal sentinel would
+    // eventually leak into the request.
     expect(ALL_COUNTRIES).toBe('')
   })
 })

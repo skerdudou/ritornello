@@ -10,29 +10,29 @@ function mockFetch(response: Response) {
 describe('api', () => {
   beforeEach(() => vi.unstubAllGlobals())
 
-  it('get renvoie le JSON décodé', async () => {
+  it('get returns the decoded JSON', async () => {
     mockFetch(new Response(JSON.stringify({ stations: [] }), { status: 200 }))
     await expect(api.get<{ stations: unknown[] }>('/x')).resolves.toEqual({ stations: [] })
   })
 
-  it('get rejette sur un statut non ok', async () => {
+  it('get rejects on a non-ok status', async () => {
     mockFetch(new Response('nope', { status: 502 }))
     await expect(api.get('/x')).rejects.toThrow('HTTP 502')
   })
 
-  it('get remonte la cause portée par le body, pas le code nu', async () => {
-    // Mesuré : le cœur fait porter sa cause au body d'un 502, mais seul `send`
-    // la lisait. Le chargement d'une page de plugin passe par `get`, et
-    // affichait « HTTP 502 » là où le même échec sur un PUT disait pourquoi.
+  it('get surfaces the cause carried by the body, not the bare code', async () => {
+    // Measured: the core puts its cause in the body of a 502, but only `send`
+    // read it. Loading a plugin page goes through `get`, and showed "HTTP 502"
+    // where the same failure on a PUT said why.
     mockFetch(
-      new Response(JSON.stringify({ error: 'le plugin a mis plus de 5 s à répondre' }), {
+      new Response(JSON.stringify({ error: 'the plugin took more than 5 s to answer' }), {
         status: 502,
       }),
     )
-    await expect(api.get('/x')).rejects.toThrow('plus de 5 s')
+    await expect(api.get('/x')).rejects.toThrow('more than 5 s')
   })
 
-  it('put renvoie null sur 204', async () => {
+  it('put returns null on 204', async () => {
     const spy = mockFetch(new Response(null, { status: 204 }))
     await expect(api.put('/x', { a: 1 })).resolves.toBeNull()
     expect(spy).toHaveBeenCalledWith('/x', {
@@ -42,27 +42,27 @@ describe('api', () => {
     })
   })
 
-  it('put renvoie le message du champ error sur 422', async () => {
-    mockFetch(new Response(JSON.stringify({ error: 'preset en double' }), { status: 422 }))
-    await expect(api.put('/x', {})).resolves.toBe('preset en double')
+  it('put returns the message of the error field on 422', async () => {
+    mockFetch(new Response(JSON.stringify({ error: 'duplicate preset' }), { status: 422 }))
+    await expect(api.put('/x', {})).resolves.toBe('duplicate preset')
   })
 
-  it('put retombe sur HTTP <code> quand le body n’est pas du JSON', async () => {
-    mockFetch(new Response('plugin injoignable', { status: 502 }))
+  it('put falls back to HTTP <code> when the body is not JSON', async () => {
+    mockFetch(new Response('plugin unreachable', { status: 502 }))
     await expect(api.put('/x', {})).resolves.toBe('HTTP 502')
   })
 
-  it('post suit la même convention que put', async () => {
+  it('post follows the same convention as put', async () => {
     const spy = mockFetch(new Response(null, { status: 204 }))
     await expect(api.post('/api/command', { cmd: 'VolumeUp' })).resolves.toBeNull()
     expect(spy.mock.calls[0]?.[1]).toMatchObject({ method: 'POST' })
   })
 
-  it('put et post rendent une panne réseau comme message, jamais comme exception', async () => {
-    // Régression (revue 2026-07-27) : un rejet de `fetch` lui-même (cœur en
-    // cours de redémarrage, Wi-Fi coupé) sortait de la convention « valeur de
-    // retour » — les appelants sans `try` laissaient l'utilisateur sans aucun
-    // retour, avec une unhandled rejection en console pour seul indice.
+  it('put and post render a network failure as a message, never as an exception', async () => {
+    // Regression (review 2026-07-27): a rejection of `fetch` itself (core
+    // restarting, Wi-Fi down) escaped the "return value" convention — callers
+    // without a `try` left the user with no feedback at all, with an unhandled
+    // rejection in the console as the only clue.
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
     await expect(api.put('/x', {})).resolves.toBe('Failed to fetch')
     await expect(api.post('/x', {})).resolves.toBe('Failed to fetch')

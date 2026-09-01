@@ -8,18 +8,18 @@ const IMPORT_MAP = `<script type="importmap">
       {"imports":{"vue":"/assets/vue.js","@ritornello/ui":"/assets/ui-kit.js"}}
     </script>`
 
-// Injecte l'import map dans le shell et recopie le bundle du kit a cote des
-// actifs de l'app, pour que le coeur n'ait qu'un seul repertoire a embarquer.
+// Injects the import map into the shell and copies the kit bundle next to
+// the app's assets, so the core only has a single directory to embed.
 function shellPlugin(): Plugin {
   return {
     name: 'ritornello-shell',
     transformIndexHtml(html) {
-      // Un `replace` sur un marqueur absent est un no-op silencieux : sans
-      // ce garde-fou, un `index.html` modifie par erreur produirait un
-      // `dist/` sans import map — donc un 404 sur chaque import de `vue` —
-      // avec un `vite build` qui reste vert.
+      // A `replace` on a missing marker is a silent no-op: without this
+      // guard, an `index.html` modified by mistake would produce a
+      // `dist/` without the import map — hence a 404 on every `vue`
+      // import — with a `vite build` that stays green.
       if (!html.includes('<!--IMPORTMAP-->')) {
-        throw new Error('marqueur IMPORTMAP absent de index.html')
+        throw new Error('IMPORTMAP marker missing from index.html')
       }
       return html.replace('<!--IMPORTMAP-->', IMPORT_MAP)
     },
@@ -36,16 +36,16 @@ export default defineConfig({
   plugins: [vue(), tailwindcss(), shellPlugin()],
   resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
   build: {
-    // `vue` et le kit sont fournis par l'import map : les externaliser ici
-    // aussi est ce qui garantit l'unicite de l'instance de Vue.
+    // `vue` and the kit are provided by the import map: externalizing them
+    // here too is what guarantees the uniqueness of the Vue instance.
     rollupOptions: {
       external: ['vue', '@ritornello/ui'],
-      // Les trois cles sont fixees ensemble : le prefixe `app-` marque tout
-      // ce qui est hashe (entree, chunks de route paresseux, feuilles de
-      // style), donc immuable par construction, par opposition a `vue.js`
-      // et `ui-kit.js` qui gardent un nom stable — les URL du contract des
-      // plugins — et doivent rester revalidables. Le coeur Rust (Task 6)
-      // deduira sa politique de cache de ce seul prefixe.
+      // The three keys are fixed together: the `app-` prefix marks
+      // everything that is hashed (entry, lazy route chunks, style
+      // sheets), hence immutable by construction, as opposed to `vue.js`
+      // and `ui-kit.js` which keep a stable name — the URLs of the
+      // plugin contract — and must remain revalidatable. The Rust core
+      // (Task 6) will derive its cache policy from this single prefix.
       output: {
         entryFileNames: 'assets/app-[hash].js',
         chunkFileNames: 'assets/app-[hash].js',

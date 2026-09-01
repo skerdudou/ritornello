@@ -1,9 +1,9 @@
-//! L'adresse et le port d'écoute du serveur MPD.
+//! The MPD server's listen address and port.
 //!
-//! Un fichier absent ou illisible retombe sur les défauts en journalisant :
-//! c'est la politique de `Stations::load` côté radio, et elle vaut ici pour la
-//! même raison — un greffon qui refuse de démarrer pour un fichier mal formé
-//! disparaît de la page de statut au lieu d'y expliquer son problème.
+//! An absent or unreadable file falls back to the defaults while logging:
+//! that is the policy of `Stations::load` on the radio side, and it holds here
+//! for the same reason — a plugin that refuses to start over a malformed file
+//! vanishes from the status page instead of explaining its problem there.
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -18,8 +18,8 @@ fn default_port() -> u16 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
-    /// Adresse d'écoute. `0.0.0.0` par défaut, comme le serveur web de
-    /// l'appareil : la même surface, déjà exposée.
+    /// Listen address. `0.0.0.0` by default, like the device's web server:
+    /// the same surface, already exposed.
     #[serde(default = "default_listen")]
     pub listen: String,
     #[serde(default = "default_port")]
@@ -33,24 +33,24 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Charge la config depuis `path`, ou retombe sur les défauts en
-    /// journalisant si le fichier est absent, illisible, ou invalide une fois
-    /// parsé. Ne renvoie jamais d'erreur : un greffon qui refuse de démarrer
-    /// pour un fichier mal formé disparaît de la page de statut au lieu d'y
-    /// expliquer son problème.
+    /// Loads the config from `path`, or falls back to the defaults while
+    /// logging if the file is absent, unreadable, or invalid once parsed.
+    /// Never returns an error: a plugin that refuses to start over a malformed
+    /// file vanishes from the status page instead of explaining its problem
+    /// there.
     pub fn load(path: &Path) -> Self {
-        let texte = match std::fs::read_to_string(path) {
+        let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
             Err(e) => {
                 tracing::info!("no config at {}: {e}; using defaults", path.display());
                 return Self::default();
             }
         };
-        match toml::from_str::<Self>(&texte) {
+        match toml::from_str::<Self>(&text) {
             Ok(c) => match c.validate() {
                 Ok(()) => c,
-                Err(raison) => {
-                    tracing::warn!("invalid config at {}: {raison}; using defaults", path.display());
+                Err(reason) => {
+                    tracing::warn!("invalid config at {}: {reason}; using defaults", path.display());
                     Self::default()
                 }
             },
@@ -61,8 +61,8 @@ impl Config {
         }
     }
 
-    /// Rend une **clé** de sources_catalog, pas une phrase : la page d'admin la
-    /// traduit (Task 9). Même convention que les refus de la radio.
+    /// Returns a catalog **key**, not a sentence: the admin page translates it
+    /// (Task 9). Same convention as the radio's rejections.
     pub fn validate(&self) -> Result<(), String> {
         if self.listen.trim().is_empty() {
             return Err("listen_empty".into());
@@ -73,20 +73,20 @@ impl Config {
         Ok(())
     }
 
-    /// Enregistre la config sur disque, refusée d'abord si elle est invalide.
-    /// L'erreur renvoyée est, comme `validate`, une clé de sources_catalog — jamais
-    /// une phrase ni un message d'E/S brut : la page d'admin la traduit.
+    /// Saves the config to disk, rejecting it first if it is invalid. The
+    /// error returned is, like `validate`, a catalog key — never a sentence
+    /// nor a raw I/O message: the admin page translates it.
     ///
-    /// Appelée par `admin.rs` (Task 9), qui résout la clé renvoyée en cas
-    /// d'échec en phrase de sources_catalog avant de répondre.
+    /// Called by `admin.rs` (Task 9), which resolves the key returned on
+    /// failure into a catalog sentence before replying.
     pub fn save(&self, path: &Path) -> Result<(), String> {
         self.validate()?;
-        let texte = toml::to_string_pretty(self).map_err(|_| "save_failed".to_string())?;
-        // Temporaire puis renommage : le renommage est atomique sur le même
-        // système de fichiers, donc aucune coupure ne laisse un toml tronqué à
-        // la place du bon.
+        let text = toml::to_string_pretty(self).map_err(|_| "save_failed".to_string())?;
+        // Temporary file then rename: the rename is atomic on the same file
+        // system, so no interruption leaves a truncated toml in place of the
+        // good one.
         let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, texte).map_err(|_| "save_failed".to_string())?;
+        std::fs::write(&tmp, text).map_err(|_| "save_failed".to_string())?;
         std::fs::rename(&tmp, path).map_err(|_| "save_failed".to_string())?;
         Ok(())
     }
@@ -97,81 +97,81 @@ mod tests {
     use super::*;
 
     #[test]
-    fn une_config_absente_donne_les_defauts() {
-        // Un fichier manquant n'est pas une erreur : le greffon doit demarrer
-        // ecoutant 0.0.0.0:6600 sans qu'on ait rien provisionne.
-        let c = Config::load(std::path::Path::new("/nexiste/pas.toml"));
+    fn an_absent_config_gives_the_defaults() {
+        // A missing file is not an error: the plugin must start listening on
+        // 0.0.0.0:6600 without anything having been provisioned.
+        let c = Config::load(std::path::Path::new("/does/not/exist.toml"));
         assert_eq!(c.listen, "0.0.0.0");
         assert_eq!(c.port, 6600);
     }
 
     #[test]
-    fn une_config_partielle_complete_par_les_defauts() {
+    fn a_partial_config_is_completed_by_the_defaults() {
         let c: Config = toml::from_str("port = 6601").unwrap();
         assert_eq!(c.listen, "0.0.0.0");
         assert_eq!(c.port, 6601);
     }
 
     #[test]
-    fn le_port_zero_est_refuse() {
-        // 0 demanderait au noyau un port libre : le client ne saurait pas lequel.
+    fn port_zero_is_rejected() {
+        // 0 would ask the kernel for a free port: the client would not know which one.
         let c = Config { listen: "0.0.0.0".into(), port: 0 };
         assert!(c.validate().is_err());
     }
 
     #[test]
-    fn une_adresse_vide_est_refusee() {
+    fn an_empty_address_is_rejected() {
         let c = Config { listen: String::new(), port: 6600 };
         assert!(c.validate().is_err());
     }
 
     #[test]
-    fn valider_rend_des_cles_de_catalogue_et_non_des_phrases() {
-        // Convention repo : la page d'admin (Task 9) traduit la clé. Une
-        // phrase toute faite ici ne pourrait pas etre relocalisee, et casser
-        // discretement en anglais dans une page francaise.
-        let clear = Config { listen: String::new(), port: 6600 };
-        assert_eq!(clear.validate().unwrap_err(), "listen_empty");
+    fn validate_returns_catalog_keys_and_not_sentences() {
+        // Repo convention: the admin page (Task 9) translates the key. A
+        // ready-made sentence here could not be relocalized, and would quietly
+        // break into English in a French page.
+        let empty = Config { listen: String::new(), port: 6600 };
+        assert_eq!(empty.validate().unwrap_err(), "listen_empty");
         let zero = Config { listen: "0.0.0.0".into(), port: 0 };
         assert_eq!(zero.validate().unwrap_err(), "port_zero");
     }
 
     #[test]
-    fn lenregistrement_est_atomique_et_relisible() {
-        // Ecriture par fichier temporaire puis renommage : une coupure de current
-        // ne laisse jamais un toml tronque a la place du bon.
+    fn the_save_is_atomic_and_readable_back() {
+        // Write through a temporary file then rename: a power cut never
+        // leaves a truncated toml in place of the good one.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mpd.toml");
         let c = Config { listen: "127.0.0.1".into(), port: 6601 };
         c.save(&path).unwrap();
         assert_eq!(Config::load(&path), c);
-        assert!(!dir.path().join("mpd.toml.tmp").exists(), "le temporaire ne survit pas");
+        assert!(!dir.path().join("mpd.toml.tmp").exists(), "the temporary file does not survive");
     }
 
     #[test]
-    fn lenregistrement_refuse_une_config_invalide_sans_toucher_au_disque() {
+    fn the_save_rejects_an_invalid_config_without_touching_the_disk() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mpd.toml");
-        let invalide = Config { listen: "0.0.0.0".into(), port: 0 };
-        assert_eq!(invalide.save(&path).unwrap_err(), "port_zero");
-        assert!(!path.exists(), "rien ne doit etre ecrit quand la validation refuse");
+        let invalid = Config { listen: "0.0.0.0".into(), port: 0 };
+        assert_eq!(invalid.save(&path).unwrap_err(), "port_zero");
+        assert!(!path.exists(), "nothing must be written when validation rejects");
     }
 
     #[test]
-    fn un_toml_illisible_ne_fait_pas_echouer_le_demarrage() {
-        // Meme politique que les stations de la radio : on retombe sur les defauts
-        // en journalisant, plutot que de refuser de demarrer.
+    fn an_unreadable_toml_does_not_fail_startup() {
+        // Same policy as the radio's stations: fall back to the defaults while
+        // logging, rather than refusing to start.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mpd.toml");
-        std::fs::write(&path, "ceci n'est pas du toml =").unwrap();
+        std::fs::write(&path, "this is not toml =").unwrap();
         assert_eq!(Config::load(&path), Config::default());
     }
 
     #[test]
-    fn une_config_syntaxiquement_valide_mais_refusee_retombe_aussi_sur_les_defauts() {
-        // Distinct du test precedent : ici le toml parse, mais `validate()`
-        // refuse le contenu (port a 0). `load` doit retomber sur les
-        // defauts dans ce cas aussi, pas seulement sur une erreur de parsing.
+    fn a_syntactically_valid_but_rejected_config_also_falls_back_to_the_defaults() {
+        // Distinct from the previous test: here the toml parses, but
+        // `validate()` rejects the content (port at 0). `load` must fall back
+        // to the defaults in this case too, not only on a parse error.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mpd.toml");
         std::fs::write(&path, "port = 0\n").unwrap();

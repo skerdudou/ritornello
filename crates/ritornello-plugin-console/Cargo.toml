@@ -11,8 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-# Pour `localtime_r` : l'heure locale de la veille. Deja l'idiome du depot
-# pour ce que la bibliotheque C sait faire seule (voir core/system.rs).
+# For `localtime_r`: the local time of the standby screen. Already the repository's
+# idiom for what the C library can do on its own (see core/system.rs).
 libc = "0.2"
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

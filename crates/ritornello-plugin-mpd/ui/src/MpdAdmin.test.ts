@@ -3,16 +3,15 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import MpdAdmin from './MpdAdmin.vue'
 
-// Meme approche que `ConfigView.test.ts` : on garde le vrai module
-// (composants, `api`, ...) et on remplace uniquement les deux entrees de
-// `toast` que cette vue utilise, pour pouvoir les observer sans afficher de
-// notification.
+// Same approach as `ConfigView.test.ts`: keep the real module (components,
+// `api`, ...) and replace only the two `toast` entries this view uses, so
+// they can be observed without showing a notification.
 vi.mock('@ritornello/ui', async () => {
-  const reel = await vi.importActual<typeof import('@ritornello/ui')>('@ritornello/ui')
-  return { ...reel, toast: { ...reel.toast, error: vi.fn(), success: vi.fn() } }
+  const real = await vi.importActual<typeof import('@ritornello/ui')>('@ritornello/ui')
+  return { ...real, toast: { ...real.toast, error: vi.fn(), success: vi.fn() } }
 })
 
-const CATALOGUE = {
+const CATALOG = {
   title: 'Serveur MPD',
   listen_label: "Adresse d'écoute",
   port_label: 'Port',
@@ -25,37 +24,37 @@ const CATALOGUE = {
   bad_request: 'requête invalide : {detail}',
 }
 
-// Prefixe absolu que le shell passe par la prop `base` (requise) : c'est le
-// contract, cette vue ne connait pas le nom sous lequel elle est servie.
+// Absolute prefix the shell passes through the (required) `base` prop: that is
+// the contract, this view does not know the name under which it is served.
 const BASE = '/plugins/mpd/'
 
-/** Monte le composant avec un `fetch` espionne servant `data` au GET. */
-async function monter(data: { listen: string; port: number } = { listen: '0.0.0.0', port: 6600 }) {
-  const puts: Array<{ url: string; corps: unknown }> = []
+/** Mounts the component with a spied `fetch` serving `data` on GET. */
+async function mountView(data: { listen: string; port: number } = { listen: '0.0.0.0', port: 6600 }) {
+  const puts: Array<{ url: string; body: unknown }> = []
   const spy = vi.fn(async (url: string, init?: RequestInit) => {
     if (init?.method === 'PUT') {
-      puts.push({ url, corps: JSON.parse(String(init.body)) })
+      puts.push({ url, body: JSON.parse(String(init.body)) })
       return new Response(null, { status: 204 })
     }
     return new Response(JSON.stringify(data), { status: 200 })
   })
   vi.stubGlobal('fetch', spy)
-  const w = mount(MpdAdmin, { props: { catalog: CATALOGUE, base: BASE } })
+  const w = mount(MpdAdmin, { props: { catalog: CATALOG, base: BASE } })
   await flushPromises()
   return { w, spy, puts }
 }
 
-/** Variante ou le PUT est refuse par le serveur (422), comme un vrai refus de validation. */
-async function monterAvecRefus(erreur: string) {
+/** Variant where the PUT is refused by the server (422), like a real validation refusal. */
+async function mountWithRefusal(error: string) {
   const data = { listen: '0.0.0.0', port: 6600 }
   const spy = vi.fn(async (url: string, init?: RequestInit) => {
     if (init?.method === 'PUT') {
-      return new Response(JSON.stringify({ error: erreur }), { status: 422 })
+      return new Response(JSON.stringify({ error }), { status: 422 })
     }
     return new Response(JSON.stringify(data), { status: 200 })
   })
   vi.stubGlobal('fetch', spy)
-  const w = mount(MpdAdmin, { props: { catalog: CATALOGUE, base: BASE } })
+  const w = mount(MpdAdmin, { props: { catalog: CATALOG, base: BASE } })
   await flushPromises()
   return { w, spy }
 }
@@ -67,25 +66,25 @@ beforeEach(() => {
 })
 
 describe('MpdAdmin', () => {
-  it('affiche les deux champs avec leurs libelles et les valeurs recues du serveur', async () => {
-    const { w } = await monter({ listen: '192.168.1.10', port: 6601 })
+  it('shows both fields with their labels and the values received from the server', async () => {
+    const { w } = await mountView({ listen: '192.168.1.10', port: 6601 })
 
-    // Les libelles du catalogue apparaissent bien dans le gabarit (et pas une
-    // cle brute, qui indiquerait une entree manquante ou un mauvais import).
+    // The catalog labels do appear in the template (and not a raw key, which
+    // would indicate a missing entry or a wrong import).
     expect(w.text()).toContain("Adresse d'écoute")
     expect(w.text()).toContain('Port')
 
-    const champListen = w.get('[data-listen]').element as HTMLInputElement
-    const champPort = w.get('[data-port]').element as HTMLInputElement
-    // Preuve que la valeur vient bien de la reponse GET, pas des defauts
-    // internes (`0.0.0.0` / `6600`) : un test qui laisserait les valeurs par
-    // defaut passerait meme si le GET n'etait jamais consomme.
-    expect(champListen.value).toBe('192.168.1.10')
-    expect(champPort.value).toBe('6601')
+    const listenField = w.get('[data-listen]').element as HTMLInputElement
+    const portField = w.get('[data-port]').element as HTMLInputElement
+    // Proof that the value does come from the GET response, not from the
+    // internal defaults (`0.0.0.0` / `6600`): a test that left the default
+    // values in place would pass even if the GET were never consumed.
+    expect(listenField.value).toBe('192.168.1.10')
+    expect(portField.value).toBe('6601')
   })
 
-  it('envoie les valeurs editees a l enregistrement', async () => {
-    const { w, puts } = await monter({ listen: '0.0.0.0', port: 6600 })
+  it('sends the edited values on save', async () => {
+    const { w, puts } = await mountView({ listen: '0.0.0.0', port: 6600 })
 
     await w.get('[data-listen]').setValue('10.0.0.5')
     await w.get('[data-port]').setValue('6601')
@@ -94,55 +93,55 @@ describe('MpdAdmin', () => {
 
     expect(puts).toHaveLength(1)
     expect(puts[0]!.url).toBe('/plugins/mpd/api/data')
-    // Le port doit etre un nombre dans le corps envoye, pas la chaine tapee
-    // dans le champ : `Config` (cote Rust) desattend un entier JSON.
-    expect(puts[0]!.corps).toEqual({ listen: '10.0.0.5', port: 6601 })
+    // The port must be a number in the sent body, not the string typed into
+    // the field: `Config` (Rust side) expects a JSON integer.
+    expect(puts[0]!.body).toEqual({ listen: '10.0.0.5', port: 6601 })
     expect(toast.success).toHaveBeenCalledWith('Enregistré')
   })
 
-  // Le garde cote client (`hasErrors`) est calque exactement sur
-  // `Config::valider` : une adresse non vide et un port dans 1..=65535 sont
-  // les deux seuls refus que le serveur connait pour ces deux champs, donc
-  // un couple qui passe le garde est par construction accepte cote serveur
-  // -- il n'existe pas de valeur que le client laisserait passer et que le
-  // serveur refuserait *pour ces deux raisons*. Ce test exerce donc un refus
-  // qui n'a rien a voir avec la forme des champs : `save_failed`, un echec
-  // d'ecriture disque (E/S), qu'aucun garde cote client ne peut anticiper.
-  // C'est le seul refus 422 encore atteignable avec une saisie valide.
-  it('un refus 422 (echec disque, non detectable cote client) affiche le message traduit du serveur', async () => {
-    const { w } = await monterAvecRefus("l'enregistrement a échoué")
+  // The client-side guard (`hasErrors`) is modelled exactly on
+  // `Config::validate`: a non-empty address and a port in 1..=65535 are the
+  // only two refusals the server knows for these two fields, so a pair that
+  // passes the guard is by construction accepted on the server side -- there
+  // is no value the client would let through that the server would refuse
+  // *for these two reasons*. This test therefore exercises a refusal that has
+  // nothing to do with the shape of the fields: `save_failed`, a disk write
+  // failure (I/O), which no client-side guard can anticipate. It is the only
+  // 422 refusal still reachable with valid input.
+  it('a 422 refusal (disk failure, not detectable client-side) shows the server-translated message', async () => {
+    const { w } = await mountWithRefusal("l'enregistrement a échoué")
 
-    // Saisie parfaitement valide selon le garde client : le refus vient donc
-    // bien du serveur, pas d'un blocage local.
+    // Input perfectly valid according to the client guard: the refusal
+    // therefore does come from the server, not from a local block.
     expect((w.get('[data-save]').element as HTMLButtonElement).disabled).toBe(false)
     await w.get('[data-save]').trigger('click')
     await flushPromises()
 
-    // Le message affiche est exactement le texte renvoye par le serveur
-    // (deja resolu depuis la cle de catalogue cote Rust) : ni une exception
-    // JS, ni une cle brute (`save_failed`).
+    // The displayed message is exactly the text returned by the server
+    // (already resolved from the catalog key on the Rust side): neither a JS
+    // exception nor a raw key (`save_failed`).
     expect(toast.error).toHaveBeenCalledWith("l'enregistrement a échoué")
     expect(toast.success).not.toHaveBeenCalled()
   })
 
-  it('un port a 0 marque le champ invalide et desactive Enregistrer : aucun PUT ne part', async () => {
-    const { w, spy } = await monter({ listen: '0.0.0.0', port: 6600 })
+  it('a port at 0 marks the field invalid and disables Save: no PUT leaves', async () => {
+    const { w, spy } = await mountView({ listen: '0.0.0.0', port: 6600 })
 
     await w.get('[data-port]').setValue('0')
 
-    const champPort = w.get('[data-port]')
-    const bouton = w.get('[data-save]').element as HTMLButtonElement
-    expect(champPort.attributes('aria-invalid')).toBe('true')
-    expect(bouton.disabled).toBe(true)
+    const portField = w.get('[data-port]')
+    const button = w.get('[data-save]').element as HTMLButtonElement
+    expect(portField.attributes('aria-invalid')).toBe('true')
+    expect(button.disabled).toBe(true)
     expect(w.find('[data-port-error]').exists()).toBe(true)
 
-    // `dispatchEvent` plutot que le `trigger()` de VTU : ce dernier renonce
-    // de lui-meme sur un element `disabled`, ce qui ferait passer ce test
-    // sans qu'aucun garde ne soit exerce dans le code de la vue (voir le
-    // meme choix dans `RadioAdmin.test.ts`). On dispatche donc le clic
-    // directement : c'est le retour anticipe d'`save()` qui est
-    // teste ici, pas le seul etat visuel du bouton.
-    bouton.dispatchEvent(new Event('click'))
+    // `dispatchEvent` rather than VTU's `trigger()`: the latter gives up on
+    // its own on a `disabled` element, which would make this test pass
+    // without any guard being exercised in the view's code (see the same
+    // choice in `RadioAdmin.test.ts`). So the click is dispatched directly:
+    // what is tested here is the early return of `save()`, not merely the
+    // button's visual state.
+    button.dispatchEvent(new Event('click'))
     await flushPromises()
 
     expect(spy.mock.calls.some((c) => (c[1] as RequestInit | undefined)?.method === 'PUT')).toBe(false)
@@ -150,8 +149,8 @@ describe('MpdAdmin', () => {
     expect(toast.success).not.toHaveBeenCalled()
   })
 
-  it('une adresse vide marque le champ invalide et desactive Enregistrer', async () => {
-    const { w } = await monter({ listen: '0.0.0.0', port: 6600 })
+  it('an empty address marks the field invalid and disables Save', async () => {
+    const { w } = await mountView({ listen: '0.0.0.0', port: 6600 })
 
     await w.get('[data-listen]').setValue('   ')
 
@@ -160,15 +159,15 @@ describe('MpdAdmin', () => {
     expect(w.find('[data-listen-error]').exists()).toBe(true)
   })
 
-  it('avertit du redemarrage necessaire des le chargement, sans attendre un enregistrement', async () => {
-    const { w } = await monter()
+  it('warns about the required restart as soon as it loads, without waiting for a save', async () => {
+    const { w } = await mountView()
 
-    // L'avis est present immediatement : le port ne change pas a chaud, donc
-    // le lire avant d'agir doit etre possible sans avoir clique sur
-    // Enregistrer. Un test qui ne verifierait cela qu'apres un clic sur
-    // Enregistrer manquerait la regression que ce cas encode.
-    const avis = w.get('[data-restart-notice]')
-    expect(avis.text()).toBe('Le changement ne prend effet quau redémarrage du greffon.')
+    // The notice is present immediately: the port does not change on the fly,
+    // so reading it before acting must be possible without having clicked
+    // Save. A test that only checked this after a click on Save would miss the
+    // regression this case encodes.
+    const notice = w.get('[data-restart-notice]')
+    expect(notice.text()).toBe('Le changement ne prend effet quau redémarrage du greffon.')
     expect(toast.success).not.toHaveBeenCalled()
     expect(toast.error).not.toHaveBeenCalled()
   })

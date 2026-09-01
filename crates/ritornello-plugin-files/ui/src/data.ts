@@ -1,21 +1,21 @@
-// Formes de données échangées avec le plugin, et les quelques fonctions pures
-// qui les mettent en forme.
+// Shapes of the data exchanged with the plugin, and the few pure functions
+// that put them into shape.
 //
-// Pourquoi normaliser au lieu de consommer le JSON tel quel : le plugin
-// sérialise ses structures Rust avec `skip_serializing_if = "Option::is_none"`
-// (voir `roots.rs`), donc un champ vide **disparaît** du corps au lieu d'y
-// figurer à vide. Une vue qui lirait `r.subpath.trim()` planterait sur la
-// première root sans sous-path — et un plantage dans un `computed` de Vue
-// laisse la page à moitié rendue, sans message. On ramène donc tout à des
-// valeurs totales une seule fois, à la frontière.
+// Why normalize instead of consuming the JSON as is: the plugin serializes
+// its Rust structures with `skip_serializing_if = "Option::is_none"` (see
+// `roots.rs`), so an empty field **disappears** from the body instead of
+// appearing empty. A view that read `r.subpath.trim()` would crash on the
+// first root without a subpath — and a crash inside a Vue `computed` leaves
+// the page half rendered, with no message. So everything is brought back to
+// total values once, at the boundary.
 
-/** Genre de root. `local` = répertoire de l'appareil, `smb` = partage réseau. */
+/** Kind of root. `local` = a directory of the device, `smb` = a network share. */
 export type RootKind = 'local' | 'smb'
 
 export interface Root {
   name: string
   kind: RootKind
-  /** Genre `local` uniquement : path absolu. */
+  /** Kind `local` only: absolute path. */
   path: string
   host: string
   share: string
@@ -23,7 +23,7 @@ export interface Root {
   user: string
   domain: string
   writable: boolean
-  /** État observé du montage, rendu par le plugin ; jamais saisi par la page. */
+  /** Observed state of the mount, rendered by the plugin; never entered by the page. */
   mounted: boolean
 }
 
@@ -32,12 +32,12 @@ export interface Track {
   name: string
   duration_s: number
   /**
-   * Track dont le fichier n'a pas été retrouvé : marquée, jamais masquée.
+   * Track whose file was not found: marked, never hidden.
    *
-   * Trois états, pas deux. `null` veut dire **indéterminé** : le point de
-   * montage de la piste ne répondait pas quand le plugin a regardé. Afficher
-   * « introuvable » dans ce cas accuserait le fichier d'une panne qui est celle
-   * du partage, et enverrait search le défaut au mauvais endroit.
+   * Three states, not two. `null` means **undetermined**: the mount point of
+   * the track was not answering when the plugin looked. Showing "not found"
+   * in that case would blame the file for a failure that belongs to the share,
+   * and would send the user looking for the defect in the wrong place.
    */
   missing: boolean | null
 }
@@ -47,101 +47,101 @@ export interface Scan {
   found: number
   dir: string
   /**
-   * Refus ou incident du **dernier** balayage, déjà traduit par le plugin.
+   * Refusal or incident of the **last** scan, already translated by the plugin.
    *
-   * Il survit à la fin du balayage, et c'est délibéré côté plugin : `add_dir`
-   * rend la main bien avant que la marche récursive ne se termine, donc c'est
-   * le seul endroit où la page peut apprendre qu'un ajout a échoué. La chaîne
-   * vide vaut « rien à signaler ».
+   * It survives the end of the scan, and that is deliberate on the plugin side:
+   * `add_dir` returns long before the recursive walk finishes, so this is the
+   * only place where the page can learn that an addition failed. The empty
+   * string means "nothing to report".
    */
   error: string
 }
 
 export interface Saved {
   name: string
-  /** `internal` ou le nom d'une root. */
+  /** `internal` or the name of a root. */
   where: string
 }
 
-/** Une entrée d'un niveau d'arborescence, path **relatif à la root**. */
+/** One entry of a tree level, path **relative to the root**. */
 export interface Entry {
   name: string
   path: string
   dir: boolean
   /**
-   * Fichier de liste de lecture (`.m3u`, `.m3u8`).
+   * Playlist file (`.m3u`, `.m3u8`).
    *
-   * Exclusif de `dir`. Il porte une action différente des autres : une liste se
-   * **charge** — elle remplace la liste en cours — là où un dossier ou une piste
-   * s'y ajoutent. Les confondre ferait ajouter un fichier texte que mpv
-   * tenterait de jouer.
+   * Exclusive with `dir`. It carries a different action from the others: a
+   * playlist **loads** — it replaces the current playlist — whereas a folder or
+   * a track is added to it. Confusing them would add a text file that mpv would
+   * try to play.
    */
   playlist: boolean
 }
 
 /**
- * Dernier journey ou dernière recherche, tels que le plugin les range.
+ * Last browse or last search, as the plugin stores them.
  *
- * `set_data` ne rend qu'un `Ok`/`Err`, sans charge utile : le contenu voyage
- * par `get_data`, comme la recherche d'annuaire du plugin radio. Les deux
- * opérations écrivent au même endroit — une recherche efface donc le niveau
- * parcouru, et réciproquement.
+ * `set_data` only returns an `Ok`/`Err`, without payload: the content travels
+ * through `get_data`, like the directory search of the radio plugin. Both
+ * operations write to the same place — so a search erases the browsed level,
+ * and vice versa.
  */
 export interface Navigation {
   root: string
   path: string
   /**
-   * Motif de la dernière recherche, vide pour un journey.
+   * Pattern of the last search, empty for a browse.
    *
-   * Ce que la page en fait : distinguer la réponse à SON journey de celle à
-   * une recherche portant sur le même dossier — les deux se rangent au même
-   * endroit côté plugin.
+   * What the page does with it: tell the answer to ITS browse apart from the
+   * answer to a search over the same folder — both are stored in the same place
+   * on the plugin side.
    */
   query: string
-  /** Contenu du niveau `path`, dossiers d'abord puis fichiers. */
+  /** Content of level `path`, folders first then files. */
   entries: Entry[]
-  /** Résultats de la dernière recherche. */
+  /** Results of the last search. */
   results: Entry[]
-  /** Le plugin a plafonné la recherche : il y en avait davantage. */
+  /** The plugin capped the search: there were more. */
   truncated: boolean
   /**
-   * Le journey a été interrompu avant d'avoir tout vu, distinct de `truncated`.
+   * The walk was interrupted before it had seen everything, distinct from `truncated`.
    *
-   * Deux causes, deux conseils : `truncated` invite à préciser le motif,
-   * `abort` invite à descend dans un sous-dossier. Les confondre faisait
-   * afficher « Aucun résultat » — donc « ce fichier n'existe pas » — pour une
-   * recherche qui avait simplement renoncé avant d'arriver jusqu'à lui.
+   * Two causes, two pieces of advice: `truncated` invites to refine the
+   * pattern, `abort` invites to go down into a subfolder. Confusing them made
+   * the page show "No result" — hence "this file does not exist" — for a search
+   * that had simply given up before reaching it.
    */
   abort: boolean
 }
 
-/** Un volume monté de l'appareil, tel que le plugin le lit dans `/proc/mounts`. */
+/** A mounted volume of the device, as the plugin reads it from `/proc/mounts`. */
 export interface Volume {
   path: string
   fstype: string
 }
 
 /**
- * L'assistant de déclaration en cours.
+ * The declaration wizard in progress.
  *
- * Emplacement **distinct** de `browse` : la popin et le volet Parcourir sont
- * deux curseurs indépendants, et les faire partager un emplacement ferait
- * qu'open une popin réinitialiserait l'arbre derrière elle.
+ * A location **distinct** from `browse`: the dialog and the Browse pane are two
+ * independent cursors, and making them share a location would make opening a
+ * dialog reset the tree behind it.
  *
- * Aucun identifiant n'y figure. Le plugin ne les sérialise jamais : le mot de
- * passe traverse le fil une fois, à la connexion, et vit ensuite dans une
- * session en mémoire du plugin que la page ne relit pas.
+ * No credential appears here. The plugin never serializes them: the password
+ * crosses the wire once, at connection time, and then lives in an in-memory
+ * session of the plugin that the page does not read back.
  */
 export interface Exploration {
   open: boolean
   kind: RootKind | null
   host: string
   share: string
-  /** Chemin absolu pour un volume, relatif au partage pour un partage. */
+  /** Absolute path for a volume, relative to the share for a share. */
   path: string
   shares: string[]
   dirs: string[]
-  /** Fichiers audio du niveau ouvert : c'est ce qui dit qu'on est au bon endroit. */
+  /** Audio files of the open level: this is what says we are in the right place. */
   audioCount: number
   busy: boolean
   error: string | null
@@ -169,66 +169,66 @@ export interface Data {
   unresolved: string[]
   browse: Navigation
   volumes: Volume[]
-  /** `smbclient` est-il utilisable. Faux grise l'assistant réseau, sans le remove. */
+  /** Is `smbclient` usable. False greys out the network wizard, without removing it. */
   canBrowseSmb: boolean
   /**
-   * Cette source joue-t-elle en ce moment.
+   * Is this source playing right now.
    *
-   * Sert à décider si clear la liste doit aussi demander l'arrêt au cœur :
-   * l'exiger sans condition couperait la radio quand on vide une liste de
-   * fichiers qui ne jouait pas.
+   * Used to decide whether clearing the playlist must also ask the core to
+   * stop: requiring it unconditionally would cut the radio when one empties a
+   * file playlist that was not playing.
    */
   playing: boolean
   /**
-   * Avancement du relevé des durées.
+   * Progress of the duration survey.
    *
-   * Asynchrone côté plugin — lire l'en-tête de deux mille fichiers sur un
-   * partage dépasse le plafond de 5 s du cœur — donc la page sonde le temps
-   * qu'il tourne, exactement comme pour le balayage.
+   * Asynchronous on the plugin side — reading the header of two thousand files
+   * on a share exceeds the core's 5 s cap — so the page probes as long as it
+   * runs, exactly as for the scan.
    */
   durations: { running: boolean; done: number; total: number }
   explore: Exploration
   /**
-   * Échec de la dernière réconciliation de montage, déjà traduit.
+   * Failure of the last mount reconciliation, already translated.
    *
-   * **Global et non porté par chaque source** : `systemctl start` réconcilie
-   * toutes les racines d'un coup et ne rend qu'un seul résultat. Prétendre
-   * attribuer cet échec à une source précise serait une information inventée —
-   * le détail par source reste le booléen `mounted`, lui observé.
+   * **Global and not carried by each source**: `systemctl start` reconciles all
+   * roots at once and returns a single result. Pretending to attribute this
+   * failure to a specific source would be invented information — the
+   * per-source detail remains the `mounted` boolean, which is observed.
    */
   mountError: string | null
   /**
-   * Points de montage dont une sonde n'est jamais revenue.
+   * Mount points from which a probe never came back.
    *
-   * Dits par le plugin pour que la page explique le silence : sans eux
-   * l'utilisateur voit des durées qui n'arrivent pas et des états indéterminés,
-   * sans aucune indication de cause.
+   * Told by the plugin so that the page can explain the silence: without them
+   * the user sees durations that never arrive and undetermined states, with no
+   * indication of the cause.
    */
   unresponsive: string[]
 }
 
-/** Destination « stockage interne » du plugin, par opposition à un nom de root. */
+/** The plugin's "internal storage" destination, as opposed to a root name. */
 export const INTERNAL = 'internal'
 
 /**
- * Traducteur, tel que `createT` le rend. Les volets le reçoivent en propriété
- * plutôt que de le reconstruire : le catalogue arrive **après** le montage (le
- * shell monte l'IHM avec un catalogue vide le temps de le load), et un `t`
- * capturé une fois pour toutes dans un enfant figerait cet état vide.
+ * Translator, as `createT` returns it. The panes receive it as a prop rather
+ * than rebuilding it: the catalog arrives **after** mounting (the shell mounts
+ * the UI with an empty catalog while loading it), and a `t` captured once and
+ * for all in a child would freeze that empty state.
  */
 export type T = (key: string, params?: Record<string, string | number>) => string
 
 /**
- * Émetteur d'opération, fourni par la page aux volets.
+ * Operation emitter, provided by the page to the panes.
  *
- * Rend l'état **relu après l'opération**, ou `null` si le plugin a refusé (le
- * refus est alors déjà affiché par la page, verbatim). Il rend l'état plutôt
- * qu'un booléen à cause de `browse` : le résultat d'un niveau d'arborescence
- * arrive dans la relecture, et un volet qui irait le search dans sa propriété
- * `data` juste après l'`await` lirait la valeur d'**avant** le rendu du
- * parent — les propriétés ne se mettent à jour qu'au prochain cycle de Vue.
+ * Returns the state **re-read after the operation**, or `null` if the plugin
+ * refused (the refusal is then already displayed by the page, verbatim). It
+ * returns the state rather than a boolean because of `browse`: the result of a
+ * tree level arrives in the re-read, and a pane that went looking for it in its
+ * `data` prop right after the `await` would read the value from **before** the
+ * parent's render — props only update on the next Vue cycle.
  */
-export type Send = (charge: Record<string, unknown>) => Promise<Data | null>
+export type Send = (payload: Record<string, unknown>) => Promise<Data | null>
 
 function string_(v: unknown): string {
   return typeof v === 'string' ? v : ''
@@ -242,13 +242,13 @@ function array(v: unknown): unknown[] {
   return Array.isArray(v) ? v : []
 }
 
-export function normalizeRoot(brut: unknown): Root {
-  const o = (brut ?? {}) as Record<string, unknown>
+export function normalizeRoot(raw: unknown): Root {
+  const o = (raw ?? {}) as Record<string, unknown>
   return {
     name: string_(o.name),
-    // Tout ce qui n'est pas explicitement `local` est traité comme un partage :
-    // le genre pilote l'affichage des champs, et se tromper dans ce sens montre
-    // des champs en trop plutôt que d'en cacher.
+    // Anything that is not explicitly `local` is treated as a share: the kind
+    // drives which fields are displayed, and erring in this direction shows
+    // extra fields rather than hiding some.
     kind: o.kind === 'local' ? 'local' : 'smb',
     path: string_(o.path),
     host: string_(o.host),
@@ -262,40 +262,39 @@ export function normalizeRoot(brut: unknown): Root {
 }
 
 /**
- * Recompose un journey ou une recherche.
+ * Recomposes a browse or a search.
  *
- * Le plugin rend `dirs` et `files` comme de **simples noms**, pas des chemins :
- * un niveau est toujours lu relativement à son répertoire, et répéter le
- * préfixe sur chaque entrée gonflerait la réponse pour rien. C'est donc à la
- * page de recoller `path/nom` — et c'est ce path-là, relatif à la root, que
- * les opérations `browse`, `add_dir` et `add_file` attendent en retour.
+ * The plugin returns `dirs` and `files` as **plain names**, not paths: a level
+ * is always read relative to its directory, and repeating the prefix on every
+ * entry would inflate the response for nothing. So it is up to the page to
+ * glue `path/name` back together — and it is that path, relative to the root,
+ * that the `browse`, `add_dir` and `add_file` operations expect in return.
  *
- * `results`, à l'inverse, porte déjà des chemins complets relatifs à la root :
- * une recherche traverse l'arborescence, ses trouvailles ne sont donc pas dans
- * le répertoire courant.
+ * `results`, conversely, already carries full paths relative to the root: a
+ * search traverses the tree, so its findings are not in the current directory.
  */
-export function normalizeBrowse(brut: unknown): Navigation {
-  const o = (brut ?? {}) as Record<string, unknown>
+export function normalizeBrowse(raw: unknown): Navigation {
+  const o = (raw ?? {}) as Record<string, unknown>
   const base = string_(o.path)
-  const joindre = (nom: string) => (base ? `${base}/${nom}` : nom)
+  const join = (name: string) => (base ? `${base}/${name}` : name)
   const entries = [
     ...array(o.dirs).map((n) => ({
       name: string_(n),
-      path: joindre(string_(n)),
+      path: join(string_(n)),
       dir: true,
       playlist: false,
     })),
-    // Les listes avant les tracks : ce sont elles qu'on cherche quand un dossier
-    // en contient, et une liste noyée sous cent fichiers ne se voit pas.
+    // Playlists before tracks: they are what one is looking for when a folder
+    // contains some, and a playlist drowned under a hundred files goes unseen.
     ...array(o.playlists).map((n) => ({
       name: string_(n),
-      path: joindre(string_(n)),
+      path: join(string_(n)),
       dir: false,
       playlist: true,
     })),
     ...array(o.files).map((n) => ({
       name: string_(n),
-      path: joindre(string_(n)),
+      path: join(string_(n)),
       dir: false,
       playlist: false,
     })),
@@ -305,8 +304,8 @@ export function normalizeBrowse(brut: unknown): Navigation {
     path: base,
     query: string_(o.query),
     entries,
-    // La recherche ne rapporte que des fichiers audio (voir `scan::search`) :
-    // aucun n'est une liste de lecture.
+    // The search only reports audio files (see `scan::search`): none of them
+    // is a playlist.
     results: array(o.results).map((p) => ({
       name: leaf(string_(p)),
       path: string_(p),
@@ -319,16 +318,16 @@ export function normalizeBrowse(brut: unknown): Navigation {
 }
 
 /**
- * Recompose l'état d'un assistant.
+ * Recomposes the state of a wizard.
  *
- * Chaque champ absent vaut sa valeur vide, jamais `undefined` : pendant un
- * déploiement le plugin peut être plus ancien que la page, et un `undefined`
- * traversant un `v-for` casserait le rendu entier au lieu d'afficher une
- * section vide.
+ * Every absent field takes its empty value, never `undefined`: during a
+ * deployment the plugin may be older than the page, and an `undefined` going
+ * through a `v-for` would break the whole render instead of showing an empty
+ * section.
  */
-export function normalizeExploration(brut: unknown): Exploration {
-  if (!brut) return EMPTY_EXPLORATION
-  const o = brut as Record<string, unknown>
+export function normalizeExploration(raw: unknown): Exploration {
+  if (!raw) return EMPTY_EXPLORATION
+  const o = raw as Record<string, unknown>
   return {
     open: o.open === true,
     kind: o.kind === 'local' || o.kind === 'smb' ? o.kind : null,
@@ -344,43 +343,43 @@ export function normalizeExploration(brut: unknown): Exploration {
 }
 
 /**
- * Tronque un path **par le début** pour qu'il tienne en `max` caractères.
+ * Truncates a path **from the start** so that it fits in `max` characters.
  *
- * Par le début, et c'est tout l'intérêt : sur un path, l'information utile est
- * la fin — le dossier où l'on se trouve. Aucune propriété CSS ne sait faire
- * cela : `text-overflow` ne coupe qu'à droite, et `direction: rtl`
- * réordonnerait les segments au lieu de les tronquer.
+ * From the start, and that is the whole point: on a path, the useful
+ * information is the end — the folder we are in. No CSS property can do this:
+ * `text-overflow` only cuts on the right, and `direction: rtl` would reorder
+ * the segments instead of truncating them.
  *
- * On retire des **segments entiers** tant que c'est trop long : couper au milieu
- * d'un nom donnerait « …ents/Ma Musique », là où « …/Ma Musique » garde un sens.
- * Le repli final ne coupe dans un nom que si ce nom dépasse à lui seul le
- * budget, faute de mieux.
+ * **Whole segments** are removed as long as it is too long: cutting in the
+ * middle of a name would give "…ents/My Music", where "…/My Music" keeps a
+ * meaning. The final fallback only cuts inside a name if that name alone
+ * exceeds the budget, for lack of anything better.
  */
 export function truncateStart(path: string, max = 52): string {
   if (path.length <= max) return path
   const segments = path.split('/').filter(Boolean)
-  let queue = ''
+  let tail = ''
   for (let i = segments.length - 1; i >= 0; i -= 1) {
-    const essai = queue ? `${segments[i]}/${queue}` : segments[i]!
-    // Deux caractères réservés pour le « …/ » qui annonce la coupure.
-    if (essai.length + 2 > max) break
-    queue = essai
+    const attempt = tail ? `${segments[i]}/${tail}` : segments[i]!
+    // Two characters reserved for the "…/" that announces the cut.
+    if (attempt.length + 2 > max) break
+    tail = attempt
   }
-  if (!queue) {
-    const dernier = segments[segments.length - 1] ?? path
-    return `…${dernier.slice(Math.max(0, dernier.length - max + 1))}`
+  if (!tail) {
+    const last = segments[segments.length - 1] ?? path
+    return `…${last.slice(Math.max(0, last.length - max + 1))}`
   }
-  return `…/${queue}`
+  return `…/${tail}`
 }
 
-/** Dernier segment d'un path relatif, séparateur `/` (celui du plugin). */
+/** Last segment of a relative path, `/` separator (the plugin's). */
 export function leaf(path: string): string {
   const parts = path.split('/').filter(Boolean)
   return parts.length ? parts[parts.length - 1]! : path
 }
 
-export function normalizeData(brut: unknown): Data {
-  const o = (brut ?? {}) as Record<string, unknown>
+export function normalizeData(raw: unknown): Data {
+  const o = (raw ?? {}) as Record<string, unknown>
   const scan = (o.scan ?? {}) as Record<string, unknown>
   return {
     roots: array(o.roots).map(normalizeRoot),
@@ -391,9 +390,9 @@ export function normalizeData(brut: unknown): Data {
         path,
         name: string_(e.name) || leaf(path),
         duration_s: number_(e.duration_s),
-        // `=== true` / `=== false` et non une coercition : c'est ce qui
-        // distingue « présent » de « on ne sait pas », le second devant rester
-        // `null` jusqu'à l'affichage.
+        // `=== true` / `=== false` and not a coercion: this is what tells
+        // "present" apart from "unknown", the latter having to stay `null`
+        // until display.
         missing: e.missing === true ? true : e.missing === false ? false : null,
       }
     }),
@@ -408,16 +407,16 @@ export function normalizeData(brut: unknown): Data {
       const e = (s ?? {}) as Record<string, unknown>
       return { name: string_(e.name), where: string_(e.where) || INTERNAL }
     }),
-    // Les entrées d'un m3u chargé qu'aucune règle n'a su résoudre : des chemins
-    // bruts, seule chose que l'utilisateur puisse rapprocher de ses fichiers.
+    // Entries of a loaded m3u that no rule could resolve: raw paths, the only
+    // thing the user can match against their files.
     unresolved: array(o.unresolved).map(string_),
     browse: normalizeBrowse(o.browse),
     volumes: array(o.volumes).map((v) => {
       const e = (v ?? {}) as Record<string, unknown>
       return { path: string_(e.path), fstype: string_(e.fstype) }
     }),
-    // Faux par défaut : mieux vaut griser un assistant utilisable que d'en
-    // offrir un qui échouera au clic sans dire pourquoi.
+    // False by default: better to grey out a usable wizard than to offer one
+    // that will fail on click without saying why.
     canBrowseSmb: o.can_browse_smb === true,
     playing: o.playing === true,
     durations: (() => {
@@ -435,21 +434,21 @@ export function normalizeData(brut: unknown): Data {
 }
 
 /**
- * Durée lisible. `0` (durée inconnue, cas d'un fichier introuvable ou d'un
- * conteneur sans en-tête) se rend par un tiret plutôt que par « 0:00 », qui
- * affirmerait une piste vide.
+ * Readable duration. `0` (unknown duration, the case of a missing file or of a
+ * container without header) renders as a dash rather than as "0:00", which
+ * would assert an empty track.
  */
-export function formatDuration(secondes: number): string {
-  if (!Number.isFinite(secondes) || secondes <= 0) return '—'
-  const s = Math.round(secondes)
+export function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '—'
+  const s = Math.round(seconds)
   const h = Math.floor(s / 3600)
   const m = Math.floor((s % 3600) / 60)
   const r = s % 60
-  const deux = (n: number) => String(n).padStart(2, '0')
-  return h ? `${h}:${deux(m)}:${deux(r)}` : `${m}:${deux(r)}`
+  const two = (n: number) => String(n).padStart(2, '0')
+  return h ? `${h}:${two(m)}:${two(r)}` : `${m}:${two(r)}`
 }
 
-/** Libellé de la cible d'une root : path local, ou `//hôte/partage/sous-path`. */
+/** Label of a root's target: local path, or `//host/share/subpath`. */
 export function rootTarget(r: Root): string {
   if (r.kind === 'local') return r.path
   const base = `//${r.host}/${r.share}`

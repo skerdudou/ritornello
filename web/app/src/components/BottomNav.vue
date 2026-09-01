@@ -5,18 +5,17 @@ import { RouterLink, useRoute } from 'vue-router'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlugins } from '../composables/usePlugins'
 
-// Quatre onglets fixes : la partie variable (une page par greffon) est derriere
-// « Greffons ». Un seul greffon a page : l'onglet y mene tout droit, la list
-// n'apporterait rien.
+// Four fixed tabs: the variable part (one page per plugin) sits behind
+// "Plugins". A single plugin with a page: the tab leads straight to it, the
+// list would add nothing.
 const { t } = useCatalog()
 const { admins } = usePlugins()
 const pluginsTarget = computed(() => (admins.value.length === 1 ? `/plugins/${admins.value[0]}/` : '/plugins/'))
 
-// `/plugins/` et `/plugins/:name/` sont des routes soeurs, step l'une prefixe
-// de l'autre : la correspondance inclusive d'`active-class` ne les confond
-// jamais, donc l'onglet resterait eteint sur la page d'un greffon. D'ou ce
-// calcul a la main sur le chemin courant, plutot que sur le mecanisme du
-// routeur.
+// `/plugins/` and `/plugins/:name/` are sibling routes, not one a prefix of
+// the other: the inclusive matching of `active-class` never conflates them,
+// so the tab would stay off on a plugin's page. Hence this hand computation on
+// the current path, rather than relying on the router's mechanism.
 const route = useRoute()
 const pluginsActive = computed(() => route.path.startsWith('/plugins/'))
 
@@ -25,9 +24,9 @@ const ACTIVE = 'text-primary'
 </script>
 
 <template>
-  <!-- `fixed` et non `sticky` : le `main` defile sous elle, et le
-       `safe-area-inset-bottom` la degage de la barre gestuelle du phone.
-       Masquee a partir de `md`, ou la nav du haut reprend. -->
+  <!-- `fixed` and not `sticky`: the `main` scrolls underneath it, and the
+       `safe-area-inset-bottom` keeps it clear of the phone's gesture bar.
+       Hidden from `md` up, where the top nav takes over. -->
   <nav
     class="fixed inset-x-0 bottom-0 z-10 grid grid-cols-4 border-t border-border bg-card pb-[env(safe-area-inset-bottom)] md:hidden"
     data-nav-basse
@@ -36,9 +35,9 @@ const ACTIVE = 'text-primary'
     <RouterLink to="/" :class="TAB" :exact-active-class="ACTIVE">
       <PlayIcon class="size-5" />{{ t('nav_listen') }}
     </RouterLink>
-    <!-- Classe calculee a la main, step `active-class` : `/plugins/` et
-         `/plugins/:name/` sont des routes soeurs, la correspondance inclusive
-         du routeur ne couvre step ce cas (voir `pluginsActive` ci-dessus). -->
+    <!-- Class computed by hand, not `active-class`: `/plugins/` and
+         `/plugins/:name/` are sibling routes, the router's inclusive matching
+         does not cover this case (see `pluginsActive` above). -->
     <RouterLink :to="pluginsTarget" :class="[TAB, pluginsActive ? ACTIVE : '']" data-nav-plugins>
       <CubeIcon class="size-5" />{{ t('nav_plugins') }}
     </RouterLink>

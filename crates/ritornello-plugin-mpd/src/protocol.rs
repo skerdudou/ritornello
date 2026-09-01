@@ -1,55 +1,53 @@
-//! La forme du protocol MPD : découper une line de commande, mettre en forme
-//! les réponses et les refus. Aucune E/S ici — c'est ce qui rend tout le remainder
-//! testable sans socket.
+//! The shape of the MPD protocol: splitting a command line, formatting the
+//! replies and the rejections. No I/O here — that is what makes everything
+//! else testable without a socket.
 //!
-//! `ack` et `line` sont appelés par `commands.rs`, `split` par la session
-//! — seule à read des lines. Plus aucun `#[allow(dead_code)]` ici : les trois
-//! ont leur appelant.
+//! `ack` and `line` are called by `commands.rs`, `split` by the session — the
+//! only one that reads lines. No more `#[allow(dead_code)]` here: all three
+//! have their caller.
 
 use std::fmt::Display;
 
-/// Les seuls codes d'erreur que ce serveur emploie. Les valeurs sont celles de
-/// `ack.h` de MPD et ne peuvent pas changer : les clients les lisent.
+/// The only error codes this server uses. The values are those of MPD's
+/// `ack.h` and cannot change: clients read them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ack {
-    /// Argument absent, non numérique, ou hors bounds.
+    /// Argument absent, non-numeric, or out of bounds.
     Arg = 2,
-    /// Commande inconnue **ou** volontairement non gérée. MPD ne distingue pas
-    /// les deux, et c'est tant mieux : `commands` dit déjà ce qui existe.
+    /// Unknown command **or** deliberately unhandled. MPD does not distinguish
+    /// the two, and so much the better: `commands` already says what exists.
     Unknown = 5,
-    /// Ce qui est nommé n'existe pas : une liste enregistrée, ou l'image d'une
-    /// URI.
+    /// What is named does not exist: a saved playlist, or the image of a URI.
     ///
-    /// Quatre producteurs dans `commands.rs`, et le name qu'ils refusent est
-    /// toujours bien formé — c'est ce qui distingue ce code d'un `Arg` : `load`
-    /// et `listplaylistinfo` pour un name de source absent du sources_catalog,
-    /// `albumart` et `readpicture` pour une URI dont ce qui plays n'a pas
-    /// d'image à cet instant.
+    /// Four producers in `commands.rs`, and the name they reject is always
+    /// well formed — that is what distinguishes this code from an `Arg`:
+    /// `load` and `listplaylistinfo` for a source name absent from the
+    /// catalog, `albumart` and `readpicture` for a URI whose playing item has
+    /// no image at that moment.
     NoExist = 50,
 }
 
-/// `ACK [<code>@<index>] {<commande>} <message>`. `index` est le rang de la
-/// commande dans une liste de commands, 0 hors liste.
-pub fn ack(code: Ack, index: usize, commande: &str, message: &str) -> String {
-    format!("ACK [{}@{index}] {{{commande}}} {message}", code as u16)
+/// `ACK [<code>@<index>] {<command>} <message>`. `index` is the rank of the
+/// command within a command list, 0 outside a list.
+pub fn ack(code: Ack, index: usize, command: &str, message: &str) -> String {
+    format!("ACK [{}@{index}] {{{command}}} {message}", code as u16)
 }
 
-/// Une line `clé: valeur` de réponse.
-pub fn line(key: &str, valeur: impl Display) -> String {
-    format!("{key}: {valeur}")
+/// A `key: value` reply line.
+pub fn line(key: &str, value: impl Display) -> String {
+    format!("{key}: {value}")
 }
 
-/// Découpe une line de commande. Les arguments sont séparés par des espaces ;
-/// un argument entre guillemets doubles peut en contenir, et `\"` comme `\\` y
-/// sont des littéraux.
+/// Splits a command line. Arguments are separated by spaces; a double-quoted
+/// argument may contain some, and `\"` as well as `\\` are literals there.
 ///
-/// Un guillemet non fermé est `Ack::Arg` et non une tolérance : accepter la
-/// line ferait exécuter une commande dont l'argument est tronqué, ce qui est
-/// pire qu'un refus lisible.
+/// An unclosed quote is `Ack::Arg` and not a tolerance: accepting the line
+/// would execute a command whose argument is truncated, which is worse than a
+/// readable rejection.
 ///
-/// Son appelant est celui qui **read des lines**, donc la session.
-/// `commands.rs` reçoit une commande déjà découpée — c'est ce qui lui permet
-/// de n'avoir aucune E/S.
+/// Its caller is the one that **reads lines**, hence the session.
+/// `commands.rs` receives an already-split command — that is what lets it
+/// have no I/O at all.
 pub fn split(line: &str) -> Result<Vec<String>, Ack> {
     let mut args = Vec::new();
     let mut chars = line.chars().peekable();
@@ -69,7 +67,7 @@ pub fn split(line: &str) -> Result<Vec<String>, Ack> {
                         None => return Err(Ack::Arg),
                         Some(e) => arg.push(e),
                     },
-                    Some(autre) => arg.push(autre),
+                    Some(other) => arg.push(other),
                 }
             }
             args.push(arg);
@@ -93,95 +91,95 @@ mod tests {
     use super::*;
 
     #[test]
-    fn les_arguments_simples_se_decoupent_sur_les_espaces() {
+    fn simple_arguments_split_on_spaces() {
         assert_eq!(split("status").unwrap(), vec!["status"]);
         assert_eq!(split("play 3").unwrap(), vec!["play", "3"]);
-        // Les espaces multiples ne produisent pas d'argument clear.
+        // Multiple spaces do not produce an empty argument.
         assert_eq!(split("play   3").unwrap(), vec!["play", "3"]);
     }
 
     #[test]
-    fn un_argument_entre_guillemets_garde_ses_espaces() {
+    fn a_quoted_argument_keeps_its_spaces() {
         assert_eq!(split(r#"load "France Inter""#).unwrap(), vec!["load", "France Inter"]);
     }
 
     #[test]
-    fn les_echappements_dans_les_guillemets() {
-        // `\"` est un guillemet litteral, `\\` une contre-oblique litterale.
-        assert_eq!(split(r#"load "un \"name\"""#).unwrap(), vec!["load", r#"un "name""#]);
+    fn escapes_inside_quotes() {
+        // `\"` is a literal quote, `\\` a literal backslash.
+        assert_eq!(split(r#"load "a \"name\"""#).unwrap(), vec!["load", r#"a "name""#]);
         assert_eq!(split(r#"load "a\\b""#).unwrap(), vec!["load", r"a\b"]);
     }
 
     #[test]
-    fn un_guillemet_non_ferme_est_un_argument_invalide() {
+    fn an_unclosed_quote_is_an_invalid_argument() {
         assert_eq!(split(r#"load "France"#), Err(Ack::Arg));
     }
 
     #[test]
-    fn une_ligne_vide_ne_donne_aucun_argument() {
+    fn an_empty_line_gives_no_argument() {
         assert!(split("").unwrap().is_empty());
         assert!(split("   ").unwrap().is_empty());
     }
 
     #[test]
-    fn un_argument_vide_entre_guillemets_est_legal() {
-        // `listplaylistinfo ""` doit arriver comme un name clear, pas disparaitre.
+    fn an_empty_quoted_argument_is_legal() {
+        // `listplaylistinfo ""` must arrive as an empty name, not disappear.
         assert_eq!(split(r#"listplaylistinfo """#).unwrap(), vec!["listplaylistinfo", ""]);
     }
 
     #[test]
-    fn une_tabulation_separe_les_arguments_comme_une_espace() {
-        // Le brief ne le teste pas explicitement, mais l'implementation traite
-        // `\t` comme separateur au meme titre que ' ' (avant guillemets, dans
-        // la boucle de saut, et comme fin d'un argument non guillemete) : ces
-        // trois chemins meritent d'etre vus une fois.
+    fn a_tab_separates_arguments_like_a_space() {
+        // The brief does not test it explicitly, but the implementation treats
+        // `\t` as a separator on a par with ' ' (before quotes, in the skip
+        // loop, and as the end of an unquoted argument): those three paths
+        // deserve to be seen once.
         assert_eq!(split("play\t3").unwrap(), vec!["play", "3"]);
         assert_eq!(split("\tplay").unwrap(), vec!["play"]);
     }
 
     #[test]
-    fn une_contre_oblique_hors_guillemets_est_litterale() {
-        // Hors guillemets, `\` n'introduit aucun echappement : c'est un
-        // caractere ordinaire de l'argument, au meme titre qu'une lettre.
-        // Un client MPD qui envoie un path Windows non guillemete (rare,
-        // mais MALP le permet en pratique) doit le retrouver intact.
-        assert_eq!(split(r"load C:\musique").unwrap(), vec!["load", r"C:\musique"]);
+    fn a_backslash_outside_quotes_is_literal() {
+        // Outside quotes, `\` introduces no escape: it is an ordinary
+        // character of the argument, on a par with a letter. An MPD client
+        // that sends an unquoted Windows path (rare, but MALP allows it in
+        // practice) must get it back intact.
+        assert_eq!(split(r"load C:\music").unwrap(), vec!["load", r"C:\music"]);
     }
 
     #[test]
-    fn une_contre_oblique_terminale_dans_une_chaine_est_un_argument_invalide() {
-        // Le cas limit que la relecture de la Task 4 a signalé : `"abc\` finit
-        // sur une contre-oblique qui appelle un caractere qui n'existe pas. Le
-        // tolerer rendrait `abc`, donc un argument **tronque** presente comme
-        // valide — exactement ce que le refus du guillemet non ferme evite.
+    fn a_trailing_backslash_inside_a_string_is_an_invalid_argument() {
+        // The edge case the Task 4 review flagged: `"abc\` ends on a backslash
+        // that calls for a character that does not exist. Tolerating it would
+        // yield `abc`, hence a **truncated** argument presented as valid —
+        // exactly what rejecting the unclosed quote avoids.
         assert_eq!(split(r#"load "abc\"#), Err(Ack::Arg));
-        // Et la variante ou l'echappement mange le guillemet fermant : la
-        // chaine n'est alors plus fermee du tout.
+        // And the variant where the escape eats the closing quote: the string
+        // is then no longer closed at all.
         assert_eq!(split(r#"load "abc\""#), Err(Ack::Arg));
     }
 
     #[test]
-    fn un_nom_accentue_survit_a_laller_retour() {
-        // Les names de stations francaises sont accentues : `Chérie FM` doit
-        // ressortir caractere pour caractere. Le decoupage travaille sur des
-        // `char` et non sur des bytes, donc un `é` ne se coupe pas en deux —
-        // mais rien ne le disait, et c'est le kind de propriete qui se casse
-        // le jour ou quelqu'un passe aux bytes pour aller plus vite.
+    fn an_accented_name_survives_the_round_trip() {
+        // French station names are accented: `Chérie FM` must come out
+        // character for character. The splitting works on `char`s and not on
+        // bytes, so an `é` is not cut in two — but nothing said so, and it is
+        // the kind of property that breaks the day someone switches to bytes
+        // to go faster.
         let line = r#"load "Chérie FM""#;
         assert_eq!(split(line).unwrap(), vec!["load", "Chérie FM"]);
-        // Un name entierement non ASCII, guillemets et espaces compris.
+        // An entirely non-ASCII name, quotes and spaces included.
         assert_eq!(split(r#"load "Radio Nova — Résonances""#).unwrap()[1], "Radio Nova — Résonances");
     }
 
     #[test]
-    fn lack_porte_son_code_son_indice_et_sa_commande() {
+    fn the_ack_carries_its_code_its_index_and_its_command() {
         assert_eq!(ack(Ack::NoExist, 0, "load", "no such playlist"), "ACK [50@0] {load} no such playlist");
-        // L'index est le rang dans une liste de commands.
+        // The index is the rank within a command list.
         assert_eq!(ack(Ack::Arg, 2, "setvol", "invalid volume"), "ACK [2@2] {setvol} invalid volume");
     }
 
     #[test]
-    fn ligne_met_en_forme_une_paire_cle_valeur() {
+    fn line_formats_a_key_value_pair() {
         assert_eq!(line("volume", 42), "volume: 42");
         assert_eq!(line("state", "play"), "state: play");
     }

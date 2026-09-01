@@ -1,47 +1,47 @@
 /**
- * Nom lisible d'une langue, dans **sa propre langue** : `fr` donne
- * « francais », `en` donne « English ».
+ * Readable name of a language, in **its own language**: `fr` gives
+ * "français", `en` gives "English".
  *
- * C'est la convention des selecteurs de langue, et la seule qui se lise quand on
- * ne comprend step celle qui est active : quelqu'un qui tombe sur un appareil
- * regle en francais doit pouvoir trouver « English » sans savoir lire le
- * francais.
+ * This is the convention of language selectors, and the only one that can be
+ * read when one does not understand the active language: somebody landing on
+ * a device set to French must be able to find "English" without being able to
+ * read French.
  *
- * Les noms ne sont step traduits par nos packs : le coeur n'expose que des codes
- * (les noms de files `<lang>.toml`), et `Intl.DisplayNames` les rend depuis
- * les data du browser — rien a tenir a jour de notre cote quand un pack de
- * langue est ajoute.
+ * The names are not translated by our packs: the core only exposes codes (the
+ * names of the `<lang>.toml` files), and `Intl.DisplayNames` renders them from
+ * the browser's data — nothing to keep up to date on our side when a language
+ * pack is added.
  *
- * Repli sur le code : une langue inconnue du moteur doit rester selectionnable,
- * step disparaitre du selecteur.
+ * Fallback on the code: a language unknown to the engine must stay
+ * selectable, not disappear from the selector.
  */
 export function languageName(code: string): string {
-  const brut = code.trim()
-  if (!brut) return ''
+  const raw = code.trim()
+  if (!raw) return ''
   try {
-    const noms = new Intl.DisplayNames([brut], { type: 'language' })
-    const nom = noms.of(brut)
-    // Capitalise seulement un **nom** : quand `Intl` ne connait step le code, il
-    // le renvoie tel quel, et un code s'displayed verbatim — « Qqq » ne serait ni
-    // un nom ni un code.
-    return nom && nom !== brut ? capitalize(nom, brut) : brut
+    const names = new Intl.DisplayNames([raw], { type: 'language' })
+    const name = names.of(raw)
+    // Capitalize only a **name**: when `Intl` does not know the code, it
+    // returns it as is, and a code is displayed verbatim — "Qqq" would be
+    // neither a name nor a code.
+    return name && name !== raw ? capitalize(name, raw) : raw
   } catch {
-    return brut
+    return raw
   }
 }
 
 /**
- * Premiere lettre en capitalize.
+ * First letter capitalized.
  *
- * Les conventions typographiques divergent — l'anglais capitalise les noms de
- * langue (« English »), le francais non (« francais ») — et une list ou les
- * entries alternent les deux se lit mal. On capitalise donc toutes les entries.
+ * Typographic conventions diverge — English capitalizes language names
+ * ("English"), French does not ("français") — and a list where the entries
+ * alternate between the two reads badly. So we capitalize every entry.
  *
- * `toLocaleUpperCase` avec la langue concernee, et non `toUpperCase` : la
- * transformation depend de la langue (le turc distingue `i` et `ı`), et elle est
- * sans effet sur les ecritures qui n'ont step de casse.
+ * `toLocaleUpperCase` with the language concerned, and not `toUpperCase`: the
+ * transformation depends on the language (Turkish distinguishes `i` and `ı`),
+ * and it has no effect on scripts that have no case.
  */
-function capitalize(nom: string, langue: string): string {
-  const premiere = nom.slice(0, 1).toLocaleUpperCase(langue)
-  return premiere + nom.slice(1)
+function capitalize(name: string, language: string): string {
+  const first = name.slice(0, 1).toLocaleUpperCase(language)
+  return first + name.slice(1)
 }

@@ -1,11 +1,12 @@
-//! Binaire **racine** : réconcilie les montages déclarés.
+//! **Root** binary: reconciles the declared mounts.
 //!
-//! Lancé par `ritornello-media-mount.service`, lui-même démarré par le plugin
-//! via `systemctl` et autorisé par polkit sur cette seule unité.
+//! Launched by `ritornello-media-mount.service`, itself started by the plugin
+//! via `systemctl` and authorized by polkit on this single unit.
 //!
-//! Il consomme une configuration écrite par un processus **non privilégié**. Il
-//! revalide donc tout ce qu'il read : la validation faite côté plugin ne compte
-//! pas comme une garantie, elle n'est qu'une politesse envers l'utilisateur.
+//! It consumes a configuration written by an **unprivileged** process. It
+//! therefore revalidates everything it reads: the validation done on the
+//! plugin side does not count as a guarantee, it is only a courtesy to the
+//! user.
 
 use anyhow::{Context, Result};
 use ritornello_plugin_files::mount::{is_mounted_in, mount_points};
@@ -17,44 +18,43 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-/// Lit `uid` et `gid` de l'utilisateur du service in_dir `/etc/passwd`.
+/// Reads the `uid` and `gid` of the service user from `/etc/passwd`.
 ///
-/// Une playback de fichier plutôt qu'une dépendance à `nix` ou `libc` : c'est
-/// trois lines, testable, et cela évite de tirer une caisse entière in_dir un
-/// binaire qui ne fait qu'appeler `mount`.
-fn uid_gid(passwd: &str, utilisateur: &str) -> Option<(u32, u32)> {
+/// A file read rather than a dependency on `nix` or `libc`: it is three lines,
+/// testable, and it avoids pulling a whole crate into a binary that does
+/// nothing but call `mount`.
+fn uid_gid(passwd: &str, user: &str) -> Option<(u32, u32)> {
     passwd.lines().find_map(|l| {
-        let mut champs = l.split(':');
-        (champs.next()? == utilisateur).then_some(())?;
-        let _mot_de_passe = champs.next()?;
-        let uid = champs.next()?.parse().ok()?;
-        let gid = champs.next()?.parse().ok()?;
+        let mut fields = l.split(':');
+        (fields.next()? == user).then_some(())?;
+        let _password = fields.next()?;
+        let uid = fields.next()?.parse().ok()?;
+        let gid = fields.next()?.parse().ok()?;
         Some((uid, gid))
     })
 }
 
-/// Points de montage sous `MOUNT_ROOT` actuellement montés.
+/// Mount points under `MOUNT_ROOT` currently mounted.
 ///
-/// L'analyse de `/proc/mounts` et son déséchappement viennent de
-/// `mount::mount_points` : une seule implémentation de cette règle, sans
-/// quoi les deux binaires divergeraient sur un détail rare — l'un traitant la
-/// tabulation échappée et pas l'autre, par exemple.
+/// The parsing of `/proc/mounts` and its unescaping come from
+/// `mount::mount_points`: a single implementation of this rule, otherwise the
+/// two binaries would diverge on a rare detail — one handling the escaped tab
+/// and not the other, for instance.
 fn mounted_under_root(proc_mounts: &str) -> Vec<PathBuf> {
     mount_points(proc_mounts).filter(|p| p.starts_with(MOUNT_ROOT)).collect()
 }
 
-/// Emplacements du programme d'aide `mount.cifs`. Les deux, et non le seul
-/// `/sbin` : sur une distribution à `/usr` fusionné c'est le même fichier, sur
-/// les autres ce ne l'est pas.
+/// Locations of the `mount.cifs` helper. Both, not just `/sbin`: on a
+/// merged-`/usr` distribution it is the same file, on the others it is not.
 const CIFS_HINTS: [&str; 2] = ["/sbin/mount.cifs", "/usr/sbin/mount.cifs"];
 
-/// `mount.cifs` est-il installé ?
+/// Is `mount.cifs` installed?
 ///
-/// Le prédicat d'existence est injecté plutôt que lu directement : la règle se
-/// teste alors sans dépendre de la machine qui lance les tests, laquelle n'a ni
-/// `cifs-utils` ni le droit d'en poser un fichier.
-fn cifs_help<F: Fn(&str) -> bool>(existe: F) -> Option<&'static str> {
-    CIFS_HINTS.into_iter().find(|c| existe(c))
+/// The existence predicate is injected rather than read directly: the rule
+/// can then be tested without depending on the machine running the tests,
+/// which has neither `cifs-utils` nor the right to place a file there.
+fn cifs_help<F: Fn(&str) -> bool>(exists: F) -> Option<&'static str> {
+    CIFS_HINTS.into_iter().find(|c| exists(c))
 }
 
 fn main() -> Result<()> {
@@ -62,14 +62,14 @@ fn main() -> Result<()> {
 
     let roots_path = env_or("RITORNELLO_FILES_ROOTS", "/etc/ritornello/media-roots.toml");
     let creds_dir = env_or("RITORNELLO_FILES_CREDENTIALS", "/etc/ritornello/media-credentials");
-    let utilisateur = env_or("RITORNELLO_USER", "ritornello");
+    let user = env_or("RITORNELLO_USER", "ritornello");
 
     let roots = match Roots::load(Path::new(&roots_path)) {
         Ok(r) => r,
         Err(e) => {
-            // Absence de configuration = rien à monter, et non un échec : le
-            // service est activé au démarrage de la machine, avant même qu'un
-            // partage n'ait jamais été déclaré.
+            // No configuration = nothing to mount, not a failure: the service
+            // is activated at machine boot, before any share has ever been
+            // declared.
             if !Path::new(&roots_path).exists() {
                 tracing::info!("{roots_path} does not exist yet: nothing to mount");
                 return Ok(());
@@ -77,65 +77,66 @@ fn main() -> Result<()> {
             return Err(e).with_context(|| format!("reading {roots_path}"));
         }
     };
-    // Ceinture et bretelles : `load` valide déjà, mais cette line est ce qui
-    // rend l'invariant visible du côté privilégié.
+    // Belt and braces: `load` already validates, but this line is what makes
+    // the invariant visible on the privileged side.
     roots.validate()?;
 
     let passwd = std::fs::read_to_string("/etc/passwd").context("reading /etc/passwd")?;
-    let (uid, gid) = uid_gid(&passwd, &utilisateur)
-        .with_context(|| format!("no user named {utilisateur} in /etc/passwd"))?;
+    let (uid, gid) = uid_gid(&passwd, &user)
+        .with_context(|| format!("no user named {user} in /etc/passwd"))?;
 
     let proc_mounts = std::fs::read_to_string("/proc/mounts").context("reading /proc/mounts")?;
 
-    // Démonter d'abord ce qui n'est plus déclaré : une racine retirée de la
-    // page doit disparaître, sinon le partage resterait monté jusqu'au
-    // prochain redémarrage de la machine.
-    let voulus: Vec<PathBuf> = roots
+    // Unmount first what is no longer declared: a root removed from the page
+    // must disappear, otherwise the share would stay mounted until the next
+    // reboot of the machine.
+    let wanted: Vec<PathBuf> = roots
         .root
         .iter()
         .filter(|r| r.kind == RootKind::Smb)
         .map(|r| r.mount_point())
         .collect();
-    for monte in mounted_under_root(&proc_mounts) {
-        if voulus.contains(&monte) {
+    for mounted in mounted_under_root(&proc_mounts) {
+        if wanted.contains(&mounted) {
             continue;
         }
-        let sortie = std::process::Command::new("umount").arg(&monte).output();
-        match sortie {
-            Ok(s) if s.status.success() => tracing::info!("unmounted {}", monte.display()),
+        let output = std::process::Command::new("umount").arg(&mounted).output();
+        match output {
+            Ok(s) if s.status.success() => tracing::info!("unmounted {}", mounted.display()),
             Ok(s) => tracing::warn!(
                 "unmounting {}: {}",
-                monte.display(),
+                mounted.display(),
                 String::from_utf8_lossy(&s.stderr).trim()
             ),
-            Err(e) => tracing::warn!("unmounting {}: {e}", monte.display()),
+            Err(e) => tracing::warn!("unmounting {}: {e}", mounted.display()),
         }
     }
 
-    // `mount -t cifs` ne monte pas par lui-même : il délègue à `mount.cifs`,
-    // seul à savoir read un fichier `credentials=`. Sans ce programme, `mount`
-    // appelle mount(2) directement, l'option n'est plus lue par personne et la
-    // session ouverte est anonyme — refusée par le NAS. L'échec rendition est alors
-    // « cannot mount //hôte/partage read-only », qui ne nomme ni
-    // l'authentification ni le paquet manquant : constaté sur DietPi bookworm,
-    // une heure pour l'attribuer. D'où ce contrôle préalable, qui remplace une
-    // tentative dont le message égare par une line qui dit quoi installer.
+    // `mount -t cifs` does not mount by itself: it delegates to `mount.cifs`,
+    // the only one that knows how to read a `credentials=` file. Without that
+    // program, `mount` calls mount(2) directly, the option is no longer read
+    // by anyone and the opened session is anonymous — refused by the NAS. The
+    // failure returned is then "cannot mount //host/share read-only", which
+    // names neither the authentication nor the missing package: observed on
+    // DietPi bookworm, one hour to attribute it. Hence this preliminary check,
+    // which replaces an attempt whose message misleads with a line that says
+    // what to install.
     //
-    // Après la boucle de démontage, et non avant : retirer un partage de la
-    // page doit continuer à le démonter, ce dont `umount` s'acquitte seul.
-    let a_monter = roots
+    // After the unmount loop, not before: removing a share from the page must
+    // keep unmounting it, which `umount` handles on its own.
+    let to_mount = roots
         .root
         .iter()
         .filter(|r| r.kind == RootKind::Smb)
         .filter(|r| !is_mounted_in(&proc_mounts, &r.mount_point()))
         .count();
-    if a_monter > 0 && cifs_help(|c| Path::new(c).exists()).is_none() {
-        // `error!` puis sortie en succès : le service reste un réconciliateur
-        // qui rend compte, et l'unité en échec n'apporterait rien de plus que
-        // du bruit au démarrage de la machine.
+    if to_mount > 0 && cifs_help(|c| Path::new(c).exists()).is_none() {
+        // `error!` then exit with success: the service remains a reconciler
+        // that reports, and a failed unit would bring nothing more than noise
+        // at machine boot.
         tracing::error!(
             "mount.cifs not found in /sbin or /usr/sbin: install cifs-utils \
-             (see docs/installation.md); {a_monter} declared share(s) left unmounted"
+             (see docs/installation.md); {to_mount} declared share(s) left unmounted"
         );
         return Ok(());
     }
@@ -151,9 +152,8 @@ fn main() -> Result<()> {
         }
         let cmd = mount_command(r, Path::new(&creds_dir), uid, gid);
         match std::process::Command::new(&cmd[0]).args(&cmd[1..]).output() {
-            // Un échec ne fait pas échouer le service : les autres partages
-            // doivent être montés quand même, et l'utilisateur verra l'état
-            // depuis la page.
+            // A failure does not fail the service: the other shares must be
+            // mounted anyway, and the user will see the state from the page.
             Ok(s) if s.status.success() => tracing::info!("mounted {}", r.name),
             Ok(s) => {
                 tracing::error!("mounting {}: {}", r.name, String::from_utf8_lossy(&s.stderr).trim())
@@ -176,25 +176,26 @@ proc /proc proc rw,relatime 0 0
 ";
 
     #[test]
-    fn un_point_de_montage_absent_de_proc_mounts_est_non_monte() {
+    fn a_mount_point_absent_from_proc_mounts_is_not_mounted() {
         assert!(is_mounted_in(PROC_MOUNTS, Path::new("/mnt/ritornello/nas")));
         assert!(!is_mounted_in(PROC_MOUNTS, Path::new("/mnt/ritornello/autre")));
     }
 
     #[test]
-    fn un_point_de_montage_avec_espace_echappe_est_reconnu() {
-        // /proc/mounts échappe l'espace en \040. Sans ce traitement, le partage
-        // passerait pour non monté et serait remonté à chaque réconciliation.
+    fn a_mount_point_with_an_escaped_space_is_recognized() {
+        // /proc/mounts escapes the space as \040. Without this handling, the
+        // share would pass for unmounted and be remounted at every
+        // reconciliation.
         assert!(is_mounted_in(PROC_MOUNTS, Path::new("/mnt/ritornello/ma musique")));
     }
 
     #[test]
-    fn seuls_les_montages_sous_la_racine_sont_candidats_au_demontage() {
-        // Le binaire tourne en root : il ne doit jamais démonter quoi que ce
-        // soit hors de son domaine, /proc et /media/usb compris.
-        let sous = mounted_under_root(PROC_MOUNTS);
+    fn only_mounts_under_the_root_are_candidates_for_unmounting() {
+        // The binary runs as root: it must never unmount anything outside its
+        // domain, /proc and /media/usb included.
+        let under = mounted_under_root(PROC_MOUNTS);
         assert_eq!(
-            sous,
+            under,
             vec![
                 PathBuf::from("/mnt/ritornello/nas"),
                 PathBuf::from("/mnt/ritornello/ma musique")
@@ -203,7 +204,7 @@ proc /proc proc rw,relatime 0 0
     }
 
     #[test]
-    fn luid_et_le_gid_se_lisent_dans_passwd() {
+    fn uid_and_gid_are_read_from_passwd() {
         let passwd = "root:x:0:0:root:/root:/bin/bash\n\
                       ritornello:x:998:997::/var/lib/ritornello:/usr/sbin/nologin\n";
         assert_eq!(uid_gid(passwd, "ritornello"), Some((998, 997)));
@@ -211,24 +212,24 @@ proc /proc proc rw,relatime 0 0
     }
 
     #[test]
-    fn un_passwd_tronque_ne_donne_pas_un_uid_faux() {
-        // Mieux vaut ne rien rendre que rendre 0 : le montage porterait alors
-        // les fichiers à root, et le service ne pourrait plus les read.
+    fn a_truncated_passwd_does_not_yield_a_wrong_uid() {
+        // Better to return nothing than to return 0: the mount would then
+        // assign the files to root, and the service could no longer read them.
         assert_eq!(uid_gid("ritornello:x\n", "ritornello"), None);
         assert_eq!(uid_gid("ritornello:x:abc:997::/:/bin/sh\n", "ritornello"), None);
     }
 
     #[test]
-    fn l_aide_cifs_est_cherchee_dans_les_deux_sbin() {
+    fn the_cifs_helper_is_looked_for_in_both_sbin() {
         assert_eq!(cifs_help(|c| c == "/sbin/mount.cifs"), Some("/sbin/mount.cifs"));
-        // Une distribution sans /usr fusionné n'a que celui-là.
+        // A distribution without merged /usr only has that one.
         assert_eq!(cifs_help(|c| c == "/usr/sbin/mount.cifs"), Some("/usr/sbin/mount.cifs"));
     }
 
     #[test]
-    fn sans_cifs_utils_l_aide_est_absente() {
-        // Le cas qui a coûté une heure sur l'appareil : `cifs-utils` non
-        // installé, et un « cannot mount … read-only » qui ne le disait pas.
+    fn without_cifs_utils_the_helper_is_absent() {
+        // The case that cost one hour on the device: `cifs-utils` not
+        // installed, and a "cannot mount … read-only" that did not say so.
         assert_eq!(cifs_help(|_| false), None);
     }
 }

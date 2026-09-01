@@ -7,12 +7,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 
-/// Racine des nœuds evdev sur un Linux standard.
+/// Root of evdev nodes on a standard Linux.
 pub const INPUT_DIR: &str = "/dev/input";
 
-/// Filtre pur d'un listing de répertoire : ne garde que les nœuds `eventN`,
-/// triés. Séparé de l'accès disque pour être testable sans matériel (comme
-/// `audio_output::parse_device_list` du cœur).
+/// Pure filter over a directory listing: keeps only `eventN` nodes, sorted.
+/// Separated from disk access to stay testable without hardware (like the
+/// core's `audio_output::parse_device_list`).
 pub fn event_nodes(root: &Path, entries: &[String]) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = entries
         .iter()
@@ -26,8 +26,8 @@ pub fn event_nodes(root: &Path, entries: &[String]) -> Vec<PathBuf> {
     v
 }
 
-/// Listing disque des nœuds evdev. Répertoire absent ou illisible → liste
-/// clear et `warn` : jamais fatal.
+/// Disk listing of evdev nodes. Missing or unreadable directory → empty list
+/// and a `warn`: never fatal.
 pub fn scan_event_nodes(root: &Path) -> Vec<PathBuf> {
     let Ok(rd) = std::fs::read_dir(root) else {
         tracing::warn!("directory {} unreadable: no input device", root.display());
@@ -40,10 +40,10 @@ pub fn scan_event_nodes(root: &Path) -> Vec<PathBuf> {
     event_nodes(root, &entries)
 }
 
-/// Ce que produit un appui de touche : la commande liée, ou rien. Le
-/// périphérique en cours d'apprentissage n'émet plus rien (sinon apprendre
-/// « Volume + » déclencherait un volume +) ; les autres continuent
-/// normalement. Fonction pure, testable sans matériel.
+/// What a key press produces: the bound command, or nothing. The device
+/// currently being learned emits nothing (otherwise learning "Volume +"
+/// would trigger a volume +); the others keep working normally. Pure
+/// function, testable without hardware.
 pub fn key_outcome(
     bindings: &Bindings,
     learning_device: Option<&str>,
@@ -74,14 +74,14 @@ pub fn key_outcome_held(
     Some(InputMessage { cmd, held })
 }
 
-/// État partagé entre la moitié Input (les tâches de playback) et la moitié
-/// Admin. `std::sync::RwLock` : les gardes sont toujours relâchées avant le
-/// moindre `.await`, et `page()` (synchrone) peut read sans runtime.
+/// State shared between the Input half (the playback tasks) and the Admin
+/// half. `std::sync::RwLock`: guards are always released before any
+/// `.await`, and `page()` (synchronous) can read without a runtime.
 #[derive(Clone)]
 pub struct Hub {
     pub bindings: Arc<RwLock<Bindings>>,
     pub learn: Arc<RwLock<LearnState>>,
-    /// Nœuds actuellement ouverts : path → name du périphérique.
+    /// Currently open nodes: path → device name.
     pub open: Arc<RwLock<BTreeMap<PathBuf, String>>>,
     pub tx: mpsc::Sender<InputMessage>,
 }
@@ -96,13 +96,12 @@ impl Hub {
         }
     }
 
-    /// Noms des périphériques actuellement ouverts, triés et dédoublonnés
-    /// (plusieurs nœuds peuvent porter le même name). Les entrées vides sont
-    /// écartées : le name clear est un placeholder de réservation posé dans
-    /// `open` pendant que `Device::open` est en cours (voir
-    /// `open_new_devices`), et la page d'admin sonde `device_names()` toutes
-    /// les 300 ms pendant l'apprentissage — sans ce filtre elle afficherait
-    /// transitoirement une entrée fantôme.
+    /// Names of the currently open devices, sorted and deduplicated (several
+    /// nodes can share the same name). Empty entries are dropped: the empty
+    /// name is a reservation placeholder set in `open` while `Device::open`
+    /// is in progress (see `open_new_devices`), and the admin page probes
+    /// `device_names()` every 300 ms during learning — without this filter
+    /// it would transiently display a ghost entry.
     pub fn device_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .open
@@ -117,17 +116,17 @@ impl Hub {
         names
     }
 
-    /// Ouvre tous les nœuds evdev lisibles pas encore ouverts et lance une
-    /// tâche de playback par nœud. Renvoie le nombre de nouveaux nœuds. Un
-    /// périphérique illisible (droits, disparu entre l'énumération et
-    /// l'ouverture) est logué en `warn` et ignoré — jamais fatal.
+    /// Opens every readable evdev node not already open and spawns one
+    /// playback task per node. Returns the number of new nodes. An
+    /// unreadable device (permissions, gone between enumeration and open)
+    /// is logged as `warn` and skipped — never fatal.
     pub fn open_new_devices(&self, root: &Path) -> usize {
-        let mut nouveaux = 0;
+        let mut new_count = 0;
         for path in scan_event_nodes(root) {
-            // Réservation atomique : le test d'appartenance et l'insertion se
-            // font sous le même verrou en écriture, pour qu'un second rescan
-            // concurrent (double-clic sur « Rafraîchir ») ne puisse pas
-            // ouvrir le même nœud deux fois et lancer deux lecteurs dessus.
+            // Atomic reservation: the membership check and the insert happen
+            // under the same write lock, so a concurrent second rescan
+            // (double-click on "Refresh") cannot open the same node twice
+            // and spawn two readers on it.
             {
                 let mut open = self.open.write().unwrap();
                 if open.contains_key(&path) {
@@ -146,12 +145,12 @@ impl Hub {
             let name = dev.name().unwrap_or("?").to_string();
             self.open.write().unwrap().insert(path.clone(), name.clone());
             self.spawn_reader(path, dev, name);
-            nouveaux += 1;
+            new_count += 1;
         }
-        nouveaux
+        new_count
     }
 
-    /// Une tâche de playback par nœud, toutes alimentant le même mpsc.
+    /// One playback task per node, all feeding the same mpsc.
     fn spawn_reader(&self, path: PathBuf, dev: Device, name: String) {
         let hub = self.clone();
         tokio::spawn(async move {
@@ -168,8 +167,8 @@ impl Hub {
                 let ev = match stream.next_event().await {
                     Ok(ev) => ev,
                     Err(e) => {
-                        // Débranchement : cette tâche se terminate, les autres
-                        // continuent.
+                        // Unplugged: this task ends, the others keep
+                        // running.
                         tracing::info!("read from {} ended: {e}", path.display());
                         break;
                     }
@@ -202,9 +201,9 @@ impl Hub {
         });
     }
 
-    /// Oublie un nœud dont la playback s'est terminée. Si plus aucun nœud ne
-    /// porte ce name, l'apprentissage éventuellement en cours dessus est
-    /// abandonné (le périphérique a disparu).
+    /// Forgets a node whose playback has ended. If no node still carries
+    /// this name, any learning session in progress on it is abandoned (the
+    /// device has disappeared).
     fn forget(&self, path: &Path) {
         let name = self.open.write().unwrap().remove(path);
         if let Some(name) = name {
@@ -229,13 +228,13 @@ mod tests {
         }
     }
 
-    fn hub_de_test() -> (Hub, mpsc::Receiver<InputMessage>) {
+    fn test_hub() -> (Hub, mpsc::Receiver<InputMessage>) {
         let (tx, rx) = mpsc::channel(8);
         (Hub::new(table(), tx), rx)
     }
 
     #[test]
-    fn event_nodes_ne_garde_que_les_noeuds_event() {
+    fn event_nodes_keeps_only_event_nodes() {
         let entries = vec![
             "event10".to_string(),
             "event2".to_string(),
@@ -251,12 +250,12 @@ mod tests {
     }
 
     #[test]
-    fn scan_event_nodes_repertoire_absent_donne_vide() {
+    fn scan_event_nodes_missing_directory_gives_empty() {
         assert!(scan_event_nodes(Path::new("/nonexistent-input-xyz")).is_empty());
     }
 
     #[test]
-    fn key_outcome_resout_le_binding_du_bon_peripherique() {
+    fn key_outcome_resolves_the_right_devices_binding() {
         let t = table();
         assert_eq!(key_outcome(&t, None, "eHome", 115), Some(Command::VolumeUp));
         assert_eq!(key_outcome(&t, None, "eHome", 42), None);
@@ -264,13 +263,13 @@ mod tests {
     }
 
     #[test]
-    fn key_outcome_supprime_lemission_du_seul_peripherique_en_apprentissage() {
+    fn key_outcome_suppresses_emission_only_from_the_device_being_learned() {
         let mut t = table();
         t.devices.push(BindDevice {
             name: "USB Keyboard".into(),
             bindings: vec![Binding::new(115, &Command::VolumeUp)],
         });
-        // apprentissage sur eHome : eHome muet, le clavier continue
+        // learning on eHome: eHome silent, the keyboard keeps working
         assert_eq!(key_outcome(&t, Some("eHome"), "eHome", 115), None);
         assert_eq!(
             key_outcome(&t, Some("eHome"), "USB Keyboard", 115),
@@ -279,8 +278,8 @@ mod tests {
     }
 
     #[test]
-    fn device_names_dedoublonne_et_trie() {
-        let (hub, _rx) = hub_de_test();
+    fn device_names_deduplicates_and_sorts() {
+        let (hub, _rx) = test_hub();
         {
             let mut open = hub.open.write().unwrap();
             open.insert(PathBuf::from("/dev/input/event3"), "eHome".into());
@@ -291,17 +290,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_new_devices_sur_un_repertoire_sans_noeud_nouvre_rien() {
+    async fn open_new_devices_on_a_directory_with_no_node_opens_nothing() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("mice"), "").unwrap();
-        let (hub, _rx) = hub_de_test();
+        let (hub, _rx) = test_hub();
         assert_eq!(hub.open_new_devices(dir.path()), 0);
         assert!(hub.device_names().is_empty());
     }
 
     #[test]
-    fn forget_retire_le_noeud_de_la_carte() {
-        let (hub, _rx) = hub_de_test();
+    fn forget_removes_the_node_from_the_map() {
+        let (hub, _rx) = test_hub();
         let p = PathBuf::from("/dev/input/event7");
         hub.open.write().unwrap().insert(p.clone(), "eHome".into());
         hub.forget(&p);
@@ -309,30 +308,30 @@ mod tests {
     }
 
     #[test]
-    fn le_hub_supprime_lemission_du_peripherique_en_apprentissage() {
-        let (hub, _rx) = hub_de_test();
+    fn the_hub_suppresses_emission_from_the_device_being_learned() {
+        let (hub, _rx) = test_hub();
         hub.bindings.write().unwrap().devices.push(BindDevice {
             name: "USB Keyboard".into(),
             bindings: vec![Binding::new(115, &Command::VolumeUp)],
         });
         hub.learn.write().unwrap().learn("eHome");
 
-        let sortie = |name: &str, code: u16| {
+        let outcome = |name: &str, code: u16| {
             let learn = hub.learn.read().unwrap();
             let b = hub.bindings.read().unwrap();
             key_outcome(&b, learn.device(), name, code)
         };
-        assert_eq!(sortie("eHome", 115), None);
-        assert_eq!(sortie("USB Keyboard", 115), Some(Command::VolumeUp));
+        assert_eq!(outcome("eHome", 115), None);
+        assert_eq!(outcome("USB Keyboard", 115), Some(Command::VolumeUp));
 
-        // une fois le code capturé, eHome réémet
+        // once the code is captured, eHome emits again
         hub.learn.write().unwrap().capture("eHome", 115);
-        assert_eq!(sortie("eHome", 115), Some(Command::VolumeUp));
+        assert_eq!(outcome("eHome", 115), Some(Command::VolumeUp));
     }
 
     #[test]
-    fn forget_abandonne_lapprentissage_quand_le_dernier_noeud_disparait() {
-        let (hub, _rx) = hub_de_test();
+    fn forget_abandons_learning_when_the_last_node_disappears() {
+        let (hub, _rx) = test_hub();
         let p1 = PathBuf::from("/dev/input/event1");
         let p2 = PathBuf::from("/dev/input/event2");
         {
@@ -341,26 +340,26 @@ mod tests {
             open.insert(p2.clone(), "eHome".into());
         }
         hub.learn.write().unwrap().learn("eHome");
-        // un seul des deux nœuds disparaît : l'apprentissage continue
+        // only one of the two nodes disappears: learning continues
         hub.forget(&p1);
         assert_eq!(hub.learn.read().unwrap().device(), Some("eHome"));
-        // le dernier disparaît : l'apprentissage est abandonné
+        // the last one disappears: learning is abandoned
         hub.forget(&p2);
         assert_eq!(hub.learn.read().unwrap().snapshot(), None);
     }
 
     #[test]
-    fn key_outcome_held_marque_les_repetitions_du_volume() {
+    fn key_outcome_held_marks_volume_repeats() {
         let t = table();
-        let presse = key_outcome_held(&t, None, "eHome", 115, false).unwrap();
-        assert_eq!(presse, InputMessage::from(Command::VolumeUp));
-        let repete = key_outcome_held(&t, None, "eHome", 115, true).unwrap();
-        assert_eq!(repete.cmd, Command::VolumeUp);
-        assert!(repete.held);
+        let pressed = key_outcome_held(&t, None, "eHome", 115, false).unwrap();
+        assert_eq!(pressed, InputMessage::from(Command::VolumeUp));
+        let repeated = key_outcome_held(&t, None, "eHome", 115, true).unwrap();
+        assert_eq!(repeated.cmd, Command::VolumeUp);
+        assert!(repeated.held);
     }
 
     #[test]
-    fn key_outcome_held_ignore_les_repetitions_hors_volume() {
+    fn key_outcome_held_ignores_repeats_outside_volume() {
         // Holding Stop or Next must not machine-gun the command: autorepeat
         // only means something for the volume.
         let mut t = table();
@@ -371,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn key_outcome_held_respecte_lapprentissage() {
+    fn key_outcome_held_respects_learning() {
         let t = table();
         assert_eq!(key_outcome_held(&t, Some("eHome"), "eHome", 115, true), None);
     }

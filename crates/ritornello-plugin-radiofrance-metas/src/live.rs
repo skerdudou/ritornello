@@ -1,14 +1,14 @@
-//! Interrogation du direct d'une station Radio France.
+//! Querying the live feed of a Radio France station.
 //!
-//! L'analyse est une fonction pure, testée sur des réponses réelles ; seule
-//! `follows` touche le réseau, et **aucun test ne l'appelle**.
+//! Parsing is a pure function, tested on real responses; only `follows`
+//! touches the network, and **no test calls it**.
 //!
-//! Contrairement à OUI FM, qui push_cover ses métadonnées dans un
-//! `text/event-stream`, Radio France répond à une interrogation ponctuelle —
-//! mais en disant lui-même quand le rappeler (`delayToRefresh`). Le rythme
-//! d'interrogation est donc dicté par le serveur, pas par nous : c'est ce qui
-//! permet de suivre un track de trois minutes sans marteler un tiers, et de
-//! laisser une tranche d'antenne d'une heure tranquille.
+//! Unlike OUI FM, which pushes its metadata over a `text/event-stream`,
+//! Radio France answers a one-off query — but tells us itself when to call
+//! back (`delayToRefresh`). The polling rhythm is therefore dictated by the
+//! server, not by us: that is what makes it possible to follow a
+//! three-minute track without hammering a third party, and to leave an
+//! hour-long air segment alone.
 
 use anyhow::{bail, Result};
 use ritornello_proto::Link;
@@ -16,207 +16,209 @@ use serde_json::Value;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// Ce qu'une réponse apprend du direct.
+/// What a response tells us about the live feed.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Meta {
     pub artist: Option<String>,
     pub title: Option<String>,
     pub album: Option<String>,
-    /// Année et liens viennent de la **grille**, comme l'album, et sont donc
-    /// remplis au même moment (voir `follows`). Le direct ne les porte pas.
+    /// Year and links come from the **schedule**, like the album, so they are
+    /// filled in at the same moment (see `follows`). The live feed does not
+    /// carry them.
     pub year: Option<u16>,
     pub links: Vec<Link>,
     pub duration_s: Option<u32>,
-    /// Début du track, en secondes depuis l'époque Unix, tel que le direct
-    /// l'announcement. Brut : c'est l'émission de l'enrichment qui en déduit
-    /// l'écoulé, pour que ce module reste sans horloge et testable sur des
-    /// captures.
+    /// Start of the track, in seconds since the Unix epoch, as announced by
+    /// the live feed. Raw: it is the enrichment emission that derives the
+    /// elapsed time from it, so that this module stays clock-free and
+    /// testable on captures.
     pub start_time: Option<u64>,
-    /// UUID brut de la cover, copié depuis `Direct.cover` dans `follows` — ce
-    /// champ est ce qui franchit le canal jusqu'au plugin, qui en fait une URL
-    /// (voir `cover_url`). `None` inclut le cas où ce n'est pas un track,
-    /// la règle étant déjà tranchée en amont, dans `Direct.cover`.
+    /// Raw UUID of the cover, copied from `Direct.cover` in `follows` — this
+    /// field is what crosses the channel to the plugin, which turns it into a
+    /// URL (see `cover_url`). `None` includes the case where this is not a
+    /// track: that rule is already settled upstream, in `Direct.cover`.
     pub cover: Option<String>,
 }
 
-/// Une réponse lue : ce qui passe, et dans combien de temps rappeler.
+/// A parsed response: what is on air, and how long until we should call back.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Direct {
-    /// `None` quand la réponse ne porte ni titre ni artiste — cas d'un
-    /// basculement d'antenne. Le délai, lui, reste exploitable.
+    /// `None` when the response carries neither title nor artist — the case
+    /// of a broadcast handover. The delay, however, remains usable.
     pub meta: Option<Meta>,
-    /// Identifiant du track en cours, quand il y en a un. Il n'est jamais
-    /// affiché : il sert à retrouver dans la grille ce que le direct ne porte
-    /// pas — album, année, lien (voir `supplement_in_schedule`).
+    /// Identifier of the current track, when there is one. It is never
+    /// displayed: it is used to find in the schedule what the live feed does
+    /// not carry — album, year, link (see `supplement_in_schedule`).
     pub song_uuid: Option<String>,
-    /// UUID de la cover, **seulement quand un vrai track plays**.
+    /// UUID of the cover, **only when a real track is playing**.
     ///
-    /// La station renseigne un `cover` même pour « Le direct » et pour ses
-    /// émissions : c'est l'image générique de l'antenne. L'annoncer ferait
-    /// taire le relai générique, puisqu'un champ rempli est un champ rempli et
-    /// qu'aucun étage supérieur ne peut savoir qu'il l'est mal.
+    /// The station fills in a `cover` even for « Le direct » and for its
+    /// shows: it is the generic image of the channel. Announcing it would
+    /// silence the generic fallback, since a filled field is a filled field
+    /// and no upper layer can know that it is filled wrongly.
     pub cover: Option<String>,
     pub recontact_at: Duration,
 }
 
-/// Attente initiale avant nouvelle tentative après échec, puis doublée.
+/// Initial wait before retrying after a failure, then doubled.
 const BACKOFF_BASE: Duration = Duration::from_secs(2);
 
-/// Plafond du recul. Un appareil qui tourne des mois sans surveillance ne doit
-/// pas marteler le serveur d'un tiers ; à l'inverse, plafonner évite qu'une
-/// coupure réseau d'une nuit se traduise par des heures d'attente au retour.
+/// Backoff cap. A device that runs unattended for months must not hammer a
+/// third party's server; conversely, capping avoids an overnight network
+/// outage turning into hours of waiting once it comes back.
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
-/// Plancher du délai annoncé par le serveur. Mesuré : il descend à 10 s sur
-/// les stations qui basculent souvent. Ce plancher n'existe donc pas pour
-/// corriger le serveur mais pour borner ce qu'une réponse aberrante — ou un
-/// mandataire qui réécrirait le JSON — pourrait nous faire faire.
+/// Floor for the delay announced by the server. Measured: it goes down to
+/// 10 s on stations that switch often. So this floor does not exist to
+/// correct the server but to bound what an aberrant response — or a proxy
+/// rewriting the JSON — could make us do.
 const RECHECK_MIN: Duration = Duration::from_secs(5);
 
-/// Plafond du délai annoncé. Mesuré : les locales annoncent jusqu'à 51 min,
-/// soit la fin de la tranche en cours. Les croire sur parole laisserait
-/// l'affichage figé aussi longtemps si la grille change en cours de route ;
-/// dix minutes coûtent au pire six requêtes par heure et par station.
+/// Cap for the announced delay. Measured: the local stations announce up to
+/// 51 min, i.e. the end of the current segment. Taking their word for it
+/// would leave the display frozen that long if the schedule changes along the
+/// way; ten minutes costs at worst six requests per hour per station.
 const RECHECK_MAX: Duration = Duration::from_secs(600);
 
-/// Délai retenu quand le serveur n'en announcement aucun.
+/// Delay used when the server announces none.
 const RECHECK_DEFAULT: Duration = Duration::from_secs(60);
 
-/// Nombre de morceaux consécutifs pour lesquels la grille n'apprend **rien**
-/// au-delà duquel on cesse de l'interroger pour cette station.
+/// Number of consecutive tracks for which the schedule teaches **nothing**
+/// beyond which we stop querying it for this station.
 ///
-/// La grille publie souvent le track **en retard d'un** : mesuré, elle
-/// s'arrête pile au début de ce qui passe. Sur certaines stations elle
-/// rattrape en quelques secondes ; sur d'autres — les 45 locales, notamment —
-/// elle n'a jamais rien sur toute la durée d'un track. Continuer à demander
-/// doublerait le nombre de requêtes chez un tiers pour une réponse qui ne
-/// vient pas, ce que le cap évite.
+/// The schedule often publishes the track **one behind**: measured, it stops
+/// exactly at the start of what is on air. On some stations it catches up
+/// within seconds; on others — the 45 local stations, notably — it never has
+/// anything for the whole duration of a track. Continuing to ask would double
+/// the number of requests to a third party for an answer that never comes,
+/// which this cap avoids.
 ///
-/// Le critère porte sur le **supplément entier** (album, année, liens) et non
-/// sur le seul album depuis le 2026-08-27 : la grille rend l'année bien plus
-/// souvent que l'album — 9 éléments sur 9 mesurés, contre 3 sur 9 pour le lien
-/// YouTube — et une requête qui rapporte l'année n'est pas une requête pour
-/// rien.
+/// The criterion covers the **whole supplement** (album, year, links) and not
+/// the album alone since 2026-08-27: the schedule returns the year far more
+/// often than the album — 9 items out of 9 measured, versus 3 out of 9 for
+/// the YouTube link — and a request that brings back the year is not a
+/// request for nothing.
 const MAX_MISSES: u32 = 5;
 
-/// Durée maximale plausible pour un élément d'antenne. Au-delà, la durée vient
-/// d'une bounded aberrante et vaut mieux ignorée qu'affichée.
+/// Maximum plausible duration for an on-air item. Beyond that, the duration
+/// comes from an aberrant bound and is better ignored than displayed.
 const MAX_DURATION_S: u64 = 24 * 3600;
 
-/// URL du direct d'une station, pour un profil de rendition donné.
+/// Live-feed URL of a station, for a given rendering profile.
 ///
-/// Le dernier segment n'identifie pas la station mais le **profil de rendition**
-/// que le serveur applique à sa réponse, et il change ce qu'on reçoit — au
-/// point qu'un mauvais choix rend le plugin muet. Mesuré au même instant sur
-/// Mouv' : `webrf_fip_player` répond « Le direct » / « Mouv' » (le slogan),
-/// quand `webrf_mouv_player` répond « La Playlist » / « SOOLKING - Bye Bye
-/// (feat. TAYC) », qui est bien ce qui passait à l'antenne. Chaque station
-/// porte donc son profil dans la table.
-fn live_url(id: u32, profil: &str) -> String {
-    format!("https://api.radiofrance.fr/livemeta/live/{id}/{profil}")
+/// The last segment does not identify the station but the **rendering
+/// profile** the server applies to its response, and it changes what we
+/// receive — to the point that a wrong choice makes the plugin silent.
+/// Measured at the same instant on Mouv': `webrf_fip_player` answers
+/// « Le direct » / « Mouv' » (the slogan), while `webrf_mouv_player` answers
+/// « La Playlist » / « SOOLKING - Bye Bye (feat. TAYC) », which is indeed
+/// what was on air. Each station therefore carries its profile in the table.
+fn live_url(id: u32, profile: &str) -> String {
+    format!("https://api.radiofrance.fr/livemeta/live/{id}/{profile}")
 }
 
-/// URL de la grille d'une station : la liste des éléments diffusés, où chaque
-/// track porte son album. Pas de profil de rendition ici, la forme est unique.
+/// Schedule URL of a station: the list of broadcast items, where each track
+/// carries its album. No rendering profile here, the shape is unique.
 fn schedule_url(id: u32) -> String {
     format!("https://api.radiofrance.fr/livemeta/pull/{id}")
 }
 
-/// URL de la cover d'un track.
+/// Cover URL of a track.
 ///
-/// `preset` n'est pas optionnel : sans lui, l'API rend un 400. Avec, elle rend
-/// un 301 vers le CDN, que le cœur follows. `400x400` est un compromis mesuré —
-/// 31 887 bytes, contre un original de size non bornée.
+/// `preset` is not optional: without it, the API returns a 400. With it, it
+/// returns a 301 to the CDN, which the core follows. `400x400` is a measured
+/// compromise — 31,887 bytes, versus an original of unbounded size.
 pub fn cover_url(uuid: &str) -> String {
     format!("https://api.radiofrance.fr/v1/services/embed/image/{uuid}?preset=400x400")
 }
 
-/// Texte non clear d'un champ, `None` sinon.
+/// Non-empty text of a field, `None` otherwise.
 fn text(v: &Value, key: &str) -> Option<String> {
     let s = v.get(key)?.as_str()?.trim();
     (!s.is_empty()).then(|| s.to_string())
 }
 
-/// Analyse une réponse du direct. `None` pour tout ce qui n'est pas du JSON
-/// exploitable — le point d'entrée n'est pas documenté, une refonte doit se
-/// traduire par un silence et non par un affichage faux.
+/// Parses a live-feed response. `None` for anything that is not usable
+/// JSON — the endpoint is undocumented, a redesign must translate into
+/// silence, not a wrong display.
 ///
-/// Les names de champs sont ceux mesurés. `now.firstLine` et `now.secondLine`
-/// portent la paire à afficher, mais **ce qu'elle contains dépend du profil**
-/// (voir `live_url`), et la réponse le dit elle-même :
+/// The field names are the measured ones. `now.firstLine` and
+/// `now.secondLine` carry the pair to display, but **what it contains depends
+/// on the profile** (see `live_url`), and the response says so itself:
 ///
-/// - avec `firstLineSongUuid`, `firstLine` **est** le track et `secondLine`
-///   son artiste — la paire est déjà séparée, et les bornes délimitent le
-///   track, donc leur écart est bien sa durée ;
-/// - sans lui, `firstLine` est l'**émission** et `secondLine` porte ce qui s'y
-///   plays, sous la forme d'une seule chaîne « ARTISTE - Titre ». Les bornes
-///   sont alors celles de l'émission : mesuré sur Mouv', elles couvraient une
-///   heure. Les prendre pour la durée d'un track afficherait une progress
-///   fausse, donc la durée est écartée dans ce cas.
-pub fn parse_direct(charge: &str) -> Option<Direct> {
-    let v: Value = serde_json::from_str(charge).ok()?;
+/// - with `firstLineSongUuid`, `firstLine` **is** the track and `secondLine`
+///   its artist — the pair is already split, and the bounds delimit the
+///   track, so their gap really is its duration;
+/// - without it, `firstLine` is the **show** and `secondLine` carries what is
+///   playing within it, as a single string « ARTIST - Title ». The bounds are
+///   then those of the show: measured on Mouv', they covered an hour. Taking
+///   them for the duration of a track would display a wrong progress bar, so
+///   the duration is discarded in that case.
+pub fn parse_direct(payload: &str) -> Option<Direct> {
+    let v: Value = serde_json::from_str(payload).ok()?;
     let recontact_at = v
         .get("delayToRefresh")
         .and_then(Value::as_u64)
         .map(|ms| Duration::from_millis(ms).clamp(RECHECK_MIN, RECHECK_MAX))
         .unwrap_or(RECHECK_DEFAULT);
     let Some(now) = v.get("now") else {
-        // Réponse bien formée mais sans direct : rien à dire, on repassera.
+        // Well-formed response but no live feed: nothing to say, we'll come back.
         return Some(Direct { meta: None, song_uuid: None, cover: None, recontact_at });
     };
-    let est_un_morceau = now.get("firstLineSongUuid").is_some_and(|u| !u.is_null());
+    let is_a_track = now.get("firstLineSongUuid").is_some_and(|u| !u.is_null());
     let duration = match (now.get("startTime").and_then(Value::as_u64), now.get("endTime").and_then(Value::as_u64)) {
-        (Some(debut), Some(fin)) if fin > debut => Some(fin - debut),
+        (Some(start), Some(end)) if end > start => Some(end - start),
         _ => None,
     };
     let title = text(now, "firstLine");
     let artist = text(now, "secondLine");
-    // Les deux lines identiques n'apprennent rien deux fois : c'est ce que
-    // renvoie une locale hors musique (« Le 18/19, ICI Picardie » des deux
-    // côtés), et l'afficher donnerait « X — X ».
+    // Two identical lines teach nothing twice: that is what a local station
+    // returns outside music (« Le 18/19, ICI Picardie » on both sides), and
+    // displaying it would give « X — X ».
     let artist = artist.filter(|a| !title.as_ref().is_some_and(|t| t.trim().eq_ignore_ascii_case(a.trim())));
-    // « C'est un track ET la durée est plausible » : une seule expression,
-    // employée pour `duration_s` comme pour `start_time`. Écrite deux fois,
-    // elle pourrait dériver ; `start_time` sortirait alors sans `duration_s`,
-    // et le plafonnement de la position côté cœur — qui a besoin des deux —
-    // disparaîtrait en silence, la barre franchissant la fin du track.
-    let morceau_plausible = est_un_morceau && duration.is_some_and(|d| d <= MAX_DURATION_S);
+    // "It is a track AND the duration is plausible": a single expression,
+    // used for `duration_s` as well as `start_time`. Written twice, it could
+    // drift; `start_time` would then leave without `duration_s`, and the
+    // position capping on the core side — which needs both — would vanish
+    // silently, the bar crossing past the end of the track.
+    let plausible_track = is_a_track && duration.is_some_and(|d| d <= MAX_DURATION_S);
     let meta = Meta {
         title,
         artist,
-        // Le direct ne porte ni album, ni année, ni lien : tout cela se read
-        // dans la grille, à part.
+        // The live feed carries neither album, nor year, nor link: all of
+        // that is read from the schedule, separately.
         album: None,
         year: None,
         links: Vec::new(),
-        duration_s: duration.filter(|_| morceau_plausible).map(|d| d as u32),
-        start_time: now.get("startTime").and_then(Value::as_u64).filter(|_| morceau_plausible),
-        // Rempli plus tard, dans `follows`, depuis `Direct.cover` : à ce stade,
-        // l'analyse pure ne connaît que le track, pas encore le canal qui le
-        // porte jusqu'au plugin.
+        duration_s: duration.filter(|_| plausible_track).map(|d| d as u32),
+        start_time: now.get("startTime").and_then(Value::as_u64).filter(|_| plausible_track),
+        // Filled in later, in `follows`, from `Direct.cover`: at this stage,
+        // the pure parsing only knows the track, not yet the channel that
+        // carries it to the plugin.
         cover: None,
     };
-    // Une durée seule n'est pas affichable : ce n'est pas une réponse.
+    // A duration alone is not displayable: it is not an answer.
     let meta = (meta.artist.is_some() || meta.title.is_some()).then_some(meta);
     let song_uuid = text(now, "songUuid");
-    // Le `songUuid` est le seul discriminant fiable entre un track et une
-    // émission — mesuré sur quatre stations.
+    // The `songUuid` is the only reliable discriminant between a track and a
+    // show — measured on four stations.
     let cover = song_uuid.as_ref().and_then(|_| text(now, "cover"));
     Some(Direct { meta, song_uuid, cover, recontact_at })
 }
 
-/// Ce que l'élément de grille apprend en plus de l'album.
+/// What the schedule item teaches beyond the album.
 ///
-/// Regroupés parce qu'ils se lisent dans le **même** élément que
-/// `titreAlbum` : les chercher séparément relirait la grille trois fois pour
-/// une seule réponse déjà en main.
+/// Grouped because they are read from the **same** item as `titreAlbum`:
+/// looking them up separately would re-read the schedule three times for a
+/// single response already in hand.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Supplement {
     pub album: Option<String>,
-    /// `anneeEditionMusique`, un **nombre** JSON dans les réponses mesurées.
+    /// `anneeEditionMusique`, a JSON **number** in the measured responses.
     pub year: Option<u16>,
-    /// `lienYoutube`. Validé par `Link::validated` côté cœur, mais déjà filtré
-    /// ici sur son hôte : autant ne pas transmettre ce qui sera refusé.
+    /// `lienYoutube`. Validated by `Link::validated` on the core side, but
+    /// already filtered here on its host: no point transmitting what will be
+    /// refused.
     pub links: Vec<Link>,
 }
 
@@ -226,22 +228,22 @@ impl Supplement {
     }
 }
 
-/// Album du track `song_uuid` dans une réponse de la grille, s'il y figure.
+/// Album of track `song_uuid` in a schedule response, if it appears there.
 ///
-/// La correspondance se fait sur `songId`, **pas** sur `uuid` : `uuid`
-/// identifie l'élément de grille, `songId` le track, et c'est ce dernier que
-/// le direct renvoie dans `songUuid`. Vérifié sur quatre stations, toutes
-/// concordantes sur `songId` et aucune sur `uuid`.
+/// The match is on `songId`, **not** on `uuid`: `uuid` identifies the
+/// schedule item, `songId` the track, and the latter is what the live feed
+/// returns in `songUuid`. Verified on four stations, all agreeing on `songId`
+/// and none on `uuid`.
 ///
-/// `None` est le cas courant, pas une anomalie : la grille publie souvent le
-/// track en retard d'un, et l'album n'est alors simplement pas encore là.
-/// Tout ce que l'élément de grille du track apprend : album, année, liens.
+/// `None` is the common case, not an anomaly: the schedule often publishes
+/// the track one behind, and the album is then simply not there yet.
+/// Everything the track's schedule item teaches: album, year, links.
 ///
-/// Un seul parcours pour les trois. `Supplement::default()` quand la grille
-/// ignore le track — le cas courant, elle a souvent un track de retard, et
-/// ce n'est pas une anomalie.
-pub fn supplement_in_schedule(charge: &str, song_uuid: &str) -> Supplement {
-    let Ok(v) = serde_json::from_str::<Value>(charge) else { return Supplement::default() };
+/// One single pass for all three. `Supplement::default()` when the schedule
+/// does not know the track — the common case, it is often one track behind,
+/// and that is not an anomaly.
+pub fn supplement_in_schedule(payload: &str, song_uuid: &str) -> Supplement {
+    let Ok(v) = serde_json::from_str::<Value>(payload) else { return Supplement::default() };
     let Some(steps) = v.get("steps").and_then(Value::as_object) else {
         return Supplement::default();
     };
@@ -249,9 +251,9 @@ pub fn supplement_in_schedule(charge: &str, song_uuid: &str) -> Supplement {
     else {
         return Supplement::default();
     };
-    // `anneeEditionMusique` est un nombre dans les réponses mesurées, mais le
-    // text est accepté aussi : le champ vient d'un tiers qui peut changer de
-    // forme sans préavis, exactement comme `durationInSeconds` chez OUI FM.
+    // `anneeEditionMusique` is a number in the measured responses, but the
+    // text form is accepted too: the field comes from a third party that can
+    // change shape without notice, exactly like `durationInSeconds` at OUI FM.
     let year = match step.get("anneeEditionMusique") {
         Some(Value::Number(n)) => Some(n.to_string()),
         Some(Value::String(s)) => Some(s.clone()),
@@ -267,50 +269,50 @@ pub fn supplement_in_schedule(charge: &str, song_uuid: &str) -> Supplement {
     Supplement { album: text(step, "titreAlbum"), year, links }
 }
 
-/// Interroge la grille pour ce que le track en cours y gagne : album, année,
-/// liens. Toute erreur vaut « rien trouvé » : ce sont des suppléments, ils ne
-/// doivent jamais empêcher le titre de partir.
+/// Queries the schedule for what the current track gains from it: album,
+/// year, links. Any error counts as "nothing found": these are supplements,
+/// they must never prevent the title from going out.
 async fn fetch_supplement(client: &reqwest::Client, id: u32, song_uuid: &str) -> Supplement {
     let Ok(resp) = client.get(schedule_url(id)).send().await else { return Supplement::default() };
     if !resp.status().is_success() {
         tracing::debug!("schedule query for station {id}: HTTP {}", resp.status());
         return Supplement::default();
     }
-    let Ok(corps) = resp.text().await else { return Supplement::default() };
-    supplement_in_schedule(&corps, song_uuid)
+    let Ok(body) = resp.text().await else { return Supplement::default() };
+    supplement_in_schedule(&body, song_uuid)
 }
 
-/// Interroge une fois le direct d'une station.
-async fn query(client: &reqwest::Client, id: u32, profil: &str) -> Result<Direct> {
-    let resp = client.get(live_url(id, profil)).send().await?;
+/// Queries a station's live feed once.
+async fn query(client: &reqwest::Client, id: u32, profile: &str) -> Result<Direct> {
+    let resp = client.get(live_url(id, profile)).send().await?;
     if !resp.status().is_success() {
         bail!("HTTP {}", resp.status());
     }
-    let corps = resp.text().await?;
-    let Some(direct) = parse_direct(&corps) else {
-        bail!("reponse illisible ({} bytes)", corps.len());
+    let body = resp.text().await?;
+    let Some(direct) = parse_direct(&body) else {
+        bail!("unreadable response ({} bytes)", body.len());
     };
     Ok(direct)
 }
 
-/// Prochain recul après un échec, d'après le recul courant.
-pub fn next_backoff(recul: Duration) -> Duration {
-    (recul * 2).min(BACKOFF_MAX)
+/// Next backoff after a failure, given the current backoff.
+pub fn next_backoff(backoff: Duration) -> Duration {
+    (backoff * 2).min(BACKOFF_MAX)
 }
 
-/// Suit une station jusqu'à ce que la tâche soit abandonnée : query le
-/// direct, attend le délai annoncé, recommence.
+/// Follows a station until the task is aborted: queries the live feed, waits
+/// for the announced delay, starts over.
 ///
-/// Ne rend jamais la main. C'est l'appelant qui arrête cette tâche (`abort`)
-/// quand ce qui plays change — d'où l'étiquetage de chaque relevé par l'`id` :
-/// un relevé déjà en file au moment de l'arrêt doit pouvoir être écarté.
+/// Never returns. The caller stops this task (`abort`) when what is playing
+/// changes — hence the tagging of each reading with the `id`: a reading
+/// already queued at the moment of the stop must be discardable.
 ///
-/// **Seuls les changements sont émis.** Le serveur redit la même chose à
-/// chaque interrogation ; réémettre ferait écrire une line au cœur toutes les
-/// dix secondes pour rien. Le premier relevé, lui, part toujours : cette tâche
-/// naît avec la station, donc son « dernier vu » est clear, et l'affichage se
-/// remplit dès la première réponse plutôt qu'au changement de track suivant.
-pub async fn follows(id: u32, profil: String, tx: mpsc::Sender<(u32, Meta)>) {
+/// **Only changes are emitted.** The server repeats the same thing on every
+/// query; re-emitting would make the core write a line every ten seconds for
+/// nothing. The first reading, however, always goes out: this task is born
+/// with the station, so its "last seen" is empty, and the display fills in
+/// from the first response rather than at the next track change.
+pub async fn follows(id: u32, profile: String, tx: mpsc::Sender<(u32, Meta)>) {
     let client = match reqwest::Client::builder()
         .user_agent("ritornello/0.1 (https://github.com/skerdudou/ritornello)")
         .connect_timeout(Duration::from_secs(10))
@@ -318,66 +320,65 @@ pub async fn follows(id: u32, profil: String, tx: mpsc::Sender<(u32, Meta)>) {
         .build()
     {
         Ok(c) => c,
-        // Défaut de construction du client (pile TLS absente) : irrécupérable,
-        // et se taire vaut mieux que boucler dessus.
+        // Client construction failure (missing TLS stack): unrecoverable, and
+        // staying silent beats looping on it.
         Err(e) => {
             tracing::warn!("HTTP client unavailable, station {id} will stay silent: {e}");
             return;
         }
     };
-    let mut recul = BACKOFF_BASE / 2;
-    // Dernier relevé émis, **sans son album** : c'est sur cette forme que porte
-    // la comparaison, pour qu'un album trouvé (ou non) une fois ne change pas
-    // le verdict « c'est le même track qu'avant » au tour suivant.
-    let mut dernier: Option<Meta> = None;
-    let mut manques = 0u32;
+    let mut backoff = BACKOFF_BASE / 2;
+    // Last emitted reading, **without its album**: the comparison is done on
+    // this form, so that an album found (or not) once does not change the
+    // verdict "same track as before" on the next round.
+    let mut last_seen: Option<Meta> = None;
+    let mut misses = 0u32;
     loop {
-        match query(&client, id, &profil).await {
+        match query(&client, id, &profile).await {
             Ok(direct) => {
-                recul = BACKOFF_BASE / 2;
+                backoff = BACKOFF_BASE / 2;
                 if let Some(mut meta) = direct.meta {
-                    // `direct.cover` n'est jamais reconstruit ici : la règle
-                    // « pas de cover hors track » est déjà tranchée dans
-                    // `parse_direct`, ce champ n'est qu'un passage de témoin
-                    // jusqu'au plugin.
+                    // `direct.cover` is never rebuilt here: the rule "no cover
+                    // outside a track" is already settled in `parse_direct`,
+                    // this field is just a baton passed along to the plugin.
                     meta.cover = direct.cover.clone();
-                    if dernier.as_ref() != Some(&meta) {
-                        dernier = Some(meta.clone());
-                        // L'album se cherche **une fois par track**, et
-                        // seulement ici : au fil des interrogations d'un même
-                        // track, la réponse ne changerait pas.
-                        let mut a_envoyer = meta;
+                    if last_seen.as_ref() != Some(&meta) {
+                        last_seen = Some(meta.clone());
+                        // The album is looked up **once per track**, and only
+                        // here: across successive queries of the same track,
+                        // the answer would not change.
+                        let mut to_send = meta;
                         if let Some(uuid) = direct.song_uuid.as_deref() {
-                            if manques < MAX_MISSES {
+                            if misses < MAX_MISSES {
                                 let s = fetch_supplement(&client, id, uuid).await;
-                                // Le compteur porte désormais sur le
-                                // supplément **entier** et non sur le seul
-                                // album, et ce changement de critère est
-                                // volontaire : la grille rend l'année bien plus
-                                // souvent que l'album (mesuré le 2026-08-27,
-                                // 9 éléments sur 9 contre 3 sur 9 pour le lien
-                                // YouTube). Continuer à l'interroger quand elle
-                                // ne donne pas l'album mais donne l'année n'est
-                                // plus une requête pour rien — ce que ce
-                                // compteur existe pour éviter.
-                                let clear = s.is_empty();
-                                a_envoyer.album = s.album;
-                                a_envoyer.year = s.year;
-                                a_envoyer.links = s.links;
-                                if clear {
-                                    manques += 1;
-                                    if manques == MAX_MISSES {
+                                // The counter now covers the **whole**
+                                // supplement and not the album alone, and this
+                                // change of criterion is deliberate: the
+                                // schedule returns the year far more often
+                                // than the album (measured on 2026-08-27,
+                                // 9 items out of 9 versus 3 out of 9 for the
+                                // YouTube link). Keeping on querying it when
+                                // it gives no album but gives the year is no
+                                // longer a request for nothing — which is what
+                                // this counter exists to avoid.
+                                let empty = s.is_empty();
+                                to_send.album = s.album;
+                                to_send.year = s.year;
+                                to_send.links = s.links;
+                                if empty {
+                                    misses += 1;
+                                    if misses == MAX_MISSES {
                                         tracing::debug!(
                                             "station {id}: schedule gave nothing for {MAX_MISSES} tracks, no longer asking"
                                         );
                                     }
                                 } else {
-                                    manques = 0;
+                                    misses = 0;
                                 }
                             }
                         }
-                        if tx.send((id, a_envoyer)).await.is_err() {
-                            // Le plugin ne nous écoute plus : la station a changé.
+                        if tx.send((id, to_send)).await.is_err() {
+                            // The plugin no longer listens to us: the station changed.
                             return;
                         }
                     }
@@ -385,12 +386,12 @@ pub async fn follows(id: u32, profil: String, tx: mpsc::Sender<(u32, Meta)>) {
                 tokio::time::sleep(direct.recontact_at).await;
             }
             Err(e) => {
-                // Tout échec est journalisé : sans cela, une station qui ne
-                // répond plus ne laisserait aucune trace dans `/api/logs` et
-                // personne ne verrait jamais rien.
+                // Every failure is logged: without that, a station that stops
+                // answering would leave no trace in `/api/logs` and nobody
+                // would ever see anything.
                 tracing::info!("live query failed for station {id}: {e}");
-                recul = next_backoff(recul);
-                tokio::time::sleep(recul).await;
+                backoff = next_backoff(backoff);
+                tokio::time::sleep(backoff).await;
             }
         }
     }
@@ -400,73 +401,73 @@ pub async fn follows(id: u32, profil: String, tx: mpsc::Sender<(u32, Meta)>) {
 mod tests {
     use super::*;
 
-    /// Réponse **capturée telle quelle** sur le direct de FIP (station 7).
-    const REPONSE_FIP: &str = r#"{"prev":[{"firstLine":"Le direct","secondLine":"La radio la plus éclectique du monde","songUuid":null,"cover":"7eee98cb-3f59-4a3b-b921-6a4be85af542","startTime":null,"endTime":null}],"now":{"firstLine":"I love marijuana","firstLineSongUuid":"1691b015-c8b9-48d2-a296-1f846e13af7b","secondLine":"Linval Thompson","secondLineSongUuid":"1691b015-c8b9-48d2-a296-1f846e13af7b","songUuid":"1691b015-c8b9-48d2-a296-1f846e13af7b","cover":"5b93ce44-3ed6-4409-a2d7-4bd159c061f8","startTime":1786722565,"endTime":1786722762},"next":[],"delayToRefresh":70000}"#;
+    /// Response **captured verbatim** from the FIP live feed (station 7).
+    const FIP_RESPONSE: &str = r#"{"prev":[{"firstLine":"Le direct","secondLine":"La radio la plus éclectique du monde","songUuid":null,"cover":"7eee98cb-3f59-4a3b-b921-6a4be85af542","startTime":null,"endTime":null}],"now":{"firstLine":"I love marijuana","firstLineSongUuid":"1691b015-c8b9-48d2-a296-1f846e13af7b","secondLine":"Linval Thompson","secondLineSongUuid":"1691b015-c8b9-48d2-a296-1f846e13af7b","songUuid":"1691b015-c8b9-48d2-a296-1f846e13af7b","cover":"5b93ce44-3ed6-4409-a2d7-4bd159c061f8","startTime":1786722565,"endTime":1786722762},"next":[],"delayToRefresh":70000}"#;
 
-    /// Réponse **capturée telle quelle** sur Mouv' (station 6, profil
-    /// `webrf_mouv_player`) : `firstLine` est l'émission, `secondLine` le
-    /// track tout entier, et les bornes couvrent **l'émission** — une heure.
-    const REPONSE_MOUV: &str = r#"{"prev":[],"now":{"firstLine":"La Playlist","secondLine":"OZUNA - Mi yo de antes","secondLineSongUuid":"c6ed3f57-10a8-435f-b71e-adca48916dce","thirdLine":null,"producers":null,"songUuid":"c6ed3f57-10a8-435f-b71e-adca48916dce","cover":"2df667ba-2852-495c-89a9-9a998daa7c0d","startTime":1786723200,"endTime":1786726800},"next":[],"delayToRefresh":3090000}"#;
+    /// Response **captured verbatim** from Mouv' (station 6, profile
+    /// `webrf_mouv_player`): `firstLine` is the show, `secondLine` the whole
+    /// track, and the bounds cover **the show** — one hour.
+    const MOUV_RESPONSE: &str = r#"{"prev":[],"now":{"firstLine":"La Playlist","secondLine":"OZUNA - Mi yo de antes","secondLineSongUuid":"c6ed3f57-10a8-435f-b71e-adca48916dce","thirdLine":null,"producers":null,"songUuid":"c6ed3f57-10a8-435f-b71e-adca48916dce","cover":"2df667ba-2852-495c-89a9-9a998daa7c0d","startTime":1786723200,"endTime":1786726800},"next":[],"delayToRefresh":3090000}"#;
 
-    /// Réponse **capturée telle quelle** sur une locale hors musique : les deux
-    /// lines disent la même chose.
-    const REPONSE_LOCALE_MUETTE: &str = r#"{"now":{"firstLine":"Le 18/19, ICI Picardie","secondLine":"Le 18/19, ici Picardie","startTime":1786723800,"endTime":1786727400},"delayToRefresh":270000}"#;
+    /// Response **captured verbatim** from a local station outside music: the
+    /// two lines say the same thing.
+    const SILENT_LOCAL_RESPONSE: &str = r#"{"now":{"firstLine":"Le 18/19, ICI Picardie","secondLine":"Le 18/19, ici Picardie","startTime":1786723800,"endTime":1786727400},"delayToRefresh":270000}"#;
 
     #[test]
-    fn analyse_une_reponse_reelle() {
-        let d = parse_direct(REPONSE_FIP).unwrap();
+    fn parses_a_real_response() {
+        let d = parse_direct(FIP_RESPONSE).unwrap();
         let m = d.meta.unwrap();
-        // `firstLine` est le titre, `secondLine` l'artiste : l'inverse de ce
-        // que l'order des champs laisse croire au premier regard.
+        // `firstLine` is the title, `secondLine` the artist: the opposite of
+        // what the field order suggests at first glance.
         assert_eq!(m.title.as_deref(), Some("I love marijuana"));
         assert_eq!(m.artist.as_deref(), Some("Linval Thompson"));
-        // `firstLineSongUuid` est présent : les bornes sont celles du track.
+        // `firstLineSongUuid` is present: the bounds are those of the track.
         assert_eq!(m.duration_s, Some(197));
         assert_eq!(d.recontact_at, Duration::from_secs(70));
     }
 
     #[test]
-    fn une_emission_qui_porte_un_morceau_ne_prend_pas_la_duree_de_lemission() {
-        // Le défaut que ce découpage évite : sans `firstLineSongUuid`, les
-        // bornes sont celles de l'émission (ici une heure). Les afficher comme
-        // durée du track donnerait une progress fausse.
-        let d = parse_direct(REPONSE_MOUV).unwrap();
+    fn a_show_carrying_a_track_does_not_take_the_shows_duration() {
+        // The defect this split avoids: without `firstLineSongUuid`, the
+        // bounds are those of the show (here one hour). Displaying them as
+        // the track's duration would give a wrong progress bar.
+        let d = parse_direct(MOUV_RESPONSE).unwrap();
         let m = d.meta.unwrap();
         assert_eq!(m.title.as_deref(), Some("La Playlist"));
         assert_eq!(m.artist.as_deref(), Some("OZUNA - Mi yo de antes"));
-        assert_eq!(m.duration_s, None, "3600 s est la tranche, pas le track");
+        assert_eq!(m.duration_s, None, "3600 s is the segment, not the track");
     }
 
     #[test]
-    fn deux_lignes_identiques_ne_sont_pas_repetees() {
-        // Sans cela, l'affichage donnerait « Le 18/19, ici Picardie — Le 18/19,
-        // ICI Picardie ». La comparaison ignore la casse : la source elle-même
-        // n'est pas constante là-dessus (« ICI » contre « ici »).
-        let m = parse_direct(REPONSE_LOCALE_MUETTE).unwrap().meta.unwrap();
+    fn two_identical_lines_are_not_repeated() {
+        // Without this, the display would give « Le 18/19, ici Picardie —
+        // Le 18/19, ICI Picardie ». The comparison ignores case: the source
+        // itself is not consistent about it (« ICI » versus « ici »).
+        let m = parse_direct(SILENT_LOCAL_RESPONSE).unwrap().meta.unwrap();
         assert_eq!(m.title.as_deref(), Some("Le 18/19, ICI Picardie"));
         assert_eq!(m.artist, None);
     }
 
     #[test]
-    fn le_delai_annonce_est_borne_des_deux_cotes() {
-        // 3 090 000 ms = 51 min : la fin de la tranche. On repasse avant.
-        assert_eq!(parse_direct(REPONSE_MOUV).unwrap().recontact_at, RECHECK_MAX);
-        let court = r#"{"now":{"firstLine":"t"},"delayToRefresh":10}"#;
-        assert_eq!(parse_direct(court).unwrap().recontact_at, RECHECK_MIN);
-        let absent = r#"{"now":{"firstLine":"t"}}"#;
-        assert_eq!(parse_direct(absent).unwrap().recontact_at, RECHECK_DEFAULT);
+    fn the_announced_delay_is_bounded_on_both_sides() {
+        // 3,090,000 ms = 51 min: the end of the segment. We come back sooner.
+        assert_eq!(parse_direct(MOUV_RESPONSE).unwrap().recontact_at, RECHECK_MAX);
+        let short = r#"{"now":{"firstLine":"t"},"delayToRefresh":10}"#;
+        assert_eq!(parse_direct(short).unwrap().recontact_at, RECHECK_MIN);
+        let missing = r#"{"now":{"firstLine":"t"}}"#;
+        assert_eq!(parse_direct(missing).unwrap().recontact_at, RECHECK_DEFAULT);
     }
 
     #[test]
-    fn une_reponse_sans_direct_donne_un_delai_sans_metadonnees() {
+    fn a_response_without_live_feed_gives_a_delay_without_metadata() {
         let d = parse_direct(r#"{"prev":[],"next":[],"delayToRefresh":20000}"#).unwrap();
-        assert!(d.meta.is_none(), "rien a afficher");
-        assert_eq!(d.recontact_at, Duration::from_secs(20), "mais on sait quand repasser");
+        assert!(d.meta.is_none(), "nothing to display");
+        assert_eq!(d.recontact_at, Duration::from_secs(20), "but we know when to come back");
     }
 
     #[test]
-    fn accepte_une_reponse_partielle() {
-        // Toute information disponible est affichée : partiel vaut mieux que rien.
+    fn accepts_a_partial_response() {
+        // Any available information is displayed: partial beats nothing.
         let m = parse_direct(r#"{"now":{"firstLine":"Téléphone"}}"#).unwrap().meta.unwrap();
         assert_eq!(m.title.as_deref(), Some("Téléphone"));
         assert_eq!(m.artist, None);
@@ -474,138 +475,138 @@ mod tests {
     }
 
     #[test]
-    fn ignore_ce_qui_nest_pas_exploitable() {
+    fn ignores_what_is_not_usable() {
         assert!(parse_direct("").is_none());
-        assert!(parse_direct("pas du json").is_none());
+        assert!(parse_direct("not json").is_none());
         assert!(parse_direct(r#"{"errCode":"e400","errMessage":"Bad Request"}"#).unwrap().meta.is_none());
-        // Ni titre ni artiste : rien à afficher, donc pas une réponse.
+        // Neither title nor artist: nothing to display, so not an answer.
         assert!(parse_direct(r#"{"now":{"startTime":1,"endTime":2}}"#).unwrap().meta.is_none());
         assert!(parse_direct(r#"{"now":{"firstLine":"","secondLine":"  "}}"#).unwrap().meta.is_none());
     }
 
     #[test]
-    fn une_duree_absurde_est_ignoree_sans_perdre_le_titre() {
-        for (debut, fin) in [(10u64, 10u64), (10, 5), (0, 90_000)] {
-            let brut = format!(
-                r#"{{"now":{{"firstLine":"t","firstLineSongUuid":"u","startTime":{debut},"endTime":{fin}}}}}"#
+    fn an_absurd_duration_is_ignored_without_losing_the_title() {
+        for (start, end) in [(10u64, 10u64), (10, 5), (0, 90_000)] {
+            let raw = format!(
+                r#"{{"now":{{"firstLine":"t","firstLineSongUuid":"u","startTime":{start},"endTime":{end}}}}}"#
             );
-            let m = parse_direct(&brut).unwrap().meta.unwrap();
-            assert_eq!(m.duration_s, None, "{debut}->{fin}");
+            let m = parse_direct(&raw).unwrap().meta.unwrap();
+            assert_eq!(m.duration_s, None, "{start}->{end}");
             assert_eq!(m.title.as_deref(), Some("t"));
         }
     }
 
-    /// Réponse **capturée telle quelle** sur la grille de FIP Jazz (station
-    /// 65), réduite à deux éléments : celui qui passait et le précédent. Le
-    /// direct annonçait au même instant `songUuid`
+    /// Response **captured verbatim** from the FIP Jazz schedule (station
+    /// 65), reduced to two items: the one on air and the previous one. At the
+    /// same instant the live feed announced `songUuid`
     /// `2edd8576-0344-4cfc-87ea-b7aaca8e3bb2`.
-    const GRILLE: &str = r#"{"steps":{"a_65":{"uuid":"11111111-1111-1111-1111-111111111111","stepId":"a_65","title":"Halfway to the Hudson","start":1786823637,"end":1786823881,"stationId":65,"embedType":"song","authors":"Lucky Chops","songId":"9648da4b-ec2c-4c1d-a75c-ba88b6e2a5fb","titreAlbum":"Lucky Chops","label":"MELTED"},"b_65":{"uuid":"8c391d63-ff9d-4f2c-9ca9-4290e6ed88e1","stepId":"8917b609-dfeb-48d8-9e26-8fea1c26a5ff_65","title":"Blakey's mood","start":1786825073,"end":1786825386,"stationId":65,"embedType":"song","authors":"Stephane Huchard","anneeEditionMusique":2008,"songId":"2edd8576-0344-4cfc-87ea-b7aaca8e3bb2","titreAlbum":"African tribute to Art Blakey","label":"HARMONIA","releaseId":"1a098645-6c16-4efd-93d3-473a8708379d"}},"levels":[],"stationId":65}"#;
+    const SCHEDULE: &str = r#"{"steps":{"a_65":{"uuid":"11111111-1111-1111-1111-111111111111","stepId":"a_65","title":"Halfway to the Hudson","start":1786823637,"end":1786823881,"stationId":65,"embedType":"song","authors":"Lucky Chops","songId":"9648da4b-ec2c-4c1d-a75c-ba88b6e2a5fb","titreAlbum":"Lucky Chops","label":"MELTED"},"b_65":{"uuid":"8c391d63-ff9d-4f2c-9ca9-4290e6ed88e1","stepId":"8917b609-dfeb-48d8-9e26-8fea1c26a5ff_65","title":"Blakey's mood","start":1786825073,"end":1786825386,"stationId":65,"embedType":"song","authors":"Stephane Huchard","anneeEditionMusique":2008,"songId":"2edd8576-0344-4cfc-87ea-b7aaca8e3bb2","titreAlbum":"African tribute to Art Blakey","label":"HARMONIA","releaseId":"1a098645-6c16-4efd-93d3-473a8708379d"}},"levels":[],"stationId":65}"#;
 
     #[test]
-    fn lalbum_se_lit_dans_la_grille_par_lidentifiant_de_morceau() {
+    fn the_album_is_read_from_the_schedule_by_track_identifier() {
         assert_eq!(
-            supplement_in_schedule(GRILLE, "2edd8576-0344-4cfc-87ea-b7aaca8e3bb2").album.as_deref(),
+            supplement_in_schedule(SCHEDULE, "2edd8576-0344-4cfc-87ea-b7aaca8e3bb2").album.as_deref(),
             Some("African tribute to Art Blakey")
         );
-        // L'autre élément de la même grille, pour prouver que la sélection
-        // porte bien sur l'identifiant et non sur le premier venu.
+        // The other item of the same schedule, to prove that the selection
+        // really is on the identifier and not on the first one found.
         assert_eq!(
-            supplement_in_schedule(GRILLE, "9648da4b-ec2c-4c1d-a75c-ba88b6e2a5fb").album.as_deref(),
+            supplement_in_schedule(SCHEDULE, "9648da4b-ec2c-4c1d-a75c-ba88b6e2a5fb").album.as_deref(),
             Some("Lucky Chops")
         );
     }
 
     #[test]
-    fn la_grille_rend_aussi_lannee_et_le_lien_youtube() {
-        // La fixture est une capture reelle : `anneeEditionMusique` y est un
-        // **nombre** (2008), et c'est la forme mesuree le 2026-08-27 sur les
-        // stations 7 et 65. Ces deux champs etaient lus et jetes.
-        let s = supplement_in_schedule(GRILLE, "2edd8576-0344-4cfc-87ea-b7aaca8e3bb2");
+    fn the_schedule_also_returns_the_year_and_the_youtube_link() {
+        // The fixture is a real capture: `anneeEditionMusique` is a **number**
+        // (2008) in it, and that is the shape measured on 2026-08-27 on
+        // stations 7 and 65. These two fields were read and thrown away.
+        let s = supplement_in_schedule(SCHEDULE, "2edd8576-0344-4cfc-87ea-b7aaca8e3bb2");
         assert_eq!(s.album.as_deref(), Some("African tribute to Art Blakey"));
         assert_eq!(s.year, Some(2008));
-        // Cet element-la n'a pas de lien : la grille en donne moins souvent que
-        // d'annees (mesure : 3 sur 9 contre 9 sur 9).
+        // That item has no link: the schedule gives them less often than
+        // years (measured: 3 out of 9 versus 9 out of 9).
         assert!(s.links.is_empty());
-        assert!(!s.is_empty(), "album et annee suffisent a ne pas etre clear");
+        assert!(!s.is_empty(), "album and year are enough not to be empty");
     }
 
     #[test]
-    fn le_lien_youtube_est_retenu_et_valide_sur_son_hote() {
-        // Motif mesure le 2026-08-27 sur les stations 7 et 65 :
+    fn the_youtube_link_is_kept_and_validated_on_its_host() {
+        // Pattern measured on 2026-08-27 on stations 7 and 65:
         // `https://www.youtube.com/watch?v=...`.
-        let avec = r#"{"steps":{"a":{"songId":"u","titreAlbum":"X",
+        let with_link = r#"{"steps":{"a":{"songId":"u","titreAlbum":"X",
             "lienYoutube":"https://www.youtube.com/watch?v=zIqlKJj9IlY"}}}"#;
         assert_eq!(
-            supplement_in_schedule(avec, "u").links,
+            supplement_in_schedule(with_link, "u").links,
             vec![Link::Youtube { url: "https://www.youtube.com/watch?v=zIqlKJj9IlY".into() }]
         );
-        // Un lien vers un autre hote est jete ici deja : inutile de faire
-        // traverser au coeur ce qu'il refusera.
-        let ailleurs = r#"{"steps":{"a":{"songId":"u","lienYoutube":"https://evil.example/x"}}}"#;
-        assert!(supplement_in_schedule(ailleurs, "u").links.is_empty());
+        // A link to another host is discarded right here: no point making the
+        // core process what it will refuse.
+        let elsewhere = r#"{"steps":{"a":{"songId":"u","lienYoutube":"https://evil.example/x"}}}"#;
+        assert!(supplement_in_schedule(elsewhere, "u").links.is_empty());
     }
 
     #[test]
-    fn une_annee_aberrante_de_la_grille_est_ignoree_sans_perdre_lalbum() {
-        let brut = r#"{"steps":{"a":{"songId":"u","titreAlbum":"X","anneeEditionMusique":0}}}"#;
-        let s = supplement_in_schedule(brut, "u");
+    fn an_aberrant_year_from_the_schedule_is_ignored_without_losing_the_album() {
+        let raw = r#"{"steps":{"a":{"songId":"u","titreAlbum":"X","anneeEditionMusique":0}}}"#;
+        let s = supplement_in_schedule(raw, "u");
         assert_eq!(s.year, None);
-        assert_eq!(s.album.as_deref(), Some("X"), "l'album survit");
-        // La forme text est acceptee aussi : le champ vient d'un tiers qui
-        // peut changer d'notice, comme `durationInSeconds` chez OUI FM.
+        assert_eq!(s.album.as_deref(), Some("X"), "the album survives");
+        // The text form is accepted too: the field comes from a third party
+        // that can change without notice, like `durationInSeconds` at OUI FM.
         let text = r#"{"steps":{"a":{"songId":"u","anneeEditionMusique":"1952"}}}"#;
         assert_eq!(supplement_in_schedule(text, "u").year, Some(1952));
     }
 
     #[test]
-    fn un_supplement_introuvable_est_vide_et_ne_panique_pas() {
-        assert!(supplement_in_schedule(GRILLE, "00000000-0000-0000-0000-000000000000").is_empty());
-        assert!(supplement_in_schedule("pas du json", "u").is_empty());
+    fn a_supplement_not_found_is_empty_and_does_not_panic() {
+        assert!(supplement_in_schedule(SCHEDULE, "00000000-0000-0000-0000-000000000000").is_empty());
+        assert!(supplement_in_schedule("not json", "u").is_empty());
         assert!(supplement_in_schedule("", "u").is_empty());
     }
 
     #[test]
-    fn la_correspondance_porte_sur_songid_et_non_sur_uuid() {
-        // `uuid` identifie l'élément de grille, `songId` le track — et c'est
-        // `songId` que le direct renvoie. Les confondre ne trouverait jamais
-        // rien, silencieusement.
-        assert!(supplement_in_schedule(GRILLE, "8c391d63-ff9d-4f2c-9ca9-4290e6ed88e1").album.is_none());
+    fn the_match_is_on_songid_and_not_on_uuid() {
+        // `uuid` identifies the schedule item, `songId` the track — and
+        // `songId` is what the live feed returns. Confusing them would never
+        // find anything, silently.
+        assert!(supplement_in_schedule(SCHEDULE, "8c391d63-ff9d-4f2c-9ca9-4290e6ed88e1").album.is_none());
     }
 
     #[test]
-    fn une_grille_qui_ignore_le_morceau_ne_donne_pas_dalbum() {
-        // Le cas le plus courant : la grille a un track de retard.
-        assert!(supplement_in_schedule(GRILLE, "00000000-0000-0000-0000-000000000000").album.is_none());
-        assert!(supplement_in_schedule("", "peu-importe").album.is_none());
-        assert!(supplement_in_schedule("pas du json", "peu-importe").album.is_none());
-        assert!(supplement_in_schedule(r#"{"stationId":65}"#, "peu-importe").album.is_none());
-        // Élément trouvé mais sans album : rien à dire non plus.
-        let sans = r#"{"steps":{"x":{"songId":"u","titreAlbum":"  "}}}"#;
-        assert!(supplement_in_schedule(sans, "u").album.is_none());
+    fn a_schedule_that_does_not_know_the_track_gives_no_album() {
+        // The most common case: the schedule is one track behind.
+        assert!(supplement_in_schedule(SCHEDULE, "00000000-0000-0000-0000-000000000000").album.is_none());
+        assert!(supplement_in_schedule("", "whatever").album.is_none());
+        assert!(supplement_in_schedule("not json", "whatever").album.is_none());
+        assert!(supplement_in_schedule(r#"{"stationId":65}"#, "whatever").album.is_none());
+        // Item found but without album: nothing to say either.
+        let without = r#"{"steps":{"x":{"songId":"u","titreAlbum":"  "}}}"#;
+        assert!(supplement_in_schedule(without, "u").album.is_none());
     }
 
     #[test]
-    fn le_direct_expose_lidentifiant_du_morceau_pour_la_recherche_dalbum() {
-        let d = parse_direct(REPONSE_FIP).unwrap();
+    fn the_live_feed_exposes_the_track_identifier_for_the_album_lookup() {
+        let d = parse_direct(FIP_RESPONSE).unwrap();
         assert_eq!(d.song_uuid.as_deref(), Some("1691b015-c8b9-48d2-a296-1f846e13af7b"));
-        // Hors track, il n'y a rien à chercher.
-        assert!(parse_direct(REPONSE_LOCALE_MUETTE).unwrap().song_uuid.is_none());
+        // Outside a track, there is nothing to look up.
+        assert!(parse_direct(SILENT_LOCAL_RESPONSE).unwrap().song_uuid.is_none());
     }
 
     #[test]
-    fn le_direct_ne_porte_jamais_dalbum_lui_meme() {
-        // Garde-fou : si le point d'entrée se mettait à en donner un, la
-        // grille cesserait d'être la seule source et ce test le signalerait.
-        assert_eq!(parse_direct(REPONSE_FIP).unwrap().meta.unwrap().album, None);
+    fn the_live_feed_never_carries_an_album_itself() {
+        // Guard rail: if the endpoint started giving one, the schedule would
+        // no longer be the sole source and this test would flag it.
+        assert_eq!(parse_direct(FIP_RESPONSE).unwrap().meta.unwrap().album, None);
     }
 
     #[test]
-    fn lurl_de_la_grille_porte_lidentifiant() {
+    fn the_schedule_url_carries_the_identifier() {
         assert_eq!(schedule_url(65), "https://api.radiofrance.fr/livemeta/pull/65");
     }
 
     #[test]
-    fn lurl_du_direct_porte_lidentifiant_et_le_profil() {
+    fn the_live_url_carries_the_identifier_and_the_profile() {
         assert_eq!(
             live_url(7, "webrf_fip_player"),
             "https://api.radiofrance.fr/livemeta/live/7/webrf_fip_player"
@@ -616,31 +617,31 @@ mod tests {
         );
     }
 
-    /// `startTime` est retenu **brut** : c'est au moment d'émettre
-    /// l'enrichment qu'on en déduit l'écoulé, pas au moment d'analyser la
-    /// réponse — l'analyse reste pure, sans horloge, comme tout ce module.
+    /// `startTime` is kept **raw**: the elapsed time is derived from it at
+    /// the moment the enrichment is emitted, not when the response is
+    /// parsed — parsing stays pure, clock-free, like the whole module.
     #[test]
-    fn le_direct_retient_le_debut_du_morceau() {
-        let m = parse_direct(REPONSE_FIP).unwrap().meta.unwrap();
+    fn the_live_feed_keeps_the_track_start() {
+        let m = parse_direct(FIP_RESPONSE).unwrap().meta.unwrap();
         assert_eq!(m.start_time, Some(1786722565));
         assert_eq!(m.duration_s, Some(197));
     }
 
-    /// Même filtre que la durée : sans `firstLineSongUuid`, les bornes sont
-    /// celles d'une tranche d'antenne et non d'un track. En déduire une
-    /// position afficherait une progress fausse — mesuré à une heure sur
+    /// Same filter as the duration: without `firstLineSongUuid`, the bounds
+    /// are those of an air segment and not of a track. Deriving a position
+    /// from them would display a wrong progress bar — measured at one hour on
     /// Mouv'.
     #[test]
-    fn une_tranche_d_antenne_ne_donne_pas_de_debut_de_morceau() {
-        let m = parse_direct(REPONSE_MOUV).unwrap().meta.unwrap();
+    fn an_air_segment_gives_no_track_start() {
+        let m = parse_direct(MOUV_RESPONSE).unwrap().meta.unwrap();
         assert_eq!(m.start_time, None);
         assert_eq!(m.duration_s, None);
     }
 
     #[test]
-    fn l_url_de_pochette_suit_le_motif_mesure() {
-        // Mesure du 2026-08-24 : ce motif rend un 301 vers le CDN, puis un
-        // JPEG de 31 887 bytes. `preset` est obligatoire — sans lui, 400.
+    fn the_cover_url_follows_the_measured_pattern() {
+        // Measurement of 2026-08-24: this pattern returns a 301 to the CDN,
+        // then a 31,887-byte JPEG. `preset` is mandatory — without it, 400.
         assert_eq!(
             cover_url("24abdb92-7220-45c6-8434-a325278efa2b"),
             "https://api.radiofrance.fr/v1/services/embed/image/24abdb92-7220-45c6-8434-a325278efa2b?preset=400x400"
@@ -648,45 +649,45 @@ mod tests {
     }
 
     #[test]
-    fn la_pochette_d_un_vrai_morceau_est_retenue() {
-        let d = parse_direct(REPONSE_FIP).unwrap();
+    fn the_cover_of_a_real_track_is_kept() {
+        let d = parse_direct(FIP_RESPONSE).unwrap();
         assert_eq!(d.cover.as_deref(), Some("5b93ce44-3ed6-4409-a2d7-4bd159c061f8"));
     }
 
     #[test]
-    fn la_pochette_est_tue_quand_ce_n_est_pas_un_morceau() {
-        // La station sert une image generique pour « Le direct » et pour ses
-        // emissions. L'annoncer ferait taire le relai generique : un champ
-        // rempli est un champ rempli, aucun etage superieur ne peut savoir
-        // qu'il l'est mal. Le critere est `songUuid`, deja extrait.
-        let d = parse_direct(REPONSE_LOCALE_MUETTE).unwrap();
-        assert_eq!(d.song_uuid, None, "prealable du test");
-        // Precondition, pas une preuve de la regle : REPONSE_LOCALE_MUETTE ne
-        // porte aucune key "cover", donc cette assertion passerait meme sans
-        // le filtre sur songUuid. C'est l'entree « Le direct » ci-dessous,
-        // avec un cover rempli a cote d'un songUuid nul, qui exerce reellement
-        // la regle.
+    fn the_cover_is_dropped_when_it_is_not_a_track() {
+        // The station serves a generic image for « Le direct » and for its
+        // shows. Announcing it would silence the generic fallback: a filled
+        // field is a filled field, no upper layer can know that it is filled
+        // wrongly. The criterion is `songUuid`, already extracted.
+        let d = parse_direct(SILENT_LOCAL_RESPONSE).unwrap();
+        assert_eq!(d.song_uuid, None, "precondition of the test");
+        // Precondition, not a proof of the rule: SILENT_LOCAL_RESPONSE
+        // carries no "cover" key at all, so this assertion would pass even
+        // without the songUuid filter. It is the « Le direct » entry below,
+        // with a filled cover next to a null songUuid, that actually
+        // exercises the rule.
         assert_eq!(d.cover, None);
 
-        // Une entree « Le direct » : songUuid nul a cote d'un cover rempli.
-        // Valeurs reprises de l'entree `prev` de REPONSE_FIP, capturee plus
-        // haut : ce n'est pas invente, c'est la meme forme que le direct sert
-        // reellement pour l'antenne generique.
+        // A « Le direct » entry: null songUuid next to a filled cover.
+        // Values taken from the `prev` entry of FIP_RESPONSE, captured above:
+        // this is not made up, it is the very shape the live feed actually
+        // serves for the generic channel.
         let direct = r#"{"now":{"firstLine":"Le direct","secondLine":"La radio la plus eclectique du monde","songUuid":null,"cover":"7eee98cb-3f59-4a3b-b921-6a4be85af542"},"delayToRefresh":70000}"#;
         assert_eq!(parse_direct(direct).unwrap().cover, None);
     }
 
     #[test]
-    fn le_recul_croit_jusquau_plafond_et_jamais_au_dela() {
-        let mut recul = BACKOFF_BASE;
-        let mut vus = vec![recul];
+    fn the_backoff_grows_up_to_the_cap_and_never_beyond() {
+        let mut backoff = BACKOFF_BASE;
+        let mut seen = vec![backoff];
         for _ in 0..10 {
-            recul = next_backoff(recul);
-            vus.push(recul);
+            backoff = next_backoff(backoff);
+            seen.push(backoff);
         }
-        assert_eq!(vus[1], Duration::from_secs(4));
-        assert_eq!(vus[2], Duration::from_secs(8));
-        assert_eq!(*vus.last().unwrap(), BACKOFF_MAX, "le cap doit etre atteint");
-        assert!(vus.windows(2).all(|p| p[1] >= p[0]), "jamais decroissant");
+        assert_eq!(seen[1], Duration::from_secs(4));
+        assert_eq!(seen[2], Duration::from_secs(8));
+        assert_eq!(*seen.last().unwrap(), BACKOFF_MAX, "the cap must be reached");
+        assert!(seen.windows(2).all(|p| p[1] >= p[0]), "never decreasing");
     }
 }

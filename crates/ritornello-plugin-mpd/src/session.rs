@@ -1,17 +1,17 @@
-//! Le dialogue avec un client : la seule partie du greffon qui touche une
-//! chaussette.
+//! The dialogue with a client: the only part of the plugin that touches a
+//! socket.
 //!
-//! Une tâche par connection, et c'est l'architecture entière : toute question se
-//! répond depuis l'état partagé (une prise de verrou en playback), toute action
-//! est un envoi sur un canal borné. Aucune session n'a donc à wait le cœur,
-//! donc **aucune ne peut retenir une autre** — un client endormi dans un `idle`
-//! ne coûte qu'une tâche en attente.
+//! One task per connection, and that is the entire architecture: every question
+//! is answered from the shared state (one read-lock acquisition), every action
+//! is a send on a bounded channel. No session ever has to wait for the core,
+//! so **none can hold another back** — a client asleep in an `idle` costs
+//! only one waiting task.
 //!
-//! Les listes de commands et `idle` vivent ici et non dans `commands.rs`,
-//! parce que ce sont des faits sur la **connection** et non sur une commande :
-//! `command_list_begin` ne fait rien d'autre que changer ce que les lines
-//! suivantes veulent dire, et `idle` ne fait rien d'autre que suspendre la
-//! playback des lines. `commands.rs` remainder pur, et se teste sans socket.
+//! Command lists and `idle` live here and not in `commands.rs`, because they
+//! are facts about the **connection** and not about a command:
+//! `command_list_begin` does nothing but change what the following lines mean,
+//! and `idle` does nothing but suspend the reading of lines. `commands.rs`
+//! stays pure, and is tested without a socket.
 
 use crate::commands::{
     cover_announced_but_missing, handle, Binary, Outcome, MAX_CHUNK,
@@ -27,193 +27,190 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Semaphore};
 
-/// La version annoncée dans la bannière.
+/// The version announced in the banner.
 ///
-/// **Elle est mentie, et il faut le dire** : ce greffon n'implémente pas tout
-/// MPD 0.23.5, il en implémente ce que `commands` énumère. Le mensonge est
-/// délibéré parce que les clients dérivent leurs capacités de ce numéro et non
-/// de `commands` seul — libmpdclient et M.A.L.P. comparent la version annoncée
-/// avant d'émettre `plchanges`, `seekcur` ou `tagtypes` — donc annoncer une
-/// version basse leur ferait renoncer à des commands qu'on gère réellement.
-/// Le risque inverse (annoncer trop haut) est borné par `commands`, qui dit la
-/// vérité, et par les `ACK 5` du remainder.
+/// **It is a lie, and that must be said**: this plugin does not implement all
+/// of MPD 0.23.5, it implements what `commands` enumerates. The lie is
+/// deliberate because clients derive their capabilities from this number and
+/// not from `commands` alone — libmpdclient and M.A.L.P. compare the announced
+/// version before emitting `plchanges`, `seekcur` or `tagtypes` — so announcing
+/// a low version would make them give up commands we actually handle.
+/// The opposite risk (announcing too high) is bounded by `commands`, which
+/// tells the truth, and by the `ACK 5`s of the rest.
 const ANNOUNCED_VERSION: &str = "0.23.5";
 
-/// Plafond de **sessions simultanées**.
+/// Cap on **simultaneous sessions**.
 ///
-/// Le multiplicateur de tout ce qui suit : chaque cap ci-dessous bounded une
-/// connection, et rien ne bornait le nombre de connexions. Or le résidu réel
-/// d'une session peut atteindre une dizaine de mébioctets (voir `MAX_RESPONSE`
-/// pour le calcul), donc cent sessions font le gigaoctet de l'appareil — la
-/// panne que tous ces plafonds existent pour éviter, atteinte par le seul
-/// path qu'ils laissaient ouvert.
+/// The multiplier of everything that follows: each cap below bounds one
+/// connection, and nothing bounded the number of connections. Yet the real
+/// residue of a session can reach some ten mebibytes (see `MAX_RESPONSE` for
+/// the math), so a hundred sessions add up to the device's gigabyte — the
+/// failure all these caps exist to avoid, reached through the only path they
+/// left open.
 ///
-/// **16, justifié par la population réelle** : un téléphone, un deuxième
-/// téléphone, `mpc` sur l'appareil, à la rigueur une tablette et un client de
-/// bureau — cinq au grand maximum, et les clients MPD n'ouvrent qu'une
-/// connection chacun (une seconde parfois, pour tenir un `idle` à part). 16
-/// laisse donc trois fois la marge de tout usage légitime, tout en bornant le
-/// pire cas à un peu moins de 200 Mio là où il était sans bounded.
+/// **16, justified by the real population**: a phone, a second phone, `mpc` on
+/// the device, at a stretch a tablet and a desktop client — five at the very
+/// most, and MPD clients open only one connection each (sometimes a second
+/// one, to hold an `idle` apart). 16 therefore leaves three times the margin
+/// of any legitimate use, while bounding the worst case to a bit under 200 MiB
+/// where it used to be unbounded.
 ///
-/// **Et ce n'est pas une protection contre la seule malveillance** : un client
-/// qui fuit ses connexions — qui en rouvre une à chaque reprise de réseau sans
-/// fermer la précédente — y arrive par accident, et c'est même le cas le plus
-/// probable des deux. Le refus est alors ce qui garde l'appareil en vie pendant
-/// que ce client se comporte mal, et le journal nomme le cap pour que la
-/// cause se lise sans deviner.
+/// **And it is not a protection against malice alone**: a client that leaks
+/// its connections — that reopens one on every network recovery without
+/// closing the previous one — gets there by accident, and that is even the
+/// more likely of the two cases. The refusal is then what keeps the device
+/// alive while that client misbehaves, and the log names the cap so the cause
+/// can be read without guessing.
 ///
-/// Un cap et non une file d'attente : faire patienter une connection
-/// derrière un cap atteint garderait un descripteur ouvert et laisserait le
-/// client croire qu'il est servi. Reject aussitôt lui dit la vérité, et c'est
-/// une réponse qu'un client sait interpréter — un serveur MPD injoignable est
-/// un état que tous savent afficher.
+/// A cap and not a waiting queue: making a connection wait behind a reached
+/// cap would keep a descriptor open and let the client believe it is being
+/// served. Refusing right away tells it the truth, and it is an answer a
+/// client knows how to interpret — an unreachable MPD server is a state all of
+/// them know how to display.
 ///
-/// **Les 200 Mio ci-dessus ne comptent que le path texte, et il faut le dire
-/// ici** : depuis les pochettes, ce cap multiplie aussi
-/// `COVER_MAX_BYTES`. Une session qui répond `albumart` retient la génération
-/// d'image qu'elle sert pendant tout son `write_all`, donc seize clients
-/// immobiles épinglent seize générations — 16 × 20 Mio = **320 Mio**, plus celle
-/// que l'état tient lui-même, soit **340 Mio**. Le calcul complet et ce qui
-/// n'est pas mitigé sont sur `commands::MAX_CHUNK` ; ce qu'il faut retenir
-/// ici est que ce cap-ci est le seul facteur qui bounded ce produit.
+/// **The 200 MiB above only count the text path, and it must be said here**:
+/// since covers arrived, this cap also multiplies `COVER_MAX_BYTES`. A session
+/// answering `albumart` holds on to the image generation it serves during its
+/// whole `write_all`, so sixteen motionless clients pin sixteen generations —
+/// 16 × 20 MiB = **320 MiB**, plus the one the state holds itself, i.e.
+/// **340 MiB**. The full math and what is not mitigated are on
+/// `commands::MAX_CHUNK`; what to remember here is that this cap is the only
+/// factor bounding that product.
 const MAX_SESSIONS: usize = 16;
 
-/// Plafond de commands accumulées dans une liste, avant `command_list_end`.
+/// Cap on commands accumulated in a list, before `command_list_end`.
 ///
-/// Ce n'est pas de la prudence décorative : entre `command_list_begin` et son
-/// `end`, la session **mémorise** chaque line sans rien exécuter, donc un
-/// client (ou un scanner de port bavard) qui n'envoie jamais le `end` fait
-/// croître un `Vec` sans bounded dans un processus qui tourne sur un Pi. MPD a la
-/// même bounded, exprimée en bytes (`max_command_list_size`, 2 Mio par défaut) ;
-/// ici c'est un nombre de commands, plus simple à justifier et suffisant pour
-/// le même effet. 2048 est très au-delà de ce qu'un client réel envoie —
-/// M.A.L.P. groupe une dizaine de commands.
+/// This is not decorative caution: between `command_list_begin` and its `end`,
+/// the session **memorizes** every line without executing anything, so a
+/// client (or a chatty port scanner) that never sends the `end` grows a `Vec`
+/// without bound in a process running on a Pi. MPD has the same bound,
+/// expressed in bytes (`max_command_list_size`, 2 MiB by default); here it is
+/// a number of commands, simpler to justify and sufficient for the same
+/// effect. 2048 is far beyond what a real client sends — M.A.L.P. groups about
+/// ten commands.
 const MAX_LIST_COMMANDS: usize = 2048;
 
-/// Plafond des **bytes** accumulés par une liste de commands.
+/// Cap on the **bytes** accumulated by a command list.
 ///
-/// Le compte de commands ne suffit pas : une line accumulée peut peser
-/// jusqu'à `MAX_LINE` en toute légitimité, donc 2048 commands bornent la
-/// mémoire à 16 Mio par connection — l'order de grandeur même que `MAX_LINE`
-/// existe pour interdire. C'est d'ailleurs en bytes, et non en commands, que
-/// MPD exprime la sienne (`max_command_list_size`, 2 Mio par défaut).
+/// The command count is not enough: an accumulated line can legitimately weigh
+/// up to `MAX_LINE`, so 2048 commands bound the memory to 16 MiB per
+/// connection — the very order of magnitude `MAX_LINE` exists to forbid. It
+/// is, by the way, in bytes and not in commands that MPD expresses its own cap
+/// (`max_command_list_size`, 2 MiB by default).
 ///
-/// 256 Kio, soit 2048 commands de 128 bytes en moyenne : un `setvol 30` en
-/// pèse dix, et la plus longue commande réaliste — un name entre guillemets — en
-/// pèse quelques centaines. Très au-dessus de ce qu'un client envoie.
+/// 256 KiB, i.e. 2048 commands of 128 bytes on average: a `setvol 30` weighs
+/// ten, and the longest realistic command — a quoted name — weighs a few
+/// hundred. Far above what a client sends.
 ///
-/// **Ce cap compte des bytes de texte, pas des bytes de tas**, et l'écart
-/// n'est pas cosmétique : ce qui est accumulé est un `Vec<Vec<String>>`, et
-/// `split` alloue une chaîne **par jeton**. Une line légale de 8 Kio faite
-/// de `"a a a a …"` devient ainsi ~4096 `String` d'un caractère, chacune coûtant
-/// ses 24 bytes de structure dans le `Vec` plus une allocation que l'allocateur
-/// arrondit — de l'order de 50 bytes pour un caractère utile, soit un facteur
-/// proche de trente. 256 Kio comptés peuvent donc peser plusieurs mébioctets
-/// réels. Le cap n'en remainder pas moins un cap ; c'est son unité qu'il ne
-/// faut pas confondre avec de la mémoire, et `MAX_SESSIONS` est ce qui bounded le
-/// produit.
+/// **This cap counts text bytes, not heap bytes**, and the gap is not
+/// cosmetic: what is accumulated is a `Vec<Vec<String>>`, and `split`
+/// allocates one string **per token**. A legal 8 KiB line made of `"a a a a …"`
+/// thus becomes ~4096 one-character `String`s, each costing its 24 bytes of
+/// structure in the `Vec` plus an allocation the allocator rounds up — on the
+/// order of 50 bytes per useful character, a factor close to thirty. 256 KiB
+/// as counted can therefore weigh several real mebibytes. The cap is a cap
+/// nonetheless; it is its unit that must not be mistaken for memory, and
+/// `MAX_SESSIONS` is what bounds the product.
 const MAX_LIST_BYTES: usize = 256 * 1024;
 
-/// Plafond des **bytes** d'une réponse, avant l'écriture.
+/// Cap on the **bytes** of a response, before writing.
 ///
-/// C'est la même fuite que `MAX_LINE` prise par l'autre bout, et le cap de
-/// commands d'une liste ne la bounded pas du tout : il bounded les commands, pas
-/// ce qu'elles **produisent**. Une liste de 2048 `playlistinfo` — 26 Kio
-/// d'entrée, une boucle, aucune malveillance — rend quatre lines par entrée de
-/// file, soit jusqu'à 1020 lines par commande à `preset_count` maximal (255) :
-/// deux millions de `String` d'un côté, et surtout **une allocation contiguë de
-/// plusieurs dizaines de mébioctets** au moment de mettre tout cela à plat pour
-/// le `write_all`. Sur un Pi 2 B, une demande contiguë de cette size échoue
-/// contre une mémoire fragmentée bien avant que le total ne soit atteint.
+/// It is the same leak as `MAX_LINE` taken from the other end, and the command
+/// cap of a list does not bound it at all: it bounds the commands, not what
+/// they **produce**. A list of 2048 `playlistinfo` — 26 KiB of input, one
+/// loop, no malice — yields four lines per queue entry, i.e. up to 1020 lines
+/// per command at maximal `preset_count` (255): two million `String`s on one
+/// side, and above all **a contiguous allocation of several tens of
+/// mebibytes** at the moment everything is flattened for the `write_all`. On a
+/// Pi 2 B, a contiguous request of that size fails against fragmented memory
+/// well before the total is reached.
 ///
-/// 1 Mio : la plus longue réponse légitime est un `playlistinfo` complet — 255
-/// entrées de quatre lines, une quinzaine de kibioctets en tout, `preset_count`
-/// étant un `Option<u8>` — et le cap en laisse donc passer une soixantaine
-/// dans une seule liste.
+/// 1 MiB: the longest legitimate response is a full `playlistinfo` — 255
+/// entries of four lines, some fifteen kibibytes in all, `preset_count` being
+/// an `Option<u8>` — so the cap lets about sixty of them through in a single
+/// list.
 ///
-/// **Ce que ce cap bounded, et ce qu'il ne bounded pas.** Il est vérifié après
-/// chaque commande du lot et non à chaque line, donc le dépassement est
-/// constaté à au plus une réponse de commande près (une quinzaine de
-/// kibioctets), et le bras `Outcome::Cancel` empile son `list_OK` sans le
-/// vérifier du tout — borné par le compte de commands, donc 2048 × 8 bytes,
-/// soit 16 Kio. Le résidu au-delà du cap est ainsi d'une trentaine de
-/// kibioctets, et non « une réponse de commande ».
+/// **What this cap bounds, and what it does not.** It is checked after each
+/// command of the batch and not on each line, so an overrun is detected at
+/// most one command response late (some fifteen kibibytes), and the
+/// `Outcome::Cancel` arm pushes its `list_OK` without checking it at all —
+/// bounded by the command count, so 2048 × 8 bytes, i.e. 16 KiB. The residue
+/// past the cap is thus some thirty kibibytes, and not "one command response".
 ///
-/// **Deux multiplicateurs à connaître pour recalculer ce que coûte vraiment une
-/// session** — les énoncer vaut mieux que d'inscrire un nombre que le prochain
-/// changement démentira :
+/// **Two multipliers to know when recomputing what a session really costs** —
+/// stating them is better than writing down a number the next change will
+/// contradict:
 ///
-/// 1. **La copie simultanée.** `write` met la réponse à plat dans une `String`
-///    dont il réserve la capacité exacte *pendant que* `Response.lines` vit
-///    encore : le texte existe donc deux fois à cet instant. Le pic **compté**
-///    d'une session est ainsi ≈ 2 × 1 Mio (la réponse et sa copie) + 256 Kio
-///    (la liste accumulée) ≈ 2,3 Mio, et non 1,3.
-/// 2. **Bytes de texte contre bytes de tas.** Comme pour `MAX_LIST_BYTES`,
-///    ces plafonds comptent du texte alors que les structures tiennent des
-///    `String` : une réponse d'un mébioctet en lines d'une vingtaine d'bytes
-///    est ~40 000 `String`, soit le double en tas. Bout à bout, une session
-///    poussée à ses deux plafonds tient de l'order de **6 à 12 Mio réels**.
+/// 1. **The simultaneous copy.** `write` flattens the response into a `String`
+///    whose exact capacity it reserves *while* `Response.lines` is still
+///    alive: the text therefore exists twice at that instant. The **counted**
+///    peak of a session is thus ≈ 2 × 1 MiB (the response and its copy) +
+///    256 KiB (the accumulated list) ≈ 2.3 MiB, and not 1.3.
+/// 2. **Text bytes versus heap bytes.** As with `MAX_LIST_BYTES`, these caps
+///    count text while the structures hold `String`s: a one-mebibyte response
+///    in lines of some twenty bytes is ~40,000 `String`s, i.e. double that on
+///    the heap. End to end, a session pushed to both of its caps holds on the
+///    order of **6 to 12 real MiB**.
 ///
-/// Le lever qui compte, si ce chiffre devenait gênant, est `MAX_LIST_BYTES`
-/// (le terme dominant, à cause du facteur trente des jetons d'un caractère), et
-/// non `MAX_SESSIONS` — mais c'est `MAX_SESSIONS` qui bounded le produit.
+/// The lever that matters, should that figure become a problem, is
+/// `MAX_LIST_BYTES` (the dominant term, because of the factor of thirty on
+/// one-character tokens), and not `MAX_SESSIONS` — but `MAX_SESSIONS` is what
+/// bounds the product.
 const MAX_RESPONSE: usize = 1024 * 1024;
 
-/// Plafond d'une **line** de commande, en bytes.
+/// Cap on a command **line**, in bytes.
 ///
-/// Sans lui, c'est la dernière surface non bornée d'un port ouvert sur tout le
-/// réseau local : un client qui se connecte et envoie des bytes **sans jamais
-/// send_frame de retour à la line** fait allouer le greffon jusqu'à ce que
-/// l'allocateur renonce. Sur cet appareil — un Pi 2 B, un gigaoctet partagé
-/// entre mpv, le cœur, l'IHM web et huit plugins — cela n'emporte pas
-/// seulement le greffon, cela emporte la musique. Et cela ne demande aucune
-/// malveillance : un scanner de port ou un client bogué le fait par accident,
-/// et le port est atteignable de tout le réseau local sans mot de passe.
+/// Without it, this is the last unbounded surface of a port open to the whole
+/// local network: a client that connects and sends bytes **without ever
+/// sending a newline** makes the plugin allocate until the allocator gives up.
+/// On this device — a Pi 2 B, one gigabyte shared between mpv, the core, the
+/// web UI and eight plugins — that does not only take the plugin down, it
+/// takes the music down. And it requires no malice: a port scanner or a buggy
+/// client does it by accident, and the port is reachable from the whole local
+/// network without a password.
 ///
-/// 8 Kio est deux fois le buffer d'entrée de MPD lui-même (4 Kio) et un order
-/// de grandeur au-dessus de la plus longue line légitime du protocol — un name
-/// de liste entre guillemets dans une liste de commands, quelques centaines
-/// d'bytes au pire. Très au-dessus du réel, très en dessous de ce qui coûte :
-/// un buffer de line par session, donc 128 Kio pour les `MAX_SESSIONS`
-/// autorisées.
+/// 8 KiB is twice MPD's own input buffer (4 KiB) and an order of magnitude
+/// above the longest legitimate line of the protocol — a quoted playlist name
+/// inside a command list, a few hundred bytes at worst. Far above the real,
+/// far below what costs: one line buffer per session, so 128 KiB for the
+/// `MAX_SESSIONS` allowed.
 ///
-/// (Cette doc a porté un temps la phrase « même cent connexions simultanées ne
-/// réservent ainsi qu'un mégaoctet ». Elle était vraie quand ce buffer était
-/// toute l'histoire, et elle est devenue fausse d'un facteur mille dès que la
-/// liste accumulée et la réponse composée ont eu leurs propres plafonds : le
-/// buffer de line n'est plus qu'un terme mineur du résidu d'une session. Voir
-/// `MAX_RESPONSE` pour le calcul complet.)
+/// (This doc carried for a while the sentence "even a hundred simultaneous
+/// connections thus reserve only one megabyte". It was true when this buffer
+/// was the whole story, and it became false by a factor of a thousand as soon
+/// as the accumulated list and the composed response got their own caps: the
+/// line buffer is now only a minor term of a session's residue. See
+/// `MAX_RESPONSE` for the full math.)
 const MAX_LINE: usize = 8 * 1024;
 
-/// Le player de lines de la session : un `BufReader`, plus le cap.
+/// The session's line reader: a `BufReader`, plus the cap.
 ///
-/// Écrit à la main (`fill_buf`/`consume`) plutôt qu'avec `BufReader::lines()`,
-/// pour la seule raison qui vaille : `lines()` accumule jusqu'au `\n` **sans
-/// bounded**. Voir `MAX_LINE`.
+/// Hand-written (`fill_buf`/`consume`) rather than with `BufReader::lines()`,
+/// for the only reason that matters: `lines()` accumulates up to the `\n`
+/// **without bound**. See `MAX_LINE`.
 struct BoundedReader {
     playback: BufReader<OwnedReadHalf>,
-    /// La line lue pendant une attente `idle` et **pushback en file** pour la
-    /// boucle de `serve`.
+    /// The line read during an `idle` wait and **pushed back in queue** for
+    /// the `serve` loop.
     ///
-    /// C'est le mécanisme du « `noidle` implicite » : une commande reçue
-    /// pendant un `idle` annule l'attente (`OK` nu) *puis* doit être exécutée
-    /// comme n'importe quelle autre line — donc repassée à l'aiguillage
-    /// complet de `serve`, listes de commands et lines illisibles comprises,
-    /// plutôt que réinterprétée à moitié dans `wait_idle`.
+    /// This is the mechanism of the "implicit `noidle`": a command received
+    /// during an `idle` cancels the wait (bare `OK`) *then* must be executed
+    /// like any other line — hence passed again through the full dispatch of
+    /// `serve`, command lists and unreadable lines included, rather than
+    /// half-reinterpreted in `wait_idle`.
     ///
-    /// Une seule line suffit, et un seul emplacement le dit : elle est pushback
-    /// juste après avoir été lue, et consommée au tour de boucle suivant, donc
-    /// deux ne peuvent pas coexister.
+    /// A single line is enough, and a single place says so: it is pushed back
+    /// right after being read, and consumed on the next loop turn, so two
+    /// cannot coexist.
     pushback: Option<String>,
-    /// Les bytes de la line en cours, entre deux `\n`.
+    /// The bytes of the current line, between two `\n`.
     ///
-    /// Il vit dans la structure et non dans la pile de `next_line`, et ce
-    /// n'est pas un détail : c'est ce qui rend cette fonction **sûre à
-    /// l'annulation**, exactement comme le buffer de `tokio::io::Lines`.
-    /// `wait_idle` la met dans un `select!` avec le réveil, donc elle est
-    /// abandonnée en cours de route chaque fois qu'un dormeur se réveille — si
-    /// le buffer était local, la moitié de line déjà lue partirait avec lui,
-    /// et la commande suivante serait tronquée.
+    /// It lives in the struct and not on `next_line`'s stack, and that is no
+    /// detail: it is what makes that function **cancel-safe**, exactly like
+    /// the buffer of `tokio::io::Lines`. `wait_idle` puts it in a `select!`
+    /// with the wakeup, so it is abandoned midway every time a sleeper wakes
+    /// up — if the buffer were local, the half line already read would leave
+    /// with it, and the next command would be truncated.
     buffer: Vec<u8>,
 }
 
@@ -222,81 +219,78 @@ impl BoundedReader {
         Self { playback: BufReader::new(playback), pushback: None, buffer: Vec::new() }
     }
 
-    /// Remet une line déjà lue devant le stream. Voir `pushback`.
+    /// Puts an already-read line back in front of the stream. See `pushback`.
     fn put_back(&mut self, line: String) {
-        debug_assert!(self.pushback.is_none(), "deux lines remises en file a la fois");
+        debug_assert!(self.pushback.is_none(), "two lines pushed back in queue at once");
         self.pushback = Some(line);
     }
 
-    /// La line suivante sans son `\n`, ou `None` à la fin du stream.
+    /// The next line without its `\n`, or `None` at end of stream.
     ///
-    /// Une line qui dépasse `MAX_LINE` est une **erreur**, donc la fin de la
-    /// session : c'est ce que fait MPD, et c'est le seul choix défendable ici.
-    /// Un `ACK` supposerait de nommer la commande fautive — impossible, la
-    /// line est tronquée — puis de jeter un nombre inconnu d'bytes jusqu'au
-    /// prochain `\n`, c'est-à-dire de garder une connection qui a déjà quitté le
-    /// protocol. Close est immédiat, défini, et journalisé par `accepter`.
+    /// A line exceeding `MAX_LINE` is an **error**, hence the end of the
+    /// session: that is what MPD does, and the only defensible choice here.
+    /// An `ACK` would require naming the offending command — impossible, the
+    /// line is truncated — then discarding an unknown number of bytes up to
+    /// the next `\n`, that is, keeping a connection that has already left the
+    /// protocol. Closing is immediate, well-defined, and logged by
+    /// `accept_loop`.
     async fn next_line(&mut self) -> Result<Option<String>> {
-        // La line pushback passe avant la chaussette, et **sans point
-        // d'attente** : ce `take` et ce `return` sont dans le même sondage, si
-        // bien qu'une annulation ne peut pas se glisser entre les deux et
-        // perdre la line.
+        // The pushed-back line goes before the socket, and **without an await
+        // point**: this `take` and this `return` are in the same poll, so a
+        // cancellation cannot slip between the two and lose the line.
         if let Some(line) = self.pushback.take() {
             return Ok(Some(line));
         }
         loop {
-            let dispo = self.playback.fill_buf().await?;
-            if dispo.is_empty() {
-                // Eof de stream. Une dernière line sans `\n` est rendue quand
-                // même, comme le faisait `Lines` : un client qui ferme sa
-                // moitié écriture juste après une commande doit voir cette
-                // commande traitée.
+            let available = self.playback.fill_buf().await?;
+            if available.is_empty() {
+                // End of stream. A last line without `\n` is returned anyway,
+                // as `Lines` did: a client that closes its write half right
+                // after a command must see that command processed.
                 if self.buffer.is_empty() {
                     return Ok(None);
                 }
                 let line = std::mem::take(&mut self.buffer);
                 return Ok(Some(Self::finish(line)?));
             }
-            match dispo.iter().position(|octet| *octet == b'\n') {
-                Some(fin) => {
-                    // Le cap est vérifié **avant** de recopier : un
-                    // dépassement ne doit pas d'abord allouer ce qu'il refuse.
-                    // Contrôlé dans les deux bras, et pas seulement dans celui
-                    // sans `\n`, pour que la bounded tienne quelle que soit la
-                    // capacité du `BufReader`.
-                    if self.buffer.len() + fin > MAX_LINE {
+            match available.iter().position(|byte| *byte == b'\n') {
+                Some(end) => {
+                    // The cap is checked **before** copying: an overrun must
+                    // not first allocate what it refuses. Checked in both
+                    // arms, and not only in the one without `\n`, so the bound
+                    // holds whatever the capacity of the `BufReader`.
+                    if self.buffer.len() + end > MAX_LINE {
                         anyhow::bail!("command line longer than {MAX_LINE} bytes");
                     }
-                    self.buffer.extend_from_slice(&dispo[..fin]);
-                    self.playback.consume(fin + 1);
+                    self.buffer.extend_from_slice(&available[..end]);
+                    self.playback.consume(end + 1);
                     let line = std::mem::take(&mut self.buffer);
                     return Ok(Some(Self::finish(line)?));
                 }
                 None => {
-                    let recu = dispo.len();
-                    if self.buffer.len() + recu > MAX_LINE {
+                    let received = available.len();
+                    if self.buffer.len() + received > MAX_LINE {
                         anyhow::bail!(
                             "command line longer than {MAX_LINE} bytes without a newline"
                         );
                     }
-                    self.buffer.extend_from_slice(dispo);
-                    self.playback.consume(recu);
+                    self.buffer.extend_from_slice(available);
+                    self.playback.consume(received);
                 }
             }
         }
     }
 
-    /// Les bytes d'une line en `String`.
+    /// The bytes of a line as a `String`.
     ///
-    /// Un `\r` terminal est retiré : `\r\n` est ce qu'envoient les clients
-    /// écrits sur Windows, et sans cela `ping\r` serait une commande inconnue.
-    /// C'est aussi ce que faisait `Lines` — le perdre en changeant de player
-    /// aurait été une régression qu'aucun test existant ne voyait.
+    /// A trailing `\r` is removed: `\r\n` is what clients written on Windows
+    /// send, and without this `ping\r` would be an unknown command. It is also
+    /// what `Lines` did — losing it while changing readers would have been a
+    /// regression no existing test saw.
     ///
-    /// Un octet non UTF-8 est une erreur, donc la fin de la session : là aussi
-    /// le comportement de `Lines`, conservé tel quel. Le protocol MPD est
-    /// textuel, et une commande dont les bytes ne forment pas du texte ne se
-    /// découpe pas.
+    /// A non-UTF-8 byte is an error, hence the end of the session: there too
+    /// the behavior of `Lines`, kept as is. The MPD protocol is textual, and a
+    /// command whose bytes do not form text cannot be split.
     fn finish(mut line: Vec<u8>) -> Result<String> {
         if line.last() == Some(&b'\r') {
             line.pop();
@@ -305,13 +299,12 @@ impl BoundedReader {
     }
 }
 
-/// Les lines d'une réponse en cours de composition, et leur poids en bytes.
+/// The lines of a response being composed, and their weight in bytes.
 ///
-/// Le compte est tenu au fur et à mesure plutôt que recalculé : la vérification
-/// du cap a lieu après chaque commande d'un lot, et resommer la réponse
-/// entière à chaque fois rendrait quadratique la composition d'une liste
-/// longue. Il compte le `\n` de chaque line, donc c'est exactement le nombre
-/// d'bytes que `write` va poser sur la chaussette.
+/// The count is kept as it goes rather than recomputed: the cap check happens
+/// after each command of a batch, and re-summing the whole response every time
+/// would make composing a long list quadratic. It counts the `\n` of each
+/// line, so it is exactly the number of bytes `write` will put on the socket.
 #[derive(Default)]
 struct Response {
     lines: Vec<String>,
@@ -330,67 +323,66 @@ impl Response {
         }
     }
 
-    /// Vrai quand la réponse dépasse `MAX_RESPONSE`.
+    /// True when the response exceeds `MAX_RESPONSE`.
     fn too_large(&self) -> bool {
         self.bytes > MAX_RESPONSE
     }
 }
 
-/// Ce qui n'appartient qu'à **une** connection, et voyage donc avec elle.
+/// What belongs to only **one** connection, and thus travels with it.
 ///
-/// Regroupés parce qu'ils ont exactement la même nature — deux faits sur le
-/// client, que rien ne partage entre sessions — et non pour raccourcir une
-/// signature : les séparer laisserait croire qu'ils ont des durées de vie
-/// différentes. L'état de liste de commands leur ressemble mais remainder dans
-/// `serve` : lui ne traverse jamais un appel à `execute`, puisque c'est
-/// `serve` qui décide ce qu'est un lot.
+/// Grouped because they have exactly the same nature — two facts about the
+/// client, that nothing shares between sessions — and not to shorten a
+/// signature: separating them would suggest they have different lifetimes.
+/// The command-list state resembles them but stays in `serve`: it never
+/// crosses a call to `execute`, since `serve` is what decides what a batch is.
 struct Connection {
-    /// Les compteurs de subsystems que cette connection a déjà vus : la référence de
-    /// tous ses `idle`. Lue par `execute`, avancée seulement par
-    /// `wait_idle`, et pour les seuls subsystems qu'un réveil announcement.
+    /// The subsystem counters this connection has already seen: the reference
+    /// of all its `idle`s. Read by `execute`, advanced only by `wait_idle`,
+    /// and only for the subsystems a wakeup announces.
     seen: [u64; 4],
-    /// La size de chunk que ce client accepte pour les réponses binaires
-    /// (voir `commands::binarylimit`). `MAX_CHUNK` tant qu'il n'a rien
-    /// demandé — le défaut du protocol.
+    /// The chunk size this client accepts for binary responses (see
+    /// `commands::binarylimit`). `MAX_CHUNK` as long as it has asked for
+    /// nothing — the protocol default.
     binary_limit: usize,
 }
 
-/// Ce que la session doit faire après un lot de commands.
+/// What the session must do after a batch of commands.
 enum Next {
-    /// Continue à read des lines.
+    /// Keep reading lines.
     Continue,
-    /// Close la connection : `close`, ou une moitié `input` morte.
+    /// Close the connection: `close`, or a dead `input` half.
     Close,
 }
 
-/// Accepte les connexions, chacune dans sa propre tâche, et **se relie quand
-/// les réglages changent**.
+/// Accepts connections, each in its own task, and **rebinds when the settings
+/// change**.
 ///
-/// La page d'admin disait « le changement ne prend effet qu'au redémarrage du
-/// greffon », et c'était vrai : le socket était lié une fois pour toutes dans
-/// `main`. Ce n'est plus le cas — un enregistrement réussi push_cover la nouvelle
-/// configuration sur `config_rx`, et cette boucle lie le nouveau couple
-/// adresse/port.
+/// The admin page said "the change only takes effect when the plugin
+/// restarts", and it was true: the socket was bound once and for all in
+/// `main`. That is no longer the case — a successful save pushes the new
+/// configuration on `config_rx`, and this loop binds the new address/port
+/// pair.
 ///
-/// **Trois décisions, chacune pour une raison :**
+/// **Three decisions, each for a reason:**
 ///
-/// - **L'ancien écouteur n'est lâché qu'une fois le nouveau lié.** Si le port
-///   demandé est déjà pris, ou l'adresse absente de la machine, l'appareil
-///   continue de serve là où il servait : un réglage fautif ne doit pas rendre
-///   le serveur MPD injoignable, alors même que la page qui l'a provoqué est
-///   toujours ouverte. L'échec part au journal, et la page dira l'inverse — le
-///   fichier, lui, a bien été enregistré. C'est le compromis assumé : la
-///   validation du port ne peut pas anticiper qu'il est occupé.
-/// - **Les sessions déjà ouvertes ne sont pas coupées.** Elles tiennent leur
-///   propre `TcpStream`, que la fermeture de l'écouteur ne touche pas. Un
-///   téléphone en train d'écouter garde donc sa connection jusqu'à ce qu'il la
-///   ferme lui-même, là où un vrai redémarrage de MPD la lui aurait arrachée.
-/// - **Le cap de sessions traverse les reliaisons.** Le sémaphore vit ici,
-///   hors de la boucle : le recréer à chaque changement de réglage rendrait
-///   `MAX_SESSIONS` contournable par une simple sauvegarde répétée.
+/// - **The old listener is only released once the new one is bound.** If the
+///   requested port is already taken, or the address absent from the machine,
+///   the device keeps serving where it served: a faulty setting must not make
+///   the MPD server unreachable, while the very page that caused it is still
+///   open. The failure goes to the log, and the page will say the opposite —
+///   the file, for its part, was indeed saved. That is the accepted trade-off:
+///   port validation cannot anticipate that it is occupied.
+/// - **Already-open sessions are not cut.** They hold their own `TcpStream`,
+///   which closing the listener does not touch. A phone in the middle of
+///   listening therefore keeps its connection until it closes it itself,
+///   where a real MPD restart would have torn it away.
+/// - **The session cap survives rebinds.** The semaphore lives here, outside
+///   the loop: recreating it on every settings change would make
+///   `MAX_SESSIONS` circumventable by a mere repeated save.
 ///
-/// `accept` est annulable sans perte (c'est la garantie de tokio), donc perdre
-/// la course du `select!` ne fait jamais tomber une connection déjà acceptée.
+/// `accept` is cancellable without loss (that is tokio's guarantee), so losing
+/// the `select!` race never drops an already-accepted connection.
 pub async fn listen(
     listener: TcpListener,
     mut config_rx: tokio::sync::watch::Receiver<crate::config::Config>,
@@ -401,22 +393,22 @@ pub async fn listen(
     let mut listener = listener;
     loop {
         tokio::select! {
-            // Ne rend jamais la main : sa seule sortie est d'être annulée par
-            // l'autre bras.
+            // Never yields: its only exit is being cancelled by the other
+            // arm.
             () = accept_loop(&listener, &slots, &state, &cmd_tx) => {}
             change = config_rx.changed() => {
                 if change.is_err() {
-                    // La moitié admin a disparu (le greffon s'arrête) : plus
-                    // aucune reliaison ne viendra, mais il remainder à serve.
+                    // The admin half is gone (the plugin is shutting down): no
+                    // rebind will ever come, but there is still serving to do.
                     tracing::debug!("mpd settings channel closed; keeping the current socket");
                     accept_loop(&listener, &slots, &state, &cmd_tx).await;
                     return;
                 }
                 let c = config_rx.borrow_and_update().clone();
                 match TcpListener::bind((c.listen.as_str(), c.port)).await {
-                    Ok(neuf) => {
+                    Ok(new_listener) => {
                         tracing::info!("mpd server now listening on {}:{}", c.listen, c.port);
-                        listener = neuf;
+                        listener = new_listener;
                     }
                     Err(e) => tracing::warn!(
                         "mpd could not listen on {}:{} ({e}); keeping the previous socket",
@@ -429,20 +421,20 @@ pub async fn listen(
     }
 }
 
-/// La boucle d'acceptation elle-même. Ne rend jamais la main.
+/// The accept loop itself. Never yields.
 ///
-/// Une erreur d'`accept` est journalisée et la boucle continue : un descripteur
-/// épuisé ou une connection réinitialisée avant l'`accept` ne doit pas emporter
-/// le serveur, sinon le port remainder ouvert dans un processus qui n'écoute plus.
+/// An `accept` error is logged and the loop continues: an exhausted descriptor
+/// or a connection reset before the `accept` must not take the server down,
+/// otherwise the port stays open in a process that no longer listens.
 ///
-/// Le sémaphore des slots est **passé** et non créé ici : il vit dans
-/// `listen`, pour que le cap de sessions traverse les reliaisons (voir sa
-/// doc). Une place par session, rendue quoi qu'il arrive — le permis vit dans
-/// la tâche, donc il repart avec elle, y compris si elle panique, puisque c'est
-/// son `Drop` qui le rend. Un `Semaphore` plutôt qu'un compteur atomique pour
-/// exactement cette raison : un compteur demanderait de se souvenir de le
-/// décrémenter sur chaque path de sortie, et le jour où l'un serait oublié
-/// l'appareil refuserait tout le monde après seize connexions.
+/// The slot semaphore is **passed in** and not created here: it lives in
+/// `listen`, so that the session cap survives rebinds (see its doc). One slot
+/// per session, returned no matter what — the permit lives in the task, so it
+/// leaves with it, including if it panics, since its `Drop` is what returns
+/// it. A `Semaphore` rather than an atomic counter for exactly this reason: a
+/// counter would require remembering to decrement it on every exit path, and
+/// the day one is forgotten the device would refuse everyone after sixteen
+/// connections.
 async fn accept_loop(
     listener: &TcpListener,
     slots: &Arc<Semaphore>,
@@ -451,31 +443,30 @@ async fn accept_loop(
 ) {
     loop {
         match listener.accept().await {
-            Ok((stream, adresse)) => {
-                // `try_acquire_owned` et non `acquire` : au-delà du cap la
-                // connection est **refusée**, pas mise en attente. Voir
-                // `MAX_SESSIONS`.
-                let Ok(place) = slots.clone().try_acquire_owned() else {
-                    tracing::warn!("mpd refusing {adresse}: {MAX_SESSIONS} sessions already open");
+            Ok((stream, address)) => {
+                // `try_acquire_owned` and not `acquire`: past the cap the
+                // connection is **refused**, not queued. See `MAX_SESSIONS`.
+                let Ok(permit) = slots.clone().try_acquire_owned() else {
+                    tracing::warn!("mpd refusing {address}: {MAX_SESSIONS} sessions already open");
                     drop(stream);
                     continue;
                 };
-                tracing::info!("mpd client connected from {adresse}");
+                tracing::info!("mpd client connected from {address}");
                 let state = state.clone();
                 let cmd_tx = cmd_tx.clone();
-                // Une tâche par client, détachée : c'est ce qui rend une
-                // session incapable d'en retenir une autre. Le `spawn` ne
-                // rend rien à surveiller — une session qui finit n'a rien à
-                // dire de plus que ce qu'elle journalise ici.
+                // One task per client, detached: this is what makes a session
+                // unable to hold another back. The `spawn` returns nothing to
+                // watch — a session that ends has nothing more to say than
+                // what it logs here.
                 tokio::spawn(async move {
                     match serve(stream, state, cmd_tx).await {
-                        Ok(()) => tracing::info!("mpd client {adresse} disconnected"),
-                        Err(e) => tracing::info!("mpd session with {adresse} ended: {e}"),
+                        Ok(()) => tracing::info!("mpd client {address} disconnected"),
+                        Err(e) => tracing::info!("mpd session with {address} ended: {e}"),
                     }
-                    // Explicite, alors que la portée s'en chargerait : c'est la
-                    // line qui dit qu'une place se libère ici, et la chercher
-                    // dans une accolade fermante serait une devinette.
-                    drop(place);
+                    // Explicit, though the scope would take care of it: this
+                    // is the line that says a slot is freed here, and hunting
+                    // for it in a closing brace would be a guessing game.
+                    drop(permit);
                 });
             }
             Err(e) => {
@@ -485,173 +476,171 @@ async fn accept_loop(
     }
 }
 
-/// Le dialogue d'une connection, du premier octet écrit au dernier lu.
+/// The dialogue of one connection, from the first byte written to the last
+/// one read.
 ///
-/// L'état de liste vit dans cette fonction et nulle part ailleurs : il n'a de
-/// sens que pour cette connection, et deux clients dont l'un est au milieu d'une
-/// liste ne se voient pas.
+/// The list state lives in this function and nowhere else: it only makes
+/// sense for this connection, and two clients, one of which is in the middle
+/// of a list, do not see each other.
 pub async fn serve(stream: TcpStream, state: Arc<SharedState>, cmd_tx: mpsc::Sender<InputMessage>) -> Result<()> {
     let (playback, mut writer) = stream.into_split();
     let mut lines = BoundedReader::new(playback);
 
-    // La bannière part sans qu'on demande rien : c'est le protocol, et un
-    // client attend cette line avant d'écrire quoi que ce soit.
+    // The banner leaves without anything being asked: that is the protocol,
+    // and a client waits for this line before writing anything.
     writer.write_all(format!("OK MPD {ANNOUNCED_VERSION}\n").as_bytes()).await?;
 
-    // **Les compteurs que cette connection a déjà vus, lus une fois pour
-    // toutes.** C'est la référence de tous ses `idle`, et elle vit ici parce
-    // que c'est un fait sur la **connection** — comme l'état de liste juste en
-    // dessous, et pour la même raison.
+    // **The counters this connection has already seen, read once and for
+    // all.** This is the reference of all its `idle`s, and it lives here
+    // because it is a fact about the **connection** — like the list state
+    // just below, and for the same reason.
     //
-    // Les read à la bannière et les porter, plutôt que de les relire dans
-    // l'`Snapshot` de chaque commande `idle`, est la correction d'un défaut
-    // réel : la playback par commande avalait tout ce qui avait bougé entre la
-    // réponse précédente et la line `idle`, c'est-à-dire pendant la seule
-    // fenêtre où un client MPD n'écoute pas. Le vrai MPD accumule ses drapeaux
-    // par connection depuis la connection ; pour `stored_playlist`, avaler un
-    // événement laisse `listplaylists` périmé jusqu'au prochain changement de
-    // sources_catalog — donc potentiellement pour toujours. Voir `state::versions`.
+    // Reading them at the banner and carrying them, rather than re-reading
+    // them in the `Snapshot` of each `idle` command, fixes a real defect: the
+    // per-command read swallowed everything that had moved between the
+    // previous response and the `idle` line, that is, during the only window
+    // where an MPD client is not listening. The real MPD accumulates its
+    // flags per connection since the connection began; for `stored_playlist`,
+    // swallowing an event leaves `listplaylists` stale until the next sources
+    // catalog change — hence potentially forever. See `state::versions`.
     //
-    // Un `idle` immédiatement réveillé sur un changement que ce client avait
-    // peut-être déjà lu par un `status` est le sens d'erreur acceptable : un
-    // réveil superflu lui coûte une interrogation redondante, un réveil
-    // manquant lui coûte la justesse de son écran.
+    // An `idle` woken immediately on a change this client had maybe already
+    // read through a `status` is the acceptable direction of error: a
+    // spurious wakeup costs it a redundant query, a missed wakeup costs it
+    // the correctness of its screen.
     let mut connection = Connection { seen: state.versions().await, binary_limit: MAX_CHUNK };
 
-    // Les commands accumulées d'une liste en cours, `None` hors liste.
-    // Un `Option<Vec<_>>` plutôt qu'un `Vec` plus un booléen : « pas dans une
-    // liste » et « dans une liste encore clear » sont deux états différents, et
-    // un `command_list_end` reçu hors liste doit être refusé comme une
-    // commande inconnue plutôt que rendre un `OK` de complaisance.
-    let mut liste: Option<Vec<Vec<String>>> = None;
-    let mut avec_ok = false;
-    // Les bytes déjà accumulés par la liste en cours. Remis à zéro à chaque
-    // ouverture, comme `avec_ok`.
-    let mut octets_liste = 0usize;
+    // The accumulated commands of an in-progress list, `None` outside a list.
+    // An `Option<Vec<_>>` rather than a `Vec` plus a boolean: "not in a list"
+    // and "in a still-empty list" are two different states, and a
+    // `command_list_end` received outside a list must be refused as an
+    // unknown command rather than return a complacent `OK`.
+    let mut list: Option<Vec<Vec<String>>> = None;
+    let mut with_ok = false;
+    // The bytes already accumulated by the current list. Reset to zero at
+    // each opening, like `with_ok`.
+    let mut list_bytes = 0usize;
 
-    while let Some(brute) = lines.next_line().await? {
-        let args = match split(&brute) {
+    while let Some(raw) = lines.next_line().await? {
+        let args = match split(&raw) {
             Ok(args) => args,
             Err(code) => {
-                // Une line illisible est un `ACK`, jamais une rupture : un
-                // client qui a mal cité un name de station doit pouvoir
-                // continuer sans se reconnecter.
+                // An unreadable line is an `ACK`, never a break: a client
+                // that misquoted a station name must be able to continue
+                // without reconnecting.
                 //
-                // Une liste en cours est en revanche abandonnée : il y manque
-                // une commande, donc l'exécuter plus tard exécuterait un lot
-                // qui n'est pas celui que le client a écrit.
-                let index = liste.as_ref().map_or(0, Vec::len);
-                liste = None;
-                let refus = ack(code, index, first_word(&brute), "invalid argument");
-                write(&mut writer, &[refus]).await?;
+                // An in-progress list is abandoned though: a command is
+                // missing from it, so executing it later would execute a
+                // batch that is not the one the client wrote.
+                let index = list.as_ref().map_or(0, Vec::len);
+                list = None;
+                let rejection = ack(code, index, first_word(&raw), "invalid argument");
+                write(&mut writer, &[rejection]).await?;
                 continue;
             }
         };
-        // `""` pour une line clear : `handle` la refuse déjà (elle est totale
-        // par construction), donc rien ici n'a besoin d'un cas à part.
-        let mot = args.first().map_or("", String::as_str);
+        // `""` for an empty line: `handle` already refuses it (it is total by
+        // construction), so nothing here needs a special case.
+        let word = args.first().map_or("", String::as_str);
 
-        if liste.is_some() {
-            match mot {
+        if list.is_some() {
+            match word {
                 "command_list_end" => {
-                    let lot = liste.take().unwrap_or_default();
-                    match execute(&mut lines, &mut writer, &state, &cmd_tx, &lot, avec_ok, &mut connection)
+                    let batch = list.take().unwrap_or_default();
+                    match execute(&mut lines, &mut writer, &state, &cmd_tx, &batch, with_ok, &mut connection)
                         .await?
                     {
                         Next::Continue => {}
                         Next::Close => break,
                     }
                 }
-                // `idle` dans une liste : MPD l'interdit, et pour une bonne
-                // raison — l'accepter demanderait de suspendre une liste à
-                // moitié écrite, dont le `OK` final ne peut pas partir avant
-                // le réveil. L'index porté est le **rang** qu'`idle` occupe
-                // dans la liste, sinon le client ne sait pas laquelle de ses
-                // commands a été refusée.
+                // `idle` in a list: MPD forbids it, and for a good reason —
+                // accepting it would require suspending a half-written list,
+                // whose final `OK` cannot leave before the wakeup. The index
+                // carried is the **rank** `idle` occupies in the list,
+                // otherwise the client does not know which of its commands
+                // was refused.
                 //
-                // Refus **à l'accumulation** et non à l'exécution : la liste
-                // ne pourra jamais être exécutée, donc y exécuter d'abord les
-                // commands qui précèdent émettrait de vraies actions (un
-                // `next`, un `setvol`) au name d'un lot que le client ne verra
-                // jamais aboutir.
+                // Refused **at accumulation** and not at execution: the list
+                // can never be executed, so first executing the commands that
+                // precede it would emit real actions (a `next`, a `setvol`)
+                // on behalf of a batch the client will never see complete.
                 "idle" => {
-                    let index = liste.as_ref().map_or(0, Vec::len);
-                    liste = None;
-                    let refus = ack(Ack::Unknown, index, "idle", "not allowed in command list");
-                    write(&mut writer, &[refus]).await?;
+                    let index = list.as_ref().map_or(0, Vec::len);
+                    list = None;
+                    let rejection = ack(Ack::Unknown, index, "idle", "not allowed in command list");
+                    write(&mut writer, &[rejection]).await?;
                 }
-                // **Une réponse binaire dans une liste de commands : MPD
-                // l'autorise, ce greffon la refuse.** Trois raisons, dans
-                // l'order où elles pèsent :
+                // **A binary response in a command list: MPD allows it, this
+                // plugin refuses it.** Three reasons, in order of weight:
                 //
-                // 1. Elle romprait la discipline d'écriture de cette session.
-                //    `execute` compose *tout* un lot en texte, vérifie le
-                //    cap, puis écrit **une fois** — ce qui garantit qu'une
-                //    réponse à moitié écrite n'est jamais lue comme complète.
-                //    Insérer des bytes au milieu obligerait soit à vider
-                //    l'accumulateur avant chaque image (donc à renoncer à cette
-                //    garantie), soit à faire passer les bytes par
-                //    l'accumulateur de texte — ce qui est impossible, ils ne
-                //    sont pas de l'UTF-8.
-                // 2. Elle rouvrirait l'amplificateur que la Task 8 a fermé :
-                //    2048 `albumart` dans une liste, c'est 26 Kio d'entrée pour
-                //    16 Mio écrits, **accumulés avant la première écriture**.
-                //    C'est exactement la mesure qui a fait naître
-                //    `MAX_RESPONSE`, sur ce même port sans authentification.
-                // 3. Personne n'en a besoin. Une cover se récupère par une
-                //    suite d'allers-retours dont chaque offset dépend du `size:`
-                //    que le précédent a rendition — or une liste de commands est
-                //    envoyée **entière avant** d'être lue. Le client ne peut
-                //    donc pas composer le lot qu'il faudrait.
+                // 1. It would break this session's write discipline.
+                //    `execute` composes a *whole* batch as text, checks the
+                //    cap, then writes **once** — which guarantees a
+                //    half-written response is never read as complete.
+                //    Inserting bytes in the middle would force either
+                //    flushing the accumulator before each image (thus giving
+                //    up that guarantee), or passing the bytes through the
+                //    text accumulator — impossible, they are not UTF-8.
+                // 2. It would reopen the amplifier Task 8 closed: 2048
+                //    `albumart` in a list is 26 KiB of input for 16 MiB
+                //    written, **accumulated before the first write**. That is
+                //    exactly the measurement that gave birth to
+                //    `MAX_RESPONSE`, on this same unauthenticated port.
+                // 3. Nobody needs it. A cover is fetched through a sequence
+                //    of round trips where each offset depends on the `size:`
+                //    the previous one returned — yet a command list is sent
+                //    **entirely before** being read. The client therefore
+                //    cannot compose the batch it would take.
                 //
-                // Refus à l'accumulation, comme `idle` et pour la même raison :
-                // le lot ne pourra jamais aboutir, donc exécuter d'abord les
-                // commands qui le précèdent émettrait de vraies actions au name
-                // d'un lot que le client ne verra jamais.
+                // Refused at accumulation, like `idle` and for the same
+                // reason: the batch can never complete, so first executing
+                // the commands preceding it would emit real actions on behalf
+                // of a batch the client will never see.
                 "albumart" | "readpicture" => {
-                    let index = liste.as_ref().map_or(0, Vec::len);
-                    liste = None;
-                    let refus = ack(Ack::Unknown, index, mot, "not allowed in command list");
-                    write(&mut writer, &[refus]).await?;
+                    let index = list.as_ref().map_or(0, Vec::len);
+                    list = None;
+                    let rejection = ack(Ack::Unknown, index, word, "not allowed in command list");
+                    write(&mut writer, &[rejection]).await?;
                 }
                 _ => {
-                    let index = liste.as_ref().map_or(0, Vec::len);
-                    // Deux bounds pour un seul refus : le nombre de commands
-                    // (qui bounded le travail d'un lot) et leur poids en bytes
-                    // (qui bounded la mémoire, une line accumulée pouvant peser
-                    // jusqu'à `MAX_LINE`). Voir les deux constantes.
-                    octets_liste += brute.len() + 1;
-                    if index >= MAX_LIST_COMMANDS || octets_liste > MAX_LIST_BYTES {
-                        liste = None;
-                        let refus = ack(Ack::Unknown, index, mot, "list too large");
-                        write(&mut writer, &[refus]).await?;
-                    } else if let Some(accumule) = liste.as_mut() {
-                        // Accumulé sans être regardé : un `command_list_begin`
-                        // imbriqué, un mot inconnu ou une line clear seront
-                        // refusés par `handle` à l'exécution, à leur rang, et
-                        // interrompront la suite comme n'importe quelle autre
-                        // erreur. Aucun cas particulier à écrire ici.
-                        accumule.push(args);
+                    let index = list.as_ref().map_or(0, Vec::len);
+                    // Two bounds for a single refusal: the command count
+                    // (which bounds a batch's work) and their weight in bytes
+                    // (which bounds memory, an accumulated line possibly
+                    // weighing up to `MAX_LINE`). See both constants.
+                    list_bytes += raw.len() + 1;
+                    if index >= MAX_LIST_COMMANDS || list_bytes > MAX_LIST_BYTES {
+                        list = None;
+                        let rejection = ack(Ack::Unknown, index, word, "list too large");
+                        write(&mut writer, &[rejection]).await?;
+                    } else if let Some(accumulated) = list.as_mut() {
+                        // Accumulated without being looked at: a nested
+                        // `command_list_begin`, an unknown word or an empty
+                        // line will be refused by `handle` at execution, at
+                        // their rank, and will interrupt what follows like
+                        // any other error. No special case to write here.
+                        accumulated.push(args);
                     }
                 }
             }
             continue;
         }
 
-        match mot {
+        match word {
             "command_list_begin" => {
-                liste = Some(Vec::new());
-                avec_ok = false;
-                octets_liste = 0;
+                list = Some(Vec::new());
+                with_ok = false;
+                list_bytes = 0;
             }
             "command_list_ok_begin" => {
-                liste = Some(Vec::new());
-                avec_ok = true;
-                octets_liste = 0;
+                list = Some(Vec::new());
+                with_ok = true;
+                list_bytes = 0;
             }
             _ => {
-                let lot = std::slice::from_ref(&args);
-                match execute(&mut lines, &mut writer, &state, &cmd_tx, lot, false, &mut connection)
+                let batch = std::slice::from_ref(&args);
+                match execute(&mut lines, &mut writer, &state, &cmd_tx, batch, false, &mut connection)
                     .await?
                 {
                     Next::Continue => {}
@@ -663,240 +652,242 @@ pub async fn serve(stream: TcpStream, state: Arc<SharedState>, cmd_tx: mpsc::Sen
     Ok(())
 }
 
-/// Exécute un lot — une commande seule, ou les commands d'une liste — et
-/// **écrit lui-même** la réponse.
+/// Executes a batch — a single command, or the commands of a list — and
+/// **writes the response itself**.
 ///
-/// Un seul path pour les deux cas : une commande hors liste est un lot d'une
-/// commande avec `avec_ok` faux. C'est ce qui garantit qu'une liste répond
-/// exactement comme la suite des commands qu'elle contains, à `list_OK` près.
+/// A single path for both cases: a command outside a list is a one-command
+/// batch with `with_ok` false. This is what guarantees a list answers exactly
+/// like the sequence of commands it contains, up to `list_OK`.
 ///
-/// `lines` n'est là que pour `idle` : c'est la seule issue qui a besoin de
-/// continuer à read (le `noidle` qui l'annule, ou la commande qui la remplace)
-/// avant d'avoir répondu.
+/// `lines` is only there for `idle`: it is the only outcome that needs to
+/// keep reading (the `noidle` that cancels it, or the command that replaces
+/// it) before having answered.
 ///
-/// `connection` porte ce qui n'appartient qu'à ce client : la référence de
-/// compteurs de ses `idle` et la size de chunk qu'il accepte (voir
-/// `Connection`).
+/// `connection` carries what belongs only to this client: the counter
+/// reference of its `idle`s and the chunk size it accepts (see `Connection`).
 async fn execute(
     lines: &mut BoundedReader,
     writer: &mut OwnedWriteHalf,
     state: &SharedState,
     cmd_tx: &mpsc::Sender<InputMessage>,
-    lot: &[Vec<String>],
-    avec_ok: bool,
+    batch: &[Vec<String>],
+    with_ok: bool,
     connection: &mut Connection,
 ) -> Result<Next> {
     let Connection { seen, binary_limit } = connection;
-    let mut sortie = Response::default();
-    for (index, args) in lot.iter().enumerate() {
-        // **Un seul instantané, lu avant `handle`.** Une seule prise de
-        // verrou pour tout ce que la réponse publie : la read en deux fois
-        // laisserait `status` se contredire au milieu de lui-même.
+    let mut output = Response::default();
+    for (index, args) in batch.iter().enumerate() {
+        // **A single snapshot, read before `handle`.** One lock acquisition
+        // for everything the response publishes: reading in two steps would
+        // let `status` contradict itself in its own middle.
         //
-        // **Ses compteurs ne servent pas de référence à un `idle`, et c'est le
-        // point.** Ils décrivent l'instant de *cette* commande ; la référence
-        // d'un `idle` est celle que la connection porte depuis sa bannière. Les
-        // confondre — ce que ce code faisait — avale tout changement survenu
-        // entre la réponse précédente et la line `idle`, et le commentaire qui
-        // vivait ici affirmait le contraire : rien dans cette playback ne rend
-        // « le réveil manqué impossible ». C'est la comparaison d'`wait`
-        // contre la référence de la connection qui l'interdit.
-        let mut instantane = state.read().await;
-        // **La seule attente que ce module s'autorise avant de handle**, et
-        // elle répare la cover qui disparaissait à chaque changement de
-        // piste : voir `cover_announced_but_missing` et `wait_cover`.
-        if cover_announced_but_missing(&instantane, args) {
-            instantane = wait_cover(state, instantane).await;
+        // **Its counters do not serve as the reference of an `idle`, and that
+        // is the point.** They describe the instant of *this* command; the
+        // reference of an `idle` is the one the connection carries since its
+        // banner. Confusing the two — which this code used to do — swallows
+        // any change occurred between the previous response and the `idle`
+        // line, and the comment that lived here claimed the opposite: nothing
+        // in this read makes "the missed wakeup impossible". It is `wait`'s
+        // comparison against the connection's reference that forbids it.
+        let mut snapshot = state.read().await;
+        // **The only wait this module allows itself before handling**, and it
+        // fixes the cover that vanished on every track change: see
+        // `cover_announced_but_missing` and `wait_cover`.
+        if cover_announced_but_missing(&snapshot, args) {
+            snapshot = wait_cover(state, snapshot).await;
         }
-        match handle(&instantane, index, args, *binary_limit) {
-            Outcome::Reply { lines: rendues, cmds } => {
+        match handle(&snapshot, index, args, *binary_limit) {
+            Outcome::Reply { lines: reply_lines, cmds } => {
                 for cmd in &cmds {
-                    // **Pousser d'abord, acter ensuite.** Le canal peut
-                    // refuser (plein, ou moitié `input` morte) et acter une
-                    // bascule qu'on n'a pas émise serait pire que ne pas
-                    // l'acter : `status` mentirait jusqu'à la trame suivante,
-                    // et un `idle` réveillé annoncerait un changement qui n'a
-                    // pas eu lieu.
+                    // **Push first, acknowledge second.** The channel can
+                    // refuse (full, or dead `input` half) and acknowledging a
+                    // switch we did not emit would be worse than not
+                    // acknowledging it: `status` would lie until the next
+                    // frame, and a woken `idle` would announce a change that
+                    // did not happen.
                     //
-                    // `held` faux, jamais autre chose : `held` dit « touche
-                    // maintenue enfoncée », une notion de clavier que le
-                    // réseau n'a pas.
+                    // `held` false, never anything else: `held` means "key
+                    // held down", a keyboard notion the network does not
+                    // have.
                     let message = InputMessage { cmd: cmd.clone(), held: false };
                     if cmd_tx.send(message).await.is_err() {
-                        // La moitié `input` est morte : plus rien de ce que
-                        // dit ce client ne peut aboutir, donc le laisser
-                        // parler serait lui mentir.
+                        // The `input` half is dead: nothing this client says
+                        // can succeed any more, so letting it talk would be
+                        // lying to it.
                         tracing::warn!("mpd input channel closed; closing session");
                         return Ok(Next::Close);
                     }
                 }
                 state.acknowledge_optimistic(&cmds).await;
-                sortie.extend(rendues);
-                if avec_ok {
-                    sortie.push("list_OK".to_string());
+                output.extend(reply_lines);
+                if with_ok {
+                    output.push("list_OK".to_string());
                 }
-                // Le cap de réponse, vérifié ici parce que c'est le seul
-                // endroit où la réponse grandit. Rien n'a encore été écrit, donc
-                // le refus **remplace** tout ce qui était composé : le client
-                // reçoit un seul terminateur pour sa requête, sa comptabilité
-                // remainder juste, et la connection survit — contrairement à la line
-                // trop longue, où fermer était le seul choix défendable puisqu'on
-                // ne pouvait même pas nommer la commande fautive. Ici on la
-                // nomme, et son rang avec elle.
+                // The response cap, checked here because this is the only
+                // place the response grows. Nothing has been written yet, so
+                // the rejection **replaces** everything composed so far: the
+                // client receives exactly one terminator for its request, its
+                // own accounting stays correct, and the connection survives —
+                // unlike the too-long line, where closing was the only
+                // defensible choice since we could not even name the
+                // offending command. Here we do name it, and its rank along
+                // with it.
                 //
-                // **Ce que le refus coûte, et qu'il faut dire** : les commands
-                // `0..=index` ont déjà poussé leur `InputMessage` et été actées
-                // optimistiquement, donc leurs effets sur l'appareil
-                // **subsistent** alors que leur sortie est jetée. Un client qui
-                // groupe `setvol 40` puis un gros `playlistinfo` verra donc le
-                // volume changer sans recevoir la moindre line. C'est
-                // exactement le compromis que MPD fait sur une erreur en milieu
-                // de liste — les commands déjà exécutées le restent — et il est
-                // acceptable pour la même raison : défaire ce qui est parti vers
-                // le cœur n'est pas en notre pouvoir, et le client peut toujours
-                // relire l'état.
-                if sortie.too_large() {
+                // **What the rejection costs, and it must be said**:
+                // commands `0..=index` have already pushed their
+                // `InputMessage` and been optimistically acknowledged, so
+                // their effects on the device **persist** even though their
+                // output is discarded. A client that groups `setvol 40` then
+                // a large `playlistinfo` will therefore see the volume
+                // change without receiving a single line. This is exactly
+                // the trade-off MPD makes on a mid-list error — commands
+                // already executed stay executed — and it is acceptable for
+                // the same reason: undoing what has already gone to the core
+                // is not in our power, and the client can always re-read the
+                // state.
+                if output.too_large() {
                     tracing::warn!("mpd response over {MAX_RESPONSE} bytes; refusing");
                     let name = args.first().map_or("", String::as_str);
-                    let refus = ack(Ack::Unknown, index, name, "response too large");
-                    write(writer, &[refus]).await?;
+                    let rejection = ack(Ack::Unknown, index, name, "response too large");
+                    write(writer, &[rejection]).await?;
                     return Ok(Next::Continue);
                 }
             }
-            // `noidle` reçu hors attente : `OK` sec, et dans une liste un
-            // `list_OK` comme n'importe quelle commande sans lines.
+            // `noidle` received outside a wait: a bare `OK`, and inside a
+            // list a `list_OK` like any other command without lines.
             //
-            // Empilé **sans vérifier le cap**, à la différence du bras
-            // ci-dessus : huit bytes par commande, donc 16 Kio au pire pour un
-            // lot entier de `noidle`, ce que le compte de commands bounded déjà.
-            // C'est ce qui porte le résidu au-delà du cap à une trentaine de
-            // kibioctets, et non à la seule réponse d'une commande.
+            // Pushed **without checking the cap**, unlike the arm above:
+            // eight bytes per command, so 16 KiB at worst for an entire batch
+            // of `noidle`, which the command count already bounds. This is
+            // what carries the residue past the cap to some thirty
+            // kibibytes, and not to a single command's response.
             Outcome::Cancel => {
-                if avec_ok {
-                    sortie.push("list_OK".to_string());
+                if with_ok {
+                    output.push("list_OK".to_string());
                 }
             }
-            // `binarylimit` : la valeur est déjà bornée par `commands`, il n'y
-            // a qu'à la retenir. Elle vaut pour la **suite** de cette
-            // connection, y compris pour les commands qui suivent dans la même
-            // liste — c'est ce que fait MPD, et c'est le seul order qui rende
-            // `binarylimit` puis `albumart` groupés utilisables.
+            // `binarylimit`: the value is already bounded by `commands`,
+            // there is nothing left but to remember it. It holds for the
+            // **rest** of this connection, including the commands that
+            // follow in the same list — that is what MPD does, and it is the
+            // only order that makes `binarylimit` followed by `albumart`
+            // grouped together usable.
             Outcome::BinaryLimit(n) => {
                 *binary_limit = n;
-                if avec_ok {
-                    sortie.push("list_OK".to_string());
+                if with_ok {
+                    output.push("list_OK".to_string());
                 }
             }
-            // La première erreur produit son `ACK` et **rien de ce qui suit
-            // n'est exécuté** : le `for` s'arrête là. Les lines déjà
-            // composées partent quand même, comme le fait MPD — un `ACK` ne
-            // rétracte pas les réponses des commands qui, elles, ont abouti.
-            Outcome::Reject(refus) => {
-                // **Le refus est journalisé avec la commande entière**, et ce
-                // n'est pas du confort. Un client qui bute sur une commande non
-                // gérée n'affiche qu'un message générique — « unsupported » —
-                // et l'opérateur n'a alors aucun moyen de savoir *laquelle* :
-                // c'est exactement ce qui a manqué pour diagnostiquer l'échec
-                // de M.A.L.P. sur la sélection d'une piste dans une liste
-                // enregistrée. Les arguments comptent autant que le name : la
-                // même commande peut être refusée pour sa forme.
+            // The first error produces its `ACK` and **nothing that follows
+            // is executed**: the `for` stops there. The lines already
+            // composed leave anyway, as MPD does — an `ACK` does not retract
+            // the responses of the commands that, for their part, succeeded.
+            Outcome::Reject(rejection) => {
+                // **The rejection is logged with the whole command**, and
+                // this is not a comfort. A client that hits an unhandled
+                // command only displays a generic message — "unsupported" —
+                // and the operator then has no way to know *which one*: this
+                // is exactly what was missing to diagnose M.A.L.P.'s failure
+                // selecting a track inside a saved playlist. The arguments
+                // matter as much as the name: the same command can be
+                // rejected for its shape.
                 //
-                // En `info` et non en `warn` : un refus est une réponse
-                // ordinaire du protocol (un client essaie, apprend, passe à
-                // autre chose), et le cœur ne retient que les `warn` pour sa
-                // carte « dernières erreurs » — y verser chaque commande
-                // inconnue d'un client bavard la remplirait de bruit.
-                tracing::info!("mpd refused {args:?}: {refus}");
-                sortie.push(refus);
-                write(writer, &sortie.lines).await?;
+                // At `info` and not at `warn`: a rejection is an ordinary
+                // protocol response (a client tries, learns, moves on), and
+                // the core only keeps `warn`s for its "recent errors" panel —
+                // pouring every unknown command from a chatty client into it
+                // would fill it with noise.
+                tracing::info!("mpd refused {args:?}: {rejection}");
+                output.push(rejection);
+                write(writer, &output.lines).await?;
                 return Ok(Next::Continue);
             }
-            // Une réponse binaire : elle est écrite **seule**, par son propre
-            // path, et elle clôt la requête — pas de `OK` ajouté par la
-            // suite de la boucle, `write_bytes` pose le sien.
+            // A binary response: it is written **alone**, through its own
+            // path, and it closes the request — no `OK` appended by the rest
+            // of the loop, `write_bytes` puts its own.
             //
-            // `sortie` est nécessairement clear ici : les deux commands
-            // binaires sont refusées à l'accumulation d'une liste (voir
-            // `serve`), donc le lot n'a qu'une commande. L'écrire quand même
-            // garde cette fonction juste si un jour ce n'était plus le cas,
-            // plutôt que d'avaler des lines — le même choix que le bras
-            // `Wait` juste en dessous, pour la même raison.
-            Outcome::Bytes(binaire) => {
-                write(writer, &sortie.lines).await?;
-                write_bytes(writer, &binaire).await?;
+            // `output` is necessarily empty here: the two binary commands
+            // are rejected at list accumulation (see `serve`), so the batch
+            // has only one command. Writing it anyway keeps this function
+            // correct should that ever stop being the case, rather than
+            // swallowing lines — the same choice as the `Wait` arm just
+            // below, for the same reason.
+            Outcome::Bytes(binary) => {
+                write(writer, &output.lines).await?;
+                write_bytes(writer, &binary).await?;
                 return Ok(Next::Continue);
             }
             Outcome::Wait(subsystems) => {
-                // `idle` n'atteint jamais ce point dans une liste : la liste
-                // l'a refusé à l'accumulation. Hors liste, le lot n'a qu'une
-                // commande, donc `sortie` est clear — l'écrire quand même
-                // garde cette fonction juste si un jour un lot en contenait
-                // plusieurs, plutôt que d'avaler des lines.
-                write(writer, &sortie.lines).await?;
+                // `idle` never reaches this point inside a list: the list
+                // rejected it at accumulation. Outside a list, the batch has
+                // only one command, so `output` is empty — writing it anyway
+                // keeps this function correct should a batch ever contain
+                // several, rather than swallowing lines.
+                write(writer, &output.lines).await?;
                 return wait_idle(lines, writer, state, &subsystems, seen).await;
             }
             Outcome::Close => {
-                // **`OK` puis fermeture, et c'est un choix.** MPD, lui,
-                // n'écrit rien avant de fermer sur `close`. Nous répondons,
-                // pour que la discipline de cette fonction n'ait aucune
-                // exception : toute commande acceptée reçoit exactement un
-                // terminateur. Un client qui a déjà cessé de read fait
-                // simplement échouer cette écriture, ce que la session traite
-                // comme une fin ordinaire — et un client qui read encore
-                // trouve sa réponse là où il l'attend. La divergence est sans
-                // effet observable puisque la connection se ferme dans les deux
-                // cas ; ce qui compte est qu'elle soit délibérée.
-                sortie.push("OK".to_string());
-                write(writer, &sortie.lines).await?;
+                // **`OK` then closing, and it is a choice.** MPD itself
+                // writes nothing before closing on `close`. We answer, so
+                // that this function's discipline has no exception: every
+                // accepted command receives exactly one terminator. A client
+                // that has already stopped reading simply makes this write
+                // fail, which the session treats as an ordinary end — and a
+                // client still reading finds its response where it expects
+                // it. The divergence has no observable effect since the
+                // connection closes in both cases; what matters is that it
+                // be deliberate.
+                output.push("OK".to_string());
+                write(writer, &output.lines).await?;
                 return Ok(Next::Close);
             }
         }
     }
-    // Un seul `OK` clôt le lot entier : c'est ce qui distingue une liste de
-    // commands de la même suite de commands envoyées une par une.
-    sortie.push("OK".to_string());
-    write(writer, &sortie.lines).await?;
+    // A single `OK` closes the whole batch: this is what distinguishes a
+    // command list from the same sequence of commands sent one by one.
+    output.push("OK".to_string());
+    write(writer, &output.lines).await?;
     Ok(Next::Continue)
 }
 
-/// Combien de temps une demande de cover patiente pour une image que
-/// l'appareil a déjà annoncée.
+/// How long a cover request waits for an image the device has already
+/// announced.
 ///
-/// Trois seconds, et le nombre vient des deux échéances qu'il doit couvrir :
-/// le cœur bounded à `health::TIMEOUT` la playback d'un fichier de cover sur un
-/// partage, et un téléchargement réseau est du même order. Au-delà, l'image
-/// n'arrivera probablement pas pour cette piste, et le refus est la bonne
-/// réponse.
+/// Three seconds, and the number comes from the two deadlines it must cover:
+/// the core bounds to `health::TIMEOUT` the playback of a cover file on a
+/// share, and a network download is of the same order. Beyond that, the
+/// image will probably not arrive for this track, and the rejection is the
+/// right response.
 ///
-/// Ce que cette attente **ne** met pas en péril : une session est une tâche à
-/// elle seule, donc patienter ici ne retient personne d'autre (voir l'en-tête
-/// du module). M.A.L.P. ouvre d'ailleurs une connection distincte pour les
-/// images.
+/// What this wait does **not** put at risk: a session is a task on its own,
+/// so waiting here holds nobody else back (see the module header). M.A.L.P.,
+/// for that matter, opens a separate connection for images.
 const COVER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Attend, au plus `COVER_TIMEOUT`, que la cover annoncée arrive, et rend
-/// l'instantané qui décidera.
+/// Waits, at most `COVER_TIMEOUT`, for the announced cover to arrive, and
+/// returns the snapshot that will decide.
 ///
-/// Rend la main **dès** que l'attente n'a plus d'objet : soit l'image est là,
-/// soit l'état a changé au point que la demande ne se répare plus (piste
-/// suivante, arrêt). C'est `cover_announced_but_missing` qui chunk, la
-/// même fonction que celle qui a décidé d'wait — un seul énoncé de la
-/// condition, jamais deux à garder d'accord.
+/// Returns control **as soon as** the wait no longer has an object: either
+/// the image is there, or the state has changed enough that the request can
+/// no longer be satisfied (next track, stop). It is
+/// `cover_announced_but_missing` that decides — the same function that
+/// decided to wait — a single statement of the condition, never two to keep
+/// in sync.
 ///
-/// À l'échéance, rend le dernier instantané lu : `handle` en tirera le refus
-/// ordinaire, comme si l'on n'avait jamais attendu.
-async fn wait_cover(state: &SharedState, instantane: Snapshot) -> Snapshot {
-    let args = cover_arguments(&instantane);
-    let mut current = instantane;
+/// At the deadline, returns the last snapshot read: `handle` will draw the
+/// ordinary rejection from it, as if we had never waited.
+async fn wait_cover(state: &SharedState, snapshot: Snapshot) -> Snapshot {
+    let args = cover_arguments(&snapshot);
+    let mut current = snapshot;
     let deadline = tokio::time::Instant::now() + COVER_TIMEOUT;
     loop {
-        // `Subsystem::Player` : c'est le sujet que `apply_cover` déplace —
-        // le protocol MPD n'en a aucun pour les images, et le greffon a choisi
-        // celui-là (voir sa doc). Wait sur lui, c'est wait exactement
-        // l'arrivée de l'image, plus les changements de piste, qui doivent eux
-        // aussi nous réveiller pour cesser d'wait.
-        let attente = state.wait(&[Subsystem::Player], current.versions);
-        if tokio::time::timeout_at(deadline, attente).await.is_err() {
+        // `Subsystem::Player`: this is the subsystem `apply_cover` moves —
+        // the MPD protocol has none for images, and the plugin chose this
+        // one (see its doc). Waiting on it waits for exactly the image's
+        // arrival, plus track changes, which must also wake us so we stop
+        // waiting.
+        let waiting = state.wait(&[Subsystem::Player], current.versions);
+        if tokio::time::timeout_at(deadline, waiting).await.is_err() {
             tracing::debug!("mpd cover did not arrive within {COVER_TIMEOUT:?}");
             return current;
         }
@@ -907,14 +898,14 @@ async fn wait_cover(state: &SharedState, instantane: Snapshot) -> Snapshot {
     }
 }
 
-/// Reconstruit les arguments d'une demande de cover pour ce qui plays.
+/// Rebuilds the arguments of a cover request for what is playing.
 ///
-/// **Reconstruits et non transportés**, et la nuance est le sujet : la boucle
-/// d'attente doit réévaluer la condition contre l'état *current*, or l'URI que
-/// le client a écrite désigne la piste d'alors. Les rebâtir depuis l'instantané
-/// de départ garde exactement la question posée — « l'image de cette piste-là
-/// est-elle arrivée ? » — et fait sortir la boucle dès que la piste change,
-/// puisque l'URI ne correspondra plus.
+/// **Rebuilt and not carried along**, and the nuance is the point: the wait
+/// loop must re-evaluate the condition against the *current* state, whereas
+/// the URI the client wrote names the track of that moment. Rebuilding them
+/// from the starting snapshot keeps exactly the question asked — "has this
+/// track's image arrived?" — and makes the loop exit as soon as the track
+/// changes, since the URI will no longer match.
 fn cover_arguments(inst: &Snapshot) -> Vec<String> {
     vec![
         "albumart".to_string(),
@@ -926,25 +917,26 @@ fn cover_arguments(inst: &Snapshot) -> Vec<String> {
     ]
 }
 
-/// Tient l'attente d'un `idle` : rend la main au réveil, ou sur ce que le
-/// client dit entre-temps.
+/// Holds an `idle` wait: returns control on wakeup, or on what the client
+/// says in the meantime.
 ///
-/// **`subsystems` clear veut dire wait pour toujours**, et non répondre `OK`
-/// tout de suite (voir la doc d'`Outcome::Wait`) : un client qui n'a nommé
-/// que des sous-systèmes que ce greffon n'émet jamais (`idle database`) a posé
-/// une question légitime dont la réponse est le silence. C'est `wait` qui
-/// l'honore sans cas particulier — aucun sujet ne peut différer, donc elle se
-/// rendort à chaque notification — et lui passer la liste telle quelle est tout
-/// ce qu'il y a à faire. Répondre `OK` ferait boucler le client à pleine
-/// vitesse, ce qui est exactement le contraire de ce qu'`idle` sert à éviter.
+/// **An empty `subsystems` means waiting forever**, and not answering `OK`
+/// right away (see `Outcome::Wait`'s doc): a client that named only
+/// subsystems this plugin never emits (`idle database`) asked a legitimate
+/// question whose answer is silence. It is `wait` that honors it without a
+/// special case — no subsystem can ever defer, so it goes back to sleep at
+/// every notification — and passing it the list as is is all there is to do.
+/// Answering `OK` would make the client loop at full speed, exactly the
+/// opposite of what `idle` exists to avoid.
 ///
-/// **`seen` est la référence de la connection, et cette fonction est la seule à
-/// l'avancer** : sur un réveil annoncé, et pour les seuls subsystems annoncés. Le
-/// vrai MPD n'efface que les drapeaux qu'il vient de rapporter, et tout avancer
-/// d'un coup perdrait le changement d'un sujet qu'un `idle` suivant demandera
-/// (`idle player` puis `idle mixer` en est le cas le plus court). Un `noidle`,
-/// lui, n'announcement rien : il n'avance donc rien, et le changement en attente
-/// ressortira à l'`idle` d'après.
+/// **`seen` is the connection's reference, and this function is the only one
+/// that advances it**: on an announced wakeup, and only for the announced
+/// subsystems. Real MPD only clears the flags it just reported, and
+/// advancing the whole array at once would lose the change of a subsystem a
+/// following `idle` will ask for (`idle player` then `idle mixer` is the
+/// shortest case of it). A `noidle`, for its part, announces nothing: it
+/// therefore advances nothing, and the pending change will resurface at the
+/// next `idle`.
 async fn wait_idle(
     lines: &mut BoundedReader,
     writer: &mut OwnedWriteHalf,
@@ -952,89 +944,90 @@ async fn wait_idle(
     subsystems: &[Subsystem],
     seen: &mut [u64; 4],
 ) -> Result<Next> {
-    // Deux issues, et il faut écouter les deux : le réveil, et ce que le client
-    // dit pendant l'attente — `noidle`, la seule commande que MPD y autorise,
-    // ou n'importe quelle autre line, qui vaut alors `noidle` implicite.
-    // `BoundedReader::next_line` est sûre à l'annulation (son buffer vit
-    // dans la structure, voir là-bas), donc la branche perdante ne perd aucun
-    // octet ; et abandonner `wait` ne perd aucun réveil, puisque `seen`
-    // remainder la référence et que les compteurs sont monotones.
+    // Two outcomes, and both must be listened to: the wakeup, and what the
+    // client says during the wait — `noidle`, the only command MPD allows
+    // there, or any other line, which then counts as an implicit `noidle`.
+    // `BoundedReader::next_line` is cancel-safe (its buffer lives in the
+    // struct, see there), so the losing branch loses no byte; and abandoning
+    // `wait` loses no wakeup, since `seen` keeps the reference and the
+    // counters are monotonic.
     let wakeup = tokio::select! {
         wakeup = state.wait(subsystems, *seen) => wakeup,
-        lue = lines.next_line() => {
-            let Some(brute) = lue? else {
-                // Le client est parti pendant son attente : rien à écrire.
+        read = lines.next_line() => {
+            let Some(raw) = read? else {
+                // The client left during its wait: nothing to write.
                 return Ok(Next::Close);
             };
-            // **Une line reçue pendant l'attente clôt l'`idle` par un `OK`
-            // nu.** C'est la comptabilité du protocol : un client MPD compte
-            // un terminateur par requête, et il en a écrit deux — son `idle`,
-            // puis cette line.
+            // **A line received during the wait closes the `idle` with a
+            // bare `OK`.** This is the protocol's accounting: an MPD client
+            // counts one terminator per request, and it has written two —
+            // its `idle`, then this line.
             //
-            // Ce code refusait cette line par un seul `ACK` et n'écrivait rien
-            // pour l'`idle` : deux requêtes se partageaient un terminateur, et
-            // le client repartait **décalé de un, définitivement** — chaque
-            // réponse suivante lue comme celle de sa requête précédente. Un
-            // décalage silencieux et permanent, là où le choix de MPD (fermer)
-            // est bruyant et auto-réparateur. Nous gardons le choix de ne pas
-            // fermer — « une line fautive n'est jamais une rupture », et une
-            // reconnexion coûterait au client un défaut qu'aucun journal ne lui
-            // montre — mais en réparant ce qu'il avait cassé : l'invariant que
-            // cette fonction énonce sur `Outcome::Close` redevient vrai, toute
-            // commande acceptée reçoit exactement un terminateur.
+            // This code used to reject this line with a single `ACK` and
+            // write nothing for the `idle`: two requests shared one
+            // terminator, and the client came out **permanently shifted by
+            // one** — every following response read as the one for its
+            // previous request. A silent, permanent shift, where MPD's
+            // choice (closing) is loud and self-repairing. We keep the
+            // choice not to close — "a faulty line is never a break", and a
+            // reconnection would cost the client a defect no log shows it —
+            // but by repairing what it had broken: the invariant this
+            // function states about `Outcome::Close` becomes true again,
+            // every accepted command receives exactly one terminator.
             //
-            // **Et l'`OK` nu n'est pas une forme inventée pour l'occasion** :
-            // c'est déjà ce que le bras `noidle` écrivait, et c'est donc la
-            // même réponse au même endroit. La correction n'étend qu'un
-            // comportement existant à un second déclencheur — elle ne peut pas
-            // mettre sur le fil une forme qu'un client n'aurait jamais vue.
+            // **And the bare `OK` is not a form invented for the
+            // occasion**: it is already what the `noidle` arm wrote, so it
+            // is the same response in the same place. The fix only extends
+            // an existing behavior to a second trigger — it cannot put on
+            // the wire a form a client would never have seen.
             write(writer, &["OK".to_string()]).await?;
-            // `noidle` est la seule line qui ne mérite pas de réponse propre :
-            // ce n'est pas une requête mais **l'annulation de celle en cours**,
-            // et l'`OK` qu'on vient d'écrire est le sien autant que celui de
-            // l'`idle` — un seul terminateur pour `idle` + `noidle`, exactement
-            // comme MPD. Tout le remainder est un `noidle` implicite **suivi de
-            // cette commande**, vraisemblablement ce que le client voulait
-            // dire : la line repart donc dans l'aiguillage complet de
-            // `serve` — listes de commands, lines illisibles et `close`
-            // comprises — sans qu'un seul cas soit réinterprété ici.
+            // `noidle` is the only line that does not deserve a proper
+            // response of its own: it is not a request but **the
+            // cancellation of the one in progress**, and the `OK` just
+            // written is as much its own as the `idle`'s — a single
+            // terminator for `idle` + `noidle`, exactly like MPD. The rest
+            // is an implicit `noidle` **followed by this command**, likely
+            // what the client meant: the line therefore goes back into
+            // `serve`'s full dispatch — command lists, unreadable lines and
+            // `close` included — without a single case being reinterpreted
+            // here.
             //
-            // Une line illisible n'est pas `noidle` (elle ne se découpe pas),
-            // et c'est la conduite voulue : elle recevra son `ACK` au tour
-            // suivant, comme n'importe où ailleurs.
-            let est_noidle = split(&brute)
-                .map(|args| args.first().is_some_and(|mot| mot == "noidle"))
+            // An unreadable line is not `noidle` (it does not split), and
+            // that is the intended behavior: it will receive its `ACK` on
+            // the next turn, like anywhere else.
+            let is_noidle = split(&raw)
+                .map(|args| args.first().is_some_and(|word| word == "noidle"))
                 .unwrap_or(false);
-            if !est_noidle {
-                lines.put_back(brute);
+            if !is_noidle {
+                lines.put_back(raw);
             }
-            // La référence de la connection n'avance pas : rien n'a été annoncé,
-            // donc un changement survenu pendant cette attente ressortira à
-            // l'`idle` suivant.
+            // The connection's reference does not advance: nothing was
+            // announced, so a change that occurred during this wait will
+            // resurface at the next `idle`.
             return Ok(Next::Continue);
         }
     };
-    // **Les compteurs rapportés, et eux seuls, sont consommés.** Avancer tout
-    // le tableau perdrait le changement d'un sujet que cet `idle` n'a pas
-    // demandé.
-    for sujet in &wakeup.moved {
-        seen[*sujet as usize] = wakeup.versions[*sujet as usize];
+    // **The reported counters, and only those, are consumed.** Advancing the
+    // whole table would lose the change of a subsystem this `idle` did not
+    // ask for.
+    for subsystem in &wakeup.moved {
+        seen[*subsystem as usize] = wakeup.versions[*subsystem as usize];
     }
-    let mut reponse: Vec<String> =
-        wakeup.moved.iter().map(|sujet| line("changed", subsystem_name(*sujet))).collect();
-    reponse.push("OK".to_string());
-    write(writer, &reponse).await?;
+    let mut response: Vec<String> =
+        wakeup.moved.iter().map(|subsystem| line("changed", subsystem_name(*subsystem))).collect();
+    response.push("OK".to_string());
+    write(writer, &response).await?;
     Ok(Next::Continue)
 }
 
-/// Le name MPD d'un sous-système, tel qu'un `changed:` le publie.
+/// The MPD name of a subsystem, as a `changed:` publishes it.
 ///
-/// C'est l'inverse exact de la table que `commands.rs` emploie pour read un
-/// `idle` : un name qui divergerait ferait annoncer un sous-système qu'aucun
-/// client ne saurait redemander. Un test le vérifie en passant chacun de ces
-/// names à `idle` et en exigeant qu'il en ressorte le même sujet.
-fn subsystem_name(sujet: Subsystem) -> &'static str {
-    match sujet {
+/// This is the exact inverse of the table `commands.rs` uses to read an
+/// `idle`: a name that diverged would announce a subsystem no client could
+/// ask for again. A test verifies it by passing each of these names to
+/// `idle` and requiring the same subsystem to come back out.
+fn subsystem_name(subsystem: Subsystem) -> &'static str {
+    match subsystem {
         Subsystem::Player => "player",
         Subsystem::Mixer => "mixer",
         Subsystem::Playlist => "playlist",
@@ -1042,27 +1035,27 @@ fn subsystem_name(sujet: Subsystem) -> &'static str {
     }
 }
 
-/// Le premier mot d'une line que `split` a refusée, pour nommer la commande
-/// dans l'`ACK`. Découpé à l'espace et sans guillemets : c'est tout ce qu'on
-/// peut dire d'une line mal citée, et un `{}` clear (ce que MPD écrit) laisse
-/// le client sans index sur laquelle de ses lines était fautive.
-fn first_word(brute: &str) -> &str {
-    brute.split_whitespace().next().unwrap_or("")
+/// The first word of a line `split` rejected, to name the command in the
+/// `ACK`. Split at the space and without quotes: that is all that can be
+/// said of a badly quoted line, and an empty `{}` (what MPD writes) leaves
+/// the client with no clue which of its lines was at fault.
+fn first_word(raw: &str) -> &str {
+    raw.split_whitespace().next().unwrap_or("")
 }
 
-/// Écrit une réponse d'un seul coup.
+/// Writes a response in one go.
 ///
-/// Un `write_all` par réponse et non un par line : une réponse de 51 lines
-/// coûte alors un appel système au lieu de 51, et rien ne peut s'intercaler au
-/// milieu — deux réponses de la même session sont écrites l'une après l'autre
-/// par construction, mais une réponse à moitié écrite serait lue comme une
-/// réponse complète par un client qui compte ses terminateurs.
+/// One `write_all` per response and not one per line: a response of 51 lines
+/// then costs one system call instead of 51, and nothing can slip in the
+/// middle — two responses of the same session are written one after the
+/// other by construction, but a half-written response would be read as a
+/// complete one by a client that counts its terminators.
 async fn write(writer: &mut OwnedWriteHalf, lines: &[String]) -> Result<()> {
-    // Capacité exacte dès le départ : sans elle, mettre à plat une réponse
-    // proche du mébioctet la réallouerait une vingtaine de fois en doublant, en
-    // demandant chaque fois un bloc contigu plus grand que le précédent.
-    // `MAX_RESPONSE` bounded la size de ce buffer ; cette line bounded le nombre
-    // de fois qu'on la demande.
+    // Exact capacity from the start: without it, flattening a response close
+    // to a mebibyte would reallocate it some twenty times by doubling, each
+    // time requesting a contiguous block bigger than the previous one.
+    // `MAX_RESPONSE` bounds the size of this buffer; this line bounds the
+    // number of times it is requested.
     let mut buffer = String::with_capacity(lines.iter().map(|l| l.len() + 1).sum());
     for l in lines {
         buffer.push_str(l);
@@ -1072,51 +1065,52 @@ async fn write(writer: &mut OwnedWriteHalf, lines: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Écrit une réponse **binaire** d'un seul coup : l'en-tête, les bytes bruts,
-/// puis le terminateur.
+/// Writes a **binary** response in one go: the header, the raw bytes, then
+/// the terminator.
 ///
-/// La forme est celle de MPD, à l'octet près :
+/// The shape is MPD's, byte for byte:
 ///
 /// ```text
-/// size: <size de l'image entière>
-/// type: <mime>            (readpicture seulement)
-/// binary: <size de cette chunk>
-/// <les bytes bruts>
+/// size: <size of the whole image>
+/// type: <mime>            (readpicture only)
+/// binary: <size of this chunk>
+/// <the raw bytes>
 /// OK
 /// ```
 ///
-/// Le `\n` qui suit les bytes bruts n'est pas décoratif : c'est celui que MPD
-/// écrit (`Response::WriteBinary`), et libmpdclient le consomme avant de read
-/// le terminateur. L'omettre ferait read `<dernier octet>OK` comme une line
-/// inconnue.
+/// The `\n` following the raw bytes is not decorative: it is the one MPD
+/// writes (`Response::WriteBinary`), and libmpdclient consumes it before
+/// reading the terminator. Omitting it would make `<last byte>OK` read as an
+/// unknown line.
 ///
-/// **Un seul `write_all`, comme `write`**, et la même raison : une réponse à
-/// moitié écrite serait lue comme une réponse complète par un client qui compte
-/// ses terminateurs. La recopie de la chunk dans le buffer coûte au plus
-/// `MAX_CHUNK_CAP` bytes — soixante-quatre kibioctets si le client a
-/// relevé sa limit par `binarylimit`, huit sinon, à comparer aux dizaines de
-/// mébioctets que le path texte a dû se voir interdire.
+/// **A single `write_all`, like `write`**, and the same reason: a
+/// half-written response would be read as a complete one by a client that
+/// counts its terminators. Copying the chunk into the buffer costs at most
+/// `MAX_CHUNK_CAP` bytes — sixty-four kibibytes if the client has raised its
+/// limit through `binarylimit`, eight otherwise, to compare against the tens
+/// of mebibytes the text path had to be forbidden.
 ///
-/// **Ce que cette fonction ne fait pas : allouer l'image.** `binaire.image` est
-/// un `Arc` partagé avec l'état ; seule la chunk est copiée. C'est ce qui rend
-/// le pire cas d'une connection binaire indépendant de la size de la cover.
-async fn write_bytes(writer: &mut OwnedWriteHalf, binaire: &Binary) -> Result<()> {
-    // Indexation sans contrôle : c'est `commands::cover` qui établit
-    // l'intervalle, et son contrat est qu'il tient dans l'image et dans la
-    // limit de la connection, elle-même plafonnée à `MAX_CHUNK_CAP`.
-    // L'assertion de débogage le dit plutôt que de le supposer en silence, sans
-    // rien coûter en production.
-    let chunk = &binaire.image[binaire.chunk.clone()];
+/// **What this function does not do: allocate the image.** `binary.image` is
+/// an `Arc` shared with the state; only the chunk is copied. This is what
+/// makes the worst case of a binary connection independent of the cover's
+/// size.
+async fn write_bytes(writer: &mut OwnedWriteHalf, binary: &Binary) -> Result<()> {
+    // Unchecked indexing: it is `commands::cover` that establishes the
+    // range, and its contract is that it fits within the image and within
+    // the connection's limit, itself capped at `MAX_CHUNK_CAP`. The debug
+    // assertion states it rather than silently assuming it, at no cost in
+    // production.
+    let chunk = &binary.image[binary.chunk.clone()];
     debug_assert!(
         chunk.len() <= MAX_CHUNK_CAP,
-        "une chunk depasse le cap du greffon"
+        "a chunk exceeds the plugin's cap"
     );
-    let binary = line("binary", chunk.len());
+    let binary_line = line("binary", chunk.len());
     let header: usize =
-        binaire.header.iter().chain(std::iter::once(&binary)).map(|l| l.len() + 1).sum();
-    // Capacité exacte : en-tête, chunk, puis `\nOK\n`.
+        binary.header.iter().chain(std::iter::once(&binary_line)).map(|l| l.len() + 1).sum();
+    // Exact capacity: header, chunk, then `\nOK\n`.
     let mut buffer = Vec::with_capacity(header + chunk.len() + 4);
-    for l in binaire.header.iter().chain(std::iter::once(&binary)) {
+    for l in binary.header.iter().chain(std::iter::once(&binary_line)) {
         buffer.extend_from_slice(l.as_bytes());
         buffer.push(b'\n');
     }
@@ -1131,479 +1125,481 @@ mod tests {
     use super::*;
     use crate::state::Snapshot;
     use ritornello_proto::{Command, Track, Playback, PlayerState};
-    // `AsyncReadExt` pour le `read_exact` des tranches binaires : le client de
-    // test est le seul du greffon à read des bytes bruts.
+    // `AsyncReadExt` for the `read_exact` of binary chunks: the test client is
+    // the only one in the plugin that reads raw bytes.
     use tokio::io::AsyncReadExt;
-    // Le player borné de la session n'en a plus besoin ; le client de test,
-    // lui, read des lines sans cap à défendre.
+    // The session's bounded reader no longer needs this; the test client, for
+    // its part, reads lines without a cap to defend.
     use tokio::io::Lines;
 
-    /// Un client de test : les lines reçues d'un côté, la plume de l'autre.
+    /// A test client: the lines received on one side, the pen on the other.
     struct Client {
         lines: Lines<BufReader<OwnedReadHalf>>,
         writer: OwnedWriteHalf,
     }
 
     impl Client {
-        /// Un client sur un stream déjà ouvert. Séparé de `Serveur::client` :
-        /// les tests de reliaison connectent une adresse qui n'est pas celle
-        /// que le `Serveur` de test porte.
-        fn depuis(stream: TcpStream) -> Client {
+        /// A client on an already-open stream. Separate from `Server::client`:
+        /// the rebind tests connect to an address that is not the one the
+        /// test `Server` carries.
+        fn from_stream(stream: TcpStream) -> Client {
             let (playback, writer) = stream.into_split();
             Client { lines: BufReader::new(playback).lines(), writer }
         }
 
-        async fn connecter(adresse: std::net::SocketAddr) -> Client {
-            Client::depuis(TcpStream::connect(adresse).await.unwrap())
+        async fn connect(address: std::net::SocketAddr) -> Client {
+            Client::from_stream(TcpStream::connect(address).await.unwrap())
         }
 
         async fn send_frame(&mut self, line: &str) {
             self.writer.write_all(format!("{line}\n").as_bytes()).await.unwrap();
         }
 
-        async fn recevoir(&mut self) -> String {
-            self.lines.next_line().await.unwrap().expect("le serveur a ferme la connection")
+        async fn receive(&mut self) -> String {
+            self.lines.next_line().await.unwrap().expect("the server closed the connection")
         }
 
-        /// Lit exactement `n` bytes **bruts**.
+        /// Reads exactly `n` **raw** bytes.
         ///
-        /// Derrière le player de lines (`get_mut`) et non sur la chaussette :
-        /// les bytes qui suivent un en-tête sont déjà dans le buffer du
-        /// `BufReader` au moment où la dernière line d'en-tête a été rendue,
-        /// et read la chaussette directement les laisserait là — un test qui
-        /// se bloquerait sans que le serveur y soit pour rien.
+        /// Through the line reader (`get_mut`) and not directly on the
+        /// socket: the bytes following a header are already in the
+        /// `BufReader`'s buffer by the time the last header line has been
+        /// returned, and reading the socket directly would leave them there —
+        /// a test that would hang through no fault of the server's.
         async fn bytes(&mut self, n: usize) -> Vec<u8> {
             let mut buffer = vec![0u8; n];
             self.lines.get_mut().read_exact(&mut buffer).await.unwrap();
             buffer
         }
 
-        /// Rejoue la séquence d'un vrai client : une requête par chunk,
-        /// l'offset croissant, jusqu'à détenir `size` bytes.
+        /// Replays the sequence of a real client: one request per chunk, the
+        /// offset growing, until it holds `size` bytes.
         ///
-        /// C'est bien la boucle de M.A.L.P. et de libmpdclient : la première
-        /// réponse apprend la size totale, chaque suivante est demandée à
-        /// l'offset de ce qu'on a déjà. La sortie de boucle ne dépend d'aucune
-        /// horloge ni d'aucun compte d'itérations — seulement de `size`.
-        async fn recuperer(&mut self, commande: &str, uri: &str) -> Recuperee {
-            let mut recuperee = Recuperee { image: Vec::new(), tailles: Vec::new(), mime: None };
+        /// This is exactly the loop M.A.L.P. and libmpdclient use: the first
+        /// response learns the total size, each following one is requested
+        /// at the offset of what is already held. The loop's exit does not
+        /// depend on any clock or iteration count — only on `size`.
+        async fn fetch(&mut self, command: &str, uri: &str) -> Fetched {
+            let mut fetched = Fetched { image: Vec::new(), sizes: Vec::new(), mime: None };
             loop {
-                self.send_frame(&format!("{commande} {uri} {}", recuperee.image.len())).await;
-                let size = self.entier("size").await;
-                let mut header = self.recevoir().await;
-                // `type:` n'est là que pour `readpicture` : c'est une line de
-                // plus, avant `binary:`, exactement comme MPD la place.
+                self.send_frame(&format!("{command} {uri} {}", fetched.image.len())).await;
+                let size = self.integer("size").await;
+                let mut header = self.receive().await;
+                // `type:` is only there for `readpicture`: it is one more
+                // line, before `binary:`, exactly where MPD places it.
                 if let Some(mime) = header.strip_prefix("type: ") {
-                    recuperee.mime = Some(mime.to_string());
-                    header = self.recevoir().await;
+                    fetched.mime = Some(mime.to_string());
+                    header = self.receive().await;
                 }
                 let n: usize = header
                     .strip_prefix("binary: ")
-                    .unwrap_or_else(|| panic!("attendu binary:, obtenu {header}"))
+                    .unwrap_or_else(|| panic!("expected binary:, got {header}"))
                     .parse()
                     .unwrap();
-                // Une chunk clear ne fait pas avancer la boucle : la refuser
-                // ici transforme un serveur qui piétine en échec franc, plutôt
-                // qu'en test qui tourne à clear.
-                assert!(n > 0, "une chunk clear ne terminate jamais la recuperation");
-                recuperee.image.extend_from_slice(&self.bytes(n).await);
-                recuperee.tailles.push(n);
-                // Le `\n` que MPD écrit après les bytes bruts : lu comme une
-                // line clear. Son absence ferait read `<dernier octet>OK`.
-                assert_eq!(self.recevoir().await, "", "un saut de line suit les bytes bruts");
-                assert_eq!(self.recevoir().await, "OK", "chaque chunk est une reponse complete");
-                if recuperee.image.len() >= size {
-                    return recuperee;
+                // An empty chunk does not advance the loop: rejecting it here
+                // turns a stalling server into an outright failure, rather
+                // than a test that spins forever.
+                assert!(n > 0, "an empty chunk never ends the fetch");
+                fetched.image.extend_from_slice(&self.bytes(n).await);
+                fetched.sizes.push(n);
+                // The `\n` MPD writes after the raw bytes: read as an empty
+                // line. Its absence would make `<last byte>OK` read as one.
+                assert_eq!(self.receive().await, "", "a newline follows the raw bytes");
+                assert_eq!(self.receive().await, "OK", "each chunk is a complete response");
+                if fetched.image.len() >= size {
+                    return fetched;
                 }
             }
         }
 
-        /// La valeur entière d'une line `clé: nombre` attendue.
-        async fn entier(&mut self, key: &str) -> usize {
-            let l = self.recevoir().await;
+        /// The integer value of an expected `key: number` line.
+        async fn integer(&mut self, key: &str) -> usize {
+            let l = self.receive().await;
             l.strip_prefix(&format!("{key}: "))
-                .unwrap_or_else(|| panic!("attendu {key}:, obtenu {l}"))
+                .unwrap_or_else(|| panic!("expected {key}:, got {l}"))
                 .parse()
                 .unwrap()
         }
 
-        /// Lit jusqu'au terminateur inclus : `OK` ou un `ACK`. `list_OK` n'en
-        /// est pas un — c'est ce qui permet de compter les deux.
-        async fn reponse(&mut self) -> Vec<String> {
-            let mut recues = Vec::new();
+        /// Reads up to and including the terminator: `OK` or an `ACK`.
+        /// `list_OK` is not one — that is what makes counting the two
+        /// possible.
+        async fn response(&mut self) -> Vec<String> {
+            let mut received = Vec::new();
             loop {
-                let l = self.recevoir().await;
-                let fin = l == "OK" || l.starts_with("ACK ");
-                recues.push(l);
-                if fin {
-                    return recues;
+                let l = self.receive().await;
+                let done = l == "OK" || l.starts_with("ACK ");
+                received.push(l);
+                if done {
+                    return received;
                 }
             }
         }
     }
 
-    /// Ce qu'une récupération complète de cover a produit : l'image
-    /// réassemblée, la size de chaque chunk reçue dans l'order, et le MIME
-    /// si le serveur l'a annoncé.
-    struct Recuperee {
+    /// What a complete cover fetch produced: the reassembled image, the size
+    /// of each chunk received in order, and the MIME type if the server
+    /// announced one.
+    struct Fetched {
         image: Vec<u8>,
-        tailles: Vec<usize>,
+        sizes: Vec<usize>,
         mime: Option<String>,
     }
 
-    struct Serveur {
-        adresse: std::net::SocketAddr,
+    struct Server {
+        address: std::net::SocketAddr,
         state: Arc<SharedState>,
-        /// Tenu vivant exprès : lâcher l'émetteur ferait sortir `listen` de
-        /// son `select!` (« la moitié admin a disparu ») et les tests
-        /// n'éprouveraient plus le path de service ordinaire, seulement celui
-        /// de l'extinction.
+        /// Kept alive on purpose: dropping the sender would make `listen`
+        /// exit its `select!` ("the admin half is gone") and the tests would
+        /// no longer exercise the ordinary serving path, only the shutdown
+        /// one.
         _config_tx: tokio::sync::watch::Sender<crate::config::Config>,
     }
 
-    /// Lie l'écouteur **dans le test** et le donne au serveur, comme
-    /// `register.rs` le fait pour ses sockets Unix : l'écouteur existe donc
-    /// avant que le client ne se connecte, et aucune boucle de reprise ni
-    /// aucun délai n'est nécessaire pour que le `connect` aboutisse.
-    async fn serveur() -> (Serveur, mpsc::Receiver<InputMessage>) {
+    /// Binds the listener **in the test** and hands it to the server, as
+    /// `register.rs` does for its Unix sockets: the listener therefore
+    /// exists before the client connects, and no retry loop or delay is
+    /// needed for `connect` to succeed.
+    async fn server() -> (Server, mpsc::Receiver<InputMessage>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let adresse = listener.local_addr().unwrap();
+        let address = listener.local_addr().unwrap();
         let state = Arc::new(SharedState::default());
         let (tx, rx) = mpsc::channel(64);
         let (config_tx, config_rx) =
             tokio::sync::watch::channel(crate::config::Config::default());
         tokio::spawn(listen(listener, config_rx, state.clone(), tx));
-        (Serveur { adresse, state, _config_tx: config_tx }, rx)
+        (Server { address, state, _config_tx: config_tx }, rx)
     }
 
-    impl Serveur {
+    impl Server {
         async fn client(&self) -> Client {
-            Client::connecter(self.adresse).await
+            Client::connect(self.address).await
         }
 
-        /// Un client dont la bannière est déjà avalée.
-        async fn client_pret(&self) -> Client {
+        /// A client whose banner has already been swallowed.
+        async fn client_ready(&self) -> Client {
             let mut c = self.client().await;
-            let banniere = c.recevoir().await;
-            assert!(banniere.starts_with("OK MPD "), "banniere inattendue: {banniere}");
+            let banner = c.receive().await;
+            assert!(banner.starts_with("OK MPD "), "unexpected banner: {banner}");
             c
         }
     }
 
-    /// Une trame qui ne bouge que `mixer`.
-    fn trame_mixer(volume: u8) -> PlayerState {
+    /// A frame that moves only `mixer`.
+    fn mixer_frame(volume: u8) -> PlayerState {
         PlayerState { volume, ..Default::default() }
     }
 
-    /// Une trame qui bouge `player` **et** `mixer` : la position déplace l'un,
-    /// le volume l'autre.
-    fn trame_player_et_mixer(v: u8) -> PlayerState {
+    /// A frame that moves `player` **and** `mixer`: the position moves one,
+    /// the volume the other.
+    fn player_and_mixer_frame(v: u8) -> PlayerState {
         PlayerState { volume: v, position_s: Some(u32::from(v)), ..Default::default() }
     }
 
-    /// Lit la réponse d'un dormeur en poussant des trames jusqu'à ce qu'elle
-    /// arrive.
+    /// Reads a sleeper's response, pushing frames until it arrives.
     ///
-    /// **Sans horloge et sans compte d'itérations**, les deux formes de marge
-    /// que ce dépôt a apprises à ne plus écrire : la boucle s'arrête quand le
-    /// dormeur répond, et une implémentation qui ne réveille jamais fait
-    /// *pendre* le test — un blocage franc, pas un passage douteux.
+    /// **Without a clock and without an iteration count**, the two forms of
+    /// margin this repo has learned not to write any more: the loop stops
+    /// when the sleeper answers, and an implementation that never wakes it
+    /// makes the test *hang* — an outright block, not a doubtful pass.
     ///
-    /// **Deux trames alternées, et non une répétée** : chaque poussée doit être
-    /// un changement réel, sinon la déduplication d'`apply_state` l'avale et
-    /// la boucle tourne à clear.
+    /// **Two alternating frames, and not one repeated**: each push must be a
+    /// real change, otherwise `apply_state`'s deduplication swallows it and
+    /// the loop spins forever.
     ///
-    /// La boucle, elle, n'arbitre plus aucune course. Elle en arbitrait une :
-    /// une trame appliquée avant que la session n'ait lu sa line `idle` était
-    /// comprise dans les compteurs qu'elle mémorisait, donc invisible pour
-    /// elle. **C'était un défaut de la session et non un contrat d'`wait`**
-    /// — la référence d'un `idle` est désormais celle que la connection porte
-    /// depuis sa bannière (voir `serve`), donc une seule trame suffirait ici.
-    /// La boucle est gardée parce qu'elle ne dépend d'aucune horloge et qu'elle
-    /// remainder juste dans les deux cas ; ce qu'il ne faut plus faire, c'est
-    /// justifier par elle une course qui a été corrigée.
-    async fn reponse_sous_trames(
+    /// The loop itself no longer arbitrates any race. It used to arbitrate
+    /// one: a frame applied before the session had read its `idle` line was
+    /// included in the counters it memorized, and thus invisible to it.
+    /// **That was a defect of the session and not a contract of `wait`** —
+    /// the reference of an `idle` is now the one the connection carries
+    /// since its banner (see `serve`), so a single frame would suffice here.
+    /// The loop is kept because it depends on no clock and stays correct in
+    /// both cases; what must no longer be done is justifying it by a race
+    /// that has been fixed.
+    async fn sleeper_response(
         client: &mut Client,
         state: &SharedState,
-        trames: [PlayerState; 2],
+        frames: [PlayerState; 2],
     ) -> Vec<String> {
         let mut i = 0usize;
-        let premiere = loop {
+        let first = loop {
             tokio::select! {
-                // `biased` : dès qu'une line est là, on la prend plutôt que
-                // de push une trame de plus.
+                // `biased`: as soon as a line is there, take it rather than
+                // pushing one more frame.
                 biased;
-                lue = client.lines.next_line() => {
-                    break lue.unwrap().expect("le serveur a ferme la connection");
+                read = client.lines.next_line() => {
+                    break read.unwrap().expect("the server closed the connection");
                 }
-                () = state.apply_state(trames[i % 2].clone()) => {
+                () = state.apply_state(frames[i % 2].clone()) => {
                     i += 1;
                     tokio::task::yield_now().await;
                 }
             }
         };
-        let mut recues = vec![premiere];
-        while recues.last().map(String::as_str) != Some("OK") {
-            recues.push(client.recevoir().await);
+        let mut received = vec![first];
+        while received.last().map(String::as_str) != Some("OK") {
+            received.push(client.receive().await);
         }
-        recues
+        received
     }
 
     #[tokio::test]
-    async fn la_banniere_arrive_sans_quon_demande_rien() {
-        let (s, _rx) = serveur().await;
+    async fn the_banner_arrives_without_anything_being_asked() {
+        let (s, _rx) = server().await;
         let mut c = s.client().await;
-        let banniere = c.recevoir().await;
-        // Comparée à la chaîne littérale et non à `ANNOUNCED_VERSION` : contre
-        // la constante, ce test ne vérifierait que la mise en forme, alors que
-        // c'est le **numéro** qui décide des capacités qu'un client s'autorise.
-        // Le changer doit être un geste conscient, pas un effet de bord.
-        assert_eq!(banniere, "OK MPD 0.23.5");
+        let banner = c.receive().await;
+        // Compared against the literal string and not against
+        // `ANNOUNCED_VERSION`: against the constant, this test would only
+        // verify the formatting, whereas it is the **number** that decides
+        // the capabilities a client allows itself. Changing it must be a
+        // conscious gesture, not a side effect.
+        assert_eq!(banner, "OK MPD 0.23.5");
     }
 
     #[tokio::test]
-    async fn une_commande_rend_ses_lignes_puis_ok() {
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn a_command_returns_its_lines_then_ok() {
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         c.send_frame("status").await;
-        let recues = c.reponse().await;
-        assert_eq!(*recues.last().unwrap(), "OK");
-        assert!(recues.iter().any(|l| l.starts_with("volume: ")), "{recues:?}");
-        assert!(recues.iter().any(|l| l.starts_with("state: ")), "{recues:?}");
+        let received = c.response().await;
+        assert_eq!(*received.last().unwrap(), "OK");
+        assert!(received.iter().any(|l| l.starts_with("volume: ")), "{received:?}");
+        assert!(received.iter().any(|l| l.starts_with("state: ")), "{received:?}");
     }
 
     #[tokio::test]
-    async fn une_liste_de_commandes_ne_rend_quun_seul_ok() {
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn a_command_list_returns_only_one_ok() {
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         c.send_frame("command_list_begin").await;
         c.send_frame("status").await;
         c.send_frame("status").await;
         c.send_frame("command_list_end").await;
-        let recues = c.reponse().await;
-        let ok = recues.iter().filter(|l| *l == "OK").count();
-        assert_eq!(ok, 1, "un seul OK clot la liste: {recues:?}");
-        // Et les deux commands ont bien été exécutées : sans ça, « un seul
-        // OK » serait aussi vrai d'une liste qui n'exécute rien.
-        assert_eq!(recues.iter().filter(|l| l.starts_with("volume: ")).count(), 2, "{recues:?}");
+        let received = c.response().await;
+        let ok = received.iter().filter(|l| *l == "OK").count();
+        assert_eq!(ok, 1, "a single OK closes the list: {received:?}");
+        // And both commands were indeed executed: without that, "a single
+        // OK" would be just as true of a list that executes nothing.
+        assert_eq!(received.iter().filter(|l| l.starts_with("volume: ")).count(), 2, "{received:?}");
     }
 
     #[tokio::test]
-    async fn command_list_ok_begin_insere_un_list_ok_par_commande() {
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn command_list_ok_begin_inserts_a_list_ok_per_command() {
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         c.send_frame("command_list_ok_begin").await;
         c.send_frame("status").await;
         c.send_frame("ping").await;
         c.send_frame("command_list_end").await;
-        let recues = c.reponse().await;
-        assert_eq!(recues.iter().filter(|l| *l == "list_OK").count(), 2, "{recues:?}");
-        assert_eq!(*recues.last().unwrap(), "OK");
-        // Le `list_OK` d'une commande sans lines (`ping`) est le dernier
-        // avant le `OK` : c'est ce qui permet à un client de recoller chaque
-        // réponse à sa commande, y compris les vides.
-        assert_eq!(recues[recues.len() - 2], "list_OK", "{recues:?}");
+        let received = c.response().await;
+        assert_eq!(received.iter().filter(|l| *l == "list_OK").count(), 2, "{received:?}");
+        assert_eq!(*received.last().unwrap(), "OK");
+        // The `list_OK` of a command without lines (`ping`) is the last one
+        // before the `OK`: this is what lets a client match each response to
+        // its command, empty ones included.
+        assert_eq!(received[received.len() - 2], "list_OK", "{received:?}");
     }
 
     #[tokio::test]
-    async fn une_erreur_dans_une_liste_interrompt_la_suite() {
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn an_error_in_a_list_interrupts_the_rest() {
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         c.send_frame("command_list_begin").await;
         c.send_frame("status").await;
         c.send_frame("nawak").await;
         c.send_frame("status").await;
         c.send_frame("command_list_end").await;
-        let recues = c.reponse().await;
-        assert_eq!(*recues.last().unwrap(), "ACK [5@1] {nawak} unsupported", "{recues:?}");
-        assert!(!recues.iter().any(|l| l == "OK"), "un ACK remplace le OK: {recues:?}");
-        // **Attention à ce qui prouve quoi ici**, la relecture s'est fait
-        // prendre et le commentaire précédent disait faux. `reponse()`
-        // s'arrête au **premier** terminateur, et un `ACK` en est un : compter
-        // les `volume:` de cette seule réponse ne prouve donc rien. Une session
-        // qui continuerait la liste après l'erreur écrirait tout d'un bloc, et
-        // `reponse()` rendrait exactement les mêmes lines — jusqu'à l'`ACK`,
-        // en laissant le `status` suivant **derrière** dans le stream.
+        let received = c.response().await;
+        assert_eq!(*received.last().unwrap(), "ACK [5@1] {nawak} unsupported", "{received:?}");
+        assert!(!received.iter().any(|l| l == "OK"), "an ACK replaces the OK: {received:?}");
+        // **Watch what actually proves what here**: the review got caught
+        // out and the previous comment was wrong. `response()` stops at the
+        // **first** terminator, and an `ACK` is one: counting the `volume:`
+        // lines of this single response therefore proves nothing. A session
+        // that kept executing the list after the error would write
+        // everything as one block, and `response()` would return exactly the
+        // same lines — up to the `ACK` — leaving the following `status`
+        // **behind** in the stream.
         //
-        // Ce qui tue ce mutant, c'est la suite : la commande d'après doit
-        // recevoir sa propre réponse et rien d'autre. Un `status` fuité
-        // ressort ici, et le compte se fait sur les **deux** réponses. Ne pas
-        // « raccourcir » ce test en gardant le compte et en jetant le `ping` :
-        // c'est le `ping` qui travaille.
+        // What kills that mutant is what comes next: the following command
+        // must receive its own response and nothing else. A leaked `status`
+        // shows up here, and the count is taken over **both** responses. Do
+        // not "shorten" this test by keeping the count and dropping the
+        // `ping`: it is the `ping` that does the work.
         c.send_frame("ping").await;
-        let apres = c.reponse().await;
-        assert_eq!(apres, vec!["OK".to_string()], "reponse fuitee: {apres:?}");
-        let volumes = recues.iter().chain(apres.iter()).filter(|l| l.starts_with("volume: ")).count();
-        assert_eq!(volumes, 1, "le troisieme status ne doit pas avoir tourne: {recues:?} {apres:?}");
+        let after = c.response().await;
+        assert_eq!(after, vec!["OK".to_string()], "leaked response: {after:?}");
+        let volumes = received.iter().chain(after.iter()).filter(|l| l.starts_with("volume: ")).count();
+        assert_eq!(volumes, 1, "the third status must not have run: {received:?} {after:?}");
     }
 
     #[tokio::test]
-    async fn idle_ne_repond_quau_changement() {
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn idle_only_responds_on_change() {
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         c.send_frame("idle").await;
-        let recues = reponse_sous_trames(&mut c, &s.state, [trame_mixer(17), trame_mixer(18)]).await;
-        // Le réveil nomme le sous-système et lui seul, puis clôt par `OK`.
-        assert_eq!(recues, vec!["changed: mixer".to_string(), "OK".to_string()]);
+        let received = sleeper_response(&mut c, &s.state, [mixer_frame(17), mixer_frame(18)]).await;
+        // The wakeup names the subsystem and only it, then closes with `OK`.
+        assert_eq!(received, vec!["changed: mixer".to_string(), "OK".to_string()]);
     }
 
     #[tokio::test]
-    async fn idle_filtre_les_sujets_demandes() {
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn idle_filters_the_requested_subsystems() {
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         c.send_frame("idle player").await;
-        // Chaque trame bouge `player` **et** `mixer` : le réveil est donc
-        // certain (aucune course à arbitrer), et le filtre se mesure à ce que
-        // la réponse *ne* nomme *pas*. Une session qui aurait ignoré la liste
-        // demandée écrirait ici deux `changed:`.
-        let recues = reponse_sous_trames(
+        // Each frame moves `player` **and** `mixer`: the wakeup is therefore
+        // certain (no race to arbitrate), and the filter is measured by what
+        // the response does *not* name. A session that ignored the requested
+        // list would write two `changed:` lines here.
+        let received = sleeper_response(
             &mut c,
             &s.state,
-            [trame_player_et_mixer(17), trame_player_et_mixer(18)],
+            [player_and_mixer_frame(17), player_and_mixer_frame(18)],
         )
         .await;
-        assert_eq!(recues, vec!["changed: player".to_string(), "OK".to_string()]);
+        assert_eq!(received, vec!["changed: player".to_string(), "OK".to_string()]);
     }
 
     #[tokio::test]
-    async fn noidle_rend_la_main_immediatement() {
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn noidle_returns_control_immediately() {
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         c.send_frame("idle").await;
         c.send_frame("noidle").await;
         c.send_frame("status").await;
-        // Un `OK` sec, et surtout **rien avant lui** : c'est la preuve sans
-        // horloge qu'`idle` ne répond pas de lui-même. S'il avait répondu sans
-        // qu'aucune trame ne bouge, la première line lue serait un
+        // A bare `OK`, and above all **nothing before it**: this is the
+        // clock-free proof that `idle` does not answer on its own. Had it
+        // answered without any frame moving, the first line read would be a
         // `changed:`.
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
-        // Et ce `status` est là pour compter les réponses sans horloge : la
-        // deuxième doit être **la sienne**. Une session qui aurait rendition un
-        // `OK` de complaisance à l'`idle` (au lieu d'wait) aurait glissé
-        // une réponse de plus dans le stream, et on lirait ici le `OK` du
-        // `noidle` au lieu des lines du `status`. Sans cette moitié, le test
-        // passait aussi bien avec un `idle` qui répond tout de suite —
-        // vérifié, et c'est ce qui l'a fait réécrire.
-        let apres = c.reponse().await;
-        assert!(apres.iter().any(|l| l.starts_with("volume: ")), "{apres:?}");
-        // Et rien n'a bougé dans l'état : `noidle` annule une attente, il ne
-        // publie pas de changement.
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
+        // And this `status` is there to count responses without a clock: the
+        // second one must be **its own**. A session that returned a
+        // complacent `OK` to the `idle` (instead of waiting) would have
+        // slipped one more response into the stream, and we would read here
+        // the `OK` of the `noidle` instead of the `status`'s lines. Without
+        // this half, the test passed just as well with an `idle` that
+        // answers right away — checked, and that is what got it rewritten.
+        let after = c.response().await;
+        assert!(after.iter().any(|l| l.starts_with("volume: ")), "{after:?}");
+        // And nothing moved in the state: `noidle` cancels a wait, it does
+        // not publish a change.
         assert_eq!(s.state.read().await.versions, [0, 0, 0, 0]);
     }
 
     #[tokio::test]
-    async fn une_commande_pendant_une_attente_annule_lattente_puis_est_executee() {
-        // **Un test de comptabilité, pas de contenu.** Le client écrit deux
-        // lines (`idle`, `status`) et doit recevoir **deux** terminateurs. Ce
-        // code n'en écrivait qu'un — l'`ACK` refusant le `status` — et l'`idle`
-        // n'en recevait aucun : le client repartait décalé de un, de façon
-        // permanente, chaque réponse suivante lue comme celle de sa requête
-        // précédente. Silencieux et définitif, là où le choix de MPD (fermer)
-        // est bruyant et auto-réparateur.
+    async fn a_command_during_a_wait_cancels_the_wait_then_is_executed() {
+        // **An accounting test, not a content one.** The client writes two
+        // lines (`idle`, `status`) and must receive **two** terminators. This
+        // code used to write only one — the `ACK` rejecting the `status` —
+        // and the `idle` received none: the client came out permanently
+        // shifted by one, every following response read as the one for its
+        // previous request. Silent and permanent, where MPD's choice
+        // (closing) is loud and self-repairing.
         //
-        // Le `noidle` implicite est ce qui répare : un `OK` nu clôt l'`idle`,
-        // puis la commande est exécutée comme n'importe où ailleurs.
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+        // The implicit `noidle` is what repairs it: a bare `OK` closes the
+        // `idle`, then the command is executed like anywhere else.
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         c.send_frame("idle").await;
         c.send_frame("status").await;
 
-        // Premier terminateur : celui de l'`idle` annulé. `OK` nu, aucun
-        // `changed:` — rien n'a bougé, et de toute façon `noidle` n'announcement
-        // rien.
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
-        // Second terminateur : la réponse du `status`, avec ses lines.
-        let deuxieme = c.reponse().await;
-        assert!(deuxieme.iter().any(|l| l.starts_with("volume: ")), "{deuxieme:?}");
-        assert_eq!(*deuxieme.last().unwrap(), "OK");
-        // Et la troisième requête reçoit **sa** réponse : c'est ce qui prouve
-        // l'absence de décalage. Un `ping` répond `OK` sec, donc une réponse de
-        // `status` qui traînerait dans le stream ressortirait ici.
+        // First terminator: that of the cancelled `idle`. Bare `OK`, no
+        // `changed:` — nothing moved, and `noidle` announces nothing anyway.
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
+        // Second terminator: the `status` response, with its lines.
+        let second = c.response().await;
+        assert!(second.iter().any(|l| l.starts_with("volume: ")), "{second:?}");
+        assert_eq!(*second.last().unwrap(), "OK");
+        // And the third request receives **its own** response: this is what
+        // proves there is no shift. A `ping` answers with a bare `OK`, so a
+        // `status` response lingering in the stream would show up here.
         c.send_frame("ping").await;
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
 
         // ------------------------------------------------------------------
-        // **Et le cas voisin qui doit rester à UN seul terminateur.** Gardé
-        // dans le même test exprès : séparés, un remaniement futur croirait
-        // l'un redondant. `noidle` n'est pas une requête mais l'annulation de
-        // celle en cours, donc `idle` + `noidle` = un `OK`, comme chez MPD.
-        // Si la correction ci-dessus le faisait passer à deux, elle aurait
-        // cassé le cas correct.
+        // **And the neighboring case that must stay at ONE terminator.**
+        // Kept in the same test on purpose: separated, a future rework would
+        // think one of them redundant. `noidle` is not a request but the
+        // cancellation of the one in progress, so `idle` + `noidle` = one
+        // `OK`, like MPD. If the fix above made it pass to two, it would
+        // have broken the correct case.
         // ------------------------------------------------------------------
         c.send_frame("idle").await;
         c.send_frame("noidle").await;
         c.send_frame("status").await;
-        assert_eq!(c.reponse().await, vec!["OK".to_string()], "un seul OK pour idle + noidle");
-        let apres = c.reponse().await;
+        assert_eq!(c.response().await, vec!["OK".to_string()], "a single OK for idle + noidle");
+        let after = c.response().await;
         assert!(
-            apres.iter().any(|l| l.starts_with("volume: ")),
-            "un terminateur de trop apres noidle: {apres:?}"
+            after.iter().any(|l| l.starts_with("volume: ")),
+            "one terminator too many after noidle: {after:?}"
         );
     }
 
     #[tokio::test]
-    async fn une_ligne_illisible_pendant_une_attente_compte_aussi_deux_terminateurs() {
-        // La même comptabilité sur l'autre entrée de cette branche : une line
-        // mal citée n'est pas `noidle` (elle ne se découpe pas), donc elle est
-        // un `noidle` implicite suivi d'une line qui recevra son `ACK` par le
-        // path ordinaire. Deux lines écrites, deux terminateurs.
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn an_unreadable_line_during_a_wait_also_counts_two_terminators() {
+        // The same accounting on the other entry of this branch: a badly
+        // quoted line is not `noidle` (it does not split), so it is an
+        // implicit `noidle` followed by a line that will receive its `ACK`
+        // through the ordinary path. Two lines written, two terminators.
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         c.send_frame("idle").await;
         c.send_frame(r#"load "France"#).await;
 
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
-        assert_eq!(c.reponse().await, vec!["ACK [2@0] {load} invalid argument".to_string()]);
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
+        assert_eq!(c.response().await, vec!["ACK [2@0] {load} invalid argument".to_string()]);
         c.send_frame("ping").await;
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
     }
 
     #[tokio::test]
-    async fn une_liste_de_commandes_ouverte_pendant_une_attente_est_traitee_comme_une_liste() {
-        // La line pushback repasse par l'aiguillage **complet** de `serve`, et
-        // non par une réinterprétation locale : un `command_list_begin` reçu
-        // pendant une attente ouvre donc une vraie liste, dont le `OK` unique
-        // arrive après celui de l'`idle` annulé. C'est ce qui garantit qu'aucun
-        // cas n'a besoin d'être dupliqué dans `wait_idle`.
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn a_command_list_opened_during_a_wait_is_treated_as_a_list() {
+        // The pushed-back line goes back through `serve`'s **full** dispatch,
+        // and not through a local reinterpretation: a `command_list_begin`
+        // received during a wait therefore opens a real list, whose single
+        // `OK` arrives after the cancelled `idle`'s. This is what guarantees
+        // no case needs to be duplicated in `wait_idle`.
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         c.send_frame("idle").await;
         c.send_frame("command_list_begin").await;
         c.send_frame("status").await;
         c.send_frame("status").await;
         c.send_frame("command_list_end").await;
 
-        assert_eq!(c.reponse().await, vec!["OK".to_string()], "l'idle annule a son terminateur");
-        let liste = c.reponse().await;
-        assert_eq!(liste.iter().filter(|l| *l == "OK").count(), 1, "{liste:?}");
-        assert_eq!(liste.iter().filter(|l| l.starts_with("volume: ")).count(), 2, "{liste:?}");
+        assert_eq!(c.response().await, vec!["OK".to_string()], "the cancelled idle gets its terminator");
+        let list = c.response().await;
+        assert_eq!(list.iter().filter(|l| *l == "OK").count(), 1, "{list:?}");
+        assert_eq!(list.iter().filter(|l| l.starts_with("volume: ")).count(), 2, "{list:?}");
     }
 
     #[tokio::test]
-    async fn un_changement_survenu_entre_deux_commandes_est_rapporte_par_lidle_suivant() {
-        // **LE test de ce correctif.** La session mémorisait les compteurs dans
-        // l'`Snapshot` de la commande `idle` elle-même, donc tout ce qui avait
-        // bougé entre la réponse précédente du client et sa line `idle` était
-        // avalé — c'est-à-dire pendant la seule fenêtre où un client MPD
-        // n'écoute pas. Pour `stored_playlist`, rien ne rejoue l'événement avant
-        // le prochain changement de sources_catalog : `listplaylists` remainder périmé,
-        // potentiellement pour toujours. C'est exactement le premier essai
-        // prévu sur l'appareil (« désactiver une source, sa liste doit
-        // rétrécir »), qui pouvait donc échouer en silence.
+    async fn a_change_between_two_commands_is_reported_by_the_next_idle() {
+        // **THE test for this fix.** The session used to memorize the
+        // counters in the `Snapshot` of the `idle` command itself, so
+        // anything that had moved between the client's previous response and
+        // its `idle` line was swallowed — that is, during the only window
+        // where an MPD client is not listening. For `stored_playlist`,
+        // nothing replays the event before the next sources_catalog change:
+        // `listplaylists` stays stale, potentially forever. This is exactly
+        // the first trial planned on the device ("disable a source, its list
+        // must shrink"), which could therefore fail silently.
         //
-        // Sans horloge, et **une seule trame poussée** : c'est ce qui rend la
-        // preuve concluante. Aucun changement ne suivra, donc une session qui
-        // relit ses compteurs à la line `idle` dort pour toujours et ce test
-        // **pend** — le mode d'échec voulu. Vérifié contre l'ancien code.
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
-        // Une commande, sa réponse lue jusqu'au terminateur : le client est
-        // désormais « entre deux commands », précisément comme un client qui
-        // vient de rafraîchir son écran.
+        // Without a clock, and **a single frame pushed**: this is what makes
+        // the proof conclusive. No change will follow, so a session that
+        // re-reads its counters at the `idle` line sleeps forever and this
+        // test **hangs** — the intended failure mode. Checked against the
+        // old code.
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
+        // One command, its response read up to the terminator: the client is
+        // now "between two commands", exactly like a client that has just
+        // refreshed its screen.
         c.send_frame("ping").await;
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
 
-        // Le changement arrive maintenant : personne n'attend.
+        // The change arrives now: nobody is waiting.
         s.state.apply_catalog(ritornello_proto::SourcesCatalog {
             sources: vec![ritornello_proto::SourceCatalog {
                 name: "radio".into(),
@@ -1614,291 +1610,294 @@ mod tests {
 
         c.send_frame("idle stored_playlist").await;
         assert_eq!(
-            c.reponse().await,
+            c.response().await,
             vec!["changed: stored_playlist".to_string(), "OK".to_string()]
         );
     }
 
     #[tokio::test]
-    async fn un_reveil_ne_consomme_que_les_sujets_quil_annonce() {
-        // La moitié fine du même dispositif. Le réveil avance la référence de la
-        // connection **sujet par sujet**, comme MPD n'efface que les drapeaux
-        // qu'il vient de rapporter : tout avancer d'un coup perdrait le
-        // changement d'un sujet que cet `idle`-là n'avait pas demandé, et le
-        // défaut réparé au-dessus se rouvrirait d'un cran plus loin.
+    async fn a_wakeup_only_consumes_the_subsystems_it_announces() {
+        // The fine half of the same mechanism. The wakeup advances the
+        // connection's reference **subsystem by subsystem**, just as MPD
+        // only clears the flags it just reported: advancing the whole array
+        // at once would lose the change of a subsystem this particular
+        // `idle` had not asked for, and the defect fixed above would reopen
+        // one notch further out.
         //
-        // Déterministe et sans horloge : la trame est appliquée **avant** les
-        // deux `idle`, donc chacun repart par la comparaison préalable, sans
-        // jamais dormir. Une implémentation qui remettrait tout le tableau à
-        // niveau au premier réveil ferait *pendre* le second `idle`.
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
-        // Une seule trame, qui bouge `player` **et** `mixer`.
-        s.state.apply_state(trame_player_et_mixer(17)).await;
+        // Deterministic and clock-free: the frame is applied **before** the
+        // two `idle`s, so each one starts from the prior comparison, never
+        // sleeping. An implementation that reset the whole table on the
+        // first wakeup would make the second `idle` *hang*.
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
+        // A single frame, which moves `player` **and** `mixer`.
+        s.state.apply_state(player_and_mixer_frame(17)).await;
 
         c.send_frame("idle player").await;
-        assert_eq!(c.reponse().await, vec!["changed: player".to_string(), "OK".to_string()]);
+        assert_eq!(c.response().await, vec!["changed: player".to_string(), "OK".to_string()]);
 
         c.send_frame("idle mixer").await;
-        assert_eq!(c.reponse().await, vec!["changed: mixer".to_string(), "OK".to_string()]);
+        assert_eq!(c.response().await, vec!["changed: mixer".to_string(), "OK".to_string()]);
     }
 
     #[tokio::test]
-    async fn un_reveil_annonce_consomme_bien_son_compteur() {
-        // Le pendant indispensable : la référence doit *avancer*. Sans cela un
-        // `idle` rapporterait éternellement le même changement, et un client
-        // qui boucle sur `idle` — c'est-à-dire tous — tournerait à pleine
-        // vitesse sur la commande faite pour l'en dispenser.
+    async fn an_announced_wakeup_does_consume_its_counter() {
+        // The indispensable counterpart: the reference must *advance*.
+        // Without that an `idle` would report the same change forever, and a
+        // client that loops on `idle` — that is, all of them — would spin at
+        // full speed on the very command meant to spare it that.
         //
-        // Prouvé sans horloge : le second `idle` doit **wait**, donc la
-        // commande d'après est un `noidle` dont le `OK` unique est suivi de la
-        // réponse du `status`. Si le second `idle` avait répondu tout seul, il
-        // y aurait un terminateur de plus et on lirait ici le `OK` du `noidle`
-        // au lieu des lines du `status` — le même compte que
-        // `noidle_rend_la_main_immediatement`.
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
-        s.state.apply_state(trame_mixer(17)).await;
+        // Proved without a clock: the second `idle` must **wait**, so the
+        // following command is a `noidle` whose single `OK` is followed by
+        // the `status` response. Had the second `idle` answered on its own,
+        // there would be one terminator too many and we would read here the
+        // `OK` of the `noidle` instead of the `status`'s lines — the same
+        // count as `noidle_returns_control_immediately`.
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
+        s.state.apply_state(mixer_frame(17)).await;
 
         c.send_frame("idle mixer").await;
-        assert_eq!(c.reponse().await, vec!["changed: mixer".to_string(), "OK".to_string()]);
+        assert_eq!(c.response().await, vec!["changed: mixer".to_string(), "OK".to_string()]);
 
         c.send_frame("idle mixer").await;
         c.send_frame("noidle").await;
         c.send_frame("status").await;
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
-        let apres = c.reponse().await;
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
+        let after = c.response().await;
         assert!(
-            apres.iter().any(|l| l.starts_with("volume: ")),
-            "le second idle a repondu tout seul: {apres:?}"
+            after.iter().any(|l| l.starts_with("volume: ")),
+            "the second idle answered on its own: {after:?}"
         );
     }
 
     #[tokio::test]
-    async fn deux_clients_ne_se_genent_pas() {
-        // LE test de l'architecture. Si `accepter` servait les connexions l'une
-        // après l'autre au lieu d'une tâche par client, B n'obtiendrait même
-        // pas sa bannière tant que A dort, et ce test se **bloquerait** — le
-        // mode d'échec franc que ce chantier préfère à une marge d'horloge.
-        let (s, _rx) = serveur().await;
-        let mut a = s.client_pret().await;
+    async fn two_clients_do_not_get_in_each_others_way() {
+        // THE architecture test. If `accept_loop` served connections one
+        // after another instead of one task per client, B would not even get
+        // its banner while A is asleep, and this test would **block** — the
+        // outright failure mode this codebase prefers over a clock margin.
+        let (s, _rx) = server().await;
+        let mut a = s.client_ready().await;
         a.send_frame("idle").await;
 
-        let mut b = s.client_pret().await;
+        let mut b = s.client_ready().await;
         b.send_frame("status").await;
-        let recues = b.reponse().await;
-        assert_eq!(*recues.last().unwrap(), "OK", "{recues:?}");
-        assert!(recues.iter().any(|l| l.starts_with("volume: ")), "{recues:?}");
+        let received = b.response().await;
+        assert_eq!(*received.last().unwrap(), "OK", "{received:?}");
+        assert!(received.iter().any(|l| l.starts_with("volume: ")), "{received:?}");
 
-        // Et A dormait vraiment : sans cette moitié, le test passerait aussi
-        // avec un A dont la session est morte — le réveil prouve qu'elle était
-        // vivante et en attente pendant que B se faisait serve.
-        let wakeup = reponse_sous_trames(&mut a, &s.state, [trame_mixer(17), trame_mixer(18)]).await;
+        // And A really was asleep: without this half, the test would pass
+        // just as well with an A whose session is dead — the wakeup proves
+        // it was alive and waiting while B was being served.
+        let wakeup = sleeper_response(&mut a, &s.state, [mixer_frame(17), mixer_frame(18)]).await;
         assert_eq!(wakeup, vec!["changed: mixer".to_string(), "OK".to_string()]);
     }
 
     #[tokio::test]
-    async fn une_commande_daction_arrive_sur_le_canal_dentree() {
-        let (s, mut rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn an_action_command_arrives_on_the_input_channel() {
+        let (s, mut rx) = server().await;
+        let mut c = s.client_ready().await;
         c.send_frame("next").await;
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
         let msg = rx.recv().await.unwrap();
         assert_eq!(msg.cmd, Command::Next);
-        assert!(!msg.held, "une commande reseau n'est jamais maintenue");
-        // Exactement une : une commande dupliquée ferait sauter deux stations.
-        assert!(rx.try_recv().is_err(), "une seule commande pour un seul next");
+        assert!(!msg.held, "a network command is never held");
+        // Exactly one: a duplicated command would skip two stations.
+        assert!(rx.try_recv().is_err(), "a single command for a single next");
     }
 
     #[tokio::test]
-    async fn une_lecture_seule_nemet_rien_sur_le_canal() {
-        let (s, mut rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn a_read_only_command_emits_nothing_on_the_channel() {
+        let (s, mut rx) = server().await;
+        let mut c = s.client_ready().await;
         c.send_frame("status").await;
-        c.reponse().await;
-        // La réponse est arrivée, donc la commande est entièrement traitée :
-        // si `status` avait émis quoi que ce soit, ce serait déjà dans le
-        // canal. Aucune horloge n'est nécessaire pour l'affirmer.
-        assert!(rx.try_recv().is_err(), "status ne demande rien a l'appareil");
+        c.response().await;
+        // The response has arrived, so the command is fully processed: had
+        // `status` emitted anything, it would already be on the channel. No
+        // clock is needed to assert that.
+        assert!(rx.try_recv().is_err(), "status asks nothing of the device");
     }
 
     #[tokio::test]
-    async fn un_canal_ferme_ferme_la_session_sans_acter_la_bascule() {
-        // L'order « push puis acter » se mesure ici et nulle part ailleurs :
-        // le canal refuse (récepteur lâché), donc rien n'a été émis, donc rien
-        // ne doit avoir été acté. Une session qui appellerait
-        // `acknowledge_optimistic` d'abord poserait le volume 30 dans l'état partagé
-        // et le ferait publier par `status` à tous les autres clients — une
-        // bascule que le cœur n'a jamais reçue.
-        let (s, rx) = serveur().await;
+    async fn a_closed_channel_closes_the_session_without_acknowledging_the_switch() {
+        // The "push then acknowledge" order is measured here and nowhere
+        // else: the channel refuses (receiver dropped), so nothing was
+        // emitted, so nothing must have been acknowledged. A session that
+        // called `acknowledge_optimistic` first would set volume 30 in the
+        // shared state and have `status` publish it to every other client —
+        // a switch the core never received.
+        let (s, rx) = server().await;
         drop(rx);
-        let mut c = s.client_pret().await;
+        let mut c = s.client_ready().await;
         c.send_frame("setvol 30").await;
         assert!(
             c.lines.next_line().await.unwrap().is_none(),
-            "une moitie input morte ferme la session"
+            "a dead input half closes the session"
         );
-        assert_eq!(s.state.read().await.state.volume, 0, "rien ne s'acte si le canal a refuse");
-        assert_eq!(s.state.read().await.versions, [0, 0, 0, 0], "et personne n'est reveille");
+        assert_eq!(s.state.read().await.state.volume, 0, "nothing is acknowledged if the channel refused");
+        assert_eq!(s.state.read().await.versions, [0, 0, 0, 0], "and nobody is woken");
     }
 
     #[tokio::test]
-    async fn idle_dans_une_liste_est_refuse_a_son_rang() {
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn idle_in_a_list_is_rejected_at_its_rank() {
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         c.send_frame("command_list_begin").await;
         c.send_frame("status").await;
         c.send_frame("idle").await;
-        let recues = c.reponse().await;
-        // L'index est le rang d'`idle` dans la liste (1), pas 0 : un client
-        // qui groupe dix commands doit savoir laquelle a été refusée.
-        assert_eq!(recues, vec!["ACK [5@1] {idle} not allowed in command list".to_string()]);
-        // Refusé **à l'accumulation** : le `status` qui précède n'a pas été
-        // exécuté, donc aucune line `volume:` n'accompagne l'ACK.
-        assert!(!recues.iter().any(|l| l.starts_with("volume: ")), "{recues:?}");
-        // Et l'état de liste a été rendition : la commande suivante répond seule.
+        let received = c.response().await;
+        // The index is `idle`'s rank in the list (1), not 0: a client
+        // that groups ten commands must know which one was rejected.
+        assert_eq!(received, vec!["ACK [5@1] {idle} not allowed in command list".to_string()]);
+        // Rejected **at accumulation**: the preceding `status` was not
+        // executed, so no `volume:` line accompanies the ACK.
+        assert!(!received.iter().any(|l| l.starts_with("volume: ")), "{received:?}");
+        // And the list state was cleared: the following command answers alone.
         c.send_frame("ping").await;
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
     }
 
     #[tokio::test]
-    async fn une_liste_sans_fin_est_bornee() {
-        // Une liste s'accumule en mémoire sans rien exécuter : sans cap, un
-        // client qui n'envoie jamais son `command_list_end` fait croître un
-        // `Vec` jusqu'à l'épuisement de la mémoire d'un Pi. Le refus arrive au
-        // rang du cap et rend l'état de liste.
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
-        let mut lot = String::from("command_list_begin\n");
+    async fn a_list_with_no_end_is_bounded() {
+        // A list accumulates in memory without executing anything: without a
+        // cap, a client that never sends its `command_list_end` grows a
+        // `Vec` until a Pi's memory is exhausted. The rejection arrives at
+        // the cap's rank and clears the list state.
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
+        let mut batch = String::from("command_list_begin\n");
         for _ in 0..=MAX_LIST_COMMANDS {
-            lot.push_str("ping\n");
+            batch.push_str("ping\n");
         }
-        c.writer.write_all(lot.as_bytes()).await.unwrap();
-        let recues = c.reponse().await;
+        c.writer.write_all(batch.as_bytes()).await.unwrap();
+        let received = c.response().await;
         assert_eq!(
-            recues,
+            received,
             vec![format!("ACK [5@{MAX_LIST_COMMANDS}] {{ping}} list too large")],
-            "{recues:?}"
+            "{received:?}"
         );
         c.send_frame("ping").await;
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
     }
 
     #[tokio::test]
-    async fn une_ligne_plus_longue_que_le_plafond_ferme_la_connexion() {
-        // La dernière surface non bornée du greffon, et elle est atteignable
-        // sans mot de passe depuis tout le réseau local : un client qui envoie
-        // des bytes sans jamais send_frame de `\n`. Sans cap, la session
-        // accumule jusqu'à ce que l'allocateur renonce — sur un Pi d'un
-        // gigaoctet partagé avec mpv, cela emporte la musique et pas seulement
-        // le greffon.
+    async fn a_line_longer_than_the_cap_closes_the_connection() {
+        // The plugin's last unbounded surface, and it is reachable without a
+        // password from the whole local network: a client that sends bytes
+        // without ever sending a `\n`. Without a cap, the session accumulates
+        // until the allocator gives up — on a Pi with one gigabyte shared
+        // with mpv, that takes the music down and not only the plugin.
         //
-        // Sans horloge : la bounded se mesure au fait que la connection **finit**.
-        // Sans cap, ce `next_line` attendrait le `\n` pour toujours et le
-        // test pendrait — vérifié, et c'est le mode d'échec voulu.
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
-        let bourrage = vec![b'a'; MAX_LINE + 1];
-        // L'écriture peut échouer si le serveur a déjà fermé : c'est une fin
-        // acceptable et non un échec du test, d'où le résultat ignoré.
-        let _ = c.writer.write_all(&bourrage).await;
+        // Without a clock: the bound is measured by the fact that the
+        // connection **ends**. Without a cap, this `next_line` would wait
+        // for the `\n` forever and the test would hang — checked, and that
+        // is the intended failure mode.
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
+        let filler = vec![b'a'; MAX_LINE + 1];
+        // The write can fail if the server has already closed: that is an
+        // acceptable end and not a test failure, hence the ignored result.
+        let _ = c.writer.write_all(&filler).await;
         assert!(
             c.lines.next_line().await.unwrap().is_none(),
-            "une line au-dela du cap ferme la connection, sans ACK"
+            "a line past the cap closes the connection, without an ACK"
         );
     }
 
     #[tokio::test]
-    async fn une_ligne_longue_mais_sous_le_plafond_est_traitee() {
-        // Le pendant du test précédent : un cap qui coupe une line
-        // légitime serait pire que pas de cap. La plus longue line
-        // plausible du protocol est un name entre guillemets, et elle doit
-        // arriver entière — ici elle mesure exactement le cap.
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn a_line_long_but_under_the_cap_is_processed() {
+        // The counterpart of the previous test: a cap that cuts a legitimate
+        // line would be worse than no cap. The longest plausible line of the
+        // protocol is a quoted name, and it must arrive whole — here it
+        // measures exactly the cap.
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         let name = "a".repeat(MAX_LINE - "load \"\"".len());
         c.send_frame(&format!("load \"{name}\"")).await;
-        // `load` refuse tout name faute de sources_catalog (Task 13), et c'est
-        // justement une réponse qui prouve que la line a été **découpée** :
-        // un `ACK 2` ou une fermeture diraient qu'elle a été tronquée.
-        assert_eq!(c.reponse().await, vec!["ACK [50@0] {load} no such playlist".to_string()]);
+        // `load` rejects every name for lack of a sources_catalog (Task 13),
+        // and that is precisely a response that proves the line was **split
+        // whole**: an `ACK 2` or a close would say it had been truncated.
+        assert_eq!(c.response().await, vec!["ACK [50@0] {load} no such playlist".to_string()]);
     }
 
     #[tokio::test]
-    async fn une_ligne_terminee_par_crlf_est_lue_sans_le_retour_chariot() {
-        // Les clients écrits sur Windows terminent par `\r\n`. Le player
-        // écrit à la main devait reprendre ce que `Lines` faisait pour nous, et
-        // rien ne le disait : sans le `\r` retiré, la commande serait `ping\r`,
-        // donc un `ACK 5` — une régression qu'aucun test existant ne voyait.
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn a_line_terminated_by_crlf_is_read_without_the_carriage_return() {
+        // Clients written on Windows terminate with `\r\n`. The hand-written
+        // reader had to reproduce what `Lines` did for us, and nothing said
+        // so: without the `\r` stripped, the command would be `ping\r`,
+        // hence an `ACK 5` — a regression no existing test caught.
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         c.writer.write_all(b"ping\r\n").await.unwrap();
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
     }
 
     #[tokio::test]
-    async fn une_derniere_ligne_sans_fin_de_ligne_est_traitee_avant_la_fermeture() {
-        // Un client qui envoie sa commande puis ferme sa moitié écriture doit
-        // la voir traitée : la fin de stream terminate la line. C'est ce que
-        // faisait `Lines`, et le path « buffer non clear à l'EOF » du nouveau
-        // player n'a pas d'autre témoin que ce test.
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn a_last_line_without_a_newline_is_processed_before_closing() {
+        // A client that sends its command then closes its write half must
+        // see it processed: end of stream terminates the line. That is what
+        // `Lines` did, and the "buffer non-empty at EOF" path of the new
+        // reader has no other witness than this test.
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         c.writer.write_all(b"ping").await.unwrap();
-        // `shutdown` et non un `drop` : la moitié playback du client doit rester
-        // ouverte pour read la réponse.
+        // `shutdown` and not a `drop`: the client's read half must stay open
+        // to read the response.
         c.writer.shutdown().await.unwrap();
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
     }
 
     #[tokio::test]
-    async fn une_ligne_au_dela_du_plafond_avec_une_fin_de_ligne_ferme_aussi() {
-        // Le cap est contrôlé dans les **deux** bras du player, et le test
-        // précédent n'en visite qu'un (le track lu ne contains pas de `\n`).
-        // Celui-ci visite l'autre : la line dépasse le cap *et* se terminate
-        // bien. Sans ce cas, retirer le contrôle du bras `Some` laissait passer
-        // toute la suite — un cap que personne n'exerce est un cap
-        // qu'on retire par distraction.
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
-        // Exactement `MAX_LINE` bytes sans `\n` : légal, le buffer les garde.
+    async fn a_line_past_the_cap_with_a_newline_also_closes() {
+        // The cap is checked in **both** arms of the reader, and the
+        // previous test only visits one (the read chunk contains no `\n`).
+        // This one visits the other: the line exceeds the cap *and*
+        // terminates properly. Without this case, removing the check from
+        // the `Some` arm let everything through — a cap nobody exercises is
+        // a cap that gets removed by inattention.
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
+        // Exactly `MAX_LINE` bytes without `\n`: legal, the buffer keeps them.
         c.writer.write_all(&vec![b'a'; MAX_LINE]).await.unwrap();
-        // Puis un octet de trop, cette fois suivi de sa fin de line : c'est le
-        // bras `Some` qui doit refuser, en comptant ce qui était déjà accumulé.
+        // Then one byte too many, this time followed by its line ending:
+        // this is the `Some` arm that must reject, counting what was already
+        // accumulated.
         let _ = c.writer.write_all(b"b\n").await;
         assert!(
             c.lines.next_line().await.unwrap().is_none(),
-            "une line au-dela du cap ferme la connection, meme terminee"
+            "a line past the cap closes the connection, even terminated"
         );
     }
 
     #[tokio::test]
-    async fn une_ligne_vide_est_refusee_sans_fermer() {
-        // Un `\n` nu. `handle` sait déjà le refuser (elle est totale par
-        // construction), mais aucun test de session ne le montrait bout en
-        // bout : la session pourrait l'avaler en silence, et un client qui
-        // attend une réponse par line resterait pendu.
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn an_empty_line_is_rejected_without_closing() {
+        // A bare `\n`. `handle` already knows to reject it (it is total by
+        // construction), but no session test showed it end to end: the
+        // session could swallow it silently, and a client waiting for one
+        // response per line would be left hanging.
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         c.writer.write_all(b"\n").await.unwrap();
-        assert_eq!(c.reponse().await, vec!["ACK [5@0] {} unsupported".to_string()]);
+        assert_eq!(c.response().await, vec!["ACK [5@0] {} unsupported".to_string()]);
         c.send_frame("ping").await;
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
     }
 
     #[tokio::test]
-    async fn une_reponse_trop_grosse_est_refusee_sans_fermer() {
-        // L'amplificateur : `MAX_LIST_COMMANDS` bounded les commands, pas ce
-        // qu'elles **produisent**. Une liste de `playlistinfo` sur une file de
-        // 255 entrées rend une quinzaine de kibioctets par commande, et la
-        // réponse entière était mise à plat dans une seule `String` avant le
-        // `write_all` — donc une allocation contiguë de plusieurs dizaines de
-        // mébioctets, demandée à un Pi dont la mémoire est fragmentée. 26 Kio
-        // d'entrée suffisaient.
+    async fn a_response_too_large_is_rejected_without_closing() {
+        // The amplifier: `MAX_LIST_COMMANDS` bounds the commands, not what
+        // they **produce**. A list of `playlistinfo` on a queue of 255
+        // entries returns some fifteen kibibytes per command, and the whole
+        // response used to be flattened into a single `String` before the
+        // `write_all` — hence a contiguous allocation of several tens of
+        // mebibytes, requested from a Pi whose memory is fragmented. 26 KiB
+        // of input was enough.
         //
-        // Le refus arrive **avant** toute écriture, donc il remplace la réponse
-        // au lieu de s'y add : un seul terminateur, et la connection vit.
-        let (s, _rx) = serveur().await;
+        // The rejection arrives **before** any write, so it replaces the
+        // response instead of being added to it: a single terminator, and
+        // the connection lives.
+        let (s, _rx) = server().await;
         s.state
             .apply_state(PlayerState {
                 source: "cd".to_string(),
@@ -1906,313 +1905,315 @@ mod tests {
                 ..Default::default()
             })
             .await;
-        let mut c = s.client_pret().await;
-        let mut lot = String::from("command_list_begin\n");
+        let mut c = s.client_ready().await;
+        let mut batch = String::from("command_list_begin\n");
         for _ in 0..100 {
-            lot.push_str("playlistinfo\n");
+            batch.push_str("playlistinfo\n");
         }
-        lot.push_str("command_list_end\n");
-        c.writer.write_all(lot.as_bytes()).await.unwrap();
-        let recues = c.reponse().await;
-        assert_eq!(recues.len(), 1, "le refus remplace la reponse composee: {recues:?}");
-        // L'index exact dépend de l'arithmétique des bytes (une quinzaine de
-        // kibioctets par commande, un mébioctet de cap) : ce qui compte est
-        // qu'il nomme la commande qui a débordé et son rang dans le lot.
-        let refus = &recues[0];
-        assert!(refus.starts_with("ACK [5@"), "{refus}");
-        assert!(refus.ends_with("] {playlistinfo} response too large"), "{refus}");
+        batch.push_str("command_list_end\n");
+        c.writer.write_all(batch.as_bytes()).await.unwrap();
+        let received = c.response().await;
+        assert_eq!(received.len(), 1, "the rejection replaces the composed response: {received:?}");
+        // The exact index depends on the byte arithmetic (some fifteen
+        // kibibytes per command, a one-mebibyte cap): what matters is that
+        // it names the command that overran and its rank in the batch.
+        let rejection = &received[0];
+        assert!(rejection.starts_with("ACK [5@"), "{rejection}");
+        assert!(rejection.ends_with("] {playlistinfo} response too large"), "{rejection}");
         c.send_frame("ping").await;
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
     }
 
     #[tokio::test]
-    async fn une_liste_lourde_en_octets_est_refusee_bien_avant_le_compte() {
-        // L'autre moitié du même trou : une line accumulée peut légitimement
-        // peser `MAX_LINE`, donc 2048 commands bornées **en nombre** pesaient
-        // 16 Mio par connection. Ici trente-deux lines de 8 Kio tombent
-        // *exactement* sur les 256 Kio — le cap refuse au-delà, pas à
-        // égalité — donc c'est la trente-troisième qui franchit, et la boucle en
-        // envoie une de plus pour cette raison. Trente-trois, c'est très loin
-        // des 2048 commands : la bounded qui refuse ici est bien celle en bytes
-        // et non celle en nombre.
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn a_list_heavy_in_bytes_is_rejected_well_before_the_count() {
+        // The other half of the same hole: an accumulated line can
+        // legitimately weigh `MAX_LINE`, so 2048 commands bounded **by
+        // count** weighed 16 MiB per connection. Here thirty-two lines of
+        // 8 KiB land *exactly* on the 256 KiB — the cap rejects past it, not
+        // at equality — so it is the thirty-third that crosses it, and the
+        // loop sends one more for that reason. Thirty-three is very far from
+        // the 2048 commands: the bound rejecting here is indeed the
+        // byte-based one and not the count-based one.
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         c.send_frame("command_list_begin").await;
-        let mut lot = String::new();
+        let mut batch = String::new();
         for _ in 0..MAX_LIST_BYTES.div_ceil(MAX_LINE) + 1 {
-            lot.push_str("ping ");
-            lot.push_str(&"a".repeat(MAX_LINE - 6));
-            lot.push('\n');
+            batch.push_str("ping ");
+            batch.push_str(&"a".repeat(MAX_LINE - 6));
+            batch.push('\n');
         }
-        c.writer.write_all(lot.as_bytes()).await.unwrap();
-        let recues = c.reponse().await;
-        assert_eq!(recues.len(), 1, "{recues:?}");
-        assert!(recues[0].starts_with("ACK [5@"), "{recues:?}");
-        assert!(recues[0].ends_with("] {ping} list too large"), "{recues:?}");
-        // L'état de liste est rendition : la commande suivante répond seule.
+        c.writer.write_all(batch.as_bytes()).await.unwrap();
+        let received = c.response().await;
+        assert_eq!(received.len(), 1, "{received:?}");
+        assert!(received[0].starts_with("ACK [5@"), "{received:?}");
+        assert!(received[0].ends_with("] {ping} list too large"), "{received:?}");
+        // The list state is cleared: the following command answers alone.
         c.send_frame("ping").await;
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
     }
 
     #[tokio::test]
-    async fn au_dela_du_plafond_de_sessions_une_connexion_est_refusee_aussitot() {
-        // Le multiplicateur : chaque autre cap bounded une connection, et le
-        // nombre de connexions ne l'était pas. Un client qui fuit ses
-        // connexions — qui en rouvre une à chaque reprise de réseau sans fermer
-        // la précédente — arrive ici par accident, sans le moindre script
-        // hostile.
+    async fn past_the_session_cap_a_connection_is_rejected_at_once() {
+        // The multiplier: every other cap bounds one connection, and the
+        // number of connections was not bounded. A client that leaks its
+        // connections — that reopens one on every network recovery without
+        // closing the previous one — gets here by accident, with no hostile
+        // script whatsoever.
         //
-        // Sans horloge, et l'order est garanti par la bannière : elle est
-        // écrite par `serve`, donc *après* la prise de la place. Avoir lu
-        // `MAX_SESSIONS` bannières prouve que les `MAX_SESSIONS` slots sont
-        // prises, et la connection suivante est donc bien celle qui déborde.
-        let (s, _rx) = serveur().await;
-        let mut ouverts = Vec::new();
+        // Without a clock, and the order is guaranteed by the banner: it is
+        // written by `serve`, hence *after* the slot is taken. Having read
+        // `MAX_SESSIONS` banners proves the `MAX_SESSIONS` slots are taken,
+        // and the following connection is therefore indeed the one that
+        // overflows.
+        let (s, _rx) = server().await;
+        let mut open = Vec::new();
         for _ in 0..MAX_SESSIONS {
-            ouverts.push(s.client_pret().await);
+            open.push(s.client_ready().await);
         }
-        // Celle de trop : acceptée par le noyau (le port écoute toujours), puis
-        // fermée aussitôt par `accepter`. Aucune bannière, donc fin de stream.
-        let mut refuse = s.client().await;
+        // The one too many: accepted by the kernel (the port is still
+        // listening), then closed at once by `accept_loop`. No banner, hence
+        // end of stream.
+        let mut rejected = s.client().await;
         assert!(
-            refuse.lines.next_line().await.unwrap().is_none(),
-            "au-dela du cap, la connection doit etre fermee sans banniere"
+            rejected.lines.next_line().await.unwrap().is_none(),
+            "past the cap, the connection must be closed without a banner"
         );
-        // Et les sessions déjà ouvertes servent encore : le cap refuse les
-        // nouvelles, il ne dégrade pas les anciennes. La première et la
-        // dernière, parce qu'un cap mal câblé casse volontiers l'une des
-        // deux extrémités.
+        // And the already-open sessions still serve: the cap rejects new
+        // ones, it does not degrade the old ones. The first and the last,
+        // because a badly wired cap readily breaks one of the two ends.
         for index in [0, MAX_SESSIONS - 1] {
-            ouverts[index].send_frame("ping").await;
-            assert_eq!(ouverts[index].reponse().await, vec!["OK".to_string()]);
+            open[index].send_frame("ping").await;
+            assert_eq!(open[index].response().await, vec!["OK".to_string()]);
         }
     }
 
     #[tokio::test]
-    async fn un_changement_de_reglages_relie_le_serveur_sans_redemarrage() {
-        // **La demande du propriétaire** : ne plus avoir à relancer le greffon à
-        // la main après avoir changé le port sur la page d'admin.
+    async fn a_settings_change_rebinds_the_server_without_a_restart() {
+        // **The owner's request**: no longer having to restart the plugin by
+        // hand after changing the port on the admin page.
         //
-        // Sans horloge, comme `un_client_qui_part_rend_sa_place` : la boucle
-        // réessaie jusqu'à ce que le nouveau port réponde, et rien ne l'arrête
-        // d'autre que ce succès. Une implémentation qui ne se relierait jamais
-        // fait *pendre* le test, ce qui est le mode d'échec voulu — et non un
-        // délai deviné qui deviendrait un flake sous charge.
+        // Without a clock, like `a_client_that_leaves_returns_its_slot`: the
+        // loop retries until the new port answers, and nothing stops it but
+        // that success. An implementation that never rebound would make the
+        // test *hang*, which is the intended failure mode — and not a
+        // guessed delay that would become a flake under load.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let ancienne = listener.local_addr().unwrap();
-        // Un port libre, choisi par le noyau puis rendition : c'est la seule façon
-        // d'en nommer un qui ne soit pas déjà pris sur la machine du test.
-        let sonde = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let neuve = sonde.local_addr().unwrap();
-        drop(sonde);
+        let old_address = listener.local_addr().unwrap();
+        // A free port, chosen by the kernel then released: this is the only way
+        // to name one that is not already taken on the test machine.
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let new_address = probe.local_addr().unwrap();
+        drop(probe);
 
         let state = Arc::new(SharedState::default());
         let (cmd_tx, _cmd_rx) = mpsc::channel(64);
         let (config_tx, config_rx) = tokio::sync::watch::channel(crate::config::Config {
             listen: "127.0.0.1".into(),
-            port: ancienne.port(),
+            port: old_address.port(),
         });
         tokio::spawn(listen(listener, config_rx, state, cmd_tx));
 
-        // L'ancien port sert bien avant tout changement.
-        let mut avant = Client::connecter(ancienne).await;
-        assert!(avant.recevoir().await.starts_with("OK MPD "));
+        // The old port serves fine before any change.
+        let mut before = Client::connect(old_address).await;
+        assert!(before.receive().await.starts_with("OK MPD "));
 
         config_tx
-            .send(crate::config::Config { listen: "127.0.0.1".into(), port: neuve.port() })
+            .send(crate::config::Config { listen: "127.0.0.1".into(), port: new_address.port() })
             .unwrap();
 
-        let banniere = loop {
-            if let Ok(stream) = TcpStream::connect(neuve).await {
-                let mut c = Client::depuis(stream);
-                break c.recevoir().await;
+        let banner = loop {
+            if let Ok(stream) = TcpStream::connect(new_address).await {
+                let mut c = Client::from_stream(stream);
+                break c.receive().await;
             }
             tokio::task::yield_now().await;
         };
-        assert!(banniere.starts_with("OK MPD "), "banniere inattendue: {banniere}");
+        assert!(banner.starts_with("OK MPD "), "unexpected banner: {banner}");
 
-        // Et la session déjà ouverte n'a pas été coupée : elle tient son propre
-        // stream, que la fermeture de l'écouteur ne touche pas. C'est la
-        // différence avec un vrai redémarrage de MPD, et elle est voulue.
-        avant.send_frame("ping").await;
-        assert_eq!(avant.reponse().await, vec!["OK".to_string()]);
+        // And the already-open session was not cut: it holds its own stream,
+        // which closing the listener does not touch. This is the difference
+        // with a real MPD restart, and it is intentional.
+        before.send_frame("ping").await;
+        assert_eq!(before.response().await, vec!["OK".to_string()]);
     }
 
     #[tokio::test]
-    async fn un_port_impossible_laisse_le_serveur_ou_il_etait() {
-        // Un réglage fautif — port déjà pris, adresse absente de la machine —
-        // ne doit pas rendre le serveur MPD injoignable. L'ancien écouteur
-        // n'est lâché qu'une fois le nouveau lié.
+    async fn an_impossible_port_leaves_the_server_where_it_was() {
+        // A faulty setting — port already taken, address absent from the
+        // machine — must not make the MPD server unreachable. The old
+        // listener is only released once the new one is bound.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let ancienne = listener.local_addr().unwrap();
+        let old_address = listener.local_addr().unwrap();
         let state = Arc::new(SharedState::default());
         let (cmd_tx, _cmd_rx) = mpsc::channel(64);
         let (config_tx, config_rx) = tokio::sync::watch::channel(crate::config::Config {
             listen: "127.0.0.1".into(),
-            port: ancienne.port(),
+            port: old_address.port(),
         });
         tokio::spawn(listen(listener, config_rx, state, cmd_tx));
 
-        // Une adresse qu'aucune interface ne porte : le `bind` échoue.
+        // An address no interface carries: the `bind` fails.
         config_tx
             .send(crate::config::Config { listen: "192.0.2.1".into(), port: 6600 })
             .unwrap();
 
-        // Le serveur répond toujours là où il répondait. Boucle sans horloge,
-        // même raison que le test ci-dessus : c'est le succès qui l'arrête.
-        let banniere = loop {
-            if let Ok(stream) = TcpStream::connect(ancienne).await {
-                let mut c = Client::depuis(stream);
-                break c.recevoir().await;
+        // The server still answers where it was answering. Clock-free loop,
+        // same reason as the test above: it is success that stops it.
+        let banner = loop {
+            if let Ok(stream) = TcpStream::connect(old_address).await {
+                let mut c = Client::from_stream(stream);
+                break c.receive().await;
             }
             tokio::task::yield_now().await;
         };
-        assert!(banniere.starts_with("OK MPD "), "banniere inattendue: {banniere}");
+        assert!(banner.starts_with("OK MPD "), "unexpected banner: {banner}");
     }
 
     #[tokio::test]
-    async fn un_client_qui_part_rend_sa_place() {
-        // Le pendant indispensable : si le permis ne repartait pas avec la
-        // tâche, l'appareil refuserait tout le monde après seize connexions
-        // dans la vie du processus — une panne qui n'apparaîtrait qu'après des
-        // jours, et qui ressemblerait à un défaut de réseau.
+    async fn a_client_that_leaves_returns_its_slot() {
+        // The indispensable counterpart: if the permit did not leave with
+        // the task, the device would refuse everyone after sixteen
+        // connections in the process's lifetime — a failure that would only
+        // show up after days, and that would look like a network defect.
         //
-        // Sans horloge : la boucle réessaie jusqu'à ce que la place soit rendue,
-        // et rien ne l'arrête d'autre que ce succès. Elle est nécessaire parce
-        // que rien n'ordonne la fermeture du client avec le moment où la session
-        // serveur la constate ; une implémentation qui ne rendrait jamais la
-        // place fait *pendre* le test, ce qui est le mode d'échec voulu.
-        let (s, _rx) = serveur().await;
-        let mut ouverts = Vec::new();
+        // Without a clock: the loop retries until the slot is returned, and
+        // nothing stops it but that success. It is necessary because nothing
+        // orders the client's closing with the moment the server session
+        // notices it; an implementation that never returned the slot makes
+        // the test *hang*, which is the intended failure mode.
+        let (s, _rx) = server().await;
+        let mut open = Vec::new();
         for _ in 0..MAX_SESSIONS {
-            ouverts.push(s.client_pret().await);
+            open.push(s.client_ready().await);
         }
-        // Le premier s'en va pour de bon : ses deux moitiés sont lâchées.
-        ouverts.remove(0);
-        let banniere = loop {
-            let mut candidat = s.client().await;
-            if let Some(line) = candidat.lines.next_line().await.unwrap() {
+        // The first one leaves for good: both its halves are dropped.
+        open.remove(0);
+        let banner = loop {
+            let mut candidate = s.client().await;
+            if let Some(line) = candidate.lines.next_line().await.unwrap() {
                 break line;
             }
         };
-        assert!(banniere.starts_with("OK MPD "), "banniere inattendue: {banniere}");
+        assert!(banner.starts_with("OK MPD "), "unexpected banner: {banner}");
     }
 
     #[tokio::test]
-    async fn une_ligne_illisible_ne_ferme_pas_la_connexion() {
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn an_unreadable_line_does_not_close_the_connection() {
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         c.send_frame(r#"load "France"#).await;
-        let recues = c.reponse().await;
-        assert_eq!(recues, vec!["ACK [2@0] {load} invalid argument".to_string()]);
-        // Le client suivant n'a pas à se reconnecter.
+        let received = c.response().await;
+        assert_eq!(received, vec!["ACK [2@0] {load} invalid argument".to_string()]);
+        // The following client does not have to reconnect.
         c.send_frame("ping").await;
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
     }
 
     #[tokio::test]
-    async fn une_ligne_illisible_dans_une_liste_labandonne() {
-        // La liste ne peut plus être exécutée telle que le client l'a écrite :
-        // l'exécuter au `command_list_end` exécuterait un lot amputé de la
-        // commande refusée. Elle est donc abandonnée, et le
-        // `command_list_end` qui suit est refusé comme une commande hors
-        // liste — un client sait alors que son lot n'a pas eu lieu.
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn an_unreadable_line_in_a_list_abandons_it() {
+        // The list can no longer be executed as the client wrote it:
+        // executing it at `command_list_end` would run a batch amputated of
+        // the rejected command. It is therefore abandoned, and the following
+        // `command_list_end` is rejected as a command outside a list — a
+        // client then knows its batch did not take place.
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         c.send_frame("command_list_begin").await;
         c.send_frame("status").await;
         c.send_frame(r#"load "France"#).await;
-        assert_eq!(c.reponse().await, vec!["ACK [2@1] {load} invalid argument".to_string()]);
+        assert_eq!(c.response().await, vec!["ACK [2@1] {load} invalid argument".to_string()]);
         c.send_frame("command_list_end").await;
         assert_eq!(
-            c.reponse().await,
+            c.response().await,
             vec!["ACK [5@0] {command_list_end} unsupported".to_string()]
         );
     }
 
     #[tokio::test]
-    async fn close_repond_ok_puis_ferme() {
-        // Décision assumée : MPD n'écrit rien avant de fermer, nous répondons.
-        // Voir le commentaire d'`Outcome::Close` dans `execute`.
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+    async fn close_answers_ok_then_closes() {
+        // A deliberate decision: MPD writes nothing before closing, we
+        // answer. See the comment on `Outcome::Close` in `execute`.
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         c.send_frame("close").await;
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
-        assert!(c.lines.next_line().await.unwrap().is_none(), "close doit fermer");
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
+        assert!(c.lines.next_line().await.unwrap().is_none(), "close must close");
     }
 
     #[tokio::test]
-    async fn les_noms_de_sujets_sont_ceux_quidle_accepte() {
-        // `subsystem_name` est l'inverse de la table de `commands.rs`, et rien ne
-        // relie les deux au compilateur : un `stored-playlist` au tiret ici
-        // ferait annoncer un sous-système qu'aucun client ne saurait
-        // redemander. Le vérifier en passant chaque name à `idle`.
-        for sujet in [Subsystem::Player, Subsystem::Mixer, Subsystem::Playlist, Subsystem::StoredPlaylist] {
-            let args = vec!["idle".to_string(), subsystem_name(sujet).to_string()];
+    async fn subsystem_names_are_the_ones_idle_accepts() {
+        // `subsystem_name` is the inverse of `commands.rs`'s table, and
+        // nothing ties the two together at compile time: a hyphenated
+        // `stored-playlist` here would announce a subsystem no client could
+        // ask for again. Verify it by passing each name to `idle`.
+        for subsystem in [Subsystem::Player, Subsystem::Mixer, Subsystem::Playlist, Subsystem::StoredPlaylist] {
+            let args = vec!["idle".to_string(), subsystem_name(subsystem).to_string()];
             assert_eq!(
                 handle(&Snapshot::default(), 0, &args, MAX_CHUNK),
-                Outcome::Wait(vec![sujet]),
-                "subsystem_name({sujet:?}) n'est pas un name qu'idle accepte"
+                Outcome::Wait(vec![subsystem]),
+                "subsystem_name({subsystem:?}) is not a name idle accepts"
             );
         }
     }
 
     #[tokio::test]
-    async fn un_idle_sans_sujet_connu_nest_pas_un_ok_immediat() {
-        // `idle database` ne nomme que des sous-systèmes que ce greffon
-        // n'émet jamais : la liste de subsystems est clear, et le contrat
-        // d'`Outcome::Wait` dit que c'est une attente **sans fin**, pas un
-        // `OK` immédiat. Un `OK` ferait boucler le client à pleine vitesse
-        // sur la seule commande faite pour l'en dispenser.
+    async fn an_idle_with_no_known_subsystem_is_not_an_immediate_ok() {
+        // `idle database` only names subsystems this plugin never emits: the
+        // subsystem list is empty, and `Outcome::Wait`'s contract says that
+        // is a wait **without end**, not an immediate `OK`. An `OK` would
+        // make the client loop at full speed on the very command meant to
+        // spare it that.
         //
-        // Prouvé sans horloge, **en comptant les terminateurs** : `idle` +
-        // `noidle` n'en valent qu'un, donc la deuxième réponse lue est celle du
-        // `status`. Une session qui aurait rendition `OK` tout de suite en aurait
-        // écrit un de plus (le sien, puis celui du `noidle` reçu hors attente),
-        // et on lirait ici un `OK` sec au lieu des lines du `status`.
+        // Proved without a clock, **by counting terminators**: `idle` +
+        // `noidle` are worth only one, so the second response read is the
+        // `status`'s. A session that returned `OK` right away would have
+        // written one more (its own, then the one for the `noidle` received
+        // outside a wait), and we would read here a bare `OK` instead of the
+        // `status`'s lines.
         //
-        // Le discriminant a changé avec le `noidle` implicite : send_frame
-        // `status` ne distingue plus rien, puisqu'une attente annulée écrit
-        // désormais `OK` puis la réponse du `status` — exactement ce qu'un
-        // `idle` répondant tout de suite produirait aussi.
-        let (s, _rx) = serveur().await;
-        let mut c = s.client_pret().await;
+        // The discriminant changed with the implicit `noidle`: sending
+        // `status` no longer distinguishes anything by itself, since a
+        // cancelled wait now writes `OK` then the `status` response —
+        // exactly what an `idle` answering right away would also produce.
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
         c.send_frame("idle database").await;
-        // Des trames qui bougent tous les compteurs : aucune ne concerne les
-        // subsystems demandés (il n'y en a aucun), donc aucune ne doit réveiller.
-        s.state.apply_state(trame_player_et_mixer(17)).await;
-        s.state.apply_state(trame_player_et_mixer(18)).await;
+        // Frames that move every counter: none concerns the requested
+        // subsystems (there are none), so none should wake it.
+        s.state.apply_state(player_and_mixer_frame(17)).await;
+        s.state.apply_state(player_and_mixer_frame(18)).await;
         c.send_frame("noidle").await;
         c.send_frame("status").await;
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
-        let apres = c.reponse().await;
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
+        let after = c.response().await;
         assert!(
-            apres.iter().any(|l| l.starts_with("volume: ")),
-            "idle database a repondu tout seul: {apres:?}"
+            after.iter().any(|l| l.starts_with("volume: ")),
+            "idle database answered on its own: {after:?}"
         );
     }
 
     // ------------------------------------------------------------------
-    // Les pochettes, sur une vraie chaussette
+    // Covers, on a real socket
     // ------------------------------------------------------------------
 
-    /// Le `href` que la trame d'état publie, et que la trame de cover
-    /// reprend.
+    /// The `href` the state frame publishes, and that the cover frame
+    /// reuses.
     const HREF: &str = "/api/cover/1a2b3c";
 
-    /// L'URI que notre `currentsong` publie pour l'état ci-dessous.
-    const URI_COURANTE: &str = "ritornello://radio/2";
+    /// The URI our `currentsong` publishes for the state below.
+    const CURRENT_URI: &str = "ritornello://radio/2";
 
-    /// Une size qui n'est pas un multiple de `MAX_CHUNK` : trois tranches,
-    /// la dernière plus courte que les autres.
-    const TAILLE: usize = MAX_CHUNK * 2 + 1234;
+    /// A size that is not a multiple of `MAX_CHUNK`: three chunks, the last
+    /// one shorter than the others.
+    const SIZE: usize = MAX_CHUNK * 2 + 1234;
 
-    /// La trame d'état **telle que le cœur l'émet quand une cover existe** :
-    /// elle porte le `cover_href`, et c'est lui que la trame de cover
-    /// reprendra. Une trame sans `cover_href` accompagnée d'une cover
-    /// n'existe pas côté producteur, et un test qui l'emploierait prouverait
-    /// une causalité impossible.
-    fn trame_avec_pochette() -> PlayerState {
+    /// The state frame **as the core emits it when a cover exists**: it
+    /// carries the `cover_href`, and that is what the cover frame will
+    /// reuse. A frame without `cover_href` accompanied by a cover does not
+    /// exist on the producer's side, and a test that used one would prove
+    /// an impossible causality.
+    fn frame_with_cover() -> PlayerState {
         PlayerState {
             source: "radio".into(),
             volume: 40,
@@ -2230,245 +2231,247 @@ mod tests {
         }
     }
 
-    /// Pousse l'état **puis** la cover, dans cet order : c'est l'order du
-    /// cœur (`display_relay` envoie l'état avant les bytes), et l'inverse
-    /// laisserait le greffon dans un état qu'il ne connaît pas en production.
-    async fn avec_pochette(state: &SharedState, size: usize) -> Vec<u8> {
+    /// Pushes the state **then** the cover, in that order: this is the
+    /// core's order (`display_relay` sends the state before the bytes), and
+    /// the reverse would leave the plugin in a state it never sees in
+    /// production.
+    async fn with_cover(state: &SharedState, size: usize) -> Vec<u8> {
         let cover = crate::state::test_cover(HREF, size);
-        state.apply_state(trame_avec_pochette()).await;
+        state.apply_state(frame_with_cover()).await;
         state.apply_cover(cover.clone()).await;
         cover.bytes
     }
 
     #[tokio::test]
-    async fn albumart_rend_limage_entiere_et_elle_se_reassemble_a_lidentique() {
-        // **Le test central de cette tâche.** Il rejoue la séquence d'un vrai
-        // client sur une vraie chaussette, et il n'affirme pas « quelque chose
-        // est arrivé » : il compare les bytes réassemblés à ceux qui ont été
-        // poussés. Un découpage qui saute, duplique ou décale un seul octet
-        // échoue ici — et l'image est du bruit, donc rien ne peut le masquer.
-        let (s, _rx) = serveur().await;
-        let expected = avec_pochette(&s.state, TAILLE).await;
-        let mut c = s.client_pret().await;
+    async fn albumart_returns_the_whole_image_and_it_reassembles_identically() {
+        // **The central test of this task.** It replays the sequence of a
+        // real client on a real socket, and it does not assert "something
+        // arrived": it compares the reassembled bytes to the ones that were
+        // pushed. A split that skips, duplicates or shifts a single byte
+        // fails here — and the image is noise, so nothing can mask it.
+        let (s, _rx) = server().await;
+        let expected = with_cover(&s.state, SIZE).await;
+        let mut c = s.client_ready().await;
 
-        let r = c.recuperer("albumart", URI_COURANTE).await;
+        let r = c.fetch("albumart", CURRENT_URI).await;
 
-        assert_eq!(r.image.len(), TAILLE, "size reassemblee");
-        assert_eq!(r.image, expected, "les bytes doivent arriver intacts");
-        // Trois tranches : deux pleines, puis le remainder. C'est la preuve que
-        // l'offset croissant est honoré (deux requêtes de plus que la première)
-        // et que la dernière chunk est plus courte que les autres.
-        assert_eq!(r.tailles, vec![MAX_CHUNK, MAX_CHUNK, 1234]);
-        // `albumart` n'announcement pas de type MIME, contrairement à `readpicture`.
+        assert_eq!(r.image.len(), SIZE, "reassembled size");
+        assert_eq!(r.image, expected, "the bytes must arrive intact");
+        // Three chunks: two full ones, then the remainder. This is the proof
+        // that the growing offset is honored (two more requests than the
+        // first) and that the last chunk is shorter than the others.
+        assert_eq!(r.sizes, vec![MAX_CHUNK, MAX_CHUNK, 1234]);
+        // `albumart` does not announce a MIME type, unlike `readpicture`.
         assert_eq!(r.mime, None);
-        // Et la connection remainder utilisable après une réponse binaire : le
-        // path des bytes ne doit pas laisser la session désalignée.
+        // And the connection stays usable after a binary response: the
+        // bytes path must not leave the session misaligned.
         c.send_frame("ping").await;
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
     }
 
     #[tokio::test]
-    async fn readpicture_rend_les_memes_octets_et_annonce_le_type() {
-        // M.A.L.P. essaie l'un, puis l'autre : les deux doivent aboutir, et sur
-        // la même image. Seul le `type:` les distingue, comme chez MPD.
-        let (s, _rx) = serveur().await;
-        let expected = avec_pochette(&s.state, TAILLE).await;
-        let mut c = s.client_pret().await;
+    async fn readpicture_returns_the_same_bytes_and_announces_the_type() {
+        // M.A.L.P. tries one, then the other: both must succeed, and on the
+        // same image. Only `type:` distinguishes them, as with MPD.
+        let (s, _rx) = server().await;
+        let expected = with_cover(&s.state, SIZE).await;
+        let mut c = s.client_ready().await;
 
-        let r = c.recuperer("readpicture", URI_COURANTE).await;
+        let r = c.fetch("readpicture", CURRENT_URI).await;
 
         assert_eq!(r.image, expected);
         assert_eq!(r.mime.as_deref(), Some("image/jpeg"));
     }
 
     #[tokio::test]
-    async fn une_image_plus_courte_quune_tranche_tient_en_un_seul_aller_retour() {
-        // Le cas réel et non le cas limit : la cover mesurée du Cover Art
-        // Archive fait 75 Kio, mais une thumbnail peut tenir sous les 8 Kio
-        // d'une chunk. Une seule requête, une seule chunk, complète.
-        let (s, _rx) = serveur().await;
-        let expected = avec_pochette(&s.state, 1000).await;
-        let mut c = s.client_pret().await;
+    async fn an_image_shorter_than_a_chunk_fits_in_a_single_round_trip() {
+        // The real case and not the edge case: the measured cover from the
+        // Cover Art Archive is 75 KiB, but a thumbnail can fit under a
+        // chunk's 8 KiB. A single request, a single chunk, complete.
+        let (s, _rx) = server().await;
+        let expected = with_cover(&s.state, 1000).await;
+        let mut c = s.client_ready().await;
 
-        let r = c.recuperer("albumart", URI_COURANTE).await;
+        let r = c.fetch("albumart", CURRENT_URI).await;
 
-        assert_eq!(r.tailles, vec![1000]);
+        assert_eq!(r.sizes, vec![1000]);
         assert_eq!(r.image, expected);
     }
 
     #[tokio::test]
-    async fn un_offset_au_dela_de_la_fin_est_refuse_sans_fermer() {
-        let (s, _rx) = serveur().await;
-        avec_pochette(&s.state, TAILLE).await;
-        let mut c = s.client_pret().await;
+    async fn an_offset_past_the_end_is_rejected_without_closing() {
+        let (s, _rx) = server().await;
+        with_cover(&s.state, SIZE).await;
+        let mut c = s.client_ready().await;
 
-        c.send_frame(&format!("albumart {URI_COURANTE} {}", TAILLE + 1)).await;
+        c.send_frame(&format!("albumart {CURRENT_URI} {}", SIZE + 1)).await;
 
         assert_eq!(
-            c.reponse().await,
+            c.response().await,
             vec!["ACK [2@0] {albumart} Offset too large".to_string()]
         );
         c.send_frame("ping").await;
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
     }
 
     #[tokio::test]
-    async fn sans_pochette_les_deux_commandes_refusent_et_la_connexion_survit() {
-        // Le cas ordinaire : un stream sans image. Le client doit recevoir un
-        // refus lisible et pouvoir continuer à parler — c'est ce refus qui le
-        // fait basculer sur l'autre name, puis renoncer proprement.
+    async fn without_a_cover_both_commands_reject_and_the_connection_survives() {
+        // The ordinary case: a stream with no image. The client must receive
+        // a readable rejection and be able to keep talking — this is the
+        // rejection that makes it switch to the other name, then give up
+        // cleanly.
         //
-        // **`cover_href: None`, et le détail est tout le test.** L'appareil
-        // n'announcement aucune image, donc le refus est définitif et doit tomber
-        // **tout de suite** : la nouvelle attente de `wait_cover` ne
-        // couvre que la fenêtre où une image *a été annoncée* et n'est pas
-        // encore arrivée. Une trame porteuse de `cover_href` ici — ce que ce
-        // test faisait avant — décrivait au contraire cette fenêtre-là, et le
-        // refus immédiat qu'il verrouillait était justement le défaut à
-        // corriger.
-        let (s, _rx) = serveur().await;
-        let mut trame = trame_avec_pochette();
-        trame.track.cover_href = None;
-        s.state.apply_state(trame).await;
-        let mut c = s.client_pret().await;
+        // **`cover_href: None`, and that detail is the whole test.** The
+        // device announces no image, so the rejection is final and must
+        // fall **right away**: `wait_cover`'s new wait only covers the
+        // window where an image *has been announced* and has not yet
+        // arrived. A frame carrying `cover_href` here — what this test used
+        // to do — described, on the contrary, exactly that window, and the
+        // immediate rejection it locked in was precisely the defect to fix.
+        let (s, _rx) = server().await;
+        let mut frame = frame_with_cover();
+        frame.track.cover_href = None;
+        s.state.apply_state(frame).await;
+        let mut c = s.client_ready().await;
 
         for name in ["albumart", "readpicture"] {
-            c.send_frame(&format!("{name} {URI_COURANTE} 0")).await;
+            c.send_frame(&format!("{name} {CURRENT_URI} 0")).await;
             assert_eq!(
-                c.reponse().await,
+                c.response().await,
                 vec![format!("ACK [50@0] {{{name}}} No file exists")]
             );
         }
         c.send_frame("ping").await;
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
     }
 
     #[tokio::test]
-    async fn binarylimit_change_la_taille_des_tranches_de_cette_connexion() {
-        // **Ce que la commande sert vraiment à faire.** Une cover se
-        // récupérait par tranches de 8 Kio, la valeur par défaut de MPD : une
-        // image de 500 Kio demandait soixante-deux allers-retours. Un client
-        // qui announcement accepter plus doit en recevoir plus — et la valeur ne
-        // vaut que pour **sa** connection.
-        let (s, _rx) = serveur().await;
-        let expected = avec_pochette(&s.state, TAILLE).await;
-        let mut c = s.client_pret().await;
+    async fn binarylimit_changes_this_connections_chunk_size() {
+        // **What the command is really for.** A cover used to be fetched in
+        // 8 KiB chunks, MPD's default value: a 500 KiB image required
+        // sixty-two round trips. A client that announces it can accept more
+        // must receive more — and the value only holds for **its own**
+        // connection.
+        let (s, _rx) = server().await;
+        let expected = with_cover(&s.state, SIZE).await;
+        let mut c = s.client_ready().await;
 
         c.send_frame("binarylimit 32768").await;
-        assert_eq!(c.reponse().await, vec!["OK".to_string()]);
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
 
-        let r = c.recuperer("albumart", URI_COURANTE).await;
+        let r = c.fetch("albumart", CURRENT_URI).await;
         assert_eq!(r.image, expected);
-        // TAILLE tient sous 32 Kio : une seule chunk, là où le défaut en
-        // demandait trois.
-        assert_eq!(r.tailles, vec![TAILLE], "la chunk demandee doit etre honoree");
+        // SIZE fits under 32 KiB: a single chunk, where the default asked
+        // for three.
+        assert_eq!(r.sizes, vec![SIZE], "the requested chunk size must be honored");
 
-        // Un second client, qui n'a rien demandé, garde le défaut : la limit
-        // est un fait sur la connection.
-        let mut autre = s.client_pret().await;
-        let r2 = autre.recuperer("albumart", URI_COURANTE).await;
-        assert_eq!(r2.tailles.first(), Some(&MAX_CHUNK));
+        // A second client, which asked nothing, keeps the default: the
+        // limit is a fact about the connection.
+        let mut other = s.client_ready().await;
+        let r2 = other.fetch("albumart", CURRENT_URI).await;
+        assert_eq!(r2.sizes.first(), Some(&MAX_CHUNK));
     }
 
     #[tokio::test]
-    async fn une_pochette_annoncee_mais_pas_encore_arrivee_est_attendue_et_servie() {
-        // **La correction de « la cover disparaît au changement de piste ».**
-        // Le cœur envoie l'état d'abord, les bytes ensuite : le client est
-        // réveillé par cette trame et demande l'image dans la foulée, pendant
-        // que le greffon tient encore celle d'avant — ou rien du tout. Il
-        // recevait « No file exists », et M.A.L.P., qui mémorise l'absence par
-        // piste, ne redemandait jamais.
+    async fn a_cover_announced_but_not_yet_arrived_is_awaited_then_served() {
+        // **The fix for "the cover disappears on track change".** The core
+        // sends the state first, the bytes after: the client is woken by
+        // this frame and requests the image right away, while the plugin
+        // still holds the previous one — or nothing at all. It used to get
+        // "No file exists", and M.A.L.P., which memorizes the absence per
+        // track, would never ask again.
         //
-        // Ici la demande arrive **avant** les bytes, et doit quand même
-        // aboutir.
-        let (s, _rx) = serveur().await;
-        s.state.apply_state(trame_avec_pochette()).await;
-        let mut c = s.client_pret().await;
+        // Here the request arrives **before** the bytes, and must still
+        // succeed.
+        let (s, _rx) = server().await;
+        s.state.apply_state(frame_with_cover()).await;
+        let mut c = s.client_ready().await;
 
         let state = s.state.clone();
-        let expected = crate::state::test_cover(HREF, TAILLE).bytes;
-        // La cover arrive pendant que la demande patiente. Une tâche à part,
-        // parce que c'est exactement la concurrence réelle : deux canaux
-        // distincts, l'un derrière l'autre.
+        let expected = crate::state::test_cover(HREF, SIZE).bytes;
+        // The cover arrives while the request is waiting. A separate task,
+        // because that is exactly the real concurrency: two distinct
+        // channels, one behind the other.
         tokio::spawn(async move {
-            state.apply_cover(crate::state::test_cover(HREF, TAILLE)).await;
+            state.apply_cover(crate::state::test_cover(HREF, SIZE)).await;
         });
 
-        let r = c.recuperer("albumart", URI_COURANTE).await;
-        assert_eq!(r.image, expected, "l'image attendue doit finish par etre servie");
+        let r = c.fetch("albumart", CURRENT_URI).await;
+        assert_eq!(r.image, expected, "the awaited image must eventually be served");
     }
 
     #[tokio::test(start_paused = true)]
-    async fn une_pochette_annoncee_qui_narrive_jamais_finit_par_etre_refusee() {
-        // Le pendant : l'attente est **bornée**. Sans cette bounded, une image
-        // qui n'arrive pas — un partage endormi, un 404 du Cover Art Archive —
-        // laisserait le client suspendu pour toujours sur une commande dont il
-        // attend une réponse.
+    async fn a_cover_announced_that_never_arrives_eventually_gets_rejected() {
+        // The counterpart: the wait is **bounded**. Without this bound, an
+        // image that never arrives — a sleeping share, a 404 from the Cover
+        // Art Archive — would leave the client suspended forever on a
+        // command it is waiting for a response to.
         //
-        // Clock simulée : tokio avance le temps virtuel dès que tout est en
-        // attente, donc ce test ne coûte pas les trois seconds réelles et ne
-        // suppose aucune durée d'exécution.
-        let (s, _rx) = serveur().await;
-        s.state.apply_state(trame_avec_pochette()).await;
-        let mut c = s.client_pret().await;
+        // Simulated clock: tokio advances virtual time as soon as everything
+        // is waiting, so this test does not cost the real three seconds and
+        // assumes no execution duration.
+        let (s, _rx) = server().await;
+        s.state.apply_state(frame_with_cover()).await;
+        let mut c = s.client_ready().await;
 
-        c.send_frame(&format!("albumart {URI_COURANTE} 0")).await;
+        c.send_frame(&format!("albumart {CURRENT_URI} 0")).await;
 
         assert_eq!(
-            c.reponse().await,
+            c.response().await,
             vec!["ACK [50@0] {albumart} No file exists".to_string()],
-            "l'attente doit finish par rendre le refus ordinaire"
+            "the wait must eventually return the ordinary rejection"
         );
     }
 
     #[tokio::test]
-    async fn une_reponse_binaire_dans_une_liste_est_refusee_a_son_rang() {
-        // MPD l'autorise, nous non : voir la justification sur place dans
-        // `serve`. Le refus arrive **à l'accumulation**, donc le `status` qui
-        // précède n'a pas été exécuté — c'est ce que l'absence de `volume:`
-        // prouve.
-        let (s, _rx) = serveur().await;
-        avec_pochette(&s.state, TAILLE).await;
-        let mut c = s.client_pret().await;
+    async fn a_binary_response_in_a_list_is_rejected_at_its_rank() {
+        // MPD allows it, we do not: see the justification in place in
+        // `serve`. The rejection arrives **at accumulation**, so the
+        // preceding `status` was not executed — that is what the absence of
+        // `volume:` proves.
+        let (s, _rx) = server().await;
+        with_cover(&s.state, SIZE).await;
+        let mut c = s.client_ready().await;
 
         c.send_frame("command_list_begin").await;
         c.send_frame("status").await;
-        c.send_frame(&format!("albumart {URI_COURANTE} 0")).await;
-        let recues = c.reponse().await;
+        c.send_frame(&format!("albumart {CURRENT_URI} 0")).await;
+        let received = c.response().await;
 
-        assert_eq!(recues, vec!["ACK [5@1] {albumart} not allowed in command list".to_string()]);
-        assert!(!recues.iter().any(|l| l.starts_with("volume: ")), "{recues:?}");
-        // L'état de liste a été rendition, et la commande répond bien hors liste :
-        // le refus ne condamne pas la commande, seulement son emballage.
-        let r = c.recuperer("albumart", URI_COURANTE).await;
-        assert_eq!(r.image.len(), TAILLE);
+        assert_eq!(received, vec!["ACK [5@1] {albumart} not allowed in command list".to_string()]);
+        assert!(!received.iter().any(|l| l.starts_with("volume: ")), "{received:?}");
+        // The list state was cleared, and the command does answer outside a
+        // list: the rejection does not condemn the command, only its
+        // packaging.
+        let r = c.fetch("albumart", CURRENT_URI).await;
+        assert_eq!(r.image.len(), SIZE);
     }
 
     #[tokio::test]
-    async fn une_pochette_qui_arrive_reveille_un_dormeur_sur_player() {
-        // Le bout en bout du réveil, sur une chaussette. Il est **nécessaire**
-        // et non cosmétique : le cœur envoie l'état d'abord, donc un client
-        // réveillé par la seule trame d'état demande son image trop tôt et
-        // reçoit un refus. Sans ce second réveil, il ne saurait jamais que
-        // l'image est arrivée.
+    async fn a_cover_that_arrives_wakes_a_sleeper_on_player() {
+        // The end-to-end wakeup, on a real socket. It is **necessary** and
+        // not cosmetic: the core sends the state first, so a client woken by
+        // the state frame alone requests its image too early and gets a
+        // rejection. Without this second wakeup, it would never know the
+        // image had arrived.
         //
-        // Sans horloge : la boucle push_cover des pochettes jusqu'à ce que le
-        // dormeur réponde, et une implémentation qui ne réveille pas fait
-        // *pendre* le test.
-        let (s, _rx) = serveur().await;
-        s.state.apply_state(trame_avec_pochette()).await;
-        let mut c = s.client_pret().await;
+        // Without a clock: the loop pushes covers until the sleeper
+        // responds, and an implementation that does not wake it makes the
+        // test *hang*.
+        let (s, _rx) = server().await;
+        s.state.apply_state(frame_with_cover()).await;
+        let mut c = s.client_ready().await;
         c.send_frame("idle player").await;
 
         let mut i = 0usize;
-        let premiere = loop {
+        let first = loop {
             tokio::select! {
                 biased;
-                lue = c.lines.next_line() => {
-                    break lue.unwrap().expect("le serveur a ferme la connection");
+                read = c.lines.next_line() => {
+                    break read.unwrap().expect("the server closed the connection");
                 }
-                // Deux tailles alternées : chaque poussée est donc un
-                // changement réel, que la déduplication ne peut pas avaler.
+                // Two alternating sizes: each push is therefore a real
+                // change, which deduplication cannot swallow.
                 () = s.state.apply_cover(
                     crate::state::test_cover(HREF, 1000 + (i % 2) * 500),
                 ) => {
@@ -2477,7 +2480,7 @@ mod tests {
                 }
             }
         };
-        assert_eq!(premiere, "changed: player");
-        assert_eq!(c.recevoir().await, "OK");
+        assert_eq!(first, "changed: player");
+        assert_eq!(c.receive().await, "OK");
     }
 }

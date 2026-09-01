@@ -6,9 +6,9 @@ import { useCatalog } from '../composables/useCatalog'
 import { useTheme } from '../composables/useTheme'
 import ThemePicker from './ThemePicker.vue'
 
-// Ces libellés étaient les seules chaînes du shell hors du circuit i18n : sur
-// un appareil en français, tout se traduisait sauf eux. En anglais embarqué,
-// les valeurs restent celles que les journey e2e ciblent (`getByLabel`).
+// These labels were the only strings of the shell outside the i18n circuit:
+// on a device in French, everything got translated except them. In embedded
+// English, the values remain those the e2e journeys target (`getByLabel`).
 const { t } = useCatalog()
 const { theme, mode, set, toggleMode } = useTheme()
 const open = ref(false)

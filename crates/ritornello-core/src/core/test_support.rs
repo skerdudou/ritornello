@@ -1,4 +1,4 @@
-//! Aides partagees par les tests des modules de core : player et sources factices, montages. pub(super) : visibles de core et de ses enfants, de personne d'autre.
+//! Helpers shared by the tests of the core modules: fake player and sources, rigs. pub(super): visible from core and its children, from nobody else.
 
 use super::*;
 use std::sync::Mutex;
@@ -6,14 +6,14 @@ use std::sync::Mutex;
 #[derive(Default)]
 pub(super) struct FakePlayer {
     pub(super) calls: Arc<Mutex<Vec<String>>>,
-    /// Ce que le player factice prétend savoir de sa progress.
-    /// `Mutex` et non champ simple : les tests le règlent après
-    /// construction, `Player` ne prenant que `&self`.
+    /// What the fake player claims to know about its progress.
+    /// `Mutex` rather than a plain field: tests set it after
+    /// construction, since `Player` only takes `&self`.
     pub(super) progress: Arc<Mutex<crate::player::Progress>>,
-    /// Quand c'est vrai, `toggle_pause` échoue — mpv absent, socket coupé.
-    /// Partagé et posé après construction, pour la même raison que
+    /// When true, `toggle_pause` fails — mpv absent, socket cut.
+    /// Shared and set after construction, for the same reason as
     /// `progress`.
-    pub(super) pause_echoue: Arc<std::sync::atomic::AtomicBool>,
+    pub(super) pause_fails: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[async_trait::async_trait]
@@ -32,8 +32,8 @@ impl crate::player::Player for FakePlayer {
     }
     async fn toggle_pause(&self) -> anyhow::Result<()> {
         self.calls.lock().unwrap().push("pause".into());
-        if self.pause_echoue.load(std::sync::atomic::Ordering::SeqCst) {
-            anyhow::bail!("mpv injoignable");
+        if self.pause_fails.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("mpv unreachable");
         }
         Ok(())
     }
@@ -83,20 +83,20 @@ pub(super) struct FakeSource {
 impl Source for FakeSource {
     async fn request(&self, req: SourceReq) -> Result<SourceAction> {
         self.calls.lock().unwrap().push(format!("{}:{:?}", self.name, req));
-        // Un name réservé pour simuler un greffon qui ne répond plus :
-        // `remove_source` doit rester correct même quand la bascule vers
-        // l'entrante échoue, et c'est le seul moyen de le tester sans
-        // truquer `FakePlayer`.
-        if self.name == "casse" {
-            anyhow::bail!("plugin casse ne répond pas");
+        // A reserved name to simulate a plugin that no longer answers:
+        // `remove_source` must stay correct even when the switch to the
+        // incoming source fails, and this is the only way to test it
+        // without rigging `FakePlayer`.
+        if self.name == "broken" {
+            anyhow::bail!("broken plugin does not answer");
         }
         Ok(match (self.name, req) {
             ("radio", SourceReq::Activate) => SourceAction::play("http://fip"),
             ("radio", SourceReq::Select(3)) => SourceAction::play("http://inter"),
             ("radio", SourceReq::Select(_)) => SourceAction::Noop,
-            // `.finite()` comme le vrai plugin cd : sans cette
-            // déclaration, la fin du disque passerait pour une coupure de
-            // stream et la restart rejouerait le disque en boucle.
+            // `.finite()` like the real cd plugin: without this
+            // declaration, the end of the disc would pass for a stream
+            // cut and the restart would replay the disc in a loop.
             ("cd", SourceReq::Activate) => SourceAction::play("cdda://").finite(),
             (_, SourceReq::Eject) if self.name == "cd" => SourceAction::Stop,
             ("radio", SourceReq::Wake) => SourceAction::play("http://fip"),
@@ -106,14 +106,14 @@ impl Source for FakeSource {
     }
 }
 
-/// Alias pour le montage de test (clippy::type_complexity) : cœur factice,
-/// logs d'appels du player et des sources, récepteur d'état, répertoire temporaire.
+/// Alias for the test rig (clippy::type_complexity): fake core,
+/// call logs of the player and of the sources, state receiver, temporary directory.
 pub(super) type Rig = (Core<FakePlayer>, Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<String>>>, watch::Receiver<PlayerState>, tempfile::TempDir);
 
-/// Câblage métadonnées sans observateur : les récepteurs sont lâchés
-/// aussitôt, les `send` du cœur échouent silencieusement (c'est déjà le cas
-/// en production quand aucun plugin `metadata` n'est déclaré). Les tests qui
-/// observent ces canaux utilisent `setup_metadata`.
+/// Metadata wiring without an observer: the receivers are dropped
+/// right away, the core's `send`s fail silently (already the case in
+/// production when no `metadata` plugin is declared). Tests that observe
+/// these channels use `setup_metadata`.
 pub(super) fn silent_wiring(plugins: Vec<String>) -> MetadataWiring {
     MetadataWiring {
         plugins,
@@ -122,22 +122,21 @@ pub(super) fn silent_wiring(plugins: Vec<String>) -> MetadataWiring {
     }
 }
 
-/// Câblage minimal des pochettes pour les montages qui n'en ont pas
-/// l'usage : un cache neuf, et un émetteur dont personne ne read la
-/// réception (le récepteur est lâché aussitôt — un envoi ultérieur
-/// échoue alors en silence, ce que `start_cover_fetch` ignore déjà).
+/// Minimal cover wiring for the rigs that have no use for it: a fresh
+/// cache, and a sender whose reception nobody reads (the receiver is
+/// dropped right away — a later send then fails silently, which
+/// `start_cover_fetch` already ignores).
 pub(super) fn test_covers() -> (Arc<crate::cover::CoverCache>, mpsc::Sender<(String, bool)>) {
     (Arc::new(crate::cover::CoverCache::new()), mpsc::channel(4).0)
 }
 
-/// Mise à jour ne portant rien : tous les champs à `None`/`false`. Base
-/// commode pour composer une trame minimale dans un test (voir les tests
-/// de statut).
+/// Update carrying nothing: every field at `None`/`false`. Convenient
+/// base to compose a minimal frame in a test (see the status tests).
 pub(super) fn bare_update() -> SourceUpdate {
     SourceUpdate::default()
 }
 
-/// Mise à jour ne portant qu'une identité.
+/// Update carrying only an identity.
 pub(super) fn plays(identity: serde_json::Value) -> SourceUpdate {
     SourceUpdate {
         identity: Some(IdentityUpdate::Playing(identity)),
@@ -152,21 +151,21 @@ pub(super) fn plays(identity: serde_json::Value) -> SourceUpdate {
     }
 }
 
-/// Une présélection nommée, forme courte pour les tests.
+/// A named preset, short form for the tests.
 pub(super) fn preset_of(index: u8, name: &str) -> Preset {
     Preset { index, name: name.into() }
 }
 
-/// Trame ne portant **que** des présélections nommées : c'est exactement la
-/// forme sous laquelle la réponse à `ListPresets` atteint le cœur, l'action
-/// corrélée (`Noop`) partant par l'autre voie.
+/// Frame carrying **only** named presets: this is exactly the form in
+/// which the answer to `ListPresets` reaches the core, the correlated
+/// action (`Noop`) leaving by the other path.
 pub(super) fn with_presets(presets: Vec<Preset>) -> SourceUpdate {
     let mut u = bare_update();
     u.presets = Some(presets);
     u
 }
 
-/// Les names d'un sources_catalog, dans l'order où il les porte.
+/// The names of a sources catalog, in the order it carries them.
 pub(super) fn names(cat: &SourcesCatalog) -> Vec<String> {
     cat.sources.iter().map(|s| s.name.clone()).collect()
 }
@@ -211,10 +210,10 @@ pub(super) fn setup_persisted(persisted: PersistedState) -> Rig {
     (core, player_calls, source_calls, state_rx, dir)
 }
 
-/// Rig observant les deux canaux de métadonnées : ce qui descend vers
-/// les plugins, et l'état structuré qui monte vers la SPA et les afficheurs.
+/// Rig observing both metadata channels: what goes down to the
+/// plugins, and the structured state that goes up to the SPA and the displays.
 ///
-/// `plugins` porte l'order de déclaration, donc la priorité d'arbitrage.
+/// `plugins` carries the declaration order, hence the arbitration priority.
 #[allow(clippy::type_complexity)]
 pub(super) fn setup_metadata(
     plugins: Vec<String>,
@@ -247,23 +246,23 @@ pub(super) fn setup_metadata(
     (core, np_rx, state_rx, dir)
 }
 
-/// Alias de `setup_metadata(vec![])` : les tests de l'état partiel
-/// n'ont besoin d'aucun greffon `metadata`, seulement du montage que
-/// `setup_metadata` sait déjà construire.
+/// Alias of `setup_metadata(vec![])`: the partial-state tests need no
+/// `metadata` plugin, only the rig that `setup_metadata` already knows
+/// how to build.
 pub(super) fn test_core() -> (Core<FakePlayer>, watch::Receiver<NowPlaying>, watch::Receiver<PlayerState>, tempfile::TempDir) {
     setup_metadata(vec![])
 }
 
-/// Comme `test_core`, mais **garde** le récepteur du canal
-/// d'extraction de cover embarquée plutôt que de le lâcher.
+/// Like `test_core`, but **keeps** the receiver of the embedded-cover
+/// extraction channel instead of dropping it.
 ///
-/// Nécessaire pour tout test qui laisse réellement tourner la tâche
-/// détachée de `handle_path` sur un vrai fichier : celle-ci est l'unique
-/// écrivaine légitime du fichier temporaire, et un test qui relirait les
-/// tags une seconde fois de son côté (pour reconstituer le `CoverRef`
-/// attendu) écrirait en concurrence avec elle sur le même path — une
-/// vraie course entre deux écrivains, découverte à l'usage (voir le
-/// rapport de tâche 6, ruling 1 de la revue).
+/// Needed by any test that really lets the detached task of
+/// `handle_path` run on a real file: that task is the only legitimate
+/// writer of the temporary file, and a test that re-read the tags a
+/// second time on its side (to reconstruct the expected `CoverRef`)
+/// would write concurrently with it on the same path — a real race
+/// between two writers, discovered in use (see the report of task 6,
+/// ruling 1 of the review).
 #[allow(clippy::type_complexity)]
 pub(super) fn test_core_with_extraction() -> (
     Core<FakePlayer>,
@@ -302,27 +301,27 @@ pub(super) fn test_core_with_extraction() -> (
 }
 
 impl Core<FakePlayer> {
-    /// Règle ce que le player factice prétend savoir de sa progress.
+    /// Sets what the fake player claims to know about its progress.
     pub(super) fn set_progress(&self, position_s: Option<f64>, duration_s: Option<f64>) {
         *self.player.progress.lock().unwrap() =
             crate::player::Progress { position_s, duration_s };
     }
 
-    /// Recule l'ancre de `duration` : le test avance le temps sans dormir.
+    /// Moves the anchor back by `duration`: the test advances time without sleeping.
     pub(super) fn advance_anchor_for_test(&mut self, duration: std::time::Duration) {
-        if let Some((p, pose)) = self.position_anchor {
-            self.position_anchor = Some((p, pose - duration));
+        if let Some((p, set_at)) = self.position_anchor {
+            self.position_anchor = Some((p, set_at - duration));
         }
     }
 }
 
-/// Cœur sans aucune source : le démarrage où *aucune* n'a répondu. C'est
-/// exactement la situation dont le câblage à chaud doit pouvoir sortir, et
-/// celle que le cœur doit désormais savoir serve — la page de statut est là
-/// pour montrer les plugins figés.
+/// Core without any source: the startup where *none* answered. This is
+/// exactly the situation hotplug wiring must be able to get out of, and
+/// the one the core must now know how to serve — the status page is
+/// there to show the frozen plugins.
 ///
-/// Le récepteur d'état est rendition (et non lâché comme dans `silent_wiring`) :
-/// « aucune source » est un état à observer, pas seulement à survivre.
+/// The state receiver is returned (not dropped as in `silent_wiring`):
+/// "no source" is a state to observe, not merely to survive.
 pub(super) fn setup_without_source() -> (Core<FakePlayer>, watch::Receiver<PlayerState>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
@@ -361,11 +360,11 @@ pub(super) fn setup_without_source() -> (Core<FakePlayer>, watch::Receiver<Playe
     (core, state_rx, dir)
 }
 
-/// Extrait le délai d'un `RetryIn`, ou échoue en nommant ce qui est arrivé.
+/// Extracts the delay of a `RetryIn`, or fails naming what happened instead.
 pub(super) fn restart(outcome: EventOutcome) -> Duration {
     match outcome {
         EventOutcome::RetryIn(d) => d,
-        autre => panic!("attendu RetryIn, obtenu {autre:?}"),
+        other => panic!("expected RetryIn, got {other:?}"),
     }
 }
 
@@ -378,13 +377,13 @@ pub(super) fn enrichment(identity: serde_json::Value, artist: &str, title: &str)
     }
 }
 
-/// Mise à jour ne portant qu'un compte de présélections déclaré par la Source.
-pub(super) fn update_with_count(compte: Option<u8>) -> SourceUpdate {
+/// Update carrying only a preset count declared by the Source.
+pub(super) fn update_with_count(count: Option<u8>) -> SourceUpdate {
     SourceUpdate {
         identity: None,
         transient: false,
         preset: None,
-        preset_count: compte,
+        preset_count: count,
         preset_name: None,
         status: None,
         can_eject: None,
@@ -393,7 +392,7 @@ pub(super) fn update_with_count(compte: Option<u8>) -> SourceUpdate {
     }
 }
 
-/// Mise à jour ne portant qu'un name de présélection déclaré par la Source.
+/// Update carrying only a preset name declared by the Source.
 pub(super) fn update_with_name(name: Option<&str>) -> SourceUpdate {
     SourceUpdate {
         identity: None,
@@ -408,8 +407,8 @@ pub(super) fn update_with_name(name: Option<&str>) -> SourceUpdate {
     }
 }
 
-/// Mise à jour ne portant que la capacité d'éjection déclarée par la Source.
-pub(super) fn update_with_eject(peut: Option<bool>) -> SourceUpdate {
+/// Update carrying only the eject capability declared by the Source.
+pub(super) fn update_with_eject(can: Option<bool>) -> SourceUpdate {
     SourceUpdate {
         identity: None,
         transient: false,
@@ -417,20 +416,20 @@ pub(super) fn update_with_eject(peut: Option<bool>) -> SourceUpdate {
         preset_count: None,
         preset_name: None,
         status: None,
-        can_eject: peut,
+        can_eject: can,
         presets: None,
         cover: None,
     }
 }
 
-/// Trame à la forme que `serve_source` produit vraiment : `can_eject`
-/// estampillé, parce que le SDK l'estampille sur **chaque** trame qu'il
-/// écrit (voir la doc de `SourceMessage::can_eject`).
+/// Frame in the shape `serve_source` really produces: `can_eject`
+/// stamped, because the SDK stamps it on **every** frame it writes (see
+/// the doc of `SourceMessage::can_eject`).
 ///
-/// À préférer à `bare_update()` dans tout test qui prétend décrire une trame
-/// venue d'un vrai greffon : `SourceUpdate::default()` laisse `can_eject` à
-/// `None`, une forme que le SDK ne peut pas émettre, et un test bâti dessus
-/// peut attester un mode de défaillance qui n'existe pas.
+/// To be preferred over `bare_update()` in any test that claims to
+/// describe a frame coming from a real plugin: `SourceUpdate::default()`
+/// leaves `can_eject` at `None`, a shape the SDK cannot emit, and a test
+/// built on it may attest a failure mode that does not exist.
 pub(super) fn sdk_frame() -> SourceUpdate {
     SourceUpdate { can_eject: Some(false), ..SourceUpdate::default() }
 }
@@ -445,27 +444,27 @@ pub(super) fn quick_settings() -> crate::state::Settings {
     }
 }
 
-/// Fabrique un mp3 réel avec une cover embarquée, via ffmpeg — même
-/// principe que `player::mpv::tests::mp3_avec_pochette`, dupliqué ici
-/// faute d'un moyen simple de partager un utilitaire de test entre
-/// modules. Rend `None` si ffmpeg est absent : le test se saute plutôt
-/// que d'échouer, ce n'est pas une dépendance du cœur.
+/// Builds a real mp3 with an embedded cover, via ffmpeg — same principle
+/// as the mp3-with-cover fixture of `player::mpv::tests`, duplicated here
+/// for lack of a simple way to share a test utility between modules.
+/// Returns `None` if ffmpeg is absent: the test skips itself rather than
+/// failing, it is not a dependency of the core.
 ///
-/// **L'image doit rester différente de celle de `player::mpv::tests`, et ce
-/// n'est pas cosmétique.** Depuis que le fichier temporaire est nommé
-/// d'après le *contenu* de l'image, deux fixtures portant la même image
-/// visent le même path dans le `temp_dir()` **partagé** par tous les tests
-/// de ce binaire — qui tournent en parallèle. Les tests d'ici traversent en
-/// plus `CoverCache`, dont l'éviction **supprime** ces fichiers : la
-/// collision s'est manifestée comme un échec intermittent chez le voisin,
-/// qui lisait un fichier effacé ou réécrit sous lui. Les deux fixtures
-/// partageaient `color=c=red:s=16x16`.
+/// **The image must stay different from the one in `player::mpv::tests`,
+/// and this is not cosmetic.** Since the temporary file is named after
+/// the *content* of the image, two fixtures carrying the same image
+/// target the same path in the `temp_dir()` **shared** by every test of
+/// this binary — which run in parallel. The tests here additionally go
+/// through `CoverCache`, whose eviction **deletes** those files: the
+/// collision showed up as an intermittent failure in the neighbour,
+/// which read a file erased or rewritten under it. Both fixtures shared
+/// `color=c=red:s=16x16`.
 pub(super) fn test_mp3_with_cover(dir: &std::path::Path) -> Option<std::path::PathBuf> {
     let image = dir.join("cover.jpg");
-    let sortie = dir.join("avec_pochette.mp3");
+    let output = dir.join("with_cover.mp3");
     let ok = std::process::Command::new("ffmpeg")
-        // Verte et 32×32 : voir la doc ci-dessus, elle **ne doit pas**
-        // coïncider avec celle de `player::mpv::tests`.
+        // Green and 32×32: see the doc above, it **must not** coincide
+        // with the one in `player::mpv::tests`.
         .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=green:s=32x32:d=1"])
         .args(["-frames:v", "1"])
         .arg(&image)
@@ -480,15 +479,15 @@ pub(super) fn test_mp3_with_cover(dir: &std::path::Path) -> Option<std::path::Pa
             .args(["-map", "0:a", "-map", "1:v", "-c:a", "libmp3lame", "-c:v", "copy"])
             .args(["-id3v2_version", "3"])
             .args(["-metadata:s:v", "title=Album cover", "-metadata:s:v", "comment=Cover (front)"])
-            .arg(&sortie)
+            .arg(&output)
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
-    ok.then_some(sortie)
+    ok.then_some(output)
 }
 
-/// Pack français livré dans le dépôt (invariant : mêmes clés que l'anglais embarqué).
+/// French pack shipped in the repository (invariant: same keys as the embedded English).
 pub(super) fn fr_pack() -> String {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales/core/fr.toml");
-    std::fs::read_to_string(p).expect("pack fr livre")
+    std::fs::read_to_string(p).expect("shipped fr pack")
 }

@@ -1,149 +1,143 @@
 /**
- * Abscisses des échantillons dans le repère du graphe, proportionnelles à leur
- * **horodatage** et non à leur rang.
+ * Abscissas of the samples in the chart's frame, proportional to their
+ * **timestamp** and not to their rank.
  *
- * Des points équidistants supposent une cadence constante. Elle ne l'est step :
- * la période de sondage se change en cours de route, et l'history garde
- * alors des échantillons espacés de 30 s à côté d'autres espacés de 1 s. Les
- * répartir également mentirait sur le temps — cinq minutes d'histoire ancienne
- * occuperaient autant de largeur que cinq secondes récentes, et la pente d'une
- * montée de load n'aurait plus de sens. En partant des horodatages, l'axe
- * redevient un axe de temps, et le tracé reconverge de lui-même vers
- * l'équidistance à mesure que les anciens échantillons sortent du tampon.
+ * Equidistant points assume a constant cadence. It is not constant: the probe
+ * period gets changed along the way, and the history then keeps samples
+ * spaced 30 s apart next to others spaced 1 s apart. Spreading them evenly
+ * would lie about time — five minutes of old history would take as much
+ * width as five recent seconds, and the slope of a load rise would no longer
+ * mean anything. Starting from the timestamps, the axis becomes a time axis
+ * again, and the plot reconverges by itself towards equidistance as the old
+ * samples leave the buffer.
  *
- * Le premier échantillon est à 0 et le last à `largeur` : la fenêtre est
- * toujours pleine, c'est son échelle qui change. Voir `windowMinutes`, qui
- * annonce la durée réellement couverte, mesurée sur les mêmes horodatages.
+ * The first sample is at 0 and the last at `width`: the window is always
+ * full, it is its scale that changes. See `windowMinutes`, which announces the
+ * duration actually covered, measured on the same timestamps.
  *
- * Étendue nulle — deux échantillons dans la même milliseconde, ou une clock
- * figée par des minuteurs simulés — : repli sur l'équidistance, qui vaut mieux
- * qu'une division par zéro.
+ * Zero extent — two samples in the same millisecond, or a clock frozen by fake
+ * timers —: fall back on equidistance, which beats a division by zero.
  */
-export function xValues(horodatages: number[], largeur: number): number[] {
-  const n = horodatages.length
-  const debut = horodatages[0]
-  const fin = horodatages[n - 1]
-  // Indéfinis ⇔ tableau vide. Le test porte sur les valeurs et non sur `n`,
-  // parce que `noUncheckedIndexedAccess` ne déduit step d'un `n >= 2` que les
-  // accès indexés sont sûrs — et une assertion `!` masquerait ici la seule
-  // chose qui rende ce code total.
-  if (debut === undefined || fin === undefined) return []
+export function xValues(timestamps: number[], width: number): number[] {
+  const n = timestamps.length
+  const start = timestamps[0]
+  const end = timestamps[n - 1]
+  // Undefined ⇔ empty array. The test is on the values and not on `n`,
+  // because `noUncheckedIndexedAccess` does not infer from `n >= 2` that the
+  // indexed accesses are safe — and a `!` assertion would hide here the only
+  // thing that makes this code total.
+  if (start === undefined || end === undefined) return []
   if (n === 1) return [0]
-  const etendue = fin - debut
-  if (etendue <= 0) return horodatages.map((_, i) => (i * largeur) / (n - 1))
-  return horodatages.map((t) => ((t - debut) / etendue) * largeur)
+  const extent = end - start
+  if (extent <= 0) return timestamps.map((_, i) => (i * width) / (n - 1))
+  return timestamps.map((t) => ((t - start) / extent) * width)
 }
 
 const MINUTE_MS = 60_000
 
 /**
- * Nombre maximum de repères rendus. La fenêtre réelle plafonne bien en dessous
- * (240 échantillons à 30 s font 120 minutes), mais un horodatage aberrant — une
- * clock qui saute, chose banale sur une machine sans pile ni réseau au
- * démarrage — produirait sinon des milliers d'éléments pour un graphe large de
- * quelques centaines de pixels.
+ * Maximum number of ticks rendered. The real window caps well below (240
+ * samples at 30 s make 120 minutes), but an aberrant timestamp — a clock that
+ * jumps, commonplace on a machine without a battery or network at boot —
+ * would otherwise produce thousands of elements for a chart a few hundred
+ * pixels wide.
  */
 const MAX_TICKS = 240
 
 /**
- * Abscisses des repères de minute : une marque à chaque **minute pleine de
- * l'clock** (secondes à zéro) tombant dans la fenêtre couverte, rendues de
- * gauche à droite.
+ * Abscissas of the minute ticks: a mark at each **full minute of the clock**
+ * (seconds at zero) falling within the covered window, rendered from left to
+ * right.
  *
- * Des minutes de l'clock et non un décompte depuis « maintenant » : une
- * marque désigne alors un instant réel, celui qu'on lit sur une montre, et deux
- * captures d'écran prises à des moments différents parlent du même axe. La
- * contrepartie est que les marques **glissent** vers la gauche à mesure que le
- * temps passe, au lieu de rester immobiles — c'est le propre d'un instant fixe
- * sur une fenêtre qui défile, step un défaut.
+ * Clock minutes and not a countdown from "now": a mark then designates a real
+ * instant, the one read on a watch, and two screenshots taken at different
+ * moments speak of the same axis. The trade-off is that the marks **slide**
+ * to the left as time passes, instead of staying still — that is the nature
+ * of a fixed instant on a scrolling window, not a defect.
  *
- * Le modulo suffit à trouver ces instants : l'époque Unix tombe elle-même sur
- * une minute pleine et tous les décalages horaires usuels sont des multiples
- * de la minute, donc `t % 60000 == 0` vaut « secondes à zéro » quelle que soit
- * la zone.
+ * The modulo is enough to find those instants: the Unix epoch itself falls on
+ * a full minute and all usual time offsets are multiples of the minute, so
+ * `t % 60000 == 0` means "seconds at zero" whatever the zone.
  *
- * Même échelle que `xValues`, forcément : un repère qui ne partagerait step
- * l'échelle du tracé désignerait un autre instant que celui qu'il prétend.
- * Étendue nulle : aucune marque. Une fenêtre plus courte qu'une minute peut au
- * contraire en porter une, si une minute pleine tombe dedans.
+ * Same scale as `xValues`, necessarily: a tick that would not share the
+ * plot's scale would designate another instant than the one it claims.
+ * Zero extent: no mark. A window shorter than a minute can on the contrary
+ * carry one, if a full minute falls inside it.
  */
-export function minuteTicks(horodatages: number[], largeur: number): number[] {
-  const n = horodatages.length
-  const debut = horodatages[0]
-  const fin = horodatages[n - 1]
-  if (debut === undefined || fin === undefined) return []
-  const etendue = fin - debut
-  if (etendue <= 0) return []
-  const premier = Math.ceil(debut / MINUTE_MS) * MINUTE_MS
-  const combien = Math.min(
-    Math.floor((fin - premier) / MINUTE_MS) + 1,
+export function minuteTicks(timestamps: number[], width: number): number[] {
+  const n = timestamps.length
+  const start = timestamps[0]
+  const end = timestamps[n - 1]
+  if (start === undefined || end === undefined) return []
+  const extent = end - start
+  if (extent <= 0) return []
+  const first = Math.ceil(start / MINUTE_MS) * MINUTE_MS
+  const count = Math.min(
+    Math.floor((end - first) / MINUTE_MS) + 1,
     MAX_TICKS,
   )
-  if (combien <= 0) return []
+  if (count <= 0) return []
   return Array.from(
-    { length: combien },
-    (_, i) => ((premier + i * MINUTE_MS - debut) / etendue) * largeur,
+    { length: count },
+    (_, i) => ((first + i * MINUTE_MS - start) / extent) * width,
   )
 }
 
 /**
- * Construit l'attribut `d` d'un `<path>` SVG pour une série de pourcentages,
- * placée aux xValues fournies par `xValues`. Une valeur `null` marque un
- * échantillon dont la mesure a échoué (par exemple une température illisible)
- * : elle ouvre un **trou** dans le tracé plutôt que d'être comblée.
+ * Builds the `d` attribute of an SVG `<path>` for a series of percentages,
+ * placed at the xValues provided by `xValues`. A `null` value marks a sample
+ * whose measurement failed (for example an unreadable temperature): it opens
+ * a **gap** in the plot rather than being filled in.
  *
- * Toute la géométrie du graphe tient ici et dans `xValues`, en fonctions
- * pures et testées : la vue n'a plus qu'à passer ses séries. Les
- * xValues arrivent en paramètre plutôt que d'être recalculées ici parce que
- * les trois séries, le trait de survol et le calage du popin doivent partager
- * exactement les mêmes — un popin décalé d'une colonne par rapport au tracé
- * qu'il commente serait pire qu'une absence de popin.
+ * All the chart's geometry lives here and in `xValues`, as pure, tested
+ * functions: the view only has to pass its series. The xValues come as a
+ * parameter rather than being recomputed here because the three series, the
+ * hover line and the positioning of the popover must share exactly the same
+ * ones — a popover shifted by one column from the plot it comments on would be
+ * worse than no popover.
  *
- * Les valeurs présentes sont bornées à 0-100 — une load supérieure au
- * number de cœurs dépasse 100 % et ne doit step sortir du cadre — et l'axe y
- * est inversé : 0 % en bas, comme on lit un graphe, alors que le repère SVG a
- * son origine en haut.
+ * Present values are clamped to 0-100 — a load higher than the number of
+ * cores exceeds 100 % and must not leave the frame — and the y axis is
+ * inverted: 0 % at the bottom, as one reads a chart, whereas the SVG frame has
+ * its origin at the top.
  *
- * Un `<path>` SVG accepte plusieurs sous-tracés : chaque `null` referme le
- * sous-tracé courant, et l'échantillon présent suivant en rouvre un avec un
- * nouveau `M` plutôt que de poursuivre avec un `L`. Deux points de part et
- * d'autre du trou ne sont donc jamais reliés par un trait — la seule autre
- * option praticable serait de recopier la dernière valeur connue sur le trou,
- * ce qui dessinerait un plateau parfaitement horizontal, indiscernable à l'œil
- * d'une mesure réelle et stable. Un trou visible dit « on ne sait step » ; un
- * plateau prétendrait le savoir.
+ * An SVG `<path>` accepts several subpaths: each `null` closes the current
+ * subpath, and the next present sample reopens one with a new `M` rather than
+ * continuing with an `L`. Two points on either side of the gap are thus never
+ * joined by a line — the only other practicable option would be to copy the
+ * last known value over the gap, which would draw a perfectly horizontal
+ * plateau, indistinguishable to the eye from a real, stable measurement. A
+ * visible gap says "we don't know"; a plateau would claim to know.
  *
- * Moins de deux points : chaîne vide. Un échantillon seul ne dessine step de
- * ligne, et un `d` vide est un `<path>` invisible, step une erreur — c'est
- * aussi ce qui se produit pour un sous-tracé d'un seul point isolé entre deux
- * trous : un `M` sans `L` qui le suit, qui ne trace rien non plus, sans que ce
- * soit un cas à part. Autant d'xValues que de valeurs, sinon chaîne vide
- * également : un appel mal apparié dessinerait des `NaN`, une dégradation
- * silencieuse vaut mieux. Toutes les valeurs `null` : chaîne vide aussi,
- * aucun sous-tracé ne s'ouvre jamais — le cas d'une machine sans la sonde
- * correspondante.
+ * Fewer than two points: empty string. A lone sample draws no line, and an
+ * empty `d` is an invisible `<path>`, not an error — this is also what
+ * happens for a subpath of a single point isolated between two gaps: an `M`
+ * with no `L` following it, which draws nothing either, without being a
+ * special case. As many xValues as values, otherwise empty string as well: a
+ * mismatched call would draw `NaN`s, a silent degradation is better. All
+ * values `null`: empty string too, no subpath ever opens — the case of a
+ * machine without the corresponding probe.
  */
 export function sparklinePath(
-  valeurs: (number | null)[],
+  values: (number | null)[],
   xs: number[],
-  hauteur: number,
+  height: number,
 ): string {
-  if (valeurs.length < 2 || xs.length !== valeurs.length) return ''
+  if (values.length < 2 || xs.length !== values.length) return ''
   let segment = true
-  return valeurs
+  return values
     .map((v, i) => {
       if (v === null) {
-        // Referme le sous-tracé courant : le prochain point présent rouvrira
-        // avec un `M`, step un `L` qui le relierait par-dessus le trou.
+        // Closes the current subpath: the next present point will reopen with
+        // an `M`, not an `L` that would join it over the gap.
         segment = true
         return ''
       }
-      const borne = Math.min(100, Math.max(0, v))
-      const y = hauteur - (borne / 100) * hauteur
-      // Le `?? 0` est inatteignable — les deux longueurs viennent d'être
-      // vérifiées égales — mais il vaut mieux qu'une assertion `!` : si
-      // quelqu'un relâche un jour ce contrôle, le tracé se décale au lieu de
-      // se remplir de `NaN`.
+      const clamped = Math.min(100, Math.max(0, v))
+      const y = height - (clamped / 100) * height
+      // The `?? 0` is unreachable — both lengths have just been checked equal
+      // — but it beats a `!` assertion: if someone one day relaxes that check,
+      // the plot shifts instead of filling with `NaN`.
       const x = xs[i] ?? 0
       const command = segment ? 'M' : 'L'
       segment = false

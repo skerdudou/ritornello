@@ -10,8 +10,8 @@ import {
 import type { RemoteCommand } from '../views/remoteCommands'
 import EjectIcon from './icons/EjectIcon.vue'
 
-// Le transport en icons, la lecture seule en plein : c'est le geste frequent,
-// et l'oeil la trouve sans lire. L'order est celui de `REMOTE_TRANSPORT`.
+// The transport as icons, play alone in full: it is the frequent gesture, and
+// the eye finds it without reading. The order is that of `REMOTE_TRANSPORT`.
 const { t } = useCatalog()
 const props = defineProps<{ state: PlayerPayload | null }>()
 const emit = defineEmits<{ command: [cmd: Command] }>()
@@ -32,18 +32,17 @@ const visible = (list: RemoteCommand[]) => list.filter((c) => !hidden(c.cmd.cmd,
 </script>
 
 <template>
-  <!-- **Le groupe principal est centre, step la rangee entiere — et a toutes
-       les largeurs.** Les cinq boutons etaient tous enfants directs d'un
-       `justify-center` : le groupe secondaire (arret, ejection) comptait donc
-       dans le centrage, et precedent/lecture/suivant se retrouvaient decales
-       vers la gauche de la moitie de sa largeur.
+  <!-- **The main group is centred, not the whole row — and at every width.**
+       The five buttons were all direct children of a `justify-center`: the
+       secondary group (stop, eject) therefore counted in the centring, and
+       previous/play/next ended up shifted to the left by half its width.
 
-       Un vide de meme souplesse a gauche (`flex-1` des deux cotes) rend au
-       trio le milieu de la carte. Il n'a **step** de `md:hidden` : sur PC la
-       rangee s'alignait a gauche, ce qui laissait le trio colle au bord et
-       Arret perdu a l'autre bout — le proprietaire l'a signale sur capture. Le
-       trio est desormais au milieu partout, et le groupe secondaire reste en
-       retrait a droite, la ou sa colonne souple le pousse. -->
+       An equally flexible void on the left (`flex-1` on both sides) gives the
+       trio the middle of the card back. It has **no** `md:hidden`: on PC the
+       row aligned left, which left the trio glued to the edge and Stop lost
+       at the other end — the owner reported it on a screenshot. The trio is
+       now in the middle everywhere, and the secondary group stays set back on
+       the right, where its flexible column pushes it. -->
   <div class="flex items-center" data-transport>
     <span class="flex-1" aria-hidden="true" />
     <div class="flex items-center gap-3 md:gap-2">
@@ -62,8 +61,8 @@ const visible = (list: RemoteCommand[]) => list.filter((c) => !hidden(c.cmd.cmd,
         <component :is="icon(c)" :class="c.cmd.cmd === 'PlayPause' ? 'size-7 md:size-6' : 'size-6 md:size-5'" />
       </Button>
     </div>
-    <!-- En retrait, a droite : sa colonne a la meme souplesse que le vide de
-         gauche, c'est ce qui garde le trio au milieu. -->
+    <!-- Set back, on the right: its column has the same flexibility as the
+         void on the left, which is what keeps the trio in the middle. -->
     <div class="flex flex-1 items-center justify-end gap-1">
       <Button
         v-for="c in visible(REMOTE_TRANSPORT_SECONDARY)"

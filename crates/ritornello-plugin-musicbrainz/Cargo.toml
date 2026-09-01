@@ -12,8 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-# `derive` : le magasin de motifs appris est sérialisé en JSON sur disque. Même
-# déclaration que les autres greffons, pour ne pas dupliquer une branche dans
+# `derive`: the store of learned patterns is serialized to JSON on disk. Same
+# declaration as the other plugins, so as not to duplicate a branch in
 # Cargo.lock.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -21,22 +21,22 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 async-trait = "0.1"
-# Pas de feature `json` : la réponse est lue en texte et analysée à la main
-# (`parse_lookup`), pour n'extraire que le premier media dont le nombre de
-# pistes correspond au disque inséré.
+# No `json` feature: the response is read as text and parsed by hand
+# (`parse_lookup`), to extract only the first medium whose track count
+# matches the inserted disc.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 ritornello-proto = { path = "../ritornello-proto" }
 ritornello-plugin-sdk = { path = "../ritornello-plugin-sdk" }
 ritornello-i18n = { path = "../ritornello-i18n" }
 
 [dev-dependencies]
-# Horloge simulée, comme dans `ritornello-core` et le greffon mpd. Nécessaire
-# et non confortable : l'étranglement des requêtes vers MusicBrainz s'éprouve
-# sur un intervalle de 1,1 s, et l'attendre pour de vrai ferait d'un test juste
-# un test lent — puis un flake dès que la suite tourne sous charge.
+# Simulated clock, as in `ritornello-core` and the mpd plugin. Necessary, not
+# a convenience: the throttling of requests to MusicBrainz is exercised over a
+# 1.1 s interval, and really waiting for it would turn a correct test into a
+# slow one — then into a flake as soon as the suite runs under load.
 #
-# À ne pas croire acquise par `features = ["full"]` côté `[dependencies]` :
-# `full` **n'inclut pas** `test-util`, et sans elle
-# `#[tokio::test(start_paused = true)]` échoue à la compilation, pas au test.
+# Not to be assumed granted by `features = ["full"]` on the `[dependencies]`
+# side: `full` does **not** include `test-util`, and without it
+# `#[tokio::test(start_paused = true)]` fails at compile time, not at test time.
 tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"

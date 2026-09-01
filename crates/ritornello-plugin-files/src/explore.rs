@@ -1,15 +1,14 @@
-//! L'état des deux assistants de déclaration de source.
+//! The state of the two source-declaration wizards.
 //!
-//! Extrait de `admin.rs`, qui atteignait 800 lines : les opérations
-//! d'assistant y auraient formé un deuxième sujet sans rapport avec la gestion
-//! de la liste de playback.
+//! Extracted from `admin.rs`, which was reaching 800 lines: the wizard
+//! operations would have formed a second topic there, unrelated to playlist
+//! management.
 //!
-//! Le protocol admin étant requête/réponse et ne poussant rien, une connexion
-//! réseau ne peut pas être attendue in_dir la requête : un NAS éteint dépasserait
-//! le cap de 5 s du cœur et la requête serait tuée avant d'avoir rien
-//! rapporté. `connect` et `browse` lancent donc une tâche et rendent la
-//! main aussitôt ; la page suit l'avancement par sondage, exactement comme pour
-//! le balayage.
+//! Since the admin protocol is request/response and pushes nothing, a network
+//! connection cannot be awaited within the request: a powered-off NAS would
+//! exceed the core's 5 s cap and the request would be killed before having
+//! reported anything. `connect` and `browse` therefore spawn a task and return
+//! immediately; the page follows progress by polling, exactly as for the scan.
 
 use crate::smb::{self, Credentials};
 use crate::{scan, volumes};
@@ -21,8 +20,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-/// Plafond d'un appel `smbclient`. Large — un NAS qui se réveille prend son
-/// temps — mais fini : la page doit toujours finir par apprendre quelque chose.
+/// Cap on one `smbclient` call. Generous — a NAS waking up takes its time —
+/// but finite: the page must always end up learning something.
 const SMB_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -32,11 +31,11 @@ pub enum Kind {
     Smb,
 }
 
-/// Ce que la page read de l'assistant en cours.
+/// What the page reads of the wizard in progress.
 ///
-/// **Ne contains aucun identifiant.** La garantie est portée par le type, comme
-/// pour `Root` : la structure sérialisée n'a pas de champ phrase de passe, il n'y
-/// a donc rien à filtrer et rien à oublier de filtrer.
+/// **Contains no credentials.** The guarantee is carried by the type, as for
+/// `Root`: the serialized structure has no passphrase field, so there is
+/// nothing to filter and nothing to forget to filter.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct View {
     pub open: bool,
@@ -52,26 +51,26 @@ pub struct View {
 }
 
 pub struct Browser {
-    /// Où poser le fichier d'authentification transitoire de `smbclient`.
+    /// Where to place the transient `smbclient` authentication file.
     ///
-    /// Le répertoire **d'exécution**, jamais celui des identifiants persistés :
-    /// ce dernier vit sous `/etc` et n'est inscriptible qu'en production, ce qui
-    /// faisait échouer l'assistant en développement avec un « Permission
-    /// denied » qui semblait accuser SMB.
+    /// The **runtime** directory, never the one of the persisted credentials:
+    /// the latter lives under `/etc` and is only writable in production, which
+    /// made the wizard fail in development with a "Permission denied" that
+    /// seemed to blame SMB.
     work_dir: PathBuf,
     catalog: Arc<RwLock<Catalog>>,
     smb_ok: Arc<AtomicBool>,
     view: Arc<Mutex<View>>,
-    /// Identifiants de la popin en cours, indexés par hôte.
+    /// Credentials of the current dialog, indexed by host.
     ///
-    /// En mémoire et **jamais sérialisés** : le phrase de passe traverse le fil
-    /// une fois, à la connexion, et non à chaque clic in_dir l'arborescence.
+    /// In memory and **never serialized**: the passphrase crosses the wire
+    /// once, at connection, and not on every click in the tree.
     sessions: Arc<Mutex<HashMap<String, Credentials>>>,
     task: Option<tokio::task::JoinHandle<()>>,
-    /// Disjoncteur des chemins média, partagé avec la moitié Admin.
+    /// Circuit breaker of the media paths, shared with the Admin half.
     ///
-    /// L'assistant local read le disque à chaque descente : un volume qui ne
-    /// répond pas doit rendre un refus, pas coincer la boucle admin.
+    /// The local wizard reads the disk on every descent: a volume that does
+    /// not respond must return a refusal, not jam the admin loop.
     health: Arc<crate::health::Health>,
 }
 
@@ -111,9 +110,9 @@ impl Browser {
 
     pub fn close(&mut self) {
         self.cancel();
-        // Les identifiants meurent avec la popin : les laisser en mémoire
-        // ferait survivre un phrase de passe à ce qui l'a recueilli, sans que rien
-        // ne le reprenne jamais.
+        // The credentials die with the dialog: leaving them in memory would
+        // let a passphrase outlive what collected it, with nothing ever
+        // reclaiming it.
         self.sessions.lock().unwrap().clear();
         *self.view.lock().unwrap() = View::default();
     }
@@ -132,19 +131,19 @@ impl Browser {
         })
     }
 
-    /// Contents d'un dossier de l'appareil.
+    /// Contents of a folder on the device.
     ///
-    /// Synchrone : un système de fichiers local répond bien en deçà du cap
-    /// du cœur, et rendre cela asynchrone n'ajouterait qu'un aller-retour de
-    /// sondage entre chaque niveau ouvert.
+    /// Synchronous: a local file system answers well within the core's cap,
+    /// and making this asynchronous would only add a polling round trip
+    /// between each opened level.
     pub async fn local(&mut self, path: &str) -> Result<(), String> {
         let path_buf = std::path::PathBuf::from(path);
         let mounts = volumes::read_proc_mounts();
-        // Canonisation **et** listage sous un seul disjoncteur : les deux
-        // touchent le disque, et sur un volume en reconnexion aucun des deux ne
-        // rend la main. Un `None` ici est un refus, pas un dossier clear.
+        // Canonicalization **and** listing under a single circuit breaker:
+        // both touch the disk, and on a reconnecting volume neither returns.
+        // A `None` here is a refusal, not an empty folder.
         let c = path_buf.clone();
-        let Some(lu) = self
+        let Some(read) = self
             .health
             .bounded(&path_buf, move || {
                 let canon = c.canonicalize().ok()?;
@@ -154,23 +153,23 @@ impl Browser {
         else {
             return Err(self.phrase("root_unresponsive").replace("{path}", path));
         };
-        let Some((canon, contenu)) = lu else {
+        let Some((canon, contents)) = read else {
             return Err(self.phrase("bad_local_path").replace("{path}", path));
         };
         if !volumes::browsable(&mounts, &canon) {
             return Err(self.phrase("bad_local_path").replace("{path}", path));
         }
-        let contenu = contenu.map_err(|e| e.message(&self.catalog.read().unwrap()))?;
+        let contents = contents.map_err(|e| e.message(&self.catalog.read().unwrap()))?;
         let mut v = self.view.lock().unwrap();
         v.path = canon.display().to_string();
-        v.dirs = contenu.dirs;
-        v.audio_count = contenu.audio.len();
+        v.dirs = contents.dirs;
+        v.audio_count = contents.audio.len();
         v.error = None;
         v.busy = false;
         Ok(())
     }
 
-    /// Se connecte à un hôte et énumère ses partages.
+    /// Connects to a host and enumerates its shares.
     pub fn connect(&mut self, host: String, user: String, password: String, domain: String) {
         self.cancel();
         if !user.is_empty() {
@@ -202,8 +201,8 @@ impl Browser {
             let mut v = view.lock().unwrap();
             v.busy = false;
             match r {
-                Ok(partages) => {
-                    v.shares = partages;
+                Ok(shares) => {
+                    v.shares = shares;
                     v.error = None;
                 }
                 Err(e) => {
@@ -214,14 +213,15 @@ impl Browser {
         }));
     }
 
-    /// Revient à la liste des partages déjà obtenue, **sans se reconnecter**.
+    /// Goes back to the list of shares already obtained, **without
+    /// reconnecting**.
     ///
-    /// Distincte de `connect` à dessein : les partages sont déjà connus, et
-    /// relancer un appel réseau pour revenir en arrière ferait attendre — voire
-    /// échouer — un geste de navigation qui n'a besoin de rien.
+    /// Distinct from `connect` on purpose: the shares are already known, and
+    /// relaunching a network call to go back would make a navigation gesture
+    /// that needs nothing wait — or even fail.
     ///
-    /// Sans cette opération, une fois un partage choisi il n'existait aucun
-    /// moyen d'en essayer un autre sans refermer la popin.
+    /// Without this operation, once a share was chosen there was no way to try
+    /// another one without closing the dialog.
     pub fn to_shares(&mut self) {
         self.cancel();
         let mut v = self.view.lock().unwrap();
@@ -233,7 +233,7 @@ impl Browser {
         v.error = None;
     }
 
-    /// Liste un dossier d'un partage.
+    /// Lists a folder of a share.
     pub fn browse(&mut self, share: String, path: String) {
         self.cancel();
         let host = self.view.lock().unwrap().host.clone();
@@ -291,7 +291,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
 
-    fn explorateur(dir: &std::path::Path) -> Browser {
+    fn browser(dir: &std::path::Path) -> Browser {
         Browser::new(
             dir.join("creds"),
             Arc::new(std::sync::RwLock::new(Catalog::load(
@@ -306,25 +306,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn le_mot_de_passe_n_apparait_dans_aucune_vue() {
-        // Il n'a aucune raison de retraverser vers le navigateur : la page l'a
-        // envoyé une fois, elle n'a pas besoin de le relire pour afficher un
-        // arbre de dirs.
+    async fn the_password_appears_in_no_view() {
+        // It has no reason to travel back to the browser: the page sent it
+        // once, it does not need to read it back to display a tree of dirs.
         let dir = tempfile::tempdir().unwrap();
-        let mut e = explorateur(dir.path());
+        let mut e = browser(dir.path());
         e.open(Kind::Smb);
         e.connect("nas".into(), "steven".into(), "secret-du-nas".into(), String::new());
-        let texte = serde_json::to_string(&e.view()).unwrap();
-        assert!(!texte.contains("secret-du-nas"), "{texte}");
-        assert!(!texte.contains("password"), "{texte}");
+        let text = serde_json::to_string(&e.view()).unwrap();
+        assert!(!text.contains("secret-du-nas"), "{text}");
+        assert!(!text.contains("password"), "{text}");
     }
 
     #[tokio::test]
-    async fn fermer_efface_la_session() {
-        // Sinon un phrase de passe survivrait en mémoire à la popin qui l'a
-        // recueilli, sans que rien ne le reprenne jamais.
+    async fn closing_clears_the_session() {
+        // Otherwise a passphrase would outlive in memory the dialog that
+        // collected it, with nothing ever reclaiming it.
         let dir = tempfile::tempdir().unwrap();
-        let mut e = explorateur(dir.path());
+        let mut e = browser(dir.path());
         e.open(Kind::Smb);
         e.connect("nas".into(), "steven".into(), "secret".into(), String::new());
         assert!(e.credentials("nas").is_some());
@@ -333,39 +332,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn un_chemin_local_hors_volume_est_refuse() {
-        // La garde de parcours. Sans elle, la page adresserait /proc/self et
-        // l'arbre partirait in_dir les liens récursifs.
+    async fn a_local_path_outside_any_volume_is_refused() {
+        // The browsing guard. Without it, the page would address /proc/self
+        // and the tree would wander into the recursive links.
         let dir = tempfile::tempdir().unwrap();
-        let faux = dir.path().join("mounts");
-        std::fs::write(&faux, "proc /proc proc rw 0 0\n/dev/sda1 / ext4 rw 0 0\n").unwrap();
-        std::env::set_var("RITORNELLO_FILES_PROC_MOUNTS", &faux);
-        let mut e = explorateur(dir.path());
+        let fake = dir.path().join("mounts");
+        std::fs::write(&fake, "proc /proc proc rw 0 0\n/dev/sda1 / ext4 rw 0 0\n").unwrap();
+        std::env::set_var("RITORNELLO_FILES_PROC_MOUNTS", &fake);
+        let mut e = browser(dir.path());
         e.open(Kind::Local);
         let err = e.local("/proc/self").await.unwrap_err();
-        assert!(err.contains(' '), "key brute : {err}");
+        assert!(err.contains(' '), "raw key: {err}");
         std::env::remove_var("RITORNELLO_FILES_PROC_MOUNTS");
     }
 
     #[tokio::test]
-    async fn un_dossier_local_rend_ses_sous_dossiers_et_son_compte_audio() {
-        // Le compte de fichiers audio est ce qui dit qu'on est au bon endroit :
-        // sans lui on choisit un dossier en espérant.
+    async fn a_local_folder_returns_its_subfolders_and_its_audio_count() {
+        // The audio file count is what says we are in the right place:
+        // without it one picks a folder hoping.
         let dir = tempfile::tempdir().unwrap();
         let media = dir.path().join("media");
         std::fs::create_dir_all(media.join("Album")).unwrap();
         std::fs::write(media.join("a.mp3"), b"").unwrap();
         std::fs::write(media.join("b.flac"), b"").unwrap();
         std::fs::write(media.join("notes.txt"), b"").unwrap();
-        let faux = dir.path().join("mounts");
-        std::fs::write(&faux, format!("/dev/sda1 {} ext4 rw 0 0\n", dir.path().display())).unwrap();
-        std::env::set_var("RITORNELLO_FILES_PROC_MOUNTS", &faux);
-        let mut e = explorateur(dir.path());
+        let fake = dir.path().join("mounts");
+        std::fs::write(&fake, format!("/dev/sda1 {} ext4 rw 0 0\n", dir.path().display())).unwrap();
+        std::env::set_var("RITORNELLO_FILES_PROC_MOUNTS", &fake);
+        let mut e = browser(dir.path());
         e.open(Kind::Local);
         e.local(&media.display().to_string()).await.unwrap();
         let v = e.view();
         assert_eq!(v["dirs"], serde_json::json!(["Album"]));
-        assert_eq!(v["audio_count"], 2, "notes.txt n'est pas un fichier audio");
+        assert_eq!(v["audio_count"], 2, "notes.txt is not an audio file");
         std::env::remove_var("RITORNELLO_FILES_PROC_MOUNTS");
     }
 }
