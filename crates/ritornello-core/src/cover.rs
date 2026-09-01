@@ -176,6 +176,18 @@ pub enum CoverPayload {
     Bytes(Vec<u8>, &'static str),
     /// Local: only the path is kept, the route re-reads the file.
     File(PathBuf),
+    /// Embedded in the audio file: only the audio file's path is kept, and
+    /// the picture is extracted again on demand. Symmetrical with `File` — a
+    /// cover that lives on a share costs a path, whether it sits beside the
+    /// track or inside it.
+    ///
+    /// **Not constructed anywhere in production yet.** This variant's read
+    /// path — `CoverCache::bytes`, `cover_get` — is wired and exercised
+    /// directly from tests; what deposits it in a real `CoverCache` (reading
+    /// the currently playing file's own embedded picture) is a later task,
+    /// hence the `allow` below.
+    #[allow(dead_code)]
+    Embedded(PathBuf),
 }
 
 /// Fingerprint of the source, published in the local URL.
@@ -621,11 +633,14 @@ impl CoverCache {
     /// `read_file_bounded` already asked for that metadata to check the size,
     /// and threw the modification date away.
     ///
-    /// **Precisely what the HTTP route avoids doing.** That one, for a local
-    /// file, opens, checks the header and *streams* without ever holding the
-    /// whole image. Pushing onto a socket leaves no such choice, hence this
-    /// method — and hence the cap, which did not exist on the local side (see
-    /// `COVER_MAX_BYTES` and the doc of `fetch`).
+    /// **Precisely what the HTTP route avoids doing for `File`.** That one
+    /// opens, checks the header and *streams* without ever holding the whole
+    /// image. Pushing onto a socket leaves no such choice, hence this method —
+    /// and hence the cap, which did not exist on the local side (see
+    /// `COVER_MAX_BYTES` and the doc of `fetch`). For `Embedded`, the route
+    /// has no such choice to begin with: a container is not a stream of image
+    /// bytes, so extracting through `read_embedded_bounded` is the only way to
+    /// get any, whether the caller is this method or the route's own body.
     ///
     /// `None` covers indistinctly: unknown key, file vanished or unreadable,
     /// share not answering, content that is no longer an image, and **size
@@ -648,7 +663,14 @@ impl CoverCache {
         // The `Bytes` branch answers under the lock rather than going through
         // `read`: that one clones the whole `CoverPayload`, which would make
         // two copies of the bytes instead of one.
-        let path = {
+        // `File` and `Embedded` both name a path rather than bytes, and both
+        // are read below the lock's release; only the read itself differs —
+        // straight for one, through a container for the other.
+        enum OnDisk {
+            File(PathBuf),
+            Embedded(PathBuf),
+        }
+        let source = {
             let e = self.entries.read().await;
             match e.iter().find(|(k, _)| k == key).map(|(_, p)| p) {
                 None => return None,
@@ -672,10 +694,14 @@ impl CoverCache {
                     }
                     return Some((*mime, v.clone(), SourceStamp::Frozen));
                 }
-                Some(CoverPayload::File(c)) => c.clone(),
+                Some(CoverPayload::File(c)) => OnDisk::File(c.clone()),
+                Some(CoverPayload::Embedded(c)) => OnDisk::Embedded(c.clone()),
             }
         };
-        read_file_bounded(&path, cap).await
+        match source {
+            OnDisk::File(path) => read_file_bounded(&path, cap).await,
+            OnDisk::Embedded(audio) => read_embedded_bounded(&audio, cap).await,
+        }
     }
 
     /// Builds the `DisplayFrame::Cover` protocol line for `key`/`href`: the
@@ -1071,6 +1097,58 @@ async fn read_file_bounded(
     }
     let mime = image_type(&bytes)?;
     Some((mime, bytes, stamp))
+}
+
+/// Reads the picture embedded in an audio file, bounded like a file read.
+///
+/// The counterpart of `read_file_bounded` for `CoverPayload::Embedded`, and
+/// deliberately its twin: same cap, same time bound, same return shape. The
+/// only difference is irreducible — a container must be parsed to find the
+/// bytes, where a `folder.jpg` can be read straight.
+///
+/// `lofty` is strictly blocking, hence `spawn_blocking`. The stamp describes
+/// the **audio file**, since that is what a caller will validate against.
+async fn read_embedded_bounded(
+    audio: &std::path::Path,
+    cap: usize,
+) -> Option<(&'static str, Vec<u8>, SourceStamp)> {
+    let path = audio.to_path_buf();
+    let work = tokio::time::timeout(
+        FILE_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            let meta = std::fs::metadata(&path).ok()?;
+            let stamp = SourceStamp::of_file(&meta);
+            let file = lofty::probe::Probe::open(&path).ok()?.read().ok()?;
+            let picture = lofty::file::TaggedFileExt::primary_tag(&file)
+                .or_else(|| lofty::file::TaggedFileExt::first_tag(&file))?
+                .pictures()
+                .first()?
+                .clone();
+            let bytes = picture.data().to_vec();
+            if bytes.len() > cap {
+                tracing::warn!(
+                    "embedded cover in {} is {} bytes, over the {cap}-byte limit",
+                    path.display(),
+                    bytes.len()
+                );
+                return None;
+            }
+            let mime = image_type(&bytes)?;
+            Some((mime, bytes, stamp))
+        }),
+    )
+    .await;
+    match work {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            tracing::warn!("embedded cover extraction panicked: {e}");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("embedded cover in {} did not answer in {FILE_TIMEOUT:?}", audio.display());
+            None
+        }
+    }
 }
 
 /// Header bytes of a recognized image. Checked before serving a local file:
@@ -1512,6 +1590,81 @@ pub async fn cover_get(
                     (header::ETAG, etag),
                 ],
                 body,
+            )
+                .into_response()
+        }
+        CoverPayload::Embedded(audio) => {
+            // **One bounding mechanism, shared with `File`**: `FILE_TIMEOUT`,
+            // not `Health` — see the doc of `FILE_TIMEOUT` for why a circuit
+            // breaker does not fit an already-async path.
+            //
+            // A bare `metadata`, deliberately **not** an open file kept
+            // around: unlike `File`, nothing downstream reuses a descriptor —
+            // a container is not a stream of image bytes, so serving a body
+            // means extracting through `read_embedded_bounded` regardless,
+            // which reopens the file itself. Stat-only is what keeps a
+            // conditional request from ever touching `lofty`.
+            let stat = tokio::time::timeout(FILE_TIMEOUT, tokio::fs::metadata(&audio)).await;
+            let meta = match stat {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
+                    tracing::warn!("cover {key} unreadable: {e}");
+                    return (StatusCode::NOT_FOUND, "illisible").into_response();
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "cover file {} did not answer in {FILE_TIMEOUT:?}",
+                        audio.display()
+                    );
+                    return (StatusCode::NOT_FOUND, "illisible").into_response();
+                }
+            };
+            let stamp = SourceStamp::of_file(&meta);
+            let source_etag = file_etag(&stamp);
+            let etag = if thumbnail_requested {
+                format!("\"v-{}\"", source_etag.trim_matches('"'))
+            } else {
+                source_etag.clone()
+            };
+            // **Before any parsing of the container**: this is the whole
+            // point of stamping from `metadata` rather than from the picture
+            // itself — a conditional request costs one `stat`, exactly like
+            // `File`, never a `lofty` probe.
+            if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) == Some(etag.as_str())
+            {
+                return StatusCode::NOT_MODIFIED.into_response();
+            }
+            if thumbnail_requested {
+                if let Some((mime, small)) =
+                    state.covers.rendition_for(&key, Some(stamp)).await
+                {
+                    return (
+                        [
+                            (header::CONTENT_TYPE, mime.to_string()),
+                            (header::CACHE_CONTROL, "no-cache".to_string()),
+                            (header::ETAG, etag),
+                        ],
+                        small.as_slice().to_vec(),
+                    )
+                        .into_response();
+                }
+                // Nothing to shrink: fall back to the original below, with
+                // the thumbnail's ETag — same reasoning as `File`.
+            }
+            // Only reached once a body is actually needed: the container is
+            // parsed here, and only here — never to answer a 304.
+            let cap = state.covers.settings().source_max;
+            let Some((mime, bytes, _)) = read_embedded_bounded(&audio, cap).await else {
+                tracing::warn!("cover {key} unreadable: {}", audio.display());
+                return (StatusCode::NOT_FOUND, "illisible").into_response();
+            };
+            (
+                [
+                    (header::CONTENT_TYPE, mime.to_string()),
+                    (header::CACHE_CONTROL, "no-cache".to_string()),
+                    (header::ETAG, etag),
+                ],
+                bytes,
             )
                 .into_response()
         }
@@ -2186,6 +2339,107 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // -- Embedded: the picture lives inside the audio file, not beside it --
+
+    #[tokio::test]
+    async fn an_embedded_cover_is_read_from_the_audio_file_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(track) =
+            crate::player::mpv::tests::mp3_with_cover_from(dir.path(), "color=c=red:s=32x32:d=1")
+        else {
+            eprintln!("ffmpeg missing: skipping test");
+            return;
+        };
+        let cache = CoverCache::new();
+        cache.insert("k".into(), CoverPayload::Embedded(track.clone())).await;
+
+        let (mime, bytes, stamp) = cache
+            .bytes("k", 8 * 1024 * 1024)
+            .await
+            .expect("the embedded picture must be readable through the cache");
+
+        assert_eq!(mime, "image/jpeg");
+        assert!(bytes.starts_with(&[0xFF, 0xD8, 0xFF]), "expected a JPEG header");
+        // The stamp must describe the AUDIO file: that is what a conditional
+        // request will be validated against.
+        let meta = std::fs::metadata(&track).unwrap();
+        assert_eq!(stamp, SourceStamp::of_file(&meta));
+    }
+
+    #[tokio::test]
+    async fn an_embedded_cover_over_the_cap_yields_nothing_like_a_file_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(track) =
+            crate::player::mpv::tests::mp3_with_cover_from(dir.path(), "color=c=red:s=32x32:d=1")
+        else {
+            eprintln!("ffmpeg missing: skipping test");
+            return;
+        };
+        let cache = CoverCache::new();
+        cache.insert("k".into(), CoverPayload::Embedded(track)).await;
+        // A cap of one byte: whatever ffmpeg produced is over it.
+        assert!(cache.bytes("k", 1).await.is_none(), "the cap must apply to an embedded picture too");
+    }
+
+    #[tokio::test]
+    async fn a_conditional_request_on_an_embedded_cover_parses_nothing() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let Some(track) =
+            crate::player::mpv::tests::mp3_with_cover_from(dir.path(), "color=c=teal:s=32x32:d=1")
+        else {
+            eprintln!("ffmpeg missing: skipping test");
+            return;
+        };
+        let cache = Arc::new(CoverCache::new());
+        cache.insert("k".into(), CoverPayload::Embedded(track)).await;
+        let app = crate::status::router(crate::status::AppState {
+            covers: cache.clone(),
+            ..crate::status::tests_support::app_state()
+        });
+
+        // First request: cold cache, a thumbnail must actually be built —
+        // otherwise `renditions_built` below would prove nothing (see
+        // `a_file_thumbnail_is_only_built_once`).
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/api/cover/k?size=thumbnail").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let etag = resp
+            .headers()
+            .get(header::ETAG)
+            .expect("the route must publish a validator")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(cache.renditions_built(), 1, "the first request must build the thumbnail");
+
+        // Second request, conditional on the ETag the first one just handed
+        // out: nothing about the source changed, so the answer must be a
+        // cheap 304 — and, crucially, one that never parsed the container
+        // again to get there.
+        let resp = app
+            .oneshot(
+                Request::get("/api/cover/k?size=thumbnail")
+                    .header(header::IF_NONE_MATCH, etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            cache.renditions_built(),
+            1,
+            "a 304 must not decode the embedded picture again — it never needed to"
+        );
     }
 
     // -- allowed_target: the SSRF safeguard, with no network at all ---------

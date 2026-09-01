@@ -513,7 +513,7 @@ impl super::Player for MpvPlayer {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::types::Event;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -759,7 +759,11 @@ mod tests {
     /// file's own name**. Two parallel tests embedding the same image
     /// would target the same path in the shared `temp_dir()`: each must
     /// therefore ask for its own image.
-    fn mp3_with_cover_from(dir: &Path, source_image: &str) -> Option<std::path::PathBuf> {
+    ///
+    /// `pub(crate)` so `cover::tests` can build a fixture that carries a
+    /// real embedded picture, rather than a second copy of this function
+    /// drifting apart from this one.
+    pub(crate) fn mp3_with_cover_from(dir: &Path, source_image: &str) -> Option<std::path::PathBuf> {
         let image = dir.join("cover.jpg");
         let output = dir.join("with_cover.mp3");
         let ok = std::process::Command::new("ffmpeg")
