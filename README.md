@@ -7,7 +7,7 @@
   <img src="https://img.shields.io/badge/back-Rust-b7410e?logo=rust&logoColor=white" alt="Back end in Rust">
   <img src="https://img.shields.io/badge/targets-armv7%20%7C%20aarch64%20%7C%20x86__64-blue" alt="armv7, aarch64, x86_64">
   <img src="https://img.shields.io/badge/UI-Vue%203-42b883?logo=vue.js&logoColor=white" alt="Vue 3">
-  <img src="https://img.shields.io/badge/0.1-yellow" alt="Ritornello 0.1">
+  <img src="https://img.shields.io/badge/version-0.1-yellow" alt="Version 0.1">
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green" alt="MIT OR Apache-2.0"></a>
 </p>
 
