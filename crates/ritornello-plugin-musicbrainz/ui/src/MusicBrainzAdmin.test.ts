@@ -24,6 +24,8 @@ const CATALOG = {
   origin_learned: 'learned deviation',
   origin_manual: 'manual',
   pattern_no_split: 'do not split',
+  pattern_no_split_provisional: '(provisional, {done} of {total} probes)',
+  pattern_no_split_anchored: '(anchored)',
   pattern_artist_first: 'artist first',
   pattern_title_first: 'title first',
   pattern_title_middle: 'title in the middle field',
@@ -68,7 +70,12 @@ const EXCEPTION_STATION = {
  *  logged in `puts` and answer 204 unless `putResponse` is provided (to
  *  simulate a refusal). */
 async function mountView(
-  data: { stations: unknown[] } = { stations: [COMPLIANT_STATION, EXCEPTION_STATION] },
+  data: { stations: unknown[]; probes_before_anchoring?: number } = {
+    stations: [COMPLIANT_STATION, EXCEPTION_STATION],
+    // The server always sends it; the default carries it so that every test
+    // exercises the real shape of the payload.
+    probes_before_anchoring: 5,
+  },
   putResponse?: (body: { action: string }) => Response,
 ) {
   const puts: Array<{ url: string; body: Record<string, unknown> }> = []
@@ -108,6 +115,38 @@ describe('MusicBrainzAdmin', () => {
     expect(rows).toHaveLength(1)
     expect(w.text()).toContain('chatter.mp3')
     expect(w.text()).not.toContain('franceinter-midfi.mp3')
+  })
+
+  it('says whether a "do not split" is still provisional or already anchored', async () => {
+    // The three states side by side, and the third is the one that would slip
+    // by: a pattern set by hand does not split either, but nothing reprobes an
+    // operator's decision — calling it "provisional" would be a lie.
+    const { w } = await mountView({
+      stations: [
+        { ...EXCEPTION_STATION, failed_probes: 2 },
+        { ...EXCEPTION_STATION, url: 'http://example/anchored.mp3', failed_probes: 5 },
+        {
+          ...EXCEPTION_STATION,
+          url: 'http://example/by-hand.mp3',
+          origin: 'manual',
+          failed_probes: 3,
+        },
+      ],
+      probes_before_anchoring: 5,
+    })
+
+    expect(w.findAll('[data-station-row]')).toHaveLength(3)
+    expect(w.findAll('[data-unsplit-state]').map((n) => n.text())).toEqual([
+      '(provisional, 2 of 5 probes)',
+      '(anchored)',
+    ])
+  })
+
+  it('says nothing about the state when the server did not send the threshold', async () => {
+    // An older server, or a field not yet sent: a made-up "2 of 5" would be
+    // worse than silence.
+    const { w } = await mountView({ stations: [{ ...EXCEPTION_STATION, failed_probes: 2 }] })
+    expect(w.find('[data-unsplit-state]').exists()).toBe(false)
   })
 
   it('shows them when the filter is unchecked', async () => {

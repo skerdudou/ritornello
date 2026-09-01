@@ -56,6 +56,23 @@ pub(crate) const MUSICBRAINZ_EN: &str = include_str!("locales/en.toml");
 /// changed shape, not a title the catalog ignores.
 const FAILURES_BEFORE_REPROBE: u32 = 3;
 
+/// Probes that must all have ruled the split out before "do not split" stops
+/// being reopened.
+///
+/// **A single title proves nothing** — the station may have been announcing a
+/// jingle, a slogan, or a talk-show guest with a dash in the middle — and the
+/// verdict used to be recorded on that one title, definitively. Five probes
+/// that all conclude the same thing describe a station that does not announce
+/// tracks.
+///
+/// Five and not "forever": the cost is what makes the choice defensible. A
+/// probe costs at most `icy::MAX_CANDIDATES` requests, so the whole life of a
+/// station is bounded by twenty, and the anchoring is what bounds it. Nothing
+/// here reads a clock: the trigger is a **new splittable string**, never a
+/// delay — replaying the probe on the jingle that produced it would spend four
+/// requests to obtain the same answer.
+const PROBES_BEFORE_ANCHORING: u32 = 5;
+
 /// The name under which the core knows a stream's header.
 ///
 /// Declared as `derived_from` by both enrichments of the ICY path: this plugin
@@ -656,14 +673,21 @@ impl MetadataPlugin for MusicBrainzPlugin {
                                 // the source: if the operator decided, we apply
                                 // what they set, even when MusicBrainz does not
                                 // want it.
-                                let is_manual = self
-                                    .store
-                                    .read()
-                                    .await
-                                    .entry(&url)
-                                    .map(|e| e.origin == patterns::Origin::Manual)
-                                    .unwrap_or(false);
-                                let reprobe = !is_manual && should_reprobe(&self.failures, &url);
+                                // Could this string be split at all? Read
+                                // before the lock, and it is what keeps a
+                                // reopened "do not split" from costing
+                                // anything on a jingle. See `reprobe_unsplit`.
+                                let splittable = !icy::candidates(&icy::clean(&raw)).is_empty();
+                                let (is_manual, unsplit) = {
+                                    let store = self.store.read().await;
+                                    let e = store.entry(&url);
+                                    (
+                                        e.is_some_and(|e| e.origin == patterns::Origin::Manual),
+                                        reprobe_unsplit(e, splittable),
+                                    )
+                                };
+                                let reprobe = !is_manual
+                                    && (should_reprobe(&self.failures, &url) || unsplit);
                                 if reprobe {
                                     // **The reprobe consumes the counter.**
                                     // Without that it stayed above the
@@ -894,6 +918,33 @@ impl MetadataPlugin for MusicBrainzPlugin {
 /// failures: see [`FAILURES_BEFORE_REPROBE`].
 fn should_reprobe(failures: &HashMap<String, u32>, url: &str) -> bool {
     failures.get(url).copied().unwrap_or(0) >= FAILURES_BEFORE_REPROBE
+}
+
+/// Should a station classified "do not split" have the question reopened?
+///
+/// The second reason to reprobe, next to [`should_reprobe`], and the one that
+/// unsticks a station branded on too little. Four conditions, each of which
+/// guards something:
+///
+/// * the station **is** classified "do not split" — otherwise
+///   [`should_reprobe`] is the one that decides;
+/// * its origin is not `Manual`: an operator's decision is never reopened;
+/// * the verdict is still **provisional** (see `Entry::failed_probes`), which
+///   is what bounds the cost;
+/// * the string at hand **could** be split. This last one is not an
+///   optimization: the only thing that can change the outcome of a probe is a
+///   new input, so replaying it on a string with no separator would spend
+///   nothing to learn nothing. The caller only reaches this on a string that
+///   differs from the previous one (`icy_seen`), so "new" is already given.
+///
+/// Pure, and for the same reason as its neighbour: the network is not
+/// reachable in tests, so it is the decision that must be testable.
+fn reprobe_unsplit(entry: Option<&patterns::Entry>, splittable: bool) -> bool {
+    let Some(e) = entry else { return false };
+    matches!(e.pattern, patterns::Pattern::DoNotSplit)
+        && e.origin != patterns::Origin::Manual
+        && e.failed_probes < PROBES_BEFORE_ANCHORING
+        && splittable
 }
 
 /// Diagnoses a dubious encoding, without repairing it.
@@ -1597,6 +1648,60 @@ mod tests {
             (candidate("B", "A", false), Some(recording(50, "A"))), // below the threshold
         ];
         assert!(best_accepted(&attempts).is_none());
+    }
+
+    fn unsplit_entry(failed_probes: u32, origin: patterns::Origin) -> patterns::Entry {
+        patterns::Entry {
+            url: "http://f".to_string(),
+            pattern: patterns::Pattern::DoNotSplit,
+            origin,
+            last_used: None,
+            split_titles: 0,
+            failed_probes,
+        }
+    }
+
+    #[test]
+    fn a_provisional_do_not_split_is_reopened_and_an_anchored_one_is_not() {
+        // The whole point of the counter: a station branded on one jingle gets
+        // its question reopened, and one branded five times over stops costing
+        // requests. Both halves matter — without the first, "never reopen"
+        // passes; without the second, "always reopen" does.
+        let learned = patterns::Origin::LearnedDeviation;
+        for probes in 0..PROBES_BEFORE_ANCHORING {
+            assert!(
+                reprobe_unsplit(Some(&unsplit_entry(probes, learned)), true),
+                "still provisional after {probes} probe(s): must be reopened"
+            );
+        }
+        assert!(
+            !reprobe_unsplit(Some(&unsplit_entry(PROBES_BEFORE_ANCHORING, learned)), true),
+            "anchored: the question is closed"
+        );
+    }
+
+    #[test]
+    fn a_do_not_split_is_never_reopened_by_hand_by_an_unsplittable_string_or_from_nothing() {
+        let learned = patterns::Origin::LearnedDeviation;
+        assert!(
+            !reprobe_unsplit(Some(&unsplit_entry(0, patterns::Origin::Manual)), true),
+            "an operator's decision is never reopened"
+        );
+        assert!(
+            !reprobe_unsplit(Some(&unsplit_entry(0, learned)), false),
+            "a string with no separator would spend four requests to learn nothing"
+        );
+        assert!(!reprobe_unsplit(None, true), "a station never probed is not a reopening");
+        // A station that **does** split is the neighbouring counter's
+        // business, never this one's: mixing the two would reprobe a proven
+        // pattern at every title.
+        let mut splitting = unsplit_entry(0, learned);
+        splitting.pattern = patterns::Pattern::Split {
+            separator: " - ".into(),
+            artist_first: true,
+            title_in_middle: false,
+        };
+        assert!(!reprobe_unsplit(Some(&splitting), true));
     }
 
     #[test]

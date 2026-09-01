@@ -116,7 +116,15 @@ impl AdminPlugin for MusicBrainzAdmin {
         // two-stage sort.
         let mut stations = store.entries().to_vec();
         stations.sort_by(|a, b| b.last_used.cmp(&a.last_used));
-        serde_json::json!({ "stations": stations })
+        // **The threshold travels with the data.** The page has to say whether
+        // a "do not split" is still provisional, which takes comparing
+        // `failed_probes` to the anchoring threshold — and that threshold is a
+        // decision of the probing logic, not of the page. Sending it spares a
+        // second copy of the number, which would be free to drift.
+        serde_json::json!({
+            "stations": stations,
+            "probes_before_anchoring": crate::PROBES_BEFORE_ANCHORING,
+        })
     }
 
     async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String> {
@@ -381,6 +389,15 @@ mod tests {
         let mut f = fixture();
         assert!(f.admin.set_data(serde_json::json!({ "action": "clear" })).await.is_ok());
         assert!(!f.state_path.exists(), "no write should have happened on an already empty store");
+    }
+
+    #[tokio::test]
+    async fn get_data_carries_the_anchoring_threshold() {
+        // Without it the page would hold its own copy of the number, free to
+        // drift from the one that actually decides.
+        let f = fixture();
+        let data = f.admin.get_data().await;
+        assert_eq!(data["probes_before_anchoring"], crate::PROBES_BEFORE_ANCHORING);
     }
 
     #[tokio::test]

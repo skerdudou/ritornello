@@ -129,6 +129,23 @@ pub struct Entry {
     pub last_used: Option<String>,
     #[serde(default)]
     pub split_titles: u64,
+    /// How many probes have concluded "do not split" on **real** evidence.
+    ///
+    /// A `DoNotSplit` is born **provisional**: a single title proves nothing —
+    /// a station announces jingles, slogans, a talk-show guest with a dash in
+    /// the middle — and as long as this stays under
+    /// `PROBES_BEFORE_ANCHORING`, a new splittable string reopens the
+    /// question. Past it, the verdict is **anchored**: five probes that all
+    /// ruled the split out describe a station that does not announce tracks,
+    /// and the admin page's "forget" is the remedy for the rare mixed one.
+    ///
+    /// It counts **probes**, not titles, and that is what bounds the cost: a
+    /// probe costs at most four requests, hence twenty per station, ever.
+    ///
+    /// Reset by a learned `Split`: the station does split after all, and what
+    /// came before says nothing about it.
+    #[serde(default)]
+    pub failed_probes: u32,
 }
 
 /// The store, indexed by stream URL and persisted as JSON.
@@ -208,12 +225,22 @@ impl Store {
     /// If the existing entry is `Manual`, does **nothing**: this is the rule
     /// on which trust in the admin page rests. Without it, the first track
     /// after a user's correction would silently undo it.
+    ///
+    /// **Also keeps the count of failed probes** (see `Entry::failed_probes`):
+    /// a learned `DoNotSplit` adds one, a learned `Split` resets it to zero.
+    /// The counting belongs here because this is the only place a probe's
+    /// lesson is recorded — putting it at the call site would let a future
+    /// second caller learn without counting.
     pub fn learn(&mut self, url: &str, pattern: Pattern) {
         if let Some(e) = self.stations.iter_mut().find(|e| e.url == url) {
             if e.origin == Origin::Manual {
                 tracing::debug!("manual pattern kept for {url}, learning ignored");
                 return;
             }
+            e.failed_probes = match pattern {
+                Pattern::DoNotSplit => e.failed_probes.saturating_add(1),
+                Pattern::Split { .. } => 0,
+            };
             e.origin = Origin::from_pattern(&pattern);
             e.pattern = pattern;
             return;
@@ -221,6 +248,7 @@ impl Store {
         self.stations.push(Entry {
             url: url.to_string(),
             origin: Origin::from_pattern(&pattern),
+            failed_probes: u32::from(pattern == Pattern::DoNotSplit),
             pattern,
             last_used: None,
             split_titles: 0,
@@ -233,6 +261,10 @@ impl Store {
         if let Some(e) = self.stations.iter_mut().find(|e| e.url == url) {
             e.pattern = pattern;
             e.origin = Origin::Manual;
+            // The count of failed probes no longer means anything: nothing
+            // reprobes a manual pattern, and leaving a non-zero count would
+            // show "provisional" on a page for a decision that is final.
+            e.failed_probes = 0;
             return;
         }
         self.stations.push(Entry {
@@ -241,6 +273,7 @@ impl Store {
             origin: Origin::Manual,
             last_used: None,
             split_titles: 0,
+            failed_probes: 0,
         });
     }
 
@@ -335,6 +368,40 @@ mod tests {
         let mut m = Store::default();
         m.set_manual("http://f", split(" - ", true));
         assert_eq!(m.entry("http://f").unwrap().origin, Origin::Manual);
+    }
+
+    #[test]
+    fn a_do_not_split_counts_its_failed_probes_and_a_split_resets_them() {
+        // The counter that makes the verdict provisional. Without the reset,
+        // a station that finally reveals its pattern would keep the count of
+        // its silent beginnings, and the first following jingle would anchor
+        // it much too early.
+        let mut store = Store::default();
+        for expected in 1..=3 {
+            store.learn("u", Pattern::DoNotSplit);
+            assert_eq!(store.entry("u").unwrap().failed_probes, expected);
+        }
+        store.learn("u", split(" - ", true));
+        assert_eq!(store.entry("u").unwrap().failed_probes, 0, "a split resets the count");
+        // And a first learning creates the entry already counted, otherwise
+        // the first probe would be free.
+        let mut fresh = Store::default();
+        fresh.learn("v", Pattern::DoNotSplit);
+        assert_eq!(fresh.entry("v").unwrap().failed_probes, 1);
+        let mut splitting = Store::default();
+        splitting.learn("w", split(" - ", true));
+        assert_eq!(splitting.entry("w").unwrap().failed_probes, 0);
+    }
+
+    #[test]
+    fn a_manual_decision_clears_the_count_of_failed_probes() {
+        // Nothing reprobes a manual pattern, so a non-zero count would make
+        // the page show "provisional" for a decision that is final.
+        let mut store = Store::default();
+        store.learn("u", Pattern::DoNotSplit);
+        store.learn("u", Pattern::DoNotSplit);
+        store.set_manual("u", Pattern::DoNotSplit);
+        assert_eq!(store.entry("u").unwrap().failed_probes, 0);
     }
 
     #[test]

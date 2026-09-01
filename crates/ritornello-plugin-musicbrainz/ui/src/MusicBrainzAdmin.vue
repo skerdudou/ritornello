@@ -48,10 +48,24 @@ interface Station {
   // an optional field that could also be missing.
   last_used: string | null
   split_titles: number
+  /** Probes that concluded "do not split" on real evidence.
+   *
+   * What makes such a verdict **provisional**: a single title proves nothing,
+   * so as long as this stays under the threshold a new splittable string
+   * reopens the question. Optional because the field is additive on the
+   * backend side (`serde(default)`), so a state file written before it reads
+   * back without it. */
+  failed_probes?: number
 }
 
 interface Data {
   stations: Station[]
+  /** Threshold beyond which a "do not split" is anchored.
+   *
+   * **Sent by the server**, never held here: it is a decision of the probing
+   * logic, and a copy in this file would be free to drift from the one that
+   * actually decides. Optional for the same reason as `failed_probes`. */
+  probes_before_anchoring?: number
 }
 
 const data = ref<Data>({ stations: [] })
@@ -103,6 +117,30 @@ function originText(o: Origin): string {
     case 'manual':
       return t.value('origin_manual')
   }
+}
+
+/**
+ * State of a "do not split" verdict: still provisional, or anchored — and
+ * `null` when the question does not arise.
+ *
+ * Shown **next to** the pattern rather than in a column of its own: it
+ * concerns one pattern out of three, and a column empty on most rows would
+ * cost more width than it gives information, on a page whose stream URLs
+ * already scroll.
+ *
+ * `null` for a manual pattern even when it does not split: nothing reprobes an
+ * operator's decision, so calling it "provisional" would be false.
+ */
+function unsplitState(st: Station): string | null {
+  if (st.pattern !== 'do_not_split' || st.origin === 'manual') return null
+  const total = data.value.probes_before_anchoring
+  const done = st.failed_probes ?? 0
+  // Threshold absent (an older server, or a field not yet sent): say nothing
+  // rather than guess a number. A wrong "2 of 5" would be worse than silence.
+  if (total === undefined) return null
+  return done >= total
+    ? t.value('pattern_no_split_anchored')
+    : t.value('pattern_no_split_provisional', { done, total })
 }
 
 function patternText(m: Pattern): string {
@@ -302,7 +340,14 @@ async function clear(): Promise<void> {
                     </p>
                   </div>
                 </template>
-                <template v-else>{{ patternText(s.pattern) }}</template>
+                <template v-else>
+                  {{ patternText(s.pattern) }}
+                  <span
+                    v-if="unsplitState(s)"
+                    data-unsplit-state
+                    class="text-xs text-muted-foreground"
+                  >{{ unsplitState(s) }}</span>
+                </template>
               </td>
 
               <td class="py-2 pr-2">{{ originText(s.origin) }}</td>
