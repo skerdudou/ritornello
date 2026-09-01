@@ -126,6 +126,21 @@ pub enum CoverPayload {
     Embedded(PathBuf),
 }
 
+/// What `p` charges against `CoverSettings::budget`.
+///
+/// Only `Bytes` costs anything real, and that mirrors `CoverPayload`'s own
+/// doc: `File` and `Embedded` both keep a path and nothing else, the same
+/// path a `folder.jpg` on a NAS would cost whether it sat beside the track
+/// or inside it. `evict_to_budget` charges a retained `Rendered` the same
+/// way, directly against its `bytes.len()` — there is no payload to match
+/// on there, only ever bytes.
+fn payload_cost(p: &CoverPayload) -> usize {
+    match p {
+        CoverPayload::Bytes(v, _) => v.len(),
+        CoverPayload::File(_) | CoverPayload::Embedded(_) => 0,
+    }
+}
+
 /// A cover the core has found, whichever door it came through, before any
 /// fetch is attempted.
 ///
@@ -250,6 +265,28 @@ fn rendition_identity(key: &str, stamp: &SourceStamp, rules: &Rendition) -> Stri
     format!("{key}:{}:{}", stamp.tag(), rules.tag())
 }
 
+/// Whether a retained rendition's identity (see `rendition_identity`) was
+/// produced under the rules the cache is configured with **right now**.
+///
+/// Nothing re-renders a retained thumbnail when the settings change — see
+/// `set_cover_settings` — so an identity's rules tag drifting from the live
+/// one is exactly what marks it as pure waste for `evict_to_budget`'s first
+/// step: it answers a question today's settings no longer ask, and nobody
+/// will ever look it up again under this identity. A disabled rendition
+/// (`current` at `None`) matches nothing at all: no rule is producing
+/// anything right now, so every retained rendition is waste, not merely
+/// stale.
+///
+/// Splitting on the **last** `:` is safe because none of the three parts of
+/// an identity ever contains one: the key and `SourceStamp::tag` are both
+/// hexadecimal, and `Rendition::tag` is digits and `-`.
+fn rendition_is_current(identity: &str, current: Option<Rendition>) -> bool {
+    match (identity.rsplit_once(':'), current) {
+        (Some((_, tag)), Some(rules)) => tag == rules.tag(),
+        _ => false,
+    }
+}
+
 /// The two stages of cover processing, not to be confused.
 ///
 /// `source_max` bounds what the core agrees to **read**, whatever happens
@@ -263,10 +300,9 @@ pub struct CoverSettings {
     /// Memory budget for the cache, in bytes. See
     /// `state::Settings::cover_cache_budget_mio`.
     ///
-    /// **Carried here, not yet consumed here.** This task (the settings and
-    /// their plumbing) only gets the figure from the config page to this
-    /// struct; the eviction that actually keeps `entries` and `renditions`
-    /// under it is a separate task, landing right after on this same branch.
+    /// Enforced by `CoverCache::evict_to_budget`, called after every
+    /// `insert` and `remember_rendition`, against the combined cost of
+    /// `entries` and `renditions` (see `payload_cost`).
     pub budget: usize,
     /// Cap on a cover **downloaded from the internet**, in bytes. See
     /// `state::Settings::cover_download_max_mio`. Passed to `download`
@@ -412,11 +448,30 @@ struct Rendered {
 /// ones, nobody asks again — a device plays one track at a time, and the page
 /// shows one square.
 ///
-/// Deliberately **not** governed by `CoverSettings::budget`, which bounds the
-/// *sources*: a source costs a `PathBuf` for a file on a share, whereas a
-/// rendition costs its bytes, up to `cover_max_bytes_ko` each. A comment here
-/// once claimed the two were the same number; they never were.
+/// **A count on top of the byte budget, not instead of it — a correction.**
+/// A comment here used to say this cap and `CoverSettings::budget` were
+/// unrelated, one bounding sources and the other renditions. That stopped
+/// being true the moment renditions started costing against the same
+/// budget as sources (see `payload_cost`, `evict_to_budget`): a tight
+/// budget can now evict a rendition long before this count is ever
+/// reached. What this constant still buys on its own is a floor that does
+/// not depend on the budget being tight: a generous budget alone would
+/// happily keep dozens of thumbnails for tracks nobody is looking at any
+/// more, since each one is small.
 const RENDITIONS: usize = 4;
+
+/// Hard cap on how many entries `entries` may hold, **regardless of what
+/// they cost**.
+///
+/// **Not a memory bound, and it must never be presented as one in the
+/// config page** — the user reasons in bytes (`CoverSettings::budget`), and
+/// this constant measures something else entirely. It exists only because
+/// `File` and `Embedded` cost nothing (see `payload_cost`): a NAS library
+/// large enough would grow `entries` forever, since a byte budget can never
+/// trigger on a collection whose every member costs zero. This is the belt
+/// for exactly that case — nothing more, nothing tuned to any particular
+/// amount of memory.
+const MAX_ENTRIES: usize = 256;
 
 impl CoverCache {
     pub fn new() -> Self {
@@ -434,13 +489,111 @@ impl CoverCache {
     }
 
     /// Retains a rendition under its identity, evicting the oldest beyond
-    /// `RENDITIONS`.
+    /// `RENDITIONS`, then reconciles the whole cache against the byte
+    /// budget — see `evict_to_budget`. The just-retained identity is passed
+    /// as the one to protect: a budget so tight it cannot even hold the
+    /// rendition just built must still serve that one, not discard it on
+    /// arrival.
     async fn remember_rendition(&self, identity: String, mime: &'static str, bytes: Arc<Vec<u8>>) {
-        let mut v = self.renditions.write().await;
-        v.retain(|e| e.identity != identity);
-        v.push_back(Rendered { identity, mime, bytes });
-        while v.len() > RENDITIONS {
-            v.pop_front();
+        {
+            let mut v = self.renditions.write().await;
+            v.retain(|e| e.identity != identity);
+            v.push_back(Rendered { identity: identity.clone(), mime, bytes });
+            while v.len() > RENDITIONS {
+                v.pop_front();
+            }
+        }
+        self.evict_to_budget(None, Some(&identity)).await;
+    }
+
+    /// Frees memory until `entries` and `renditions` together fit
+    /// `CoverSettings::budget`, cheapest-to-rebuild first:
+    ///
+    /// 1. renditions whose rules no longer match the live settings — pure
+    ///    waste, nobody will ever ask for them again (`rendition_is_current`);
+    /// 2. the oldest remaining rendition;
+    /// 3. the oldest remaining source.
+    ///
+    /// **Why that order.** A rendition rebuilds from its source on the very
+    /// next request, at the cost of a decode; a source may need a fresh
+    /// download or a read from a sleeping share. The cheap side is spent
+    /// first so the expensive side is only touched once the cheap side
+    /// truly cannot make room.
+    ///
+    /// `keep_entry`/`keep_rendition` name what the caller just inserted:
+    /// never evicted, so a budget too small for even one cover still serves
+    /// that one instead of discarding it the instant it arrives.
+    ///
+    /// **Stops the moment one action fails to shrink the total**, instead of
+    /// working through the rest of a collection that cannot help. Without
+    /// this, a NAS library — every source costing 0 bytes, see
+    /// `payload_cost` — would have its sources evicted one by one in a vain
+    /// search for bytes that are not there, right down to the one just
+    /// inserted, the moment anything else (a network cover, a rendition)
+    /// pushed the total over budget.
+    async fn evict_to_budget(&self, keep_entry: Option<&str>, keep_rendition: Option<&str>) {
+        let settings = self.settings();
+        loop {
+            let mut renditions = self.renditions.write().await;
+            let mut entries = self.entries.write().await;
+
+            let total = renditions.iter().map(|r| r.bytes.len()).sum::<usize>()
+                + entries.iter().map(|(_, p)| payload_cost(p)).sum::<usize>();
+            if total <= settings.budget {
+                break;
+            }
+
+            // Step 1: purge every rendition that answers a question the
+            // current settings no longer ask. May free several at once,
+            // hence the length check rather than a single `remove`.
+            let before = renditions.len();
+            renditions.retain(|r| {
+                Some(r.identity.as_str()) == keep_rendition
+                    || rendition_is_current(&r.identity, settings.rendition)
+            });
+            if renditions.len() != before {
+                continue;
+            }
+
+            // Step 2: the oldest rendition that is not the one just built.
+            if let Some(pos) =
+                renditions.iter().position(|r| Some(r.identity.as_str()) != keep_rendition)
+            {
+                renditions.remove(pos);
+                continue;
+            }
+
+            // Step 3: the oldest source that is not the one just inserted.
+            match entries.iter().position(|(k, _)| Some(k.as_str()) != keep_entry) {
+                Some(pos) => {
+                    let freed = payload_cost(&entries[pos].1);
+                    entries.remove(pos);
+                    if freed == 0 {
+                        // This action could not have moved `total`: every
+                        // other candidate left in `entries` costs no more
+                        // than this one did (`File`/`Embedded` are always
+                        // 0), so another lap would only repeat it for the
+                        // same nothing. Stop rather than discarding an
+                        // entire local library in search of bytes that do
+                        // not exist there.
+                        return;
+                    }
+                }
+                // Nothing left to evict beyond what must be kept.
+                None => return,
+            }
+        }
+
+        // Independent of the byte budget just enforced above — see
+        // `MAX_ENTRIES`'s doc for why this exists at all.
+        let mut entries = self.entries.write().await;
+        while entries.len() > MAX_ENTRIES {
+            match entries.iter().position(|(k, _)| Some(k.as_str()) != keep_entry) {
+                Some(pos) => {
+                    entries.remove(pos);
+                }
+                None => break,
+            }
         }
     }
 
@@ -584,21 +737,25 @@ impl CoverCache {
         }
     }
 
-    /// Retains `p` under `key`.
+    /// Retains `p` under `key`, then reconciles the whole cache against the
+    /// byte budget — see `evict_to_budget`.
     ///
-    /// **No eviction happens here.** The count-based cap this method used to
-    /// enforce (`CoverSettings::entries`, a number of covers) is gone along
-    /// with the setting it read: the config page now hands over a memory
-    /// budget in bytes (`CoverSettings::budget`), and a cache that is meant
-    /// to stay under a byte budget cannot decide anything by counting its
-    /// entries — a `Bytes` payload and a `File` payload are not the same cost
-    /// at all (see `CoverPayload`). Landing the setting ahead of the eviction
-    /// that reads it is deliberate: this task is the settings and their
-    /// plumbing only, nothing that decides what to keep or drop.
+    /// **No longer a count-based cap.** This method used to enforce
+    /// `CoverSettings::entries`, a number of covers; that setting is gone,
+    /// replaced by a memory budget in bytes (`CoverSettings::budget`), and a
+    /// cache that is meant to stay under a byte budget cannot decide
+    /// anything by counting its entries — a `Bytes` payload and a `File`
+    /// payload are not the same cost at all (see `CoverPayload` and
+    /// `payload_cost`). `key` is passed to `evict_to_budget` as the entry to
+    /// protect: the one just inserted is never the one evicted to make room
+    /// for itself.
     pub async fn insert(&self, key: String, p: CoverPayload) {
-        let mut e = self.entries.write().await;
-        e.retain(|(k, _)| k != &key);
-        e.push_back((key, p));
+        {
+            let mut e = self.entries.write().await;
+            e.retain(|(k, _)| k != &key);
+            e.push_back((key.clone(), p));
+        }
+        self.evict_to_budget(Some(&key), None).await;
     }
 
     pub async fn contains(&self, key: &str) -> bool {
@@ -1989,17 +2146,6 @@ mod tests {
         assert_eq!(cache.renditions_built(), 1, "eight callers, one decode");
     }
 
-    // The two tests that used to live here — a cache bounded by
-    // `cover_cache_entries` and forgetting its oldest, and the same bound
-    // reclaiming memory as soon as it was lowered — tested a count-based cap
-    // that no longer exists: `insert` performs no eviction at all in this
-    // task (see its doc), the setting it used to read having been replaced
-    // by a memory budget nothing here consumes yet. The task that brings
-    // eviction back under that budget (byte-accounted, and ordered
-    // renditions-then-sources) owns proving it bounds and reclaims memory;
-    // reintroducing a stand-in count-based version here would only be
-    // deleted again the moment that lands.
-
     /// **The guard for this task's whole deletion.** `CoverPayload::Embedded`
     /// names the user's own *audio* file, not a copy of ours — nothing here
     /// may ever delete it. Written and proven green before commit 901bbe2
@@ -2007,15 +2153,16 @@ mod tests {
     /// guarded against — from `insert`, so that the removal was checked
     /// against a real assertion rather than against the absence of a crash.
     ///
-    /// **No longer forced through an eviction to prove it.** The count-based
-    /// cap this test used to lower (`entries: 1`) is gone along with the
-    /// setting that fed it: `insert` performs no eviction at all in this
-    /// task (see its doc). The property under test does not depend on that
-    /// mechanism existing — `insert` must never open or delete the file it
-    /// is handed, whether or not anything is evicted — so it still holds,
-    /// and still fails the moment an unconditional delete is reintroduced.
-    /// The task that brings eviction back under the byte budget must re-arm
-    /// an eviction-shaped version of this guard against its own code path.
+    /// **Re-armed under the byte budget.** The count-based cap this test
+    /// used to lower (`entries: 1`) is gone, but a budget of 0 forces the
+    /// very same shape of eviction: inserting `"b"` pushes the total over
+    /// budget, and `"a"` — the only other entry, hence the oldest — is what
+    /// `evict_to_budget` removes to try to make room, even though an
+    /// `Embedded` costs nothing and removing it cannot actually help (see
+    /// `payload_cost`). The assertion on `contains("a")` proves the eviction
+    /// really ran, not merely that nothing crashed; the assertion on
+    /// `track.exists()` is the one that matters, and is what would have
+    /// caught the `remove_file` this test was written against.
     ///
     /// No real MP3 needed: `insert` never opens the file, it only ever moves
     /// a path in and out of the cache — so a one-byte stand-in exercises the
@@ -2028,15 +2175,18 @@ mod tests {
         let track = dir.path().join("t.mp3");
         std::fs::write(&track, b"x").unwrap();
         let cache = CoverCache::new();
+        cache.set_cover_settings(CoverSettings { budget: 0, ..CoverSettings::default() });
         cache.insert("a".into(), CoverPayload::Embedded(track.clone())).await;
         cache.insert("b".into(), CoverPayload::Bytes(vec![1], "image/jpeg")).await;
+        assert!(!cache.contains("a").await, "the test must actually force an eviction to prove anything");
         assert!(track.exists(), "insertion must never delete the user's audio file");
     }
 
     /// Insertion must never touch a `folder.jpg` declared by a Source, which
     /// lives on its own share and is not ours to delete. See the doc of
-    /// `inserting_over_an_embedded_entry_deletes_no_file` just above for why
-    /// this no longer forces an eviction to make its point.
+    /// `inserting_over_an_embedded_entry_deletes_no_file` just above for how
+    /// the eviction is forced now that the cap is a byte budget rather than
+    /// a count.
     #[tokio::test]
     async fn inserting_over_a_source_folder_jpg_deletes_no_file() {
         let source_dir = tempfile::tempdir().unwrap();
@@ -2044,12 +2194,123 @@ mod tests {
         std::fs::write(&folder_jpg, b"x").unwrap();
 
         let cache = CoverCache::new();
+        cache.set_cover_settings(CoverSettings { budget: 0, ..CoverSettings::default() });
         cache.insert("to-keep".into(), CoverPayload::File(folder_jpg.clone())).await;
         for i in 0..4u8 {
             cache.insert(format!("k{i}"), CoverPayload::Bytes(vec![i], "image/jpeg")).await;
         }
 
+        assert!(!cache.contains("to-keep").await, "the test must actually force an eviction to prove anything");
         assert!(folder_jpg.exists(), "a Source's folder.jpg must never be deleted on our own initiative");
+    }
+
+    // -- `evict_to_budget`: the byte budget, not a count -------------------
+
+    #[tokio::test]
+    async fn the_budget_evicts_by_bytes_not_by_count() {
+        // Fails the moment `insert` goes back to counting entries instead of
+        // bytes (or drops `evict_to_budget` entirely): a count-based cap
+        // would keep some fixed number of these regardless of their size.
+        let cache = CoverCache::new();
+        cache.set_cover_settings(CoverSettings {
+            budget: 8 * 1024 * 1024,
+            ..CoverSettings::default()
+        });
+        for i in 0..20 {
+            cache
+                .insert(format!("k{i}"), CoverPayload::Bytes(vec![0u8; 3 * 1024 * 1024], "image/jpeg"))
+                .await;
+        }
+        let mut kept = 0;
+        for i in 0..20 {
+            if cache.contains(&format!("k{i}")).await {
+                kept += 1;
+            }
+        }
+        assert_eq!(kept, 2, "an 8 MiB budget must hold two 3 MiB covers, not twenty");
+    }
+
+    #[tokio::test]
+    async fn an_entry_larger_than_the_whole_budget_is_still_served() {
+        // Fails if `evict_to_budget` ever removes the entry the caller just
+        // inserted while trying to satisfy an unsatisfiable budget:
+        // `keep_entry` would no longer be honored, and a bad configuration
+        // (a budget smaller than one cover) would leave the cache unable to
+        // serve anything at all, or would hang trying.
+        let cache = CoverCache::new();
+        cache.set_cover_settings(CoverSettings { budget: 10, ..CoverSettings::default() });
+        cache.insert("huge".into(), CoverPayload::Bytes(vec![0u8; 1024], "image/jpeg")).await;
+        assert!(
+            cache.contains("huge").await,
+            "the one cover a misconfigured budget was asked to hold must still be served"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_entries_cost_nothing_and_do_not_loop_the_eviction() {
+        // Fails if `evict_to_budget` drops the "a pass that frees nothing
+        // stops" rule: without it, the permanently-over-budget total left by
+        // the protected `Bytes` entry below would make every local entry
+        // look worth trying, and the loop would walk through all fifty of
+        // them — each freeing 0 bytes, since `File` costs nothing — instead
+        // of giving up after the first.
+        let cache = CoverCache::new();
+        cache.set_cover_settings(CoverSettings { budget: 1, ..CoverSettings::default() });
+        for i in 0..50 {
+            cache
+                .insert(format!("local-{i}"), CoverPayload::File(PathBuf::from(format!("/nas/{i}.jpg"))))
+                .await;
+        }
+        // Pushes the total permanently over budget: this entry alone is
+        // over the 1-byte budget, is protected as the one just inserted,
+        // and every local entry above costs 0 — nothing can ever bring the
+        // total back under budget by evicting them.
+        cache.insert("network".into(), CoverPayload::Bytes(vec![0u8; 1024], "image/jpeg")).await;
+
+        assert!(cache.contains("network").await, "the just-inserted entry is never evicted");
+        let mut kept = 0;
+        for i in 0..50 {
+            if cache.contains(&format!("local-{i}")).await {
+                kept += 1;
+            }
+        }
+        assert!(
+            kept >= 49,
+            "eviction must give up after the first zero-byte source fails to free anything, \
+             not spin through the rest of a local library in search of bytes that are not \
+             there: only {kept} of 50 local entries survived"
+        );
+    }
+
+    #[tokio::test]
+    async fn renditions_are_dropped_before_sources() {
+        // Fails if step 3 (evict the oldest source) ever runs while step 2
+        // (evict the oldest rendition) still has something to give: the
+        // rendition here alone is enough to bring the total back under
+        // budget, so if the source were touched instead, `contains("src")`
+        // would go false.
+        let cache = CoverCache::new();
+        cache.insert("src".into(), CoverPayload::Bytes(vec![0u8; 1000], "image/jpeg")).await;
+        // Built under the settings' current rules, so step 1 (purge stale
+        // renditions) leaves it alone — this test is about step 2 versus
+        // step 3, not about a fingerprint mismatch.
+        let rules = CoverSettings::default().rendition.expect("rendition on by default");
+        let identity = rendition_identity("src", &SourceStamp::Frozen, &rules);
+        cache.remember_rendition(identity.clone(), "image/jpeg", Arc::new(vec![0u8; 500])).await;
+
+        // The source alone (1000 bytes) fits; the rendition on top (1500
+        // total) does not.
+        cache.set_cover_settings(CoverSettings { budget: 1000, ..CoverSettings::default() });
+        // Eviction runs lazily, on the next write — exactly as in
+        // production, where nothing re-checks the budget on a settings
+        // change alone.
+        cache.insert("trigger".into(), CoverPayload::File(PathBuf::from("/nas/x.jpg"))).await;
+
+        assert!(cache.contains("src").await, "a rendition must give way before its own source is touched");
+        assert!(
+            cache.cached_rendition(&identity).await.is_none(),
+            "the rendition must have been evicted to bring the total back under budget"
+        );
     }
 
     #[tokio::test]
