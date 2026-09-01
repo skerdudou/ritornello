@@ -43,6 +43,14 @@ type FrameInFlight = Arc<tokio::sync::OnceCell<Option<Arc<str>>>>;
 type RenditionInFlight =
     Arc<tokio::sync::OnceCell<Option<(&'static str, Arc<Vec<u8>>)>>>;
 
+/// A full-size embedded extraction under way, shared between the caller
+/// running it and those waiting for it. The third instance of the same
+/// rendezvous, one stage lower than `RenditionInFlight`: what is shared here
+/// is the raw picture pulled out of the audio container, before any
+/// re-encoding — see `CoverCache::embedded_in_flight` for why this one exists
+/// at all.
+type EmbeddedInFlight = Arc<tokio::sync::OnceCell<Option<(&'static str, Arc<Vec<u8>>)>>>;
+
 /// What proves a source has not changed under its key.
 ///
 /// **Owned by this module, and that is a correction.** The HTTP route used to
@@ -430,6 +438,32 @@ pub struct CoverCache {
     /// touched it. An assertion that cannot fail is not an assertion.
     #[cfg(test)]
     renditions_built: std::sync::atomic::AtomicUsize,
+    /// Full-size embedded extractions in progress, one entry per cache key.
+    ///
+    /// **What `renditions_in_flight` does not cover.** That rendezvous spares
+    /// two consumers building the *same thumbnail* together, but a full-size
+    /// request (no `?size=thumbnail`) never asks for a rendition at all —
+    /// `cover_get`'s `CoverPayload::Embedded` branch used to call
+    /// `read_embedded_bounded` on its own, no rendezvous of any kind guarding
+    /// it. That route is unauthenticated on the LAN, so N browsers enlarging
+    /// the very same embedded cover (`PlayerCard.vue`'s zoom) each ran their
+    /// own `lofty` parse of the whole container, holding the full picture N
+    /// times over: with `cover_source_max_mio` at its 20 MiB default, three
+    /// concurrent viewers already transiently allocate on the order of a
+    /// Pi's entire RAM budget, and ten exhaust it outright.
+    embedded_in_flight: tokio::sync::Mutex<HashMap<String, EmbeddedInFlight>>,
+    /// How many full-size embedded extractions were **actually** run.
+    ///
+    /// Under `cfg(test)`, the same trade-off as `builds` and
+    /// `renditions_built` above, and for the same reason: only a count of
+    /// executions can prove the rendezvous above spares the extraction.
+    /// **Cannot be folded into `renditions_built`**: that one counts
+    /// *renditions* (thumbnails), and the full-size route this counter
+    /// watches never produces one — a counter that watched the wrong path
+    /// would stay at one however many times this path actually extracted,
+    /// proving nothing.
+    #[cfg(test)]
+    embedded_extractions: std::sync::atomic::AtomicUsize,
 }
 
 /// A retained rendition: its identity (see `rendition_identity`), its MIME
@@ -682,6 +716,63 @@ impl CoverCache {
         result
     }
 
+    /// Extracts (or retrieves, mid-flight) `audio`'s embedded picture at
+    /// **full size**, under the rendezvous keyed by `key`. This is what
+    /// `cover_get`'s `CoverPayload::Embedded` branch now calls instead of
+    /// reaching for `read_embedded_bounded` on its own — see
+    /// `embedded_in_flight`'s doc for the concrete failure this closes.
+    ///
+    /// **The same shape as `line` and `rendition_for`, not a third variant**:
+    /// a `OnceCell` per key behind an `Arc`, registered under the table's
+    /// lock and then awaited outside it — the lock never covers the work,
+    /// which occupies a blocking-pool thread parsing a container — removed
+    /// afterwards by whichever caller finds it still pointing at the cell it
+    /// registered.
+    ///
+    /// **The picture travels behind an `Arc`, and that is the one property
+    /// that matters.** Cloning the `OnceCell`'s answer must stay a refcount
+    /// bump: were the shared value a bare `Vec<u8>` instead, every one of the
+    /// N waiters resolving together would pay for a full copy of the
+    /// picture on its way out of `get_or_init` — the rendezvous would have
+    /// spared the extraction and spent the memory right back, which is
+    /// precisely the property this task exists to establish.
+    ///
+    /// Keyed by the bare cache key rather than a full identity, exactly like
+    /// `renditions_in_flight`: concurrent callers on one key necessarily read
+    /// the same audio file, and there is no stamp yet to fold into an
+    /// identity before that read happens.
+    async fn extract_embedded(
+        &self,
+        key: &str,
+        audio: &std::path::Path,
+        cap: usize,
+    ) -> Option<(&'static str, Arc<Vec<u8>>)> {
+        let cell = {
+            let mut in_flight = self.embedded_in_flight.lock().await;
+            in_flight.entry(key.to_string()).or_insert_with(EmbeddedInFlight::default).clone()
+        };
+        let result = cell
+            .get_or_init(|| async {
+                let (mime, bytes, _stamp) = self.read_embedded_bounded(audio, cap).await?;
+                Some((mime, Arc::new(bytes)))
+            })
+            .await
+            .clone();
+
+        // Same reasoning as `line`/`rendition_for`: a `OnceCell` keeps its
+        // value forever, and this rendezvous is keyed by the bare cache key,
+        // which says nothing about the source's freshness — left in the
+        // table, it would go on serving a picture read long ago to a caller
+        // showing up after the audio file changed under its path.
+        {
+            let mut in_flight = self.embedded_in_flight.lock().await;
+            if in_flight.get(key).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
+                in_flight.remove(key);
+            }
+        }
+        result
+    }
+
     /// How many times a frame was built since the cache was created.
     #[cfg(test)]
     pub(crate) fn builds(&self) -> usize {
@@ -693,6 +784,13 @@ impl CoverCache {
     #[cfg(test)]
     pub(crate) fn renditions_built(&self) -> usize {
         self.renditions_built.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// How many full-size embedded extractions ran since the cache was
+    /// created. See the `embedded_extractions` field.
+    #[cfg(test)]
+    pub(crate) fn embedded_extractions(&self) -> usize {
+        self.embedded_extractions.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Publishes new settings, taken into account at the next publication.
@@ -774,7 +872,8 @@ impl CoverCache {
     /// `COVER_MAX_BYTES` and the doc of `fetch`). For `Embedded`, the route
     /// has no such choice to begin with: a container is not a stream of image
     /// bytes, so extracting through `read_embedded_bounded` is the only way to
-    /// get any, whether the caller is this method or the route's own body.
+    /// get any, whether the caller is this method or, through
+    /// `extract_embedded`'s rendezvous, the route's own body.
     ///
     /// `None` covers indistinctly: unknown key, file vanished or unreadable,
     /// share not answering, content that is no longer an image, and **size
@@ -835,7 +934,7 @@ impl CoverCache {
         };
         match source {
             OnDisk::File(path) => read_file_bounded(&path, cap).await,
-            OnDisk::Embedded(audio) => read_embedded_bounded(&audio, cap).await,
+            OnDisk::Embedded(audio) => self.read_embedded_bounded(&audio, cap).await,
         }
     }
 
@@ -1243,45 +1342,61 @@ async fn read_file_bounded(
 ///
 /// `lofty` is strictly blocking, hence `spawn_blocking`. The stamp describes
 /// the **audio file**, since that is what a caller will validate against.
-async fn read_embedded_bounded(
-    audio: &std::path::Path,
-    cap: usize,
-) -> Option<(&'static str, Vec<u8>, SourceStamp)> {
-    let path = audio.to_path_buf();
-    let work = tokio::time::timeout(
-        FILE_TIMEOUT,
-        tokio::task::spawn_blocking(move || {
-            let meta = std::fs::metadata(&path).ok()?;
-            let stamp = SourceStamp::of_file(&meta);
-            let file = lofty::probe::Probe::open(&path).ok()?.read().ok()?;
-            let bytes = lofty::file::TaggedFileExt::primary_tag(&file)
-                .or_else(|| lofty::file::TaggedFileExt::first_tag(&file))?
-                .pictures()
-                .first()?
-                .data()
-                .to_vec();
-            if bytes.len() > cap {
-                tracing::warn!(
-                    "embedded cover in {} is {} bytes, over the {cap}-byte limit",
-                    path.display(),
-                    bytes.len()
-                );
-                return None;
+///
+/// **A method, not a free function, purely to host `embedded_extractions`.**
+/// This is the only place a container is actually parsed for its picture, so
+/// it is the one true place to count an extraction: both of this method's
+/// callers below (`bytes`, and — through `extract_embedded` —
+/// `cover_get`) go through here, and neither is left free to increment the
+/// counter on its own, which would only prove that a caller ran, not that an
+/// extraction did.
+impl CoverCache {
+    async fn read_embedded_bounded(
+        &self,
+        audio: &std::path::Path,
+        cap: usize,
+    ) -> Option<(&'static str, Vec<u8>, SourceStamp)> {
+        #[cfg(test)]
+        self.embedded_extractions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let path = audio.to_path_buf();
+        let work = tokio::time::timeout(
+            FILE_TIMEOUT,
+            tokio::task::spawn_blocking(move || {
+                let meta = std::fs::metadata(&path).ok()?;
+                let stamp = SourceStamp::of_file(&meta);
+                let file = lofty::probe::Probe::open(&path).ok()?.read().ok()?;
+                let bytes = lofty::file::TaggedFileExt::primary_tag(&file)
+                    .or_else(|| lofty::file::TaggedFileExt::first_tag(&file))?
+                    .pictures()
+                    .first()?
+                    .data()
+                    .to_vec();
+                if bytes.len() > cap {
+                    tracing::warn!(
+                        "embedded cover in {} is {} bytes, over the {cap}-byte limit",
+                        path.display(),
+                        bytes.len()
+                    );
+                    return None;
+                }
+                let mime = image_type(&bytes)?;
+                Some((mime, bytes, stamp))
+            }),
+        )
+        .await;
+        match work {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                tracing::warn!("embedded cover extraction panicked: {e}");
+                None
             }
-            let mime = image_type(&bytes)?;
-            Some((mime, bytes, stamp))
-        }),
-    )
-    .await;
-    match work {
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) => {
-            tracing::warn!("embedded cover extraction panicked: {e}");
-            None
-        }
-        Err(_) => {
-            tracing::warn!("embedded cover in {} did not answer in {FILE_TIMEOUT:?}", audio.display());
-            None
+            Err(_) => {
+                tracing::warn!(
+                    "embedded cover in {} did not answer in {FILE_TIMEOUT:?}",
+                    audio.display()
+                );
+                None
+            }
         }
     }
 }
@@ -1821,8 +1936,18 @@ pub async fn cover_get(
             }
             // Only reached once a body is actually needed: the container is
             // parsed here, and only here — never to answer a 304.
+            //
+            // **Through `extract_embedded`, not `read_embedded_bounded`
+            // directly.** This bare URL is the enlarged view of
+            // `PlayerCard.vue`, unauthenticated on the LAN: nothing upstream
+            // of this branch deduplicates concurrent callers the way
+            // `rendition_for`/`renditions_in_flight` do for the thumbnail
+            // branch just above, so N browsers enlarging the same cover at
+            // once used to run N independent `lofty` parses. See
+            // `CoverCache::embedded_in_flight` for the full account.
             let cap = state.covers.settings().source_max;
-            let Some((mime, bytes, _)) = read_embedded_bounded(&audio, cap).await else {
+            let Some((mime, bytes)) = state.covers.extract_embedded(&key, &audio, cap).await
+            else {
                 tracing::warn!("cover {key} unreadable: {}", audio.display());
                 return (StatusCode::NOT_FOUND, "illisible").into_response();
             };
@@ -1832,7 +1957,13 @@ pub async fn cover_get(
                     (header::CACHE_CONTROL, "no-cache".to_string()),
                     (header::ETAG, etag),
                 ],
-                bytes,
+                // Cloned out of the `Arc`, same as `line`'s `Some(_)` branch:
+                // `axum`'s response body wants an owned buffer, and this is
+                // the one copy each caller must eventually pay to hand its
+                // own bytes to its own socket — what the rendezvous above
+                // spares is the extraction and the N-fold container parse,
+                // not this final, unavoidable handoff.
+                bytes.as_ref().clone(),
             )
                 .into_response()
         }
@@ -2743,6 +2874,49 @@ mod tests {
             1,
             "a 304 must not decode the embedded picture again — it never needed to"
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_full_size_requests_extract_once() {
+        // **The gap `renditions_in_flight` does not cover.** A bare URL (no
+        // `?size=thumbnail`) asks for no rendition at all, so the rendezvous
+        // one stage up never engages — before this test, `cover_get`'s
+        // `CoverPayload::Embedded` branch called `read_embedded_bounded`
+        // directly, unguarded, on a route reachable without authentication
+        // from the LAN. Eight browsers enlarging the very same embedded
+        // cover (`PlayerCard.vue`'s zoom) used to run eight independent
+        // `lofty` parses of the whole container, each briefly holding the
+        // full picture.
+        //
+        // Only a count of executions can prove this: comparing the eight
+        // response bodies proves nothing, they are byte-identical whether
+        // one extraction ran or eight — same reasoning as
+        // `two_browsers_asking_at_the_same_instant_decode_the_image_once`,
+        // one stage lower (raw extraction, not re-encoding).
+        let dir = tempfile::tempdir().unwrap();
+        let Some(track) =
+            crate::player::mpv::tests::mp3_with_cover_from(dir.path(), "color=c=red:s=64x64:d=1")
+        else {
+            eprintln!("ffmpeg missing: skipping test");
+            return;
+        };
+        let cache = Arc::new(CoverCache::new());
+        cache.insert("k".into(), CoverPayload::Embedded(track)).await;
+
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let c = cache.clone();
+                tokio::spawn(async move { served_body(&c, "k", "").await })
+            })
+            .collect();
+        let mut bodies = Vec::new();
+        for t in tasks {
+            let (status, body) = t.await.expect("no task may panic");
+            assert_eq!(status, 200);
+            bodies.push(body);
+        }
+        assert!(bodies.iter().all(|b| b == &bodies[0]), "all eight must get the same picture");
+        assert_eq!(cache.embedded_extractions(), 1, "eight callers, one extraction");
     }
 
     // -- allowed_target: the SSRF safeguard, with no network at all ---------
