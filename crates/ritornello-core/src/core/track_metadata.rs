@@ -369,8 +369,31 @@ impl<P: Player> Core<P> {
         let covers = self.covers.clone();
         let tx = self.cover_tx.clone();
         self.cover_in_flight = Some(key.clone());
+        // An embedded source must not take the `contains` short-circuit
+        // below. The key is content-addressed (`cover::key` hashes the
+        // picture's bytes, not the audio path — see its doc), which is
+        // exactly what lets a fifteen-track album share one entry; but the
+        // payload behind that entry names one specific audio file, and
+        // `contains` alone cannot tell "still the same file" from "a
+        // different file that once produced the same key". Two ways for
+        // that to go wrong if this branch is removed: the first file named
+        // gets moved, renamed or deleted, and every other track sharing its
+        // key starts 404ing even though it still carries the very picture
+        // the key promises; or the first file gets retagged in place (same
+        // path, a new picture) and a later track that still carries the
+        // *old* picture recomputes the same old key, finds `contains` true,
+        // and is served the retagged file's *new* bytes under a key that
+        // was never computed from them — a content-addressed key silently
+        // lying about its own content. Always re-probing and re-inserting
+        // settles both: the entry ends up naming whichever file this
+        // `fetch` actually just saw carry this exact picture. This costs
+        // nothing for `Embedded` — `cover::fetch` performs no IO on it, see
+        // its doc — which is why the branch stays worth keeping for `Ref`:
+        // there, skipping a re-download over the internet is the entire
+        // point of the guard.
+        let is_embedded = matches!(&r, crate::cover::CoverSource::Embedded { .. });
         tokio::spawn(async move {
-            if covers.contains(&key).await {
+            if !is_embedded && covers.contains(&key).await {
                 let _ = tx.send((key, true)).await;
                 return;
             }
@@ -1305,6 +1328,170 @@ mod tests {
             core.player_state().status.as_deref(),
             Some("LIVE"),
             "and the remembered status must survive"
+        );
+    }
+
+    /// Face 1 of the stale-embedded-path bug: `cover::key` is derived from
+    /// the picture's **content**, so every track of an album shares one
+    /// cache entry — but the payload behind that entry used to keep naming
+    /// whichever track was probed *first*, forever. Move, rename or delete
+    /// that one file and the shared entry breaks for the whole album, even
+    /// though every other track still carries the exact picture the key
+    /// promises.
+    ///
+    /// Production change that defeats this test: reinstating the `contains`
+    /// short-circuit for `CoverSource::Embedded` in `start_cover_fetch`
+    /// (i.e. removing the branch this fix adds). See the task report for
+    /// the observed failure of this test before the fix.
+    #[tokio::test]
+    async fn a_second_track_of_the_same_album_refreshes_the_stale_audio_path() {
+        let (mut core, _state_rx, mut cover_rx, tmp) = test_core_with_cover_channel();
+        let Some(track1) = test_mp3_with_cover(tmp.path()) else {
+            eprintln!("ffmpeg missing: skipping test");
+            return;
+        };
+        // Track 2 of the same album: a distinct file, byte-for-byte the
+        // same embedded picture — exactly the situation `cover::key` is
+        // built to deduplicate.
+        let track2 = tmp.path().join("track2.mp3");
+        std::fs::copy(&track1, &track2).unwrap();
+
+        let path1 = track1.to_string_lossy().into_owned();
+        core.set_identity(Some(serde_json::json!({"kind": "file", "path": path1})));
+        core.current_path = Some(path1.clone());
+        let r1 = crate::player::mpv::embedded_cover(&path1).expect("track1 carries a cover");
+        let key = crate::cover::key(&r1);
+        core.extraction_arrived(path1.clone(), Some(r1)).await;
+        let (k, ok) = cover_rx.recv().await.expect("the first probe must trigger a real fetch");
+        assert_eq!(k, key);
+        assert!(ok, "an unseen key must be fetched successfully");
+        // **Fed back, and it is not decoration.** In production `main`'s
+        // loop drains this channel into `cover_arrived`, which is the only
+        // thing that releases `cover_in_flight`. A test that merely reads
+        // the message off the channel leaves the marker armed for this key
+        // forever: track 2's `start_cover_fetch` then returns on the
+        // in-flight guard, sends nothing, and the second `recv` below
+        // blocks until the harness kills the run.
+        core.cover_arrived(k, ok).await;
+
+        // Track 2 starts playing: same picture, hence the same key — and
+        // the entry must therefore be refreshed to name what is playing
+        // *now*, not merely confirmed as already known.
+        let path2 = track2.to_string_lossy().into_owned();
+        core.set_identity(Some(serde_json::json!({"kind": "file", "path": path2})));
+        core.current_path = Some(path2.clone());
+        let r2 = crate::player::mpv::embedded_cover(&path2).expect("track2 carries the same cover");
+        assert_eq!(crate::cover::key(&r2), key, "both tracks must share one cache entry");
+        core.extraction_arrived(path2.clone(), Some(r2)).await;
+        // A message comes back **either way** — the short-circuit branch
+        // reports `(key, true)` just as a real fetch does — so this `recv`
+        // proves only that a task ran to completion, never that the entry
+        // was refreshed. It is the request below that separates fixed from
+        // unfixed. Awaited all the same, and that is what makes the test
+        // deterministic: the detached task inserts before it sends, so once
+        // this returns the cache is settled and no sleep is needed.
+        let (k2, ok2) = cover_rx.recv().await.expect("track 2 must run a cover task of its own");
+        assert_eq!(k2, key);
+        assert!(ok2);
+
+        // Track 1 is gone. If the shared entry still named it, this route
+        // would 404 even though the album's picture is still perfectly
+        // available — inside track 2, which the entry must now name.
+        std::fs::remove_file(&track1).unwrap();
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+        let app = crate::status::router(crate::status::AppState {
+            covers: core.app_covers().clone(),
+            ..crate::status::tests_support::app_state()
+        });
+        let resp = app
+            .oneshot(Request::get(format!("/api/cover/{key}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the shared entry must have followed track2, not stayed pinned on the deleted track1"
+        );
+    }
+
+    /// Face 2 of the stale-embedded-path bug, and the more dangerous one:
+    /// the entry does not merely go stale, it serves the **wrong picture**
+    /// while looking perfectly valid. Key `K` is content-addressed from
+    /// track1's original picture. Track1 gets retagged in place (same
+    /// path, a new picture). Track7, elsewhere, carries the very picture
+    /// track1 used to: its probe recomputes the same `K`, and before this
+    /// fix `covers.contains(K)` alone was enough to serve the entry as-is —
+    /// which by then names track1's path, and therefore reads its *new*
+    /// picture, never the one `K` was ever computed from.
+    #[tokio::test]
+    async fn a_retag_never_serves_its_stale_picture_under_a_still_valid_key() {
+        let (mut core, _state_rx, mut cover_rx, tmp) = test_core_with_cover_channel();
+        let Some(track1) = test_mp3_with_cover(tmp.path()) else {
+            eprintln!("ffmpeg missing: skipping test");
+            return;
+        };
+        let track7 = tmp.path().join("track7.mp3");
+        std::fs::copy(&track1, &track7).unwrap();
+        // Grabbed from track7, which is never retagged below, so what this
+        // test compares against cannot itself be a stale read.
+        let old_picture = embedded_picture_bytes(&track7);
+
+        let path1 = track1.to_string_lossy().into_owned();
+        core.set_identity(Some(serde_json::json!({"kind": "file", "path": path1})));
+        core.current_path = Some(path1.clone());
+        let r1 = crate::player::mpv::embedded_cover(&path1).expect("track1 carries a cover");
+        let key = crate::cover::key(&r1);
+        core.extraction_arrived(path1.clone(), Some(r1)).await;
+        let (k, ok) = cover_rx.recv().await.expect("the first probe must trigger a real fetch");
+        // Fed back for the same reason as in the test above: `cover_arrived`
+        // is what releases `cover_in_flight`, and without it track 7's fetch
+        // below never starts and its `recv` never returns.
+        core.cover_arrived(k, ok).await;
+
+        // Track 1 is retagged: same path, a deliberately different
+        // picture.
+        assert!(
+            retag_embedded_cover(&track1, "red"),
+            "ffmpeg must still be available to retag the file"
+        );
+
+        // Track 7 starts playing. It still carries the OLD picture, so it
+        // recomputes the very same key `K`.
+        let path7 = track7.to_string_lossy().into_owned();
+        core.set_identity(Some(serde_json::json!({"kind": "file", "path": path7})));
+        core.current_path = Some(path7.clone());
+        let r7 = crate::player::mpv::embedded_cover(&path7).expect("track7 carries the old cover");
+        assert_eq!(crate::cover::key(&r7), key, "track7 must recompute the same content-addressed key");
+        core.extraction_arrived(path7.clone(), Some(r7)).await;
+        // Same reading as in the test above: this only says a task ran —
+        // the short-circuit reports success too. What it buys is ordering:
+        // the insert precedes the send, so the request below sees a settled
+        // cache without any sleep. The bytes are what judge the fix.
+        cover_rx.recv().await.expect("track 7 must run a cover task of its own");
+
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+        let app = crate::status::router(crate::status::AppState {
+            covers: core.app_covers().clone(),
+            ..crate::status::tests_support::app_state()
+        });
+        let resp = app
+            .oneshot(Request::get(format!("/api/cover/{key}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let served = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        // Compared through `content_key` rather than as raw slices, and it
+        // is not only for a readable failure: `content_key` is the very
+        // function `key` hashes, so this states the promise the URL makes —
+        // *these bytes fingerprint to what K was built from* — instead of a
+        // two-hundred-byte array diff that says the same thing unreadably.
+        assert_eq!(
+            crate::cover::content_key(&served),
+            crate::cover::content_key(&old_picture),
+            "K must keep serving the picture it was computed from — track7's — never track1's new one"
         );
     }
 }

@@ -490,6 +490,102 @@ pub(super) fn test_mp3_with_cover(dir: &std::path::Path) -> Option<std::path::Pa
     ok.then_some(output)
 }
 
+/// Rewrites the picture embedded in `output` **in place**, same path, via
+/// ffmpeg — the retag scenario the stale-embedded-path bug lives in: a
+/// track's audio file changes what it carries without moving. Same pipeline
+/// as `test_mp3_with_cover`, parameterized on `color` so the new picture is
+/// provably different from whatever was there before. `false` if ffmpeg is
+/// absent, exactly like `test_mp3_with_cover`.
+pub(super) fn retag_embedded_cover(output: &std::path::Path, color: &str) -> bool {
+    let image = output.with_extension(format!("{color}.jpg"));
+    std::process::Command::new("ffmpeg")
+        .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i"])
+        .arg(format!("color=c={color}:s=32x32:d=1"))
+        .args(["-frames:v", "1"])
+        .arg(&image)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+        && std::process::Command::new("ffmpeg")
+            .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("sine=frequency=440:duration=1")
+            .arg("-i")
+            .arg(&image)
+            .args(["-map", "0:a", "-map", "1:v", "-c:a", "libmp3lame", "-c:v", "copy"])
+            .args(["-id3v2_version", "3"])
+            .args(["-metadata:s:v", "title=Album cover", "-metadata:s:v", "comment=Cover (front)"])
+            .arg(output)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+}
+
+/// The raw bytes of the picture embedded in `path`, read directly with
+/// `lofty` — what a test compares served bytes against, independently of
+/// anything `cover.rs` does with them.
+pub(super) fn embedded_picture_bytes(path: &std::path::Path) -> Vec<u8> {
+    let file = lofty::probe::Probe::open(path).expect("probe the test fixture").read().expect("read tags");
+    lofty::file::TaggedFileExt::primary_tag(&file)
+        .or_else(|| lofty::file::TaggedFileExt::first_tag(&file))
+        .expect("the fixture carries a tag")
+        .pictures()
+        .first()
+        .expect("the fixture carries a picture")
+        .data()
+        .to_vec()
+}
+
+/// Like `test_core_with_extraction`, but keeps the **cover** channel instead
+/// of the extraction one.
+///
+/// Needed by any test that must observe whether `start_cover_fetch`'s real
+/// detached task actually re-fetched and re-inserted a cache entry, rather
+/// than short-circuiting on `contains`. Hand-replaying the end of the
+/// detached task — as most other tests in this module do, calling
+/// `cover::fetch`/`insert` directly — would bypass the very guard the
+/// stale-embedded-path bug lives in, and prove nothing about it.
+#[allow(clippy::type_complexity)]
+pub(super) fn test_core_with_cover_channel() -> (
+    Core<FakePlayer>,
+    watch::Receiver<PlayerState>,
+    mpsc::Receiver<(String, bool)>,
+    tempfile::TempDir,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let source_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
+    sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: source_calls.clone() }));
+    sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls }));
+    let (np_tx, _np_rx) =
+        watch::channel(NowPlaying { source: "radio".into(), identity: None, ..Default::default() });
+    let (state_tx, state_rx) = watch::channel(PlayerState::default());
+    let root = dir.path().to_path_buf();
+    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+        "core",
+        "en",
+        &root,
+        crate::i18n::EN,
+    )));
+    let covers = Arc::new(crate::cover::CoverCache::new());
+    let (cover_tx, cover_rx) = mpsc::channel(4);
+    let core = Core::new(
+        FakePlayer::default(),
+        Wiring {
+            sources,
+            persisted: PersistedState::default(),
+            state_path: dir.path().join("state.json"),
+            catalog,
+            locales_root: root,
+            sources_catalog: watch::channel(SourcesCatalog::default()).0,
+            metadata: MetadataWiring { plugins: vec![], now_playing: np_tx, state: state_tx },
+        },
+        covers,
+        cover_tx,
+        mpsc::channel(4).0,
+    );
+    (core, state_rx, cover_rx, dir)
+}
+
 /// French pack shipped in the repository (invariant: same keys as the embedded English).
 pub(super) fn fr_pack() -> String {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales/core/fr.toml");
