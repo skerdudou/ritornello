@@ -4,10 +4,10 @@
 
 <p align="center">
   <a href="https://github.com/skerdudou/ritornello/actions/workflows/ci.yml"><img src="https://github.com/skerdudou/ritornello/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/badge/rust-2021%20edition-b7410e?logo=rust" alt="Rust 2021">
+  <img src="https://img.shields.io/badge/back-Rust-b7410e?logo=rust&logoColor=white" alt="Back end in Rust">
   <img src="https://img.shields.io/badge/targets-armv7%20%7C%20aarch64%20%7C%20x86__64-blue" alt="armv7, aarch64, x86_64">
   <img src="https://img.shields.io/badge/UI-Vue%203-42b883?logo=vue.js&logoColor=white" alt="Vue 3">
-  <img src="https://img.shields.io/badge/status-0.1%20%E2%80%94%20daily%20use-yellow" alt="0.1, in daily use">
+  <img src="https://img.shields.io/badge/0.1-yellow" alt="Ritornello 0.1">
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green" alt="MIT OR Apache-2.0"></a>
 </p>
 
