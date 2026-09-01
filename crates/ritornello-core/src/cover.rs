@@ -444,22 +444,6 @@ struct Rendered {
     bytes: Arc<Vec<u8>>,
 }
 
-/// Number of renditions retained. Beyond the current cover and a few previous
-/// ones, nobody asks again — a device plays one track at a time, and the page
-/// shows one square.
-///
-/// **A count on top of the byte budget, not instead of it — a correction.**
-/// A comment here used to say this cap and `CoverSettings::budget` were
-/// unrelated, one bounding sources and the other renditions. That stopped
-/// being true the moment renditions started costing against the same
-/// budget as sources (see `payload_cost`, `evict_to_budget`): a tight
-/// budget can now evict a rendition long before this count is ever
-/// reached. What this constant still buys on its own is a floor that does
-/// not depend on the budget being tight: a generous budget alone would
-/// happily keep dozens of thumbnails for tracks nobody is looking at any
-/// more, since each one is small.
-const RENDITIONS: usize = 4;
-
 /// Hard cap on how many entries `entries` may hold, **regardless of what
 /// they cost**.
 ///
@@ -488,20 +472,27 @@ impl CoverCache {
             .map(|v| (v.mime, v.bytes.clone()))
     }
 
-    /// Retains a rendition under its identity, evicting the oldest beyond
-    /// `RENDITIONS`, then reconciles the whole cache against the byte
-    /// budget — see `evict_to_budget`. The just-retained identity is passed
-    /// as the one to protect: a budget so tight it cannot even hold the
-    /// rendition just built must still serve that one, not discard it on
-    /// arrival.
+    /// Retains a rendition under its identity, then reconciles the whole
+    /// cache against the byte budget — see `evict_to_budget`. The
+    /// just-retained identity is passed as the one to protect: a budget so
+    /// tight it cannot even hold the rendition just built must still serve
+    /// that one, not discard it on arrival.
+    ///
+    /// **No count-based cap on top, and that is deliberate.** The config
+    /// page's estimate of how many covers a budget holds (see
+    /// `CoverSettings::budget`'s doc) is built entirely from that budget;
+    /// for a NAS library, a rendition is the *only* thing that ever costs
+    /// anything (`payload_cost`), so a hidden extra cap here would make
+    /// that estimate a lie in exactly the way this chantier exists to
+    /// remove. Stale thumbnails do not pile up under a generous budget
+    /// either: `evict_to_budget`'s first step purges every rendition whose
+    /// rules no longer match the live settings, and the budget itself
+    /// bounds what is left, oldest first.
     async fn remember_rendition(&self, identity: String, mime: &'static str, bytes: Arc<Vec<u8>>) {
         {
             let mut v = self.renditions.write().await;
             v.retain(|e| e.identity != identity);
             v.push_back(Rendered { identity: identity.clone(), mime, bytes });
-            while v.len() > RENDITIONS {
-                v.pop_front();
-            }
         }
         self.evict_to_budget(None, Some(&identity)).await;
     }
@@ -524,13 +515,16 @@ impl CoverCache {
     /// never evicted, so a budget too small for even one cover still serves
     /// that one instead of discarding it the instant it arrives.
     ///
-    /// **Stops the moment one action fails to shrink the total**, instead of
-    /// working through the rest of a collection that cannot help. Without
-    /// this, a NAS library — every source costing 0 bytes, see
-    /// `payload_cost` — would have its sources evicted one by one in a vain
-    /// search for bytes that are not there, right down to the one just
-    /// inserted, the moment anything else (a network cover, a rendition)
-    /// pushed the total over budget.
+    /// **Step 3 only ever considers a source that actually costs
+    /// something.** A `File`/`Embedded` entry costs 0 (`payload_cost`), so
+    /// evicting one can never shrink `total`: doing it anyway would both
+    /// fail to fix the budget and destroy a perfectly usable cache entry
+    /// for nothing. Entries are in insertion order, not cost order, so the
+    /// oldest entry overall and the oldest *evictable* entry are not the
+    /// same thing — a NAS `File` sitting before an internet `Bytes` cover
+    /// must not be the one sacrificed just because it came first. Bounding
+    /// how many zero-cost entries `entries` may hold is `MAX_ENTRIES`'s job
+    /// alone, run right after this loop.
     async fn evict_to_budget(&self, keep_entry: Option<&str>, keep_rendition: Option<&str>) {
         let settings = self.settings();
         loop {
@@ -563,23 +557,21 @@ impl CoverCache {
                 continue;
             }
 
-            // Step 3: the oldest source that is not the one just inserted.
-            match entries.iter().position(|(k, _)| Some(k.as_str()) != keep_entry) {
+            // Step 3: the oldest source that both costs something and is
+            // not the one just inserted. A zero-cost source is skipped
+            // rather than evicted — see the doc above for why.
+            match entries
+                .iter()
+                .position(|(k, p)| Some(k.as_str()) != keep_entry && payload_cost(p) > 0)
+            {
                 Some(pos) => {
-                    let freed = payload_cost(&entries[pos].1);
                     entries.remove(pos);
-                    if freed == 0 {
-                        // This action could not have moved `total`: every
-                        // other candidate left in `entries` costs no more
-                        // than this one did (`File`/`Embedded` are always
-                        // 0), so another lap would only repeat it for the
-                        // same nothing. Stop rather than discarding an
-                        // entire local library in search of bytes that do
-                        // not exist there.
-                        return;
-                    }
+                    continue;
                 }
-                // Nothing left to evict beyond what must be kept.
+                // Nothing left that would actually free anything: either
+                // only zero-cost entries and the protected one remain, or
+                // nothing remains at all. Stop rather than spinning through
+                // a collection that cannot help.
                 None => return,
             }
         }
@@ -2153,16 +2145,19 @@ mod tests {
     /// guarded against — from `insert`, so that the removal was checked
     /// against a real assertion rather than against the absence of a crash.
     ///
-    /// **Re-armed under the byte budget.** The count-based cap this test
-    /// used to lower (`entries: 1`) is gone, but a budget of 0 forces the
-    /// very same shape of eviction: inserting `"b"` pushes the total over
-    /// budget, and `"a"` — the only other entry, hence the oldest — is what
-    /// `evict_to_budget` removes to try to make room, even though an
-    /// `Embedded` costs nothing and removing it cannot actually help (see
-    /// `payload_cost`). The assertion on `contains("a")` proves the eviction
-    /// really ran, not merely that nothing crashed; the assertion on
-    /// `track.exists()` is the one that matters, and is what would have
-    /// caught the `remove_file` this test was written against.
+    /// **Re-armed under `MAX_ENTRIES`, not the byte budget.** The
+    /// count-based cap this test used to lower (`entries: 1`) is gone, and a
+    /// tight *byte* budget can no longer stand in for it: an `Embedded`
+    /// costs 0 (`payload_cost`), and `evict_to_budget`'s step 3 now skips
+    /// every zero-cost entry rather than evict one for no gain (see its
+    /// doc). The only cap left that ever touches a zero-cost entry is
+    /// `MAX_ENTRIES`, so this test pushes `entries` one past it: `"a"`,
+    /// inserted first, is the oldest, and the trim removes it to bring the
+    /// count back down. The assertion on `contains("a")` proves the
+    /// eviction really ran, not merely that nothing crashed; the assertion
+    /// on `track.exists()` is the one that matters, and is what would have
+    /// caught the `remove_file` this test was written against (removed in
+    /// commit 901bbe2).
     ///
     /// No real MP3 needed: `insert` never opens the file, it only ever moves
     /// a path in and out of the cache — so a one-byte stand-in exercises the
@@ -2175,18 +2170,18 @@ mod tests {
         let track = dir.path().join("t.mp3");
         std::fs::write(&track, b"x").unwrap();
         let cache = CoverCache::new();
-        cache.set_cover_settings(CoverSettings { budget: 0, ..CoverSettings::default() });
         cache.insert("a".into(), CoverPayload::Embedded(track.clone())).await;
-        cache.insert("b".into(), CoverPayload::Bytes(vec![1], "image/jpeg")).await;
+        for i in 0..MAX_ENTRIES {
+            cache.insert(format!("k{i}"), CoverPayload::Bytes(vec![1], "image/jpeg")).await;
+        }
         assert!(!cache.contains("a").await, "the test must actually force an eviction to prove anything");
         assert!(track.exists(), "insertion must never delete the user's audio file");
     }
 
     /// Insertion must never touch a `folder.jpg` declared by a Source, which
     /// lives on its own share and is not ours to delete. See the doc of
-    /// `inserting_over_an_embedded_entry_deletes_no_file` just above for how
-    /// the eviction is forced now that the cap is a byte budget rather than
-    /// a count.
+    /// `inserting_over_an_embedded_entry_deletes_no_file` just above for why
+    /// `MAX_ENTRIES`, not the byte budget, is what forces the eviction now.
     #[tokio::test]
     async fn inserting_over_a_source_folder_jpg_deletes_no_file() {
         let source_dir = tempfile::tempdir().unwrap();
@@ -2194,10 +2189,9 @@ mod tests {
         std::fs::write(&folder_jpg, b"x").unwrap();
 
         let cache = CoverCache::new();
-        cache.set_cover_settings(CoverSettings { budget: 0, ..CoverSettings::default() });
         cache.insert("to-keep".into(), CoverPayload::File(folder_jpg.clone())).await;
-        for i in 0..4u8 {
-            cache.insert(format!("k{i}"), CoverPayload::Bytes(vec![i], "image/jpeg")).await;
+        for i in 0..MAX_ENTRIES {
+            cache.insert(format!("k{i}"), CoverPayload::Bytes(vec![1], "image/jpeg")).await;
         }
 
         assert!(!cache.contains("to-keep").await, "the test must actually force an eviction to prove anything");
@@ -2248,12 +2242,12 @@ mod tests {
 
     #[tokio::test]
     async fn local_entries_cost_nothing_and_do_not_loop_the_eviction() {
-        // Fails if `evict_to_budget` drops the "a pass that frees nothing
-        // stops" rule: without it, the permanently-over-budget total left by
-        // the protected `Bytes` entry below would make every local entry
-        // look worth trying, and the loop would walk through all fifty of
-        // them — each freeing 0 bytes, since `File` costs nothing — instead
-        // of giving up after the first.
+        // Fails if step 3 goes back to evicting whatever is oldest
+        // regardless of cost: with the protected `Bytes` entry below the
+        // only thing in the cache that costs anything, and every local
+        // entry costing 0, step 3 has no eligible candidate at all and must
+        // return immediately rather than walking through all fifty local
+        // entries hunting for bytes that are not there.
         let cache = CoverCache::new();
         cache.set_cover_settings(CoverSettings { budget: 1, ..CoverSettings::default() });
         for i in 0..50 {
@@ -2264,7 +2258,8 @@ mod tests {
         // Pushes the total permanently over budget: this entry alone is
         // over the 1-byte budget, is protected as the one just inserted,
         // and every local entry above costs 0 — nothing can ever bring the
-        // total back under budget by evicting them.
+        // total back under budget by evicting them, so none of them should
+        // even be tried.
         cache.insert("network".into(), CoverPayload::Bytes(vec![0u8; 1024], "image/jpeg")).await;
 
         assert!(cache.contains("network").await, "the just-inserted entry is never evicted");
@@ -2274,12 +2269,31 @@ mod tests {
                 kept += 1;
             }
         }
-        assert!(
-            kept >= 49,
-            "eviction must give up after the first zero-byte source fails to free anything, \
-             not spin through the rest of a local library in search of bytes that are not \
-             there: only {kept} of 50 local entries survived"
+        assert_eq!(
+            kept, 50,
+            "a zero-cost entry must never be evicted in a vain search for bytes that do not \
+             exist there — only {kept} of 50 local entries survived"
         );
+    }
+
+    #[tokio::test]
+    async fn the_oldest_costly_source_is_evicted_not_a_zero_cost_one_in_between() {
+        // Fails if step 3 goes back to picking the oldest entry regardless
+        // of cost: `a` (a `File`, 0 bytes) sits before `b` (a `Bytes`, 2048
+        // bytes) in insertion order. Evicting `a` first would free nothing,
+        // permanently leave the budget exceeded, and destroy a perfectly
+        // usable local entry for no gain — `b` is the one that must go.
+        let cache = CoverCache::new();
+        cache.insert("a".into(), CoverPayload::File(PathBuf::from("/nas/a.jpg"))).await;
+        cache.insert("b".into(), CoverPayload::Bytes(vec![0u8; 2048], "image/jpeg")).await;
+        // Lowered after the fact, exactly as `renditions_are_dropped_before_sources`
+        // does it: eviction runs lazily, on the next write.
+        cache.set_cover_settings(CoverSettings { budget: 100, ..CoverSettings::default() });
+        cache.insert("c".into(), CoverPayload::File(PathBuf::from("/nas/c.jpg"))).await;
+
+        assert!(cache.contains("a").await, "a zero-cost entry must never be evicted to free bytes it does not have");
+        assert!(!cache.contains("b").await, "the entry that actually costs bytes must be the one evicted");
+        assert!(cache.contains("c").await, "the just-inserted entry is never evicted");
     }
 
     #[tokio::test]
