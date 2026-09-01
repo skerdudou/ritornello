@@ -188,20 +188,20 @@ impl FilesSource {
             let _ = tx.send(None);
             return;
         };
-        if let Some((known, found)) = &*self.cover_by_dir.lock().unwrap() {
-            if known == &dir {
-                // `debug` and not `info`: `arm_cover` is called twice per
-                // track (the playback, then the resync), so this line came
-                // out twice **per track** for a fact that does not change for
-                // the whole album. The fresh lookup below, on the other hand,
-                // stays at `info`: once per directory, it is the useful
-                // answer to "why no cover".
-                if found.is_none() {
-                    tracing::debug!("no cover file in {} (remembered)", dir.display());
-                }
-                let _ = tx.send(found.clone());
-                return;
+        if let Some((known, found)) = &*self.cover_by_dir.lock().unwrap()
+            && known == &dir
+        {
+            // `debug` and not `info`: `arm_cover` is called twice per
+            // track (the playback, then the resync), so this line came
+            // out twice **per track** for a fact that does not change for
+            // the whole album. The fresh lookup below, on the other hand,
+            // stays at `info`: once per directory, it is the useful
+            // answer to "why no cover".
+            if found.is_none() {
+                tracing::debug!("no cover file in {} (remembered)", dir.display());
             }
+            let _ = tx.send(found.clone());
+            return;
         }
         let health = self.health.clone();
         let memory = self.cover_by_dir.clone();

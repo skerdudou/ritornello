@@ -89,10 +89,10 @@ fn purge_temp_files_in(dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        if name.to_str().is_some_and(|n| n.starts_with(TEMP_PREFIX)) {
-            if let Err(e) = std::fs::remove_file(entry.path()) {
-                tracing::debug!("purging leftover cover file {}: {e}", entry.path().display());
-            }
+        if name.to_str().is_some_and(|n| n.starts_with(TEMP_PREFIX))
+            && let Err(e) = std::fs::remove_file(entry.path())
+        {
+            tracing::debug!("purging leftover cover file {}: {e}", entry.path().display());
         }
     }
 }
@@ -417,12 +417,11 @@ impl CoverCache {
             // for months and walks a large library must not leave one file per
             // distinct track never replayed. Never touches a Source's
             // `folder.jpg`, which is not ours.
-            if let CoverPayload::File(path) = &evicted {
-                if is_cover_temp(path) {
-                    if let Err(err) = tokio::fs::remove_file(path).await {
-                        tracing::debug!("purging evicted cover file {}: {err}", path.display());
-                    }
-                }
+            if let CoverPayload::File(path) = &evicted
+                && is_cover_temp(path)
+                && let Err(err) = tokio::fs::remove_file(path).await
+            {
+                tracing::debug!("purging evicted cover file {}: {err}", path.display());
             }
         }
     }

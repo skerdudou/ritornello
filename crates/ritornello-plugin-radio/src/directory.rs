@@ -592,7 +592,14 @@ mod tests {
     /// over several tests would make them dependent on cargo's scheduling.
     #[test]
     fn default_bases_in_order_and_pinning_through_the_environment() {
-        std::env::remove_var("RITORNELLO_RADIO_DIRECTORY");
+        // SAFETY: edition 2024 made these `unsafe` because mutating the
+        // environment races with any concurrent `getenv`. This test is the
+        // only writer of the variable in the binary — which is precisely
+        // why the three cases are one test, as the comment above says — so
+        // nothing here can race with another writer. The residual risk, a
+        // read from another thread while `environ` is reallocated, is not
+        // ours to remove, and exists only in the test binary.
+        unsafe { std::env::remove_var("RITORNELLO_RADIO_DIRECTORY") };
         let expected: Vec<String> = DEFAULT_BASES.iter().map(|b| b.to_string()).collect();
         assert_eq!(bases_from_env(), expected);
         // the order is that of the constant, not an arbitrary order
@@ -601,13 +608,16 @@ mod tests {
         assert_eq!(bases_from_env().len(), 5);
 
         // pinned: the variable becomes the only base tried
-        std::env::set_var("RITORNELLO_RADIO_DIRECTORY", "https://fr1.api.radio-browser.info");
+        // SAFETY: as above — this test owns the variable.
+        unsafe { std::env::set_var("RITORNELLO_RADIO_DIRECTORY", "https://fr1.api.radio-browser.info") };
         assert_eq!(bases_from_env(), vec!["https://fr1.api.radio-browser.info".to_string()]);
 
         // empty or blank value = variable ignored (fallback on the list)
-        std::env::set_var("RITORNELLO_RADIO_DIRECTORY", "   ");
+        // SAFETY: as above — this test owns the variable.
+        unsafe { std::env::set_var("RITORNELLO_RADIO_DIRECTORY", "   ") };
         assert_eq!(bases_from_env(), expected);
-        std::env::remove_var("RITORNELLO_RADIO_DIRECTORY");
+        // SAFETY: as above — this test owns the variable.
+        unsafe { std::env::remove_var("RITORNELLO_RADIO_DIRECTORY") };
 
         // `HttpDirectory::from_env()` delegates to `bases_from_env()`: same
         // assertion here, in the only test that owns the environment

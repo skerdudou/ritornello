@@ -211,12 +211,12 @@ pub fn validate_audio_device(device: &str) -> Result<(), AudioOutputError> {
 async fn audio_output_put(State(state): State<AppState>, Json(req): Json<AudioOutputRequest>) -> Response {
     // `null` (or absent) = follow the system default. A named device is
     // validated as before: the empty string stays refused.
-    if let Some(device) = &req.device {
-        if let Err(e) = validate_audio_device(device) {
-            let msg = e.message(&*state.catalog.read().await);
-            return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg })))
-                .into_response();
-        }
+    if let Some(device) = &req.device
+        && let Err(e) = validate_audio_device(device)
+    {
+        let msg = e.message(&*state.catalog.read().await);
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg })))
+            .into_response();
     }
     *state.audio_current.write().await = req.device.clone();
     if state.audio_tx.send(req.device).await.is_err() {

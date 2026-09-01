@@ -146,6 +146,66 @@ pub fn read_proc_mounts() -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
 
+/// Diversion of `/proc/mounts` for the library's tests.
+///
+/// A near twin of the fixture in the plugin's `admin` module, deliberately not
+/// shared with it: `admin` compiles into the binary and this into the library,
+/// so `cargo test` builds two executables and runs them as two processes.
+/// Neither can see the other's environment, so one lock per test binary is
+/// what the hazard actually calls for. Sharing one would mean making it `pub`
+/// in production code to cross the crate boundary, carrying `set_var` into the
+/// shipped binary to serialise processes that cannot collide.
+#[cfg(test)]
+pub(crate) mod fixture {
+    use std::sync::Mutex;
+
+    /// Serialises the tests that divert `/proc/mounts`.
+    ///
+    /// `std::env::set_var` is process-global, and the tests of one binary run
+    /// in parallel inside it: without this lock, one test's fake file is read
+    /// by another, with a failure that never reproduces on its own. The two
+    /// tests of `explore` used to set the variable bare, so that failure was
+    /// theirs to draw.
+    static PROC_MOUNTS_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Guard returned by [`divert_proc_mounts`].
+    ///
+    /// Carries the serialisation lock **and** clears the variable in turn, in
+    /// a `Drop` rather than a line repeated at the end of each test: the lock
+    /// is released even if the test panics, and so, now, is the diversion. A
+    /// panicking test would otherwise leave the rest of the suite reading a
+    /// fake `/proc/mounts` pointing into an already deleted tempdir — one
+    /// failure turned into an unreadable cascade.
+    pub(crate) struct ProcMountsGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for ProcMountsGuard {
+        fn drop(&mut self) {
+            // SAFETY: see the note in `divert_proc_mounts`.
+            unsafe { std::env::remove_var("RITORNELLO_FILES_PROC_MOUNTS") };
+        }
+    }
+
+    /// Writes a fake `/proc/mounts` and makes the code under test read it.
+    ///
+    /// Returns the guard: the caller must keep it alive until the end of the
+    /// test (`let _guard = ...`, never `let _ = ...`, which would release it
+    /// immediately).
+    pub(crate) fn divert_proc_mounts(root_dir: &std::path::Path, content: &str) -> ProcMountsGuard {
+        let lock = PROC_MOUNTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fake = root_dir.join("mounts");
+        std::fs::write(&fake, content).unwrap();
+        // SAFETY: edition 2024 made this `unsafe` because mutating the
+        // environment races with any concurrent `getenv`. The lock above
+        // serialises every writer of the variable in this test binary. The
+        // residual risk, a read from another thread while `environ` is
+        // reallocated, is not ours to remove and exists only under test.
+        unsafe { std::env::set_var("RITORNELLO_FILES_PROC_MOUNTS", &fake) };
+        ProcMountsGuard { _lock: lock }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

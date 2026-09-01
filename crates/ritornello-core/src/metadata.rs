@@ -379,15 +379,15 @@ impl Metadata {
     /// others (see `failed_covers`): precedence says whom we prefer, it does
     /// not say to prefer indefinitely an image the device failed to obtain.
     pub fn selected_cover(&self) -> Option<(CoverRef, String)> {
-        if let Some((r, o)) = &self.cover_source {
-            if !self.has_failed(r) {
-                return Some((r.clone(), o.clone()));
-            }
+        if let Some((r, o)) = &self.cover_source
+            && !self.has_failed(r)
+        {
+            return Some((r.clone(), o.clone()));
         }
-        if let Some(r) = &self.cover_tags {
-            if !self.has_failed(r) {
-                return Some((r.clone(), ORIGIN_TAGS.to_string()));
-            }
+        if let Some(r) = &self.cover_tags
+            && !self.has_failed(r)
+        {
+            return Some((r.clone(), ORIGIN_TAGS.to_string()));
         }
         // An overriding plugin first, then a `fill_only`. Two passes rather
         // than one: otherwise a `fill_only` declared high in `plugins.toml`
@@ -395,14 +395,12 @@ impl Metadata {
         // exactly the opposite of its intention.
         for fill_only in [false, true] {
             for plugin in &self.order {
-                if let Some(e) = self.enrichments.get(plugin) {
-                    if e.fill_only == fill_only {
-                        if let Some(r) = &e.cover {
-                            if !self.has_failed(r) {
-                                return Some((r.clone(), plugin.clone()));
-                            }
-                        }
-                    }
+                if let Some(e) = self.enrichments.get(plugin)
+                    && e.fill_only == fill_only
+                    && let Some(r) = &e.cover
+                    && !self.has_failed(r)
+                {
+                    return Some((r.clone(), plugin.clone()));
                 }
             }
         }
@@ -493,12 +491,12 @@ impl Metadata {
         // without a key, no cover reaches the display anyway (see
         // `set_cover_href`), and this method is called at least once per
         // second as long as a track is playing.
-        if let Some(key) = &self.cover_cle {
-            if let Some((_, origin)) = self.selected_cover() {
-                m.cover_href = Some(format!("{}{key}", crate::cover::HREF_PREFIX));
-                m.provenance.fields.insert("cover".into(), origin.clone());
-                m.cover_origin = Some(origin);
-            }
+        if let Some(key) = &self.cover_cle
+            && let Some((_, origin)) = self.selected_cover()
+        {
+            m.cover_href = Some(format!("{}{key}", crate::cover::HREF_PREFIX));
+            m.provenance.fields.insert("cover".into(), origin.clone());
+            m.cover_origin = Some(origin);
         }
         m
     }
@@ -721,20 +719,20 @@ impl Metadata {
     pub fn duration_s(&self) -> Option<u32> {
         let mut duration = None;
         for plugin in &self.order {
-            if let Some(e) = self.enrichments.get(plugin) {
-                if !e.fill_only {
-                    duration = e.duration_s;
-                    break;
-                }
+            if let Some(e) = self.enrichments.get(plugin)
+                && !e.fill_only
+            {
+                duration = e.duration_s;
+                break;
             }
         }
         if duration.is_none() {
             for plugin in &self.order {
-                if let Some(e) = self.enrichments.get(plugin) {
-                    if e.fill_only && e.duration_s.is_some() {
-                        duration = e.duration_s;
-                        break;
-                    }
+                if let Some(e) = self.enrichments.get(plugin)
+                    && e.fill_only && e.duration_s.is_some()
+                {
+                    duration = e.duration_s;
+                    break;
                 }
             }
         }

@@ -145,10 +145,10 @@ impl Roots {
                     if !field_on(&r.share) {
                         return Err(RootError::BadShare { share: r.share.clone() });
                     }
-                    if let Some(s) = &r.subpath {
-                        if !subpath_on(s) {
-                            return Err(RootError::BadSubpath { subpath: s.clone() });
-                        }
+                    if let Some(s) = &r.subpath
+                        && !subpath_on(s)
+                    {
+                        return Err(RootError::BadSubpath { subpath: s.clone() });
                     }
                 }
             }

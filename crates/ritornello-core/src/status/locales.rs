@@ -8,10 +8,10 @@ use super::*;
 pub fn parse_available_locales(filenames: &[String]) -> Vec<String> {
     let mut out = vec!["en".to_string()];
     for f in filenames {
-        if let Some(stem) = f.strip_suffix(".toml") {
-            if stem != "en" && !out.iter().any(|x| x == stem) {
-                out.push(stem.to_string());
-            }
+        if let Some(stem) = f.strip_suffix(".toml")
+            && stem != "en" && !out.iter().any(|x| x == stem)
+        {
+            out.push(stem.to_string());
         }
     }
     out

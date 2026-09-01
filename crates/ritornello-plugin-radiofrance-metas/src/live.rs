@@ -348,33 +348,33 @@ pub async fn follows(id: u32, profile: String, tx: mpsc::Sender<(u32, Meta)>) {
                         // here: across successive queries of the same track,
                         // the answer would not change.
                         let mut to_send = meta;
-                        if let Some(uuid) = direct.song_uuid.as_deref() {
-                            if misses < MAX_MISSES {
-                                let s = fetch_supplement(&client, id, uuid).await;
-                                // The counter now covers the **whole**
-                                // supplement and not the album alone, and this
-                                // change of criterion is deliberate: the
-                                // schedule returns the year far more often
-                                // than the album (measured on 2026-08-27,
-                                // 9 items out of 9 versus 3 out of 9 for the
-                                // YouTube link). Keeping on querying it when
-                                // it gives no album but gives the year is no
-                                // longer a request for nothing — which is what
-                                // this counter exists to avoid.
-                                let empty = s.is_empty();
-                                to_send.album = s.album;
-                                to_send.year = s.year;
-                                to_send.links = s.links;
-                                if empty {
-                                    misses += 1;
-                                    if misses == MAX_MISSES {
-                                        tracing::debug!(
-                                            "station {id}: schedule gave nothing for {MAX_MISSES} tracks, no longer asking"
-                                        );
-                                    }
-                                } else {
-                                    misses = 0;
+                        if let Some(uuid) = direct.song_uuid.as_deref()
+                            && misses < MAX_MISSES
+                        {
+                            let s = fetch_supplement(&client, id, uuid).await;
+                            // The counter now covers the **whole**
+                            // supplement and not the album alone, and this
+                            // change of criterion is deliberate: the
+                            // schedule returns the year far more often
+                            // than the album (measured on 2026-08-27,
+                            // 9 items out of 9 versus 3 out of 9 for the
+                            // YouTube link). Keeping on querying it when
+                            // it gives no album but gives the year is no
+                            // longer a request for nothing — which is what
+                            // this counter exists to avoid.
+                            let empty = s.is_empty();
+                            to_send.album = s.album;
+                            to_send.year = s.year;
+                            to_send.links = s.links;
+                            if empty {
+                                misses += 1;
+                                if misses == MAX_MISSES {
+                                    tracing::debug!(
+                                        "station {id}: schedule gave nothing for {MAX_MISSES} tracks, no longer asking"
+                                    );
                                 }
+                            } else {
+                                misses = 0;
                             }
                         }
                         if tx.send((id, to_send)).await.is_err() {

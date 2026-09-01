@@ -1323,7 +1323,8 @@ mod tests {
 
     impl Drop for ProcMountsGuard {
         fn drop(&mut self) {
-            std::env::remove_var("RITORNELLO_FILES_PROC_MOUNTS");
+            // SAFETY: see the note in `divert_proc_mounts`.
+            unsafe { std::env::remove_var("RITORNELLO_FILES_PROC_MOUNTS") };
         }
     }
 
@@ -1336,7 +1337,14 @@ mod tests {
         let lock = PROC_MOUNTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let fake = root_dir.join("mounts");
         std::fs::write(&fake, content).unwrap();
-        std::env::set_var("RITORNELLO_FILES_PROC_MOUNTS", &fake);
+        // SAFETY: edition 2024 made this `unsafe` because mutating the
+        // environment races with any concurrent `getenv`. The lock above
+        // serialises every writer of the variable in this test binary: this
+        // module compiles into the plugin's binary, whose tests are their own
+        // executable, and the library has its twin fixture in `volumes`. The
+        // residual risk, a read from another thread while `environ` is
+        // reallocated, is not ours to remove and exists only under test.
+        unsafe { std::env::set_var("RITORNELLO_FILES_PROC_MOUNTS", &fake) };
         ProcMountsGuard { _lock: lock }
     }
 

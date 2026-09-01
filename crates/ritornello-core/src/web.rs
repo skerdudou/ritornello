@@ -45,27 +45,27 @@ pub fn serves_shell(path: &str) -> bool {
     if path.starts_with("/api/") || path.starts_with("/assets/") {
         return false;
     }
-    if let Some(rest) = path.strip_prefix("/plugins/") {
-        if let Some((_, after)) = rest.split_once('/') {
-            if after.starts_with("api/") || after.starts_with("ui.") {
-                return false;
-            }
-            // Deep asset path (`/plugins/radio/assets/chunk.js`): a plugin's
-            // assets are only served on **a single** segment
-            // (`/plugins/<name>/<file>`), so a multi-segment path matches no
-            // route and fell through here — the fallback then returned **the
-            // HTML shell with a 200**, so that a dynamic `import()` received
-            // HTML: a very confusing failure mode, nothing flagging the error.
-            // It now gets a clean 404.
-            //
-            // The `serves_shell("/plugins/<name>/")` test stays green: `after`
-            // is then the empty string, which contains no `/`. That is also why
-            // this condition is preferred to a `/plugins/:name/*file` wildcard
-            // in the router, whose empty remainder does not match reliably —
-            // and this URL is an invariant.
-            if after.contains('/') {
-                return false;
-            }
+    if let Some(rest) = path.strip_prefix("/plugins/")
+        && let Some((_, after)) = rest.split_once('/')
+    {
+        if after.starts_with("api/") || after.starts_with("ui.") {
+            return false;
+        }
+        // Deep asset path (`/plugins/radio/assets/chunk.js`): a plugin's
+        // assets are only served on **a single** segment
+        // (`/plugins/<name>/<file>`), so a multi-segment path matches no
+        // route and fell through here — the fallback then returned **the
+        // HTML shell with a 200**, so that a dynamic `import()` received
+        // HTML: a very confusing failure mode, nothing flagging the error.
+        // It now gets a clean 404.
+        //
+        // The `serves_shell("/plugins/<name>/")` test stays green: `after`
+        // is then the empty string, which contains no `/`. That is also why
+        // this condition is preferred to a `/plugins/:name/*file` wildcard
+        // in the router, whose empty remainder does not match reliably —
+        // and this URL is an invariant.
+        if after.contains('/') {
+            return false;
         }
     }
     true
