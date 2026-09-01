@@ -266,6 +266,38 @@ impl Metadata {
         // only reads `Some`s). It only adds a line to `Provenance::misses`.
         if e.is_empty() && e.cover.is_none() && e.year.is_none() && e.links.is_empty() && !e.searched
         {
+            // **An enrichment that says nothing at all is a withdrawal**, no
+            // longer only a refusal: it removes what this plugin had retained.
+            //
+            // "I have nothing to say about this track" was impossible to
+            // express, and its absence had a cost. Refusing the frame left the
+            // plugin's **previous** enrichment in place, and since a radio's
+            // identity does not change from one track to the next, the previous
+            // track's title and cover stayed on screen for the whole of the
+            // next one. The musicbrainz plugin worked around it by emitting the
+            // station's own string signed with its own name, which is what put
+            // "reworked by musicbrainz" under a field it had not touched.
+            //
+            // Idempotent: the second time there is nothing left to remove, so
+            // nothing is republished — the same guarantee as the comparison
+            // just below, and for the same reason.
+            //
+            // **Only on a frame that really carries nothing.** A duration or a
+            // position, alone, keeps being counted as no response, exactly as
+            // before: those two do not make a displayable enrichment, but
+            // losing one's text by sending a position would be a trap.
+            if e.duration_s.is_none() && e.position_s.is_none() {
+                let before = self.selected_cover();
+                if self.enrichments.remove(plugin).is_none() {
+                    tracing::debug!("empty enrichment from {plugin}, nothing to withdraw");
+                    return false;
+                }
+                tracing::debug!("{plugin} withdraws its enrichment");
+                if self.selected_cover() != before {
+                    self.cover_cle = None;
+                }
+                return true;
+            }
             tracing::debug!("empty enrichment from {plugin}, counted as no response");
             return false;
         }
@@ -1519,6 +1551,75 @@ mod tests {
         // both facts hold together.
         assert_eq!(state.provenance.derived.get("title").map(String::as_str), Some("musicbrainz"));
         assert_eq!(state.provenance.derived.get("artist").map(String::as_str), Some("musicbrainz"));
+    }
+
+    #[test]
+    fn an_enrichment_that_says_nothing_withdraws_the_previous_one() {
+        // **The other half of the defect just above.** The plugin signed the
+        // station's string with its own name for one reason only: emitting
+        // nothing left its *previous* enrichment in place — `set_icy` does not
+        // erase them, by an owner decision — and a radio's identity does not
+        // change from one track to the next, so the previous track's title
+        // stayed on screen. Withdrawing makes "I have nothing to say about
+        // this track" expressible, and it is what lets the plugin stop
+        // claiming a rework it did not do.
+        let mut m = Metadata::new(vec!["musicbrainz".into()]);
+        m.set_identity(Some(json!(1)));
+        m.set_icy("Miles Davis - So What".into());
+        assert!(m.add(
+            "musicbrainz",
+            Enrichment {
+                identity: json!(1),
+                artist: Some("Miles Davis".into()),
+                title: Some("So What".into()),
+                derived_from: Some(ORIGIN_ICY.to_string()),
+                ..Default::default()
+            }
+        ));
+        assert_eq!(m.state().artist.as_deref(), Some("Miles Davis"));
+
+        // Next title on the same station, and this one says nothing splittable.
+        m.set_icy("Vous ecoutez Radio X".into());
+        assert!(
+            m.add("musicbrainz", Enrichment { identity: json!(1), ..Default::default() }),
+            "a withdrawal is a change, and must be published"
+        );
+
+        let state = m.state();
+        assert_eq!(state.artist, None, "the previous track's artist must not survive");
+        assert_eq!(state.title.as_deref(), Some("Vous ecoutez Radio X"));
+        assert_eq!(state.origin.as_deref(), Some(ORIGIN_ICY));
+        assert_eq!(state.provenance.fields.get("title").map(String::as_str), Some(ORIGIN_ICY));
+        assert!(state.provenance.derived.is_empty(), "nobody reworked this string");
+        assert!(state.provenance.misses.is_empty(), "and nobody searched either");
+
+        // Idempotent: a second withdrawal changes nothing, hence publishes
+        // nothing. Without it, a station announcing nothing but its own name
+        // would send a frame to every display at every repetition.
+        assert!(!m.add("musicbrainz", Enrichment { identity: json!(1), ..Default::default() }));
+    }
+
+    #[test]
+    fn a_lone_position_or_duration_is_still_counted_as_no_response() {
+        // The boundary of the withdrawal, and it is not decoration: neither of
+        // those two makes a displayable enrichment, but losing one's text by
+        // sending a position would be a trap set for a future plugin.
+        let mut m = Metadata::new(vec!["musicbrainz".into()]);
+        m.set_identity(Some(json!(1)));
+        assert!(m.add(
+            "musicbrainz",
+            Enrichment { identity: json!(1), title: Some("So What".into()), ..Default::default() }
+        ));
+        assert!(!m.add(
+            "musicbrainz",
+            Enrichment { identity: json!(1), position_s: Some(42), ..Default::default() }
+        ));
+        assert_eq!(m.state().title.as_deref(), Some("So What"), "a position costs no text");
+        assert!(!m.add(
+            "musicbrainz",
+            Enrichment { identity: json!(1), duration_s: Some(300), ..Default::default() }
+        ));
+        assert_eq!(m.state().title.as_deref(), Some("So What"), "and neither does a duration");
     }
 
     #[test]

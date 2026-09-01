@@ -307,6 +307,18 @@ struct IcyOutcome {
     ///   station whose pattern is right and proven would trigger a reprobe of
     ///   that good pattern.
     unanswered: bool,
+    /// A search **took place and was answered** during this handling.
+    ///
+    /// This is the protocol's `searched` (see `Enrichment::searched`), whose
+    /// rule this field respects to the letter: an outage is *not* declared
+    /// there, so a handling that went unanswered has not searched. Zero
+    /// request — a station classified "do not split", or a pattern that no
+    /// longer applies — has not searched either.
+    ///
+    /// What it decides: whether the screen should read "musicbrainz found
+    /// nothing for this track" or say nothing about this plugin at all. Two
+    /// different statements, and only the plugin knows which one is true.
+    searched: bool,
     /// The pair from the **local** split, whether validation succeeded or
     /// not.
     ///
@@ -861,44 +873,68 @@ impl MetadataPlugin for MusicBrainzPlugin {
                                 if !outcome.unanswered {
                                     *self.failures.entry(outcome.url.clone()).or_default() += 1;
                                 }
-                                // **Emit anyway.** Emitting nothing let the
+                                // **Something must go out**, and emitting
+                                // nothing is not an option: it let the
                                 // enrichment of the *previous* track win the
                                 // arbitration, a radio's identity not changing
-                                // from one track to the next: the screen
+                                // from one track to the next, and the screen
                                 // announced the previous artist, title and
-                                // cover for the whole duration of the next
-                                // one. The worst of the three states, and the
-                                // one my spec described without seeing it when
-                                // writing "emit nothing for this track".
+                                // cover for the whole duration of the next one.
                                 //
-                                // What is emitted depends on what is known:
+                                // But **what** goes out depends on what this
+                                // plugin actually did, and that is the
+                                // distinction this arm was missing. It used to
+                                // sign the station's own string with its name
+                                // in every case, so the provenance popin read
+                                // "reworked by musicbrainz" under a title it
+                                // had not touched — the owner reported it.
                                 //
-                                // * the local pair, when the pattern applies.
-                                //   MusicBrainz does not know this track, which
-                                //   says nothing against a split already
-                                //   confirmed on this station. No cover, for
-                                //   want of a release to cite.
-                                // * otherwise the cleaned string as the title:
-                                //   the pattern no longer applies (the station
-                                //   changed shape) or there is none. No split
-                                //   is asserted then — just what the stream
-                                //   announces, stripped of its advertising.
-                                let (artist, title) = match outcome.pair {
-                                    Some((a, t)) => (Some(a), Some(t)),
-                                    None => (None, Some(icy::clean(&outcome.raw))),
-                                };
-                                self.ready = Some(Enrichment {
-                                    identity: outcome.identity,
-                                    // Even truer here than above: this path
-                                    // carries **only** the local split,
-                                    // MusicBrainz having validated nothing at
-                                    // all. The title comes from the station,
-                                    // word for word.
-                                    derived_from: Some(SOURCE_ICY.to_string()),
-                                    artist,
-                                    title,
-                                    fill_only: false,
-                                    ..Default::default()
+                                // Three cases, in decreasing order of what we
+                                // contributed:
+                                //
+                                // * **a split applied**: we did rework the
+                                //   string. The pair goes out signed, and the
+                                //   mention is deserved. MusicBrainz not
+                                //   knowing this track says nothing against a
+                                //   split already confirmed on this station.
+                                //   No cover, for want of a release to cite.
+                                // * **`clean` stripped something** (a jingle
+                                //   after a bar, a bracketed duration): the
+                                //   displayed text differs from what the stream
+                                //   announces, and the mention is what explains
+                                //   why.
+                                // * **nothing at all**: no split, and `clean`
+                                //   changed not one character. We emit an
+                                //   enrichment that says nothing, which the
+                                //   core reads as a withdrawal (or as a miss
+                                //   when a search did take place): it drops our
+                                //   previous entry and falls back on the ICY
+                                //   block. The screen shows the same text,
+                                //   attributed to the station **alone**.
+                                let cleaned = icy::clean(&outcome.raw);
+                                self.ready = Some(match outcome.pair {
+                                    Some((artist, title)) => Enrichment {
+                                        identity: outcome.identity,
+                                        derived_from: Some(SOURCE_ICY.to_string()),
+                                        artist: Some(artist),
+                                        title: Some(title),
+                                        searched: outcome.searched,
+                                        fill_only: false,
+                                        ..Default::default()
+                                    },
+                                    None if cleaned != outcome.raw => Enrichment {
+                                        identity: outcome.identity,
+                                        derived_from: Some(SOURCE_ICY.to_string()),
+                                        title: Some(cleaned),
+                                        searched: outcome.searched,
+                                        fill_only: false,
+                                        ..Default::default()
+                                    },
+                                    None => Enrichment {
+                                        identity: outcome.identity,
+                                        searched: outcome.searched,
+                                        ..Default::default()
+                                    },
                                 });
                             }
                         }
@@ -1060,6 +1096,7 @@ async fn handle_icy(
                     validated: None,
                     pair: None,
                     unanswered: false,
+                    searched: false,
                 };
             }
             Some(m @ patterns::Pattern::Split { .. }) => {
@@ -1090,6 +1127,9 @@ async fn handle_icy(
                     identity,
                     pattern: None,
                     validated,
+                    // A search only took place if the pattern applied, and it
+                    // only counts if it was answered.
+                    searched: pair.is_some() && !unanswered,
                     pair,
                     unanswered,
                 };
@@ -1145,6 +1185,7 @@ async fn handle_icy(
                 validated: Some((winner.artist.clone(), winner.title.clone(), cover_url)),
                 pair: Some((winner.artist, winner.title)),
                 unanswered,
+                searched: true,
             }
         }
         None => {
@@ -1165,6 +1206,7 @@ async fn handle_icy(
                 validated: None,
                 pair: None,
                 unanswered,
+                searched: tried_count > 0 && !unanswered,
             }
         }
     }
@@ -1769,6 +1811,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_jingle_actually_stripped_stays_signed() {
+        // The middle case: no split, but `clean` did remove something, so the
+        // displayed text differs from what the stream announces — and the
+        // mention "reworked by musicbrainz" is exactly what explains why. It
+        // must therefore survive, otherwise the fix would have swung too far
+        // and the screen would show a text nobody signs.
+        let mut p = test_plugin();
+        let url = "http://f";
+        let raw = "Miles Davis - So What | Radio X";
+        p.icy_seen = Some(raw.to_string());
+        p.icy_tx
+            .send(IcyOutcome {
+                url: url.to_string(),
+                raw: raw.to_string(),
+                identity: json!({"kind": "stream", "url": url}),
+                pattern: None,
+                validated: None,
+                pair: None,
+                unanswered: false,
+                searched: true,
+            })
+            .await
+            .unwrap();
+        let e = p.next_enrichment().await;
+        assert_eq!(e.title.as_deref(), Some("Miles Davis - So What"), "the jingle is stripped");
+        assert_eq!(
+            e.derived_from.as_deref(),
+            Some(SOURCE_ICY),
+            "the station remains the source, and the rework is real"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_split_that_applied_stays_signed_even_unvalidated() {
+        // The first case, unchanged: MusicBrainz not knowing the track says
+        // nothing against a split already confirmed on this station.
+        let mut p = test_plugin();
+        let url = "http://f";
+        p.icy_seen = Some("Miles Davis - So What".to_string());
+        p.icy_tx
+            .send(IcyOutcome {
+                url: url.to_string(),
+                raw: "Miles Davis - So What".to_string(),
+                identity: json!({"kind": "stream", "url": url}),
+                pattern: None,
+                validated: None,
+                pair: Some(("Miles Davis".to_string(), "So What".to_string())),
+                unanswered: false,
+                searched: true,
+            })
+            .await
+            .unwrap();
+        let e = p.next_enrichment().await;
+        assert_eq!(e.artist.as_deref(), Some("Miles Davis"));
+        assert_eq!(e.title.as_deref(), Some("So What"));
+        assert_eq!(e.derived_from.as_deref(), Some(SOURCE_ICY));
+    }
+
+    #[tokio::test]
     async fn an_unanswered_validation_is_not_counted_as_a_failure() {
         // "MusicBrainz does not answer, it does not count" — on the steady
         // state too. Three unanswered validations in a row would otherwise
@@ -1850,16 +1951,23 @@ mod tests {
                 validated: None,
                 pair: None,
                 unanswered,
+                // An outage has not searched: the protocol says so, and it is
+                // the whole difference between "found nothing" and "could not
+                // ask".
+                searched: !unanswered,
             })
             .await
             .unwrap();
         let e = p.next_enrichment().await;
         assert_eq!(e.artist, None, "a failure asserts no artist");
-        assert_eq!(
-            e.title.as_deref(),
-            Some(icy::clean(raw).as_str()),
-            "it shows what the stream announces, cleaned"
-        );
+        // The fixtures of these tests use a string `clean` does not touch, so
+        // this plugin reworked **nothing** — and claims nothing. What goes out
+        // says nothing, the core drops the previous entry and falls back on
+        // the ICY block: the screen keeps the same text, attributed to the
+        // station alone. See the three cases in `next_enrichment`.
+        assert_eq!(icy::clean(raw), raw, "test precondition: nothing to clean here");
+        assert_eq!(e.title, None, "nothing reworked, hence nothing claimed");
+        assert_eq!(e.derived_from, None, "and no \"reworked by\" to be shown");
         assert!(e.cover.is_none(), "and no cover, for want of a release to cite");
     }
 
@@ -1953,6 +2061,7 @@ mod tests {
                 validated: Some(("Artist".to_string(), "Title".to_string(), None)),
                 pair: Some(("Artist".to_string(), "Title".to_string())),
                 unanswered: false,
+                searched: true,
             })
             .await
             .unwrap();
