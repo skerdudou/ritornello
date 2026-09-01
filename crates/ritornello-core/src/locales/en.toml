@@ -53,9 +53,19 @@ remote_eject = "Eject"
 remote_source = "Source"
 remote_power = "Standby"
 seek_step_label = "Seek step (s)"
-# Album covers. The source ceiling comes first and stays live whatever the
-# switch below says: it is the only guard left when re-encoding is off.
+# Album covers. Two boxes: what the cache keeps in memory (a budget, not a
+# count), and what the core reads to publish. The source ceiling comes first
+# in the second box and stays live whatever the switch below says: it is the
+# only guard left when re-encoding is off.
 cover_card_title = "Album covers"
+cover_kept_title = "What is kept in memory"
+cover_read_title = "What is read to publish"
+cover_cache_budget_label = "Memory budget (MiB)"
+cover_cache_budget_help = "Bounds the bytes of covers downloaded from the internet and the thumbnails kept ready to serve. A local cover — a file beside the track, or one embedded in it — costs only a path, never these bytes."
+cover_cache_estimate = "At least {floor} covers held at once in the worst case (every cover from the internet); about {typical} for a library of local covers."
+cover_cache_estimate_unlimited = "At least {floor} covers held at once in the worst case; re-encoding is off, so a purely local library costs only a path and every cover fits."
+cover_download_max_label = "Network cover ceiling (MiB)"
+cover_download_max_help = "Largest cover the device accepts to download from the internet and hold in memory."
 cover_source_max_label = "Source ceiling (MiB)"
 cover_source_max_help = "Largest cover the device will read. Always applied, re-encoding or not; capped at the 20 MiB the plugin protocol guarantees."
 cover_rendition_label = "Re-encode covers before pushing them"
@@ -64,10 +74,7 @@ cover_max_edge_label = "Thumbnail longest edge (px)"
 cover_jpeg_quality_label = "JPEG quality"
 cover_jpeg_quality_help = "JPEG only: a cover with an alpha channel is re-encoded to PNG, lossless."
 cover_max_bytes_label = "Rendered ceiling (KiB)"
-cover_max_bytes_help = "A net, not a target: past it nothing is pushed and the log says so."
-cover_cache_entries_label = "Covers kept"
-cover_cache_entries_help = "How many covers stay servable to the page. Below that, a published cover answers 404 and the square falls back to the ♫."
-cover_cache_entries_ram = "At most {size} MiB of memory: a network cover is capped at {cap} MiB, a local one only keeps a path."
+cover_max_bytes_help = "A net, not a target: past it nothing is pushed and the log says so. Also feeds the memory budget above: each retained thumbnail costs this many bytes."
 cover_max_pixels_label = "Decode ceiling (Mpx)"
 cover_max_pixels_help = "Read from the header before any allocation: w x h x 4 bytes of buffer, so 16 Mpx is 64 MiB. A 200 KiB PNG can claim 30000 x 30000 pixels."
 seek_card_title = "Seeking"

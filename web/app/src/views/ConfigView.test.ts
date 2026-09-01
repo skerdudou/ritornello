@@ -42,6 +42,14 @@ const CATALOGUE = {
   seek_card_title: 'Déplacement',
   seek_step_label: 'Pas de déplacement (s)',
   cover_card_title: "Pochettes d'album",
+  cover_kept_title: 'Ce qui est gardé en mémoire',
+  cover_read_title: 'Ce qui est lu pour publier',
+  cover_cache_budget_label: 'Budget mémoire (Mio)',
+  cover_cache_budget_help: 'Borne les octets réseau et les vignettes gardées.',
+  cover_cache_estimate: 'Au moins {floor} pochettes ; environ {typical} pour une bibliothèque locale.',
+  cover_cache_estimate_unlimited: 'Au moins {floor} pochettes ; toutes les pochettes locales tiennent.',
+  cover_download_max_label: 'Plafond réseau (Mio)',
+  cover_download_max_help: 'Plus grande pochette téléchargée depuis internet.',
   cover_source_max_label: 'Plafond de la source (Mio)',
   cover_source_max_help: 'Toujours appliqué.',
   cover_rendition_label: 'Réencoder les pochettes',
@@ -78,6 +86,7 @@ function payloads() {
     '/api/settings': {
       volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'on',
       overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
+      cover_cache_budget_mio: 50, cover_download_max_mio: 2,
       cover_source_max_mio: 20, cover_rendition: true, cover_max_edge_px: 640,
       cover_jpeg_quality: 85, cover_max_bytes_ko: 512, cover_max_pixels_mpx: 16,
     } as unknown,
@@ -551,6 +560,7 @@ describe('ConfigView — settings', () => {
         body: {
           volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'previous',
           overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
+          cover_cache_budget_mio: 50, cover_download_max_mio: 2,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_max_bytes_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
         },
@@ -570,6 +580,7 @@ describe('ConfigView — settings', () => {
         body: {
           volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'standby',
           overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
+          cover_cache_budget_mio: 50, cover_download_max_mio: 2,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_max_bytes_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
         },
@@ -590,6 +601,7 @@ describe('ConfigView — settings', () => {
         body: {
           volume_repeat_initial_ms: 1500, volume_repeat_interval_ms: 300, startup_power: 'on',
           overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
+          cover_cache_budget_mio: 50, cover_download_max_mio: 2,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_max_bytes_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
         },
@@ -639,6 +651,7 @@ describe('ConfigView — overlays', () => {
         body: {
           volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'on',
           overlay_ms: 2000, tens_window_ms: 7000, seek_step_s: 10,
+          cover_cache_budget_mio: 50, cover_download_max_mio: 2,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_max_bytes_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
         },
@@ -768,6 +781,52 @@ describe('ConfigView — covers', () => {
       cover_max_bytes_ko: 256,
       cover_max_pixels_mpx: 24,
     })
+  })
+
+  it('sends the memory budget and the download cap as numbers, never as strings', async () => {
+    // Same defect as above (IMPORTANT 3 of the review), on the two fields
+    // this task adds: `Input`'s native `v-model` has no `.number` modifier,
+    // so an edited field is a string here. Uncast, it fails the core's `u32`
+    // deserialization and refuses the *whole* PUT, not just these two
+    // fields — the first time a user touches either box.
+    const { w, puts } = await mountView()
+    await w.find('[data-cover-cache-budget]').setValue('64')
+    await w.find('[data-cover-download-max]').setValue('5')
+    await w.find('[data-cover-change]').trigger('click')
+    await flushPromises()
+    expect(puts[0]!.body).toMatchObject({
+      cover_cache_budget_mio: 64,
+      cover_download_max_mio: 5,
+    })
+  })
+
+  it('estimates a floor and a typical count from the budget', async () => {
+    // Defaults: 50 MiB budget, 2 MiB download cap, 512 KiB thumbnail cap.
+    // floor = 50 / (2 + 0.5) = 20 (worst case: every cover from the
+    // internet, paying its bytes and its thumbnail).
+    // typical = 50 / 0.5 = 100 (a library of local covers, paying only
+    // their thumbnail).
+    const { w } = await mountView()
+    expect(w.find('[data-cover-cache-estimate]').text()).toBe(
+      'Au moins 20 pochettes ; environ 100 pour une bibliothèque locale.',
+    )
+  })
+
+  it('says local covers all fit when re-encoding is off', async () => {
+    // Re-encoding off means no thumbnail is produced at all: a local cover's
+    // cost falls to zero, so the "typical" formula would divide by zero.
+    // Printing "about 256" (the core's internal MAX_CACHE_ENTRIES, which
+    // this case would otherwise reduce to) would expose a constant the user
+    // has no way to interpret. The floor is unaffected by the switch — a
+    // network cover with no rendition still costs its downloaded bytes —
+    // and becomes 50 / 2 = 25 now that the thumbnail no longer adds to the
+    // per-entry cost.
+    const { w } = await mountView()
+    await w.find('[data-cover-rendition]').trigger('click')
+    await flushPromises()
+    const text = w.find('[data-cover-cache-estimate]').text()
+    expect(text).not.toContain('256')
+    expect(text).toBe('Au moins 25 pochettes ; toutes les pochettes locales tiennent.')
   })
 })
 

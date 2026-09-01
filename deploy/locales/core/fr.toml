@@ -53,10 +53,20 @@ remote_eject = "Éjecter"
 remote_source = "Source"
 remote_power = "Veille"
 seek_step_label = "Pas de déplacement (s)"
-# Pochettes d'album. Le plafond de la source vient en premier et reste actif
-# quoi que dise l'interrupteur en dessous : c'est la seule garde qui subsiste
-# quand le réencodage est décoché.
+# Pochettes d'album. Deux boîtes : ce que le cache garde en mémoire (un
+# budget, pas un compte), et ce que le cœur lit pour publier. Le plafond de la
+# source vient en premier dans la seconde boîte et reste actif quoi que dise
+# l'interrupteur en dessous : c'est la seule garde qui subsiste quand le
+# réencodage est décoché.
 cover_card_title = "Pochettes d'album"
+cover_kept_title = "Ce qui est gardé en mémoire"
+cover_read_title = "Ce qui est lu pour publier"
+cover_cache_budget_label = "Budget mémoire (Mio)"
+cover_cache_budget_help = "Borne les octets des pochettes téléchargées depuis internet et les vignettes gardées prêtes à servir. Une pochette locale — un fichier à côté du morceau, ou intégré à celui-ci — ne coûte qu'un chemin, jamais ces octets."
+cover_cache_estimate = "Au moins {floor} pochettes en mémoire dans le pire cas (toutes venues d'internet) ; environ {typical} pour une bibliothèque de pochettes locales."
+cover_cache_estimate_unlimited = "Au moins {floor} pochettes en mémoire dans le pire cas ; le réencodage est décoché, donc une bibliothèque purement locale ne coûte qu'un chemin et toutes les pochettes tiennent."
+cover_download_max_label = "Plafond réseau (Mio)"
+cover_download_max_help = "Plus grande pochette que l'appareil accepte de télécharger depuis internet et de garder en mémoire."
 cover_source_max_label = "Plafond de la source (Mio)"
 cover_source_max_help = "Plus grande pochette que l'appareil accepte de lire. Toujours appliqué, réencodage ou non ; borné aux 20 Mio que le protocole des greffons garantit."
 cover_rendition_label = "Réencoder les pochettes avant de les pousser"
@@ -65,10 +75,7 @@ cover_max_edge_label = "Côté le plus long de la vignette (px)"
 cover_jpeg_quality_label = "Qualité JPEG"
 cover_jpeg_quality_help = "JPEG seulement : une pochette à canal alpha est réencodée en PNG, sans perte."
 cover_max_bytes_label = "Plafond de la vignette (Kio)"
-cover_max_bytes_help = "Un filet, pas une cible : au-delà, rien n'est poussé et le journal le dit."
-cover_cache_entries_label = "Pochettes gardées"
-cover_cache_entries_help = "Combien de pochettes restent servables à la page. Au-delà, une pochette déjà publiée répond 404 et le carré retombe sur le ♫."
-cover_cache_entries_ram = "Au pire {size} Mio en mémoire : une pochette réseau est plafonnée à {cap} Mio, une pochette locale ne garde qu'un chemin."
+cover_max_bytes_help = "Un filet, pas une cible : au-delà, rien n'est poussé et le journal le dit. Alimente aussi le budget mémoire ci-dessus : chaque vignette gardée coûte ce nombre d'octets."
 cover_max_pixels_label = "Plafond de décodage (Mpx)"
 cover_max_pixels_help = "Lu dans l'en-tête avant toute allocation : l x h x 4 octets de tampon, donc 16 Mpx font 64 Mio. Un PNG de 200 Kio peut annoncer 30000 x 30000 pixels."
 seek_card_title = "Déplacement"

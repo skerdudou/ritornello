@@ -1777,16 +1777,22 @@ image: a 404 from the Cover Art Archive, common since many releases have
 none, becomes silence rather than an empty frame.
 
 The cache is a small table, **in memory**, and it does **not** survive a
-restart. Its size is a setting (`cover_cache_entries`, twenty by default, two to
-a hundred) rather than the constant four it used to be: four did not even cover
-one album walked in both directions, and past the bound a cover already
-published in `cover_href` answers 404 — the page falls back to its ♫ for an
-image the appliance had and lost. The memory cost is bounded and modest, which
-is what makes the setting safe to raise: a local cover keeps only a path, and a
-network one is capped at `PLAFOND_RESEAU` (2 MiB) when downloaded, so twenty
-entries are 40 MiB in the absolute worst case and a couple in practice. The
-config page shows that worst case next to the field, computed from the two
-settings that bound it. This is a deliberate rejection of a
+restart. It is bounded by memory, not by a count: `cover_cache_budget_mio`
+(8 to 256 MiB, 50 by default) is charged against the bytes of covers
+downloaded from the internet and the thumbnails kept ready to serve, while a
+local cover — a file beside the track, or one embedded in it — keeps only a
+path and so costs nothing against this budget. A count-bounded cache used to
+force the user to multiply three settings to learn what it cost, and the
+product could reach values in the hundreds of megabytes without anything
+objecting; a memory-bounded one cannot. Past the budget, eviction proceeds by
+bytes, and a cover already published in `cover_href` can answer 404 — the page
+falls back to its ♫ for an image the appliance had and lost. The config page
+shows the number of covers this implies: at least `cover_cache_budget_mio` /
+(`cover_download_max_mio` + thumbnail ceiling) in the worst case, where every
+cover comes from the internet and pays both its bytes and its thumbnail, and
+about `cover_cache_budget_mio` / thumbnail ceiling for a library of local
+covers, which pay only their thumbnail — with the defaults, at least twenty
+and about a hundred. This is a deliberate rejection of a
 disk cache, not an oversight: a radio changes track every few minutes, a
 disc's cover is already remembered per-disc inside `musicbrainz` itself,
 and a local file's cover is reread from disk in a fraction of a

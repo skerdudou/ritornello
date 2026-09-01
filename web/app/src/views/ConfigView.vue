@@ -40,32 +40,72 @@ const settings = ref<SettingsPayload>({
 })
 
 /**
- * Cap of a **network** cover in memory, in mebibytes.
- *
- * Now a setting in its own right (`cover_download_max_mio`) rather than a
- * copy of a core constant: the estimate below reads the same figure the
- * download itself is cut at, so the two can no longer silently diverge.
- *
- * **Minimal wiring, not the redesigned panel** — the two-box layout and the
- * live floor/typical estimate described in the design belong to the task
- * that rebuilds this panel; this computed only keeps the existing line
- * truthful now that the settings it reads have changed shape.
+ * The core's own internal cap on the number of cache entries
+ * (`cover.rs::MAX_ENTRIES`). It is **not** a memory bound — the byte budget
+ * alone governs eviction — and must never be shown to the user as one: it
+ * exists only so a pathological setting combination (e.g. re-encoding off,
+ * every cover local) cannot make the estimate below print an unbounded or
+ * meaningless number. The estimate takes `min` with it so it never overstates
+ * what the cache would actually hold, but the figure itself never reaches the
+ * page — see `coverCacheEstimateText`.
  */
-const capPerCover = computed(() =>
-  Math.min(
-    Number(settings.value.cover_download_max_mio) || 2,
-    Number(settings.value.cover_source_max_mio) || 2,
-  ),
+const MAX_CACHE_ENTRIES = 256
+
+/** Budget for the cache, in bytes, as entered by the user. */
+const coverBudgetBytes = computed(
+  () => (Number(settings.value.cover_cache_budget_mio) || 0) * 1024 * 1024,
+)
+
+/** Cap on a cover downloaded from the internet, in bytes. */
+const coverDownloadBytes = computed(
+  () => (Number(settings.value.cover_download_max_mio) || 0) * 1024 * 1024,
 )
 
 /**
- * The memory budget, in mebibytes, as entered by the user.
- *
- * Used to read `entries * capPerCover`, the absolute worst case of a
- * count-bounded cache. The budget **is** that figure directly now — there is
- * no count left to multiply by a per-entry cost.
+ * What a retained thumbnail costs, in bytes — zero when re-encoding is off,
+ * since no thumbnail is produced at all in that case (see `CoverSettings` in
+ * cover.rs, `rendition: None`). This is the value that can make the "typical"
+ * estimate below divide by zero.
  */
-const ramMaxCache = computed(() => Number(settings.value.cover_cache_budget_mio) || 0)
+const coverThumbnailBytes = computed(() =>
+  settings.value.cover_rendition ? (Number(settings.value.cover_max_bytes_ko) || 0) * 1024 : 0,
+)
+
+/**
+ * Floor of the number of covers the budget holds at once: the worst case
+ * where every entry is a network cover paying both its downloaded bytes and
+ * its thumbnail. Always finite — the download cap cannot be zero — so this
+ * one never needs the "unlimited" escape hatch below.
+ */
+const coverFloorEstimate = computed(() => {
+  const perEntry = coverDownloadBytes.value + coverThumbnailBytes.value
+  if (perEntry <= 0) return MAX_CACHE_ENTRIES
+  return Math.min(MAX_CACHE_ENTRIES, Math.floor(coverBudgetBytes.value / perEntry))
+})
+
+/**
+ * Typical count for a library of local covers, which pay only their
+ * thumbnail. `null` means "every local cover fits": re-encoding is off, so a
+ * local entry costs nothing at all (only a path — see `payload_cost` in
+ * cover.rs) and the division below would be by zero. Printing
+ * `MAX_CACHE_ENTRIES` in that case would expose an internal constant the user
+ * has no way to interpret, so the template shows a dedicated sentence
+ * instead (`cover_cache_estimate_unlimited`).
+ */
+const coverTypicalEstimate = computed<number | null>(() => {
+  if (coverThumbnailBytes.value <= 0) return null
+  return Math.min(MAX_CACHE_ENTRIES, Math.floor(coverBudgetBytes.value / coverThumbnailBytes.value))
+})
+
+/** The live estimate shown under the budget field. */
+const coverCacheEstimateText = computed(() =>
+  coverTypicalEstimate.value === null
+    ? t.value('cover_cache_estimate_unlimited', { floor: coverFloorEstimate.value })
+    : t.value('cover_cache_estimate', {
+        floor: coverFloorEstimate.value,
+        typical: coverTypicalEstimate.value,
+      }),
+)
 
 /**
  * View value for "Default (system)": never sent as is ("Change" translates it
@@ -234,6 +274,13 @@ async function saveSettings() {
     overlay_ms: Number(settings.value.overlay_ms),
     tens_window_ms: Number(settings.value.tens_window_ms),
     seek_step_s: Number(settings.value.seek_step_s),
+    // Both read from a plain number input (`Input` has no `.number` modifier
+    // on its native `v-model`), so an edited field is a **string** here.
+    // Uncast, a string fails the core's `u32` deserialization and refuses the
+    // *whole* PUT — not just this field — the first time a user touches
+    // either box, which is exactly the defect this cast closes.
+    cover_cache_budget_mio: Number(settings.value.cover_cache_budget_mio),
+    cover_download_max_mio: Number(settings.value.cover_download_max_mio),
     // The four rendition settings are sent **even when the switch is
     // unchecked**, and that is deliberate: the UI greys them out without
     // emptying them, so re-checking the switch finds the values that had been
@@ -549,31 +596,50 @@ function goTo(id: string) {
         </Card>
       </section>
 
-      <!-- Covers. A single card, two tiers that must not be confused, and the
-           layout carries that distinction: the source cap comes **first** and
-           is never greyed out, because it applies whatever the switch says —
-           it is the only guard left when re-encoding is unchecked. The switch
-           comes next, and greys out the four settings that only describe the
-           thumbnail.
+      <!-- Covers. Two boxes that must not be confused, one per question:
+           what the cache **keeps in memory** (a budget the user reads
+           directly, plus the live count it implies), and what the core
+           **reads to publish** (the source cap, then the switch and the four
+           settings it greys out). Mixing them in one box is what produced the
+           false "40 MiB, 2 MiB per cover" line this replaces: a label that
+           looked like a memory bound levered nothing, because the real bound
+           lived in a different setting entirely.
 
-           Greyed out, not emptied: the values stay readable and go back in the
-           PUT (see `saveSettings`), so re-checking the switch finds what had
-           been set. -->
-      <section id="covers" class="scroll-mt-6">
+           Greyed out, not emptied: the four rendition settings stay readable
+           and go back in the PUT (see `saveSettings`), so re-checking the
+           switch finds what had been set. -->
+      <section id="covers" class="scroll-mt-6 space-y-4">
         <Card>
-          <CardHeader><CardTitle>{{ t('cover_card_title') }}</CardTitle></CardHeader>
+          <CardHeader><CardTitle>{{ t('cover_kept_title') }}</CardTitle></CardHeader>
           <CardContent class="space-y-4">
-            <!-- Outside the greyed-out re-encoding box, like the source cap:
-                 this bound applies whatever happens. -->
             <label class="grid gap-1 text-sm">
-              {{ t('cover_cache_entries_label') }}
-              <Input type="number" min="8" max="256" step="1" class="w-28" data-cover-cache-entries
+              {{ t('cover_cache_budget_label') }}
+              <Input type="number" min="8" max="256" step="1" class="w-28" data-cover-cache-budget
                 v-model="settings.cover_cache_budget_mio" />
-              <span class="max-w-md text-xs text-muted-foreground">{{ t('cover_cache_entries_help') }}</span>
-              <span class="max-w-md text-xs text-muted-foreground" data-cover-cache-ram>
-                {{ t('cover_cache_entries_ram', { size: ramMaxCache, cap: capPerCover }) }}
-              </span>
+              <span class="max-w-md text-xs text-muted-foreground">{{ t('cover_cache_budget_help') }}</span>
             </label>
+            <label class="grid gap-1 text-sm">
+              {{ t('cover_download_max_label') }}
+              <Input type="number" min="1" max="20" class="w-28" data-cover-download-max
+                v-model="settings.cover_download_max_mio" />
+              <span class="max-w-md text-xs text-muted-foreground">{{ t('cover_download_max_help') }}</span>
+            </label>
+            <!-- The live estimate: what the budget above translates to, in
+                 covers, given the current download and thumbnail ceilings.
+                 Reactive to every field that feeds it, so it never lags what
+                 the user just typed. -->
+            <p class="max-w-md text-xs text-muted-foreground" data-cover-cache-estimate>
+              {{ coverCacheEstimateText }}
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader><CardTitle>{{ t('cover_read_title') }}</CardTitle></CardHeader>
+          <CardContent class="space-y-4">
+            <!-- Outside the greyed-out re-encoding box: this bound applies
+                 whatever happens, and is the only guard left once re-encoding
+                 is unchecked. -->
             <label class="grid gap-1 text-sm">
               {{ t('cover_source_max_label') }}
               <Input type="number" min="1" max="20" class="w-28" data-cover-source-max
