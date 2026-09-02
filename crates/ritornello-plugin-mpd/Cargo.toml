@@ -14,7 +14,7 @@ anyhow = "1"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
+toml = "1.1"
 # Features listed explicitly, not `full`: `net` for the `TcpListener`,
 # `io-util` for lines (Task 8), `sync` for the `RwLock` and the `Notify`
 # (Task 5), `time` for the timeouts. See `files`'s `Cargo.toml` — "a
