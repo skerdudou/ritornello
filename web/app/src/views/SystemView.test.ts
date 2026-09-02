@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CardTitle, Select } from '@ritornello/ui'
 import { useCatalog } from '../composables/useCatalog'
 import { resetMetrics, useMetrics } from '../composables/useMetrics'
+import { firePointer } from '../testing/pointer'
 import SystemView from './SystemView.vue'
 
 // Complete payload, reused and tweaked per case. The CPU jiffies default to
@@ -1061,7 +1062,7 @@ describe('SystemView', () => {
 
     it('a pointer in the middle of the chart displays the middle sample', async () => {
       const { w, svg } = await mountWithHistory()
-      await svg.trigger('pointermove', { clientX: 100 })
+      await firePointer(svg, 'pointermove', { clientX: 100 })
       const popover = w.get('[data-system-history-popin]')
       expect(popover.text()).toContain('50 %')
       expect(popover.text()).toContain('45 %')
@@ -1070,7 +1071,7 @@ describe('SystemView', () => {
 
     it('a pointer on the first column displays the first sample', async () => {
       const { w, svg } = await mountWithHistory()
-      await svg.trigger('pointermove', { clientX: 0 })
+      await firePointer(svg, 'pointermove', { clientX: 0 })
       const popover = w.get('[data-system-history-popin]')
       expect(popover.text()).toContain('10 %')
       expect(popover.text()).toContain('5 %')
@@ -1079,7 +1080,7 @@ describe('SystemView', () => {
 
     it('a pointer on the last column displays the last sample', async () => {
       const { w, svg } = await mountWithHistory()
-      await svg.trigger('pointermove', { clientX: 200 })
+      await firePointer(svg, 'pointermove', { clientX: 200 })
       const popover = w.get('[data-system-history-popin]')
       expect(popover.text()).toContain('90 %')
       expect(popover.text()).toContain('85 %')
@@ -1089,7 +1090,7 @@ describe('SystemView', () => {
     it('the popover appears on hover and disappears on leaving the chart', async () => {
       const { w, svg } = await mountWithHistory()
       expect(w.find('[data-system-history-popin]').exists()).toBe(false)
-      await svg.trigger('pointermove', { clientX: 100 })
+      await firePointer(svg, 'pointermove', { clientX: 100 })
       expect(w.find('[data-system-history-popin]').exists()).toBe(true)
       await svg.trigger('pointerleave')
       expect(w.find('[data-system-history-popin]').exists()).toBe(false)
@@ -1101,7 +1102,7 @@ describe('SystemView', () => {
       // screen would never trigger `pointermove`.
       const { w, svg } = await mountWithHistory()
       expect(w.find('[data-system-history-popin]').exists()).toBe(false)
-      await svg.trigger('pointerdown', { clientX: 100 })
+      await firePointer(svg, 'pointerdown', { clientX: 100 })
       const popover = w.get('[data-system-history-popin]')
       expect(popover.text()).toContain('50 %')
       w.unmount()
@@ -1111,7 +1112,7 @@ describe('SystemView', () => {
       // `pointercancel`: the gesture is interrupted (a page scroll starting,
       // for instance) without any `pointerup` ever happening.
       const { w, svg } = await mountWithHistory()
-      await svg.trigger('pointerdown', { clientX: 100 })
+      await firePointer(svg, 'pointerdown', { clientX: 100 })
       expect(w.find('[data-system-history-popin]').exists()).toBe(true)
       await svg.trigger('pointercancel')
       expect(w.find('[data-system-history-popin]').exists()).toBe(false)
@@ -1123,7 +1124,7 @@ describe('SystemView', () => {
       // Column 2 (hovered by `clientX: 100`, see the middle test above) must
       // therefore place the line at x = 50.
       const { w, svg } = await mountWithHistory()
-      await svg.trigger('pointermove', { clientX: 100 })
+      await firePointer(svg, 'pointermove', { clientX: 100 })
       const line = w.get('[data-system-history-line]')
       expect(line.attributes('x1')).toBe('50')
       expect(line.attributes('x2')).toBe('50')
@@ -1137,17 +1138,17 @@ describe('SystemView', () => {
       // first and 2 for the second, two different answers where "the
       // nearest" admits only one.
       const { w, svg } = await mountWithHistory()
-      await svg.trigger('pointermove', { clientX: 95 })
+      await firePointer(svg, 'pointermove', { clientX: 95 })
       let line = w.get('[data-system-history-line]')
       expect(line.attributes('x1')).toBe('50')
-      await svg.trigger('pointermove', { clientX: 105 })
+      await firePointer(svg, 'pointermove', { clientX: 105 })
       line = w.get('[data-system-history-line]')
       expect(line.attributes('x1')).toBe('50')
       // `clientX: 125` (fraction 2.5, halfway between columns 2 and 3):
       // `Math.round` rounds halves up, hence column 3 (x = 75), which a
       // different "nearest" rounding (to even, for instance) would not
       // necessarily give.
-      await svg.trigger('pointermove', { clientX: 125 })
+      await firePointer(svg, 'pointermove', { clientX: 125 })
       line = w.get('[data-system-history-line]')
       expect(line.attributes('x1')).toBe('75')
       w.unmount()
@@ -1162,20 +1163,20 @@ describe('SystemView', () => {
       // First column (i = 0 of 5): ideal centre at 0 px, clamped to 50 px —
       // the transform stays a constant -50 %, it is the position that is
       // clamped, not a special-cased transform as before this series.
-      await svg.trigger('pointermove', { clientX: 0 })
+      await firePointer(svg, 'pointermove', { clientX: 0 })
       let popover = w.get('[data-system-history-popin]').element as HTMLElement
       expect(popover.style.transform).toBe('translateX(-50%)')
       expect(popover.style.left).toBe('50px')
       // Middle column (i = 2 of 5): ideal centre at 100 px, in the unclamped
       // band — that was the untested branch before this series, the one where
       // the old code centred without ever clamping.
-      await svg.trigger('pointermove', { clientX: 100 })
+      await firePointer(svg, 'pointermove', { clientX: 100 })
       popover = w.get('[data-system-history-popin]').element as HTMLElement
       expect(popover.style.transform).toBe('translateX(-50%)')
       expect(popover.style.left).toBe('100px')
       // Last column (i = 4 of 5): ideal centre at 200 px, clamped to 150 px,
       // symmetric to the first column.
-      await svg.trigger('pointermove', { clientX: 200 })
+      await firePointer(svg, 'pointermove', { clientX: 200 })
       popover = w.get('[data-system-history-popin]').element as HTMLElement
       expect(popover.style.transform).toBe('translateX(-50%)')
       expect(popover.style.left).toBe('150px')
@@ -1192,7 +1193,7 @@ describe('SystemView', () => {
       stub(payload({ cpu_total_jiffies: 0, cpu_idle_jiffies: 0 }))
       const w = await mountView()
       const svg = w.get('[data-system-history]')
-      await svg.trigger('pointermove', { clientX: 100 })
+      await firePointer(svg, 'pointermove', { clientX: 100 })
       expect(w.find('[data-system-history-popin]').exists()).toBe(false)
       expect(w.find('[data-system-history-line]').exists()).toBe(false)
       w.unmount()
@@ -1276,7 +1277,7 @@ describe('SystemView', () => {
       vi.spyOn(svg.element, 'getBoundingClientRect').mockReturnValue({
         left: 0, width: 200, top: 0, height: 0, right: 200, bottom: 0, x: 0, y: 0, toJSON: () => {},
       } as DOMRect)
-      await svg.trigger('pointermove', { clientX: 10 })
+      await firePointer(svg, 'pointermove', { clientX: 10 })
       await flushPromises()
       expect(w.get('[data-system-history-popin]').text()).toContain('47.8 °C')
       w.unmount()
