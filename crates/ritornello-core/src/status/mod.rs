@@ -91,14 +91,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/system", get(crate::system::system_json))
         .route("/api/system/power", axum::routing::post(crate::system::power_post))
         .route("/api/command", axum::routing::post(command_post))
-        .route("/api/cover/:key", get(crate::cover::cover_get))
+        .route("/api/cover/{key}", get(crate::cover::cover_get))
         .route(
-            "/plugins/:name/api/data",
+            "/plugins/{name}/api/data",
             get(crate::admin::admin_get_data).put(crate::admin::admin_put_data),
         )
-        .route("/plugins/:name/api/i18n", get(crate::admin::admin_i18n))
-        .route("/plugins/:name/:fichier", get(crate::admin::admin_asset))
-        .route("/api/plugins/:name/enabled", axum::routing::put(plugin_enabled_put))
+        .route("/plugins/{name}/api/i18n", get(crate::admin::admin_i18n))
+        .route("/plugins/{name}/{file}", get(crate::admin::admin_asset))
+        .route("/api/plugins/{name}/enabled", axum::routing::put(plugin_enabled_put))
         .merge(crate::web::routes())
         .fallback(crate::web::shell)
         .with_state(state)
