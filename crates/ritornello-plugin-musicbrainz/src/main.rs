@@ -575,10 +575,10 @@ impl MusicBrainzPlugin {
         if self.in_flight.as_deref() == Some(toc.as_str()) {
             return;
         }
-        if let Some((known_toc, _)) = &self.known {
-            if known_toc == &toc {
-                return; // already queried, result memorized (found or not)
-            }
+        if let Some((known_toc, _)) = &self.known
+            && known_toc == &toc
+        {
+            return; // already queried, result memorized (found or not)
         }
         let param = match musicbrainz::mb_toc_param(&toc) {
             Ok(p) => p,
@@ -663,69 +663,69 @@ impl MetadataPlugin for MusicBrainzPlugin {
                 // Triggered on a change of `stream_title`, not on every frame:
                 // Icecast repeats the same header throughout a track, and
                 // re-handling it every time would be a request for nothing.
-                if let Some(url) = icy_url {
-                    if stream_title != self.icy_seen {
-                        self.icy_seen = stream_title.clone();
-                        if let Some(raw) = stream_title {
-                            // `icy_in_flight` prevents launching a second
-                            // handling for the same URL while a first one is
-                            // still in flight; the staleness guard in
-                            // `next_enrichment` filters an answer that became
-                            // off-topic during the flight.
-                            if self.icy_in_flight.as_deref() != Some(url.as_str()) {
-                                self.icy_in_flight = Some(url.clone());
-                                // **A station with a manual pattern is never
-                                // reprobed.** The store did refuse to rewrite
-                                // the entry (`Store::learn`), but nothing
-                                // prevented the probe from starting — and then
-                                // it was *its* split that got displayed, not
-                                // the operator's. The documentation was thus
-                                // true of the file and false of the screen.
-                                // Consulting the origin here closes the gap at
-                                // the source: if the operator decided, we apply
-                                // what they set, even when MusicBrainz does not
-                                // want it.
-                                // Could this string be split at all? Read
-                                // before the lock, and it is what keeps a
-                                // reopened "do not split" from costing
-                                // anything on a jingle. See `reprobe_unsplit`.
-                                let splittable = !icy::candidates(&icy::clean(&raw)).is_empty();
-                                let (is_manual, unsplit) = {
-                                    let store = self.store.read().await;
-                                    let e = store.entry(&url);
-                                    (
-                                        e.is_some_and(|e| e.origin == patterns::Origin::Manual),
-                                        reprobe_unsplit(e, splittable),
-                                    )
-                                };
-                                let reprobe = !is_manual
-                                    && (should_reprobe(&self.failures, &url) || unsplit);
-                                if reprobe {
-                                    // **The reprobe consumes the counter.**
-                                    // Without that it stayed above the
-                                    // threshold for the life of the process: a
-                                    // station that never validates — a
-                                    // mojibake stream, for instance — went
-                                    // back into a full probe at *every* title,
-                                    // which contradicted the documentation and
-                                    // made this limit a guaranteed request
-                                    // storm. A reprobe buys three titles, it
-                                    // does not stay armed permanently.
-                                    self.failures.remove(&url);
-                                }
-                                let store = self.store.clone();
-                                let tx = self.icy_tx.clone();
-                                let task_url = url.clone();
-                                // `stream_url` already recognized the identity,
-                                // so it is there: the `unwrap_or` is only type
-                                // totality, not a use case.
-                                let identity = stream_identity.clone().unwrap_or(Value::Null);
-                                tokio::spawn(async move {
-                                    let known = store.read().await.entry(&task_url).map(|e| e.pattern.clone());
-                                    let outcome = handle_icy(task_url, raw, identity, known, reprobe).await;
-                                    let _ = tx.send(outcome).await;
-                                });
+                if let Some(url) = icy_url
+                    && stream_title != self.icy_seen
+                {
+                    self.icy_seen = stream_title.clone();
+                    if let Some(raw) = stream_title {
+                        // `icy_in_flight` prevents launching a second
+                        // handling for the same URL while a first one is
+                        // still in flight; the staleness guard in
+                        // `next_enrichment` filters an answer that became
+                        // off-topic during the flight.
+                        if self.icy_in_flight.as_deref() != Some(url.as_str()) {
+                            self.icy_in_flight = Some(url.clone());
+                            // **A station with a manual pattern is never
+                            // reprobed.** The store did refuse to rewrite
+                            // the entry (`Store::learn`), but nothing
+                            // prevented the probe from starting — and then
+                            // it was *its* split that got displayed, not
+                            // the operator's. The documentation was thus
+                            // true of the file and false of the screen.
+                            // Consulting the origin here closes the gap at
+                            // the source: if the operator decided, we apply
+                            // what they set, even when MusicBrainz does not
+                            // want it.
+                            // Could this string be split at all? Read
+                            // before the lock, and it is what keeps a
+                            // reopened "do not split" from costing
+                            // anything on a jingle. See `reprobe_unsplit`.
+                            let splittable = !icy::candidates(&icy::clean(&raw)).is_empty();
+                            let (is_manual, unsplit) = {
+                                let store = self.store.read().await;
+                                let e = store.entry(&url);
+                                (
+                                    e.is_some_and(|e| e.origin == patterns::Origin::Manual),
+                                    reprobe_unsplit(e, splittable),
+                                )
+                            };
+                            let reprobe = !is_manual
+                                && (should_reprobe(&self.failures, &url) || unsplit);
+                            if reprobe {
+                                // **The reprobe consumes the counter.**
+                                // Without that it stayed above the
+                                // threshold for the life of the process: a
+                                // station that never validates — a
+                                // mojibake stream, for instance — went
+                                // back into a full probe at *every* title,
+                                // which contradicted the documentation and
+                                // made this limit a guaranteed request
+                                // storm. A reprobe buys three titles, it
+                                // does not stay armed permanently.
+                                self.failures.remove(&url);
                             }
+                            let store = self.store.clone();
+                            let tx = self.icy_tx.clone();
+                            let task_url = url.clone();
+                            // `stream_url` already recognized the identity,
+                            // so it is there: the `unwrap_or` is only type
+                            // totality, not a use case.
+                            let identity = stream_identity.clone().unwrap_or(Value::Null);
+                            tokio::spawn(async move {
+                                let known = store.read().await.entry(&task_url).map(|e| e.pattern.clone());
+                                let outcome = handle_icy(task_url, raw, identity, known, reprobe).await;
+                                let _ = tx.send(outcome).await;
+                            });
                         }
                     }
                 }

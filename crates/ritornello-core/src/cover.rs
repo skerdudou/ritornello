@@ -726,15 +726,14 @@ impl CoverCache {
         // rules that never coexisted.
         let settings = self.settings();
         let rules = settings.rendition?;
-        if let Some(stamp) = known_stamp {
-            if let Some((mime, bytes)) =
+        if let Some(stamp) = known_stamp
+            && let Some((mime, bytes)) =
                 self.cached_rendition(&rendition_identity(key, &stamp, &rules)).await
-            {
-                // A hit here is filed under the caller's own stamp by
-                // construction — the identity was built from it — so handing
-                // it back is not an approximation.
-                return Some((mime, bytes, stamp));
-            }
+        {
+            // A hit here is filed under the caller's own stamp by
+            // construction — the identity was built from it — so handing
+            // it back is not an approximation.
+            return Some((mime, bytes, stamp));
         }
 
         // Registration at the rendezvous. The table's lock only covers the
@@ -1961,36 +1960,34 @@ pub async fn cover_get(
             // the share again**. And because the stamp is part of the
             // identity, a `folder.jpg` replaced on the share is a different
             // identity, and its old rendition is never served again.
-            if thumbnail_requested {
-                if let Some((mime, small, served)) =
+            if thumbnail_requested
+                && let Some((mime, small, served)) =
                     state.covers.rendition_for(&key, Some(stamp)).await
-                {
-                    return (
-                        [
-                            (header::CONTENT_TYPE, mime.to_string()),
-                            (header::CACHE_CONTROL, "no-cache".to_string()),
-                            // **`served`, not `stamp`.** A caller that missed
-                            // the cache and joined a rendezvous already under
-                            // way gets a picture read before its own stat, and
-                            // labelling it with `stamp` would pin those older
-                            // bytes under a validator that keeps matching for
-                            // the life of that browser's cache. `served` makes
-                            // the label describe the bytes; the next request
-                            // stats afresh, mismatches, and is served the
-                            // current image. See `RenditionInFlight`.
-                            (header::ETAG, variant_etag(&served, true)),
-                        ],
-                        small.as_slice().to_vec(),
-                    )
-                        .into_response();
-                }
-                // Nothing to shrink: we fall back to streaming the original,
-                // below, with the thumbnail's ETag — the content served under
-                // this URL stays consistent with its validator, which is all
-                // the cache requires. That one is `stamp`'s, rightly: what
-                // gets streamed comes from the descriptor this route opened
-                // and stat'ed itself, no rendezvous in between.
+            {
+                return (
+                    [
+                        (header::CONTENT_TYPE, mime.to_string()),
+                        (header::CACHE_CONTROL, "no-cache".to_string()),
+                        // **`served`, not `stamp`.** A caller that missed the
+                        // cache and joined a rendezvous already under way gets
+                        // a picture read before its own stat, and labelling it
+                        // with `stamp` would pin those older bytes under a
+                        // validator that keeps matching for the life of that
+                        // browser's cache. `served` makes the label describe
+                        // the bytes; the next request stats afresh,
+                        // mismatches, and is served the current image. See
+                        // `RenditionInFlight`.
+                        (header::ETAG, variant_etag(&served, true)),
+                    ],
+                    small.as_slice().to_vec(),
+                )
+                    .into_response();
             }
+            // Falling through means either no thumbnail was asked for, or
+            // there was nothing to shrink. Either way we stream the original
+            // below, with `stamp`'s ETag — rightly: what gets streamed comes
+            // from the descriptor this route opened and stat'ed itself, with
+            // no rendezvous in between, so the label describes those bytes.
             // Revalidation of the header bytes at serving time, and not only
             // at discovery time (`fetch`): between the two, the share is not
             // under the device's control, and a contributor who replaced the
@@ -2100,25 +2097,25 @@ pub async fn cover_get(
             {
                 return StatusCode::NOT_MODIFIED.into_response();
             }
-            if thumbnail_requested {
-                if let Some((mime, small, served)) =
+            if thumbnail_requested
+                && let Some((mime, small, served)) =
                     state.covers.rendition_for(&key, Some(stamp)).await
-                {
-                    return (
-                        [
-                            (header::CONTENT_TYPE, mime.to_string()),
-                            (header::CACHE_CONTROL, "no-cache".to_string()),
-                            // `served`, not `stamp` — same reasoning as the
-                            // `File` arm above.
-                            (header::ETAG, variant_etag(&served, true)),
-                        ],
-                        small.as_slice().to_vec(),
-                    )
-                        .into_response();
-                }
-                // Nothing to shrink: fall back to the original below, with
-                // the thumbnail's ETag — same reasoning as `File`.
+            {
+                return (
+                    [
+                        (header::CONTENT_TYPE, mime.to_string()),
+                        (header::CACHE_CONTROL, "no-cache".to_string()),
+                        // `served`, not `stamp` — same reasoning as the
+                        // `File` arm above.
+                        (header::ETAG, variant_etag(&served, true)),
+                    ],
+                    small.as_slice().to_vec(),
+                )
+                    .into_response();
             }
+            // Falling through means no thumbnail was asked for, or there was
+            // nothing to shrink: the original is served below — same
+            // reasoning as `File`.
             // Only reached once a body is actually needed: the container is
             // parsed here, and only here — never to answer a 304.
             //

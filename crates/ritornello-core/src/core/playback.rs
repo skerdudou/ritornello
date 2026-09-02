@@ -10,10 +10,10 @@ impl<P: Player> Core<P> {
         }
         if let Some(locale) = self.locale.clone() {
             for name in self.source_order.clone() {
-                if let Some(src) = self.sources.get(&name) {
-                    if let Err(e) = src.request(SourceReq::SetLocale(locale.clone())).await {
-                        tracing::warn!("SetLocale to {name}: {e}");
-                    }
+                if let Some(src) = self.sources.get(&name)
+                    && let Err(e) = src.request(SourceReq::SetLocale(locale.clone())).await
+                {
+                    tracing::warn!("SetLocale to {name}: {e}");
                 }
             }
         }
@@ -29,10 +29,10 @@ impl<P: Player> Core<P> {
     /// Replays the current content of the active source (`Activate` asks the
     /// source to give the current URI again, not to move to the next content).
     pub async fn retry_stream(&mut self) -> Result<()> {
-        if !self.standby && self.expecting_stream {
-            if let Some(action) = self.active_request(SourceReq::Activate).await? {
-                self.apply(action).await?;
-            }
+        if !self.standby && self.expecting_stream
+            && let Some(action) = self.active_request(SourceReq::Activate).await?
+        {
+            self.apply(action).await?;
         }
         Ok(())
     }
@@ -72,10 +72,10 @@ impl<P: Player> Core<P> {
             // identity, which the core recognizes as unchanged, and the
             // identical view is not pushed again.
             Event::TrackChanged(n) => {
-                if !self.standby {
-                    if let Err(e) = self.active_request(SourceReq::PlayerTrack(n)).await {
-                        tracing::debug!("track notification to source: {e}");
-                    }
+                if !self.standby
+                    && let Err(e) = self.active_request(SourceReq::PlayerTrack(n)).await
+                {
+                    tracing::debug!("track notification to source: {e}");
                 }
             }
             Event::PlaybackIdle => {
@@ -97,10 +97,10 @@ impl<P: Player> Core<P> {
                 // file would remain admissible and a final refresh from mpv
                 // would put them back on screen after the end of the list.
                 self.playback = false;
-                if !self.standby {
-                    if let Err(e) = self.active_request(SourceReq::Stop).await {
-                        tracing::debug!("stop notification to source: {e}");
-                    }
+                if !self.standby
+                    && let Err(e) = self.active_request(SourceReq::Stop).await
+                {
+                    tracing::debug!("stop notification to source: {e}");
                 }
             }
         }

@@ -306,10 +306,10 @@ impl<P: Player> Core<P> {
         let Some(locale) = self.locale.clone() else {
             return;
         };
-        if let Some(src) = self.sources.get(name) {
-            if let Err(e) = src.request(SourceReq::SetLocale(locale)).await {
-                tracing::warn!("SetLocale to {name}: {e}");
-            }
+        if let Some(src) = self.sources.get(name)
+            && let Err(e) = src.request(SourceReq::SetLocale(locale)).await
+        {
+            tracing::warn!("SetLocale to {name}: {e}");
         }
     }
 

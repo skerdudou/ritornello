@@ -290,10 +290,10 @@ impl SourcePlugin for CdSource {
                 // The comparison only happens if a previous TOC is known: on
                 // the first disc it is `None`, and a playback the user has just
                 // started must absolutely not be switched off.
-                if let Some(previous) = &self.previous_toc {
-                    if Some(previous) != toc.as_ref() {
-                        self.playback = false;
-                    }
+                if let Some(previous) = &self.previous_toc
+                    && Some(previous) != toc.as_ref()
+                {
+                    self.playback = false;
                 }
                 self.toc = toc;
                 // Deferred arrival of the TOC: this is the moment the track

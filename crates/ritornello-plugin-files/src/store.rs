@@ -184,10 +184,10 @@ pub fn in_dir(dir: &Path, loc: Location) -> Vec<Saved> {
             .and_then(|x| x.to_str())
             .map(|x| x.eq_ignore_ascii_case("m3u"))
             .unwrap_or(false);
-        if m3u {
-            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                names.push(stem.to_string());
-            }
+        if m3u
+            && let Some(stem) = p.file_stem().and_then(|s| s.to_str())
+        {
+            names.push(stem.to_string());
         }
     }
     names.sort();

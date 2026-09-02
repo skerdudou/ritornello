@@ -35,10 +35,10 @@ impl<P: Player> Core<P> {
         *self.catalog.write().await = new_catalog;
         self.persist();
         for name in self.source_order.clone() {
-            if let Some(src) = self.sources.get(&name) {
-                if let Err(e) = src.request(SourceReq::SetLocale(locale.clone())).await {
-                    tracing::warn!("SetLocale to {name}: {e}");
-                }
+            if let Some(src) = self.sources.get(&name)
+                && let Err(e) = src.request(SourceReq::SetLocale(locale.clone())).await
+            {
+                tracing::warn!("SetLocale to {name}: {e}");
             }
         }
         self.publish_state();

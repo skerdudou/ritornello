@@ -137,10 +137,10 @@ impl SourceClient {
                         continue;
                     }
                 };
-                if let (Some(id), Some(action)) = (msg.id, msg.action.clone()) {
-                    if let Some(tx) = pending.lock().await.remove(&id) {
-                        let _ = tx.send(action);
-                    }
+                if let (Some(id), Some(action)) = (msg.id, msg.action.clone())
+                    && let Some(tx) = pending.lock().await.remove(&id)
+                {
+                    let _ = tx.send(action);
                 }
                 let carries_identity = msg.identity.is_some();
                 // **Exhaustive** literal, without `..`: adding a field to

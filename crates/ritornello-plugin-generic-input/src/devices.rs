@@ -206,10 +206,10 @@ impl Hub {
     /// device has disappeared).
     fn forget(&self, path: &Path) {
         let name = self.open.write().unwrap().remove(path);
-        if let Some(name) = name {
-            if !self.device_names().contains(&name) {
-                self.learn.write().unwrap().cancel_if(&name);
-            }
+        if let Some(name) = name
+            && !self.device_names().contains(&name)
+        {
+            self.learn.write().unwrap().cancel_if(&name);
         }
     }
 }

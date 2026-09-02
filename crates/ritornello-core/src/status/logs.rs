@@ -152,10 +152,10 @@ mod tests {
         for _ in 0..50 {
             let Some(chunk) = body.next().await else { panic!("stream ended before the frame") };
             buffer.push_str(std::str::from_utf8(&chunk.unwrap()).unwrap());
-            if let Some(data) = buffer.lines().find_map(|l| l.strip_prefix("data:")) {
-                if buffer.contains("\n\n") {
-                    return serde_json::from_str(data.trim()).expect("JSON payload");
-                }
+            if let Some(data) = buffer.lines().find_map(|l| l.strip_prefix("data:"))
+                && buffer.contains("\n\n")
+            {
+                return serde_json::from_str(data.trim()).expect("JSON payload");
             }
         }
         panic!("no complete frame received: {buffer:?}");

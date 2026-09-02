@@ -251,18 +251,17 @@ fn display_relay(
             // must show what is playing without waiting for the next track
             // change.
             let mut cover_tracking = CoverTracking::default();
-            if wants_covers {
-                if let Err(e) = push_cover(
+            if wants_covers
+                && let Err(e) = push_cover(
                     &client,
                     &covers,
                     &mut cover_tracking,
                     state.track.cover_href.as_deref(),
                 )
                 .await
-                {
-                    tracing::warn!("display plugin {name} relay stopped: {e}");
-                    break 'alive true;
-                }
+            {
+                tracing::warn!("display plugin {name} relay stopped: {e}");
+                break 'alive true;
             }
             loop {
                 let send_result = tokio::select! {

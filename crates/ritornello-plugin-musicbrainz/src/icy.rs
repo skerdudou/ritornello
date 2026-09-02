@@ -64,10 +64,10 @@ pub fn clean(raw: &str) -> String {
     let mut s = without_bar.trim();
     // A single group removed, at the end of the string: looping would cut a
     // title that legitimately ended with brackets.
-    if let Some(opening) = s.rfind('[') {
-        if s.trim_end().ends_with(']') {
-            s = s[..opening].trim_end();
-        }
+    if let Some(opening) = s.rfind('[')
+        && s.trim_end().ends_with(']')
+    {
+        s = s[..opening].trim_end();
     }
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }

@@ -289,6 +289,7 @@ impl Browser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::volumes::fixture::divert_proc_mounts;
     use std::sync::atomic::AtomicBool;
 
     fn browser(dir: &std::path::Path) -> Browser {
@@ -336,14 +337,12 @@ mod tests {
         // The browsing guard. Without it, the page would address /proc/self
         // and the tree would wander into the recursive links.
         let dir = tempfile::tempdir().unwrap();
-        let fake = dir.path().join("mounts");
-        std::fs::write(&fake, "proc /proc proc rw 0 0\n/dev/sda1 / ext4 rw 0 0\n").unwrap();
-        std::env::set_var("RITORNELLO_FILES_PROC_MOUNTS", &fake);
+        let _guard =
+            divert_proc_mounts(dir.path(), "proc /proc proc rw 0 0\n/dev/sda1 / ext4 rw 0 0\n");
         let mut e = browser(dir.path());
         e.open(Kind::Local);
         let err = e.local("/proc/self").await.unwrap_err();
         assert!(err.contains(' '), "raw key: {err}");
-        std::env::remove_var("RITORNELLO_FILES_PROC_MOUNTS");
     }
 
     #[tokio::test]
@@ -356,15 +355,15 @@ mod tests {
         std::fs::write(media.join("a.mp3"), b"").unwrap();
         std::fs::write(media.join("b.flac"), b"").unwrap();
         std::fs::write(media.join("notes.txt"), b"").unwrap();
-        let fake = dir.path().join("mounts");
-        std::fs::write(&fake, format!("/dev/sda1 {} ext4 rw 0 0\n", dir.path().display())).unwrap();
-        std::env::set_var("RITORNELLO_FILES_PROC_MOUNTS", &fake);
+        let _guard = divert_proc_mounts(
+            dir.path(),
+            &format!("/dev/sda1 {} ext4 rw 0 0\n", dir.path().display()),
+        );
         let mut e = browser(dir.path());
         e.open(Kind::Local);
         e.local(&media.display().to_string()).await.unwrap();
         let v = e.view();
         assert_eq!(v["dirs"], serde_json::json!(["Album"]));
         assert_eq!(v["audio_count"], 2, "notes.txt is not an audio file");
-        std::env::remove_var("RITORNELLO_FILES_PROC_MOUNTS");
     }
 }

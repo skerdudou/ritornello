@@ -29,15 +29,15 @@ pub fn parse_device_list(raw: &str) -> Vec<AudioDevice> {
             if !skipping {
                 devices.push(AudioDevice { name, description: String::new() });
             }
-        } else if !skipping {
-            if let Some(d) = devices.last_mut() {
-                let part = line.trim();
-                if !part.is_empty() {
-                    if !d.description.is_empty() {
-                        d.description.push_str(" — ");
-                    }
-                    d.description.push_str(part);
+        } else if !skipping
+            && let Some(d) = devices.last_mut()
+        {
+            let part = line.trim();
+            if !part.is_empty() {
+                if !d.description.is_empty() {
+                    d.description.push_str(" — ");
                 }
+                d.description.push_str(part);
             }
         }
     }

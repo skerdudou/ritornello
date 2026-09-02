@@ -928,10 +928,11 @@ mod tests {
             };
             let (mut core, _pc, source_calls, _rx, _d) = setup_persisted(persisted);
             core.startup().await.unwrap();
-            // The lock is released by this binding, not held until the end
-            // of the block: otherwise `source_calls` is freed before it.
-            let woke = source_calls.lock().unwrap().iter().any(|c| c.contains("Wake"));
-            woke
+            // The guard is a temporary of the tail expression, so edition
+            // 2024 drops it *before* the block's locals and it cannot
+            // outlive `source_calls`. Up to edition 2021 the reverse held,
+            // and this needed a binding of its own to release the lock.
+            source_calls.lock().unwrap().iter().any(|c| c.contains("Wake"))
         }
 
         assert!(wakes(StartupPower::On, true).await, "\"on\" ignores the standby on disk");
