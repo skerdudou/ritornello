@@ -1,0 +1,66 @@
+version: 2
+
+# Three ecosystems live in this repository and each wants a different cadence.
+# The grouping matters more than the cadence: `serde` alone is declared in 12
+# of the 13 crates and `tokio` in 11, so an ungrouped week could open a dozen
+# pull requests that all say the same thing. Every pull request opened here
+# also runs the whole CI — including the Playwright journeys — so noise is not
+# free.
+
+updates:
+  # -- GitHub Actions ---------------------------------------------------------
+  # The workflows pin moving major tags (`checkout@v7`), which already carry
+  # every patch and minor release without anyone acting. Dependabot therefore
+  # only ever has something to say when a **new major** appears, which is a
+  # handful of times a year and always worth reading: monthly is not a
+  # compromise here, it is the real frequency of the event.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # -- Rust -------------------------------------------------------------------
+  # `directory: "/"` is the workspace root: the members are discovered from it
+  # and there is a single `Cargo.lock`. There is no `[workspace.dependencies]`
+  # table, so one bump edits the manifest of every crate that names the crate
+  # being bumped — one pull request touching eleven files rather than eleven
+  # pull requests, which is exactly what the group below buys.
+  #
+  # Majors are deliberately left out of the group. A major in `axum`, `reqwest`
+  # or `lofty` is a reading job, not a merge job, and burying three of them in
+  # one pull request is how a breaking change gets waved through.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      cargo-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # -- npm --------------------------------------------------------------------
+  # One `package-lock.json` at the root covers all eight manifests (the
+  # `workspaces` field lists `web/kit`, `web/app` and `crates/*/ui`), so the
+  # root entry is the whole story — no per-workspace entry is needed.
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      npm-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
