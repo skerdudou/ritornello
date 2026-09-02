@@ -34,14 +34,95 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Queue the merge for anything short of a major
-        # Majors are the reading job that `.github/dependabot.yml` keeps out
-        # of its groups on purpose: a major in `axum`, `reqwest` or `lofty`
-        # can pass the whole suite and still change behaviour the suite does
-        # not cover. Those wait for a human. Everything else merges itself
+      - name: Classify the bump the way Cargo and npm actually resolve it
+        id: gate
+        # `update-type` alone is not a safe gate, and this repository learned
+        # it the hard way: `tower 0.4.13 -> 0.5.3` and `evdev 0.12.2 ->
+        # 0.13.2` are reported as `semver-minor`, because in literal semver
+        # the major component is still 0 — and both merged themselves without
+        # anyone reading them. But a caret requirement pins the **leftmost
+        # non-zero** component, so `0.4 -> 0.5` is exactly as breaking as
+        # `1.x -> 2.x`, and `0.0.3 -> 0.0.4` is too. Cargo and npm agree on
+        # this; semver's own vocabulary is what disagrees.
+        #
+        # Two further reasons this is a script and not an `if:` expression on
+        # `previous-version`: that output describes a single dependency, so a
+        # group mixing `1.2 -> 1.3` with `0.4 -> 0.5` could report the
+        # harmless one, and `0.0.x` bumps arrive labelled `semver-patch`,
+        # which no comparison against `semver-minor` would ever catch.
+        # `updated-dependencies-json` carries every member of the group, so
+        # the verdict is taken over all of them.
+        env:
+          UPDATES: ${{ steps.meta.outputs.updated-dependencies-json }}
+        run: |
+          cat > classify.mjs <<'MJS'
+          const updates = JSON.parse(process.env.UPDATES || '[]')
+
+          // Anything that is not a plain dotted numeric version -- an empty
+          // string, a prerelease, junk -- returns null and is treated as
+          // breaking. The shape has to be checked before splitting, because
+          // `Number('')` is 0, not NaN: `''.split('.').map(Number)` yields
+          // `[0]`, which reads as a perfectly ordinary version and would wave
+          // the bump through. A gate that fails open is not a gate.
+          const parse = (v) => {
+            const s = String(v ?? '')
+            return /^\d+(\.\d+)*$/.test(s) ? s.split('.').map(Number) : null
+          }
+
+          // The index of the leftmost non-zero component: 0 for `1.2.3`,
+          // 1 for `0.4.13`, 2 for `0.0.3`. That component is the one a caret
+          // requirement refuses to cross.
+          const breakingIndex = (parts) => parts.findIndex((n) => n > 0)
+
+          const reasons = []
+          for (const u of updates) {
+            const name = u.dependencyName || '(unnamed)'
+            if (u.updateType === 'version-update:semver-major') {
+              reasons.push(`${name}: major (${u.prevVersion} -> ${u.newVersion})`)
+              continue
+            }
+            const prev = parse(u.prevVersion)
+            const next = parse(u.newVersion)
+            if (!prev || !next) {
+              reasons.push(`${name}: unreadable versions (${u.prevVersion} -> ${u.newVersion})`)
+              continue
+            }
+            const i = breakingIndex(prev)
+            // -1 is `0.0.0`, which nothing depends on; 0 means the major
+            // component leads, and a change there is already a major above.
+            if (i > 0 && prev[i] !== next[i]) {
+              reasons.push(`${name}: ${u.prevVersion} -> ${u.newVersion} crosses the leading component`)
+            }
+          }
+
+          if (updates.length === 0) {
+            reasons.push('no dependency metadata to read')
+          }
+
+          for (const reason of reasons) console.log(`breaking :: ${reason}`)
+          console.log(`${updates.length} dependency/ies examined, ${reasons.length} blocking`)
+          MJS
+          node classify.mjs | tee classify.log
+          if grep -q '^breaking :: ' classify.log; then
+            echo "compatible=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "compatible=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Queue the merge for a genuinely compatible bump
+        # Everything the step above called breaking waits for a human. That is
+        # the reading job `.github/dependabot.yml` keeps out of its groups on
+        # purpose: a breaking bump can pass the whole suite and still change
+        # behaviour the suite does not cover. Everything else merges itself
         # once the required checks are green.
-        if: steps.meta.outputs.update-type != 'version-update:semver-major'
+        if: steps.gate.outputs.compatible == 'true'
         run: gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Say why the merge is waiting
+        if: steps.gate.outputs.compatible != 'true'
+        run: |
+          echo "Not queued: this bump crosses a component a caret requirement pins." >> "$GITHUB_STEP_SUMMARY"
+          echo "It stays open for review. See the classification step for the dependency and versions." >> "$GITHUB_STEP_SUMMARY"
