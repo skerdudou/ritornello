@@ -34,7 +34,7 @@ describe('PluginRoute', () => {
       vi.fn((url: string) =>
         String(url).startsWith('/plugins/radio/')
           ? radioResponse
-          : Promise.resolve(new Response(JSON.stringify({ qui: 'generic-input' }), { status: 200 })),
+          : Promise.resolve(new Response(JSON.stringify({ from: 'generic-input' }), { status: 200 })),
       ),
     )
     const PluginRoute = (await import('./PluginRoute.vue')).default
@@ -43,12 +43,12 @@ describe('PluginRoute', () => {
 
     route.params.name = 'generic-input'
     await flushPromises()
-    expect(w.findComponent(PluginViewStub).props('catalog')).toEqual({ qui: 'generic-input' })
+    expect(w.findComponent(PluginViewStub).props('catalog')).toEqual({ from: 'generic-input' })
 
     // The radio response finally arrives: it is stale, nothing must move.
-    deliverRadio(new Response(JSON.stringify({ qui: 'radio' }), { status: 200 }))
+    deliverRadio(new Response(JSON.stringify({ from: 'radio' }), { status: 200 }))
     await flushPromises()
-    expect(w.findComponent(PluginViewStub).props('catalog')).toEqual({ qui: 'generic-input' })
+    expect(w.findComponent(PluginViewStub).props('catalog')).toEqual({ from: 'generic-input' })
   })
 
   it('passes on the cause carried by a refusal of the core instead of swallowing it', async () => {

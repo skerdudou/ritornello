@@ -237,7 +237,7 @@ mod tests {
     fn an_invalid_file_leaves_the_embedded_table_intact() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("ouifm.toml");
-        std::fs::write(&p, "ceci n'est pas du toml [[[").unwrap();
+        std::fs::write(&p, "this is not toml [[[").unwrap();
         assert_eq!(Table::load(&p).webradios.len(), Table::embedded().webradios.len());
     }
 

@@ -20,34 +20,34 @@ import { readFileSync, readdirSync } from 'node:fs'
 
 const distDir = `${process.cwd()}/dist`
 
-function echouer(message) {
+function fail(message) {
   console.error(`check-plugin-dist: ${message}`)
   process.exit(1)
 }
 
-let entrees
+let entries
 try {
-  entrees = readdirSync(distDir)
+  entries = readdirSync(distDir)
 } catch {
-  echouer(`impossible de lire ${distDir} — le build a-t-il ete lance avant ce script ?`)
+  fail(`cannot read ${distDir} — was the build run before this script?`)
 }
 
 // 1. Delivery contract: only ui.js and ui.css, flat. An extra file (or a
 // subdirectory, e.g. assets/) matches no core route
 // (`/plugins/<name>/<file>`, no subdirectory) and would fail as a silent
 // 404 in use.
-const attendu = new Set(['ui.js', 'ui.css'])
-const inattendus = entrees.filter((f) => !attendu.has(f))
-if (inattendus.length > 0) {
-  echouer(
-    `dist/ contient des entrees en trop : ${inattendus.join(', ')} — ` +
-      "seuls 'ui.js' et 'ui.css' sont attendus, a plat. Verifier " +
-      'rollupOptions.output.assetFileNames et build.lib.fileName dans vite.config.ts.',
+const expected = new Set(['ui.js', 'ui.css'])
+const unexpected = entries.filter((f) => !expected.has(f))
+if (unexpected.length > 0) {
+  fail(
+    `dist/ has extra entries: ${unexpected.join(', ')} — ` +
+      "only 'ui.js' and 'ui.css' are expected, flat; check " +
+      'rollupOptions.output.assetFileNames and build.lib.fileName in vite.config.ts',
   )
 }
-for (const fichier of attendu) {
-  if (!entrees.includes(fichier)) {
-    echouer(`dist/${fichier} est absent — le build a-t-il echoue silencieusement ?`)
+for (const file of expected) {
+  if (!entries.includes(file)) {
+    fail(`dist/${file} is missing — did the build fail silently?`)
   }
 }
 
@@ -58,11 +58,11 @@ const uiCss = readFileSync(`${distDir}/ui.css`, 'utf8')
 // surviving reference crashes at load time (no global `process` in the
 // browser). Same risk as the one documented in
 // web/app/scripts/check-dist.mjs for vue.js/ui-kit.js.
-for (const [nom, contenu] of [['ui.js', uiJs], ['ui.css', uiCss]]) {
-  if (contenu.includes('process.env')) {
-    echouer(
-      `${nom} contient encore "process.env" — verifier le define ` +
-        "'process.env.NODE_ENV': JSON.stringify('production') dans vite.config.ts.",
+for (const [name, content] of [['ui.js', uiJs], ['ui.css', uiCss]]) {
+  if (content.includes('process.env')) {
+    fail(
+      `${name} still contains "process.env" — check the define ` +
+        "'process.env.NODE_ENV': JSON.stringify('production') in vite.config.ts",
     )
   }
 }
@@ -70,11 +70,11 @@ for (const [nom, contenu] of [['ui.js', uiJs], ['ui.css', uiCss]]) {
 // 3. `vue` and `@ritornello/ui` must appear as external imports (no
 // bundling of the kit or the Vue runtime into the plugin module).
 for (const specifier of ['vue', '@ritornello/ui']) {
-  const motif = new RegExp(`from\\s*["']${specifier.replace('/', '\\/')}["']`)
-  if (!motif.test(uiJs)) {
-    echouer(
-      `ui.js ne contient aucun "import ... from '${specifier}'" — ` +
-        `verifier que '${specifier}' figure dans rollupOptions.external de vite.config.ts.`,
+  const pattern = new RegExp(`from\\s*["']${specifier.replace('/', '\\/')}["']`)
+  if (!pattern.test(uiJs)) {
+    fail(
+      `ui.js contains no "import ... from '${specifier}'" — ` +
+        `check that '${specifier}' is listed in rollupOptions.external in vite.config.ts`,
     )
   }
 }
@@ -83,12 +83,12 @@ for (const specifier of ['vue', '@ritornello/ui']) {
 // Vue runtime had been bundled despite the declared externalization,
 // these fingerprints generally survive minification (they are never
 // present in plugin code, only in the Vue runtime itself).
-for (const empreinte of ['__v_isRef', '__v_skip', '[Vue warn]']) {
-  if (uiJs.includes(empreinte)) {
-    echouer(
-      `ui.js contient l'empreinte de runtime Vue "${empreinte}" — ` +
-        "verifier que 'vue' figure dans rollupOptions.external de vite.config.ts " +
-        'et que ce fichier ne bundle pas Vue en double.',
+for (const fingerprint of ['__v_isRef', '__v_skip', '[Vue warn]']) {
+  if (uiJs.includes(fingerprint)) {
+    fail(
+      `ui.js contains the Vue runtime fingerprint "${fingerprint}" — ` +
+        "check that 'vue' is listed in rollupOptions.external in vite.config.ts " +
+        'and that this file does not bundle a second Vue',
     )
   }
 }
