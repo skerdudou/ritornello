@@ -139,7 +139,7 @@ pub async fn shell(State(state): State<AppState>, uri: Uri) -> Response {
 }
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/assets/*path", get(asset))
+    Router::new().route("/assets/{*path}", get(asset))
 }
 
 #[cfg(test)]
