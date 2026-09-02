@@ -1763,9 +1763,10 @@ fact. Each step now says what it did:
   later" needed to become a measurement.
 
 Two refusals are `warn` rather than `info` because they are broken promises: a
-key requested by the browser that the cache no longer holds (`ENTREES` entries,
-FIFO), and a cover evicted between its retrieval and its publication. Both mean
-the appliance had the image and lost it.
+key requested by the browser that the cache no longer holds (evicted under the
+byte budget described below, oldest first), and a cover evicted between its
+retrieval and its publication. Both mean the appliance had the image and lost
+it.
 
 **`GET /api/cover/{key}`** serves the bytes. It is **the appliance** that
 fetches an image, never the browser — the same principle already stated
@@ -1792,7 +1793,11 @@ shows the number of covers this implies: at least `cover_cache_budget_mio` /
 cover comes from the internet and pays both its bytes and its thumbnail, and
 about `cover_cache_budget_mio` / thumbnail ceiling for a library of local
 covers, which pay only their thumbnail — with the defaults, at least twenty
-and about a hundred. This is a deliberate rejection of a
+and about a hundred. One belt sits behind the budget and is not a memory
+bound: the table holds a few hundred entries at most, whatever they cost,
+because a library of local covers charges nothing at all and a byte budget can
+never trigger on it. Past that, the oldest entry goes and its key answers the
+same 404 as above. This is a deliberate rejection of a
 disk cache, not an oversight: a radio changes track every few minutes, a
 disc's cover is already remembered per-disc inside `musicbrainz` itself,
 and a local file's cover is reread from disk in a fraction of a

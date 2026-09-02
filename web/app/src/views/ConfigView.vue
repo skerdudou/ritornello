@@ -42,12 +42,18 @@ const settings = ref<SettingsPayload>({
 /**
  * The core's own internal cap on the number of cache entries
  * (`cover.rs::MAX_ENTRIES`). It is **not** a memory bound — the byte budget
- * alone governs eviction — and must never be shown to the user as one: it
- * exists only so a pathological setting combination (e.g. re-encoding off,
- * every cover local) cannot make the estimate below print an unbounded or
- * meaningless number. The estimate takes `min` with it so it never overstates
- * what the cache would actually hold, but the figure itself never reaches the
- * page — see `coverCacheEstimateText`.
+ * alone governs eviction — and must never be *labelled* as one: it exists
+ * only so a pathological setting combination (e.g. re-encoding off, every
+ * cover local) cannot make the estimate below print an unbounded number.
+ *
+ * **The figure does reach the page**, and a comment here used to deny it. Both
+ * estimates take `min` with it so neither overstates what the cache would
+ * actually hold, and that `min` bites at ordinary settings: budget 256 MiB
+ * with a 32 KiB rendered ceiling clamps the typical count to 256, and
+ * re-encoding off with a 1 MiB download cap clamps the floor to it too. What
+ * must not happen is the page *explaining* the number — hence the wording of
+ * `cover_cache_estimate_unlimited`, which states a few-hundred ceiling in
+ * prose rather than naming a constant the user cannot interpret.
  */
 const MAX_CACHE_ENTRIES = 256
 
@@ -76,24 +82,41 @@ const coverThumbnailBytes = computed(() =>
  * where every entry is a network cover paying both its downloaded bytes and
  * its thumbnail. Always finite — the download cap cannot be zero — so this
  * one never needs the "unlimited" escape hatch below.
+ *
+ * **Never below one**, and that is not cosmetic rounding. The combination
+ * exists: an 8 MiB budget with a 20 MiB download cap and an 8192 KiB rendered
+ * ceiling floors to zero, and the page then read "at least 0 covers" — which
+ * is both alarming and false. `cover.rs::evict_to_budget` protects the entry
+ * its caller just inserted (`keep_entry`), so a budget too small for even one
+ * cover still serves that one rather than discarding it on arrival. One is
+ * therefore what the core actually guarantees.
  */
 const coverFloorEstimate = computed(() => {
   const perEntry = coverDownloadBytes.value + coverThumbnailBytes.value
   if (perEntry <= 0) return MAX_CACHE_ENTRIES
-  return Math.min(MAX_CACHE_ENTRIES, Math.floor(coverBudgetBytes.value / perEntry))
+  return Math.min(MAX_CACHE_ENTRIES, Math.max(1, Math.floor(coverBudgetBytes.value / perEntry)))
 })
 
 /**
  * Typical count for a library of local covers, which pay only their
- * thumbnail. `null` means "every local cover fits": re-encoding is off, so a
- * local entry costs nothing at all (only a path — see `payload_cost` in
- * cover.rs) and the division below would be by zero. Printing
- * `MAX_CACHE_ENTRIES` in that case would expose an internal constant the user
- * has no way to interpret, so the template shows a dedicated sentence
- * instead (`cover_cache_estimate_unlimited`).
+ * thumbnail. `null` selects the sentence for "re-encoding is off": a local
+ * entry then costs nothing at all (only a path — see `payload_cost` in
+ * cover.rs), so there is no per-entry figure to divide the budget by.
+ *
+ * **Gated on the switch, not on the byte value**, and that distinction is a
+ * fix. `coverThumbnailBytes` is also zero while the rendered-ceiling box is
+ * momentarily empty — clearing a number input to retype it is an ordinary
+ * keystroke — and testing the bytes made the page announce "re-encoding is
+ * off" with the switch visibly on. The switch is the only thing that answers
+ * the question the sentence asks.
+ *
+ * A blank box with the switch on falls to the same `MAX_CACHE_ENTRIES` clamp
+ * the floor already uses: a transient figure for a transient state, and the
+ * only alternative — dividing by zero — prints `Infinity`.
  */
 const coverTypicalEstimate = computed<number | null>(() => {
-  if (coverThumbnailBytes.value <= 0) return null
+  if (!settings.value.cover_rendition) return null
+  if (coverThumbnailBytes.value <= 0) return MAX_CACHE_ENTRIES
   return Math.min(MAX_CACHE_ENTRIES, Math.floor(coverBudgetBytes.value / coverThumbnailBytes.value))
 })
 

@@ -103,19 +103,26 @@ pub struct Settings {
     /// 24-hour time (`13:05`) rather than 12-hour (`1:05 PM`).
     pub clock_24h: bool,
 
-    // ---- Covers: what comes in, then what goes out -------------------------
+    // ---- Covers: what is kept, then what is read, then what is produced ----
     //
-    // Two stages that must not be confused, and that is why the first setting
-    // lives **outside** the switch in the UI.
+    // Eight settings in three groups, and the UI's two cards carry the
+    // distinction rather than decorating it.
     //
-    // `cover_source_max_mio` bounds what the core agrees to read, whatever
-    // happens next: it is the only protection when re-encoding is disabled,
-    // and the cheapest of all, since it is judged on the file size without
-    // reading a byte of its content.
+    // `cover_cache_budget_mio` comes first, in a card of its own ("what is
+    // kept in memory"): it bounds what the appliance *holds*, and is the only
+    // one of the eight that says nothing about any single cover.
     //
-    // The five others only describe the **rendition** — what the core makes to
-    // push onto a socket. Switch unchecked, none of them makes sense: the
-    // source leaves as is.
+    // `cover_download_max_mio` and `cover_source_max_mio` bound what the core
+    // agrees to bring in — the first for the internet only, the second for
+    // every source. Both live outside the switch: `cover_source_max_mio` is
+    // the only protection left when re-encoding is disabled, and the cheapest
+    // of all, since it is judged on the file size without reading a byte of
+    // its content.
+    //
+    // The remaining five are the switch (`cover_rendition`) and the four
+    // settings that only describe the **rendition** — what the core makes to
+    // push onto a socket. Switch unchecked, none of those four means anything:
+    // the source leaves as is.
     /// Memory allowed to the covers the device keeps at hand, in mebibytes.
     ///
     /// **The budget, not a count** — and that inversion is the point. A number

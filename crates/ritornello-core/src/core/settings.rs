@@ -234,4 +234,51 @@ mod tests {
         fr_keys.sort();
         assert_eq!(en_keys, fr_keys, "en/fr key sets diverge");
     }
+
+    #[test]
+    fn the_cache_estimate_never_promises_that_every_cover_fits() {
+        // **A promise the cache cannot keep, in both catalogues.** With
+        // re-encoding off, a local cover costs no bytes at all
+        // (`cover::payload_cost`), so this sentence read "every cover fits" —
+        // and it was false: `cover::evict_to_budget` trims `entries` down to
+        // `cover::MAX_ENTRIES` whatever they cost, so cover 257 evicts cover
+        // 1. What the user then meets is not a missing niceness but the one
+        // failure the subsystem itself logs as a broken promise —
+        // `cover_get` answering 404 on a key the core published in
+        // `cover_href`, and the square falling back to its ♫. A NAS library
+        // past a few hundred albums is unremarkable.
+        //
+        // **This test pins the claim, not the sentence.** It does not compare
+        // the string to a literal — that would break on any rewording and
+        // teach nothing — but refuses the two shapes of unbounded promise the
+        // wording must never take again, and requires the ceiling to be
+        // stated. Named production change it guards: putting "every cover
+        // fits" / "toutes les pochettes tiennent" back into either catalogue.
+        let en = ritornello_i18n::try_parse(crate::i18n::EN).unwrap();
+        let fr = ritornello_i18n::try_parse(&fr_pack()).unwrap();
+        let key = "cover_cache_estimate_unlimited";
+        let en_text = en.get(key).expect("the embedded English carries this key").to_lowercase();
+        let fr_text = fr.get(key).expect("the shipped French carries this key").to_lowercase();
+
+        for forbidden in ["every cover", "all covers", "any number"] {
+            assert!(
+                !en_text.contains(forbidden),
+                "the English estimate must not promise an unbounded cache: {en_text}"
+            );
+        }
+        for forbidden in ["toutes les pochettes", "toute pochette", "sans limite"] {
+            assert!(
+                !fr_text.contains(forbidden),
+                "the French estimate must not promise an unbounded cache: {fr_text}"
+            );
+        }
+        assert!(
+            en_text.contains("a few hundred"),
+            "the English estimate must state the ceiling it does have: {en_text}"
+        );
+        assert!(
+            fr_text.contains("quelques centaines"),
+            "the French estimate must state the ceiling it does have: {fr_text}"
+        );
+    }
 }

@@ -2821,8 +2821,9 @@ mod relay_tests {
 
     #[tokio::test]
     async fn an_href_with_no_cached_cover_does_not_break_the_relay() {
-        // The cache is bounded (`ENTRIES` entries): the key published in the
-        // state may have been evicted in the meantime.
+        // The cache is bounded by bytes (`CoverSettings::budget`, with
+        // `MAX_ENTRIES` as an internal belt on paths): the key published in
+        // the state may have been evicted in the meantime.
         let covers = Arc::new(CoverCache::new());
         let mut b = bench(true, covers, state_with_cover("evicted")).await;
         let received = witness(&mut b).await;

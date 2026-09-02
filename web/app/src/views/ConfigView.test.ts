@@ -47,7 +47,7 @@ const CATALOGUE = {
   cover_cache_budget_label: 'Budget mémoire (Mio)',
   cover_cache_budget_help: 'Borne les octets réseau et les vignettes gardées.',
   cover_cache_estimate: 'Au moins {floor} pochettes ; environ {typical} pour une bibliothèque locale.',
-  cover_cache_estimate_unlimited: 'Au moins {floor} pochettes ; toutes les pochettes locales tiennent.',
+  cover_cache_estimate_unlimited: 'Au moins {floor} pochettes ; le cache en garde quelques centaines au plus.',
   cover_download_max_label: 'Plafond réseau (Mio)',
   cover_download_max_help: 'Plus grande pochette téléchargée depuis internet.',
   cover_source_max_label: 'Plafond de la source (Mio)',
@@ -812,7 +812,7 @@ describe('ConfigView — covers', () => {
     )
   })
 
-  it('says local covers all fit when re-encoding is off', async () => {
+  it('drops the per-cover figure when re-encoding is off', async () => {
     // Re-encoding off means no thumbnail is produced at all: a local cover's
     // cost falls to zero, so the "typical" formula would divide by zero.
     // Printing "about 256" (the core's internal MAX_CACHE_ENTRIES, which
@@ -826,7 +826,41 @@ describe('ConfigView — covers', () => {
     await flushPromises()
     const text = w.find('[data-cover-cache-estimate]').text()
     expect(text).not.toContain('256')
-    expect(text).toBe('Au moins 25 pochettes ; toutes les pochettes locales tiennent.')
+    expect(text).toBe('Au moins 25 pochettes ; le cache en garde quelques centaines au plus.')
+  })
+
+  it('keeps the two-figure wording while the rendered ceiling is being retyped', async () => {
+    // Clearing a number input to retype it is an ordinary keystroke, and it
+    // made `Number('') || 0` collapse to zero — the same value the switch
+    // being off produces. The page then announced "re-encoding is off" with
+    // the switch visibly on, which is simply a false statement about the
+    // appliance.
+    //
+    // Named production change this guards: testing `coverThumbnailBytes <= 0`
+    // instead of `settings.cover_rendition` to choose the sentence.
+    const { w } = await mountView()
+    await w.find('[data-cover-max-bytes]').setValue('')
+    await flushPromises()
+    const text = w.find('[data-cover-cache-estimate]').text()
+    expect(text).toContain('pour une bibliothèque locale')
+    expect(text).not.toContain('quelques centaines au plus')
+  })
+
+  it('never announces a floor of zero covers', async () => {
+    // 8 MiB of budget, a 20 MiB download cap and an 8192 KiB rendered
+    // ceiling floor to `Math.floor(8 / 28)` = 0, and the page read "at least
+    // 0 covers" — alarming and false. `evict_to_budget` protects the entry
+    // its caller just inserted, so one cover is what the core actually
+    // guarantees however badly the boxes are set.
+    //
+    // Named production change this guards: dropping the `Math.max(1, …)` in
+    // `coverFloorEstimate`.
+    const { w } = await mountView()
+    await w.find('[data-cover-cache-budget]').setValue('8')
+    await w.find('[data-cover-download-max]').setValue('20')
+    await w.find('[data-cover-max-bytes]').setValue('8192')
+    await flushPromises()
+    expect(w.find('[data-cover-cache-estimate]').text()).toContain('Au moins 1 pochettes')
   })
 })
 

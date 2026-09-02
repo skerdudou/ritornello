@@ -585,16 +585,53 @@ Living in the core rather than on the key means the same reasoning as the
 5% volume step: a remote never has to be reprogrammed just because the step
 it sends should now be bigger or smaller.
 
-### Album covers card
+### Album covers cards
 
-Six settings on the same `GET`/`PUT /api/settings` and the same
-`422`-on-write contract, and the card's layout carries a distinction that
-matters more than any of the values.
+Eight settings on the same `GET`/`PUT /api/settings` and the same
+`422`-on-write contract, split across **two cards**, and that split carries a
+distinction that matters more than any of the values: what the appliance
+*keeps*, and what it *reads and produces*.
 
-**`cover_source_max_mio`** comes first and is never greyed out: it bounds
-what the core agrees to *read*, whatever happens next, and it is the only
-guard left when re-encoding is off. 20 MiB by default, bounded **1-20** —
-the upper bound is `COVER_MAX_BYTES` expressed in the setting's unit, not a
+**What is kept in memory.** **`cover_cache_budget_mio`** comes first, alone
+in its card. 50 MiB by default, bounded **8-256**. It is the memory the cover cache may occupy, and
+it replaced a count of entries: a number of covers said nothing about memory
+— one had to multiply it by two other settings to learn what it cost, and the
+product could reach absurd figures without anything objecting. The figure the
+user reads is now the memory itself, and the number of covers becomes a
+consequence the page estimates for them.
+
+What is charged against it: the bytes of covers **downloaded from the
+internet**, and each **retained thumbnail** (at most `cover_max_bytes_ko`
+each). What is not: a local cover — a `folder.jpg` on a share, or a picture
+embedded in the audio file — which keeps only a path and so weighs on this
+budget solely through its thumbnail. Past the budget, eviction goes
+cheapest-to-rebuild first: stale thumbnails, then the oldest thumbnail, then
+the oldest source that actually costs bytes. A zero-cost source is never
+evicted to free bytes it does not have.
+
+Under the field the page prints a **live estimate**, recomputed as the boxes
+are typed in: "at least N covers in the worst case (every cover from the
+internet), about M for a library of local covers". The worst case charges
+`cover_download_max_mio + cover_max_bytes_ko` per entry; the typical one
+charges the thumbnail alone. With re-encoding off, a local cover costs
+nothing at all and the second half of the sentence is replaced by a different
+one — the cache still holds only **a few hundred** entries whatever they
+cost, an internal belt (`cover.rs::MAX_ENTRIES`, 256) against a library of
+free paths growing without end. That belt is deliberately *not* presented as
+a memory bound, because it measures something else; but the sentence must not
+promise that every cover fits either, because past it cover 257 evicts cover
+1 and the browser meets a `404` on a key the core itself published.
+
+**`cover_download_max_mio`** (2 MiB by default, bounded **1-20**) is the
+largest cover the appliance will download from the internet and hold whole in
+memory. It is the other half of the worst-case estimate above, and it is not
+`cover_source_max_mio`: one bounds a transfer from a third party, the other
+bounds any read at all.
+
+**What is read to publish.** **`cover_source_max_mio`** comes first in this
+card and is never greyed out: it bounds what the core agrees to *read*,
+whatever happens next, and it is the only guard left when re-encoding is off.
+20 MiB by default, bounded **1-20** — the upper bound is `COVER_MAX_BYTES` expressed in the setting's unit, not a
 comfort choice. That constant is the promise made to display plugins about
 what they may receive, and the MPD plugin sizes its own bounds on it without
 being able to read the core's settings, so this setting can only lower it.
@@ -641,13 +678,20 @@ blocking thread. Swapping the last two would let a bomb through on its
 weight, since a bomb is precisely a file that is tiny in bytes and immense in
 pixels.
 
-Two consequences worth knowing. Nothing is memoised: the cache key hashes the
-*path*, not the content, so a kept thumbnail would go stale the moment
-someone replaces the image under that path — and replacing it is exactly the
-triggering gesture. And with re-encoding on, a cover whose bytes do not
-decode is dropped: the header check only reads magic bytes, so a truncated
-file used to pass it and reach every display, each showing a broken square
-its own way. The device now settles it once, centrally.
+One consequence worth knowing: with re-encoding on, a cover whose bytes do
+not decode is dropped. The header check only reads magic bytes, so a
+truncated file used to pass it and reach every display, each showing a broken
+square its own way. The device now settles it once, centrally.
+
+Thumbnails **are** memoised, and used not to be. What forbade it was the key,
+not the cost: a key that hashes the *path* goes stale the moment someone
+replaces the image under that path, and replacing it is exactly the
+triggering gesture. A retained thumbnail is therefore filed under an identity
+that carries three things — the cache key, a **stamp** of the source (its
+modification date and size), and the rules that produced it. Replace the file
+and the stamp changes; lower the longest edge and the rules change; either
+way the old thumbnail is never looked up again, and the next reconciliation
+of the budget throws it out.
 
 The rendition serves the HTTP route too, but **only on request**.
 `GET /api/cover/{key}` streams a `folder.jpg` from a share without ever
@@ -672,12 +716,24 @@ the cap that costs nothing to check for a file costs a full parse to check
 for an embedded picture, so it is enforced there too, and the picture simply
 does not come through.
 
-Unlike the push path, these thumbnails **are** memoised — four of them, and the
-distinction is entirely in the key. `ligne` could memoise nothing because its
-key hashes the path; here the key carries the ETag as well (the file's mtime
-and size), so replacing the image under that path changes the key and the old
-thumbnail is never served again. Without it every page load would decode and
-re-encode on a Pi 2, which is the very cost the thumbnail exists to avoid.
+The same memoised thumbnails serve this route, and there is **no count cap on
+them**: how many are retained is decided by `cover_cache_budget_mio` alone.
+A hidden extra cap would make the page's estimate a lie in exactly the way
+the budget exists to remove. Without the memo every page load would decode
+and re-encode on a Pi 2, which is the very cost the thumbnail exists to
+avoid.
+
+The direction of that identity is worth stating, because it is easy to get
+backwards: the **core** owns the stamp, and HTTP *derives* its `ETag` from it
+— not the reverse. A validator is a protocol's business and has no place
+inside the core's memory. One consequence: a `200` is labelled from the stamp
+of the read that produced its bytes, which is not always the stat the route
+took on the way in. A caller that joins an extraction already under way
+collects a picture read before its own stat, and labelling those bytes with
+the newer stamp would pin the wrong image in that browser for good — it
+revalidates, the stat still matches, the `304` returns the same stale bytes.
+The `304` itself keeps using the route's own stat, which is what makes a
+conditional request cost one `stat` and never a container parse.
 
 ### Where the metadata comes from
 

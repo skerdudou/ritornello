@@ -405,8 +405,10 @@ impl<P: Player> Core<P> {
             let started = std::time::Instant::now();
             // Read just before the fetch it bounds, like every other cover
             // setting in this module: the download may take seconds, and a
-            // value read earlier could describe a budget the user has since
-            // changed.
+            // value read earlier could describe a download cap the user has
+            // since changed. The cache's byte budget is a different setting
+            // and not the one read here — `cover::fetch` bounds one transfer,
+            // it does not decide what the cache retains.
             let download_max = covers.settings().download_max;
             match crate::cover::fetch(&r, download_max).await {
                 Some(p) => {

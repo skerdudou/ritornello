@@ -53,6 +53,16 @@ pub(super) const COVER_MAX_BYTES_KO: std::ops::RangeInclusive<u32> = 32..=8192;
 /// Memory budget for covers, in mebibytes. 8 at the bottom, under which
 /// even one worst-case entry would not fit and the cache would thrash;
 /// 256 at the top, already a quarter of a 1 GiB Pi's memory.
+///
+/// **That quarter is only true because the cached buffers are trimmed**, and
+/// the figure this ceiling was chosen from was briefly wrong. The budget sums
+/// `len()`; the allocator charges `capacity()`, and both cached buffers are
+/// grown from an empty `Vec` — chunk by chunk in `cover::download`, by the
+/// encoder in `cover::encode`. Geometric growth leaves a capacity of up to
+/// nearly twice the length, so an untrimmed cache at this ceiling could
+/// occupy close to *half* a 1 GiB Pi instead. Both call sites now
+/// `shrink_to_fit` before handing their buffer over; remove either and this
+/// bound stops meaning what it says.
 pub(super) const COVER_CACHE_BUDGET_MIO: std::ops::RangeInclusive<u32> = 8..=256;
 
 /// Cap on a downloaded cover, in mebibytes. Its ceiling is
