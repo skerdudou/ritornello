@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "workspaces": ["web/kit", "web/app", "crates/*/ui"],
-  "engines": { "node": ">=20" },
+  "engines": { "node": ">=22" },
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
