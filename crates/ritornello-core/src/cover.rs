@@ -498,6 +498,42 @@ pub struct CoverCache {
     /// proving nothing.
     #[cfg(test)]
     embedded_extractions: std::sync::atomic::AtomicUsize,
+    /// Test-only hold on the one extraction a flight performs.
+    ///
+    /// **Why production code carries a test hook at all.** The property to
+    /// establish is that N callers arriving on one flight cause a single
+    /// extraction, and that is a statement about N callers being inside the
+    /// flight at the same instant. Spawning N callers does not obtain it:
+    /// `read_embedded_bounded` hands its work to a blocking thread, and when
+    /// that thread finishes before the handle is first polled, the `await`
+    /// returns `Ready` without ever yielding. The first caller then runs
+    /// register / extract / remove in a single poll and every follower
+    /// arrives to an empty table — eight extractions, and a rendezvous never
+    /// exercised. Measured: 13 failures in 60 runs with the test binary
+    /// pinned to one CPU, and on CI it turned main red.
+    ///
+    /// Seeding the cell by hand, the answer for the rendezvous tests that
+    /// need only *one* follower (see
+    /// `a_picture_from_the_rendezvous_is_labelled_with_its_own_stamp`),
+    /// cannot express this property: the first caller to read a seeded cell
+    /// removes it, so followers two and up would extract for real.
+    ///
+    /// **A `Semaphore` rather than a `Notify`**, so that the order of
+    /// install-then-release cannot matter: a permit added before the
+    /// extraction reaches its `acquire` is still there to be taken, whereas
+    /// a notification sent before anyone waits is lost — and a lost wake-up
+    /// here is a test that hangs rather than one that fails.
+    #[cfg(test)]
+    extraction_hold: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// Test-only count of callers that reached the embedded rendezvous.
+    ///
+    /// What lets a test wait on a *state* instead of on a duration: it yields
+    /// until every caller it launched has registered, then lifts
+    /// `extraction_hold`. Counted at the rendezvous rather than at the
+    /// extraction because followers never reach the extraction — that is the
+    /// very thing the flight exists to spare them.
+    #[cfg(test)]
+    rendezvous_arrivals: std::sync::atomic::AtomicUsize,
 }
 
 /// A retained rendition: its identity (see `rendition_identity`), its MIME
@@ -837,6 +873,10 @@ impl CoverCache {
             let mut in_flight = self.embedded_in_flight.lock().await;
             in_flight.entry(key.to_string()).or_insert_with(EmbeddedInFlight::default).clone()
         };
+        // Registered, whether this caller goes on to extract or to wait. See
+        // the `rendezvous_arrivals` field.
+        #[cfg(test)]
+        self.rendezvous_arrivals.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let result = cell
             .get_or_init(|| async {
                 let (mime, bytes, stamp) = self.read_embedded_bounded(audio, cap).await?;
@@ -885,6 +925,20 @@ impl CoverCache {
     #[cfg(test)]
     pub(crate) fn embedded_extractions(&self) -> usize {
         self.embedded_extractions.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Installs the hold described on the `extraction_hold` field: every
+    /// extraction begun afterwards waits for a permit before doing any work.
+    #[cfg(test)]
+    pub(crate) fn hold_extractions(&self, hold: Arc<tokio::sync::Semaphore>) {
+        *self.extraction_hold.lock().unwrap() = Some(hold);
+    }
+
+    /// How many callers have reached the embedded rendezvous. See the
+    /// `rendezvous_arrivals` field.
+    #[cfg(test)]
+    pub(crate) fn rendezvous_arrivals(&self) -> usize {
+        self.rendezvous_arrivals.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Publishes new settings, taken into account at the next publication.
@@ -1499,6 +1553,18 @@ impl CoverCache {
     ) -> Option<(&'static str, Vec<u8>, SourceStamp)> {
         #[cfg(test)]
         self.embedded_extractions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Before any work, so that a test can keep this one flight open while
+        // it watches the followers arrive. See the `extraction_hold` field.
+        // The guard is a temporary of its own statement, so it is released
+        // before the `await` below — a `std::sync::MutexGuard` held across an
+        // await point would not compile here, and should not.
+        #[cfg(test)]
+        {
+            let hold = self.extraction_hold.lock().unwrap().clone();
+            if let Some(hold) = hold {
+                let _permit = hold.acquire().await;
+            }
+        }
         let path = audio.to_path_buf();
         let work = tokio::time::timeout(
             FILE_TIMEOUT,
@@ -3312,12 +3378,42 @@ mod tests {
         let cache = Arc::new(CoverCache::new());
         cache.insert("k".into(), CoverPayload::Embedded(track)).await;
 
+        // **The eight callers are made simultaneous, not hoped to be.** This
+        // test used to spawn them and trust that the first would still be
+        // inside `lofty` when the others showed up; with a 248-byte picture
+        // it usually was not, which is the flake that turned main red. See
+        // `CoverCache::extraction_hold` for the measurement and the reason a
+        // seeded cell cannot express this property.
+        let hold = Arc::new(tokio::sync::Semaphore::new(0));
+        cache.hold_extractions(hold.clone());
+
         let tasks: Vec<_> = (0..8)
             .map(|_| {
                 let c = cache.clone();
                 tokio::spawn(async move { served_body(&c, "k", "").await })
             })
             .collect();
+
+        // Waiting on a state, never on a duration — no clock appears in this
+        // test. The bound exists so that a caller which never reaches the
+        // rendezvous *fails* the test instead of hanging it.
+        let mut spins = 0;
+        while cache.rendezvous_arrivals() < 8 {
+            spins += 1;
+            assert!(
+                spins < 100_000,
+                "only {} of the eight callers reached the rendezvous",
+                cache.rendezvous_arrivals()
+            );
+            tokio::task::yield_now().await;
+        }
+        // **One permit per caller, not one in total.** A rendezvous that
+        // stopped collapsing would have all eight callers waiting here; with
+        // a single permit, seven would wait for ever and the suite would
+        // hang instead of reporting a failure. Intact, the flight consumes
+        // exactly one and the spare permits are never taken.
+        hold.add_permits(8);
+
         let mut bodies = Vec::new();
         for t in tasks {
             let (status, body) = t.await.expect("no task may panic");
@@ -3357,6 +3453,14 @@ mod tests {
         cache.insert("k".into(), CoverPayload::Embedded(track.clone())).await;
         let cap = cache.settings().source_max;
 
+        // Simultaneous by construction, exactly as in the test above: this
+        // one held only because its first `spawn_blocking` has to create the
+        // blocking-pool thread and so cannot help but yield — a property of
+        // the pool being cold, not of the test. One earlier `spawn_blocking`
+        // on this path would have taken it away.
+        let hold = Arc::new(tokio::sync::Semaphore::new(0));
+        cache.hold_extractions(hold.clone());
+
         let tasks: Vec<_> = (0..8)
             .map(|_| {
                 let c = cache.clone();
@@ -3364,12 +3468,37 @@ mod tests {
                 tokio::spawn(async move { c.extract_embedded("k", &audio, cap).await })
             })
             .collect();
-        let mut ptrs = Vec::new();
+
+        let mut spins = 0;
+        while cache.rendezvous_arrivals() < 8 {
+            spins += 1;
+            assert!(
+                spins < 100_000,
+                "only {} of the eight callers reached the rendezvous",
+                cache.rendezvous_arrivals()
+            );
+            tokio::task::yield_now().await;
+        }
+        // **One permit per caller, not one in total.** A rendezvous that
+        // stopped collapsing would have all eight callers waiting here; with
+        // a single permit, seven would wait for ever and the suite would
+        // hang instead of reporting a failure. Intact, the flight consumes
+        // exactly one and the spare permits are never taken.
+        hold.add_permits(8);
+
+        // **The buffers are kept alive, and that is load-bearing.** Reading
+        // `as_ptr()` and dropping each `Bytes` in turn let the allocator hand
+        // the next extraction the address the last one just freed: eight
+        // separate copies would then compare equal and this test would pass
+        // on the very regression it names. Holding all eight at once makes
+        // one address per buffer impossible unless they really are one.
+        let mut buffers = Vec::new();
         for t in tasks {
             let (_, bytes, _) =
                 t.await.expect("no task may panic").expect("the picture must be readable");
-            ptrs.push(bytes.as_ptr());
+            buffers.push(bytes);
         }
+        let ptrs: Vec<_> = buffers.iter().map(|b| b.as_ptr()).collect();
         assert!(
             ptrs.iter().all(|p| *p == ptrs[0]),
             "all eight must share the very same buffer, not merely equal bytes"
