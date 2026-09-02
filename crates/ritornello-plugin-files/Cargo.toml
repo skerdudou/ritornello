@@ -30,7 +30,7 @@ anyhow = "1"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
+toml = "1.1"
 # `time` is declared because this crate uses `tokio::time` (timeouts in `smb`
 # and `health`). It already compiled without it, the feature coming from the SDK
 # through unification: a dependency one does not ask for is a dependency one
