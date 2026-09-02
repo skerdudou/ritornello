@@ -15,7 +15,7 @@ const CATALOG = {
   saved: 'Enregistré', save_error: 'Échec : ', load_error: 'Erreur : ', no_device: 'Aucun périphérique',
   conflict_code: 'le code {code} est déjà affecté à {action}',
   conflict_dup: 'le code {code} est saisi deux fois',
-  save_conflicts: 'Corrigez les codes en double avant d’save',
+  save_conflicts: 'Corrigez les codes en double avant d’enregistrer',
   act_mute: 'Muet', act_power: 'Veille',
 }
 

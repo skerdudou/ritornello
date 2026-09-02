@@ -9,13 +9,13 @@
     "types": ["vitest/globals", "vite/client"],
     "skipLibCheck": true,
     "noEmit": true,
-    // Ce paquet n'a pas d'alias `@/` a lui (src plat) : ce mapping existe
-    // uniquement pour que `vue-tsc` resolve `@/lib/utils` et
-    // `@/components/ui/button`, references par les `.vue` du kit
-    // (`@ritornello/ui` expose ses sources brutes, jamais compilees) quand
-    // leur type est verifie depuis ce programme. Meme alias que celui que
-    // `vitest.config.ts` (`kitAlias`) redirige deja vers `web/kit/src` au
-    // build/test.
+    // This package has no `@/` alias of its own (flat src): this mapping
+    // exists only so that `vue-tsc` resolves `@/lib/utils` and
+    // `@/components/ui/button`, referenced by the kit's `.vue` files
+    // (`@ritornello/ui` exposes its raw sources, never compiled) when their
+    // type is checked from this program. Same alias as the one
+    // `vitest.config.ts` (`kitAlias`) already redirects to `web/kit/src` at
+    // build/test time.
     "paths": { "@/*": ["../../../web/kit/src/*"] }
   },
   "include": ["src", "*.ts"]

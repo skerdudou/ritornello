@@ -10,12 +10,12 @@
     "types": ["vitest/globals", "vite/client"],
     "skipLibCheck": true,
     "noEmit": true,
-    // `@ritornello/ui` expose ses sources brutes (voir vitest.config.ts,
-    // `crossPackageAlias`) : un `.vue` du kit importe via `@/lib/utils`,
-    // resolu par vite/vitest en fonction de l'importeur, mais `vue-tsc`
-    // n'a qu'un seul jeu de `paths` par programme. Le second candidat
-    // (`../kit/src/*`) n'est essaye que si `./src/*` ne resout rien : les
-    // files de l'app ne collisionnent avec aucun chemin du kit.
+    // `@ritornello/ui` exposes its raw sources (see vitest.config.ts,
+    // `crossPackageAlias`): a `.vue` from the kit imports via `@/lib/utils`,
+    // resolved by vite/vitest according to the importer, but `vue-tsc` has
+    // only one set of `paths` per program. The second candidate
+    // (`../kit/src/*`) is tried only if `./src/*` resolves nothing: the
+    // app's files collide with no path of the kit's.
     "paths": { "@/*": ["./src/*", "../kit/src/*"] },
     "jsx": "preserve"
   },

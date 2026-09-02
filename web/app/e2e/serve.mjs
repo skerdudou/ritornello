@@ -161,7 +161,7 @@ writeFileSync(
 // background, painting the scrollbar and the buttons outside it. jsdom has no
 // layout engine and cannot see that; Playwright measures it.
 const LONG_NAME =
-  'Un nom de dossier volontairement tres long pour eprouver la mise en page de la popin'
+  'A deliberately very long folder name, to put the dialog layout under strain'
 mkdirSync(join(configDirNative, LONG_NAME), { recursive: true })
 
 // A fake `smbclient`, so the network wizard can be played end to end on a
