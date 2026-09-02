@@ -60,5 +60,5 @@ tempfile = "3"
 # `register::tests::a_ready_announcement_at_the_deadline_is_never_lost`), and
 # the test would pass just as well with the defect it is supposed to forbid.
 tokio = { version = "1", features = ["test-util"] }
-tower = { version = "0.4", features = ["util"] }
+tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
