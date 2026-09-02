@@ -1,6 +1,7 @@
 import { Slider } from '@ritornello/ui'
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeAll, describe, expect, it } from 'vitest'
+import { firePointer } from '../testing/pointer'
 import ProgressBar from './ProgressBar.vue'
 
 const mounted = (props: Record<string, unknown>) =>
@@ -127,8 +128,8 @@ describe('ProgressBar', () => {
     // the handle back for an instant — the visible defect of naive players.
     const w = mounted({ seekable: true })
     const track = rectangle(w)
-    await track.trigger('pointerdown', { clientX: 100, pointerId: 1, button: 0 })
-    await track.trigger('pointerup', { clientX: 100, pointerId: 1 })
+    await firePointer(track, 'pointerdown', { clientX: 100, pointerId: 1, button: 0 })
+    await firePointer(track, 'pointerup', { clientX: 100, pointerId: 1 })
     expect(w.emitted('seek')).toEqual([[127]])
     await w.setProps({ position: 88 }) // the frame from before the jump
     expect(w.get('[data-position]').text()).toBe('2:07')
@@ -142,8 +143,8 @@ describe('ProgressBar', () => {
     // would stay stuck on the old target forever.
     const w = mounted({ seekable: true, position: 87 })
     const track = rectangle(w)
-    await track.trigger('pointerdown', { clientX: 100, pointerId: 1, button: 0 })
-    await track.trigger('pointerup', { clientX: 100, pointerId: 1 })
+    await firePointer(track, 'pointerdown', { clientX: 100, pointerId: 1, button: 0 })
+    await firePointer(track, 'pointerup', { clientX: 100, pointerId: 1 })
     expect(w.emitted('seek')).toEqual([[127]])
     await w.setProps({ position: null })
     // No more position: nothing is rendered (see the test "shows the position
