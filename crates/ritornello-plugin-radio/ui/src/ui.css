@@ -2,7 +2,7 @@
 @import "tailwindcss/utilities.css" layer(utilities);
 @import "@ritornello/ui/theme.css";
 
-/* Tailwind ne genere que les classes qu'il voit : ce `@source` couvre les
-   classes propres a ce module. Celles des composants du kit viennent du CSS
-   du shell. */
+/* Tailwind only generates the classes it sees: this `@source` covers the
+   classes specific to this module. Those of the kit components come from the
+   shell's CSS. */
 @source "./";
