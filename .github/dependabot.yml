@@ -64,3 +64,27 @@ updates:
       npm-minor-and-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    ignore:
+      # TypeScript 7 is the native compiler, not a new release of the
+      # JavaScript one: its npm package ships per-platform binaries and exposes
+      # exactly two properties, `version` and `versionMajorMinor`. Measured on
+      # 7.0.2, that breaks the Vue toolchain in two independent places, neither
+      # of them ours:
+      #
+      #   * `@vue/compiler-sfc` takes its file-system access from `ts.sys` when
+      #     it has to resolve an imported type in `<script setup>`. With `sys`
+      #     gone the SFC compiler aborts — "No fs option provided to
+      #     `compileScript` in non-Node environment" — and the `web/kit` build
+      #     fails, which then starves `web/app` of `ui-kit.js`.
+      #   * `vue-tsc` requires `typescript/lib/tsc`, the whole JavaScript
+      #     compiler, which the v7 package no longer exports at all
+      #     (ERR_PACKAGE_PATH_NOT_EXPORTED). The typecheck cannot run.
+      #
+      # Vue 3.5.42 and vue-tsc 3.3.11 are already the newest published
+      # versions, so there is nothing to upgrade our way out of and no
+      # prerelease to try. The bound is `>= 7` rather than "no majors" on
+      # purpose: 6.0.0-beta exists and is the last JavaScript-based line, so a
+      # TypeScript 6 major should still be proposed and read. Lift this once
+      # the Vue language tools speak to the native compiler.
+      - dependency-name: typescript
+        versions: [">= 7"]
