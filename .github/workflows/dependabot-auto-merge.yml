@@ -1,0 +1,47 @@
+name: Dependabot auto-merge
+
+# **This workflow only ever asks GitHub to wait.** `gh pr merge --auto` queues
+# the merge behind whatever `main` requires; it does not decide anything
+# itself. That is why branch protection is the load-bearing half of this
+# feature and not an optional extra: with no required status check, a
+# Dependabot pull request is mergeable the instant it opens, `--auto` finds
+# nothing to wait for, and the bump lands unverified. The three checks that
+# actually run on a pull request are required on `main` — `armv7 binaries
+# (cross)` is deliberately *not*, since it only runs on a `v*` tag and a
+# skipped check never reports success, which would leave every pull request
+# waiting for ever.
+#
+# `pull_request` and not `pull_request_target`: a workflow triggered by
+# Dependabot gets a read-only token unless the workflow declares its own
+# permissions, which the block below does. That is the shape GitHub's own
+# documentation recommends, and it avoids `pull_request_target` running
+# base-branch code against an untrusted head.
+
+on: pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Queue the merge for anything short of a major
+        # Majors are the reading job that `.github/dependabot.yml` keeps out
+        # of its groups on purpose: a major in `axum`, `reqwest` or `lofty`
+        # can pass the whole suite and still change behaviour the suite does
+        # not cover. Those wait for a human. Everything else merges itself
+        # once the required checks are green.
+        if: steps.meta.outputs.update-type != 'version-update:semver-major'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

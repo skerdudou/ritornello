@@ -12,11 +12,12 @@ on:
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
+    # **No review for a bot's pull request.** Dependabot opens one per grouped
+    # bump (see .github/dependabot.yml), and reviewing `serde 1.0.x -> 1.0.y`
+    # spends tokens to reach the conclusion the CI already proves. Keyed on
+    # `user.type` rather than on a list of logins, so a bot added later is
+    # covered without an edit here.
+    if: github.event.pull_request.user.type != 'Bot'
 
     runs-on: ubuntu-latest
     permissions:
