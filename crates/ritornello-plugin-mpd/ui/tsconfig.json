@@ -6,7 +6,7 @@
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "lib": ["ES2022", "DOM"],
-    "types": ["vitest/globals"],
+    "types": ["vitest/globals", "vite/client"],
     "skipLibCheck": true,
     "noEmit": true,
     // This package has no `@/` alias of its own (flat src): this mapping
@@ -16,7 +16,6 @@
     // type is checked from this program. Same alias as the one
     // `vitest.config.ts` (`kitAlias`) already redirects to `web/kit/src` at
     // build/test time.
-    "baseUrl": ".",
     "paths": { "@/*": ["../../../web/kit/src/*"] }
   },
   "include": ["src", "*.ts"]

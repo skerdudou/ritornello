@@ -7,10 +7,9 @@
     "noUncheckedIndexedAccess": true,
     "resolveJsonModule": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["vitest/globals"],
+    "types": ["vitest/globals", "vite/client"],
     "skipLibCheck": true,
     "noEmit": true,
-    "baseUrl": ".",
     // `@ritornello/ui` expose ses sources brutes (voir vitest.config.ts,
     // `crossPackageAlias`) : un `.vue` du kit importe via `@/lib/utils`,
     // resolu par vite/vitest en fonction de l'importeur, mais `vue-tsc`

@@ -6,7 +6,7 @@
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "lib": ["ES2022", "DOM"],
-    "types": ["vitest/globals"],
+    "types": ["vitest/globals", "vite/client"],
     "skipLibCheck": true,
     "noEmit": true,
     // Ce paquet n'a pas d'alias `@/` a lui (src plat) : ce mapping existe
@@ -16,7 +16,6 @@
     // leur type est verifie depuis ce programme. Meme alias que celui que
     // `vitest.config.ts` (`kitAlias`) redirige deja vers `web/kit/src` au
     // build/test.
-    "baseUrl": ".",
     "paths": { "@/*": ["../../../web/kit/src/*"] }
   },
   "include": ["src", "*.ts"]

@@ -7,10 +7,9 @@
     "noUncheckedIndexedAccess": true,
     "resolveJsonModule": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["vitest/globals"],
+    "types": ["vitest/globals", "vite/client"],
     "skipLibCheck": true,
     "noEmit": true,
-    "baseUrl": ".",
     "paths": { "@/*": ["./src/*"] },
     "jsx": "preserve"
   },
