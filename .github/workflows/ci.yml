@@ -20,8 +20,8 @@ jobs:
     name: Web UI (build, typecheck, vitest)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -33,7 +33,7 @@ jobs:
         # dist/ is git-ignored: this job is the only producer, the others
         # download. Without dist, build.rs embeds a stub and settles for a
         # warning — see "Refuse an embedded stub" below.
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist-web
           if-no-files-found: error
@@ -46,8 +46,8 @@ jobs:
     needs: web
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: dist-web
       - name: Refuse an embedded stub
@@ -73,11 +73,11 @@ jobs:
     needs: web
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: dist-web
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -93,7 +93,7 @@ jobs:
       - run: npm run e2e
         working-directory: web/app
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: |
@@ -106,8 +106,8 @@ jobs:
     needs: [rust, e2e]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: dist-web
       - uses: dtolnay/rust-toolchain@stable
@@ -120,7 +120,7 @@ jobs:
           cp target/armv7-unknown-linux-gnueabihf/release/ritornello-core release-bundle/
           cp target/armv7-unknown-linux-gnueabihf/release/ritornello-plugin-* release-bundle/
           ls -l release-bundle
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ritornello-armv7-${{ github.ref_name }}
           path: release-bundle
